@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hardrails/steward/internal/runtime"
@@ -75,5 +76,25 @@ func TestDurableStateSurvivesRestart(t *testing.T) {
 	}
 	if decodeInstance(t, reprov).RuntimeRef != refA {
 		t.Fatal("reprovision after restart returned a different runtime_ref")
+	}
+}
+
+// TestCapabilitiesReportsDurableState proves the durable_state bit in
+// /v1/capabilities flips to true when a state file is configured (the in-memory
+// case is covered by TestCapabilities), and that advertising it never leaks the
+// configured filesystem path into the response body.
+func TestCapabilitiesReportsDurableState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	h := stateHandler(t, path)
+
+	rec := do(h, http.MethodGet, "/v1/capabilities", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capabilities: status=%d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !decodeCapabilities(t, rec).DurableState {
+		t.Fatal("durable_state = false, want true when a state file is configured")
+	}
+	if body := rec.Body.String(); strings.Contains(body, path) || strings.Contains(body, filepath.Dir(path)) {
+		t.Fatalf("capabilities body leaked the state-file path: %s", body)
 	}
 }

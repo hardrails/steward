@@ -145,6 +145,22 @@ func (t *Tracker) Len() int {
 	return len(t.byRef)
 }
 
+// MaxInstances returns the configured capacity cap: the maximum number of
+// instances the tracker holds before Provision returns ErrCapacityExceeded. It
+// is fixed at construction and never mutated afterward, so it needs no lock.
+func (t *Tracker) MaxInstances() int {
+	return t.maxInstances
+}
+
+// Durable reports whether this tracker persists its state to a file. It exposes
+// only whether persistence is enabled, never the file path, so a caller can
+// advertise durability (for example in GET /v1/capabilities) without leaking a
+// local filesystem path. stateFile is fixed at construction and never mutated
+// afterward, so it needs no lock.
+func (t *Tracker) Durable() bool {
+	return t.stateFile != ""
+}
+
 func (t *Tracker) Start(runtimeRef string) (*Instance, error) {
 	return t.transition(runtimeRef, StatusRunning)
 }
