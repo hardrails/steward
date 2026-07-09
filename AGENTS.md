@@ -27,18 +27,22 @@ operator with zero trust in any vendor can clone it alone and build it.
 
 ## Before you commit
 
-Run what CI runs, locally, first — CI failing is a review comment landing
-minutes late instead of seconds:
+A pre-commit hook at `.githooks/pre-commit` runs `gofmt -l .`, `go vet ./...`,
+`go build ./...`, and `go test ./...` against the staged snapshot (not the
+working tree — unstaged/untracked changes are autostashed for the check and
+restored after) before a commit lands. Enable it once per clone:
+`git config core.hooksPath .githooks`.
 
-```console
-gofmt -l .          # must be empty
-go vet ./...
-go build ./...
-go test -race ./...
-```
+It deliberately skips `-race`: that's a CI job, not a local one, because it
+routinely runs 2-5x slower and a hook slow enough to tempt `--no-verify`
+defeats itself. Run `go test -race ./...` yourself before opening a PR,
+and always if you touched `internal/runtime` (the mutex-guarded tracker —
+exactly what the race detector exists to check). CI's `build / vet / test`
+job runs it too and is a required check, so a race can't reach `main` even
+if you forget — it'll just cost you a slower feedback loop than doing it
+locally first.
 
-A pre-commit hook that runs exactly this exists at `.githooks/pre-commit`.
-Enable it once per clone: `git config core.hooksPath .githooks`. `main` is
+`main` is
 branch-protected — `build / vet / test`, `golangci-lint`, and `openapi lint`
 must all pass before a PR can merge, and force-pushes/deletions are blocked —
 so a bypassed local hook does not mean bad code reaches `main`, only that it
