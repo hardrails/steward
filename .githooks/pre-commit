@@ -1,0 +1,20 @@
+#!/bin/sh
+# Local guard, mirrors CI (.github/workflows/ci.yml's `go` job) so a broken
+# commit never lands: gofmt, vet, build, race-tested. No third-party tool --
+# Steward stays buildable by anyone with only the Go toolchain installed.
+#
+# Enabled once per clone: git config core.hooksPath .githooks
+
+set -e
+
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+	echo "pre-commit: gofmt would reformat:" >&2
+	echo "$unformatted" >&2
+	echo "run: gofmt -w ." >&2
+	exit 1
+fi
+
+go vet ./...
+go build ./...
+go test -race ./...
