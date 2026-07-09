@@ -1,4 +1,6 @@
-// Package runtime is Steward's in-memory tracker for agent-instance lifecycle.
+// Package runtime is Steward's tracker for agent-instance lifecycle. State is
+// held in memory by default; a tracker built with LoadTracker also persists
+// every mutation to a state file so tracked instances survive a restart.
 package runtime
 
 import (
@@ -56,17 +58,30 @@ func (i *Instance) clone() *Instance {
 	return &c
 }
 
-// Tracker tracks instances in memory only; a restart loses all tracked state.
+// Tracker tracks instances behind a single mutex. By default it holds state in
+// memory only and a restart loses everything; when constructed with a state file
+// (see LoadTracker) it additionally persists every mutation so state survives a
+// restart. stateFile is empty for the in-memory case and never mutated after
+// construction, so it needs no lock.
 type Tracker struct {
 	mu           sync.Mutex
 	byRef        map[string]*Instance
 	byID         map[string]string
 	maxInstances int
+	stateFile    string
 }
 
-// NewTracker returns a tracker that holds at most maxInstances instances. A
-// non-positive maxInstances is replaced with DefaultMaxInstances.
+// NewTracker returns an in-memory tracker that holds at most maxInstances
+// instances and never persists; a restart loses all tracked state. A
+// non-positive maxInstances is replaced with DefaultMaxInstances. Use
+// LoadTracker for durable state.
 func NewTracker(maxInstances int) *Tracker {
+	return newTracker(maxInstances, "")
+}
+
+// newTracker is the shared constructor for NewTracker and LoadTracker. An empty
+// stateFile disables persistence.
+func newTracker(maxInstances int, stateFile string) *Tracker {
 	if maxInstances <= 0 {
 		maxInstances = DefaultMaxInstances
 	}
@@ -74,6 +89,7 @@ func NewTracker(maxInstances int) *Tracker {
 		byRef:        make(map[string]*Instance),
 		byID:         make(map[string]string),
 		maxInstances: maxInstances,
+		stateFile:    stateFile,
 	}
 }
 
@@ -110,7 +126,23 @@ func (t *Tracker) Provision(instanceID string, spec json.RawMessage) (inst *Inst
 	}
 	t.byRef[stored.RuntimeRef] = stored
 	t.byID[instanceID] = stored.RuntimeRef
+	if err := t.persistLocked(); err != nil {
+		// Persistence failed: undo the in-memory insert so memory never claims a
+		// durability the state file does not have. The caller sees the error and
+		// can retry; a retry re-provisions cleanly.
+		delete(t.byRef, stored.RuntimeRef)
+		delete(t.byID, instanceID)
+		return nil, false, err
+	}
 	return stored.clone(), true, nil
+}
+
+// Len returns the number of currently tracked instances. It is safe for
+// concurrent use.
+func (t *Tracker) Len() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.byRef)
 }
 
 func (t *Tracker) Start(runtimeRef string) (*Instance, error) {
@@ -139,11 +171,18 @@ func (t *Tracker) Destroy(runtimeRef string) (*Instance, error) {
 	if !ok {
 		return nil, ErrNotFound
 	}
+	prevStatus := inst.Status
 	inst.Status = StatusDestroyed
-	snapshot := inst.clone()
 	delete(t.byRef, runtimeRef)
 	delete(t.byID, inst.InstanceID)
-	return snapshot, nil
+	if err := t.persistLocked(); err != nil {
+		// Roll back the removal so memory matches the last durable state.
+		inst.Status = prevStatus
+		t.byRef[runtimeRef] = inst
+		t.byID[inst.InstanceID] = runtimeRef
+		return nil, err
+	}
+	return inst.clone(), nil
 }
 
 func (t *Tracker) Status(runtimeRef string) (*Instance, error) {
@@ -165,7 +204,12 @@ func (t *Tracker) transition(runtimeRef string, status Status) (*Instance, error
 	if !ok {
 		return nil, ErrNotFound
 	}
+	prev := inst.Status
 	inst.Status = status
+	if err := t.persistLocked(); err != nil {
+		inst.Status = prev // roll back to the last durable status
+		return nil, err
+	}
 	return inst.clone(), nil
 }
 

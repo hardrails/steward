@@ -22,11 +22,21 @@ type Server struct {
 	logger  *slog.Logger
 }
 
-// New builds a Server whose tracker holds at most maxInstances instances. A
-// non-positive maxInstances falls back to runtime.DefaultMaxInstances.
+// New builds a Server whose tracker holds at most maxInstances instances in
+// memory only (no persistence). A non-positive maxInstances falls back to
+// runtime.DefaultMaxInstances. For durable state, build a tracker with
+// runtime.LoadTracker and pass it to NewWithTracker.
 func New(logger *slog.Logger, maxInstances int) *Server {
+	return NewWithTracker(logger, runtime.NewTracker(maxInstances))
+}
+
+// NewWithTracker builds a Server around a caller-provided tracker. It lets the
+// caller inject a tracker bound to a state file (see runtime.LoadTracker) so the
+// same wiring serves both the in-memory default and the opt-in durable-state
+// mode.
+func NewWithTracker(logger *slog.Logger, tracker *runtime.Tracker) *Server {
 	return &Server{
-		tracker: runtime.NewTracker(maxInstances),
+		tracker: tracker,
 		logger:  logger,
 	}
 }

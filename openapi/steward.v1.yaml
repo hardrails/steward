@@ -7,8 +7,12 @@ info:
     document is the authoritative public contract for its HTTP API. If the running
     server and this document disagree, this document is the specification.
 
-    State is held in memory only; restarting the process forgets all tracked
-    instances.
+    By default state is held in memory only and restarting the process forgets
+    all tracked instances. An operator may opt into durable state (the server's
+    `-state-file` flag), which persists state across restarts. Persistence is a
+    server-side deployment concern and is transparent to this HTTP contract: it
+    adds no endpoint, field, or status code, and does not change any request or
+    response shape below.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

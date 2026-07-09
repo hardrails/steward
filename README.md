@@ -7,9 +7,11 @@ nothing else. It is designed to be managed remotely over HTTP by a separate
 control plane.
 
 Steward is deliberately a *walking skeleton*: lifecycle tracking only, no command
-execution, no sandboxing, no persistence. See [ARCHITECTURE.md](ARCHITECTURE.md)
-for the design boundaries and the deferred decisions (notably how a future
-computer-use capability is kept out of Steward's own process).
+execution, no sandboxing. State is in memory by default (a restart forgets every
+instance); durable state across a restart is opt-in via `-state-file`. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the design boundaries and the deferred
+decisions (notably how a future computer-use capability is kept out of Steward's
+own process).
 
 ## The public contract
 
@@ -68,6 +70,29 @@ go run ./cmd/steward -addr 127.0.0.1:9090
 STEWARD_ADDR=0.0.0.0:8080 go run ./cmd/steward
 ```
 
+Every setting is a flag with a matching `STEWARD_`-prefixed env var (the flag
+wins when both are set):
+
+| Flag              | Env var                  | Default          | Purpose                                                                 |
+| ----------------- | ------------------------ | ---------------- | ----------------------------------------------------------------------- |
+| `-addr`           | `STEWARD_ADDR`           | `127.0.0.1:8080` | host:port to listen on                                                  |
+| `-max-instances`  | `STEWARD_MAX_INSTANCES`  | `1024`           | maximum tracked instances before Provision returns 503                  |
+| `-state-file`     | `STEWARD_STATE_FILE`     | (unset)          | path to a JSON file for durable state; unset means in-memory only       |
+
+By default Steward keeps state in memory and a restart forgets every tracked
+instance. Set `-state-file` to persist state across restarts:
+
+```console
+# Durable state: instances survive a restart. The file is created on first use.
+go run ./cmd/steward -state-file ./steward-state.json
+STEWARD_STATE_FILE=/var/lib/steward/state.json go run ./cmd/steward
+```
+
+Each state-changing operation is written atomically (temp file + rename) using
+only the standard library. On startup Steward loads an existing file before
+serving; a corrupt or unreadable file is a fail-closed startup error naming the
+path and the fix, never a silent empty start.
+
 ## API at a glance
 
 | Method | Path                        | Operation                                   |
@@ -83,8 +108,9 @@ STEWARD_ADDR=0.0.0.0:8080 go run ./cmd/steward
 `{id}` is the opaque `runtime_ref` returned by provisioning. An unknown
 `runtime_ref` returns `404` with `{"error": "unknown_runtime_ref", "message": ...}`.
 
-State is held in memory only; restarting the process forgets all tracked
-instances.
+By default state is held in memory only and restarting the process forgets all
+tracked instances. Set `-state-file` (or `STEWARD_STATE_FILE`) to persist state
+across restarts; see [Run](#run) above.
 
 ### Example
 
