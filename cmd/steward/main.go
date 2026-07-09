@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hardrails/steward/internal/runtime"
 	"github.com/hardrails/steward/internal/server"
 )
 
@@ -20,13 +21,28 @@ func main() {
 	addr := flag.String("addr", envOr("STEWARD_ADDR", "127.0.0.1:8080"), "host:port to listen on")
 	maxInstances := flag.Int("max-instances", envOrInt("STEWARD_MAX_INSTANCES", 1024),
 		"maximum number of tracked instances before Provision returns 503")
+	stateFile := flag.String("state-file", envOr("STEWARD_STATE_FILE", ""),
+		"optional path to a JSON file for durable instance state; empty means in-memory only (state is lost on restart)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
+	// LoadTracker restores any existing state before the server accepts requests.
+	// An empty -state-file disables persistence (the in-memory default); a corrupt
+	// or unreadable file fails closed here with a message naming the path and fix,
+	// rather than starting with silently-empty state.
+	tracker, err := runtime.LoadTracker(*maxInstances, *stateFile)
+	if err != nil {
+		logger.Error("load state", "err", err)
+		os.Exit(1)
+	}
+	if *stateFile != "" {
+		logger.Info("durable state enabled", "path", *stateFile, "restored_instances", tracker.Len())
+	}
+
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           server.New(logger, *maxInstances).Handler(),
+		Handler:           server.NewWithTracker(logger, tracker).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
