@@ -103,10 +103,19 @@ path and the fix, never a silent empty start.
 | POST   | `/v1/instances/{id}/stop`   | Stop                                        |
 | POST   | `/v1/instances/{id}/hibernate` | Hibernate                                |
 | DELETE | `/v1/instances/{id}`        | Destroy                                     |
-| GET    | `/v1/capabilities`          | Capabilities (`{"skills": []}` in v1)       |
+| GET    | `/v1/capabilities`          | Advertised skills + operational info        |
+| GET    | `/v1/healthz`               | Liveness probe (`{"status": "ok"}`)         |
 
 `{id}` is the opaque `runtime_ref` returned by provisioning. An unknown
 `runtime_ref` returns `404` with `{"error": "unknown_runtime_ref", "message": ...}`.
+
+`GET /v1/capabilities` advertises the (still-empty in v1) `skills` array plus a
+small slice of operational state for a control-plane dashboard: `version`, the
+current `instance_count`, the configured `max_instances` cap, and `durable_state`
+(a boolean — whether `-state-file` is set, never the path). `GET /v1/healthz` is a
+liveness probe returning `{"status": "ok"}`; it confirms the process is up and
+serving and deliberately does not probe the state file (durable state is already
+fail-closed at startup and on every mutation).
 
 By default state is held in memory only and restarting the process forgets all
 tracked instances. Set `-state-file` (or `STEWARD_STATE_FILE`) to persist state

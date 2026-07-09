@@ -189,6 +189,26 @@ func TestProvisionCapacityExceeded(t *testing.T) {
 	}
 }
 
+func TestMaxInstancesReportsConfiguredCap(t *testing.T) {
+	if got := NewTracker(7).MaxInstances(); got != 7 {
+		t.Fatalf("MaxInstances() = %d, want the configured 7", got)
+	}
+	// A non-positive cap falls back to the default, and the accessor reports it.
+	if got := NewTracker(0).MaxInstances(); got != DefaultMaxInstances {
+		t.Fatalf("MaxInstances() = %d, want DefaultMaxInstances (%d)", got, DefaultMaxInstances)
+	}
+}
+
+func TestDurableReflectsPersistenceMode(t *testing.T) {
+	if NewTracker(0).Durable() {
+		t.Fatal("Durable() = true for an in-memory tracker, want false")
+	}
+	tr, _ := stateBoundTracker(t, 0)
+	if !tr.Durable() {
+		t.Fatal("Durable() = false for a state-file-backed tracker, want true")
+	}
+}
+
 func TestDestroyReleasesInstanceIDForReuse(t *testing.T) {
 	tr := NewTracker(0)
 

@@ -51,6 +51,15 @@ func provisionID(t *testing.T, h http.Handler, id, spec string) string {
 	return decodeInstance(t, rec).RuntimeRef
 }
 
+func decodeCapabilities(t *testing.T, rec *httptest.ResponseRecorder) capabilitiesResponse {
+	t.Helper()
+	var got capabilitiesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode capabilities: %v (body=%s)", err, rec.Body.String())
+	}
+	return got
+}
+
 func assertJSONError(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int) {
 	t.Helper()
 	if rec.Code != wantStatus {
@@ -125,17 +134,50 @@ func TestLifecycleEndpoints(t *testing.T) {
 }
 
 func TestCapabilities(t *testing.T) {
-	h := newTestHandler(0)
+	h := newTestHandler(7)
 	rec := do(h, http.MethodGet, "/v1/capabilities", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("capabilities: status=%d want 200", rec.Code)
 	}
-	var got capabilitiesResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode capabilities: %v", err)
-	}
+	got := decodeCapabilities(t, rec)
 	if len(got.Skills) != 0 {
 		t.Fatalf("skills = %v, want empty", got.Skills)
+	}
+	if got.Version == "" {
+		t.Fatal("version is empty; capabilities must advertise a build/version string")
+	}
+	if got.MaxInstances != 7 {
+		t.Fatalf("max_instances = %d, want 7 (the configured cap)", got.MaxInstances)
+	}
+	if got.DurableState {
+		t.Fatal("durable_state = true, want false for an in-memory tracker")
+	}
+	if got.InstanceCount != 0 {
+		t.Fatalf("instance_count = %d, want 0 before any provision", got.InstanceCount)
+	}
+
+	// instance_count reflects live provisions.
+	provisionID(t, h, "agent-1", "")
+	if c := decodeCapabilities(t, do(h, http.MethodGet, "/v1/capabilities", "")).InstanceCount; c != 1 {
+		t.Fatalf("instance_count = %d after one provision, want 1", c)
+	}
+}
+
+func TestHealthz(t *testing.T) {
+	h := newTestHandler(0)
+	rec := do(h, http.MethodGet, "/v1/healthz", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthz: status=%d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type = %q, want application/json (body=%s)", ct, rec.Body.String())
+	}
+	var got healthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode health: %v (body=%s)", err, rec.Body.String())
+	}
+	if got.Status != "ok" {
+		t.Fatalf("status = %q, want ok", got.Status)
 	}
 }
 
@@ -233,6 +275,7 @@ func TestWrongMethodReturnsJSON405(t *testing.T) {
 		{http.MethodGet, "/v1/instances"},       // provision is POST-only
 		{http.MethodPut, "/v1/instances"},       // unsupported verb
 		{http.MethodDelete, "/v1/capabilities"}, // capabilities is GET-only
+		{http.MethodPost, "/v1/healthz"},        // healthz is GET-only
 	}
 	for _, c := range cases {
 		t.Run(c.method+" "+c.path, func(t *testing.T) {

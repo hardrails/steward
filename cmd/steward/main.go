@@ -53,7 +53,7 @@ func main() {
 	defer stop()
 
 	go func() {
-		logger.Info("steward listening", "addr", *addr)
+		logger.Info("steward listening", "addr", *addr, "version", server.Version)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server error", "err", err)
 			stop()

@@ -10,9 +10,10 @@ info:
     By default state is held in memory only and restarting the process forgets
     all tracked instances. An operator may opt into durable state (the server's
     `-state-file` flag), which persists state across restarts. Persistence is a
-    server-side deployment concern and is transparent to this HTTP contract: it
-    adds no endpoint, field, or status code, and does not change any request or
-    response shape below.
+    server-side deployment concern: the only place this HTTP contract reflects it
+    is the boolean `durable_state` field of `GET /v1/capabilities`, which reports
+    *whether* persistence is enabled (never the file path). It otherwise changes
+    no instance request or response shape or status code below.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -27,6 +28,8 @@ tags:
     description: Agent-instance lifecycle operations.
   - name: capabilities
     description: Capabilities advertised by this Steward.
+  - name: health
+    description: Liveness/readiness probes.
 paths:
   /v1/instances:
     post:
@@ -171,9 +174,15 @@ paths:
       operationId: getCapabilities
       summary: List advertised capabilities
       description: |
-        Returns the capabilities this Steward advertises. In v1 `skills` is always
-        an empty array; the field shape is reserved for a future optional
-        computer-use worker capability that will register itself here.
+        Returns the capabilities this Steward advertises plus a small slice of
+        operational state useful to a control-plane dashboard: the current tracked
+        `instance_count`, the configured `max_instances` cap, whether durable state
+        is enabled (`durable_state`, a boolean — never the file path), and the
+        Steward `version`.
+
+        `skills` is always an empty array in v1; its shape is reserved for a future
+        optional computer-use worker capability that will register itself here. The
+        operational fields are additive to that v1 shape.
       responses:
         "200":
           description: The advertised capabilities.
@@ -181,6 +190,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Capabilities"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/healthz:
+    get:
+      tags: [health]
+      operationId: getHealthz
+      summary: Liveness probe
+      description: |
+        A liveness probe. A `200` with `{"status":"ok"}` confirms the process is up
+        and the HTTP server is serving requests.
+
+        This is deliberately liveness only: it does not probe the durable-state
+        file even when `-state-file` is configured. Durable state is already
+        fail-closed at startup (an unreadable or corrupt file aborts boot) and on
+        every mutation (a failed persist rolls back and returns an error), so a
+        broken state file surfaces there — not as a healthy probe masking a doomed
+        node — and re-probing it here on a hot, frequently-polled path would add
+        cost without adding a guarantee.
+      responses:
+        "200":
+          description: The process is up and serving.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "500":
@@ -285,6 +321,10 @@ components:
       type: object
       required:
         - skills
+        - version
+        - instance_count
+        - max_instances
+        - durable_state
       properties:
         skills:
           type: array
@@ -292,6 +332,31 @@ components:
           items:
             type: object
             additionalProperties: true
+        version:
+          type: string
+          description: The Steward build/version string.
+        instance_count:
+          type: integer
+          minimum: 0
+          description: Number of instances currently tracked.
+        max_instances:
+          type: integer
+          minimum: 1
+          description: Configured capacity cap; `provisionInstance` returns 503 beyond it.
+        durable_state:
+          type: boolean
+          description: |
+            Whether durable state is enabled (the server's `-state-file` flag). A
+            boolean only — the configured file path is never exposed.
+    Health:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          description: Liveness marker; `ok` when the process is up and serving.
+          example: ok
     Error:
       type: object
       required:

@@ -17,6 +17,13 @@ import (
 // with 413 before it is buffered into memory.
 const maxRequestBodyBytes = 1 << 20
 
+// Version is the Steward build/version string advertised by GET /v1/capabilities.
+// It lives here (not in cmd/steward) because the capabilities handler needs it
+// and the command package cannot be imported by this internal package. It is a
+// plain hardcoded string on purpose: Steward has no build-info system today, and
+// adding one is not warranted for a single advertised field.
+const Version = "0.1.0"
+
 type Server struct {
 	tracker *runtime.Tracker
 	logger  *slog.Logger
@@ -50,6 +57,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/instances/{id}/stop", s.handleStop)
 	mux.HandleFunc("POST /v1/instances/{id}/hibernate", s.handleHibernate)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
+	mux.HandleFunc("GET /v1/healthz", s.handleHealthz)
 	// Order (outermost first): recover so a panic still yields a clean JSON 500;
 	// logging so every response is recorded; jsonErrors so the mux's stdlib
 	// plain-text 404/405 become our JSON error shape.
@@ -61,8 +69,27 @@ type provisionRequest struct {
 	Spec       json.RawMessage `json:"spec"`
 }
 
+// capabilitiesResponse advertises what this Steward can do plus a small slice of
+// operational state useful to a control-plane dashboard. The change from the v1
+// static {"skills": []} is strictly additive: skills keeps its shape and
+// meaning, and the new fields are appended, so a consumer that only reads skills
+// (or ignores unknown fields) is unaffected.
 type capabilitiesResponse struct {
 	Skills []any `json:"skills"`
+	// Version is the Steward build/version string.
+	Version string `json:"version"`
+	// InstanceCount is the number of instances currently tracked.
+	InstanceCount int `json:"instance_count"`
+	// MaxInstances is the configured capacity cap (Provision returns 503 beyond it).
+	MaxInstances int `json:"max_instances"`
+	// DurableState reports whether durable state is enabled. It is a bool, never
+	// the configured file path, so this response never leaks a local filesystem
+	// path.
+	DurableState bool `json:"durable_state"`
+}
+
+type healthResponse struct {
+	Status string `json:"status"`
 }
 
 type errorResponse struct {
@@ -153,7 +180,29 @@ func (s *Server) handleDestroy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, capabilitiesResponse{Skills: []any{}})
+	writeJSON(w, http.StatusOK, capabilitiesResponse{
+		Skills:        []any{},
+		Version:       Version,
+		InstanceCount: s.tracker.Len(),
+		MaxInstances:  s.tracker.MaxInstances(),
+		DurableState:  s.tracker.Durable(),
+	})
+}
+
+// handleHealthz is a liveness probe: a 200 with {"status":"ok"} proves the
+// process is up and the HTTP server is serving. It deliberately does NOT probe
+// the durable-state file, even when -state-file is configured, for three reasons:
+//   - health is a hot, frequently-polled path, and per-poll disk I/O is wasted work;
+//   - an active write-probe would churn temp files and could race the
+//     atomic-rename persistence discipline in internal/runtime;
+//   - durable state is already fail-closed elsewhere — LoadTracker refuses to
+//     start on an unreadable or corrupt file, and every mutation rolls back and
+//     returns an error if its persist write fails — so a broken state file
+//     surfaces as a startup failure or a 5xx on the actual write, never as a
+//     healthy liveness probe masking a doomed node. Adding a filesystem probe
+//     here would duplicate that guarantee at a cost, not add a new one.
+func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
 }
 
 func (s *Server) respond(w http.ResponseWriter, inst *runtime.Instance, err error) {

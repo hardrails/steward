@@ -58,9 +58,11 @@ When a state file is configured:
   round-tripped byte-for-byte; only insignificant JSON whitespace in a `spec` is
   normalized.
 
-Persistence is transparent to the HTTP contract: it adds no endpoint, field, or
-status code, and the request/response shapes in `openapi/steward.v1.yaml` are
-unchanged.
+Persistence is a server-side deployment concern. The only place the HTTP contract
+reflects it is the boolean `durable_state` field of `GET /v1/capabilities`, which
+reports *whether* persistence is enabled — never the file path. It otherwise adds
+no endpoint and leaves every instance request/response shape and status code in
+`openapi/steward.v1.yaml` unchanged.
 
 Those are out of scope on purpose. Steward is meant to be small enough to read in
 one sitting and to audit against its published contract
@@ -107,8 +109,13 @@ two independent reasons:
    crash of the worker cannot take the supervisor — or the node — down with it,
    and the blast radius stays inside the sandbox.
 
-Until that worker exists, `GET /v1/capabilities` returns `{"skills": []}` and
-Steward does nothing related to skills or computer-use.
+Until that worker exists, the `skills` array of `GET /v1/capabilities` stays
+empty and Steward does nothing related to skills or computer-use. That endpoint
+does additionally report read-only operational state for a control plane's
+dashboard — `version`, the current `instance_count`, the configured
+`max_instances` cap, and a `durable_state` boolean — but that is pure
+introspection over the tracker's existing state, not a new capability or any
+step toward in-process computer-use.
 
 ## Layout
 
