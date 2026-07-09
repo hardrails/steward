@@ -1,0 +1,178 @@
+// Package runtime is Steward's in-memory tracker for agent-instance lifecycle.
+package runtime
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"sync"
+)
+
+// Status mirrors the state names used by the control plane's own state machine;
+// the two sides are kept in sync by convention, so do not rename these values.
+type Status string
+
+const (
+	StatusPending    Status = "PENDING"
+	StatusRunning    Status = "RUNNING"
+	StatusStopped    Status = "STOPPED"
+	StatusHibernated Status = "HIBERNATED"
+	StatusDestroyed  Status = "DESTROYED"
+	// StatusFailed is part of the shared status vocabulary but is never emitted
+	// by Steward itself: it is reserved for the caller (the control plane), which
+	// writes FAILED on its own row when it cannot reach this Steward. It stays in
+	// the enum so both sides share one vocabulary; do not remove it.
+	StatusFailed Status = "FAILED"
+)
+
+// DefaultMaxInstances bounds how many instances a tracker will hold when the
+// constructor is given a non-positive limit. It is a circuit breaker against an
+// unbounded-Provision DoS, not a scheduler.
+const DefaultMaxInstances = 1024
+
+// ErrNotFound is returned when an operation names a runtime_ref the tracker does
+// not know. The HTTP layer turns this into a 404.
+var ErrNotFound = errors.New("unknown runtime_ref")
+
+// ErrCapacityExceeded is returned by Provision when the tracker already holds
+// its maximum number of instances. The HTTP layer turns this into a 503.
+var ErrCapacityExceeded = errors.New("instance capacity exceeded")
+
+// Instance is a tracked agent instance. Spec is opaque config, round-tripped
+// verbatim; the tracker never parses or validates its contents.
+type Instance struct {
+	InstanceID string          `json:"instance_id"`
+	RuntimeRef string          `json:"runtime_ref"`
+	Status     Status          `json:"status"`
+	Spec       json.RawMessage `json:"spec,omitempty"`
+}
+
+func (i *Instance) clone() *Instance {
+	c := *i
+	if i.Spec != nil {
+		c.Spec = append(json.RawMessage(nil), i.Spec...)
+	}
+	return &c
+}
+
+// Tracker tracks instances in memory only; a restart loses all tracked state.
+type Tracker struct {
+	mu           sync.Mutex
+	byRef        map[string]*Instance
+	byID         map[string]string
+	maxInstances int
+}
+
+// NewTracker returns a tracker that holds at most maxInstances instances. A
+// non-positive maxInstances is replaced with DefaultMaxInstances.
+func NewTracker(maxInstances int) *Tracker {
+	if maxInstances <= 0 {
+		maxInstances = DefaultMaxInstances
+	}
+	return &Tracker{
+		byRef:        make(map[string]*Instance),
+		byID:         make(map[string]string),
+		maxInstances: maxInstances,
+	}
+}
+
+// Provision is idempotent on instanceID: a repeated call for an already-tracked
+// instance returns the existing instance with created=false, so a client
+// retrying an ambiguous timed-out call cannot double-provision. It returns
+// ErrCapacityExceeded when a *new* instance would push the tracker past its
+// configured maximum; re-provisioning an already-tracked instance never fails on
+// capacity because it does not grow the map.
+func (t *Tracker) Provision(instanceID string, spec json.RawMessage) (inst *Instance, created bool, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if ref, ok := t.byID[instanceID]; ok {
+		// Defensive: byID and byRef are only ever mutated together under this
+		// mutex, so a present id implies a present ref. Guard anyway so a future
+		// edit that breaks the invariant re-provisions cleanly instead of
+		// panicking on a nil clone.
+		if existing, ok := t.byRef[ref]; ok {
+			return existing.clone(), false, nil
+		}
+		delete(t.byID, instanceID)
+	}
+
+	if len(t.byRef) >= t.maxInstances {
+		return nil, false, ErrCapacityExceeded
+	}
+
+	stored := &Instance{
+		InstanceID: instanceID,
+		RuntimeRef: newRuntimeRef(),
+		Status:     StatusPending,
+		Spec:       append(json.RawMessage(nil), spec...),
+	}
+	t.byRef[stored.RuntimeRef] = stored
+	t.byID[instanceID] = stored.RuntimeRef
+	return stored.clone(), true, nil
+}
+
+func (t *Tracker) Start(runtimeRef string) (*Instance, error) {
+	return t.transition(runtimeRef, StatusRunning)
+}
+
+func (t *Tracker) Stop(runtimeRef string) (*Instance, error) {
+	return t.transition(runtimeRef, StatusStopped)
+}
+
+func (t *Tracker) Hibernate(runtimeRef string) (*Instance, error) {
+	return t.transition(runtimeRef, StatusHibernated)
+}
+
+// Destroy removes the instance and releases its instance_id for reuse. A later
+// Provision with the same instance_id creates a new, unrelated instance with a
+// fresh runtime_ref rather than erroring or resurrecting the destroyed one; the
+// idempotency guarantee therefore covers only an instance's live span, not a
+// span that straddles a Destroy. This release-on-destroy is intentional: the
+// caller treats a destroyed instance_id as free to reuse.
+func (t *Tracker) Destroy(runtimeRef string) (*Instance, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	inst, ok := t.byRef[runtimeRef]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	inst.Status = StatusDestroyed
+	snapshot := inst.clone()
+	delete(t.byRef, runtimeRef)
+	delete(t.byID, inst.InstanceID)
+	return snapshot, nil
+}
+
+func (t *Tracker) Status(runtimeRef string) (*Instance, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	inst, ok := t.byRef[runtimeRef]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return inst.clone(), nil
+}
+
+func (t *Tracker) transition(runtimeRef string, status Status) (*Instance, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	inst, ok := t.byRef[runtimeRef]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	inst.Status = status
+	return inst.clone(), nil
+}
+
+func newRuntimeRef() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // a crypto/rand failure is unrecoverable
+	}
+	return "rt_" + hex.EncodeToString(b[:])
+}

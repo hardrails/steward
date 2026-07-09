@@ -1,0 +1,302 @@
+openapi: 3.0.3
+info:
+  title: Steward API
+  version: "1.0.0"
+  description: |
+    Steward is a minimal, on-node lifecycle supervisor for agent instances. This
+    document is the authoritative public contract for its HTTP API. If the running
+    server and this document disagree, this document is the specification.
+
+    State is held in memory only; restarting the process forgets all tracked
+    instances.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: Steward
+    url: https://github.com/hardrails/steward
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local development default
+tags:
+  - name: instances
+    description: Agent-instance lifecycle operations.
+  - name: capabilities
+    description: Capabilities advertised by this Steward.
+paths:
+  /v1/instances:
+    post:
+      tags: [instances]
+      operationId: provisionInstance
+      summary: Provision an instance
+      description: |
+        Provision a new agent instance. Idempotent on `instance_id`: if an
+        instance with the given `instance_id` is already tracked, the existing
+        instance is returned (HTTP 200) instead of creating a new one. A newly
+        created instance is returned with HTTP 201.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProvisionRequest"
+      responses:
+        "201":
+          description: A new instance was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Instance"
+        "200":
+          description: An instance with this `instance_id` already existed and was returned unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Instance"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/CapacityExceeded"
+  /v1/instances/{id}:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    get:
+      tags: [instances]
+      operationId: getInstance
+      summary: Get instance status
+      responses:
+        "200":
+          description: The current state of the instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Instance"
+        "404":
+          $ref: "#/components/responses/UnknownRuntimeRef"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [instances]
+      operationId: destroyInstance
+      summary: Destroy an instance
+      description: Destroys the instance and stops tracking it. The returned body reflects the terminal `DESTROYED` status.
+      responses:
+        "200":
+          description: The destroyed instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Instance"
+        "404":
+          $ref: "#/components/responses/UnknownRuntimeRef"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/instances/{id}/start:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    post:
+      tags: [instances]
+      operationId: startInstance
+      summary: Start an instance
+      responses:
+        "200":
+          description: The updated instance (`RUNNING`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Instance"
+        "404":
+          $ref: "#/components/responses/UnknownRuntimeRef"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/instances/{id}/stop:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    post:
+      tags: [instances]
+      operationId: stopInstance
+      summary: Stop an instance
+      responses:
+        "200":
+          description: The updated instance (`STOPPED`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Instance"
+        "404":
+          $ref: "#/components/responses/UnknownRuntimeRef"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/instances/{id}/hibernate:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    post:
+      tags: [instances]
+      operationId: hibernateInstance
+      summary: Hibernate an instance
+      responses:
+        "200":
+          description: The updated instance (`HIBERNATED`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Instance"
+        "404":
+          $ref: "#/components/responses/UnknownRuntimeRef"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/capabilities:
+    get:
+      tags: [capabilities]
+      operationId: getCapabilities
+      summary: List advertised capabilities
+      description: |
+        Returns the capabilities this Steward advertises. In v1 `skills` is always
+        an empty array; the field shape is reserved for a future optional
+        computer-use worker capability that will register itself here.
+      responses:
+        "200":
+          description: The advertised capabilities.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capabilities"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  parameters:
+    RuntimeRef:
+      name: id
+      in: path
+      required: true
+      description: The opaque `runtime_ref` returned when the instance was provisioned.
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: The request body was malformed, `instance_id` was missing, or `spec` was not a JSON object.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnknownRuntimeRef:
+      description: No instance is tracked for the given `runtime_ref`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    MethodNotAllowed:
+      description: The HTTP method is not allowed on this path.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    PayloadTooLarge:
+      description: The request body exceeded the 1 MiB limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    CapacityExceeded:
+      description: The tracker has reached its maximum number of instances; retry later.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: An unexpected internal error occurred.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Status:
+      type: string
+      description: |
+        Lifecycle status. These names mirror the control plane's own state
+        machine and are kept in sync by convention.
+      enum:
+        - PENDING
+        - RUNNING
+        - STOPPED
+        - HIBERNATED
+        - DESTROYED
+        - FAILED
+    Instance:
+      type: object
+      required:
+        - instance_id
+        - runtime_ref
+        - status
+      properties:
+        instance_id:
+          type: string
+          description: Caller-supplied identifier; the idempotency key for provisioning.
+        runtime_ref:
+          type: string
+          description: Opaque handle assigned by Steward; used to address the instance on all other routes.
+        status:
+          $ref: "#/components/schemas/Status"
+        spec:
+          type: object
+          additionalProperties: true
+          description: |
+            Opaque, forwards-compatible configuration supplied at provision time.
+            Must be a JSON object; its contents are stored and echoed verbatim and
+            are never otherwise parsed or interpreted.
+    ProvisionRequest:
+      type: object
+      required:
+        - instance_id
+      properties:
+        instance_id:
+          type: string
+          description: Caller-supplied identifier. Provisioning is idempotent on this value.
+        spec:
+          type: object
+          additionalProperties: true
+          description: |
+            Opaque, forwards-compatible configuration, round-tripped verbatim. Must
+            be a JSON object; a non-object value is rejected with 400. An omitted or
+            null `spec` is accepted and stored as absent.
+    Capabilities:
+      type: object
+      required:
+        - skills
+      properties:
+        skills:
+          type: array
+          description: Reserved for future capability descriptors; always empty in v1.
+          items:
+            type: object
+            additionalProperties: true
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Stable machine-readable error code (for example, `unknown_runtime_ref`).
+        message:
+          type: string
+          description: Human-readable explanation.
