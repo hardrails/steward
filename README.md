@@ -41,6 +41,14 @@ lists only this module. Any private dependency would appear here (and in
 
 - Go 1.24 or newer.
 
+## Contributing
+
+Read [AGENTS.md](AGENTS.md) first — it names the invariants a change must not
+regress (zero private dependencies, request-size/instance-count bounds,
+concurrency safety in `internal/runtime`) and the local guard:
+`git config core.hooksPath .githooks` once per clone, run before every commit,
+mirrored by required status checks on `main`.
+
 ## Build and test
 
 ```console

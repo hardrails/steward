@@ -1,0 +1,41 @@
+#!/bin/sh
+# Local guard, mirrors CI (.github/workflows/ci.yml's `go` job) so a broken
+# commit never lands: gofmt, vet, build, tested. No third-party tool --
+# Steward stays buildable by anyone with only the Go toolchain installed.
+#
+# Checks the STAGED snapshot, not the working tree: unstaged and untracked
+# changes are autostashed for the duration of the checks and restored
+# afterward, even if a check fails, so a dirty working tree can neither hide
+# a broken staged commit nor block an otherwise-clean one.
+#
+# No -race here -- go test -race routinely runs 2-5x slower, and a hook slow
+# enough to tempt `--no-verify` defeats itself. CI's `build / vet / test` job
+# runs -race and is a required check before merge, so the race detector still
+# gates before main; this hook is the fast, every-commit first pass.
+#
+# Enabled once per clone: git config core.hooksPath .githooks
+
+set -e
+
+before=$(git stash list | wc -l)
+git stash push --keep-index --include-untracked --quiet -m "pre-commit: autostash"
+after=$(git stash list | wc -l)
+stashed=0
+[ "$after" -gt "$before" ] && stashed=1
+
+restore() {
+	[ "$stashed" -eq 1 ] && git stash pop --quiet
+}
+trap restore EXIT
+
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+	echo "pre-commit: gofmt would reformat:" >&2
+	echo "$unformatted" >&2
+	echo "run: gofmt -w ." >&2
+	exit 1
+fi
+
+go vet ./...
+go build ./...
+go test ./...
