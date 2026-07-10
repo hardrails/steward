@@ -1116,11 +1116,40 @@ func TestNonPositiveCommandQueueDepthExitsNonZero(t *testing.T) {
 		assertRejects(t, exec.Command(bin, "-uplink-command-queue-depth=-4", "-addr", "127.0.0.1:0"))
 	})
 	t.Run("env zero", func(t *testing.T) {
-		assertRejects(t, exec.Command(bin, "-addr", "127.0.0.1:0", "-uplink-command-queue-depth", "0"))
+		// Genuinely via the env var (not a flag): a zero parses fine, so it reaches
+		// prepareRuntime's positive-value check.
+		cmd := exec.Command(bin, "-addr", "127.0.0.1:0")
+		cmd.Env = stewardEnv("STEWARD_UPLINK_COMMAND_QUEUE_DEPTH=0")
+		assertRejects(t, cmd)
 	})
 	t.Run("config file zero via -check-config", func(t *testing.T) {
 		cfg := writeConfigFile(t, `{"uplink_command_queue_depth":0}`)
 		assertFailsWith(t, exec.Command(bin, "-check-config", "-config", cfg), "-uplink-command-queue-depth", "positive")
+	})
+
+	// A SET-but-unparseable env value must fail closed (like STEWARD_UPLINK_POLL_INTERVAL),
+	// not silently fall back to the 256 default — otherwise a typo runs the node at a
+	// backpressure cap the operator never chose. This is a different error path from the
+	// non-positive checks above (the value never parses), so it names the env var and
+	// the bad value rather than the flag/"positive".
+	t.Run("env malformed fails closed", func(t *testing.T) {
+		const badValue = "25O" // letter O, not zero
+		cmd := exec.Command(bin, "-addr", "127.0.0.1:0")
+		cmd.Env = stewardEnv("STEWARD_UPLINK_COMMAND_QUEUE_DEPTH=" + badValue)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected a non-zero exit on a malformed queue-depth env var, got success:\n%s", out)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "STEWARD_UPLINK_COMMAND_QUEUE_DEPTH") {
+			t.Errorf("startup error does not name the env var:\n%s", out)
+		}
+		if !strings.Contains(string(out), badValue) {
+			t.Errorf("startup error does not name the bad value %q:\n%s", badValue, out)
+		}
 	})
 }
 

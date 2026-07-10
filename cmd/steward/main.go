@@ -83,6 +83,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// STEWARD_UPLINK_COMMAND_QUEUE_DEPTH is the backpressure bound this feature adds;
+	// a SET-but-unparseable value ("25O") must not silently fall back to the 256
+	// default and run at a cap the operator never chose, so it gets the same
+	// fail-closed treatment envDuration/envBool give (not the soft envOrInt the
+	// pre-existing -max-instances flag uses). A non-positive value is caught later,
+	// fail-closed, in prepareRuntime.
+	queueDepthDefault, err := envInt("STEWARD_UPLINK_COMMAND_QUEUE_DEPTH", 256)
+	if err != nil {
+		logger.Error("configure uplink command queue depth", "err", err)
+		os.Exit(1)
+	}
+
 	addr := flag.String("addr", envOr("STEWARD_ADDR", "127.0.0.1:8080"), "host:port to listen on")
 	maxInstances := flag.Int("max-instances", envOrInt("STEWARD_MAX_INSTANCES", 1024),
 		"maximum number of tracked instances before Provision returns 503")
@@ -104,7 +116,7 @@ func main() {
 		"INSECURE: skip verification of the control plane's TLS certificate. Defeats TLS authentication and exposes the uplink to a man-in-the-middle; off by default and logged loudly when on. For temporary diagnostics only.")
 	uplinkPollInterval := flag.Duration("uplink-poll-interval", pollIntervalDefault,
 		"base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap)")
-	uplinkCommandQueueDepth := flag.Int("uplink-command-queue-depth", envOrInt("STEWARD_UPLINK_COMMAND_QUEUE_DEPTH", 256),
+	uplinkCommandQueueDepth := flag.Int("uplink-command-queue-depth", queueDepthDefault,
 		"maximum number of received-but-not-yet-executed uplink commands held at once (queued plus in-flight); a poll cycle's excess beyond this is rejected and left for the control plane to redeliver, rather than committing the node to unbounded work. Must be a positive integer; only consumed when -uplink-url is set.")
 	disableInbound := flag.Bool("disable-inbound-listener", disableInboundDefault,
 		"do not bind an inbound HTTP listener; requires -uplink-url. All fleet operations then flow through the outbound uplink poll loop only.")
@@ -686,6 +698,31 @@ func envOrInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// envInt reads an integer from the environment, failing closed on a SET-but-invalid
+// value instead of silently falling back — the same posture envDuration and envBool
+// take, and the reason it is a type-named helper (fail-closed) rather than an
+// "Or"-named one (soft, like envOrInt). An unset key returns fallback with no error.
+// A set value that strconv.Atoi rejects (a non-integer typo like "25O") returns an
+// error naming the key, the bad value, and the fix, so main can make it a startup
+// error rather than run at a value the operator never chose.
+//
+// It is used for -uplink-command-queue-depth specifically: a typo in its env var must
+// not silently disable the backpressure bound this feature exists to enforce. The
+// pre-existing -max-instances / -max-requests-per-second flags keep the soft envOrInt
+// for backward compatibility; giving them the same fail-closed treatment is a separate,
+// deliberate change, not smuggled in here.
+func envInt(key string, fallback int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: not a valid integer; fix the value or unset it to use the default", key, v)
+	}
+	return n, nil
 }
 
 // envBool mirrors envDuration's shape and posture, not envOrInt's: this reads a
