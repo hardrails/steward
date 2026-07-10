@@ -47,7 +47,19 @@ func main() {
 		"path to the node's uplink credential JSON; required when -uplink-url is set")
 	uplinkPollInterval := flag.Duration("uplink-poll-interval", pollIntervalDefault,
 		"base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap)")
+	disableInbound := flag.Bool("disable-inbound-listener", envOrBool("STEWARD_DISABLE_INBOUND_LISTENER", false),
+		"do not bind an inbound HTTP listener; requires -uplink-url. All fleet operations then flow through the outbound uplink poll loop only.")
 	flag.Parse()
+
+	// A node with neither the inbound listener nor the outbound uplink enabled would
+	// be unreachable in both directions — a dark, useless process. Fail closed here,
+	// before any other startup work, naming both the flag and the fix, the same
+	// discipline the uplink credential and poll-interval checks below apply.
+	if *disableInbound && *uplinkURL == "" {
+		logger.Error("inbound listener disabled but no uplink configured",
+			"hint", "a node with neither an inbound listener nor an outbound uplink is unreachable; set -uplink-url (or STEWARD_UPLINK_URL) to poll a control plane, or drop -disable-inbound-listener to serve the inbound REST API")
+		os.Exit(1)
+	}
 
 	// LoadTracker restores any existing state before the server accepts requests.
 	// An empty -state-file disables persistence (the in-memory default); a corrupt
@@ -105,13 +117,20 @@ func main() {
 		}
 	}
 
-	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           server.NewWithTracker(logger, tracker).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
+	// When the inbound listener is disabled, srv stays nil: no http.Server is built
+	// and no ListenAndServe goroutine is started. All fleet operations then flow
+	// through the uplink poll loop only (see the fail-closed guard above, which
+	// already refused this combination without -uplink-url).
+	var srv *http.Server
+	if !*disableInbound {
+		srv = &http.Server{
+			Addr:              *addr,
+			Handler:           server.NewWithTracker(logger, tracker).Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -130,22 +149,28 @@ func main() {
 		uplinkDone = done
 	}
 
-	go func() {
-		logger.Info("steward listening", "addr", *addr, "version", server.Version)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server error", "err", err)
-			stop()
-		}
-	}()
+	if srv != nil {
+		go func() {
+			logger.Info("steward listening", "addr", *addr, "version", server.Version)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("server error", "err", err)
+				stop()
+			}
+		}()
+	} else {
+		logger.Info("inbound listener disabled; serving via uplink only", "version", server.Version)
+	}
 
 	<-ctx.Done()
 	logger.Info("shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("shutdown error", "err", err)
-		os.Exit(1)
+	if srv != nil {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Error("shutdown error", "err", err)
+			os.Exit(1)
+		}
 	}
 
 	// Wait for the uplink loop to finish, bounded by the same shutdown deadline. ctx
@@ -171,6 +196,20 @@ func envOrInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+// envOrBool mirrors envOrInt's shape and posture: a set-but-unparseable value
+// falls back to the default rather than failing closed. That is the correct
+// direction here — a typo (e.g. "ture") falls back to the safe, reachable state
+// (the listener enabled), and the genuinely-dangerous case (no listener and no
+// uplink) is caught independently by the fail-closed startup guard in main.
+func envOrBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return fallback

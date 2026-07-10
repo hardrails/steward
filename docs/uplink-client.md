@@ -564,9 +564,14 @@ because the companion Railyard-side v1 has not committed to it either:
   taxonomy). Auto-recovery on re-enrollment is the natural follow-up.
 - **Multi-control-plane failover.** One `-uplink-url`. No list, no health-based
   failover between control planes.
-- **Disabling the inbound listener entirely.** v1 always starts the HTTP listener
-  (loopback by default) even in "uplink-only" deployments, for local health checks.
-  A flag to bind nothing inbound is a plausible follow-up but is not v1.
+- **Disabling the inbound listener entirely — closed.** v1 always started the HTTP
+  listener (loopback by default) even in "uplink-only" deployments, for local health
+  checks. This is now designed and implemented: `-disable-inbound-listener` (env
+  `STEWARD_DISABLE_INBOUND_LISTENER`) lets a uplink-only node bind nothing inbound,
+  with a fail-closed startup guard refusing the combination without `-uplink-url`.
+  See [`docs/disable-inbound-listener.md`](disable-inbound-listener.md) for the full
+  design and [ARCHITECTURE.md](../ARCHITECTURE.md#the-inbound-listener-is-opt-out-uplink-only-nodes-bind-nothing-inbound)
+  for the summary.
 - **A durable outbound report queue.** Not needed: a lost report is recovered by the
   server's claim-lease redelivery + fencing (see [Reporting a result](#reporting-a-result)),
   so the node stays stateless about outbound reports on purpose.

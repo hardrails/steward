@@ -81,6 +81,7 @@ wins when both are set):
 | `-uplink-url`              | `STEWARD_UPLINK_URL`              | (unset)          | control-plane base URL for the outbound uplink; unset disables it       |
 | `-uplink-credential-file`  | `STEWARD_UPLINK_CREDENTIAL_FILE`  | (unset)          | path to the node's uplink credential JSON; required when `-uplink-url` is set |
 | `-uplink-poll-interval`    | `STEWARD_UPLINK_POLL_INTERVAL`    | `10s`            | base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap) |
+| `-disable-inbound-listener` | `STEWARD_DISABLE_INBOUND_LISTENER` | `false`          | do not bind an inbound listener; requires `-uplink-url`                |
 
 By default Steward keeps state in memory and a restart forgets every tracked
 instance. Set `-state-file` to persist state across restarts:
@@ -95,6 +96,15 @@ Each state-changing operation is written atomically (temp file + rename) using
 only the standard library. On startup Steward loads an existing file before
 serving; a corrupt or unreadable file is a fail-closed startup error naming the
 path and the fix, never a silent empty start.
+
+By default Steward always binds the inbound HTTP listener on `-addr`, even when
+the outbound uplink (`-uplink-url`) is also enabled. A node whose only reason for
+using the uplink is that inbound connections are impossible — behind NAT or a
+firewall — can set `-disable-inbound-listener` to bind nothing inbound; all
+fleet operations then flow through the uplink poll loop only. The flag requires
+`-uplink-url` — a node with neither door open is unreachable and fails closed at
+startup. See [`docs/disable-inbound-listener.md`](docs/disable-inbound-listener.md)
+for the full design.
 
 ## API at a glance
 
