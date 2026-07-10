@@ -60,6 +60,15 @@ func decodeCapabilities(t *testing.T, rec *httptest.ResponseRecorder) capabiliti
 	return got
 }
 
+func decodeInstances(t *testing.T, rec *httptest.ResponseRecorder) instancesResponse {
+	t.Helper()
+	var got instancesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode instances: %v (body=%s)", err, rec.Body.String())
+	}
+	return got
+}
+
 func assertJSONError(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int) {
 	t.Helper()
 	if rec.Code != wantStatus {
@@ -278,8 +287,7 @@ func TestWrongMethodReturnsJSON405(t *testing.T) {
 	cases := []struct {
 		method, path string
 	}{
-		{http.MethodGet, "/v1/instances"},       // provision is POST-only
-		{http.MethodPut, "/v1/instances"},       // unsupported verb
+		{http.MethodPut, "/v1/instances"},       // only GET (list) and POST (provision) are defined
 		{http.MethodDelete, "/v1/capabilities"}, // capabilities is GET-only
 		{http.MethodPost, "/v1/healthz"},        // healthz is GET-only
 	}
@@ -311,4 +319,60 @@ func TestRecoverMiddlewareReturnsJSON500(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
 	assertJSONError(t, rec, http.StatusInternalServerError)
+}
+
+func TestListInstancesEmptyReturnsWrappedArray(t *testing.T) {
+	h := newTestHandler(0)
+	rec := do(h, http.MethodGet, "/v1/instances", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list (empty): status=%d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type = %q, want application/json (body=%s)", ct, rec.Body.String())
+	}
+	// Shape: a top-level object carrying an `instances` key — never a bare array.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &obj); err != nil {
+		t.Fatalf("body is not a JSON object: %v (body=%s)", err, rec.Body.String())
+	}
+	if _, ok := obj["instances"]; !ok {
+		t.Fatalf("response object missing `instances` key (body=%s)", rec.Body.String())
+	}
+	// Empty tracker: a non-nil, zero-length array (serialized as [], not null).
+	got := decodeInstances(t, rec)
+	if got.Instances == nil {
+		t.Fatalf("instances = null, want an empty array (body=%s)", rec.Body.String())
+	}
+	if len(got.Instances) != 0 {
+		t.Fatalf("instances has %d entries, want 0", len(got.Instances))
+	}
+}
+
+// TestListInstancesMatchesTrackerList drives the handler over a tracker whose
+// contents it also reads directly, proving the endpoint returns every tracked
+// instance in exactly the order Tracker.List guarantees (sorted by runtime_ref).
+func TestListInstancesMatchesTrackerList(t *testing.T) {
+	tr := runtime.NewTracker(0)
+	for _, id := range []string{"c", "a", "b", "agent-x", "agent-y"} {
+		if _, _, err := tr.Provision(id, 0, json.RawMessage(`{"id":"`+id+`"}`)); err != nil {
+			t.Fatalf("provision %q: %v", id, err)
+		}
+	}
+	h := NewWithTracker(slog.New(slog.NewTextHandler(io.Discard, nil)), tr).Handler()
+
+	got := decodeInstances(t, do(h, http.MethodGet, "/v1/instances", ""))
+	want := tr.List()
+	if len(got.Instances) != len(want) {
+		t.Fatalf("handler listed %d instances, want %d", len(got.Instances), len(want))
+	}
+	for i := range want {
+		if got.Instances[i].RuntimeRef != want[i].RuntimeRef {
+			t.Fatalf("order mismatch at %d: handler %q, List() %q",
+				i, got.Instances[i].RuntimeRef, want[i].RuntimeRef)
+		}
+		if got.Instances[i].InstanceID != want[i].InstanceID {
+			t.Fatalf("instance_id mismatch at %d: handler %q, List() %q",
+				i, got.Instances[i].InstanceID, want[i].InstanceID)
+		}
+	}
 }

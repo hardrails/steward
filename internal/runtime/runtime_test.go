@@ -380,3 +380,82 @@ func TestGenerationForInstanceUnknownIDReportsNotOk(t *testing.T) {
 		t.Fatalf("GenerationForInstance after destroy = (%d, %v), want (0, false)", gen, ok)
 	}
 }
+
+// TestListEmptyReturnsNonNilSlice pins that an empty tracker lists a non-nil,
+// zero-length slice, so the HTTP layer serializes it as [] rather than null.
+func TestListEmptyReturnsNonNilSlice(t *testing.T) {
+	tr := NewTracker(0)
+	got := tr.List()
+	if got == nil {
+		t.Fatal("List() on empty tracker = nil, want a non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("List() on empty tracker has %d instances, want 0", len(got))
+	}
+}
+
+// TestListReturnsAllSortedByRuntimeRef pins the core List() contract: every
+// tracked instance appears exactly once, and the slice is sorted ascending by
+// runtime_ref (the same deterministic order snapshotLocked writes to disk).
+func TestListReturnsAllSortedByRuntimeRef(t *testing.T) {
+	tr := NewTracker(0)
+
+	want := make(map[string]bool)
+	for _, id := range []string{"agent-1", "agent-2", "agent-3", "agent-4"} {
+		inst, _, err := tr.Provision(id, 0, json.RawMessage(`{"id":"`+id+`"}`))
+		if err != nil {
+			t.Fatalf("provision %q: %v", id, err)
+		}
+		want[inst.RuntimeRef] = true
+	}
+
+	list := tr.List()
+	if len(list) != len(want) {
+		t.Fatalf("List() returned %d instances, want %d", len(list), len(want))
+	}
+	for i := 1; i < len(list); i++ {
+		if list[i-1].RuntimeRef >= list[i].RuntimeRef {
+			t.Fatalf("List() not sorted by runtime_ref: %q >= %q at index %d",
+				list[i-1].RuntimeRef, list[i].RuntimeRef, i)
+		}
+	}
+	for _, inst := range list {
+		if !want[inst.RuntimeRef] {
+			t.Fatalf("List() returned unexpected runtime_ref %q", inst.RuntimeRef)
+		}
+		delete(want, inst.RuntimeRef)
+	}
+	if len(want) != 0 {
+		t.Fatalf("List() omitted %d provisioned instances: %v", len(want), want)
+	}
+}
+
+// TestListReturnsIndependentCopies pins that the listed instances are deep
+// clones: mutating a returned element (its status or its spec bytes) must not
+// corrupt live tracker state. This is the careless-caller guard — a consumer
+// that scribbles on the list cannot poison the tracker.
+func TestListReturnsIndependentCopies(t *testing.T) {
+	tr := NewTracker(0)
+	inst, _, err := tr.Provision("agent-1", 0, json.RawMessage(`{"k":"v"}`))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	list := tr.List()
+	if len(list) != 1 {
+		t.Fatalf("List() returned %d instances, want 1", len(list))
+	}
+	list[0].Status = StatusDestroyed
+	list[0].Spec[2] = 'X'
+
+	got, err := tr.Status(inst.RuntimeRef)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if got.Status != StatusPending {
+		t.Fatalf("tracked status = %q after mutating a List() copy, want unchanged PENDING", got.Status)
+	}
+	if string(got.Spec) != `{"k":"v"}` {
+		t.Fatalf("tracked spec = %s after mutating a List() copy, want unchanged", got.Spec)
+	}
+}

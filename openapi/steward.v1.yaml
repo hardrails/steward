@@ -32,6 +32,27 @@ tags:
     description: Liveness/readiness probes.
 paths:
   /v1/instances:
+    get:
+      tags: [instances]
+      operationId: listInstances
+      summary: List tracked instances
+      description: |
+        Returns every instance this Steward currently tracks, sorted by
+        `runtime_ref` for a deterministic order. The list is wrapped in an object
+        under `instances` (never a bare top-level array) so future sibling fields
+        stay additive. A destroyed instance is no longer tracked and does not
+        appear; an empty tracker returns an empty `instances` array.
+      responses:
+        "200":
+          description: The currently tracked instances.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceList"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       tags: [instances]
       operationId: provisionInstance
@@ -302,6 +323,18 @@ components:
             Opaque, forwards-compatible configuration supplied at provision time.
             Must be a JSON object; its contents are stored and echoed verbatim and
             are never otherwise parsed or interpreted.
+    InstanceList:
+      type: object
+      required:
+        - instances
+      properties:
+        instances:
+          type: array
+          description: |
+            Every currently tracked instance, sorted by `runtime_ref`. Empty when
+            nothing is tracked; never null.
+          items:
+            $ref: "#/components/schemas/Instance"
     ProvisionRequest:
       type: object
       required:
