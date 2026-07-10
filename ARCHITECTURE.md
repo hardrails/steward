@@ -64,6 +64,51 @@ reports *whether* persistence is enabled — never the file path. It otherwise a
 no endpoint and leaves every instance request/response shape and status code in
 `openapi/steward.v1.yaml` unchanged.
 
+### `max_instances` hot-reloads on `SIGHUP`, and lowering it never evicts
+
+The `max_instances` cap can be retuned on a running node without a restart:
+`SIGHUP` re-reads the `-config` file and applies a new `max_instances` in place.
+Two design decisions define what that reload does — and, more importantly, what it
+deliberately does *not* do.
+
+- **Lowering the cap does not evict.** A `SIGHUP` that lowers `max_instances` below
+  the current instance count stops the tracker growing further; it does **not**
+  stop, destroy, or otherwise touch any already-tracked instance. This is the exact
+  same posture the state-file loader already takes when it reads a file holding more
+  instances than its cap: *"`maxInstances` is a DoS circuit-breaker on growth, not
+  on reload … honored in full rather than silently truncated, and new provisions
+  stay blocked until the count drops back under the cap"* (`internal/runtime/persist.go`).
+  The cap is enforced in exactly one place — `Provision`'s
+  `len(byRef) >= maxInstances` check, which only fires when creating a *new*
+  instance — so a lowered cap naturally blocks new provisions (`503`) and lets the
+  count drain back under the ceiling through ordinary `Destroy` attrition. There is
+  no eviction path anywhere in the package, by design: a capacity re-tune is an
+  operator tuning a knob, and it must never silently turn into an outage by
+  reaching in and killing live instances. Applying the new house rule to a new
+  mechanism, not inventing a second, harsher one for the live path.
+- **Only `max_instances` reloads — scope is the safety boundary.** `SIGHUP`
+  reloads `max_instances` and nothing else. Every other setting is a much larger,
+  riskier live-reconfiguration surface: rebinding `-addr` means tearing down and
+  rebuilding the listener under in-flight requests; changing `-uplink-url` or the
+  credential means re-dialing a control plane mid-poll; swapping `-state-file` means
+  moving durable state out from under active mutations. `max_instances` is uniquely
+  safe to reload because it is a single in-memory integer — it is not even part of
+  the persisted state snapshot — so applying it touches no listener, no socket, and
+  no file. The narrow scope is the point, not a limitation: it keeps a live reload
+  to the one setting that can change with zero blast radius. Broader live
+  reconfiguration, if ever wanted, is a separate, deliberate decision, not a default
+  smuggled in behind a signal handler.
+
+Like every other Steward setting, the reload obeys the startup precedence model
+(flag > env > file): a `max_instances` pinned by `-max-instances` or
+`STEWARD_MAX_INSTANCES` at startup still wins over the file on the live path too,
+rather than the reload inventing a different rule. `SIGHUP` never triggers
+shutdown (only `SIGINT`/`SIGTERM` do), a missing `-config` file makes it a
+documented no-op, and an unreadable or invalid file leaves the live cap unchanged —
+every outcome is logged, never silent. It adds no endpoint or contract change:
+`GET /v1/capabilities` already reads `max_instances` live, so it simply reflects
+the updated value after a reload.
+
 ### Outbound uplink is opt-in
 
 By default Steward is reachable only through its inbound REST API, which assumes the
