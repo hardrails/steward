@@ -380,6 +380,30 @@ func TestDispatchProvisionAdoptsGeneration(t *testing.T) {
 	}
 }
 
+// TestDispatchProvisionClampsNegativeGenerationToZero pins the write-path
+// symmetry with persist.go's load-time reject of a negative Instance.Generation:
+// an out-of-contract negative instance_generation on a provision command must
+// never be persisted as-is (it would round-trip through the state file and brick
+// the node as "corrupt" on the next restart). It is treated as the unset
+// sentinel (0) instead — never fenced, and the tracked generation lands at 0.
+func TestDispatchProvisionClampsNegativeGenerationToZero(t *testing.T) {
+	d, tr := newDispatcher(t)
+
+	cmd := cmdGen("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1, -5)
+	rep, _, fenced := d.execute(cmd)
+	if fenced {
+		t.Fatal("a first provision must never be fenced, even with an out-of-contract negative generation")
+	}
+	if rep.Status != statusDone {
+		t.Fatalf("provision status=%q, want done", rep.Status)
+	}
+
+	gen, ok := tr.GenerationForInstance("agent-1")
+	if !ok || gen != 0 {
+		t.Fatalf("GenerationForInstance = (%d,%v), want (0,true) — a negative wire generation must clamp to 0, not persist negative", gen, ok)
+	}
+}
+
 func TestDispatchNonObjectPayloadRejectedBeforeProvision(t *testing.T) {
 	for _, payload := range []string{`[1,2,3]`, `42`, `"a string"`, `true`} {
 		spy := &spyTracker{Tracker: runtime.NewTracker(0)}

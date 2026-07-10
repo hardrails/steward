@@ -216,6 +216,19 @@ func (d *dispatcher) execute(cmd command) (rep report, retry, fenced bool) {
 // lineage baseline (new instance: set; existing instance: raised to
 // max(existing, generation), never lowered).
 func (d *dispatcher) provision(rep report, instanceID string, generation int64, payload json.RawMessage) report {
+	// A negative generation is out-of-contract for a trusted control plane (real
+	// generations are minted >= 1); treat it the same as the unset sentinel (0)
+	// rather than persist it. Symmetric with persist.go's load-time reject of a
+	// negative Instance.Generation: without this clamp, an out-of-contract
+	// negative value would round-trip through the state file, get rejected as
+	// corrupt on the NEXT restart, and brick the node — strictly worse than
+	// today's unfenced behavior, which the design forbids.
+	if generation < 0 {
+		d.logger.Warn("uplink provision carried a negative instance_generation; treating as unset (0)",
+			"command_id", rep.CommandID, "instance_id", instanceID, "instance_generation", generation)
+		generation = 0
+	}
+
 	spec := payload
 	if bytes.Equal(bytes.TrimSpace(spec), []byte("null")) {
 		spec = nil
