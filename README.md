@@ -93,6 +93,8 @@ file, which beats the built-in default):
 | `-disable-inbound-listener` | `STEWARD_DISABLE_INBOUND_LISTENER` | `false`          | do not bind an inbound listener; requires `-uplink-url`                |
 | `-enable-metrics`          | `STEWARD_ENABLE_METRICS`          | `false`          | expose `GET /metrics` (Prometheus text format) on the inbound listener; see [Metrics](#metrics) |
 | `-audit-log-file`          | `STEWARD_AUDIT_LOG_FILE`          | (unset)          | path to a JSON-lines file recording every executed uplink command; unset disables it; see [Command audit log](#command-audit-log) |
+| `-enable-process-exec`     | `STEWARD_ENABLE_PROCESS_EXEC`     | `false`          | run real OS processes for `command`-bearing specs; off by default (pure status tracking). See [Process supervision](#process-supervision) |
+| `-process-stop-grace-period` | `STEWARD_PROCESS_STOP_GRACE_PERIOD` | `10s`         | how long a stop waits after SIGTERM before escalating to SIGKILL; must be positive; only used when process execution is enabled |
 | `-config`                  | `STEWARD_CONFIG`                  | (unset)          | path to a JSON [config file](#config-file) supplying any of the settings above; a flag or env var overrides it |
 
 `-version`, `-check-config`, and `-schema` are action flags rather than settings
@@ -251,6 +253,61 @@ inbound REST API, which has no command-id concept of its own. Setting
 `-audit-log-file` with no `-uplink-url` is accepted (the file is still created) but
 logs a startup `WARN`, since no uplink command will ever exist to record.
 
+### Process supervision
+
+By default Steward tracks lifecycle *status* and spawns nothing — starting an
+instance just moves it to `RUNNING`. With `-enable-process-exec` it becomes a real,
+`os/exec`-level process supervisor (in the class of systemd/supervisord), turning an
+instance whose `spec` carries a `command` into an actual OS process it spawns,
+signals, and monitors.
+
+```console
+# Enable real process execution, with a 15s SIGTERM→SIGKILL grace period.
+go run ./cmd/steward -enable-process-exec -process-stop-grace-period 15s
+
+# Provision an instance whose spec is a real command, then start it.
+curl -sX POST localhost:8080/v1/instances \
+  -d '{"instance_id":"worker-1","spec":{"command":"/usr/bin/my-agent","args":["--serve"],"env":{"LOG":"debug"},"working_dir":"/srv"}}'
+# -> the runtime_ref in the response; POST .../{runtime_ref}/start spawns the process.
+```
+
+**The opt-in is backward-compatible by design.** `spec` has always been an opaque
+blob callers fill with arbitrary config, so real execution requires **both**
+`-enable-process-exec` **and** a `command` field in the spec:
+
+- With execution **off** (the default), a spec **without** a `command` is exactly as
+  before (opaque config, no process), and a spec **with** a `command` is rejected
+  with `400 process_exec_disabled` — a caller's intent to run a process is failed
+  loudly, never silently ignored.
+- With execution **on**, a spec without a `command` is still a pure status
+  transition; only a `command`-bearing spec spawns a process.
+
+The interpreted spec fields are `command` (string; its presence is the trigger),
+`args` (string array), `env` (a name→value object), and `working_dir` (string);
+every other key stays opaque.
+
+Lifecycle maps to signals: **start** spawns (or, from hibernation, `SIGCONT`-resumes
+the existing process); **stop** sends `SIGTERM`, waits the grace period, then
+`SIGKILL`; **hibernate** sends `SIGSTOP`; **destroy** terminates the process. An
+already-running start is an idempotent no-op — no duplicate process. A process that
+exits on its own (a crash) moves the instance to `STOPPED` (Steward never emits
+`FAILED`) and records `last_exit_reason: "crashed"` — distinct from a requested
+stop's `"stopped"`/`"killed"` — with a WARN naming it an unexpected exit.
+
+**Security posture** (deliberate): the command is run **directly, never via a
+shell**, so args cannot cause shell injection; the child does **not** inherit
+Steward's environment (which may hold secrets) — only `PATH` plus the spec's `env`;
+and there is **no sandboxing and no resource limiting** in this layer — it is
+process supervision, not the separate, still-deferred sandboxed computer-use worker.
+
+**Restart limitation (honest):** an OS process handle and its stdout/stderr pipes
+cannot survive a Steward restart. The child's `pid` is persisted (when `-state-file`
+is set), and on reload Steward liveness-checks it: a dead pid becomes `STOPPED`
+(`last_exit_reason: "supervision_lost"`); a live pid is **reattached in a degraded,
+liveness-only mode** — Steward can stop/hibernate/resume it by pid but has lost its
+stdout/stderr and can no longer detect a future crash proactively. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the full design and limits.
+
 ### Uplink transport security
 
 The outbound uplink is an HTTP client dialing the control plane, so its transport
@@ -330,8 +387,8 @@ Any setting can live in a JSON config file, pointed at by `-config` (or
 overrides the same key in the file (**flag > env var > config file**). Keys are
 `snake_case` — the same names as the `STEWARD_`-prefixed env vars, minus the
 prefix — and every key is optional; an omitted key falls back to its env var,
-flag, or built-in default. `uplink_poll_interval` is a Go duration string (e.g.
-`"30s"`, `"1m30s"`).
+flag, or built-in default. `uplink_poll_interval` and `process_stop_grace_period`
+are Go duration strings (e.g. `"30s"`, `"1m30s"`).
 
 ```json
 {
@@ -342,7 +399,9 @@ flag, or built-in default. `uplink_poll_interval` is a Go duration string (e.g.
   "uplink_url": "https://control-plane.example",
   "uplink_credential_file": "/etc/steward/uplink-credential.json",
   "uplink_poll_interval": "30s",
-  "disable_inbound_listener": false
+  "disable_inbound_listener": false,
+  "enable_process_exec": false,
+  "process_stop_grace_period": "10s"
 }
 ```
 
@@ -478,6 +537,11 @@ stopping or hibernating a `PENDING` instance that was never started — is rejec
 with `409 invalid_state_transition` and the instance is left unchanged, rather
 than silently recording a nonsensical status. `provision` stays idempotent on
 `instance_id` and `destroy` is always allowed on a live instance, both unchanged.
+
+By default these transitions are pure status changes. With
+[process supervision](#process-supervision) enabled, a `command`-bearing instance
+also spawns/signals a real OS process on each transition — but the status
+semantics above (including idempotency and the `PENDING` guard) are identical.
 
 ### Filtered listing
 

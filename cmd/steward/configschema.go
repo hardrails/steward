@@ -31,6 +31,8 @@ var configFieldDescriptions = map[string]string{
 	"uplink_command_queue_depth": "maximum number of received-but-not-yet-executed uplink commands held at once (queued plus in-flight); a poll cycle's excess beyond this is rejected and left for the control plane to redeliver. Must be a positive integer; only consumed when uplink_url is set.",
 	"disable_inbound_listener":   "when true, bind no inbound HTTP listener at all; requires uplink_url so the node is still reachable via the outbound uplink.",
 	"log_level":                  "log verbosity: one of debug, info, warn, error. The real validator additionally accepts other letter casing and surrounding whitespace; this schema documents the canonical lowercase form.",
+	"enable_process_exec":        "when true, enable real OS-process supervision: an instance whose spec has a \"command\" field spawns and supervises an actual process on start. Off by default (pure status tracking); provisioning a command-bearing spec is rejected with 400 while off. No sandboxing or resource limits.",
+	"process_stop_grace_period":  "how long a stop waits after SIGTERM before escalating to SIGKILL, as a Go duration string (e.g. \"10s\"); must be positive. Only used when enable_process_exec is true.",
 }
 
 // configSchemaJSON returns the pretty-printed JSON Schema (draft 2020-12) for the

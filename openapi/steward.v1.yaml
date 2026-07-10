@@ -254,6 +254,17 @@ paths:
       tags: [instances]
       operationId: startInstance
       summary: Start an instance
+      description: |
+        Starts the instance (`PENDING`/`STOPPED`/`HIBERNATED` → `RUNNING`).
+        Starting an already-`RUNNING` instance is an idempotent no-op (`200`) and
+        never spawns a duplicate process.
+
+        When process execution is enabled and the instance's spec carries a
+        `command`, this spawns a real OS process (or, from `HIBERNATED`, resumes the
+        suspended one via SIGCONT). If the process cannot be spawned (executable not
+        found, permission denied, missing `working_dir`), the call fails with `400
+        process_start_failed` and the instance is left in its prior status — never
+        falsely reported `RUNNING`.
       responses:
         "200":
           description: The updated instance (`RUNNING`).
@@ -264,6 +275,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Instance"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/UnknownRuntimeRef"
         "405":
@@ -588,7 +601,12 @@ components:
         example: "2026-07-01T00:00:00Z"
   responses:
     BadRequest:
-      description: The request body was malformed, `instance_id` was missing, or `spec` was not a JSON object.
+      description: |
+        The request was rejected as a client error (400). See the `error` code for the
+        class: a malformed body/field or bad query filter (`invalid_request`); a
+        malformed `spec` (`invalid_spec`); a `command`-bearing spec while process
+        execution is disabled (`process_exec_disabled`); or a start whose configured
+        process could not be spawned (`process_start_failed`).
       headers:
         X-Request-Id:
           $ref: "#/components/headers/RequestId"
@@ -713,12 +731,34 @@ components:
             the original `created_at` unchanged, not a fresh one). This is the
             field `created_since` on `listInstances` filters against.
         spec:
-          type: object
-          additionalProperties: true
+          $ref: "#/components/schemas/Spec"
+        pid:
+          type: integer
           description: |
-            Opaque, forwards-compatible configuration supplied at provision time.
-            Must be a JSON object; its contents are stored and echoed verbatim and
-            are never otherwise parsed or interpreted.
+            OS process id of the currently supervised process, when process
+            execution is enabled (`-enable-process-exec`) and this instance has a
+            running `command`-bearing spec. Omitted (or 0) otherwise. It is persisted
+            so a best-effort liveness check can run after a Steward restart.
+        last_exit_code:
+          type: integer
+          description: |
+            Exit code of this instance's most recent supervised-process exit, when
+            known. A clean exit is 0; a process terminated by a signal (e.g. the
+            SIGKILL escalation) reports -1. Omitted when the instance never ran a
+            process or its exit code is unknown (a reattached orphan, or lost
+            supervision across a restart).
+        last_exit_reason:
+          type: string
+          description: |
+            Why the most recent supervised process is no longer running. Because
+            `status` cannot itself distinguish an unexpected exit from a requested
+            stop (both are `STOPPED` — Steward never emits `FAILED`), this field
+            records the distinction. Omitted when no process has exited.
+          enum:
+            - stopped          # exited within the grace period after SIGTERM (a graceful, requested stop)
+            - killed           # survived the grace period and was SIGKILLed (a forced, requested stop)
+            - crashed          # exited on its own, unrequested (a crash); status is STOPPED, not FAILED
+            - supervision_lost # its pid was gone when Steward reloaded durable state after a restart
     InstanceList:
       type: object
       required:
@@ -731,6 +771,52 @@ components:
             nothing is tracked; never null.
           items:
             $ref: "#/components/schemas/Instance"
+    Spec:
+      type: object
+      additionalProperties: true
+      description: |
+        Opaque, forwards-compatible instance configuration, round-tripped verbatim.
+        Must be a JSON object; a non-object value is rejected with 400. An omitted or
+        null `spec` is accepted and stored as absent. `additionalProperties: true`:
+        the control plane may add fields without a Steward release, and Steward does
+        not otherwise parse or interpret the contents.
+
+        The named fields below are interpreted ONLY when process execution is enabled
+        on the server (`-enable-process-exec`). When it is enabled, the PRESENCE of a
+        `command` field is what turns an instance into a supervised OS process:
+        starting it spawns the process, stopping it sends SIGTERM then SIGKILL,
+        hibernating it sends SIGSTOP, and starting again sends SIGCONT. When process
+        execution is DISABLED (the default), a spec containing a `command` field is
+        rejected at provision time with 400 `process_exec_disabled` — the intent is
+        never silently ignored — while a spec WITHOUT a `command` field behaves
+        exactly as it always has: opaque config, no process. Steward NEVER runs the
+        command through a shell, so shell metacharacters in `args` cannot cause
+        injection; the child does NOT inherit Steward's environment (only `PATH` plus
+        `env`); and there is no sandboxing or resource limiting (see ARCHITECTURE.md).
+      properties:
+        command:
+          type: string
+          description: |
+            Executable to run (an absolute path, or a name resolved against Steward's
+            PATH). Its presence is what triggers real process supervision. Run
+            directly, never via a shell.
+        args:
+          type: array
+          items:
+            type: string
+          description: Command-line arguments, passed verbatim (no shell expansion).
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Environment variables for the child process, as a name→value map. The
+            child does NOT inherit Steward's own environment (which may hold secrets);
+            its environment is a minimal base of only `PATH` (copied from Steward) plus
+            these entries, which take precedence.
+        working_dir:
+          type: string
+          description: Working directory for the child process; omitted inherits Steward's.
     ProvisionRequest:
       type: object
       required:
@@ -740,12 +826,7 @@ components:
           type: string
           description: Caller-supplied identifier. Provisioning is idempotent on this value.
         spec:
-          type: object
-          additionalProperties: true
-          description: |
-            Opaque, forwards-compatible configuration, round-tripped verbatim. Must
-            be a JSON object; a non-object value is rejected with 400. An omitted or
-            null `spec` is accepted and stored as absent.
+          $ref: "#/components/schemas/Spec"
     BatchOperationKind:
       type: string
       description: Which lifecycle verb a `BatchOperation` runs.
@@ -777,9 +858,9 @@ components:
           type: string
           description: Required when `op` is `"start"`, `"stop"`, or `"destroy"`; ignored otherwise.
         spec:
-          type: object
-          additionalProperties: true
-          description: Optional; only used when `op` is `"provision"`. Same validation as `ProvisionRequest.spec`.
+          allOf:
+            - $ref: "#/components/schemas/Spec"
+          description: Optional; only used when `op` is `"provision"`. Same shape and validation as `ProvisionRequest.spec`.
     BatchRequest:
       type: object
       required:
@@ -917,7 +998,9 @@ components:
             human-facing prose that may change.
           enum:
             - invalid_request          # 400: malformed request body, missing/empty required field, unknown batch op, or unparseable query filter
-            - invalid_spec             # 400: a present `spec` (opaque instance config) is not a JSON object — the malformed-config class
+            - invalid_spec             # 400: a present `spec` is malformed — not a JSON object, or a command-bearing spec with wrong-typed process fields
+            - process_exec_disabled    # 400: spec has a `command` field but process execution is disabled (-enable-process-exec is off)
+            - process_start_failed     # 400: a valid start could not spawn the configured process (executable not found, permission denied, missing working_dir)
             - unknown_runtime_ref      # 404: no instance is tracked for the addressed runtime_ref (including one already destroyed)
             - invalid_state_transition # 409: a Start/Stop/Hibernate whose target status is not reachable from the current status (e.g. stopping a PENDING instance)
             - capacity_exceeded        # 503: a new provision would exceed the configured max_instances cap

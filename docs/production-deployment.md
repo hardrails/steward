@@ -186,6 +186,13 @@ silently-disabled uplink. As general secret-handling practice, write it with
 restrictive permissions (`0600`, owned by the service user) — Steward does not
 set the file's mode for you.
 
+Apply the same restrictive permissions to the `-state-file` when durable state is
+enabled: once process execution is used (`-enable-process-exec`), an instance's
+`spec` — including any `spec.env` values a caller passes to the child process, which
+may be secrets — is persisted verbatim, in cleartext, in that file. Steward does not
+set its mode for you, so a `0600`, service-user-owned `-state-file` is the control
+that keeps those child-process secrets off other local accounts.
+
 ### Rotating a credential without downtime
 
 A fatal `401`/`403` used to stop the poll loop outright, requiring a full process

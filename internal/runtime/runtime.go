@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,11 @@ const (
 // unbounded-Provision DoS, not a scheduler.
 const DefaultMaxInstances = 1024
 
+// DefaultStopGracePeriod is how long Stop/Destroy wait after SIGTERM before
+// escalating to SIGKILL, when process execution is enabled and no explicit grace
+// period is configured. It matches the CLI flag's default.
+const DefaultStopGracePeriod = 10 * time.Second
+
 // ErrNotFound is returned when an operation names a runtime_ref the tracker does
 // not know. The HTTP layer turns this into a 404.
 var ErrNotFound = errors.New("unknown runtime_ref")
@@ -53,6 +59,28 @@ var ErrCapacityExceeded = errors.New("instance capacity exceeded")
 // it names the current and requested status so the error tells an operator
 // exactly which transition was refused (see transitionAllowed and transition).
 var ErrInvalidStateTransition = errors.New("invalid state transition")
+
+// ErrProcessExecDisabled is returned by Provision when a spec carries a "command"
+// field (an intent to run a real process) but process execution is disabled at the
+// Steward level (-enable-process-exec is off, the default). It is fail-loud on
+// purpose: a caller's real intent is rejected, never silently stored and ignored.
+// The HTTP layer turns this into a 400 (codeProcessExecDisabled).
+var ErrProcessExecDisabled = errors.New("process execution is disabled but the spec has a command")
+
+// ErrInvalidProcessSpec is returned when a spec expresses process-execution intent
+// (a "command" field) but is malformed — command not a non-empty string, or
+// args/env/working_dir of the wrong JSON type. The HTTP layer turns this into a 400
+// (codeInvalidSpec). It is detected at Provision (fail early), and defensively again
+// at Start.
+var ErrInvalidProcessSpec = errors.New("invalid process spec")
+
+// ErrProcessStart is returned by Start when a valid, allowed start could not spawn
+// the configured process (executable not found, permission denied, missing
+// working_dir, or a failed resume). The instance is left in its prior status — it is
+// NOT falsely reported RUNNING. The HTTP layer turns this into a 400
+// (codeProcessStartFailed): the root cause is the caller-supplied command or its
+// environment, not a Steward fault, so it is a client-fixable 4xx rather than a 5xx.
+var ErrProcessStart = errors.New("process failed to start")
 
 // transitionAllowed reports whether an instance in status `from` may move to
 // status `to` via a Start (→RUNNING), Stop (→STOPPED), or Hibernate
@@ -124,19 +152,49 @@ func transitionAllowed(from, to Status) bool {
 // ListFilter.CreatedSince — the same safe-default reasoning Generation's
 // zero value uses, just without the byte-identical-on-rewrite property
 // omitempty gives Generation.
+// The four process-supervision fields (PID, ProcStartToken, LastExitCode,
+// LastExitReason) are additive and populated only when process execution is enabled
+// and the instance carries a command spec; for every other instance they stay zero
+// and are omitted from the wire and the state file. Like CreatedAt and Generation
+// before them, they need no state-file format-version bump: a snapshot written before
+// they existed simply lacks the keys and decodes to their zero values (see the
+// CreatedAt doc comment and docs). PID is the OS pid of the currently supervised
+// process (0 when none), persisted so a best-effort liveness check can run after a
+// restart. ProcStartToken is a start-time identity witness for that pid, captured at
+// spawn and re-verified at reattach: a bare live pid is NOT proof the original child
+// is still there, because the OS reuses pids and an unrelated process (a cron job, a
+// database, sshd) may now hold it. A restart therefore reattaches only when the pid's
+// current start time still matches this recorded witness; otherwise supervision is
+// treated as lost rather than signalling a stranger's pid (see
+// reconcileProcessesAfterLoad). It is empty for a non-process instance, or when the
+// witness could not be read — an empty witness fails closed (no reattach).
+// LastExitCode/LastExitReason record the most recent process exit so an operator can
+// tell a crash ("crashed") from a requested stop ("stopped"/"killed") or lost
+// supervision ("supervision_lost") — a distinction the Status field cannot carry,
+// since Steward never emits FAILED and every non-running end state is STOPPED.
+// LastExitCode is a *int so a clean exit (0) is distinguishable from "never exited"
+// (nil/absent).
 type Instance struct {
-	InstanceID string          `json:"instance_id"`
-	RuntimeRef string          `json:"runtime_ref"`
-	Status     Status          `json:"status"`
-	Generation int64           `json:"generation,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
-	Spec       json.RawMessage `json:"spec,omitempty"`
+	InstanceID     string          `json:"instance_id"`
+	RuntimeRef     string          `json:"runtime_ref"`
+	Status         Status          `json:"status"`
+	Generation     int64           `json:"generation,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	Spec           json.RawMessage `json:"spec,omitempty"`
+	PID            int             `json:"pid,omitempty"`
+	ProcStartToken string          `json:"proc_start_token,omitempty"`
+	LastExitCode   *int            `json:"last_exit_code,omitempty"`
+	LastExitReason string          `json:"last_exit_reason,omitempty"`
 }
 
 func (i *Instance) clone() *Instance {
 	c := *i
 	if i.Spec != nil {
 		c.Spec = append(json.RawMessage(nil), i.Spec...)
+	}
+	if i.LastExitCode != nil {
+		v := *i.LastExitCode
+		c.LastExitCode = &v
 	}
 	return &c
 }
@@ -152,28 +210,82 @@ type Tracker struct {
 	byID         map[string]string
 	maxInstances int
 	stateFile    string
+
+	// Process supervision — all opt-in and zero-valued unless WithExec turns it on
+	// (see exec.go). When execEnabled is false (the default), every lifecycle
+	// transition stays the pure status mutation it has always been, procs stays
+	// empty, and none of the process logic runs. logger is never nil: it defaults to
+	// a discard handler so exec.go can log unconditionally.
+	execEnabled     bool
+	stopGracePeriod time.Duration
+	logger          *slog.Logger
+	procs           map[string]*supervisedProcess // live processes by runtime_ref; guarded by mu
+
+	// testHookStopAfterTerminate, when non-nil, is called by stopExec after the
+	// stopped process is confirmed dead but before the lock is re-acquired — the exact
+	// window in which a concurrent Start can spawn a replacement process for the same
+	// runtime_ref. It exists ONLY to make that stop-vs-start race deterministically
+	// testable and is nil in production.
+	testHookStopAfterTerminate func()
 }
 
-// NewTracker returns an in-memory tracker that holds at most maxInstances
-// instances and never persists; a restart loses all tracked state. A
-// non-positive maxInstances is replaced with DefaultMaxInstances. Use
-// LoadTracker for durable state.
-func NewTracker(maxInstances int) *Tracker {
-	return newTracker(maxInstances, "")
+// Option configures a Tracker at construction. Options are the backward-compatible
+// seam for opt-in features (process supervision today): a tracker built with no
+// options is the pure status tracker Steward has always been, so every existing
+// NewTracker/LoadTracker call site is unaffected.
+type Option func(*Tracker)
+
+// ExecConfig turns on real OS-process supervision for instances whose spec carries a
+// "command" field. Enabled is the master switch (-enable-process-exec);
+// StopGracePeriod is how long Stop/Destroy wait after SIGTERM before escalating to
+// SIGKILL (non-positive keeps DefaultStopGracePeriod); Logger receives the process
+// lifecycle events (nil keeps the discard default). See exec.go and ARCHITECTURE.md.
+type ExecConfig struct {
+	Enabled         bool
+	StopGracePeriod time.Duration
+	Logger          *slog.Logger
+}
+
+// WithExec applies an ExecConfig to a tracker under construction.
+func WithExec(cfg ExecConfig) Option {
+	return func(t *Tracker) {
+		t.execEnabled = cfg.Enabled
+		if cfg.StopGracePeriod > 0 {
+			t.stopGracePeriod = cfg.StopGracePeriod
+		}
+		if cfg.Logger != nil {
+			t.logger = cfg.Logger
+		}
+	}
+}
+
+// NewTracker returns an in-memory tracker that holds at most maxInstances instances
+// and never persists; a restart loses all tracked state. A non-positive
+// maxInstances is replaced with DefaultMaxInstances. Use LoadTracker for durable
+// state. Optional Options (WithExec) enable opt-in features.
+func NewTracker(maxInstances int, opts ...Option) *Tracker {
+	return newTracker(maxInstances, "", opts...)
 }
 
 // newTracker is the shared constructor for NewTracker and LoadTracker. An empty
 // stateFile disables persistence.
-func newTracker(maxInstances int, stateFile string) *Tracker {
+func newTracker(maxInstances int, stateFile string, opts ...Option) *Tracker {
 	if maxInstances <= 0 {
 		maxInstances = DefaultMaxInstances
 	}
-	return &Tracker{
-		byRef:        make(map[string]*Instance),
-		byID:         make(map[string]string),
-		maxInstances: maxInstances,
-		stateFile:    stateFile,
+	t := &Tracker{
+		byRef:           make(map[string]*Instance),
+		byID:            make(map[string]string),
+		maxInstances:    maxInstances,
+		stateFile:       stateFile,
+		stopGracePeriod: DefaultStopGracePeriod,
+		logger:          slog.New(slog.DiscardHandler),
+		procs:           make(map[string]*supervisedProcess),
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 // Provision is idempotent on instanceID: a repeated call for an already-tracked
@@ -193,6 +305,23 @@ func newTracker(maxInstances int, stateFile string) *Tracker {
 // a brand-new instance simply starts unfenced (today's REST-handler behavior;
 // see docs/instance-generation-fencing.md).
 func (t *Tracker) Provision(instanceID string, generation int64, spec json.RawMessage) (inst *Instance, created bool, err error) {
+	// Process-exec opt-in gate. A spec carrying a "command" field expresses intent to
+	// run a real process. If process execution is disabled, that intent is REJECTED
+	// loudly (never silently stored and later ignored). If it is enabled, the process
+	// spec is validated now so a malformed command fails at provision, not only at
+	// the first start. A spec with no command field is the historical opaque blob and
+	// is unaffected either way, so an existing caller provisioning arbitrary config is
+	// exactly as before. This runs before the idempotency lookup on purpose: a
+	// command-bearing spec must be rejected under a disabled Steward regardless of
+	// whether the instance_id happens to already exist.
+	_, hasCommand, specErr := parseProcessSpec(spec)
+	if hasCommand && !t.execEnabled {
+		return nil, false, ErrProcessExecDisabled
+	}
+	if hasCommand && specErr != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrInvalidProcessSpec, specErr)
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -294,16 +423,32 @@ func (t *Tracker) Durable() bool {
 	return t.stateFile != ""
 }
 
+// Start, Stop, and Hibernate route to the pure in-memory transition when process
+// execution is disabled (the default) — byte-for-byte the behavior Steward has
+// always had — and to the process-aware path (see exec.go) when it is enabled. The
+// process-aware path still falls back to a pure transition for an instance whose
+// spec carries no command, so an opaque instance under an exec-enabled Steward is
+// unaffected too.
+
 func (t *Tracker) Start(runtimeRef string) (*Instance, error) {
-	return t.transition(runtimeRef, StatusRunning)
+	if !t.execEnabled {
+		return t.transition(runtimeRef, StatusRunning)
+	}
+	return t.startExec(runtimeRef)
 }
 
 func (t *Tracker) Stop(runtimeRef string) (*Instance, error) {
-	return t.transition(runtimeRef, StatusStopped)
+	if !t.execEnabled {
+		return t.transition(runtimeRef, StatusStopped)
+	}
+	return t.stopExec(runtimeRef)
 }
 
 func (t *Tracker) Hibernate(runtimeRef string) (*Instance, error) {
-	return t.transition(runtimeRef, StatusHibernated)
+	if !t.execEnabled {
+		return t.transition(runtimeRef, StatusHibernated)
+	}
+	return t.hibernateExec(runtimeRef)
 }
 
 // Destroy removes the instance and releases its instance_id for reuse. A later
@@ -314,24 +459,48 @@ func (t *Tracker) Hibernate(runtimeRef string) (*Instance, error) {
 // caller treats a destroyed instance_id as free to reuse.
 func (t *Tracker) Destroy(runtimeRef string) (*Instance, error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	inst, ok := t.byRef[runtimeRef]
 	if !ok {
+		t.mu.Unlock()
 		return nil, ErrNotFound
+	}
+	// A tracked real process (only ever present when process execution is enabled) is
+	// terminated regardless of the instance's current status. Latch the coming exit
+	// as intentional first, so its monitor does not race a crash transition, then
+	// remove tracking and persist under the lock, and finally terminate the process
+	// AFTER releasing the lock — terminate can block up to the grace period and must
+	// not freeze the tracker. When exec is disabled, sp is always nil and this is the
+	// pure removal Destroy has always been.
+	sp := t.procs[runtimeRef]
+	if sp != nil {
+		sp.markIntentional()
 	}
 	prevStatus := inst.Status
 	inst.Status = StatusDestroyed
 	delete(t.byRef, runtimeRef)
 	delete(t.byID, inst.InstanceID)
+	delete(t.procs, runtimeRef)
 	if err := t.persistLocked(); err != nil {
 		// Roll back the removal so memory matches the last durable state.
 		inst.Status = prevStatus
 		t.byRef[runtimeRef] = inst
 		t.byID[inst.InstanceID] = runtimeRef
+		if sp != nil {
+			t.procs[runtimeRef] = sp
+		}
+		t.mu.Unlock()
 		return nil, err
 	}
-	return inst.clone(), nil
+	out := inst.clone()
+	t.mu.Unlock()
+
+	if sp != nil {
+		exitCode, reason := sp.terminate(t.stopGracePeriod)
+		t.logger.Info("destroyed instance and terminated its supervised process",
+			"runtime_ref", runtimeRef, "instance_id", out.InstanceID, "exit_code", exitCode, "reason", reason)
+	}
+	return out, nil
 }
 
 func (t *Tracker) Status(runtimeRef string) (*Instance, error) {

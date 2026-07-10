@@ -228,9 +228,22 @@ const (
 	// or an unparseable query filter. Always HTTP 400.
 	codeInvalidRequest = "invalid_request"
 	// codeInvalidSpec — the request was well-formed but its `spec` (the opaque
-	// instance config blob) is present and not a JSON object: the "malformed
-	// config" class, distinct from a malformed request envelope. Always HTTP 400.
+	// instance config blob) is malformed: either not a JSON object, or a spec that
+	// expresses process-execution intent (a `command` field) but whose process fields
+	// are the wrong shape. The "malformed config" class, distinct from a malformed
+	// request envelope. Always HTTP 400.
 	codeInvalidSpec = "invalid_spec"
+	// codeProcessExecDisabled — the spec carries a `command` field (an intent to run
+	// a real process) but process execution is disabled at the Steward level
+	// (-enable-process-exec is off). Fail-loud rather than silently ignoring the
+	// intent. Always HTTP 400. Mirrors runtime.ErrProcessExecDisabled.
+	codeProcessExecDisabled = "process_exec_disabled"
+	// codeProcessStartFailed — a valid, allowed Start could not spawn the configured
+	// process (executable not found, permission denied, missing working_dir, or a
+	// failed resume). The instance keeps its prior status. Always HTTP 400: the root
+	// cause is the caller-supplied command or its environment, not a Steward fault.
+	// Mirrors runtime.ErrProcessStart.
+	codeProcessStartFailed = "process_start_failed"
 	// codeUnknownRuntimeRef — no instance is tracked for the addressed
 	// runtime_ref (including one already destroyed and released). Always HTTP 404.
 	codeUnknownRuntimeRef = "unknown_runtime_ref"
@@ -288,6 +301,15 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	// and docs/instance-generation-fencing.md).
 	inst, created, err := s.tracker.Provision(req.InstanceID, 0, spec)
 	if err != nil {
+		if errors.Is(err, runtime.ErrProcessExecDisabled) {
+			writeError(w, http.StatusBadRequest, codeProcessExecDisabled,
+				"spec has a \"command\" field but process execution is disabled; start Steward with -enable-process-exec to run processes, or remove the command from the spec")
+			return
+		}
+		if errors.Is(err, runtime.ErrInvalidProcessSpec) {
+			writeError(w, http.StatusBadRequest, codeInvalidSpec, err.Error())
+			return
+		}
 		if errors.Is(err, runtime.ErrCapacityExceeded) {
 			writeError(w, http.StatusServiceUnavailable, codeCapacityExceeded,
 				"instance capacity reached; retry later")
@@ -465,6 +487,19 @@ func (s *Server) respond(w http.ResponseWriter, inst *runtime.Instance, err erro
 		// echoing it tells the caller exactly which transition was refused.
 		if errors.Is(err, runtime.ErrInvalidStateTransition) {
 			writeError(w, http.StatusConflict, codeInvalidStateTransition, err.Error())
+			return
+		}
+		// A Start whose configured process could not be spawned (or a malformed
+		// process spec surfacing at Start): the runtime_ref and transition were valid,
+		// but the OS-level start failed for a caller-fixable reason (bad command,
+		// permissions, working_dir). Report 400 with the actionable detail; the
+		// instance was left in its prior status, not falsely reported RUNNING.
+		if errors.Is(err, runtime.ErrProcessStart) || errors.Is(err, runtime.ErrInvalidProcessSpec) {
+			code := codeProcessStartFailed
+			if errors.Is(err, runtime.ErrInvalidProcessSpec) {
+				code = codeInvalidSpec
+			}
+			writeError(w, http.StatusBadRequest, code, err.Error())
 			return
 		}
 		s.logger.Error("lifecycle operation failed", "err", err)

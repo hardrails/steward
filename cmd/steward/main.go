@@ -83,6 +83,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	// STEWARD_ENABLE_PROCESS_EXEC turns Steward from a lifecycle-status tracker into a
+	// real process supervisor: with it on, provisioning a spec that carries a
+	// "command" field and starting it spawns and supervises an actual OS process. It
+	// is a security-critical switch (it enables real command execution), so a
+	// set-but-unparseable value gets the same fail-closed envBool treatment
+	// -disable-inbound-listener does — a typo must never silently pick the executing
+	// side. It defaults false (pure status tracking, exactly as before).
+	enableProcessExecDefault, err := envBool("STEWARD_ENABLE_PROCESS_EXEC", false)
+	if err != nil {
+		logger.Error("configure process execution", "err", err)
+		os.Exit(1)
+	}
+
+	// STEWARD_PROCESS_STOP_GRACE_PERIOD is how long a stop waits after SIGTERM before
+	// escalating to SIGKILL. Like the poll interval it gets the fail-closed
+	// envDuration treatment: a set-but-unparseable value is a startup error, never a
+	// silent fall back to the default. Only used when process execution is enabled.
+	processStopGraceDefault, err := envDuration("STEWARD_PROCESS_STOP_GRACE_PERIOD", runtime.DefaultStopGracePeriod)
+	if err != nil {
+		logger.Error("configure process stop grace period", "err", err)
+		os.Exit(1)
+	}
+
 	// STEWARD_UPLINK_COMMAND_QUEUE_DEPTH is the backpressure bound this feature adds;
 	// a SET-but-unparseable value ("25O") must not silently fall back to the 256
 	// default and run at a cap the operator never chose, so it gets the same
@@ -124,6 +147,10 @@ func main() {
 		"expose GET /metrics (Prometheus text exposition format) on the inbound listener: current instance count by status, uplink poll latency and backoff state, and uplink command success/failure counters; off by default. Has no effect when -disable-inbound-listener is set (there is no listener to serve it from).")
 	auditLogFile := flag.String("audit-log-file", envOr("STEWARD_AUDIT_LOG_FILE", ""),
 		"optional path to a JSON-lines file recording one record per executed uplink command (timestamp, command_id, instance_id, kind, status, and error detail on failure); empty disables command auditing")
+	enableProcessExec := flag.Bool("enable-process-exec", enableProcessExecDefault,
+		"enable real OS-process supervision: when on, an instance whose spec has a \"command\" field spawns and supervises an actual process on start (SIGTERM/SIGKILL on stop, SIGSTOP/SIGCONT on hibernate/resume). Off by default (pure status tracking). Provisioning a command-bearing spec is REJECTED with 400 while this is off. Spawned commands run with STEWARD'S OWN user and privileges (no privilege drop, no sandbox) — if Steward runs as root, they run as root, so run Steward as an unprivileged, dedicated user. No sandboxing or resource limits — see ARCHITECTURE.md.")
+	processStopGracePeriod := flag.Duration("process-stop-grace-period", processStopGraceDefault,
+		"how long a stop waits after SIGTERM before escalating to SIGKILL, when process execution is enabled; must be positive")
 	logLevel := flag.String("log-level", envOr("STEWARD_LOG_LEVEL", "info"),
 		"log verbosity: one of debug, info, warn, error (case-insensitive)")
 	configFile := flag.String("config", envOr("STEWARD_CONFIG", ""),
@@ -233,6 +260,21 @@ func main() {
 	if fc.LogLevel != nil && fileMayFill("log-level", "STEWARD_LOG_LEVEL") {
 		*logLevel = *fc.LogLevel
 	}
+	if fc.EnableProcessExec != nil && fileMayFill("enable-process-exec", "STEWARD_ENABLE_PROCESS_EXEC") {
+		*enableProcessExec = *fc.EnableProcessExec
+	}
+	// process_stop_grace_period is carried as a Go duration string (like
+	// uplink_poll_interval), parsed here the same way; a malformed value is a
+	// fail-closed startup error naming the file and the bad value.
+	if fc.ProcessStopGracePeriod != nil && fileMayFill("process-stop-grace-period", "STEWARD_PROCESS_STOP_GRACE_PERIOD") {
+		d, perr := time.ParseDuration(*fc.ProcessStopGracePeriod)
+		if perr != nil {
+			logger.Error("configure process stop grace period",
+				"err", fmt.Errorf("config file %q has an invalid process_stop_grace_period %q: not a valid duration (want e.g. \"10s\", \"30s\")", *configFile, *fc.ProcessStopGracePeriod))
+			os.Exit(1)
+		}
+		*processStopGracePeriod = d
+	}
 	// The poll interval is the one non-string setting: the file carries it as a Go
 	// duration string (e.g. "30s"), parsed here the same way envDuration and the
 	// -uplink-poll-interval flag parse theirs. A malformed value is a fail-closed
@@ -263,6 +305,8 @@ func main() {
 		enableMetrics:           *enableMetrics,
 		auditLogFile:            *auditLogFile,
 		logLevel:                *logLevel,
+		enableProcessExec:       *enableProcessExec,
+		processStopGracePeriod:  *processStopGracePeriod,
 	}
 
 	// -check-config is a dry run: it exercises the exact same validation-and-build
@@ -466,6 +510,8 @@ type resolvedConfig struct {
 	enableMetrics           bool
 	auditLogFile            string
 	logLevel                string
+	enableProcessExec       bool
+	processStopGracePeriod  time.Duration
 }
 
 // prepareRuntime runs every fail-closed startup check against cfg and builds the
@@ -567,18 +613,44 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 		}
 	}
 
+	// Process execution is a security-critical opt-in: with it on, Steward spawns and
+	// supervises real OS processes for command-bearing specs. The stop grace period
+	// (SIGTERM→SIGKILL window) must be positive; a non-positive value is a
+	// configuration mistake, so fail closed and name it, the same discipline
+	// -max-instances applies. Only validated when execution is actually enabled — an
+	// unused grace value on a tracker in status-only mode must not fail startup.
+	if cfg.enableProcessExec && cfg.processStopGracePeriod <= 0 {
+		logger.Error("invalid -process-stop-grace-period",
+			"value", cfg.processStopGracePeriod.String(),
+			"hint", "-process-stop-grace-period (or STEWARD_PROCESS_STOP_GRACE_PERIOD) must be a positive duration, e.g. \"10s\"; omit it to use the default 10s")
+		return logger, nil, nil, nil, fmt.Errorf("invalid -process-stop-grace-period %s", cfg.processStopGracePeriod)
+	}
+
 	// LoadTracker restores any existing state (validating the file) before the server
 	// accepts requests. An empty -state-file disables persistence (the in-memory
 	// default); a corrupt or unreadable file fails closed here with a message naming
 	// the path and fix, rather than starting with silently-empty state. In a dry run
 	// this validates the file is loadable without keeping the tracker for real use.
-	tracker, err := runtime.LoadTracker(cfg.maxInstances, cfg.stateFile)
+	// WithExec threads the process-supervision settings in; when execution is disabled
+	// it is inert and the tracker is the pure status map it has always been. On a real
+	// (non-dry-run) boot with a state file and execution enabled, this is also where
+	// LoadTracker reconciles any previously-supervised process against reality (a
+	// liveness probe on its stored pid), so the exec config must be in place first.
+	tracker, err := runtime.LoadTracker(cfg.maxInstances, cfg.stateFile, runtime.WithExec(runtime.ExecConfig{
+		Enabled:         cfg.enableProcessExec,
+		StopGracePeriod: cfg.processStopGracePeriod,
+		Logger:          logger,
+	}))
 	if err != nil {
 		logger.Error("load state", "err", err)
 		return logger, nil, nil, nil, err
 	}
 	if cfg.stateFile != "" && !checkOnly {
 		logger.Info("durable state enabled", "path", cfg.stateFile, "restored_instances", tracker.Len())
+	}
+	if cfg.enableProcessExec && !checkOnly {
+		logger.Warn("process execution is ENABLED: instances with a \"command\" spec will spawn and supervise real OS processes; there is no sandboxing or resource limiting (see ARCHITECTURE.md)",
+			"stop_grace_period", cfg.processStopGracePeriod.String())
 	}
 
 	// -audit-log-file is opened here, before the uplink is built, regardless of
@@ -806,6 +878,8 @@ type fileConfig struct {
 	UplinkCommandQueueDepth *int    `json:"uplink_command_queue_depth"`
 	DisableInboundListener  *bool   `json:"disable_inbound_listener"`
 	LogLevel                *string `json:"log_level"`
+	EnableProcessExec       *bool   `json:"enable_process_exec"`
+	ProcessStopGracePeriod  *string `json:"process_stop_grace_period"`
 }
 
 // loadConfigFile reads and parses the JSON config file at path, fail-closed. It

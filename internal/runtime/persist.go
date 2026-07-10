@@ -39,8 +39,8 @@ type snapshot struct {
 //   - an existing file that is unreadable or malformed is a fatal, fail-closed
 //     error whose message names the path and the fix, rather than silently
 //     starting empty or panicking.
-func LoadTracker(maxInstances int, stateFile string) (*Tracker, error) {
-	t := newTracker(maxInstances, stateFile)
+func LoadTracker(maxInstances int, stateFile string, opts ...Option) (*Tracker, error) {
+	t := newTracker(maxInstances, stateFile, opts...)
 	if stateFile == "" {
 		return t, nil
 	}
@@ -82,6 +82,8 @@ func (t *Tracker) load() error {
 			return t.corruptErr(fmt.Sprintf("instance %q has unknown status %q", inst.InstanceID, inst.Status))
 		case inst.Generation < 0:
 			return t.corruptErr(fmt.Sprintf("instance %q has a negative generation %d", inst.InstanceID, inst.Generation))
+		case inst.PID < 0:
+			return t.corruptErr(fmt.Sprintf("instance %q has a negative pid %d", inst.InstanceID, inst.PID))
 		case len(inst.Spec) > 0 && !IsJSONObject(inst.Spec):
 			return t.corruptErr(fmt.Sprintf("instance %q has a non-object spec", inst.InstanceID))
 		}
@@ -102,6 +104,16 @@ func (t *Tracker) load() error {
 	// new provisions stay blocked until the count drops back under the cap.
 	t.byRef = byRef
 	t.byID = byID
+
+	// When process execution is enabled, reconcile any instance recorded as running a
+	// real process against reality: a restart severed every process handle, so probe
+	// the stored pid and either reattach (alive, degraded) or transition to STOPPED
+	// (gone). See reconcileProcessesAfterLoad. When exec is disabled the loaded state
+	// is honored verbatim — a state file written by a prior exec-enabled run loads as
+	// plain data, its processes untouched.
+	if t.execEnabled {
+		t.reconcileProcessesAfterLoad()
+	}
 	return nil
 }
 
