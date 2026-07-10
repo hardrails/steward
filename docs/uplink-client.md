@@ -236,11 +236,54 @@ For `start` / `stop` / `hibernate`, `ErrNotFound` **is** a genuine failure (you
 cannot start an instance the node has never provisioned) → report `failed`; the
 control plane reconciles and re-drives.
 
-**Batch ordering.** A single poll can return both a `provision` and a `start` for
-the same instance. The client processes `provision` commands first within a batch,
-so a start does not spuriously hit `ErrNotFound` ahead of its own provision. This is
-a cheap ordering step, not a dependency graph; anything it misses still self-heals
-via redelivery.
+**Batch ordering.** A single poll can return several commands for the same
+instance, and the server's claim query
+(`node_uplink._orm.claim_pending_commands`) has **no `ORDER BY`** — so the batch
+order is whatever the database returned and is **not** guaranteed to be causal or
+chronological. The client therefore processes a batch in the **server's own
+returned order, reordering nothing**, then makes exactly **one bounded retry
+pass** over **`start` only**: a `start` that fails only because its instance is
+not yet known (the `RefForInstance` miss) is deferred, not reported failed; after
+the first pass runs to completion, each deferred `start` is retried exactly once
+(a sibling `provision` earlier *or later* in the same batch has now had its chance
+to run); a `start` still naming an unknown instance then reports `failed` for real.
+This is bounded (one retry pass, never an unbounded loop), needs no server-side
+wire change, and — because `destroy` is already idempotent on a missing instance,
+`provision` depends on no sibling, and `stop`/`hibernate` are deliberately excluded
+(see below) — only `start` ever defers.
+
+> **Retraction (closed review finding).** An earlier version of this design moved
+> every `provision` to the front of the batch ("provisions always first"),
+> reasoning that a `start` should not hit an unknown instance ahead of its own
+> provision. A hosted review found that blanket reordering **inverts a REPLACE**:
+> when a single poll carries `destroy(x)` then `provision(x)` (the control plane
+> replacing an instance), hoisting the provision ahead of the destroy runs
+> `provision` (an idempotent no-op — `x` still exists) and *then* `destroy`, ending
+> with `x` **gone** instead of recreated. The corrected approach above reorders
+> nothing, so the `destroy → provision` replace runs in the intended order, while
+> the one retry pass still closes the original `start`-before-its-own-provision
+> case. A wire-level ordering guarantee — an epoch/generation or a causal sequence
+> on `runtime_ref` — is the sound long-term fix and is tracked as a cross-repo
+> follow-up in the `node_uplink` primitive (the same primitive that owns the
+> [deferred `instance_id`-reuse race](#deliberately-deferred)), not built in this
+> client-only change.
+
+> **Narrowing (second, more precise hosted review finding).** The fix above first
+> shipped with the deferred retry applying to **any** of `start` / `stop` /
+> `hibernate` on an unknown instance, on the theory that a sibling `provision`
+> anywhere in the batch might create the instance in time for all three. A second
+> hosted review found that reasoning only holds for `start`: `stop`/`hibernate` on
+> a missing instance has no equivalent legitimate case, and deferring them
+> introduces a **new** ordering inversion — a batch carrying `stop(agent-1)` then
+> `provision(agent-1)` would defer the stop, let the provision create the instance,
+> and then the retry pass would **stop the instance the provision just created**,
+> which is very likely wrong (the stop probably targeted an old/different lineage,
+> or the control plane's intent does not include stopping something it is
+> provisioning in the same batch). This is the same class of bug the first
+> retraction above already closed for `destroy`/`provision`, resurfacing for
+> `stop`/`hibernate`. The retry-eligibility signal is now scoped to `start` only:
+> `stop`/`hibernate` on a missing instance report `failed` immediately on the first
+> pass, exactly as they did before the batch-ordering fix was introduced.
 
 ### Reporting a result
 
@@ -530,3 +573,28 @@ because the companion Railyard-side v1 has not committed to it either:
 - **Batching reports onto the next poll.** v1 reports each command immediately after
   executing it; folding reports into the next poll's round-trip is an optimization,
   not v1.
+- **`instance_id` reuse across a destroy/re-provision cycle is a known, accepted race,
+  not silently ignored.** A hosted review of the implementation found it precisely: if
+  the SAME `instance_id` on the SAME node is destroyed and then re-provisioned before a
+  STALE, already-in-flight lifecycle command from the OLD instance's lineage is finally
+  delivered (a long network partition, a redelivery after the claim lease expires), the
+  client's `RefForInstance(instanceID)` resolves to the NEW instance — a stale `stop` /
+  `hibernate` / `destroy` can mutate or remove the wrong (newly-provisioned) instance.
+  **This is a deeper root cause than a client-side bug**: `format_runtime_ref` (the
+  control-plane side, `hardrails_runtime.node_uplink.core`) is a PURE function of
+  `(node_id, instance_id)` with no epoch/generation component, and
+  `agent_instances._orm.destroy` deletes the `AgentInstance` row outright (freeing the
+  `instance_id` for reuse) — so the exact same ambiguity exists in the control plane's
+  OWN command queue (`node_uplink`'s `hardrails_uplink_commands` table is keyed by the
+  same non-epoch-scoped `runtime_ref`), not just in this client's local lookup. A sound
+  fix needs an epoch/generation added to `runtime_ref` itself (or a tombstone on destroy
+  that the control plane refuses to re-provision over), which is a cross-repo primitive
+  change out of scope for a client-only v1 patch — a client-side patch alone would give
+  false confidence without closing the hole. **Accepted mitigation for v1**: this
+  requires (a) a stale command surviving redelivery across (b) an operator or automation
+  reusing the exact same `instance_id` after destroying it, on (c) the same node, within
+  a narrow timing window — a real but low-probability compound race, not a routine
+  path. Operators who want to eliminate it entirely today can simply never reuse a
+  destroyed `instance_id` (mint a fresh one per provision). **Follow-up**: add an
+  epoch/generation to `runtime_ref` (or an equivalent tombstone-on-destroy) in the
+  `node_uplink` primitive — a hardrails/Railyard-side change, tracked there, not here.

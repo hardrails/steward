@@ -122,7 +122,7 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	if bytes.Equal(bytes.TrimSpace(spec), []byte("null")) {
 		spec = nil
 	}
-	if len(spec) > 0 && !isJSONObject(spec) {
+	if len(spec) > 0 && !runtime.IsJSONObject(spec) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "spec must be a JSON object")
 		return
 	}
@@ -144,14 +144,6 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, inst)
-}
-
-// isJSONObject reports whether raw (already-validated JSON) is a JSON object. The
-// decoder guarantees raw is well-formed JSON, so inspecting the first
-// non-whitespace byte is sufficient.
-func isJSONObject(raw json.RawMessage) bool {
-	trimmed := bytes.TrimSpace(raw)
-	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

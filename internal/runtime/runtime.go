@@ -212,6 +212,21 @@ func (t *Tracker) Status(runtimeRef string) (*Instance, error) {
 	return inst.clone(), nil
 }
 
+// RefForInstance returns the runtime_ref currently tracked for instanceID, or
+// ("", false) when no live instance has that instance_id. It is a locked read of
+// the existing byID index and runs no lifecycle logic: it exists so a caller that
+// addresses instances by instance_id (the outbound uplink client) can resolve the
+// tracker's own runtime_ref and then drive the same transition methods the REST
+// handlers already call. A resolve-then-act across two locked calls is safe — if
+// the instance is destroyed between this read and the follow-up mutator, that
+// mutator returns ErrNotFound, which is the intended "gone" outcome, not a race.
+func (t *Tracker) RefForInstance(instanceID string) (runtimeRef string, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	ref, ok := t.byID[instanceID]
+	return ref, ok
+}
+
 func (t *Tracker) transition(runtimeRef string, status Status) (*Instance, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
