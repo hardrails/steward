@@ -162,20 +162,30 @@ func (p *Poller) Run(ctx context.Context) {
 }
 
 // executeBatch runs each command in the SERVER'S OWN returned order — reordering
-// nothing — then makes exactly one bounded retry pass over the start/stop/hibernate
-// commands that failed only because their instance was not yet known to the tracker.
+// nothing — then makes exactly one bounded retry pass over the start commands (and
+// ONLY start; see below) that failed only because their instance was not yet known
+// to the tracker.
 //
 // Reordering the batch is wrong. The server's claim query
 // (node_uplink._orm.claim_pending_commands) has no ORDER BY, so the batch order is
 // not guaranteed causal; more importantly, a single poll can carry a REPLACE —
 // destroy(x) then provision(x) — and hoisting the provision ahead of the destroy
 // would run them out of order and leave x destroyed instead of recreated.
-// Processing in the given order and retrying an unknown-instance miss once closes
-// BOTH the destroy-then-provision replace (nothing is reordered) and the original
-// start-before-its-own-provision concern (the retry runs after the sibling
+// Processing in the given order and retrying a start's unknown-instance miss once
+// closes BOTH the destroy-then-provision replace (nothing is reordered) and the
+// original start-before-its-own-provision concern (the retry runs after the sibling
 // provision), with no server-side wire change and no unbounded loop. (A wire-level
 // ordering guarantee — an epoch/generation or causal sequence on runtime_ref — is a
 // separate cross-repo follow-up in the node_uplink primitive, not built here.)
+//
+// stop/hibernate deliberately do NOT get this deferral (a hosted review finding
+// that narrowed an earlier, too-broad version of this fix): there is no legitimate
+// case where a sibling provision in the same batch should make a stop/hibernate
+// succeed after the fact, and deferring one would risk stopping/hibernating an
+// instance the sibling provision just created — a new ordering inversion of the same
+// class the destroy-then-provision fix above already closed. A stop/hibernate on an
+// unknown instance reports failed on the first pass, exactly like every other
+// terminal outcome.
 //
 // A report POST failure is logged at WARN and not retried: the server's claim lease
 // redelivers the command with a bumped claim_generation, so the node stays
@@ -188,9 +198,11 @@ func (p *Poller) executeBatch(ctx context.Context, commands []command) {
 		}
 		rep, retry := p.dispatcher.execute(cmd)
 		if retry {
-			// A start/stop/hibernate whose instance is not yet known: defer one retry
-			// (a sibling provision later in this same batch may create it) rather than
-			// reporting failed now. No report is sent for it in this pass.
+			// A start whose instance is not yet known: defer one retry (a sibling
+			// provision later in this same batch may create it) rather than reporting
+			// failed now. No report is sent for it in this pass. stop/hibernate never
+			// set retry=true (see the executeBatch doc comment), so this branch only
+			// ever defers a start.
 			deferred = append(deferred, cmd)
 			continue
 		}
@@ -199,17 +211,17 @@ func (p *Poller) executeBatch(ctx context.Context, commands []command) {
 				"command_id", rep.CommandID, "err", err)
 		}
 	}
-	// One bounded retry pass. Every deferred command now runs after every command
-	// from the first pass, so any sibling provision has had its chance. A command
-	// still naming an unknown instance here fails for real — the existing terminal
-	// outcome, delayed by exactly one pass, never an unbounded loop.
+	// One bounded retry pass over the deferred starts. Each now runs after every
+	// command from the first pass, so any sibling provision has had its chance. A
+	// start still naming an unknown instance here fails for real — the existing
+	// terminal outcome, delayed by exactly one pass, never an unbounded loop.
 	for _, cmd := range deferred {
 		if ctx.Err() != nil {
 			return
 		}
 		rep, stillUnknown := p.dispatcher.execute(cmd)
 		if stillUnknown {
-			p.logger.Error("uplink lifecycle command still names an unknown instance after the retry pass; reporting failed — no provision for it arrived in this batch, so the control plane will reconcile and re-drive",
+			p.logger.Error("uplink start command still names an unknown instance after the retry pass; reporting failed — no provision for it arrived in this batch, so the control plane will reconcile and re-drive",
 				"command_id", rep.CommandID)
 		}
 		if err := p.sendReport(ctx, rep); err != nil {

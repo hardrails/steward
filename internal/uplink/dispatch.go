@@ -121,15 +121,20 @@ type dispatcher struct {
 }
 
 // execute runs one command against the tracker and returns the report to POST plus
-// a retry signal. retry is true only when the command is a start/stop/hibernate
-// that failed solely because its instance is not (yet) known to this node: a
-// sibling provision elsewhere in the SAME poll batch may still create it, so the
-// batch runner defers exactly one retry before treating that outcome as terminal
-// (see Poller.executeBatch). Every other outcome — success, a rejected/foreign/
-// unknown command, a provision or destroy result, or a lifecycle failure once the
-// ref resolved — returns retry=false. It always returns a report echoing the
-// command's command_id and claim_generation, even on rejection, so the server can
-// retire the command.
+// a retry signal. retry is true only when the command is a start that failed solely
+// because its instance is not (yet) known to this node: a sibling provision
+// elsewhere in the SAME poll batch may still create it, so the batch runner defers
+// exactly one retry before treating that outcome as terminal (see
+// Poller.executeBatch). stop/hibernate never retry, even on the same "unknown
+// instance" miss: unlike start, there is no legitimate case where a sibling
+// provision in the same batch should make a stop/hibernate succeed after the fact —
+// deferring one would risk stopping/hibernating an instance a sibling provision just
+// created for an unrelated reason, which is a NEW ordering inversion (a hosted
+// review finding), not a fix. Every other outcome — success, a rejected/foreign/
+// unknown command, a provision or destroy result, a stop/hibernate miss, or a
+// lifecycle failure once the ref resolved — returns retry=false. It always returns a
+// report echoing the command's command_id and claim_generation, even on rejection,
+// so the server can retire the command.
 func (d *dispatcher) execute(cmd command) (report, bool) {
 	rep := report{CommandID: cmd.CommandID, ClaimGeneration: cmd.ClaimGeneration}
 
@@ -193,20 +198,32 @@ func (d *dispatcher) provision(rep report, instanceID string, payload json.RawMe
 }
 
 // transition resolves instanceID to the tracker's runtime_ref and drives one of
-// start/stop/hibernate. It returns retry=true only for the "unknown instance"
-// miss — instanceID is not in the tracker's index — because a sibling provision
-// elsewhere in the SAME poll batch may still create it; the batch runner defers
-// exactly one retry before this becomes a terminal failure. Once the ref resolves,
-// ErrNotFound from the mutator itself (a destroy racing between resolve and act) is
-// a genuine, non-retryable failure: the instance existed at resolve time and is now
-// deliberately gone, so a retry cannot help. The miss is logged at DEBUG, not
-// ERROR: on the first pass it is an expected, self-correcting condition (the
-// provision has not run yet), and the batch runner logs the real ERROR if the
-// instance is still unknown after the retry pass.
+// start/stop/hibernate. It returns retry=true only for kindStart on the "unknown
+// instance" miss — instanceID is not in the tracker's index — because a sibling
+// provision elsewhere in the SAME poll batch may still create it; the batch runner
+// defers exactly one retry before this becomes a terminal failure. stop/hibernate
+// never retry on that same miss: there is no legitimate case where a sibling
+// provision should make a stop/hibernate succeed after the fact, and deferring one
+// would risk stopping/hibernating an instance a sibling provision in the same batch
+// just created — a NEW ordering inversion, not the one this mechanism exists to
+// close (a hosted review finding narrowed this from all three lifecycle kinds to
+// start only). Once the ref resolves, ErrNotFound from the mutator itself (a destroy
+// racing between resolve and act) is a genuine, non-retryable failure: the instance
+// existed at resolve time and is now deliberately gone, so a retry cannot help.
+// start's miss is logged at DEBUG, not ERROR: on the first pass it is an expected,
+// self-correcting condition (the provision has not run yet), and the batch runner
+// logs the real ERROR if the instance is still unknown after the retry pass.
+// stop/hibernate's miss is terminal immediately, so it is logged at ERROR here,
+// exactly like any other first-pass failure.
 func (d *dispatcher) transition(rep report, instanceID, kind string, op func(string) (*runtime.Instance, error)) (report, bool) {
 	ref, ok := d.tracker.RefForInstance(instanceID)
 	if !ok {
-		d.logger.Debug("uplink lifecycle command names an instance not yet known to this node; deferring one retry",
+		if kind != kindStart {
+			d.logger.Error("uplink lifecycle command names an instance not known to this node; reporting failed",
+				"command_id", rep.CommandID, "kind", kind, "instance_id", instanceID)
+			return d.fail(rep, kind+" names an unknown instance"), false
+		}
+		d.logger.Debug("uplink start command names an instance not yet known to this node; deferring one retry",
 			"command_id", rep.CommandID, "kind", kind, "instance_id", instanceID)
 		return d.fail(rep, kind+" names an unknown instance"), true
 	}

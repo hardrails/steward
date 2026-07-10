@@ -390,6 +390,76 @@ func TestExecuteBatchStartNeverProvisionedReportsFailedOnce(t *testing.T) {
 	}
 }
 
+// TestExecuteBatchStopBeforeProvisionFailsImmediately pins the second, narrower
+// hosted review finding: a batch carrying stop(agent-1) BEFORE agent-1's own
+// provision must NOT defer the stop and retry it after the provision runs — that
+// would stop the instance the provision just created, which is the wrong outcome.
+// The stop must report failed on the very first pass, and the provision must still
+// succeed with agent-1 left un-stopped (still PENDING, not STOPPED).
+func TestExecuteBatchStopBeforeProvisionFailsImmediately(t *testing.T) {
+	tr := runtime.NewTracker(0)
+	p, sink := batchPoller(t, tr)
+
+	p.executeBatch(context.Background(), []command{
+		cmd("c-stop", "node-7", "agent-1", kindStop, "", 1),
+		cmd("c-provision", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 2),
+	})
+
+	ref, ok := tr.RefForInstance("agent-1")
+	if !ok {
+		t.Fatal("agent-1 must exist after its provision ran")
+	}
+	inst, err := tr.Status(ref)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if inst.Status != runtime.StatusPending {
+		t.Fatalf("agent-1 status = %v, want PENDING (the stop must not act on the sibling provision's instance)", inst.Status)
+	}
+	if rep, ok := sink.byID("c-stop"); !ok || rep.Status != statusFailed || rep.ReportedStatus != "failed" {
+		t.Fatalf("stop report = %+v (found=%v), want failed/failed on the first pass", rep, ok)
+	}
+	if rep, ok := sink.byID("c-provision"); !ok || rep.Status != statusDone {
+		t.Fatalf("provision report = %+v (found=%v), want done", rep, ok)
+	}
+	if n := sink.count(); n != 2 {
+		t.Fatalf("got %d reports, want 2 (stop failed once on the first pass, no retry; provision done once)", n)
+	}
+}
+
+// TestExecuteBatchHibernateBeforeProvisionFailsImmediately mirrors
+// TestExecuteBatchStopBeforeProvisionFailsImmediately for hibernate.
+func TestExecuteBatchHibernateBeforeProvisionFailsImmediately(t *testing.T) {
+	tr := runtime.NewTracker(0)
+	p, sink := batchPoller(t, tr)
+
+	p.executeBatch(context.Background(), []command{
+		cmd("c-hibernate", "node-7", "agent-1", kindHibernate, "", 1),
+		cmd("c-provision", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 2),
+	})
+
+	ref, ok := tr.RefForInstance("agent-1")
+	if !ok {
+		t.Fatal("agent-1 must exist after its provision ran")
+	}
+	inst, err := tr.Status(ref)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if inst.Status != runtime.StatusPending {
+		t.Fatalf("agent-1 status = %v, want PENDING (the hibernate must not act on the sibling provision's instance)", inst.Status)
+	}
+	if rep, ok := sink.byID("c-hibernate"); !ok || rep.Status != statusFailed || rep.ReportedStatus != "failed" {
+		t.Fatalf("hibernate report = %+v (found=%v), want failed/failed on the first pass", rep, ok)
+	}
+	if rep, ok := sink.byID("c-provision"); !ok || rep.Status != statusDone {
+		t.Fatalf("provision report = %+v (found=%v), want done", rep, ok)
+	}
+	if n := sink.count(); n != 2 {
+		t.Fatalf("got %d reports, want 2 (hibernate failed once on the first pass, no retry; provision done once)", n)
+	}
+}
+
 // reportSink captures the reports an executeBatch run POSTs so a test can assert
 // each command's terminal outcome by command_id. It is concurrency-safe because
 // the httptest handler records from a server goroutine.

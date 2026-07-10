@@ -242,15 +242,15 @@ instance, and the server's claim query
 order is whatever the database returned and is **not** guaranteed to be causal or
 chronological. The client therefore processes a batch in the **server's own
 returned order, reordering nothing**, then makes exactly **one bounded retry
-pass**: any `start` / `stop` / `hibernate` that fails only because its instance is
+pass** over **`start` only**: a `start` that fails only because its instance is
 not yet known (the `RefForInstance` miss) is deferred, not reported failed; after
-the first pass runs to completion, each deferred command is retried exactly once
+the first pass runs to completion, each deferred `start` is retried exactly once
 (a sibling `provision` earlier *or later* in the same batch has now had its chance
-to run); a command still naming an unknown instance then reports `failed` for real.
+to run); a `start` still naming an unknown instance then reports `failed` for real.
 This is bounded (one retry pass, never an unbounded loop), needs no server-side
-wire change, and — because `destroy` is already idempotent on a missing instance
-and `provision` depends on no sibling — only the three lifecycle transitions ever
-defer.
+wire change, and — because `destroy` is already idempotent on a missing instance,
+`provision` depends on no sibling, and `stop`/`hibernate` are deliberately excluded
+(see below) — only `start` ever defers.
 
 > **Retraction (closed review finding).** An earlier version of this design moved
 > every `provision` to the front of the batch ("provisions always first"),
@@ -267,6 +267,23 @@ defer.
 > follow-up in the `node_uplink` primitive (the same primitive that owns the
 > [deferred `instance_id`-reuse race](#deliberately-deferred)), not built in this
 > client-only change.
+
+> **Narrowing (second, more precise hosted review finding).** The fix above first
+> shipped with the deferred retry applying to **any** of `start` / `stop` /
+> `hibernate` on an unknown instance, on the theory that a sibling `provision`
+> anywhere in the batch might create the instance in time for all three. A second
+> hosted review found that reasoning only holds for `start`: `stop`/`hibernate` on
+> a missing instance has no equivalent legitimate case, and deferring them
+> introduces a **new** ordering inversion — a batch carrying `stop(agent-1)` then
+> `provision(agent-1)` would defer the stop, let the provision create the instance,
+> and then the retry pass would **stop the instance the provision just created**,
+> which is very likely wrong (the stop probably targeted an old/different lineage,
+> or the control plane's intent does not include stopping something it is
+> provisioning in the same batch). This is the same class of bug the first
+> retraction above already closed for `destroy`/`provision`, resurfacing for
+> `stop`/`hibernate`. The retry-eligibility signal is now scoped to `start` only:
+> `stop`/`hibernate` on a missing instance report `failed` immediately on the first
+> pass, exactly as they did before the batch-ordering fix was introduced.
 
 ### Reporting a result
 

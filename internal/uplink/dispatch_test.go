@@ -116,13 +116,35 @@ func TestDispatchRedeliveredDestroyReportsDone(t *testing.T) {
 func TestDispatchStartOnUnknownInstanceReportsFailed(t *testing.T) {
 	d, _ := newDispatcher(t)
 
-	for _, kind := range []string{kindStart, kindStop, kindHibernate} {
+	// start is the one kind eligible for the deferred retry: retry=true on the
+	// first pass, terminal (failed) only after the batch runner's retry pass.
+	rep, retry := d.execute(cmd("c1", "node-7", "never-provisioned", kindStart, "", 1))
+	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
+		t.Fatalf("start on unknown instance: status=%q reported=%q, want failed/failed", rep.Status, rep.ReportedStatus)
+	}
+	if !retry {
+		t.Fatal("start on unknown instance: retry=false, want true (an unknown instance is one bounded retry away from failed)")
+	}
+	if !resultContains(t, rep.Result, "unknown instance") {
+		t.Fatalf("start on unknown instance: result %s does not name the cause", rep.Result)
+	}
+}
+
+// TestDispatchStopHibernateOnUnknownInstanceReportsFailedImmediately pins the
+// second, narrower hosted review finding: unlike start, stop and hibernate never
+// defer/retry on an unknown instance — they report failed on the very first pass.
+// Deferring them would risk acting on an instance a sibling provision elsewhere in
+// the same batch creates later, which is a new ordering inversion, not a fix.
+func TestDispatchStopHibernateOnUnknownInstanceReportsFailedImmediately(t *testing.T) {
+	d, _ := newDispatcher(t)
+
+	for _, kind := range []string{kindStop, kindHibernate} {
 		rep, retry := d.execute(cmd("c1", "node-7", "never-provisioned", kind, "", 1))
 		if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 			t.Fatalf("%s on unknown instance: status=%q reported=%q, want failed/failed", kind, rep.Status, rep.ReportedStatus)
 		}
-		if !retry {
-			t.Fatalf("%s on unknown instance: retry=false, want true (an unknown instance is one bounded retry away from failed)", kind)
+		if retry {
+			t.Fatalf("%s on unknown instance: retry=true, want false (only start defers/retries)", kind)
 		}
 		if !resultContains(t, rep.Result, "unknown instance") {
 			t.Fatalf("%s on unknown instance: result %s does not name the cause", kind, rep.Result)
@@ -223,8 +245,8 @@ func TestDispatchProvisionAtCapacityReportsFailed(t *testing.T) {
 }
 
 // TestDispatchRetrySignal pins the contract Poller.executeBatch depends on: only a
-// start/stop/hibernate whose instance is not yet known signals retry=true; every
-// other outcome (a resolved lifecycle transition, a provision, a destroy) is
+// start whose instance is not yet known signals retry=true; every other outcome (a
+// resolved lifecycle transition, a stop/hibernate miss, a provision, a destroy) is
 // terminal (retry=false), so the batch runner never defers work it should report now.
 func TestDispatchRetrySignal(t *testing.T) {
 	d, tr := newDispatcher(t)
@@ -240,6 +262,15 @@ func TestDispatchRetrySignal(t *testing.T) {
 	}
 	if _, retry := d.execute(cmd("c2", "node-7", "agent-1", kindStart, "", 2)); retry {
 		t.Fatal("start on a known instance must signal retry=false")
+	}
+
+	// stop/hibernate on an unknown instance are terminal immediately — only start
+	// gets the deferred retry.
+	if _, retry := d.execute(cmd("c5", "node-7", "never-provisioned", kindStop, "", 5)); retry {
+		t.Fatal("stop on an unknown instance must signal retry=false")
+	}
+	if _, retry := d.execute(cmd("c6", "node-7", "never-provisioned", kindHibernate, "", 6)); retry {
+		t.Fatal("hibernate on an unknown instance must signal retry=false")
 	}
 
 	// provision and destroy never depend on a sibling command, so never retry.
