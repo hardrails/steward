@@ -1,8 +1,8 @@
 # Design: disabling the inbound listener (a bind-nothing-inbound flag for uplink-only nodes)
 
-Status: **plan / design provenance. No implementation code has been written yet.**
-This document records the shape chosen, the shapes rejected, the invariants the
-design must hold, and the exact task list. It follows the same style as
+Status: **implemented; design provenance.** This document records the shape
+chosen, the shapes rejected, the invariants the design must hold, and the exact
+task list that was implemented. It follows the same style as
 [ARCHITECTURE.md](../ARCHITECTURE.md), [`docs/uplink-client.md`](uplink-client.md),
 and [`docs/instance-generation-fencing.md`](instance-generation-fencing.md): it
 explains not just *what* but *why*, and it names the failure mode each decision
