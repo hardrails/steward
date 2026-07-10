@@ -1,0 +1,17 @@
+# Gremlins mutation-testing config. See https://gremlins.dev and the go-gremlins
+# repo's own .gremlins.yaml for the format.
+#
+# The gate is efficacy — KILLED / (KILLED + LIVED), the conventional mutation
+# "kill rate". CI runs `gremlins unleash .`, which exits non-zero when efficacy
+# is below this floor. NOT_COVERED mutants (gremlins tests only covered mutants)
+# are excluded from efficacy by construction; that is why main()'s thin CLI/glue
+# — which gremlins sees as uncovered, since its own `go test` coverage does not
+# instrument the compiled binary — does not drag this number down. mutant-coverage
+# (--threshold-mcover) is a DIFFERENT metric and is deliberately not gated here.
+#
+# Floor rationale: measured efficacy is ~78% (Killed 102 / Lived 28). 70 leaves a
+# working margin above the run-to-run jitter inherent to mutation testing while
+# still catching a real regression in the gate-critical packages.
+unleash:
+  threshold:
+    efficacy: 70

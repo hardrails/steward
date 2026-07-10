@@ -47,3 +47,49 @@ jobs:
           node-version: "20"
       - name: spectral lint
         run: npx --yes @stoplight/spectral-cli@6.16.1 lint --fail-severity=error openapi/steward.v1.yaml
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24"
+          check-latest: false
+      # Honest aggregate coverage: unit coverage unioned with the real main()
+      # coverage recovered from the -cover-instrumented subprocess integration
+      # tests (see scripts/coverage.sh). Fails below the 85% floor.
+      - name: coverage floor (aggregate >= 85%)
+        run: bash scripts/coverage.sh 0.85
+
+  mutation:
+    name: mutation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24"
+          check-latest: false
+      # gremlins is a CI-only tool: installed as a pinned versioned binary, never
+      # imported and never added to go.mod/go.sum (verified: go list -m all still
+      # lists only this module). The efficacy floor lives in .gremlins.yaml.
+      - name: install gremlins (pinned)
+        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
+      - name: mutation testing (efficacy >= 70%)
+        run: "$(go env GOPATH)/bin/gremlins unleash ."
+
+  smoke:
+    name: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24"
+          check-latest: false
+      # Build the real release binary, serve it, assert GET /v1/healthz -> 200
+      # {"status":"ok"}, then SIGTERM and assert a clean, panic-free exit.
+      - name: smoke test (healthz + clean shutdown)
+        run: bash scripts/smoke.sh
