@@ -173,9 +173,39 @@ func (t *Tracker) Len() int {
 
 // MaxInstances returns the configured capacity cap: the maximum number of
 // instances the tracker holds before Provision returns ErrCapacityExceeded. It
-// is fixed at construction and never mutated afterward, so it needs no lock.
+// takes the lock because SetMaxInstances can update the cap live (a SIGHUP config
+// reload), so a lock-free read would race that write — the race detector would
+// flag it, and GET /v1/capabilities reads this on every request concurrently with
+// a reload.
 func (t *Tracker) MaxInstances() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.maxInstances
+}
+
+// SetMaxInstances updates the tracker's live capacity cap. It does not evict or
+// otherwise touch any already-tracked instance, even when lowering the cap below
+// the current instance count: Provision's existing capacity check
+// (len(t.byRef) >= t.maxInstances) already blocks *new* provisions once the count
+// reaches the new, lower ceiling, and every existing instance is left exactly as
+// it was. This is the same "circuit breaker on growth, not on reload" posture
+// load() already applies to a state file that holds more instances than its cap
+// (see persist.go): a lowered cap stops the tracker growing further and lets the
+// count drain back under the ceiling through ordinary Destroy attrition, rather
+// than force-stopping live instances — which would turn an operator's capacity
+// re-tune into an outage.
+//
+// Validating maxInstances is the caller's responsibility, matching every other
+// operator-facing config boundary in this codebase (see cmd/steward/main.go's
+// -max-instances check in prepareRuntime, and reloadMaxInstances for the SIGHUP
+// path): this method does NOT silently substitute DefaultMaxInstances the way the
+// newTracker constructor's non-positive convenience does, because a caller here
+// already holds a validated value and a silent substitution would mask a
+// misconfiguration instead of surfacing it.
+func (t *Tracker) SetMaxInstances(maxInstances int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.maxInstances = maxInstances
 }
 
 // Durable reports whether this tracker persists its state to a file. It exposes

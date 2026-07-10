@@ -199,6 +199,69 @@ func TestMaxInstancesReportsConfiguredCap(t *testing.T) {
 	}
 }
 
+// TestSetMaxInstancesUpdatesLiveCap pins the SIGHUP hot-reload's runtime half:
+// SetMaxInstances changes the cap Provision enforces and MaxInstances reports,
+// and — critically — lowering it below the live instance count evicts nothing: the
+// already-tracked instances stay, and only new provisions are blocked until the
+// count drains back under the new ceiling. This is the "circuit breaker on growth,
+// not on reload" behavior the SIGHUP path relies on.
+func TestSetMaxInstancesUpdatesLiveCap(t *testing.T) {
+	tr := NewTracker(2)
+
+	if _, _, err := tr.Provision("a", 0, nil); err != nil {
+		t.Fatalf("provision a: %v", err)
+	}
+	if _, _, err := tr.Provision("b", 0, nil); err != nil {
+		t.Fatalf("provision b: %v", err)
+	}
+	// At capacity: a new provision is refused today.
+	if _, _, err := tr.Provision("c", 0, nil); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("provision c at cap 2: err=%v, want ErrCapacityExceeded", err)
+	}
+
+	// Raise the cap: the accessor reports it and the previously-blocked provision
+	// now succeeds.
+	tr.SetMaxInstances(3)
+	if got := tr.MaxInstances(); got != 3 {
+		t.Fatalf("MaxInstances() = %d after raise, want 3", got)
+	}
+	if _, created, err := tr.Provision("c", 0, nil); err != nil || !created {
+		t.Fatalf("provision c after raising cap: created=%v err=%v, want true nil", created, err)
+	}
+
+	// Lower the cap below the live count (3 tracked, new cap 2). Nothing is
+	// evicted: every instance is still present and a new provision is refused.
+	tr.SetMaxInstances(2)
+	if got := tr.MaxInstances(); got != 2 {
+		t.Fatalf("MaxInstances() = %d after lower, want 2", got)
+	}
+	if got := tr.Len(); got != 3 {
+		t.Fatalf("Len() = %d after lowering the cap, want 3 (no eviction)", got)
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		if _, ok := tr.RefForInstance(id); !ok {
+			t.Errorf("instance %q was evicted by lowering the cap; it must survive", id)
+		}
+	}
+	if _, _, err := tr.Provision("d", 0, nil); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("provision d over the lowered cap: err=%v, want ErrCapacityExceeded", err)
+	}
+
+	// Attrition drains the count back under the ceiling: with cap 2, a new
+	// provision needs the count below 2, so destroying two of the three tracked
+	// instances (count → 1) lets a new one fit again — the ceiling was never an
+	// eviction, just a growth block until the count came down naturally.
+	for _, id := range []string{"a", "b"} {
+		ref, _ := tr.RefForInstance(id)
+		if _, err := tr.Destroy(ref); err != nil {
+			t.Fatalf("destroy %q: %v", id, err)
+		}
+	}
+	if _, created, err := tr.Provision("d", 0, nil); err != nil || !created {
+		t.Fatalf("provision d after attrition: created=%v err=%v, want true nil", created, err)
+	}
+}
+
 func TestDurableReflectsPersistenceMode(t *testing.T) {
 	if NewTracker(0).Durable() {
 		t.Fatal("Durable() = true for an in-memory tracker, want false")
