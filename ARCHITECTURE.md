@@ -164,7 +164,9 @@ durable state. When it is set:
   for mTLS, and the insecure, loudly-warned `-uplink-tls-skip-verify` escape hatch),
   built with only `crypto/tls` — no new dependency — and validated fail-closed at
   startup and under `-check-config`, so a bad CA/cert/key is a startup error, never a
-  silent fall back to system defaults. Every poll/report body the client reads or
+  silent fall back to system defaults. The client private key gets the same
+  owner-only (`0600`) permission gate the credential does, since it is an equivalent
+  node-authenticating secret. Every poll/report body the client reads or
   writes is bounded at the same 1 MiB the inbound REST API caps a request body to: a
   poll response over the cap is a clean, logged rejection (this cycle is dropped and
   retried next, never an unbounded read), and a report body over the cap is refused

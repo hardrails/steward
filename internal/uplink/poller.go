@@ -480,8 +480,19 @@ func (p *Poller) sendReport(ctx context.Context, rep report) error {
 		drain(resp.Body)
 		return fmt.Errorf("uplink report returned HTTP %d", resp.StatusCode)
 	}
+	// The report response is read with the same over-cap rejection the poll
+	// response uses, not a bare LimitReader: a LimitReader would let json.Decode
+	// succeed on the leading {"applied":...} and silently ignore an oversized
+	// padded tail, whereas readCappedBody detects and rejects the over-cap body.
+	respBody, tooLarge, err := readCappedBody(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read report response: %w", err)
+	}
+	if tooLarge {
+		return fmt.Errorf("uplink report response body exceeds the %d-byte cap", maxUplinkBodyBytes)
+	}
 	var rr reportResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxUplinkBodyBytes)).Decode(&rr); err != nil {
+	if err := json.Unmarshal(respBody, &rr); err != nil {
 		return fmt.Errorf("decode report response: %w", err)
 	}
 	if !rr.Applied {

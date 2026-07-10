@@ -118,6 +118,36 @@ func TestNewHTTPClientLoadsValidClientCert(t *testing.T) {
 	}
 }
 
+// TestNewHTTPClientRejectsOverPermissiveClientKey pins that the mTLS private key
+// gets the same owner-only permission gate the bearer credential does: a group- or
+// other-accessible key is refused fail-closed (naming the chmod fix), so a local
+// user cannot copy it and impersonate the node. A 0600 key still loads.
+func TestNewHTTPClientRejectsOverPermissiveClientKey(t *testing.T) {
+	certFile, keyFile := generateCertPair(t)
+	// Loosen the key to group/other-readable — exactly the posture to refuse.
+	if err := os.Chmod(keyFile, 0o644); err != nil {
+		t.Fatalf("chmod key: %v", err)
+	}
+
+	_, err := NewHTTPClient(TLSConfig{ClientCertFile: certFile, ClientKeyFile: keyFile})
+	if err == nil {
+		t.Fatal("NewHTTPClient with a group-readable client key: got nil err, want fail-closed")
+	}
+	for _, want := range []string{keyFile, "permission", "chmod 600"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	// Tightening the key back to owner-only lets it load.
+	if err := os.Chmod(keyFile, 0o600); err != nil {
+		t.Fatalf("chmod key: %v", err)
+	}
+	if _, err := NewHTTPClient(TLSConfig{ClientCertFile: certFile, ClientKeyFile: keyFile}); err != nil {
+		t.Fatalf("NewHTTPClient with a 0600 client key: unexpected err %v", err)
+	}
+}
+
 // TestNewHTTPClientMutualTLS drives an end-to-end mTLS handshake: a server that
 // requires and verifies a client certificate accepts the client only when the
 // client presents its cert, proving the -uplink-tls-client-cert/-key path is

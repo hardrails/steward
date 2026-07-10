@@ -258,7 +258,10 @@ credential-permission check, which is always on when the uplink is enabled.
   fail-closed at startup and under `-check-config`: an unreadable CA, a CA file
   with no usable certificate, or a client cert without its key (or a pair that
   does not load) is a startup error naming the fix, never a silent fall back to
-  system defaults. It is built with only `crypto/tls` from the standard library —
+  system defaults. The client **private key** is a secret like the credential, so
+  its file must also be `0600` or stricter — a group- or other-accessible key is
+  refused fail-closed (the public certificate needs no such check). It is built
+  with only `crypto/tls` from the standard library —
   no new dependency. `-uplink-tls-skip-verify` disables certificate verification
   entirely; it is **insecure** (it defeats TLS authentication and exposes the
   channel to a man-in-the-middle), defaults off, and logs a loud warning whenever
@@ -272,12 +275,12 @@ credential-permission check, which is always on when the uplink is enabled.
   redelivers the command via its claim lease). A hostile or buggy control plane
   therefore cannot make Steward read or send an unbounded body.
 
-- **Credential file permissions.** The uplink credential is a bearer secret, so
-  its file must be `0600` or stricter (owner-only). A file readable or writable by
-  group or others is refused fail-closed — at startup, under `-check-config`, and
-  on the credential hot-reload watch — with an actionable message naming the path
-  and the `chmod 600` fix. The check is on the mode bits, so it holds even when
-  Steward runs as root.
+- **Secret file permissions.** The uplink credential and the TLS client private
+  key are both secrets, so each file must be `0600` or stricter (owner-only). A
+  file readable or writable by group or others is refused fail-closed — at startup,
+  under `-check-config`, and (for the credential) on the hot-reload watch — with an
+  actionable message naming the path and the `chmod 600` fix. The check is on the
+  mode bits, so it holds even when Steward runs as root.
 
 ## Config file
 

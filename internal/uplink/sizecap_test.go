@@ -143,6 +143,32 @@ func TestSendReportRefusesOversizedBody(t *testing.T) {
 	}
 }
 
+// TestSendReportRejectsOversizedResponse pins that the report-response read
+// enforces the cap the same way the poll response does: a 2xx report response
+// whose body exceeds the cap is rejected (not silently accepted from a bounded
+// LimitReader that ignores the padded tail). sendReport returns an error, which
+// the caller logs at WARN; the server redelivers via its claim lease.
+func TestSendReportRejectsOversizedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// A valid applied:true prefix followed by padding past the cap. A bare
+		// LimitReader would decode the prefix and drop the tail; readCappedBody
+		// rejects the whole over-cap body.
+		_, _ = io.WriteString(w, `{"applied":true}`)
+		_, _ = io.WriteString(w, strings.Repeat(" ", maxUplinkBodyBytes+64))
+	}))
+	defer srv.Close()
+
+	p := mustPoller(t, runtime.NewTracker(0), Config{
+		BaseURL: srv.URL, Credential: "tok", NodeID: "node-7", PollInterval: time.Second,
+	})
+
+	err := p.sendReport(context.Background(), report{CommandID: "cmd-ok", Status: "success"})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("err = %v, want one naming the exceeded response cap", err)
+	}
+}
+
 // TestSendReportSendsUnderCapBody is the paired happy path: a normal report is
 // marshaled, passes the cap, and is delivered.
 func TestSendReportSendsUnderCapBody(t *testing.T) {

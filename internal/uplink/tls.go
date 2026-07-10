@@ -72,6 +72,19 @@ func NewHTTPClient(cfg TLSConfig) (*http.Client, error) {
 	case cfg.ClientKeyFile != "" && cfg.ClientCertFile == "":
 		return nil, fmt.Errorf("uplink TLS client key %q is set but no client certificate is; set -uplink-tls-client-cert (or STEWARD_UPLINK_TLS_CLIENT_CERT) too, or drop both to disable mTLS", cfg.ClientKeyFile)
 	case cfg.ClientCertFile != "" && cfg.ClientKeyFile != "":
+		// The client private key authenticates this node to the control plane, so
+		// it is a secret exactly like the bearer credential (see LoadCredential):
+		// refuse it fail-closed if group or others can read or write it (looser
+		// than 0600), otherwise a local user could copy the key and impersonate
+		// this node over mTLS. The public certificate carries no secret and needs
+		// no such check. On the mode bits, so it holds even when Steward runs as root.
+		info, err := os.Stat(cfg.ClientKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("stat uplink TLS client key %q: %w", cfg.ClientKeyFile, err)
+		}
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			return nil, fmt.Errorf("uplink TLS client key %q has insecure permissions %#o: it is readable or writable by group or others; restrict it to the owner (run: chmod 600 %s) so the private key cannot be read and used to impersonate this node", cfg.ClientKeyFile, perm, cfg.ClientKeyFile)
+		}
 		cert, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("load uplink TLS client certificate/key pair (cert %q, key %q): %w (check both are PEM-encoded and match; re-issue the node's client certificate if unsure)", cfg.ClientCertFile, cfg.ClientKeyFile, err)
