@@ -12,12 +12,19 @@ import (
 )
 
 // fakeUplinkMetrics is a test double for UplinkMetrics: it returns a fixed
-// snapshot without driving a real poll loop over HTTP.
+// snapshot and a fixed readiness verdict without driving a real poll loop over
+// HTTP. ready/readyDetail default to the zero value (not ready); the
+// /metrics tests never consult Ready, and the readiness tests set them
+// explicitly.
 type fakeUplinkMetrics struct {
-	snap uplink.Snapshot
+	snap        uplink.Snapshot
+	ready       bool
+	readyDetail string
 }
 
 func (f fakeUplinkMetrics) MetricsSnapshot() uplink.Snapshot { return f.snap }
+
+func (f fakeUplinkMetrics) Ready() (bool, string) { return f.ready, f.readyDetail }
 
 func metricsTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))

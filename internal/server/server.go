@@ -135,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/instances/{id}/hibernate", s.handleHibernate)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/healthz", s.handleHealthz)
+	mux.HandleFunc("GET /v1/readiness", s.handleReadiness)
 	if s.metricsEnabled {
 		mux.HandleFunc("GET /metrics", s.handleMetrics)
 	}
@@ -193,10 +194,64 @@ type healthResponse struct {
 	Status string `json:"status"`
 }
 
+// readinessResponse is the body of GET /v1/readiness. Status is "ready" (200)
+// or "not_ready" (503). On a not_ready response, Check names the first failing
+// gate ("uplink", "state_file", or "tracker") and Detail is a human
+// explanation, so an orchestrator log names exactly which readiness gate held
+// the instance back; both are omitted on a ready response.
+type readinessResponse struct {
+	Status string `json:"status"`
+	Check  string `json:"check,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
 type errorResponse struct {
 	Error   string `json:"error"`
 	Message string `json:"message"`
 }
+
+// The error-code taxonomy: the closed, stable set of machine-readable strings
+// the `error` field of every errorResponse carries. Each names one distinct
+// failure class an operator or client can branch on, and each is documented as
+// the `Error.error` enum in openapi/steward.v1.yaml — this block and that enum
+// are the two halves of one contract and must stay in sync. Grouping the codes
+// here (rather than scattering string literals across handlers) is what keeps
+// the set small, named, and drift-proof.
+//
+// The HTTP status each code travels with is fixed by the handler that emits it
+// (see the writeError calls below); railyard's Steward adapter branches on the
+// HTTP status, not on these strings, so the strings describe the failure to a
+// human without being a load-bearing wire ABI.
+const (
+	// codeInvalidRequest — the request itself is malformed: undecodable JSON
+	// body, a missing/empty required field (instance_id), an unknown batch op,
+	// or an unparseable query filter. Always HTTP 400.
+	codeInvalidRequest = "invalid_request"
+	// codeInvalidSpec — the request was well-formed but its `spec` (the opaque
+	// instance config blob) is present and not a JSON object: the "malformed
+	// config" class, distinct from a malformed request envelope. Always HTTP 400.
+	codeInvalidSpec = "invalid_spec"
+	// codeUnknownRuntimeRef — no instance is tracked for the addressed
+	// runtime_ref (including one already destroyed and released). Always HTTP 404.
+	codeUnknownRuntimeRef = "unknown_runtime_ref"
+	// codeInvalidStateTransition — a Start/Stop/Hibernate whose target status is
+	// not reachable from the instance's current status (e.g. stopping a PENDING
+	// instance). Always HTTP 409. Mirrors runtime.ErrInvalidStateTransition.
+	codeInvalidStateTransition = "invalid_state_transition"
+	// codeCapacityExceeded — a new provision would exceed the configured
+	// max_instances cap. Always HTTP 503. Mirrors runtime.ErrCapacityExceeded.
+	codeCapacityExceeded = "capacity_exceeded"
+	// codeRequestTooLarge — the request body exceeded the 1 MiB cap. Always HTTP 413.
+	codeRequestTooLarge = "request_too_large"
+	// codeRateLimited — the per-source inbound rate limit was exceeded. Always HTTP 429.
+	codeRateLimited = "rate_limited"
+	// codeNotFound — no route matches the path. Always HTTP 404 (see jsonErrors).
+	codeNotFound = "not_found"
+	// codeMethodNotAllowed — the method is not allowed on the path. Always HTTP 405.
+	codeMethodNotAllowed = "method_not_allowed"
+	// codeInternalError — an unexpected server-side error. Always HTTP 500.
+	codeInternalError = "internal_error"
+)
 
 func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
@@ -205,15 +260,15 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+			writeError(w, http.StatusRequestEntityTooLarge, codeRequestTooLarge,
 				"request body exceeds the 1MiB limit")
 			return
 		}
-		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be a JSON object")
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "request body must be a JSON object")
 		return
 	}
 	if req.InstanceID == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request", "instance_id is required")
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "instance_id is required")
 		return
 	}
 
@@ -224,7 +279,7 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 		spec = nil
 	}
 	if len(spec) > 0 && !runtime.IsJSONObject(spec) {
-		writeError(w, http.StatusBadRequest, "invalid_request", "spec must be a JSON object")
+		writeError(w, http.StatusBadRequest, codeInvalidSpec, "spec must be a JSON object")
 		return
 	}
 
@@ -234,12 +289,12 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 	inst, created, err := s.tracker.Provision(req.InstanceID, 0, spec)
 	if err != nil {
 		if errors.Is(err, runtime.ErrCapacityExceeded) {
-			writeError(w, http.StatusServiceUnavailable, "capacity_exceeded",
+			writeError(w, http.StatusServiceUnavailable, codeCapacityExceeded,
 				"instance capacity reached; retry later")
 			return
 		}
 		s.logger.Error("provision failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "operation failed")
+		writeError(w, http.StatusInternalServerError, codeInternalError, "operation failed")
 		return
 	}
 
@@ -277,7 +332,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	if raw := q.Get("status"); raw != "" {
 		status := runtime.Status(raw)
 		if !status.Valid() {
-			writeError(w, http.StatusBadRequest, "invalid_request",
+			writeError(w, http.StatusBadRequest, codeInvalidRequest,
 				"status must be one of PENDING, RUNNING, STOPPED, HIBERNATED, DESTROYED, FAILED")
 			return
 		}
@@ -287,7 +342,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	if raw := q.Get("created_since"); raw != "" {
 		since, err := time.Parse(time.RFC3339, raw)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_request",
+			writeError(w, http.StatusBadRequest, codeInvalidRequest,
 				"created_since must be an RFC3339 timestamp")
 			return
 		}
@@ -343,14 +398,77 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
 }
 
+// handleReadiness is a rolling-deployment readiness gate, distinct from the
+// healthz liveness probe: a load balancer or orchestrator should route traffic
+// to (or keep) this instance only when it returns 200. It returns 503 (naming
+// the first failing check in the JSON body) when the instance is not yet ready
+// or is degraded, so a not-yet-warm or persistently-failing node is drained
+// rather than served. Three gates, cheapest first, first failure wins:
+//
+//  1. The instance tracker is initialized. Always true for a server built by
+//     New/NewWithTracker; the guard fails closed rather than NPE if a future
+//     wiring path ever leaves it nil.
+//  2. The outbound uplink (when enabled — s.uplinkMetrics is non-nil exactly
+//     then) has completed at least one successful poll OR is not in a
+//     persistent-failure state (a rejected credential, or sustained polling
+//     failure with no success yet). A brief transient blip does not flip
+//     readiness; a node that has never reached its control plane and is stuck
+//     does. See uplink.Poller.Ready.
+//  3. Durable state (when enabled) is writable — the capability persistence
+//     actually needs. Unlike the liveness probe, readiness deliberately does
+//     this filesystem check (see Tracker.CheckDurableWritable): a state
+//     directory that has gone read-only or full cannot durably record a
+//     mutation, and such an instance must be drained even though its process is
+//     alive. The probe never races the atomic-rename persistence writes.
+//
+// Like healthz, it lives only on the inbound listener, so a
+// -disable-inbound-listener (uplink-only) node has no local readiness endpoint —
+// its readiness signal is its advancing uplink poll logs, exactly as its
+// liveness signal is.
+func (s *Server) handleReadiness(w http.ResponseWriter, _ *http.Request) {
+	if s.tracker == nil {
+		writeNotReady(w, "tracker", "instance tracker is not initialized")
+		return
+	}
+	if s.uplinkMetrics != nil {
+		if ready, detail := s.uplinkMetrics.Ready(); !ready {
+			writeNotReady(w, "uplink", detail)
+			return
+		}
+	}
+	if err := s.tracker.CheckDurableWritable(); err != nil {
+		writeNotReady(w, "state_file", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, readinessResponse{Status: "ready"})
+}
+
+// writeNotReady writes a 503 readiness response naming the gate that failed.
+func writeNotReady(w http.ResponseWriter, check, detail string) {
+	writeJSON(w, http.StatusServiceUnavailable, readinessResponse{
+		Status: "not_ready",
+		Check:  check,
+		Detail: detail,
+	})
+}
+
 func (s *Server) respond(w http.ResponseWriter, inst *runtime.Instance, err error) {
 	if err != nil {
 		if errors.Is(err, runtime.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "unknown_runtime_ref", "no instance with that runtime_ref")
+			writeError(w, http.StatusNotFound, codeUnknownRuntimeRef, "no instance with that runtime_ref")
+			return
+		}
+		// A rejected lifecycle transition (e.g. stopping a PENDING instance) is a
+		// 409, not a 500: it is the caller's request conflicting with the
+		// instance's current state, not a server fault. The wrapped error already
+		// names the current and requested status (safe, public status names), so
+		// echoing it tells the caller exactly which transition was refused.
+		if errors.Is(err, runtime.ErrInvalidStateTransition) {
+			writeError(w, http.StatusConflict, codeInvalidStateTransition, err.Error())
 			return
 		}
 		s.logger.Error("lifecycle operation failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "operation failed")
+		writeError(w, http.StatusInternalServerError, codeInternalError, "operation failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, inst)
@@ -415,7 +533,7 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 		defer func() {
 			if rec := recover(); rec != nil {
 				s.logger.Error("panic recovered", "err", rec, "method", r.Method, "path", r.URL.Path)
-				writeError(w, http.StatusInternalServerError, "internal_error", "operation failed")
+				writeError(w, http.StatusInternalServerError, codeInternalError, "operation failed")
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -443,9 +561,9 @@ func (w *jsonErrorWriter) WriteHeader(code int) {
 	if (code == http.StatusNotFound || code == http.StatusMethodNotAllowed) &&
 		w.Header().Get("Content-Type") != "application/json" {
 		w.swallow = true
-		body := errorResponse{Error: "not_found", Message: "no route matches that path"}
+		body := errorResponse{Error: codeNotFound, Message: "no route matches that path"}
 		if code == http.StatusMethodNotAllowed {
-			body = errorResponse{Error: "method_not_allowed", Message: "that method is not allowed on this path"}
+			body = errorResponse{Error: codeMethodNotAllowed, Message: "that method is not allowed on this path"}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.ResponseWriter.WriteHeader(code)

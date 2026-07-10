@@ -271,11 +271,63 @@ invariant above.
   otherwise ignored, since the audit log is a best-effort trail, never a source
   of truth a command's real outcome depends on.
 
-### Provisioning is idempotent by design
+### Failure classes are named, not generic
+
+Every error response carries a stable `error` code drawn from one small, closed
+taxonomy defined in exactly one place (`internal/server`'s error-code constants)
+and projected into the `Error.error` enum of `openapi/steward.v1.yaml` — the two
+halves of one contract, kept from drifting. The codes name distinct real failure
+classes: `invalid_request` (a malformed request envelope or missing field),
+`invalid_spec` (a present but non-object instance `spec` — the malformed-config
+class, split out from the generic request error), `unknown_runtime_ref`,
+`invalid_state_transition` (see below), `capacity_exceeded`, `request_too_large`,
+`rate_limited`, `not_found`, `method_not_allowed`, and `internal_error`. Each
+code travels with a fixed HTTP status; a consumer branches on the status (or the
+code), never on the human-facing `message`. The set is additive over the prior
+generic codes — the one behavior change is that a non-object `spec`, formerly
+`invalid_request`, is now the more specific `invalid_spec` (still a `400`, so a
+status-based client is unaffected).
+
+### Readiness is distinct from liveness
+
+`GET /v1/healthz` answers "is the process up?"; the separate `GET /v1/readiness`
+answers "should traffic go to this instance *right now*?" — the question a
+rolling deploy or load balancer must ask. It returns `200` only when three gates
+pass, and `503` naming the first failing one otherwise: the instance tracker is
+initialized; the outbound uplink (when enabled) has completed at least one
+successful poll **or** is not in a persistent-failure state (a rejected
+credential, or sustained polling failure with no success yet — a brief blip does
+not flip readiness, and one success keeps a node ready across a later blip); and
+durable state (when enabled) is writable. That last gate is the deliberate
+inversion of `healthz`'s posture: liveness refuses to touch the state file (a hot
+path, and a redundant guarantee), but readiness *does* probe writability, because
+a state directory gone read-only or full is exactly the degraded-but-alive
+condition a readiness gate exists to drain. The probe creates and removes a
+uniquely-prefixed temp file, so it never races the atomic-rename persistence
+writes. Like `healthz` it lives only on the inbound listener; an uplink-only node
+signals readiness through its advancing poll logs, the same way it signals
+liveness.
+
+### Provisioning is idempotent by design, and transitions are validated
 
 `Provision` keys on the caller-supplied `instance_id`. If an instance with that
 id is already tracked, the existing `runtime_ref` and status are returned
-unchanged rather than creating a second instance. This is the safety net for a
+unchanged rather than creating a second instance.
+
+The three lifecycle transitions (`start`/`stop`/`hibernate`) are validated
+against the instance's current status by a small allowed-transitions table,
+rather than mutating unconditionally. Two rules define it. First, a
+self-transition is always an idempotent no-op success — starting an
+already-`RUNNING` instance returns it unchanged — because that is the property a
+redelivered (report-lost) uplink command and a retried batch both depend on: the
+double-invoke covenant would break if the second call reported a spurious
+failure. Second, `stop`/`hibernate` are refused from `PENDING` (a `409
+invalid_state_transition`, instance left unchanged) — a never-started instance
+has nothing to stop or hibernate, so silently recording `STOPPED`/`HIBERNATED`
+would be a nonsensical state, not a transition. Every other move among the live
+statuses stays valid: Steward mirrors the control plane's state machine, it does
+not impose a stricter one. `destroy` is always allowed on a live instance and is
+not routed through the table. This is the safety net for a
 client that retries an ambiguous, timed-out provision call: a double-invoke
 cannot create a duplicate. The concurrency test in `internal/runtime` pins this
 by racing many goroutines to provision the same id and asserting exactly one

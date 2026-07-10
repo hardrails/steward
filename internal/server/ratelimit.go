@@ -221,7 +221,7 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowed, retryAfter := s.limiter.allow(sourceKey(r.RemoteAddr)); !allowed {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-			writeError(w, http.StatusTooManyRequests, "rate_limited",
+			writeError(w, http.StatusTooManyRequests, codeRateLimited,
 				"too many requests from your source address; retry after the Retry-After interval")
 			return
 		}

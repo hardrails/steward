@@ -35,6 +35,14 @@ const (
 	// pollBody is the (empty) poll request body: the server derives the node from
 	// the credential, so no node_id or heartbeat payload is sent.
 	pollBody = `{}`
+	// persistentFailureThreshold is how many consecutive poll failures (with no
+	// successful poll yet) the readiness gate treats as a sustained, persistent
+	// failure rather than a transient blip (see Metrics.readiness and
+	// Poller.Ready). With the exponential backoff a handful of failures already
+	// spans minutes, and a version-skew rejection pins the failure count at the
+	// cap immediately (skewFailures), so this small value drains a genuinely-stuck
+	// fresh node quickly while never flapping readiness on one lost poll.
+	persistentFailureThreshold = 3
 	// DefaultCredentialWatchInterval is how often Run re-reads the credential file
 	// while paused after a fatal 401/403 rejection (see waitForCredentialChange),
 	// when Config.CredentialWatchInterval is unset. This loop makes no outbound
@@ -185,6 +193,16 @@ func (p *Poller) MetricsSnapshot() Snapshot {
 	return p.metrics.snapshot(p.baseInterval)
 }
 
+// Ready reports whether this poll loop is ready to serve traffic — it has
+// completed at least one successful poll, or is not in a persistent-failure
+// state (a rejected credential, or persistentFailureThreshold consecutive
+// failures with no success yet) — and, when not, a human detail naming why.
+// It backs the GET /v1/readiness gate (see internal/server.UplinkMetrics and
+// handleReadiness). Safe to call concurrently with Run.
+func (p *Poller) Ready() (ready bool, detail string) {
+	return p.metrics.readiness(persistentFailureThreshold)
+}
+
 // Run drives the poll loop until ctx is cancelled. The inter-poll wait and every
 // in-flight request are cancelled by ctx, so a shutdown signal returns promptly.
 // It leaves the rest of Steward (an inbound REST listener, if bound) running.
@@ -212,6 +230,7 @@ func (p *Poller) Run(ctx context.Context) {
 		switch class {
 		case classOK:
 			failures = 0
+			p.metrics.recordPollSuccess() // readiness: the node has reached its control plane.
 			p.executeBatch(ctx, commands)
 		case classTransient:
 			failures++
@@ -228,11 +247,18 @@ func (p *Poller) Run(ctx context.Context) {
 					"err", err, "node_id", p.dispatcher.nodeID)
 				return
 			}
+			// A rejected credential with the loop paused is a persistent-failure
+			// state for the readiness gate — one the consecutive-failure count does
+			// not capture on its own (a first-poll rejection leaves it at 0). Mark it
+			// before the (blocking) wait and clear it only once a new credential
+			// resumes the loop.
+			p.metrics.setCredentialRejected(true)
 			p.logger.Error("uplink credential rejected; pausing the poll loop and waiting for a new credential",
 				"err", err, "node_id", p.dispatcher.nodeID, "path", p.credentialPath)
 			if !p.waitForCredentialChange(ctx) {
 				return // ctx cancelled while waiting: a real shutdown, not a resume.
 			}
+			p.metrics.setCredentialRejected(false)
 			failures = 0
 		}
 		// Mirror the local failures count into the metrics gauge every iteration

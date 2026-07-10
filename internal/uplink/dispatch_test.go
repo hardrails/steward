@@ -326,13 +326,17 @@ func TestDispatchFenceAllowsCommandAtOrAboveTrackedGeneration(t *testing.T) {
 			}
 			d := &dispatcher{tracker: tr, nodeID: "node-7", logger: discardLogger()}
 
-			cmd := cmdGen("c1", "node-7", "agent-1", kindStop, "", 1, gen)
+			// The representative non-fenced command is a start (agent-1 is PENDING,
+			// so PENDING→RUNNING is a valid transition); fencing is kind-agnostic, so
+			// this exercises the same not-fenced-proceeds path a stop would while
+			// avoiding the now-rejected stop-on-PENDING.
+			cmd := cmdGen("c1", "node-7", "agent-1", kindStart, "", 1, gen)
 			rep, _, fenced := d.execute(cmd)
 			if fenced {
 				t.Fatalf("instance_generation=%d: fenced=true, want false (not older than tracked 5)", gen)
 			}
 			if rep.Status != statusDone {
-				t.Fatalf("instance_generation=%d: status=%q, want done (the stop must proceed)", gen, rep.Status)
+				t.Fatalf("instance_generation=%d: status=%q, want done (the command must proceed)", gen, rep.Status)
 			}
 		})
 	}
@@ -348,7 +352,9 @@ func TestDispatchFenceIgnoresZeroInstanceGeneration(t *testing.T) {
 	}
 	d := &dispatcher{tracker: tr, nodeID: "node-7", logger: discardLogger()}
 
-	cmd := cmdGen("c1", "node-7", "agent-1", kindStop, "", 1, 0)
+	// start (agent-1 is PENDING) is the representative non-fenced command; fencing
+	// is kind-agnostic, so this avoids the now-rejected stop-on-PENDING.
+	cmd := cmdGen("c1", "node-7", "agent-1", kindStart, "", 1, 0)
 	rep, _, fenced := d.execute(cmd)
 	if fenced {
 		t.Fatal("instance_generation=0 must never be fenced (old-control-plane compatibility)")

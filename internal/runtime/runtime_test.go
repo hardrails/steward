@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -88,6 +89,154 @@ func TestLifecycleTransitions(t *testing.T) {
 
 	if _, err := tr.Status(ref); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("status after destroy: err=%v, want ErrNotFound", err)
+	}
+}
+
+// reachStatus provisions a fresh instance and drives it to target through a
+// valid transition path, returning its runtime_ref. It is the setup helper for
+// the transition-validity cases: a PENDING instance cannot be stopped or
+// hibernated directly, so STOPPED/HIBERNATED are reached via RUNNING.
+func reachStatus(t *testing.T, tr *Tracker, id string, target Status) string {
+	t.Helper()
+	inst, _, err := tr.Provision(id, 0, nil)
+	if err != nil {
+		t.Fatalf("provision %q: %v", id, err)
+	}
+	ref := inst.RuntimeRef
+	drive := func(op func(string) (*Instance, error)) {
+		if _, err := op(ref); err != nil {
+			t.Fatalf("setup transition to %s: %v", target, err)
+		}
+	}
+	switch target {
+	case StatusPending:
+		// already there
+	case StatusRunning:
+		drive(tr.Start)
+	case StatusStopped:
+		drive(tr.Start)
+		drive(tr.Stop)
+	case StatusHibernated:
+		drive(tr.Start)
+		drive(tr.Hibernate)
+	default:
+		t.Fatalf("reachStatus: unsupported target %q", target)
+	}
+	return ref
+}
+
+// TestTransitionAllowedTable pins the full transition matrix at the pure-function
+// level: it is the authoritative table, so a mutant that flips any cell is caught
+// here. Self-transitions are always allowed (idempotency); stop/hibernate are
+// refused only from PENDING (a never-started instance); FAILED and DESTROYED
+// (which Steward never drives a transition from) fail closed.
+func TestTransitionAllowedTable(t *testing.T) {
+	cases := []struct {
+		from, to Status
+		want     bool
+	}{
+		// Self-transitions: always allowed (redelivery-/retry-safe idempotency).
+		{StatusPending, StatusPending, true},
+		{StatusRunning, StatusRunning, true},
+		{StatusStopped, StatusStopped, true},
+		{StatusHibernated, StatusHibernated, true},
+		// start (→RUNNING): from any non-terminal status, including PENDING.
+		{StatusPending, StatusRunning, true},
+		{StatusStopped, StatusRunning, true},
+		{StatusHibernated, StatusRunning, true},
+		// stop (→STOPPED): only from a status that has run — never PENDING.
+		{StatusPending, StatusStopped, false},
+		{StatusRunning, StatusStopped, true},
+		{StatusHibernated, StatusStopped, true},
+		// hibernate (→HIBERNATED): only from a status that has run — never PENDING.
+		{StatusPending, StatusHibernated, false},
+		{StatusRunning, StatusHibernated, true},
+		{StatusStopped, StatusHibernated, true},
+		// FAILED (never emitted by Steward) and DESTROYED (never tracked) fail
+		// closed for every non-self target.
+		{StatusFailed, StatusRunning, false},
+		{StatusFailed, StatusStopped, false},
+		{StatusFailed, StatusHibernated, false},
+		{StatusDestroyed, StatusRunning, false},
+	}
+	for _, c := range cases {
+		if got := transitionAllowed(c.from, c.to); got != c.want {
+			t.Errorf("transitionAllowed(%s, %s) = %v, want %v", c.from, c.to, got, c.want)
+		}
+	}
+}
+
+// TestTransitionValidity proves the table is wired through the tracker's
+// Start/Stop/Hibernate methods: every valid transition succeeds and lands on the
+// expected status (self-transitions included, so Provision-then-double-start is
+// idempotent), and every invalid transition is rejected with
+// ErrInvalidStateTransition while leaving the instance's status UNCHANGED (no
+// silent mutation into a nonsensical state).
+func TestTransitionValidity(t *testing.T) {
+	ops := map[string]func(*Tracker, string) (*Instance, error){
+		"start":     (*Tracker).Start,
+		"stop":      (*Tracker).Stop,
+		"hibernate": (*Tracker).Hibernate,
+	}
+	cases := []struct {
+		from       Status
+		op         string
+		wantErr    bool
+		wantStatus Status // meaningful only when wantErr is false
+	}{
+		{StatusPending, "start", false, StatusRunning},
+		{StatusPending, "stop", true, ""},
+		{StatusPending, "hibernate", true, ""},
+		{StatusRunning, "start", false, StatusRunning}, // idempotent self-transition
+		{StatusRunning, "stop", false, StatusStopped},
+		{StatusRunning, "hibernate", false, StatusHibernated},
+		{StatusStopped, "start", false, StatusRunning},
+		{StatusStopped, "stop", false, StatusStopped}, // idempotent self-transition
+		{StatusStopped, "hibernate", false, StatusHibernated},
+		{StatusHibernated, "start", false, StatusRunning},
+		{StatusHibernated, "stop", false, StatusStopped},
+		{StatusHibernated, "hibernate", false, StatusHibernated}, // idempotent self-transition
+	}
+	for _, c := range cases {
+		t.Run(string(c.from)+"_"+c.op, func(t *testing.T) {
+			tr := NewTracker(0)
+			ref := reachStatus(t, tr, "agent", c.from)
+			inst, err := ops[c.op](tr, ref)
+			if c.wantErr {
+				if !errors.Is(err, ErrInvalidStateTransition) {
+					t.Fatalf("%s from %s: err=%v, want ErrInvalidStateTransition", c.op, c.from, err)
+				}
+				got, gerr := tr.Status(ref)
+				if gerr != nil {
+					t.Fatalf("status after rejected %s: %v", c.op, gerr)
+				}
+				if got.Status != c.from {
+					t.Fatalf("status after rejected %s = %q, want unchanged %q", c.op, got.Status, c.from)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s from %s: unexpected err %v", c.op, c.from, err)
+			}
+			if inst.Status != c.wantStatus {
+				t.Fatalf("%s from %s: status=%q, want %q", c.op, c.from, inst.Status, c.wantStatus)
+			}
+		})
+	}
+}
+
+// TestInvalidTransitionErrorNamesStatuses pins the 3am test: the rejection error
+// names both the current and requested status so an operator reading it knows
+// exactly which transition was refused.
+func TestInvalidTransitionErrorNamesStatuses(t *testing.T) {
+	tr := NewTracker(0)
+	ref := reachStatus(t, tr, "agent", StatusPending)
+	_, err := tr.Stop(ref)
+	if !errors.Is(err, ErrInvalidStateTransition) {
+		t.Fatalf("err=%v, want ErrInvalidStateTransition", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, string(StatusPending)) || !strings.Contains(msg, string(StatusStopped)) {
+		t.Fatalf("error %q must name both the current (%s) and requested (%s) status", msg, StatusPending, StatusStopped)
 	}
 }
 

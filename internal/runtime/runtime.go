@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,64 @@ var ErrNotFound = errors.New("unknown runtime_ref")
 // ErrCapacityExceeded is returned by Provision when the tracker already holds
 // its maximum number of instances. The HTTP layer turns this into a 503.
 var ErrCapacityExceeded = errors.New("instance capacity exceeded")
+
+// ErrInvalidStateTransition is returned by a lifecycle transition (Start,
+// Stop, or Hibernate) when the requested target status is not reachable from
+// the instance's current status — for example, stopping or hibernating an
+// instance that is still PENDING (never started). The HTTP layer turns this
+// into a 409, and the outbound uplink reports the command failed rather than
+// silently mutating the instance into a nonsensical state. Every wrapping of
+// it names the current and requested status so the error tells an operator
+// exactly which transition was refused (see transitionAllowed and transition).
+var ErrInvalidStateTransition = errors.New("invalid state transition")
+
+// transitionAllowed reports whether an instance in status `from` may move to
+// status `to` via a Start (→RUNNING), Stop (→STOPPED), or Hibernate
+// (→HIBERNATED) operation. Destroy is not routed through here — a live
+// instance can always be destroyed — and Provision has its own idempotency
+// path, so this governs only the three transition verbs.
+//
+// The table encodes one rule beyond the always-allowed self-transition: a
+// PENDING instance has never run, so it can only be started (or destroyed);
+// stopping or hibernating a never-started instance is rejected rather than
+// recording a nonsensical STOPPED/HIBERNATED. Once an instance has run at
+// least once (RUNNING, STOPPED, or HIBERNATED) any of start/stop/hibernate is
+// allowed, matching the loose lifecycle the control plane drives — Steward
+// mirrors that state machine (see the Status doc comment), it does not impose
+// a stricter one. A status not covered below (FAILED, which Steward never
+// emits itself, or any future addition) permits no transition: fail-closed,
+// the house default.
+//
+// A self-transition (from == to) is always allowed and is the load-bearing
+// idempotency guarantee, not an oversight: an at-least-once-redelivered start
+// whose report was lost — the server redelivers it and the instance is already
+// RUNNING — must report done, not a spurious failure; a retried batch's
+// start/stop must "converge on the same terminal status either way"
+// (ARCHITECTURE.md). Rejecting a self-transition would break both, and the
+// double-invoke covenant they rest on.
+func transitionAllowed(from, to Status) bool {
+	if from == to {
+		return true // idempotent no-op: redelivery- and retry-safe.
+	}
+	switch to {
+	case StatusRunning: // start: from any non-terminal status, including a never-started PENDING.
+		switch from {
+		case StatusPending, StatusStopped, StatusHibernated:
+			return true
+		}
+	case StatusStopped: // stop: only an instance that has run — never a PENDING one.
+		switch from {
+		case StatusRunning, StatusHibernated:
+			return true
+		}
+	case StatusHibernated: // hibernate: only an instance that has run — never a PENDING one.
+		switch from {
+		case StatusRunning, StatusStopped:
+			return true
+		}
+	}
+	return false
+}
 
 // Instance is a tracked agent instance. Spec is opaque config, round-tripped
 // verbatim; the tracker never parses or validates its contents. Generation is
@@ -403,6 +462,11 @@ func (t *Tracker) transition(runtimeRef string, status Status) (*Instance, error
 	inst, ok := t.byRef[runtimeRef]
 	if !ok {
 		return nil, ErrNotFound
+	}
+	if !transitionAllowed(inst.Status, status) {
+		// Name the current and requested status so the 409 (REST) and the uplink
+		// failure log say exactly which transition was refused — the 3am test.
+		return nil, fmt.Errorf("%w: %s cannot become %s", ErrInvalidStateTransition, inst.Status, status)
 	}
 	prev := inst.Status
 	inst.Status = status

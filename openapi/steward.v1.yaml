@@ -279,6 +279,12 @@ paths:
       tags: [instances]
       operationId: stopInstance
       summary: Stop an instance
+      description: |
+        Stops the instance (`RUNNING`/`HIBERNATED`/`STOPPED` → `STOPPED`).
+        Stopping an already-`STOPPED` instance is an idempotent no-op (`200`).
+        Stopping a `PENDING` instance — one that has never started — is rejected
+        with `409 invalid_state_transition` rather than silently recording a
+        nonsensical `STOPPED`.
       responses:
         "200":
           description: The updated instance (`STOPPED`).
@@ -293,6 +299,8 @@ paths:
           $ref: "#/components/responses/UnknownRuntimeRef"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/InvalidStateTransition"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -304,6 +312,11 @@ paths:
       tags: [instances]
       operationId: hibernateInstance
       summary: Hibernate an instance
+      description: |
+        Hibernates the instance (`RUNNING`/`STOPPED`/`HIBERNATED` →
+        `HIBERNATED`). Hibernating an already-`HIBERNATED` instance is an
+        idempotent no-op (`200`). Hibernating a `PENDING` instance — one that has
+        never started — is rejected with `409 invalid_state_transition`.
       responses:
         "200":
           description: The updated instance (`HIBERNATED`).
@@ -318,6 +331,8 @@ paths:
           $ref: "#/components/responses/UnknownRuntimeRef"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/InvalidStateTransition"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -379,6 +394,61 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/readiness:
+    get:
+      tags: [health]
+      operationId: getReadiness
+      summary: Readiness probe
+      description: |
+        A rolling-deployment readiness gate, distinct from the `/v1/healthz`
+        liveness probe. Returns `200 {"status":"ready"}` only when the instance
+        is ready to receive traffic; `503` (with a body naming the failing
+        check) when it is not yet ready or is degraded, so a load balancer or
+        orchestrator drains a not-yet-warm or persistently-failing instance
+        rather than routing to it.
+
+        Three gates, checked cheapest-first, first failure wins:
+          - the instance tracker is initialized;
+          - when the outbound uplink is enabled (`-uplink-url`), it has completed
+            at least one successful poll OR is not in a persistent-failure state
+            (a rejected credential, or sustained polling failure with no success
+            yet) — a brief transient blip does not flip readiness;
+          - when durable state is enabled (`-state-file`), its directory is
+            writable — the capability persistence needs. Unlike the liveness
+            probe, readiness deliberately performs this filesystem check, since a
+            state directory gone read-only or full means the process is alive but
+            can no longer durably record a mutation.
+
+        Like `/v1/healthz`, it exists only on the inbound listener: a
+        `-disable-inbound-listener` (uplink-only) node has no local readiness
+        endpoint — its readiness signal is its advancing uplink poll logs.
+      responses:
+        "200":
+          description: The instance is ready to receive traffic.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+        "503":
+          description: |
+            The instance is not ready or is degraded. The body's `check` names
+            the first failing gate and `detail` explains why.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "429":
@@ -549,6 +619,21 @@ components:
             $ref: "#/components/schemas/Error"
     CapacityExceeded:
       description: The tracker has reached its maximum number of instances; retry later.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InvalidStateTransition:
+      description: |
+        The requested lifecycle operation is not valid for the instance's
+        current status — for example, stopping or hibernating an instance that
+        is still `PENDING` (never started). The instance is left unchanged (no
+        silent mutation into a nonsensical state); the `message` names the
+        refused transition. A self-transition (e.g. starting an already-`RUNNING`
+        instance) is NOT rejected — it is an idempotent no-op returning `200`.
       headers:
         X-Request-Id:
           $ref: "#/components/headers/RequestId"
@@ -786,6 +871,31 @@ components:
           type: string
           description: Liveness marker; `ok` when the process is up and serving.
           example: ok
+    Readiness:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          description: |
+            `ready` (HTTP 200) when the instance may receive traffic;
+            `not_ready` (HTTP 503) when it is not yet ready or is degraded.
+          enum:
+            - ready
+            - not_ready
+        check:
+          type: string
+          description: |
+            On a `not_ready` response, the first readiness gate that failed.
+            Omitted on a ready response.
+          enum:
+            - uplink
+            - state_file
+            - tracker
+        detail:
+          type: string
+          description: On a `not_ready` response, a human-readable explanation. Omitted on a ready response.
     Error:
       type: object
       required:
@@ -794,7 +904,22 @@ components:
       properties:
         error:
           type: string
-          description: Stable machine-readable error code (for example, `unknown_runtime_ref`).
+          description: |
+            Stable machine-readable error code naming the failure class — one of
+            a small, closed taxonomy. Branch on this (or, more portably, on the
+            HTTP status it travels with) rather than on `message`, which is
+            human-facing prose that may change.
+          enum:
+            - invalid_request          # 400: malformed request body, missing/empty required field, unknown batch op, or unparseable query filter
+            - invalid_spec             # 400: a present `spec` (opaque instance config) is not a JSON object — the malformed-config class
+            - unknown_runtime_ref      # 404: no instance is tracked for the addressed runtime_ref (including one already destroyed)
+            - invalid_state_transition # 409: a Start/Stop/Hibernate whose target status is not reachable from the current status (e.g. stopping a PENDING instance)
+            - capacity_exceeded        # 503: a new provision would exceed the configured max_instances cap
+            - request_too_large        # 413: the request body exceeded the 1 MiB cap
+            - rate_limited             # 429: the per-source inbound rate limit was exceeded
+            - not_found                # 404: no route matches the path
+            - method_not_allowed       # 405: the method is not allowed on the path
+            - internal_error           # 500: an unexpected server-side error
         message:
           type: string
           description: Human-readable explanation.
