@@ -51,6 +51,7 @@ func NewWithTracker(logger *slog.Logger, tracker *runtime.Tracker) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/instances", s.handleProvision)
+	mux.HandleFunc("GET /v1/instances", s.handleList)
 	mux.HandleFunc("GET /v1/instances/{id}", s.handleStatus)
 	mux.HandleFunc("DELETE /v1/instances/{id}", s.handleDestroy)
 	mux.HandleFunc("POST /v1/instances/{id}/start", s.handleStart)
@@ -67,6 +68,17 @@ func (s *Server) Handler() http.Handler {
 type provisionRequest struct {
 	InstanceID string          `json:"instance_id"`
 	Spec       json.RawMessage `json:"spec"`
+}
+
+// instancesResponse wraps the tracked-instance list in a named object under a
+// stable `instances` key rather than returning a bare top-level JSON array. A
+// top-level array is a forwards-compatibility trap: it leaves no room to add
+// sibling fields (paging, a count) later without a breaking shape change, and it
+// matches the object-wrapped convention capabilitiesResponse already sets.
+type instancesResponse struct {
+	// Instances is every currently tracked instance, sorted by runtime_ref by
+	// runtime.Tracker.List. Never null: an empty tracker yields an empty array.
+	Instances []runtime.Instance `json:"instances"`
 }
 
 // capabilitiesResponse advertises what this Steward can do plus a small slice of
@@ -152,6 +164,14 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	inst, err := s.tracker.Status(r.PathValue("id"))
 	s.respond(w, inst, err)
+}
+
+// handleList enumerates every instance this Steward currently tracks, in the
+// deterministic runtime_ref order Tracker.List guarantees. It is a read-only GET
+// with no request body, so it needs no MaxBytesReader bound. The list is wrapped
+// in an object (see instancesResponse), never returned as a bare array.
+func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, instancesResponse{Instances: s.tracker.List()})
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
