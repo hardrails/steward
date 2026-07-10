@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	"github.com/hardrails/steward/internal/runtime"
 )
@@ -302,10 +303,10 @@ func orderProvisionsFirst(commands []command) []command {
 // wrong prefix, a non-decimal or overrunning length, or an empty component is an
 // error; the caller reports the command failed rather than trusting a naive split.
 func parseRuntimeRef(ref string) (nodeID, instanceID string, err error) {
-	if len(ref) < len(runtimeRefPrefix) || ref[:len(runtimeRefPrefix)] != runtimeRefPrefix {
+	if !strings.HasPrefix(ref, runtimeRefPrefix) {
 		return "", "", fmt.Errorf("runtime_ref %q does not begin with %q", ref, runtimeRefPrefix)
 	}
-	body := []rune(ref[len(runtimeRefPrefix):])
+	body := []rune(strings.TrimPrefix(ref, runtimeRefPrefix))
 
 	sep := indexRune(body, ':')
 	if sep < 0 {
