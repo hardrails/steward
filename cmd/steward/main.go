@@ -36,6 +36,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// STEWARD_DISABLE_INBOUND_LISTENER controls network exposure, not a soft
+	// operational limit like -max-instances or -uplink-poll-interval — a set-but-
+	// unparseable value ("yes", "on", a typo) must not silently fall back to false
+	// (listener enabled), or an operator who explicitly tried to close the inbound
+	// surface would get it silently left open instead. Fail closed here, the same
+	// discipline envDuration applies to the poll interval above, rather than the
+	// soft envOrInt fallback other, non-security-relevant flags use.
+	disableInboundDefault, err := envBool("STEWARD_DISABLE_INBOUND_LISTENER", false)
+	if err != nil {
+		logger.Error("configure inbound listener", "err", err)
+		os.Exit(1)
+	}
+
 	addr := flag.String("addr", envOr("STEWARD_ADDR", "127.0.0.1:8080"), "host:port to listen on")
 	maxInstances := flag.Int("max-instances", envOrInt("STEWARD_MAX_INSTANCES", 1024),
 		"maximum number of tracked instances before Provision returns 503")
@@ -47,7 +60,7 @@ func main() {
 		"path to the node's uplink credential JSON; required when -uplink-url is set")
 	uplinkPollInterval := flag.Duration("uplink-poll-interval", pollIntervalDefault,
 		"base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap)")
-	disableInbound := flag.Bool("disable-inbound-listener", envOrBool("STEWARD_DISABLE_INBOUND_LISTENER", false),
+	disableInbound := flag.Bool("disable-inbound-listener", disableInboundDefault,
 		"do not bind an inbound HTTP listener; requires -uplink-url. All fleet operations then flow through the outbound uplink poll loop only.")
 	flag.Parse()
 
@@ -145,6 +158,19 @@ func main() {
 		go func() {
 			defer close(done)
 			poller.Run(ctx)
+			// Poller.Run returns two ways: ctx was cancelled (a shutdown already in
+			// progress -- ctx.Err() is non-nil), or it gave up on its own (a fatal
+			// credential rejection -- classFatal -- ctx.Err() is still nil). The
+			// latter, with no inbound listener to fall back to, would otherwise leave
+			// main blocked on <-ctx.Done() forever: no uplink loop running, no REST
+			// API serving, a zombie process an operator's monitoring would see as
+			// "up" while it does nothing. Mirrors the server goroutine's own
+			// error->stop() pattern above -- a fatal exit on the ONLY control path
+			// triggers the same graceful shutdown, rather than hanging silently.
+			if srv == nil && ctx.Err() == nil {
+				logger.Error("uplink poll loop exited and no inbound listener is configured; shutting down")
+				stop()
+			}
 		}()
 		uplinkDone = done
 	}
@@ -201,18 +227,25 @@ func envOrInt(key string, fallback int) int {
 	return fallback
 }
 
-// envOrBool mirrors envOrInt's shape and posture: a set-but-unparseable value
-// falls back to the default rather than failing closed. That is the correct
-// direction here — a typo (e.g. "ture") falls back to the safe, reachable state
-// (the listener enabled), and the genuinely-dangerous case (no listener and no
-// uplink) is caught independently by the fail-closed startup guard in main.
-func envOrBool(key string, fallback bool) bool {
-	if v := os.Getenv(key); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			return b
-		}
+// envBool mirrors envDuration's shape and posture, not envOrInt's: this reads a
+// SECURITY-relevant boolean (whether the inbound listener binds at all), where a
+// set-but-unparseable value ("yes", "on", a typo) must not silently fall back to
+// the default. A soft fallback would be wrong in EITHER direction here — an
+// operator who typo'd true-meaning-"disable" would silently get the listener
+// left open; a hypothetical future flag defaulting true could as easily leave
+// something silently closed. Fail closed and name the value, same as
+// envDuration does for the poll interval. An unset key returns fallback with no
+// error (the expected default path).
+func envBool(key string, fallback bool) (bool, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
 	}
-	return fallback
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s %q: not a valid boolean (want e.g. \"true\", \"false\", \"1\", \"0\"); fix the value or unset it to use the default", key, v)
+	}
+	return b, nil
 }
 
 // envDuration reads a Go duration from the environment, failing closed on a

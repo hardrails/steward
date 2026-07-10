@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,28 +54,47 @@ func TestEnvOrInt(t *testing.T) {
 	})
 }
 
-func TestEnvOrBool(t *testing.T) {
-	t.Run("unset falls back", func(t *testing.T) {
-		if got := envOrBool("STEWARD_TEST_UNSET", true); got != true {
+func TestEnvBool(t *testing.T) {
+	t.Run("unset falls back with no error", func(t *testing.T) {
+		got, err := envBool("STEWARD_TEST_UNSET", true)
+		if err != nil {
+			t.Fatalf("unexpected err %v", err)
+		}
+		if got != true {
 			t.Fatalf("got %v, want true", got)
 		}
 	})
 	t.Run(`"true" wins`, func(t *testing.T) {
 		t.Setenv("STEWARD_TEST_BOOL", "true")
-		if got := envOrBool("STEWARD_TEST_BOOL", false); got != true {
+		got, err := envBool("STEWARD_TEST_BOOL", false)
+		if err != nil {
+			t.Fatalf("unexpected err %v", err)
+		}
+		if got != true {
 			t.Fatalf("got %v, want true", got)
 		}
 	})
 	t.Run(`"1" wins`, func(t *testing.T) {
 		t.Setenv("STEWARD_TEST_BOOL", "1")
-		if got := envOrBool("STEWARD_TEST_BOOL", false); got != true {
+		got, err := envBool("STEWARD_TEST_BOOL", false)
+		if err != nil {
+			t.Fatalf("unexpected err %v", err)
+		}
+		if got != true {
 			t.Fatalf("got %v, want true", got)
 		}
 	})
-	t.Run("invalid falls back", func(t *testing.T) {
-		t.Setenv("STEWARD_TEST_BOOL", "not-a-bool")
-		if got := envOrBool("STEWARD_TEST_BOOL", true); got != true {
-			t.Fatalf("got %v, want true", got)
+	t.Run("invalid value is a fail-closed error naming the value and key, not a silent fallback", func(t *testing.T) {
+		// A "yes"/"on"/typo must NOT silently fall back -- an operator who tried to
+		// set a security-relevant flag and typo'd it must see a startup error, not
+		// silently get the opposite of what they configured.
+		t.Setenv("STEWARD_TEST_BOOL", "yes")
+		_, err := envBool("STEWARD_TEST_BOOL", true)
+		if err == nil {
+			t.Fatal("expected an error for an invalid boolean, got nil")
+		}
+		if !strings.Contains(err.Error(), "STEWARD_TEST_BOOL") || !strings.Contains(err.Error(), "yes") {
+			t.Fatalf("error %q does not name the key and the bad value", err.Error())
 		}
 	})
 }
@@ -324,6 +345,41 @@ func TestDisableInboundListenerWithoutUplinkExitsNonZero(t *testing.T) {
 	}
 }
 
+// TestDisableInboundListenerMalformedEnvExitsNonZero is the hosted-review
+// finding (P2/security, "Invalid Disable Env Binds"): STEWARD_DISABLE_INBOUND_LISTENER
+// is access-control-relevant, so a set-but-unparseable value ("yes", "on", a
+// typo) must fail closed at startup, not silently fall back to false (listener
+// left open) -- an operator who tried to close the inbound surface and typo'd
+// the env var must see an error, never silently get the opposite of what they
+// configured.
+func TestDisableInboundListenerMalformedEnvExitsNonZero(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := filepath.Join(t.TempDir(), "steward")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build steward: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin, "-addr", "127.0.0.1:0")
+	cmd.Env = append(os.Environ(), "STEWARD_DISABLE_INBOUND_LISTENER=yes")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected a non-zero exit for STEWARD_DISABLE_INBOUND_LISTENER=yes, got success:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "STEWARD_DISABLE_INBOUND_LISTENER") {
+		t.Errorf("startup error does not name the env var:\n%s", out)
+	}
+	if !strings.Contains(string(out), "yes") {
+		t.Errorf("startup error does not name the bad value:\n%s", out)
+	}
+}
+
 // runStewardAndSignal starts the steward binary with args, waits (within a 5s
 // deadline) for a log line containing want, confirms the process is still
 // running past that point, sends SIGTERM, and waits for it to exit. It returns
@@ -417,6 +473,92 @@ func TestDisableInboundListenerStartsCleanWithUplink(t *testing.T) {
 	for _, line := range lines {
 		if strings.Contains(line, "steward listening") {
 			t.Errorf("\"steward listening\" must never be logged when the inbound listener is disabled:\n%s", line)
+		}
+	}
+}
+
+// TestDisableInboundListenerShutsDownOnFatalPollRejection is the hosted-review
+// finding (P1, "Fatal Uplink Leaves Zombie"): when the inbound listener is
+// disabled, the uplink is the ONLY control path. If the poll loop gives up on
+// its own (classFatal -- a 401/403 credential rejection, not a shutdown-driven
+// context cancellation), nothing used to signal the process to exit: main
+// would block on <-ctx.Done() forever, serving nothing and doing nothing,
+// while an operator's process-liveness check saw it as "up". This asserts the
+// fix: the process exits ON ITS OWN, with no SIGTERM sent, once the poll loop
+// fatally gives up with no listener to fall back to.
+func TestDisableInboundListenerShutsDownOnFatalPollRejection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a binary; skipped in -short")
+	}
+	bin := filepath.Join(t.TempDir(), "steward")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build steward: %v\n%s", err, out)
+	}
+
+	// A fake control plane that rejects every poll with 401 -- classFatal in
+	// the poller's classification, the same trigger a real revoked/rotated
+	// credential would produce.
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer fake.Close()
+
+	credPath := writeValidCredentialFile(t)
+
+	cmd := exec.Command(bin,
+		"-disable-inbound-listener",
+		"-uplink-url", fake.URL,
+		"-uplink-credential-file", credPath,
+		"-uplink-poll-interval", "20ms",
+	)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start steward: %v", err)
+	}
+
+	var lines []string
+	lineCh := make(chan string, 64)
+	go func() {
+		defer close(lineCh)
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			lineCh <- scanner.Text()
+		}
+	}()
+
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case line, ok := <-lineCh:
+			if !ok {
+				lineCh = nil
+				continue
+			}
+			lines = append(lines, line)
+		case waitErr := <-waitCh:
+			// No SIGTERM was ever sent -- the process had to exit on its own.
+			if waitErr != nil {
+				t.Fatalf("expected a clean self-triggered exit, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+			}
+			joined := strings.Join(lines, "\n")
+			if !strings.Contains(joined, "credential rejected") {
+				t.Errorf("expected the poller's fatal-rejection log, got:\n%s", joined)
+			}
+			if !strings.Contains(joined, "no inbound listener is configured") {
+				t.Errorf("expected the zombie-prevention shutdown log naming the cause, got:\n%s", joined)
+			}
+			return
+		case <-deadline:
+			_ = cmd.Process.Kill()
+			t.Fatalf("timed out waiting for steward to exit on its own (zombie process):\n%s", strings.Join(lines, "\n"))
 		}
 	}
 }
