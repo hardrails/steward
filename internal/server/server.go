@@ -3,10 +3,13 @@ package server
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"github.com/hardrails/steward/internal/runtime"
@@ -17,12 +20,54 @@ import (
 // with 413 before it is buffered into memory.
 const maxRequestBodyBytes = 1 << 20
 
-// Version is the Steward build/version string advertised by GET /v1/capabilities.
-// It lives here (not in cmd/steward) because the capabilities handler needs it
-// and the command package cannot be imported by this internal package. It is a
-// plain hardcoded string on purpose: Steward has no build-info system today, and
-// adding one is not warranted for a single advertised field.
+// Version is the compiled-in fallback Steward version string. It lives here (not
+// in cmd/steward) because the capabilities handler needs it and the command
+// package cannot be imported by this internal package. ResolveVersion prefers
+// the build metadata the Go toolchain stamps into a real `go build`/`go install`
+// (a tagged module version, else the VCS revision) and only falls back to this
+// constant when no such metadata exists (a `go run` or `go test` invocation), so
+// the advertised version reflects the actual build rather than a string nobody
+// remembers to bump.
 const Version = "0.1.0"
+
+// ResolveVersion returns the Steward version to advertise, via both GET
+// /v1/capabilities and the `-version` CLI flag. It prefers the build metadata the
+// Go toolchain embeds: the main module's version when the binary was
+// `go install`ed at a tagged version, otherwise the (shortened) VCS revision
+// stamped into any `go build` of a committed tree, suffixed `-dirty` when that
+// tree had uncommitted changes. It falls back to the compiled-in Version constant
+// when no usable build metadata is present — under `go run` or `go test`,
+// debug.ReadBuildInfo reports a "(devel)" main version and no VCS revision — so it
+// never returns an empty string.
+func ResolveVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return Version
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	var revision string
+	var modified bool
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			modified = setting.Value == "true"
+		}
+	}
+	if revision == "" {
+		return Version
+	}
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	if modified {
+		revision += "-dirty"
+	}
+	return revision
+}
 
 type Server struct {
 	tracker *runtime.Tracker
@@ -197,7 +242,7 @@ func (s *Server) handleDestroy(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
 		Skills:        []any{},
-		Version:       Version,
+		Version:       ResolveVersion(),
 		InstanceCount: s.tracker.Len(),
 		MaxInstances:  s.tracker.MaxInstances(),
 		DurableState:  s.tracker.Durable(),
@@ -233,18 +278,46 @@ func (s *Server) respond(w http.ResponseWriter, inst *runtime.Instance, err erro
 	writeJSON(w, http.StatusOK, inst)
 }
 
+// requestIDHeader carries a per-request correlation id, echoed on every response
+// so a control-plane-side failure report can be matched to the one node-side log
+// line that served it. It is a logging/correlation aid, not a trace-context or
+// APM header: Steward mints a fresh id per request rather than propagating a
+// client-supplied one — this service is unauthenticated by design, so an echoed
+// client value would be untrusted input landing in the logs.
+const requestIDHeader = "X-Request-Id"
+
 func (s *Server) withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		requestID := newRequestID()
+		// Set the header before the inner handler runs so it is present on every
+		// response, including the stdlib mux's rewritten 404/405 (jsonErrors) and a
+		// recovered panic's 500 (recoverMiddleware) — both write their headers after
+		// this point, on the same underlying ResponseWriter.
+		w.Header().Set(requestIDHeader, requestID)
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
 		s.logger.Info("request",
+			"request_id", requestID,
 			"method", r.Method,
 			"path", r.URL.Path,
+			"remote_addr", r.RemoteAddr,
 			"status", rec.status,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
 	})
+}
+
+// newRequestID returns a short random hex id (8 bytes → 16 hex chars) for
+// per-request log correlation. It uses crypto/rand and panics on failure, the
+// same unrecoverable-entropy posture as newRuntimeRef in internal/runtime; a
+// panic here is caught by recoverMiddleware and turned into a clean JSON 500.
+func newRequestID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // a crypto/rand failure is unrecoverable
+	}
+	return hex.EncodeToString(b[:])
 }
 
 type statusRecorder struct {

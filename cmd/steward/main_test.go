@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -637,4 +638,173 @@ func writeValidCredentialFile(t *testing.T) string {
 		t.Fatalf("write credential file: %v", err)
 	}
 	return path
+}
+
+// TestParseLogLevel pins task 2's parser: the level name is case-insensitive and
+// surrounding whitespace is trimmed, and any other value fails closed with a
+// message naming the bad value and the accepted set — never a silent default.
+func TestParseLogLevel(t *testing.T) {
+	valid := map[string]slog.Level{
+		"debug":   slog.LevelDebug,
+		"INFO":    slog.LevelInfo, // case-insensitive
+		"  warn ": slog.LevelWarn, // surrounding whitespace trimmed
+		"Error":   slog.LevelError,
+	}
+	for in, want := range valid {
+		got, err := parseLogLevel(in)
+		if err != nil {
+			t.Fatalf("parseLogLevel(%q): unexpected err %v", in, err)
+		}
+		if got != want {
+			t.Fatalf("parseLogLevel(%q) = %v, want %v", in, got, want)
+		}
+	}
+
+	_, err := parseLogLevel("verbose")
+	if err == nil {
+		t.Fatal("parseLogLevel(\"verbose\") must return an error, not a silent default")
+	}
+	if !strings.Contains(err.Error(), "verbose") || !strings.Contains(err.Error(), "debug, info, warn, error") {
+		t.Fatalf("error %q must name the bad value and the accepted set", err)
+	}
+}
+
+// TestVersionFlag pins task 1: -version prints a version string and exits 0
+// before binding any port or starting the uplink loop, and it short-circuits the
+// flag-level startup guards so it still reports even alongside otherwise-fatal
+// flags.
+func TestVersionFlag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a binary; skipped in -short")
+	}
+	bin := filepath.Join(t.TempDir(), "steward")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build steward: %v\n%s", err, out)
+	}
+
+	t.Run("prints version and exits zero without starting the server", func(t *testing.T) {
+		out, err := exec.Command(bin, "-version").CombinedOutput()
+		if err != nil {
+			t.Fatalf("-version must exit 0, got %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "steward") {
+			t.Errorf("-version output does not name steward:\n%s", out)
+		}
+		// It must short-circuit before any listener binds.
+		if strings.Contains(string(out), "steward listening") {
+			t.Errorf("-version must not start the HTTP server:\n%s", out)
+		}
+	})
+
+	t.Run("short-circuits the flag-level startup guards", func(t *testing.T) {
+		// -version is handled before the -max-instances / -log-level / listener
+		// guards, so an otherwise-fatal flag combination still prints version and
+		// exits 0 rather than failing closed on those.
+		out, err := exec.Command(bin, "-version", "-max-instances=-5", "-disable-inbound-listener").CombinedOutput()
+		if err != nil {
+			t.Fatalf("-version must exit 0 even with otherwise-invalid flags, got %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "steward") {
+			t.Errorf("-version output does not name steward:\n%s", out)
+		}
+	})
+}
+
+// TestLogLevelFlag pins task 2's wiring: a garbage level (flag or env) fails
+// closed at startup naming the bad value and the accepted set, and a valid level
+// starts and shuts down cleanly.
+func TestLogLevelFlag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a binary; skipped in -short")
+	}
+	bin := filepath.Join(t.TempDir(), "steward")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build steward: %v\n%s", err, out)
+	}
+
+	t.Run("invalid -log-level flag fails closed", func(t *testing.T) {
+		out, err := exec.Command(bin, "-log-level", "verbose", "-addr", "127.0.0.1:0").CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected a non-zero exit on an invalid -log-level, got success:\n%s", out)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "verbose") {
+			t.Errorf("error does not name the bad value:\n%s", out)
+		}
+		if !strings.Contains(string(out), "debug, info, warn, error") {
+			t.Errorf("error does not name the accepted levels:\n%s", out)
+		}
+	})
+
+	t.Run("invalid STEWARD_LOG_LEVEL env fails closed", func(t *testing.T) {
+		cmd := exec.Command(bin, "-addr", "127.0.0.1:0")
+		cmd.Env = append(os.Environ(), "STEWARD_LOG_LEVEL=chatty")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected a non-zero exit on an invalid STEWARD_LOG_LEVEL, got success:\n%s", out)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "chatty") {
+			t.Errorf("error does not name the bad value:\n%s", out)
+		}
+	})
+
+	t.Run("valid level starts clean", func(t *testing.T) {
+		// "steward listening" is an INFO line, visible at debug; the process must
+		// bind, stay up, and shut down cleanly on SIGTERM.
+		lines, waitErr := runStewardAndSignal(t, bin, []string{"-log-level", "debug", "-addr", "127.0.0.1:0"}, "steward listening")
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+	})
+}
+
+// TestNonPositiveMaxInstancesExitsNonZero pins task 4: a non-positive
+// -max-instances (via flag or env) is a fail-closed startup error naming the flag
+// and the fix, never a silent override to the 1024 default the operator did not
+// ask for.
+func TestNonPositiveMaxInstancesExitsNonZero(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := filepath.Join(t.TempDir(), "steward")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build steward: %v\n%s", err, out)
+	}
+
+	assertFailsClosed := func(t *testing.T, cmd *exec.Cmd) {
+		t.Helper()
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected a non-zero exit, got success:\n%s", out)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "-max-instances") {
+			t.Errorf("error does not name -max-instances:\n%s", out)
+		}
+		if !strings.Contains(string(out), "positive") {
+			t.Errorf("error does not tell the operator to pass a positive value:\n%s", out)
+		}
+	}
+
+	t.Run("flag zero", func(t *testing.T) {
+		assertFailsClosed(t, exec.Command(bin, "-max-instances", "0", "-addr", "127.0.0.1:0"))
+	})
+	t.Run("flag negative", func(t *testing.T) {
+		assertFailsClosed(t, exec.Command(bin, "-max-instances=-1", "-addr", "127.0.0.1:0"))
+	})
+	t.Run("env zero", func(t *testing.T) {
+		cmd := exec.Command(bin, "-addr", "127.0.0.1:0")
+		cmd.Env = append(os.Environ(), "STEWARD_MAX_INSTANCES=0")
+		assertFailsClosed(t, cmd)
+	})
 }

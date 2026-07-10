@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +21,11 @@ import (
 )
 
 func main() {
+	// A bootstrap logger at the default level records the few startup errors that
+	// must be reported before -log-level is known: the env-default validations
+	// below run before flag.Parse. They are Error-level lines, emitted regardless
+	// of the eventual level; the logger is rebuilt at the configured level right
+	// after flags are parsed, before any request is served or poll is sent.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	// The uplink poll interval's default comes from STEWARD_UPLINK_POLL_INTERVAL when
@@ -62,7 +68,49 @@ func main() {
 		"base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap)")
 	disableInbound := flag.Bool("disable-inbound-listener", disableInboundDefault,
 		"do not bind an inbound HTTP listener; requires -uplink-url. All fleet operations then flow through the outbound uplink poll loop only.")
+	logLevel := flag.String("log-level", envOr("STEWARD_LOG_LEVEL", "info"),
+		"log verbosity: one of debug, info, warn, error (case-insensitive)")
+	showVersion := flag.Bool("version", false,
+		"print version information and exit")
 	flag.Parse()
+
+	// -version prints the build/version string and exits 0, before binding any
+	// port, loading state, or starting the uplink loop. It resolves the same value
+	// GET /v1/capabilities advertises (server.ResolveVersion): the Go toolchain's
+	// stamped VCS revision or tagged module version, falling back to the compiled-in
+	// constant under `go run`.
+	if *showVersion {
+		fmt.Println("steward " + server.ResolveVersion())
+		os.Exit(0)
+	}
+
+	// Rebuild the logger at the configured level now that flags are parsed. A
+	// garbage -log-level (or STEWARD_LOG_LEVEL) is a fail-closed startup error
+	// naming the bad value and the accepted set, never a silent fall back to a
+	// verbosity the operator did not choose — the same discipline the poll-interval
+	// and inbound-listener checks apply.
+	level, err := parseLogLevel(*logLevel)
+	if err != nil {
+		logger.Error("configure log level", "err", err)
+		os.Exit(1)
+	}
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+
+	// -max-instances is a DoS circuit-breaker (an unauthenticated loop of distinct
+	// instance_ids is the same OOM shape as an unbounded request body); a
+	// non-positive value is a configuration mistake, not a request for "unlimited".
+	// The tracker constructor's <=0 → DefaultMaxInstances convenience is for
+	// programmatic callers (server.New, tests); at this operator-facing CLI boundary
+	// the default already comes from the flag's own 1024, so a non-positive value
+	// here can only be a typo. Fail closed and name it — the same discipline the
+	// -uplink-url and -disable-inbound-listener checks apply — rather than silently
+	// running at 1024 the operator never asked for.
+	if *maxInstances <= 0 {
+		logger.Error("invalid -max-instances",
+			"value", *maxInstances,
+			"hint", "-max-instances (or STEWARD_MAX_INSTANCES) must be a positive integer; omit it to use the default 1024")
+		os.Exit(1)
+	}
 
 	// A node with neither the inbound listener nor the outbound uplink enabled would
 	// be unreachable in both directions — a dark, useless process. Fail closed here,
@@ -264,4 +312,24 @@ func envDuration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid %s %q: not a valid duration (want e.g. \"10s\", \"1m30s\"); fix the value or unset it to use the default", key, v)
 	}
 	return d, nil
+}
+
+// parseLogLevel maps a case-insensitive level name to a slog.Level, failing
+// closed on any other value. The flag/env default ("info") always parses, so
+// only an explicit garbage -log-level or STEWARD_LOG_LEVEL reaches the error
+// path — where it names the bad value and the accepted set rather than silently
+// picking a verbosity the operator never chose.
+func parseLogLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("invalid log level %q: want one of debug, info, warn, error (via -log-level or STEWARD_LOG_LEVEL)", s)
+	}
 }
