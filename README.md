@@ -4,11 +4,11 @@ Steward is a lightweight, always-running **process supervisor for agent
 instances** that runs on a node, managed remotely over HTTP by a separate
 control plane. Behind a small, fully-documented HTTP API it provisions, starts,
 stops, hibernates, and destroys real OS processes — signaling them, monitoring
-for an unexpected exit, and best-effort reattaching them across a restart — with
-the operational maturity a production fleet needs: TLS-secured and
-credential-rotating remote control, per-source rate limiting, bounded command
-backpressure, Prometheus metrics, a command audit log, batch operations, and
-durable state across a restart.
+for an unexpected exit, and, when durable state is enabled, best-effort
+reattaching them across a restart — with the operational maturity a production
+fleet needs: TLS-secured and credential-rotating remote control, per-source rate
+limiting, bounded command backpressure, Prometheus metrics, a command audit log,
+batch operations, and opt-in durable state across a restart.
 
 Real process execution is opt-in via `-enable-process-exec`; with it off,
 Steward is a pure lifecycle-status tracker — a control-plane integration point a
