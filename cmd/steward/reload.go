@@ -98,6 +98,12 @@ func reloadMaxInstances(configFile string, fileMayApply bool, tracker *runtime.T
 	// new provisions until ordinary attrition drops the count back under the
 	// ceiling (see runtime.Tracker.SetMaxInstances and the "circuit breaker on
 	// growth, not on reload" precedent in persist.go).
+	//
+	// old was read via a separate, prior MaxInstances() lock acquisition, so the
+	// logged "old" is accurate only because reloadMaxInstances is the sole caller
+	// of SetMaxInstances today. A second call site (e.g. an API-driven cap
+	// update) would need its own lock or a combined swap-and-return method to
+	// keep this read-then-write pair race-free.
 	tracker.SetMaxInstances(*fc.MaxInstances)
 	logger.Info("sighup reload: max_instances updated",
 		"old_max_instances", old,
