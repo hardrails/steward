@@ -11,7 +11,7 @@ func TestProvisionCreatesInstance(t *testing.T) {
 	tr := NewTracker(0)
 	spec := json.RawMessage(`{"model":"opus","memory_mb":512}`)
 
-	inst, created, err := tr.Provision("agent-1", spec)
+	inst, created, err := tr.Provision("agent-1", 0, spec)
 	if err != nil {
 		t.Fatalf("provision: unexpected err %v", err)
 	}
@@ -36,8 +36,8 @@ func TestProvisionCreatesInstance(t *testing.T) {
 func TestProvisionIdempotentOnInstanceID(t *testing.T) {
 	tr := NewTracker(0)
 
-	first, created1, err1 := tr.Provision("agent-1", json.RawMessage(`{"a":1}`))
-	second, created2, err2 := tr.Provision("agent-1", json.RawMessage(`{"b":2}`))
+	first, created1, err1 := tr.Provision("agent-1", 0, json.RawMessage(`{"a":1}`))
+	second, created2, err2 := tr.Provision("agent-1", 0, json.RawMessage(`{"b":2}`))
 	if err1 != nil || err2 != nil {
 		t.Fatalf("provision: unexpected errs %v, %v", err1, err2)
 	}
@@ -62,7 +62,7 @@ func TestProvisionIdempotentOnInstanceID(t *testing.T) {
 
 func TestLifecycleTransitions(t *testing.T) {
 	tr := NewTracker(0)
-	inst, _, _ := tr.Provision("agent-1", nil)
+	inst, _, _ := tr.Provision("agent-1", 0, nil)
 	ref := inst.RuntimeRef
 
 	started, err := tr.Start(ref)
@@ -122,7 +122,7 @@ func TestConcurrentProvisionCreatesOnlyOne(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			<-start
-			inst, created, err := tr.Provision("agent-1", json.RawMessage(`{}`))
+			inst, created, err := tr.Provision("agent-1", 0, json.RawMessage(`{}`))
 			if err != nil {
 				t.Errorf("provision: unexpected err %v", err)
 				return
@@ -156,7 +156,7 @@ func TestConcurrentProvisionCreatesOnlyOne(t *testing.T) {
 func TestSpecIsDefensivelyCopied(t *testing.T) {
 	tr := NewTracker(0)
 	spec := json.RawMessage(`{"k":"v"}`)
-	inst, _, _ := tr.Provision("agent-1", spec)
+	inst, _, _ := tr.Provision("agent-1", 0, spec)
 
 	// Mutating the caller's slice must not corrupt tracked state.
 	spec[2] = 'X'
@@ -172,19 +172,19 @@ func TestSpecIsDefensivelyCopied(t *testing.T) {
 func TestProvisionCapacityExceeded(t *testing.T) {
 	tr := NewTracker(2)
 
-	if _, _, err := tr.Provision("a", nil); err != nil {
+	if _, _, err := tr.Provision("a", 0, nil); err != nil {
 		t.Fatalf("provision a: %v", err)
 	}
-	if _, _, err := tr.Provision("b", nil); err != nil {
+	if _, _, err := tr.Provision("b", 0, nil); err != nil {
 		t.Fatalf("provision b: %v", err)
 	}
-	if _, _, err := tr.Provision("c", nil); !errors.Is(err, ErrCapacityExceeded) {
+	if _, _, err := tr.Provision("c", 0, nil); !errors.Is(err, ErrCapacityExceeded) {
 		t.Fatalf("provision c: err=%v, want ErrCapacityExceeded", err)
 	}
 
 	// Re-provisioning an already-tracked instance must still succeed at capacity;
 	// it does not grow the map.
-	if _, created, err := tr.Provision("a", nil); err != nil || created {
+	if _, created, err := tr.Provision("a", 0, nil); err != nil || created {
 		t.Fatalf("reprovision a at capacity: created=%v err=%v, want false nil", created, err)
 	}
 }
@@ -211,7 +211,7 @@ func TestDurableReflectsPersistenceMode(t *testing.T) {
 
 func TestRefForInstanceResolvesTrackedInstance(t *testing.T) {
 	tr := NewTracker(0)
-	inst, _, err := tr.Provision("agent-1", nil)
+	inst, _, err := tr.Provision("agent-1", 0, nil)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestRefForInstanceUnknownIDReportsNotOk(t *testing.T) {
 
 	// After a destroy the instance_id is released, so RefForInstance stops
 	// resolving it — the resolve-then-act "gone" outcome the uplink relies on.
-	inst, _, err := tr.Provision("agent-1", nil)
+	inst, _, err := tr.Provision("agent-1", 0, nil)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestRefForInstanceUnknownIDReportsNotOk(t *testing.T) {
 func TestDestroyReleasesInstanceIDForReuse(t *testing.T) {
 	tr := NewTracker(0)
 
-	first, _, err := tr.Provision("agent-1", nil)
+	first, _, err := tr.Provision("agent-1", 0, nil)
 	if err != nil {
 		t.Fatalf("first provision: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestDestroyReleasesInstanceIDForReuse(t *testing.T) {
 
 	// A provision after destroy creates a new, unrelated instance with a fresh
 	// runtime_ref rather than resurrecting the old one.
-	second, created, err := tr.Provision("agent-1", nil)
+	second, created, err := tr.Provision("agent-1", 0, nil)
 	if err != nil {
 		t.Fatalf("second provision: %v", err)
 	}
@@ -268,5 +268,115 @@ func TestDestroyReleasesInstanceIDForReuse(t *testing.T) {
 	}
 	if second.RuntimeRef == first.RuntimeRef {
 		t.Fatal("provision after destroy must assign a fresh runtime_ref")
+	}
+}
+
+// TestProvisionGenerationSetForNewInstance pins task 2's first acceptance check:
+// provisioning a new id sets its generation to the value the caller carried.
+func TestProvisionGenerationSetForNewInstance(t *testing.T) {
+	tr := NewTracker(0)
+	inst, _, err := tr.Provision("agent-1", 3, nil)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if inst.Generation != 3 {
+		t.Fatalf("generation = %d, want 3", inst.Generation)
+	}
+}
+
+// TestProvisionGenerationNeverLowered pins task 2's core rule: a re-provision
+// with a lower generation than the tracked one leaves it unchanged, and a
+// re-provision with a higher generation raises it — max(existing, generation),
+// never lowered, regardless of caller.
+func TestProvisionGenerationNeverLowered(t *testing.T) {
+	tr := NewTracker(0)
+	inst, _, err := tr.Provision("agent-1", 5, nil)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if inst.Generation != 5 {
+		t.Fatalf("initial generation = %d, want 5", inst.Generation)
+	}
+
+	// A lower generation on re-provision must not lower the tracked one.
+	lower, created, err := tr.Provision("agent-1", 2, nil)
+	if err != nil {
+		t.Fatalf("reprovision with lower generation: %v", err)
+	}
+	if created {
+		t.Fatal("reprovision must report created=false")
+	}
+	if lower.Generation != 5 {
+		t.Fatalf("generation after a lower reprovision = %d, want unchanged 5", lower.Generation)
+	}
+
+	// A higher generation on re-provision must raise the tracked one.
+	higher, _, err := tr.Provision("agent-1", 9, nil)
+	if err != nil {
+		t.Fatalf("reprovision with higher generation: %v", err)
+	}
+	if higher.Generation != 9 {
+		t.Fatalf("generation after a higher reprovision = %d, want raised to 9", higher.Generation)
+	}
+}
+
+// TestProvisionGenerationZeroLeavesExistingUntouched pins the REST-handler
+// compatibility case: passing generation 0 (the direct-REST path's "no fencing"
+// value) to Provision for an already-tracked instance must not lower or zero an
+// existing non-zero generation.
+func TestProvisionGenerationZeroLeavesExistingUntouched(t *testing.T) {
+	tr := NewTracker(0)
+	if _, _, err := tr.Provision("agent-1", 4, nil); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	again, created, err := tr.Provision("agent-1", 0, nil)
+	if err != nil {
+		t.Fatalf("reprovision with generation 0: %v", err)
+	}
+	if created {
+		t.Fatal("reprovision must report created=false")
+	}
+	if again.Generation != 4 {
+		t.Fatalf("generation after a generation-0 reprovision = %d, want unchanged 4", again.Generation)
+	}
+}
+
+// TestGenerationForInstanceResolvesTrackedInstance mirrors
+// TestRefForInstanceResolvesTrackedInstance for the generation accessor.
+func TestGenerationForInstanceResolvesTrackedInstance(t *testing.T) {
+	tr := NewTracker(0)
+	if _, _, err := tr.Provision("agent-1", 7, nil); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	gen, ok := tr.GenerationForInstance("agent-1")
+	if !ok {
+		t.Fatal("GenerationForInstance(agent-1): ok=false, want true for a tracked instance")
+	}
+	if gen != 7 {
+		t.Fatalf("GenerationForInstance(agent-1) = %d, want 7", gen)
+	}
+}
+
+// TestGenerationForInstanceUnknownIDReportsNotOk mirrors
+// TestRefForInstanceUnknownIDReportsNotOk for the generation accessor: an
+// unknown id, and an id whose instance has since been destroyed, both report
+// (0, false).
+func TestGenerationForInstanceUnknownIDReportsNotOk(t *testing.T) {
+	tr := NewTracker(0)
+
+	if gen, ok := tr.GenerationForInstance("never-provisioned"); ok || gen != 0 {
+		t.Fatalf("GenerationForInstance(unknown) = (%d, %v), want (0, false)", gen, ok)
+	}
+
+	inst, _, err := tr.Provision("agent-1", 2, nil)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if _, err := tr.Destroy(inst.RuntimeRef); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	if gen, ok := tr.GenerationForInstance("agent-1"); ok || gen != 0 {
+		t.Fatalf("GenerationForInstance after destroy = (%d, %v), want (0, false)", gen, ok)
 	}
 }

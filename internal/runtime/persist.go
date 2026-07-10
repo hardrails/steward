@@ -80,6 +80,8 @@ func (t *Tracker) load() error {
 			return t.corruptErr(fmt.Sprintf("instance %q is missing runtime_ref", inst.InstanceID))
 		case !inst.Status.valid():
 			return t.corruptErr(fmt.Sprintf("instance %q has unknown status %q", inst.InstanceID, inst.Status))
+		case inst.Generation < 0:
+			return t.corruptErr(fmt.Sprintf("instance %q has a negative generation %d", inst.InstanceID, inst.Generation))
 		case len(inst.Spec) > 0 && !IsJSONObject(inst.Spec):
 			return t.corruptErr(fmt.Sprintf("instance %q has a non-object spec", inst.InstanceID))
 		}

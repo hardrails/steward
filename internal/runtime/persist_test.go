@@ -26,15 +26,15 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 
 	// Provision a spread of instances: with a spec, without a spec, and one that
 	// is then transitioned to a non-PENDING status.
-	a, _, err := tr.Provision("agent-a", json.RawMessage(`{"model":"opus","memory_mb":512}`))
+	a, _, err := tr.Provision("agent-a", 0, json.RawMessage(`{"model":"opus","memory_mb":512}`))
 	if err != nil {
 		t.Fatalf("provision a: %v", err)
 	}
-	b, _, err := tr.Provision("agent-b", nil)
+	b, _, err := tr.Provision("agent-b", 0, nil)
 	if err != nil {
 		t.Fatalf("provision b: %v", err)
 	}
-	c, _, err := tr.Provision("agent-c", json.RawMessage(`{"k":"v"}`))
+	c, _, err := tr.Provision("agent-c", 0, json.RawMessage(`{"k":"v"}`))
 	if err != nil {
 		t.Fatalf("provision c: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 
 	// The rebuilt byID index must make provisioning idempotent across the restart.
-	again, created, err := reloaded.Provision("agent-a", json.RawMessage(`{"ignored":true}`))
+	again, created, err := reloaded.Provision("agent-a", 0, json.RawMessage(`{"ignored":true}`))
 	if err != nil {
 		t.Fatalf("reprovision after reload: %v", err)
 	}
@@ -100,10 +100,10 @@ func TestPersistPreservesCompactSpecNormalizesWhitespace(t *testing.T) {
 	// byte-for-byte, including characters (<, &) an HTML-escaping encoder would
 	// otherwise rewrite.
 	const compact = `{"url":"https://x/?a=1&b=2","expr":"a<b"}`
-	exact, _, _ := tr.Provision("compact", json.RawMessage(compact))
+	exact, _, _ := tr.Provision("compact", 0, json.RawMessage(compact))
 	// A spec carrying insignificant whitespace is preserved semantically; the
 	// persisted form is normalized (compacted).
-	spaced, _, _ := tr.Provision("spaced", json.RawMessage(`{ "k" : "v" }`))
+	spaced, _, _ := tr.Provision("spaced", 0, json.RawMessage(`{ "k" : "v" }`))
 
 	reloaded, err := LoadTracker(0, path)
 	if err != nil {
@@ -130,8 +130,8 @@ func TestPersistPreservesCompactSpecNormalizesWhitespace(t *testing.T) {
 func TestDestroyDoesNotSurviveRestart(t *testing.T) {
 	tr, path := stateBoundTracker(t, 0)
 
-	keep, _, _ := tr.Provision("keep", nil)
-	gone, _, _ := tr.Provision("gone", nil)
+	keep, _, _ := tr.Provision("keep", 0, nil)
+	gone, _, _ := tr.Provision("gone", 0, nil)
 	if _, err := tr.Destroy(gone.RuntimeRef); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestLoadMissingFileStartsEmpty(t *testing.T) {
 		t.Fatalf("fresh tracker holds %d instances, want 0", tr.Len())
 	}
 	// A missing file is a first run: provisioning creates it.
-	if _, _, err := tr.Provision("agent-1", nil); err != nil {
+	if _, _, err := tr.Provision("agent-1", 0, nil); err != nil {
 		t.Fatalf("provision after empty start: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -174,7 +174,7 @@ func TestEmptyStateFileDisablesPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTracker(\"\"): %v", err)
 	}
-	if _, _, err := tr.Provision("agent-1", nil); err != nil {
+	if _, _, err := tr.Provision("agent-1", 0, nil); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	if tr.stateFile != "" {
@@ -194,6 +194,7 @@ func TestLoadCorruptFileFailsClosed(t *testing.T) {
 		{"missing runtime_ref", `{"version":1,"instances":[{"instance_id":"a","status":"PENDING"}]}`},
 		{"unknown status", `{"version":1,"instances":[{"instance_id":"a","runtime_ref":"rt_1","status":"BOGUS"}]}`},
 		{"non-object spec", `{"version":1,"instances":[{"instance_id":"a","runtime_ref":"rt_1","status":"PENDING","spec":[1,2,3]}]}`},
+		{"negative generation", `{"version":1,"instances":[{"instance_id":"a","runtime_ref":"rt_1","status":"PENDING","generation":-1}]}`},
 		{"duplicate runtime_ref", `{"version":1,"instances":[{"instance_id":"a","runtime_ref":"rt_1","status":"PENDING"},{"instance_id":"b","runtime_ref":"rt_1","status":"PENDING"}]}`},
 		{"duplicate instance_id", `{"version":1,"instances":[{"instance_id":"a","runtime_ref":"rt_1","status":"PENDING"},{"instance_id":"a","runtime_ref":"rt_2","status":"PENDING"}]}`},
 	}
@@ -223,7 +224,7 @@ func TestSaveLeavesNoTempFile(t *testing.T) {
 	dir := filepath.Dir(path)
 
 	// Several mutations, each triggering an atomic save.
-	inst, _, _ := tr.Provision("agent-1", json.RawMessage(`{"a":1}`))
+	inst, _, _ := tr.Provision("agent-1", 0, json.RawMessage(`{"a":1}`))
 	if _, err := tr.Start(inst.RuntimeRef); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -272,7 +273,7 @@ func TestFailedSaveIsAtomicAndRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTracker: %v", err)
 	}
-	kept, _, err := tr.Provision("kept", json.RawMessage(`{"keep":true}`))
+	kept, _, err := tr.Provision("kept", 0, json.RawMessage(`{"keep":true}`))
 	if err != nil {
 		t.Fatalf("provision kept: %v", err)
 	}
@@ -287,7 +288,7 @@ func TestFailedSaveIsAtomicAndRollsBack(t *testing.T) {
 	// Restore write perms so t.TempDir cleanup can remove the directory.
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-	if _, _, err := tr.Provision("doomed", nil); err == nil {
+	if _, _, err := tr.Provision("doomed", 0, nil); err == nil {
 		t.Fatal("provision into unwritable dir: got nil err, want persist failure")
 	}
 	// In-memory rollback: the doomed instance must not be tracked.
@@ -323,7 +324,7 @@ func TestConcurrentProvisionWithPersistence(t *testing.T) {
 			defer wg.Done()
 			<-start
 			id := "agent-" + strconv.Itoa(idx)
-			if _, _, err := tr.Provision(id, json.RawMessage(`{"i":`+strconv.Itoa(idx)+`}`)); err != nil {
+			if _, _, err := tr.Provision(id, 0, json.RawMessage(`{"i":`+strconv.Itoa(idx)+`}`)); err != nil {
 				t.Errorf("provision %s: %v", id, err)
 			}
 		}(i)
@@ -341,5 +342,56 @@ func TestConcurrentProvisionWithPersistence(t *testing.T) {
 	}
 	if reloaded.Len() != goroutines {
 		t.Fatalf("reloaded holds %d instances, want %d", reloaded.Len(), goroutines)
+	}
+}
+
+// TestGenerationRoundTripsThroughPersistence pins task 1's acceptance check: a
+// tracker provisioned with a non-zero generation, saved and reloaded via a
+// -state-file, must recover the exact same generation.
+func TestGenerationRoundTripsThroughPersistence(t *testing.T) {
+	tr, path := stateBoundTracker(t, 0)
+
+	inst, _, err := tr.Provision("agent-1", 5, json.RawMessage(`{"model":"opus"}`))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if inst.Generation != 5 {
+		t.Fatalf("provisioned generation = %d, want 5", inst.Generation)
+	}
+
+	reloaded, err := LoadTracker(0, path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got, err := reloaded.Status(inst.RuntimeRef)
+	if err != nil {
+		t.Fatalf("reloaded status: %v", err)
+	}
+	if got.Generation != 5 {
+		t.Fatalf("reloaded generation = %d, want 5 (round-tripped)", got.Generation)
+	}
+}
+
+// TestOldFormatFileWithNoGenerationKeyLoadsAsZero pins the additive-field,
+// no-format-version-bump promise: a hand-written state file predating the
+// generation field (no "generation" key at all) must load successfully with
+// every instance's generation defaulting to 0 ("no fencing"), not an error.
+func TestOldFormatFileWithNoGenerationKeyLoadsAsZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	const oldFormat = `{"version":1,"instances":[{"instance_id":"agent-1","runtime_ref":"rt_old","status":"PENDING"}]}`
+	if err := os.WriteFile(path, []byte(oldFormat), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	tr, err := LoadTracker(0, path)
+	if err != nil {
+		t.Fatalf("LoadTracker on a pre-generation state file: unexpected err %v", err)
+	}
+	got, err := tr.Status("rt_old")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if got.Generation != 0 {
+		t.Fatalf("generation = %d, want 0 (default for a file with no generation key)", got.Generation)
 	}
 }

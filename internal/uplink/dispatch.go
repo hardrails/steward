@@ -39,13 +39,21 @@ const (
 )
 
 // command is one queued lifecycle command as it arrives in a poll response.
+// InstanceGeneration is inbound-only: the node reads it to decide whether to
+// act (see the fence guard in execute) and never echoes it back on a report —
+// claim_generation remains the sole fencing token on the report path. Zero is
+// the "unset" sentinel: an absent field decodes to 0 naturally, so an old
+// control plane that never sends it, and a new one that sends 0, are both
+// treated as "no fencing for this command" (see
+// docs/instance-generation-fencing.md).
 type command struct {
-	CommandID       string          `json:"command_id"`
-	NodeID          string          `json:"node_id"`
-	RuntimeRef      string          `json:"runtime_ref"`
-	Kind            string          `json:"kind"`
-	Payload         json.RawMessage `json:"payload"`
-	ClaimGeneration int64           `json:"claim_generation"`
+	CommandID          string          `json:"command_id"`
+	NodeID             string          `json:"node_id"`
+	RuntimeRef         string          `json:"runtime_ref"`
+	Kind               string          `json:"kind"`
+	Payload            json.RawMessage `json:"payload"`
+	ClaimGeneration    int64           `json:"claim_generation"`
+	InstanceGeneration int64           `json:"instance_generation"`
 }
 
 // pollResponse is the body of a successful POST /uplink/poll. An empty poll is
@@ -74,15 +82,17 @@ type reportResponse struct {
 }
 
 // Tracker is the subset of *runtime.Tracker the dispatcher drives. It is an
-// interface so a test can inject a spy (for example to prove a rejected payload
-// never reaches Provision); *runtime.Tracker satisfies it directly.
+// interface so a test can inject a spy (for example to prove a rejected payload,
+// or a fenced command, never reaches Provision); *runtime.Tracker satisfies it
+// directly.
 type Tracker interface {
-	Provision(instanceID string, spec json.RawMessage) (*runtime.Instance, bool, error)
+	Provision(instanceID string, generation int64, spec json.RawMessage) (*runtime.Instance, bool, error)
 	Start(runtimeRef string) (*runtime.Instance, error)
 	Stop(runtimeRef string) (*runtime.Instance, error)
 	Hibernate(runtimeRef string) (*runtime.Instance, error)
 	Destroy(runtimeRef string) (*runtime.Instance, error)
 	RefForInstance(instanceID string) (string, bool)
+	GenerationForInstance(instanceID string) (int64, bool)
 }
 
 // reportedStatus translates Steward's own UPPERCASE Status vocabulary (which must
@@ -120,29 +130,39 @@ type dispatcher struct {
 	logger  *slog.Logger
 }
 
-// execute runs one command against the tracker and returns the report to POST plus
-// a retry signal. retry is true only when the command is a start that failed solely
-// because its instance is not (yet) known to this node: a sibling provision
-// elsewhere in the SAME poll batch may still create it, so the batch runner defers
-// exactly one retry before treating that outcome as terminal (see
-// Poller.executeBatch). stop/hibernate never retry, even on the same "unknown
-// instance" miss: unlike start, there is no legitimate case where a sibling
-// provision in the same batch should make a stop/hibernate succeed after the fact —
-// deferring one would risk stopping/hibernating an instance a sibling provision just
-// created for an unrelated reason, which is a NEW ordering inversion (a hosted
-// review finding), not a fix. Every other outcome — success, a rejected/foreign/
-// unknown command, a provision or destroy result, a stop/hibernate miss, or a
-// lifecycle failure once the ref resolved — returns retry=false. It always returns a
-// report echoing the command's command_id and claim_generation, even on rejection,
-// so the server can retire the command.
-func (d *dispatcher) execute(cmd command) (report, bool) {
-	rep := report{CommandID: cmd.CommandID, ClaimGeneration: cmd.ClaimGeneration}
+// execute runs one command against the tracker and returns the report to POST,
+// a retry signal, and a fenced signal.
+//
+// fenced is true only when the command's instance_generation is strictly older
+// than the generation this node currently tracks for its instance_id (see the
+// fence guard below) — a stale, superseded-lineage command from at-least-once
+// redelivery. A fenced command never reaches a tracker mutator, produces no
+// report (rep is the zero value and must not be sent), and is not deferred:
+// this is the third outcome distinct from the (report, retry) pair, and
+// Poller.executeBatch must check it before consulting retry.
+//
+// retry is true only when the command is a start that failed solely because its
+// instance is not (yet) known to this node: a sibling provision elsewhere in the
+// SAME poll batch may still create it, so the batch runner defers exactly one
+// retry before treating that outcome as terminal (see Poller.executeBatch).
+// stop/hibernate never retry, even on the same "unknown instance" miss: unlike
+// start, there is no legitimate case where a sibling provision in the same batch
+// should make a stop/hibernate succeed after the fact — deferring one would risk
+// stopping/hibernating an instance a sibling provision just created for an
+// unrelated reason, which is a NEW ordering inversion (a hosted review finding),
+// not a fix. Every other outcome — success, a rejected/foreign/unknown/fenced
+// command, a provision or destroy result, a stop/hibernate miss, or a lifecycle
+// failure once the ref resolved — returns retry=false. Every non-fenced outcome
+// returns a report echoing the command's command_id and claim_generation, even
+// on rejection, so the server can retire the command.
+func (d *dispatcher) execute(cmd command) (rep report, retry, fenced bool) {
+	rep = report{CommandID: cmd.CommandID, ClaimGeneration: cmd.ClaimGeneration}
 
 	nodeID, instanceID, err := parseRuntimeRef(cmd.RuntimeRef)
 	if err != nil {
 		d.logger.Error("uplink command has an unparseable runtime_ref; reporting failed",
 			"command_id", cmd.CommandID, "runtime_ref", cmd.RuntimeRef, "err", err)
-		return d.fail(rep, "runtime_ref is unparseable"), false
+		return d.fail(rep, "runtime_ref is unparseable"), false, false
 	}
 	// The client-side analog of the server adapter's _verify_issued check: the
 	// server should only ever queue commands for this node, so a foreign node_id is
@@ -151,24 +171,55 @@ func (d *dispatcher) execute(cmd command) (report, bool) {
 	if nodeID != d.nodeID {
 		d.logger.Error("uplink command addressed to a foreign node_id; rejecting",
 			"command_id", cmd.CommandID, "command_node_id", nodeID, "this_node_id", d.nodeID)
-		return d.fail(rep, "runtime_ref is addressed to a different node"), false
+		return d.fail(rep, "runtime_ref is addressed to a different node"), false, false
+	}
+
+	// A negative instance_generation is out-of-contract for a trusted control
+	// plane (real generations are minted >= 1); normalize it to the unset
+	// sentinel (0) HERE, before the fence check, not inside provision(). The
+	// fence guard below runs before the per-kind dispatch and must see the same
+	// clamped value provision() eventually adopts — otherwise a re-provision
+	// for an already-tracked instance (known=true) carrying a negative
+	// generation is itself fenced (any negative < any tracked generation) and
+	// silently dropped before the clamp ever gets a chance to run, defeating
+	// the whole point of normalizing it.
+	generation := cmd.InstanceGeneration
+	if generation < 0 {
+		d.logger.Warn("uplink command carried a negative instance_generation; treating as unset (0)",
+			"command_id", cmd.CommandID, "instance_id", instanceID, "instance_generation", generation)
+		generation = 0
+	}
+
+	// The fence guard: one chokepoint before the per-kind dispatch, so no command
+	// kind can reach a tracker mutator around it. known=false (never-seen
+	// instance_id) and generation==0 (old control plane / unset / clamped) both
+	// mean "do not fence" — see docs/instance-generation-fencing.md. Only a
+	// strictly older carried generation than the tracked one is stale.
+	if trackedGen, known := d.tracker.GenerationForInstance(instanceID); known && generation != 0 && generation < trackedGen {
+		d.logger.Info("uplink command is fenced (its instance_generation is superseded); dropping without a report",
+			"command_id", cmd.CommandID, "kind", cmd.Kind, "instance_id", instanceID,
+			"command_generation", generation, "tracked_generation", trackedGen)
+		return report{}, false, true
 	}
 
 	switch cmd.Kind {
 	case kindProvision:
-		return d.provision(rep, instanceID, cmd.Payload), false
+		return d.provision(rep, instanceID, generation, cmd.Payload), false, false
 	case kindStart:
-		return d.transition(rep, instanceID, cmd.Kind, d.tracker.Start)
+		r, retry := d.transition(rep, instanceID, cmd.Kind, d.tracker.Start)
+		return r, retry, false
 	case kindStop:
-		return d.transition(rep, instanceID, cmd.Kind, d.tracker.Stop)
+		r, retry := d.transition(rep, instanceID, cmd.Kind, d.tracker.Stop)
+		return r, retry, false
 	case kindHibernate:
-		return d.transition(rep, instanceID, cmd.Kind, d.tracker.Hibernate)
+		r, retry := d.transition(rep, instanceID, cmd.Kind, d.tracker.Hibernate)
+		return r, retry, false
 	case kindDestroy:
-		return d.destroy(rep, instanceID), false
+		return d.destroy(rep, instanceID), false, false
 	default:
 		d.logger.Error("uplink command has an unknown kind; reporting failed",
 			"command_id", cmd.CommandID, "kind", cmd.Kind)
-		return d.fail(rep, "unknown command kind"), false
+		return d.fail(rep, "unknown command kind"), false, false
 	}
 }
 
@@ -176,8 +227,17 @@ func (d *dispatcher) execute(cmd command) (report, bool) {
 // applies to spec (an explicit null or absent payload is "no spec"; any other
 // present value must be a JSON object) so the uplink path enforces the exact same
 // instance-spec contract, then calls the tracker. A non-object payload is reported
-// failed and never reaches Tracker.Provision.
-func (d *dispatcher) provision(rep report, instanceID string, payload json.RawMessage) report {
+// failed and never reaches Tracker.Provision. generation is passed straight
+// through to Tracker.Provision, which atomically adopts it as the instance's new
+// lineage baseline (new instance: set; existing instance: raised to
+// max(existing, generation), never lowered).
+func (d *dispatcher) provision(rep report, instanceID string, generation int64, payload json.RawMessage) report {
+	// generation is already clamped non-negative by execute() before the fence
+	// check — see the comment there for why the clamp cannot live here alone
+	// (a negative value must not reach the fence guard unclamped, or a
+	// re-provision for an already-tracked instance is itself fenced before
+	// this function ever runs).
+
 	spec := payload
 	if bytes.Equal(bytes.TrimSpace(spec), []byte("null")) {
 		spec = nil
@@ -188,7 +248,7 @@ func (d *dispatcher) provision(rep report, instanceID string, payload json.RawMe
 		return d.fail(rep, "provision payload must be a JSON object")
 	}
 
-	inst, _, err := d.tracker.Provision(instanceID, spec)
+	inst, _, err := d.tracker.Provision(instanceID, generation, spec)
 	if err != nil {
 		d.logger.Error("uplink provision failed",
 			"command_id", rep.CommandID, "instance_id", instanceID, "err", err)

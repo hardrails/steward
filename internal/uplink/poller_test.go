@@ -304,7 +304,7 @@ func TestJitterStaysWithinBounds(t *testing.T) {
 // leaving agent-1 gone.
 func TestExecuteBatchReplaceDestroyThenProvision(t *testing.T) {
 	tr := runtime.NewTracker(0)
-	if _, _, err := tr.Provision("agent-1", nil); err != nil {
+	if _, _, err := tr.Provision("agent-1", 0, nil); err != nil {
 		t.Fatalf("seed the instance being replaced: %v", err)
 	}
 	p, sink := batchPoller(t, tr)
@@ -457,6 +457,93 @@ func TestExecuteBatchHibernateBeforeProvisionFailsImmediately(t *testing.T) {
 	}
 	if n := sink.count(); n != 2 {
 		t.Fatalf("got %d reports, want 2 (hibernate failed once on the first pass, no retry; provision done once)", n)
+	}
+}
+
+// TestExecuteBatchFencedCommandProducesNoReport pins task 5's central acceptance
+// check: a batch containing one stale (fenced) command and one normal command
+// must report exactly the non-stale command — the fenced one produces no report
+// POST at all — and must not mutate the fenced command's target instance.
+func TestExecuteBatchFencedCommandProducesNoReport(t *testing.T) {
+	tr := runtime.NewTracker(0)
+	if _, _, err := tr.Provision("agent-1", 5, nil); err != nil {
+		t.Fatalf("seed agent-1 at generation 5: %v", err)
+	}
+	if _, _, err := tr.Provision("agent-2", 0, nil); err != nil {
+		t.Fatalf("seed agent-2: %v", err)
+	}
+	p, sink := batchPoller(t, tr)
+
+	stale := cmdGen("c-stale", "node-7", "agent-1", kindStop, "", 1, 2) // 2 < tracked 5: fenced
+	good := cmdGen("c-good", "node-7", "agent-2", kindStop, "", 2, 0)   // 0: never fenced
+
+	p.executeBatch(context.Background(), []command{stale, good})
+
+	if _, ok := sink.byID("c-stale"); ok {
+		t.Fatal("a fenced command must produce no report POST")
+	}
+	if rep, ok := sink.byID("c-good"); !ok || rep.Status != statusDone {
+		t.Fatalf("good command report = %+v (found=%v), want done", rep, ok)
+	}
+	if n := sink.count(); n != 1 {
+		t.Fatalf("got %d reports, want exactly 1 (the fenced command sent none)", n)
+	}
+
+	// The fenced stop must not have mutated agent-1's status.
+	ref, ok := tr.RefForInstance("agent-1")
+	if !ok {
+		t.Fatal("agent-1 must still exist (the fenced stop must not have destroyed/altered it)")
+	}
+	inst, err := tr.Status(ref)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if inst.Status != runtime.StatusPending {
+		t.Fatalf("agent-1 status = %v, want PENDING (the fenced stop must not have acted)", inst.Status)
+	}
+}
+
+// TestExecuteBatchDeferredStartFencedAfterSiblingProvisionBumpsGeneration proves
+// fencing composes correctly with the one-pass start-retry mechanism: a start
+// deferred on the first pass (its instance is not yet known) is re-checked
+// against the fence on the retry pass too. If its own carried
+// instance_generation is now stale relative to the generation a sibling
+// provision just adopted earlier in the SAME batch, the retried start must be
+// fenced — not reported done, not reported failed, and not applied — rather
+// than blindly starting an instance whose lineage has already moved on.
+func TestExecuteBatchDeferredStartFencedAfterSiblingProvisionBumpsGeneration(t *testing.T) {
+	tr := runtime.NewTracker(0)
+	p, sink := batchPoller(t, tr)
+
+	// The start's own instance_generation (3) predates the sibling provision's
+	// generation (10) landing later in the same batch.
+	start := cmdGen("c-start", "node-7", "agent-1", kindStart, "", 1, 3)
+	provision := cmdGen("c-provision", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 2, 10)
+
+	p.executeBatch(context.Background(), []command{start, provision})
+
+	if _, ok := sink.byID("c-start"); ok {
+		t.Fatal("the deferred start must be fenced on retry (its own instance_generation is now stale), producing no report")
+	}
+	if rep, ok := sink.byID("c-provision"); !ok || rep.Status != statusDone {
+		t.Fatalf("provision report = %+v (found=%v), want done", rep, ok)
+	}
+	if n := sink.count(); n != 1 {
+		t.Fatalf("got %d reports, want exactly 1 (provision only; the deferred start was fenced, not reported)", n)
+	}
+
+	// agent-1 must exist (from the provision) but must NOT be RUNNING: the
+	// fenced start must never have reached the tracker's Start mutator.
+	ref, ok := tr.RefForInstance("agent-1")
+	if !ok {
+		t.Fatal("agent-1 must exist after its provision ran")
+	}
+	inst, err := tr.Status(ref)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if inst.Status != runtime.StatusPending {
+		t.Fatalf("agent-1 status = %v, want PENDING (the fenced start must not have run)", inst.Status)
 	}
 }
 

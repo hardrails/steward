@@ -106,6 +106,38 @@ The design provenance — the shape chosen, the shapes rejected, the invariants,
 the (provisional) wire contract still being reconciled with the control-plane side —
 lives in [`docs/uplink-client.md`](docs/uplink-client.md).
 
+### Uplink commands are generation-fenced
+
+Because `Destroy` releases an `instance_id` for reuse, two different instances can
+share one `instance_id` across a destroy boundary — so a stale, redelivered
+lifecycle command from a destroyed instance's lineage could act on the *wrong*,
+newly re-provisioned instance. Steward closes that race by **fencing on a generation
+token**: each tracked instance records the `generation` of the lineage it belongs to,
+the control plane stamps every queued command with the `instance_generation` it is
+addressed to, and the uplink **drops any command whose generation is older than the
+one the node currently tracks** for that `instance_id`. A fresh `provision` carries —
+and the tracker adopts, atomically with the provision — the new generation, so
+everything from the superseded lineage is fenced thereafter.
+
+- **It rides the existing durable state, not a new file.** The generation is one
+  additive `generation` field on the persisted instance record, so it survives a
+  restart through `-state-file` exactly as the rest of the tracked state does; the
+  state-file format version is unchanged (the field's zero value is the safe "no
+  fencing" default).
+- **A fenced command is a no-op, not a failure.** Steward drops it silently — it logs
+  the drop but sends no report — because a superseded command is an expected
+  consequence of at-least-once delivery, not an operator-visible failure, and a
+  fabricated success report could corrupt the live instance's control-plane state.
+- **It is additive and dormant until the control plane sends it.** A command with an
+  absent or zero `instance_generation` is never fenced, so this changes nothing about
+  the inbound REST path, the published `openapi/steward.v1.yaml` contract (unchanged —
+  this is outbound-client behavior), or a Steward talking to a control plane that does
+  not yet send the field. It requires no synchronized upgrade.
+
+The design provenance — the persistence choice, the fence rule, the silent-drop
+semantics, the first-seen bootstrap, and the rollout compatibility matrix — lives in
+[`docs/instance-generation-fencing.md`](docs/instance-generation-fencing.md).
+
 Those are out of scope on purpose. Steward is meant to be small enough to read in
 one sitting and to audit against its published contract
 (`openapi/steward.v1.yaml`).
