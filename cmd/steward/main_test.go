@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -807,4 +809,331 @@ func TestNonPositiveMaxInstancesExitsNonZero(t *testing.T) {
 		cmd.Env = append(os.Environ(), "STEWARD_MAX_INSTANCES=0")
 		assertFailsClosed(t, cmd)
 	})
+}
+
+// writeConfigFile writes body to a temp JSON config file and returns its path.
+func writeConfigFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	return path
+}
+
+// assertFailsWith runs cmd, asserts it exits non-zero with an ExitError, and that
+// its combined output contains every substring in want. It supplies stewardEnv()
+// (so integration coverage is captured) only when the caller has not already set an
+// environment — a caller injecting env vars uses stewardEnv("KEY=val") itself.
+func assertFailsWith(t *testing.T, cmd *exec.Cmd, want ...string) {
+	t.Helper()
+	if cmd.Env == nil {
+		cmd.Env = stewardEnv()
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected a non-zero exit, got success:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+	}
+	for _, w := range want {
+		if !strings.Contains(string(out), w) {
+			t.Errorf("output does not contain %q:\n%s", w, out)
+		}
+	}
+}
+
+// assertExitsZero runs cmd, asserts a clean exit 0, and that stdout/stderr contains
+// wantStdout (when non-empty). Env handling matches assertFailsWith.
+func assertExitsZero(t *testing.T, cmd *exec.Cmd, wantStdout string) {
+	t.Helper()
+	if cmd.Env == nil {
+		cmd.Env = stewardEnv()
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected a clean exit 0, got %v\n%s", err, out)
+	}
+	if wantStdout != "" && !strings.Contains(string(out), wantStdout) {
+		t.Errorf("output does not contain %q:\n%s", wantStdout, out)
+	}
+}
+
+// TestCheckConfigValid pins task 1's happy path: -check-config validates a good
+// configuration and exits 0 WITHOUT binding a port, serving, or starting/dialing
+// the uplink loop.
+func TestCheckConfigValid(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+
+	t.Run("exits zero and binds no port", func(t *testing.T) {
+		// Occupy a port and hold it for the whole subprocess run. If -check-config
+		// tried to bind -addr it would fail with "address already in use"; a clean
+		// exit 0 on the occupied addr proves it created no listener.
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("occupy a port: %v", err)
+		}
+		defer ln.Close()
+		occupied := ln.Addr().String()
+
+		cmd := exec.Command(bin, "-check-config", "-addr", occupied)
+		cmd.Env = stewardEnv()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("-check-config must exit 0 without binding -addr (port is occupied), got %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "configuration valid") {
+			t.Errorf("-check-config did not print the validation success line:\n%s", out)
+		}
+		if strings.Contains(string(out), "steward listening") {
+			t.Errorf("-check-config must not start the HTTP server:\n%s", out)
+		}
+	})
+
+	t.Run("valid uplink config does not start or dial the poll loop", func(t *testing.T) {
+		cred := writeValidCredentialFile(t)
+		// A syntactically valid URL pointed at a closed port: NewPoller validates it
+		// but never dials; only Poller.Run (never called by -check-config) would.
+		cmd := exec.Command(bin, "-check-config",
+			"-uplink-url", "http://127.0.0.1:1",
+			"-uplink-credential-file", cred,
+		)
+		cmd.Env = stewardEnv()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("-check-config on a valid uplink config must exit 0, got %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "configuration valid") {
+			t.Errorf("-check-config did not print the validation success line:\n%s", out)
+		}
+		// A dry run validates a config; it does not enable anything. The progress
+		// logs must stay silent so the output is not misleading.
+		if strings.Contains(string(out), "uplink enabled") {
+			t.Errorf("-check-config must not report the uplink as enabled:\n%s", out)
+		}
+	})
+}
+
+// TestCheckConfigInvalidMatchesRealStartup pins the core promise of task 1: on every
+// category of invalid config, -check-config exits non-zero with the SAME actionable
+// message a real startup would — proven by running both the real startup path and
+// the dry run with the same config and asserting both fail with the same markers.
+func TestCheckConfigInvalidMatchesRealStartup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+
+	validCred := writeValidCredentialFile(t)
+	missingCred := filepath.Join(t.TempDir(), "no-such-credential.json")
+	corruptState := filepath.Join(t.TempDir(), "corrupt-state.json")
+	if err := os.WriteFile(corruptState, []byte("not valid steward state json"), 0o600); err != nil {
+		t.Fatalf("write corrupt state file: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		args []string // the invalid-config flags, shared by both invocations
+		want []string // substrings both the real boot and the dry run must emit
+	}{
+		{"bad log level", []string{"-log-level", "verbose"}, []string{"verbose", "debug, info, warn, error"}},
+		{"non-positive max-instances", []string{"-max-instances", "0"}, []string{"-max-instances", "positive"}},
+		{"malformed uplink url", []string{"-uplink-url", "control-plane.example", "-uplink-credential-file", validCred}, []string{"control-plane.example", "http"}},
+		{"missing credential file", []string{"-uplink-url", "http://control-plane.example", "-uplink-credential-file", missingCred}, []string{missingCred}},
+		{"uplink url without credential file", []string{"-uplink-url", "http://control-plane.example"}, []string{"-uplink-credential-file"}},
+		{"corrupt state file", []string{"-state-file", corruptState}, []string{corruptState}},
+		{"malformed addr", []string{"-addr", "0.0.0.0.8080"}, []string{"0.0.0.0.8080"}},
+		{"addr port out of range", []string{"-addr", "127.0.0.1:99999"}, []string{"127.0.0.1:99999", "99999"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Real startup fails closed on this config, before binding a port...
+			realArgs := append([]string{"-addr", "127.0.0.1:0"}, tc.args...)
+			assertFailsWith(t, exec.Command(bin, realArgs...), tc.want...)
+			// ...and -check-config fails closed identically.
+			checkArgs := append([]string{"-check-config"}, tc.args...)
+			assertFailsWith(t, exec.Command(bin, checkArgs...), tc.want...)
+		})
+	}
+}
+
+// TestCheckConfigIgnoresAddrWhenInboundDisabled pins the guard on the new -addr
+// validation: an uplink-only node (-disable-inbound-listener) never binds -addr, so
+// a garbage -addr there must not fail a config that would otherwise be valid — the
+// unconditional check would be a false positive for exactly the deployment shape
+// -disable-inbound-listener exists for.
+func TestCheckConfigIgnoresAddrWhenInboundDisabled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+	cred := writeValidCredentialFile(t)
+
+	assertExitsZero(t, exec.Command(bin, "-check-config",
+		"-addr", "garbage",
+		"-disable-inbound-listener",
+		"-uplink-url", "http://127.0.0.1:1",
+		"-uplink-credential-file", cred,
+	), "configuration valid")
+}
+
+// TestConfigFileValueApplied pins task 2's read-and-apply: a valid JSON config is
+// accepted, and a value it carries actually reaches the validation sequence (proven
+// by a config-only invalid value failing closed with its message).
+func TestConfigFileValueApplied(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+
+	t.Run("a valid JSON config is accepted", func(t *testing.T) {
+		cfg := writeConfigFile(t, `{"addr":"127.0.0.1:0","max_instances":16,"log_level":"debug","uplink_poll_interval":"20s"}`)
+		assertExitsZero(t, exec.Command(bin, "-check-config", "-config", cfg), "configuration valid")
+	})
+
+	t.Run("a config-file value is read and applied", func(t *testing.T) {
+		// With no flag or env for log-level, the file's value is what gets validated;
+		// an invalid one must fail closed naming it, proving the file was applied
+		// rather than silently ignored.
+		cfg := writeConfigFile(t, `{"log_level":"verbose"}`)
+		assertFailsWith(t, exec.Command(bin, "-check-config", "-config", cfg), "verbose", "debug, info, warn, error")
+	})
+
+	t.Run("uplink settings from the file are applied and validated", func(t *testing.T) {
+		// A whole uplink-only node configured from the file: a syntactically valid
+		// URL, a real credential file, and the inbound listener disabled. The
+		// resolved config must pass every check (valid URL, credential loads, and the
+		// disable-inbound/uplink combination is allowed) without starting anything.
+		cred := writeValidCredentialFile(t)
+		cfg := writeConfigFile(t, fmt.Sprintf(
+			`{"uplink_url":"http://127.0.0.1:1","uplink_credential_file":%q,"disable_inbound_listener":true}`, cred))
+		assertExitsZero(t, exec.Command(bin, "-check-config", "-config", cfg), "configuration valid")
+	})
+}
+
+// TestConfigFilePrecedence pins the precedence contract flag > env > config file.
+// It uses log-level as the observable: the file supplies an INVALID value, and a
+// higher-precedence VALID value winning makes -check-config exit 0, while the file's
+// value winning would fail closed.
+func TestConfigFilePrecedence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+	cfg := writeConfigFile(t, `{"log_level":"verbose"}`)
+
+	t.Run("a flag overrides a config-file value", func(t *testing.T) {
+		assertExitsZero(t, exec.Command(bin, "-check-config", "-config", cfg, "-log-level", "info"), "configuration valid")
+	})
+
+	t.Run("an env var overrides a config-file value", func(t *testing.T) {
+		cmd := exec.Command(bin, "-check-config", "-config", cfg)
+		cmd.Env = stewardEnv("STEWARD_LOG_LEVEL=info")
+		assertExitsZero(t, cmd, "configuration valid")
+	})
+
+	t.Run("a flag overrides both an env var and a config-file value", func(t *testing.T) {
+		// File says verbose (invalid), env says chatty (invalid), flag says info
+		// (valid). A clean exit proves the flag beat both lower layers.
+		cmd := exec.Command(bin, "-check-config", "-config", cfg, "-log-level", "info")
+		cmd.Env = stewardEnv("STEWARD_LOG_LEVEL=chatty")
+		assertExitsZero(t, cmd, "configuration valid")
+	})
+}
+
+// TestMalformedConfigFileFailsClosed pins task 2's fail-closed loader: a garbage,
+// unknown-key, trailing-data, or missing -config file is a startup error naming the
+// file (never a silently-ignored or half-applied config), for a real boot and the
+// dry run alike.
+func TestMalformedConfigFileFailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+
+	t.Run("garbage JSON", func(t *testing.T) {
+		cfg := writeConfigFile(t, `{not json`)
+		assertFailsWith(t, exec.Command(bin, "-check-config", "-config", cfg), cfg)
+		// The same malformed file also fails a real startup, before it binds a port.
+		assertFailsWith(t, exec.Command(bin, "-config", cfg, "-addr", "127.0.0.1:0"), cfg)
+	})
+
+	t.Run("unknown key is rejected, not silently dropped", func(t *testing.T) {
+		cfg := writeConfigFile(t, `{"max_instance":5}`)
+		assertFailsWith(t, exec.Command(bin, "-check-config", "-config", cfg), cfg, "unknown field")
+	})
+
+	t.Run("trailing data after the object", func(t *testing.T) {
+		cfg := writeConfigFile(t, `{"addr":"127.0.0.1:0"}{}`)
+		assertFailsWith(t, exec.Command(bin, "-check-config", "-config", cfg), cfg, "trailing data")
+	})
+
+	t.Run("malformed duration value names the file and value", func(t *testing.T) {
+		cfg := writeConfigFile(t, `{"uplink_poll_interval":"30sec"}`)
+		assertFailsWith(t, exec.Command(bin, "-check-config", "-config", cfg), cfg, "30sec")
+	})
+
+	t.Run("missing config file", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "no-such-config.json")
+		assertFailsWith(t, exec.Command(bin, "-check-config", "-config", missing), missing)
+	})
+}
+
+// TestConfigFileAppliedToRealStartup proves the config file is honored by a REAL
+// boot (not only by -check-config): a state_file from the file drives the durable-
+// state path an actual startup logs, and a -state-file flag still overrides it.
+func TestConfigFileAppliedToRealStartup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+
+	fromFile := filepath.Join(t.TempDir(), "from-config-file.json")
+	cfg := writeConfigFile(t, fmt.Sprintf(`{"state_file":%q}`, fromFile))
+
+	t.Run("a config-file value drives real startup", func(t *testing.T) {
+		lines, waitErr := runStewardAndSignal(t, bin, []string{"-config", cfg, "-addr", "127.0.0.1:0"}, "durable state enabled")
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+		if !containsLine(lines, "durable state enabled", fromFile) {
+			t.Errorf("real startup did not apply the config-file state_file %q:\n%s", fromFile, strings.Join(lines, "\n"))
+		}
+	})
+
+	t.Run("a flag overrides the config-file value at real startup", func(t *testing.T) {
+		fromFlag := filepath.Join(t.TempDir(), "from-flag.json")
+		lines, waitErr := runStewardAndSignal(t, bin, []string{"-config", cfg, "-state-file", fromFlag, "-addr", "127.0.0.1:0"}, "durable state enabled")
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+		if !containsLine(lines, "durable state enabled", fromFlag) {
+			t.Errorf("the -state-file flag did not override the config-file value:\n%s", strings.Join(lines, "\n"))
+		}
+		if containsLine(lines, "durable state enabled", fromFile) {
+			t.Errorf("the config-file state_file must not win over the -state-file flag:\n%s", strings.Join(lines, "\n"))
+		}
+	})
+}
+
+// containsLine reports whether any line contains every one of subs.
+func containsLine(lines []string, subs ...string) bool {
+	for _, line := range lines {
+		all := true
+		for _, s := range subs {
+			if !strings.Contains(line, s) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
 }

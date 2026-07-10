@@ -70,8 +70,10 @@ go run ./cmd/steward -addr 127.0.0.1:9090
 STEWARD_ADDR=0.0.0.0:8080 go run ./cmd/steward
 ```
 
-Every setting is a flag with a matching `STEWARD_`-prefixed env var (the flag
-wins when both are set):
+Every setting is a flag with a matching `STEWARD_`-prefixed env var, and can also
+be supplied in a JSON [config file](#config-file). Precedence is
+**flag > env var > config file** (a flag beats an env var, which beats the config
+file, which beats the built-in default):
 
 | Flag              | Env var                  | Default          | Purpose                                                                 |
 | ----------------- | ------------------------ | ---------------- | ----------------------------------------------------------------------- |
@@ -83,13 +85,28 @@ wins when both are set):
 | `-uplink-credential-file`  | `STEWARD_UPLINK_CREDENTIAL_FILE`  | (unset)          | path to the node's uplink credential JSON; required when `-uplink-url` is set |
 | `-uplink-poll-interval`    | `STEWARD_UPLINK_POLL_INTERVAL`    | `10s`            | base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap) |
 | `-disable-inbound-listener` | `STEWARD_DISABLE_INBOUND_LISTENER` | `false`          | do not bind an inbound listener; requires `-uplink-url`                |
+| `-config`                  | `STEWARD_CONFIG`                  | (unset)          | path to a JSON [config file](#config-file) supplying any of the settings above; a flag or env var overrides it |
 
-`-version` is an action flag rather than a setting (it has no env var): it prints
-the build/version string and exits 0 without binding a port or starting the
-uplink loop. The string is the VCS revision the Go toolchain stamps into the
-binary (`go build`/`go install`), falling back to a compiled-in constant when no
-build metadata is available (for example under `go run`). It is the same value
-`GET /v1/capabilities` advertises.
+`-version` and `-check-config` are action flags rather than settings (they have no
+env var):
+
+- `-version` prints the build/version string and exits 0 without binding a port or
+  starting the uplink loop. The string is the VCS revision the Go toolchain stamps
+  into the binary (`go build`/`go install`), falling back to a compiled-in constant
+  when no build metadata is available (for example under `go run`). It is the same
+  value `GET /v1/capabilities` advertises.
+- `-check-config` runs every fail-closed startup check against the fully resolved
+  configuration (flags, env vars, and any `-config` file) and then exits 0 (valid)
+  or non-zero with the same actionable message a real startup would give —
+  **without binding a port, keeping state for real use, or starting the uplink
+  loop**. It answers "will this configuration work?" before a rollout. It validates
+  a `-config` file too:
+
+  ```console
+  # Validate the flags, env, and config file this node would boot with.
+  go run ./cmd/steward -check-config -config /etc/steward/config.json
+  # -> prints "configuration valid" and exits 0, or names the first problem and exits non-zero.
+  ```
 
 By default Steward keeps state in memory and a restart forgets every tracked
 instance. Set `-state-file` to persist state across restarts:
@@ -113,6 +130,43 @@ fleet operations then flow through the uplink poll loop only. The flag requires
 `-uplink-url` — a node with neither door open is unreachable and fails closed at
 startup. See [`docs/disable-inbound-listener.md`](docs/disable-inbound-listener.md)
 for the full design.
+
+## Config file
+
+Any setting can live in a JSON config file, pointed at by `-config` (or
+`STEWARD_CONFIG`). It is the lowest-precedence layer: a flag or an env var always
+overrides the same key in the file (**flag > env var > config file**). Keys are
+`snake_case` — the same names as the `STEWARD_`-prefixed env vars, minus the
+prefix — and every key is optional; an omitted key falls back to its env var,
+flag, or built-in default. `uplink_poll_interval` is a Go duration string (e.g.
+`"30s"`, `"1m30s"`).
+
+```json
+{
+  "addr": "0.0.0.0:8080",
+  "max_instances": 512,
+  "log_level": "info",
+  "state_file": "/var/lib/steward/state.json",
+  "uplink_url": "https://control-plane.example",
+  "uplink_credential_file": "/etc/steward/uplink-credential.json",
+  "uplink_poll_interval": "30s",
+  "disable_inbound_listener": false
+}
+```
+
+```console
+go run ./cmd/steward -config /etc/steward/config.json
+
+# A flag or env var still wins over the file — here the listen address is
+# overridden while the rest of the file's settings apply.
+go run ./cmd/steward -config /etc/steward/config.json -addr 127.0.0.1:9090
+```
+
+The file is read fail-closed, the same way the state and credential files are: a
+missing file, malformed JSON, an unknown key (a typo such as `max_instance` for
+`max_instances`), or trailing data is a startup error naming the file and the
+problem, never a silently-ignored or half-applied config. Run
+`steward -check-config -config <path>` to validate it without starting the server.
 
 ## API at a glance
 
