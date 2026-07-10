@@ -35,9 +35,14 @@ func TestDurableStateSurvivesRestart(t *testing.T) {
 	refB := provisionID(t, h1, "agent-b", "")
 	refGone := provisionID(t, h1, "agent-gone", `{"tmp":true}`)
 
-	// Mutate: A running, B hibernated, gone destroyed.
+	// Mutate: A running, B hibernated, gone destroyed. B reaches HIBERNATED via
+	// RUNNING — hibernate is only valid on an instance that has run, never a
+	// PENDING one — so start B before hibernating it.
 	if rec := do(h1, http.MethodPost, "/v1/instances/"+refA+"/start", ""); rec.Code != http.StatusOK {
 		t.Fatalf("start A: status=%d", rec.Code)
+	}
+	if rec := do(h1, http.MethodPost, "/v1/instances/"+refB+"/start", ""); rec.Code != http.StatusOK {
+		t.Fatalf("start B: status=%d", rec.Code)
 	}
 	if rec := do(h1, http.MethodPost, "/v1/instances/"+refB+"/hibernate", ""); rec.Code != http.StatusOK {
 		t.Fatalf("hibernate B: status=%d", rec.Code)

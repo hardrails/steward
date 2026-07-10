@@ -152,6 +152,64 @@ func TestLifecycleEndpoints(t *testing.T) {
 	assertJSONError(t, do(h, http.MethodGet, "/v1/instances/"+ref, ""), http.StatusNotFound)
 }
 
+// decodeError decodes a JSON error body and returns it.
+func decodeError(t *testing.T, rec *httptest.ResponseRecorder) errorResponse {
+	t.Helper()
+	var er errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &er); err != nil {
+		t.Fatalf("decode error: %v (body=%s)", err, rec.Body.String())
+	}
+	return er
+}
+
+// TestInvalidStateTransitionReturns409 pins the new failure class: stopping a
+// PENDING instance (never started) is a 409 with the invalid_state_transition
+// code and a message naming the refused transition, not a silent 200 that
+// mutates PENDING→STOPPED, and the instance is left unchanged.
+func TestInvalidStateTransitionReturns409(t *testing.T) {
+	h := newTestHandler(0)
+	ref := provisionID(t, h, "agent-1", "") // PENDING
+
+	rec := do(h, http.MethodPost, "/v1/instances/"+ref+"/stop", "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stop on PENDING: status=%d want 409 (body=%s)", rec.Code, rec.Body.String())
+	}
+	er := decodeError(t, rec)
+	if er.Error != "invalid_state_transition" {
+		t.Fatalf("error code=%q, want invalid_state_transition", er.Error)
+	}
+	if !strings.Contains(er.Message, "PENDING") || !strings.Contains(er.Message, "STOPPED") {
+		t.Fatalf("message %q must name the refused transition (PENDING→STOPPED)", er.Message)
+	}
+
+	// The instance must be unchanged (still PENDING), not silently mutated.
+	get := do(h, http.MethodGet, "/v1/instances/"+ref, "")
+	if inst := decodeInstance(t, get); inst.Status != runtime.StatusPending {
+		t.Fatalf("status after rejected stop = %q, want unchanged PENDING", inst.Status)
+	}
+}
+
+// TestInvalidSpecReturnsDistinctCode pins the malformed-config class: a present
+// non-object spec is a 400 with the distinct invalid_spec code, separate from
+// the invalid_request code a malformed request envelope or missing field gets.
+func TestInvalidSpecReturnsDistinctCode(t *testing.T) {
+	h := newTestHandler(0)
+
+	rec := do(h, http.MethodPost, "/v1/instances", `{"instance_id":"x","spec":[1,2,3]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("array spec: status=%d want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if er := decodeError(t, rec); er.Error != "invalid_spec" {
+		t.Fatalf("error code=%q, want invalid_spec", er.Error)
+	}
+
+	// A missing field stays invalid_request — the two classes are distinct.
+	rec = do(h, http.MethodPost, "/v1/instances", `{"spec":{"k":"v"}}`)
+	if er := decodeError(t, rec); er.Error != "invalid_request" {
+		t.Fatalf("missing instance_id: error code=%q, want invalid_request", er.Error)
+	}
+}
+
 func TestCapabilities(t *testing.T) {
 	h := newTestHandler(7)
 	rec := do(h, http.MethodGet, "/v1/capabilities", "")

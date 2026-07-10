@@ -438,14 +438,25 @@ margin above 10 seconds that the systemd unit above uses.
 
 **With the inbound listener bound** (the default, or explicit `disable_inbound_listener: false`):
 
-- `GET /v1/healthz` → `200 {"status":"ok"}` is a liveness probe only. It
+- `GET /v1/healthz` → `200 {"status":"ok"}` is a **liveness** probe only. It
   deliberately does not touch the durable-state file — that would waste I/O on a
   hot path and risks racing the state file's own atomic-rename writes — because a
   broken state file already fails closed elsewhere (at startup, or on the write
   inside the mutation that touches it), never silently behind a healthy probe.
+  Point your orchestrator's liveness/restart probe here.
+- `GET /v1/readiness` → `200 {"status":"ready"}` when the instance should receive
+  traffic, or `503 {"status":"not_ready","check":"...","detail":"..."}` naming the
+  first failing gate when it should be drained. It is the **readiness** probe for
+  rolling deployments: it passes only when the tracker is initialized, the uplink
+  (if enabled) has polled successfully at least once or is not persistently
+  failing, and durable state (if enabled) is writable. Point your load balancer /
+  orchestrator readiness probe here so a not-yet-warm or degraded instance is kept
+  out of rotation — and set the readiness `503` to remove the instance from the
+  pool without restarting it (that is what liveness is for).
 - `GET /v1/capabilities` reports `version`, `instance_count`, `max_instances`, and
   a `durable_state` boolean. It's useful for confirming a rollout landed the
-  binary and config you expect, but it's introspection, not a readiness gate.
+  binary and config you expect, but it's introspection, not a readiness gate — use
+  `/v1/readiness` for that.
 
 **With the inbound listener disabled** (`disable_inbound_listener: true`), neither
 endpoint exists locally — there is no listener to serve them. Liveness for a

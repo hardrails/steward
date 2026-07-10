@@ -12,14 +12,20 @@ import (
 	"github.com/hardrails/steward/internal/uplink"
 )
 
-// UplinkMetrics is the subset of the uplink poll loop's live metrics the
-// /metrics endpoint reports. It is an interface — satisfied by *uplink.Poller
-// via its MetricsSnapshot method — rather than a direct *uplink.Poller field,
-// so a test can inject a fake snapshot without driving a real poll loop over
-// HTTP. A nil UplinkMetrics (the uplink is disabled, e.g. no -uplink-url) is
-// expected and handled by handleMetrics: it simply omits the uplink_* series.
+// UplinkMetrics is the subset of the uplink poll loop's live state the server
+// observes — for the /metrics endpoint (MetricsSnapshot) and the /v1/readiness
+// gate (Ready). It is an interface — satisfied by *uplink.Poller — rather than
+// a direct *uplink.Poller field, so a test can inject a fake without driving a
+// real poll loop over HTTP. A nil UplinkMetrics (the uplink is disabled, e.g.
+// no -uplink-url) is expected: handleMetrics then omits the uplink_* series and
+// handleReadiness skips the uplink readiness gate entirely.
 type UplinkMetrics interface {
 	MetricsSnapshot() uplink.Snapshot
+	// Ready reports whether the uplink poll loop is ready to serve traffic — it
+	// has completed at least one successful poll, or is not in a
+	// persistent-failure state — and, when not, a human detail naming why (see
+	// uplink.Poller.Ready).
+	Ready() (ready bool, detail string)
 }
 
 // handleMetrics renders Steward's operational state in the Prometheus text

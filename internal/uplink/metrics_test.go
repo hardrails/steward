@@ -5,6 +5,76 @@ import (
 	"time"
 )
 
+// TestMetricsReadiness pins the readiness rule (see Metrics.readiness and
+// Poller.Ready): ready if a poll has succeeded OR the loop is not in a
+// persistent-failure state; not ready only when it has never succeeded AND is
+// stuck (credential rejected, or >= threshold consecutive failures). Each case
+// is exactly assertable, so a mutant that flips a comparison or drops a branch
+// is caught here rather than in a timing-dependent integration run.
+func TestMetricsReadiness(t *testing.T) {
+	const threshold = 3
+
+	t.Run("fresh with no failures is ready", func(t *testing.T) {
+		if ready, _ := (&Metrics{}).readiness(threshold); !ready {
+			t.Fatal("a fresh metrics with no failures must be ready")
+		}
+	})
+
+	t.Run("one success stays ready despite later failure signals", func(t *testing.T) {
+		m := &Metrics{}
+		m.recordPollSuccess()
+		m.setConsecutiveFailures(threshold + 100)
+		m.setCredentialRejected(true)
+		if ready, _ := m.readiness(threshold); !ready {
+			t.Fatal("a poller that has succeeded once must stay ready across a later blip")
+		}
+	})
+
+	t.Run("credential rejected with no success is not ready", func(t *testing.T) {
+		m := &Metrics{}
+		m.setCredentialRejected(true)
+		ready, detail := m.readiness(threshold)
+		if ready {
+			t.Fatal("a credential-rejected loop with no success must not be ready")
+		}
+		if detail == "" {
+			t.Fatal("a not-ready result must carry a detail naming why")
+		}
+	})
+
+	t.Run("failures at threshold with no success is not ready", func(t *testing.T) {
+		m := &Metrics{}
+		m.setConsecutiveFailures(threshold)
+		ready, detail := m.readiness(threshold)
+		if ready {
+			t.Fatal("sustained failures (>= threshold) with no success must not be ready")
+		}
+		if detail == "" {
+			t.Fatal("a not-ready result must carry a detail naming why")
+		}
+	})
+
+	t.Run("failures below threshold with no success is still ready", func(t *testing.T) {
+		m := &Metrics{}
+		m.setConsecutiveFailures(threshold - 1)
+		if ready, _ := m.readiness(threshold); !ready {
+			t.Fatal("a brief blip below the threshold must not flip readiness")
+		}
+	})
+
+	t.Run("nil metrics is defensively ready and its setters are inert", func(t *testing.T) {
+		var m *Metrics
+		// Mirrors AuditLogger's nil-safety: a *dispatcher built directly in tests
+		// bypasses NewPoller, so a nil *Metrics must be an inert no-op, never a
+		// nil-pointer panic.
+		m.recordPollSuccess()
+		m.setCredentialRejected(true)
+		if ready, _ := m.readiness(threshold); !ready {
+			t.Fatal("a nil metrics has no failure to report and must be ready")
+		}
+	})
+}
+
 // TestMetricsRecordPollLatencyTracksMinMaxLastAndCount pins recordPollLatency's
 // exact min/max/last/count arithmetic directly (rather than through a real,
 // timing-nondeterministic HTTP round trip — see

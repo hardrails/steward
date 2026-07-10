@@ -256,6 +256,77 @@ func TestPollerMetricsSnapshotTracksPollCountLatencyAndBackoff(t *testing.T) {
 	}
 }
 
+// TestPollerReadyBeforeAnyPoll pins the fresh-node readiness default: a poller
+// that has not polled yet has no failures, so it is ready — a new node is not
+// held out of rotation merely for being new, only for being stuck.
+func TestPollerReadyBeforeAnyPoll(t *testing.T) {
+	p := mustPoller(t, runtime.NewTracker(0), Config{
+		BaseURL: "https://cp.example", Credential: "tok", NodeID: "node-7", PollInterval: time.Second,
+	})
+	if ready, detail := p.Ready(); !ready {
+		t.Fatalf("a fresh poller with no failures must be ready, got not-ready (%q)", detail)
+	}
+}
+
+// TestPollerReadinessTracksCredentialRejectionAndResume proves the readiness
+// wiring end to end: a fatal credential rejection (with no successful poll yet)
+// drives Ready() to not-ready naming the credential, and once a valid credential
+// resumes the loop and a poll succeeds, Ready() reports ready again. It reuses
+// the credential-hot-reload server shape (old-secret → 403, new-secret → 200).
+func TestPollerReadinessTracksCredentialRejectionAndResume(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /uplink/poll", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Authorization") {
+		case "Bearer new-secret":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"commands":[]}`)
+		default:
+			w.WriteHeader(http.StatusForbidden)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	credPath := filepath.Join(t.TempDir(), "credential.json")
+	writeCredentialFile(t, credPath, "acme", "node-7", "old-secret")
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := mustPoller(t, runtime.NewTracker(0), Config{
+		BaseURL: srv.URL, Credential: "old-secret", NodeID: "node-7",
+		PollInterval: 5 * time.Millisecond, Logger: logger,
+		CredentialPath: credPath, CredentialWatchInterval: 5 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := run(p, ctx)
+
+	// Once paused on the rejected credential (and with no poll ever having
+	// succeeded), the node must report not-ready and name why.
+	waitForLog(t, logBuf, "waiting for a new credential")
+	if ready, detail := p.Ready(); ready || detail == "" {
+		t.Fatalf("after a credential rejection with no success: Ready()=(%v,%q), want (false, non-empty)", ready, detail)
+	}
+
+	// Drop a valid credential; the loop resumes and its next poll succeeds, so the
+	// node becomes ready again.
+	writeCredentialFile(t, credPath, "acme", "node-7", "new-secret")
+	deadline := time.After(2 * time.Second)
+	for {
+		if ready, _ := p.Ready(); ready {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("poller did not become ready after resuming with a valid credential")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	<-done
+}
+
 // TestPollerStopsOnCredentialRejection covers the pre-hot-reload fallback: a
 // Poller built WITHOUT Config.CredentialPath has no file to watch, so a fatal
 // 401/403 must still stop Run outright exactly as before. The hot-reload path
@@ -868,7 +939,7 @@ func TestExecuteBatchFencedCommandProducesNoReport(t *testing.T) {
 	p, sink := batchPoller(t, tr)
 
 	stale := cmdGen("c-stale", "node-7", "agent-1", kindStop, "", 1, 2) // 2 < tracked 5: fenced
-	good := cmdGen("c-good", "node-7", "agent-2", kindStop, "", 2, 0)   // 0: never fenced
+	good := cmdGen("c-good", "node-7", "agent-2", kindStart, "", 2, 0)  // 0: never fenced (start: PENDING→RUNNING is valid)
 
 	p.executeBatch(context.Background(), []command{stale, good})
 

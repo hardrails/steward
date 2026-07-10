@@ -55,6 +55,39 @@ func TestBatchAllSucceed(t *testing.T) {
 	}
 }
 
+// TestBatchInvalidStateTransitionReturns409PerOperation pins that a rejected
+// transition inside a batch surfaces per-operation exactly as the single-op
+// endpoint does: a stop of a freshly-provisioned (PENDING) instance is a 409
+// with the invalid_state_transition code at its own index, while sibling
+// operations still run and the batch call itself is 200.
+func TestBatchInvalidStateTransitionReturns409PerOperation(t *testing.T) {
+	h := newTestHandler(0)
+	ref := provisionID(t, h, "agent-1", "") // PENDING
+
+	body := `{"operations":[
+		{"op":"stop","runtime_ref":"` + ref + `"},
+		{"op":"start","runtime_ref":"` + ref + `"}
+	]}`
+	rec := do(h, http.MethodPost, "/v1/instances/batch", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch: status=%d want 200 (per-op failure is not an overall error)", rec.Code)
+	}
+	got := decodeBatch(t, rec)
+	if len(got.Results) != 2 {
+		t.Fatalf("results has %d entries, want 2", len(got.Results))
+	}
+	if got.Results[0].Status != http.StatusConflict || got.Results[0].Error == nil ||
+		got.Results[0].Error.Error != "invalid_state_transition" {
+		t.Fatalf("result 0 = %+v, want 409 invalid_state_transition (stop of a PENDING instance)", got.Results[0])
+	}
+	// The sibling start still ran (PENDING→RUNNING), proving the batch did not
+	// stop on the failure.
+	if got.Results[1].Status != http.StatusOK || got.Results[1].Instance == nil ||
+		got.Results[1].Instance.Status != runtime.StatusRunning {
+		t.Fatalf("result 1 = %+v, want 200 RUNNING (the sibling start must still run)", got.Results[1])
+	}
+}
+
 // TestBatchPartialFailureReportsEachResultIndependently pins the core
 // partial-success contract: operation 3 of 5 failing does not prevent 1, 2, 4,
 // 5 from running, and every result — success or failure — is reported at its

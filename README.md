@@ -363,10 +363,21 @@ instances than its cap — a capacity re-tune must never become an outage.
 | DELETE | `/v1/instances/{id}`        | Destroy                                     |
 | GET    | `/v1/capabilities`          | Advertised skills + operational info        |
 | GET    | `/v1/healthz`               | Liveness probe (`{"status": "ok"}`)         |
+| GET    | `/v1/readiness`             | Readiness probe (`200` ready / `503` not ready; see [Health and readiness](#health-and-readiness)) |
 | GET    | `/metrics`                  | Prometheus metrics (opt-in; see [Metrics](#metrics)) |
 
 `{id}` is the opaque `runtime_ref` returned by provisioning. An unknown
 `runtime_ref` returns `404` with `{"error": "unknown_runtime_ref", "message": ...}`.
+
+Every error response carries a stable, machine-readable `error` code drawn from a
+small closed taxonomy — `invalid_request`, `invalid_spec` (a malformed instance
+`spec`), `unknown_runtime_ref`, `invalid_state_transition` (a lifecycle operation
+the instance's current status does not allow — see [Lifecycle transitions](#lifecycle-transitions)),
+`capacity_exceeded`, `request_too_large`, `rate_limited`, `not_found`,
+`method_not_allowed`, and `internal_error`. Each is documented, with its HTTP
+status, as the `Error.error` enum in [`openapi/steward.v1.yaml`](openapi/steward.v1.yaml);
+branch on it (or, more portably, on the HTTP status) rather than on the
+human-facing `message`.
 
 Every response carries an `X-Request-Id` header: a per-request correlation id,
 echoed on the matching structured log line (alongside the client's
@@ -378,14 +389,49 @@ one.
 `GET /v1/capabilities` advertises the (still-empty in v1) `skills` array plus a
 small slice of operational state for a control-plane dashboard: `version`, the
 current `instance_count`, the configured `max_instances` cap, and `durable_state`
-(a boolean — whether `-state-file` is set, never the path). `GET /v1/healthz` is a
-liveness probe returning `{"status": "ok"}`; it confirms the process is up and
-serving and deliberately does not probe the state file (durable state is already
-fail-closed at startup and on every mutation).
+(a boolean — whether `-state-file` is set, never the path).
 
 By default state is held in memory only and restarting the process forgets all
 tracked instances. Set `-state-file` (or `STEWARD_STATE_FILE`) to persist state
 across restarts; see [Run](#run) above.
+
+### Health and readiness
+
+Steward exposes two distinct probes on the inbound listener:
+
+- **`GET /v1/healthz` — liveness.** A `200 {"status": "ok"}` confirms the process
+  is up and serving. It deliberately does **not** probe the state file (durable
+  state is already fail-closed at startup and on every mutation), so it stays a
+  cheap hot-path check.
+- **`GET /v1/readiness` — readiness (rolling-deployment safety).** A `200
+  {"status": "ready"}` means the instance may receive traffic; a `503
+  {"status": "not_ready", "check": "...", "detail": "..."}` names the first gate
+  that failed so a load balancer or orchestrator drains a not-yet-warm or
+  degraded instance instead of routing to it. Three gates, checked in order:
+  1. the instance tracker is initialized;
+  2. when the outbound uplink is enabled (`-uplink-url`), it has completed at
+     least one successful poll **or** is not in a persistent-failure state (a
+     rejected credential, or sustained polling failure with no success yet) — a
+     brief transient blip does not flip readiness;
+  3. when durable state is enabled (`-state-file`), its directory is writable —
+     the capability persistence needs. Unlike the liveness probe, readiness
+     deliberately performs this filesystem check, so a state directory gone
+     read-only or full drains the instance even though its process is alive.
+
+Both probes live only on the inbound listener; a `-disable-inbound-listener`
+(uplink-only) node has neither — its liveness and readiness signal is its
+advancing uplink poll logs (see [Uplink client](docs/uplink-client.md)).
+
+### Lifecycle transitions
+
+`start`/`stop`/`hibernate` are validated against the instance's current status.
+Re-applying the same operation is an idempotent no-op (starting an already-`RUNNING`
+instance returns `200` unchanged — this is what keeps a retried/redelivered
+command safe). A transition that assumes a lifecycle step that never happened —
+stopping or hibernating a `PENDING` instance that was never started — is rejected
+with `409 invalid_state_transition` and the instance is left unchanged, rather
+than silently recording a nonsensical status. `provision` stays idempotent on
+`instance_id` and `destroy` is always allowed on a live instance, both unchanged.
 
 ### Filtered listing
 

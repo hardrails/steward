@@ -42,6 +42,11 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if _, err := tr.Start(b.RuntimeRef); err != nil {
 		t.Fatalf("start b: %v", err)
 	}
+	// c reaches HIBERNATED via RUNNING: hibernate is only valid on an instance
+	// that has run (never a PENDING one), so start it before hibernating.
+	if _, err := tr.Start(c.RuntimeRef); err != nil {
+		t.Fatalf("start c: %v", err)
+	}
 	if _, err := tr.Hibernate(c.RuntimeRef); err != nil {
 		t.Fatalf("hibernate c: %v", err)
 	}
@@ -217,6 +222,42 @@ func TestLoadCorruptFileFailsClosed(t *testing.T) {
 				t.Errorf("error %q does not name the state file path %q", err, path)
 			}
 		})
+	}
+}
+
+// TestCheckDurableWritable pins the GET /v1/readiness state-file gate: an
+// in-memory tracker is always writable (nothing to persist), a durable tracker
+// with a writable directory reports nil and leaves no probe temp file behind,
+// and a durable tracker whose state directory does not exist reports a
+// fail-closed error naming the directory.
+func TestCheckDurableWritable(t *testing.T) {
+	// In-memory: nothing to persist, always writable.
+	if err := NewTracker(0).CheckDurableWritable(); err != nil {
+		t.Fatalf("in-memory tracker: CheckDurableWritable = %v, want nil", err)
+	}
+
+	// Durable, writable directory: nil, and the probe cleans up after itself.
+	dir := t.TempDir()
+	tr, err := LoadTracker(0, filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatalf("LoadTracker: %v", err)
+	}
+	if err := tr.CheckDurableWritable(); err != nil {
+		t.Fatalf("writable dir: CheckDurableWritable = %v, want nil", err)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, ".steward-ready-*")); len(leftovers) != 0 {
+		t.Fatalf("probe left temp files behind: %v", leftovers)
+	}
+
+	// Durable, but the state directory does not exist: a missing file is a valid
+	// first run (LoadTracker succeeds), yet no mutation could ever persist, so the
+	// readiness probe must fail closed.
+	missing, err := LoadTracker(0, filepath.Join(dir, "does-not-exist", "state.json"))
+	if err != nil {
+		t.Fatalf("LoadTracker(missing dir): %v (a missing state file is a first run)", err)
+	}
+	if err := missing.CheckDurableWritable(); err == nil {
+		t.Fatal("state directory does not exist: CheckDurableWritable = nil, want a fail-closed error")
 	}
 }
 

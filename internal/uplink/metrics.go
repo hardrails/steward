@@ -34,6 +34,18 @@ type Metrics struct {
 	commandsSucceeded   atomic.Int64
 	commandsFailed      atomic.Int64
 	consecutiveFailures atomic.Int64
+
+	// pollsSucceeded and credentialRejected back the readiness gate (see
+	// readiness and Poller.Ready), read by the /v1/readiness HTTP handler from a
+	// goroutine other than the one Poller.Run drives. pollsSucceeded counts polls
+	// that returned commands cleanly (classOK); once it is non-zero the node has
+	// proven it can reach its control plane, so a later transient blip never flips
+	// readiness back. credentialRejected is true only while the loop is paused on
+	// a fatal 401/403 waiting for a new credential (a persistent-failure state the
+	// consecutive-failure count alone does not capture, since a first-poll
+	// rejection leaves that count at 0).
+	pollsSucceeded     atomic.Int64
+	credentialRejected atomic.Bool
 }
 
 // Snapshot is a point-in-time, race-free copy of a Poller's metrics, shaped
@@ -84,6 +96,54 @@ func (m *Metrics) setConsecutiveFailures(n int) {
 		return
 	}
 	m.consecutiveFailures.Store(int64(n))
+}
+
+// recordPollSuccess records that a poll returned cleanly (classOK). Called from
+// the single goroutine Poller.Run drives, once per successful poll. It is the
+// "has the node ever reached its control plane" signal the readiness gate keys
+// on; it never decrements, so one success makes the node durably ready across a
+// later transient failure.
+func (m *Metrics) recordPollSuccess() {
+	if m == nil {
+		return
+	}
+	m.pollsSucceeded.Add(1)
+}
+
+// setCredentialRejected records whether the poll loop is currently paused on a
+// fatal 401/403 waiting for a new credential (see Poller.Run's classFatal arm).
+// Called from the single goroutine Poller.Run drives; read by the readiness
+// gate from the HTTP goroutine.
+func (m *Metrics) setCredentialRejected(rejected bool) {
+	if m == nil {
+		return
+	}
+	m.credentialRejected.Store(rejected)
+}
+
+// readiness reports whether the uplink poll loop is ready to serve traffic and,
+// when not, a human detail naming why. The rule (see Poller.Ready and
+// GET /v1/readiness) is: ready if it has completed at least one successful poll
+// OR is not in a persistent-failure state. So a node is NOT ready only when it
+// has never polled successfully AND is currently stuck — its credential was
+// rejected, or it has failed at least persistentFailureThreshold times in a row
+// (a sustained inability to reach the control plane, not a single blip). A
+// freshly started node with no failures yet is ready; a node that has proven it
+// can reach its control plane stays ready across a later transient blip.
+func (m *Metrics) readiness(persistentFailureThreshold int64) (ready bool, detail string) {
+	if m == nil {
+		return true, "" // defensive: a nil metrics has no failure to report.
+	}
+	if m.pollsSucceeded.Load() > 0 {
+		return true, ""
+	}
+	if m.credentialRejected.Load() {
+		return false, "uplink credential was rejected and no poll has succeeded yet; waiting for a valid credential"
+	}
+	if m.consecutiveFailures.Load() >= persistentFailureThreshold {
+		return false, "uplink has not completed a successful poll and is in sustained failure"
+	}
+	return true, ""
 }
 
 // recordCommandOutcome increments the success or failure counter for one

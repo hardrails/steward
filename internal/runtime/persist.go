@@ -105,6 +105,44 @@ func (t *Tracker) load() error {
 	return nil
 }
 
+// CheckDurableWritable reports whether this tracker can still durably persist a
+// mutation, for the GET /v1/readiness gate. It is a no-op returning nil when no
+// state file is configured (the in-memory default persists nothing, so there is
+// nothing that can be un-writable).
+//
+// When a state file is configured it verifies the exact capability persistence
+// depends on — creating a file in the state file's directory and (implicitly,
+// via the OS) being able to rename it — by creating a uniquely-named probe temp
+// file there and removing it immediately. This is what catches the failures a
+// liveness probe deliberately does not (a directory gone read-only, a full or
+// unmounted filesystem): saveSnapshot writes a temp file in this same directory
+// and renames it over the state path, so if a temp file cannot be created here,
+// the next real mutation's persist would fail and roll back too.
+//
+// The probe never races that atomic-rename persistence discipline: it uses a
+// DISTINCT temp-file prefix (".steward-ready-*") from saveSnapshot's
+// (".steward-state-*") and removes its own file, while saveSnapshot only ever
+// creates and renames its own uniquely-named temp — neither enumerates or
+// touches the other's files. It takes no lock: stateFile is fixed at
+// construction, and a create-then-remove of a private temp name is independent
+// of the live byRef/byID maps a mutation guards. This is why the liveness probe
+// (handleHealthz) still refuses to do it — it is a readiness concern, run at a
+// lower cadence, not a hot-path liveness one.
+func (t *Tracker) CheckDurableWritable() error {
+	if t.stateFile == "" {
+		return nil
+	}
+	dir := filepath.Dir(t.stateFile)
+	f, err := os.CreateTemp(dir, ".steward-ready-*.tmp")
+	if err != nil {
+		return fmt.Errorf("state directory %q is not writable: %w (fix its permissions or free space, or the next durable mutation will fail)", dir, err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return nil
+}
+
 // corruptErr builds a uniform fail-closed error for a structurally invalid state
 // file, always naming the path and the remedy so the message passes the 3am
 // test.

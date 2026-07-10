@@ -88,11 +88,11 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+			writeError(w, http.StatusRequestEntityTooLarge, codeRequestTooLarge,
 				"request body exceeds the 1MiB limit")
 			return
 		}
-		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be a JSON object")
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "request body must be a JSON object")
 		return
 	}
 
@@ -121,7 +121,7 @@ func (s *Server) executeBatchOperation(op batchOperation) batchOperationResult {
 			Op:     op.Op,
 			Status: http.StatusBadRequest,
 			Error: &errorResponse{
-				Error:   "invalid_request",
+				Error:   codeInvalidRequest,
 				Message: fmt.Sprintf("op %q must be one of provision, start, stop, destroy", op.Op),
 			},
 		}
@@ -138,7 +138,7 @@ func (s *Server) batchProvision(op batchOperation) batchOperationResult {
 		return batchOperationResult{
 			Op:     op.Op,
 			Status: http.StatusBadRequest,
-			Error:  &errorResponse{Error: "invalid_request", Message: "instance_id is required"},
+			Error:  &errorResponse{Error: codeInvalidRequest, Message: "instance_id is required"},
 		}
 	}
 
@@ -151,7 +151,7 @@ func (s *Server) batchProvision(op batchOperation) batchOperationResult {
 			Op:         op.Op,
 			InstanceID: op.InstanceID,
 			Status:     http.StatusBadRequest,
-			Error:      &errorResponse{Error: "invalid_request", Message: "spec must be a JSON object"},
+			Error:      &errorResponse{Error: codeInvalidSpec, Message: "spec must be a JSON object"},
 		}
 	}
 
@@ -162,7 +162,7 @@ func (s *Server) batchProvision(op batchOperation) batchOperationResult {
 				Op:         op.Op,
 				InstanceID: op.InstanceID,
 				Status:     http.StatusServiceUnavailable,
-				Error:      &errorResponse{Error: "capacity_exceeded", Message: "instance capacity reached; retry later"},
+				Error:      &errorResponse{Error: codeCapacityExceeded, Message: "instance capacity reached; retry later"},
 			}
 		}
 		s.logger.Error("batch provision failed", "err", err)
@@ -170,7 +170,7 @@ func (s *Server) batchProvision(op batchOperation) batchOperationResult {
 			Op:         op.Op,
 			InstanceID: op.InstanceID,
 			Status:     http.StatusInternalServerError,
-			Error:      &errorResponse{Error: "internal_error", Message: "operation failed"},
+			Error:      &errorResponse{Error: codeInternalError, Message: "operation failed"},
 		}
 	}
 
@@ -191,7 +191,7 @@ func (s *Server) batchTransition(op batchOperation, transition func(string) (*ru
 		return batchOperationResult{
 			Op:     op.Op,
 			Status: http.StatusBadRequest,
-			Error:  &errorResponse{Error: "invalid_request", Message: "runtime_ref is required"},
+			Error:  &errorResponse{Error: codeInvalidRequest, Message: "runtime_ref is required"},
 		}
 	}
 
@@ -202,7 +202,20 @@ func (s *Server) batchTransition(op batchOperation, transition func(string) (*ru
 				Op:         op.Op,
 				RuntimeRef: op.RuntimeRef,
 				Status:     http.StatusNotFound,
-				Error:      &errorResponse{Error: "unknown_runtime_ref", Message: "no instance with that runtime_ref"},
+				Error:      &errorResponse{Error: codeUnknownRuntimeRef, Message: "no instance with that runtime_ref"},
+			}
+		}
+		// A rejected lifecycle transition (e.g. a batched stop of a PENDING
+		// instance) is a per-operation 409, exactly as the single-instance
+		// endpoint returns; destroy never reaches this branch (it is always
+		// allowed on a live instance). The wrapped error names the current and
+		// requested status.
+		if errors.Is(err, runtime.ErrInvalidStateTransition) {
+			return batchOperationResult{
+				Op:         op.Op,
+				RuntimeRef: op.RuntimeRef,
+				Status:     http.StatusConflict,
+				Error:      &errorResponse{Error: codeInvalidStateTransition, Message: err.Error()},
 			}
 		}
 		s.logger.Error("batch operation failed", "op", op.Op, "err", err)
@@ -210,7 +223,7 @@ func (s *Server) batchTransition(op batchOperation, transition func(string) (*ru
 			Op:         op.Op,
 			RuntimeRef: op.RuntimeRef,
 			Status:     http.StatusInternalServerError,
-			Error:      &errorResponse{Error: "internal_error", Message: "operation failed"},
+			Error:      &errorResponse{Error: codeInternalError, Message: "operation failed"},
 		}
 	}
 	return batchOperationResult{Op: op.Op, RuntimeRef: op.RuntimeRef, Status: http.StatusOK, Instance: inst}
