@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -319,6 +321,120 @@ func TestRecoverMiddlewareReturnsJSON500(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
 	assertJSONError(t, rec, http.StatusInternalServerError)
+}
+
+// TestRequestIDHeaderPresentUniqueAndHex pins task 3: every response carries a
+// non-empty, hex, per-request X-Request-Id — on a success and on an error path
+// alike, because withLogging sets it before the inner handler runs — and two
+// requests never share the same id.
+func TestRequestIDHeaderPresentUniqueAndHex(t *testing.T) {
+	h := newTestHandler(0)
+
+	// A 200 (capabilities) and a rewritten JSON 404 (unknown route) both flow
+	// through withLogging, so both must carry the header.
+	ok := do(h, http.MethodGet, "/v1/capabilities", "")
+	notFound := do(h, http.MethodGet, "/v1/does-not-exist", "")
+
+	for name, rec := range map[string]*httptest.ResponseRecorder{"capabilities_200": ok, "unknown_route_404": notFound} {
+		id := rec.Header().Get("X-Request-Id")
+		if id == "" {
+			t.Fatalf("%s: response is missing the X-Request-Id header", name)
+		}
+		// 8 random bytes hex-encoded == 16 lowercase hex chars.
+		if len(id) != 16 {
+			t.Fatalf("%s: X-Request-Id = %q, want 16 hex chars", name, id)
+		}
+		if _, err := hex.DecodeString(id); err != nil {
+			t.Fatalf("%s: X-Request-Id = %q is not valid hex: %v", name, id, err)
+		}
+	}
+
+	if a, b := ok.Header().Get("X-Request-Id"), notFound.Header().Get("X-Request-Id"); a == b {
+		t.Fatalf("two requests shared X-Request-Id %q; the id must be per-request", a)
+	}
+}
+
+// TestRequestLogCarriesRequestIDAndRemoteAddr pins the other half of task 3: the
+// structured request log line carries the same request_id echoed in the response
+// header plus the client's remote_addr, so a control-plane failure report can be
+// correlated to the one node-side log line that served it.
+func TestRequestLogCarriesRequestIDAndRemoteAddr(t *testing.T) {
+	var buf bytes.Buffer
+	h := New(slog.New(slog.NewJSONHandler(&buf, nil)), 0).Handler()
+
+	rec := do(h, http.MethodGet, "/v1/capabilities", "")
+	headerID := rec.Header().Get("X-Request-Id")
+	if headerID == "" {
+		t.Fatal("response is missing the X-Request-Id header")
+	}
+
+	var line map[string]any
+	dec := json.NewDecoder(&buf)
+	for dec.More() {
+		var m map[string]any
+		if err := dec.Decode(&m); err != nil {
+			t.Fatalf("decode log line: %v", err)
+		}
+		if m["msg"] == "request" {
+			line = m
+		}
+	}
+	if line == nil {
+		t.Fatalf("no \"request\" log line was emitted; got:\n%s", buf.String())
+	}
+	if line["request_id"] != headerID {
+		t.Fatalf("log request_id = %v, want it to match the response header %q", line["request_id"], headerID)
+	}
+	if ra, ok := line["remote_addr"].(string); !ok || ra == "" {
+		t.Fatalf("log line is missing a non-empty remote_addr; got %v", line["remote_addr"])
+	}
+}
+
+func assertHexRequestID(t *testing.T, rec *httptest.ResponseRecorder, name string) {
+	t.Helper()
+	id := rec.Header().Get("X-Request-Id")
+	if id == "" {
+		t.Fatalf("%s: response is missing the X-Request-Id header", name)
+	}
+	// 8 random bytes hex-encoded == 16 lowercase hex chars.
+	if len(id) != 16 {
+		t.Fatalf("%s: X-Request-Id = %q, want 16 hex chars", name, id)
+	}
+	if _, err := hex.DecodeString(id); err != nil {
+		t.Fatalf("%s: X-Request-Id = %q is not valid hex: %v", name, id, err)
+	}
+}
+
+// TestRequestIDHeaderPresentOn405AndRecoveredPanic closes the two response paths
+// the commit message claims carry X-Request-Id but the 200/404 tests above do
+// not exercise: the stdlib mux's rewritten 405 (a registered path hit with an
+// unregistered method) and a recovered-panic 500. Both work for the same reason
+// — every middleware wrapper shares one response header map and withLogging sets
+// the header before the inner handler runs — so this pins that the header is not
+// merely a happy-path artifact.
+func TestRequestIDHeaderPresentOn405AndRecoveredPanic(t *testing.T) {
+	// 405: /v1/capabilities is registered for GET only; POSTing it flows through
+	// jsonErrors' method-not-allowed rewrite, which writes to the same header map.
+	h := newTestHandler(0)
+	m405 := do(h, http.MethodPost, "/v1/capabilities", "")
+	if m405.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /v1/capabilities: status=%d want 405 (body=%s)", m405.Code, m405.Body.String())
+	}
+	assertHexRequestID(t, m405, "method_not_allowed_405")
+
+	// Recovered panic: assemble the real middleware order (recover→logging→
+	// jsonErrors) around a handler that panics, proving the header withLogging set
+	// before next.ServeHTTP survives the panic recoverMiddleware turns into a 500.
+	s := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0)
+	panicky := s.recoverMiddleware(s.withLogging(s.jsonErrors(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))))
+	rec := httptest.NewRecorder()
+	panicky.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("recovered panic: status=%d want 500 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertHexRequestID(t, rec, "recovered_panic_500")
 }
 
 func TestListInstancesEmptyReturnsWrappedArray(t *testing.T) {
