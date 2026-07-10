@@ -1,0 +1,119 @@
+name: Release
+
+# Publishes cross-platform binaries and a SHA-256 checksums file to a GitHub
+# Release when a version tag (vX.Y.Z) is pushed. A manual workflow_dispatch runs
+# the identical build + checksum + version-assertion path but publishes NOTHING:
+# the artifacts are uploaded to the workflow run only, so the release automation
+# can be dry-fired safely without cutting a release. See docs/releasing.md.
+#
+# Two jobs by design, for least privilege: `build` runs the tagged commit's own
+# code (scripts/release.sh) with a read-only token and can publish nothing;
+# `publish` holds the only contents:write token, checks out no repository code,
+# and does nothing but attach the already-built artifacts to a GitHub Release.
+#
+# The binaries derive their version from Go's VCS build metadata
+# (runtime/debug.ReadBuildInfo -> Main.Version), which resolves to the exact tag
+# when built from a tag checkout with full history — no ldflags injection is used
+# or needed. scripts/release.sh asserts this on every tag build.
+
+on:
+  push:
+    # Fire on any v-prefixed tag. GitHub's tag-filter glob does not reliably
+    # support regex-style quantifiers, and a filter that silently failed to match
+    # the release tag would be a far worse failure than a broad match — so the
+    # authoritative semver-shape gate lives in scripts/release.sh instead, which
+    # fails a non-semver tag (vnext, v2, ...) fast and loudly before building.
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Least privilege by default: the top-level token can only read. Only the publish
+# job elevates to contents:write, so every step that runs repository code stays
+# read-only.
+permissions:
+  contents: read
+
+# Never cancel an in-flight publish; serialize runs per ref instead.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build + checksum
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # No permissions override: this job inherits the top-level contents:read. It
+    # runs the tagged commit's own code (scripts/release.sh), so it deliberately
+    # holds NO publish-capable token — publishing is the separate job below.
+    steps:
+      # fetch-depth: 0 pulls full history AND tags so the Go toolchain can resolve
+      # the tag pointing at HEAD and stamp it as the module version. A shallow
+      # checkout would make the binary self-report a pseudo-version instead of the
+      # tag; scripts/release.sh's assertion would then fail the release.
+      - name: Checkout (full history for correct version stamping)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24"
+          check-latest: false
+
+      # Cross-compiles the target matrix, packages each as a .tar.gz, writes
+      # checksums.txt, and (on a tag build) asserts the binary self-reports the
+      # tag — failing the whole release here if it does not. All output lands in
+      # dist/.
+      - name: Build release artifacts
+        run: bash scripts/release.sh
+
+      # Hand the built artifacts to the publish job, and retain them on the run.
+      # On a workflow_dispatch dry-run this is the ONLY output (nothing is
+      # published), so a maintainer can download and inspect or run the binaries.
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: steward-dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub Release
+    needs: build
+    # Publish ONLY on a real semver tag push. A workflow_dispatch run (any branch)
+    # never reaches this job, so the dry-run path can neither create nor mutate a
+    # release. `needs: build` also means a failed build/version-assertion aborts
+    # the publish.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: write # the ONLY write token in this workflow; used solely to create the Release
+    steps:
+      # No checkout: this job runs no repository code. It only fetches the
+      # artifacts the read-only build job produced and attaches them, keeping the
+      # write-token surface as small as possible.
+      - name: Download built artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: steward-dist
+          path: dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A semver pre-release tag carries a hyphen (v1.2.3-rc.1); mark those as a
+          # GitHub pre-release so they are not surfaced as the "latest" release.
+          prerelease=()
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag \
+            "${prerelease[@]}" \
+            dist/steward_*.tar.gz \
+            dist/checksums.txt
