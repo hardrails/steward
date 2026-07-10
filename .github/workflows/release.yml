@@ -1,0 +1,90 @@
+name: Release
+
+# Publishes cross-platform binaries and a SHA-256 checksums file to a GitHub
+# Release when a version tag (vX.Y.Z) is pushed. A manual workflow_dispatch runs
+# the identical build + checksum + version-assertion path but publishes NOTHING:
+# the artifacts are uploaded to the workflow run only, so the release automation
+# can be dry-fired safely without cutting a release. See docs/releasing.md.
+#
+# The binaries derive their version from Go's VCS build metadata
+# (runtime/debug.ReadBuildInfo -> Main.Version), which resolves to the exact tag
+# when built from a tag checkout with full history — no ldflags injection is used
+# or needed. scripts/release.sh asserts this on every tag build.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Least privilege by default: the top-level token can only read. The release job
+# elevates to contents:write for itself, so every other job (none today, and any
+# added later) stays read-only.
+permissions:
+  contents: read
+
+# Never cancel an in-flight publish; serialize runs per ref instead.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build + checksum + release
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: write # create the GitHub Release and upload its assets (tag push only)
+    steps:
+      # fetch-depth: 0 pulls full history AND tags so the Go toolchain can resolve
+      # the tag pointing at HEAD and stamp it as the module version. A shallow
+      # checkout would make the binary self-report a pseudo-version instead of the
+      # tag; scripts/release.sh's assertion would then fail the release.
+      - name: Checkout (full history for correct version stamping)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.24"
+          check-latest: false
+
+      # Cross-compiles the target matrix, packages each as a .tar.gz, writes
+      # checksums.txt, and (on a tag build) asserts the binary self-reports the
+      # tag. All build output lands in dist/.
+      - name: Build release artifacts
+        run: bash scripts/release.sh
+
+      # Always retain the built artifacts on the workflow run. On a workflow_dispatch
+      # dry-run this is the ONLY output (nothing is published), so a maintainer can
+      # download and inspect or run the binaries; on a real release it is a backup
+      # of exactly what was published.
+      - name: Upload artifacts to the workflow run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: steward-dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+      # Publish ONLY on a real tag push. A workflow_dispatch run (any branch) skips
+      # this step entirely, so the dry-run path can never create or mutate a release.
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A semver pre-release tag carries a hyphen (v1.2.3-rc.1); mark those as a
+          # GitHub pre-release so they are not surfaced as the "latest" release.
+          prerelease=()
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag \
+            "${prerelease[@]}" \
+            dist/steward_*.tar.gz \
+            dist/checksums.txt
