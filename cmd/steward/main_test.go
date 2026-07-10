@@ -571,14 +571,11 @@ func TestListenerEnabledByDefault(t *testing.T) {
 // scripts/coverage.sh (and the coverage CI job) via STEWARD_TEST_COVERDIR.
 //
 // It is deliberately NOT GOCOVERDIR: `go test` overwrites GOCOVERDIR in the test
-// process env with its own managed directory, and that directory also collects
-// the go-test test-binary's coverage pods. `go tool covdata` will not merge the
-// standalone binary's cmd/steward counters with the test binary's (their meta
-// hashes differ — the test binary compiles main() but never calls it), so main()
-// would be shadowed at 0%. Keeping the standalone binary's data in its own dir,
-// injected as GOCOVERDIR per-subprocess below, keeps it a clean single-meta input
-// that covdata reports honestly; the coverage script unions it with the unit
-// profile.
+// process env with its own managed directory, which also collects the go-test
+// test-binary's coverage pods. Keeping the standalone binary's counters in their
+// own dir, injected as GOCOVERDIR per-subprocess below, keeps `go tool covdata`'s
+// input a clean single-meta set instead of a mix of test-binary and real-binary
+// pods; the coverage script unions the resulting profile with the unit profile.
 func integrationCoverDir() string { return os.Getenv("STEWARD_TEST_COVERDIR") }
 
 // buildSteward compiles the steward binary to a temp path and returns it. When

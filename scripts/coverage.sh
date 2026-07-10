@@ -14,9 +14,10 @@
 #      STEWARD_TEST_COVERDIR is set — the cmd/steward integration tests build a
 #      -cover binary whose counters land in a dedicated dir (GOCOVERDIR is
 #      injected per-subprocess by stewardEnv in main_test.go). The dir is
-#      dedicated on purpose: mixing the standalone binary's counters with the
-#      go-test test-binary's own coverage pods lets `covdata` shadow main() at
-#      0% (their instrumentation meta differs), so we keep them separate.
+#      dedicated on purpose: it keeps `covdata`'s input a clean single-meta set
+#      (just the standalone binary's own counters) instead of mixing in the
+#      go-test test-binary's separate coverage pods, so step 2 below has one
+#      unambiguous source to convert.
 #   2. `go tool covdata textfmt` turns the standalone binary's counters into a
 #      text profile.
 #   3. The two profiles are unioned: a source region counts as covered if EITHER
