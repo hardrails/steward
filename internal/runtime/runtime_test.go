@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestProvisionCreatesInstance(t *testing.T) {
@@ -497,6 +498,232 @@ func TestListReturnsAllSortedByRuntimeRef(t *testing.T) {
 // clones: mutating a returned element (its status or its spec bytes) must not
 // corrupt live tracker state. This is the careless-caller guard — a consumer
 // that scribbles on the list cannot poison the tracker.
+// TestProvisionSetsCreatedAt pins that a freshly created instance gets a
+// non-zero CreatedAt close to "now", and that CreatedAt survives clone()
+// unchanged.
+func TestProvisionSetsCreatedAt(t *testing.T) {
+	tr := NewTracker(0)
+	before := time.Now().Add(-time.Second)
+	inst, _, err := tr.Provision("agent-1", 0, nil)
+	after := time.Now().Add(time.Second)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if inst.CreatedAt.IsZero() {
+		t.Fatal("CreatedAt is zero, want a real timestamp")
+	}
+	if inst.CreatedAt.Before(before) || inst.CreatedAt.After(after) {
+		t.Fatalf("CreatedAt = %v, want between %v and %v", inst.CreatedAt, before, after)
+	}
+}
+
+// TestReprovisionPreservesOriginalCreatedAt pins that re-provisioning an
+// already-tracked instance_id (the idempotent path) returns the ORIGINAL
+// CreatedAt, not a fresh one — CreatedAt marks when the tracked instance was
+// first created, not when it was last provisioned.
+func TestReprovisionPreservesOriginalCreatedAt(t *testing.T) {
+	tr := NewTracker(0)
+	first, _, err := tr.Provision("agent-1", 0, nil)
+	if err != nil {
+		t.Fatalf("first provision: %v", err)
+	}
+
+	second, created, err := tr.Provision("agent-1", 0, nil)
+	if err != nil {
+		t.Fatalf("reprovision: %v", err)
+	}
+	if created {
+		t.Fatal("reprovision must report created=false")
+	}
+	if !second.CreatedAt.Equal(first.CreatedAt) {
+		t.Fatalf("CreatedAt changed on reprovision: %v != %v", second.CreatedAt, first.CreatedAt)
+	}
+}
+
+// TestDestroyThenReprovisionGetsFreshCreatedAt pins the complementary case: a
+// genuinely new instance (a different runtime_ref, minted after Destroy
+// released the instance_id) gets its own fresh CreatedAt rather than
+// inheriting the destroyed instance's.
+func TestDestroyThenReprovisionGetsFreshCreatedAt(t *testing.T) {
+	tr := NewTracker(0)
+	first, _, err := tr.Provision("agent-1", 0, nil)
+	if err != nil {
+		t.Fatalf("first provision: %v", err)
+	}
+	if _, err := tr.Destroy(first.RuntimeRef); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+
+	time.Sleep(time.Millisecond)
+	second, created, err := tr.Provision("agent-1", 0, nil)
+	if err != nil {
+		t.Fatalf("second provision: %v", err)
+	}
+	if !created {
+		t.Fatal("provision after destroy must report created=true")
+	}
+	if !second.CreatedAt.After(first.CreatedAt) {
+		t.Fatalf("second CreatedAt %v must be after first CreatedAt %v", second.CreatedAt, first.CreatedAt)
+	}
+}
+
+// TestListFilteredZeroValueMatchesList pins that ListFiltered with a
+// zero-value ListFilter returns exactly what List() returns.
+func TestListFilteredZeroValueMatchesList(t *testing.T) {
+	tr := NewTracker(0)
+	for _, id := range []string{"a", "b", "c"} {
+		if _, _, err := tr.Provision(id, 0, nil); err != nil {
+			t.Fatalf("provision %q: %v", id, err)
+		}
+	}
+
+	want := tr.List()
+	got := tr.ListFiltered(ListFilter{})
+	if len(got) != len(want) {
+		t.Fatalf("ListFiltered(zero value) returned %d instances, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].RuntimeRef != want[i].RuntimeRef {
+			t.Fatalf("order mismatch at %d: ListFiltered %q, List %q", i, got[i].RuntimeRef, want[i].RuntimeRef)
+		}
+	}
+}
+
+// TestListFilteredByStatus pins the status filter alone: only instances in
+// exactly that status are returned.
+func TestListFilteredByStatus(t *testing.T) {
+	tr := NewTracker(0)
+	running, _, err := tr.Provision("running-1", 0, nil)
+	if err != nil {
+		t.Fatalf("provision running-1: %v", err)
+	}
+	if _, err := tr.Start(running.RuntimeRef); err != nil {
+		t.Fatalf("start running-1: %v", err)
+	}
+	if _, _, err := tr.Provision("pending-1", 0, nil); err != nil {
+		t.Fatalf("provision pending-1: %v", err)
+	}
+
+	got := tr.ListFiltered(ListFilter{Status: StatusRunning})
+	if len(got) != 1 || got[0].InstanceID != "running-1" {
+		t.Fatalf("ListFiltered(status=RUNNING) = %+v, want exactly running-1", got)
+	}
+}
+
+// TestListFilteredByInstanceIDPrefix pins the instance_id_prefix filter alone:
+// a plain string-prefix match.
+func TestListFilteredByInstanceIDPrefix(t *testing.T) {
+	tr := NewTracker(0)
+	for _, id := range []string{"web-1", "web-2", "worker-1"} {
+		if _, _, err := tr.Provision(id, 0, nil); err != nil {
+			t.Fatalf("provision %q: %v", id, err)
+		}
+	}
+
+	got := tr.ListFiltered(ListFilter{InstanceIDPrefix: "web-"})
+	if len(got) != 2 {
+		t.Fatalf("ListFiltered(prefix=web-) returned %d instances, want 2: %+v", len(got), got)
+	}
+	for _, inst := range got {
+		if inst.InstanceID != "web-1" && inst.InstanceID != "web-2" {
+			t.Fatalf("ListFiltered(prefix=web-) returned unexpected instance_id %q", inst.InstanceID)
+		}
+	}
+}
+
+// TestListFilteredByCreatedSince pins the created_since filter alone:
+// inclusive of instances created exactly at the boundary, exclusive of
+// instances created before it.
+func TestListFilteredByCreatedSince(t *testing.T) {
+	tr := NewTracker(0)
+	if _, _, err := tr.Provision("old-1", 0, nil); err != nil {
+		t.Fatalf("provision old-1: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	boundary := time.Now()
+	time.Sleep(2 * time.Millisecond)
+	newer, _, err := tr.Provision("new-1", 0, nil)
+	if err != nil {
+		t.Fatalf("provision new-1: %v", err)
+	}
+
+	got := tr.ListFiltered(ListFilter{CreatedSince: boundary})
+	if len(got) != 1 || got[0].InstanceID != "new-1" {
+		t.Fatalf("ListFiltered(created_since=boundary) = %+v, want exactly new-1", got)
+	}
+
+	// Inclusive at the exact instant an instance was created.
+	gotInclusive := tr.ListFiltered(ListFilter{CreatedSince: newer.CreatedAt})
+	if len(gotInclusive) != 1 || gotInclusive[0].InstanceID != "new-1" {
+		t.Fatalf("ListFiltered(created_since=new-1's own CreatedAt) = %+v, want exactly new-1 (inclusive)", gotInclusive)
+	}
+}
+
+// TestListFilteredCombinedFiltersAND pins that multiple non-zero filter fields
+// compose via AND, not OR.
+func TestListFilteredCombinedFiltersAND(t *testing.T) {
+	tr := NewTracker(0)
+	webRunning, _, err := tr.Provision("web-1", 0, nil)
+	if err != nil {
+		t.Fatalf("provision web-1: %v", err)
+	}
+	if _, err := tr.Start(webRunning.RuntimeRef); err != nil {
+		t.Fatalf("start web-1: %v", err)
+	}
+	if _, _, err := tr.Provision("web-2", 0, nil); err != nil { // PENDING, wrong status
+		t.Fatalf("provision web-2: %v", err)
+	}
+	workerRunning, _, err := tr.Provision("worker-1", 0, nil) // wrong prefix
+	if err != nil {
+		t.Fatalf("provision worker-1: %v", err)
+	}
+	if _, err := tr.Start(workerRunning.RuntimeRef); err != nil {
+		t.Fatalf("start worker-1: %v", err)
+	}
+
+	got := tr.ListFiltered(ListFilter{Status: StatusRunning, InstanceIDPrefix: "web-"})
+	if len(got) != 1 || got[0].InstanceID != "web-1" {
+		t.Fatalf("ListFiltered(status=RUNNING, prefix=web-) = %+v, want exactly web-1", got)
+	}
+}
+
+// TestListFilteredEmptyResult pins that a filter matching nothing returns a
+// non-nil, zero-length slice (never nil), the same "empty JSON array, not
+// null" contract List() already guarantees.
+func TestListFilteredEmptyResult(t *testing.T) {
+	tr := NewTracker(0)
+	if _, _, err := tr.Provision("agent-1", 0, nil); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	got := tr.ListFiltered(ListFilter{InstanceIDPrefix: "does-not-exist-"})
+	if got == nil {
+		t.Fatal("ListFiltered with no matches = nil, want a non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListFiltered with no matches returned %d instances, want 0", len(got))
+	}
+}
+
+// TestListFilteredExcludesDestroyed pins that a status filter can never match
+// a destroyed instance: Destroy removes it from the tracker entirely, so it
+// is absent from every ListFiltered call regardless of filter.
+func TestListFilteredExcludesDestroyed(t *testing.T) {
+	tr := NewTracker(0)
+	inst, _, err := tr.Provision("agent-1", 0, nil)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if _, err := tr.Destroy(inst.RuntimeRef); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+
+	got := tr.ListFiltered(ListFilter{Status: StatusDestroyed})
+	if len(got) != 0 {
+		t.Fatalf("ListFiltered(status=DESTROYED) = %+v, want empty (destroyed instances are not tracked)", got)
+	}
+}
+
 func TestListReturnsIndependentCopies(t *testing.T) {
 	tr := NewTracker(0)
 	inst, _, err := tr.Provision("agent-1", 0, json.RawMessage(`{"k":"v"}`))

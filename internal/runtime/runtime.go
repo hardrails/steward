@@ -8,7 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
+	"time"
 )
 
 // Status mirrors the state names used by the control plane's own state machine;
@@ -48,12 +50,27 @@ var ErrCapacityExceeded = errors.New("instance capacity exceeded")
 // dispatcher fences a stale command whose carried generation is older than the
 // one tracked here. Its zero value ("no lineage baseline / no fencing") is a
 // safe default, so it is omitempty and needs no state-file format-version bump
-// (see docs/instance-generation-fencing.md).
+// (see docs/instance-generation-fencing.md). CreatedAt is set once, when a
+// *new* instance is created by Provision, and never changes again — including
+// across a re-provision of the same still-live instance_id, which returns the
+// existing instance (and its original CreatedAt) unchanged.
+//
+// CreatedAt has no `omitempty`: encoding/json's omitempty never omits a struct
+// field regardless of value (unlike Generation's int64, a zero time.Time is
+// not treated as "empty"), so it is deliberately not tagged with an omitempty
+// that would silently be a no-op. This is still additive and needs no
+// state-file format-version bump: a snapshot loaded from a file written before
+// this field existed simply has no created_at key, decodes to Go's zero
+// time.Time, and that zero value never matches a real (non-zero)
+// ListFilter.CreatedSince — the same safe-default reasoning Generation's
+// zero value uses, just without the byte-identical-on-rewrite property
+// omitempty gives Generation.
 type Instance struct {
 	InstanceID string          `json:"instance_id"`
 	RuntimeRef string          `json:"runtime_ref"`
 	Status     Status          `json:"status"`
 	Generation int64           `json:"generation,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
 	Spec       json.RawMessage `json:"spec,omitempty"`
 }
 
@@ -148,6 +165,7 @@ func (t *Tracker) Provision(instanceID string, generation int64, spec json.RawMe
 		RuntimeRef: newRuntimeRef(),
 		Status:     StatusPending,
 		Generation: generation,
+		CreatedAt:  time.Now().UTC(),
 		Spec:       append(json.RawMessage(nil), spec...),
 	}
 	t.byRef[stored.RuntimeRef] = stored
@@ -278,6 +296,49 @@ func (t *Tracker) List() []Instance {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.snapshotLocked().Instances
+}
+
+// ListFilter narrows the instances ListFiltered returns. Every non-zero field
+// composes with the others via AND; a zero-value ListFilter matches every
+// instance, the same result as List().
+type ListFilter struct {
+	// Status, when non-empty, keeps only instances whose status is exactly this
+	// value (an exact match against the wire enum, e.g. "RUNNING" — no
+	// case-folding). A destroyed instance is never tracked in the first place
+	// (Destroy removes it), so Status: StatusDestroyed always matches nothing.
+	Status Status
+	// InstanceIDPrefix, when non-empty, keeps only instances whose instance_id
+	// has this as a plain string prefix.
+	InstanceIDPrefix string
+	// CreatedSince, when non-zero, keeps only instances created at or after
+	// this instant (inclusive).
+	CreatedSince time.Time
+}
+
+// ListFiltered is List narrowed by filter: every currently tracked instance
+// that matches every non-zero field of filter, deep-cloned and sorted by
+// runtime_ref exactly as List() orders them. The result is a fresh, non-nil
+// slice — empty when nothing matches — so it serializes as an empty JSON array
+// rather than null. It is safe for concurrent use.
+func (t *Tracker) ListFiltered(filter ListFilter) []Instance {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	all := t.snapshotLocked().Instances
+
+	out := make([]Instance, 0, len(all))
+	for _, inst := range all {
+		if filter.Status != "" && inst.Status != filter.Status {
+			continue
+		}
+		if filter.InstanceIDPrefix != "" && !strings.HasPrefix(inst.InstanceID, filter.InstanceIDPrefix) {
+			continue
+		}
+		if !filter.CreatedSince.IsZero() && inst.CreatedAt.Before(filter.CreatedSince) {
+			continue
+		}
+		out = append(out, inst)
+	}
+	return out
 }
 
 // RefForInstance returns the runtime_ref currently tracked for instanceID, or

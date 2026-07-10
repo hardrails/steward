@@ -248,6 +248,70 @@ contract) — and otherwise stores and echoes its contents verbatim without pars
 them, so the control plane can evolve the spec shape without a Steward release.
 An omitted or explicit-null `spec` is accepted and stored as absent.
 
+### Listing supports filtering, and instances carry `created_at`
+
+`GET /v1/instances` accepts three optional query-string filters —
+`status`, `instance_id_prefix`, and `created_since` — that compose via AND
+when combined. This rides `runtime.Tracker.ListFiltered`, a filtered sibling
+of the existing `List()` (which is unchanged and still backs the no-filter
+case, so omitting all three query params is byte-for-byte the same response
+this endpoint always returned). `created_since` filters on a new
+`created_at` field on every tracked `Instance`, set once by `Provision` when
+a *new* instance is created and never changed again — including across an
+idempotent re-provision of the same still-live `instance_id`, which returns
+the original `created_at` unchanged. `created_at` therefore now appears on
+every `Instance` in every response (it has no `omitempty`, because
+`encoding/json`'s `omitempty` never omits a struct-typed field regardless of
+value — unlike `Generation`'s `int64`, a zero `time.Time` is not "empty" to
+the encoder). An instance loaded from a state file written before this field
+existed simply has no `created_at` key and decodes to the zero time, which
+never matches a real (non-zero) `created_since` filter — the same
+additive, no-format-version-bump discipline `Generation` established (see
+[`docs/instance-generation-fencing.md`](docs/instance-generation-fencing.md)),
+adapted to a field whose zero value can't be made to disappear from the wire.
+
+### Batch operations execute sequentially, are not a transaction, and reuse existing idempotency
+
+`POST /v1/instances/batch` executes an ordered list of `provision`/`start`/
+`stop`/`destroy` operations against the tracker, one at a time, in exactly
+the order given, and reports one result per operation. Each operation is
+dispatched through the *exact same* tracker call its single-instance
+endpoint already uses (`Tracker.Provision`, `.Start`, `.Stop`, `.Destroy`) —
+the batch handler adds no parallel logic of its own, so a batched operation
+keeps precisely the request/response shape and idempotency behavior its
+single-op endpoint already has, rather than a second, possibly-diverging
+implementation.
+
+It is deliberately **not** a transaction: operations are not rolled back on
+a later failure, and because they run strictly in request order against the
+live tracker (never pre-validated or executed out of order), a later
+operation observes an earlier one's effect within the same batch — for
+example, destroying an `instance_id` and re-provisioning it in one batch
+works, because the destroy has already released the `instance_id` by the
+time the provision runs. A failure on one operation never blocks its
+siblings: the response's `results` array reports every operation's own
+outcome at its own index, so partial success (operation 3 of 5 failing while
+1, 2, 4, and 5 succeed) is always visible per-operation, never silently
+swallowed and never an all-or-nothing rollback.
+
+Retrying a whole batch (the case a client-side timeout leaves genuinely
+ambiguous — did the server finish before or after the connection dropped?)
+is safe exactly to the extent each constituent operation's own single-op
+endpoint already is: `provision` stays idempotent on `instance_id` because it
+calls the same `Tracker.Provision` the single-instance endpoint does, and
+`start`/`stop` converge on the same terminal status either way. `destroy` is
+the one exception, and it is an existing property of `Tracker.Destroy`, not
+something batching makes worse: destroying releases the `runtime_ref`
+(see [Provisioning is idempotent by design](#provisioning-is-idempotent-by-design)
+and the `Destroy` doc comment in `internal/runtime/runtime.go`), so replaying
+a batch that already destroyed an instance gets a `404 unknown_runtime_ref`
+on that operation the second time — the same outcome a repeated
+`DELETE /v1/instances/{id}` retry would give.
+
+The design provenance — the request/response shape decisions, the
+transaction-vs-not tradeoff, and the idempotency analysis per operation kind
+— lives in [`docs/batch-instance-operations.md`](docs/batch-instance-operations.md).
+
 ## Deferred decision: computer-use is a separate worker, never in-process
 
 Steward will eventually need to offer a computer-use capability. The decision for

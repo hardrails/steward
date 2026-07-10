@@ -42,9 +42,18 @@ paths:
         under `instances` (never a bare top-level array) so future sibling fields
         stay additive. A destroyed instance is no longer tracked and does not
         appear; an empty tracker returns an empty `instances` array.
+
+        Three optional query-string filters narrow the result and compose via
+        AND when combined: `status`, `instance_id_prefix`, and
+        `created_since`. Omitting all three is byte-for-byte the same
+        unfiltered response this endpoint always returned.
+      parameters:
+        - $ref: "#/components/parameters/StatusFilter"
+        - $ref: "#/components/parameters/InstanceIDPrefixFilter"
+        - $ref: "#/components/parameters/CreatedSinceFilter"
       responses:
         "200":
-          description: The currently tracked instances.
+          description: The currently tracked instances matching every given filter.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -52,6 +61,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InstanceList"
+        "400":
+          description: "`status` was not a recognized value, or `created_since` was not a parseable RFC3339 timestamp."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "429":
@@ -104,6 +122,77 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/CapacityExceeded"
+  /v1/instances/batch:
+    post:
+      tags: [instances]
+      operationId: batchInstanceOperations
+      summary: Execute an ordered batch of lifecycle operations
+      description: |
+        Executes an ordered list of lifecycle operations — `provision`,
+        `start`, `stop`, `destroy` — against the tracker, one at a time, in
+        exactly the order given, and returns one result per operation at the
+        same index in `results`.
+
+        **This is deliberately not a transaction.** Operations are not rolled
+        back on a later failure, and an earlier operation's effect is visible
+        to a later one in the same batch — for example, a batch that destroys
+        an `instance_id` and then re-provisions it works, because by the time
+        the second operation runs, the first has already released the
+        `instance_id`. A failure in one operation never blocks the rest of
+        the batch: if operation 3 of 5 fails, 1, 2, 4, and 5 still execute.
+        Partial success is always visible per-operation in `results` — never
+        silently swallowed — and the overall HTTP response is `200` as long
+        as the request body itself was well-formed; each operation's own
+        outcome (success or failure) lives in that operation's own
+        `status`/`instance`/`error` fields, not in the response's HTTP status.
+
+        Each operation is executed through the exact same tracker call its
+        single-instance endpoint uses (`POST /v1/instances` for `"provision"`,
+        `POST /v1/instances/{id}/start` for `"start"`, and so on), so it keeps
+        that endpoint's own idempotency behavior. In particular, `"provision"`
+        stays idempotent on `instance_id` — retrying an entire batch (for
+        example after a client-side timeout left the outcome ambiguous) does
+        not double-provision. `"destroy"` is **not** idempotent across a
+        retry: it releases the `runtime_ref`, so replaying a batch that
+        already destroyed an instance gets a `404 unknown_runtime_ref` on
+        that operation the second time — the same outcome a repeated
+        `DELETE /v1/instances/{id}` would give.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchRequest"
+      responses:
+        "200":
+          description: |
+            The batch was executed; every operation was attempted in order.
+            Check each entry of `results` for its own outcome — a `200` here
+            does not imply every operation succeeded.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchResponse"
+        "400":
+          description: The request body was malformed or was not a JSON object with an `operations` array.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/instances/{id}:
     parameters:
       - $ref: "#/components/parameters/RuntimeRef"
@@ -320,6 +409,40 @@ components:
       description: The opaque `runtime_ref` returned when the instance was provisioned.
       schema:
         type: string
+    StatusFilter:
+      name: status
+      in: query
+      required: false
+      description: |
+        Keep only instances whose `status` is exactly this value (an exact
+        match against the `Status` enum — no case-folding). Omitted means no
+        status filtering. An unrecognized value is a `400`, never a
+        silently-empty result. A destroyed instance is never tracked in the
+        first place (`destroyInstance` removes it), so `status=DESTROYED`
+        always matches nothing.
+      schema:
+        $ref: "#/components/schemas/Status"
+    InstanceIDPrefixFilter:
+      name: instance_id_prefix
+      in: query
+      required: false
+      description: |
+        Keep only instances whose `instance_id` has this as a plain
+        string prefix. Omitted means no prefix filtering.
+      schema:
+        type: string
+    CreatedSinceFilter:
+      name: created_since
+      in: query
+      required: false
+      description: |
+        Keep only instances created at or after this instant (inclusive). Must
+        be an RFC3339 timestamp; an unparseable value is a `400`, never a
+        silently-ignored filter. Omitted means no created_since filtering.
+      schema:
+        type: string
+        format: date-time
+        example: "2026-07-01T00:00:00Z"
   responses:
     BadRequest:
       description: The request body was malformed, `instance_id` was missing, or `spec` was not a JSON object.
@@ -412,6 +535,7 @@ components:
         - instance_id
         - runtime_ref
         - status
+        - created_at
       properties:
         instance_id:
           type: string
@@ -421,6 +545,15 @@ components:
           description: Opaque handle assigned by Steward; used to address the instance on all other routes.
         status:
           $ref: "#/components/schemas/Status"
+        created_at:
+          type: string
+          format: date-time
+          description: |
+            When this instance was first created by `provisionInstance`. Set
+            once and never changed again, including across an idempotent
+            re-provision of the same still-live `instance_id` (which returns
+            the original `created_at` unchanged, not a fresh one). This is the
+            field `created_since` on `listInstances` filters against.
         spec:
           type: object
           additionalProperties: true
@@ -455,6 +588,97 @@ components:
             Opaque, forwards-compatible configuration, round-tripped verbatim. Must
             be a JSON object; a non-object value is rejected with 400. An omitted or
             null `spec` is accepted and stored as absent.
+    BatchOperationKind:
+      type: string
+      description: Which lifecycle verb a `BatchOperation` runs.
+      enum:
+        - provision
+        - start
+        - stop
+        - destroy
+    BatchOperation:
+      type: object
+      required:
+        - op
+      description: |
+        One entry in `BatchRequest.operations`. `op` selects which lifecycle
+        verb to run and which of the remaining fields apply, mirroring the
+        field each single-instance endpoint already accepts for that verb:
+        `"provision"` mirrors `ProvisionRequest` (`instance_id` required,
+        `spec` optional; `runtime_ref` is ignored); `"start"`, `"stop"`, and
+        `"destroy"` mirror the single-instance routes, which address an
+        instance by `runtime_ref` (`runtime_ref` required; `instance_id` and
+        `spec` are ignored).
+      properties:
+        op:
+          $ref: "#/components/schemas/BatchOperationKind"
+        instance_id:
+          type: string
+          description: Required when `op` is `"provision"`; ignored otherwise.
+        runtime_ref:
+          type: string
+          description: Required when `op` is `"start"`, `"stop"`, or `"destroy"`; ignored otherwise.
+        spec:
+          type: object
+          additionalProperties: true
+          description: Optional; only used when `op` is `"provision"`. Same validation as `ProvisionRequest.spec`.
+    BatchRequest:
+      type: object
+      required:
+        - operations
+      properties:
+        operations:
+          type: array
+          description: |
+            An ordered list of operations, executed one at a time in exactly
+            this order. An empty array is valid and yields an empty `results`.
+          items:
+            $ref: "#/components/schemas/BatchOperation"
+    BatchOperationResult:
+      type: object
+      required:
+        - op
+        - status
+      description: |
+        One entry of `BatchResponse.results`, positionally aligned with the
+        `BatchRequest.operations` entry that produced it. Exactly one of
+        `instance` or `error` is set: `instance` is the same body a
+        successful single-op call would return, and `error` is the same body
+        a failed single-op call would return, with `status` set to that
+        call's HTTP status code. `instance_id`/`runtime_ref` echo whichever
+        identifier the request operation carried, so a result is
+        self-describing without cross-referencing the original request by
+        index.
+      properties:
+        op:
+          type: string
+          description: The `op` of the corresponding request operation (echoed even when it was not a recognized value).
+        instance_id:
+          type: string
+        runtime_ref:
+          type: string
+        status:
+          type: integer
+          description: The HTTP status code this operation would have returned as a single-instance call.
+        instance:
+          $ref: "#/components/schemas/Instance"
+        error:
+          $ref: "#/components/schemas/Error"
+    BatchResponse:
+      type: object
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          description: |
+            One entry per input operation, in the same order. Produced by
+            executing every operation in that order against the live tracker
+            and continuing regardless of any individual operation's outcome —
+            this is NOT an all-or-nothing transaction. Never null: an empty
+            `operations` list yields an empty `results` array.
+          items:
+            $ref: "#/components/schemas/BatchOperationResult"
     Capabilities:
       type: object
       required:
