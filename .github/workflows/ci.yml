@@ -75,8 +75,10 @@ jobs:
       # gremlins is a CI-only tool: installed as a pinned versioned binary, never
       # imported and never added to go.mod/go.sum (verified: go list -m all still
       # lists only this module). The efficacy floor lives in .gremlins.yaml.
+      # Pinned to the v0.6.0 tag's commit, not the tag itself, matching the
+      # full-SHA pinning convention used for the actions/* steps above.
       - name: install gremlins (pinned)
-        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
+        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@e05b1d47b8c55748e50abc28ff6b132c536bacca # v0.6.0
       - name: mutation testing (efficacy >= 70%)
         run: "$(go env GOPATH)/bin/gremlins unleash ."
 

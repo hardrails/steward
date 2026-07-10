@@ -71,8 +71,8 @@ kill -TERM "${pid}"
 exit_code=""
 for _ in $(seq 1 100); do
 	if ! kill -0 "${pid}" 2>/dev/null; then
-		wait "${pid}"
-		exit_code=$?
+		wait "${pid}" || exit_code=$?
+		: "${exit_code:=0}"
 		break
 	fi
 	sleep 0.1
