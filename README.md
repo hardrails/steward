@@ -552,6 +552,23 @@ $ curl -s -X POST localhost:8080/v1/instances/rt_.../start
 {"instance_id":"agent-1","runtime_ref":"rt_...","status":"RUNNING","created_at":"2026-07-10T12:00:00Z","spec":{...}}
 ```
 
+## Releases
+
+Tagged releases attach cross-platform binaries (`linux/amd64`, `linux/arm64`,
+`darwin/amd64`, `darwin/arm64`) and SHA-256 checksums to a GitHub Release,
+built by the [`Release` workflow](.github/workflows/release.yml) when a `vX.Y.Z`
+tag is pushed. You can also install a tagged version straight from source:
+
+```console
+go install github.com/hardrails/steward/cmd/steward@vX.Y.Z
+steward -version   # -> steward vX.Y.Z
+```
+
+A released binary reports its version from the Go toolchain's VCS build metadata,
+so `steward -version` matches the tag it was built from. Maintainers: see
+[`docs/releasing.md`](docs/releasing.md) for the full release runbook, the version
+mechanism, and how to dry-run the automation without publishing.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
