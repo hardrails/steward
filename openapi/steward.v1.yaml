@@ -14,6 +14,10 @@ info:
     is the boolean `durable_state` field of `GET /v1/capabilities`, which reports
     *whether* persistence is enabled (never the file path). It otherwise changes
     no instance request or response shape or status code below.
+
+    `GET /metrics` is likewise opt-in (the server's `-enable-metrics` flag) and
+    off by default; unlike every other operation here its response is
+    `text/plain` (Prometheus text exposition format), not `application/json`.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -30,6 +34,8 @@ tags:
     description: Capabilities advertised by this Steward.
   - name: health
     description: Liveness/readiness probes.
+  - name: metrics
+    description: Opt-in Prometheus-format operational metrics.
 paths:
   /v1/instances:
     get:
@@ -284,6 +290,67 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /metrics:
+    get:
+      tags: [metrics]
+      operationId: getMetrics
+      summary: Operational metrics (opt-in)
+      description: |
+        Renders Steward's operational state in the [Prometheus text exposition
+        format](https://github.com/prometheus/docs/blob/main/content/docs/instrumenting/exposition_formats.md):
+        the current tracked instance count (broken down by status), the configured
+        `max_instances` cap, and — only when the outbound uplink is enabled
+        (`-uplink-url`) — its poll latency (min/max/last), poll count, command
+        success/failure counters, and current backoff.
+
+        This endpoint is **off by default**: it exists only when the server's
+        `-enable-metrics` flag (or `STEWARD_ENABLE_METRICS`) is set. When disabled
+        (the default), `GET /metrics` is not a registered route and behaves like any
+        other unknown path — a `404` with the standard `Error` JSON shape, not a
+        special case. When enabled, it is reachable only through the same inbound
+        HTTP listener every other operation in this document uses: there is no
+        second listener, so it is absent whenever the server's
+        `-disable-inbound-listener` flag leaves no listener bound at all, and it is
+        subject to the same per-source rate limit as every other operation below.
+      responses:
+        "200":
+          description: |
+            Operational metrics in Prometheus text exposition format. Unlike every
+            other response in this document, the body is `text/plain`, not
+            `application/json` — the standard content type a Prometheus scraper
+            expects.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP steward_instances_total Current number of tracked instances, by status.
+                # TYPE steward_instances_total gauge
+                steward_instances_total{status="RUNNING"} 3
+                # HELP steward_max_instances Configured instance capacity cap (Provision returns 503 beyond it).
+                # TYPE steward_max_instances gauge
+                steward_max_instances 1024
+        "404":
+          description: |
+            `/metrics` is not registered: the server was started without
+            `-enable-metrics`. Identical in shape to the 404 any other unknown path
+            returns.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "429":

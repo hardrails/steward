@@ -250,6 +250,24 @@ func (t *Tracker) List() []Instance {
 	return t.snapshotLocked().Instances
 }
 
+// StatusCounts returns the number of currently tracked instances in each
+// status, keyed by Status. Unlike List, it does not clone or sort individual
+// instances — it is a locked read of byRef that only tallies the Status field
+// — so it is cheap enough for a frequently-scraped /metrics endpoint even
+// though it still touches every tracked instance once. Only statuses with at
+// least one live instance appear as keys; the caller treats an absent key as
+// zero. A destroyed instance is never tracked (Destroy removes it from
+// byRef), so StatusDestroyed never appears here.
+func (t *Tracker) StatusCounts() map[Status]int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	counts := make(map[Status]int)
+	for _, inst := range t.byRef {
+		counts[inst.Status]++
+	}
+	return counts
+}
+
 // RefForInstance returns the runtime_ref currently tracked for instanceID, or
 // ("", false) when no live instance has that instance_id. It is a locked read of
 // the existing byID index and runs no lifecycle logic: it exists so a caller that

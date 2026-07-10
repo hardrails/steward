@@ -675,6 +675,126 @@ func TestRateLimitStartupLogReflectsConfig(t *testing.T) {
 	})
 }
 
+// TestMetricsStartupLogReflectsConfig is the integration check for the
+// -enable-metrics wiring: the "metrics endpoint enabled" INFO line appears
+// only when the flag is set, and — because the srv-construction block it
+// lives in is entirely skipped when -disable-inbound-listener is set (see
+// main's `if !cfg.disableInbound` guard) — never appears at all in that mode,
+// even with -enable-metrics also passed. That absence is this package's proof
+// of the task's "absent when -disable-inbound-listener is set" requirement:
+// internal/server has no such flag to test against directly, since the whole
+// http.Server (and therefore every route, /metrics included) is simply never
+// built on that path.
+func TestMetricsStartupLogReflectsConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+
+	t.Run("disabled by default", func(t *testing.T) {
+		lines, waitErr := runStewardAndSignal(t, bin, []string{"-addr", "127.0.0.1:0"}, "steward listening")
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+		if strings.Contains(strings.Join(lines, "\n"), "metrics endpoint enabled") {
+			t.Errorf("metrics must be off by default:\n%s", strings.Join(lines, "\n"))
+		}
+	})
+
+	t.Run("enabled with -enable-metrics", func(t *testing.T) {
+		lines, waitErr := runStewardAndSignal(t, bin,
+			[]string{"-addr", "127.0.0.1:0", "-enable-metrics"}, "steward listening")
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+		joined := strings.Join(lines, "\n")
+		if !strings.Contains(joined, "metrics endpoint enabled") || !strings.Contains(joined, `"path":"/metrics"`) {
+			t.Errorf("expected the metrics-enabled startup log naming the path:\n%s", joined)
+		}
+	})
+
+	t.Run("never logged when the inbound listener is disabled", func(t *testing.T) {
+		credPath := writeValidCredentialFile(t)
+		lines, waitErr := runStewardAndSignal(t, bin, []string{
+			"-disable-inbound-listener",
+			"-enable-metrics",
+			"-uplink-url", "http://127.0.0.1:1", // syntactically valid; never actually dialed by this test
+			"-uplink-credential-file", credPath,
+		}, "inbound listener disabled")
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+		if strings.Contains(strings.Join(lines, "\n"), "metrics endpoint enabled") {
+			t.Errorf("-enable-metrics must have no effect with no inbound listener bound (no http.Server is built to serve it from):\n%s", strings.Join(lines, "\n"))
+		}
+	})
+}
+
+// TestAuditLogStartupBehavior is the integration check for the
+// -audit-log-file wiring: the file is created (fail-closed on an unwritable
+// path), a WARN fires when it is configured with no uplink to ever populate
+// it, and an INFO confirms it when the uplink is also enabled.
+func TestAuditLogStartupBehavior(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+
+	t.Run("set without uplink logs a WARN, not a failure", func(t *testing.T) {
+		auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+		lines, waitErr := runStewardAndSignal(t, bin,
+			[]string{"-addr", "127.0.0.1:0", "-audit-log-file", auditPath}, "steward listening")
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+		joined := strings.Join(lines, "\n")
+		if !strings.Contains(joined, "audit log file configured but the uplink is disabled") {
+			t.Errorf("expected the pointless-but-not-unsafe WARN:\n%s", joined)
+		}
+		if _, err := os.Stat(auditPath); err != nil {
+			t.Errorf("audit log file was not created: %v", err)
+		}
+	})
+
+	t.Run("set with uplink logs enabled, not a WARN", func(t *testing.T) {
+		auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+		credPath := writeValidCredentialFile(t)
+		lines, waitErr := runStewardAndSignal(t, bin, []string{
+			"-addr", "127.0.0.1:0",
+			"-audit-log-file", auditPath,
+			"-uplink-url", "http://127.0.0.1:1", // syntactically valid; never actually dialed by this test
+			"-uplink-credential-file", credPath,
+		}, "steward listening")
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+		joined := strings.Join(lines, "\n")
+		if !strings.Contains(joined, "command audit logging enabled") {
+			t.Errorf("expected the audit-logging-enabled INFO line:\n%s", joined)
+		}
+		if strings.Contains(joined, "uplink is disabled") {
+			t.Errorf("must not warn that the uplink is disabled when -uplink-url is set:\n%s", joined)
+		}
+	})
+
+	t.Run("unwritable path fails closed", func(t *testing.T) {
+		badPath := filepath.Join(t.TempDir(), "no-such-dir", "audit.jsonl")
+		cmd := exec.Command(bin, "-addr", "127.0.0.1:0", "-audit-log-file", badPath)
+		cmd.Env = stewardEnv()
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected a non-zero exit on an unwritable -audit-log-file path, got success:\n%s", out)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), badPath) {
+			t.Errorf("startup error does not name the bad path %q:\n%s", badPath, out)
+		}
+	})
+}
+
 // integrationCoverDir is the directory the instrumented steward subprocess writes
 // its coverage counters to, or "" to disable integration coverage. It is set by
 // scripts/coverage.sh (and the coverage CI job) via STEWARD_TEST_COVERDIR.

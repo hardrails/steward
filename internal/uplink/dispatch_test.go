@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/runtime"
 )
@@ -20,6 +23,26 @@ func newDispatcher(t *testing.T) (*dispatcher, *runtime.Tracker) {
 	t.Helper()
 	tr := runtime.NewTracker(0)
 	return &dispatcher{tracker: tr, nodeID: "node-7", logger: discardLogger()}, tr
+}
+
+// newInstrumentedDispatcher is newDispatcher plus a live *Metrics, for tests
+// that assert on command-outcome counters. auditPath, when non-empty, also
+// wires a real *AuditLogger writing to that file; the caller is responsible
+// for closing it (t.Cleanup is not used here so a test can read the file's
+// contents before closing, avoiding any Close-vs-read ordering question).
+func newInstrumentedDispatcher(t *testing.T, auditPath string) (*dispatcher, *runtime.Tracker, *Metrics) {
+	t.Helper()
+	tr := runtime.NewTracker(0)
+	d := &dispatcher{tracker: tr, nodeID: "node-7", logger: discardLogger(), metrics: &Metrics{}}
+	if auditPath != "" {
+		al, err := NewAuditLogger(auditPath)
+		if err != nil {
+			t.Fatalf("NewAuditLogger: %v", err)
+		}
+		t.Cleanup(func() { _ = al.Close() })
+		d.audit = al
+	}
+	return d, tr, d.metrics
 }
 
 // ref builds the runtime_ref the control plane would mint for node-7's instanceID.
@@ -534,6 +557,176 @@ func TestDispatchRetrySignal(t *testing.T) {
 	if _, retry, _ := d.execute(cmd("c4", "node-7", "ghost", kindDestroy, "", 4)); retry {
 		t.Fatal("destroy must never signal retry")
 	}
+}
+
+// TestDispatchCommandCountersOnlyCountTerminalOutcomes pins the metrics-
+// counting contract execute's doc comment describes: the success/failure
+// counters increment exactly once per REPORTED (non-fenced, non-retry)
+// outcome, never for a fenced drop and never twice for a start whose first
+// pass only defers (retry=true, no report sent) before its retry pass
+// produces the real, counted outcome.
+func TestDispatchCommandCountersOnlyCountTerminalOutcomes(t *testing.T) {
+	d, tr, metrics := newInstrumentedDispatcher(t, "")
+
+	// A straightforward success.
+	if rep, _, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1)); rep.Status != statusDone {
+		t.Fatalf("provision: status=%q, want done", rep.Status)
+	}
+	// A straightforward failure (unknown kind).
+	if rep, _, _ := d.execute(cmd("c2", "node-7", "agent-1", "teleport", "", 2)); rep.Status != statusFailed {
+		t.Fatalf("unknown kind: status=%q, want failed", rep.Status)
+	}
+	snap := metrics.snapshot(time.Second)
+	if snap.CommandsSucceeded != 1 || snap.CommandsFailed != 1 {
+		t.Fatalf("after 1 success + 1 failure: snapshot = %+v, want succeeded=1 failed=1", snap)
+	}
+
+	// A fenced command: must not move either counter.
+	if _, _, err := tr.Provision("agent-2", 5, nil); err != nil {
+		t.Fatalf("seed agent-2 at generation 5: %v", err)
+	}
+	stale := cmdGen("c3", "node-7", "agent-2", kindStop, "", 3, 2)
+	if _, _, fenced := d.execute(stale); !fenced {
+		t.Fatal("expected the stale command to be fenced")
+	}
+	snap = metrics.snapshot(time.Second)
+	if snap.CommandsSucceeded != 1 || snap.CommandsFailed != 1 {
+		t.Fatalf("after a fenced command: snapshot = %+v, want unchanged (succeeded=1 failed=1)", snap)
+	}
+
+	// A start on an unknown instance: retry=true on the first pass must NOT
+	// count (its report is discarded, never sent); only the retry pass's real
+	// outcome, once the instance exists, counts.
+	deferredRep, retry, _ := d.execute(cmd("c4", "node-7", "agent-3", kindStart, "", 4))
+	if !retry || deferredRep.Status != statusFailed {
+		t.Fatalf("deferred start: retry=%v status=%q, want retry=true status=failed", retry, deferredRep.Status)
+	}
+	snap = metrics.snapshot(time.Second)
+	if snap.CommandsSucceeded != 1 || snap.CommandsFailed != 1 {
+		t.Fatalf("after a deferred (not yet retried) start: snapshot = %+v, want still succeeded=1 failed=1 (the deferral must not count)", snap)
+	}
+	if _, _, err := tr.Provision("agent-3", 0, nil); err != nil {
+		t.Fatalf("provision agent-3 so the retry resolves: %v", err)
+	}
+	retryRep, retryAgain, _ := d.execute(cmd("c4", "node-7", "agent-3", kindStart, "", 4))
+	if retryAgain || retryRep.Status != statusDone {
+		t.Fatalf("retried start: retry=%v status=%q, want retry=false status=done", retryAgain, retryRep.Status)
+	}
+	snap = metrics.snapshot(time.Second)
+	if snap.CommandsSucceeded != 2 || snap.CommandsFailed != 1 {
+		t.Fatalf("after the retry's real outcome: snapshot = %+v, want succeeded=2 failed=1 (counted exactly once, on the retry pass)", snap)
+	}
+}
+
+// TestDispatchAuditLogRecordsExactlyOneLinePerTerminalOutcome is the audit-log
+// analog of the counters test above: it drives the same deferred-start-then-
+// retry shape through a dispatcher wired to a real *AuditLogger and asserts
+// the file holds exactly one well-formed JSON line per REPORTED command —
+// none for the fenced drop, none for the discarded first-pass deferral, and
+// the failure line carries error detail.
+func TestDispatchAuditLogRecordsExactlyOneLinePerTerminalOutcome(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	d, tr, _ := newInstrumentedDispatcher(t, auditPath)
+
+	if _, _, err := tr.Provision("agent-2", 5, nil); err != nil {
+		t.Fatalf("seed agent-2 at generation 5: %v", err)
+	}
+
+	d.execute(cmd("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1)) // success
+	d.execute(cmd("c2", "node-7", "agent-1", "teleport", "", 2))                    // failure
+	d.execute(cmdGen("c3", "node-7", "agent-2", kindStop, "", 3, 2))                // fenced: no record
+	d.execute(cmd("c4", "node-7", "agent-3", kindStart, "", 4))                     // deferred: no record yet
+	if _, _, err := tr.Provision("agent-3", 0, nil); err != nil {
+		t.Fatalf("provision agent-3: %v", err)
+	}
+	d.execute(cmd("c4", "node-7", "agent-3", kindStart, "", 4)) // retried: now records
+
+	records := readAuditRecords(t, auditPath)
+	if len(records) != 3 {
+		t.Fatalf("got %d audit records, want 3 (c1 success, c2 failure, c4's retried outcome — never c3 fenced or c4's discarded deferral):\n%+v", len(records), records)
+	}
+
+	byID := map[string]auditRecord{}
+	for _, r := range records {
+		byID[r.CommandID] = r
+	}
+	if r, ok := byID["c1"]; !ok || r.Status != "success" || r.InstanceID != "agent-1" || r.Kind != kindProvision || r.Error != "" {
+		t.Fatalf("c1 record = %+v (found=%v), want success/agent-1/provision with no error", r, ok)
+	}
+	if r, ok := byID["c2"]; !ok || r.Status != "failure" || r.Kind != "teleport" || r.Error == "" {
+		t.Fatalf("c2 record = %+v (found=%v), want failure/teleport with a non-empty error detail", r, ok)
+	}
+	if r, ok := byID["c4"]; !ok || r.Status != "success" || r.InstanceID != "agent-3" || r.Kind != kindStart {
+		t.Fatalf("c4 record = %+v (found=%v), want success/agent-3/start (the retried, real outcome)", r, ok)
+	}
+	if _, ok := byID["c3"]; ok {
+		t.Fatal("c3 (fenced) must not appear in the audit log")
+	}
+}
+
+// TestDispatchAuditWriteFailureLogsWarnAndDoesNotDisruptTheReport pins the
+// documented degradation: a failed audit-log write (here, forced by closing
+// the logger's own file out from under it, simulating a disk/permissions
+// failure mid-run) must not affect the report execute already produced or the
+// command-counter metrics — both are logged as WARN and otherwise ignored,
+// never surfaced as a command failure the caller didn't actually have.
+func TestDispatchAuditWriteFailureLogsWarnAndDoesNotDisruptTheReport(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	al, err := NewAuditLogger(auditPath)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	// Close the underlying file directly (not via al.Close, which a real
+	// shutdown would call once and stop using afterward): this simulates an
+	// I/O failure on an AuditLogger the dispatcher is still actively using,
+	// the shape a full disk or a revoked permission would take.
+	if err := al.file.Close(); err != nil {
+		t.Fatalf("close underlying file: %v", err)
+	}
+
+	var logBuf strings.Builder
+	tr := runtime.NewTracker(0)
+	d := &dispatcher{
+		tracker: tr,
+		nodeID:  "node-7",
+		logger:  slog.New(slog.NewTextHandler(&logBuf, nil)),
+		metrics: &Metrics{},
+		audit:   al,
+	}
+
+	rep, _, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1))
+	if rep.Status != statusDone {
+		t.Fatalf("report status = %q, want done — a broken audit log must not turn a successful command into a failure", rep.Status)
+	}
+	if snap := d.metrics.snapshot(time.Second); snap.CommandsSucceeded != 1 {
+		t.Fatalf("CommandsSucceeded = %d, want 1 — a broken audit log must not stop metrics from counting", snap.CommandsSucceeded)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "audit log write failed") || !strings.Contains(logs, "c1") {
+		t.Fatalf("expected a WARN naming the audit write failure and command_id c1, got:\n%s", logs)
+	}
+}
+
+// readAuditRecords reads path as JSON-lines and decodes each into an
+// auditRecord, failing the test on any malformed line.
+func readAuditRecords(t *testing.T, path string) []auditRecord {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	var records []auditRecord
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var r auditRecord
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("audit log line %q is not valid JSON: %v", line, err)
+		}
+		records = append(records, r)
+	}
+	return records
 }
 
 func TestParseRuntimeRef(t *testing.T) {

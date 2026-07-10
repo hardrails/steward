@@ -86,6 +86,8 @@ file, which beats the built-in default):
 | `-uplink-credential-file`  | `STEWARD_UPLINK_CREDENTIAL_FILE`  | (unset)          | path to the node's uplink credential JSON; required when `-uplink-url` is set |
 | `-uplink-poll-interval`    | `STEWARD_UPLINK_POLL_INTERVAL`    | `10s`            | base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap) |
 | `-disable-inbound-listener` | `STEWARD_DISABLE_INBOUND_LISTENER` | `false`          | do not bind an inbound listener; requires `-uplink-url`                |
+| `-enable-metrics`          | `STEWARD_ENABLE_METRICS`          | `false`          | expose `GET /metrics` (Prometheus text format) on the inbound listener; see [Metrics](#metrics) |
+| `-audit-log-file`          | `STEWARD_AUDIT_LOG_FILE`          | (unset)          | path to a JSON-lines file recording every executed uplink command; unset disables it; see [Command audit log](#command-audit-log) |
 | `-config`                  | `STEWARD_CONFIG`                  | (unset)          | path to a JSON [config file](#config-file) supplying any of the settings above; a flag or env var overrides it |
 
 `-version` and `-check-config` are action flags rather than settings (they have no
@@ -161,6 +163,65 @@ unauthenticated caller could forge `X-Forwarded-For` to dodge the limit), a
 deployment that terminates connections behind a shared proxy sees all traffic as one
 source; rate-limit at that proxy and disable Steward's limiter there.
 
+### Metrics
+
+`GET /metrics` is an **opt-in** endpoint (`-enable-metrics` /
+`STEWARD_ENABLE_METRICS`, default off) that renders Steward's operational state in
+the [Prometheus text exposition
+format](https://github.com/prometheus/docs/blob/main/content/docs/instrumenting/exposition_formats.md).
+It reports:
+
+- `steward_instances_total{status="..."}` — current tracked instances, broken down
+  by status.
+- `steward_max_instances` — the configured capacity cap.
+- `steward_uplink_poll_latency_seconds{stat="min"|"max"|"last"}` — the outbound
+  uplink's `/uplink/poll` round-trip latency (present only when `-uplink-url` is
+  set).
+- `steward_uplink_polls_total` — total polls attempted, success and failure alike.
+- `steward_uplink_commands_total{status="success"|"failure"}` — uplink commands
+  executed, by outcome.
+- `steward_uplink_backoff_seconds` — the poll loop's current interval/backoff.
+
+The `steward_uplink_*` series are present only when the outbound uplink is enabled
+(`-uplink-url`); on an inbound-REST-only node the endpoint still serves the
+instance-count and capacity gauges.
+
+It is off by default and, when enabled, is reachable **only** through the same
+inbound HTTP listener every other endpoint uses — there is no second listener, so
+`/metrics` automatically respects `-disable-inbound-listener` (no listener, no
+`/metrics`) and the per-source rate limiter above. It is built entirely from the
+standard library (`fmt`, `strings`, `net/http`): the Prometheus text format is
+simple enough that the official `prometheus/client_golang` library was not needed
+to stay within the [zero-dependency invariant](#zero-private-dependencies).
+
+### Command audit log
+
+`-audit-log-file` (env `STEWARD_AUDIT_LOG_FILE`, unset by default) appends one
+JSON-lines record to the given file for every uplink command Steward executes to a
+terminal (reported) outcome:
+
+```json
+{"timestamp":"2025-01-01T00:00:00Z","command_id":"cmd-123","instance_id":"agent-1","kind":"provision","status":"success"}
+{"timestamp":"2025-01-01T00:00:05Z","command_id":"cmd-124","instance_id":"agent-1","kind":"stop","status":"failure","error":"stop names an unknown instance"}
+```
+
+`error` is present only on a `"failure"` record. The file is opened once (created
+if missing) and appended to for the life of the process; each record is written
+with a single `os.File.Write` call under a mutex, the same append-only,
+torn-write-tolerant discipline `-state-file`'s crash-safety gives durable state,
+achieved with a different mechanism suited to an append-only log rather than a
+rewritten-in-full snapshot (see [ARCHITECTURE.md](ARCHITECTURE.md) for why). A
+failure to open the file at startup is a fail-closed error naming the path; a
+failure to write a record at runtime is logged at `WARN` and otherwise ignored — the
+audit log is a best-effort operational trail, not a source of truth the tracker or
+control plane depend on, so it must never turn a successful command into a failure.
+
+This covers commands the **outbound uplink** dispatches (provision/start/stop/
+hibernate/destroy), which carry a `command_id`; it does not cover the direct
+inbound REST API, which has no command-id concept of its own. Setting
+`-audit-log-file` with no `-uplink-url` is accepted (the file is still created) but
+logs a startup `WARN`, since no uplink command will ever exist to record.
+
 ## Config file
 
 Any setting can live in a JSON config file, pointed at by `-config` (or
@@ -211,6 +272,7 @@ problem, never a silently-ignored or half-applied config. Run
 | DELETE | `/v1/instances/{id}`        | Destroy                                     |
 | GET    | `/v1/capabilities`          | Advertised skills + operational info        |
 | GET    | `/v1/healthz`               | Liveness probe (`{"status": "ok"}`)         |
+| GET    | `/metrics`                  | Prometheus metrics (opt-in; see [Metrics](#metrics)) |
 
 `{id}` is the opaque `runtime_ref` returned by provisioning. An unknown
 `runtime_ref` returns `404` with `{"error": "unknown_runtime_ref", "message": ...}`.

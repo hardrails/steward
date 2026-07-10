@@ -186,6 +186,76 @@ func TestPollerBacksOffAndRetriesOn5xx(t *testing.T) {
 	waitDone(t, done)
 }
 
+// TestPollerMetricsSnapshotTracksPollCountLatencyAndBackoff proves the
+// /metrics data path end to end at the Poller level: MetricsSnapshot must
+// reflect the real poll count, non-negative latency gauges, and a
+// CurrentBackoff that has actually grown past the base interval once
+// consecutive failures have accumulated. The mock server always fails (503)
+// so failures never resets to 0 mid-test, avoiding a race between the
+// assertion and the poll loop's own state transitions; the snapshot is read
+// only AFTER cancel+waitDone, when Run has fully returned and every write to
+// the metrics happened-before this goroutine's read (via the closed done
+// channel), so this test itself needs no -race-sensitive synchronization of
+// its own.
+func TestPollerMetricsSnapshotTracksPollCountLatencyAndBackoff(t *testing.T) {
+	var mu sync.Mutex
+	polls := 0
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /uplink/poll", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		polls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	const base = 5 * time.Millisecond
+	p := mustPoller(t, runtime.NewTracker(0), Config{BaseURL: srv.URL, Credential: "tok", NodeID: "node-7", PollInterval: base})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := run(p, ctx)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n := polls
+		mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("only %d polls after 2s; expected at least 3 before checking metrics", n)
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	waitDone(t, done)
+
+	snap := p.MetricsSnapshot()
+	if snap.PollCount < 3 {
+		t.Errorf("PollCount = %d, want >= 3", snap.PollCount)
+	}
+	if snap.PollLatencyMin < 0 || snap.PollLatencyMax < 0 || snap.PollLatencyLast < 0 {
+		t.Errorf("negative latency gauge in snapshot %+v", snap)
+	}
+	if snap.PollLatencyMax < snap.PollLatencyMin {
+		t.Errorf("PollLatencyMax (%s) < PollLatencyMin (%s)", snap.PollLatencyMax, snap.PollLatencyMin)
+	}
+	// At least 2 consecutive 503s must have accumulated by the time Run stopped
+	// (3 polls observed means at least 2 failures were counted before the
+	// 3rd's outcome could even be classified), so the reported backoff must
+	// have grown past the base interval — backoffDuration(base, >=2) >= base*4.
+	if snap.CurrentBackoff <= base {
+		t.Errorf("CurrentBackoff = %s, want > base interval %s after repeated failures", snap.CurrentBackoff, base)
+	}
+	if snap.CommandsSucceeded != 0 || snap.CommandsFailed != 0 {
+		t.Errorf("no commands were ever executed (every poll failed before reaching executeBatch), want succeeded=0 failed=0, got %+v", snap)
+	}
+}
+
 // TestPollerStopsOnCredentialRejection covers the pre-hot-reload fallback: a
 // Poller built WITHOUT Config.CredentialPath has no file to watch, so a fatal
 // 401/403 must still stop Run outright exactly as before. The hot-reload path
