@@ -64,6 +64,48 @@ reports *whether* persistence is enabled — never the file path. It otherwise a
 no endpoint and leaves every instance request/response shape and status code in
 `openapi/steward.v1.yaml` unchanged.
 
+### Outbound uplink is opt-in
+
+By default Steward is reachable only through its inbound REST API, which assumes the
+control plane can dial *into* the node. That fails when the node sits behind NAT or a
+firewall that blocks inbound connections. The opt-in **outbound uplink** inverts who
+dials whom: instead of being dialed, the node makes an outbound-only HTTP connection
+*out* to the control plane, polls for queued lifecycle commands, executes them, and
+reports the results back. Outbound connections are what NAT and stateful firewalls
+allow by default, so this channel reaches the node from exactly the places the
+inbound API cannot.
+
+The uplink is off unless the operator sets `-uplink-url` (or `STEWARD_UPLINK_URL`);
+its presence is the opt-in switch, exactly as `-state-file`'s presence enables
+durable state. When it is set:
+
+- **It is a second caller of the same tracker, not a second lifecycle engine.** The
+  poll loop drives the same `internal/runtime` operations — provision, start, stop,
+  hibernate, destroy — that the inbound handlers call, behind the same single mutex.
+  A node may run inbound-REST-only, uplink-only, or both at once; "both" needs no
+  conflict resolution because both are just callers of one idempotent, mutex-guarded
+  state machine, sharing one durable file when `-state-file` is set.
+- **It authenticates the node *to* the control plane, outbound — it does not add
+  inbound authentication.** The node presents a bearer credential (tenant, node,
+  secret), minted by the control-plane operator at enrollment and persisted locally
+  as a small, versioned JSON file, using only `encoding/json` and `os` — the same
+  standard-library-only posture as durable state, and no new dependency. When the
+  uplink is enabled the credential is loaded **fail-closed** at startup: a missing or
+  corrupt credential file is a startup error naming the path and the fix, never a
+  silent disable — the same discipline `LoadTracker` applies to a corrupt state file.
+  The inbound REST API remains unauthenticated by design, as above.
+- **It adds nothing to the published inbound contract.** The uplink is an outbound
+  *client*, so it introduces no new endpoint, request/response shape, or status code;
+  `openapi/steward.v1.yaml` is unchanged. A poll failure is classified transient
+  (network blip, `5xx` — bounded backoff, keep retrying) or fatal (`401`/`403`, a
+  bad or revoked credential — a loud, actionable log and the loop stops for an
+  operator), with no third-party retry or backoff library: the bounded-backoff loop
+  is hand-written on the standard library.
+
+The design provenance — the shape chosen, the shapes rejected, the invariants, and
+the (provisional) wire contract still being reconciled with the control-plane side —
+lives in [`docs/uplink-client.md`](docs/uplink-client.md).
+
 Those are out of scope on purpose. Steward is meant to be small enough to read in
 one sitting and to audit against its published contract
 (`openapi/steward.v1.yaml`).
