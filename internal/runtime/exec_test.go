@@ -921,6 +921,47 @@ func TestStopSupersededByConcurrentStartDoesNotOrphan(t *testing.T) {
 	}
 }
 
+func TestStopFinalizesStoppedWhenReplacementRolledBack(t *testing.T) {
+	// Greptile P1 follow-up: while Stop is parked outside the lock, a concurrent Start
+	// can spawn a replacement, fail to persist, and roll back — killing the replacement,
+	// deleting t.procs[ref], and restoring the stale pre-stop RUNNING/pid. When Stop
+	// re-locks, the tracked slot is EMPTY. Stop must still finalize STOPPED (its own
+	// process is dead and nothing live replaced it), never defer to the absent process
+	// and leave a phantom RUNNING pointing at a dead pid. The hook reproduces that net
+	// effect (an emptied slot at re-lock) deterministically.
+	tr, _ := execTracker(t, 5*time.Second)
+	ref := startedInstance(t, tr, "a", helperSpec("sleep", nil))
+
+	tr.testHookStopAfterTerminate = func() {
+		// Mimic the rolled-back replacement: the slot ends up empty while the instance is
+		// left at its stale pre-stop RUNNING/pid (which the Stop still owns and must clear).
+		tr.mu.Lock()
+		delete(tr.procs, ref)
+		tr.mu.Unlock()
+	}
+
+	stopped, err := tr.Stop(ref)
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if stopped.Status != StatusStopped {
+		t.Fatalf("status=%q, want STOPPED (the stopped process is dead and nothing live replaced it)", stopped.Status)
+	}
+	if stopped.PID != 0 {
+		t.Errorf("pid=%d, want 0 (no phantom RUNNING with a dead pid)", stopped.PID)
+	}
+	if stopped.LastExitReason != exitReasonStopped {
+		t.Errorf("last_exit_reason=%q, want %q", stopped.LastExitReason, exitReasonStopped)
+	}
+	after, err := tr.Status(ref)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if after.Status != StatusStopped || after.PID != 0 {
+		t.Errorf("state=%s/pid %d after a superseded-then-rolled-back stop, want STOPPED/0", after.Status, after.PID)
+	}
+}
+
 // --- helpers ---
 
 func mustPID(t *testing.T, tr *Tracker, ref string) int {

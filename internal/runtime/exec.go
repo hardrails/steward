@@ -554,14 +554,22 @@ func (t *Tracker) stopExec(runtimeRef string) (*Instance, error) {
 		// of the requested end state.
 		return nil, ErrNotFound
 	}
-	if t.procs[runtimeRef] != sp {
-		// A concurrent Start spawned a NEW process for this runtime_ref while the lock
-		// was released for the grace wait (the same identity guard handleUnexpectedExit
-		// uses). That newer process now owns the instance: clobbering the status/PID to
-		// STOPPED and deleting it from t.procs here would orphan a live child — never
-		// signalled again, its pid persisted as 0 so a restart cannot find it either —
-		// and wrongly report a RUNNING instance STOPPED. The process THIS stop terminated
-		// is already dead; leave the newer one untouched and return the current state.
+	if cur := t.procs[runtimeRef]; cur != nil && cur != sp {
+		// A concurrent Start spawned a NEW, still-tracked process for this runtime_ref
+		// while the lock was released for the grace wait (the same identity guard
+		// handleUnexpectedExit uses). That newer process now owns the instance: clobbering
+		// the status/PID to STOPPED and deleting it from t.procs here would orphan a live
+		// child — never signalled again, its pid persisted as 0 so a restart cannot find
+		// it either — and wrongly report a RUNNING instance STOPPED. The process THIS stop
+		// terminated is already dead; leave the newer one untouched and return the current
+		// state.
+		//
+		// We defer ONLY to a genuinely-present replacement (cur != nil). If the slot is
+		// EMPTY — e.g. a concurrent Start that spawned a replacement and then rolled it
+		// back on its own failed persist, deleting the entry and restoring the stale
+		// pre-stop RUNNING/pid — there is nothing live to protect, so we must fall through
+		// and finalize STOPPED here rather than defer and leave a phantom RUNNING pointing
+		// at this stop's already-dead pid.
 		t.logger.Info("stop superseded by a concurrent start; the newer supervised process is left tracked and running",
 			"runtime_ref", runtimeRef, "instance_id", instanceID)
 		return inst.clone(), nil
