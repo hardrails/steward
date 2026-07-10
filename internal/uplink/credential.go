@@ -40,10 +40,30 @@ type Credential struct {
 // is called only when the uplink is enabled, so — unlike runtime.LoadTracker's
 // optional state file — a missing file is a fatal error, not a first-run empty
 // start: an enabled uplink with no credential cannot authenticate. A missing,
-// unreadable, non-JSON, wrong-version, or empty-field file returns an error whose
-// message names the path and the remedy (re-enroll the node and rewrite the file),
-// never a silently-disabled uplink. On success it returns the parsed credential.
+// unreadable, over-permissive, non-JSON, wrong-version, or empty-field file
+// returns an error whose message names the path and the remedy (re-enroll the
+// node and rewrite the file), never a silently-disabled uplink. On success it
+// returns the parsed credential.
+//
+// It runs on every load — startup, -check-config, and the credential hot-reload
+// watch (see Poller.waitForCredentialChange) — so an over-permissive credential
+// is refused on every path a new credential can enter, not just at boot.
 func LoadCredential(path string) (*Credential, error) {
+	// A bearer credential is a secret; its file must not be readable or writable
+	// by group or others (0600 or stricter). Check the permission bits before
+	// reading the contents so an over-exposed secret is a loud, actionable
+	// startup error naming the fix, never a silently-accepted world-readable
+	// token. The check is on the mode bits themselves, so it fails closed even
+	// when the process runs as root (whose access would otherwise bypass the
+	// permissions).
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat uplink credential file %q: %w (re-enroll this node and write its credential to that path)", path, err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return nil, fmt.Errorf("uplink credential file %q has insecure permissions %#o: it is readable or writable by group or others; restrict it to the owner (run: chmod 600 %s) so the bearer credential cannot be read by another user", path, perm, path)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read uplink credential file %q: %w (re-enroll this node and write its credential to that path)", path, err)
