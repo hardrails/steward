@@ -145,11 +145,7 @@ func TestUplinkBadCredentialExitsNonZero(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a binary; skipped in -short")
 	}
-	bin := filepath.Join(t.TempDir(), "steward")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build steward: %v\n%s", err, out)
-	}
+	bin := buildSteward(t)
 
 	missing := filepath.Join(t.TempDir(), "no-such-credential.json")
 	cmd := exec.Command(bin,
@@ -157,6 +153,7 @@ func TestUplinkBadCredentialExitsNonZero(t *testing.T) {
 		"-uplink-credential-file", missing,
 		"-addr", "127.0.0.1:0",
 	)
+	cmd.Env = stewardEnv()
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected a non-zero exit on a missing credential, got success:\n%s", out)
@@ -180,11 +177,7 @@ func TestUplinkBadURLExitsNonZero(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a binary; skipped in -short")
 	}
-	bin := filepath.Join(t.TempDir(), "steward")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build steward: %v\n%s", err, out)
-	}
+	bin := buildSteward(t)
 
 	credPath := writeValidCredentialFile(t)
 
@@ -194,6 +187,7 @@ func TestUplinkBadURLExitsNonZero(t *testing.T) {
 		"-uplink-credential-file", credPath,
 		"-addr", "127.0.0.1:0",
 	)
+	cmd.Env = stewardEnv()
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected a non-zero exit on a malformed -uplink-url, got success:\n%s", out)
@@ -222,11 +216,7 @@ func TestUplinkPollIntervalAboveCapLogsWarning(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs a binary; skipped in -short")
 	}
-	bin := filepath.Join(t.TempDir(), "steward")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build steward: %v\n%s", err, out)
-	}
+	bin := buildSteward(t)
 
 	credPath := writeValidCredentialFile(t)
 
@@ -236,6 +226,7 @@ func TestUplinkPollIntervalAboveCapLogsWarning(t *testing.T) {
 		"-uplink-poll-interval", "10m",
 		"-addr", "127.0.0.1:0",
 	)
+	cmd.Env = stewardEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
@@ -286,15 +277,11 @@ func TestUplinkInvalidPollIntervalEnvExitsNonZero(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a binary; skipped in -short")
 	}
-	bin := filepath.Join(t.TempDir(), "steward")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build steward: %v\n%s", err, out)
-	}
+	bin := buildSteward(t)
 
 	const badValue = "30sec"
 	cmd := exec.Command(bin, "-addr", "127.0.0.1:0")
-	cmd.Env = append(os.Environ(), "STEWARD_UPLINK_POLL_INTERVAL="+badValue)
+	cmd.Env = stewardEnv("STEWARD_UPLINK_POLL_INTERVAL=" + badValue)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected a non-zero exit on an invalid poll-interval env var, got success:\n%s", out)
@@ -320,16 +307,13 @@ func TestDisableInboundListenerWithoutUplinkExitsNonZero(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a binary; skipped in -short")
 	}
-	bin := filepath.Join(t.TempDir(), "steward")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build steward: %v\n%s", err, out)
-	}
+	bin := buildSteward(t)
 
 	cmd := exec.Command(bin,
 		"-disable-inbound-listener",
 		"-addr", "127.0.0.1:0",
 	)
+	cmd.Env = stewardEnv()
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected a non-zero exit with -disable-inbound-listener and no -uplink-url, got success:\n%s", out)
@@ -357,14 +341,10 @@ func TestDisableInboundListenerMalformedEnvExitsNonZero(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a binary; skipped in -short")
 	}
-	bin := filepath.Join(t.TempDir(), "steward")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build steward: %v\n%s", err, out)
-	}
+	bin := buildSteward(t)
 
 	cmd := exec.Command(bin, "-addr", "127.0.0.1:0")
-	cmd.Env = append(os.Environ(), "STEWARD_DISABLE_INBOUND_LISTENER=yes")
+	cmd.Env = stewardEnv("STEWARD_DISABLE_INBOUND_LISTENER=yes")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected a non-zero exit for STEWARD_DISABLE_INBOUND_LISTENER=yes, got success:\n%s", out)
@@ -389,6 +369,7 @@ func TestDisableInboundListenerMalformedEnvExitsNonZero(t *testing.T) {
 func runStewardAndSignal(t *testing.T, bin string, args []string, want string) (lines []string, waitErr error) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
+	cmd.Env = stewardEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
@@ -455,11 +436,7 @@ func TestDisableInboundListenerStartsCleanWithUplink(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs a binary; skipped in -short")
 	}
-	bin := filepath.Join(t.TempDir(), "steward")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build steward: %v\n%s", err, out)
-	}
+	bin := buildSteward(t)
 
 	credPath := writeValidCredentialFile(t)
 
@@ -491,11 +468,7 @@ func TestDisableInboundListenerShutsDownOnFatalPollRejection(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs a binary; skipped in -short")
 	}
-	bin := filepath.Join(t.TempDir(), "steward")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build steward: %v\n%s", err, out)
-	}
+	bin := buildSteward(t)
 
 	// A fake control plane that rejects every poll with 401 -- classFatal in
 	// the poller's classification, the same trigger a real revoked/rotated
@@ -513,6 +486,7 @@ func TestDisableInboundListenerShutsDownOnFatalPollRejection(t *testing.T) {
 		"-uplink-credential-file", credPath,
 		"-uplink-poll-interval", "20ms",
 	)
+	cmd.Env = stewardEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
@@ -571,11 +545,7 @@ func TestListenerEnabledByDefault(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs a binary; skipped in -short")
 	}
-	bin := filepath.Join(t.TempDir(), "steward")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build steward: %v\n%s", err, out)
-	}
+	bin := buildSteward(t)
 
 	t.Run("uplink off", func(t *testing.T) {
 		lines, waitErr := runStewardAndSignal(t, bin, []string{"-addr", "127.0.0.1:0"}, "steward listening")
@@ -595,6 +565,66 @@ func TestListenerEnabledByDefault(t *testing.T) {
 			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
 		}
 	})
+}
+
+// integrationCoverDir is the directory the instrumented steward subprocess writes
+// its coverage counters to, or "" to disable integration coverage. It is set by
+// scripts/coverage.sh (and the coverage CI job) via STEWARD_TEST_COVERDIR.
+//
+// It is deliberately NOT GOCOVERDIR: `go test` overwrites GOCOVERDIR in the test
+// process env with its own managed directory, which also collects the go-test
+// test-binary's coverage pods. Keeping the standalone binary's counters in their
+// own dir, injected as GOCOVERDIR per-subprocess below, keeps `go tool covdata`'s
+// input a clean single-meta set instead of a mix of test-binary and real-binary
+// pods; the coverage script unions the resulting profile with the unit profile.
+func integrationCoverDir() string { return os.Getenv("STEWARD_TEST_COVERDIR") }
+
+// buildSteward compiles the steward binary to a temp path and returns it. When
+// integration coverage is enabled it builds with -cover so the REAL main() logic
+// these subprocess tests already exercise — startup validation, uplink wiring,
+// graceful shutdown — is counted. A plain `go build` binary is not
+// coverage-instrumented, so that genuinely-run logic otherwise reports as 0%
+// covered; the instrumented binary writes its counters (via GOCOVERDIR, set per
+// subprocess by stewardEnv) to integrationCoverDir on exit. With coverage
+// disabled (the normal `go test ./...` and the pre-commit hook) it builds plain
+// and fast, exactly as before.
+func buildSteward(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "steward")
+	args := []string{"build", "-o", bin, "."}
+	if integrationCoverDir() != "" {
+		args = []string{"build", "-cover", "-o", bin, "."}
+	}
+	build := exec.Command("go", args...)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build steward: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// stewardEnv builds the environment for a steward subprocess. When integration
+// coverage is enabled it points GOCOVERDIR at integrationCoverDir (replacing any
+// GOCOVERDIR go test injected into this test process, so the standalone binary's
+// counters land in our dedicated dir), then appends any extra "KEY=VALUE" entries
+// the caller needs. It returns nil when nothing needs customizing, which leaves
+// exec.Command's default of inheriting the parent environment.
+func stewardEnv(extra ...string) []string {
+	dir := integrationCoverDir()
+	if dir == "" && len(extra) == 0 {
+		return nil
+	}
+	base := os.Environ()
+	env := make([]string, 0, len(base)+1+len(extra))
+	for _, e := range base {
+		if dir != "" && strings.HasPrefix(e, "GOCOVERDIR=") {
+			continue // replace go test's managed GOCOVERDIR with our integration dir
+		}
+		env = append(env, e)
+	}
+	if dir != "" {
+		env = append(env, "GOCOVERDIR="+dir)
+	}
+	return append(env, extra...)
 }
 
 // writeValidCredentialFile writes a valid uplink credential JSON file to a temp
