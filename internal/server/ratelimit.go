@@ -26,11 +26,18 @@ import (
 // polling several times a second is unaffected. Meanwhile an unauthenticated flood
 // (thousands of requests/second from one source) drains the bucket in well under a
 // second and is shed with 429s. The budget is per-source, so one abusive IP cannot
-// degrade service for the legitimate control plane arriving from another IP. A rare
-// bulk operation (cold-provisioning hundreds of instances back to back) is
-// rate-shaped rather than dropped; an operator who needs more can raise
-// -max-requests-per-second, or disable the limiter with 0 when Steward already sits
-// behind their own rate-limiting gateway.
+// degrade service for the legitimate control plane arriving from another IP.
+//
+// A rare bulk operation (cold-provisioning hundreds of instances back to back, one
+// Railyard replica, one source IP, no client-side throttle) CAN exceed the 40-token
+// burst and get some items shed with 429 -- whether that lands as smooth
+// rate-shaping or a hard per-item failure depends entirely on whether the CALLER
+// retries a 429 with Retry-After. This listener sheds the request before any
+// handler work runs, so a 429 is always safe to retry -- but that is a property the
+// caller must act on, not something this limiter can guarantee on its own. An
+// operator who needs more headroom can raise -max-requests-per-second, or disable
+// the limiter with 0 when Steward already sits behind their own rate-limiting
+// gateway.
 
 const (
 	// rateBurstFactor sets the token-bucket depth as a multiple of the per-second

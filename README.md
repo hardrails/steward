@@ -130,11 +130,14 @@ provision/start/stop/hibernate/destroy/status/list at reconciler-and-human pace,
 a normal reconciliation spike sits well inside the burst and steady traffic well
 under the rate, while a flood from one source is shed in well under a second. The
 limit is per-source, so one abusive IP cannot degrade service for the legitimate
-control plane on another. Raise `-max-requests-per-second` (or
-`STEWARD_MAX_REQUESTS_PER_SECOND`) for heavier bulk operation, or set it to `0` to
-disable the limiter entirely — appropriate only when Steward already sits behind a
-gateway that rate-limits for it. The per-source bucket map is bounded and its idle
-entries are swept, so a distributed many-IP flood cannot grow it without limit.
+control plane on another. A 429 is shed before any handler work runs, so it is
+always safe to retry — but whether a bulk operation that exceeds the burst degrades
+gracefully depends on the caller honoring `Retry-After`, not on this limiter alone.
+Raise `-max-requests-per-second` (or `STEWARD_MAX_REQUESTS_PER_SECOND`) for heavier
+bulk operation, or set it to `0` to disable the limiter entirely — appropriate only
+when Steward already sits behind a gateway that rate-limits for it. The per-source
+bucket map is bounded and its idle entries are swept, so a distributed many-IP
+flood cannot grow it without limit.
 
 Because the key is the real TCP peer and never a client-supplied header (an
 unauthenticated caller could forge `X-Forwarded-For` to dodge the limit), a
