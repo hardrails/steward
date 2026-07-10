@@ -50,10 +50,15 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	}
 	sort.Strings(statuses)
 
-	fmt.Fprintln(&b, "# HELP steward_instances_total Current number of tracked instances, by status.")
-	fmt.Fprintln(&b, "# TYPE steward_instances_total gauge")
+	// steward_instances (not steward_instances_total): Prometheus naming
+	// convention reserves the _total suffix for counter metric families
+	// (monotonically increasing); this is a gauge (instance counts rise and
+	// fall), so it must not carry that suffix, unlike the genuine counters
+	// below (steward_uplink_polls_total, steward_uplink_commands_total).
+	fmt.Fprintln(&b, "# HELP steward_instances Current number of tracked instances, by status.")
+	fmt.Fprintln(&b, "# TYPE steward_instances gauge")
 	for _, status := range statuses {
-		fmt.Fprintf(&b, "steward_instances_total{status=%q} %d\n", status, counts[runtime.Status(status)])
+		fmt.Fprintf(&b, "steward_instances{status=%q} %d\n", status, counts[runtime.Status(status)])
 	}
 
 	fmt.Fprintln(&b, "# HELP steward_max_instances Configured instance capacity cap (Provision returns 503 beyond it).")

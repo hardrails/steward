@@ -56,9 +56,9 @@ func TestMetricsEndpointServesInstanceCounts(t *testing.T) {
 	body := rec.Body.String()
 
 	for _, want := range []string{
-		"# TYPE steward_instances_total gauge",
-		`steward_instances_total{status="PENDING"} 1`,
-		`steward_instances_total{status="RUNNING"} 1`,
+		"# TYPE steward_instances gauge",
+		`steward_instances{status="PENDING"} 1`,
+		`steward_instances{status="RUNNING"} 1`,
 		"# TYPE steward_max_instances gauge",
 		"steward_max_instances 5",
 	} {

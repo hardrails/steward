@@ -171,8 +171,9 @@ the [Prometheus text exposition
 format](https://github.com/prometheus/docs/blob/main/content/docs/instrumenting/exposition_formats.md).
 It reports:
 
-- `steward_instances_total{status="..."}` — current tracked instances, broken down
-  by status.
+- `steward_instances{status="..."}` — current tracked instances, broken down by
+  status (a gauge, not a counter — no `_total` suffix, since it can go down as
+  well as up).
 - `steward_max_instances` — the configured capacity cap.
 - `steward_uplink_poll_latency_seconds{stat="min"|"max"|"last"}` — the outbound
   uplink's `/uplink/poll` round-trip latency (present only when `-uplink-url` is

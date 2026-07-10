@@ -795,6 +795,45 @@ func TestAuditLogStartupBehavior(t *testing.T) {
 	})
 }
 
+// TestPrepareRuntimeReturnsAuditLoggerEvenWithUplinkDisabled is a direct,
+// in-process regression test for a hosted-review finding: prepareRuntime opens
+// the audit log file whenever -audit-log-file is set, regardless of whether the
+// uplink is enabled, but only WIRES it into a Poller when the uplink is also
+// enabled. With the uplink disabled, poller is nil, so a caller that only
+// closes the file through poller (as an earlier version of main did) never
+// closes it at all -- the file handle leaks for the process's entire lifetime.
+// Returning the *uplink.AuditLogger as its own value, independent of poller,
+// is what lets the caller close it unconditionally; this test pins that the
+// returned value is genuinely non-nil (and closable) in exactly the
+// uplink-disabled combination that exposed the leak, not just checking that no
+// error is returned.
+func TestPrepareRuntimeReturnsAuditLoggerEvenWithUplinkDisabled(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	cfg := resolvedConfig{
+		addr:         "127.0.0.1:0",
+		maxInstances: 1024,
+		auditLogFile: auditPath,
+		logLevel:     "info",
+		// uplinkURL intentionally left empty: this is the exact combination
+		// (-audit-log-file set, uplink disabled) the finding was about.
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	_, _, poller, auditLogger, err := prepareRuntime(cfg, logger, false)
+	if err != nil {
+		t.Fatalf("prepareRuntime: unexpected err %v", err)
+	}
+	if poller != nil {
+		t.Fatal("poller must be nil when -uplink-url is unset")
+	}
+	if auditLogger == nil {
+		t.Fatal("auditLogger must be non-nil: -audit-log-file was set, so the caller needs a way to close it even though poller is nil")
+	}
+	if err := auditLogger.Close(); err != nil {
+		t.Errorf("Close: unexpected err %v", err)
+	}
+}
+
 // integrationCoverDir is the directory the instrumented steward subprocess writes
 // its coverage counters to, or "" to disable integration coverage. It is set by
 // scripts/coverage.sh (and the coverage CI job) via STEWARD_TEST_COVERDIR.

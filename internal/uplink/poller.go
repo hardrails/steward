@@ -80,9 +80,12 @@ type Config struct {
 
 	// AuditLogger, when non-nil, receives one record per executed command's
 	// terminal outcome (see dispatcher.recordOutcome and cmd/steward's
-	// -audit-log-file flag). The caller owns opening it (NewAuditLogger) and
-	// closing it (Poller.Close closes it as a convenience); a nil value
-	// disables command auditing, the default.
+	// -audit-log-file flag). The caller owns its whole lifecycle -- opening it
+	// (NewAuditLogger) and closing it once done with it -- independently of this
+	// Poller: cmd/steward's -audit-log-file is accepted even when the uplink
+	// itself is disabled (the file is opened but never wired into a Poller), so
+	// a Poller-scoped close would not be reachable in that case anyway. A nil
+	// value disables command auditing, the default.
 	AuditLogger *AuditLogger
 }
 
@@ -180,14 +183,6 @@ func NewPoller(tracker Tracker, cfg Config) (*Poller, error) {
 // internal/server.UplinkMetrics). Safe to call concurrently with Run.
 func (p *Poller) MetricsSnapshot() Snapshot {
 	return p.metrics.snapshot(p.baseInterval)
-}
-
-// Close releases resources this Poller owns beyond its HTTP client (which
-// needs no explicit close): today, only the optional audit logger (see
-// Config.AuditLogger). Safe to call whether or not auditing is enabled
-// (AuditLogger.Close is nil-safe) and safe to call after Run has returned.
-func (p *Poller) Close() error {
-	return p.dispatcher.audit.Close()
 }
 
 // Run drives the poll loop until ctx is cancelled. The inter-poll wait and every

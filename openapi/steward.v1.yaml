@@ -333,9 +333,9 @@ paths:
               schema:
                 type: string
               example: |
-                # HELP steward_instances_total Current number of tracked instances, by status.
-                # TYPE steward_instances_total gauge
-                steward_instances_total{status="RUNNING"} 3
+                # HELP steward_instances Current number of tracked instances, by status.
+                # TYPE steward_instances gauge
+                steward_instances{status="RUNNING"} 3
                 # HELP steward_max_instances Configured instance capacity cap (Provision returns 503 beyond it).
                 # TYPE steward_max_instances gauge
                 steward_max_instances 1024

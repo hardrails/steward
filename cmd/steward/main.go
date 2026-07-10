@@ -187,24 +187,32 @@ func main() {
 	// question an operator asks before rolling a config out, the -config file
 	// included.
 	if *checkConfig {
-		if _, _, _, err := prepareRuntime(cfg, logger, true); err != nil {
+		_, _, _, dryRunAuditLogger, err := prepareRuntime(cfg, logger, true)
+		// prepareRuntime opens the audit log file (when -audit-log-file is set)
+		// even in a dry run, so -check-config exercises the same fail-closed
+		// openability check a real boot would; close it again immediately since a
+		// dry run keeps nothing running afterward. Nil-safe either way (auditing
+		// disabled, or prepareRuntime failed before ever opening it).
+		_ = dryRunAuditLogger.Close()
+		if err != nil {
 			os.Exit(1)
 		}
 		fmt.Println("configuration valid")
 		os.Exit(0)
 	}
 
-	logger, tracker, poller, err := prepareRuntime(cfg, logger, false)
+	logger, tracker, poller, auditLogger, err := prepareRuntime(cfg, logger, false)
 	if err != nil {
 		os.Exit(1)
 	}
-	// The audit logger (when -audit-log-file is set) is owned by the poller it
-	// was wired into (see prepareRuntime); Poller.Close releases its file handle
-	// on shutdown. Safe to call even when poller is nil or auditing is disabled
-	// (both cases are nil-safe all the way down), so this is unconditional.
-	if poller != nil {
-		defer func() { _ = poller.Close() }()
-	}
+	// auditLogger is the caller's to close regardless of whether poller is nil
+	// (see prepareRuntime's doc comment): -audit-log-file is accepted even with
+	// the uplink disabled, in which case the file is opened but never reachable
+	// through poller. Closing it directly here -- rather than through a
+	// poller-scoped close that would never run in that combination -- is what
+	// keeps the file handle from leaking for the process's entire lifetime.
+	// Nil-safe, so this defer is unconditional.
+	defer func() { _ = auditLogger.Close() }()
 
 	// Register the signal handler as the FIRST thing after a successful
 	// prepareRuntime, before any further startup logging or server construction:
@@ -343,21 +351,32 @@ type resolvedConfig struct {
 }
 
 // prepareRuntime runs every fail-closed startup check against cfg and builds the
-// live objects the server runs from — the restored tracker and, when the uplink is
-// enabled, the poller. It is the ONE validation-and-construction sequence shared by
-// the real startup path and the -check-config dry run, so a dry run can never accept
-// a config a real boot would reject (or the reverse). It rebuilds the logger at the
-// configured level (returned for the caller to keep using) and, on any invalid
-// setting, logs the same actionable error a real boot would and returns it. It binds
-// no port and starts no goroutine: the caller wires the HTTP server and starts the
-// poll loop from the returned objects.
+// live objects the server runs from — the restored tracker, the poller when the
+// uplink is enabled, and the audit logger when -audit-log-file is set. It is the
+// ONE validation-and-construction sequence shared by the real startup path and the
+// -check-config dry run, so a dry run can never accept a config a real boot would
+// reject (or the reverse). It rebuilds the logger at the configured level (returned
+// for the caller to keep using) and, on any invalid setting, logs the same
+// actionable error a real boot would and returns it. It binds no port and starts no
+// goroutine: the caller wires the HTTP server and starts the poll loop from the
+// returned objects.
+//
+// The returned *uplink.AuditLogger is ALWAYS the caller's to close (via its Close
+// method, nil-safe if auditing was never enabled) once it is done with it,
+// regardless of whether poller is nil: when -audit-log-file is set without
+// -uplink-url, the file is still opened (so -check-config exercises the exact
+// fail-closed openability check a real boot would) but never wired into a Poller,
+// so the caller cannot reach it through poller alone. Returning it as its own value
+// — rather than relying on the (possibly-nil) poller to hold the only reference —
+// is what lets main close it unconditionally instead of leaking the file handle for
+// the process's entire lifetime whenever the uplink is disabled.
 //
 // When checkOnly is true the success/progress logs ("durable state enabled",
 // "uplink enabled") are suppressed: a dry run validates a configuration, it does not
 // enable anything, so reporting those would be misleading. The fail-closed error
 // logs and the poll-interval-clamp warning — which report on the config itself — are
 // emitted either way.
-func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*slog.Logger, *runtime.Tracker, *uplink.Poller, error) {
+func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*slog.Logger, *runtime.Tracker, *uplink.Poller, *uplink.AuditLogger, error) {
 	// Rebuild the logger at the configured level now that the config is resolved. A
 	// garbage -log-level (or STEWARD_LOG_LEVEL, or log_level in the config file) is a
 	// fail-closed startup error naming the bad value and the accepted set, logged via
@@ -365,7 +384,7 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 	level, err := parseLogLevel(cfg.logLevel)
 	if err != nil {
 		logger.Error("configure log level", "err", err)
-		return logger, nil, nil, err
+		return logger, nil, nil, nil, err
 	}
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
@@ -382,7 +401,7 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 		logger.Error("invalid -max-instances",
 			"value", cfg.maxInstances,
 			"hint", "-max-instances (or STEWARD_MAX_INSTANCES) must be a positive integer; omit it to use the default 1024")
-		return logger, nil, nil, fmt.Errorf("invalid -max-instances %d", cfg.maxInstances)
+		return logger, nil, nil, nil, fmt.Errorf("invalid -max-instances %d", cfg.maxInstances)
 	}
 
 	// A node with neither the inbound listener nor the outbound uplink enabled would
@@ -392,7 +411,7 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 	if cfg.disableInbound && cfg.uplinkURL == "" {
 		logger.Error("inbound listener disabled but no uplink configured",
 			"hint", "a node with neither an inbound listener nor an outbound uplink is unreachable; set -uplink-url (or STEWARD_UPLINK_URL) to poll a control plane, or drop -disable-inbound-listener to serve the inbound REST API")
-		return logger, nil, nil, errors.New("inbound listener disabled but no uplink configured")
+		return logger, nil, nil, nil, errors.New("inbound listener disabled but no uplink configured")
 	}
 
 	// -addr is only exercised by ListenAndServe on the real startup path, which a
@@ -406,12 +425,12 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 		if err != nil {
 			logger.Error("invalid -addr", "value", cfg.addr, "err", err,
 				"hint", "-addr (or STEWARD_ADDR) must be host:port, e.g. \"127.0.0.1:8080\" or \":8080\"")
-			return logger, nil, nil, fmt.Errorf("invalid -addr %q: %w", cfg.addr, err)
+			return logger, nil, nil, nil, fmt.Errorf("invalid -addr %q: %w", cfg.addr, err)
 		}
 		if n, convErr := strconv.Atoi(port); convErr == nil && (n < 0 || n > 65535) {
 			logger.Error("invalid -addr port", "value", cfg.addr, "port", n,
 				"hint", "-addr's port must be 0-65535")
-			return logger, nil, nil, fmt.Errorf("invalid -addr %q: port %d out of range", cfg.addr, n)
+			return logger, nil, nil, nil, fmt.Errorf("invalid -addr %q: port %d out of range", cfg.addr, n)
 		}
 	}
 
@@ -423,7 +442,7 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 	tracker, err := runtime.LoadTracker(cfg.maxInstances, cfg.stateFile)
 	if err != nil {
 		logger.Error("load state", "err", err)
-		return logger, nil, nil, err
+		return logger, nil, nil, nil, err
 	}
 	if cfg.stateFile != "" && !checkOnly {
 		logger.Info("durable state enabled", "path", cfg.stateFile, "restored_instances", tracker.Len())
@@ -443,7 +462,7 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 		auditLogger, err = uplink.NewAuditLogger(cfg.auditLogFile)
 		if err != nil {
 			logger.Error("open audit log file", "err", err)
-			return logger, nil, nil, err
+			return logger, nil, nil, nil, err
 		}
 		if cfg.uplinkURL == "" {
 			logger.Warn("audit log file configured but the uplink is disabled; no commands will ever be executed to log",
@@ -467,12 +486,12 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 		if cfg.uplinkCredentialFile == "" {
 			logger.Error("uplink enabled but no credential file",
 				"hint", "set -uplink-credential-file (or STEWARD_UPLINK_CREDENTIAL_FILE) when -uplink-url is set")
-			return logger, nil, nil, errors.New("uplink enabled but no credential file")
+			return logger, nil, nil, auditLogger, errors.New("uplink enabled but no credential file")
 		}
 		cred, err := uplink.LoadCredential(cfg.uplinkCredentialFile)
 		if err != nil {
 			logger.Error("load uplink credential", "err", err)
-			return logger, nil, nil, err
+			return logger, nil, nil, auditLogger, err
 		}
 		poller, err = uplink.NewPoller(tracker, uplink.Config{
 			BaseURL:        cfg.uplinkURL,
@@ -485,7 +504,7 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 		})
 		if err != nil {
 			logger.Error("configure uplink", "err", err)
-			return logger, nil, nil, err
+			return logger, nil, nil, auditLogger, err
 		}
 		if !checkOnly {
 			logger.Info("uplink enabled",
@@ -503,7 +522,7 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 		}
 	}
 
-	return logger, tracker, poller, nil
+	return logger, tracker, poller, auditLogger, nil
 }
 
 func envOr(key, fallback string) string {
