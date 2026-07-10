@@ -15,14 +15,16 @@ import (
 )
 
 const (
-	// maxBackoff caps the exponential backoff between failed polls. A blackholed or
-	// mid-deploy control plane is retried at most this often, so a dark node's poll
-	// traffic and logs stay bounded.
-	maxBackoff = 5 * time.Minute
+	// MaxBackoff caps the exponential backoff between failed polls, and is also the
+	// ceiling applied to the base poll interval itself (see backoffDuration): a
+	// blackholed or mid-deploy control plane is retried at most this often, so a
+	// dark node's poll traffic and logs stay bounded. Exported so cmd/steward can
+	// warn at startup when -uplink-poll-interval exceeds it.
+	MaxBackoff = 5 * time.Minute
 	// jitterFraction is the +/- proportion of each wait randomized to decorrelate a
 	// fleet that restarts together (a control-plane redeploy, a power event).
 	jitterFraction = 0.20
-	// skewFailures pins the backoff to maxBackoff for an other-4xx (probable version
+	// skewFailures pins the backoff to MaxBackoff for an other-4xx (probable version
 	// skew): a value large enough that backoffDuration reaches the cap for any base.
 	skewFailures = 62
 	// httpTimeout bounds every poll/report round-trip so a blackholed control plane
@@ -71,8 +73,8 @@ type Poller struct {
 }
 
 // NewPoller validates cfg and builds a Poller driving tracker. It fails closed on a
-// missing field or an unparseable URL so a misconfiguration is a startup error, not
-// a loop that silently never works.
+// missing field or a URL that is not an absolute http(s) URL so a misconfiguration
+// is a startup error, not a loop that silently never works.
 func NewPoller(tracker Tracker, cfg Config) (*Poller, error) {
 	switch {
 	case cfg.BaseURL == "":
@@ -84,8 +86,14 @@ func NewPoller(tracker Tracker, cfg Config) (*Poller, error) {
 	case cfg.PollInterval <= 0:
 		return nil, fmt.Errorf("uplink poll interval must be positive, got %s", cfg.PollInterval)
 	}
-	if _, err := url.Parse(cfg.BaseURL); err != nil {
-		return nil, fmt.Errorf("invalid uplink URL %q: %w", cfg.BaseURL, err)
+	// url.Parse alone is not enough: it happily accepts a bare hostname like
+	// "control-plane.example" (a plausible forgot-the-scheme operator typo) with no
+	// error, an empty Scheme, and no Host — every subsequent poll would then fail
+	// with "unsupported protocol scheme ''" forever instead of failing here at
+	// startup. Require an absolute http(s) URL explicitly.
+	u, err := url.Parse(cfg.BaseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("invalid uplink URL %q: need an absolute http(s) URL, e.g. https://control-plane.example (set -uplink-url)", cfg.BaseURL)
 	}
 	pollURL, err := url.JoinPath(cfg.BaseURL, "uplink", "poll")
 	if err != nil {
@@ -144,7 +152,7 @@ func (p *Poller) Run(ctx context.Context) {
 		case classSkew:
 			failures = skewFailures
 			p.logger.Error("uplink poll rejected (probable control-plane version skew); backing off at the cap and retrying",
-				"err", err, "next_backoff", maxBackoff.String())
+				"err", err, "next_backoff", MaxBackoff.String())
 		case classFatal:
 			p.logger.Error("uplink credential rejected; stopping the poll loop — re-enroll this node, update the credential file, and restart",
 				"err", err, "node_id", p.dispatcher.nodeID)
@@ -262,17 +270,20 @@ func (p *Poller) post(ctx context.Context, endpoint string, body []byte) (*http.
 
 // backoffDuration is the capped exponential backoff for a given number of
 // consecutive failures: base for zero failures, base*2^failures otherwise, clamped
-// to maxBackoff. It guards against int64 overflow so an absurd failure count still
-// returns the cap rather than a wrapped negative duration.
+// to MaxBackoff. It guards against int64 overflow so an absurd failure count still
+// returns the cap rather than a wrapped negative duration. A base at or above
+// MaxBackoff (an operator-configured -uplink-poll-interval past the cap) is
+// clamped even at zero failures — see NewPoller's caller in cmd/steward, which
+// warns about this at startup so it is not a silent surprise.
 func backoffDuration(base time.Duration, failures int) time.Duration {
-	if base >= maxBackoff {
-		return maxBackoff
+	if base >= MaxBackoff {
+		return MaxBackoff
 	}
 	d := base
 	for i := 0; i < failures; i++ {
 		d *= 2
-		if d <= 0 || d >= maxBackoff {
-			return maxBackoff
+		if d <= 0 || d >= MaxBackoff {
+			return MaxBackoff
 		}
 	}
 	return d

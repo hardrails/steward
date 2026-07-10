@@ -25,6 +25,12 @@ func TestNewPollerRejectsBadConfig(t *testing.T) {
 		"missing credential":    {BaseURL: "http://cp", NodeID: "node-7", PollInterval: time.Second},
 		"missing node_id":       {BaseURL: "http://cp", Credential: "tok", PollInterval: time.Second},
 		"non-positive interval": {BaseURL: "http://cp", Credential: "tok", NodeID: "node-7", PollInterval: 0},
+		// A bare hostname (the plausible forgot-"http://" operator typo) parses
+		// without error and with an empty scheme and host — it must be rejected here
+		// rather than succeeding silently and failing every poll forever.
+		"bare hostname, no scheme": {BaseURL: "control-plane.example", Credential: "tok", NodeID: "node-7", PollInterval: time.Second},
+		"scheme with no host":      {BaseURL: "http://", Credential: "tok", NodeID: "node-7", PollInterval: time.Second},
+		"non-http(s) scheme":       {BaseURL: "ftp://cp", Credential: "tok", NodeID: "node-7", PollInterval: time.Second},
 	}
 	for name, cfg := range cases {
 		if _, err := NewPoller(tr, cfg); err == nil {
@@ -32,7 +38,10 @@ func TestNewPollerRejectsBadConfig(t *testing.T) {
 		}
 	}
 	if _, err := NewPoller(tr, base); err != nil {
-		t.Fatalf("NewPoller(valid): unexpected err %v", err)
+		t.Fatalf("NewPoller(valid http): unexpected err %v", err)
+	}
+	if _, err := NewPoller(tr, Config{BaseURL: "https://cp", Credential: "tok", NodeID: "node-7", PollInterval: time.Second}); err != nil {
+		t.Fatalf("NewPoller(valid https): unexpected err %v", err)
 	}
 }
 

@@ -29,7 +29,7 @@ func main() {
 	uplinkCredentialFile := flag.String("uplink-credential-file", envOr("STEWARD_UPLINK_CREDENTIAL_FILE", ""),
 		"path to the node's uplink credential JSON; required when -uplink-url is set")
 	uplinkPollInterval := flag.Duration("uplink-poll-interval", envOrDuration("STEWARD_UPLINK_POLL_INTERVAL", 10*time.Second),
-		"base cadence for uplink polling; jitter is applied on top")
+		"base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -79,6 +79,15 @@ func main() {
 		logger.Info("uplink enabled",
 			"url", *uplinkURL, "node_id", cred.NodeID, "tenant_id", cred.TenantID,
 			"poll_interval", uplinkPollInterval.String())
+		// -uplink-poll-interval has no documented ceiling, but the steady-state poll
+		// cadence is clamped to the same 5-minute cap used for failed-poll backoff
+		// (see backoffDuration): a base at or above the cap polls at the cap, not at
+		// the configured value. Warn once at startup naming both, so this is visible
+		// rather than a silent surprise.
+		if *uplinkPollInterval > uplink.MaxBackoff {
+			logger.Warn("uplink poll interval exceeds the backoff cap; effective interval is clamped",
+				"configured_interval", uplinkPollInterval.String(), "effective_interval", uplink.MaxBackoff.String())
+		}
 	}
 
 	srv := &http.Server{
