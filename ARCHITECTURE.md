@@ -1,20 +1,29 @@
 # Architecture
 
-Steward is an on-node supervisor whose only job is to track the lifecycle of
-agent instances and expose that lifecycle over a small HTTP API. This document
-records what it deliberately does *not* do, and why the most sensitive future
-capability is kept at arm's length.
+Steward is an on-node supervisor for the lifecycle of agent instances, exposed
+over a small HTTP API. This document records the core it always provides,
+which capabilities are opt-in versus on by default, what it deliberately does
+*not* do, and why the most sensitive future capability is kept at arm's length.
 
-## Intentionally minimal
+## A minimal core, with opt-in capabilities layered on top
 
-This version of Steward is a walking skeleton. It does exactly one thing:
+Every version of Steward provides one always-on core:
 
 - **Lifecycle tracking.** A tracker (`internal/runtime`) maps an opaque
   `runtime_ref` to an instance and its status (`PENDING`, `RUNNING`, `STOPPED`,
   `HIBERNATED`, `DESTROYED`, `FAILED`). The six operations — provision, start,
-  stop, hibernate, destroy, status — are thin transitions over that map, guarded
-  by a single mutex. State is held in memory by default; durable state across a
+  stop, hibernate, destroy, status — are transitions over that map, guarded by
+  a single mutex. State is held in memory by default; durable state across a
   restart is opt-in (see below).
+
+Layered on that core, several capabilities are available but off by default,
+so a minimal deployment stays minimal until an operator deliberately turns
+each one on: real process execution (`-enable-process-exec` — see [Process
+supervision is opt-in](#process-supervision-is-opt-in)), durable state (`-state-file`), Prometheus
+metrics (`-enable-metrics`), a command audit log (`-audit-log-file`), and the
+outbound uplink (`-uplink-url`) with its TLS/credential hardening. This
+document's "does not do" list below is about permanent, structural boundaries
+— things no flag turns on — not about these opt-in capabilities.
 
 It explicitly does **not**, by default:
 

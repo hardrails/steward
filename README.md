@@ -1,17 +1,21 @@
 # Steward
 
-Steward is a minimal, always-running **lifecycle supervisor for agent instances**
-that runs on a node. It tracks the lifecycle of agent instances — provision,
-start, stop, hibernate, destroy, and status — behind a small HTTP API, and does
-nothing else. It is designed to be managed remotely over HTTP by a separate
-control plane.
+Steward is a lightweight, always-running **process supervisor for agent
+instances** that runs on a node, managed remotely over HTTP by a separate
+control plane. Behind a small, fully-documented HTTP API it provisions, starts,
+stops, hibernates, and destroys real OS processes — signaling them, monitoring
+for an unexpected exit, and, when durable state is enabled, best-effort
+reattaching them across a restart — with the operational maturity a production
+fleet needs: TLS-secured and credential-rotating remote control, per-source rate
+limiting, bounded command backpressure, Prometheus metrics, a command audit log,
+batch operations, and opt-in durable state across a restart.
 
-Steward is deliberately a *walking skeleton*: lifecycle tracking only, no command
-execution, no sandboxing. State is in memory by default (a restart forgets every
-instance); durable state across a restart is opt-in via `-state-file`. See
+Real process execution is opt-in via `-enable-process-exec`; with it off,
+Steward is a pure lifecycle-status tracker — a control-plane integration point a
+fleet can build and test against before wiring in real execution. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for the design boundaries and the deferred
-decisions (notably how a future computer-use capability is kept out of Steward's
-own process).
+decisions — notably how a future, separately sandboxed computer-use capability
+is kept out of Steward's own process.
 
 ## The public contract
 
