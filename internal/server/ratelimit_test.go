@@ -168,17 +168,32 @@ func TestRateLimiterRefillCapsAtBurst(t *testing.T) {
 	}
 }
 
-// TestTableFullRetryAfterSeconds pins the table-full Retry-After hint: whole seconds of
-// the sweep interval, rounded up and floored at 1.
+// TestTableFullRetryAfterSeconds pins the table-full Retry-After hint: the whole
+// seconds remaining until the next sweep (sweepEvery - elapsed since lastSweep),
+// rounded up and floored at 1 -- a tight hint, not always the full interval.
 func TestTableFullRetryAfterSeconds(t *testing.T) {
-	if got := (&rateLimiter{sweepEvery: 90 * time.Second}).tableFullRetryAfterSeconds(); got != 90 {
-		t.Errorf("tableFullRetryAfterSeconds(90s) = %d, want 90", got)
+	cur := time.Unix(1000, 0)
+	l := &rateLimiter{sweepEvery: 90 * time.Second, lastSweep: cur, now: func() time.Time { return cur }}
+
+	if got := l.tableFullRetryAfterSeconds(); got != 90 {
+		t.Errorf("no time elapsed: tableFullRetryAfterSeconds() = %d, want 90", got)
 	}
-	if got := (&rateLimiter{sweepEvery: 89500 * time.Millisecond}).tableFullRetryAfterSeconds(); got != 90 {
-		t.Errorf("tableFullRetryAfterSeconds(89.5s) = %d, want 90 (rounded up)", got)
+
+	// 60.5s after the last sweep, 29.5s remain -- rounds up to 30, not the full 90s.
+	cur = cur.Add(60500 * time.Millisecond)
+	if got := l.tableFullRetryAfterSeconds(); got != 30 {
+		t.Errorf("60.5s elapsed: tableFullRetryAfterSeconds() = %d, want 30 (tight, not the full interval)", got)
 	}
+
+	// Past the sweep interval (a sweep should have run, but if it somehow hasn't):
+	// never negative, floored at 1.
+	cur = cur.Add(time.Hour)
+	if got := l.tableFullRetryAfterSeconds(); got != 1 {
+		t.Errorf("elapsed past sweepEvery: tableFullRetryAfterSeconds() = %d, want 1 (floored, never negative)", got)
+	}
+
 	if got := (&rateLimiter{sweepEvery: 0}).tableFullRetryAfterSeconds(); got != 1 {
-		t.Errorf("tableFullRetryAfterSeconds(0) = %d, want 1 (floored)", got)
+		t.Errorf("tableFullRetryAfterSeconds(sweepEvery=0) = %d, want 1 (floored)", got)
 	}
 }
 

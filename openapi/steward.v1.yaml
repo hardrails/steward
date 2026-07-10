@@ -306,7 +306,7 @@ components:
     RetryAfter:
       description: |
         The number of seconds to wait before retrying, sent on a `429` when the
-        per-source inbound rate limit is exceeded. A non-negative integer
+        per-source inbound rate limit is exceeded. A positive integer
         (delta-seconds), always at least 1.
       schema:
         type: integer

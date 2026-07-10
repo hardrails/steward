@@ -185,9 +185,16 @@ func (l *rateLimiter) fullRefill() time.Duration {
 }
 
 // tableFullRetryAfterSeconds advises a source refused because the tracking table is
-// full to retry once the reclamation sweep has had a chance to run.
+// full to retry once the reclamation sweep has had a chance to run. It returns the
+// remaining time until the next sweep (sweepEvery - elapsed since lastSweep), floored
+// at 1s, rather than always the full interval — the caller holds l.mu, so lastSweep
+// is current.
 func (l *rateLimiter) tableFullRetryAfterSeconds() int {
-	secs := int(math.Ceil(l.sweepEvery.Seconds()))
+	remaining := l.sweepEvery - l.clock().Sub(l.lastSweep)
+	if remaining < 0 {
+		remaining = 0
+	}
+	secs := int(math.Ceil(remaining.Seconds()))
 	if secs < 1 {
 		secs = 1
 	}
