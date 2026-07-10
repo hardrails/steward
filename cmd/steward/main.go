@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,6 +20,22 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	// The uplink poll interval's default comes from STEWARD_UPLINK_POLL_INTERVAL when
+	// set. A SET-but-unparseable value (a "30sec" typo for "30s") is a fail-closed
+	// startup error naming the value, the env var, and the expected format — the same
+	// discipline the credential loader and the -uplink-url check apply — never a
+	// silent fall back to the 10s default at a cadence the operator did not ask for.
+	// An unset value uses the default silently. (The -uplink-poll-interval CLI flag
+	// already fails closed on an invalid value: Go's flag package parses a duration
+	// flag with time.ParseDuration and exits non-zero on a parse error.)
+	pollIntervalDefault, err := envDuration("STEWARD_UPLINK_POLL_INTERVAL", 10*time.Second)
+	if err != nil {
+		logger.Error("configure uplink poll interval", "err", err)
+		os.Exit(1)
+	}
+
 	addr := flag.String("addr", envOr("STEWARD_ADDR", "127.0.0.1:8080"), "host:port to listen on")
 	maxInstances := flag.Int("max-instances", envOrInt("STEWARD_MAX_INSTANCES", 1024),
 		"maximum number of tracked instances before Provision returns 503")
@@ -28,11 +45,9 @@ func main() {
 		"control-plane base URL for the outbound uplink; empty disables it (inbound REST only)")
 	uplinkCredentialFile := flag.String("uplink-credential-file", envOr("STEWARD_UPLINK_CREDENTIAL_FILE", ""),
 		"path to the node's uplink credential JSON; required when -uplink-url is set")
-	uplinkPollInterval := flag.Duration("uplink-poll-interval", envOrDuration("STEWARD_UPLINK_POLL_INTERVAL", 10*time.Second),
+	uplinkPollInterval := flag.Duration("uplink-poll-interval", pollIntervalDefault,
 		"base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap)")
 	flag.Parse()
-
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	// LoadTracker restores any existing state before the server accepts requests.
 	// An empty -state-file disables persistence (the in-memory default); a corrupt
@@ -161,11 +176,20 @@ func envOrInt(key string, fallback int) int {
 	return fallback
 }
 
-func envOrDuration(key string, fallback time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
+// envDuration reads a Go duration from the environment, failing closed on a
+// SET-but-invalid value instead of silently falling back. An unset key returns
+// fallback with no error (the expected default path); a set value that
+// time.ParseDuration rejects returns an error naming the key, the bad value, and
+// the expected format, so main can make it a startup error rather than run at a
+// cadence the operator never asked for.
+func envDuration(key string, fallback time.Duration) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
 	}
-	return fallback
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: not a valid duration (want e.g. \"10s\", \"1m30s\"); fix the value or unset it to use the default", key, v)
+	}
+	return d, nil
 }

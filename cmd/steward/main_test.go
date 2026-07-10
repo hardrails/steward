@@ -51,22 +51,39 @@ func TestEnvOrInt(t *testing.T) {
 	})
 }
 
-func TestEnvOrDuration(t *testing.T) {
-	t.Run("unset falls back", func(t *testing.T) {
-		if got := envOrDuration("STEWARD_TEST_UNSET", 10*time.Second); got != 10*time.Second {
+func TestEnvDuration(t *testing.T) {
+	t.Run("unset falls back with no error", func(t *testing.T) {
+		got, err := envDuration("STEWARD_TEST_UNSET", 10*time.Second)
+		if err != nil {
+			t.Fatalf("unexpected err %v", err)
+		}
+		if got != 10*time.Second {
 			t.Fatalf("got %s, want 10s", got)
 		}
 	})
 	t.Run("valid duration wins", func(t *testing.T) {
 		t.Setenv("STEWARD_TEST_INTERVAL", "30s")
-		if got := envOrDuration("STEWARD_TEST_INTERVAL", 10*time.Second); got != 30*time.Second {
+		got, err := envDuration("STEWARD_TEST_INTERVAL", 10*time.Second)
+		if err != nil {
+			t.Fatalf("unexpected err %v", err)
+		}
+		if got != 30*time.Second {
 			t.Fatalf("got %s, want 30s", got)
 		}
 	})
-	t.Run("invalid duration falls back", func(t *testing.T) {
-		t.Setenv("STEWARD_TEST_INTERVAL", "not-a-duration")
-		if got := envOrDuration("STEWARD_TEST_INTERVAL", 10*time.Second); got != 10*time.Second {
-			t.Fatalf("got %s, want 10s", got)
+	t.Run("invalid duration is a fail-closed error naming the value and key", func(t *testing.T) {
+		// A "30sec" typo for "30s" must NOT silently fall back to the default — it is
+		// a startup config error the operator has to see and fix.
+		t.Setenv("STEWARD_TEST_INTERVAL", "30sec")
+		_, err := envDuration("STEWARD_TEST_INTERVAL", 10*time.Second)
+		if err == nil {
+			t.Fatal("a set-but-invalid duration must return an error, not fall back silently")
+		}
+		if !strings.Contains(err.Error(), "30sec") {
+			t.Errorf("error %q does not name the bad value", err)
+		}
+		if !strings.Contains(err.Error(), "STEWARD_TEST_INTERVAL") {
+			t.Errorf("error %q does not name the env var", err)
 		}
 	})
 }
@@ -209,6 +226,39 @@ func TestUplinkPollIntervalAboveCapLogsWarning(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the poll-interval warning log")
+	}
+}
+
+// TestUplinkInvalidPollIntervalEnvExitsNonZero is the integration check for the
+// silent-fallback finding: a SET-but-invalid STEWARD_UPLINK_POLL_INTERVAL (a
+// "30sec" typo for "30s") must be a fail-closed startup error naming the bad value
+// and the env var, never a silent fall back to the 10s default.
+func TestUplinkInvalidPollIntervalEnvExitsNonZero(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := filepath.Join(t.TempDir(), "steward")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build steward: %v\n%s", err, out)
+	}
+
+	const badValue = "30sec"
+	cmd := exec.Command(bin, "-addr", "127.0.0.1:0")
+	cmd.Env = append(os.Environ(), "STEWARD_UPLINK_POLL_INTERVAL="+badValue)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected a non-zero exit on an invalid poll-interval env var, got success:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), badValue) {
+		t.Errorf("startup error does not name the bad value %q:\n%s", badValue, out)
+	}
+	if !strings.Contains(string(out), "STEWARD_UPLINK_POLL_INTERVAL") {
+		t.Errorf("startup error does not name the env var:\n%s", out)
 	}
 }
 
