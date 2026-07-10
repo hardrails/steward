@@ -50,12 +50,18 @@ paths:
       responses:
         "201":
           description: A new instance was created.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Instance"
         "200":
           description: An instance with this `instance_id` already existed and was returned unchanged.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
           content:
             application/json:
               schema:
@@ -80,6 +86,9 @@ paths:
       responses:
         "200":
           description: The current state of the instance.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
           content:
             application/json:
               schema:
@@ -98,6 +107,9 @@ paths:
       responses:
         "200":
           description: The destroyed instance.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
           content:
             application/json:
               schema:
@@ -118,6 +130,9 @@ paths:
       responses:
         "200":
           description: The updated instance (`RUNNING`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
           content:
             application/json:
               schema:
@@ -138,6 +153,9 @@ paths:
       responses:
         "200":
           description: The updated instance (`STOPPED`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
           content:
             application/json:
               schema:
@@ -158,6 +176,9 @@ paths:
       responses:
         "200":
           description: The updated instance (`HIBERNATED`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
           content:
             application/json:
               schema:
@@ -186,6 +207,9 @@ paths:
       responses:
         "200":
           description: The advertised capabilities.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
           content:
             application/json:
               schema:
@@ -213,6 +237,9 @@ paths:
       responses:
         "200":
           description: The process is up and serving.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
           content:
             application/json:
               schema:
@@ -222,6 +249,18 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 components:
+  headers:
+    RequestId:
+      description: |
+        A per-request correlation id, unique per request and emitted on the
+        matching server-side log line, so a client or control plane can tie a
+        response to the exact node-side log entry that produced it. Present on
+        every response. It is a logging/correlation aid, not a trace-context
+        header: the server always mints a fresh value and never propagates a
+        client-supplied one.
+      schema:
+        type: string
+        example: 9f8e7d6c5b4a3210
   parameters:
     RuntimeRef:
       name: id
@@ -233,36 +272,54 @@ components:
   responses:
     BadRequest:
       description: The request body was malformed, `instance_id` was missing, or `spec` was not a JSON object.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     UnknownRuntimeRef:
       description: No instance is tracked for the given `runtime_ref`.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     MethodNotAllowed:
       description: The HTTP method is not allowed on this path.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     PayloadTooLarge:
       description: The request body exceeded the 1 MiB limit.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     CapacityExceeded:
       description: The tracker has reached its maximum number of instances; retry later.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     InternalError:
       description: An unexpected internal error occurred.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:

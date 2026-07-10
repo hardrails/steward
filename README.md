@@ -76,12 +76,20 @@ wins when both are set):
 | Flag              | Env var                  | Default          | Purpose                                                                 |
 | ----------------- | ------------------------ | ---------------- | ----------------------------------------------------------------------- |
 | `-addr`                    | `STEWARD_ADDR`                    | `127.0.0.1:8080` | host:port to listen on                                                  |
-| `-max-instances`           | `STEWARD_MAX_INSTANCES`           | `1024`           | maximum tracked instances before Provision returns 503                  |
+| `-log-level`               | `STEWARD_LOG_LEVEL`               | `info`           | log verbosity: one of `debug`, `info`, `warn`, `error` (case-insensitive); a garbage value fails closed at startup |
+| `-max-instances`           | `STEWARD_MAX_INSTANCES`           | `1024`           | maximum tracked instances before Provision returns 503; must be a positive integer (a non-positive value fails closed at startup) |
 | `-state-file`              | `STEWARD_STATE_FILE`              | (unset)          | path to a JSON file for durable state; unset means in-memory only       |
 | `-uplink-url`              | `STEWARD_UPLINK_URL`              | (unset)          | control-plane base URL for the outbound uplink; unset disables it       |
 | `-uplink-credential-file`  | `STEWARD_UPLINK_CREDENTIAL_FILE`  | (unset)          | path to the node's uplink credential JSON; required when `-uplink-url` is set |
 | `-uplink-poll-interval`    | `STEWARD_UPLINK_POLL_INTERVAL`    | `10s`            | base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap) |
 | `-disable-inbound-listener` | `STEWARD_DISABLE_INBOUND_LISTENER` | `false`          | do not bind an inbound listener; requires `-uplink-url`                |
+
+`-version` is an action flag rather than a setting (it has no env var): it prints
+the build/version string and exits 0 without binding a port or starting the
+uplink loop. The string is the VCS revision the Go toolchain stamps into the
+binary (`go build`/`go install`), falling back to a compiled-in constant when no
+build metadata is available (for example under `go run`). It is the same value
+`GET /v1/capabilities` advertises.
 
 By default Steward keeps state in memory and a restart forgets every tracked
 instance. Set `-state-file` to persist state across restarts:
@@ -121,6 +129,13 @@ for the full design.
 
 `{id}` is the opaque `runtime_ref` returned by provisioning. An unknown
 `runtime_ref` returns `404` with `{"error": "unknown_runtime_ref", "message": ...}`.
+
+Every response carries an `X-Request-Id` header: a per-request correlation id,
+echoed on the matching structured log line (alongside the client's
+`remote_addr`) so a control-plane failure report can be tied to the exact
+node-side log entry that served it. It is a logging aid, not distributed tracing
+— Steward mints a fresh id per request and never propagates a client-supplied
+one.
 
 `GET /v1/capabilities` advertises the (still-empty in v1) `skills` array plus a
 small slice of operational state for a control-plane dashboard: `version`, the
