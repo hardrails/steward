@@ -238,6 +238,18 @@ func (t *Tracker) Status(runtimeRef string) (*Instance, error) {
 	return inst.clone(), nil
 }
 
+// List returns every currently tracked instance, deep-cloned and sorted by
+// runtime_ref. It reuses the same snapshotLocked clone-and-sort discipline the
+// state file uses, so a listed instance never aliases live tracker state and the
+// order is deterministic (stable output, reproducible tests). The result is a
+// fresh, non-nil slice — empty when nothing is tracked — so it serializes as an
+// empty JSON array rather than null. It is safe for concurrent use.
+func (t *Tracker) List() []Instance {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.snapshotLocked().Instances
+}
+
 // RefForInstance returns the runtime_ref currently tracked for instanceID, or
 // ("", false) when no live instance has that instance_id. It is a locked read of
 // the existing byID index and runs no lifecycle logic: it exists so a caller that
