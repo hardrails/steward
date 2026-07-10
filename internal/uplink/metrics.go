@@ -165,20 +165,26 @@ func (m *Metrics) setQueueDepth(n int) {
 	m.queueDepth.Store(int64(n))
 }
 
-// recordQueueCycle feeds the backpressure readiness gate: a poll cycle that rejected
-// at least one command (rejectedAny) extends the consecutive-full streak by one, and a
-// cycle that admitted everything resets it to 0. Called once per successful poll from
-// the single goroutine Poller.Run drives (see Poller.admit); read by the readiness
-// gate from the HTTP goroutine.
-func (m *Metrics) recordQueueCycle(rejectedAny bool) {
+// growQueueFullStreak extends the consecutive-full-queue streak by one — a poll cycle
+// that turned distinct work away for capacity, i.e. the node is backed up. Called from
+// the single goroutine Poller.Run drives (see Poller.admit); read by the readiness gate
+// from the HTTP goroutine.
+func (m *Metrics) growQueueFullStreak() {
 	if m == nil {
 		return
 	}
-	if rejectedAny {
-		m.queueFullStreak.Add(1)
-	} else {
-		m.queueFullStreak.Store(0)
+	m.queueFullStreak.Add(1)
+}
+
+// resetQueueFullStreak clears the streak — a poll cycle that demonstrated headroom
+// (admitted new work with no rejection, or an empty poll with nothing pending), i.e.
+// the node is keeping up. A duplicate-only cycle does NEITHER (see Poller.admit): it is
+// not evidence of progress, so it must not clear a real backpressure signal.
+func (m *Metrics) resetQueueFullStreak() {
+	if m == nil {
+		return
 	}
+	m.queueFullStreak.Store(0)
 }
 
 // readiness reports whether the uplink poll loop is ready to serve traffic and,

@@ -420,10 +420,25 @@ func (p *Poller) admit(commands []command) {
 			"rejected_runtime_refs", runtimeRefs(rejected))
 		p.metrics.recordCommandsRejected(len(rejected))
 	}
-	// Feed the readiness gate: a cycle that rejected anything extends the
-	// full-queue streak, a cycle that admitted everything (including an empty poll)
-	// resets it. See Metrics.readiness and queueBackpressureThreshold.
-	p.metrics.recordQueueCycle(len(rejected) > 0)
+	// Feed the backpressure readiness gate (see Metrics.readiness and
+	// queueBackpressureThreshold). Three outcomes, not two, because a duplicate-only
+	// cycle is neither backlog nor progress:
+	admitted := len(commands) - len(rejected) - len(duplicates)
+	switch {
+	case len(rejected) > 0:
+		// Distinct work was turned away for capacity — the node is backed up.
+		p.metrics.growQueueFullStreak()
+	case admitted > 0 || len(duplicates) == 0:
+		// Headroom: the cycle admitted new work with no rejection, or the poll was
+		// empty (nothing pending). Either way the node is keeping up — reset.
+		p.metrics.resetQueueFullStreak()
+	default:
+		// rejected==0, admitted==0, duplicates>0: the poll re-offered only commands
+		// already queued or in-flight. That is neither new backlog (nothing was
+		// turned away) nor proof of progress (the in-flight work has not cleared),
+		// so leave the streak unchanged — an incidental redelivery must not silently
+		// clear a real backpressure signal (a hosted-review finding).
+	}
 	p.metrics.setQueueDepth(p.queue.outstandingNow())
 }
 

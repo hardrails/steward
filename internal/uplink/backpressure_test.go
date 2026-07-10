@@ -124,6 +124,42 @@ func (b *blockingTracker) provisionCalls(instanceID string) int {
 	return b.provisionByID[instanceID]
 }
 
+// TestPollerAdmitBackpressureStreakGrowsHoldsAndResets drives admit directly to pin
+// the three-way full-queue streak decision — and specifically the hosted-review fix
+// that a duplicate-only cycle must HOLD (not reset) a real streak, so an incidental
+// redelivery of an in-flight command cannot silently clear the backpressure signal.
+func TestPollerAdmitBackpressureStreakGrowsHoldsAndResets(t *testing.T) {
+	p := mustPoller(t, runtime.NewTracker(0), Config{
+		BaseURL: "http://cp.example", Credential: "tok", NodeID: "node-7",
+		PollInterval: time.Second, CommandQueueDepth: 1,
+	})
+	// Occupy the single slot so subsequent DISTINCT commands are rejected, and a
+	// redelivery of this command is a duplicate.
+	if rej, _ := p.queue.enqueue([]command{qcmd("in-flight")}); len(rej) != 0 {
+		t.Fatalf("seed enqueue rejected %d, want 0 (the slot was free)", len(rej))
+	}
+
+	// Two cycles that reject distinct work grow the streak.
+	p.admit([]command{qcmd("x1")})
+	p.admit([]command{qcmd("x2")})
+	if got := p.metrics.queueFullStreak.Load(); got != 2 {
+		t.Fatalf("streak after two rejecting cycles = %d, want 2", got)
+	}
+
+	// A duplicate-only cycle (only the in-flight command re-offered) must HOLD the
+	// streak — the P1 fix. Resetting here would let a redelivery mask real backpressure.
+	p.admit([]command{qcmd("in-flight")})
+	if got := p.metrics.queueFullStreak.Load(); got != 2 {
+		t.Fatalf("streak after a duplicate-only cycle = %d, want 2 held (an incidental redelivery must not clear the backpressure signal)", got)
+	}
+
+	// An empty poll proves headroom (nothing pending) and resets the streak.
+	p.admit(nil)
+	if got := p.metrics.queueFullStreak.Load(); got != 0 {
+		t.Fatalf("streak after an empty poll = %d, want 0 (reset on demonstrated headroom)", got)
+	}
+}
+
 // TestPollerRejectsBurstExceedingQueueDepthAndRedelivers is the core backpressure
 // proof: a single poll returning more commands than the queue depth has its excess
 // rejected (not silently dropped, not a crash, not a block) with the rejected

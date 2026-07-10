@@ -166,7 +166,8 @@ func TestMetricsNilIsInertNoOp(t *testing.T) {
 	m.recordCommandOutcome(true)
 	m.recordCommandsRejected(4)
 	m.setQueueDepth(7)
-	m.recordQueueCycle(true)
+	m.growQueueFullStreak()
+	m.resetQueueFullStreak()
 
 	snap := m.snapshot(10*time.Second, 128)
 	if snap.CurrentBackoff != 10*time.Second {
@@ -197,13 +198,13 @@ func TestMetricsBackpressureReadinessGate(t *testing.T) {
 	m := &Metrics{}
 	m.recordPollSuccess() // reachability is healthy — only backpressure can flip it now.
 
-	m.recordQueueCycle(true)
-	m.recordQueueCycle(true)
+	m.growQueueFullStreak()
+	m.growQueueFullStreak()
 	if ready, _ := m.readiness(failThreshold, queueThreshold); !ready {
 		t.Fatal("a streak below the queue threshold must not flip readiness (no flapping on a brief burst)")
 	}
 
-	m.recordQueueCycle(true) // streak now == threshold
+	m.growQueueFullStreak() // streak now == threshold
 	ready, detail := m.readiness(failThreshold, queueThreshold)
 	if ready {
 		t.Fatal("a full-queue streak at the threshold must flip readiness, even for a successfully-polling node")
@@ -212,9 +213,9 @@ func TestMetricsBackpressureReadinessGate(t *testing.T) {
 		t.Fatal("a not-ready backpressure result must carry a detail naming why")
 	}
 
-	m.recordQueueCycle(false) // a clean cycle resets the streak.
+	m.resetQueueFullStreak() // a headroom cycle resets the streak.
 	if ready, _ := m.readiness(failThreshold, queueThreshold); !ready {
-		t.Fatal("a clean cycle must reset the full-queue streak and restore readiness")
+		t.Fatal("a headroom cycle must reset the full-queue streak and restore readiness")
 	}
 }
 
