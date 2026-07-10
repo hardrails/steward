@@ -190,13 +190,22 @@ func (p *Poller) Run(ctx context.Context) {
 // A report POST failure is logged at WARN and not retried: the server's claim lease
 // redelivers the command with a bumped claim_generation, so the node stays
 // stateless about outbound reports.
+//
+// A fenced command (see dispatcher.execute) sends no report and is never
+// deferred to the retry pass: it is checked ahead of retry in both passes, so a
+// command found stale on the first pass is dropped outright, and a start that is
+// deferred and only becomes stale after its sibling provision runs (adopting a
+// higher generation) is dropped on the retry pass instead of being reported.
 func (p *Poller) executeBatch(ctx context.Context, commands []command) {
 	var deferred []command
 	for _, cmd := range commands {
 		if ctx.Err() != nil {
 			return
 		}
-		rep, retry := p.dispatcher.execute(cmd)
+		rep, retry, fenced := p.dispatcher.execute(cmd)
+		if fenced {
+			continue
+		}
 		if retry {
 			// A start whose instance is not yet known: defer one retry (a sibling
 			// provision later in this same batch may create it) rather than reporting
@@ -219,7 +228,10 @@ func (p *Poller) executeBatch(ctx context.Context, commands []command) {
 		if ctx.Err() != nil {
 			return
 		}
-		rep, stillUnknown := p.dispatcher.execute(cmd)
+		rep, stillUnknown, fenced := p.dispatcher.execute(cmd)
+		if fenced {
+			continue
+		}
 		if stillUnknown {
 			p.logger.Error("uplink start command still names an unknown instance after the retry pass; reporting failed — no provision for it arrived in this batch, so the control plane will reconcile and re-drive",
 				"command_id", rep.CommandID)

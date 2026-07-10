@@ -127,7 +127,10 @@ func (s *Server) handleProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inst, created, err := s.tracker.Provision(req.InstanceID, spec)
+	// The direct-REST path has no instance_generation concept, so it always passes
+	// 0 — the coherent "no fencing" value (see internal/runtime.Tracker.Provision
+	// and docs/instance-generation-fencing.md).
+	inst, created, err := s.tracker.Provision(req.InstanceID, 0, spec)
 	if err != nil {
 		if errors.Is(err, runtime.ErrCapacityExceeded) {
 			writeError(w, http.StatusServiceUnavailable, "capacity_exceeded",

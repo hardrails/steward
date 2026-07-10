@@ -2,6 +2,7 @@ package uplink
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -53,11 +54,20 @@ func cmd(id, nodeID, instanceID, kind string, payload string, gen int64) command
 	return c
 }
 
+// cmdGen is like cmd but also sets InstanceGeneration, for the fence-guard
+// tests: instanceGen is the command's carried instance_generation, distinct
+// from claimGen (the report-path fencing token cmd already covers).
+func cmdGen(id, nodeID, instanceID, kind, payload string, claimGen, instanceGen int64) command {
+	c := cmd(id, nodeID, instanceID, kind, payload, claimGen)
+	c.InstanceGeneration = instanceGen
+	return c
+}
+
 func TestDispatchProvisionThenLifecycleReportedStatuses(t *testing.T) {
 	d, tr := newDispatcher(t)
 
 	// provision -> provisioning (PENDING), and the tracker actually holds it.
-	rep, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1))
+	rep, _, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1))
 	if rep.Status != statusDone || rep.ReportedStatus != "provisioning" {
 		t.Fatalf("provision: status=%q reported=%q, want done/provisioning", rep.Status, rep.ReportedStatus)
 	}
@@ -77,14 +87,14 @@ func TestDispatchProvisionThenLifecycleReportedStatuses(t *testing.T) {
 		{kindHibernate, "hibernated"},
 	}
 	for _, c := range cases {
-		rep, _ := d.execute(cmd("c-"+c.kind, "node-7", "agent-1", c.kind, "", 2))
+		rep, _, _ := d.execute(cmd("c-"+c.kind, "node-7", "agent-1", c.kind, "", 2))
 		if rep.Status != statusDone || rep.ReportedStatus != c.want {
 			t.Fatalf("%s: status=%q reported=%q, want done/%s", c.kind, rep.Status, rep.ReportedStatus, c.want)
 		}
 	}
 
 	// destroy -> done/stopped, and the instance is gone.
-	rep, _ = d.execute(cmd("c-destroy", "node-7", "agent-1", kindDestroy, "", 3))
+	rep, _, _ = d.execute(cmd("c-destroy", "node-7", "agent-1", kindDestroy, "", 3))
 	if rep.Status != statusDone || rep.ReportedStatus != "stopped" {
 		t.Fatalf("destroy: status=%q reported=%q, want done/stopped", rep.Status, rep.ReportedStatus)
 	}
@@ -98,7 +108,7 @@ func TestDispatchRedeliveredDestroyReportsDone(t *testing.T) {
 
 	// The instance was never provisioned on this node (a redelivered destroy after a
 	// lost report, whose instance is already gone): destroy's goal is already met.
-	rep, _ := d.execute(cmd("c1", "node-7", "ghost", kindDestroy, "", 5))
+	rep, _, _ := d.execute(cmd("c1", "node-7", "ghost", kindDestroy, "", 5))
 	if rep.Status != statusDone || rep.ReportedStatus != "stopped" {
 		t.Fatalf("redelivered destroy: status=%q reported=%q, want done/stopped", rep.Status, rep.ReportedStatus)
 	}
@@ -107,7 +117,7 @@ func TestDispatchRedeliveredDestroyReportsDone(t *testing.T) {
 	}
 
 	// A second identical delivery is still done — idempotent.
-	rep, _ = d.execute(cmd("c1", "node-7", "ghost", kindDestroy, "", 6))
+	rep, _, _ = d.execute(cmd("c1", "node-7", "ghost", kindDestroy, "", 6))
 	if rep.Status != statusDone || rep.ReportedStatus != "stopped" {
 		t.Fatalf("second redelivered destroy: status=%q reported=%q, want done/stopped", rep.Status, rep.ReportedStatus)
 	}
@@ -118,7 +128,7 @@ func TestDispatchStartOnUnknownInstanceReportsFailed(t *testing.T) {
 
 	// start is the one kind eligible for the deferred retry: retry=true on the
 	// first pass, terminal (failed) only after the batch runner's retry pass.
-	rep, retry := d.execute(cmd("c1", "node-7", "never-provisioned", kindStart, "", 1))
+	rep, retry, _ := d.execute(cmd("c1", "node-7", "never-provisioned", kindStart, "", 1))
 	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 		t.Fatalf("start on unknown instance: status=%q reported=%q, want failed/failed", rep.Status, rep.ReportedStatus)
 	}
@@ -139,7 +149,7 @@ func TestDispatchStopHibernateOnUnknownInstanceReportsFailedImmediately(t *testi
 	d, _ := newDispatcher(t)
 
 	for _, kind := range []string{kindStop, kindHibernate} {
-		rep, retry := d.execute(cmd("c1", "node-7", "never-provisioned", kind, "", 1))
+		rep, retry, _ := d.execute(cmd("c1", "node-7", "never-provisioned", kind, "", 1))
 		if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 			t.Fatalf("%s on unknown instance: status=%q reported=%q, want failed/failed", kind, rep.Status, rep.ReportedStatus)
 		}
@@ -157,7 +167,7 @@ func TestDispatchForeignNodeIDRejected(t *testing.T) {
 
 	// A command whose runtime_ref names a different node is rejected without touching
 	// the tracker, even for provision.
-	rep, _ := d.execute(cmd("c1", "node-99", "agent-1", kindProvision, `{"model":"opus"}`, 1))
+	rep, _, _ := d.execute(cmd("c1", "node-99", "agent-1", kindProvision, `{"model":"opus"}`, 1))
 	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 		t.Fatalf("foreign node: status=%q reported=%q, want failed/failed", rep.Status, rep.ReportedStatus)
 	}
@@ -176,9 +186,198 @@ type spyTracker struct {
 	provisionCalls int
 }
 
-func (s *spyTracker) Provision(instanceID string, spec json.RawMessage) (*runtime.Instance, bool, error) {
+func (s *spyTracker) Provision(instanceID string, generation int64, spec json.RawMessage) (*runtime.Instance, bool, error) {
 	s.provisionCalls++
-	return s.Tracker.Provision(instanceID, spec)
+	return s.Tracker.Provision(instanceID, generation, spec)
+}
+
+// fenceSpyTracker records a call count for every mutator method (not just
+// Provision), embedding a real tracker so every other read stays faithful. It
+// exists to prove a fenced command never reaches ANY tracker mutator, not just
+// that it produces no report.
+type fenceSpyTracker struct {
+	*runtime.Tracker
+	provisionCalls int
+	startCalls     int
+	stopCalls      int
+	hibernateCalls int
+	destroyCalls   int
+}
+
+func (s *fenceSpyTracker) Provision(instanceID string, generation int64, spec json.RawMessage) (*runtime.Instance, bool, error) {
+	s.provisionCalls++
+	return s.Tracker.Provision(instanceID, generation, spec)
+}
+
+func (s *fenceSpyTracker) Start(runtimeRef string) (*runtime.Instance, error) {
+	s.startCalls++
+	return s.Tracker.Start(runtimeRef)
+}
+
+func (s *fenceSpyTracker) Stop(runtimeRef string) (*runtime.Instance, error) {
+	s.stopCalls++
+	return s.Tracker.Stop(runtimeRef)
+}
+
+func (s *fenceSpyTracker) Hibernate(runtimeRef string) (*runtime.Instance, error) {
+	s.hibernateCalls++
+	return s.Tracker.Hibernate(runtimeRef)
+}
+
+func (s *fenceSpyTracker) Destroy(runtimeRef string) (*runtime.Instance, error) {
+	s.destroyCalls++
+	return s.Tracker.Destroy(runtimeRef)
+}
+
+func (s *fenceSpyTracker) totalMutatorCalls() int {
+	return s.provisionCalls + s.startCalls + s.stopCalls + s.hibernateCalls + s.destroyCalls
+}
+
+// TestDispatchFenceDropsStaleCommandForEveryKind pins task 4's central acceptance
+// check: a command whose instance_generation is strictly OLDER than the
+// generation this node tracks for its instance_id is dropped for every command
+// kind — no report is sent (rep is the zero value), fenced=true, retry=false,
+// the tracker mutator is never called (proved via the spy, not just "no
+// report"), and the drop is logged at INFO, never ERROR.
+func TestDispatchFenceDropsStaleCommandForEveryKind(t *testing.T) {
+	cases := []struct {
+		kind    string
+		payload string
+	}{
+		{kindStart, ""},
+		{kindStop, ""},
+		{kindHibernate, ""},
+		{kindDestroy, ""},
+		{kindProvision, `{"model":"opus"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.kind, func(t *testing.T) {
+			tr := runtime.NewTracker(0)
+			// Seed a tracked baseline of generation 5 directly on the raw tracker (not
+			// through the spy), so the spy's call counts below reflect only the
+			// command under test.
+			if _, _, err := tr.Provision("agent-1", 5, nil); err != nil {
+				t.Fatalf("seed provision: %v", err)
+			}
+			var logBuf strings.Builder
+			logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+			spy := &fenceSpyTracker{Tracker: tr}
+			d := &dispatcher{tracker: spy, nodeID: "node-7", logger: logger}
+
+			// instance_generation 3 is strictly older than the tracked 5: stale.
+			cmd := cmdGen("c1", "node-7", "agent-1", c.kind, c.payload, 1, 3)
+			rep, retry, fenced := d.execute(cmd)
+
+			if !fenced {
+				t.Fatalf("%s: fenced=false, want true (instance_generation 3 < tracked 5)", c.kind)
+			}
+			if retry {
+				t.Fatalf("%s: retry=true, want false for a fenced command", c.kind)
+			}
+			if rep.CommandID != "" || rep.Status != "" || rep.ReportedStatus != "" || rep.ClaimGeneration != 0 || rep.Result != nil {
+				t.Fatalf("%s: rep=%+v, want the zero report (no report sent for a fenced command)", c.kind, rep)
+			}
+			if n := spy.totalMutatorCalls(); n != 0 {
+				t.Fatalf("%s: tracker mutator called %d times, want 0 (the fence must run before any dispatch)", c.kind, n)
+			}
+			logs := logBuf.String()
+			if !strings.Contains(logs, "level=INFO") || !strings.Contains(logs, "fenced") {
+				t.Fatalf("%s: fence drop not logged at INFO naming \"fenced\":\n%s", c.kind, logs)
+			}
+			if strings.Contains(logs, "level=ERROR") {
+				t.Fatalf("%s: a fenced command must not log at ERROR:\n%s", c.kind, logs)
+			}
+		})
+	}
+}
+
+// TestDispatchFenceAllowsCommandAtOrAboveTrackedGeneration pins the "strictly
+// older only" rule: a command whose instance_generation equals or exceeds the
+// tracked generation is never fenced and proceeds to dispatch normally.
+func TestDispatchFenceAllowsCommandAtOrAboveTrackedGeneration(t *testing.T) {
+	for _, gen := range []int64{5, 9} {
+		t.Run(fmt.Sprintf("instance_generation=%d", gen), func(t *testing.T) {
+			tr := runtime.NewTracker(0)
+			if _, _, err := tr.Provision("agent-1", 5, nil); err != nil {
+				t.Fatalf("seed provision: %v", err)
+			}
+			d := &dispatcher{tracker: tr, nodeID: "node-7", logger: discardLogger()}
+
+			cmd := cmdGen("c1", "node-7", "agent-1", kindStop, "", 1, gen)
+			rep, _, fenced := d.execute(cmd)
+			if fenced {
+				t.Fatalf("instance_generation=%d: fenced=true, want false (not older than tracked 5)", gen)
+			}
+			if rep.Status != statusDone {
+				t.Fatalf("instance_generation=%d: status=%q, want done (the stop must proceed)", gen, rep.Status)
+			}
+		})
+	}
+}
+
+// TestDispatchFenceIgnoresZeroInstanceGeneration pins the old-control-plane
+// compatibility rule: instance_generation 0 is the "unset" sentinel and is never
+// fenced, even when the tracker already holds a higher tracked generation.
+func TestDispatchFenceIgnoresZeroInstanceGeneration(t *testing.T) {
+	tr := runtime.NewTracker(0)
+	if _, _, err := tr.Provision("agent-1", 5, nil); err != nil {
+		t.Fatalf("seed provision: %v", err)
+	}
+	d := &dispatcher{tracker: tr, nodeID: "node-7", logger: discardLogger()}
+
+	cmd := cmdGen("c1", "node-7", "agent-1", kindStop, "", 1, 0)
+	rep, _, fenced := d.execute(cmd)
+	if fenced {
+		t.Fatal("instance_generation=0 must never be fenced (old-control-plane compatibility)")
+	}
+	if rep.Status != statusDone {
+		t.Fatalf("status=%q, want done", rep.Status)
+	}
+}
+
+// TestDispatchFenceNeverSeenInstanceNotFenced pins the first-seen bootstrap: an
+// instance_id the tracker has never seen has no baseline to compare against, so
+// the fence does not trigger regardless of the carried instance_generation.
+func TestDispatchFenceNeverSeenInstanceNotFenced(t *testing.T) {
+	d, _ := newDispatcher(t)
+
+	cmd := cmdGen("c1", "node-7", "never-provisioned", kindDestroy, "", 1, 99)
+	rep, _, fenced := d.execute(cmd)
+	if fenced {
+		t.Fatal("a never-seen instance_id must not be fenced (first-seen bootstrap)")
+	}
+	// destroy on a never-seen instance is the existing idempotent "already gone"
+	// outcome, unaffected by the fence.
+	if rep.Status != statusDone || rep.ReportedStatus != "stopped" {
+		t.Fatalf("status=%q reported=%q, want done/stopped (idempotent destroy)", rep.Status, rep.ReportedStatus)
+	}
+}
+
+// TestDispatchProvisionAdoptsGeneration pins the provision-adoption rule: a
+// provision command's instance_generation becomes the new tracked baseline, so a
+// subsequent command carrying an older generation is fenced.
+func TestDispatchProvisionAdoptsGeneration(t *testing.T) {
+	d, tr := newDispatcher(t)
+
+	first := cmdGen("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1, 7)
+	rep, _, fenced := d.execute(first)
+	if fenced {
+		t.Fatal("a first provision must never be fenced")
+	}
+	if rep.Status != statusDone {
+		t.Fatalf("provision status=%q, want done", rep.Status)
+	}
+	gen, ok := tr.GenerationForInstance("agent-1")
+	if !ok || gen != 7 {
+		t.Fatalf("GenerationForInstance = (%d,%v), want (7,true) after provision adopts the carried generation", gen, ok)
+	}
+
+	// A later command carrying a generation older than the adopted 7 is now fenced.
+	stale := cmdGen("c2", "node-7", "agent-1", kindStop, "", 2, 3)
+	_, _, staleFenced := d.execute(stale)
+	if !staleFenced {
+		t.Fatal("a command older than the adopted generation must be fenced")
+	}
 }
 
 func TestDispatchNonObjectPayloadRejectedBeforeProvision(t *testing.T) {
@@ -186,7 +385,7 @@ func TestDispatchNonObjectPayloadRejectedBeforeProvision(t *testing.T) {
 		spy := &spyTracker{Tracker: runtime.NewTracker(0)}
 		d := &dispatcher{tracker: spy, nodeID: "node-7", logger: discardLogger()}
 
-		rep, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, payload, 1))
+		rep, _, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, payload, 1))
 		if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 			t.Fatalf("payload %s: status=%q reported=%q, want failed/failed", payload, rep.Status, rep.ReportedStatus)
 		}
@@ -204,7 +403,7 @@ func TestDispatchNullAndAbsentPayloadProvisionSucceeds(t *testing.T) {
 	// treats an explicit null / absent spec — they must provision, not be rejected.
 	for _, payload := range []string{`null`, ``} {
 		d, tr := newDispatcher(t)
-		rep, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, payload, 1))
+		rep, _, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, payload, 1))
 		if rep.Status != statusDone || rep.ReportedStatus != "provisioning" {
 			t.Fatalf("payload %q: status=%q reported=%q, want done/provisioning", payload, rep.Status, rep.ReportedStatus)
 		}
@@ -216,7 +415,7 @@ func TestDispatchNullAndAbsentPayloadProvisionSucceeds(t *testing.T) {
 
 func TestDispatchUnknownKindReportsFailed(t *testing.T) {
 	d, _ := newDispatcher(t)
-	rep, _ := d.execute(cmd("c1", "node-7", "agent-1", "teleport", "", 1))
+	rep, _, _ := d.execute(cmd("c1", "node-7", "agent-1", "teleport", "", 1))
 	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 		t.Fatalf("unknown kind: status=%q reported=%q, want failed/failed", rep.Status, rep.ReportedStatus)
 	}
@@ -225,7 +424,7 @@ func TestDispatchUnknownKindReportsFailed(t *testing.T) {
 func TestDispatchUnparseableRefReportsFailed(t *testing.T) {
 	d := &dispatcher{tracker: runtime.NewTracker(0), nodeID: "node-7", logger: discardLogger()}
 	c := command{CommandID: "c1", RuntimeRef: "not-an-uplink-ref", Kind: kindStart, ClaimGeneration: 1}
-	rep, _ := d.execute(c)
+	rep, _, _ := d.execute(c)
 	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 		t.Fatalf("unparseable ref: status=%q reported=%q, want failed/failed", rep.Status, rep.ReportedStatus)
 	}
@@ -233,12 +432,12 @@ func TestDispatchUnparseableRefReportsFailed(t *testing.T) {
 
 func TestDispatchProvisionAtCapacityReportsFailed(t *testing.T) {
 	tr := runtime.NewTracker(1)
-	if _, _, err := tr.Provision("first", nil); err != nil {
+	if _, _, err := tr.Provision("first", 0, nil); err != nil {
 		t.Fatalf("seed provision: %v", err)
 	}
 	d := &dispatcher{tracker: tr, nodeID: "node-7", logger: discardLogger()}
 
-	rep, _ := d.execute(cmd("c1", "node-7", "second", kindProvision, `{}`, 1))
+	rep, _, _ := d.execute(cmd("c1", "node-7", "second", kindProvision, `{}`, 1))
 	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 		t.Fatalf("provision at capacity: status=%q reported=%q, want failed/failed", rep.Status, rep.ReportedStatus)
 	}
@@ -252,32 +451,32 @@ func TestDispatchRetrySignal(t *testing.T) {
 	d, tr := newDispatcher(t)
 
 	// start on an unknown instance: retryable (a sibling provision may create it).
-	if _, retry := d.execute(cmd("c1", "node-7", "agent-1", kindStart, "", 1)); !retry {
+	if _, retry, _ := d.execute(cmd("c1", "node-7", "agent-1", kindStart, "", 1)); !retry {
 		t.Fatal("start on an unknown instance must signal retry=true")
 	}
 
 	// Once provisioned, the same start resolves and is terminal.
-	if _, _, err := tr.Provision("agent-1", nil); err != nil {
+	if _, _, err := tr.Provision("agent-1", 0, nil); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if _, retry := d.execute(cmd("c2", "node-7", "agent-1", kindStart, "", 2)); retry {
+	if _, retry, _ := d.execute(cmd("c2", "node-7", "agent-1", kindStart, "", 2)); retry {
 		t.Fatal("start on a known instance must signal retry=false")
 	}
 
 	// stop/hibernate on an unknown instance are terminal immediately — only start
 	// gets the deferred retry.
-	if _, retry := d.execute(cmd("c5", "node-7", "never-provisioned", kindStop, "", 5)); retry {
+	if _, retry, _ := d.execute(cmd("c5", "node-7", "never-provisioned", kindStop, "", 5)); retry {
 		t.Fatal("stop on an unknown instance must signal retry=false")
 	}
-	if _, retry := d.execute(cmd("c6", "node-7", "never-provisioned", kindHibernate, "", 6)); retry {
+	if _, retry, _ := d.execute(cmd("c6", "node-7", "never-provisioned", kindHibernate, "", 6)); retry {
 		t.Fatal("hibernate on an unknown instance must signal retry=false")
 	}
 
 	// provision and destroy never depend on a sibling command, so never retry.
-	if _, retry := d.execute(cmd("c3", "node-7", "agent-2", kindProvision, `{}`, 3)); retry {
+	if _, retry, _ := d.execute(cmd("c3", "node-7", "agent-2", kindProvision, `{}`, 3)); retry {
 		t.Fatal("provision must never signal retry")
 	}
-	if _, retry := d.execute(cmd("c4", "node-7", "ghost", kindDestroy, "", 4)); retry {
+	if _, retry, _ := d.execute(cmd("c4", "node-7", "ghost", kindDestroy, "", 4)); retry {
 		t.Fatal("destroy must never signal retry")
 	}
 }

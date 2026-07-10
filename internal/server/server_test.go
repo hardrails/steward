@@ -92,6 +92,12 @@ func TestProvisionHappyPathAndSpecRoundTrip(t *testing.T) {
 	if string(inst.Spec) != spec {
 		t.Fatalf("spec = %s, want verbatim %s", inst.Spec, spec)
 	}
+	// The direct-REST path has no instance_generation concept: it always passes 0
+	// to Tracker.Provision (task 3), so a REST-provisioned instance reports
+	// generation 0.
+	if inst.Generation != 0 {
+		t.Fatalf("generation = %d, want 0 (the REST path is unfenced)", inst.Generation)
+	}
 
 	// Status round-trip: GET returns the same spec unchanged.
 	get := do(h, http.MethodGet, "/v1/instances/"+inst.RuntimeRef, "")

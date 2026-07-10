@@ -42,11 +42,18 @@ var ErrNotFound = errors.New("unknown runtime_ref")
 var ErrCapacityExceeded = errors.New("instance capacity exceeded")
 
 // Instance is a tracked agent instance. Spec is opaque config, round-tripped
-// verbatim; the tracker never parses or validates its contents.
+// verbatim; the tracker never parses or validates its contents. Generation is
+// the fencing token of the lineage this instance belongs to: a fresh Provision
+// sets it, a re-provision only ever raises it (never lowers), and the uplink
+// dispatcher fences a stale command whose carried generation is older than the
+// one tracked here. Its zero value ("no lineage baseline / no fencing") is a
+// safe default, so it is omitempty and needs no state-file format-version bump
+// (see docs/instance-generation-fencing.md).
 type Instance struct {
 	InstanceID string          `json:"instance_id"`
 	RuntimeRef string          `json:"runtime_ref"`
 	Status     Status          `json:"status"`
+	Generation int64           `json:"generation,omitempty"`
 	Spec       json.RawMessage `json:"spec,omitempty"`
 }
 
@@ -99,7 +106,17 @@ func newTracker(maxInstances int, stateFile string) *Tracker {
 // ErrCapacityExceeded when a *new* instance would push the tracker past its
 // configured maximum; re-provisioning an already-tracked instance never fails on
 // capacity because it does not grow the map.
-func (t *Tracker) Provision(instanceID string, spec json.RawMessage) (inst *Instance, created bool, err error) {
+//
+// generation is the fencing token of the lineage this provision belongs to: a
+// new instance adopts it as its baseline; an already-tracked instance's
+// generation is raised to max(existing, generation) — it is never lowered,
+// regardless of caller — and the adoption happens atomically with the rest of
+// this call, under the same lock, so no lifecycle command can observe a
+// not-yet-adopted generation on a freshly (re-)provisioned instance. Passing 0
+// is the coherent "no fencing" value: it never lowers an existing generation and
+// a brand-new instance simply starts unfenced (today's REST-handler behavior;
+// see docs/instance-generation-fencing.md).
+func (t *Tracker) Provision(instanceID string, generation int64, spec json.RawMessage) (inst *Instance, created bool, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -109,6 +126,14 @@ func (t *Tracker) Provision(instanceID string, spec json.RawMessage) (inst *Inst
 		// edit that breaks the invariant re-provisions cleanly instead of
 		// panicking on a nil clone.
 		if existing, ok := t.byRef[ref]; ok {
+			if generation > existing.Generation {
+				prevGeneration := existing.Generation
+				existing.Generation = generation
+				if err := t.persistLocked(); err != nil {
+					existing.Generation = prevGeneration // roll back to the last durable generation
+					return nil, false, err
+				}
+			}
 			return existing.clone(), false, nil
 		}
 		delete(t.byID, instanceID)
@@ -122,6 +147,7 @@ func (t *Tracker) Provision(instanceID string, spec json.RawMessage) (inst *Inst
 		InstanceID: instanceID,
 		RuntimeRef: newRuntimeRef(),
 		Status:     StatusPending,
+		Generation: generation,
 		Spec:       append(json.RawMessage(nil), spec...),
 	}
 	t.byRef[stored.RuntimeRef] = stored
@@ -225,6 +251,28 @@ func (t *Tracker) RefForInstance(instanceID string) (runtimeRef string, ok bool)
 	defer t.mu.Unlock()
 	ref, ok := t.byID[instanceID]
 	return ref, ok
+}
+
+// GenerationForInstance returns the generation currently tracked for
+// instanceID, or (0, false) when no live instance has that instance_id. It is a
+// locked read of the existing byID/byRef indexes and runs no lifecycle logic:
+// it exists so the uplink dispatcher can fence a stale command before dispatch,
+// the sibling of RefForInstance for the fence-check path (see
+// docs/instance-generation-fencing.md).
+func (t *Tracker) GenerationForInstance(instanceID string) (generation int64, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	ref, ok := t.byID[instanceID]
+	if !ok {
+		return 0, false
+	}
+	inst, ok := t.byRef[ref]
+	if !ok {
+		// Defensive: same invariant guard as Provision — byID/byRef are only ever
+		// mutated together under this mutex.
+		return 0, false
+	}
+	return inst.Generation, true
 }
 
 func (t *Tracker) transition(runtimeRef string, status Status) (*Instance, error) {
