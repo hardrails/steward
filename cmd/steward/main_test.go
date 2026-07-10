@@ -947,6 +947,8 @@ func TestCheckConfigInvalidMatchesRealStartup(t *testing.T) {
 		{"missing credential file", []string{"-uplink-url", "http://control-plane.example", "-uplink-credential-file", missingCred}, []string{missingCred}},
 		{"uplink url without credential file", []string{"-uplink-url", "http://control-plane.example"}, []string{"-uplink-credential-file"}},
 		{"corrupt state file", []string{"-state-file", corruptState}, []string{corruptState}},
+		{"malformed addr", []string{"-addr", "0.0.0.0.8080"}, []string{"0.0.0.0.8080"}},
+		{"addr port out of range", []string{"-addr", "127.0.0.1:99999"}, []string{"127.0.0.1:99999", "99999"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -958,6 +960,26 @@ func TestCheckConfigInvalidMatchesRealStartup(t *testing.T) {
 			assertFailsWith(t, exec.Command(bin, checkArgs...), tc.want...)
 		})
 	}
+}
+
+// TestCheckConfigIgnoresAddrWhenInboundDisabled pins the guard on the new -addr
+// validation: an uplink-only node (-disable-inbound-listener) never binds -addr, so
+// a garbage -addr there must not fail a config that would otherwise be valid — the
+// unconditional check would be a false positive for exactly the deployment shape
+// -disable-inbound-listener exists for.
+func TestCheckConfigIgnoresAddrWhenInboundDisabled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+	cred := writeValidCredentialFile(t)
+
+	assertExitsZero(t, exec.Command(bin, "-check-config",
+		"-addr", "garbage",
+		"-disable-inbound-listener",
+		"-uplink-url", "http://127.0.0.1:1",
+		"-uplink-credential-file", cred,
+	), "configuration valid")
 }
 
 // TestConfigFileValueApplied pins task 2's read-and-apply: a valid JSON config is

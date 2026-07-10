@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -324,6 +325,26 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 		logger.Error("inbound listener disabled but no uplink configured",
 			"hint", "a node with neither an inbound listener nor an outbound uplink is unreachable; set -uplink-url (or STEWARD_UPLINK_URL) to poll a control plane, or drop -disable-inbound-listener to serve the inbound REST API")
 		return logger, nil, nil, errors.New("inbound listener disabled but no uplink configured")
+	}
+
+	// -addr is only exercised by ListenAndServe on the real startup path, which a
+	// dry run deliberately never reaches — so without this check, -check-config
+	// would bless an unservable addr (a missing-port typo, an out-of-range port) as
+	// "configuration valid". Validate syntax without binding: guarded by
+	// !disableInbound, since addr is unused on an uplink-only node and a garbage
+	// value there must not fail a config that never binds it.
+	if !cfg.disableInbound {
+		_, port, err := net.SplitHostPort(cfg.addr)
+		if err != nil {
+			logger.Error("invalid -addr", "value", cfg.addr, "err", err,
+				"hint", "-addr (or STEWARD_ADDR) must be host:port, e.g. \"127.0.0.1:8080\" or \":8080\"")
+			return logger, nil, nil, fmt.Errorf("invalid -addr %q: %w", cfg.addr, err)
+		}
+		if n, convErr := strconv.Atoi(port); convErr == nil && (n < 0 || n > 65535) {
+			logger.Error("invalid -addr port", "value", cfg.addr, "port", n,
+				"hint", "-addr's port must be 0-65535")
+			return logger, nil, nil, fmt.Errorf("invalid -addr %q: port %d out of range", cfg.addr, n)
+		}
 	}
 
 	// LoadTracker restores any existing state (validating the file) before the server
