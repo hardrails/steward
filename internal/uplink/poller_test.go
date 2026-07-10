@@ -296,6 +296,152 @@ func TestJitterStaysWithinBounds(t *testing.T) {
 	}
 }
 
+// TestExecuteBatchReplaceDestroyThenProvision is the regression test for the
+// "batch reordering inverts replace" review finding: a poll carrying
+// destroy(agent-1) then provision(agent-1) (the control plane replacing an
+// instance) must run in the server's order and end with agent-1 EXISTING. The old
+// "provisions first" reordering ran provision (an idempotent no-op) then destroy,
+// leaving agent-1 gone.
+func TestExecuteBatchReplaceDestroyThenProvision(t *testing.T) {
+	tr := runtime.NewTracker(0)
+	if _, _, err := tr.Provision("agent-1", nil); err != nil {
+		t.Fatalf("seed the instance being replaced: %v", err)
+	}
+	p, sink := batchPoller(t, tr)
+
+	p.executeBatch(context.Background(), []command{
+		cmd("c-destroy", "node-7", "agent-1", kindDestroy, "", 1),
+		cmd("c-provision", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 2),
+	})
+
+	if _, ok := tr.RefForInstance("agent-1"); !ok {
+		t.Fatal("after a destroy-then-provision replace, agent-1 must exist (the replace succeeded)")
+	}
+	if rep, ok := sink.byID("c-destroy"); !ok || rep.Status != statusDone {
+		t.Fatalf("destroy report = %+v (found=%v), want done", rep, ok)
+	}
+	if rep, ok := sink.byID("c-provision"); !ok || rep.Status != statusDone || rep.ReportedStatus != "provisioning" {
+		t.Fatalf("provision report = %+v (found=%v), want done/provisioning", rep, ok)
+	}
+	if n := sink.count(); n != 2 {
+		t.Fatalf("got %d reports, want 2 (destroy + provision, each once)", n)
+	}
+}
+
+// TestExecuteBatchStartBeforeProvisionRetries proves the retry pass still closes
+// the original out-of-order concern the blanket reordering was meant to solve: a
+// poll carrying start(agent-1) BEFORE its own provision ends with agent-1 RUNNING —
+// the start is deferred on the first pass and retried after the provision runs.
+func TestExecuteBatchStartBeforeProvisionRetries(t *testing.T) {
+	tr := runtime.NewTracker(0)
+	p, sink := batchPoller(t, tr)
+
+	p.executeBatch(context.Background(), []command{
+		cmd("c-start", "node-7", "agent-1", kindStart, "", 1),
+		cmd("c-provision", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 2),
+	})
+
+	ref, ok := tr.RefForInstance("agent-1")
+	if !ok {
+		t.Fatal("agent-1 must exist after its provision ran")
+	}
+	inst, err := tr.Status(ref)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if inst.Status != runtime.StatusRunning {
+		t.Fatalf("agent-1 status = %v, want RUNNING (the deferred start retried after the provision)", inst.Status)
+	}
+	if rep, ok := sink.byID("c-start"); !ok || rep.Status != statusDone || rep.ReportedStatus != "running" {
+		t.Fatalf("start report = %+v (found=%v), want done/running", rep, ok)
+	}
+	if rep, ok := sink.byID("c-provision"); !ok || rep.Status != statusDone {
+		t.Fatalf("provision report = %+v (found=%v), want done", rep, ok)
+	}
+	if n := sink.count(); n != 2 {
+		t.Fatalf("got %d reports, want 2 (start reported once, after its retry)", n)
+	}
+}
+
+// TestExecuteBatchStartNeverProvisionedReportsFailedOnce proves the retry pass is
+// bounded: a start whose instance is never provisioned anywhere in the batch is
+// deferred once, retried once, and then reported failed for real — exactly one
+// report, never an infinite loop.
+func TestExecuteBatchStartNeverProvisionedReportsFailedOnce(t *testing.T) {
+	tr := runtime.NewTracker(0)
+	p, sink := batchPoller(t, tr)
+
+	p.executeBatch(context.Background(), []command{
+		cmd("c-start", "node-7", "agent-1", kindStart, "", 1),
+	})
+
+	if _, ok := tr.RefForInstance("agent-1"); ok {
+		t.Fatal("agent-1 must not exist; it was never provisioned")
+	}
+	rep, ok := sink.byID("c-start")
+	if !ok {
+		t.Fatal("the start must be reported (failed) after the bounded retry pass")
+	}
+	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
+		t.Fatalf("start report = %+v, want failed/failed", rep)
+	}
+	if n := sink.count(); n != 1 {
+		t.Fatalf("got %d reports, want exactly 1 (bounded: reported failed once, not looped)", n)
+	}
+}
+
+// reportSink captures the reports an executeBatch run POSTs so a test can assert
+// each command's terminal outcome by command_id. It is concurrency-safe because
+// the httptest handler records from a server goroutine.
+type reportSink struct {
+	mu   sync.Mutex
+	reps []report
+}
+
+func (s *reportSink) add(r report) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reps = append(s.reps, r)
+}
+
+func (s *reportSink) byID(id string) (report, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.reps {
+		if r.CommandID == id {
+			return r, true
+		}
+	}
+	return report{}, false
+}
+
+func (s *reportSink) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.reps)
+}
+
+// batchPoller builds a Poller whose /uplink/report endpoint records every report
+// into the returned sink, so a test can drive p.executeBatch directly and assert
+// the per-command outcomes. The /uplink/poll endpoint is unused by executeBatch.
+func batchPoller(t *testing.T, tr Tracker) (*Poller, *reportSink) {
+	t.Helper()
+	sink := &reportSink{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /uplink/report", func(w http.ResponseWriter, r *http.Request) {
+		var rep report
+		if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+			t.Errorf("decode report: %v", err)
+		}
+		sink.add(rep)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"applied":true}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return mustPoller(t, tr, Config{BaseURL: srv.URL, Credential: "tok", NodeID: "node-7", PollInterval: time.Second}), sink
+}
+
 // mustPoller builds a Poller with a discard logger unless cfg supplies one.
 func mustPoller(t *testing.T, tr Tracker, cfg Config) *Poller {
 	t.Helper()

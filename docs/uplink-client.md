@@ -236,11 +236,37 @@ For `start` / `stop` / `hibernate`, `ErrNotFound` **is** a genuine failure (you
 cannot start an instance the node has never provisioned) → report `failed`; the
 control plane reconciles and re-drives.
 
-**Batch ordering.** A single poll can return both a `provision` and a `start` for
-the same instance. The client processes `provision` commands first within a batch,
-so a start does not spuriously hit `ErrNotFound` ahead of its own provision. This is
-a cheap ordering step, not a dependency graph; anything it misses still self-heals
-via redelivery.
+**Batch ordering.** A single poll can return several commands for the same
+instance, and the server's claim query
+(`node_uplink._orm.claim_pending_commands`) has **no `ORDER BY`** — so the batch
+order is whatever the database returned and is **not** guaranteed to be causal or
+chronological. The client therefore processes a batch in the **server's own
+returned order, reordering nothing**, then makes exactly **one bounded retry
+pass**: any `start` / `stop` / `hibernate` that fails only because its instance is
+not yet known (the `RefForInstance` miss) is deferred, not reported failed; after
+the first pass runs to completion, each deferred command is retried exactly once
+(a sibling `provision` earlier *or later* in the same batch has now had its chance
+to run); a command still naming an unknown instance then reports `failed` for real.
+This is bounded (one retry pass, never an unbounded loop), needs no server-side
+wire change, and — because `destroy` is already idempotent on a missing instance
+and `provision` depends on no sibling — only the three lifecycle transitions ever
+defer.
+
+> **Retraction (closed review finding).** An earlier version of this design moved
+> every `provision` to the front of the batch ("provisions always first"),
+> reasoning that a `start` should not hit an unknown instance ahead of its own
+> provision. A hosted review found that blanket reordering **inverts a REPLACE**:
+> when a single poll carries `destroy(x)` then `provision(x)` (the control plane
+> replacing an instance), hoisting the provision ahead of the destroy runs
+> `provision` (an idempotent no-op — `x` still exists) and *then* `destroy`, ending
+> with `x` **gone** instead of recreated. The corrected approach above reorders
+> nothing, so the `destroy → provision` replace runs in the intended order, while
+> the one retry pass still closes the original `start`-before-its-own-provision
+> case. A wire-level ordering guarantee — an epoch/generation or a causal sequence
+> on `runtime_ref` — is the sound long-term fix and is tracked as a cross-repo
+> follow-up in the `node_uplink` primitive (the same primitive that owns the
+> [deferred `instance_id`-reuse race](#deliberately-deferred)), not built in this
+> client-only change.
 
 ### Reporting a result
 

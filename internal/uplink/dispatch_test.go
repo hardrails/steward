@@ -57,7 +57,7 @@ func TestDispatchProvisionThenLifecycleReportedStatuses(t *testing.T) {
 	d, tr := newDispatcher(t)
 
 	// provision -> provisioning (PENDING), and the tracker actually holds it.
-	rep := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1))
+	rep, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1))
 	if rep.Status != statusDone || rep.ReportedStatus != "provisioning" {
 		t.Fatalf("provision: status=%q reported=%q, want done/provisioning", rep.Status, rep.ReportedStatus)
 	}
@@ -77,14 +77,14 @@ func TestDispatchProvisionThenLifecycleReportedStatuses(t *testing.T) {
 		{kindHibernate, "hibernated"},
 	}
 	for _, c := range cases {
-		rep := d.execute(cmd("c-"+c.kind, "node-7", "agent-1", c.kind, "", 2))
+		rep, _ := d.execute(cmd("c-"+c.kind, "node-7", "agent-1", c.kind, "", 2))
 		if rep.Status != statusDone || rep.ReportedStatus != c.want {
 			t.Fatalf("%s: status=%q reported=%q, want done/%s", c.kind, rep.Status, rep.ReportedStatus, c.want)
 		}
 	}
 
 	// destroy -> done/stopped, and the instance is gone.
-	rep = d.execute(cmd("c-destroy", "node-7", "agent-1", kindDestroy, "", 3))
+	rep, _ = d.execute(cmd("c-destroy", "node-7", "agent-1", kindDestroy, "", 3))
 	if rep.Status != statusDone || rep.ReportedStatus != "stopped" {
 		t.Fatalf("destroy: status=%q reported=%q, want done/stopped", rep.Status, rep.ReportedStatus)
 	}
@@ -98,7 +98,7 @@ func TestDispatchRedeliveredDestroyReportsDone(t *testing.T) {
 
 	// The instance was never provisioned on this node (a redelivered destroy after a
 	// lost report, whose instance is already gone): destroy's goal is already met.
-	rep := d.execute(cmd("c1", "node-7", "ghost", kindDestroy, "", 5))
+	rep, _ := d.execute(cmd("c1", "node-7", "ghost", kindDestroy, "", 5))
 	if rep.Status != statusDone || rep.ReportedStatus != "stopped" {
 		t.Fatalf("redelivered destroy: status=%q reported=%q, want done/stopped", rep.Status, rep.ReportedStatus)
 	}
@@ -107,7 +107,7 @@ func TestDispatchRedeliveredDestroyReportsDone(t *testing.T) {
 	}
 
 	// A second identical delivery is still done — idempotent.
-	rep = d.execute(cmd("c1", "node-7", "ghost", kindDestroy, "", 6))
+	rep, _ = d.execute(cmd("c1", "node-7", "ghost", kindDestroy, "", 6))
 	if rep.Status != statusDone || rep.ReportedStatus != "stopped" {
 		t.Fatalf("second redelivered destroy: status=%q reported=%q, want done/stopped", rep.Status, rep.ReportedStatus)
 	}
@@ -117,9 +117,12 @@ func TestDispatchStartOnUnknownInstanceReportsFailed(t *testing.T) {
 	d, _ := newDispatcher(t)
 
 	for _, kind := range []string{kindStart, kindStop, kindHibernate} {
-		rep := d.execute(cmd("c1", "node-7", "never-provisioned", kind, "", 1))
+		rep, retry := d.execute(cmd("c1", "node-7", "never-provisioned", kind, "", 1))
 		if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 			t.Fatalf("%s on unknown instance: status=%q reported=%q, want failed/failed", kind, rep.Status, rep.ReportedStatus)
+		}
+		if !retry {
+			t.Fatalf("%s on unknown instance: retry=false, want true (an unknown instance is one bounded retry away from failed)", kind)
 		}
 		if !resultContains(t, rep.Result, "unknown instance") {
 			t.Fatalf("%s on unknown instance: result %s does not name the cause", kind, rep.Result)
@@ -132,7 +135,7 @@ func TestDispatchForeignNodeIDRejected(t *testing.T) {
 
 	// A command whose runtime_ref names a different node is rejected without touching
 	// the tracker, even for provision.
-	rep := d.execute(cmd("c1", "node-99", "agent-1", kindProvision, `{"model":"opus"}`, 1))
+	rep, _ := d.execute(cmd("c1", "node-99", "agent-1", kindProvision, `{"model":"opus"}`, 1))
 	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 		t.Fatalf("foreign node: status=%q reported=%q, want failed/failed", rep.Status, rep.ReportedStatus)
 	}
@@ -161,7 +164,7 @@ func TestDispatchNonObjectPayloadRejectedBeforeProvision(t *testing.T) {
 		spy := &spyTracker{Tracker: runtime.NewTracker(0)}
 		d := &dispatcher{tracker: spy, nodeID: "node-7", logger: discardLogger()}
 
-		rep := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, payload, 1))
+		rep, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, payload, 1))
 		if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 			t.Fatalf("payload %s: status=%q reported=%q, want failed/failed", payload, rep.Status, rep.ReportedStatus)
 		}
@@ -179,7 +182,7 @@ func TestDispatchNullAndAbsentPayloadProvisionSucceeds(t *testing.T) {
 	// treats an explicit null / absent spec — they must provision, not be rejected.
 	for _, payload := range []string{`null`, ``} {
 		d, tr := newDispatcher(t)
-		rep := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, payload, 1))
+		rep, _ := d.execute(cmd("c1", "node-7", "agent-1", kindProvision, payload, 1))
 		if rep.Status != statusDone || rep.ReportedStatus != "provisioning" {
 			t.Fatalf("payload %q: status=%q reported=%q, want done/provisioning", payload, rep.Status, rep.ReportedStatus)
 		}
@@ -191,7 +194,7 @@ func TestDispatchNullAndAbsentPayloadProvisionSucceeds(t *testing.T) {
 
 func TestDispatchUnknownKindReportsFailed(t *testing.T) {
 	d, _ := newDispatcher(t)
-	rep := d.execute(cmd("c1", "node-7", "agent-1", "teleport", "", 1))
+	rep, _ := d.execute(cmd("c1", "node-7", "agent-1", "teleport", "", 1))
 	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 		t.Fatalf("unknown kind: status=%q reported=%q, want failed/failed", rep.Status, rep.ReportedStatus)
 	}
@@ -200,7 +203,7 @@ func TestDispatchUnknownKindReportsFailed(t *testing.T) {
 func TestDispatchUnparseableRefReportsFailed(t *testing.T) {
 	d := &dispatcher{tracker: runtime.NewTracker(0), nodeID: "node-7", logger: discardLogger()}
 	c := command{CommandID: "c1", RuntimeRef: "not-an-uplink-ref", Kind: kindStart, ClaimGeneration: 1}
-	rep := d.execute(c)
+	rep, _ := d.execute(c)
 	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 		t.Fatalf("unparseable ref: status=%q reported=%q, want failed/failed", rep.Status, rep.ReportedStatus)
 	}
@@ -213,28 +216,38 @@ func TestDispatchProvisionAtCapacityReportsFailed(t *testing.T) {
 	}
 	d := &dispatcher{tracker: tr, nodeID: "node-7", logger: discardLogger()}
 
-	rep := d.execute(cmd("c1", "node-7", "second", kindProvision, `{}`, 1))
+	rep, _ := d.execute(cmd("c1", "node-7", "second", kindProvision, `{}`, 1))
 	if rep.Status != statusFailed || rep.ReportedStatus != "failed" {
 		t.Fatalf("provision at capacity: status=%q reported=%q, want failed/failed", rep.Status, rep.ReportedStatus)
 	}
 }
 
-func TestOrderProvisionsFirst(t *testing.T) {
-	in := []command{
-		{CommandID: "start", Kind: kindStart},
-		{CommandID: "provision", Kind: kindProvision},
-		{CommandID: "stop", Kind: kindStop},
-		{CommandID: "provision2", Kind: kindProvision},
+// TestDispatchRetrySignal pins the contract Poller.executeBatch depends on: only a
+// start/stop/hibernate whose instance is not yet known signals retry=true; every
+// other outcome (a resolved lifecycle transition, a provision, a destroy) is
+// terminal (retry=false), so the batch runner never defers work it should report now.
+func TestDispatchRetrySignal(t *testing.T) {
+	d, tr := newDispatcher(t)
+
+	// start on an unknown instance: retryable (a sibling provision may create it).
+	if _, retry := d.execute(cmd("c1", "node-7", "agent-1", kindStart, "", 1)); !retry {
+		t.Fatal("start on an unknown instance must signal retry=true")
 	}
-	got := orderProvisionsFirst(in)
-	wantOrder := []string{"provision", "provision2", "start", "stop"}
-	if len(got) != len(wantOrder) {
-		t.Fatalf("got %d commands, want %d", len(got), len(wantOrder))
+
+	// Once provisioned, the same start resolves and is terminal.
+	if _, _, err := tr.Provision("agent-1", nil); err != nil {
+		t.Fatalf("provision: %v", err)
 	}
-	for i, w := range wantOrder {
-		if got[i].CommandID != w {
-			t.Fatalf("ordered[%d] = %q, want %q", i, got[i].CommandID, w)
-		}
+	if _, retry := d.execute(cmd("c2", "node-7", "agent-1", kindStart, "", 2)); retry {
+		t.Fatal("start on a known instance must signal retry=false")
+	}
+
+	// provision and destroy never depend on a sibling command, so never retry.
+	if _, retry := d.execute(cmd("c3", "node-7", "agent-2", kindProvision, `{}`, 3)); retry {
+		t.Fatal("provision must never signal retry")
+	}
+	if _, retry := d.execute(cmd("c4", "node-7", "ghost", kindDestroy, "", 4)); retry {
+		t.Fatal("destroy must never signal retry")
 	}
 }
 

@@ -120,17 +120,24 @@ type dispatcher struct {
 	logger  *slog.Logger
 }
 
-// execute runs one command against the tracker and returns the report to POST. It
-// always returns a report echoing the command's command_id and claim_generation,
-// even on rejection, so the server can retire the command.
-func (d *dispatcher) execute(cmd command) report {
+// execute runs one command against the tracker and returns the report to POST plus
+// a retry signal. retry is true only when the command is a start/stop/hibernate
+// that failed solely because its instance is not (yet) known to this node: a
+// sibling provision elsewhere in the SAME poll batch may still create it, so the
+// batch runner defers exactly one retry before treating that outcome as terminal
+// (see Poller.executeBatch). Every other outcome — success, a rejected/foreign/
+// unknown command, a provision or destroy result, or a lifecycle failure once the
+// ref resolved — returns retry=false. It always returns a report echoing the
+// command's command_id and claim_generation, even on rejection, so the server can
+// retire the command.
+func (d *dispatcher) execute(cmd command) (report, bool) {
 	rep := report{CommandID: cmd.CommandID, ClaimGeneration: cmd.ClaimGeneration}
 
 	nodeID, instanceID, err := parseRuntimeRef(cmd.RuntimeRef)
 	if err != nil {
 		d.logger.Error("uplink command has an unparseable runtime_ref; reporting failed",
 			"command_id", cmd.CommandID, "runtime_ref", cmd.RuntimeRef, "err", err)
-		return d.fail(rep, "runtime_ref is unparseable")
+		return d.fail(rep, "runtime_ref is unparseable"), false
 	}
 	// The client-side analog of the server adapter's _verify_issued check: the
 	// server should only ever queue commands for this node, so a foreign node_id is
@@ -139,12 +146,12 @@ func (d *dispatcher) execute(cmd command) report {
 	if nodeID != d.nodeID {
 		d.logger.Error("uplink command addressed to a foreign node_id; rejecting",
 			"command_id", cmd.CommandID, "command_node_id", nodeID, "this_node_id", d.nodeID)
-		return d.fail(rep, "runtime_ref is addressed to a different node")
+		return d.fail(rep, "runtime_ref is addressed to a different node"), false
 	}
 
 	switch cmd.Kind {
 	case kindProvision:
-		return d.provision(rep, instanceID, cmd.Payload)
+		return d.provision(rep, instanceID, cmd.Payload), false
 	case kindStart:
 		return d.transition(rep, instanceID, cmd.Kind, d.tracker.Start)
 	case kindStop:
@@ -152,11 +159,11 @@ func (d *dispatcher) execute(cmd command) report {
 	case kindHibernate:
 		return d.transition(rep, instanceID, cmd.Kind, d.tracker.Hibernate)
 	case kindDestroy:
-		return d.destroy(rep, instanceID)
+		return d.destroy(rep, instanceID), false
 	default:
 		d.logger.Error("uplink command has an unknown kind; reporting failed",
 			"command_id", cmd.CommandID, "kind", cmd.Kind)
-		return d.fail(rep, "unknown command kind")
+		return d.fail(rep, "unknown command kind"), false
 	}
 }
 
@@ -186,24 +193,30 @@ func (d *dispatcher) provision(rep report, instanceID string, payload json.RawMe
 }
 
 // transition resolves instanceID to the tracker's runtime_ref and drives one of
-// start/stop/hibernate. An unknown instance is a genuine failure here — you cannot
-// start an instance the node never provisioned — so it reports failed and the
-// control plane reconciles and re-drives. ErrNotFound from the mutator (a destroy
-// racing between resolve and act) is the same failed outcome.
-func (d *dispatcher) transition(rep report, instanceID, kind string, op func(string) (*runtime.Instance, error)) report {
+// start/stop/hibernate. It returns retry=true only for the "unknown instance"
+// miss — instanceID is not in the tracker's index — because a sibling provision
+// elsewhere in the SAME poll batch may still create it; the batch runner defers
+// exactly one retry before this becomes a terminal failure. Once the ref resolves,
+// ErrNotFound from the mutator itself (a destroy racing between resolve and act) is
+// a genuine, non-retryable failure: the instance existed at resolve time and is now
+// deliberately gone, so a retry cannot help. The miss is logged at DEBUG, not
+// ERROR: on the first pass it is an expected, self-correcting condition (the
+// provision has not run yet), and the batch runner logs the real ERROR if the
+// instance is still unknown after the retry pass.
+func (d *dispatcher) transition(rep report, instanceID, kind string, op func(string) (*runtime.Instance, error)) (report, bool) {
 	ref, ok := d.tracker.RefForInstance(instanceID)
 	if !ok {
-		d.logger.Error("uplink command names an instance this node has not provisioned; reporting failed",
+		d.logger.Debug("uplink lifecycle command names an instance not yet known to this node; deferring one retry",
 			"command_id", rep.CommandID, "kind", kind, "instance_id", instanceID)
-		return d.fail(rep, kind+" names an unknown instance")
+		return d.fail(rep, kind+" names an unknown instance"), true
 	}
 	inst, err := op(ref)
 	if err != nil {
 		d.logger.Error("uplink lifecycle transition failed",
 			"command_id", rep.CommandID, "kind", kind, "instance_id", instanceID, "err", err)
-		return d.fail(rep, kind+" failed")
+		return d.fail(rep, kind+" failed"), false
 	}
-	return d.succeed(rep, inst.Status)
+	return d.succeed(rep, inst.Status), false
 }
 
 // destroy drives a destroy idempotently: the command's desired end state is "this
@@ -272,27 +285,6 @@ func errorResult(reason string) json.RawMessage {
 		return emptyResult
 	}
 	return b
-}
-
-// orderProvisionsFirst returns commands with every provision moved ahead of the
-// rest, preserving relative order within each group. A single poll can carry both
-// a provision and a start for the same instance; processing provisions first means
-// a start does not spuriously hit an unknown instance ahead of its own provision.
-// It is a cheap ordering step, not a dependency graph — anything it misses still
-// self-heals via the server's redelivery.
-func orderProvisionsFirst(commands []command) []command {
-	ordered := make([]command, 0, len(commands))
-	for _, c := range commands {
-		if c.Kind == kindProvision {
-			ordered = append(ordered, c)
-		}
-	}
-	for _, c := range commands {
-		if c.Kind != kindProvision {
-			ordered = append(ordered, c)
-		}
-	}
-	return ordered
 }
 
 // parseRuntimeRef is the injective inverse of the control plane's
