@@ -6,6 +6,11 @@ name: Release
 # the artifacts are uploaded to the workflow run only, so the release automation
 # can be dry-fired safely without cutting a release. See docs/releasing.md.
 #
+# Two jobs by design, for least privilege: `build` runs the tagged commit's own
+# code (scripts/release.sh) with a read-only token and can publish nothing;
+# `publish` holds the only contents:write token, checks out no repository code,
+# and does nothing but attach the already-built artifacts to a GitHub Release.
+#
 # The binaries derive their version from Go's VCS build metadata
 # (runtime/debug.ReadBuildInfo -> Main.Version), which resolves to the exact tag
 # when built from a tag checkout with full history — no ldflags injection is used
@@ -13,12 +18,15 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    # Semver-shaped tags only (vX.Y.Z, optionally a -prerelease/+build suffix). A
+    # stray tag like `vnext` or `v2` never enters the release path; the release
+    # contract is vX.Y.Z (see docs/releasing.md).
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
   workflow_dispatch:
 
-# Least privilege by default: the top-level token can only read. The release job
-# elevates to contents:write for itself, so every other job (none today, and any
-# added later) stays read-only.
+# Least privilege by default: the top-level token can only read. Only the publish
+# job elevates to contents:write, so every step that runs repository code stays
+# read-only.
 permissions:
   contents: read
 
@@ -28,11 +36,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: build + checksum + release
+  build:
+    name: build + checksum
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      contents: write # create the GitHub Release and upload its assets (tag push only)
+    # No permissions override: this job inherits the top-level contents:read. It
+    # runs the tagged commit's own code (scripts/release.sh), so it deliberately
+    # holds NO publish-capable token — publishing is the separate job below.
     steps:
       # fetch-depth: 0 pulls full history AND tags so the Go toolchain can resolve
       # the tag pointing at HEAD and stamp it as the module version. A shallow
@@ -51,15 +60,15 @@ jobs:
 
       # Cross-compiles the target matrix, packages each as a .tar.gz, writes
       # checksums.txt, and (on a tag build) asserts the binary self-reports the
-      # tag. All build output lands in dist/.
+      # tag — failing the whole release here if it does not. All output lands in
+      # dist/.
       - name: Build release artifacts
         run: bash scripts/release.sh
 
-      # Always retain the built artifacts on the workflow run. On a workflow_dispatch
-      # dry-run this is the ONLY output (nothing is published), so a maintainer can
-      # download and inspect or run the binaries; on a real release it is a backup
-      # of exactly what was published.
-      - name: Upload artifacts to the workflow run
+      # Hand the built artifacts to the publish job, and retain them on the run.
+      # On a workflow_dispatch dry-run this is the ONLY output (nothing is
+      # published), so a maintainer can download and inspect or run the binaries.
+      - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: steward-dist
@@ -67,10 +76,28 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-      # Publish ONLY on a real tag push. A workflow_dispatch run (any branch) skips
-      # this step entirely, so the dry-run path can never create or mutate a release.
+  publish:
+    name: publish GitHub Release
+    needs: build
+    # Publish ONLY on a real semver tag push. A workflow_dispatch run (any branch)
+    # never reaches this job, so the dry-run path can neither create nor mutate a
+    # release. `needs: build` also means a failed build/version-assertion aborts
+    # the publish.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: write # the ONLY write token in this workflow; used solely to create the Release
+    steps:
+      # No checkout: this job runs no repository code. It only fetches the
+      # artifacts the read-only build job produced and attaches them, keeping the
+      # write-token surface as small as possible.
+      - name: Download built artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: steward-dist
+          path: dist
+
       - name: Create GitHub Release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

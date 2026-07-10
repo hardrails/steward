@@ -34,17 +34,26 @@ That is the whole flow. Everything below is the detail behind it.
 
 ## What the automation does
 
-`.github/workflows/release.yml` triggers on `push` of any `v*` tag. It runs one
-job that:
+`.github/workflows/release.yml` triggers on `push` of a semver-shaped tag
+(`v[0-9]+.[0-9]+.[0-9]+*`, so `vnext` or `v2` never enter the release path). It
+runs **two jobs**, split deliberately for least privilege:
 
-1. checks out the tag with **full history** (`fetch-depth: 0`) so the Go
-   toolchain can stamp the tag as the binary's version (see below);
-2. runs `scripts/release.sh`, which cross-compiles the target matrix, packages
-   each build as a `.tar.gz` (binary + `LICENSE` + `README.md`), writes a
-   `checksums.txt` of SHA-256 sums, and asserts the binary self-reports the tag;
-3. uploads the whole `dist/` directory to the workflow run as an artifact; and
-4. **only on a tag push**, creates a GitHub Release named after the tag with
-   auto-generated notes and attaches the archives and `checksums.txt`.
+1. **`build`** — with a **read-only** token — checks out the tag with **full
+   history** (`fetch-depth: 0`) so the Go toolchain can stamp the tag as the
+   binary's version (see below), then runs `scripts/release.sh`, which
+   cross-compiles the target matrix, packages each build as a `.tar.gz` (binary +
+   `LICENSE` + `README.md`), writes a `checksums.txt` of SHA-256 sums, asserts the
+   binary self-reports the tag, and uploads the whole `dist/` directory as a
+   workflow artifact.
+2. **`publish`** — the only job with a `contents: write` token — runs **only on a
+   tag push**, checks out **no repository code**, downloads the artifacts the
+   build produced, and creates a GitHub Release named after the tag (auto-generated
+   notes, archives, and `checksums.txt` attached).
+
+The split is the point: the job that runs the tagged commit's own code
+(`scripts/release.sh`) never holds a token that can publish, and the job that can
+publish runs nothing but `gh release create` against already-built artifacts. So
+an accidentally-tagged bad commit cannot execute with publish permissions.
 
 ### Target matrix
 
@@ -134,9 +143,9 @@ matrix build instead, for reasons specific to Steward:
   validated end-to-end (all four targets cross-compiled, each self-reporting
   `v0.1.0` from a tagged checkout) before this workflow was committed.
 - **Smaller trusted-action surface.** The workflow pins only `actions/checkout`,
-  `actions/setup-go`, and `actions/upload-artifact` to full commit SHAs — the same
-  supply-chain discipline the rest of CI already uses — and publishes with the
-  built-in `GITHUB_TOKEN` via `gh`, adding no third-party release action.
+  `actions/setup-go`, and `actions/{upload,download}-artifact` to full commit SHAs
+  — the same supply-chain discipline the rest of CI already uses — and publishes
+  with the built-in `GITHUB_TOKEN` via `gh`, adding no third-party release action.
 
 If Steward later grows needs goreleaser serves well — Linux packages (`.deb`/
 `.rpm`), Homebrew taps, Docker manifests, SBOM/signing pipelines — revisit this
