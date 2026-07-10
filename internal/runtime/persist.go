@@ -78,7 +78,7 @@ func (t *Tracker) load() error {
 			return t.corruptErr("an instance is missing instance_id")
 		case inst.RuntimeRef == "":
 			return t.corruptErr(fmt.Sprintf("instance %q is missing runtime_ref", inst.InstanceID))
-		case !inst.Status.valid():
+		case !inst.Status.Valid():
 			return t.corruptErr(fmt.Sprintf("instance %q has unknown status %q", inst.InstanceID, inst.Status))
 		case inst.Generation < 0:
 			return t.corruptErr(fmt.Sprintf("instance %q has a negative generation %d", inst.InstanceID, inst.Generation))
@@ -197,9 +197,12 @@ func saveSnapshot(path string, snap snapshot) (err error) {
 	return nil
 }
 
-// valid reports whether s is one of the known lifecycle statuses. It gates
-// loaded state so a corrupt or hand-edited file cannot inject an unknown status.
-func (s Status) valid() bool {
+// Valid reports whether s is one of the known lifecycle statuses. It gates
+// loaded state so a corrupt or hand-edited file cannot inject an unknown
+// status, and is exported so the HTTP layer can validate a caller-supplied
+// `status` filter value the same way (one definition, not two copies that
+// could drift).
+func (s Status) Valid() bool {
 	switch s {
 	case StatusPending, StatusRunning, StatusStopped, StatusHibernated, StatusDestroyed, StatusFailed:
 		return true

@@ -127,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/instances", s.handleProvision)
 	mux.HandleFunc("GET /v1/instances", s.handleList)
+	mux.HandleFunc("POST /v1/instances/batch", s.handleBatch)
 	mux.HandleFunc("GET /v1/instances/{id}", s.handleStatus)
 	mux.HandleFunc("DELETE /v1/instances/{id}", s.handleDestroy)
 	mux.HandleFunc("POST /v1/instances/{id}/start", s.handleStart)
@@ -172,7 +173,8 @@ type instancesResponse struct {
 // operational state useful to a control-plane dashboard. The change from the v1
 // static {"skills": []} is strictly additive: skills keeps its shape and
 // meaning, and the new fields are appended, so a consumer that only reads skills
-// (or ignores unknown fields) is unaffected.
+// (or ignores unknown fields) is unaffected. See batch.go for the
+// POST /v1/instances/batch request/response types.
 type capabilitiesResponse struct {
 	Skills []any `json:"skills"`
 	// Version is the Steward build/version string.
@@ -254,11 +256,45 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleList enumerates every instance this Steward currently tracks, in the
-// deterministic runtime_ref order Tracker.List guarantees. It is a read-only GET
-// with no request body, so it needs no MaxBytesReader bound. The list is wrapped
-// in an object (see instancesResponse), never returned as a bare array.
-func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, instancesResponse{Instances: s.tracker.List()})
+// deterministic runtime_ref order Tracker.List/ListFiltered guarantees. It is a
+// read-only GET with no request body, so it needs no MaxBytesReader bound. The
+// list is wrapped in an object (see instancesResponse), never returned as a
+// bare array.
+//
+// Three optional query-string filters compose via AND: `status` (an exact
+// match against the Status enum), `instance_id_prefix` (a plain string-prefix
+// match), and `created_since` (an RFC3339 timestamp; matches instances created
+// at or after it). Omitting all three is byte-for-byte the same unfiltered
+// response this endpoint always returned. An unparseable `created_since` or an
+// unknown `status` value is a 400, never a silently-ignored filter and never a
+// 500.
+func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	var filter runtime.ListFilter
+	filter.InstanceIDPrefix = q.Get("instance_id_prefix")
+
+	if raw := q.Get("status"); raw != "" {
+		status := runtime.Status(raw)
+		if !status.Valid() {
+			writeError(w, http.StatusBadRequest, "invalid_request",
+				"status must be one of PENDING, RUNNING, STOPPED, HIBERNATED, DESTROYED, FAILED")
+			return
+		}
+		filter.Status = status
+	}
+
+	if raw := q.Get("created_since"); raw != "" {
+		since, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request",
+				"created_since must be an RFC3339 timestamp")
+			return
+		}
+		filter.CreatedSince = since
+	}
+
+	writeJSON(w, http.StatusOK, instancesResponse{Instances: s.tracker.ListFiltered(filter)})
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {

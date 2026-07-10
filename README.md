@@ -265,7 +265,8 @@ problem, never a silently-ignored or half-applied config. Run
 | Method | Path                        | Operation                                   |
 | ------ | --------------------------- | ------------------------------------------- |
 | POST   | `/v1/instances`             | Provision (idempotent on `instance_id`)     |
-| GET    | `/v1/instances`             | List tracked instances (sorted by `runtime_ref`) |
+| GET    | `/v1/instances`             | List tracked instances (sorted by `runtime_ref`; optionally filtered — see below) |
+| POST   | `/v1/instances/batch`       | Execute an ordered batch of lifecycle operations (see below) |
 | GET    | `/v1/instances/{id}`        | Status                                      |
 | POST   | `/v1/instances/{id}/start`  | Start                                       |
 | POST   | `/v1/instances/{id}/stop`   | Stop                                        |
@@ -297,15 +298,77 @@ By default state is held in memory only and restarting the process forgets all
 tracked instances. Set `-state-file` (or `STEWARD_STATE_FILE`) to persist state
 across restarts; see [Run](#run) above.
 
+### Filtered listing
+
+`GET /v1/instances` accepts three optional query-string filters that compose
+via AND when combined; omitting all three is byte-for-byte the same
+unfiltered response this endpoint always returned:
+
+| Query param           | Matches                                                      |
+| ---------------------- | ------------------------------------------------------------ |
+| `status`               | Exact match against the `Status` enum (`PENDING`, `RUNNING`, `STOPPED`, `HIBERNATED`, `DESTROYED`, `FAILED`) |
+| `instance_id_prefix`   | A plain string prefix of `instance_id`                       |
+| `created_since`        | Instances created at or after this RFC3339 timestamp (inclusive) |
+
+An unrecognized `status` or an unparseable `created_since` is a `400`, never a
+silently-ignored filter:
+
+```console
+$ curl -s 'localhost:8080/v1/instances?status=RUNNING&instance_id_prefix=web-'
+{"instances":[{"instance_id":"web-1","runtime_ref":"rt_...","status":"RUNNING","created_at":"2026-07-10T12:00:00Z"}]}
+```
+
+### Batch operations
+
+`POST /v1/instances/batch` executes an ordered list of `provision`/`start`/
+`stop`/`destroy` operations, one at a time in exactly the given order, and
+returns one result per operation. Each operation is executed through the
+exact same tracker call its single-instance endpoint uses, so it keeps that
+endpoint's own request/response shape and idempotency behavior.
+
+**This is deliberately not a transaction.** A failure in one operation never
+blocks the rest of the batch — if operation 3 of 5 fails, 1, 2, 4, and 5 still
+run — and every outcome is reported at its own index in `results`, never
+silently swallowed. The overall HTTP response is `200` as long as the request
+body itself was well-formed; each operation's own success or failure lives in
+that entry's own `status`/`instance`/`error` fields. Because operations run
+strictly in order against the live tracker, a later operation sees an
+earlier one's effect — for example, destroying an `instance_id` and
+re-provisioning it within the same batch works.
+
+```console
+$ curl -s localhost:8080/v1/instances/batch -d '{
+    "operations": [
+      {"op": "destroy", "runtime_ref": "rt_old..."},
+      {"op": "provision", "instance_id": "agent-1", "spec": {"model": "example"}}
+    ]
+  }'
+{"results":[
+  {"op":"destroy","runtime_ref":"rt_old...","status":200,"instance":{...,"status":"DESTROYED"}},
+  {"op":"provision","instance_id":"agent-1","status":201,"instance":{...,"status":"PENDING"}}
+]}
+```
+
+Retrying an entire batch (for example after a client-side timeout left the
+outcome ambiguous) is safe to the extent each constituent operation already
+is: `provision` stays idempotent on `instance_id`, and `start`/`stop` converge
+on the same terminal state either way — but `destroy` is **not** idempotent
+across a retry, since it releases the `runtime_ref`; replaying a batch that
+already destroyed an instance gets a `404 unknown_runtime_ref` on that
+operation the second time, the same outcome a repeated
+`DELETE /v1/instances/{id}` would give. See
+[`docs/batch-instance-operations.md`](docs/batch-instance-operations.md) for
+the full design.
+
 ### Example
 
 ```console
 $ curl -s localhost:8080/v1/instances \
     -d '{"instance_id": "agent-1", "spec": {"model": "example", "memory_mb": 512}}'
-{"instance_id":"agent-1","runtime_ref":"rt_...","status":"PENDING","spec":{"model":"example","memory_mb":512}}
+{"instance_id":"agent-1","runtime_ref":"rt_...","status":"PENDING","created_at":"2026-07-10T12:00:00Z","spec":{"model":"example","memory_mb":512}}
 
 $ curl -s -X POST localhost:8080/v1/instances/rt_.../start
-{"instance_id":"agent-1","runtime_ref":"rt_...","status":"RUNNING","spec":{...}}
+{"instance_id":"agent-1","runtime_ref":"rt_...","status":"RUNNING","created_at":"2026-07-10T12:00:00Z","spec":{...}}
 ```
 
 ## License
