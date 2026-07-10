@@ -141,7 +141,12 @@ durable state. When it is set:
   uplink is enabled the credential is loaded **fail-closed** at startup: a missing or
   corrupt credential file is a startup error naming the path and the fix, never a
   silent disable — the same discipline `LoadTracker` applies to a corrupt state file.
-  The inbound REST API remains unauthenticated by design, as above.
+  Because the credential is a bearer secret, its file must additionally be owner-only
+  (`0600` or stricter): a file readable or writable by group or others is refused
+  fail-closed — at startup, under `-check-config`, and on the credential hot-reload
+  watch — with a message naming the path and the `chmod 600` fix. The check is on the
+  mode bits, so it holds even when Steward runs as root. The inbound REST API remains
+  unauthenticated by design, as above.
 - **It adds nothing to the published inbound contract.** The uplink is an outbound
   *client*, so it introduces no new endpoint, request/response shape, or status code;
   `openapi/steward.v1.yaml` is unchanged. A poll failure is classified transient
@@ -153,6 +158,18 @@ durable state. When it is set:
   operator drops a valid new credential, then resumes with no process restart —
   node-side credential hot-reload, detailed in
   [`docs/uplink-client.md`](docs/uplink-client.md#node-side-credential-hot-reload).
+- **Its outbound transport is hardened the same fail-closed, standard-library-only
+  way.** The HTTP client's TLS is operator-configurable (`-uplink-tls-ca-file` for a
+  custom/private control-plane CA, `-uplink-tls-client-cert`/`-uplink-tls-client-key`
+  for mTLS, and the insecure, loudly-warned `-uplink-tls-skip-verify` escape hatch),
+  built with only `crypto/tls` — no new dependency — and validated fail-closed at
+  startup and under `-check-config`, so a bad CA/cert/key is a startup error, never a
+  silent fall back to system defaults. Every poll/report body the client reads or
+  writes is bounded at the same 1 MiB the inbound REST API caps a request body to: a
+  poll response over the cap is a clean, logged rejection (this cycle is dropped and
+  retried next, never an unbounded read), and a report body over the cap is refused
+  before it is sent (the server redelivers via its claim lease). The outbound channel
+  gets the same request-size and validation discipline the inbound one already has.
 
 The design provenance — the shape chosen, the shapes rejected, the invariants, and
 the (provisional) wire contract still being reconciled with the control-plane side —

@@ -71,6 +71,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// STEWARD_UPLINK_TLS_SKIP_VERIFY disables verification of the control plane's
+	// TLS certificate — a security-critical switch, so a set-but-unparseable value
+	// gets the same fail-closed envBool treatment -disable-inbound-listener does
+	// rather than a soft fallback: a typo must never silently pick the insecure
+	// side. It defaults false (verify), and prepareRuntime logs a loud warning when
+	// it is true.
+	uplinkTLSSkipVerifyDefault, err := envBool("STEWARD_UPLINK_TLS_SKIP_VERIFY", false)
+	if err != nil {
+		logger.Error("configure uplink TLS", "err", err)
+		os.Exit(1)
+	}
+
 	addr := flag.String("addr", envOr("STEWARD_ADDR", "127.0.0.1:8080"), "host:port to listen on")
 	maxInstances := flag.Int("max-instances", envOrInt("STEWARD_MAX_INSTANCES", 1024),
 		"maximum number of tracked instances before Provision returns 503")
@@ -82,6 +94,14 @@ func main() {
 		"control-plane base URL for the outbound uplink; empty disables it (inbound REST only)")
 	uplinkCredentialFile := flag.String("uplink-credential-file", envOr("STEWARD_UPLINK_CREDENTIAL_FILE", ""),
 		"path to the node's uplink credential JSON; required when -uplink-url is set")
+	uplinkTLSCAFile := flag.String("uplink-tls-ca-file", envOr("STEWARD_UPLINK_TLS_CA_FILE", ""),
+		"path to a PEM CA bundle used to verify the control plane's TLS certificate; empty verifies against the host's system root CAs")
+	uplinkTLSClientCert := flag.String("uplink-tls-client-cert", envOr("STEWARD_UPLINK_TLS_CLIENT_CERT", ""),
+		"path to a PEM client certificate presented for mutual TLS (mTLS); requires -uplink-tls-client-key")
+	uplinkTLSClientKey := flag.String("uplink-tls-client-key", envOr("STEWARD_UPLINK_TLS_CLIENT_KEY", ""),
+		"path to the PEM private key for -uplink-tls-client-cert; requires -uplink-tls-client-cert")
+	uplinkTLSSkipVerify := flag.Bool("uplink-tls-skip-verify", uplinkTLSSkipVerifyDefault,
+		"INSECURE: skip verification of the control plane's TLS certificate. Defeats TLS authentication and exposes the uplink to a man-in-the-middle; off by default and logged loudly when on. For temporary diagnostics only.")
 	uplinkPollInterval := flag.Duration("uplink-poll-interval", pollIntervalDefault,
 		"base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap)")
 	disableInbound := flag.Bool("disable-inbound-listener", disableInboundDefault,
@@ -178,6 +198,18 @@ func main() {
 	if fc.UplinkCredentialFile != nil && fileMayFill("uplink-credential-file", "STEWARD_UPLINK_CREDENTIAL_FILE") {
 		*uplinkCredentialFile = *fc.UplinkCredentialFile
 	}
+	if fc.UplinkTLSCAFile != nil && fileMayFill("uplink-tls-ca-file", "STEWARD_UPLINK_TLS_CA_FILE") {
+		*uplinkTLSCAFile = *fc.UplinkTLSCAFile
+	}
+	if fc.UplinkTLSClientCert != nil && fileMayFill("uplink-tls-client-cert", "STEWARD_UPLINK_TLS_CLIENT_CERT") {
+		*uplinkTLSClientCert = *fc.UplinkTLSClientCert
+	}
+	if fc.UplinkTLSClientKey != nil && fileMayFill("uplink-tls-client-key", "STEWARD_UPLINK_TLS_CLIENT_KEY") {
+		*uplinkTLSClientKey = *fc.UplinkTLSClientKey
+	}
+	if fc.UplinkTLSSkipVerify != nil && fileMayFill("uplink-tls-skip-verify", "STEWARD_UPLINK_TLS_SKIP_VERIFY") {
+		*uplinkTLSSkipVerify = *fc.UplinkTLSSkipVerify
+	}
 	if fc.DisableInboundListener != nil && fileMayFill("disable-inbound-listener", "STEWARD_DISABLE_INBOUND_LISTENER") {
 		*disableInbound = *fc.DisableInboundListener
 	}
@@ -204,6 +236,10 @@ func main() {
 		stateFile:            *stateFile,
 		uplinkURL:            *uplinkURL,
 		uplinkCredentialFile: *uplinkCredentialFile,
+		uplinkTLSCAFile:      *uplinkTLSCAFile,
+		uplinkTLSClientCert:  *uplinkTLSClientCert,
+		uplinkTLSClientKey:   *uplinkTLSClientKey,
+		uplinkTLSSkipVerify:  *uplinkTLSSkipVerify,
 		uplinkPollInterval:   *uplinkPollInterval,
 		disableInbound:       *disableInbound,
 		enableMetrics:        *enableMetrics,
@@ -402,6 +438,10 @@ type resolvedConfig struct {
 	stateFile            string
 	uplinkURL            string
 	uplinkCredentialFile string
+	uplinkTLSCAFile      string
+	uplinkTLSClientCert  string
+	uplinkTLSClientKey   string
+	uplinkTLSSkipVerify  bool
 	uplinkPollInterval   time.Duration
 	disableInbound       bool
 	enableMetrics        bool
@@ -552,11 +592,35 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 			logger.Error("load uplink credential", "err", err)
 			return logger, nil, nil, auditLogger, err
 		}
+		// -uplink-tls-skip-verify defeats TLS authentication entirely, so warn
+		// loudly whenever it is set -- in a dry run too, since it is a fact about
+		// the config an operator must see before a rollout, exactly like the
+		// poll-interval-clamp warning below.
+		if cfg.uplinkTLSSkipVerify {
+			logger.Warn("uplink TLS certificate verification is DISABLED (-uplink-tls-skip-verify); the control plane's certificate is not checked and the outbound channel is exposed to a man-in-the-middle — use only for temporary diagnostics, never in production")
+		}
+		// Build the outbound HTTP client with the operator-configured TLS settings
+		// (custom CA, client cert for mTLS, or skip-verify). NewHTTPClient fails
+		// closed on an unreadable CA/cert/key, a CA with no usable certificate, or a
+		// client cert without its key, so a TLS misconfiguration is a startup error
+		// here (and under -check-config, which runs prepareRuntime), never a silent
+		// fall back to system defaults.
+		httpClient, err := uplink.NewHTTPClient(uplink.TLSConfig{
+			CAFile:         cfg.uplinkTLSCAFile,
+			ClientCertFile: cfg.uplinkTLSClientCert,
+			ClientKeyFile:  cfg.uplinkTLSClientKey,
+			SkipVerify:     cfg.uplinkTLSSkipVerify,
+		})
+		if err != nil {
+			logger.Error("configure uplink TLS", "err", err)
+			return logger, nil, nil, auditLogger, err
+		}
 		poller, err = uplink.NewPoller(tracker, uplink.Config{
 			BaseURL:        cfg.uplinkURL,
 			Credential:     cred.Credential,
 			NodeID:         cred.NodeID,
 			PollInterval:   cfg.uplinkPollInterval,
+			HTTPClient:     httpClient,
 			Logger:         logger,
 			CredentialPath: cfg.uplinkCredentialFile,
 			AuditLogger:    auditLogger,
@@ -673,6 +737,10 @@ type fileConfig struct {
 	StateFile              *string `json:"state_file"`
 	UplinkURL              *string `json:"uplink_url"`
 	UplinkCredentialFile   *string `json:"uplink_credential_file"`
+	UplinkTLSCAFile        *string `json:"uplink_tls_ca_file"`
+	UplinkTLSClientCert    *string `json:"uplink_tls_client_cert"`
+	UplinkTLSClientKey     *string `json:"uplink_tls_client_key"`
+	UplinkTLSSkipVerify    *bool   `json:"uplink_tls_skip_verify"`
 	UplinkPollInterval     *string `json:"uplink_poll_interval"`
 	DisableInboundListener *bool   `json:"disable_inbound_listener"`
 	LogLevel               *string `json:"log_level"`
