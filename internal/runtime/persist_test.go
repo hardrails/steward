@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // stateBoundTracker returns a tracker persisting to a fresh path under t.TempDir.
@@ -393,5 +394,59 @@ func TestOldFormatFileWithNoGenerationKeyLoadsAsZero(t *testing.T) {
 	}
 	if got.Generation != 0 {
 		t.Fatalf("generation = %d, want 0 (default for a file with no generation key)", got.Generation)
+	}
+}
+
+// TestCreatedAtRoundTripsThroughPersistence mirrors
+// TestGenerationRoundTripsThroughPersistence for the created_at field: a
+// tracker's CreatedAt, saved and reloaded via a -state-file, must recover the
+// exact same instant.
+func TestCreatedAtRoundTripsThroughPersistence(t *testing.T) {
+	tr, path := stateBoundTracker(t, 0)
+
+	inst, _, err := tr.Provision("agent-1", 0, json.RawMessage(`{"model":"opus"}`))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	reloaded, err := LoadTracker(0, path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got, err := reloaded.Status(inst.RuntimeRef)
+	if err != nil {
+		t.Fatalf("reloaded status: %v", err)
+	}
+	if !got.CreatedAt.Equal(inst.CreatedAt) {
+		t.Fatalf("reloaded CreatedAt = %v, want %v (round-tripped)", got.CreatedAt, inst.CreatedAt)
+	}
+}
+
+// TestOldFormatFileWithNoCreatedAtKeyLoadsAsZero mirrors
+// TestOldFormatFileWithNoGenerationKeyLoadsAsZero for the created_at field: a
+// hand-written state file predating it (no "created_at" key at all) must load
+// successfully with every instance's CreatedAt defaulting to the zero time,
+// not an error.
+func TestOldFormatFileWithNoCreatedAtKeyLoadsAsZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	const oldFormat = `{"version":1,"instances":[{"instance_id":"agent-1","runtime_ref":"rt_old","status":"PENDING"}]}`
+	if err := os.WriteFile(path, []byte(oldFormat), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	tr, err := LoadTracker(0, path)
+	if err != nil {
+		t.Fatalf("LoadTracker on a pre-created_at state file: unexpected err %v", err)
+	}
+	got, err := tr.Status("rt_old")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !got.CreatedAt.IsZero() {
+		t.Fatalf("CreatedAt = %v, want the zero time (default for a file with no created_at key)", got.CreatedAt)
+	}
+	// The zero CreatedAt must never match a real (non-zero) CreatedSince filter.
+	if got := tr.ListFiltered(ListFilter{CreatedSince: time.Unix(0, 0)}); len(got) != 0 {
+		t.Fatalf("ListFiltered(created_since=unix epoch) matched a zero-CreatedAt instance: %+v", got)
 	}
 }
