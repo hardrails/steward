@@ -184,7 +184,17 @@ without a second source of truth:
    should only ever queue commands for this node, so this is a version-skew / bug
    tripwire, not an expected path.
 2. `provision` calls `Provision(instance_id, payload)` — the tracker mints its
-   `rt_<hex>` and the client learns it from the return value.
+   `rt_<hex>` and the client learns it from the return value. **The client must apply
+   the same object-shape validation the inbound REST handler already applies**
+   (`internal/server`'s `isJSONObject`, called from `handleProvision`): a non-object
+   `payload` (a bare scalar or array) is rejected — reported `failed` with a message
+   naming the shape problem, never passed to `Tracker.Provision` — before the tracker
+   ever sees it. Without this, the uplink path would create tracker state the
+   published REST contract would have rejected as `400 invalid_request`, so the two
+   lifecycle callers would silently enforce different instance-spec contracts (a real
+   finding from this doc's own review — see the task-list acceptance check below).
+   Reuse `isJSONObject` directly (export it, or move it beside the tracker) rather
+   than re-implementing the check a second time.
 3. `start` / `stop` / `hibernate` / `destroy` need the tracker's `rt_<hex>` ref. The
    client resolves `instance_id → rt_<hex>` through the tracker's own `byID` index
    via **one new read-only method** (below), then calls the existing transition
@@ -456,11 +466,17 @@ Layer tags use Steward's own layout: `cmd` (entrypoint/wiring), `runtime` (track
 
 3. **`uplink`: status mapping + command dispatch.** The `Status → reported_status`
    table and the `CommandKind → tracker method` dispatch, including the `destroy`
-   `ErrNotFound → done` rule and the wrong-`node_id` rejection. Depends on 1.
+   `ErrNotFound → done` rule, the wrong-`node_id` rejection, and a `provision`
+   payload's object-shape validation (reusing `isJSONObject`, matching the inbound
+   REST handler exactly — see [the resolved review finding](#executing-a-command-against-the-tracker)).
+   Depends on 1.
    *Check:* table tests drive each `CommandKind` against an in-memory tracker and
    assert the resulting `reported_status`; a redelivered `destroy` after destroy
    reports `done`; a `start` on an unknown instance reports `failed`; a command for
-   a foreign `node_id` is rejected. Gate: `go test -race ./internal/uplink`.
+   a foreign `node_id` is rejected; a `provision` command with a non-object payload
+   (a bare scalar or array) is rejected as `failed` and never reaches
+   `Tracker.Provision` — proving the uplink path enforces the same instance-spec
+   contract the REST handler does. Gate: `go test -race ./internal/uplink`.
 
 4. **`uplink`: the poll loop, backoff, and HTTP.** The `Poller` struct, the
    `time.Timer`/`ctx` select, jitter, the transient/fatal classification, and the
