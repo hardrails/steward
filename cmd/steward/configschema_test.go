@@ -120,6 +120,25 @@ func TestConfigSchemaMaxInstancesPositive(t *testing.T) {
 	}
 }
 
+// TestConfigSchemaCommandQueueDepthPositive pins that uplink_command_queue_depth is an
+// integer with exclusiveMinimum:0, the direct mirror of prepareRuntime's unconditional
+// `uplinkCommandQueueDepth <= 0` rejection (see the comment there for why it validates
+// even when the uplink is off — precisely to keep this schema constraint faithful).
+func TestConfigSchemaCommandQueueDepthPositive(t *testing.T) {
+	schema := decodeSchema(t)
+	props, _ := schema["properties"].(map[string]any)
+	prop, ok := props["uplink_command_queue_depth"].(map[string]any)
+	if !ok {
+		t.Fatal("uplink_command_queue_depth property missing")
+	}
+	if got := prop["type"]; got != "integer" {
+		t.Errorf("uplink_command_queue_depth type = %v, want integer", got)
+	}
+	if got, ok := prop["exclusiveMinimum"].(float64); !ok || got != 0 {
+		t.Errorf("uplink_command_queue_depth exclusiveMinimum = %v, want 0", prop["exclusiveMinimum"])
+	}
+}
+
 // TestConfigSchemaUplinkDependencyIsOneDirectional pins constraint 3 and its most
 // important property: the uplink_url ⇒ uplink_credential_file dependency is
 // encoded in ONE direction only, matching prepareRuntime (which has no symmetric

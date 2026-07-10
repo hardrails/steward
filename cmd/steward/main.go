@@ -104,6 +104,8 @@ func main() {
 		"INSECURE: skip verification of the control plane's TLS certificate. Defeats TLS authentication and exposes the uplink to a man-in-the-middle; off by default and logged loudly when on. For temporary diagnostics only.")
 	uplinkPollInterval := flag.Duration("uplink-poll-interval", pollIntervalDefault,
 		"base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap)")
+	uplinkCommandQueueDepth := flag.Int("uplink-command-queue-depth", envOrInt("STEWARD_UPLINK_COMMAND_QUEUE_DEPTH", 256),
+		"maximum number of received-but-not-yet-executed uplink commands held at once (queued plus in-flight); a poll cycle's excess beyond this is rejected and left for the control plane to redeliver, rather than committing the node to unbounded work. Must be a positive integer; only consumed when -uplink-url is set.")
 	disableInbound := flag.Bool("disable-inbound-listener", disableInboundDefault,
 		"do not bind an inbound HTTP listener; requires -uplink-url. All fleet operations then flow through the outbound uplink poll loop only.")
 	enableMetrics := flag.Bool("enable-metrics", enableMetricsDefault,
@@ -210,6 +212,9 @@ func main() {
 	if fc.UplinkTLSSkipVerify != nil && fileMayFill("uplink-tls-skip-verify", "STEWARD_UPLINK_TLS_SKIP_VERIFY") {
 		*uplinkTLSSkipVerify = *fc.UplinkTLSSkipVerify
 	}
+	if fc.UplinkCommandQueueDepth != nil && fileMayFill("uplink-command-queue-depth", "STEWARD_UPLINK_COMMAND_QUEUE_DEPTH") {
+		*uplinkCommandQueueDepth = *fc.UplinkCommandQueueDepth
+	}
 	if fc.DisableInboundListener != nil && fileMayFill("disable-inbound-listener", "STEWARD_DISABLE_INBOUND_LISTENER") {
 		*disableInbound = *fc.DisableInboundListener
 	}
@@ -231,20 +236,21 @@ func main() {
 	}
 
 	cfg := resolvedConfig{
-		addr:                 *addr,
-		maxInstances:         *maxInstances,
-		stateFile:            *stateFile,
-		uplinkURL:            *uplinkURL,
-		uplinkCredentialFile: *uplinkCredentialFile,
-		uplinkTLSCAFile:      *uplinkTLSCAFile,
-		uplinkTLSClientCert:  *uplinkTLSClientCert,
-		uplinkTLSClientKey:   *uplinkTLSClientKey,
-		uplinkTLSSkipVerify:  *uplinkTLSSkipVerify,
-		uplinkPollInterval:   *uplinkPollInterval,
-		disableInbound:       *disableInbound,
-		enableMetrics:        *enableMetrics,
-		auditLogFile:         *auditLogFile,
-		logLevel:             *logLevel,
+		addr:                    *addr,
+		maxInstances:            *maxInstances,
+		stateFile:               *stateFile,
+		uplinkURL:               *uplinkURL,
+		uplinkCredentialFile:    *uplinkCredentialFile,
+		uplinkTLSCAFile:         *uplinkTLSCAFile,
+		uplinkTLSClientCert:     *uplinkTLSClientCert,
+		uplinkTLSClientKey:      *uplinkTLSClientKey,
+		uplinkTLSSkipVerify:     *uplinkTLSSkipVerify,
+		uplinkPollInterval:      *uplinkPollInterval,
+		uplinkCommandQueueDepth: *uplinkCommandQueueDepth,
+		disableInbound:          *disableInbound,
+		enableMetrics:           *enableMetrics,
+		auditLogFile:            *auditLogFile,
+		logLevel:                *logLevel,
 	}
 
 	// -check-config is a dry run: it exercises the exact same validation-and-build
@@ -433,20 +439,21 @@ func main() {
 // the single input both the real startup path and the -check-config dry run
 // validate and build from, so the two can never diverge on what a valid config is.
 type resolvedConfig struct {
-	addr                 string
-	maxInstances         int
-	stateFile            string
-	uplinkURL            string
-	uplinkCredentialFile string
-	uplinkTLSCAFile      string
-	uplinkTLSClientCert  string
-	uplinkTLSClientKey   string
-	uplinkTLSSkipVerify  bool
-	uplinkPollInterval   time.Duration
-	disableInbound       bool
-	enableMetrics        bool
-	auditLogFile         string
-	logLevel             string
+	addr                    string
+	maxInstances            int
+	stateFile               string
+	uplinkURL               string
+	uplinkCredentialFile    string
+	uplinkTLSCAFile         string
+	uplinkTLSClientCert     string
+	uplinkTLSClientKey      string
+	uplinkTLSSkipVerify     bool
+	uplinkPollInterval      time.Duration
+	uplinkCommandQueueDepth int
+	disableInbound          bool
+	enableMetrics           bool
+	auditLogFile            string
+	logLevel                string
 }
 
 // prepareRuntime runs every fail-closed startup check against cfg and builds the
@@ -501,6 +508,21 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 			"value", cfg.maxInstances,
 			"hint", "-max-instances (or STEWARD_MAX_INSTANCES) must be a positive integer; omit it to use the default 1024")
 		return logger, nil, nil, nil, fmt.Errorf("invalid -max-instances %d", cfg.maxInstances)
+	}
+
+	// -uplink-command-queue-depth bounds the uplink's received-but-not-yet-executed
+	// backlog (queued plus in-flight); a non-positive value is a configuration
+	// mistake, not a request for "unbounded", the same fail-closed posture as
+	// -max-instances. It is validated unconditionally (not gated on -uplink-url)
+	// precisely so the -config schema's exclusiveMinimum:0 constraint stays faithful
+	// to the real validator — no stricter, no looser — even though the value is only
+	// consumed when the uplink is enabled. A positive default (256) means a config
+	// that never sets it always passes.
+	if cfg.uplinkCommandQueueDepth <= 0 {
+		logger.Error("invalid -uplink-command-queue-depth",
+			"value", cfg.uplinkCommandQueueDepth,
+			"hint", "-uplink-command-queue-depth (or STEWARD_UPLINK_COMMAND_QUEUE_DEPTH) must be a positive integer; omit it to use the default 256")
+		return logger, nil, nil, nil, fmt.Errorf("invalid -uplink-command-queue-depth %d", cfg.uplinkCommandQueueDepth)
 	}
 
 	// A node with neither the inbound listener nor the outbound uplink enabled would
@@ -616,14 +638,15 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 			return logger, nil, nil, auditLogger, err
 		}
 		poller, err = uplink.NewPoller(tracker, uplink.Config{
-			BaseURL:        cfg.uplinkURL,
-			Credential:     cred.Credential,
-			NodeID:         cred.NodeID,
-			PollInterval:   cfg.uplinkPollInterval,
-			HTTPClient:     httpClient,
-			Logger:         logger,
-			CredentialPath: cfg.uplinkCredentialFile,
-			AuditLogger:    auditLogger,
+			BaseURL:           cfg.uplinkURL,
+			Credential:        cred.Credential,
+			NodeID:            cred.NodeID,
+			PollInterval:      cfg.uplinkPollInterval,
+			CommandQueueDepth: cfg.uplinkCommandQueueDepth,
+			HTTPClient:        httpClient,
+			Logger:            logger,
+			CredentialPath:    cfg.uplinkCredentialFile,
+			AuditLogger:       auditLogger,
 		})
 		if err != nil {
 			logger.Error("configure uplink", "err", err)
@@ -632,7 +655,8 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 		if !checkOnly {
 			logger.Info("uplink enabled",
 				"url", cfg.uplinkURL, "node_id", cred.NodeID, "tenant_id", cred.TenantID,
-				"poll_interval", cfg.uplinkPollInterval.String())
+				"poll_interval", cfg.uplinkPollInterval.String(),
+				"command_queue_depth", cfg.uplinkCommandQueueDepth)
 		}
 		// -uplink-poll-interval has no documented ceiling, but the steady-state poll
 		// cadence is clamped to the same 5-minute cap used for failed-poll backoff
@@ -732,18 +756,19 @@ func parseLogLevel(s string) (slog.Level, error) {
 // var suffixes. uplink_poll_interval is a Go duration string (e.g. "30s"), parsed
 // the same way the flag and env var parse theirs.
 type fileConfig struct {
-	Addr                   *string `json:"addr"`
-	MaxInstances           *int    `json:"max_instances"`
-	StateFile              *string `json:"state_file"`
-	UplinkURL              *string `json:"uplink_url"`
-	UplinkCredentialFile   *string `json:"uplink_credential_file"`
-	UplinkTLSCAFile        *string `json:"uplink_tls_ca_file"`
-	UplinkTLSClientCert    *string `json:"uplink_tls_client_cert"`
-	UplinkTLSClientKey     *string `json:"uplink_tls_client_key"`
-	UplinkTLSSkipVerify    *bool   `json:"uplink_tls_skip_verify"`
-	UplinkPollInterval     *string `json:"uplink_poll_interval"`
-	DisableInboundListener *bool   `json:"disable_inbound_listener"`
-	LogLevel               *string `json:"log_level"`
+	Addr                    *string `json:"addr"`
+	MaxInstances            *int    `json:"max_instances"`
+	StateFile               *string `json:"state_file"`
+	UplinkURL               *string `json:"uplink_url"`
+	UplinkCredentialFile    *string `json:"uplink_credential_file"`
+	UplinkTLSCAFile         *string `json:"uplink_tls_ca_file"`
+	UplinkTLSClientCert     *string `json:"uplink_tls_client_cert"`
+	UplinkTLSClientKey      *string `json:"uplink_tls_client_key"`
+	UplinkTLSSkipVerify     *bool   `json:"uplink_tls_skip_verify"`
+	UplinkPollInterval      *string `json:"uplink_poll_interval"`
+	UplinkCommandQueueDepth *int    `json:"uplink_command_queue_depth"`
+	DisableInboundListener  *bool   `json:"disable_inbound_listener"`
+	LogLevel                *string `json:"log_level"`
 }
 
 // loadConfigFile reads and parses the JSON config file at path, fail-closed. It

@@ -810,10 +810,11 @@ func TestAuditLogStartupBehavior(t *testing.T) {
 func TestPrepareRuntimeReturnsAuditLoggerEvenWithUplinkDisabled(t *testing.T) {
 	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
 	cfg := resolvedConfig{
-		addr:         "127.0.0.1:0",
-		maxInstances: 1024,
-		auditLogFile: auditPath,
-		logLevel:     "info",
+		addr:                    "127.0.0.1:0",
+		maxInstances:            1024,
+		uplinkCommandQueueDepth: 256,
+		auditLogFile:            auditPath,
+		logLevel:                "info",
 		// uplinkURL intentionally left empty: this is the exact combination
 		// (-audit-log-file set, uplink disabled) the finding was about.
 	}
@@ -1073,6 +1074,53 @@ func TestNonPositiveMaxInstancesExitsNonZero(t *testing.T) {
 		cmd := exec.Command(bin, "-addr", "127.0.0.1:0")
 		cmd.Env = append(os.Environ(), "STEWARD_MAX_INSTANCES=0")
 		assertFailsClosed(t, cmd)
+	})
+}
+
+// TestNonPositiveCommandQueueDepthExitsNonZero mirrors the -max-instances rule for the
+// uplink command-queue depth: a non-positive value (flag, env, or config file) is a
+// fail-closed startup error naming the flag and the fix. It is validated
+// unconditionally (not gated on -uplink-url) so the -config schema's exclusiveMinimum:0
+// stays faithful to the real validator; these cases therefore need no uplink config.
+func TestNonPositiveCommandQueueDepthExitsNonZero(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+
+	assertRejects := func(t *testing.T, cmd *exec.Cmd) {
+		t.Helper()
+		if cmd.Env == nil {
+			cmd.Env = stewardEnv()
+		}
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected a non-zero exit, got success:\n%s", out)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "-uplink-command-queue-depth") {
+			t.Errorf("error does not name -uplink-command-queue-depth:\n%s", out)
+		}
+		if !strings.Contains(string(out), "positive") {
+			t.Errorf("error does not tell the operator to pass a positive value:\n%s", out)
+		}
+	}
+
+	t.Run("flag zero", func(t *testing.T) {
+		assertRejects(t, exec.Command(bin, "-uplink-command-queue-depth", "0", "-addr", "127.0.0.1:0"))
+	})
+	t.Run("flag negative", func(t *testing.T) {
+		assertRejects(t, exec.Command(bin, "-uplink-command-queue-depth=-4", "-addr", "127.0.0.1:0"))
+	})
+	t.Run("env zero", func(t *testing.T) {
+		assertRejects(t, exec.Command(bin, "-addr", "127.0.0.1:0", "-uplink-command-queue-depth", "0"))
+	})
+	t.Run("config file zero via -check-config", func(t *testing.T) {
+		cfg := writeConfigFile(t, `{"uplink_command_queue_depth":0}`)
+		assertFailsWith(t, exec.Command(bin, "-check-config", "-config", cfg), "-uplink-command-queue-depth", "positive")
 	})
 }
 

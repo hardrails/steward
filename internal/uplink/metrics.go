@@ -35,6 +35,19 @@ type Metrics struct {
 	commandsFailed      atomic.Int64
 	consecutiveFailures atomic.Int64
 
+	// commandsRejected, queueDepth, and queueFullStreak back the bounded command
+	// queue's observability and its readiness gate (see queue.go and Poller.admit).
+	// commandsRejected is a monotonic counter of commands dropped because the queue
+	// was full (left for redelivery). queueDepth is the current queued-plus-in-flight
+	// gauge. queueFullStreak is the count of consecutive poll cycles that each
+	// rejected at least one command; the readiness gate reports not-ready once it
+	// reaches queueBackpressureThreshold, and a cycle that admits everything resets it
+	// to 0. All three are read by the /metrics and /v1/readiness HTTP handlers from a
+	// goroutine other than the one Poller.Run drives, so they are atomics.
+	commandsRejected atomic.Int64
+	queueDepth       atomic.Int64
+	queueFullStreak  atomic.Int64
+
 	// pollsSucceeded and credentialRejected back the readiness gate (see
 	// readiness and Poller.Ready), read by the /v1/readiness HTTP handler from a
 	// goroutine other than the one Poller.Run drives. pollsSucceeded counts polls
@@ -64,6 +77,15 @@ type Snapshot struct {
 	// operator reasons about backoff state ("roughly how long until the next
 	// retry"), not the exact jittered value of any one wait.
 	CurrentBackoff time.Duration
+	// CommandQueueDepth is the current queued-plus-in-flight command count, and
+	// CommandQueueMaxDepth is the configured cap (see commandQueue); their ratio is
+	// the backpressure headroom an operator watches. CommandsRejected is the
+	// monotonic count of commands dropped because the queue was full (left for the
+	// control plane to redeliver) — a sustained non-zero rate means the node is not
+	// keeping up with its command backlog.
+	CommandQueueDepth    int64
+	CommandQueueMaxDepth int64
+	CommandsRejected     int64
 }
 
 // recordPollLatency updates the min/max/last poll-latency gauges and the poll
@@ -121,18 +143,67 @@ func (m *Metrics) setCredentialRejected(rejected bool) {
 	m.credentialRejected.Store(rejected)
 }
 
+// recordCommandsRejected adds n to the count of commands dropped because the
+// command queue was full (see Poller.admit). Called from the single goroutine
+// Poller.Run drives; read by /metrics from the HTTP goroutine.
+func (m *Metrics) recordCommandsRejected(n int) {
+	if m == nil {
+		return
+	}
+	m.commandsRejected.Add(int64(n))
+}
+
+// setQueueDepth records the current queued-plus-in-flight command count for the
+// steward_uplink_command_queue_depth gauge. Called from both the producer
+// (Poller.admit) and the consumer (Poller.consume) goroutines after they change the
+// queue's outstanding count; the atomic store makes those two writers safe, and the
+// /metrics reader sees a recent value either way.
+func (m *Metrics) setQueueDepth(n int) {
+	if m == nil {
+		return
+	}
+	m.queueDepth.Store(int64(n))
+}
+
+// recordQueueCycle feeds the backpressure readiness gate: a poll cycle that rejected
+// at least one command (rejectedAny) extends the consecutive-full streak by one, and a
+// cycle that admitted everything resets it to 0. Called once per successful poll from
+// the single goroutine Poller.Run drives (see Poller.admit); read by the readiness
+// gate from the HTTP goroutine.
+func (m *Metrics) recordQueueCycle(rejectedAny bool) {
+	if m == nil {
+		return
+	}
+	if rejectedAny {
+		m.queueFullStreak.Add(1)
+	} else {
+		m.queueFullStreak.Store(0)
+	}
+}
+
 // readiness reports whether the uplink poll loop is ready to serve traffic and,
-// when not, a human detail naming why. The rule (see Poller.Ready and
-// GET /v1/readiness) is: ready if it has completed at least one successful poll
-// OR is not in a persistent-failure state. So a node is NOT ready only when it
-// has never polled successfully AND is currently stuck — its credential was
-// rejected, or it has failed at least persistentFailureThreshold times in a row
-// (a sustained inability to reach the control plane, not a single blip). A
-// freshly started node with no failures yet is ready; a node that has proven it
-// can reach its control plane stays ready across a later transient blip.
-func (m *Metrics) readiness(persistentFailureThreshold int64) (ready bool, detail string) {
+// when not, a human detail naming why. Two independent gates make a node not-ready:
+//
+//   - Backpressure: the command queue has been full for at least
+//     queueBackpressureThreshold consecutive poll cycles. This gate is checked FIRST
+//     and applies even to a node that is polling successfully — a node reaching its
+//     control plane fine but unable to keep up with its command backlog is precisely
+//     the case where routing it more work is counterproductive, so it should be
+//     drained until it catches up.
+//   - Reachability: the node has never completed a successful poll AND is currently
+//     stuck — its credential was rejected, or it has failed at least
+//     persistentFailureThreshold times in a row (a sustained inability to reach the
+//     control plane, not a single blip).
+//
+// A freshly started node with no failures and an empty queue is ready; a node that has
+// proven it can reach its control plane stays ready across a later transient blip, but
+// NOT across a sustained command-queue backup.
+func (m *Metrics) readiness(persistentFailureThreshold, queueBackpressureThreshold int64) (ready bool, detail string) {
 	if m == nil {
 		return true, "" // defensive: a nil metrics has no failure to report.
+	}
+	if m.queueFullStreak.Load() >= queueBackpressureThreshold {
+		return false, "uplink command queue has been full for consecutive polls; the node is not keeping up with its command backlog and should not receive more work until it drains"
 	}
 	if m.pollsSucceeded.Load() > 0 {
 		return true, ""
@@ -164,10 +235,15 @@ func (m *Metrics) recordCommandOutcome(succeeded bool) {
 // snapshot builds a Snapshot from the live metrics. baseInterval is the
 // Poller's configured base poll interval, needed to translate the stored
 // consecutive-failure count into a CurrentBackoff duration via the same
-// backoffDuration function the poll loop itself uses.
-func (m *Metrics) snapshot(baseInterval time.Duration) Snapshot {
+// backoffDuration function the poll loop itself uses. queueMaxDepth is the
+// Poller's configured command-queue cap, reported as CommandQueueMaxDepth so
+// /metrics can render the current-vs-max backpressure headroom.
+func (m *Metrics) snapshot(baseInterval time.Duration, queueMaxDepth int) Snapshot {
 	if m == nil {
-		return Snapshot{CurrentBackoff: backoffDuration(baseInterval, 0)}
+		return Snapshot{
+			CurrentBackoff:       backoffDuration(baseInterval, 0),
+			CommandQueueMaxDepth: int64(queueMaxDepth),
+		}
 	}
 	m.mu.Lock()
 	min, max, last, count := m.pollLatencyMin, m.pollLatencyMax, m.pollLatencyLast, m.pollCount
@@ -175,12 +251,15 @@ func (m *Metrics) snapshot(baseInterval time.Duration) Snapshot {
 
 	failures := int(m.consecutiveFailures.Load())
 	return Snapshot{
-		PollLatencyMin:    min,
-		PollLatencyMax:    max,
-		PollLatencyLast:   last,
-		PollCount:         count,
-		CommandsSucceeded: m.commandsSucceeded.Load(),
-		CommandsFailed:    m.commandsFailed.Load(),
-		CurrentBackoff:    backoffDuration(baseInterval, failures),
+		PollLatencyMin:       min,
+		PollLatencyMax:       max,
+		PollLatencyLast:      last,
+		PollCount:            count,
+		CommandsSucceeded:    m.commandsSucceeded.Load(),
+		CommandsFailed:       m.commandsFailed.Load(),
+		CurrentBackoff:       backoffDuration(baseInterval, failures),
+		CommandQueueDepth:    m.queueDepth.Load(),
+		CommandQueueMaxDepth: int64(queueMaxDepth),
+		CommandsRejected:     m.commandsRejected.Load(),
 	}
 }

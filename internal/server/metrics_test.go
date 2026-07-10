@@ -91,13 +91,16 @@ func TestMetricsEndpointServesInstanceCounts(t *testing.T) {
 // plane to drive).
 func TestMetricsEndpointIncludesUplinkSeriesWhenWired(t *testing.T) {
 	fake := fakeUplinkMetrics{snap: uplink.Snapshot{
-		PollLatencyMin:    10 * time.Millisecond,
-		PollLatencyMax:    50 * time.Millisecond,
-		PollLatencyLast:   20 * time.Millisecond,
-		PollCount:         7,
-		CommandsSucceeded: 3,
-		CommandsFailed:    1,
-		CurrentBackoff:    2 * time.Second,
+		PollLatencyMin:       10 * time.Millisecond,
+		PollLatencyMax:       50 * time.Millisecond,
+		PollLatencyLast:      20 * time.Millisecond,
+		PollCount:            7,
+		CommandsSucceeded:    3,
+		CommandsFailed:       1,
+		CurrentBackoff:       2 * time.Second,
+		CommandQueueDepth:    4,
+		CommandQueueMaxDepth: 256,
+		CommandsRejected:     9,
 	}}
 	h := New(metricsTestLogger(), 0, 0, true, fake).Handler()
 
@@ -115,6 +118,9 @@ func TestMetricsEndpointIncludesUplinkSeriesWhenWired(t *testing.T) {
 		`steward_uplink_commands_total{status="success"} 3`,
 		`steward_uplink_commands_total{status="failure"} 1`,
 		"steward_uplink_backoff_seconds 2",
+		"steward_uplink_command_queue_depth 4",
+		"steward_uplink_command_queue_max_depth 256",
+		"steward_uplink_commands_rejected_total 9",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body does not contain %q:\n%s", want, body)

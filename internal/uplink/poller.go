@@ -50,6 +50,17 @@ const (
 	// cap immediately (skewFailures), so this small value drains a genuinely-stuck
 	// fresh node quickly while never flapping readiness on one lost poll.
 	persistentFailureThreshold = 3
+	// queueBackpressureThreshold is how many consecutive poll cycles must each reject
+	// at least one command for a full command queue (see commandQueue) before the
+	// readiness gate reports the node not-ready (see Metrics.readiness and
+	// Poller.Ready). A single over-full poll is an expected momentary spike the
+	// control plane redelivers next cycle, not a reason to drain the node; only a
+	// SUSTAINED inability to admit the backlog — the queue full for several polls in a
+	// row — means the node is genuinely not keeping up and should stop being routed
+	// new work. A cycle that admits everything resets the streak, so a node that
+	// catches up becomes ready again on its very next clean poll (never flapping on
+	// one burst).
+	queueBackpressureThreshold = 3
 	// DefaultCredentialWatchInterval is how often Run re-reads the credential file
 	// while paused after a fatal 401/403 rejection (see waitForCredentialChange),
 	// when Config.CredentialWatchInterval is unset. This loop makes no outbound
@@ -93,6 +104,15 @@ type Config struct {
 	// Exposed the same way PollInterval is, so a test can drive it fast.
 	CredentialWatchInterval time.Duration
 
+	// CommandQueueDepth bounds how many received-but-not-yet-executed commands the
+	// poll loop holds at once (queued plus in-flight): a poll cycle whose commands
+	// would exceed it has its excess rejected (logged, left for the control plane to
+	// redeliver) rather than committing the node to unbounded work — see commandQueue.
+	// Optional: a value <= 0 uses DefaultCommandQueueDepth. cmd/steward validates the
+	// operator-facing value fail-closed before constructing a Poller (see
+	// prepareRuntime), so only a library caller relies on this default.
+	CommandQueueDepth int
+
 	// AuditLogger, when non-nil, receives one record per executed command's
 	// terminal outcome (see dispatcher.recordOutcome and cmd/steward's
 	// -audit-log-file flag). The caller owns its whole lifecycle -- opening it
@@ -120,6 +140,12 @@ type Poller struct {
 	// credentialPath is empty when hot-reload is not configured (see Config).
 	credentialPath          string
 	credentialWatchInterval time.Duration
+
+	// queue is the bounded, deduplicating command queue between polling and
+	// execution: the poll loop (producer) enqueues each poll's commands and a
+	// consumer goroutine drains and executes them (see Run/admit/consume). Always
+	// non-nil (see NewPoller).
+	queue *commandQueue
 
 	// metrics is always non-nil (see NewPoller) so command/poll counters are
 	// always collected; the optional /metrics endpoint decides only whether to
@@ -171,6 +197,14 @@ func NewPoller(tracker Tracker, cfg Config) (*Poller, error) {
 	if watchInterval <= 0 {
 		watchInterval = DefaultCredentialWatchInterval
 	}
+	// A non-positive CommandQueueDepth falls back to the default, mirroring how
+	// CredentialWatchInterval and PollInterval's HTTPClient default are supplied:
+	// cmd/steward always passes an operator-validated positive value (see
+	// prepareRuntime), so this fallback only serves a library caller that omits it.
+	queueDepth := cfg.CommandQueueDepth
+	if queueDepth <= 0 {
+		queueDepth = DefaultCommandQueueDepth
+	}
 	metrics := &Metrics{}
 	return &Poller{
 		httpClient:   client,
@@ -188,6 +222,7 @@ func NewPoller(tracker Tracker, cfg Config) (*Poller, error) {
 		},
 		credentialPath:          cfg.CredentialPath,
 		credentialWatchInterval: watchInterval,
+		queue:                   newCommandQueue(queueDepth),
 		metrics:                 metrics,
 	}, nil
 }
@@ -197,17 +232,22 @@ func NewPoller(tracker Tracker, cfg Config) (*Poller, error) {
 // backoff), for the optional /metrics HTTP endpoint (see
 // internal/server.UplinkMetrics). Safe to call concurrently with Run.
 func (p *Poller) MetricsSnapshot() Snapshot {
-	return p.metrics.snapshot(p.baseInterval)
+	return p.metrics.snapshot(p.baseInterval, p.queue.depth)
 }
 
-// Ready reports whether this poll loop is ready to serve traffic — it has
-// completed at least one successful poll, or is not in a persistent-failure
-// state (a rejected credential, or persistentFailureThreshold consecutive
-// failures with no success yet) — and, when not, a human detail naming why.
-// It backs the GET /v1/readiness gate (see internal/server.UplinkMetrics and
-// handleReadiness). Safe to call concurrently with Run.
+// Ready reports whether this poll loop is ready to serve traffic and, when not, a
+// human detail naming why. It backs the GET /v1/readiness gate (see
+// internal/server.UplinkMetrics and handleReadiness). A node is NOT ready when
+// either:
+//   - its command queue has been full for queueBackpressureThreshold consecutive
+//     poll cycles — it is not keeping up with its command backlog, so routing it
+//     more work is counterproductive; or
+//   - it has never completed a successful poll AND is in a persistent-failure state
+//     (a rejected credential, or persistentFailureThreshold consecutive failures).
+//
+// Safe to call concurrently with Run.
 func (p *Poller) Ready() (ready bool, detail string) {
-	return p.metrics.readiness(persistentFailureThreshold)
+	return p.metrics.readiness(persistentFailureThreshold, queueBackpressureThreshold)
 }
 
 // Run drives the poll loop until ctx is cancelled. The inter-poll wait and every
@@ -223,6 +263,31 @@ func (p *Poller) Ready() (ready bool, detail string) {
 // rejection stop Run outright, the pre-hot-reload behavior, since there is then
 // no file to watch and a restart is the only way to recover.
 func (p *Poller) Run(ctx context.Context) {
+	// The consumer drains the bounded queue and executes commands in its own
+	// goroutine, so a slow batch (many state-file writes) never stalls polling and
+	// the queue can hold a backlog across poll cycles — the two properties the
+	// bounded queue exists to provide (see commandQueue). Run does not return until
+	// the consumer has also stopped, so main's shutdown wait covers both goroutines
+	// and no command executes after Run returns.
+	//
+	// The consumer runs under a CHILD context cancelled the moment Run's producer
+	// loop returns — not just when the parent ctx is cancelled. That matters for the
+	// one path where the producer loop returns on its own with the parent ctx still
+	// live: a fatal 401/403 with no credential-hot-reload path (Config.CredentialPath
+	// unset). Without the child cancel, the consumer would block forever in
+	// waitForWork and Run's join below would deadlock. With it, the producer's return
+	// stops the consumer too, exactly as a real shutdown would.
+	consumerCtx, stopConsumer := context.WithCancel(ctx)
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		p.consume(consumerCtx)
+	}()
+	defer func() {
+		stopConsumer()
+		<-consumerDone
+	}()
+
 	failures := 0
 	for {
 		if !p.wait(ctx, p.nextWait(failures)) {
@@ -238,7 +303,7 @@ func (p *Poller) Run(ctx context.Context) {
 		case classOK:
 			failures = 0
 			p.metrics.recordPollSuccess() // readiness: the node has reached its control plane.
-			p.executeBatch(ctx, commands)
+			p.admit(commands)
 		case classTransient:
 			failures++
 			p.logger.Warn("uplink poll failed; backing off and retrying",
@@ -324,6 +389,62 @@ func (p *Poller) waitForCredentialChange(ctx context.Context) bool {
 			"path", p.credentialPath, "node_id", p.dispatcher.nodeID)
 		p.credential = cred.Credential
 		return true
+	}
+}
+
+// admit is the producer side of the bounded queue: it enqueues one poll cycle's
+// commands, then logs and records what the queue could not admit. It never blocks the
+// poll loop — a full queue rejects the excess rather than waiting for the consumer.
+//
+// The rejection log uses a grep-able "uplink command queue full:" prefix (mirroring
+// reload.go's "sighup reload:" convention) and names the rejected commands by both
+// command_id and runtime_ref, so an operator can see exactly which commands were
+// deferred to a later poll cycle. A rejected command is not lost: it was never
+// reported, so the control plane's claim lease redelivers it once the backlog drains.
+// A duplicate (a command_id already queued or in-flight) is logged at DEBUG only — it
+// is the benign, expected consequence of at-least-once redelivery, not an
+// operator-actionable condition.
+func (p *Poller) admit(commands []command) {
+	rejected, duplicates := p.queue.enqueue(commands)
+
+	if len(duplicates) > 0 {
+		p.logger.Debug("uplink command queue: skipping redelivered commands already queued or in flight; they will not be executed twice",
+			"duplicate_count", len(duplicates),
+			"duplicate_command_ids", commandIDs(duplicates))
+	}
+	if len(rejected) > 0 {
+		p.logger.Warn("uplink command queue full: rejecting excess commands this poll cycle; they will be redelivered by the control plane once the backlog drains",
+			"queue_max_depth", p.queue.depth,
+			"rejected_count", len(rejected),
+			"rejected_command_ids", commandIDs(rejected),
+			"rejected_runtime_refs", runtimeRefs(rejected))
+		p.metrics.recordCommandsRejected(len(rejected))
+	}
+	// Feed the readiness gate: a cycle that rejected anything extends the
+	// full-queue streak, a cycle that admitted everything (including an empty poll)
+	// resets it. See Metrics.readiness and queueBackpressureThreshold.
+	p.metrics.recordQueueCycle(len(rejected) > 0)
+	p.metrics.setQueueDepth(p.queue.outstandingNow())
+}
+
+// consume is the consumer side of the bounded queue: it waits for work, drains the
+// whole queue as one batch (preserving each poll batch's own ordering, which
+// executeBatch's replace/retry semantics depend on), executes it, then marks the batch
+// complete so its capacity and dedup entries are freed. It returns when ctx is
+// cancelled — waitForWork selects on ctx.Done(), so a shutdown returns promptly and
+// executeBatch itself bails between commands on a cancelled ctx.
+func (p *Poller) consume(ctx context.Context) {
+	for {
+		if !p.queue.waitForWork(ctx) {
+			return
+		}
+		batch := p.queue.drain()
+		if len(batch) == 0 {
+			continue // a spurious/coalesced wake with nothing queued; wait again.
+		}
+		p.executeBatch(ctx, batch)
+		p.queue.complete(batch)
+		p.metrics.setQueueDepth(p.queue.outstandingNow())
 	}
 }
 

@@ -92,6 +92,18 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(&b, "# HELP steward_uplink_backoff_seconds Current uplink poll interval/backoff (excludes jitter).")
 		fmt.Fprintln(&b, "# TYPE steward_uplink_backoff_seconds gauge")
 		fmt.Fprintf(&b, "steward_uplink_backoff_seconds %s\n", formatSeconds(snap.CurrentBackoff))
+
+		fmt.Fprintln(&b, "# HELP steward_uplink_command_queue_depth Uplink commands received but not yet executed (queued plus in-flight).")
+		fmt.Fprintln(&b, "# TYPE steward_uplink_command_queue_depth gauge")
+		fmt.Fprintf(&b, "steward_uplink_command_queue_depth %d\n", snap.CommandQueueDepth)
+
+		fmt.Fprintln(&b, "# HELP steward_uplink_command_queue_max_depth Configured maximum uplink command queue depth (a poll cycle's excess is rejected and redelivered).")
+		fmt.Fprintln(&b, "# TYPE steward_uplink_command_queue_max_depth gauge")
+		fmt.Fprintf(&b, "steward_uplink_command_queue_max_depth %d\n", snap.CommandQueueMaxDepth)
+
+		fmt.Fprintln(&b, "# HELP steward_uplink_commands_rejected_total Uplink commands rejected because the command queue was full (left for the control plane to redeliver).")
+		fmt.Fprintln(&b, "# TYPE steward_uplink_commands_rejected_total counter")
+		fmt.Fprintf(&b, "steward_uplink_commands_rejected_total %d\n", snap.CommandsRejected)
 	}
 
 	// text/plain with an explicit exposition-format version is what a real

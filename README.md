@@ -89,6 +89,7 @@ file, which beats the built-in default):
 | `-uplink-tls-client-key`   | `STEWARD_UPLINK_TLS_CLIENT_KEY`   | (unset)          | PEM private key for `-uplink-tls-client-cert`; requires `-uplink-tls-client-cert` |
 | `-uplink-tls-skip-verify`  | `STEWARD_UPLINK_TLS_SKIP_VERIFY`  | `false`          | **INSECURE**: skip verification of the control plane's TLS certificate. Defeats TLS authentication; logged loudly when on. Temporary diagnostics only |
 | `-uplink-poll-interval`    | `STEWARD_UPLINK_POLL_INTERVAL`    | `10s`            | base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap) |
+| `-uplink-command-queue-depth` | `STEWARD_UPLINK_COMMAND_QUEUE_DEPTH` | `256`     | maximum received-but-not-yet-executed uplink commands held at once (queued plus in-flight); a poll cycle's excess beyond this is rejected and left for the control plane to redeliver, rather than committing the node to unbounded work. Must be a positive integer; only consumed when `-uplink-url` is set — see [Command backpressure](#command-backpressure) |
 | `-disable-inbound-listener` | `STEWARD_DISABLE_INBOUND_LISTENER` | `false`          | do not bind an inbound listener; requires `-uplink-url`                |
 | `-enable-metrics`          | `STEWARD_ENABLE_METRICS`          | `false`          | expose `GET /metrics` (Prometheus text format) on the inbound listener; see [Metrics](#metrics) |
 | `-audit-log-file`          | `STEWARD_AUDIT_LOG_FILE`          | (unset)          | path to a JSON-lines file recording every executed uplink command; unset disables it; see [Command audit log](#command-audit-log) |
@@ -200,6 +201,15 @@ It reports:
 - `steward_uplink_commands_total{status="success"|"failure"}` — uplink commands
   executed, by outcome.
 - `steward_uplink_backoff_seconds` — the poll loop's current interval/backoff.
+- `steward_uplink_command_queue_depth` — uplink commands received but not yet
+  executed (queued plus in-flight); a gauge that rises under a burst and drains as
+  the node catches up.
+- `steward_uplink_command_queue_max_depth` — the configured
+  `-uplink-command-queue-depth` cap, so a dashboard can chart current-vs-max
+  backpressure headroom.
+- `steward_uplink_commands_rejected_total` — uplink commands rejected because the
+  queue was full (left for the control plane to redeliver); a sustained non-zero
+  rate means the node is not keeping up with its command backlog.
 
 The `steward_uplink_*` series are present only when the outbound uplink is enabled
 (`-uplink-url`); on an inbound-REST-only node the endpoint still serves the
@@ -281,6 +291,37 @@ credential-permission check, which is always on when the uplink is enabled.
   under `-check-config`, and (for the credential) on the hot-reload watch — with an
   actionable message naming the path and the `chmod 600` fix. The check is on the
   mode bits, so it holds even when Steward runs as root.
+
+### Command backpressure
+
+The uplink poll loop puts a **bounded, in-memory queue** between the commands a
+poll returns and the commands the node executes, so a control plane that queues
+work faster than the node can execute it (a burst of provision/start/stop) cannot
+commit the node to unbounded in-flight or queued work. The poll loop is the
+producer and a single background consumer drains and executes the queue, so a slow
+batch never stalls polling.
+
+- **Bounded, with a redelivery-safe overflow.** `-uplink-command-queue-depth`
+  (env `STEWARD_UPLINK_COMMAND_QUEUE_DEPTH`, default `256`, validated positive at
+  startup and under `-check-config`) caps the queued-plus-in-flight command count.
+  When a poll cycle's commands would exceed the cap, the **excess is rejected, not
+  silently dropped**: each rejected command is logged at `WARN` under a grep-able
+  `uplink command queue full:` prefix (the same operator-greppable convention as
+  `sighup reload:`), naming the rejected commands' `command_id`s and `runtime_ref`s.
+  A rejected command is never reported, so the control plane's poll/report protocol
+  redelivers it on a later cycle once the backlog drains — nothing is lost.
+- **Deduplicated across poll cycles.** If a command's `command_id` is already
+  queued or in-flight, a redelivered copy (a report lost in transit, a claim-lease
+  reclaim) is skipped rather than executed a second time. Steward's tracker
+  operations are idempotent in effect regardless, so this is a work-saving guard
+  (it avoids redundant tracker mutations and, with `-state-file`, redundant disk
+  writes), not a correctness fix.
+- **Feeds readiness.** A queue that stays full for several consecutive poll cycles
+  flips `GET /v1/readiness` to `503` (naming the command-queue backlog), so a load
+  balancer or orchestrator stops routing new work to a node that is not keeping up;
+  the node returns to ready on its first clean poll cycle once the backlog drains. A
+  single momentary over-full poll never flips readiness (no flapping). See
+  [Health and readiness](#health-and-readiness).
 
 ## Config file
 
@@ -407,13 +448,18 @@ Steward exposes two distinct probes on the inbound listener:
   {"status": "ready"}` means the instance may receive traffic; a `503
   {"status": "not_ready", "check": "...", "detail": "..."}` names the first gate
   that failed so a load balancer or orchestrator drains a not-yet-warm or
-  degraded instance instead of routing to it. Three gates, checked in order:
+  degraded instance instead of routing to it. The gates, checked in order:
   1. the instance tracker is initialized;
-  2. when the outbound uplink is enabled (`-uplink-url`), it has completed at
+  2. when the outbound uplink is enabled, its command queue has **not** been full
+     for several consecutive poll cycles — a node not keeping up with its command
+     backlog is drained until it catches up (see
+     [Command backpressure](#command-backpressure)), while a single momentary
+     over-full poll never flips readiness;
+  3. when the outbound uplink is enabled (`-uplink-url`), it has completed at
      least one successful poll **or** is not in a persistent-failure state (a
      rejected credential, or sustained polling failure with no success yet) — a
      brief transient blip does not flip readiness;
-  3. when durable state is enabled (`-state-file`), its directory is writable —
+  4. when durable state is enabled (`-state-file`), its directory is writable —
      the capability persistence needs. Unlike the liveness probe, readiness
      deliberately performs this filesystem check, so a state directory gone
      read-only or full drains the instance even though its process is alive.
