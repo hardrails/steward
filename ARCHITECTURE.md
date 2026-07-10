@@ -106,6 +106,43 @@ The design provenance — the shape chosen, the shapes rejected, the invariants,
 the (provisional) wire contract still being reconciled with the control-plane side —
 lives in [`docs/uplink-client.md`](docs/uplink-client.md).
 
+### The inbound listener is opt-out (uplink-only nodes bind nothing inbound)
+
+A node with the uplink enabled has two independent front doors onto one tracker: the
+inbound REST listener (dialed *into*) and the outbound uplink (dialing *out*). A node
+whose reason for using the uplink is that inbound connections are impossible — behind
+NAT or a firewall — has no use for the inbound listener at all, yet by default it
+still binds one (loopback). `-disable-inbound-listener` (env
+`STEWARD_DISABLE_INBOUND_LISTENER`) lets such a node **bind nothing inbound**: the
+`http.Server` is not built, and all fleet operations flow through the uplink poll
+loop only. This is safe because the uplink is already a second *in-process* caller of
+the tracker, not an HTTP client of the local listener — removing the inbound door
+does not touch the outbound one.
+
+- **It is opt-out, so today's behavior is the default.** With the flag unset the
+  listener binds `-addr` exactly as before, whether or not the uplink is also on. Only
+  an explicit `-disable-inbound-listener` removes it. This mirrors how every other
+  Steward setting defaults to today's behavior.
+- **A node is never left unreachable.** Disabling the listener *without* an uplink
+  would leave a node that can neither be dialed nor dial out — a dark, useless
+  process. That combination is a **fail-closed startup error** naming the
+  contradiction and both fixes, never a silent launch — the same discipline the uplink
+  credential and `-uplink-poll-interval` checks already apply. The startup rule reduces
+  to one line: a node must open at least one door (inbound, outbound, or both); only
+  "neither" is refused.
+- **It changes nothing on the published contract.** The flag adds no endpoint,
+  request/response shape, or status code, so `openapi/steward.v1.yaml` is unchanged;
+  which front doors a node opens is a deployment-mode concern, exactly as durable state
+  is. A uplink-only node has no local `GET /v1/healthz`; its liveness signal is the
+  process being up and its uplink poll logs advancing (a fatal `401`/`403` stops the
+  loop loudly), which is the model a co-located supervisor already uses — nothing
+  external can reach a loopback probe on a NAT'd node anyway. An operator who wants a
+  local HTTP health probe simply leaves the listener on (the default).
+
+The design provenance — the flag-vs-`-addr` decision, the interaction rules, the
+health/readiness answer, and the task list — lives in
+[`docs/disable-inbound-listener.md`](docs/disable-inbound-listener.md).
+
 ### Uplink commands are generation-fenced
 
 Because `Destroy` releases an `instance_id` for reuse, two different instances can
