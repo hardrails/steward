@@ -413,8 +413,12 @@ paths:
         orchestrator drains a not-yet-warm or persistently-failing instance
         rather than routing to it.
 
-        Three gates, checked cheapest-first, first failure wins:
+        The gates, checked cheapest-first, first failure wins:
           - the instance tracker is initialized;
+          - when the outbound uplink is enabled, its command queue has not been
+            full for several consecutive poll cycles — a node not keeping up with
+            its command backlog is drained until it catches up, while a single
+            momentary over-full poll does not flip readiness;
           - when the outbound uplink is enabled (`-uplink-url`), it has completed
             at least one successful poll OR is not in a persistent-failure state
             (a rejected credential, or sustained polling failure with no success
@@ -466,7 +470,9 @@ paths:
         the current tracked instance count (broken down by status), the configured
         `max_instances` cap, and — only when the outbound uplink is enabled
         (`-uplink-url`) — its poll latency (min/max/last), poll count, command
-        success/failure counters, and current backoff.
+        success/failure counters, current backoff, and command-queue backpressure
+        (current and maximum queue depth, plus a counter of commands rejected because
+        the queue was full and left for the control plane to redeliver).
 
         This endpoint is **off by default**: it exists only when the server's
         `-enable-metrics` flag (or `STEWARD_ENABLE_METRICS`) is set. When disabled
