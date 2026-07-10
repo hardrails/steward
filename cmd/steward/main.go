@@ -2,7 +2,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,8 +26,8 @@ func main() {
 	// A bootstrap logger at the default level records the few startup errors that
 	// must be reported before -log-level is known: the env-default validations
 	// below run before flag.Parse. They are Error-level lines, emitted regardless
-	// of the eventual level; the logger is rebuilt at the configured level right
-	// after flags are parsed, before any request is served or poll is sent.
+	// of the eventual level; the logger is rebuilt at the configured level in
+	// prepareRuntime, before any request is served or poll is sent.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	// The uplink poll interval's default comes from STEWARD_UPLINK_POLL_INTERVAL when
@@ -70,122 +72,119 @@ func main() {
 		"do not bind an inbound HTTP listener; requires -uplink-url. All fleet operations then flow through the outbound uplink poll loop only.")
 	logLevel := flag.String("log-level", envOr("STEWARD_LOG_LEVEL", "info"),
 		"log verbosity: one of debug, info, warn, error (case-insensitive)")
+	configFile := flag.String("config", envOr("STEWARD_CONFIG", ""),
+		"optional path to a JSON config file supplying any of the settings above; a flag or env var overrides it (precedence: flag > env > config file)")
+	checkConfig := flag.Bool("check-config", false,
+		"validate the resolved configuration (flags, env, and any -config file) with the same fail-closed checks a real startup runs, then exit 0 (valid) or non-zero (naming the problem), without binding a port or starting the uplink loop")
 	showVersion := flag.Bool("version", false,
 		"print version information and exit")
 	flag.Parse()
 
-	// -version prints the build/version string and exits 0, before binding any
-	// port, loading state, or starting the uplink loop. It resolves the same value
-	// GET /v1/capabilities advertises (server.ResolveVersion): the Go toolchain's
-	// stamped VCS revision or tagged module version, falling back to the compiled-in
-	// constant under `go run`.
+	// -version prints the build/version string and exits 0, before loading the
+	// config file, binding any port, loading state, or starting the uplink loop. It
+	// resolves the same value GET /v1/capabilities advertises (server.ResolveVersion):
+	// the Go toolchain's stamped VCS revision or tagged module version, falling back
+	// to the compiled-in constant under `go run`.
 	if *showVersion {
 		fmt.Println("steward " + server.ResolveVersion())
 		os.Exit(0)
 	}
 
-	// Rebuild the logger at the configured level now that flags are parsed. A
-	// garbage -log-level (or STEWARD_LOG_LEVEL) is a fail-closed startup error
-	// naming the bad value and the accepted set, never a silent fall back to a
-	// verbosity the operator did not choose — the same discipline the poll-interval
-	// and inbound-listener checks apply.
-	level, err := parseLogLevel(*logLevel)
+	// Load the JSON config file (if any) and fold it in as the lowest-precedence
+	// layer, below env and flags. It is read after -version (which needs no config)
+	// but before every validation, so -check-config validates a -config file too and
+	// a malformed file fails closed identically for a real boot and a dry run.
+	fc, err := loadConfigFile(*configFile)
 	if err != nil {
-		logger.Error("configure log level", "err", err)
+		logger.Error("load config file", "err", err)
 		os.Exit(1)
 	}
-	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
-
-	// -max-instances is a DoS circuit-breaker (an unauthenticated loop of distinct
-	// instance_ids is the same OOM shape as an unbounded request body); a
-	// non-positive value is a configuration mistake, not a request for "unlimited".
-	// The tracker constructor's <=0 → DefaultMaxInstances convenience is for
-	// programmatic callers (server.New, tests); at this operator-facing CLI boundary
-	// the default already comes from the flag's own 1024, so a non-positive value
-	// here can only be a typo. Fail closed and name it — the same discipline the
-	// -uplink-url and -disable-inbound-listener checks apply — rather than silently
-	// running at 1024 the operator never asked for.
-	if *maxInstances <= 0 {
-		logger.Error("invalid -max-instances",
-			"value", *maxInstances,
-			"hint", "-max-instances (or STEWARD_MAX_INSTANCES) must be a positive integer; omit it to use the default 1024")
-		os.Exit(1)
+	// Fold the config file in as the lowest-precedence layer, below env and flags.
+	// flag.Parse has already applied the flag layer (an explicitly-passed flag) and
+	// the env layer (folded into each flag's default via envOr/envOrInt/envDuration/
+	// envBool). A config-file value may therefore fill a setting only when BOTH its
+	// flag was not passed and its env var is unset — fileMayFill encodes exactly that,
+	// so the file can never override an operator's flag or env choice. An empty (or
+	// unset) env var counts as "env absent" so the file may fill it, matching
+	// envOr/envOrInt/envDuration/envBool, which all treat an empty value as unset.
+	setFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+	fileMayFill := func(flagName, envKey string) bool {
+		return !setFlags[flagName] && os.Getenv(envKey) == ""
+	}
+	if fc.Addr != nil && fileMayFill("addr", "STEWARD_ADDR") {
+		*addr = *fc.Addr
+	}
+	if fc.MaxInstances != nil && fileMayFill("max-instances", "STEWARD_MAX_INSTANCES") {
+		*maxInstances = *fc.MaxInstances
+	}
+	if fc.StateFile != nil && fileMayFill("state-file", "STEWARD_STATE_FILE") {
+		*stateFile = *fc.StateFile
+	}
+	if fc.UplinkURL != nil && fileMayFill("uplink-url", "STEWARD_UPLINK_URL") {
+		*uplinkURL = *fc.UplinkURL
+	}
+	if fc.UplinkCredentialFile != nil && fileMayFill("uplink-credential-file", "STEWARD_UPLINK_CREDENTIAL_FILE") {
+		*uplinkCredentialFile = *fc.UplinkCredentialFile
+	}
+	if fc.DisableInboundListener != nil && fileMayFill("disable-inbound-listener", "STEWARD_DISABLE_INBOUND_LISTENER") {
+		*disableInbound = *fc.DisableInboundListener
+	}
+	if fc.LogLevel != nil && fileMayFill("log-level", "STEWARD_LOG_LEVEL") {
+		*logLevel = *fc.LogLevel
+	}
+	// The poll interval is the one non-string setting: the file carries it as a Go
+	// duration string (e.g. "30s"), parsed here the same way envDuration and the
+	// -uplink-poll-interval flag parse theirs. A malformed value is a fail-closed
+	// startup error naming the file and the bad value, never a silent default.
+	if fc.UplinkPollInterval != nil && fileMayFill("uplink-poll-interval", "STEWARD_UPLINK_POLL_INTERVAL") {
+		d, perr := time.ParseDuration(*fc.UplinkPollInterval)
+		if perr != nil {
+			logger.Error("configure uplink poll interval",
+				"err", fmt.Errorf("config file %q has an invalid uplink_poll_interval %q: not a valid duration (want e.g. \"10s\", \"1m30s\")", *configFile, *fc.UplinkPollInterval))
+			os.Exit(1)
+		}
+		*uplinkPollInterval = d
 	}
 
-	// A node with neither the inbound listener nor the outbound uplink enabled would
-	// be unreachable in both directions — a dark, useless process. Fail closed here,
-	// before any other startup work, naming both the flag and the fix, the same
-	// discipline the uplink credential and poll-interval checks below apply.
-	if *disableInbound && *uplinkURL == "" {
-		logger.Error("inbound listener disabled but no uplink configured",
-			"hint", "a node with neither an inbound listener nor an outbound uplink is unreachable; set -uplink-url (or STEWARD_UPLINK_URL) to poll a control plane, or drop -disable-inbound-listener to serve the inbound REST API")
-		os.Exit(1)
+	cfg := resolvedConfig{
+		addr:                 *addr,
+		maxInstances:         *maxInstances,
+		stateFile:            *stateFile,
+		uplinkURL:            *uplinkURL,
+		uplinkCredentialFile: *uplinkCredentialFile,
+		uplinkPollInterval:   *uplinkPollInterval,
+		disableInbound:       *disableInbound,
+		logLevel:             *logLevel,
 	}
 
-	// LoadTracker restores any existing state before the server accepts requests.
-	// An empty -state-file disables persistence (the in-memory default); a corrupt
-	// or unreadable file fails closed here with a message naming the path and fix,
-	// rather than starting with silently-empty state.
-	tracker, err := runtime.LoadTracker(*maxInstances, *stateFile)
+	// -check-config is a dry run: it exercises the exact same validation-and-build
+	// sequence a real startup runs (prepareRuntime), then exits 0 (valid) or
+	// non-zero with the same actionable error — without binding a port, serving, or
+	// starting the uplink poll loop. It is the "will this configuration work?"
+	// question an operator asks before rolling a config out, the -config file
+	// included.
+	if *checkConfig {
+		if _, _, _, err := prepareRuntime(cfg, logger, true); err != nil {
+			os.Exit(1)
+		}
+		fmt.Println("configuration valid")
+		os.Exit(0)
+	}
+
+	logger, tracker, poller, err := prepareRuntime(cfg, logger, false)
 	if err != nil {
-		logger.Error("load state", "err", err)
 		os.Exit(1)
-	}
-	if *stateFile != "" {
-		logger.Info("durable state enabled", "path", *stateFile, "restored_instances", tracker.Len())
-	}
-
-	// The uplink is enabled iff -uplink-url is set (mirroring how -state-file's
-	// presence enables durable state). When enabled, load the node credential
-	// fail-closed before serving — a missing or corrupt credential is a startup
-	// error naming the path, never a silently-disabled uplink, the same discipline
-	// LoadTracker applies to a corrupt state file — and build the poller. The poll
-	// goroutine is started below, bound to the shutdown context.
-	var poller *uplink.Poller
-	if *uplinkURL != "" {
-		if *uplinkCredentialFile == "" {
-			logger.Error("uplink enabled but no credential file",
-				"hint", "set -uplink-credential-file (or STEWARD_UPLINK_CREDENTIAL_FILE) when -uplink-url is set")
-			os.Exit(1)
-		}
-		cred, err := uplink.LoadCredential(*uplinkCredentialFile)
-		if err != nil {
-			logger.Error("load uplink credential", "err", err)
-			os.Exit(1)
-		}
-		poller, err = uplink.NewPoller(tracker, uplink.Config{
-			BaseURL:      *uplinkURL,
-			Credential:   cred.Credential,
-			NodeID:       cred.NodeID,
-			PollInterval: *uplinkPollInterval,
-			Logger:       logger,
-		})
-		if err != nil {
-			logger.Error("configure uplink", "err", err)
-			os.Exit(1)
-		}
-		logger.Info("uplink enabled",
-			"url", *uplinkURL, "node_id", cred.NodeID, "tenant_id", cred.TenantID,
-			"poll_interval", uplinkPollInterval.String())
-		// -uplink-poll-interval has no documented ceiling, but the steady-state poll
-		// cadence is clamped to the same 5-minute cap used for failed-poll backoff
-		// (see backoffDuration): a base at or above the cap polls at the cap, not at
-		// the configured value. Warn once at startup naming both, so this is visible
-		// rather than a silent surprise.
-		if *uplinkPollInterval > uplink.MaxBackoff {
-			logger.Warn("uplink poll interval exceeds the backoff cap; effective interval is clamped",
-				"configured_interval", uplinkPollInterval.String(), "effective_interval", uplink.MaxBackoff.String())
-		}
 	}
 
 	// When the inbound listener is disabled, srv stays nil: no http.Server is built
 	// and no ListenAndServe goroutine is started. All fleet operations then flow
-	// through the uplink poll loop only (see the fail-closed guard above, which
-	// already refused this combination without -uplink-url).
+	// through the uplink poll loop only (see the fail-closed guard in prepareRuntime,
+	// which already refused this combination without -uplink-url).
 	var srv *http.Server
-	if !*disableInbound {
+	if !cfg.disableInbound {
 		srv = &http.Server{
-			Addr:              *addr,
+			Addr:              cfg.addr,
 			Handler:           server.NewWithTracker(logger, tracker).Handler(),
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       15 * time.Second,
@@ -225,7 +224,7 @@ func main() {
 
 	if srv != nil {
 		go func() {
-			logger.Info("steward listening", "addr", *addr, "version", server.Version)
+			logger.Info("steward listening", "addr", cfg.addr, "version", server.Version)
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				logger.Error("server error", "err", err)
 				stop()
@@ -257,6 +256,137 @@ func main() {
 			logger.Warn("uplink poll loop did not stop within the shutdown deadline")
 		}
 	}
+}
+
+// resolvedConfig is the fully-layered startup configuration: every setting after
+// precedence (flag > env > -config file > built-in default) has been applied. It is
+// the single input both the real startup path and the -check-config dry run
+// validate and build from, so the two can never diverge on what a valid config is.
+type resolvedConfig struct {
+	addr                 string
+	maxInstances         int
+	stateFile            string
+	uplinkURL            string
+	uplinkCredentialFile string
+	uplinkPollInterval   time.Duration
+	disableInbound       bool
+	logLevel             string
+}
+
+// prepareRuntime runs every fail-closed startup check against cfg and builds the
+// live objects the server runs from — the restored tracker and, when the uplink is
+// enabled, the poller. It is the ONE validation-and-construction sequence shared by
+// the real startup path and the -check-config dry run, so a dry run can never accept
+// a config a real boot would reject (or the reverse). It rebuilds the logger at the
+// configured level (returned for the caller to keep using) and, on any invalid
+// setting, logs the same actionable error a real boot would and returns it. It binds
+// no port and starts no goroutine: the caller wires the HTTP server and starts the
+// poll loop from the returned objects.
+//
+// When checkOnly is true the success/progress logs ("durable state enabled",
+// "uplink enabled") are suppressed: a dry run validates a configuration, it does not
+// enable anything, so reporting those would be misleading. The fail-closed error
+// logs and the poll-interval-clamp warning — which report on the config itself — are
+// emitted either way.
+func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*slog.Logger, *runtime.Tracker, *uplink.Poller, error) {
+	// Rebuild the logger at the configured level now that the config is resolved. A
+	// garbage -log-level (or STEWARD_LOG_LEVEL, or log_level in the config file) is a
+	// fail-closed startup error naming the bad value and the accepted set, logged via
+	// the bootstrap logger since the configured one is not yet valid.
+	level, err := parseLogLevel(cfg.logLevel)
+	if err != nil {
+		logger.Error("configure log level", "err", err)
+		return logger, nil, nil, err
+	}
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+
+	// -max-instances is a DoS circuit-breaker (an unauthenticated loop of distinct
+	// instance_ids is the same OOM shape as an unbounded request body); a
+	// non-positive value is a configuration mistake, not a request for "unlimited".
+	// The tracker constructor's <=0 → DefaultMaxInstances convenience is for
+	// programmatic callers (server.New, tests); at this operator-facing CLI boundary
+	// the default already comes from the flag's own 1024, so a non-positive value
+	// here can only be a typo. Fail closed and name it — the same discipline the
+	// -uplink-url and -disable-inbound-listener checks apply — rather than silently
+	// running at 1024 the operator never asked for.
+	if cfg.maxInstances <= 0 {
+		logger.Error("invalid -max-instances",
+			"value", cfg.maxInstances,
+			"hint", "-max-instances (or STEWARD_MAX_INSTANCES) must be a positive integer; omit it to use the default 1024")
+		return logger, nil, nil, fmt.Errorf("invalid -max-instances %d", cfg.maxInstances)
+	}
+
+	// A node with neither the inbound listener nor the outbound uplink enabled would
+	// be unreachable in both directions — a dark, useless process. Fail closed here,
+	// before any other startup work, naming both the flag and the fix, the same
+	// discipline the uplink credential and poll-interval checks below apply.
+	if cfg.disableInbound && cfg.uplinkURL == "" {
+		logger.Error("inbound listener disabled but no uplink configured",
+			"hint", "a node with neither an inbound listener nor an outbound uplink is unreachable; set -uplink-url (or STEWARD_UPLINK_URL) to poll a control plane, or drop -disable-inbound-listener to serve the inbound REST API")
+		return logger, nil, nil, errors.New("inbound listener disabled but no uplink configured")
+	}
+
+	// LoadTracker restores any existing state (validating the file) before the server
+	// accepts requests. An empty -state-file disables persistence (the in-memory
+	// default); a corrupt or unreadable file fails closed here with a message naming
+	// the path and fix, rather than starting with silently-empty state. In a dry run
+	// this validates the file is loadable without keeping the tracker for real use.
+	tracker, err := runtime.LoadTracker(cfg.maxInstances, cfg.stateFile)
+	if err != nil {
+		logger.Error("load state", "err", err)
+		return logger, nil, nil, err
+	}
+	if cfg.stateFile != "" && !checkOnly {
+		logger.Info("durable state enabled", "path", cfg.stateFile, "restored_instances", tracker.Len())
+	}
+
+	// The uplink is enabled iff -uplink-url is set (mirroring how -state-file's
+	// presence enables durable state). When enabled, load the node credential
+	// fail-closed and build the poller — a missing or corrupt credential, or a URL
+	// that is not an absolute http(s) URL, is a startup error naming the path/value,
+	// never a silently-disabled uplink. The poll goroutine is started by the caller,
+	// not here; in a dry run NewPoller validates the URL and credential without
+	// dialing.
+	var poller *uplink.Poller
+	if cfg.uplinkURL != "" {
+		if cfg.uplinkCredentialFile == "" {
+			logger.Error("uplink enabled but no credential file",
+				"hint", "set -uplink-credential-file (or STEWARD_UPLINK_CREDENTIAL_FILE) when -uplink-url is set")
+			return logger, nil, nil, errors.New("uplink enabled but no credential file")
+		}
+		cred, err := uplink.LoadCredential(cfg.uplinkCredentialFile)
+		if err != nil {
+			logger.Error("load uplink credential", "err", err)
+			return logger, nil, nil, err
+		}
+		poller, err = uplink.NewPoller(tracker, uplink.Config{
+			BaseURL:      cfg.uplinkURL,
+			Credential:   cred.Credential,
+			NodeID:       cred.NodeID,
+			PollInterval: cfg.uplinkPollInterval,
+			Logger:       logger,
+		})
+		if err != nil {
+			logger.Error("configure uplink", "err", err)
+			return logger, nil, nil, err
+		}
+		if !checkOnly {
+			logger.Info("uplink enabled",
+				"url", cfg.uplinkURL, "node_id", cred.NodeID, "tenant_id", cred.TenantID,
+				"poll_interval", cfg.uplinkPollInterval.String())
+		}
+		// -uplink-poll-interval has no documented ceiling, but the steady-state poll
+		// cadence is clamped to the same 5-minute cap used for failed-poll backoff
+		// (see backoffDuration): a base at or above the cap polls at the cap, not at
+		// the configured value. Warn once naming both, so this is visible rather than
+		// a silent surprise — in a dry run too, since it is a fact about the config.
+		if cfg.uplinkPollInterval > uplink.MaxBackoff {
+			logger.Warn("uplink poll interval exceeds the backoff cap; effective interval is clamped",
+				"configured_interval", cfg.uplinkPollInterval.String(), "effective_interval", uplink.MaxBackoff.String())
+		}
+	}
+
+	return logger, tracker, poller, nil
 }
 
 func envOr(key, fallback string) string {
@@ -332,4 +462,54 @@ func parseLogLevel(s string) (slog.Level, error) {
 	default:
 		return 0, fmt.Errorf("invalid log level %q: want one of debug, info, warn, error (via -log-level or STEWARD_LOG_LEVEL)", s)
 	}
+}
+
+// fileConfig is the -config JSON file's shape: the same settings the flags and env
+// vars carry, supplied as the lowest-precedence layer (flag > env > file). Every
+// field is a pointer so an absent key is distinguishable from a present zero value —
+// an absent key leaves the env/flag/default value untouched, while a present key
+// (even one set to "" or false) overrides the built-in default. Keys are snake_case,
+// matching this repo's other JSON files (state, credential) and the STEWARD_* env
+// var suffixes. uplink_poll_interval is a Go duration string (e.g. "30s"), parsed
+// the same way the flag and env var parse theirs.
+type fileConfig struct {
+	Addr                   *string `json:"addr"`
+	MaxInstances           *int    `json:"max_instances"`
+	StateFile              *string `json:"state_file"`
+	UplinkURL              *string `json:"uplink_url"`
+	UplinkCredentialFile   *string `json:"uplink_credential_file"`
+	UplinkPollInterval     *string `json:"uplink_poll_interval"`
+	DisableInboundListener *bool   `json:"disable_inbound_listener"`
+	LogLevel               *string `json:"log_level"`
+}
+
+// loadConfigFile reads and parses the JSON config file at path, fail-closed. It
+// mirrors the state-file and credential-file loaders: a read error, malformed JSON,
+// an unknown key, or trailing data is a startup error naming the file and the
+// problem, never a silently-ignored or half-applied config — an operator's typo'd
+// key ("max_instance" for "max_instances") is exactly the "will this config work?"
+// foot-gun -check-config exists to catch, so an unknown key is rejected rather than
+// silently dropped. An empty path means no config file (the default) and returns a
+// zero fileConfig. Value *validity* (a bad log level, a non-positive max-instances, a
+// malformed uplink URL) is deliberately NOT checked here — it is caught by the same
+// startup sequence that validates flags and env, so a file value and a flag value
+// fail identically.
+func loadConfigFile(path string) (fileConfig, error) {
+	if path == "" {
+		return fileConfig{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fileConfig{}, fmt.Errorf("read config file %q: %w (fix its path or permissions, or drop -config to use flags and env only)", path, err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var fc fileConfig
+	if err := dec.Decode(&fc); err != nil {
+		return fileConfig{}, fmt.Errorf("config file %q is not valid Steward config JSON: %w (fix the file, or drop -config to use flags and env only)", path, err)
+	}
+	if dec.More() {
+		return fileConfig{}, fmt.Errorf("config file %q has trailing data after the JSON object; it must contain exactly one JSON object (fix the file, or drop -config to use flags and env only)", path)
+	}
+	return fc, nil
 }
