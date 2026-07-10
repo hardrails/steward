@@ -197,7 +197,7 @@ func (p *Poller) Run(ctx context.Context) {
 					"err", err, "node_id", p.dispatcher.nodeID)
 				return
 			}
-			p.logger.Error("uplink credential rejected; pausing the poll loop and waiting for a new credential at "+p.credentialPath,
+			p.logger.Error("uplink credential rejected; pausing the poll loop and waiting for a new credential",
 				"err", err, "node_id", p.dispatcher.nodeID, "path", p.credentialPath)
 			if !p.waitForCredentialChange(ctx) {
 				return // ctx cancelled while waiting: a real shutdown, not a resume.
