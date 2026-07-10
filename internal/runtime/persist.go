@@ -80,7 +80,7 @@ func (t *Tracker) load() error {
 			return t.corruptErr(fmt.Sprintf("instance %q is missing runtime_ref", inst.InstanceID))
 		case !inst.Status.valid():
 			return t.corruptErr(fmt.Sprintf("instance %q has unknown status %q", inst.InstanceID, inst.Status))
-		case len(inst.Spec) > 0 && !isJSONObject(inst.Spec):
+		case len(inst.Spec) > 0 && !IsJSONObject(inst.Spec):
 			return t.corruptErr(fmt.Sprintf("instance %q has a non-object spec", inst.InstanceID))
 		}
 		if _, dup := byRef[inst.RuntimeRef]; dup {
@@ -206,10 +206,12 @@ func (s Status) valid() bool {
 	}
 }
 
-// isJSONObject reports whether raw (already-validated JSON) is a JSON object.
+// IsJSONObject reports whether raw (already-validated JSON) is a JSON object.
 // json.RawMessage unmarshaling guarantees raw is well-formed JSON, so inspecting
-// the first non-whitespace byte is sufficient.
-func isJSONObject(raw json.RawMessage) bool {
+// the first non-whitespace byte is sufficient. It is exported so the inbound REST
+// handler and the outbound uplink client enforce the *same* "spec must be a JSON
+// object" contract from one definition rather than two copies that could drift.
+func IsJSONObject(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) > 0 && trimmed[0] == '{'
 }

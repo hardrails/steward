@@ -209,6 +209,43 @@ func TestDurableReflectsPersistenceMode(t *testing.T) {
 	}
 }
 
+func TestRefForInstanceResolvesTrackedInstance(t *testing.T) {
+	tr := NewTracker(0)
+	inst, _, err := tr.Provision("agent-1", nil)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	ref, ok := tr.RefForInstance("agent-1")
+	if !ok {
+		t.Fatal("RefForInstance(agent-1): ok=false, want true for a tracked instance")
+	}
+	if ref != inst.RuntimeRef {
+		t.Fatalf("RefForInstance(agent-1) = %q, want the tracked runtime_ref %q", ref, inst.RuntimeRef)
+	}
+}
+
+func TestRefForInstanceUnknownIDReportsNotOk(t *testing.T) {
+	tr := NewTracker(0)
+
+	if ref, ok := tr.RefForInstance("never-provisioned"); ok || ref != "" {
+		t.Fatalf("RefForInstance(unknown) = (%q, %v), want (\"\", false)", ref, ok)
+	}
+
+	// After a destroy the instance_id is released, so RefForInstance stops
+	// resolving it — the resolve-then-act "gone" outcome the uplink relies on.
+	inst, _, err := tr.Provision("agent-1", nil)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if _, err := tr.Destroy(inst.RuntimeRef); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	if ref, ok := tr.RefForInstance("agent-1"); ok || ref != "" {
+		t.Fatalf("RefForInstance after destroy = (%q, %v), want (\"\", false)", ref, ok)
+	}
+}
+
 func TestDestroyReleasesInstanceIDForReuse(t *testing.T) {
 	tr := NewTracker(0)
 
