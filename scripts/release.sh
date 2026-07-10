@@ -35,18 +35,23 @@ targets=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64)
 # "dev" outside any checkout.
 VERSION="${GITHUB_REF_NAME:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
 
-# Fail-fast semver gate. The workflow's push trigger is the broad `v*` (GitHub's
-# tag-filter glob cannot reliably express "semver only"), so THIS is the
+# Fail-fast release-tag gate. The workflow's push trigger is the broad `v*`
+# (GitHub's tag-filter glob cannot reliably express "semver only"), so THIS is the
 # authoritative shape check: on a tag build, a tag that is not vX.Y.Z (with an
-# optional -prerelease / +build suffix) is refused here, before a single target is
-# built, instead of failing late — a stray tag like `vnext` or `v2` never proceeds
-# to a build or a publish. The stricter version assertion at the end still runs
-# too; this one just makes the common mistake fail immediately and legibly.
+# optional -prerelease suffix) is refused here, before a single target is built,
+# instead of failing late — a stray tag like `vnext` or `v2` never proceeds to a
+# build or a publish. Build-metadata tags (a `+...` suffix, e.g. `v1.2.3+ci`) are
+# rejected too: they are not resolvable Go module versions, so `go install
+# pkg@v1.2.3+ci` — a supported install path per the README — could not install
+# them; the accepted release tags are kept to installable versions only. The
+# stricter version assertion at the end still runs too; this one just makes the
+# common mistake fail immediately and legibly.
 if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-	if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]]; then
-		echo "release: FATAL — tag '${GITHUB_REF_NAME}' is not a semver release tag." >&2
-		echo "  Expected vX.Y.Z (optionally -prerelease or +build), e.g. v0.1.0 or v0.1.0-rc.1." >&2
-		echo "  Delete the tag and push a semver tag instead. See docs/releasing.md." >&2
+	if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+		echo "release: FATAL — tag '${GITHUB_REF_NAME}' is not an installable semver release tag." >&2
+		echo "  Expected vX.Y.Z with an optional -prerelease suffix, e.g. v0.1.0 or v0.1.0-rc.1" >&2
+		echo "  (no build-metadata '+...' suffix — it is not a resolvable Go module version)." >&2
+		echo "  Delete the tag and push a conforming tag instead. See docs/releasing.md." >&2
 		exit 1
 	fi
 fi
