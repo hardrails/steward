@@ -98,9 +98,13 @@ durable state. When it is set:
   *client*, so it introduces no new endpoint, request/response shape, or status code;
   `openapi/steward.v1.yaml` is unchanged. A poll failure is classified transient
   (network blip, `5xx` — bounded backoff, keep retrying) or fatal (`401`/`403`, a
-  bad or revoked credential — a loud, actionable log and the loop stops for an
-  operator), with no third-party retry or backoff library: the bounded-backoff loop
-  is hand-written on the standard library.
+  bad or revoked credential — a loud, actionable log), with no third-party retry or
+  backoff library: the bounded-backoff loop is hand-written on the standard library.
+  A fatal rejection no longer stops the loop outright: it pauses and watches the
+  credential file (content comparison, bounded interval, never a busy loop) until an
+  operator drops a valid new credential, then resumes with no process restart —
+  node-side credential hot-reload, detailed in
+  [`docs/uplink-client.md`](docs/uplink-client.md#node-side-credential-hot-reload).
 
 The design provenance — the shape chosen, the shapes rejected, the invariants, and
 the (provisional) wire contract still being reconciled with the control-plane side —
@@ -134,10 +138,11 @@ does not touch the outbound one.
   request/response shape, or status code, so `openapi/steward.v1.yaml` is unchanged;
   which front doors a node opens is a deployment-mode concern, exactly as durable state
   is. A uplink-only node has no local `GET /v1/healthz`; its liveness signal is the
-  process being up and its uplink poll logs advancing (a fatal `401`/`403` stops the
-  loop loudly), which is the model a co-located supervisor already uses — nothing
-  external can reach a loopback probe on a NAT'd node anyway. An operator who wants a
-  local HTTP health probe simply leaves the listener on (the default).
+  process being up and its uplink poll logs advancing (a fatal `401`/`403` pauses and
+  watches the credential file loudly, rather than exiting — see credential
+  hot-reload above), which is the model a co-located supervisor already uses —
+  nothing external can reach a loopback probe on a NAT'd node anyway. An operator
+  who wants a local HTTP health probe simply leaves the listener on (the default).
 
 The design provenance — the flag-vs-`-addr` decision, the interaction rules, the
 health/readiness answer, and the task list — lives in

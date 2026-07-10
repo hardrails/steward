@@ -225,15 +225,21 @@ func main() {
 		go func() {
 			defer close(done)
 			poller.Run(ctx)
-			// Poller.Run returns two ways: ctx was cancelled (a shutdown already in
-			// progress -- ctx.Err() is non-nil), or it gave up on its own (a fatal
-			// credential rejection -- classFatal -- ctx.Err() is still nil). The
-			// latter, with no inbound listener to fall back to, would otherwise leave
-			// main blocked on <-ctx.Done() forever: no uplink loop running, no REST
-			// API serving, a zombie process an operator's monitoring would see as
-			// "up" while it does nothing. Mirrors the server goroutine's own
-			// error->stop() pattern above -- a fatal exit on the ONLY control path
-			// triggers the same graceful shutdown, rather than hanging silently.
+			// Poller.Run returns for real work only when ctx is cancelled (a
+			// shutdown already in progress -- ctx.Err() is non-nil): main always
+			// sets uplink.Config.CredentialPath (above), so a fatal 401/403 now
+			// pauses and watches the credential file for a fix instead of giving
+			// up -- see waitForCredentialChange -- rather than stopping the loop
+			// outright. This branch is a defensive fallback for the one case Run
+			// can still return with ctx.Err() == nil: CredentialPath unset (not
+			// reachable from main today, but Poller is also a library type other
+			// callers can construct without it). With no inbound listener to fall
+			// back to, that would otherwise leave main blocked on <-ctx.Done()
+			// forever: no uplink loop running, no REST API serving, a zombie
+			// process an operator's monitoring would see as "up" while it does
+			// nothing. Mirrors the server goroutine's own error->stop() pattern
+			// above -- a fatal exit on the ONLY control path triggers the same
+			// graceful shutdown, rather than hanging silently.
 			if srv == nil && ctx.Err() == nil {
 				logger.Error("uplink poll loop exited and no inbound listener is configured; shutting down")
 				stop()
@@ -386,7 +392,9 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 	// that is not an absolute http(s) URL, is a startup error naming the path/value,
 	// never a silently-disabled uplink. The poll goroutine is started by the caller,
 	// not here; in a dry run NewPoller validates the URL and credential without
-	// dialing.
+	// dialing. CredentialPath is threaded through unconditionally so a fatal 401/403
+	// hot-reloads instead of stopping the loop — see uplink.Poller.Run and
+	// docs/uplink-client.md's credential hot-reload section.
 	var poller *uplink.Poller
 	if cfg.uplinkURL != "" {
 		if cfg.uplinkCredentialFile == "" {
@@ -400,11 +408,12 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 			return logger, nil, nil, err
 		}
 		poller, err = uplink.NewPoller(tracker, uplink.Config{
-			BaseURL:      cfg.uplinkURL,
-			Credential:   cred.Credential,
-			NodeID:       cred.NodeID,
-			PollInterval: cfg.uplinkPollInterval,
-			Logger:       logger,
+			BaseURL:        cfg.uplinkURL,
+			Credential:     cred.Credential,
+			NodeID:         cred.NodeID,
+			PollInterval:   cfg.uplinkPollInterval,
+			Logger:         logger,
+			CredentialPath: cfg.uplinkCredentialFile,
 		})
 		if err != nil {
 			logger.Error("configure uplink", "err", err)

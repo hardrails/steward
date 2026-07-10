@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +45,33 @@ func TestNewPollerRejectsBadConfig(t *testing.T) {
 	}
 	if _, err := NewPoller(tr, Config{BaseURL: "https://cp", Credential: "tok", NodeID: "node-7", PollInterval: time.Second}); err != nil {
 		t.Fatalf("NewPoller(valid https): unexpected err %v", err)
+	}
+}
+
+// TestNewPollerDefaultsCredentialWatchInterval proves the zero-value fallback: an
+// unset (zero) Config.CredentialWatchInterval must resolve to
+// DefaultCredentialWatchInterval, never stay 0 -- a 0 interval would make
+// waitForCredentialChange's p.wait a no-op timer, turning the "watch on a bounded
+// interval, never busy-loop" design into exactly the busy loop it exists to avoid.
+// An explicit override must still win.
+func TestNewPollerDefaultsCredentialWatchInterval(t *testing.T) {
+	tr := runtime.NewTracker(0)
+
+	unset := mustPoller(t, tr, Config{
+		BaseURL: "http://cp", Credential: "tok", NodeID: "node-7", PollInterval: time.Second,
+		CredentialPath: "/irrelevant/for/this/check",
+	})
+	if unset.credentialWatchInterval != DefaultCredentialWatchInterval {
+		t.Errorf("credentialWatchInterval = %s, want the default %s when Config.CredentialWatchInterval is unset",
+			unset.credentialWatchInterval, DefaultCredentialWatchInterval)
+	}
+
+	explicit := mustPoller(t, tr, Config{
+		BaseURL: "http://cp", Credential: "tok", NodeID: "node-7", PollInterval: time.Second,
+		CredentialPath: "/irrelevant/for/this/check", CredentialWatchInterval: 3 * time.Second,
+	})
+	if explicit.credentialWatchInterval != 3*time.Second {
+		t.Errorf("credentialWatchInterval = %s, want the explicit override 3s", explicit.credentialWatchInterval)
 	}
 }
 
@@ -156,6 +186,11 @@ func TestPollerBacksOffAndRetriesOn5xx(t *testing.T) {
 	waitDone(t, done)
 }
 
+// TestPollerStopsOnCredentialRejection covers the pre-hot-reload fallback: a
+// Poller built WITHOUT Config.CredentialPath has no file to watch, so a fatal
+// 401/403 must still stop Run outright exactly as before. The hot-reload path
+// (CredentialPath set) is covered separately below by
+// TestPollerEntersWatchModeAndResumesOnCredentialFileChange and its siblings.
 func TestPollerStopsOnCredentialRejection(t *testing.T) {
 	var mu sync.Mutex
 	polls := 0
@@ -198,6 +233,294 @@ func TestPollerStopsOnCredentialRejection(t *testing.T) {
 	}
 	if !strings.Contains(logs, "re-enroll") || !strings.Contains(logs, "restart") {
 		t.Errorf("credential-rejection log does not name the remedy (re-enroll/restart):\n%s", logs)
+	}
+}
+
+// TestPollerEntersWatchModeAndResumesOnCredentialFileChange is the core proof for
+// node-side credential hot-reload: with Config.CredentialPath set, a fatal 401/403
+// must NOT stop Run. It must pause, watch the credential file WITHOUT re-hitting
+// /uplink/poll while paused (no busy-loop against the control plane), and resume
+// once the file's content genuinely changes to a credential the server accepts.
+func TestPollerEntersWatchModeAndResumesOnCredentialFileChange(t *testing.T) {
+	var mu sync.Mutex
+	oldTokenPolls, newTokenPolls := 0, 0
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /uplink/poll", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Header.Get("Authorization") {
+		case "Bearer old-secret":
+			oldTokenPolls++
+			w.WriteHeader(http.StatusForbidden)
+		case "Bearer new-secret":
+			newTokenPolls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"commands":[]}`)
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	credPath := filepath.Join(t.TempDir(), "credential.json")
+	writeCredentialFile(t, credPath, "acme", "node-7", "old-secret")
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := mustPoller(t, runtime.NewTracker(0), Config{
+		BaseURL: srv.URL, Credential: "old-secret", NodeID: "node-7",
+		PollInterval: 5 * time.Millisecond, Logger: logger,
+		CredentialPath: credPath, CredentialWatchInterval: 5 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := run(p, ctx)
+
+	waitForLog(t, logBuf, "waiting for a new credential")
+
+	// The rejection must have happened exactly once so far.
+	mu.Lock()
+	n := oldTokenPolls
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("polled with the rejected credential %d times before pausing, want exactly 1", n)
+	}
+
+	// While paused, several watch ticks must pass with NO further /uplink/poll
+	// call at all -- the wait loop only reads the local file, it never re-hits
+	// the control plane with the still-rejected credential.
+	time.Sleep(10 * p.credentialWatchInterval)
+	mu.Lock()
+	n = oldTokenPolls
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("polled with the rejected credential %d times while paused, want exactly 1 (busy-looping against the control plane)", n)
+	}
+
+	// The operator drops a genuinely new credential; Run must resume with it.
+	writeCredentialFile(t, credPath, "acme", "node-7", "new-secret")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n = newTokenPolls
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for the poller to resume polling with the new credential")
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+
+	if !strings.Contains(logBuf.String(), "credential file changed") {
+		t.Errorf("expected a log naming the credential file change, got:\n%s", logBuf.String())
+	}
+
+	cancel()
+	waitDone(t, done)
+}
+
+// TestPollerWatchLoopIgnoresUnchangedOrUnreadableCredentialFile proves the "did the
+// credential actually change" check is a CONTENT comparison, not an mtime check,
+// and that a transiently absent/truncated/malformed file (the shape a non-atomic
+// external rotation tool produces mid-write) is retried, not treated as a crash or
+// a spurious resume.
+func TestPollerWatchLoopIgnoresUnchangedOrUnreadableCredentialFile(t *testing.T) {
+	var mu sync.Mutex
+	acceptedPolls := 0
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /uplink/poll", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Header.Get("Authorization") == "Bearer new-secret" {
+			acceptedPolls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"commands":[]}`)
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	credPath := filepath.Join(t.TempDir(), "credential.json")
+	writeCredentialFile(t, credPath, "acme", "node-7", "old-secret")
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := mustPoller(t, runtime.NewTracker(0), Config{
+		BaseURL: srv.URL, Credential: "old-secret", NodeID: "node-7",
+		PollInterval: 5 * time.Millisecond, Logger: logger,
+		CredentialPath: credPath, CredentialWatchInterval: 5 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := run(p, ctx)
+
+	waitForLog(t, logBuf, "waiting for a new credential")
+
+	// A same-content rewrite (an editor's mtime-only touch) must NOT resume.
+	writeCredentialFile(t, credPath, "acme", "node-7", "old-secret")
+	time.Sleep(10 * p.credentialWatchInterval)
+	mu.Lock()
+	n := acceptedPolls
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("resumed after a same-content rewrite, want no resume (accepted polls = %d)", n)
+	}
+
+	// A non-atomic external rewrite can leave the file transiently truncated or
+	// absent; this must not crash the loop, and must not be mistaken for a valid
+	// new credential.
+	if err := os.WriteFile(credPath, []byte(`{"version":1,"tenant_id":`), 0o600); err != nil {
+		t.Fatalf("write truncated fixture: %v", err)
+	}
+	time.Sleep(5 * p.credentialWatchInterval)
+	if err := os.Remove(credPath); err != nil {
+		t.Fatalf("remove fixture: %v", err)
+	}
+	time.Sleep(5 * p.credentialWatchInterval)
+	mu.Lock()
+	n = acceptedPolls
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("resumed while the credential file was malformed/absent, want no resume (accepted polls = %d)", n)
+	}
+
+	// A genuinely new secret must resume the loop.
+	writeCredentialFile(t, credPath, "acme", "node-7", "new-secret")
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n = acceptedPolls
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for the poller to resume once a genuinely new credential was written")
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	waitDone(t, done)
+}
+
+// TestPollerWatchLoopRefusesCredentialWithDifferentNodeID proves the careless-
+// caller guard: a reloaded credential file naming a DIFFERENT node_id must be
+// refused, not silently adopted as though this process were now that node.
+func TestPollerWatchLoopRefusesCredentialWithDifferentNodeID(t *testing.T) {
+	var mu sync.Mutex
+	acceptedPolls := 0
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /uplink/poll", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Header.Get("Authorization") == "Bearer new-secret" {
+			acceptedPolls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"commands":[]}`)
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	credPath := filepath.Join(t.TempDir(), "credential.json")
+	writeCredentialFile(t, credPath, "acme", "node-7", "old-secret")
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := mustPoller(t, runtime.NewTracker(0), Config{
+		BaseURL: srv.URL, Credential: "old-secret", NodeID: "node-7",
+		PollInterval: 5 * time.Millisecond, Logger: logger,
+		CredentialPath: credPath, CredentialWatchInterval: 5 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := run(p, ctx)
+
+	waitForLog(t, logBuf, "waiting for a new credential")
+
+	// A valid, new-secret credential for a FOREIGN node_id must be refused.
+	writeCredentialFile(t, credPath, "acme", "node-99", "new-secret")
+	time.Sleep(10 * p.credentialWatchInterval)
+	mu.Lock()
+	n := acceptedPolls
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("resumed using a credential for a different node_id, want refused (accepted polls = %d)", n)
+	}
+	if !strings.Contains(logBuf.String(), "different node_id") {
+		t.Errorf("expected a log naming the refused foreign node_id, got:\n%s", logBuf.String())
+	}
+
+	// The correct node_id with the same new secret must then resume normally.
+	writeCredentialFile(t, credPath, "acme", "node-7", "new-secret")
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n = acceptedPolls
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for the poller to resume once the correct node_id's credential was written")
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	waitDone(t, done)
+}
+
+// TestPollerWatchLoopRespectsContextCancellation proves the watch-for-a-new-
+// credential wait is itself ctx-aware, exactly like the ordinary inter-poll wait:
+// cancellation must return Run promptly, never block until the next watch tick.
+func TestPollerWatchLoopRespectsContextCancellation(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /uplink/poll", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	credPath := filepath.Join(t.TempDir(), "credential.json")
+	writeCredentialFile(t, credPath, "acme", "node-7", "tok")
+
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := mustPoller(t, runtime.NewTracker(0), Config{
+		BaseURL: srv.URL, Credential: "tok", NodeID: "node-7",
+		PollInterval: 5 * time.Millisecond, Logger: logger,
+		CredentialPath: credPath,
+		// Long enough that if cancellation did not interrupt the watch wait, the
+		// test would time out well before the next tick -- proving the loop is
+		// ctx-aware, not a plain blocking sleep.
+		CredentialWatchInterval: time.Hour,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := run(p, ctx)
+
+	waitForLog(t, logBuf, "waiting for a new credential")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return promptly after cancellation during the credential-watch wait")
 	}
 }
 
@@ -628,5 +951,59 @@ func waitDone(t *testing.T, done <-chan struct{}) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("poll loop did not return within the deadline")
+	}
+}
+
+// syncBuffer is a concurrency-safe bytes.Buffer wrapper. The credential-hot-reload
+// tests above read a Poller's live log output from the test goroutine while Run
+// (and its slog handler) is still writing to it from its own goroutine -- a plain
+// bytes.Buffer is not safe for that under -race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// writeCredentialFile writes a valid, version-1 credential JSON fixture
+// atomically (write to a sibling temp file, then rename) so a concurrently
+// running watch loop never observes a torn write from THIS helper -- the test
+// that wants to exercise a genuinely non-atomic, torn write does so explicitly
+// with os.WriteFile instead.
+func writeCredentialFile(t *testing.T, path, tenantID, nodeID, secret string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"version":1,"tenant_id":%q,"node_id":%q,"credential":%q}`, tenantID, nodeID, secret)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
+		t.Fatalf("write credential fixture: %v", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatalf("rename credential fixture into place: %v", err)
+	}
+}
+
+// waitForLog polls logBuf until it contains substr or the deadline elapses.
+func waitForLog(t *testing.T, logBuf *syncBuffer, substr string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if strings.Contains(logBuf.String(), substr) {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for log to contain %q; got:\n%s", substr, logBuf.String())
+		case <-time.After(2 * time.Millisecond):
+		}
 	}
 }

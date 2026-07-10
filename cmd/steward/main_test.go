@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -457,30 +459,46 @@ func TestDisableInboundListenerStartsCleanWithUplink(t *testing.T) {
 	}
 }
 
-// TestDisableInboundListenerShutsDownOnFatalPollRejection is the hosted-review
-// finding (P1, "Fatal Uplink Leaves Zombie"): when the inbound listener is
-// disabled, the uplink is the ONLY control path. If the poll loop gives up on
-// its own (classFatal -- a 401/403 credential rejection, not a shutdown-driven
-// context cancellation), nothing used to signal the process to exit: main
-// would block on <-ctx.Done() forever, serving nothing and doing nothing,
-// while an operator's process-liveness check saw it as "up". This asserts the
-// fix: the process exits ON ITS OWN, with no SIGTERM sent, once the poll loop
-// fatally gives up with no listener to fall back to.
-func TestDisableInboundListenerShutsDownOnFatalPollRejection(t *testing.T) {
+// TestDisableInboundListenerRecoversFromFatalPollRejectionViaCredentialHotReload
+// supersedes the old "fatal uplink leaves zombie" test: since node-side credential
+// hot-reload (internal/uplink.Poller.Run / waitForCredentialChange), a fatal
+// 401/403 no longer stops the poll loop outright -- it pauses and watches the
+// credential file, resuming once a genuinely new credential is written, with no
+// process restart. When the inbound listener is disabled the uplink is the ONLY
+// control path, so this is the end-to-end proof that main.go actually wires
+// uplink.Config.CredentialPath through to the real binary (see prepareRuntime's
+// uplink.NewPoller call): the process must stay alive through the rejection
+// (never the old self-triggered exit), resume polling once the operator rewrites
+// the credential file, and still shut down cleanly on SIGTERM afterward.
+func TestDisableInboundListenerRecoversFromFatalPollRejectionViaCredentialHotReload(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs a binary; skipped in -short")
 	}
 	bin := buildSteward(t)
 
-	// A fake control plane that rejects every poll with 401 -- classFatal in
-	// the poller's classification, the same trigger a real revoked/rotated
-	// credential would produce.
+	var mu sync.Mutex
+	acceptedPolls := 0
+
+	// A fake control plane that rejects the original credential (401 --
+	// classFatal, the same trigger a real revoked/rotated credential produces)
+	// and accepts only a rotated one.
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer new-secret" {
+			mu.Lock()
+			acceptedPolls++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"commands":[]}`)
+			return
+		}
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer fake.Close()
 
-	credPath := writeValidCredentialFile(t)
+	credPath := filepath.Join(t.TempDir(), "credential.json")
+	if err := os.WriteFile(credPath, []byte(`{"version":1,"tenant_id":"acme","node_id":"node-7","credential":"old-secret"}`), 0o600); err != nil {
+		t.Fatalf("write credential file: %v", err)
+	}
 
 	cmd := exec.Command(bin,
 		"-disable-inbound-listener",
@@ -511,32 +529,81 @@ func TestDisableInboundListenerShutsDownOnFatalPollRejection(t *testing.T) {
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
-	deadline := time.After(5 * time.Second)
+	// Stage 1: wait for the pause-and-watch log. If the process exits on its own
+	// here instead, that is the OLD (now-wrong) zombie-avoidance behavior.
+	deadline := time.After(3 * time.Second)
+waitPause:
 	for {
 		select {
 		case line, ok := <-lineCh:
 			if !ok {
-				lineCh = nil
+				t.Fatalf("stdout closed before the pause-and-watch log appeared:\n%s", strings.Join(lines, "\n"))
+			}
+			lines = append(lines, line)
+			if strings.Contains(line, "credential rejected") && strings.Contains(line, "waiting for a new credential") {
+				break waitPause
+			}
+		case waitErr := <-waitCh:
+			t.Fatalf("steward exited on its own instead of pausing to watch the credential file (waitErr=%v):\n%s", waitErr, strings.Join(lines, "\n"))
+		case <-deadline:
+			t.Fatalf("timed out waiting for the pause-and-watch log:\n%s", strings.Join(lines, "\n"))
+		}
+	}
+
+	// Stage 2: it must stay running for a bit -- no self-triggered shutdown just
+	// because the uplink is the only control path.
+	select {
+	case waitErr := <-waitCh:
+		t.Fatalf("steward exited after the fatal rejection instead of staying up to watch the credential file (waitErr=%v):\n%s", waitErr, strings.Join(lines, "\n"))
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Stage 3: the operator drops a rotated credential; steward must pick it up
+	// (on the default watch interval) and resume polling with it -- proven by the
+	// fake control plane actually accepting an authenticated poll.
+	if err := os.WriteFile(credPath, []byte(`{"version":1,"tenant_id":"acme","node_id":"node-7","credential":"new-secret"}`), 0o600); err != nil {
+		t.Fatalf("rewrite credential file: %v", err)
+	}
+	deadline = time.After(10 * time.Second)
+	for {
+		mu.Lock()
+		n := acceptedPolls
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case waitErr := <-waitCh:
+			t.Fatalf("steward exited before resuming with the rotated credential (waitErr=%v):\n%s", waitErr, strings.Join(lines, "\n"))
+		case line, ok := <-lineCh:
+			if !ok {
+				lineCh = nil // avoid busy-looping on a closed channel; waitCh still covers exit.
 				continue
 			}
 			lines = append(lines, line)
-		case waitErr := <-waitCh:
-			// No SIGTERM was ever sent -- the process had to exit on its own.
-			if waitErr != nil {
-				t.Fatalf("expected a clean self-triggered exit, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
-			}
-			joined := strings.Join(lines, "\n")
-			if !strings.Contains(joined, "credential rejected") {
-				t.Errorf("expected the poller's fatal-rejection log, got:\n%s", joined)
-			}
-			if !strings.Contains(joined, "no inbound listener is configured") {
-				t.Errorf("expected the zombie-prevention shutdown log naming the cause, got:\n%s", joined)
-			}
-			return
+		case <-time.After(20 * time.Millisecond):
+			// A successful (empty-commands) poll logs nothing, so re-check
+			// acceptedPolls on a short tick too -- otherwise this select would
+			// block silently on lineCh/waitCh for the whole 10s deadline even
+			// after the fake server already recorded the accepted poll.
 		case <-deadline:
-			_ = cmd.Process.Kill()
-			t.Fatalf("timed out waiting for steward to exit on its own (zombie process):\n%s", strings.Join(lines, "\n"))
+			t.Fatalf("timed out waiting for steward to resume polling with the rotated credential:\n%s", strings.Join(lines, "\n"))
 		}
+	}
+
+	// Stage 4: it still shuts down cleanly on SIGTERM afterward, like any other
+	// run -- hot-reload recovery does not leave it unkillable.
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("send SIGTERM: %v", err)
+	}
+	select {
+	case waitErr := <-waitCh:
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("steward did not exit within 5s of SIGTERM")
 	}
 }
 
