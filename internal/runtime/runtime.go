@@ -152,14 +152,22 @@ func transitionAllowed(from, to Status) bool {
 // ListFilter.CreatedSince — the same safe-default reasoning Generation's
 // zero value uses, just without the byte-identical-on-rewrite property
 // omitempty gives Generation.
-// The four process-supervision fields (PID, LastExitCode, LastExitReason) are
-// additive and populated only when process execution is enabled and the instance
-// carries a command spec; for every other instance they stay zero and are omitted
-// from the wire and the state file. Like CreatedAt and Generation before them, they
-// need no state-file format-version bump: a snapshot written before they existed
-// simply lacks the keys and decodes to their zero values (see the CreatedAt doc
-// comment and docs). PID is the OS pid of the currently supervised process (0 when
-// none), persisted so a best-effort liveness check can run after a restart.
+// The four process-supervision fields (PID, ProcStartToken, LastExitCode,
+// LastExitReason) are additive and populated only when process execution is enabled
+// and the instance carries a command spec; for every other instance they stay zero
+// and are omitted from the wire and the state file. Like CreatedAt and Generation
+// before them, they need no state-file format-version bump: a snapshot written before
+// they existed simply lacks the keys and decodes to their zero values (see the
+// CreatedAt doc comment and docs). PID is the OS pid of the currently supervised
+// process (0 when none), persisted so a best-effort liveness check can run after a
+// restart. ProcStartToken is a start-time identity witness for that pid, captured at
+// spawn and re-verified at reattach: a bare live pid is NOT proof the original child
+// is still there, because the OS reuses pids and an unrelated process (a cron job, a
+// database, sshd) may now hold it. A restart therefore reattaches only when the pid's
+// current start time still matches this recorded witness; otherwise supervision is
+// treated as lost rather than signalling a stranger's pid (see
+// reconcileProcessesAfterLoad). It is empty for a non-process instance, or when the
+// witness could not be read — an empty witness fails closed (no reattach).
 // LastExitCode/LastExitReason record the most recent process exit so an operator can
 // tell a crash ("crashed") from a requested stop ("stopped"/"killed") or lost
 // supervision ("supervision_lost") — a distinction the Status field cannot carry,
@@ -174,6 +182,7 @@ type Instance struct {
 	CreatedAt      time.Time       `json:"created_at"`
 	Spec           json.RawMessage `json:"spec,omitempty"`
 	PID            int             `json:"pid,omitempty"`
+	ProcStartToken string          `json:"proc_start_token,omitempty"`
 	LastExitCode   *int            `json:"last_exit_code,omitempty"`
 	LastExitReason string          `json:"last_exit_reason,omitempty"`
 }
@@ -211,6 +220,13 @@ type Tracker struct {
 	stopGracePeriod time.Duration
 	logger          *slog.Logger
 	procs           map[string]*supervisedProcess // live processes by runtime_ref; guarded by mu
+
+	// testHookStopAfterTerminate, when non-nil, is called by stopExec after the
+	// stopped process is confirmed dead but before the lock is re-acquired — the exact
+	// window in which a concurrent Start can spawn a replacement process for the same
+	// runtime_ref. It exists ONLY to make that stop-vs-start race deterministically
+	// testable and is nil in production.
+	testHookStopAfterTerminate func()
 }
 
 // Option configures a Tracker at construction. Options are the backward-compatible

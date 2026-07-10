@@ -520,8 +520,17 @@ failing early, not at first start.
 
 ### Security posture
 
-Three deliberate choices, not afterthoughts:
+Deliberate choices, not afterthoughts — plus one caveat an operator **must** act on:
 
+- **The child runs with Steward's own user and privileges.** A spawned process
+  inherits Steward's UID, GID, and privileges; Steward drops **no** privileges (no
+  `setuid`/`setgid`, no `SysProcAttr` credential change) and applies no sandbox. **If
+  Steward runs as root, spawned commands run as root.** Run Steward as an unprivileged,
+  dedicated user — never root — so an operator-configured command cannot act with more
+  authority than intended. This is also why the identity-verified reattachment above is
+  a safety property and not merely a correctness one: a root Steward that mis-reattached
+  a reused pid would SIGKILL an arbitrary root-owned host process, and the start-time
+  witness closes exactly that door.
 - **No shell, ever.** Steward runs `exec.Command(command, args...)` directly. There
   is no `sh -c`, so shell metacharacters in a caller-supplied arg cannot cause
   injection.
@@ -576,25 +585,41 @@ Three deliberate choices, not afterthoughts:
   `killed` for a graceful/forced stop, `supervision_lost` for a process gone across a
   restart.
 
-### Restart reattachment is best-effort and honestly limited
+### Restart reattachment is best-effort, identity-verified, and honestly limited
 
 An OS process handle — its `*os.Process`, its monitor goroutine, its stdout/stderr
 pipes — **cannot** be persisted or truly reattached across a Steward restart. We do
-not pretend otherwise. The child's `pid` is persisted (an additive, non-breaking
-state-file field, like `created_at`/`generation` before it). On reload with
-execution enabled, for each instance recorded `RUNNING`/`HIBERNATED` with a
-`command` spec, Steward does a best-effort liveness probe (`signal 0`) on the stored
-pid:
+not pretend otherwise. The child's `pid` is persisted together with a **start-time
+identity witness** (`proc_start_token`) captured immediately after spawn (both
+additive, non-breaking state-file fields, like `created_at`/`generation` before them).
+On reload with execution enabled, for each instance recorded `RUNNING`/`HIBERNATED`
+with a `command` spec, Steward first probes the stored pid's liveness (`signal 0`) and
+then re-verifies its **identity** — because a live pid alone is **not** proof the
+original child is still there:
 
 - **pid gone** → the process did not survive; the instance is transitioned to
   `STOPPED` with `last_exit_reason = supervision_lost`, logged clearly.
-- **pid alive** (the child was reparented to init when Steward exited) → Steward
-  **reattaches in a deliberately degraded, liveness-only mode**: it regains the
-  ability to stop/hibernate/resume the process by pid, but it has **not** regained
-  the process's stdout/stderr (those file descriptors are gone forever) and cannot
-  `Wait()`/reap it or proactively detect a future crash. A reattached instance keeps
-  its status and is logged loudly as `DEGRADED`. This is a real, permanent limitation
-  of process reattachment, stated plainly rather than glossed over.
+- **pid alive but not provably ours** → the OS reuses pids, so an unrelated process (a
+  cron job, a database, `sshd`) may now hold that exact pid. Steward re-reads the pid's
+  current start time and compares it to the recorded witness; if they differ — or the
+  witness is missing or unreadable — it **fails closed**: the instance is transitioned
+  to `STOPPED` (`supervision_lost`) and Steward **never signals that pid**. This is
+  precisely what stops a later Stop/Destroy/Hibernate from sending
+  SIGTERM/SIGKILL/SIGSTOP to a stranger's reused pid.
+- **pid alive and identity confirmed** (the child was reparented to init when Steward
+  exited, and its start time still matches the witness) → Steward **reattaches in a
+  deliberately degraded, liveness-only mode**: it regains the ability to
+  stop/hibernate/resume the process by pid, but it has **not** regained the process's
+  stdout/stderr (those file descriptors are gone forever) and cannot `Wait()`/reap it
+  or proactively detect a future crash. A reattached instance keeps its status and is
+  logged loudly as `DEGRADED`. This is a real, permanent limitation of process
+  reattachment, stated plainly rather than glossed over.
+
+The witness is the process start time, read via `ps -o lstart=` — one portable path
+across Steward's Linux and macOS targets, with no dependency. Its granularity is one
+second (coarser than the kernel's boot-tick resolution), but the check only ever fails
+**closed**: a coarse witness can cause a conservative `supervision_lost`, never a false
+reattach onto the wrong process.
 
 ### Known gap: no resource limits or sandboxing
 
@@ -603,7 +628,12 @@ limits (cgroups/ulimits), **no** sandboxing, and **no** isolation of a child's
 grandchildren — matching what a systemd/supervisord-style tool does at its base
 layer, and matching the existing documented deferrals for durable state and
 computer-use. Resource limits and sandboxing are an explicit, named future decision,
-not a silent omission. Platform note: process supervision uses Unix signals and is
+not a silent omission. Neither `command` nor `working_dir` is validated against an
+allowlist: `command` is any executable, and `working_dir` may point anywhere the
+Steward process's user can access — both are trusted, operator-configured inputs (the
+same posture as a systemd unit's `ExecStart` and `WorkingDirectory`), which is the
+other reason to run Steward as an unprivileged, dedicated user. Platform note: process
+supervision uses Unix signals and is
 supported on Linux and macOS (Steward's CI and deployment targets); a Windows build
 of the supervisor is out of scope.
 

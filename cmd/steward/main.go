@@ -148,7 +148,7 @@ func main() {
 	auditLogFile := flag.String("audit-log-file", envOr("STEWARD_AUDIT_LOG_FILE", ""),
 		"optional path to a JSON-lines file recording one record per executed uplink command (timestamp, command_id, instance_id, kind, status, and error detail on failure); empty disables command auditing")
 	enableProcessExec := flag.Bool("enable-process-exec", enableProcessExecDefault,
-		"enable real OS-process supervision: when on, an instance whose spec has a \"command\" field spawns and supervises an actual process on start (SIGTERM/SIGKILL on stop, SIGSTOP/SIGCONT on hibernate/resume). Off by default (pure status tracking). Provisioning a command-bearing spec is REJECTED with 400 while this is off. No sandboxing or resource limits — see ARCHITECTURE.md.")
+		"enable real OS-process supervision: when on, an instance whose spec has a \"command\" field spawns and supervises an actual process on start (SIGTERM/SIGKILL on stop, SIGSTOP/SIGCONT on hibernate/resume). Off by default (pure status tracking). Provisioning a command-bearing spec is REJECTED with 400 while this is off. Spawned commands run with STEWARD'S OWN user and privileges (no privilege drop, no sandbox) — if Steward runs as root, they run as root, so run Steward as an unprivileged, dedicated user. No sandboxing or resource limits — see ARCHITECTURE.md.")
 	processStopGracePeriod := flag.Duration("process-stop-grace-period", processStopGraceDefault,
 		"how long a stop waits after SIGTERM before escalating to SIGKILL, when process execution is enabled; must be positive")
 	logLevel := flag.String("log-level", envOr("STEWARD_LOG_LEVEL", "info"),

@@ -20,6 +20,8 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -252,8 +254,61 @@ func (sp *supervisedProcess) terminateReattached(grace time.Duration) (int, stri
 // still performs the existence/permission check, so it is the standard "is this pid
 // alive?" probe: a nil error means alive and signalable; an error (ESRCH — no such
 // process, or os.ErrProcessDone for a reaped child) means gone.
+//
+// Liveness is NOT identity: signal 0 succeeding only proves SOME process holds this
+// pid, not that it is the one Steward spawned. Across a restart the OS may have reused
+// the pid for an unrelated process, so a bare liveness probe must be paired with an
+// identity witness (procStartToken) before Steward signals a reattached pid. See
+// reconcileProcessesAfterLoad.
 func processAlive(proc *os.Process) bool {
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// procStartToken returns a stable start-time witness for the process currently at
+// pid. A pid alone is not an identity — the OS reuses pids — but a pid plus its start
+// time is: a reused pid necessarily belongs to a process that started later, so a
+// changed start time means the original process is gone. It shells out to
+// `ps -o lstart=` rather than reading /proc, because one portable path then covers
+// every platform Steward supports (Linux release/CI targets and macOS dev hosts both
+// ship a `ps` with lstart, and neither needs cgo or a dependency). The witness is
+// whole-second granularity — coarser than /proc/<pid>/stat's boot-tick starttime, but
+// a pid reused after a Steward restart is astronomically unlikely to also land in the
+// original's exact one-second start window, and the check fails CLOSED anyway (a coarse
+// witness only ever risks a conservative supervision-lost, never a false reattach).
+// Any failure — the pid gone, `ps` absent, empty output — returns an error, so a
+// caller that cannot read the witness treats it as unverifiable rather than a match.
+func procStartToken(pid int) (string, error) {
+	if pid <= 0 {
+		return "", fmt.Errorf("invalid pid %d for start-time witness", pid)
+	}
+	out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return "", fmt.Errorf("read start-time witness for pid %d: %w", pid, err)
+	}
+	token := strings.TrimSpace(string(out))
+	if token == "" {
+		return "", fmt.Errorf("empty start-time witness for pid %d", pid)
+	}
+	return token, nil
+}
+
+// reattachIdentityConfirmed reports whether the process now at pid is provably the
+// SAME one Steward spawned, by re-reading its start-time witness and comparing it to
+// the one recorded at spawn (recorded). It FAILS CLOSED: an empty recorded witness (an
+// older state file, or a spawn that could not read one), an unreadable current witness,
+// or any mismatch all return false — so a reattach that cannot be positively proven
+// never happens. Trusting a bare live pid instead is exactly the pid-reuse hole this
+// closes: a stranger now holding a recycled pid must never inherit the original's
+// stop/kill/suspend signals.
+func reattachIdentityConfirmed(recorded string, pid int) bool {
+	if recorded == "" {
+		return false
+	}
+	current, err := procStartToken(pid)
+	if err != nil {
+		return false
+	}
+	return current == recorded
 }
 
 // spawn starts a fresh child for an instance per ps and begins supervising it. The
@@ -265,7 +320,7 @@ func processAlive(proc *os.Process) bool {
 // handle and its pid, or an error if the command could not be spawned (executable
 // not found, permission denied, missing working_dir) — in which case NOTHING is
 // tracked and the caller must not report the instance RUNNING.
-func (t *Tracker) spawn(runtimeRef, instanceID string, ps *processSpec) (*supervisedProcess, int, error) {
+func (t *Tracker) spawn(runtimeRef, instanceID string, ps *processSpec) (sp *supervisedProcess, pid int, startToken string, err error) {
 	cmd := exec.Command(ps.Command, ps.Args...)
 	cmd.Env = buildChildEnv(ps.Env)
 	if ps.WorkingDir != "" {
@@ -274,13 +329,25 @@ func (t *Tracker) spawn(runtimeRef, instanceID string, ps *processSpec) (*superv
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
-		return nil, 0, err
+		return nil, 0, "", err
 	}
-	sp := &supervisedProcess{proc: cmd.Process, doneCh: make(chan struct{})}
+	pid = cmd.Process.Pid
+	// Capture the process-identity witness immediately, so a later restart can prove
+	// THIS process (not a stranger who reused its pid) is still alive before
+	// reattaching. Best-effort: a spawn that already succeeded must not be torn down
+	// just because the witness could not be read — an empty token simply makes a future
+	// reattach fail closed (supervision reported lost) for this one instance.
+	token, terr := procStartToken(pid)
+	if terr != nil {
+		token = ""
+		t.logger.Warn("could not capture a start-time identity witness for a just-spawned process; it will be reported supervision-lost (not reattached) after a Steward restart",
+			"runtime_ref", runtimeRef, "instance_id", instanceID, "pid", pid, "err", terr.Error())
+	}
+	sp = &supervisedProcess{proc: cmd.Process, doneCh: make(chan struct{})}
 	go t.monitor(runtimeRef, instanceID, sp, cmd)
 	t.logger.Info("supervised process started",
-		"runtime_ref", runtimeRef, "instance_id", instanceID, "pid", cmd.Process.Pid, "command", ps.Command)
-	return sp, cmd.Process.Pid, nil
+		"runtime_ref", runtimeRef, "instance_id", instanceID, "pid", pid, "command", ps.Command)
+	return sp, pid, token, nil
 }
 
 // monitor is one child's supervision goroutine: it blocks in cmd.Wait() until the
@@ -329,6 +396,7 @@ func (t *Tracker) handleUnexpectedExit(runtimeRef, instanceID string, sp *superv
 	}
 	inst.Status = StatusStopped
 	inst.PID = 0
+	inst.ProcStartToken = ""
 	c := code
 	inst.LastExitCode = &c
 	inst.LastExitReason = exitReasonCrashed
@@ -408,16 +476,18 @@ func (t *Tracker) startExec(runtimeRef string) (*Instance, error) {
 			"runtime_ref", runtimeRef, "instance_id", inst.InstanceID, "lost_pid", inst.PID)
 	}
 
-	sp, pid, err := t.spawn(runtimeRef, inst.InstanceID, ps)
+	sp, pid, startToken, err := t.spawn(runtimeRef, inst.InstanceID, ps)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProcessStart, err)
 	}
 
 	prevStatus := inst.Status
 	prevPID := inst.PID
+	prevToken := inst.ProcStartToken
 	t.procs[runtimeRef] = sp
 	inst.Status = StatusRunning
 	inst.PID = pid
+	inst.ProcStartToken = startToken
 	inst.LastExitCode = nil
 	inst.LastExitReason = ""
 	if err := t.persistLocked(); err != nil {
@@ -432,6 +502,7 @@ func (t *Tracker) startExec(runtimeRef string) (*Instance, error) {
 		delete(t.procs, runtimeRef)
 		inst.Status = prevStatus
 		inst.PID = prevPID
+		inst.ProcStartToken = prevToken
 		return nil, err
 	}
 	return inst.clone(), nil
@@ -468,6 +539,13 @@ func (t *Tracker) stopExec(runtimeRef string) (*Instance, error) {
 
 	exitCode, reason := sp.terminate(t.stopGracePeriod)
 
+	// testHookStopAfterTerminate fires here, in production nil, to make the
+	// stop-vs-concurrent-start race below deterministically testable: the process is
+	// now dead but the lock is not yet re-acquired.
+	if t.testHookStopAfterTerminate != nil {
+		t.testHookStopAfterTerminate()
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	inst, ok = t.byRef[runtimeRef]
@@ -476,8 +554,21 @@ func (t *Tracker) stopExec(runtimeRef string) (*Instance, error) {
 		// of the requested end state.
 		return nil, ErrNotFound
 	}
+	if t.procs[runtimeRef] != sp {
+		// A concurrent Start spawned a NEW process for this runtime_ref while the lock
+		// was released for the grace wait (the same identity guard handleUnexpectedExit
+		// uses). That newer process now owns the instance: clobbering the status/PID to
+		// STOPPED and deleting it from t.procs here would orphan a live child — never
+		// signalled again, its pid persisted as 0 so a restart cannot find it either —
+		// and wrongly report a RUNNING instance STOPPED. The process THIS stop terminated
+		// is already dead; leave the newer one untouched and return the current state.
+		t.logger.Info("stop superseded by a concurrent start; the newer supervised process is left tracked and running",
+			"runtime_ref", runtimeRef, "instance_id", instanceID)
+		return inst.clone(), nil
+	}
 	inst.Status = StatusStopped
 	inst.PID = 0
+	inst.ProcStartToken = ""
 	c := exitCode
 	inst.LastExitCode = &c
 	inst.LastExitReason = reason
@@ -573,13 +664,24 @@ func (t *Tracker) reconcileProcessesAfterLoad() {
 		}
 		if inst.PID <= 0 {
 			// A live-process status with no usable pid: nothing to probe or reattach.
-			t.markSupervisionLost(inst)
+			t.markSupervisionLost(inst, "no usable pid was recorded")
 			changed = true
 			continue
 		}
 		proc, ferr := os.FindProcess(inst.PID)
 		if ferr != nil || !processAlive(proc) {
-			t.markSupervisionLost(inst)
+			t.markSupervisionLost(inst, "its pid did not survive the restart")
+			changed = true
+			continue
+		}
+		if !reattachIdentityConfirmed(inst.ProcStartToken, inst.PID) {
+			// The pid is alive but is NOT provably the process Steward spawned: the OS may
+			// have reused it for an unrelated process (a cron job, a database, sshd), or the
+			// recorded identity witness is missing/unreadable. Reattaching would let a later
+			// stop/hibernate/destroy signal a STRANGER's pid, so fail closed — Steward does
+			// not touch that pid and reports supervision lost instead. This is what turns a
+			// bare "pid alive" into a real "MY process is alive" check.
+			t.markSupervisionLost(inst, "its pid is alive but is not the process Steward spawned (pid reuse) or its identity could not be verified; Steward did NOT signal that pid")
 			changed = true
 			continue
 		}
@@ -594,14 +696,17 @@ func (t *Tracker) reconcileProcessesAfterLoad() {
 	}
 }
 
-// markSupervisionLost transitions a reload-orphaned instance to STOPPED. The caller
-// (reconcileProcessesAfterLoad) persists the batch of corrections afterward.
-func (t *Tracker) markSupervisionLost(inst *Instance) {
+// markSupervisionLost transitions a reload-orphaned instance to STOPPED. cause names
+// why the reattach could not happen (pid gone, pid reused by a stranger, no witness),
+// so the single WARN tells an operator exactly what Steward observed and did. The
+// caller (reconcileProcessesAfterLoad) persists the batch of corrections afterward.
+func (t *Tracker) markSupervisionLost(inst *Instance, cause string) {
 	priorStatus := inst.Status
 	lostPID := inst.PID
 	inst.Status = StatusStopped
 	inst.PID = 0
+	inst.ProcStartToken = ""
 	inst.LastExitReason = exitReasonSupervisionLost
-	t.logger.Warn("a supervised process did not survive a Steward restart; instance transitioned to STOPPED (supervision lost)",
+	t.logger.Warn("a supervised process could not be reattached after a Steward restart; instance transitioned to STOPPED (supervision lost): "+cause,
 		"instance_id", inst.InstanceID, "lost_pid", lostPID, "prior_status", priorStatus)
 }

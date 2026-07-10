@@ -545,7 +545,9 @@ func TestReconcileAfterLoadDeadProcess(t *testing.T) {
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait() // reap, so the pid is truly gone
 
-	path := writeStateFile(t, "rt_dead", "a", StatusRunning, pid, helperSpec("sleep", nil))
+	// token is irrelevant here: the liveness probe fails first (the pid is gone), so
+	// reattach is refused before identity is ever consulted.
+	path := writeStateFile(t, "rt_dead", "a", StatusRunning, pid, "", helperSpec("sleep", nil))
 	buf := &syncBuffer{}
 	tr, err := LoadTracker(0, path, WithExec(ExecConfig{Enabled: true, StopGracePeriod: time.Second, Logger: slog.New(slog.NewJSONHandler(buf, nil))}))
 	if err != nil {
@@ -582,7 +584,13 @@ func TestReconcileAfterLoadAliveProcessReattachesAndCanStop(t *testing.T) {
 		<-reaped
 	})
 
-	path := writeStateFile(t, "rt_alive", "a", StatusRunning, pid, helperSpec("sleep", nil))
+	// Record the orphan's real start-time witness so reattach can positively confirm
+	// this exact process (not a pid-reuse stranger) is still alive.
+	token, err := procStartToken(pid)
+	if err != nil {
+		t.Fatalf("read start-time witness: %v", err)
+	}
+	path := writeStateFile(t, "rt_alive", "a", StatusRunning, pid, token, helperSpec("sleep", nil))
 	buf := &syncBuffer{}
 	tr, err := LoadTracker(0, path, WithExec(ExecConfig{Enabled: true, StopGracePeriod: 2 * time.Second, Logger: slog.New(slog.NewJSONHandler(buf, nil))}))
 	if err != nil {
@@ -638,7 +646,11 @@ func TestReconcileAfterLoadReattachedStopEscalatesToSIGKILL(t *testing.T) {
 	waitFileExists(t, readyFile, 10*time.Second) // the SIGTERM-ignoring handler is installed
 
 	grace := 250 * time.Millisecond
-	path := writeStateFile(t, "rt_x", "a", StatusRunning, pid, helperSpec("ignore-sigterm", nil))
+	token, err := procStartToken(pid)
+	if err != nil {
+		t.Fatalf("read start-time witness: %v", err)
+	}
+	path := writeStateFile(t, "rt_x", "a", StatusRunning, pid, token, helperSpec("ignore-sigterm", nil))
 	buf := &syncBuffer{}
 	tr, err := LoadTracker(0, path, WithExec(ExecConfig{Enabled: true, StopGracePeriod: grace, Logger: slog.New(slog.NewJSONHandler(buf, nil))}))
 	if err != nil {
@@ -660,6 +672,252 @@ func TestReconcileAfterLoadReattachedStopEscalatesToSIGKILL(t *testing.T) {
 	<-reaped
 	if processStillAlive(pid) {
 		t.Errorf("pid %d survived the SIGKILL escalation", pid)
+	}
+}
+
+// --- process-identity witness (pid-reuse) ---
+
+func TestProcStartTokenStableAndFailsClosedWhenGone(t *testing.T) {
+	cmd := exec.Command(testBinary(), "-test.run=^TestHelperProcess$", "--")
+	cmd.Env = append(os.Environ(), "STEWARD_WANT_HELPER=1", "STEWARD_HELPER_MODE=sleep")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	pid := cmd.Process.Pid
+	reaped := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(reaped) }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-reaped
+	})
+
+	first, err := procStartToken(pid)
+	if err != nil || first == "" {
+		t.Fatalf("first read: token=%q err=%v, want a non-empty witness", first, err)
+	}
+	second, err := procStartToken(pid)
+	if err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if first != second {
+		t.Errorf("witness not stable across reads: %q != %q", first, second)
+	}
+
+	// Once the pid is gone the witness must FAIL CLOSED (an error), never return a
+	// bogus value that could be mistaken for a match.
+	_ = cmd.Process.Kill()
+	<-reaped
+	if tok, err := procStartToken(pid); err == nil {
+		t.Errorf("dead pid returned witness %q with no error; procStartToken must fail closed", tok)
+	}
+}
+
+func TestReconcileAfterLoadPidReuseForgedWitnessReportsSupervisionLost(t *testing.T) {
+	// The CRITICAL pid-reuse case: the process Steward recorded is gone and an
+	// UNRELATED process now holds its pid. The OS cannot be made to deterministically
+	// hand a reused pid to a stranger in a test, so we prove the MECHANISM directly: a
+	// live pid whose recorded start-time witness does not match its current one must be
+	// treated as supervision-lost — and, above all, the live process must be left
+	// UNTOUCHED, exactly as an unrelated host process (a cron job, a database, sshd)
+	// would be.
+	cmd := exec.Command(testBinary(), "-test.run=^TestHelperProcess$", "--")
+	cmd.Env = append(os.Environ(), "STEWARD_WANT_HELPER=1", "STEWARD_HELPER_MODE=sleep")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn stand-in: %v", err)
+	}
+	pid := cmd.Process.Pid
+	reaped := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(reaped) }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-reaped
+	})
+
+	if !processStillAlive(pid) {
+		t.Fatal("stand-in process is not alive; the test cannot distinguish a mismatch from a dead pid")
+	}
+	realToken, err := procStartToken(pid)
+	if err != nil {
+		t.Fatalf("read real witness: %v", err)
+	}
+	forged := realToken + " (forged)" // a witness the live pid's real one can never equal
+
+	path := writeStateFile(t, "rt_reuse", "a", StatusRunning, pid, forged, helperSpec("sleep", nil))
+	buf := &syncBuffer{}
+	tr, err := LoadTracker(0, path, WithExec(ExecConfig{Enabled: true, StopGracePeriod: time.Second, Logger: slog.New(slog.NewJSONHandler(buf, nil))}))
+	if err != nil {
+		t.Fatalf("LoadTracker: %v", err)
+	}
+
+	inst, err := tr.Status("rt_reuse")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if inst.Status != StatusStopped {
+		t.Fatalf("status=%q, want STOPPED (identity witness mismatched: pid reuse suspected)", inst.Status)
+	}
+	if inst.LastExitReason != exitReasonSupervisionLost {
+		t.Errorf("last_exit_reason=%q, want %q", inst.LastExitReason, exitReasonSupervisionLost)
+	}
+	if inst.PID != 0 {
+		t.Errorf("pid=%d, want 0", inst.PID)
+	}
+	// It must NOT be reattached...
+	tr.mu.Lock()
+	_, tracked := tr.procs["rt_reuse"]
+	tr.mu.Unlock()
+	if tracked {
+		t.Error("a pid whose identity could not be confirmed was reattached; it must be treated as supervision-lost")
+	}
+	// ...and CRITICALLY the live process must be untouched (never signalled). This is
+	// the whole point of the fix: Steward must not SIGTERM/SIGKILL a stranger's pid.
+	if !processStillAlive(pid) {
+		t.Fatal("the unrelated live process was signalled during reconcile; Steward must never touch a pid it cannot confirm as its own")
+	}
+}
+
+func TestReconcileAfterLoadMatchingWitnessReattaches(t *testing.T) {
+	// The true-positive path: a live pid whose recorded start-time witness DOES match
+	// its current one is provably the same process Steward spawned, so it reattaches.
+	cmd := exec.Command(testBinary(), "-test.run=^TestHelperProcess$", "--")
+	cmd.Env = append(os.Environ(), "STEWARD_WANT_HELPER=1", "STEWARD_HELPER_MODE=sleep")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn orphan: %v", err)
+	}
+	pid := cmd.Process.Pid
+	reaped := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(reaped) }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-reaped
+	})
+
+	token, err := procStartToken(pid)
+	if err != nil {
+		t.Fatalf("read witness: %v", err)
+	}
+	path := writeStateFile(t, "rt_match", "a", StatusRunning, pid, token, helperSpec("sleep", nil))
+	buf := &syncBuffer{}
+	tr, err := LoadTracker(0, path, WithExec(ExecConfig{Enabled: true, StopGracePeriod: time.Second, Logger: slog.New(slog.NewJSONHandler(buf, nil))}))
+	if err != nil {
+		t.Fatalf("LoadTracker: %v", err)
+	}
+	inst, err := tr.Status("rt_match")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if inst.Status != StatusRunning {
+		t.Fatalf("status=%q, want RUNNING (identity witness matched)", inst.Status)
+	}
+	tr.mu.Lock()
+	sp := tr.procs["rt_match"]
+	tr.mu.Unlock()
+	if sp == nil || !sp.reattached {
+		t.Fatalf("instance with a matching witness was not reattached: sp=%v", sp)
+	}
+}
+
+func TestReconcileAfterLoadMissingWitnessFailsClosed(t *testing.T) {
+	// A state file written before the identity witness existed (no proc_start_token)
+	// must NOT reattach even when its pid is alive: without a recorded witness the
+	// identity cannot be confirmed, so it fails closed to supervision-lost rather than
+	// trusting a bare live pid.
+	cmd := exec.Command(testBinary(), "-test.run=^TestHelperProcess$", "--")
+	cmd.Env = append(os.Environ(), "STEWARD_WANT_HELPER=1", "STEWARD_HELPER_MODE=sleep")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn orphan: %v", err)
+	}
+	pid := cmd.Process.Pid
+	reaped := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(reaped) }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-reaped
+	})
+
+	path := writeStateFile(t, "rt_nowitness", "a", StatusRunning, pid, "", helperSpec("sleep", nil))
+	buf := &syncBuffer{}
+	tr, err := LoadTracker(0, path, WithExec(ExecConfig{Enabled: true, StopGracePeriod: time.Second, Logger: slog.New(slog.NewJSONHandler(buf, nil))}))
+	if err != nil {
+		t.Fatalf("LoadTracker: %v", err)
+	}
+	inst, err := tr.Status("rt_nowitness")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if inst.Status != StatusStopped {
+		t.Fatalf("status=%q, want STOPPED (no witness recorded: identity unverifiable)", inst.Status)
+	}
+	if inst.LastExitReason != exitReasonSupervisionLost {
+		t.Errorf("last_exit_reason=%q, want %q", inst.LastExitReason, exitReasonSupervisionLost)
+	}
+	// The live pid must be untouched.
+	if !processStillAlive(pid) {
+		t.Fatal("an unverified live pid was signalled during reconcile; it must be left untouched")
+	}
+}
+
+// --- stop vs concurrent start race ---
+
+func TestStopSupersededByConcurrentStartDoesNotOrphan(t *testing.T) {
+	// The stop-vs-start race: while a Stop is parked outside the lock (its process
+	// already dead but the instance not yet finalized), a concurrent Start spawns a
+	// REPLACEMENT process for the same runtime_ref. On re-acquiring the lock, Stop must
+	// not clobber that newer process's RUNNING status to STOPPED or delete it from
+	// tracking — doing so would orphan a live child (never signalled again, its pid
+	// persisted as 0 so a restart cannot find it either). testHookStopAfterTerminate
+	// fires the concurrent Start at the exact window, so the race is deterministic.
+	tr, _ := execTracker(t, 5*time.Second)
+	ref := startedInstance(t, tr, "a", helperSpec("sleep", nil))
+	firstPID := mustPID(t, tr, ref)
+
+	var newPID int
+	var startErr error
+	tr.testHookStopAfterTerminate = func() {
+		// Runs while Stop holds no lock and the first process is already dead, so this
+		// Start falls through to spawn a fresh process and registers it as the instance's
+		// current one.
+		inst, err := tr.Start(ref)
+		startErr = err
+		if inst != nil {
+			newPID = inst.PID
+		}
+	}
+
+	stopped, err := tr.Stop(ref)
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if startErr != nil {
+		t.Fatalf("concurrent start: %v", startErr)
+	}
+	if newPID <= 0 || newPID == firstPID {
+		t.Fatalf("concurrent start did not spawn a distinct new process: newPID=%d firstPID=%d", newPID, firstPID)
+	}
+
+	// The racing Stop must have deferred to the newer process, not clobbered it.
+	if stopped.Status != StatusRunning {
+		t.Errorf("stop returned status=%q, want RUNNING (a concurrent start superseded it)", stopped.Status)
+	}
+	after, err := tr.Status(ref)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if after.Status != StatusRunning {
+		t.Errorf("status=%q after a superseded stop, want RUNNING", after.Status)
+	}
+	if after.PID != newPID {
+		t.Errorf("pid=%d after a superseded stop, want the new process's pid %d (not clobbered to 0)", after.PID, newPID)
+	}
+	// The new process must still be tracked (not orphaned) and still alive.
+	tr.mu.Lock()
+	sp := tr.procs[ref]
+	tr.mu.Unlock()
+	if sp == nil {
+		t.Fatal("the new process was deleted from tracking by the racing stop: it is now an unsignalable orphan")
+	}
+	if !processStillAlive(newPID) {
+		t.Errorf("new process pid %d is not alive", newPID)
 	}
 }
 
@@ -713,8 +971,11 @@ func fileSize(t *testing.T, path string) int64 {
 }
 
 // writeStateFile hand-authors a version-1 state file with a single instance, as a
-// previous Steward run would have persisted it, and returns its path.
-func writeStateFile(t *testing.T, ref, id string, status Status, pid int, spec json.RawMessage) string {
+// previous Steward run would have persisted it, and returns its path. A non-empty
+// token records the process-identity witness (proc_start_token) that reattach
+// re-verifies; an empty token omits the key, mirroring a state file written before the
+// witness existed (which must then fail closed on reattach).
+func writeStateFile(t *testing.T, ref, id string, status Status, pid int, token string, spec json.RawMessage) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "state.json")
 	inst := map[string]any{
@@ -724,6 +985,9 @@ func writeStateFile(t *testing.T, ref, id string, status Status, pid int, spec j
 		"created_at":  time.Now().UTC().Format(time.RFC3339Nano),
 		"pid":         pid,
 		"spec":        json.RawMessage(spec),
+	}
+	if token != "" {
+		inst["proc_start_token"] = token
 	}
 	snap := map[string]any{"version": 1, "instances": []any{inst}}
 	b, err := json.Marshal(snap)
