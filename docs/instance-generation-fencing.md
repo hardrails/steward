@@ -1,8 +1,8 @@
 # Design: instance-generation fencing (closing the destroy/re-provision race)
 
-Status: **plan / design provenance. No implementation code has been written yet.**
-This document records the shape chosen, the shapes rejected, the invariants the
-design must hold, and the exact task list. It follows the same style as
+Status: **implemented node-side; design provenance.** This document records the
+shape chosen, the shapes rejected, the invariants the design must hold, and the
+exact task list that was implemented. It follows the same style as
 [ARCHITECTURE.md](../ARCHITECTURE.md) and [`docs/uplink-client.md`](uplink-client.md):
 it explains not just *what* but *why*, and it names the failure mode each decision
 closes.

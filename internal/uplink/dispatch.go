@@ -174,21 +174,37 @@ func (d *dispatcher) execute(cmd command) (rep report, retry, fenced bool) {
 		return d.fail(rep, "runtime_ref is addressed to a different node"), false, false
 	}
 
+	// A negative instance_generation is out-of-contract for a trusted control
+	// plane (real generations are minted >= 1); normalize it to the unset
+	// sentinel (0) HERE, before the fence check, not inside provision(). The
+	// fence guard below runs before the per-kind dispatch and must see the same
+	// clamped value provision() eventually adopts — otherwise a re-provision
+	// for an already-tracked instance (known=true) carrying a negative
+	// generation is itself fenced (any negative < any tracked generation) and
+	// silently dropped before the clamp ever gets a chance to run, defeating
+	// the whole point of normalizing it.
+	generation := cmd.InstanceGeneration
+	if generation < 0 {
+		d.logger.Warn("uplink command carried a negative instance_generation; treating as unset (0)",
+			"command_id", cmd.CommandID, "instance_id", instanceID, "instance_generation", generation)
+		generation = 0
+	}
+
 	// The fence guard: one chokepoint before the per-kind dispatch, so no command
 	// kind can reach a tracker mutator around it. known=false (never-seen
-	// instance_id) and cmd.InstanceGeneration==0 (old control plane / unset) both
+	// instance_id) and generation==0 (old control plane / unset / clamped) both
 	// mean "do not fence" — see docs/instance-generation-fencing.md. Only a
 	// strictly older carried generation than the tracked one is stale.
-	if trackedGen, known := d.tracker.GenerationForInstance(instanceID); known && cmd.InstanceGeneration != 0 && cmd.InstanceGeneration < trackedGen {
+	if trackedGen, known := d.tracker.GenerationForInstance(instanceID); known && generation != 0 && generation < trackedGen {
 		d.logger.Info("uplink command is fenced (its instance_generation is superseded); dropping without a report",
 			"command_id", cmd.CommandID, "kind", cmd.Kind, "instance_id", instanceID,
-			"command_generation", cmd.InstanceGeneration, "tracked_generation", trackedGen)
+			"command_generation", generation, "tracked_generation", trackedGen)
 		return report{}, false, true
 	}
 
 	switch cmd.Kind {
 	case kindProvision:
-		return d.provision(rep, instanceID, cmd.InstanceGeneration, cmd.Payload), false, false
+		return d.provision(rep, instanceID, generation, cmd.Payload), false, false
 	case kindStart:
 		r, retry := d.transition(rep, instanceID, cmd.Kind, d.tracker.Start)
 		return r, retry, false
@@ -216,18 +232,11 @@ func (d *dispatcher) execute(cmd command) (rep report, retry, fenced bool) {
 // lineage baseline (new instance: set; existing instance: raised to
 // max(existing, generation), never lowered).
 func (d *dispatcher) provision(rep report, instanceID string, generation int64, payload json.RawMessage) report {
-	// A negative generation is out-of-contract for a trusted control plane (real
-	// generations are minted >= 1); treat it the same as the unset sentinel (0)
-	// rather than persist it. Symmetric with persist.go's load-time reject of a
-	// negative Instance.Generation: without this clamp, an out-of-contract
-	// negative value would round-trip through the state file, get rejected as
-	// corrupt on the NEXT restart, and brick the node — strictly worse than
-	// today's unfenced behavior, which the design forbids.
-	if generation < 0 {
-		d.logger.Warn("uplink provision carried a negative instance_generation; treating as unset (0)",
-			"command_id", rep.CommandID, "instance_id", instanceID, "instance_generation", generation)
-		generation = 0
-	}
+	// generation is already clamped non-negative by execute() before the fence
+	// check — see the comment there for why the clamp cannot live here alone
+	// (a negative value must not reach the fence guard unclamped, or a
+	// re-provision for an already-tracked instance is itself fenced before
+	// this function ever runs).
 
 	spec := payload
 	if bytes.Equal(bytes.TrimSpace(spec), []byte("null")) {

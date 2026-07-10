@@ -404,6 +404,37 @@ func TestDispatchProvisionClampsNegativeGenerationToZero(t *testing.T) {
 	}
 }
 
+// TestDispatchNegativeGenerationDoesNotFenceAlreadyTrackedInstance pins a hosted
+// review finding: the clamp must run BEFORE the fence check, not only inside
+// provision(). An already-tracked instance (generation 5) receiving ANY command
+// with a negative instance_generation must not be fenced — a negative value has
+// to be normalized to the unset sentinel (0) first, or it would otherwise compare
+// as "older than every positive tracked generation" and get silently dropped,
+// including a legitimate re-provision that should succeed (raising/holding the
+// tracked generation via Provision's max(existing, 0) = existing rule).
+func TestDispatchNegativeGenerationDoesNotFenceAlreadyTrackedInstance(t *testing.T) {
+	d, tr := newDispatcher(t)
+
+	seed := cmdGen("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1, 5)
+	if _, _, fenced := d.execute(seed); fenced {
+		t.Fatal("seed provision must not be fenced")
+	}
+
+	reprovision := cmdGen("c2", "node-7", "agent-1", kindProvision, `{"model":"opus-2"}`, 2, -1)
+	rep, _, fenced := d.execute(reprovision)
+	if fenced {
+		t.Fatal("a negative instance_generation on an already-tracked instance must not be fenced — it must clamp to 0 before the fence check runs")
+	}
+	if rep.Status != statusDone {
+		t.Fatalf("re-provision status=%q, want done", rep.Status)
+	}
+
+	gen, ok := tr.GenerationForInstance("agent-1")
+	if !ok || gen != 5 {
+		t.Fatalf("GenerationForInstance = (%d,%v), want (5,true) — max(existing=5, clamped=0) must hold the tracked generation at 5", gen, ok)
+	}
+}
+
 func TestDispatchNonObjectPayloadRejectedBeforeProvision(t *testing.T) {
 	for _, payload := range []string{`[1,2,3]`, `42`, `"a string"`, `true`} {
 		spy := &spyTracker{Tracker: runtime.NewTracker(0)}
