@@ -78,6 +78,7 @@ wins when both are set):
 | `-addr`                    | `STEWARD_ADDR`                    | `127.0.0.1:8080` | host:port to listen on                                                  |
 | `-log-level`               | `STEWARD_LOG_LEVEL`               | `info`           | log verbosity: one of `debug`, `info`, `warn`, `error` (case-insensitive); a garbage value fails closed at startup |
 | `-max-instances`           | `STEWARD_MAX_INSTANCES`           | `1024`           | maximum tracked instances before Provision returns 503; must be a positive integer (a non-positive value fails closed at startup) |
+| `-max-requests-per-second` | `STEWARD_MAX_REQUESTS_PER_SECOND` | `20`             | max inbound requests/second per source IP before returning 429 (burst is 2x this); `0` or negative disables the per-source limiter |
 | `-state-file`              | `STEWARD_STATE_FILE`              | (unset)          | path to a JSON file for durable state; unset means in-memory only       |
 | `-uplink-url`              | `STEWARD_UPLINK_URL`              | (unset)          | control-plane base URL for the outbound uplink; unset disables it       |
 | `-uplink-credential-file`  | `STEWARD_UPLINK_CREDENTIAL_FILE`  | (unset)          | path to the node's uplink credential JSON; required when `-uplink-url` is set |
@@ -113,6 +114,32 @@ fleet operations then flow through the uplink poll loop only. The flag requires
 `-uplink-url` — a node with neither door open is unreachable and fails closed at
 startup. See [`docs/disable-inbound-listener.md`](docs/disable-inbound-listener.md)
 for the full design.
+
+### Inbound rate limiting
+
+The inbound HTTP listener is unauthenticated by design, so it defends itself from
+denial-of-service the same structural way it bounds request bodies and instance
+count: a per-source (client IP) request-rate limit. Steward keys a hand-rolled,
+standard-library-only token bucket on the connecting IP and, when a source exceeds
+its budget, sheds the request with `429 Too Many Requests` and a `Retry-After`
+header — never touching the request or response body shape of any operation.
+
+The default budget — `20` requests/second per source with a burst of `40` — is
+sized for a control-plane-facing lifecycle API. Railyard drives
+provision/start/stop/hibernate/destroy/status/list at reconciler-and-human pace, so
+a normal reconciliation spike sits well inside the burst and steady traffic well
+under the rate, while a flood from one source is shed in well under a second. The
+limit is per-source, so one abusive IP cannot degrade service for the legitimate
+control plane on another. Raise `-max-requests-per-second` (or
+`STEWARD_MAX_REQUESTS_PER_SECOND`) for heavier bulk operation, or set it to `0` to
+disable the limiter entirely — appropriate only when Steward already sits behind a
+gateway that rate-limits for it. The per-source bucket map is bounded and its idle
+entries are swept, so a distributed many-IP flood cannot grow it without limit.
+
+Because the key is the real TCP peer and never a client-supplied header (an
+unauthenticated caller could forge `X-Forwarded-For` to dodge the limit), a
+deployment that terminates connections behind a shared proxy sees all traffic as one
+source; rate-limit at that proxy and disable Steward's limiter there.
 
 ## API at a glance
 

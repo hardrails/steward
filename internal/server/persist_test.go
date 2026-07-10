@@ -19,7 +19,7 @@ func stateHandler(t *testing.T, path string) http.Handler {
 	if err != nil {
 		t.Fatalf("LoadTracker(%q): %v", path, err)
 	}
-	return NewWithTracker(slog.New(slog.NewTextHandler(io.Discard, nil)), tr).Handler()
+	return NewWithTracker(slog.New(slog.NewTextHandler(io.Discard, nil)), tr, 0).Handler()
 }
 
 // TestDurableStateSurvivesRestart drives the full HTTP surface, then rebuilds a

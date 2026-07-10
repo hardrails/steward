@@ -58,6 +58,8 @@ func main() {
 	addr := flag.String("addr", envOr("STEWARD_ADDR", "127.0.0.1:8080"), "host:port to listen on")
 	maxInstances := flag.Int("max-instances", envOrInt("STEWARD_MAX_INSTANCES", 1024),
 		"maximum number of tracked instances before Provision returns 503")
+	rateLimitPerSecond := flag.Int("max-requests-per-second", envOrInt("STEWARD_MAX_REQUESTS_PER_SECOND", 20),
+		"max inbound requests per second per source IP before returning 429 (burst is 2x this); 0 or negative disables the per-source rate limiter")
 	stateFile := flag.String("state-file", envOr("STEWARD_STATE_FILE", ""),
 		"optional path to a JSON file for durable instance state; empty means in-memory only (state is lost on restart)")
 	uplinkURL := flag.String("uplink-url", envOr("STEWARD_UPLINK_URL", ""),
@@ -184,9 +186,20 @@ func main() {
 	// already refused this combination without -uplink-url).
 	var srv *http.Server
 	if !*disableInbound {
+		// The per-source rate limiter is a DoS defense for this unauthenticated-by-design
+		// listener, in the same class as the body-size and instance-count caps. Log its
+		// state at startup so an operator sees whether inbound requests are throttled; a
+		// disabled limiter is a WARN because it leaves the flood surface open (a
+		// deliberate choice only when a fronting gateway already rate-limits).
+		if *rateLimitPerSecond > 0 {
+			logger.Info("inbound rate limiting enabled", "max_requests_per_second_per_source", *rateLimitPerSecond)
+		} else {
+			logger.Warn("inbound rate limiting disabled",
+				"hint", "per-source request throttling is off; set -max-requests-per-second (or STEWARD_MAX_REQUESTS_PER_SECOND) to a positive value to re-enable it")
+		}
 		srv = &http.Server{
 			Addr:              *addr,
-			Handler:           server.NewWithTracker(logger, tracker).Handler(),
+			Handler:           server.NewWithTracker(logger, tracker, *rateLimitPerSecond).Handler(),
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       15 * time.Second,
 			WriteTimeout:      15 * time.Second,

@@ -567,6 +567,45 @@ func TestListenerEnabledByDefault(t *testing.T) {
 	})
 }
 
+// TestRateLimitStartupLogReflectsConfig is the integration check for the inbound
+// rate-limiter wiring: with the inbound listener bound, steward logs whether
+// per-source throttling is enabled — an INFO line naming the configured rate by
+// default, and a WARN when it is disabled with -max-requests-per-second 0, so an
+// operator can see at a glance whether the flood surface is throttled.
+func TestRateLimitStartupLogReflectsConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+
+	t.Run("enabled by default", func(t *testing.T) {
+		lines, waitErr := runStewardAndSignal(t, bin, []string{"-addr", "127.0.0.1:0"}, "steward listening")
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+		joined := strings.Join(lines, "\n")
+		if !strings.Contains(joined, "inbound rate limiting enabled") {
+			t.Errorf("expected the enabled-by-default rate-limit log line:\n%s", joined)
+		}
+		// The default budget is 20 requests/second per source; pin it so a changed
+		// default is a visible, deliberate edit rather than a silent drift.
+		if !strings.Contains(joined, `"max_requests_per_second_per_source":20`) {
+			t.Errorf("expected the default rate (20/s per source) in the startup log:\n%s", joined)
+		}
+	})
+
+	t.Run("disabled with zero", func(t *testing.T) {
+		lines, waitErr := runStewardAndSignal(t, bin,
+			[]string{"-addr", "127.0.0.1:0", "-max-requests-per-second", "0"}, "steward listening")
+		if waitErr != nil {
+			t.Fatalf("expected a clean exit after SIGTERM, got %v\noutput:\n%s", waitErr, strings.Join(lines, "\n"))
+		}
+		if !strings.Contains(strings.Join(lines, "\n"), "inbound rate limiting disabled") {
+			t.Errorf("expected the disabled rate-limit WARN when -max-requests-per-second is 0:\n%s", strings.Join(lines, "\n"))
+		}
+	})
+}
+
 // integrationCoverDir is the directory the instrumented steward subprocess writes
 // its coverage counters to, or "" to disable integration coverage. It is set by
 // scripts/coverage.sh (and the coverage CI job) via STEWARD_TEST_COVERDIR.

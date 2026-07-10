@@ -72,24 +72,37 @@ func ResolveVersion() string {
 type Server struct {
 	tracker *runtime.Tracker
 	logger  *slog.Logger
+	limiter *rateLimiter
 }
 
 // New builds a Server whose tracker holds at most maxInstances instances in
 // memory only (no persistence). A non-positive maxInstances falls back to
 // runtime.DefaultMaxInstances. For durable state, build a tracker with
-// runtime.LoadTracker and pass it to NewWithTracker.
-func New(logger *slog.Logger, maxInstances int) *Server {
-	return NewWithTracker(logger, runtime.NewTracker(maxInstances))
+// runtime.LoadTracker and pass it to NewWithTracker. rateLimitPerSecond wires the
+// per-source inbound rate limiter (see NewWithTracker).
+func New(logger *slog.Logger, maxInstances, rateLimitPerSecond int) *Server {
+	return NewWithTracker(logger, runtime.NewTracker(maxInstances), rateLimitPerSecond)
 }
 
 // NewWithTracker builds a Server around a caller-provided tracker. It lets the
 // caller inject a tracker bound to a state file (see runtime.LoadTracker) so the
 // same wiring serves both the in-memory default and the opt-in durable-state
 // mode.
-func NewWithTracker(logger *slog.Logger, tracker *runtime.Tracker) *Server {
+//
+// rateLimitPerSecond enables the per-source inbound rate limiter: a positive value
+// installs a token bucket allowing that many requests per second per source IP (with
+// a burst of rateBurstFactor times that); a value of zero or less disables the
+// limiter entirely, for an operator who fronts Steward with their own rate-limiting
+// gateway. See ratelimit.go for the budget rationale.
+func NewWithTracker(logger *slog.Logger, tracker *runtime.Tracker, rateLimitPerSecond int) *Server {
+	var limiter *rateLimiter
+	if rateLimitPerSecond > 0 {
+		limiter = newRateLimiter(rateLimitPerSecond)
+	}
 	return &Server{
 		tracker: tracker,
 		logger:  logger,
+		limiter: limiter,
 	}
 }
 
@@ -104,10 +117,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/instances/{id}/hibernate", s.handleHibernate)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/healthz", s.handleHealthz)
+
+	// jsonErrors is closest to the mux so the stdlib plain-text 404/405 become our
+	// JSON error shape; the per-source rate limiter (when enabled) wraps it so a flood
+	// is shed before any routing or handler work.
+	var routed http.Handler = s.jsonErrors(mux)
+	if s.limiter != nil {
+		routed = s.rateLimit(routed)
+	}
+
 	// Order (outermost first): recover so a panic still yields a clean JSON 500;
-	// logging so every response is recorded; jsonErrors so the mux's stdlib
-	// plain-text 404/405 become our JSON error shape.
-	return s.recoverMiddleware(s.withLogging(s.jsonErrors(mux)))
+	// logging so every response — including a rate-limited 429 — is recorded and
+	// carries X-Request-Id; then the (optional) rate limiter; then jsonErrors + mux.
+	return s.recoverMiddleware(s.withLogging(routed))
 }
 
 type provisionRequest struct {

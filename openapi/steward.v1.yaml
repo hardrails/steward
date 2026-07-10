@@ -54,6 +54,8 @@ paths:
                 $ref: "#/components/schemas/InstanceList"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
     post:
@@ -96,6 +98,8 @@ paths:
           $ref: "#/components/responses/MethodNotAllowed"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -121,6 +125,8 @@ paths:
           $ref: "#/components/responses/UnknownRuntimeRef"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
     delete:
@@ -142,6 +148,8 @@ paths:
           $ref: "#/components/responses/UnknownRuntimeRef"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/instances/{id}/start:
@@ -165,6 +173,8 @@ paths:
           $ref: "#/components/responses/UnknownRuntimeRef"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/instances/{id}/stop:
@@ -188,6 +198,8 @@ paths:
           $ref: "#/components/responses/UnknownRuntimeRef"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/instances/{id}/hibernate:
@@ -211,6 +223,8 @@ paths:
           $ref: "#/components/responses/UnknownRuntimeRef"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/capabilities:
@@ -240,6 +254,8 @@ paths:
                 $ref: "#/components/schemas/Capabilities"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/healthz:
@@ -270,6 +286,8 @@ paths:
                 $ref: "#/components/schemas/Health"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
 components:
@@ -285,6 +303,15 @@ components:
       schema:
         type: string
         example: 9f8e7d6c5b4a3210
+    RetryAfter:
+      description: |
+        The number of seconds to wait before retrying, sent on a `429` when the
+        per-source inbound rate limit is exceeded. A non-negative integer
+        (delta-seconds), always at least 1.
+      schema:
+        type: integer
+        minimum: 1
+        example: 1
   parameters:
     RuntimeRef:
       name: id
@@ -335,6 +362,24 @@ components:
       headers:
         X-Request-Id:
           $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: |
+        Too many requests from this source address. Steward applies a per-source
+        (client IP) request-rate limit to its unauthenticated inbound listener, in
+        the same defensive class as the request-body and instance-count caps. It is
+        an operator-tunable server-side deployment control (the server's
+        `-max-requests-per-second` flag, default 20 requests/second per source with a
+        burst of twice that; 0 disables it) and applies uniformly to every operation
+        below — it changes no request or response body shape.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
       content:
         application/json:
           schema:
