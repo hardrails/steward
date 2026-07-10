@@ -62,6 +62,15 @@ func decodeCapabilities(t *testing.T, rec *httptest.ResponseRecorder) capabiliti
 	return got
 }
 
+func decodeInstances(t *testing.T, rec *httptest.ResponseRecorder) instancesResponse {
+	t.Helper()
+	var got instancesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode instances: %v (body=%s)", err, rec.Body.String())
+	}
+	return got
+}
+
 func assertJSONError(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int) {
 	t.Helper()
 	if rec.Code != wantStatus {
@@ -280,8 +289,7 @@ func TestWrongMethodReturnsJSON405(t *testing.T) {
 	cases := []struct {
 		method, path string
 	}{
-		{http.MethodGet, "/v1/instances"},       // provision is POST-only
-		{http.MethodPut, "/v1/instances"},       // unsupported verb
+		{http.MethodPut, "/v1/instances"},       // only GET (list) and POST (provision) are defined
 		{http.MethodDelete, "/v1/capabilities"}, // capabilities is GET-only
 		{http.MethodPost, "/v1/healthz"},        // healthz is GET-only
 	}
@@ -379,5 +387,108 @@ func TestRequestLogCarriesRequestIDAndRemoteAddr(t *testing.T) {
 	}
 	if ra, ok := line["remote_addr"].(string); !ok || ra == "" {
 		t.Fatalf("log line is missing a non-empty remote_addr; got %v", line["remote_addr"])
+	}
+}
+
+func assertHexRequestID(t *testing.T, rec *httptest.ResponseRecorder, name string) {
+	t.Helper()
+	id := rec.Header().Get("X-Request-Id")
+	if id == "" {
+		t.Fatalf("%s: response is missing the X-Request-Id header", name)
+	}
+	// 8 random bytes hex-encoded == 16 lowercase hex chars.
+	if len(id) != 16 {
+		t.Fatalf("%s: X-Request-Id = %q, want 16 hex chars", name, id)
+	}
+	if _, err := hex.DecodeString(id); err != nil {
+		t.Fatalf("%s: X-Request-Id = %q is not valid hex: %v", name, id, err)
+	}
+}
+
+// TestRequestIDHeaderPresentOn405AndRecoveredPanic closes the two response paths
+// the commit message claims carry X-Request-Id but the 200/404 tests above do
+// not exercise: the stdlib mux's rewritten 405 (a registered path hit with an
+// unregistered method) and a recovered-panic 500. Both work for the same reason
+// — every middleware wrapper shares one response header map and withLogging sets
+// the header before the inner handler runs — so this pins that the header is not
+// merely a happy-path artifact.
+func TestRequestIDHeaderPresentOn405AndRecoveredPanic(t *testing.T) {
+	// 405: /v1/capabilities is registered for GET only; POSTing it flows through
+	// jsonErrors' method-not-allowed rewrite, which writes to the same header map.
+	h := newTestHandler(0)
+	m405 := do(h, http.MethodPost, "/v1/capabilities", "")
+	if m405.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /v1/capabilities: status=%d want 405 (body=%s)", m405.Code, m405.Body.String())
+	}
+	assertHexRequestID(t, m405, "method_not_allowed_405")
+
+	// Recovered panic: assemble the real middleware order (recover→logging→
+	// jsonErrors) around a handler that panics, proving the header withLogging set
+	// before next.ServeHTTP survives the panic recoverMiddleware turns into a 500.
+	s := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0)
+	panicky := s.recoverMiddleware(s.withLogging(s.jsonErrors(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))))
+	rec := httptest.NewRecorder()
+	panicky.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("recovered panic: status=%d want 500 (body=%s)", rec.Code, rec.Body.String())
+	}
+	assertHexRequestID(t, rec, "recovered_panic_500")
+}
+
+func TestListInstancesEmptyReturnsWrappedArray(t *testing.T) {
+	h := newTestHandler(0)
+	rec := do(h, http.MethodGet, "/v1/instances", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list (empty): status=%d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type = %q, want application/json (body=%s)", ct, rec.Body.String())
+	}
+	// Shape: a top-level object carrying an `instances` key — never a bare array.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &obj); err != nil {
+		t.Fatalf("body is not a JSON object: %v (body=%s)", err, rec.Body.String())
+	}
+	if _, ok := obj["instances"]; !ok {
+		t.Fatalf("response object missing `instances` key (body=%s)", rec.Body.String())
+	}
+	// Empty tracker: a non-nil, zero-length array (serialized as [], not null).
+	got := decodeInstances(t, rec)
+	if got.Instances == nil {
+		t.Fatalf("instances = null, want an empty array (body=%s)", rec.Body.String())
+	}
+	if len(got.Instances) != 0 {
+		t.Fatalf("instances has %d entries, want 0", len(got.Instances))
+	}
+}
+
+// TestListInstancesMatchesTrackerList drives the handler over a tracker whose
+// contents it also reads directly, proving the endpoint returns every tracked
+// instance in exactly the order Tracker.List guarantees (sorted by runtime_ref).
+func TestListInstancesMatchesTrackerList(t *testing.T) {
+	tr := runtime.NewTracker(0)
+	for _, id := range []string{"c", "a", "b", "agent-x", "agent-y"} {
+		if _, _, err := tr.Provision(id, 0, json.RawMessage(`{"id":"`+id+`"}`)); err != nil {
+			t.Fatalf("provision %q: %v", id, err)
+		}
+	}
+	h := NewWithTracker(slog.New(slog.NewTextHandler(io.Discard, nil)), tr).Handler()
+
+	got := decodeInstances(t, do(h, http.MethodGet, "/v1/instances", ""))
+	want := tr.List()
+	if len(got.Instances) != len(want) {
+		t.Fatalf("handler listed %d instances, want %d", len(got.Instances), len(want))
+	}
+	for i := range want {
+		if got.Instances[i].RuntimeRef != want[i].RuntimeRef {
+			t.Fatalf("order mismatch at %d: handler %q, List() %q",
+				i, got.Instances[i].RuntimeRef, want[i].RuntimeRef)
+		}
+		if got.Instances[i].InstanceID != want[i].InstanceID {
+			t.Fatalf("instance_id mismatch at %d: handler %q, List() %q",
+				i, got.Instances[i].InstanceID, want[i].InstanceID)
+		}
 	}
 }

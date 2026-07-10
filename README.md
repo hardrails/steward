@@ -119,6 +119,7 @@ for the full design.
 | Method | Path                        | Operation                                   |
 | ------ | --------------------------- | ------------------------------------------- |
 | POST   | `/v1/instances`             | Provision (idempotent on `instance_id`)     |
+| GET    | `/v1/instances`             | List tracked instances (sorted by `runtime_ref`) |
 | GET    | `/v1/instances/{id}`        | Status                                      |
 | POST   | `/v1/instances/{id}/start`  | Start                                       |
 | POST   | `/v1/instances/{id}/stop`   | Stop                                        |
