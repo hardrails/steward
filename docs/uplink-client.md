@@ -140,7 +140,13 @@ loop:
   classify(err / HTTP status):
     ok        → reset backoff; execute & report each command (below)
     transient → increment backoff; log WARN; continue
-    fatal     → log ERROR naming the remedy; return (stop the loop)
+    fatal     → log ERROR naming the remedy
+                → CredentialPath set (the normal case): pause and watch the
+                  credential file (see "Node-side credential hot-reload" below),
+                  then resume with the new credential once it changes
+                → CredentialPath unset: return (stop the loop) — pre-hot-reload
+                  fallback, only reachable from a caller that built a Poller
+                  without a credential path
 ```
 
 - **Jitter (thundering-herd avoidance).** The steady-state wait is
@@ -353,20 +359,72 @@ next.
 | ------------------------------------------ | ---------- | ---------------------------------------------------------------------------------------------- |
 | `2xx`                                      | ok         | Process commands; reset backoff to base.                                                        |
 | network error / timeout / `5xx` / `429`    | transient  | `WARN`; exponential backoff (base × 2^failures, capped at 5m) with the same ±20% jitter; retry. |
-| `401` / `403` (bad/revoked credential)     | **fatal**  | `ERROR` naming the remedy; **stop the poll loop.**                                               |
+| `401` / `403` (bad/revoked credential)     | **fatal**  | `ERROR` naming the remedy; **pause the poll loop and watch the credential file for a fix** (see [below](#node-side-credential-hot-reload)) instead of stopping outright. |
 | other `4xx` (e.g. `400`/`404`)             | transient  | `ERROR` naming it as a probable version-skew/bug; back off at the cap and keep retrying.         |
 
 The transient/fatal split is the crux of requirement 3. A rejected bearer credential
-does **not** become valid by retrying it; retrying floods the control plane's auth
-path and the node's logs, and the operator's remedy (re-enroll, rewrite the
-credential file, restart) requires a restart regardless. So `401`/`403` is fatal: the
-loop logs one loud, actionable `ERROR`
-(`"uplink credential rejected (403); re-enroll node <id> and update <path>, then
-restart"`) and stops. The rest of Steward keeps running — an inbound REST listener,
-if bound, is unaffected — so "uplink went dark" is visible without taking the process
-down. Other `4xx` codes are treated as transient-at-max-backoff so a control plane
-mid-deploy (a momentary `404`) does not permanently dark the node over a blip, while
-still logging loudly.
+does **not** become valid by retrying it against the SAME secret; retrying floods the
+control plane's auth path and the node's logs. So `401`/`403` is fatal to the current
+credential: the loop logs one loud, actionable `ERROR`
+(`"uplink credential rejected; pausing the poll loop and waiting for a new credential
+at <path>"`) and pauses — see
+[Node-side credential hot-reload](#node-side-credential-hot-reload) for how it resumes
+without a restart. The rest of Steward keeps running throughout — an inbound REST
+listener, if bound, is unaffected — so "uplink went dark" is visible without taking
+the process down. Other `4xx` codes are treated as transient-at-max-backoff so a
+control plane mid-deploy (a momentary `404`) does not permanently dark the node over a
+blip, while still logging loudly.
+
+### Node-side credential hot-reload
+
+A fatal `401`/`403` used to stop `Poller.Run` outright — recovering after a revoked
+node or a rotated secret required a full process restart, even with a corrected
+credential file already in place (see
+[Deliberately deferred](#deliberately-deferred), where this was originally scoped
+out). It is now closed: `Run` pauses instead of returning, and
+`waitForCredentialChange` watches the credential file until it changes to a new,
+valid credential for this node, then resumes polling with it — no restart, no
+operator intervention beyond dropping the new file.
+
+- **Configuration.** `uplink.Config.CredentialPath` is the file `Credential` was
+  loaded from; `cmd/steward` always sets it to `-uplink-credential-file`'s value, so
+  this is the default behavior for the real binary. It is optional at the `Poller`
+  API level — a caller that omits it gets the pre-hot-reload behavior (`Run` stops
+  outright on a fatal rejection), since there is then no file to watch.
+- **Poll on a bounded interval, never busy-loop.** The wait loop re-reads the file
+  every `Config.CredentialWatchInterval` (default `DefaultCredentialWatchInterval`,
+  5s), using the same `ctx`-aware `time.Timer` pattern as the ordinary inter-poll
+  wait — cancellation (a shutdown) returns promptly instead of blocking until the
+  next tick. It issues **no** `/uplink/poll` request while paused: only a local file
+  read per tick, so a permanently-wrong credential costs a small stat/read every few
+  seconds, never a hot loop and never repeated control-plane traffic.
+- **Compare by content, not mtime.** Each tick re-parses the file with
+  `LoadCredential` and compares the decoded secret against the one just rejected. An
+  mtime-only rewrite (an editor's save, a permissions-preserving copy) must not
+  trigger a doomed resume attempt with the same already-rejected secret — mtime alone
+  is not trustworthy evidence of a real rotation.
+- **Tolerate a torn write.** A non-atomic external rotation tool can leave the file
+  transiently absent, truncated, or syntactically invalid mid-write.
+  `LoadCredential`'s fail-closed error in that case is logged at `DEBUG` (the
+  expected steady state while waiting) and retried on the next tick — never treated
+  as a crash or a valid-but-unchanged credential.
+- **Refuse a foreign `node_id`.** A reloaded file naming a different `node_id` than
+  this process was configured with is refused (logged at `ERROR`, wait continues):
+  silently adopting it would re-identify this process as a different node rather than
+  rotate its secret, a control-plane trust violation the loop must not paper over.
+  Rotating a node's own secret in place, and re-enrolling it as an unrelated node
+  identity, are different operations; only the former is hot-reloaded.
+- **If the new credential is ALSO rejected,** `Run` pauses and watches again — the
+  same `classFatal` → pause → watch → resume cycle, indefinitely, never a crash and
+  never a busy loop.
+
+See `internal/uplink/poller_test.go`'s
+`TestPollerEntersWatchModeAndResumesOnCredentialFileChange` and its siblings
+(`...IgnoresUnchangedOrUnreadableCredentialFile`, `...RefusesCredentialWithDifferentNodeID`,
+`...RespectsContextCancellation`) for the behavior pinned as tests, and
+`cmd/steward/main_test.go`'s
+`TestDisableInboundListenerRecoversFromFatalPollRejectionViaCredentialHotReload` for
+the end-to-end proof against the real binary.
 
 ### Coexistence with the inbound REST API
 
@@ -553,15 +611,19 @@ in `.github/workflows/ci.yml`.
 ## Deliberately deferred
 
 In ARCHITECTURE.md's "deferred decision" spirit — named explicitly so they are choices,
-not oversights. **None** of these is designed or built in v1, and each is deferred
-because the companion Railyard-side v1 has not committed to it either:
+not oversights. None of these was designed or built in v1; each was deferred because
+the companion Railyard-side v1 had not committed to it either. Two have since been
+closed (marked below) as real follow-up work landed; the rest remain deferred.
 
 - **TLS client-certificate auth.** v1 is bearer-credential only. mTLS is a larger
   enrollment/PKI story on both sides.
-- **Node-side credential rotation.** The credential file is load-only in v1; rotating
-  a secret is re-enroll + rewrite + restart. No in-place rotation, no re-auth-on-403
-  recovery loop — a `403` stops the loop and waits for an operator (see the failure
-  taxonomy). Auto-recovery on re-enrollment is the natural follow-up.
+- **Node-side credential rotation — closed.** v1 read the credential file once at
+  startup; rotating a secret required re-enroll + rewrite + restart, and a `403`
+  stopped the loop outright with no recovery short of a restart. This is now
+  designed and implemented: a fatal `401`/`403` pauses `Run` and watches the
+  credential file (content comparison, bounded interval, no busy-loop) until it
+  changes to a new, valid credential for this node, then resumes — no restart. See
+  [Node-side credential hot-reload](#node-side-credential-hot-reload) above.
 - **Multi-control-plane failover.** One `-uplink-url`. No list, no health-based
   failover between control planes.
 - **Disabling the inbound listener entirely — closed.** v1 always started the HTTP

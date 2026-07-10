@@ -35,6 +35,14 @@ const (
 	// pollBody is the (empty) poll request body: the server derives the node from
 	// the credential, so no node_id or heartbeat payload is sent.
 	pollBody = `{}`
+	// DefaultCredentialWatchInterval is how often Run re-reads the credential file
+	// while paused after a fatal 401/403 rejection (see waitForCredentialChange),
+	// when Config.CredentialWatchInterval is unset. This loop makes no outbound
+	// HTTP request per tick -- it only reads a local file -- so a value this small
+	// does not hammer the control plane; it is still a fixed interval, never a
+	// busy loop, so a permanently-wrong credential costs one small file read every
+	// few seconds, not spinning CPU.
+	DefaultCredentialWatchInterval = 5 * time.Second
 )
 
 // pollClass is how a poll round-trip's outcome is classified for the loop.
@@ -57,6 +65,18 @@ type Config struct {
 	PollInterval time.Duration
 	HTTPClient   *http.Client
 	Logger       *slog.Logger
+
+	// CredentialPath is the on-disk path Credential was loaded from (see
+	// LoadCredential). Optional: when set, a fatal 401/403 rejection pauses Run
+	// instead of stopping it, and watches this file until it changes to a new,
+	// valid credential for this node -- see waitForCredentialChange. When empty,
+	// Run keeps the pre-hot-reload behavior: a fatal rejection stops the loop and
+	// a restart (with a corrected credential in place) is the only way to resume.
+	CredentialPath string
+	// CredentialWatchInterval overrides DefaultCredentialWatchInterval for the
+	// wait loop above. Optional; meaningful only when CredentialPath is set.
+	// Exposed the same way PollInterval is, so a test can drive it fast.
+	CredentialWatchInterval time.Duration
 }
 
 // Poller is the outbound uplink loop: it polls the control plane for queued
@@ -70,6 +90,11 @@ type Poller struct {
 	baseInterval time.Duration
 	logger       *slog.Logger
 	dispatcher   *dispatcher
+
+	// credentialPath and credentialWatchInterval drive waitForCredentialChange.
+	// credentialPath is empty when hot-reload is not configured (see Config).
+	credentialPath          string
+	credentialWatchInterval time.Duration
 }
 
 // NewPoller validates cfg and builds a Poller driving tracker. It fails closed on a
@@ -112,22 +137,35 @@ func NewPoller(tracker Tracker, cfg Config) (*Poller, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	watchInterval := cfg.CredentialWatchInterval
+	if watchInterval <= 0 {
+		watchInterval = DefaultCredentialWatchInterval
+	}
 	return &Poller{
-		httpClient:   client,
-		pollURL:      pollURL,
-		reportURL:    reportURL,
-		credential:   cfg.Credential,
-		baseInterval: cfg.PollInterval,
-		logger:       logger,
-		dispatcher:   &dispatcher{tracker: tracker, nodeID: cfg.NodeID, logger: logger},
+		httpClient:              client,
+		pollURL:                 pollURL,
+		reportURL:               reportURL,
+		credential:              cfg.Credential,
+		baseInterval:            cfg.PollInterval,
+		logger:                  logger,
+		dispatcher:              &dispatcher{tracker: tracker, nodeID: cfg.NodeID, logger: logger},
+		credentialPath:          cfg.CredentialPath,
+		credentialWatchInterval: watchInterval,
 	}, nil
 }
 
-// Run drives the poll loop until ctx is cancelled or a fatal credential rejection
-// stops it. It returns when either happens; the caller closes its done channel. The
-// inter-poll wait and every in-flight request are cancelled by ctx, so a shutdown
-// signal returns promptly. A fatal 401/403 stops the loop but leaves the rest of
-// Steward (an inbound REST listener, if bound) running.
+// Run drives the poll loop until ctx is cancelled. The inter-poll wait and every
+// in-flight request are cancelled by ctx, so a shutdown signal returns promptly.
+// It leaves the rest of Steward (an inbound REST listener, if bound) running.
+//
+// A fatal 401/403 no longer stops the loop outright when Config.CredentialPath is
+// set (the normal case: cmd/steward always sets it): Run pauses, logs the
+// rejection, and watches the credential file until it changes to a new, valid
+// credential for this node -- see waitForCredentialChange -- then resumes polling
+// with it. If the NEW credential is rejected too, Run pauses and watches again;
+// it never busy-loops or crashes. Only when CredentialPath is empty does a fatal
+// rejection stop Run outright, the pre-hot-reload behavior, since there is then
+// no file to watch and a restart is the only way to recover.
 func (p *Poller) Run(ctx context.Context) {
 	failures := 0
 	for {
@@ -154,10 +192,68 @@ func (p *Poller) Run(ctx context.Context) {
 			p.logger.Error("uplink poll rejected (probable control-plane version skew); backing off at the cap and retrying",
 				"err", err, "next_backoff", MaxBackoff.String())
 		case classFatal:
-			p.logger.Error("uplink credential rejected; stopping the poll loop — re-enroll this node, update the credential file, and restart",
-				"err", err, "node_id", p.dispatcher.nodeID)
-			return
+			if p.credentialPath == "" {
+				p.logger.Error("uplink credential rejected; stopping the poll loop — re-enroll this node, update the credential file, and restart",
+					"err", err, "node_id", p.dispatcher.nodeID)
+				return
+			}
+			p.logger.Error("uplink credential rejected; pausing the poll loop and waiting for a new credential at "+p.credentialPath,
+				"err", err, "node_id", p.dispatcher.nodeID, "path", p.credentialPath)
+			if !p.waitForCredentialChange(ctx) {
+				return // ctx cancelled while waiting: a real shutdown, not a resume.
+			}
+			failures = 0
 		}
+	}
+}
+
+// waitForCredentialChange blocks, re-reading p.credentialPath every
+// p.credentialWatchInterval, until ctx is cancelled (returns false: Run should
+// stop, this is a shutdown, not a resume) or the file changes to a new, validly
+// parseable credential for this node (returns true, having already updated
+// p.credential to the new secret so the next poll uses it).
+//
+// The comparison is by CONTENT, not by mtime: it re-parses the file with
+// LoadCredential and compares the decoded Credential (secret) field against the
+// one just rejected. mtime alone is not trustworthy here -- some editors and
+// deployment tools rewrite a file's mtime without changing its bytes (a
+// permissions-preserving copy, a `touch`), which would otherwise trigger a
+// pointless resume attempt with the SAME already-rejected secret, immediately
+// failing again. A read/parse error (the file briefly absent, truncated, or
+// syntactically invalid mid-write by a non-atomic external rotation tool) is the
+// expected steady state while waiting, not a fatal condition: it is logged at
+// DEBUG and retried on the next tick, exactly like an unchanged secret. Neither
+// case busy-loops; both simply wait for the next fixed-interval tick.
+//
+// A file that now parses to a DIFFERENT node_id than this Poller was configured
+// with is refused (logged at ERROR, wait continues): adopting it would silently
+// re-identify this process as a different node rather than rotate its secret --
+// a control-plane trust violation this loop must not paper over.
+func (p *Poller) waitForCredentialChange(ctx context.Context) bool {
+	for {
+		if !p.wait(ctx, p.credentialWatchInterval) {
+			return false
+		}
+
+		cred, err := LoadCredential(p.credentialPath)
+		if err != nil {
+			p.logger.Debug("uplink credential file is not yet readable while waiting for a new credential; retrying",
+				"path", p.credentialPath, "err", err)
+			continue
+		}
+		if cred.NodeID != p.dispatcher.nodeID {
+			p.logger.Error("uplink credential file now names a different node_id than this process was started with; refusing to adopt it and continuing to wait",
+				"path", p.credentialPath, "file_node_id", cred.NodeID, "this_node_id", p.dispatcher.nodeID)
+			continue
+		}
+		if cred.Credential == p.credential {
+			continue // Same secret as the one just rejected (e.g. an mtime-only touch); keep waiting.
+		}
+
+		p.logger.Info("uplink credential file changed; resuming the poll loop",
+			"path", p.credentialPath, "node_id", p.dispatcher.nodeID)
+		p.credential = cred.Credential
+		return true
 	}
 }
 
