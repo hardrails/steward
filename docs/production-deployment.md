@@ -1,0 +1,382 @@
+# Production deployment
+
+This is the operator-facing companion to [README.md](../README.md) (the flag/API
+reference) and [ARCHITECTURE.md](../ARCHITECTURE.md) (the design). It ties together
+the operational surface a production rollout actually touches — config, pre-flight
+validation, credential rotation, rate limiting, networking, and shutdown — into one
+walkthrough. It assumes you have already built Steward (see README's
+[Build and test](../README.md#build-and-test)) and does not repeat the full flag
+table or API reference; it links to them where relevant.
+
+Two deployment topologies are coherent, and this document covers both, weighted
+toward the second:
+
+- **Directly reachable.** Railyard dials the node's inbound REST API. `-addr` must
+  be bound to a network-reachable address.
+- **NAT'd / firewalled (the uplink pattern).** The node sits behind NAT or a
+  firewall that blocks inbound connections. Steward instead polls Railyard
+  outbound. This is the deployment the uplink client, rate limiting, and
+  credential hot-reload were built for, so it gets the most detail below.
+
+## Configuring a production node
+
+Any setting can go in a JSON file pointed at by `-config` (or `STEWARD_CONFIG`);
+see README's [Config file](../README.md#config-file) for the full key list and the
+precedence rule (flag > env var > config file > built-in default). In production,
+prefer a config file over a long flag list — it is what your fleet-management
+tooling checks in and validates (see [Pre-flight validation](#pre-flight-validation-with--check-config)
+below), one file per node or per node class, with the per-node credential kept in
+its own file rather than inlined.
+
+A production config for a NAT'd, uplink-only node looks like:
+
+```json
+{
+  "uplink_url": "https://control-plane.example",
+  "uplink_credential_file": "/etc/steward/uplink-credential.json",
+  "uplink_poll_interval": "30s",
+  "state_file": "/var/lib/steward/state.json",
+  "disable_inbound_listener": true,
+  "log_level": "info"
+}
+```
+
+Nothing is unconditionally required — every flag has a default — but two settings
+become required together, and are validated as such at startup:
+
+- `-uplink-url` and `-uplink-credential-file` are a pair: setting one without the
+  other is a fail-closed startup error.
+- `-disable-inbound-listener` requires `-uplink-url` already be set: a node with
+  neither door open is unreachable and refuses to start (see
+  [Networking](#networking-does-steward-need-an-open-inbound-port) below).
+
+Everything else — `-max-instances`, `-max-requests-per-second`, `-log-level`,
+`-uplink-poll-interval` — has a default sane enough to run unmodified; tune them
+per the guidance in the sections below as your fleet's actual traffic tells you to,
+not preemptively.
+
+## Pre-flight validation with `-check-config`
+
+`-check-config` runs the exact same fail-closed validation sequence a real startup
+runs — including a `-config` file, if one is given — then exits `0` (valid) or
+non-zero, without binding a port, loading state for real use, or starting the
+uplink loop:
+
+```console
+$ steward -check-config -config /etc/steward/config.json
+configuration valid
+```
+
+Run it as the last step of your config-rendering pipeline, before a candidate
+config file is distributed to a node or a fleet: it catches a typo'd JSON key (an
+unknown key is rejected, not silently dropped), a malformed
+`uplink_poll_interval` duration, a non-positive `max_instances`, or a
+`disable_inbound_listener: true` with no `uplink_url` — the same problems a real
+boot would refuse, surfaced before a rollout instead of after one.
+
+One operational detail: Steward logs everything, including this error, as JSON to
+**stdout** (there is no separate stderr stream for failures). Automation wrapping
+`-check-config` should check the **exit code**, not which stream a message landed
+on.
+
+## Networking: does Steward need an open inbound port?
+
+**No — not for the uplink pattern.** This is worth stating plainly because it is
+the entire point of a NAT'd/firewalled deployment: `internal/uplink.Poller` is
+handed the tracker directly and dials **out** to `-uplink-url` on its own
+`http.Client` (`p.pollURL` / `p.reportURL`, both derived from that flag). Nothing
+in `internal/uplink` opens a listener or accepts a connection. The inbound HTTP
+listener (`-addr`) and the outbound uplink are two independent front doors onto
+one tracker — see
+[ARCHITECTURE.md's "second caller, not a second lifecycle engine"](../ARCHITECTURE.md#outbound-uplink-is-opt-in) —
+and removing one does not touch the other.
+
+What the inbound listener is *for*, then, on a NAT'd node:
+
+- The **direct-REST topology**, where it's the whole point (Railyard dials in).
+- **Local health/admin** on the uplink topology: `GET /v1/healthz` and
+  `GET /v1/capabilities`, reachable only on-box since the default `-addr` is
+  `127.0.0.1:8080` (loopback, not exposed to the network unless explicitly
+  rebound).
+
+If your process supervisor watches the process and its stdout logs directly
+(systemd, a container runtime, a Kubernetes exec probe) rather than polling an
+HTTP endpoint, you have no use for even the loopback listener. Set
+`-disable-inbound-listener` (env `STEWARD_DISABLE_INBOUND_LISTENER`) and the node
+binds **nothing** inbound — no `http.Server` is built at all — while every fleet
+operation still flows through the uplink poll loop. A node with the flag set and
+no `-uplink-url` is refused at startup (a dark, unreachable process is a
+configuration error, not a valid deployment); see
+[ARCHITECTURE.md](../ARCHITECTURE.md#the-inbound-listener-is-opt-out-uplink-only-nodes-bind-nothing-inbound)
+and the full design in [`disable-inbound-listener.md`](disable-inbound-listener.md).
+
+Practical read: for a NAT'd node, the only network egress you need to open at the
+firewall is ordinary outbound HTTPS to `-uplink-url` — the same egress a browser
+on that box would already need. There is nothing to open for inbound.
+
+## Credential provisioning and rotation
+
+### Initial provisioning
+
+The uplink authenticates the node *to* the control plane, outbound only — it adds
+no inbound authentication. The credential is minted by the control-plane operator
+at enrollment and delivered to the node as a small versioned JSON file:
+
+```json
+{
+  "version": 1,
+  "tenant_id": "acme",
+  "node_id": "node-7",
+  "credential": "<opaque bearer token minted at enrollment>"
+}
+```
+
+Write it to the path named by `-uplink-credential-file`. Steward treats the
+`credential` field as an opaque string sent verbatim in the `Authorization`
+header — it never parses it — so provisioning is just: get the file from
+enrollment onto the node, at that path. `internal/uplink.LoadCredential` reads it
+fail-closed at startup: a missing file (when the uplink is enabled), invalid JSON,
+wrong `version`, or an empty `tenant_id`/`node_id`/`credential` is a startup error
+naming the path and the fix — re-enroll the node and rewrite the file — never a
+silently-disabled uplink. As general secret-handling practice, write it with
+restrictive permissions (`0600`, owned by the service user) — Steward does not
+set the file's mode for you.
+
+### Rotating a credential without downtime
+
+A fatal `401`/`403` used to stop the poll loop outright, requiring a full process
+restart to pick up a corrected credential. That's closed: `Poller.Run` now pauses
+on a fatal rejection and watches `-uplink-credential-file` — the same path the
+credential was loaded from — until it changes to a new, valid credential for this
+node, then resumes with no restart. The full design is in
+[`uplink-client.md`'s node-side credential hot-reload section](uplink-client.md#node-side-credential-hot-reload);
+the operational shape that matters for a rollout:
+
+- **It is reactive, not a live file-watcher.** The watch loop only starts once a
+  poll is actually rejected with `401`/`403`. Pre-staging a new credential file
+  *before* the control plane revokes the old one does nothing by itself — Steward
+  keeps polling with its in-memory credential until a poll fails. The safe
+  sequence for a planned rotation is: **(1)** mint the new credential and write it
+  to the node's credential-file path first, so it's ready, **(2)** revoke the old
+  credential on the control-plane side. The next poll attempt then gets rejected,
+  Steward pauses and starts watching, and — because the new file is already
+  staged — picks it up on its very next check.
+- **The watch interval is fixed at 5 seconds** (`uplink.DefaultCredentialWatchInterval`)
+  for the real binary; `cmd/steward` does not expose it as a flag. So the total
+  exposure window for a planned rotation is roughly one poll attempt (governed by
+  `-uplink-poll-interval`) plus at most 5 seconds — no restart, no re-enrollment,
+  no operator action beyond writing the file and revoking the old secret.
+- **Write the new file atomically** (temp file + rename in the same directory),
+  the same discipline Steward's own state and credential files use internally.
+  The watch loop tolerates a torn read from a non-atomic rotation tool (a
+  transiently absent, truncated, or invalid-JSON file is logged at `DEBUG` and
+  retried on the next tick, not treated as fatal) — but atomic replacement avoids
+  relying on that tolerance at all.
+- **`node_id` must not change across a rotation.** A reloaded file naming a
+  different `node_id` than the process was started with is refused (logged at
+  `ERROR`, watch continues) — rotating a node's own secret and re-enrolling it as
+  a different node identity are different operations, and only the former
+  hot-reloads. Re-enrolling as a new identity still requires a restart with the
+  new credential file in place.
+- **A bad replacement just keeps waiting.** If the newly-dropped credential is
+  *also* rejected, `Run` pauses and watches again — the same cycle, indefinitely.
+  There is no crash and no restart needed; fix the file and it resumes on the next
+  tick.
+
+For a **compromised** credential, the actual security control is the revocation on
+the control-plane side — that's what turns the next poll into the `401`/`403`
+that pauses the loop. Delivering the replacement file is the recovery step, and
+because it's hot-reloaded, no process restart is needed for either half.
+
+## Inbound rate limiting
+
+The inbound HTTP listener is unauthenticated by design, so it defends itself from
+a request flood the same structural way it bounds request bodies and instance
+count: a per-source (client IP) token-bucket limiter. The default —
+`20` requests/second per source with a burst of `40` — sheds excess requests with
+`429 Too Many Requests` and a `Retry-After` header before any handler work runs, so
+a 429 is always safe to retry. See README's
+[Inbound rate limiting](../README.md#inbound-rate-limiting) for the full budget
+rationale.
+
+**This only matters when the inbound listener is bound.** On a
+`-disable-inbound-listener` node there is no listener to protect, and this whole
+section is moot. Even with the listener on, the default `-addr` is loopback-only,
+so the limiter is defense-in-depth there rather than load-bearing against
+off-box traffic — it becomes operationally significant on the direct-REST
+topology, or any deployment that rebinds `-addr` to a network-reachable address.
+
+Tuning for fleet scale:
+
+- The default is sized for Railyard driving lifecycle operations at
+  reconciler-and-human pace. A **bulk operation** — cold-provisioning hundreds of
+  instances back to back from one Railyard replica — can exceed the 40-token
+  burst and see some requests shed with 429. Raise `-max-requests-per-second` (or
+  `STEWARD_MAX_REQUESTS_PER_SECOND`) for that traffic class, or set it to `0` to
+  disable the limiter outright — appropriate only when Steward already sits
+  behind a gateway that rate-limits for it, since the listener is still otherwise
+  unauthenticated.
+- The limiter keys on the **real TCP peer**, never a client-supplied header like
+  `X-Forwarded-For` (a forgeable value on an unauthenticated listener would let an
+  attacker dodge the limit by rotating it). One consequence: if multiple Railyard
+  replicas — or any fronting proxy — reach a node through one shared egress
+  address, they all share a single bucket. That's a signal to raise the limit for
+  that node, or move rate limiting to the fronting layer instead of tightening
+  Steward's per-source key.
+- The per-source bucket map is capped (bounded memory against a distributed
+  many-IP flood) and idle buckets are swept periodically; this is not a tuning
+  knob an operator sets, just a reassurance that raising the rate limit for
+  legitimate traffic doesn't also open an unbounded-memory path. See
+  `internal/server/ratelimit.go` if you need the exact numbers.
+
+## Graceful shutdown
+
+`cmd/steward/main.go` registers a `SIGINT`/`SIGTERM` handler
+(`signal.NotifyContext`) immediately after startup validation succeeds. On
+receipt of either signal:
+
+1. It logs `"shutting down"` and opens a **10-second** shutdown deadline
+   (`shutdownCtx`).
+2. If the inbound listener is bound, `srv.Shutdown(shutdownCtx)` stops accepting
+   new connections and drains in-flight ones. A failure here is the one case that
+   exits non-zero.
+3. It waits for the uplink poll loop to finish — its context is already
+   cancelled, so `Run` returns promptly — bounded by the *same* 10-second
+   deadline. A poll loop that doesn't drain in time logs a `WARN` but does **not**
+   fail the shutdown; the process still exits `0`.
+
+The practical rule for a supervisor: **send `SIGTERM`, not `SIGKILL`, and allow at
+least the 10-second internal bound plus margin before force-killing** — a
+supervisor timeout shorter than that will `SIGKILL` mid-drain and defeat the
+graceful path entirely. `scripts/smoke.sh` is the proof this contract holds on the
+real release binary: CI builds it, sends `SIGTERM`, and asserts a clean, panic-free
+exit `0` within a timeout on every push (see
+[How a release build is proven solid](#how-a-release-build-is-proven-solid)).
+
+**Under systemd**, set an explicit stop timeout above the internal bound:
+
+```ini
+[Unit]
+Description=Steward lifecycle supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/steward -config /etc/steward/config.json
+User=steward
+Group=steward
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+StateDirectory=steward
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`TimeoutStopSec=15` leaves margin above Steward's own 10-second bound so systemd
+never `SIGKILL`s before the graceful path finishes on its own.
+
+**Under a container runtime**, make sure `SIGTERM` actually reaches the Steward
+process: use the exec form of your entrypoint (or an init such as `tini`) rather
+than a shell wrapper that swallows the signal, and give Kubernetes'
+`terminationGracePeriodSeconds` (or the equivalent in your orchestrator) the same
+margin above 10 seconds that the systemd unit above uses.
+
+## Health and readiness signals
+
+**With the inbound listener bound** (the default, or explicit `disable_inbound_listener: false`):
+
+- `GET /v1/healthz` → `200 {"status":"ok"}` is a liveness probe only. It
+  deliberately does not touch the durable-state file — that would waste I/O on a
+  hot path and risks racing the state file's own atomic-rename writes — because a
+  broken state file already fails closed elsewhere (at startup, or on the write
+  inside the mutation that touches it), never silently behind a healthy probe.
+- `GET /v1/capabilities` reports `version`, `instance_count`, `max_instances`, and
+  a `durable_state` boolean. It's useful for confirming a rollout landed the
+  binary and config you expect, but it's introspection, not a readiness gate.
+
+**With the inbound listener disabled** (`disable_inbound_listener: true`), neither
+endpoint exists locally — there is no listener to serve them. Liveness for a
+uplink-only node is **process-alive plus advancing structured JSON logs on
+stdout**. Representative lines to key alerting on:
+
+```json
+{"level":"INFO","msg":"uplink enabled","url":"https://control-plane.example","node_id":"node-7","tenant_id":"acme","poll_interval":"30s"}
+{"level":"WARN","msg":"uplink poll failed; backing off and retrying","consecutive_failures":1,"next_backoff":"1m0s"}
+{"level":"ERROR","msg":"uplink credential rejected; pausing the poll loop and waiting for a new credential","node_id":"node-7","path":"/etc/steward/uplink-credential.json"}
+{"level":"INFO","msg":"uplink credential file changed; resuming the poll loop","node_id":"node-7"}
+```
+
+A fatal credential rejection **pauses** the loop rather than exiting the process
+(see [Rotating a credential](#rotating-a-credential-without-downtime) above), so
+"process still running" stays a valid liveness signal even through a rejected
+credential — the `ERROR` log line, not process exit, is what should page someone.
+The one condition that *does* trigger a shutdown on a listener-disabled node
+without an operator signal is the poll loop returning unexpectedly with no
+shutdown already in progress (a defensive fallback for a misconfigured library
+caller, not reachable through `cmd/steward`'s own flags today): it logs an
+`ERROR` and triggers the same graceful shutdown a real `SIGTERM` would, ending in
+process exit. If that ever fires, `Restart=on-failure` (or your orchestrator's
+equivalent) is the correct response.
+
+See [`disable-inbound-listener.md`](disable-inbound-listener.md) for the full
+design provenance behind this model.
+
+## A minimal production rollout walkthrough
+
+For a NAT'd node using the uplink pattern end to end:
+
+1. **Build the binary.** `go build -o steward ./cmd/steward` (see README's
+   [Build and test](../README.md#build-and-test)), or use a pinned release build —
+   either way, confirm what you're running with `steward -version`.
+2. **Enroll the node** on the control-plane side to obtain its `tenant_id`,
+   `node_id`, and bearer `credential`.
+3. **Write the credential file** to the node, e.g.
+   `/etc/steward/uplink-credential.json`, with `0600` permissions owned by the
+   service user (see [Initial provisioning](#initial-provisioning) above).
+4. **Write the config file**, e.g. `/etc/steward/config.json`, with `uplink_url`,
+   `uplink_credential_file`, `state_file`, `disable_inbound_listener`, and
+   `log_level` set as your topology needs (see the example under
+   [Configuring a production node](#configuring-a-production-node)).
+5. **Validate before rolling out**: `steward -check-config -config /etc/steward/config.json`.
+6. **Install and start** the systemd unit from
+   [Graceful shutdown](#graceful-shutdown) (or your orchestrator's equivalent),
+   pointing `ExecStart` at the binary and config file, then
+   `systemctl daemon-reload && systemctl enable --now steward`.
+7. **Verify locally**: `journalctl -u steward -f` should show `"uplink enabled"`
+   naming the right `node_id`/`tenant_id`/`url`; if the inbound listener is on,
+   `curl localhost:8080/v1/healthz` should return `200 {"status":"ok"}`.
+8. **Verify from the control plane** that the node is polling and its lifecycle
+   commands are being claimed — that side of the contract is Railyard's, out of
+   scope here.
+
+## How a release build is proven solid
+
+CI (`.github/workflows/ci.yml`) gates every push to `main` and every pull request
+with five jobs, all required:
+
+- **build / vet / test** — `go build`, `go vet`, and `go test -race ./...`
+  (the race detector catches exactly the concurrency class the tracker's
+  single-mutex design depends on).
+- **golangci-lint**.
+- **openapi lint** — spectral against `openapi/steward.v1.yaml`, the same public
+  contract this document assumes.
+- **coverage** — an 85% floor over the honest aggregate: unit test coverage
+  unioned with `main()`'s own coverage recovered from a `-cover`-instrumented
+  subprocess run (`scripts/coverage.sh`), so the CLI/startup glue this document
+  walks through is actually covered, not exempted.
+- **mutation** — a 70% kill-efficacy floor (`gremlins`, `.gremlins.yaml`) over the
+  same code.
+- **smoke** — builds the real release binary, asserts `GET /v1/healthz` comes up
+  within a timeout, then sends `SIGTERM` and asserts a clean, panic-free exit `0`
+  (`scripts/smoke.sh`). This is the one job that exercises this document's
+  [graceful shutdown](#graceful-shutdown) contract end to end, not just described
+  in prose.
+
+An operator asking "is this build solid" can point at green CI on the commit or
+tag being deployed — the smoke test in particular is proof, not just a claim, that
+the shutdown behavior this document relies on actually holds on the compiled
+binary.
