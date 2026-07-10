@@ -34,17 +34,20 @@ That is the whole flow. Everything below is the detail behind it.
 
 ## What the automation does
 
-`.github/workflows/release.yml` triggers on `push` of a semver-shaped tag
-(`v[0-9]+.[0-9]+.[0-9]+*`, so `vnext` or `v2` never enter the release path). It
-runs **two jobs**, split deliberately for least privilege:
+`.github/workflows/release.yml` triggers on `push` of any `v*` tag. (The trigger
+is a broad glob on purpose: GitHub's tag-filter syntax cannot reliably express
+"semver only", and a filter that silently failed to match the release tag would be
+worse than a broad one — so `scripts/release.sh` enforces the `vX.Y.Z` shape
+itself, failing a stray tag like `vnext` or `v2` fast and loudly before anything is
+built or published.) It runs **two jobs**, split deliberately for least privilege:
 
 1. **`build`** — with a **read-only** token — checks out the tag with **full
    history** (`fetch-depth: 0`) so the Go toolchain can stamp the tag as the
-   binary's version (see below), then runs `scripts/release.sh`, which
-   cross-compiles the target matrix, packages each build as a `.tar.gz` (binary +
-   `LICENSE` + `README.md`), writes a `checksums.txt` of SHA-256 sums, asserts the
-   binary self-reports the tag, and uploads the whole `dist/` directory as a
-   workflow artifact.
+   binary's version (see below), then runs `scripts/release.sh`, which rejects a
+   non-semver tag up front, cross-compiles the target matrix, packages each build
+   as a `.tar.gz` (binary + `LICENSE` + `README.md`), writes a `checksums.txt` of
+   SHA-256 sums, asserts the binary self-reports the tag, and uploads the whole
+   `dist/` directory as a workflow artifact.
 2. **`publish`** — the only job with a `contents: write` token — runs **only on a
    tag push**, checks out **no repository code**, downloads the artifacts the
    build produced, and creates a GitHub Release named after the tag (auto-generated

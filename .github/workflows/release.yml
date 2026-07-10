@@ -18,10 +18,12 @@ name: Release
 
 on:
   push:
-    # Semver-shaped tags only (vX.Y.Z, optionally a -prerelease/+build suffix). A
-    # stray tag like `vnext` or `v2` never enters the release path; the release
-    # contract is vX.Y.Z (see docs/releasing.md).
-    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+    # Fire on any v-prefixed tag. GitHub's tag-filter glob does not reliably
+    # support regex-style quantifiers, and a filter that silently failed to match
+    # the release tag would be a far worse failure than a broad match — so the
+    # authoritative semver-shape gate lives in scripts/release.sh instead, which
+    # fails a non-semver tag (vnext, v2, ...) fast and loudly before building.
+    tags: ["v*"]
   workflow_dispatch:
 
 # Least privilege by default: the top-level token can only read. Only the publish
