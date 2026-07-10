@@ -83,7 +83,11 @@ file, which beats the built-in default):
 | `-max-requests-per-second` | `STEWARD_MAX_REQUESTS_PER_SECOND` | `20`             | max inbound requests/second per source IP before returning 429 (burst is 2x this); `0` or negative disables the per-source limiter |
 | `-state-file`              | `STEWARD_STATE_FILE`              | (unset)          | path to a JSON file for durable state; unset means in-memory only       |
 | `-uplink-url`              | `STEWARD_UPLINK_URL`              | (unset)          | control-plane base URL for the outbound uplink; unset disables it       |
-| `-uplink-credential-file`  | `STEWARD_UPLINK_CREDENTIAL_FILE`  | (unset)          | path to the node's uplink credential JSON; required when `-uplink-url` is set |
+| `-uplink-credential-file`  | `STEWARD_UPLINK_CREDENTIAL_FILE`  | (unset)          | path to the node's uplink credential JSON; required when `-uplink-url` is set. Must be `0600` or stricter (owner-only); a group- or other-accessible file fails closed at startup — see [Uplink transport security](#uplink-transport-security) |
+| `-uplink-tls-ca-file`      | `STEWARD_UPLINK_TLS_CA_FILE`      | (unset)          | PEM CA bundle used to verify the control plane's TLS certificate; unset verifies against the host's system root CAs |
+| `-uplink-tls-client-cert`  | `STEWARD_UPLINK_TLS_CLIENT_CERT`  | (unset)          | PEM client certificate presented for mutual TLS (mTLS); requires `-uplink-tls-client-key` |
+| `-uplink-tls-client-key`   | `STEWARD_UPLINK_TLS_CLIENT_KEY`   | (unset)          | PEM private key for `-uplink-tls-client-cert`; requires `-uplink-tls-client-cert` |
+| `-uplink-tls-skip-verify`  | `STEWARD_UPLINK_TLS_SKIP_VERIFY`  | `false`          | **INSECURE**: skip verification of the control plane's TLS certificate. Defeats TLS authentication; logged loudly when on. Temporary diagnostics only |
 | `-uplink-poll-interval`    | `STEWARD_UPLINK_POLL_INTERVAL`    | `10s`            | base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap) |
 | `-disable-inbound-listener` | `STEWARD_DISABLE_INBOUND_LISTENER` | `false`          | do not bind an inbound listener; requires `-uplink-url`                |
 | `-enable-metrics`          | `STEWARD_ENABLE_METRICS`          | `false`          | expose `GET /metrics` (Prometheus text format) on the inbound listener; see [Metrics](#metrics) |
@@ -236,6 +240,47 @@ hibernate/destroy), which carry a `command_id`; it does not cover the direct
 inbound REST API, which has no command-id concept of its own. Setting
 `-audit-log-file` with no `-uplink-url` is accepted (the file is still created) but
 logs a startup `WARN`, since no uplink command will ever exist to record.
+
+### Uplink transport security
+
+The outbound uplink is an HTTP client dialing the control plane, so its transport
+security is a node-side deployment concern configured the same flag > env > file
+way as everything else. Three defenses harden it; all are opt-in except the
+credential-permission check, which is always on when the uplink is enabled.
+
+- **Configurable TLS.** By default the uplink verifies the control plane's
+  certificate against the host's system root CAs and presents no client
+  certificate. A node that talks to a control plane behind a private or internal
+  CA can point `-uplink-tls-ca-file` at a PEM CA bundle to trust it without
+  touching the system trust store, and a deployment that wants mutual TLS can set
+  `-uplink-tls-client-cert` and `-uplink-tls-client-key` (both required together)
+  so the node presents a client certificate. All four settings are validated
+  fail-closed at startup and under `-check-config`: an unreadable CA, a CA file
+  with no usable certificate, or a client cert without its key (or a pair that
+  does not load) is a startup error naming the fix, never a silent fall back to
+  system defaults. The client **private key** is a secret like the credential, so
+  its file must also be `0600` or stricter — a group- or other-accessible key is
+  refused fail-closed (the public certificate needs no such check). It is built
+  with only `crypto/tls` from the standard library —
+  no new dependency. `-uplink-tls-skip-verify` disables certificate verification
+  entirely; it is **insecure** (it defeats TLS authentication and exposes the
+  channel to a man-in-the-middle), defaults off, and logs a loud warning whenever
+  it is set — use it only for a temporary diagnostic, never in production.
+
+- **Bounded poll/report bodies.** The uplink caps every HTTP body it reads or
+  writes at the same 1 MiB the inbound REST API bounds a request body to. A poll
+  response over the cap is a clean, logged rejection — this poll cycle is dropped
+  and retried next, never read unbounded into memory or parsed from a truncated
+  prefix — and a report body over the cap is refused before it is sent (the server
+  redelivers the command via its claim lease). A hostile or buggy control plane
+  therefore cannot make Steward read or send an unbounded body.
+
+- **Secret file permissions.** The uplink credential and the TLS client private
+  key are both secrets, so each file must be `0600` or stricter (owner-only). A
+  file readable or writable by group or others is refused fail-closed — at startup,
+  under `-check-config`, and (for the credential) on the hot-reload watch — with an
+  actionable message naming the path and the `chmod 600` fix. The check is on the
+  mode bits, so it holds even when Steward runs as root.
 
 ## Config file
 

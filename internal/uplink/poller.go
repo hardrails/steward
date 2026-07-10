@@ -30,8 +30,15 @@ const (
 	// httpTimeout bounds every poll/report round-trip so a blackholed control plane
 	// cannot wedge the loop forever.
 	httpTimeout = 30 * time.Second
-	// maxResponseBytes caps a poll/report response body read into memory.
-	maxResponseBytes = 4 << 20
+	// maxUplinkBodyBytes caps every poll/report HTTP body Steward reads or writes,
+	// at the same 1 MiB the inbound REST API bounds a request body to
+	// (internal/server.maxRequestBodyBytes). The outbound channel gets the same
+	// defense as the inbound one: a poll response over the cap is a clean, logged
+	// rejection (this poll is dropped and retried next cycle — see poll), and a
+	// report body over the cap is refused before it is sent (see sendReport), so a
+	// hostile or buggy control plane can never make Steward read or send an
+	// unbounded body into memory.
+	maxUplinkBodyBytes = 1 << 20
 	// pollBody is the (empty) poll request body: the server derives the node from
 	// the credential, so no node_id or heartbeat payload is sent.
 	pollBody = `{}`
@@ -414,8 +421,21 @@ func (p *Poller) poll(ctx context.Context) ([]command, pollClass, error) {
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		body, tooLarge, err := readCappedBody(resp.Body)
+		if err != nil {
+			// A read error mid-body is the same class as a transport error: back
+			// off and retry rather than executing a partial/empty batch.
+			return nil, classTransient, fmt.Errorf("read poll response: %w", err)
+		}
+		if tooLarge {
+			// A response past the cap is dropped whole, not truncated-and-parsed:
+			// a truncated JSON prefix could decode into a partial, wrong command
+			// batch. Reject cleanly and retry next cycle, the same posture the
+			// inbound listener takes when a request body exceeds its 1 MiB cap.
+			return nil, classTransient, fmt.Errorf("uplink poll response body exceeds the %d-byte cap; dropping this poll and retrying next cycle", maxUplinkBodyBytes)
+		}
 		var pr pollResponse
-		if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&pr); err != nil {
+		if err := json.Unmarshal(body, &pr); err != nil {
 			// A 2xx with an unparseable body is a server bug; treat it as transient
 			// rather than executing nothing forever silently.
 			return nil, classTransient, fmt.Errorf("decode poll response: %w", err)
@@ -441,6 +461,15 @@ func (p *Poller) sendReport(ctx context.Context, rep report) error {
 	if err != nil {
 		return fmt.Errorf("marshal report: %w", err)
 	}
+	// Cap the outbound report body at the same bound as the inbound listener and
+	// the poll response: an unexpectedly huge report (e.g. a pathological error
+	// string in a command outcome) is refused before it is sent, rather than
+	// pushing an unbounded body onto the control plane. The caller logs this at
+	// WARN and does not retry; the server redelivers the command via its claim
+	// lease, so no outcome is lost.
+	if int64(len(body)) > maxUplinkBodyBytes {
+		return fmt.Errorf("uplink report body is %d bytes, over the %d-byte cap; not sending it (the server will redeliver this command via its claim lease)", len(body), maxUplinkBodyBytes)
+	}
 	resp, err := p.post(ctx, p.reportURL, body)
 	if err != nil {
 		return err
@@ -451,8 +480,19 @@ func (p *Poller) sendReport(ctx context.Context, rep report) error {
 		drain(resp.Body)
 		return fmt.Errorf("uplink report returned HTTP %d", resp.StatusCode)
 	}
+	// The report response is read with the same over-cap rejection the poll
+	// response uses, not a bare LimitReader: a LimitReader would let json.Decode
+	// succeed on the leading {"applied":...} and silently ignore an oversized
+	// padded tail, whereas readCappedBody detects and rejects the over-cap body.
+	respBody, tooLarge, err := readCappedBody(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read report response: %w", err)
+	}
+	if tooLarge {
+		return fmt.Errorf("uplink report response body exceeds the %d-byte cap", maxUplinkBodyBytes)
+	}
 	var rr reportResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&rr); err != nil {
+	if err := json.Unmarshal(respBody, &rr); err != nil {
 		return fmt.Errorf("decode report response: %w", err)
 	}
 	if !rr.Applied {
@@ -504,8 +544,25 @@ func jitter(d time.Duration) time.Duration {
 	return time.Duration(float64(d) + offset)
 }
 
-// drain reads and discards up to maxResponseBytes of body so an HTTP/1.1 keep-alive
-// connection can be reused before Close.
+// drain reads and discards up to maxUplinkBodyBytes of body so an HTTP/1.1
+// keep-alive connection can be reused before Close.
 func drain(body io.Reader) {
-	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxResponseBytes))
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxUplinkBodyBytes))
+}
+
+// readCappedBody reads r into memory bounded by maxUplinkBodyBytes, reading one
+// byte past the cap so an over-cap body is detected rather than silently
+// truncated. It returns the bytes read (the truncated prefix when tooLarge is
+// true, which the caller must reject rather than parse), whether the body
+// exceeded the cap, and any read error. The read is never unbounded: at most
+// maxUplinkBodyBytes+1 bytes are ever buffered.
+func readCappedBody(r io.Reader) (data []byte, tooLarge bool, err error) {
+	data, err = io.ReadAll(io.LimitReader(r, maxUplinkBodyBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > maxUplinkBodyBytes {
+		return data[:maxUplinkBodyBytes], true, nil
+	}
+	return data, false, nil
 }

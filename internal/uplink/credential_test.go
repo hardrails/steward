@@ -3,6 +3,7 @@ package uplink
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -79,6 +80,62 @@ func TestLoadCredentialMissingFileFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Errorf("error %q does not name the missing file path %q", err, path)
+	}
+}
+
+// TestLoadCredentialRejectsOverPermissiveFile pins the fail-closed permission
+// check: a credential file readable or writable by group or others (anything
+// looser than 0600) is refused with an actionable message naming the path and the
+// chmod fix, so a bearer secret can never be quietly loaded from a world- or
+// group-exposed file. The check is on the mode bits, so it fires even as root.
+func TestLoadCredentialRejectsOverPermissiveFile(t *testing.T) {
+	const content = `{"version":1,"tenant_id":"acme","node_id":"node-7","credential":"tok"}`
+	// Every mode here exposes at least one group/other read or write bit and must
+	// be rejected; the strict modes in the accepted table below must pass.
+	rejected := []os.FileMode{0o644, 0o640, 0o604, 0o606, 0o660, 0o666, 0o744, 0o622}
+	for _, mode := range rejected {
+		t.Run("rejects "+strconv.FormatUint(uint64(mode), 8), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cred.json")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			// Chmod explicitly so the mode is exact regardless of the process umask.
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatalf("chmod fixture: %v", err)
+			}
+			cred, err := LoadCredential(path)
+			if err == nil {
+				t.Fatalf("LoadCredential on a %#o file: got nil err, want fail-closed", mode)
+			}
+			if cred != nil {
+				t.Errorf("LoadCredential on a %#o file: got non-nil credential, want nil", mode)
+			}
+			// The 3am test: the message names the path and the exact fix.
+			msg := err.Error()
+			for _, want := range []string{path, "permission", "chmod 600"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error %q does not mention %q", msg, want)
+				}
+			}
+		})
+	}
+
+	// The strict modes are accepted: 0600 and stricter carry no group/other bits.
+	accepted := []os.FileMode{0o600, 0o400}
+	for _, mode := range accepted {
+		t.Run("accepts "+strconv.FormatUint(uint64(mode), 8), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cred.json")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatalf("chmod fixture: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+			if _, err := LoadCredential(path); err != nil {
+				t.Fatalf("LoadCredential on a %#o file: unexpected err %v", mode, err)
+			}
+		})
 	}
 }
 
