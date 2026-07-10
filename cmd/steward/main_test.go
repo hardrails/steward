@@ -1,6 +1,13 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestEnvOr(t *testing.T) {
 	t.Run("unset falls back", func(t *testing.T) {
@@ -40,4 +47,57 @@ func TestEnvOrInt(t *testing.T) {
 			t.Fatalf("got %d, want 7", got)
 		}
 	})
+}
+
+func TestEnvOrDuration(t *testing.T) {
+	t.Run("unset falls back", func(t *testing.T) {
+		if got := envOrDuration("STEWARD_TEST_UNSET", 10*time.Second); got != 10*time.Second {
+			t.Fatalf("got %s, want 10s", got)
+		}
+	})
+	t.Run("valid duration wins", func(t *testing.T) {
+		t.Setenv("STEWARD_TEST_INTERVAL", "30s")
+		if got := envOrDuration("STEWARD_TEST_INTERVAL", 10*time.Second); got != 30*time.Second {
+			t.Fatalf("got %s, want 30s", got)
+		}
+	})
+	t.Run("invalid duration falls back", func(t *testing.T) {
+		t.Setenv("STEWARD_TEST_INTERVAL", "not-a-duration")
+		if got := envOrDuration("STEWARD_TEST_INTERVAL", 10*time.Second); got != 10*time.Second {
+			t.Fatalf("got %s, want 10s", got)
+		}
+	})
+}
+
+// TestUplinkBadCredentialExitsNonZero is the integration check for the fail-closed
+// startup: with the uplink enabled but pointed at a missing credential file,
+// steward must exit non-zero with a message naming the path — never start with a
+// silently-disabled uplink.
+func TestUplinkBadCredentialExitsNonZero(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := filepath.Join(t.TempDir(), "steward")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build steward: %v\n%s", err, out)
+	}
+
+	missing := filepath.Join(t.TempDir(), "no-such-credential.json")
+	cmd := exec.Command(bin,
+		"-uplink-url", "http://control-plane.example",
+		"-uplink-credential-file", missing,
+		"-addr", "127.0.0.1:0",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected a non-zero exit on a missing credential, got success:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected an ExitError, got %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), missing) {
+		t.Errorf("startup error does not name the missing credential path %q:\n%s", missing, out)
+	}
 }
