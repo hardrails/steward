@@ -45,13 +45,17 @@ VERSION="${GITHUB_REF_NAME:-$(git describe --tags --always --dirty 2>/dev/null |
 # pkg@v1.2.3+ci` — a supported install path per the README — could not install
 # them; the accepted release tags are kept to installable versions only. The
 # stricter version assertion at the end still runs too; this one just makes the
-# common mistake fail immediately and legibly.
+# common mistake fail immediately and legibly. The pattern is strict semver: no
+# leading-zero numeric parts, and a prerelease is dot-separated non-empty
+# identifiers (so a malformed suffix like `-a..b` or a trailing `-` is refused),
+# and no build-metadata `+...` — i.e. exactly the tags that resolve as Go module
+# versions for `go install pkg@vX.Y.Z`.
 if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-	if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+	if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
 		echo "release: FATAL — tag '${GITHUB_REF_NAME}' is not an installable semver release tag." >&2
 		echo "  Expected vX.Y.Z with an optional -prerelease suffix, e.g. v0.1.0 or v0.1.0-rc.1" >&2
-		echo "  (no build-metadata '+...' suffix — it is not a resolvable Go module version)." >&2
-		echo "  Delete the tag and push a conforming tag instead. See docs/releasing.md." >&2
+		echo "  (no leading-zero parts, no malformed prerelease, no build-metadata '+...' suffix —" >&2
+		echo "  it must resolve as a Go module version). See docs/releasing.md." >&2
 		exit 1
 	fi
 fi
