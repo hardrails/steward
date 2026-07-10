@@ -488,6 +488,76 @@ func TestHibernateSuspendsAndStartResumes(t *testing.T) {
 	}
 }
 
+func TestResumePersistFailureReSuspendsProcess(t *testing.T) {
+	// Mirror of the hibernate rollback: if resume's SIGCONT succeeds but persisting
+	// RUNNING fails, the process must be re-suspended (SIGSTOP) and the status left
+	// HIBERNATED — never a process actually running (consuming resources) while the
+	// instance is still labeled HIBERNATED. Failure is forced by making the state
+	// directory unwritable, the same technique persist_test.go uses.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses directory permissions; cannot force a persist failure")
+	}
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	path := filepath.Join(dir, "state.json")
+
+	buf := &syncBuffer{}
+	tr, err := LoadTracker(0, path, WithExec(ExecConfig{Enabled: true, StopGracePeriod: 2 * time.Second, Logger: slog.New(slog.NewJSONHandler(buf, nil))}))
+	if err != nil {
+		t.Fatalf("LoadTracker: %v", err)
+	}
+
+	tickFile := filepath.Join(t.TempDir(), "ticks")
+	inst, _, err := tr.Provision("a", 0, helperSpec("tick", map[string]string{"STEWARD_HELPER_FILE": tickFile}))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	ref := inst.RuntimeRef
+	// Restore write perms before destroying, so the destroy's own persist can succeed
+	// and actually terminate the child (a destroy whose persist fails would leak it).
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700); _, _ = tr.Destroy(ref) })
+
+	if _, err := tr.Start(ref); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitFileExists(t, tickFile, 10*time.Second)
+	if _, err := tr.Hibernate(ref); err != nil {
+		t.Fatalf("hibernate: %v", err)
+	}
+
+	// Force the next persist to fail, then attempt a resume (Start from HIBERNATED).
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod ro: %v", err)
+	}
+	if _, err := tr.Start(ref); err == nil {
+		t.Fatal("resume into an unwritable state dir: got nil err, want a persist failure")
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod rw: %v", err)
+	}
+
+	// Status must have rolled back to HIBERNATED, not been left RUNNING.
+	after, err := tr.Status(ref)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if after.Status != StatusHibernated {
+		t.Fatalf("status=%q after a failed resume, want HIBERNATED (rolled back)", after.Status)
+	}
+
+	// And the process must be re-suspended: its tick output must stay FROZEN. Without
+	// the process-side rollback the SIGCONT would leave it running and ticking.
+	time.Sleep(60 * time.Millisecond)
+	frozen := fileSize(t, tickFile)
+	time.Sleep(200 * time.Millisecond)
+	if grew := fileSize(t, tickFile); grew != frozen {
+		t.Fatalf("tick file grew from %d to %d after a failed resume; the process must be re-suspended (SIGSTOP), not left running", frozen, grew)
+	}
+}
+
 func TestUnexpectedExitTransitionsToStopped(t *testing.T) {
 	tr, buf := execTracker(t, time.Second)
 	ref := startedInstance(t, tr, "a", helperSpec("exit", map[string]string{"STEWARD_HELPER_EXIT_CODE": "3"}))

@@ -453,12 +453,19 @@ func (t *Tracker) startExec(runtimeRef string) (*Instance, error) {
 		if err := existing.resume(); err != nil {
 			return nil, fmt.Errorf("%w: resuming the suspended process failed: %v", ErrProcessStart, err)
 		}
-		out, err := t.setStatusLocked(inst, StatusRunning)
-		if err != nil {
+		prev := inst.Status
+		inst.Status = StatusRunning
+		if err := t.persistLocked(); err != nil {
+			// Roll BOTH sides back: re-suspend the process (undo the SIGCONT) AND restore
+			// HIBERNATED, so a persistence failure never leaves the process actually running
+			// (consuming resources) while the instance is still labeled HIBERNATED. This is
+			// the exact mirror of hibernateExec's rollback, which resumes on a failed persist.
+			_ = existing.suspend()
+			inst.Status = prev
 			return nil, err
 		}
 		t.logger.Info("resumed suspended process (SIGCONT)", "runtime_ref", runtimeRef, "instance_id", inst.InstanceID)
-		return out, nil
+		return inst.clone(), nil
 	}
 
 	// RUNNING + a live process → idempotent no-op. This is the self-transition
