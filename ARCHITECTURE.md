@@ -16,15 +16,19 @@ This version of Steward is a walking skeleton. It does exactly one thing:
   by a single mutex. State is held in memory by default; durable state across a
   restart is opt-in (see below).
 
-It explicitly does **not**:
+It explicitly does **not**, by default:
 
-- execute commands or run workloads,
-- sandbox or isolate anything,
-- perform computer-use or any other agent capability,
+- execute commands or run workloads — real process supervision is **opt-in**
+  (`-enable-process-exec`, off by default; see below). With it off, every
+  lifecycle operation is a pure status transition, exactly as it always was.
+- sandbox or isolate anything (this holds even with process execution on — see
+  the process-supervision section's stated limits),
+- perform computer-use or any other agent capability (a separate, still-deferred
+  concept — see the deferred-decision section, and do not conflate it with the
+  process supervision below),
 - authenticate, terminate TLS, or emit distributed traces,
-- emit metrics or a command audit log **by default** — both are opt-in (see
-  below); nothing is exposed or written until an operator deliberately turns
-  it on.
+- emit metrics or a command audit log — both are opt-in (see below); nothing is
+  exposed or written until an operator deliberately turns it on.
 
 By default it also does not persist state — a restart forgets every tracked
 instance — unless durable state is explicitly enabled.
@@ -425,10 +429,138 @@ The design provenance — the request/response shape decisions, the
 transaction-vs-not tradeoff, and the idempotency analysis per operation kind
 — lives in [`docs/batch-instance-operations.md`](docs/batch-instance-operations.md).
 
+## Process supervision is opt-in
+
+By default Steward tracks lifecycle *status* and spawns nothing. With
+`-enable-process-exec` (or `STEWARD_ENABLE_PROCESS_EXEC`, or `enable_process_exec`
+in the config file) turned on, it becomes a real, `os/exec`-level process
+supervisor for instances whose `spec` carries a `command` — in the same class as
+systemd or supervisord, and deliberately *not* the sandboxed computer-use worker
+below.
+
+### The opt-in gate is two conditions, and it is backward-compatible by design
+
+`spec` has always been an opaque, forwards-compatible blob that existing callers
+fill with arbitrary config (`{"owner":"a"}`) never meant to be a process spec.
+Making execution mandatory would break all of them, so real execution requires
+**both**:
+
+1. Steward started with `-enable-process-exec` (default **off**), and
+2. the per-instance `spec` containing a `command` field (a JSON string).
+
+The **presence of `command`** is the trigger. When execution is off, provisioning a
+`command`-bearing spec is **rejected** with `400 process_exec_disabled` — a
+caller's real intent to run a process is failed loudly, never silently stored and
+ignored. When execution is on but `command` is absent, behavior is byte-for-byte
+what it always was: a pure status transition, no process. So an existing opaque
+caller is unaffected in either mode, and only a spec that explicitly asks for a
+process ever gets one.
+
+The interpreted spec fields (every other key stays ignored, `additionalProperties`
+holds): `command` (string, the executable — its presence is the trigger), `args`
+(string array), `env` (a name→value object), and `working_dir` (string). `env` is
+a map rather than a `KEY=VALUE` list because that is the natural JSON shape and
+frees callers from pre-formatting; Steward converts it to the `[]string` `exec.Cmd`
+wants. A malformed process spec (a non-string/empty `command`, a wrong-typed
+`args`/`env`/`working_dir`) is rejected with `400 invalid_spec` at provision time —
+failing early, not at first start.
+
+### Security posture
+
+Three deliberate choices, not afterthoughts:
+
+- **No shell, ever.** Steward runs `exec.Command(command, args...)` directly. There
+  is no `sh -c`, so shell metacharacters in a caller-supplied arg cannot cause
+  injection.
+- **No environment inheritance.** The child does **not** inherit Steward's own
+  environment, which may hold the uplink credential, TLS key paths, and other
+  secrets. Its environment is a minimal base of only `PATH` (copied from Steward so
+  the child and its subprocesses can still find executables) plus exactly the
+  variables in `spec.env`, which take precedence. The child's env is always an
+  explicit, non-nil set, so `exec.Cmd` never silently falls back to inheriting the
+  parent environment.
+- **Everything is logged.** Every start, stop, hibernate, resume, unexpected exit,
+  and restart reattachment is a structured log line on Steward's own JSON logger
+  (the same stream an operator already captures), with a distinct message and
+  fields (`runtime_ref`, `instance_id`, `pid`, `exit_code`, `reason`). An unexpected
+  exit is logged at WARN with an explicit "UNEXPECTEDLY" marker so a crash is
+  distinguishable from a requested stop even though both land on `STOPPED`. We
+  deliberately did **not** add a separate process-audit-log *file*: the existing
+  `-audit-log-file` is uplink-command-specific and lives in a package `internal/
+  runtime` cannot import without a cycle, and process events already flow through the
+  same structured logger — a second sink would duplicate that trail for marginal
+  benefit. A dedicated file is an easy, non-breaking follow-up if an operator wants
+  one.
+
+### Lifecycle semantics (only when execution is on and `command` is present)
+
+- **Provision** is unchanged: it stores the spec, `PENDING`, no process yet.
+- **Start** from `PENDING`/`STOPPED` spawns a fresh process and a monitor goroutine
+  that `Wait()`s on it. If the spawn itself fails (executable not found, permission
+  denied, missing `working_dir`) the call returns `400 process_start_failed` and the
+  instance is left in its prior status — never a false `RUNNING`.
+- **Start** on an already-`RUNNING` instance with a live tracked process is an
+  idempotent no-op — it does **not** spawn a duplicate (the same redelivery-safety
+  guarantee the status state machine already makes).
+- **Start** from `HIBERNATED` sends **SIGCONT** to resume the *existing* suspended
+  process, preserving its in-memory state, rather than spawning anew. If the handle
+  was lost (a restart could not reattach), it falls back to a fresh spawn and logs
+  the discontinuity.
+- **Stop** sends SIGTERM, waits up to `-process-stop-grace-period` (default 10s),
+  then escalates to SIGKILL if still alive, and transitions to `STOPPED` once the
+  process is confirmed dead. The grace wait runs **without** the tracker lock, so
+  stopping one instance never freezes the whole tracker.
+- **Hibernate** sends **SIGSTOP** to suspend (not kill) the process, so Start can
+  later resume it.
+- **Destroy** terminates any tracked process (SIGTERM→SIGKILL) and removes tracking,
+  regardless of status.
+- **Unexpected exit.** When the monitor sees a process exit that Steward did not
+  request, the instance transitions to **`STOPPED`, never `FAILED`** — Steward must
+  never emit `FAILED` (that status is reserved for the control plane, which sets it
+  when it cannot reach Steward at all). Because `STOPPED` cannot itself distinguish a
+  crash from a requested stop, the additive `last_exit_code`/`last_exit_reason`
+  fields on the instance record it: `crashed` for an unexpected exit, `stopped`/
+  `killed` for a graceful/forced stop, `supervision_lost` for a process gone across a
+  restart.
+
+### Restart reattachment is best-effort and honestly limited
+
+An OS process handle — its `*os.Process`, its monitor goroutine, its stdout/stderr
+pipes — **cannot** be persisted or truly reattached across a Steward restart. We do
+not pretend otherwise. The child's `pid` is persisted (an additive, non-breaking
+state-file field, like `created_at`/`generation` before it). On reload with
+execution enabled, for each instance recorded `RUNNING`/`HIBERNATED` with a
+`command` spec, Steward does a best-effort liveness probe (`signal 0`) on the stored
+pid:
+
+- **pid gone** → the process did not survive; the instance is transitioned to
+  `STOPPED` with `last_exit_reason = supervision_lost`, logged clearly.
+- **pid alive** (the child was reparented to init when Steward exited) → Steward
+  **reattaches in a deliberately degraded, liveness-only mode**: it regains the
+  ability to stop/hibernate/resume the process by pid, but it has **not** regained
+  the process's stdout/stderr (those file descriptors are gone forever) and cannot
+  `Wait()`/reap it or proactively detect a future crash. A reattached instance keeps
+  its status and is logged loudly as `DEGRADED`. This is a real, permanent limitation
+  of process reattachment, stated plainly rather than glossed over.
+
+### Known gap: no resource limits or sandboxing
+
+This pass is `os/exec`-level process supervision only. There are **no** resource
+limits (cgroups/ulimits), **no** sandboxing, and **no** isolation of a child's
+grandchildren — matching what a systemd/supervisord-style tool does at its base
+layer, and matching the existing documented deferrals for durable state and
+computer-use. Resource limits and sandboxing are an explicit, named future decision,
+not a silent omission. Platform note: process supervision uses Unix signals and is
+supported on Linux and macOS (Steward's CI and deployment targets); a Windows build
+of the supervisor is out of scope.
+
 ## Deferred decision: computer-use is a separate worker, never in-process
 
-Steward will eventually need to offer a computer-use capability. The decision for
-this repository is that computer-use will be a **separate, optional,
+Steward will eventually need to offer a computer-use capability. This is **distinct
+from the `os/exec` process supervision above** — that runs an arbitrary
+operator-configured command with no sandbox; computer-use is the specific,
+highest-risk agent capability and gets a stronger isolation boundary. The decision
+for this repository is that computer-use will be a **separate, optional,
 container-based "worker" process** that Steward provisions on demand, and that
 registers itself back through the `skills` array of `GET /v1/capabilities`. The
 `skills` field ships empty in v1 precisely to reserve that shape.
@@ -460,7 +592,8 @@ step toward in-process computer-use.
 ```
 cmd/steward/        HTTP server entrypoint (flags/env, graceful shutdown)
 internal/runtime/   Instance tracker and lifecycle operations (in-memory, with
-                    opt-in durable state via a JSON state file)
+                    opt-in durable state via a JSON state file); exec.go adds the
+                    opt-in real process supervision (spawn/signal/monitor)
 internal/server/    HTTP handlers wiring the operations to REST endpoints,
                     plus the opt-in /metrics endpoint
 internal/uplink/    Outbound uplink poll loop, command dispatch, and the
