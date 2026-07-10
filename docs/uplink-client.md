@@ -530,3 +530,28 @@ because the companion Railyard-side v1 has not committed to it either:
 - **Batching reports onto the next poll.** v1 reports each command immediately after
   executing it; folding reports into the next poll's round-trip is an optimization,
   not v1.
+- **`instance_id` reuse across a destroy/re-provision cycle is a known, accepted race,
+  not silently ignored.** A hosted review of the implementation found it precisely: if
+  the SAME `instance_id` on the SAME node is destroyed and then re-provisioned before a
+  STALE, already-in-flight lifecycle command from the OLD instance's lineage is finally
+  delivered (a long network partition, a redelivery after the claim lease expires), the
+  client's `RefForInstance(instanceID)` resolves to the NEW instance — a stale `stop` /
+  `hibernate` / `destroy` can mutate or remove the wrong (newly-provisioned) instance.
+  **This is a deeper root cause than a client-side bug**: `format_runtime_ref` (the
+  control-plane side, `hardrails_runtime.node_uplink.core`) is a PURE function of
+  `(node_id, instance_id)` with no epoch/generation component, and
+  `agent_instances._orm.destroy` deletes the `AgentInstance` row outright (freeing the
+  `instance_id` for reuse) — so the exact same ambiguity exists in the control plane's
+  OWN command queue (`node_uplink`'s `hardrails_uplink_commands` table is keyed by the
+  same non-epoch-scoped `runtime_ref`), not just in this client's local lookup. A sound
+  fix needs an epoch/generation added to `runtime_ref` itself (or a tombstone on destroy
+  that the control plane refuses to re-provision over), which is a cross-repo primitive
+  change out of scope for a client-only v1 patch — a client-side patch alone would give
+  false confidence without closing the hole. **Accepted mitigation for v1**: this
+  requires (a) a stale command surviving redelivery across (b) an operator or automation
+  reusing the exact same `instance_id` after destroying it, on (c) the same node, within
+  a narrow timing window — a real but low-probability compound race, not a routine
+  path. Operators who want to eliminate it entirely today can simply never reuse a
+  destroyed `instance_id` (mint a fresh one per provision). **Follow-up**: add an
+  epoch/generation to `runtime_ref` (or an equivalent tombstone-on-destroy) in the
+  `node_uplink` primitive — a hardrails/Railyard-side change, tracked there, not here.
