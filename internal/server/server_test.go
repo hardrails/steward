@@ -15,7 +15,9 @@ import (
 )
 
 func newTestHandler(maxInstances int) http.Handler {
-	return New(slog.New(slog.NewTextHandler(io.Discard, nil)), maxInstances).Handler()
+	// Rate limiting off (0) so these tests exercise handler behavior without the
+	// per-source throttle; the limiter has its own tests in ratelimit_test.go.
+	return New(slog.New(slog.NewTextHandler(io.Discard, nil)), maxInstances, 0).Handler()
 }
 
 func do(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -314,7 +316,7 @@ func TestCapacityExceededReturns503(t *testing.T) {
 }
 
 func TestRecoverMiddlewareReturnsJSON500(t *testing.T) {
-	s := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0)
+	s := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0, 0)
 	h := s.recoverMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	}))
@@ -360,7 +362,7 @@ func TestRequestIDHeaderPresentUniqueAndHex(t *testing.T) {
 // correlated to the one node-side log line that served it.
 func TestRequestLogCarriesRequestIDAndRemoteAddr(t *testing.T) {
 	var buf bytes.Buffer
-	h := New(slog.New(slog.NewJSONHandler(&buf, nil)), 0).Handler()
+	h := New(slog.New(slog.NewJSONHandler(&buf, nil)), 0, 0).Handler()
 
 	rec := do(h, http.MethodGet, "/v1/capabilities", "")
 	headerID := rec.Header().Get("X-Request-Id")
@@ -425,7 +427,7 @@ func TestRequestIDHeaderPresentOn405AndRecoveredPanic(t *testing.T) {
 	// Recovered panic: assemble the real middleware order (recover→logging→
 	// jsonErrors) around a handler that panics, proving the header withLogging set
 	// before next.ServeHTTP survives the panic recoverMiddleware turns into a 500.
-	s := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0)
+	s := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0, 0)
 	panicky := s.recoverMiddleware(s.withLogging(s.jsonErrors(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	}))))
@@ -474,7 +476,7 @@ func TestListInstancesMatchesTrackerList(t *testing.T) {
 			t.Fatalf("provision %q: %v", id, err)
 		}
 	}
-	h := NewWithTracker(slog.New(slog.NewTextHandler(io.Discard, nil)), tr).Handler()
+	h := NewWithTracker(slog.New(slog.NewTextHandler(io.Discard, nil)), tr, 0).Handler()
 
 	got := decodeInstances(t, do(h, http.MethodGet, "/v1/instances", ""))
 	want := tr.List()
