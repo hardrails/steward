@@ -426,6 +426,74 @@ See `internal/uplink/poller_test.go`'s
 `TestDisableInboundListenerRecoversFromFatalPollRejectionViaCredentialHotReload` for
 the end-to-end proof against the real binary.
 
+### Command backpressure and deduplication
+
+The original design executed a poll's commands **inline**: `poll` returned a batch and
+`executeBatch` ran every command before the next poll. That is correct for a
+steady-state fleet, but it has no bound on the work one poll commits the node to, and
+no guard against re-executing a command the control plane redelivers across poll cycles
+(a report lost in transit, a claim-lease reclaim). This is now closed with a **bounded,
+in-memory command queue** (`internal/uplink.commandQueue`) between "commands received
+from a poll" and "commands executed": the poll loop is the producer, and a single
+background consumer drains and executes the queue.
+
+- **Bounded, with a redelivery-safe overflow.** `-uplink-command-queue-depth`
+  (env `STEWARD_UPLINK_COMMAND_QUEUE_DEPTH`, default `256`) caps the
+  queued-plus-in-flight command count. A poll cycle whose commands would exceed the cap
+  has its **excess rejected**, not silently dropped — logged at `WARN` under the
+  grep-able `uplink command queue full:` prefix (matching `reload.go`'s `sighup reload:`
+  convention), naming each rejected command's `command_id` and `runtime_ref`. Because a
+  rejected command is never reported, the server's existing claim-lease machinery
+  redelivers it next cycle once the backlog drains — the same "a lost report is
+  self-healing" property [Reporting a result](#reporting-a-result) already relies on,
+  reused for a rejected command. Rejecting-and-redelivering, rather than blocking the
+  poll loop or growing memory without bound, is the whole point: the node accepts only
+  what it can hold. The value is validated positive at startup and under
+  `-check-config`, unconditionally (not gated on `-uplink-url`), so the `-config`
+  schema's `exclusiveMinimum: 0` for `uplink_command_queue_depth` stays a faithful
+  mirror of the real validator.
+- **Deduplicated across poll cycles by `command_id`.** A command whose `command_id` is
+  already queued or in-flight is skipped rather than queued a second time. `command_id`
+  is the protocol's own unique command identity (`node_uplink.core.NodeCommand`), and
+  it is exactly what survives a redelivery — the claim lease bumps `claim_generation`,
+  never `command_id` — so it is the correct dedup key, not one this client invents.
+  `(runtime_ref, kind)` was considered and rejected as the key: two genuinely distinct
+  commands can share a `(runtime_ref, kind)` (the control plane legitimately queuing a
+  second `start`, or a differing payload), and collapsing them would drop real work.
+  The dedup entry lives from enqueue through the **end of execution** (drained but not
+  yet completed still counts), which is precisely the window a redelivery must be caught
+  in; once a command completes, a genuinely new later delivery of the same id is
+  admitted again. This is a work-saving guard, not a correctness fix — the tracker is
+  already idempotent in effect (`provision` returns the existing instance, `destroy`
+  after destroy reports done), so the win is avoiding redundant tracker mutations and,
+  with `-state-file`, redundant disk writes. An empty `command_id` (out-of-contract) is
+  never deduplicated, so distinct empty-id commands are not collapsed onto one key.
+- **Whole-queue drain preserves batch ordering.** The consumer drains the entire queue
+  as one batch and runs it through the existing `executeBatch`, so a poll batch's own
+  ordering — and the replace (`destroy`→`provision`) and one-pass start-retry semantics
+  `executeBatch` depends on (see [Batch ordering](#the-shape-chosen)) — is preserved,
+  while the depth cap still bounds the batch's size. Merging across cycles can only help
+  a deferred start (a sibling `provision` from a later cycle now has a chance to run
+  first); it never reorders a replace, because the queue is FIFO.
+- **A persistently-full queue drains the node from readiness.** A queue full for
+  `queueBackpressureThreshold` consecutive poll cycles reports `GET /v1/readiness`
+  not-ready (naming the backlog) — a gate checked *before* the poll-success gate, so it
+  can drain a node reaching its control plane fine but not executing fast enough. A
+  single momentary over-full poll never flips readiness; the node returns to ready on
+  its first clean cycle. On a `-disable-inbound-listener` node the signal is instead the
+  `steward_uplink_command_queue_depth` and `steward_uplink_commands_rejected_total`
+  metrics.
+
+Concurrency and shutdown: the consumer runs under a child context cancelled the moment
+the producer loop returns, so a fatal `401`/`403` with no credential-hot-reload path
+(`CredentialPath` unset) stops both goroutines without deadlock, and a real shutdown
+(parent ctx cancelled) returns both promptly — `Run` joins the consumer before
+returning, so `cmd/steward`'s graceful-shutdown wait covers it. See
+`internal/uplink/queue_test.go` for the queue's unit proofs and
+`internal/uplink/backpressure_test.go` for the end-to-end proofs against an
+`httptest` control plane (burst rejection with logged identities, in-flight
+deduplication, and both readiness paths).
+
 ### Coexistence with the inbound REST API
 
 Three configurations are coherent, and all three are just different callers of the

@@ -582,7 +582,7 @@ func TestDispatchCommandCountersOnlyCountTerminalOutcomes(t *testing.T) {
 	if rep, _, _ := d.execute(cmd("c2", "node-7", "agent-1", "teleport", "", 2)); rep.Status != statusFailed {
 		t.Fatalf("unknown kind: status=%q, want failed", rep.Status)
 	}
-	snap := metrics.snapshot(time.Second)
+	snap := metrics.snapshot(time.Second, DefaultCommandQueueDepth)
 	if snap.CommandsSucceeded != 1 || snap.CommandsFailed != 1 {
 		t.Fatalf("after 1 success + 1 failure: snapshot = %+v, want succeeded=1 failed=1", snap)
 	}
@@ -595,7 +595,7 @@ func TestDispatchCommandCountersOnlyCountTerminalOutcomes(t *testing.T) {
 	if _, _, fenced := d.execute(stale); !fenced {
 		t.Fatal("expected the stale command to be fenced")
 	}
-	snap = metrics.snapshot(time.Second)
+	snap = metrics.snapshot(time.Second, DefaultCommandQueueDepth)
 	if snap.CommandsSucceeded != 1 || snap.CommandsFailed != 1 {
 		t.Fatalf("after a fenced command: snapshot = %+v, want unchanged (succeeded=1 failed=1)", snap)
 	}
@@ -607,7 +607,7 @@ func TestDispatchCommandCountersOnlyCountTerminalOutcomes(t *testing.T) {
 	if !retry || deferredRep.Status != statusFailed {
 		t.Fatalf("deferred start: retry=%v status=%q, want retry=true status=failed", retry, deferredRep.Status)
 	}
-	snap = metrics.snapshot(time.Second)
+	snap = metrics.snapshot(time.Second, DefaultCommandQueueDepth)
 	if snap.CommandsSucceeded != 1 || snap.CommandsFailed != 1 {
 		t.Fatalf("after a deferred (not yet retried) start: snapshot = %+v, want still succeeded=1 failed=1 (the deferral must not count)", snap)
 	}
@@ -618,7 +618,7 @@ func TestDispatchCommandCountersOnlyCountTerminalOutcomes(t *testing.T) {
 	if retryAgain || retryRep.Status != statusDone {
 		t.Fatalf("retried start: retry=%v status=%q, want retry=false status=done", retryAgain, retryRep.Status)
 	}
-	snap = metrics.snapshot(time.Second)
+	snap = metrics.snapshot(time.Second, DefaultCommandQueueDepth)
 	if snap.CommandsSucceeded != 2 || snap.CommandsFailed != 1 {
 		t.Fatalf("after the retry's real outcome: snapshot = %+v, want succeeded=2 failed=1 (counted exactly once, on the retry pass)", snap)
 	}
@@ -704,7 +704,7 @@ func TestDispatchAuditWriteFailureLogsWarnAndDoesNotDisruptTheReport(t *testing.
 	if rep.Status != statusDone {
 		t.Fatalf("report status = %q, want done — a broken audit log must not turn a successful command into a failure", rep.Status)
 	}
-	if snap := d.metrics.snapshot(time.Second); snap.CommandsSucceeded != 1 {
+	if snap := d.metrics.snapshot(time.Second, DefaultCommandQueueDepth); snap.CommandsSucceeded != 1 {
 		t.Fatalf("CommandsSucceeded = %d, want 1 — a broken audit log must not stop metrics from counting", snap.CommandsSucceeded)
 	}
 	logs := logBuf.String()

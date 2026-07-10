@@ -251,6 +251,59 @@ The design provenance — the persistence choice, the fence rule, the silent-dro
 semantics, the first-seen bootstrap, and the rollout compatibility matrix — lives in
 [`docs/instance-generation-fencing.md`](docs/instance-generation-fencing.md).
 
+### Uplink commands are bounded and deduplicated (backpressure)
+
+The uplink poll loop does not execute a poll's commands inline. It puts a **bounded,
+in-memory queue** (`internal/uplink.commandQueue`) between "commands received from a
+poll" and "commands executed": the poll loop is the producer, and a single background
+consumer drains and executes the queue. This decoupling is what makes two properties
+possible that an execute-every-command-inline loop cannot give — and both close a real
+gap for a node whose control plane can queue work faster than the node executes it.
+
+- **Bounded in-flight work, with a redelivery-safe overflow.** At most
+  `-uplink-command-queue-depth` commands are ever queued-plus-in-flight (default
+  `256`, validated positive at startup and under `-check-config`). A poll cycle whose
+  commands would exceed the cap has its **excess rejected, never silently dropped**:
+  each rejected command is logged at `WARN` under the grep-able
+  `uplink command queue full:` prefix (the same operator convention as
+  `sighup reload:`), named by `command_id` and `runtime_ref`. A rejected command is
+  never reported, so the server's existing poll/report claim-lease machinery
+  redelivers it on a later cycle once the backlog drains — the node commits to no more
+  than it can hold, and loses nothing. This is the same "circuit breaker on growth,
+  not an outage" posture `maxInstances` takes for the inbound path, applied to the
+  outbound command stream. The consumer draining the whole queue at once preserves each
+  poll batch's own ordering — the replace/retry semantics `executeBatch` depends on —
+  while the cap still bounds the batch's size.
+- **Deduplication across poll cycles.** A command whose `command_id` is already queued
+  or in-flight is skipped rather than executed a second time, so a command redelivered
+  while its first copy is still pending (a report lost in transit, a claim-lease
+  reclaim) is not re-executed. `command_id` is the protocol's own unique command
+  identity, and it is exactly what the server preserves across a redelivery (the claim
+  lease bumps `claim_generation`, not `command_id`), so it is the correct dedup key —
+  not a new one this client invents. Because the tracker's operations are already
+  idempotent in effect (a redelivered `provision` returns the existing instance, a
+  redelivered `destroy` after destroy reports done), this dedup is a **work-saving
+  guard**, not a correctness fix: it avoids redundant tracker mutations and, when
+  `-state-file` is set, redundant disk writes. An empty `command_id` (out-of-contract)
+  is never deduplicated, so distinct empty-id commands are not collapsed onto one key.
+- **A persistently-full queue factors into readiness.** A node that keeps rejecting a
+  backlog for several consecutive poll cycles is, by definition, not keeping up — so
+  the `GET /v1/readiness` gate reports it not-ready (naming the backlog), and a load
+  balancer or orchestrator stops routing it new work until it catches up. This is a
+  distinct gate checked *before* the poll-success gate, so it can drain a node that is
+  reaching its control plane fine but cannot execute fast enough. A single momentary
+  over-full poll never flips readiness (no flapping); the node returns to ready on its
+  first clean poll cycle. On a `-disable-inbound-listener` (uplink-only) node there is
+  no `/v1/readiness` endpoint, so the signal there is the same advancing poll logs plus
+  the `steward_uplink_command_queue_depth` / `steward_uplink_commands_rejected_total`
+  metrics.
+
+Like the generation fence and the credential hot-reload, this is additive
+outbound-client behavior: it adds no inbound endpoint, request/response shape, or status
+code, so `openapi/steward.v1.yaml` is unchanged except for the (opt-in) `/metrics`
+prose that enumerates the new series. The design provenance lives in
+[`docs/uplink-client.md`](docs/uplink-client.md#command-backpressure-and-deduplication).
+
 Those are out of scope on purpose. Steward is meant to be small enough to read in
 one sitting and to audit against its published contract
 (`openapi/steward.v1.yaml`).
