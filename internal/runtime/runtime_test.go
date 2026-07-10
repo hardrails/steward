@@ -749,3 +749,58 @@ func TestListReturnsIndependentCopies(t *testing.T) {
 		t.Fatalf("tracked spec = %s after mutating a List() copy, want unchanged", got.Spec)
 	}
 }
+
+// TestStatusCountsEmptyReturnsEmptyMap pins the "cheap to compute" contract's
+// base case: an empty tracker returns an empty (non-nil) map, not one carrying
+// a zero entry per known status.
+func TestStatusCountsEmptyReturnsEmptyMap(t *testing.T) {
+	tr := NewTracker(0)
+	counts := tr.StatusCounts()
+	if counts == nil {
+		t.Fatal("StatusCounts() on an empty tracker = nil, want a non-nil empty map")
+	}
+	if len(counts) != 0 {
+		t.Fatalf("StatusCounts() on an empty tracker = %v, want empty", counts)
+	}
+}
+
+// TestStatusCountsTalliesByStatus pins the core StatusCounts contract: every
+// tracked instance is tallied under its own status, and a Destroy removes its
+// instance from every tally (StatusDestroyed never appears — Destroy deletes
+// from byRef, so there is nothing left to count as destroyed).
+func TestStatusCountsTalliesByStatus(t *testing.T) {
+	tr := NewTracker(0)
+
+	pending, _, err := tr.Provision("agent-1", 0, nil)
+	if err != nil {
+		t.Fatalf("provision agent-1: %v", err)
+	}
+	running, _, err := tr.Provision("agent-2", 0, nil)
+	if err != nil {
+		t.Fatalf("provision agent-2: %v", err)
+	}
+	if _, err := tr.Start(running.RuntimeRef); err != nil {
+		t.Fatalf("start agent-2: %v", err)
+	}
+	toDestroy, _, err := tr.Provision("agent-3", 0, nil)
+	if err != nil {
+		t.Fatalf("provision agent-3: %v", err)
+	}
+	if _, err := tr.Destroy(toDestroy.RuntimeRef); err != nil {
+		t.Fatalf("destroy agent-3: %v", err)
+	}
+
+	counts := tr.StatusCounts()
+	if counts[StatusPending] != 1 {
+		t.Errorf("StatusCounts()[PENDING] = %d, want 1 (%s)", counts[StatusPending], pending.RuntimeRef)
+	}
+	if counts[StatusRunning] != 1 {
+		t.Errorf("StatusCounts()[RUNNING] = %d, want 1", counts[StatusRunning])
+	}
+	if n, ok := counts[StatusDestroyed]; ok {
+		t.Errorf("StatusCounts()[DESTROYED] = %d present, want the key entirely absent (a destroyed instance is not tracked)", n)
+	}
+	if total := counts[StatusPending] + counts[StatusRunning]; total != 2 {
+		t.Errorf("total tallied instances = %d, want 2 (the destroyed one must not appear anywhere)", total)
+	}
+}

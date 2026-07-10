@@ -77,6 +77,16 @@ type Config struct {
 	// wait loop above. Optional; meaningful only when CredentialPath is set.
 	// Exposed the same way PollInterval is, so a test can drive it fast.
 	CredentialWatchInterval time.Duration
+
+	// AuditLogger, when non-nil, receives one record per executed command's
+	// terminal outcome (see dispatcher.recordOutcome and cmd/steward's
+	// -audit-log-file flag). The caller owns its whole lifecycle -- opening it
+	// (NewAuditLogger) and closing it once done with it -- independently of this
+	// Poller: cmd/steward's -audit-log-file is accepted even when the uplink
+	// itself is disabled (the file is opened but never wired into a Poller), so
+	// a Poller-scoped close would not be reachable in that case anyway. A nil
+	// value disables command auditing, the default.
+	AuditLogger *AuditLogger
 }
 
 // Poller is the outbound uplink loop: it polls the control plane for queued
@@ -95,6 +105,11 @@ type Poller struct {
 	// credentialPath is empty when hot-reload is not configured (see Config).
 	credentialPath          string
 	credentialWatchInterval time.Duration
+
+	// metrics is always non-nil (see NewPoller) so command/poll counters are
+	// always collected; the optional /metrics endpoint decides only whether to
+	// render them (see MetricsSnapshot).
+	metrics *Metrics
 }
 
 // NewPoller validates cfg and builds a Poller driving tracker. It fails closed on a
@@ -141,17 +156,33 @@ func NewPoller(tracker Tracker, cfg Config) (*Poller, error) {
 	if watchInterval <= 0 {
 		watchInterval = DefaultCredentialWatchInterval
 	}
+	metrics := &Metrics{}
 	return &Poller{
-		httpClient:              client,
-		pollURL:                 pollURL,
-		reportURL:               reportURL,
-		credential:              cfg.Credential,
-		baseInterval:            cfg.PollInterval,
-		logger:                  logger,
-		dispatcher:              &dispatcher{tracker: tracker, nodeID: cfg.NodeID, logger: logger},
+		httpClient:   client,
+		pollURL:      pollURL,
+		reportURL:    reportURL,
+		credential:   cfg.Credential,
+		baseInterval: cfg.PollInterval,
+		logger:       logger,
+		dispatcher: &dispatcher{
+			tracker: tracker,
+			nodeID:  cfg.NodeID,
+			logger:  logger,
+			metrics: metrics,
+			audit:   cfg.AuditLogger,
+		},
 		credentialPath:          cfg.CredentialPath,
 		credentialWatchInterval: watchInterval,
+		metrics:                 metrics,
 	}, nil
+}
+
+// MetricsSnapshot returns a point-in-time copy of this Poller's live metrics
+// (poll latency, poll count, command success/failure counters, current
+// backoff), for the optional /metrics HTTP endpoint (see
+// internal/server.UplinkMetrics). Safe to call concurrently with Run.
+func (p *Poller) MetricsSnapshot() Snapshot {
+	return p.metrics.snapshot(p.baseInterval)
 }
 
 // Run drives the poll loop until ctx is cancelled. The inter-poll wait and every
@@ -204,6 +235,12 @@ func (p *Poller) Run(ctx context.Context) {
 			}
 			failures = 0
 		}
+		// Mirror the local failures count into the metrics gauge every iteration
+		// (not just on change) -- simplest correct option: /metrics reads this
+		// from a different goroutine than the one mutating failures, so the
+		// gauge must be updated whenever failures could have changed, and every
+		// switch arm above touches it.
+		p.metrics.setConsecutiveFailures(failures)
 	}
 }
 
@@ -360,8 +397,16 @@ func (p *Poller) wait(ctx context.Context, d time.Duration) bool {
 
 // poll POSTs to /uplink/poll and classifies the outcome. On classOK it returns the
 // decoded commands; otherwise commands is nil and err describes the condition.
+//
+// It records the round-trip latency into p.metrics for every attempt,
+// success or failure alike: latency is the round-trip time itself, not a
+// judgment about the outcome, and a struggling or blackholed control plane's
+// slow/timed-out polls are exactly the signal an operator wants a latency
+// gauge to surface.
 func (p *Poller) poll(ctx context.Context) ([]command, pollClass, error) {
+	start := time.Now()
 	resp, err := p.post(ctx, p.pollURL, []byte(pollBody))
+	p.metrics.recordPollLatency(time.Since(start))
 	if err != nil {
 		return nil, classTransient, err
 	}

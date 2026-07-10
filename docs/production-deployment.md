@@ -134,10 +134,12 @@ and removing one does not touch the other.
 What the inbound listener is *for*, then, on a NAT'd node:
 
 - The **direct-REST topology**, where it's the whole point (Railyard dials in).
-- **Local health/admin** on the uplink topology: `GET /v1/healthz` and
-  `GET /v1/capabilities`, reachable only on-box since the default `-addr` is
+- **Local health/admin** on the uplink topology: `GET /v1/healthz`,
+  `GET /v1/capabilities`, and — if `-enable-metrics` is also set —
+  `GET /metrics`, all reachable only on-box since the default `-addr` is
   `127.0.0.1:8080` (loopback, not exposed to the network unless explicitly
-  rebound).
+  rebound). See [Metrics and the command audit log](#metrics-and-the-command-audit-log)
+  below.
 
 If your process supervisor watches the process and its stdout logs directly
 (systemd, a container runtime, a Kubernetes exec probe) rather than polling an
@@ -268,6 +270,54 @@ Tuning for fleet scale:
   knob an operator sets, just a reassurance that raising the rate limit for
   legitimate traffic doesn't also open an unbounded-memory path. See
   `internal/server/ratelimit.go` if you need the exact numbers.
+
+## Metrics and the command audit log
+
+Both are opt-in and off by default; see README's
+[Metrics](../README.md#metrics) and
+[Command audit log](../README.md#command-audit-log) for the flag reference and
+the exact metric names / JSON-line shape.
+
+**Wiring `-enable-metrics` into a Prometheus scrape config.** `GET /metrics`
+lives on the same listener and `-addr` as everything else — there is no
+separate metrics port to open at the firewall or expose in a Service/Ingress
+beyond what you already do for the inbound API. A minimal scrape job:
+
+```yaml
+scrape_configs:
+  - job_name: steward
+    static_configs:
+      - targets: ["node-host:8080"]
+    metrics_path: /metrics
+```
+
+Two consequences follow directly from "same listener, no second door":
+
+- **`-disable-inbound-listener` nodes have nothing to scrape.** If your fleet
+  runs the NAT'd/uplink-only topology (the default recommendation above), there
+  is no local listener at all, so `-enable-metrics` has no effect and no target
+  to add to Prometheus. Pull operational state for that topology from the
+  control-plane side (Railyard) instead, or run a **separate** direct-REST node
+  in your fleet dashboard's monitoring path if you need node-local scraping —
+  do not reach for a second listener inside Steward itself; that is exactly the
+  shape ARCHITECTURE.md's zero-dependency, single-listener posture rules out.
+- **It inherits the per-source rate limiter.** A scraper hitting `/metrics`
+  counts against the same token bucket as every other inbound request from that
+  source. The default budget (20 req/s, burst 40) comfortably covers any
+  reasonable scrape interval (15s–60s is typical); only tighten
+  `-max-requests-per-second` awareness if you also run a very aggressive scrape
+  interval from the same source as heavy lifecycle traffic.
+
+**Wiring `-audit-log-file` for log shipping.** The file is plain JSON-lines
+(one record per line, no wrapping array), so it drops directly into a
+`filelog`/`journald`/Fluent Bit-style tail-and-ship pipeline without a custom
+parser — treat it the same way you would any other application JSON-lines log,
+rotated by your log-shipping agent (Steward itself does not rotate or truncate
+it; it only ever appends). It records **uplink-dispatched** commands only (see
+README for why the direct REST path has no `command_id` to attach a record to)
+— on a direct-REST-only node (no `-uplink-url`), setting this flag creates the
+file but nothing is ever written to it, and startup logs a `WARN` saying so;
+that combination is a config smell worth cleaning up, not a startup failure.
 
 ## Hot-reloading `max_instances` with `SIGHUP`
 

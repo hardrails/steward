@@ -21,7 +21,10 @@ It explicitly does **not**:
 - execute commands or run workloads,
 - sandbox or isolate anything,
 - perform computer-use or any other agent capability,
-- authenticate, terminate TLS, or emit metrics/traces.
+- authenticate, terminate TLS, or emit distributed traces,
+- emit metrics or a command audit log **by default** — both are opt-in (see
+  below); nothing is exposed or written until an operator deliberately turns
+  it on.
 
 By default it also does not persist state — a restart forgets every tracked
 instance — unless durable state is explicitly enabled.
@@ -229,6 +232,45 @@ Those are out of scope on purpose. Steward is meant to be small enough to read i
 one sitting and to audit against its published contract
 (`openapi/steward.v1.yaml`).
 
+### Metrics and the command audit log are opt-in
+
+Two observability surfaces exist, both off unless an operator turns them on, and
+both built with only the standard library — neither pulls in
+`prometheus/client_golang` or any other dependency, per the zero-dependency
+invariant above.
+
+- **`GET /metrics`** (`-enable-metrics` / `STEWARD_ENABLE_METRICS`, default off)
+  renders the tracker's live instance counts (by status) and capacity cap, plus —
+  when the outbound uplink is also enabled — its poll latency (min/max/last),
+  poll count, command success/failure counters, and current backoff, in the
+  [Prometheus text exposition
+  format](https://github.com/prometheus/docs/blob/main/content/docs/instrumenting/exposition_formats.md)
+  (`# HELP`/`# TYPE` comments and `metric_name{labels} value` lines — simple
+  enough that a handful of `fmt.Fprintf` calls suffice). It is registered on the
+  **same** `http.ServeMux` and reachable only through the **same** inbound
+  listener every other endpoint uses (see `internal/server.Server.Handler`): there
+  is no second listener, so it automatically inherits `-disable-inbound-listener`
+  (no listener bound at all means no `/metrics`, the same as every other route)
+  and the per-source rate limiter. Disabled (the default), the route is never
+  registered and the path 404s exactly like any other unrouted path.
+- **`-audit-log-file`** (env `STEWARD_AUDIT_LOG_FILE`, unset by default) appends
+  one JSON-lines record — timestamp, `command_id`, `instance_id`, `kind`,
+  `status` (`"success"`/`"failure"`), and an `error` detail on failure — for
+  every **uplink** command Steward executes to a terminal (reported) outcome.
+  It covers the outbound uplink dispatcher specifically (`internal/uplink`),
+  which is where a queued lifecycle command is a first-class object with its own
+  `command_id`; the direct inbound REST API has no such identifier to record. The
+  file is opened once (created if missing) and appended to for the process's
+  life: each record is one `os.File.Write` call under a mutex — POSIX guarantees
+  a single `O_APPEND` write is atomic against any other writer to the same file
+  — which gives the same "never a torn/corrupt record" property `-state-file`'s
+  temp-file-then-rename gives a rewritten-in-full snapshot, via a mechanism suited
+  to a log that only ever grows by appending. Opening the file fails closed at
+  startup (a bad path names the fix, the same discipline every other file this
+  project opens uses); a write failure at runtime is logged at `WARN` and
+  otherwise ignored, since the audit log is a best-effort trail, never a source
+  of truth a command's real outcome depends on.
+
 ### Provisioning is idempotent by design
 
 `Provision` keys on the caller-supplied `instance_id`. If an instance with that
@@ -348,6 +390,9 @@ step toward in-process computer-use.
 cmd/steward/        HTTP server entrypoint (flags/env, graceful shutdown)
 internal/runtime/   Instance tracker and lifecycle operations (in-memory, with
                     opt-in durable state via a JSON state file)
-internal/server/    HTTP handlers wiring the operations to REST endpoints
+internal/server/    HTTP handlers wiring the operations to REST endpoints,
+                    plus the opt-in /metrics endpoint
+internal/uplink/    Outbound uplink poll loop, command dispatch, and the
+                    opt-in command audit log
 openapi/            Hand-written public API contract (the audit surface)
 ```

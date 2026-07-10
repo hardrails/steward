@@ -73,15 +73,24 @@ type Server struct {
 	tracker *runtime.Tracker
 	logger  *slog.Logger
 	limiter *rateLimiter
+	// metricsEnabled gates whether GET /metrics is registered at all (see
+	// Handler): off by default, matching ARCHITECTURE.md's "intentionally
+	// minimal" posture — ONLY -enable-metrics turns it on.
+	metricsEnabled bool
+	// uplinkMetrics is nil when the uplink itself is disabled (no -uplink-url),
+	// independent of metricsEnabled: /metrics can be enabled on a node with no
+	// uplink, it then just omits the uplink_* series. See handleMetrics.
+	uplinkMetrics UplinkMetrics
 }
 
 // New builds a Server whose tracker holds at most maxInstances instances in
 // memory only (no persistence). A non-positive maxInstances falls back to
 // runtime.DefaultMaxInstances. For durable state, build a tracker with
 // runtime.LoadTracker and pass it to NewWithTracker. rateLimitPerSecond wires the
-// per-source inbound rate limiter (see NewWithTracker).
-func New(logger *slog.Logger, maxInstances, rateLimitPerSecond int) *Server {
-	return NewWithTracker(logger, runtime.NewTracker(maxInstances), rateLimitPerSecond)
+// per-source inbound rate limiter, and enableMetrics/uplinkMetrics wire the
+// optional /metrics endpoint (see NewWithTracker for both).
+func New(logger *slog.Logger, maxInstances, rateLimitPerSecond int, enableMetrics bool, uplinkMetrics UplinkMetrics) *Server {
+	return NewWithTracker(logger, runtime.NewTracker(maxInstances), rateLimitPerSecond, enableMetrics, uplinkMetrics)
 }
 
 // NewWithTracker builds a Server around a caller-provided tracker. It lets the
@@ -94,15 +103,23 @@ func New(logger *slog.Logger, maxInstances, rateLimitPerSecond int) *Server {
 // a burst of rateBurstFactor times that); a value of zero or less disables the
 // limiter entirely, for an operator who fronts Steward with their own rate-limiting
 // gateway. See ratelimit.go for the budget rationale.
-func NewWithTracker(logger *slog.Logger, tracker *runtime.Tracker, rateLimitPerSecond int) *Server {
+//
+// enableMetrics gates GET /metrics (see handleMetrics): false, the default,
+// means the route is never registered and the path 404s like any other
+// unknown path. uplinkMetrics is the (possibly nil, when the uplink is
+// disabled) source of uplink poll-loop metrics /metrics also reports; it is
+// read only when enableMetrics is true.
+func NewWithTracker(logger *slog.Logger, tracker *runtime.Tracker, rateLimitPerSecond int, enableMetrics bool, uplinkMetrics UplinkMetrics) *Server {
 	var limiter *rateLimiter
 	if rateLimitPerSecond > 0 {
 		limiter = newRateLimiter(rateLimitPerSecond)
 	}
 	return &Server{
-		tracker: tracker,
-		logger:  logger,
-		limiter: limiter,
+		tracker:        tracker,
+		logger:         logger,
+		limiter:        limiter,
+		metricsEnabled: enableMetrics,
+		uplinkMetrics:  uplinkMetrics,
 	}
 }
 
@@ -118,6 +135,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/instances/{id}/hibernate", s.handleHibernate)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/healthz", s.handleHealthz)
+	if s.metricsEnabled {
+		mux.HandleFunc("GET /metrics", s.handleMetrics)
+	}
 
 	// jsonErrors is closest to the mux so the stdlib plain-text 404/405 become our
 	// JSON error shape; the per-source rate limiter (when enabled) wraps it so a flood

@@ -339,7 +339,7 @@ func TestSourceKey(t *testing.T) {
 // is shed with a 429, a Retry-After header, the shared JSON error shape, and — because
 // the limiter sits below withLogging — an X-Request-Id.
 func TestRateLimitMiddlewareSheds429WithRetryAfter(t *testing.T) {
-	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0, 1).Handler()
+	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0, 1, false, nil).Handler()
 	const src = "203.0.113.5:44444"
 
 	for i := 0; i < 2; i++ {
@@ -371,7 +371,7 @@ func TestRateLimitMiddlewareSheds429WithRetryAfter(t *testing.T) {
 // TestRateLimitMiddlewarePerSourceIsolation proves the HTTP path keys on the source IP:
 // a flood from one address does not throttle another.
 func TestRateLimitMiddlewarePerSourceIsolation(t *testing.T) {
-	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0, 1).Handler()
+	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0, 1, false, nil).Handler()
 	const a = "198.51.100.1:1111"
 	const b = "198.51.100.2:2222"
 
@@ -388,7 +388,7 @@ func TestRateLimitMiddlewarePerSourceIsolation(t *testing.T) {
 // TestRateLimitDisabledAllowsUnthrottled proves rate<=0 disables the limiter entirely:
 // a heavy burst from one source is never shed.
 func TestRateLimitDisabledAllowsUnthrottled(t *testing.T) {
-	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0, 0).Handler()
+	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), 0, 0, false, nil).Handler()
 	const src = "192.0.2.7:9999"
 	for i := 0; i < 100; i++ {
 		if rec := doFrom(h, http.MethodGet, "/v1/healthz", src); rec.Code != http.StatusOK {

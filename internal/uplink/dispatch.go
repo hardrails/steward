@@ -122,12 +122,20 @@ func reportedStatus(s runtime.Status) (string, bool) {
 }
 
 // dispatcher executes one command against the tracker and produces the report to
-// send. It holds no state beyond its tracker, this node's node_id, and a logger,
-// and it performs no I/O — the poll loop owns the HTTP round-trips.
+// send. It holds no state beyond its tracker, this node's node_id, a logger, its
+// always-present metrics counters, and an optional audit logger, and it performs
+// no I/O of its own beyond an optional audit-log append — the poll loop owns the
+// HTTP round-trips.
 type dispatcher struct {
 	tracker Tracker
 	nodeID  string
 	logger  *slog.Logger
+	// metrics is never nil (see NewPoller): command counters are always
+	// collected, cheaply, so /metrics only has to decide whether to render them.
+	metrics *Metrics
+	// audit is nil when -audit-log-file is unset (auditing disabled); every call
+	// through it is nil-safe (see AuditLogger.Record).
+	audit *AuditLogger
 }
 
 // execute runs one command against the tracker and returns the report to POST,
@@ -155,15 +163,33 @@ type dispatcher struct {
 // failure once the ref resolved — returns retry=false. Every non-fenced outcome
 // returns a report echoing the command's command_id and claim_generation, even
 // on rejection, so the server can retire the command.
+//
+// A non-fenced, non-retry outcome is also, by definition, the outcome actually
+// reported to the server (see Poller.executeBatch) — so it is the one place both
+// the command-counter metrics and the optional audit log record a command as
+// executed. A deferred start's first pass (retry=true) built a report via fail()
+// internally but never sends it and is not deferred; recording here too would
+// double-count it once for the discarded deferral and once for its real,
+// retried-pass outcome. The instanceID local is seeded with the raw runtime_ref
+// before parseRuntimeRef runs so the one failure mode with no parsed instance_id
+// (an unparseable ref) still logs/records something diagnostic instead of an
+// empty string.
 func (d *dispatcher) execute(cmd command) (rep report, retry, fenced bool) {
 	rep = report{CommandID: cmd.CommandID, ClaimGeneration: cmd.ClaimGeneration}
+	instanceID := cmd.RuntimeRef
+	defer func() {
+		if !fenced && !retry {
+			d.recordOutcome(cmd.CommandID, instanceID, cmd.Kind, rep)
+		}
+	}()
 
-	nodeID, instanceID, err := parseRuntimeRef(cmd.RuntimeRef)
+	nodeID, parsedInstanceID, err := parseRuntimeRef(cmd.RuntimeRef)
 	if err != nil {
 		d.logger.Error("uplink command has an unparseable runtime_ref; reporting failed",
 			"command_id", cmd.CommandID, "runtime_ref", cmd.RuntimeRef, "err", err)
 		return d.fail(rep, "runtime_ref is unparseable"), false, false
 	}
+	instanceID = parsedInstanceID
 	// The client-side analog of the server adapter's _verify_issued check: the
 	// server should only ever queue commands for this node, so a foreign node_id is
 	// a version-skew/bug tripwire, not an expected path. Reject without touching the
@@ -345,6 +371,50 @@ func (d *dispatcher) fail(rep report, reason string) report {
 	rep.ReportedStatus = "failed"
 	rep.Result = errorResult(reason)
 	return rep
+}
+
+// recordOutcome updates the command-counter metrics and, when enabled, appends
+// one audit-log record for cmd's terminal (reported) outcome. It is called by
+// execute's defer exactly once per non-fenced, non-retry outcome — see that
+// doc comment for why fenced/retry outcomes must not reach here.
+//
+// A failed audit-log write is logged at WARN and otherwise ignored: the audit
+// log is a best-effort operational trail, not a source of truth the tracker or
+// the control plane depend on, so a full disk or a permissions change must not
+// stop command execution or the report that already succeeded.
+func (d *dispatcher) recordOutcome(commandID, instanceID, kind string, rep report) {
+	succeeded := rep.Status == statusDone
+	d.metrics.recordCommandOutcome(succeeded)
+
+	if d.audit == nil {
+		return
+	}
+	status := "success"
+	errDetail := ""
+	if !succeeded {
+		status = "failure"
+		errDetail = auditErrorDetail(rep.Result)
+	}
+	if err := d.audit.Record(commandID, instanceID, kind, status, errDetail); err != nil {
+		d.logger.Warn("audit log write failed", "command_id", commandID, "err", err)
+	}
+}
+
+// auditErrorDetail extracts the human-readable reason from a failed report's
+// Result (see errorResult) for the audit log's error field. A Result that
+// does not decode to {"error": "..."} (structurally impossible today, since
+// every failure path builds Result via errorResult, but defensive against a
+// future caller of fail() that doesn't) yields an empty string rather than an
+// error: the audit log still gets a record for the failure, just without
+// detail.
+func auditErrorDetail(result json.RawMessage) string {
+	var r struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(result, &r); err != nil {
+		return ""
+	}
+	return r.Error
 }
 
 // emptyResult is the opaque success result: an empty JSON object, never null, so
