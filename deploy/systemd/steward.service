@@ -1,0 +1,44 @@
+[Unit]
+Description=Steward agent lifecycle supervisor
+Documentation=https://github.com/hardrails/steward
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=steward
+Group=steward
+UMask=0077
+ExecStart=/usr/local/bin/steward -config /etc/steward/steward.json -audit-log-file /var/log/steward/audit.jsonl
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+StateDirectory=steward
+StateDirectoryMode=0700
+LogsDirectory=steward
+LogsDirectoryMode=0700
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
