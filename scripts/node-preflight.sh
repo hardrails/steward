@@ -59,7 +59,8 @@ for key in $allowed; do
 	fi
 done
 
-runuser -u steward -- "$steward_bin" -check-config -config "$steward_config"
+runuser -u steward -- "$steward_bin" -check-config -config "$steward_config" \
+	-audit-log-file /var/log/steward/audit.jsonl
 runuser -u steward-executor -- "$executor_bin" -check-config \
 	-token-file "${executor[EXECUTOR_TOKEN_FILE]}" \
 	-docker-socket "${executor[EXECUTOR_DOCKER_SOCKET]}" \
@@ -73,7 +74,5 @@ runuser -u steward-executor -- "$executor_bin" -check-config \
 	-max-pids "${executor[EXECUTOR_MAX_PIDS]}" \
 	-max-workloads "${executor[EXECUTOR_MAX_WORKLOADS]}" \
 	-max-workloads-per-tenant "${executor[EXECUTOR_MAX_WORKLOADS_PER_TENANT]}"
-systemd-analyze verify \
-	/etc/systemd/system/steward.service \
-	/etc/systemd/system/steward-executor.service
+systemd-analyze verify steward.service steward-executor.service
 echo "node-preflight: Steward node configuration valid"

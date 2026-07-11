@@ -30,11 +30,9 @@ for binary in steward steward-executor; do
 	fi
 done
 
-if [[ ${2:-} == --restart ]]; then
-	STEWARD_BIN="$release_dir/steward" \
-		STEWARD_EXECUTOR_BIN="$release_dir/steward-executor" \
-		/usr/local/libexec/steward/node-preflight
-fi
+STEWARD_BIN="$release_dir/steward" \
+	STEWARD_EXECUTOR_BIN="$release_dir/steward-executor" \
+	/usr/local/libexec/steward/node-preflight
 
 install -d -o root -g root -m 0755 /opt/steward /usr/local/bin
 current_tmp="/opt/steward/.current.new.$$"
