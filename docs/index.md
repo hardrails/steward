@@ -34,7 +34,7 @@ home: true
   </div>
   <div>
     <h3>I integrate a control plane</h3>
-    <p>Use the public OpenAPI and uplink contracts. Railyard is one consumer; Steward does not require it.</p>
+    <p>Use the public OpenAPI and uplink contracts from any independently operated control plane.</p>
     <p><a href="{{ '/reference/api/' | relative_url }}">Read the contracts →</a></p>
   </div>
 </div>

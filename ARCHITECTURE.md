@@ -7,8 +7,8 @@ which capabilities are opt-in versus on by default, what it deliberately does
 
 ## Separation of concerns
 
-Steward is an independently buildable, control-plane-neutral application. A
-proprietary control plane such as Railyard may depend on Steward's public HTTP and
+Steward is an independently buildable, control-plane-neutral application. An
+independently operated control plane may depend on Steward's public HTTP and
 uplink contracts; the dependency never points back the other way. Steward contains
 no tenant database, user identity system, approval workflow, rollout scheduler,
 private client SDK, or vendor-specific API.

@@ -11,12 +11,9 @@ rejected, the invariants the design must hold, and the exact task list. It follo
 the same style as [ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md): it explains not just *what*
 but *why*, and it names the failure mode each decision closes.
 
-[The wire contract](#the-wire-contract--reconciled-against-the-merged-railyard-side-plan)
-was originally written against a provisional guess and has since been reconciled
-against the companion Railyard-side plan (`docs/loop/node-uplink-consumer/plan.md`
-in `~/Projects/railyard`, itself planned and completed in parallel) — every field
-name, endpoint path, and status-vocabulary question below is now confirmed, not
-guessed. Implementation can proceed against it.
+[The wire contract](#the-wire-contract) records the implemented public endpoint
+paths, field names, and status vocabulary used between Steward and any compatible
+control plane.
 
 ## Why this exists
 
@@ -35,12 +32,9 @@ allow outbound connections by default, so this channel works from exactly the
 places the inbound API cannot reach. The control plane *queues* commands; the node
 *polls* for them.
 
-This is the **client** half — the code that runs inside Steward. The **server** half
-(the poll/report endpoints, node enrollment, and the bearer-credential scheme) is a
-companion Railyard-side design, finalized in parallel. The two halves are being
-designed against one shared vocabulary: the `hardrails_runtime.node_uplink.core`
-value types (`NodeCommand`, `CommandReport`, `CommandKind`, the per-node
-credential), which this design was read against.
+This is the **client** half—the code that runs inside Steward. A compatible control
+plane owns the server half: poll/report endpoints, node enrollment, command claims,
+and credential issuance. Both sides use the public wire vocabulary documented below.
 
 ## What stays true (invariants)
 
@@ -113,7 +107,7 @@ Design decisions for this file:
 
 - **The `credential` is stored as one opaque string** and sent verbatim in the auth
   header. Steward does **not** parse it, and therefore does **not** reimplement the
-  hardrails-side length-prefixed credential codec
+  control-plane length-prefixed credential codec
   (`format_node_credential`/`parse_node_credential`). That keeps Steward decoupled
   from a private encoding: the token is minted server-side and the node only echoes
   it. This is why `tenant_id` and `node_id` are stored as **separate explicit
@@ -172,8 +166,7 @@ loop:
 Each `NodeCommand` carries a control-plane-minted, self-describing `runtime_ref`
 (`uplink:<len>:<node_id>:<instance_id>`), a `kind`, an opaque `payload`, a
 `command_id`, and a `claim_generation` fencing token. The five `CommandKind`s map
-**1:1** onto the existing tracker methods (this 1:1 is stated in
-`node_uplink/core.py` itself):
+**1:1** onto the existing tracker methods:
 
 | `CommandKind` | tracker call                          | resulting `Status` | `reported_status` (wire) |
 | ------------- | ------------------------------------- | ------------------ | ------------------------ |
@@ -248,9 +241,7 @@ cannot start an instance the node has never provisioned) → report `failed`; th
 control plane reconciles and re-drives.
 
 **Batch ordering.** A single poll can return several commands for the same
-instance, and the server's claim query
-(`node_uplink._orm.claim_pending_commands`) has **no `ORDER BY`** — so the batch
-order is whatever the database returned and is **not** guaranteed to be causal or
+instance, and the wire contract does not guarantee that a returned batch is causal or
 chronological. The client therefore processes a batch in the **server's own
 returned order, reordering nothing**, then makes exactly **one bounded retry
 pass** over **`start` only**: a `start` that fails only because its instance is
@@ -274,10 +265,8 @@ wire change, and — because `destroy` is already idempotent on a missing instan
 > nothing, so the `destroy → provision` replace runs in the intended order, while
 > the one retry pass still closes the original `start`-before-its-own-provision
 > case. A wire-level ordering guarantee — an epoch/generation or a causal sequence
-> on `runtime_ref` — is the sound long-term fix and is tracked as a cross-repo
-> follow-up in the `node_uplink` primitive (the same primitive that owns the
-> [deferred `instance_id`-reuse race](#deliberately-deferred)), not built in this
-> client-only change.
+> on `runtime_ref` is the sound long-term fix and belongs in the public protocol,
+> not in this client-only change.
 
 > **Narrowing (second, more precise hosted review finding).** The fix above first
 > shipped with the deferred retry applying to **any** of `start` / `stop` /
@@ -316,11 +305,11 @@ re-executes (idempotent) and re-reports. So report-POST failures are logged at W
 and *not* retried in an inner loop — the server's existing lease + fencing machinery
 is the retry mechanism, and reusing it keeps the node stateless.
 
-### Status vocabulary mapping (RECONCILED against the merged Railyard-side plan)
+### Status vocabulary mapping
 
 Steward's own `Status` values are UPPERCASE and **must not be renamed**
 (`internal/runtime` says so, and the direct-REST contract depends on them). The wire's
-`reported_status` is a `hardrails_runtime` `AgentInstanceStatus` (lowercase). The
+`reported_status` uses the wire's lowercase lifecycle vocabulary. The
 uplink client owns a small translation table so neither side's vocabulary leaks into
 the other:
 
@@ -331,28 +320,17 @@ the other:
 | `STOPPED`        | `stopped`              |                                                                   |
 | `HIBERNATED`     | `hibernated`           |                                                                   |
 | `FAILED`         | `failed`               |                                                                   |
-| `DESTROYED`      | `stopped`              | No `destroyed` member exists in `AgentInstanceStatus`. See note.  |
+| `DESTROYED`      | `stopped`              | No `destroyed` member exists in the wire vocabulary. See note.   |
 
-Both items are now **resolved**, by reading the merged `node_uplink` adapter and the
-Railyard-side plan directly (not left as guesses):
+Two mappings deserve explicit explanation:
 
-- `PENDING → provisioning`, confirmed correct. `UplinkAgentRuntimeAdapter.provision()`
-  (`node_uplink/adapter.py`) enqueues a **`provision`** command and returns
-  `AgentInstanceStatus.PROVISIONING` immediately — it does **not** also enqueue a
-  `start`. `CommandKind.PROVISION` and `CommandKind.START` are two distinct enum
-  members (`node_uplink/core.py`), so the control plane always sends a **separate**
-  `start` command later to drive to `running`, exactly mirroring Steward's own
-  two-step `Provision` then `Start` model. No bridge needed beyond the table above.
-- `DESTROYED`'s `reported_status`, resolved as `stopped`. Reading
-  `node_uplink/_orm.py`'s `node_reported_status`: it returns the most recent
-  terminal command's `reported_status` verbatim, so any valid `AgentInstanceStatus`
-  member works — the exact choice is close to inert in practice, because Railyard's
-  `fleet` capability removes the `AgentInstance` row on a successful destroy
-  (mirroring `agent_instances`' own `LocalAgentRuntimeAdapter.destroy`, which pops
-  tracked state rather than assigning a terminal status), so no caller polls
-  `status()` on a destroyed instance afterward. `stopped` is the closest semantic
-  match ("no longer running") and is confirmed as the value to send, not a
-  placeholder.
+- `PENDING → provisioning`: `provision` and `start` are distinct wire commands, so a
+  compatible control plane sends a separate `start` later to drive to `running`,
+  exactly mirroring Steward's own two-step `Provision` then `Start` model. No bridge
+  is needed beyond the table above.
+- `DESTROYED → stopped`: a successful destroy removes the tracked instance, so no
+  caller should poll its status afterward. `stopped` is the closest available wire
+  value for "no longer running."
 
 ### Failure taxonomy (transient vs. fatal)
 
@@ -459,7 +437,7 @@ background consumer drains and executes the queue.
   mirror of the real validator.
 - **Deduplicated across poll cycles by `command_id`.** A command whose `command_id` is
   already queued or in-flight is skipped rather than queued a second time. `command_id`
-  is the protocol's own unique command identity (`node_uplink.core.NodeCommand`), and
+  is the protocol's own unique command identity, and
   it is exactly what survives a redelivery — the claim lease bumps `claim_generation`,
   never `command_id` — so it is the correct dedup key, not one this client invents.
   `(runtime_ref, kind)` was considered and rejected as the key: two genuinely distinct
@@ -518,14 +496,10 @@ same tracker:
   A `provision` racing between the two channels resolves by the tracker's existing
   idempotency-on-`instance_id`; a lifecycle transition racing resolves by the mutex.
 
-## The wire contract — RECONCILED against the merged Railyard-side plan
+## The wire contract
 
-The endpoint paths, JSON field names, and header format below are taken directly from
-`~/Projects/railyard`'s `docs/loop/node-uplink-consumer/plan.md` (the companion
-server-side plan, completed and read in full) — no longer guesses. Confirmed against
-this repo's own `fleet_router.py` that Railyard's routes carry **no** `/v1` prefix
-(`APIRouter(prefix="/fleet", ...)`, not `/v1/fleet`), so the uplink routes follow the
-same convention.
+The endpoint paths, JSON field names, and header format below are Steward's public
+outbound control-plane contract. The uplink routes carry no `/v1` prefix.
 
 **Poll.** `POST {uplink-url}/uplink/poll` (no `/v1` prefix), empty (or `{}`) body. The
 server derives the node from the credential (no `node_id` in the path/body). Response:
@@ -684,9 +658,8 @@ in `.github/workflows/ci.yml`.
 ## Deliberately deferred
 
 In ARCHITECTURE.md's "deferred decision" spirit — named explicitly so they are choices,
-not oversights. None of these was designed or built in v1; each was deferred because
-the companion Railyard-side v1 had not committed to it either. Two have since been
-closed (marked below) as real follow-up work landed; the rest remain deferred.
+not oversights. None of these was designed or built in v1. Two have since been closed
+(marked below) as real follow-up work landed; the rest remain deferred.
 
 - **TLS client-certificate auth.** v1 is bearer-credential only. mTLS is a larger
   enrollment/PKI story on both sides.
@@ -721,15 +694,13 @@ closed (marked below) as real follow-up work landed; the rest remain deferred.
   client's `RefForInstance(instanceID)` resolves to the NEW instance — a stale `stop` /
   `hibernate` / `destroy` can mutate or remove the wrong (newly-provisioned) instance.
   **This is a deeper root cause than a client-side bug**: `format_runtime_ref` (the
-  control-plane side, `hardrails_runtime.node_uplink.core`) is a PURE function of
+  control-plane side) is a pure function of
   `(node_id, instance_id)` with no epoch/generation component, and
-  `agent_instances._orm.destroy` deletes the `AgentInstance` row outright (freeing the
-  `instance_id` for reuse) — so the exact same ambiguity exists in the control plane's
-  OWN command queue (`node_uplink`'s `hardrails_uplink_commands` table is keyed by the
-  same non-epoch-scoped `runtime_ref`), not just in this client's local lookup. A sound
+  control plane may release the `instance_id` for reuse—so the exact same ambiguity
+  can exist in its command queue, not just in this client's local lookup. A sound
   fix needs an epoch/generation added to `runtime_ref` itself (or a tombstone on destroy
-  that the control plane refuses to re-provision over), which is a cross-repo primitive
-  change out of scope for a client-only v1 patch — a client-side patch alone would give
+  that the control plane refuses to re-provision over), which is a protocol change
+  out of scope for a client-only v1 patch—a client-side patch alone would give
   false confidence without closing the hole. **Accepted mitigation for v1**: this
   requires (a) a stale command surviving redelivery across (b) an operator or automation
   reusing the exact same `instance_id` after destroying it, on (c) the same node, within
@@ -737,4 +708,4 @@ closed (marked below) as real follow-up work landed; the rest remain deferred.
   path. Operators who want to eliminate it entirely today can simply never reuse a
   destroyed `instance_id` (mint a fresh one per provision). **Follow-up**: add an
   epoch/generation to `runtime_ref` (or an equivalent tombstone-on-destroy) in the
-  `node_uplink` primitive — a hardrails/Railyard-side change, tracked there, not here.
+  public protocol.

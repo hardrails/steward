@@ -8,7 +8,7 @@
   "uplink_command_queue_depth": 256,
   "uplink_credential_file": "/etc/steward/uplink-credential.json",
   "uplink_poll_interval": "10s",
-  "uplink_tls_ca_file": "/etc/steward/railyard-ca.pem",
+  "uplink_tls_ca_file": "/etc/steward/control-plane-ca.pem",
   "uplink_tls_skip_verify": false,
-  "uplink_url": "https://railyard.example.invalid"
+  "uplink_url": "https://control.example.invalid"
 }

@@ -1,6 +1,6 @@
 ---
 title: Frequently asked questions
-description: Answers about Steward's purpose, Railyard relationship, Docker and gVisor requirements, tenant isolation, air-gapped operation, agent support, and v0.1 scope.
+description: Answers about Steward's purpose, control-plane neutrality, Docker and gVisor requirements, tenant isolation, air-gapped operation, agent support, and v0.1 scope.
 section: Reference
 ---
 
@@ -17,11 +17,11 @@ supervisor and a separate Docker/gVisor Executor.
 No. Hermes Agent, OpenClaw, and other agent runtimes run as OCI workloads. Steward
 provides the node lifecycle, isolation, and remote-control boundary beneath them.
 
-## Is Steward Railyard?
+## Does Steward require a particular control plane?
 
-No. Railyard is Hardrails' separately hosted proprietary control plane. It can
-provision and manage a fleet through Steward's public contracts. Steward remains an
-independent Apache-2.0 project with no private build or runtime dependencies.
+No. Any compatible control plane can provision and manage a fleet through Steward's
+public contracts. Steward is an independent Apache-2.0 project with no private build
+or runtime dependencies.
 
 ## Can another control plane use Steward?
 

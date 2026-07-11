@@ -91,7 +91,7 @@ targets=(
 	/etc/steward/uplink-credential.json
 	/etc/steward/executor-uplink.json
 	/etc/steward/executor-token
-	/etc/steward/railyard-ca.pem
+	/etc/steward/control-plane-ca.pem
 )
 for target in "${targets[@]}"; do
 	name=${target##*/}
@@ -134,15 +134,21 @@ rollback() {
 trap rollback ERR INT TERM
 
 steward_tmp=$(mktemp /etc/steward/.steward.json.XXXXXX)
-awk -v url="$control_plane_url" '
+awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" '
 	/^[[:space:]]*"uplink_url"[[:space:]]*:/ {
 		comma = ($0 ~ /,[[:space:]]*$/) ? "," : ""
 		printf "  \"uplink_url\": \"%s\"%s\n", url, comma
-		found = 1
+		found_url = 1
+		next
+	}
+	/^[[:space:]]*"uplink_tls_ca_file"[[:space:]]*:/ {
+		comma = ($0 ~ /,[[:space:]]*$/) ? "," : ""
+		printf "  \"uplink_tls_ca_file\": \"%s\"%s\n", ca, comma
+		found_ca = 1
 		next
 	}
 	{ print }
-	END { if (!found) exit 3 }
+	END { if (!found_url || !found_ca) exit 3 }
 ' /etc/steward/steward.json >"$steward_tmp"
 chown root:steward "$steward_tmp"
 chmod 0640 "$steward_tmp"
@@ -150,14 +156,19 @@ mv -f "$steward_tmp" /etc/steward/steward.json
 steward_tmp=
 
 executor_tmp=$(mktemp /etc/steward/.executor.env.XXXXXX)
-awk -v url="$control_plane_url" '
+awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" '
 	/^EXECUTOR_UPLINK_URL=/ {
 		print "EXECUTOR_UPLINK_URL=" url
-		found = 1
+		found_url = 1
+		next
+	}
+	/^EXECUTOR_UPLINK_TLS_CA_FILE=/ {
+		print "EXECUTOR_UPLINK_TLS_CA_FILE=" ca
+		found_ca = 1
 		next
 	}
 	{ print }
-	END { if (!found) exit 3 }
+	END { if (!found_url || !found_ca) exit 3 }
 ' /etc/steward/executor.env >"$executor_tmp"
 chown root:root "$executor_tmp"
 chmod 0600 "$executor_tmp"
@@ -175,7 +186,7 @@ install_atomic "$steward_credential" /etc/steward/uplink-credential.json \
 	steward steward 0600
 install_atomic "$executor_credential" /etc/steward/executor-uplink.json \
 	steward-executor steward-executor 0600
-install_atomic "$ca_file" /etc/steward/railyard-ca.pem root root 0644
+install_atomic "$ca_file" /etc/steward/control-plane-ca.pem root root 0644
 if [[ -n $executor_token ]]; then
 	install_atomic "$executor_token" /etc/steward/executor-token \
 		steward-executor steward-executor 0600

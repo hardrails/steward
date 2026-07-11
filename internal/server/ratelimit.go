@@ -17,7 +17,7 @@ import (
 // holds) — mirroring the hand-rolled backoff/jitter in internal/uplink/poller.go.
 //
 // Budget rationale for the defaults below: Steward is a control-plane-facing
-// LIFECYCLE API. Railyard drives provision/start/stop/hibernate/destroy/status/list
+// LIFECYCLE API. A control plane drives provision/start/stop/hibernate/destroy/status/list
 // at reconciler-and-human pace, not high-frequency traffic. A default of 20 requests
 // per second sustained with a burst of 40 (rateBurstFactor) comfortably covers normal
 // operation with headroom: a fleet reconciliation sweep or a batch of lifecycle
@@ -29,7 +29,7 @@ import (
 // degrade service for the legitimate control plane arriving from another IP.
 //
 // A rare bulk operation (cold-provisioning hundreds of instances back to back, one
-// Railyard replica, one source IP, no client-side throttle) CAN exceed the 40-token
+// control-plane replica, one source IP, no client-side throttle) CAN exceed the 40-token
 // burst and get some items shed with 429 -- whether that lands as smooth
 // rate-shaping or a hard per-item failure depends entirely on whether the CALLER
 // retries a 429 with Retry-After. This listener sheds the request before any
