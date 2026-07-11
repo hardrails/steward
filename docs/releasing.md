@@ -1,3 +1,9 @@
+---
+title: Releasing Steward
+description: Maintainer runbook for validating, tagging, building, checksumming, publishing, and verifying a Steward release.
+section: Maintainer guide
+---
+
 # Releasing Steward
 
 This document is the maintainer runbook for cutting a Steward release. Pushing a

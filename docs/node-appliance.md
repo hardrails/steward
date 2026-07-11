@@ -1,3 +1,9 @@
+---
+title: Steward node appliance
+description: Detailed Linux appliance packaging, installation, enrollment, preflight, activation, rollback, removal, and filesystem ownership behavior.
+section: Operator reference
+---
+
 # Installing the Steward node appliance
 
 Every Linux release is available as DEB, RPM, and a universal systemd archive. All
@@ -16,7 +22,7 @@ and operable.
 - Docker already installed, with a local `docker` group and gVisor registered as
   runtime `runsc` (the guided installer can install/register official gVisor);
 - one matching Steward release artifact; and
-- customer-provisioned Railyard CA, node credentials, and Executor host token.
+- customer-provisioned control-plane CA, node credentials, and Executor host token.
 
 Docker is deliberately not installed or reconfigured beyond optional gVisor
 registration: it is a host prerequisite controlled by the operator. No path pulls an
@@ -70,7 +76,7 @@ secrets on the command line:
 ```console
 sudo bash install-steward.sh \
   --non-interactive \
-  --version v0.2.0 \
+  --version v0.1.0 \
   --install-gvisor \
   --control-plane-url https://control.customer.example \
   --steward-credential /secure/enrollment/steward.json \
@@ -96,7 +102,7 @@ and its pinned trust key before importing these files into the facility.
 
 ```console
 sudo bash install-steward.sh \
-  --offline-dir /media/steward-v0.2.0 \
+  --offline-dir /media/steward-v0.1.0 \
   --control-plane-url https://control.customer.example \
   --steward-credential /media/enrollment/steward.json \
   --executor-credential /media/enrollment/executor.json \
@@ -113,7 +119,7 @@ directly (`dpkg -i ...deb` or `rpm -Uvh ...rpm`). The universal equivalent remai
 
 ```console
 sha256sum -c checksums.txt
-tar -xzf steward_v0.2.0_linux_amd64.tar.gz
+tar -xzf steward_v0.1.0_linux_amd64.tar.gz
 sudo bash scripts/install-node.sh
 ```
 
@@ -193,7 +199,7 @@ configured; a later install only stages the new version and does not change or r
 the active release. Activate or roll back atomically:
 
 ```console
-sudo /usr/local/libexec/steward/activate-node-release v0.2.0 --restart
+sudo /usr/local/libexec/steward/activate-node-release v0.1.0 --restart
 sudo /usr/local/libexec/steward/activate-node-release v0.1.0 --restart
 ```
 
@@ -211,7 +217,7 @@ requires a separate operator-approved recovery procedure.
 The guided upgrade equivalent is:
 
 ```console
-sudo bash install-steward.sh --version v0.2.0 --reuse-configuration
+sudo bash install-steward.sh --version v0.1.0 --reuse-configuration
 ```
 
 ## Removal

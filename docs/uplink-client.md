@@ -1,9 +1,14 @@
+---
+title: Outbound uplink client
+description: Design provenance and wire contract for Steward's implemented NAT-friendly outbound command and reporting channel.
+section: Design record
+---
+
 # Design: the outbound uplink client (NAT-friendly control channel)
 
-Status: **plan / design provenance, wire contract reconciled.** No implementation
-code has been written yet. This document records the shape chosen, the shapes
+Status: **implemented; design provenance and wire contract.** This document records the shape chosen, the shapes
 rejected, the invariants the design must hold, and the exact task list. It follows
-the same style as [ARCHITECTURE.md](../ARCHITECTURE.md): it explains not just *what*
+the same style as [ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md): it explains not just *what*
 but *why*, and it names the failure mode each decision closes.
 
 [The wire contract](#the-wire-contract--reconciled-against-the-merged-railyard-side-plan)
@@ -15,9 +20,9 @@ guessed. Implementation can proceed against it.
 
 ## Why this exists
 
-Steward today serves only an **inbound** REST API (`internal/server`, six lifecycle
-endpoints). That assumes whoever runs the control plane can dial *into* the node —
-true only when the node is directly reachable (same network, public IP, VPN). In
+Steward originally served only an **inbound** REST API. That assumed whoever ran the
+control plane could dial *into* the node—true only when the node was directly
+reachable (same network, public IP, VPN). In
 the target sovereign/enterprise deployment the node sits behind NAT or a corporate
 firewall that blocks inbound connections entirely, so the control plane can never
 open a socket to it.
@@ -605,7 +610,7 @@ dependency.**
 - **Why the cost is worth it.** Steward's entire value proposition is that a
   sovereign operator with zero trust in any vendor can clone *this repository alone*
   and build it (`go list -m all` lists only this module — see
-  [AGENTS.md](../AGENTS.md)). A single third-party dependency, however small,
+  [AGENTS.md](https://github.com/hardrails/steward/blob/main/AGENTS.md)). A single third-party dependency, however small,
   breaks that guarantee irreversibly. The convenience a backoff library buys is not
   remotely worth forfeiting the one invariant the repo exists to hold.
 
@@ -699,8 +704,8 @@ closed (marked below) as real follow-up work landed; the rest remain deferred.
   checks. This is now designed and implemented: `-disable-inbound-listener` (env
   `STEWARD_DISABLE_INBOUND_LISTENER`) lets a uplink-only node bind nothing inbound,
   with a fail-closed startup guard refusing the combination without `-uplink-url`.
-  See [`docs/disable-inbound-listener.md`](disable-inbound-listener.md) for the full
-  design and [ARCHITECTURE.md](../ARCHITECTURE.md#the-inbound-listener-is-opt-out-uplink-only-nodes-bind-nothing-inbound)
+  See [`docs/disable-inbound-listener.md`]({{ '/disable-inbound-listener/' | relative_url }}) for the full
+  design and [ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md#the-inbound-listener-is-opt-out-uplink-only-nodes-bind-nothing-inbound)
   for the summary.
 - **A durable outbound report queue.** Not needed: a lost report is recovered by the
   server's claim-lease redelivery + fencing (see [Reporting a result](#reporting-a-result)),

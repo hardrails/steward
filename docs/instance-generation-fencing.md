@@ -1,14 +1,20 @@
+---
+title: Instance-generation fencing
+description: Design record for closing delayed-command destroy and reprovision races with durable instance-generation and command-sequence fences.
+section: Design record
+---
+
 # Design: instance-generation fencing (closing the destroy/re-provision race)
 
 Status: **implemented node-side; design provenance.** This document records the
 shape chosen, the shapes rejected, the invariants the design must hold, and the
 exact task list that was implemented. It follows the same style as
-[ARCHITECTURE.md](../ARCHITECTURE.md) and [`docs/uplink-client.md`](uplink-client.md):
+[ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md) and [`docs/uplink-client.md`]({{ '/uplink-client/' | relative_url }}):
 it explains not just *what* but *why*, and it names the failure mode each decision
 closes.
 
 This is the **node-side (load-bearing) half** of a two-repo change. The framework
-side (the `hardrails` repo, a companion task, in progress) adds a wire-carried
+side adds a wire-carried
 `instance_generation: int` field to `NodeCommand`, minted per
 `(tenant_id, node_id, instance_id)` lineage and bumped on every fresh `provision`,
 mirroring the existing `claim_generation` fencing token exactly. That field is
@@ -18,7 +24,7 @@ the half that makes the node actually enforce it.**
 
 ## Why this exists
 
-[`docs/uplink-client.md`](uplink-client.md#deliberately-deferred) names a
+[`docs/uplink-client.md`]({{ '/uplink-client/' | relative_url }}#deliberately-deferred) names a
 deliberately-deferred race precisely: if the **same** `instance_id` on the **same**
 node is destroyed and then re-provisioned *before* a **stale, already-in-flight**
 lifecycle command from the OLD instance's lineage is finally delivered (a long
@@ -71,7 +77,7 @@ level up, to the **instance lineage** instead of the **command claim**.
   the *command-execution* path, and the two do not mix.
 - **Zero new dependencies.** A generation is an `int64`, a comparison, and a field on
   a struct that already round-trips through `encoding/json`. Nothing here needs a
-  library. The zero-private-dependency invariant ([AGENTS.md](../AGENTS.md)) is
+  library. The zero-private-dependency invariant ([AGENTS.md](https://github.com/hardrails/steward/blob/main/AGENTS.md)) is
   untouched.
 - **Scope is one race.** This closes the `instance_id`-reuse race and nothing else.
   It is not credential rotation, not TLS, not multi-control-plane failover, and — see
@@ -398,7 +404,7 @@ reading the companion change, not to guess.
 a `max`, and one struct field that already serializes through `encoding/json`. There is
 nothing here a library would do, and adding one would forfeit the zero-private-dependency
 invariant that is the whole reason Steward is a separate public repo
-([AGENTS.md](../AGENTS.md)). As with uplink-client.md, this decision is recorded inline
+([AGENTS.md](https://github.com/hardrails/steward/blob/main/AGENTS.md)). As with uplink-client.md, this decision is recorded inline
 as prose rather than as a `docs/adr/NNNN-*.md` file **on purpose**: this repo records
 architectural decisions as prose sections, and an ADR directory tree would be the kind
 of over-building this design resists.

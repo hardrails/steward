@@ -1,9 +1,15 @@
+---
+title: Ordered batch lifecycle operations
+description: Design rationale, ordering guarantees, idempotency behavior, bounds, and error semantics for POST /v1/instances/batch.
+section: Design record
+---
+
 # Design: `POST /v1/instances/batch` (ordered batch lifecycle operations)
 
 Status: **implemented; design provenance.** This document records the shape
 chosen, the shapes rejected, and the idempotency analysis for the batch
-endpoint. It follows the same style as [ARCHITECTURE.md](../ARCHITECTURE.md)
-and [`docs/instance-generation-fencing.md`](instance-generation-fencing.md):
+endpoint. It follows the same style as [ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md)
+and [`docs/instance-generation-fencing.md`]({{ '/instance-generation-fencing/' | relative_url }}):
 it explains not just *what* but *why*.
 
 ## Why this exists
@@ -37,7 +43,7 @@ operation's effect being visible to the second.
   This is what makes "destroy `instance_id` X, then re-provision X" work
   inside one batch: by the time the second operation runs, the first has
   already executed and released the `instance_id` (see
-  [Provisioning is idempotent by design](../ARCHITECTURE.md#provisioning-is-idempotent-by-design)
+  [Provisioning is idempotent by design](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md#provisioning-is-idempotent-by-design)
   and the `Destroy` doc comment in `internal/runtime/runtime.go`).
 - **Not a transaction — stated, not implied.** No operation is ever rolled
   back because a later one failed, and there is no dry-run/validate-first

@@ -1,10 +1,16 @@
+---
+title: Disabling the inbound listener
+description: Design rationale and safety invariants for running Steward in outbound-only mode without binding any inbound management socket.
+section: Design record
+---
+
 # Design: disabling the inbound listener (a bind-nothing-inbound flag for uplink-only nodes)
 
 Status: **implemented; design provenance.** This document records the shape
 chosen, the shapes rejected, the invariants the design must hold, and the exact
 task list that was implemented. It follows the same style as
-[ARCHITECTURE.md](../ARCHITECTURE.md), [`docs/uplink-client.md`](uplink-client.md),
-and [`docs/instance-generation-fencing.md`](instance-generation-fencing.md): it
+[ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md), [`docs/uplink-client.md`]({{ '/uplink-client/' | relative_url }}),
+and [`docs/instance-generation-fencing.md`]({{ '/instance-generation-fencing/' | relative_url }}): it
 explains not just *what* but *why*, and it names the failure mode each decision
 closes.
 
@@ -17,7 +23,7 @@ shape, or status code.
 
 ## Why this exists
 
-[`docs/uplink-client.md`](uplink-client.md#deliberately-deferred) names this as a
+[`docs/uplink-client.md`]({{ '/uplink-client/' | relative_url }}#deliberately-deferred) names this as a
 deliberately-deferred follow-up:
 
 > **Disabling the inbound listener entirely.** v1 always starts the HTTP listener

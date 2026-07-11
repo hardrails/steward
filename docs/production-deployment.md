@@ -1,11 +1,17 @@
+---
+title: Production deployment
+description: Production rollout guidance for Steward configuration, credentials, networking, observability, process supervision, shutdown, and recovery.
+section: Operator guide
+---
+
 # Production deployment
 
-This is the operator-facing companion to [README.md](../README.md) (the flag/API
-reference) and [ARCHITECTURE.md](../ARCHITECTURE.md) (the design). It ties together
+This is the operator-facing companion to the [configuration reference]({{ '/reference/configuration/' | relative_url }})
+and [ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md). It ties together
 the operational surface a production rollout actually touches — config, pre-flight
 validation, credential rotation, rate limiting, networking, and shutdown — into one
-walkthrough. It assumes you have already built Steward (see README's
-[Build and test](../README.md#build-and-test)) and does not repeat the full flag
+walkthrough. It assumes you have already built Steward (see the repository
+[build instructions](https://github.com/hardrails/steward#build-and-contribute)) and does not repeat the full flag
 table or API reference; it links to them where relevant.
 
 Two deployment topologies are coherent, and this document covers both, weighted
@@ -21,7 +27,7 @@ toward the second:
 ## Configuring a production node
 
 Any setting can go in a JSON file pointed at by `-config` (or `STEWARD_CONFIG`);
-see README's [Config file](../README.md#config-file) for the full key list and the
+see the [configuration reference]({{ '/reference/configuration/' | relative_url }}) for the full key list and the
 precedence rule (flag > env var > config file > built-in default). In production,
 prefer a config file over a long flag list — it is what your fleet-management
 tooling checks in and validates (see [Pre-flight validation](#pre-flight-validation-with--check-config)
@@ -131,7 +137,7 @@ handed the tracker directly and dials **out** to `-uplink-url` on its own
 in `internal/uplink` opens a listener or accepts a connection. The inbound HTTP
 listener (`-addr`) and the outbound uplink are two independent front doors onto
 one tracker — see
-[ARCHITECTURE.md's "second caller, not a second lifecycle engine"](../ARCHITECTURE.md#outbound-uplink-is-opt-in) —
+[ARCHITECTURE.md's "second caller, not a second lifecycle engine"](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md#outbound-uplink-is-opt-in) —
 and removing one does not touch the other.
 
 What the inbound listener is *for*, then, on a NAT'd node:
@@ -152,8 +158,8 @@ binds **nothing** inbound — no `http.Server` is built at all — while every f
 operation still flows through the uplink poll loop. A node with the flag set and
 no `-uplink-url` is refused at startup (a dark, unreachable process is a
 configuration error, not a valid deployment); see
-[ARCHITECTURE.md](../ARCHITECTURE.md#the-inbound-listener-is-opt-out-uplink-only-nodes-bind-nothing-inbound)
-and the full design in [`disable-inbound-listener.md`](disable-inbound-listener.md).
+[ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md#the-inbound-listener-is-opt-out-uplink-only-nodes-bind-nothing-inbound)
+and the full design in [`disable-inbound-listener.md`]({{ '/disable-inbound-listener/' | relative_url }}).
 
 Practical read: for a NAT'd node, the only network egress you need to open at the
 firewall is ordinary outbound HTTPS to `-uplink-url` — the same egress a browser
@@ -211,7 +217,7 @@ restart to pick up a corrected credential. That's closed: `Poller.Run` now pause
 on a fatal rejection and watches `-uplink-credential-file` — the same path the
 credential was loaded from — until it changes to a new, valid credential for this
 node, then resumes with no restart. The full design is in
-[`uplink-client.md`'s node-side credential hot-reload section](uplink-client.md#node-side-credential-hot-reload);
+[`uplink-client.md`'s node-side credential hot-reload section]({{ '/uplink-client/' | relative_url }}#node-side-credential-hot-reload);
 the operational shape that matters for a rollout:
 
 - **It is reactive, not a live file-watcher.** The watch loop only starts once a
@@ -257,8 +263,8 @@ a request flood the same structural way it bounds request bodies and instance
 count: a per-source (client IP) token-bucket limiter. The default —
 `20` requests/second per source with a burst of `40` — sheds excess requests with
 `429 Too Many Requests` and a `Retry-After` header before any handler work runs, so
-a 429 is always safe to retry. See README's
-[Inbound rate limiting](../README.md#inbound-rate-limiting) for the full budget
+a 429 is always safe to retry. See the
+[Configuration reference]({{ '/reference/configuration/' | relative_url }}) for the full budget
 rationale.
 
 **This only matters when the inbound listener is bound.** On a
@@ -293,9 +299,8 @@ Tuning for fleet scale:
 
 ## Metrics and the command audit log
 
-Both are opt-in and off by default; see README's
-[Metrics](../README.md#metrics) and
-[Command audit log](../README.md#command-audit-log) for the flag reference and
+Both are opt-in and off by default; see the
+[Configuration reference]({{ '/reference/configuration/' | relative_url }}) for the metrics and command-audit flags and
 the exact metric names / JSON-line shape.
 
 **Wiring `-enable-metrics` into a Prometheus scrape config.** `GET /metrics`
@@ -399,7 +404,7 @@ What the reload guarantees, all logged and never silent:
   under the ceiling. This is the same "circuit breaker on growth, not on reload"
   posture Steward applies when it loads a state file holding more instances than its
   cap — a capacity re-tune must never become an outage. See
-  [ARCHITECTURE.md](../ARCHITECTURE.md#max_instances-hot-reloads-on-sighup-and-lowering-it-never-evicts)
+  [ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md#max_instances-hot-reloads-on-sighup-and-lowering-it-never-evicts)
   for the design provenance.
 - **The startup precedence model still holds.** If `max_instances` was pinned by
   the `-max-instances` flag or `STEWARD_MAX_INSTANCES` env var at startup, the file
@@ -518,7 +523,7 @@ caller, not reachable through `cmd/steward`'s own flags today): it logs an
 process exit. If that ever fires, `Restart=on-failure` (or your orchestrator's
 equivalent) is the correct response.
 
-See [`disable-inbound-listener.md`](disable-inbound-listener.md) for the full
+See [`disable-inbound-listener.md`]({{ '/disable-inbound-listener/' | relative_url }}) for the full
 design provenance behind this model.
 
 ## A minimal production rollout walkthrough
@@ -526,7 +531,7 @@ design provenance behind this model.
 For a NAT'd node using the uplink pattern end to end:
 
 1. **Build the binary.** `go build -o steward ./cmd/steward` (see README's
-   [Build and test](../README.md#build-and-test)), or use a pinned release build —
+   [build instructions](https://github.com/hardrails/steward#build-and-contribute)), or use a pinned release build —
    either way, confirm what you're running with `steward -version`.
 2. **Enroll the node** on the control-plane side to obtain its `tenant_id`,
    `node_id`, and bearer `credential`.
