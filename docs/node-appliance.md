@@ -9,7 +9,7 @@ section: Operator reference
 Every Linux release is available as DEB, RPM, and a universal systemd archive. All
 three contain the same two static binaries, hardened systemd units, fail-closed
 configuration templates, and small Bash utilities for install, enrollment,
-preflight, version activation, and removal. They contain no Railyard code.
+preflight, version activation, and removal. They contain no control-plane code.
 
 This is the open-source node half of a sovereign deployment. A separately delivered
 control-plane bundle may carry this archive, customer trust material, and approved
@@ -151,7 +151,7 @@ Agent containers never receive the socket.
 
 ## Provision trust material
 
-Replace `railyard.example.invalid` in both `/etc/steward/steward.json` and
+Replace `control.example.invalid` in both `/etc/steward/steward.json` and
 `/etc/steward/executor.env`. Install these files from the customer's enrollment and
 PKI workflow:
 
@@ -160,7 +160,7 @@ PKI workflow:
 | `/etc/steward/uplink-credential.json` | `steward:steward`, `0600` | Steward node credential |
 | `/etc/steward/executor-uplink.json` | `steward-executor:steward-executor`, `0600` | Executor node credential |
 | `/etc/steward/executor-token` | `steward-executor:steward-executor`, `0600` | host-local Executor bearer secret |
-| `/etc/steward/railyard-ca.pem` | `root:root`, `0644` | customer control-plane CA bundle |
+| `/etc/steward/control-plane-ca.pem` | `root:root`, `0644` | customer control-plane CA bundle |
 
 Initialize the Executor's durable command fence exactly once, as its service user:
 

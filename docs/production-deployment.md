@@ -17,10 +17,10 @@ table or API reference; it links to them where relevant.
 Two deployment topologies are coherent, and this document covers both, weighted
 toward the second:
 
-- **Directly reachable.** Railyard dials the node's inbound REST API. `-addr` must
+- **Directly reachable.** A control plane dials the node's inbound REST API. `-addr` must
   be bound to a network-reachable address.
 - **NAT'd / firewalled (the uplink pattern).** The node sits behind NAT or a
-  firewall that blocks inbound connections. Steward instead polls Railyard
+  firewall that blocks inbound connections. Steward instead polls the control plane
   outbound. This is the deployment the uplink client, rate limiting, and
   credential hot-reload were built for, so it gets the most detail below.
 
@@ -142,7 +142,7 @@ and removing one does not touch the other.
 
 What the inbound listener is *for*, then, on a NAT'd node:
 
-- The **direct-REST topology**, where it's the whole point (Railyard dials in).
+- The **direct-REST topology**, where the control plane dials in.
 - **Local health/admin** on the uplink topology: `GET /v1/healthz`,
   `GET /v1/capabilities`, and — if `-enable-metrics` is also set —
   `GET /metrics`, all reachable only on-box since the default `-addr` is
@@ -276,9 +276,9 @@ topology, or any deployment that rebinds `-addr` to a network-reachable address.
 
 Tuning for fleet scale:
 
-- The default is sized for Railyard driving lifecycle operations at
+- The default is sized for a control plane driving lifecycle operations at
   reconciler-and-human pace. A **bulk operation** — cold-provisioning hundreds of
-  instances back to back from one Railyard replica — can exceed the 40-token
+  instances back to back from one control-plane replica — can exceed the 40-token
   burst and see some requests shed with 429. Raise `-max-requests-per-second` (or
   `STEWARD_MAX_REQUESTS_PER_SECOND`) for that traffic class, or set it to `0` to
   disable the limiter outright — appropriate only when Steward already sits
@@ -286,7 +286,7 @@ Tuning for fleet scale:
   unauthenticated.
 - The limiter keys on the **real TCP peer**, never a client-supplied header like
   `X-Forwarded-For` (a forgeable value on an unauthenticated listener would let an
-  attacker dodge the limit by rotating it). One consequence: if multiple Railyard
+  attacker dodge the limit by rotating it). One consequence: if multiple control-plane
   replicas — or any fronting proxy — reach a node through one shared egress
   address, they all share a single bucket. That's a signal to raise the limit for
   that node, or move rate limiting to the fronting layer instead of tightening
@@ -322,7 +322,7 @@ Two consequences follow directly from "same listener, no second door":
   runs the NAT'd/uplink-only topology (the default recommendation above), there
   is no local listener at all, so `-enable-metrics` has no effect and no target
   to add to Prometheus. Pull operational state for that topology from the
-  control-plane side (Railyard) instead, or run a **separate** direct-REST node
+  control-plane side instead, or run a **separate** direct-REST node
   in your fleet dashboard's monitoring path if you need node-local scraping —
   do not reach for a second listener inside Steward itself; that is exactly the
   shape ARCHITECTURE.md's zero-dependency, single-listener posture rules out.
@@ -551,8 +551,8 @@ For a NAT'd node using the uplink pattern end to end:
    naming the right `node_id`/`tenant_id`/`url`; if the inbound listener is on,
    `curl localhost:8080/v1/healthz` should return `200 {"status":"ok"}`.
 8. **Verify from the control plane** that the node is polling and its lifecycle
-   commands are being claimed — that side of the contract is Railyard's, out of
-   scope here.
+   commands are being claimed—that side of the contract belongs to the control
+   plane and is out of scope here.
 
 ## How a release build is proven solid
 

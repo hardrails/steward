@@ -17,10 +17,7 @@ issue them.
 | `/etc/steward/uplink-credential.json` | `steward:steward`, `0600` | Supervisor uplink identity |
 | `/etc/steward/executor-uplink.json` | `steward-executor:steward-executor`, `0600` | Executor uplink identity |
 | `/etc/steward/executor-token` | `steward-executor:steward-executor`, `0600` | Host-local API bearer token |
-| `/etc/steward/railyard-ca.pem` | `root:root`, `0644` | Control-plane CA bundle |
-
-The filename `railyard-ca.pem` is a packaging default, not a protocol dependency.
-It may contain the CA for any compatible control plane.
+| `/etc/steward/control-plane-ca.pem` | `root:root`, `0644` | Control-plane CA bundle |
 
 ## Preferred enrollment path
 
