@@ -1,0 +1,12 @@
+Package: steward-node
+Version: @VERSION@
+Section: admin
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Hardrails <support@hardrails.dev>
+Depends: passwd, systemd, util-linux
+Homepage: https://github.com/hardrails/steward
+Description: Sovereign Steward agent execution node
+ Installs the Steward lifecycle supervisor and Docker/gVisor executor as separate,
+ hardened systemd services. Installation is offline and noninteractive; services
+ remain disabled until the operator provisions trust material and runs preflight.

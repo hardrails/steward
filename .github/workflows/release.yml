@@ -11,10 +11,8 @@ name: Release
 # `publish` holds the only contents:write token, checks out no repository code,
 # and does nothing but attach the already-built artifacts to a GitHub Release.
 #
-# The binaries derive their version from Go's VCS build metadata
-# (runtime/debug.ReadBuildInfo -> Main.Version), which resolves to the exact tag
-# when built from a tag checkout with full history — no ldflags injection is used
-# or needed. scripts/release.sh asserts this on every tag build.
+# scripts/release.sh stamps the release tag into both binaries with the standard Go
+# linker and independently executes both to assert the result before publishing.
 
 on:
   push:
@@ -45,11 +43,9 @@ jobs:
     # runs the tagged commit's own code (scripts/release.sh), so it deliberately
     # holds NO publish-capable token — publishing is the separate job below.
     steps:
-      # fetch-depth: 0 pulls full history AND tags so the Go toolchain can resolve
-      # the tag pointing at HEAD and stamp it as the module version. A shallow
-      # checkout would make the binary self-report a pseudo-version instead of the
-      # tag; scripts/release.sh's assertion would then fail the release.
-      - name: Checkout (full history for correct version stamping)
+      # Full history supports release notes, tag verification, and local parity.
+      # Version identity itself is an explicit linker stamp asserted below.
+      - name: Checkout release source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
@@ -59,6 +55,11 @@ jobs:
         with:
           go-version: "1.24"
           check-latest: false
+
+      - name: Install native RPM build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y rpm
 
       # Cross-compiles the target matrix, packages each as a .tar.gz, writes
       # checksums.txt, and (on a tag build) asserts the binary self-reports the
@@ -116,4 +117,7 @@ jobs:
             --verify-tag \
             "${prerelease[@]}" \
             dist/steward_*.tar.gz \
+            dist/steward-node_*.deb \
+            dist/steward-node_*.rpm \
+            dist/install-steward.sh \
             dist/checksums.txt

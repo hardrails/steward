@@ -1,9 +1,10 @@
 # Releasing Steward
 
 This document is the maintainer runbook for cutting a Steward release. Pushing a
-version tag (`vX.Y.Z`) builds cross-platform binaries with SHA-256 checksums and
-attaches them to a GitHub Release — no manual uploads. It also records *why* the
-release is a plain GitHub Actions matrix rather than goreleaser, and how the
+version tag (`vX.Y.Z`) builds cross-platform binaries, Linux packages, the guided
+installer, and SHA-256 checksums and attaches them to a GitHub Release — no manual
+uploads. It also records *why* the release uses native package tools rather than a
+packaging framework, and how the
 version a binary reports is derived, because both were decided from empirical
 tests, not assumption.
 
@@ -41,14 +42,14 @@ worse than a broad one — so `scripts/release.sh` enforces the `vX.Y.Z` shape
 itself, failing a stray tag like `vnext` or `v2` fast and loudly before anything is
 built or published.) It runs **two jobs**, split deliberately for least privilege:
 
-1. **`build`** — with a **read-only** token — checks out the tag with **full
-   history** (`fetch-depth: 0`) so the Go toolchain can stamp the tag as the
-   binaries' version (see below), then runs `scripts/release.sh`, which rejects a
+1. **`build`** — with a **read-only** token — checks out the release source with
+   full history, then runs `scripts/release.sh`, which rejects a
    non-semver tag up front, cross-compiles the target matrix, packages each build
    as a `.tar.gz` (`steward` everywhere, plus `steward-executor` and the offline
    node-appliance assets on Linux, with `LICENSE` + `README.md`), writes a `checksums.txt` of
-   SHA-256 sums, asserts both binaries self-report the tag, and uploads the whole
-   `dist/` directory as a workflow artifact.
+   SHA-256 sums, builds DEB and RPM node packages for both Linux architectures,
+   includes `install-steward.sh`, asserts both binaries self-report the tag, and
+   uploads the whole `dist/` directory as a workflow artifact.
 2. **`publish`** — the only job with a `contents: write` token — runs **only on a
    tag push**, checks out **no repository code**, downloads the artifacts the
    build produced, and creates a GitHub Release named after the tag (auto-generated
@@ -68,6 +69,11 @@ an accidentally-tagged bad commit cannot execute with publish permissions.
 | darwin | amd64  | `steward_vX.Y.Z_darwin_amd64.tar.gz` | `steward` |
 | darwin | arm64  | `steward_vX.Y.Z_darwin_arm64.tar.gz` | `steward` |
 
+Each Linux row additionally produces
+`steward-node_vX.Y.Z_<arch>.deb` and
+`steward-node_vX.Y.Z_<arch>.rpm`. `install-steward.sh` is architecture-independent
+and selects among those packages and the archive at runtime.
+
 Both Steward process binaries are pure–standard-library Go. Executor and the
 systemd/config/install/preflight/activation node-appliance assets are shipped in each
 Linux archive—the supported node-server platform—and versioned as an integral Steward
@@ -76,76 +82,58 @@ not advertise an Executor or Linux service installer that cannot obtain Docker `
 on macOS. Adding a target requires deciding explicitly whether it can satisfy Executor's
 host contract.
 
-## How the version is derived (and why there is no ldflags injection)
+## How release identity is stamped
 
-`internal/buildinfo.Resolve()` prefers the build metadata the Go toolchain
-embeds, and only falls back to the compiled-in `const Version` when none exists.
-Its precedence, confirmed empirically by building the binary several ways, is:
+`internal/buildinfo.Resolve()` has four explicit precedence levels:
 
-1. **`debug.ReadBuildInfo().Main.Version`** — the module version. This is set by
-   the module system, not by the linker.
-2. **VCS revision** — the commit SHA (`-dirty` when the tree had uncommitted
+1. **Stamped release version** — `scripts/release.sh` sets the otherwise-empty
+   private string `releaseVersion` through Go's standard `-ldflags -X` support.
+2. **`debug.ReadBuildInfo().Main.Version`** — used by a versioned `go install`.
+3. **VCS revision** — the commit SHA (`-dirty` when the tree had uncommitted
    changes), stamped by any `go build` of a committed tree.
-3. **`const Version`** (`"0.1.0"`) — the fallback when there is no build
+4. **`const Version`** (`"0.1.0"`) — the development fallback when there is no build
    metadata at all (`go run`, `go test`, or a build with VCS stamping disabled).
 
-The load-bearing finding: **when the binary is built from a checkout that sits
-exactly on a semver tag, the Go toolchain derives `Main.Version` as that tag.**
-So both supported install paths report the tag with no version injection:
+The explicit first level is load-bearing. A local-module checkout normally has
+`Main.Version="(devel)"`; VCS metadata identifies a commit, not the human release
+tag; and reproducible `-trimpath` builds may omit that metadata. The artifact
+filename, `/opt/steward/releases/<version>` directory, and activation argument must
+still agree exactly, so the release tag is passed directly to every cross-build:
 
 ```console
-# Canonical `go install` — Main.Version is the tagged module version:
-$ go install github.com/hardrails/steward/cmd/steward@v0.1.0
-$ steward -version
-steward v0.1.0
-
-# The release workflow's `go build` from the tag checkout — same result, because
-# Go stamps the tag as Main.Version when it is checked out with full history:
-$ steward -version
-steward v0.1.0
+go build -trimpath \
+  -ldflags "-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=v0.1.0" \
+  ./cmd/steward
 ```
 
-Two consequences worth stating plainly, because they were verified rather than
-assumed:
+The release script then builds host-native copies through the same path, executes
+both `steward -version` and `steward-executor -version`, and fails before publishing
+unless both equal `GITHUB_REF_NAME`. This guards the linker symbol, import path, and
+both entry points rather than assuming a successful `go build` implies the version
+arrived.
 
-- **No `-ldflags -X` injection is used or needed.** The tag-derived version is
-  already correct. And `Version` is a `const`, which the linker's
-  `-ldflags -X importpath.Version=...` **cannot patch** anyway — a `const` is
-  inlined at compile time and has no linker-visible symbol, so the flag is
-  silently inert (it does not error; it simply does nothing). Making the binaries
-  report the tag through injection would require both changing the `const` to a
-  `var` *and* disabling VCS stamping — strictly worse than letting Go's native
-  mechanism do it for free.
-- **`fetch-depth: 0` is mandatory in CI.** A shallow checkout would leave the tag
-  unresolvable, and the binary would self-report a `v0.0.0-<timestamp>-<sha>`
-  pseudo-version (an untagged clean tree) or the bare `const` fallback instead of
-  the tag. `scripts/release.sh` guards against exactly this: on a tag build it
-  builds the host-native binary, reads its `-version`, and **fails the release**
-  if it does not equal the tag — so a stamping regression aborts the publish
-  instead of shipping a mislabeled artifact.
+A canonical `go install github.com/hardrails/steward/cmd/steward@v0.1.0` still
+reports `v0.1.0` through `Main.Version` without release flags. The shared fallback
+constant matters only for metadata-free developer invocations; keep it roughly in
+step for tidiness, but it does not identify published artifacts.
 
-The shared `const Version` in `internal/buildinfo/version.go` therefore matters only for
-non-release invocations (`go run ./cmd/steward -version` prints `steward 0.1.0`).
-Keep it roughly in step with the latest release for tidiness, but it is not what a
-released binary reports and bumping it is optional.
+## Why native package tools, not a packaging framework
 
-## Why a plain Actions matrix, not goreleaser
+The release deliberately uses `dpkg-deb` and `rpmbuild`, invoked by short audited
+scripts, instead of goreleaser, nfpm, fpm, or a self-extracting installer:
 
-[goreleaser](https://goreleaser.com) is the Go ecosystem's standard release tool
-and would also work here. This repository deliberately uses a plain GitHub Actions
-matrix build instead, for reasons specific to Steward:
-
-- **Zero new tooling in the release path.** Steward's whole premise is that it is
-  "buildable by anyone with only the Go toolchain installed" (see `AGENTS.md` and
-  the pre-commit hook). The release uses only `go build` plus POSIX shell and the
-  `gh` CLI that is preinstalled on the runner — nothing a contributor cannot run
-  locally with `scripts/release.sh`. goreleaser would add a tool (and its GitHub
-  Action or binary) to the trusted release surface for functionality this project
-  does not need.
-- **The native version mechanism removes goreleaser's main draw.** goreleaser's
-  headline feature for a project like this is templated `-ldflags` version
-  injection. Steward gets the correct tagged version from Go's own VCS build info
-  with no injection at all (above), so that feature would be redundant.
+- **Use the host's ownership model.** DEB and RPM provide atomic file ownership,
+  upgrade ordering, dependency checks, and removal semantics. A self-extracting
+  shell archive would have to recreate those poorly.
+- **No application dependency.** The package builders are distribution-native
+  release tools, not Go module or runtime dependencies. `go list -m all` remains
+  exactly the Steward module.
+- **Small audit surface.** The templates only carry the already-built release stage
+  and invoke the same `install-node.sh` lifecycle on the target. There is no second
+  implementation of identity, configuration, unit, or activation behavior.
+- **The one linker stamp needs no framework.** The native release script applies a
+  single standard `-X` value and executes both outputs to verify it. A packaging
+  framework would not make that contract smaller or safer.
 - **Locally and fully verifiable.** `scripts/release.sh` is the exact build CI
   runs; a maintainer can dry-run the whole thing on their laptop. The build was
   validated end-to-end (all four targets cross-compiled, each self-reporting
@@ -155,10 +143,10 @@ matrix build instead, for reasons specific to Steward:
   — the same supply-chain discipline the rest of CI already uses — and publishes
   with the built-in `GITHUB_TOKEN` via `gh`, adding no third-party release action.
 
-If Steward later grows needs goreleaser serves well — Linux packages (`.deb`/
-`.rpm`), Homebrew taps, Docker manifests, SBOM/signing pipelines — revisit this
-decision then. For two static binaries in one checksummed archive, the matrix is the
-smaller, more auditable, more on-ethos choice.
+Revisit a packaging framework only when Steward commits to another native format
+(for example, a non-systemd platform) or package metadata becomes complex enough
+that maintaining the two templates is riskier than adopting the tool. Do not adopt
+one merely to shorten these build scripts.
 
 ## Dry-running the release without publishing
 
@@ -167,12 +155,16 @@ You never have to publish to test the automation. Two ways:
 ### Locally (no GitHub involved)
 
 ```console
-# Builds every target, archives them, writes checksums — into ./dist. Publishes
-# nothing. dist/ is git-ignored.
+# Builds every target and any native packages whose platform tools are installed,
+# then writes checksums into ./dist. Publishes nothing. dist/ is git-ignored.
 bash scripts/release.sh
 ls dist/
-sha256sum -c dist/checksums.txt   # (shasum -a 256 -c on macOS)
+(cd dist && sha256sum -c checksums.txt)   # use `shasum -a 256 -c` on macOS
 ```
+
+On Ubuntu CI, `dpkg-deb` and `rpmbuild` are both installed and every advertised
+package is mandatory. A maintainer's macOS dry run builds archives and skips native
+packages whose Linux tools are absent; use the CI dry run for the complete matrix.
 
 Run against a tag locally to also exercise the version assertion:
 

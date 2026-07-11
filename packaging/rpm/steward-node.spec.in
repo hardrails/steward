@@ -1,0 +1,62 @@
+Name:           steward-node
+Version:        @VERSION@
+Release:        @RELEASE@%{?dist}
+Summary:        Sovereign Steward agent execution node
+License:        Apache-2.0
+URL:            https://github.com/hardrails/steward
+BuildArch:      @ARCH@
+# The payload contains already-stripped, reproducible static Go binaries. Do not
+# let distribution brp scripts mutate them or require a target-architecture
+# binutils toolchain merely to wrap the release stage.
+%global __os_install_post %{nil}
+Requires:       systemd
+Requires:       /usr/sbin/useradd
+Requires:       /usr/sbin/usermod
+Requires:       util-linux
+
+%description
+Installs the Steward lifecycle supervisor and Docker/gVisor executor as
+separate, hardened systemd services. Installation is offline and
+noninteractive; services remain disabled until the operator provisions trust
+material and runs preflight.
+
+%prep
+
+%build
+
+%install
+mkdir -p %{buildroot}/usr/lib/steward-node/release
+mkdir -p %{buildroot}/usr/share/doc/steward-node
+cp -a %{_sourcedir}/release/. %{buildroot}/usr/lib/steward-node/release/
+install -m 0644 %{_sourcedir}/LICENSE %{buildroot}/usr/share/doc/steward-node/LICENSE
+install -m 0644 %{_sourcedir}/README.md %{buildroot}/usr/share/doc/steward-node/README.md
+
+%post
+if [ "$1" -ge 1 ]; then
+    /usr/lib/steward-node/release/scripts/install-node.sh
+fi
+
+%preun
+if [ "$1" -eq 0 ]; then
+    systemctl disable --now steward.service steward-executor.service >/dev/null 2>&1 || true
+fi
+
+%postun
+if [ "$1" -eq 0 ]; then
+    for binary in steward steward-executor; do
+        path="/usr/local/bin/$binary"
+        target=$(readlink "$path" 2>/dev/null || true)
+        case "$target" in
+            /opt/steward/current/* | /opt/steward/releases/*) rm -f "$path" ;;
+        esac
+    done
+    rm -rf /usr/local/libexec/steward
+    rm -f /usr/local/lib/systemd/system/steward.service \
+        /usr/local/lib/systemd/system/steward-executor.service
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+%files
+%license /usr/share/doc/steward-node/LICENSE
+%doc /usr/share/doc/steward-node/README.md
+/usr/lib/steward-node/release/

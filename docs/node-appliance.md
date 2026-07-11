@@ -1,10 +1,9 @@
-# Disconnected Steward node appliance
+# Installing the Steward node appliance
 
-The Linux release archive is an offline-installable node payload for both Steward
-processes. It contains the two static binaries, hardened systemd units, fail-closed
-configuration templates, and small Bash utilities for install, preflight, and
-version activation. It contains no Railyard code and makes no network call during
-installation.
+Every Linux release is available as DEB, RPM, and a universal systemd archive. All
+three contain the same two static binaries, hardened systemd units, fail-closed
+configuration templates, and small Bash utilities for install, enrollment,
+preflight, version activation, and removal. They contain no Railyard code.
 
 This is the open-source node half of a sovereign deployment. A separately delivered
 control-plane bundle may carry this archive, customer trust material, and approved
@@ -13,27 +12,108 @@ and operable.
 
 ## Host contract
 
-- Linux with systemd;
+- Linux with systemd on `amd64` or `arm64`;
 - Docker already installed, with a local `docker` group and gVisor registered as
-  runtime `runsc`;
-- one of the published Linux `amd64` or `arm64` Steward archives; and
+  runtime `runsc` (the guided installer can install/register official gVisor);
+- one matching Steward release artifact; and
 - customer-provisioned Railyard CA, node credentials, and Executor host token.
 
-The installer does not install Docker or gVisor, fetch packages, contact GitHub, pull
-images, create credentials, or trust an embedded vendor endpoint. Those are explicit
-operator inputs. It also does not enable or start either service.
+Docker is deliberately not installed or reconfigured beyond optional gVisor
+registration: it is a host prerequisite controlled by the operator. No path pulls an
+agent image, creates a control-plane credential, or trusts an embedded endpoint.
 
-## Offline install
+## Platform and artifact matrix
 
-Verify the archive using the release `checksums.txt`, transfer it into the facility,
-then unpack and install as root. A checksum proves integrity against the manifest you
-received; it does not by itself authenticate who supplied that manifest. When this
-archive is carried inside a signed appliance bundle, verify that outer signature and
-its pinned trust key before checking these inner hashes.
+| Target family | Preferred artifact | Installer behavior |
+| --- | --- | --- |
+| Debian, Ubuntu, derivatives | `steward-node_<version>_<arch>.deb` | Installs with `dpkg` |
+| RHEL, Rocky, Alma, CentOS Stream, Fedora, Amazon Linux, Oracle Linux, SUSE | `steward-node_<version>_<arch>.rpm` | Installs with `rpm` |
+| Other systemd Linux distributions | `steward_<version>_linux_<arch>.tar.gz` | Uses the generic node installer |
+
+The release architectures are `amd64` and `arm64`; RPM metadata maps those to
+`x86_64` and `aarch64`. Alpine/OpenRC, macOS, Windows, BSD, and non-systemd Linux are
+not advertised as Executor node platforms. The universal archive is a distribution
+fallback, not a way to bypass the Linux/systemd/gVisor host contract.
+
+## Guided online install
+
+Download the immutable release asset rather than piping an unreviewed mutable branch
+into a root shell:
+
+```console
+curl -fsSLo install-steward.sh \
+  https://github.com/hardrails/steward/releases/latest/download/install-steward.sh
+less install-steward.sh
+sudo bash install-steward.sh
+```
+
+The interactive flow detects the platform, asks for the release (latest by default),
+enrollment URL, two credential files, and CA. It generates the host-local Executor
+token when one is not supplied. If Docker does not advertise `runsc`, it asks before
+installing gVisor from the official release channel, verifies both gVisor binaries
+against their published SHA-512 values, runs `runsc install`, reloads Docker, and
+checks that Docker now reports the runtime. It preserves and restores an existing
+Docker daemon configuration if registration fails.
+
+After package installation, enrollment is transactional through node preflight:
+invalid credentials, modes, CA material, configuration, gVisor, or systemd units
+restore the previous `/etc/steward` files. A newly created empty Executor fence is
+removed if that same enrollment transaction fails before service start; any
+pre-existing fence is never reset or removed. A valid target version is then
+activated atomically and both services are enabled and started.
+
+## Unattended install
+
+The same flow has no prompts with `--non-interactive`. Values are file paths, not
+secrets on the command line:
+
+```console
+sudo bash install-steward.sh \
+  --non-interactive \
+  --version v0.2.0 \
+  --install-gvisor \
+  --control-plane-url https://control.customer.example \
+  --steward-credential /secure/enrollment/steward.json \
+  --executor-credential /secure/enrollment/executor.json \
+  --ca-file /secure/enrollment/control-plane-ca.pem
+```
+
+This is suitable for cloud-init, Packer, configuration management, or a customer
+golden image. Use `--no-start` on an already-stopped node to configure and activate
+without starting it, `--stage-only` to install an upgrade without requiring a
+running Docker daemon or gVisor and without configuring or activating it, and
+`--reuse-configuration` to validate and retain an already-enrolled node during an
+upgrade. `--dry-run` resolves the platform plan without root, downloads, or mutation.
+Every option has a documented `STEWARD_*` environment equivalent in
+`install-steward.sh --help`.
+
+## Air-gapped install
+
+Transfer `install-steward.sh`, `checksums.txt`, and the matching DEB/RPM/archive into
+one directory. A checksum proves integrity against the manifest you received; it does
+not authenticate who supplied the manifest. Verify the signed outer appliance bundle
+and its pinned trust key before importing these files into the facility.
+
+```console
+sudo bash install-steward.sh \
+  --offline-dir /media/steward-v0.2.0 \
+  --control-plane-url https://control.customer.example \
+  --steward-credential /media/enrollment/steward.json \
+  --executor-credential /media/enrollment/executor.json \
+  --ca-file /media/enrollment/control-plane-ca.pem
+```
+
+This path makes no Steward network request. If gVisor is not already registered,
+also transfer `runsc`, `containerd-shim-runsc-v1`, and their official `.sha512`
+files, then add `--install-gvisor --gvisor-dir /media/gvisor`. In unattended mode,
+add `--non-interactive`.
+
+For a deliberately staged two-phase rollout, native packages can be installed
+directly (`dpkg -i ...deb` or `rpm -Uvh ...rpm`). The universal equivalent remains:
 
 ```console
 sha256sum -c checksums.txt
-tar -xzf steward_v0.1.0_linux_amd64.tar.gz
+tar -xzf steward_v0.2.0_linux_amd64.tar.gz
 sudo bash scripts/install-node.sh
 ```
 
@@ -48,7 +128,8 @@ The installer:
 5. installs vendor systemd units under `/usr/local/lib/systemd/system` and
    configuration templates without overwriting an operator's existing configuration
    or `/etc/systemd/system` overrides; and
-6. leaves both services disabled and stopped.
+6. leaves both services disabled and stopped. Only the top-level guided installer
+   proceeds through enrollment, preflight, activation, and explicit enablement.
 
 An exact legacy unit written to `/etc/systemd/system` by the prototype installer is
 migrated automatically. A differing full-unit override is treated as operator-owned:
@@ -126,3 +207,27 @@ Application rollback is not a state rollback. Preserve `/var/lib/steward`,
 `/var/lib/steward-executor`, `/var/log/steward`, and `/etc/steward`; deleting or
 restoring those paths changes lifecycle, audit, identity, or anti-replay state and
 requires a separate operator-approved recovery procedure.
+
+The guided upgrade equivalent is:
+
+```console
+sudo bash install-steward.sh --version v0.2.0 --reuse-configuration
+```
+
+## Removal
+
+Use the native package manager (`apt remove steward-node` or
+`rpm -e steward-node`) for native installations. Removal stops and disables both
+services and removes package-owned integration, but retains enrollment and durable
+state. Debian `apt purge` additionally removes `/etc/steward`; it still retains
+`/opt/steward` and `/var/lib` because deleting anti-replay or lifecycle state must be
+an explicit recovery decision.
+
+For the universal archive, run:
+
+```console
+sudo /usr/local/libexec/steward/uninstall-node
+```
+
+It retains configuration and state by default. `--purge-config` and `--purge-data`
+are separate, explicit destructive acknowledgements.
