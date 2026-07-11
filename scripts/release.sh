@@ -17,20 +17,45 @@
 #
 # Usage: scripts/release.sh
 # Env (set automatically by GitHub Actions; optional locally):
-#   GITHUB_REF_TYPE  "tag" enables the strict version assertion below.
-#   GITHUB_REF_NAME  the tag (e.g. v0.1.0); used for artifact names and the assertion.
+#   GITHUB_REF_TYPE         "tag" enables the strict version assertion below.
+#   GITHUB_REF_NAME         the tag (e.g. v0.1.0); used for artifact names and the assertion.
+#   STEWARD_RELEASE_VERSION explicit path-safe artifact and binary version. CI
+#                           uses the tag, or v0.0.0-dev.<commit> for a dry-run.
+#   STEWARD_RELEASE_TARGETS whitespace-separated GOOS/GOARCH targets. The default
+#                           remains the complete public matrix. CI narrows this to
+#                           one architecture per native package-building runner.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 # The published target matrix: pure-stdlib Go with CGO off, so every target is a
 # trivial cross-compile from any host.
-targets=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64)
+default_targets="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"
+target_input=${STEWARD_RELEASE_TARGETS:-$default_targets}
+targets=()
+while IFS= read -r target_line; do
+	line_targets=()
+	read -r -a line_targets <<<"$target_line"
+	targets+=("${line_targets[@]}")
+done <<<"$target_input"
+if (( ${#targets[@]} == 0 )); then
+	echo "release: STEWARD_RELEASE_TARGETS selected no targets" >&2
+	exit 2
+fi
+for target in "${targets[@]}"; do
+	case "$target" in
+		linux/amd64 | linux/arm64 | darwin/amd64 | darwin/arm64) ;;
+		*)
+			echo "release: unsupported target '$target'" >&2
+			exit 2
+			;;
+	esac
+done
 
 # VERSION labels artifacts and is stamped into both binaries. On a tag push
 # GITHUB_REF_NAME is authoritative; a local dry run falls back to `git describe`,
 # then to "dev" outside any checkout.
-VERSION="${GITHUB_REF_NAME:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
+VERSION="${STEWARD_RELEASE_VERSION:-${GITHUB_REF_NAME:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}}"
 release_ldflags="-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=${VERSION}"
 
 # Fail-fast release-tag gate. The workflow's push trigger is the broad `v*`
