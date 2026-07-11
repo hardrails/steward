@@ -1,5 +1,6 @@
 # Compiled binary produced by `go build ./cmd/steward`
 /steward
+/steward-executor
 
 # Release build output produced by `scripts/release.sh` (cross-compiled
 # archives + checksums); published to a GitHub Release, never committed.

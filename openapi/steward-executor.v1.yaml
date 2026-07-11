@@ -1,0 +1,392 @@
+openapi: 3.0.3
+info:
+  title: Steward Executor API
+  version: "1.0.0"
+  description: |
+    Public host-local contract for Steward's separate Docker/gVisor executor
+    process. The control plane supplies a fully resolved generic OCI workload;
+    Executor independently enforces immutable images, resource ceilings, and
+    non-escapable sandbox settings. Railyard is one consumer, not a dependency.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: Steward
+    url: https://github.com/hardrails/steward
+servers:
+  - url: http://127.0.0.1:8090
+    description: Default host-local listener
+security:
+  - bearerAuth: []
+tags:
+  - name: workloads
+    description: Tenant-scoped OCI workload lifecycle.
+  - name: health
+    description: Executor process liveness.
+paths:
+  /v1/healthz:
+    get:
+      tags: [health]
+      operationId: executorHealth
+      summary: Report process liveness
+      description: Returns process liveness without requiring the host-control credential.
+      security: []
+      responses:
+        "200":
+          description: Executor is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/workloads:
+    post:
+      tags: [workloads]
+      operationId: provisionWorkload
+      summary: Provision a validated workload
+      description: |
+        Creates a stopped Docker container under gVisor. Replaying the exact
+        tenant, instance, and immutable workload returns the existing container
+        with 200 only when its stored fingerprint and hardened Docker settings
+        still match; any drift returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Workload"
+      responses:
+        "200":
+          description: Exact idempotent replay of an existing workload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkloadState"
+        "201":
+          description: Workload container created in the stopped state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkloadState"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: The deterministic runtime reference already has a different or drifted definition.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "503":
+          description: Host or per-tenant workload capacity is exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/workloads/{runtime_ref}:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    get:
+      tags: [workloads]
+      operationId: getWorkload
+      summary: Read current workload status
+      description: Returns Docker's current status only for an Executor-managed, still-hardened container.
+      responses:
+        "200":
+          description: Current Docker workload status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkloadState"
+        "400":
+          $ref: "#/components/responses/InvalidRuntimeRef"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/WorkloadDrift"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [workloads]
+      operationId: destroyWorkload
+      summary: Idempotently destroy a workload
+      description: Removes only an Executor-managed workload; an absent or unmanaged name is already absent from this boundary.
+      responses:
+        "204":
+          description: Workload is absent; repeated destroys also return 204.
+        "400":
+          $ref: "#/components/responses/InvalidRuntimeRef"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/WorkloadDrift"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/workloads/{runtime_ref}/start:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    post:
+      tags: [workloads]
+      operationId: startWorkload
+      summary: Idempotently start a workload
+      description: Starts only an Executor-managed, still-hardened workload; an already-running workload is a no-op.
+      responses:
+        "200":
+          description: Workload is running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkloadState"
+        "400":
+          $ref: "#/components/responses/InvalidRuntimeRef"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/WorkloadDrift"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/workloads/{runtime_ref}/stop:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    post:
+      tags: [workloads]
+      operationId: stopWorkload
+      summary: Idempotently stop a workload
+      description: Stops only an Executor-managed, still-hardened workload; an already-stopped workload is a no-op.
+      responses:
+        "200":
+          description: Workload is not running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkloadState"
+        "400":
+          $ref: "#/components/responses/InvalidRuntimeRef"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/WorkloadDrift"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/workloads/{runtime_ref}/logs:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    get:
+      tags: [workloads]
+      operationId: getWorkloadLogs
+      summary: Read a bounded workload log tail
+      description: Returns at most the most recent 1 MiB from an Executor-managed workload.
+      responses:
+        "200":
+          description: Combined stdout/stderr tail, bounded to 1 MiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkloadLogs"
+        "400":
+          $ref: "#/components/responses/InvalidRuntimeRef"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/WorkloadDrift"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    RuntimeRef:
+      name: runtime_ref
+      in: path
+      required: true
+      description: Opaque Executor-issued workload identifier.
+      schema:
+        type: string
+        pattern: "^executor-[a-f0-9]{64}$"
+  schemas:
+    Workload:
+      type: object
+      additionalProperties: false
+      required: [instance_id, tenant_id, profile_id, image, command, resources, egress]
+      properties:
+        instance_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        tenant_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        profile_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        image:
+          type: string
+          maxLength: 1024
+          pattern: "^.+@sha256:[a-f0-9]{64}$"
+        command:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: string
+            maxLength: 4096
+        resources:
+          $ref: "#/components/schemas/Resources"
+        egress:
+          $ref: "#/components/schemas/Egress"
+    Resources:
+      type: object
+      additionalProperties: false
+      required: [memory_bytes, cpu_millis, pids]
+      properties:
+        memory_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+        cpu_millis:
+          type: integer
+          format: int64
+          minimum: 1
+        pids:
+          type: integer
+          format: int64
+          minimum: 1
+    Egress:
+      type: object
+      additionalProperties: false
+      properties:
+        allowed_hosts:
+          type: array
+          maxItems: 0
+          items:
+            type: string
+      description: V1 admits no networking; any non-empty allowlist is rejected.
+    WorkloadState:
+      type: object
+      additionalProperties: false
+      required: [runtime_ref, status]
+      properties:
+        runtime_ref:
+          type: string
+          pattern: "^executor-[a-f0-9]{64}$"
+        status:
+          type: string
+          enum: [created, restarting, running, removing, paused, exited, dead]
+    WorkloadLogs:
+      type: object
+      additionalProperties: false
+      required: [runtime_ref, logs]
+      properties:
+        runtime_ref:
+          type: string
+        logs:
+          type: string
+          maxLength: 1048576
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error, message]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+  responses:
+    InvalidRequest:
+      description: Malformed JSON, unknown field, policy violation, or resource request above the host ceiling.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InvalidRuntimeRef:
+      description: The runtime reference is not an Executor-issued identifier.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Valid host-control bearer credential required.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: No Executor-managed workload has this runtime reference.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    MethodNotAllowed:
+      description: Method not allowed for this path.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    WorkloadDrift:
+      description: The managed container no longer matches its admitted fingerprint or fixed sandbox policy.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    DockerError:
+      description: The bounded local Docker Engine operation failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: Executor recovered an unexpected internal failure.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

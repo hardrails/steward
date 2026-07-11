@@ -9,6 +9,7 @@ package uplink
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -16,6 +17,7 @@ import (
 // checked on load so a future incompatible format change fails closed rather than
 // being silently mis-parsed, mirroring the tracker's state-file versioning.
 const credentialVersion = 1
+const maxCredentialBytes = 64 << 10
 
 // Credential is the operator-provisioned bearer identity a node presents on every
 // outbound poll and report. It is the output of control-plane enrollment, dropped
@@ -56,22 +58,35 @@ func LoadCredential(path string) (*Credential, error) {
 	// token. The check is on the mode bits themselves, so it fails closed even
 	// when the process runs as root (whose access would otherwise bypass the
 	// permissions).
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat uplink credential file %q: %w (re-enroll this node and write its credential to that path)", path, err)
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return nil, fmt.Errorf("uplink credential file %q has insecure permissions %#o: it is readable or writable by group or others; restrict it to the owner (run: chmod 600 %s) so the bearer credential cannot be read by another user", path, perm, path)
 	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("uplink credential file %q must be a regular file", path)
+	}
+	if info.Size() > maxCredentialBytes {
+		return nil, fmt.Errorf("uplink credential file %q exceeds the %d-byte limit", path, maxCredentialBytes)
+	}
 
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("read uplink credential file %q: %w (re-enroll this node and write its credential to that path)", path, err)
 	}
+	defer file.Close()
 
 	var c Credential
-	if err := json.Unmarshal(data, &c); err != nil {
+	decoder := json.NewDecoder(io.LimitReader(file, maxCredentialBytes+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&c); err != nil {
 		return nil, fmt.Errorf("uplink credential file %q is not valid credential JSON: %w (re-enroll this node and rewrite the credential file)", path, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("uplink credential file %q must contain exactly one JSON object", path)
 	}
 	if c.Version != credentialVersion {
 		return nil, fmt.Errorf("uplink credential file %q has unsupported format version %d; this build reads version %d (re-enroll this node and rewrite the credential file)", path, c.Version, credentialVersion)

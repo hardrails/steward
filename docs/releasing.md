@@ -18,7 +18,7 @@ git pull origin main
 #    ONLY the version reported under `go run`/`go test`; a real tagged build does
 #    not use it (see "How the version is derived" below). Skip if it already
 #    matches the release you are cutting.
-#    -> internal/server/server.go: const Version = "0.1.0"
+#    -> internal/buildinfo/version.go: const Version = "0.1.0"
 
 # 3. Tag the release commit and push the tag. The tag push is what triggers the
 #    Release workflow.
@@ -43,10 +43,10 @@ built or published.) It runs **two jobs**, split deliberately for least privileg
 
 1. **`build`** — with a **read-only** token — checks out the tag with **full
    history** (`fetch-depth: 0`) so the Go toolchain can stamp the tag as the
-   binary's version (see below), then runs `scripts/release.sh`, which rejects a
+   binaries' version (see below), then runs `scripts/release.sh`, which rejects a
    non-semver tag up front, cross-compiles the target matrix, packages each build
-   as a `.tar.gz` (binary + `LICENSE` + `README.md`), writes a `checksums.txt` of
-   SHA-256 sums, asserts the binary self-reports the tag, and uploads the whole
+   as a `.tar.gz` (`steward` + `steward-executor` + `LICENSE` + `README.md`), writes a `checksums.txt` of
+   SHA-256 sums, asserts both binaries self-report the tag, and uploads the whole
    `dist/` directory as a workflow artifact.
 2. **`publish`** — the only job with a `contents: write` token — runs **only on a
    tag push**, checks out **no repository code**, downloads the artifacts the
@@ -67,13 +67,15 @@ an accidentally-tagged bad commit cannot execute with publish permissions.
 | darwin | amd64  | `steward_vX.Y.Z_darwin_amd64.tar.gz`    |
 | darwin | arm64  | `steward_vX.Y.Z_darwin_arm64.tar.gz`    |
 
-Steward is pure–standard-library Go, so every target is a trivial `CGO_ENABLED=0`
-cross-compile from any host. Adding a target (for example `windows/amd64`) is one
-line in the `targets` array of `scripts/release.sh`.
+Both Steward process binaries are pure–standard-library Go, so every target is a
+trivial `CGO_ENABLED=0` cross-compile from any host. Each archive contains both
+processes so Executor is versioned and distributed as an integral Steward component.
+Adding a target (for example `windows/amd64`) is one line in the `targets` array of
+`scripts/release.sh`.
 
 ## How the version is derived (and why there is no ldflags injection)
 
-`internal/server.ResolveVersion()` prefers the build metadata the Go toolchain
+`internal/buildinfo.Resolve()` prefers the build metadata the Go toolchain
 embeds, and only falls back to the compiled-in `const Version` when none exists.
 Its precedence, confirmed empirically by building the binary several ways, is:
 
@@ -119,7 +121,7 @@ assumed:
   if it does not equal the tag — so a stamping regression aborts the publish
   instead of shipping a mislabeled artifact.
 
-The `const Version` in `internal/server/server.go` therefore matters only for
+The shared `const Version` in `internal/buildinfo/version.go` therefore matters only for
 non-release invocations (`go run ./cmd/steward -version` prints `steward 0.1.0`).
 Keep it roughly in step with the latest release for tidiness, but it is not what a
 released binary reports and bumping it is optional.
@@ -152,7 +154,7 @@ matrix build instead, for reasons specific to Steward:
 
 If Steward later grows needs goreleaser serves well — Linux packages (`.deb`/
 `.rpm`), Homebrew taps, Docker manifests, SBOM/signing pipelines — revisit this
-decision then. For a single static binary with checksums, the matrix is the
+decision then. For two static binaries in one checksummed archive, the matrix is the
 smaller, more auditable, more on-ethos choice.
 
 ## Dry-running the release without publishing
@@ -202,6 +204,7 @@ gh release download v0.1.0 --repo hardrails/steward
 sha256sum -c checksums.txt      # macOS: shasum -a 256 -c checksums.txt
 tar -xzf steward_v0.1.0_linux_amd64.tar.gz
 ./steward -version              # -> steward v0.1.0
+# steward-executor is in the same verified archive.
 ```
 
 ## Pre-flight checklist
@@ -210,7 +213,7 @@ tar -xzf steward_v0.1.0_linux_amd64.tar.gz
 - [ ] The tag is a valid semver `vX.Y.Z` (a pre-release such as `v0.1.0-rc.1`
       is auto-marked as a GitHub pre-release; a hyphen in the tag is the signal).
 - [ ] You are tagging the intended commit (`git log -1`).
-- [ ] (Optional) `const Version` in `internal/server/server.go` is not
+- [ ] (Optional) `const Version` in `internal/buildinfo/version.go` is not
       embarrassingly stale.
 
 ## Rollback / re-cut

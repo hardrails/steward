@@ -13,20 +13,21 @@ uplink contracts; the dependency never points back the other way. Steward contai
 no tenant database, user identity system, approval workflow, rollout scheduler,
 private client SDK, or vendor-specific API.
 
-Three runtime boundaries keep higher-risk responsibilities out of this process:
+Three runtime boundaries keep higher-risk responsibilities separated:
 
 1. The **control plane** owns enterprise identity, tenant authorization, desired
    state, artifact and skill approval, fleet rollout, and evidence aggregation.
-2. A separate open-source **Steward Executor** owns the Docker socket and admits
-   untrusted OCI images and workload configuration under Docker plus gVisor. It is
-   a host-local execution boundary, not a package linked into Steward.
+2. The included open-source **Steward Executor** sibling process owns the Docker
+   socket and admits untrusted OCI images and workload configuration under Docker
+   plus gVisor. It ships from this repository as `steward-executor` but is never
+   linked into or hosted inside the `steward` daemon process.
 3. An operator-managed **OpenAI-compatible inference gateway** owns model routing
    and inference policy. Steward treats it as outside the lifecycle contract.
 
 The built-in `os/exec` supervisor is therefore a trusted-operator facility, not the
 untrusted tenant workload path. Root and non-loopback startup acknowledgements are
 defense-in-depth against accidental exposure; neither provides sandboxing. Any
-untrusted workload belongs at the external executor boundary.
+untrusted workload belongs at the separate Executor process boundary.
 
 ## A minimal core, with opt-in capabilities layered on top
 
@@ -47,6 +48,11 @@ metrics (`-enable-metrics`), a command audit log (`-audit-log-file`), and the
 outbound uplink (`-uplink-url`) with its TLS/credential hardening. This
 document's "does not do" list below is about permanent, structural boundaries
 — things no flag turns on — not about these opt-in capabilities.
+
+The sibling `steward-executor` binary is documented separately in
+[`docs/executor.md`](docs/executor.md). It is part of the Steward distribution but
+not a capability flag in this daemon: enabling Executor means starting a second
+service unit with its own identity, state, listener/uplink, and Docker-socket mount.
 
 It explicitly does **not**, by default:
 
