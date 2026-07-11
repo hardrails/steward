@@ -181,7 +181,7 @@ if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
 		echo "release: FATAL — release binaries report '${reported}', '${executor_reported}', and '${ctl_reported}', but the tag is '${GITHUB_REF_NAME}'." >&2
 		echo "  The explicit release-version linker stamp did not reach all three binaries," >&2
 		echo "  so the artifacts would misreport their version. Ensure scripts/release.sh" >&2
-		echo "  supplies release_ldflags to both entry points. See docs/releasing.md." >&2
+		echo "  supplies release_ldflags to all three entry points. See docs/releasing.md." >&2
 		exit 1
 	fi
 	echo "release: version assertion OK — all three binaries self-report the tag ${GITHUB_REF_NAME}"

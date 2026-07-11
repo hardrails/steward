@@ -55,8 +55,9 @@ receipt chain**:
 
 1. a publisher-signed, immutable profile capsule defines a bounded workload
    ceiling;
-2. a site-root-signed policy scopes publishers, tenant authority, artifacts,
-   resources, routes, service shapes, component digests, and revocation;
+2. a site-root-signed policy scopes publishers, tenant authority, profiles,
+   repositories or exact image manifests, resource ceilings, inference route
+   IDs, service IDs, and revocation;
 3. an authenticated instance intent binds an actual tenant, node, instance,
    lineage, and generation;
 4. the local executor admits only the intersection, creates the constrained

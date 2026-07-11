@@ -62,7 +62,7 @@ The three inputs have different jobs:
   Docker option, or caller-selected privilege.
 - A **site policy** is rooted in the operator's local trust. It scopes allowed
   publishers, tenants, profiles, repositories or exact image digests, resource
-  ceilings, routes, service shapes, component digests, and revocation state.
+  ceilings, inference route IDs, service IDs, and publisher revocation state.
 - An **instance intent** is authenticated separately. Its caller identity binds
   the tenant and node; a generation fence is keyed by `(tenant_id, instance_id)`
   so a stale request cannot replace a newer workload.

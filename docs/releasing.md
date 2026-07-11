@@ -123,7 +123,7 @@ go build -trimpath \
 The release script then builds host-native copies through the same path, executes
 both `steward -version` and `steward-executor -version`, and fails before publishing
 unless both equal `GITHUB_REF_NAME`. This guards the linker symbol, import path, and
-both entry points rather than assuming a successful `go build` implies the version
+all three entry points rather than assuming a successful `go build` implies the version
 arrived.
 
 A canonical `go install github.com/hardrails/steward/cmd/steward@v1.2.0` still
