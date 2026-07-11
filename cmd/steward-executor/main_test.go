@@ -1,6 +1,12 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/executoruplink"
 )
 
@@ -37,6 +45,110 @@ func TestReadTokenRejectsOverPermissiveFile(t *testing.T) {
 	}
 	if _, err := readToken(path); err == nil {
 		t.Fatal("world-readable executor token was accepted")
+	}
+}
+
+func TestSecureArtifactAndKeyReadersRejectUnsafeOrMalformedInputs(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "artifact")
+	if err := os.WriteFile(regular, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readSecureArtifact(regular, false, 16); err != nil || string(got) != "payload" {
+		t.Fatalf("readSecureArtifact = %q, %v", got, err)
+	}
+	if _, err := readSecureArtifact(regular, false, 3); err == nil {
+		t.Fatal("readSecureArtifact accepted oversized artifact")
+	}
+	if err := os.Chmod(regular, 0o622); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSecureArtifact(regular, false, 16); err == nil {
+		t.Fatal("readSecureArtifact accepted group-writable trust artifact")
+	}
+	if _, err := readSecureArtifact(regular, true, 16); err == nil {
+		t.Fatal("readSecureArtifact accepted group-writable secret")
+	}
+	if err := os.Chmod(regular, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "artifact-link")
+	if err := os.Symlink(regular, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSecureArtifact(link, false, 16); err == nil {
+		t.Fatal("readSecureArtifact followed symlink")
+	}
+	if _, err := readSecureArtifact(dir, false, 16); err == nil {
+		t.Fatal("readSecureArtifact accepted directory")
+	}
+
+	badPublic := filepath.Join(dir, "bad-public")
+	if err := os.WriteFile(badPublic, []byte("not base64"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readEd25519PublicKey(badPublic); err == nil {
+		t.Fatal("readEd25519PublicKey accepted malformed key")
+	}
+	badPrivate := filepath.Join(dir, "bad-private")
+	if err := os.WriteFile(badPrivate, []byte("not pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readEd25519PrivateKey(badPrivate); err == nil {
+		t.Fatal("readEd25519PrivateKey accepted malformed key")
+	}
+}
+
+func TestEd25519KeyReadersAcceptOnlyExpectedFormats(t *testing.T) {
+	dir := t.TempDir()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicPath := filepath.Join(dir, "public")
+	if err := os.WriteFile(publicPath, []byte(base64.StdEncoding.EncodeToString(public)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readEd25519PublicKey(publicPath); err != nil || !got.Equal(public) {
+		t.Fatalf("read public key: %v", err)
+	}
+	encoded, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privatePath := filepath.Join(dir, "private")
+	if err := os.WriteFile(privatePath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readEd25519PrivateKey(privatePath); err != nil || !got.Equal(private) {
+		t.Fatalf("read private key: %v", err)
+	}
+	if err := os.Chmod(privatePath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readEd25519PrivateKey(privatePath); err == nil {
+		t.Fatal("readEd25519PrivateKey accepted group/world readable key")
+	}
+}
+
+func TestReadTokenRejectsEmptyOversizedAndDirectory(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty-token")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readToken(empty); err == nil {
+		t.Fatal("readToken accepted empty token")
+	}
+	large := filepath.Join(dir, "large-token")
+	if err := os.WriteFile(large, []byte(strings.Repeat("x", 4097)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readToken(large); err == nil {
+		t.Fatal("readToken accepted oversized token")
+	}
+	if _, err := readToken(dir); err == nil {
+		t.Fatal("readToken accepted directory")
 	}
 }
 
@@ -178,6 +290,24 @@ func TestExecutorMainVersionNeedsNoDockerOrCredential(t *testing.T) {
 	}
 }
 
+func TestExecutorMainInitializesAdmissionFenceExactlyOnce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the real executor binary")
+	}
+	bin := buildExecutor(t)
+	path := filepath.Join(t.TempDir(), "admission-fences.bin")
+	command := exec.Command(bin, "-initialize-admission-fence", "-admission-fence-file", path)
+	command.Env = executorEnv()
+	if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), "initialized admission fence") {
+		t.Fatalf("initialize: err=%v output=%s", err, output)
+	}
+	command = exec.Command(bin, "-initialize-admission-fence", "-admission-fence-file", path)
+	command.Env = executorEnv()
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("reinitialize unexpectedly succeeded: %s", output)
+	}
+}
+
 func TestExecutorMainCheckConfigValidatesWithoutServing(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the real executor binary")
@@ -292,6 +422,76 @@ func buildExecutor(t *testing.T) string {
 		t.Fatalf("build executor: %v\n%s", err, output)
 	}
 	return bin
+}
+
+func TestExecutorMainCheckConfigValidatesSecureAdmission(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the real executor binary")
+	}
+	bin := buildExecutor(t)
+	dir := t.TempDir()
+	sitePublic, sitePrivate, _ := ed25519.GenerateKey(rand.Reader)
+	publisherPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	_, receiptPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	policy := admission.SitePolicy{
+		SchemaVersion: admission.SchemaV1, PolicyID: "site-a", PolicyEpoch: 1,
+		Publishers: []admission.PublisherRule{{
+			KeyID: "publisher-a", PublicKey: base64.StdEncoding.EncodeToString(publisherPublic),
+			AllowedProfiles:     []admission.ProfileRef{{ID: "generic-v1", Version: "v1"}},
+			AllowedRepositories: []string{"registry.local/agent"},
+			ResourceCeiling:     admission.ResourceLimits{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 32},
+		}},
+		Tenants: []admission.TenantRule{{
+			TenantID: "tenant-a", PublisherKeyIDs: []string{"publisher-a"},
+			ResourceCeiling: admission.ResourceLimits{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 32},
+		}},
+	}
+	payload, _ := json.Marshal(policy)
+	envelope, err := dsse.Sign(admission.PolicyPayloadType, payload, "site-root", sitePrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyRaw, _ := dsse.Marshal(envelope)
+	policyPath := filepath.Join(dir, "policy.dsse.json")
+	rootPath := filepath.Join(dir, "site-root.public")
+	receiptPath := filepath.Join(dir, "receipt.private.pem")
+	if err := os.WriteFile(policyPath, policyRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rootPath, []byte(base64.StdEncoding.EncodeToString(sitePublic)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	privateDER, _ := x509.MarshalPKCS8PrivateKey(receiptPrivate)
+	if err := os.WriteFile(receiptPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fencePath := filepath.Join(dir, "fences.bin")
+	if err := admission.InitializeFenceStore(fencePath); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(bin,
+		"-check-config", "-docker-socket", fakeDockerSocket(t, true), "-token-file", executorTokenFile(t),
+		"-admission-policy-file", policyPath,
+		"-admission-site-root-public-key-file", rootPath,
+		"-admission-site-root-key-id", "site-root", "-admission-node-id", "node-a",
+		"-admission-fence-file", fencePath,
+		"-admission-journal-file", filepath.Join(dir, "journal.bin"),
+		"-admission-evidence-file", filepath.Join(dir, "evidence.bin"),
+		"-admission-evidence-key-file", receiptPath,
+	)
+	command.Env = executorEnv()
+	output, err := command.CombinedOutput()
+	if err != nil || string(output) != "executor configuration valid\n" {
+		t.Fatalf("secure check config: err=%v output=%s", err, output)
+	}
+	partial := exec.Command(bin,
+		"-check-config", "-docker-socket", fakeDockerSocket(t, true), "-token-file", executorTokenFile(t),
+		"-admission-policy-file", policyPath,
+	)
+	partial.Env = executorEnv()
+	if output, err := partial.CombinedOutput(); err == nil || !strings.Contains(string(output), "signed admission requires") {
+		t.Fatalf("partial admission did not fail: err=%v output=%s", err, output)
+	}
 }
 
 func executorEnv() []string {

@@ -1,13 +1,13 @@
 ---
 title: Upgrade and roll back Steward
-description: Stage a Steward release without disruption, preflight it, atomically activate both binaries, and roll back application code without corrupting identity state.
+description: Stage a Steward release without disruption, preflight it, atomically activate all three binaries, and roll back application code without corrupting identity state.
 section: How-to guide
 ---
 
 # Upgrade and roll back Steward
 
 Steward keeps immutable releases under `/opt/steward/releases/<version>` and selects
-both binaries through one `/opt/steward/current` symlink. Configuration, durable
+all three binaries through one `/opt/steward/current` symlink. Configuration, durable
 state, audit logs, and anti-replay state live outside release directories.
 
 ## Stage the latest release
@@ -32,7 +32,7 @@ a new active version.
 ## Activate atomically
 
 ```console
-sudo /usr/local/libexec/steward/activate-node-release v0.1.0 --restart
+sudo /usr/local/libexec/steward/activate-node-release v1.2.0 --restart
 ```
 
 Activation checks both target binaries and runs full node preflight before switching

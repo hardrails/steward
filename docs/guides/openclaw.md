@@ -1,6 +1,6 @@
 ---
 title: OpenClaw on Steward
-description: Safely evaluate a digest-pinned OpenClaw image under Steward Executor v0.1 and understand the storage, secret, network, and port grants full operation needs.
+description: Safely evaluate a digest-pinned OpenClaw image under Steward Executor v1.2 and understand the storage, secret, network, and port grants full operation needs.
 section: Agent compatibility
 ---
 
@@ -8,7 +8,7 @@ section: Agent compatibility
 
 <div class="callout warning">
   <strong>Compatibility status: lifecycle validation only</strong>
-  Steward v0.1 can admit and start an OpenClaw image under its hardened sandbox.
+  Steward v1.2 can admit and start an OpenClaw image under its hardened sandbox.
   It cannot yet provide OpenClaw's persistent configuration/workspace, credentials,
   outbound connections, or gateway ports.
 </div>
@@ -16,7 +16,7 @@ section: Agent compatibility
 [OpenClaw](https://github.com/openclaw/openclaw) is an independent personal agent
 runtime. Its official Docker deployment persists configuration and workspace data,
 injects authentication material, connects to model and messaging services, and
-publishes gateway ports. Steward v0.1 denies each of those capabilities by default.
+publishes gateway ports. Steward v1.2 denies each of those capabilities by default.
 
 ## Validate the image boundary
 
@@ -55,14 +55,14 @@ with:
 - `image`: the value of `$OPENCLAW_IMAGE`
 - `command`: `['node', 'dist/index.js', '--help']`, adjusted to the pinned image
 
-This proves only that the selected command executes inside the v0.1 sandbox. It does
+This proves only that the selected command executes inside the v1.2 sandbox. It does
 not establish functional model access, channel connectivity, browser control,
 workspace persistence, or gateway reachability.
 
 ## What full operation requires
 
 OpenClaw's normal container setup needs capabilities intentionally missing from the
-v0.1 workload schema:
+v1.2 workload schema:
 
 1. tenant-scoped persistent configuration and workspace claims;
 2. node-resolved secrets that never appear in a fleet command payload;

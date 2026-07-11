@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hardrails/steward/internal/admission"
 )
 
 func TestDispatcherOverridesTenantAndInstanceAndFencesReplay(t *testing.T) {
@@ -65,6 +67,41 @@ func TestDispatcherRejectsCrossTenantAndUnknownPayloadFields(t *testing.T) {
 	}
 	if mutations != 0 {
 		t.Fatalf("rejected commands mutated executor %d times", mutations)
+	}
+}
+
+func TestDispatcherRoutesOnlyIdentityBoundSignedAdmission(t *testing.T) {
+	var path string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]string{"runtime_ref": "executor-x", "status": "created"})
+	})
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
+	d := dispatcher{handler: handler, token: "token", tenantID: "tenant-a", nodeID: "node-1", state: store}
+	payload := admissionPayload{
+		CapsuleDSSEBase64: "opaque",
+		Intent: admission.InstanceIntent{
+			TenantID: "tenant-a", NodeID: "node-1", InstanceID: "agent-1", LineageID: "lineage-1",
+			Generation: 2, CapsuleDigest: "sha256:" + strings.Repeat("a", 64),
+			Resources: admission.ResourceLimits{MemoryBytes: 1, CPUMillis: 1, PIDs: 1}, StateDisposition: "none",
+		},
+	}
+	raw, _ := json.Marshal(payload)
+	cmd := command{
+		CommandID: "signed-1", TenantID: "tenant-a", NodeID: "node-1",
+		RuntimeRef: "uplink:6:node-1:agent-1", Kind: "admit", Payload: raw,
+		ClaimGeneration: 1, InstanceGeneration: 2, CommandSequence: 1,
+	}
+	if report := d.execute(context.Background(), cmd); report.Status != "done" || path != "/v1/admissions" {
+		t.Fatalf("report=%#v path=%q", report, path)
+	}
+	store = newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
+	d.state = store
+	payload.Intent.TenantID = "tenant-b"
+	cmd.Payload, _ = json.Marshal(payload)
+	path = ""
+	if report := d.execute(context.Background(), cmd); report.Status != "failed" || path != "" {
+		t.Fatalf("mismatched identity report=%#v path=%q", report, path)
 	}
 }
 

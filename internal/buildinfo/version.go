@@ -5,7 +5,7 @@ import "runtime/debug"
 
 // Version is the fallback used when the Go toolchain supplies no module or VCS
 // metadata (notably go run and go test).
-const Version = "0.1.0"
+const Version = "1.2.0"
 
 // releaseVersion is set only by scripts/release.sh through the standard Go
 // linker's -X flag. A checkout build's module version is normally "(devel)" and
@@ -14,8 +14,8 @@ const Version = "0.1.0"
 var releaseVersion string
 
 // Resolve prefers an explicit release stamp, then the tagged module version, the
-// shortened VCS revision, and finally Version. Both steward processes call this
-// one function so a release cannot report two different provenance strings.
+// shortened VCS revision, and finally Version. Every Steward binary calls this
+// function so a release cannot report different provenance strings.
 func Resolve() string {
 	if releaseVersion != "" {
 		return releaseVersion

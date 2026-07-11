@@ -1,14 +1,14 @@
 ---
 title: Steward node field manual
-description: Install, secure, operate, and audit Steward—the open-source Docker and gVisor node runtime for isolated multi-tenant AI agent workloads.
+description: Install and operate Steward—the open-source sovereign admission and Docker/gVisor execution runtime for tenant-bound AI agent workloads.
 home: true
 ---
 
 <section class="hero">
   <p class="eyebrow">Open-source sovereign agent infrastructure</p>
   <h1>Keep agent execution under local authority.</h1>
-  <p class="hero-lede">Steward turns an operator-controlled Linux server into a hardened execution node for untrusted AI agent images. It keeps Docker authority out of the control plane, works across trust boundaries, and has no dependency on private software.</p>
-  <div class="status-line"><span>Docker + gVisor</span><span>Air-gap capable</span><span>Control-plane neutral</span><span>Apache-2.0</span></div>
+  <p class="hero-lede">When signed admission is configured, know which agent artifact was authorized, for which tenant, under which local policy—and keep a receipt the node can verify without a vendor. Steward binds that decision to a hardened Docker + gVisor workload.</p>
+  <div class="status-line"><span>Signed local authority</span><span>Offline-verifiable receipts</span><span>Docker + gVisor</span><span>Apache-2.0</span></div>
   <div class="install-box">
     <header><span>Interactive Linux install</span><button class="copy-button" type="button">Copy</button></header>
     <pre><code>curl -fsSL https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | sudo bash</code></pre>
@@ -16,12 +16,12 @@ home: true
   <p><a href="{{ '/getting-started/' | relative_url }}">Start with installation →</a></p>
 </section>
 
-## One node boundary, three hard problems
+## One node boundary, three questions you must answer
 
 <div class="grid">
-  <article class="card"><span class="number">01 / ISOLATE</span><h3>Untrusted workloads</h3><p>Executor admits only immutable, resource-bounded images and applies a fixed Docker + gVisor sandbox.</p><a href="{{ '/concepts/security-model/' | relative_url }}">Security model →</a></article>
-  <article class="card"><span class="number">02 / CONTROL</span><h3>Remote fleets</h3><p>Outbound HTTPS channels carry commands and evidence without exposing Docker or requiring inbound node access.</p><a href="{{ '/concepts/control-plane-boundary/' | relative_url }}">Trust boundary →</a></article>
-  <article class="card"><span class="number">03 / OWN</span><h3>Sovereign operation</h3><p>Static artifacts, offline installation, public contracts, operator-owned PKI, and zero private dependencies.</p><a href="{{ '/guides/air-gapped/' | relative_url }}">Air-gapped guide →</a></article>
+  <article class="card"><span class="number">01 / AUTHORIZE</span><h3>Why may this run?</h3><p>The opt-in signed path intersects publisher capsule, site-root policy, and tenant-bound intent locally. Stale generations and policy rollback are denied.</p><a href="{{ '/guides/signed-admission/' | relative_url }}">Signed admission →</a></article>
+  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor admits only immutable, resource-bounded images and applies a fixed no-network Docker + gVisor sandbox.</p><a href="{{ '/concepts/security-model/' | relative_url }}">Security model →</a></article>
+  <article class="card"><span class="number">03 / VERIFY</span><h3>What did the node enforce?</h3><p>Signed, hash-linked receipts bind the accepted artifact, policy, generation, and mutation outcome for offline verification.</p><a href="{{ '/product/positioning/' | relative_url }}">Why Steward exists →</a></article>
 </div>
 
 ## Choose your path
@@ -42,9 +42,9 @@ home: true
 ## System boundary
 
 <div class="architecture-strip">
-  <div><small>Remote</small><strong>Independent control plane</strong><p>Tenancy, policy, desired state, fleet evidence</p></div>
+  <div><small>Authority inputs</small><strong>Capsule + policy + intent</strong><p>Signed artifact ceiling, local trust, tenant generation</p></div>
   <span class="arrow">→</span>
-  <div><small>Linux node</small><strong>Steward + Executor</strong><p>Lifecycle, admission, replay fencing</p></div>
+  <div><small>Linux node</small><strong>Steward + Executor</strong><p>Admission, journal, replay fences, signed receipts</p></div>
   <span class="arrow">→</span>
   <div><small>Sandbox</small><strong>Agent OCI image</strong><p>Docker + gVisor, fixed least privilege</p></div>
 </div>
@@ -52,10 +52,10 @@ home: true
 Inference is intentionally outside this boundary. Operators can expose local models
 through a separately controlled OpenAI-compatible gateway.
 
-## Agent compatibility in v0.1
+## Agent compatibility in v1.2
 
 Steward is designed to host agent runtimes such as Hermes Agent and OpenClaw, but
-v0.1 only supports hardened image-admission and lifecycle validation. The connected,
+v1.2 supports signed image admission and lifecycle validation. The connected,
 persistent operation these agents need requires future explicit grants for egress,
 secrets, storage, and ports.
 
@@ -68,7 +68,14 @@ secrets, storage, and ports.
 
 [Test Hermes Agent compatibility]({{ '/guides/hermes-agent/' | relative_url }}) ·
 [Test OpenClaw compatibility]({{ '/guides/openclaw/' | relative_url }}) ·
-[Read all v0.1 limitations]({{ '/limitations/' | relative_url }})
+[Read all v1.2 limitations]({{ '/limitations/' | relative_url }})
+
+## Market position
+
+Sandbox lifecycle, microVMs, egress policy, credential injection, and JSON audit
+logs are increasingly table stakes. Steward focuses on a different gap: portable,
+operator-owned authorization inputs tied to the node's recorded enforcement
+decision, including disconnected sites. Read the [dated comparison]({{ '/product/market-analysis/' | relative_url }}) and its claim limits.
 
 ## Documentation model
 

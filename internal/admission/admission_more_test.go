@@ -1,0 +1,224 @@
+package admission
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestIntersectRejectsAuthorityAndCapabilityViolations(t *testing.T) {
+	publisher, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*ProfileCapsule, *SitePolicy, *InstanceIntent, *AuthenticatedIdentity, *PersistedFences)
+	}{
+		{name: "caller tenant mismatch", mutate: func(_ *ProfileCapsule, _ *SitePolicy, _ *InstanceIntent, caller *AuthenticatedIdentity, _ *PersistedFences) {
+			caller.TenantID = "tenant-b"
+		}},
+		{name: "policy epoch rollback", mutate: func(_ *ProfileCapsule, _ *SitePolicy, _ *InstanceIntent, _ *AuthenticatedIdentity, fences *PersistedFences) {
+			fences.PolicyEpoch = 2
+		}},
+		{name: "generation rollback", mutate: func(_ *ProfileCapsule, _ *SitePolicy, _ *InstanceIntent, _ *AuthenticatedIdentity, fences *PersistedFences) {
+			fences.Generation = 2
+		}},
+		{name: "revoked publisher", mutate: func(_ *ProfileCapsule, policy *SitePolicy, _ *InstanceIntent, _ *AuthenticatedIdentity, _ *PersistedFences) {
+			policy.Publishers[0].Revoked = true
+		}},
+		{name: "unapproved repository", mutate: func(capsule *ProfileCapsule, _ *SitePolicy, _ *InstanceIntent, _ *AuthenticatedIdentity, _ *PersistedFences) {
+			capsule.Image.Repository = "registry.example/other"
+		}},
+		{name: "unknown profile", mutate: func(capsule *ProfileCapsule, policy *SitePolicy, _ *InstanceIntent, _ *AuthenticatedIdentity, _ *PersistedFences) {
+			capsule.Profile = ProfileRef{ID: "other", Version: "v1"}
+			policy.Publishers[0].AllowedProfiles = []ProfileRef{capsule.Profile}
+		}},
+		{name: "state shape differs", mutate: func(capsule *ProfileCapsule, _ *SitePolicy, _ *InstanceIntent, _ *AuthenticatedIdentity, _ *PersistedFences) {
+			capsule.State.Path = "/other"
+		}},
+		{name: "inference route denied", mutate: func(_ *ProfileCapsule, _ *SitePolicy, intent *InstanceIntent, _ *AuthenticatedIdentity, _ *PersistedFences) {
+			intent.InferenceRouteID = "other-route"
+		}},
+		{name: "service denied", mutate: func(_ *ProfileCapsule, _ *SitePolicy, intent *InstanceIntent, _ *AuthenticatedIdentity, _ *PersistedFences) {
+			intent.ServiceID = "other-service"
+		}},
+		{name: "resource exceeds ceiling", mutate: func(_ *ProfileCapsule, _ *SitePolicy, intent *InstanceIntent, _ *AuthenticatedIdentity, _ *PersistedFences) {
+			intent.Resources.PIDs = 129
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capsule, policy := testCapsule(), testPolicy(publisher)
+			intent := testIntent(testDigest('d'))
+			identity := AuthenticatedIdentity{TenantID: "tenant-a", NodeID: "node-a"}
+			fences := PersistedFences{}
+			test.mutate(&capsule, &policy, &intent, &identity, &fences)
+			if _, err := Intersect(capsule, intent.CapsuleDigest, policy, testDigest('e'), "publisher-1", "site-root", intent, identity, fences, DefaultProfiles()); err == nil {
+				t.Fatal("unauthorized intersection accepted")
+			}
+		})
+	}
+}
+
+func TestValidationRejectsCapsuleAndPolicyEdgeCases(t *testing.T) {
+	publisher, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*ProfileCapsule)
+	}{
+		{name: "expired", mutate: func(c *ProfileCapsule) { c.ExpiresAt = "2020-01-01T00:00:00Z" }},
+		{name: "malformed issue time", mutate: func(c *ProfileCapsule) { c.IssuedAt = "not-a-time" }},
+		{name: "service shape without grant", mutate: func(c *ProfileCapsule) { c.Capabilities.Service = false }},
+		{name: "unsafe state path", mutate: func(c *ProfileCapsule) { c.State.Path = "/state/../escape" }},
+		{name: "bad image digest", mutate: func(c *ProfileCapsule) { c.Image.ConfigDigest = "sha256:not-hex" }},
+		{name: "nul command", mutate: func(c *ProfileCapsule) { c.Command = []string{"agent\x00"} }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capsule := testCapsule()
+			test.mutate(&capsule)
+			if err := capsule.Validate(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)); err == nil {
+				t.Fatal("invalid capsule accepted")
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*SitePolicy)
+	}{
+		{name: "duplicate publisher", mutate: func(p *SitePolicy) { p.Publishers = append(p.Publishers, p.Publishers[0]) }},
+		{name: "unknown tenant publisher", mutate: func(p *SitePolicy) { p.Tenants[0].PublisherKeyIDs = []string{"missing"} }},
+		{name: "invalid repository", mutate: func(p *SitePolicy) { p.Publishers[0].AllowedRepositories = []string{"https://registry.example/agent"} }},
+		{name: "invalid public key", mutate: func(p *SitePolicy) { p.Publishers[0].PublicKey = "not-base64" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy := testPolicy(publisher)
+			test.mutate(&policy)
+			if err := policy.Validate(); err == nil {
+				t.Fatal("invalid policy accepted")
+			}
+		})
+	}
+}
+
+func TestPublisherKeysReturnsIndependentDecodedKeys(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := testPolicy(public)
+	keys, err := policy.PublisherKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keys["publisher-1"].Equal(public) {
+		t.Fatal("decoded publisher key differs")
+	}
+	policy.Publishers[0].PublicKey = base64.StdEncoding.EncodeToString([]byte("short"))
+	if _, err := policy.PublisherKeys(); err == nil || !strings.Contains(err.Error(), "decode publisher key") {
+		t.Fatalf("invalid publisher key did not fail predictably: %v", err)
+	}
+}
+
+func TestCapsuleValidationRejectsEveryBoundedShape(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*ProfileCapsule)
+	}{
+		{"identity", func(c *ProfileCapsule) { c.CapsuleID = "" }},
+		{"profile", func(c *ProfileCapsule) { c.Profile.ID = "" }},
+		{"repository", func(c *ProfileCapsule) { c.Image.Repository = "bad@repo" }},
+		{"platform", func(c *ProfileCapsule) { c.Image.Platform.OS = "" }},
+		{"resources", func(c *ProfileCapsule) { c.Resources.MemoryBytes = 0 }},
+		{"empty command", func(c *ProfileCapsule) { c.Command = nil }},
+		{"too many command args", func(c *ProfileCapsule) { c.Command = make([]string, 65) }},
+		{"long command arg", func(c *ProfileCapsule) { c.Command = []string{strings.Repeat("x", 4097)} }},
+		{"state schema", func(c *ProfileCapsule) { c.State.SchemaVersion = "" }},
+		{"service id", func(c *ProfileCapsule) { c.Service.ID = "" }},
+		{"service port", func(c *ProfileCapsule) { c.Service.Port = 70000 }},
+		{"too many artifacts", func(c *ProfileCapsule) { c.Artifacts = make([]ArtifactDigest, 33) }},
+		{"artifact kind", func(c *ProfileCapsule) { c.Artifacts[0].Kind = "" }},
+		{"artifact digest", func(c *ProfileCapsule) { c.Artifacts[0].Digest = "bad" }},
+		{"malformed expiry", func(c *ProfileCapsule) { c.ExpiresAt = "tomorrow" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capsule := testCapsule()
+			test.mutate(&capsule)
+			if err := capsule.Validate(time.Now()); err == nil {
+				t.Fatal("invalid capsule accepted")
+			}
+		})
+	}
+}
+
+func TestPolicyValidationRejectsEveryBoundedShape(t *testing.T) {
+	public, _, _ := ed25519.GenerateKey(rand.Reader)
+	for _, test := range []struct {
+		name   string
+		mutate func(*SitePolicy)
+	}{
+		{"identity", func(p *SitePolicy) { p.PolicyEpoch = 0 }},
+		{"no publishers", func(p *SitePolicy) { p.Publishers = nil }},
+		{"no tenants", func(p *SitePolicy) { p.Tenants = nil }},
+		{"publisher key id", func(p *SitePolicy) { p.Publishers[0].KeyID = "" }},
+		{"publisher ceiling", func(p *SitePolicy) { p.Publishers[0].ResourceCeiling.PIDs = 0 }},
+		{"profiles empty", func(p *SitePolicy) { p.Publishers[0].AllowedProfiles = nil }},
+		{"profile invalid", func(p *SitePolicy) { p.Publishers[0].AllowedProfiles[0].Version = "" }},
+		{"repositories empty", func(p *SitePolicy) { p.Publishers[0].AllowedRepositories = nil }},
+		{"manifest digest", func(p *SitePolicy) { p.Publishers[0].AllowedManifestDigests = []string{"bad"} }},
+		{"duplicate tenant", func(p *SitePolicy) { p.Tenants = append(p.Tenants, p.Tenants[0]) }},
+		{"tenant id", func(p *SitePolicy) { p.Tenants[0].TenantID = "" }},
+		{"tenant publishers", func(p *SitePolicy) { p.Tenants[0].PublisherKeyIDs = nil }},
+		{"tenant ceiling", func(p *SitePolicy) { p.Tenants[0].ResourceCeiling.CPUMillis = 0 }},
+		{"route", func(p *SitePolicy) { p.Tenants[0].InferenceRouteIDs = []string{""} }},
+		{"service", func(p *SitePolicy) { p.Tenants[0].ServiceIDs = []string{""} }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy := testPolicy(public)
+			test.mutate(&policy)
+			if err := policy.Validate(); err == nil {
+				t.Fatal("invalid policy accepted")
+			}
+		})
+	}
+}
+
+func TestIntersectRejectsRemainingAuthorityEdges(t *testing.T) {
+	public, _, _ := ed25519.GenerateKey(rand.Reader)
+	for _, test := range []struct {
+		name   string
+		mutate func(*ProfileCapsule, *SitePolicy, *InstanceIntent)
+	}{
+		{"capsule digest mismatch", func(_ *ProfileCapsule, _ *SitePolicy, i *InstanceIntent) { i.CapsuleDigest = testDigest('f') }},
+		{"publisher not tenant authorized", func(_ *ProfileCapsule, p *SitePolicy, _ *InstanceIntent) {
+			p.Tenants[0].PublisherKeyIDs = []string{"other"}
+			p.Publishers = append(p.Publishers, PublisherRule{KeyID: "other", PublicKey: base64.StdEncoding.EncodeToString(public), AllowedProfiles: p.Publishers[0].AllowedProfiles, AllowedRepositories: p.Publishers[0].AllowedRepositories, ResourceCeiling: p.Publishers[0].ResourceCeiling})
+		}},
+		{"profile not authorized", func(c *ProfileCapsule, p *SitePolicy, _ *InstanceIntent) {
+			p.Publishers[0].AllowedProfiles = []ProfileRef{{ID: c.Profile.ID, Version: "v2"}}
+		}},
+		{"manifest denied", func(_ *ProfileCapsule, p *SitePolicy, _ *InstanceIntent) {
+			p.Publishers[0].AllowedManifestDigests = []string{testDigest('f')}
+		}},
+		{"capability exceeds capsule", func(c *ProfileCapsule, _ *SitePolicy, _ *InstanceIntent) { c.Capabilities.State = false }},
+		{"state disposition", func(_ *ProfileCapsule, _ *SitePolicy, i *InstanceIntent) { i.StateDisposition = "none" }},
+		{"inference fields without capability", func(_ *ProfileCapsule, _ *SitePolicy, i *InstanceIntent) { i.Capabilities.Inference = false }},
+		{"service field without capability", func(_ *ProfileCapsule, _ *SitePolicy, i *InstanceIntent) { i.Capabilities.Service = false }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capsule, policy := testCapsule(), testPolicy(public)
+			intent := testIntent(testDigest('d'))
+			test.mutate(&capsule, &policy, &intent)
+			if _, err := Intersect(capsule, testDigest('d'), policy, testDigest('e'), "publisher-1", "site-root", intent,
+				AuthenticatedIdentity{TenantID: "tenant-a", NodeID: "node-a"}, PersistedFences{}, DefaultProfiles()); err == nil {
+				t.Fatal("invalid authority edge accepted")
+			}
+		})
+	}
+}

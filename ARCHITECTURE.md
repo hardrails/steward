@@ -24,6 +24,10 @@ Three runtime boundaries keep higher-risk responsibilities separated:
 3. An operator-managed **OpenAI-compatible inference gateway** owns model routing
    and inference policy. Steward treats it as outside the lifecycle contract.
 
+The distribution also includes `stewardctl`, an offline administrative CLI rather
+than a service boundary. It creates and verifies Ed25519 keys, profile capsules,
+site policies, and receipt chains without receiving Docker authority.
+
 The built-in `os/exec` supervisor is therefore a trusted-operator facility, not the
 untrusted tenant workload path. Root and non-loopback startup acknowledgements are
 defense-in-depth against accidental exposure; neither provides sandboxing. Any
@@ -54,12 +58,41 @@ The sibling `steward-executor` binary is documented separately in
 not a capability flag in this daemon: enabling Executor means starting a second
 service unit with its own identity, state, listener/uplink, and Docker-socket mount.
 
-The Linux release archive packages those two service identities as a disconnected
+The Linux release archive packages those two service identities and three binaries
+(`steward`, `steward-executor`, and `stewardctl`) as a disconnected
 node appliance. Versioned binaries live separately from durable state and credentials;
 activation swaps only binary symlinks after both target binaries pass non-serving
 configuration validation. The installer never owns Docker/gVisor installation,
 control-plane deployment, tenant policy, approved OCI images, or inference. See
 [`docs/node-appliance.md`](docs/node-appliance.md).
+
+### Signed Executor admission is opt-in
+
+Executor's v1.2 signed path admits the intersection of three differently owned
+inputs: a reusable publisher-signed profile capsule, a site-root-signed policy,
+and an authenticated instance intent bound to tenant, node, instance, lineage,
+and generation. The publisher authorizes an artifact/profile ceiling; it does not
+schedule tenants. The site policy narrows publishers, repositories or exact
+digests, profiles, tenants, and resource ceilings. The intent selects only within
+both ceilings.
+
+Before Docker mutation, Executor durably prepares a fixed-format operation journal
+and appends a signed pre-effect receipt. It creates and inspects the fixed gVisor
+workload, appends a signed commit receipt, advances the policy/generation fence,
+and then marks the operation committed. A corrupt receipt chain, changed key,
+rollback, or pending operation fails closed. Receipts are exact binary-framed,
+Ed25519-signed, hash-linked records; they do not depend on JSON canonicalization.
+
+This is node-local enforcement evidence, not hostile-host attestation. Host root,
+the host kernel, Docker, gVisor, and node key protection remain trusted. Prompts,
+model responses, agent logs, and semantic tool actions are outside the receipt.
+The v1.2 Executor owns the receipt key in-process; a separate signer identity is a
+future authority-separation improvement.
+
+The capsule schema reserves bounded `state`, `inference`, and `service` ceilings,
+but v1.2 returns `501` for any positive request. A signed field is not treated as
+an enforcement mechanism. Those capabilities require separate state/gateway/relay
+runtime work and cross-tenant acceptance before they can be enabled.
 
 It explicitly does **not**, by default:
 

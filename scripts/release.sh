@@ -52,7 +52,7 @@ for target in "${targets[@]}"; do
 	esac
 done
 
-# VERSION labels artifacts and is stamped into both binaries. On a tag push
+# VERSION labels artifacts and is stamped into all three binaries. On a tag push
 # GITHUB_REF_NAME is authoritative; a local dry run falls back to `git describe`,
 # then to "dev" outside any checkout.
 VERSION="${STEWARD_RELEASE_VERSION:-${GITHUB_REF_NAME:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}}"
@@ -96,7 +96,9 @@ for target in "${targets[@]}"; do
 	# -s -w strips the symbol table and DWARF; -X supplies the release identity.
 	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward" ./cmd/steward
-	files=(steward LICENSE README.md)
+	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/stewardctl" ./cmd/stewardctl
+	files=(steward stewardctl LICENSE README.md)
 	if [ "$goos" = "linux" ]; then
 		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-executor" ./cmd/steward-executor
@@ -107,9 +109,9 @@ for target in "${targets[@]}"; do
 			scripts/uninstall-node.sh \
 			"${stage}/scripts/"
 		chmod 0755 "${stage}"/scripts/*.sh
-		files=(steward steward-executor LICENSE README.md deploy scripts)
+		files=(steward stewardctl steward-executor LICENSE README.md deploy scripts)
 	fi
-	# Ship the license and readme alongside both binaries so the download is
+	# Ship the license and readme alongside all three binaries so the download is
 	# self-contained and license-compliant.
 	cp LICENSE README.md "${stage}/"
 	# Never carry workstation xattrs (notably macOS provenance) into the sovereign
@@ -167,19 +169,22 @@ install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
 native_dir="$(mktemp -d)"
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward" ./cmd/steward
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-executor" ./cmd/steward-executor
+go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/stewardctl" ./cmd/stewardctl
 reported="$("$native_dir/steward" -version | awk '{print $2}')"
 executor_reported="$("$native_dir/steward-executor" -version | awk '{print $2}')"
+ctl_reported="$("$native_dir/stewardctl" -version | awk '{print $2}')"
 echo "release: host-native steward self-reports version '${reported}'"
 echo "release: host-native steward-executor self-reports version '${executor_reported}'"
+echo "release: host-native stewardctl self-reports version '${ctl_reported}'"
 if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-	if [ "${reported}" != "${GITHUB_REF_NAME}" ] || [ "${executor_reported}" != "${GITHUB_REF_NAME}" ]; then
-		echo "release: FATAL — steward reports '${reported}' and steward-executor reports '${executor_reported}', but the tag is '${GITHUB_REF_NAME}'." >&2
-		echo "  The explicit release-version linker stamp did not reach both binaries," >&2
+	if [ "${reported}" != "${GITHUB_REF_NAME}" ] || [ "${executor_reported}" != "${GITHUB_REF_NAME}" ] || [ "${ctl_reported}" != "${GITHUB_REF_NAME}" ]; then
+		echo "release: FATAL — release binaries report '${reported}', '${executor_reported}', and '${ctl_reported}', but the tag is '${GITHUB_REF_NAME}'." >&2
+		echo "  The explicit release-version linker stamp did not reach all three binaries," >&2
 		echo "  so the artifacts would misreport their version. Ensure scripts/release.sh" >&2
 		echo "  supplies release_ldflags to both entry points. See docs/releasing.md." >&2
 		exit 1
 	fi
-	echo "release: version assertion OK — both binaries self-report the tag ${GITHUB_REF_NAME}"
+	echo "release: version assertion OK — all three binaries self-report the tag ${GITHUB_REF_NAME}"
 fi
 rm -rf "$native_dir"
 

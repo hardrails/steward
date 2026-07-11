@@ -12,8 +12,8 @@ name: Release
 # manifest; `publish` holds the only contents:write token, checks out no code,
 # and only attaches the already-built artifacts to a GitHub Release.
 #
-# scripts/release.sh stamps the release tag into both binaries with the standard Go
-# linker and independently executes both to assert the result before publishing.
+# scripts/release.sh stamps the release tag into all binaries with the standard Go
+# linker and independently executes all three to assert the result before publishing.
 
 on:
   push:

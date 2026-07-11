@@ -82,10 +82,26 @@ explicit flags and forces `-disable-inbound-listener`.
 | `-max-pids` | `128` | Per-workload process ceiling |
 | `-max-workloads` | `32` | Managed workload cap for the host |
 | `-max-workloads-per-tenant` | `4` | Managed workload cap per tenant |
+| `-admission-policy-file` | empty | Signed site-policy DSSE; enables v1.2 signed admission |
+| `-admission-site-root-public-key-file` | empty | Base64 Ed25519 site-root public key |
+| `-admission-site-root-key-id` | empty | Required signature key ID for the site policy |
+| `-admission-node-id` | empty | Stable node ID bound into intents and receipts |
+| `-admission-fence-file` | `/var/lib/steward-executor/admission-fences.bin` | Policy/generation high-water store |
+| `-initialize-admission-fence` | `false` | Exclusively create the empty fence and exit; normal startup never recreates it |
+| `-admission-allow-host-admin-intent` | `false` | Break glass: let the host-wide local token select an intent tenant |
+| `-admission-journal-file` | `/var/lib/steward-executor/operation-journal.bin` | Fsynced host-mutation journal |
+| `-admission-evidence-file` | `/var/lib/steward-executor/evidence.bin` | Signed receipt chain |
+| `-admission-evidence-key-file` | empty | Owner-only PKCS#8 Ed25519 receipt private key |
+| `-admission-evidence-epoch` | `1` | Receipt-key epoch expected by offline verification |
 
 The break-glass `-uplink-allow-insecure-http` and `-uplink-tls-skip-verify` flags
 weaken transport authentication and are off by default. They are not appropriate for
 production configuration.
+
+Signed admission is opt-in but atomic: setting any trust input requires the
+complete policy, site-root key and ID, node ID, and evidence key. The packaged
+unit accepts the matching optional `EXECUTOR_ADMISSION_*` values from
+`/etc/steward/executor.env`. See [signed admission and receipts]({{ '/guides/signed-admission/' | relative_url }}).
 
 Validate the same token, Docker, `runsc`, policy, fence, TLS, and credential paths
 used during real startup without binding or polling:

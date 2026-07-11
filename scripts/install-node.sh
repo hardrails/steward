@@ -12,7 +12,7 @@ if [[ $(uname -s) != Linux ]]; then
 fi
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-for path in steward steward-executor deploy/systemd/steward.service \
+for path in steward stewardctl steward-executor deploy/systemd/steward.service \
 	deploy/systemd/steward-executor.service deploy/config/steward.json \
 	deploy/config/executor.env scripts/activate-node-release.sh \
 	scripts/node-preflight.sh scripts/configure-node.sh scripts/uninstall-node.sh; do
@@ -54,10 +54,12 @@ incoming=$(mktemp -d /opt/steward/.incoming.XXXXXX)
 trap 'rm -rf "$incoming"' EXIT
 chmod 0755 "$incoming"
 install -o root -g root -m 0755 "$root/steward" "$incoming/steward"
+install -o root -g root -m 0755 "$root/stewardctl" "$incoming/stewardctl"
 install -o root -g root -m 0755 "$root/steward-executor" "$incoming/steward-executor"
 steward_version=$(runuser -u steward -- "$incoming/steward" -version | awk '{print $2}')
+ctl_version=$(runuser -u steward -- "$incoming/stewardctl" -version | awk '{print $2}')
 executor_version=$(runuser -u steward -- "$incoming/steward-executor" -version | awk '{print $2}')
-if [[ -z $steward_version || $steward_version != "$executor_version" ]]; then
+if [[ -z $steward_version || $steward_version != "$executor_version" || $steward_version != "$ctl_version" ]]; then
 	echo "install-node: Steward process versions do not match" >&2
 	exit 2
 fi
@@ -66,7 +68,7 @@ if [[ ! $steward_version =~ ^[A-Za-z0-9._+-]+$ ]]; then
 	exit 2
 fi
 
-for binary in steward steward-executor; do
+for binary in steward stewardctl steward-executor; do
 	active="/usr/local/bin/$binary"
 	if [[ -e $active || -L $active ]]; then
 		target=$(readlink "$active" 2>/dev/null || true)
@@ -83,6 +85,7 @@ done
 release_dir="/opt/steward/releases/$steward_version"
 install -d -o root -g root -m 0755 "$release_dir"
 install -o root -g root -m 0755 "$incoming/steward" "$release_dir/steward"
+install -o root -g root -m 0755 "$incoming/stewardctl" "$release_dir/stewardctl"
 install -o root -g root -m 0755 "$incoming/steward-executor" "$release_dir/steward-executor"
 rm -rf "$incoming"
 trap - EXIT
@@ -142,7 +145,7 @@ else
 	mv -Tf "$current_tmp" /opt/steward/current
 	selection="selected for first-time configuration"
 fi
-for binary in steward steward-executor; do
+for binary in steward stewardctl steward-executor; do
 	tmp="/usr/local/bin/.${binary}.new.$$"
 	rm -f "$tmp"
 	ln -s "/opt/steward/current/$binary" "$tmp"

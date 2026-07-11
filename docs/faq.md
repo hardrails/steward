@@ -1,6 +1,6 @@
 ---
 title: Frequently asked questions
-description: Answers about Steward's purpose, control-plane neutrality, Docker and gVisor requirements, tenant isolation, air-gapped operation, agent support, and v0.1 scope.
+description: Answers about Steward's purpose, control-plane neutrality, Docker and gVisor requirements, tenant isolation, air-gapped operation, agent support, and v1.2 scope.
 section: Reference
 ---
 
@@ -47,10 +47,24 @@ mount or network, and tenant-scoped capacity accounting. Dedicated hardware may
 still be required for threats such as microarchitectural side channels or stronger
 failure-domain separation.
 
-## Can v0.1 run Hermes Agent or OpenClaw?
+## What does signed admission add beyond a sandbox?
+
+It answers why a workload was allowed. Executor verifies a reusable
+publisher-signed profile capsule, a site-root-signed local policy, and an
+instance intent bound to tenant, node, instance, and generation. It then journals
+the mutation and emits signed receipts that `stewardctl` can verify offline. This
+is opt-in in v1.2; see [the how-to]({{ '/guides/signed-admission/' | relative_url }}).
+
+## Do receipts prove everything an agent did?
+
+No. They bind Steward's admission and mutation records. They exclude prompts,
+model responses, agent logs, and semantic tool actions. A host-root compromise is
+also outside the node-local receipt trust boundary.
+
+## Can v1.2 run Hermes Agent or OpenClaw?
 
 It can test image admission and offline lifecycle behavior. It cannot yet run them
-as connected persistent services because Executor v0.1 grants no egress, secrets,
+as connected persistent services because Executor v1.2 grants no egress, secrets,
 durable storage, or published ports. See the [Hermes]({{ '/guides/hermes-agent/' | relative_url }})
 and [OpenClaw]({{ '/guides/openclaw/' | relative_url }}) guides.
 

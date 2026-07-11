@@ -12,6 +12,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/executor"
 )
 
@@ -41,6 +43,11 @@ type workloadPayload struct {
 	Command   []string           `json:"command,omitempty"`
 	Resources executor.Resources `json:"resources"`
 	Egress    executor.Egress    `json:"egress"`
+}
+
+type admissionPayload struct {
+	CapsuleDSSEBase64 string                   `json:"capsule_dsse_base64"`
+	Intent            admission.InstanceIntent `json:"intent"`
 }
 
 type dispatcher struct {
@@ -110,6 +117,17 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 
 func (d *dispatcher) apply(ctx context.Context, cmd command, instanceID, runtimeRef string) (string, error) {
 	switch cmd.Kind {
+	case "admit":
+		var payload admissionPayload
+		if err := dsse.DecodeStrictInto(cmd.Payload, maxWireBytes, &payload); err != nil {
+			return "", fmt.Errorf("invalid signed admission payload: %w", err)
+		}
+		if payload.Intent.TenantID != d.tenantID || payload.Intent.NodeID != d.nodeID ||
+			payload.Intent.InstanceID != instanceID || payload.Intent.Generation != uint64(cmd.InstanceGeneration) {
+			return "", errors.New("signed admission intent does not match enrolled command identity and generation")
+		}
+		ctx = executor.WithAdmissionPrincipal(ctx, d.tenantID, d.nodeID, uint64(cmd.InstanceGeneration))
+		return d.call(ctx, http.MethodPost, "/v1/admissions", payload)
 	case "provision":
 		var payload workloadPayload
 		decoder := json.NewDecoder(bytes.NewReader(cmd.Payload))
@@ -127,10 +145,13 @@ func (d *dispatcher) apply(ctx context.Context, cmd command, instanceID, runtime
 		}
 		return d.call(ctx, http.MethodPost, "/v1/workloads", workload)
 	case "start":
+		ctx = executor.WithAdmissionPrincipal(ctx, d.tenantID, d.nodeID, uint64(cmd.InstanceGeneration))
 		return d.call(ctx, http.MethodPost, "/v1/workloads/"+runtimeRef+"/start", nil)
 	case "stop":
+		ctx = executor.WithAdmissionPrincipal(ctx, d.tenantID, d.nodeID, uint64(cmd.InstanceGeneration))
 		return d.call(ctx, http.MethodPost, "/v1/workloads/"+runtimeRef+"/stop", nil)
 	case "destroy":
+		ctx = executor.WithAdmissionPrincipal(ctx, d.tenantID, d.nodeID, uint64(cmd.InstanceGeneration))
 		if _, err := d.call(ctx, http.MethodDelete, "/v1/workloads/"+runtimeRef, nil); err != nil {
 			return "", err
 		}

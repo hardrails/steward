@@ -1,6 +1,6 @@
 ---
 title: Hermes Agent on Steward
-description: Safely evaluate a digest-pinned NousResearch Hermes Agent image under Steward Executor v0.1 and understand what is required for full connected operation.
+description: Safely evaluate a digest-pinned NousResearch Hermes Agent image under Steward Executor v1.2 and understand what is required for full connected operation.
 section: Agent compatibility
 ---
 
@@ -8,7 +8,7 @@ section: Agent compatibility
 
 <div class="callout warning">
   <strong>Compatibility status: lifecycle validation only</strong>
-  Steward v0.1 can admit and start a Hermes Agent image under its hardened sandbox.
+  Steward v1.2 can admit and start a Hermes Agent image under its hardened sandbox.
   It cannot yet provide the network, secrets, persistent <code>/opt/data</code>, or
   gateway ports required for a useful connected Hermes deployment.
 </div>
@@ -16,7 +16,7 @@ section: Agent compatibility
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) is an independent agent
 runtime. Its official Docker workflow stores configuration, credentials, memories,
 skills, and sessions under `/opt/data`, and connected use requires model and tool
-network access. Steward v0.1 deliberately supplies neither persistent host storage
+network access. Steward v1.2 deliberately supplies neither persistent host storage
 nor network access.
 
 ## Validate the image boundary
@@ -56,15 +56,15 @@ with:
 - `image`: the value of `$HERMES_IMAGE`
 - `command`: `['hermes', '--help']`, adjusted only to the pinned image's documented CLI
 
-A successful test proves the image can enter the v0.1 sandbox and execute the chosen
+A successful test proves the image can enter the v1.2 sandbox and execute the chosen
 offline command. It does **not** prove a gateway, messaging integration, browser
 tool, model call, or persistent memory works.
 
-## Why the normal Hermes setup does not fit v0.1
+## Why the normal Hermes setup does not fit v1.2
 
 The upstream setup command mounts a durable host directory at `/opt/data` and writes
 secrets and configuration there. The gateway also needs outbound connections and
-normally exposes a service port. Executor's public v0.1 contract has no field for
+normally exposes a service port. Executor's public v1.2 contract has no field for
 any of those capabilities, so a control plane cannot smuggle them through.
 
 Full Hermes operation belongs behind future, auditable grants:
