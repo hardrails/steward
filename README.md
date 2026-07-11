@@ -13,9 +13,8 @@ for enterprise, regulated, defense, critical-infrastructure, and sovereign
 operators who need to run untrusted agent images and configuration on infrastructure
 they control—including disconnected environments.
 
-Steward is control-plane neutral and independently useful. Railyard is a first-party
-proprietary control plane for Steward fleets, but Steward has **no build-time or
-runtime dependency on Railyard or any other private system**.
+Steward is control-plane neutral and independently useful. It has **no build-time or
+runtime dependency on any private system**.
 
 ## Install on a Linux server
 
@@ -71,7 +70,7 @@ typically exposed through an operator-selected OpenAI-compatible gateway.
 ## How it is built
 
 ```text
-  Independent control plane (Railyard or another implementation)
+  Independent control plane
                  |  outbound HTTPS, desired state, evidence
                  v
   +---------------- Steward node ----------------+

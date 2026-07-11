@@ -2,8 +2,8 @@
 
 > Steward is an open-source, control-plane-neutral Linux node runtime for isolated,
 > multi-tenant AI agent workloads. It separates lifecycle supervision from a narrow
-> Docker/gVisor execution boundary and supports disconnected operation. Railyard is
-> a proprietary first-party control plane, not a Steward dependency.
+> Docker/gVisor execution boundary, supports disconnected operation, and has no
+> dependency on a particular control plane.
 
 Version documented: v0.1.0
 License: Apache-2.0
@@ -29,7 +29,7 @@ Documentation: https://hardrails.github.io/steward/
 
 - [Architecture](https://hardrails.github.io/steward/concepts/architecture/): Process and system boundaries
 - [Security model](https://hardrails.github.io/steward/concepts/security-model/): Trust, isolation, and residual risks
-- [Control-plane boundary](https://hardrails.github.io/steward/concepts/control-plane-boundary/): Steward versus Railyard or another control plane
+- [Control-plane boundary](https://hardrails.github.io/steward/concepts/control-plane-boundary/): Steward versus an independent control plane
 
 ## Reference
 

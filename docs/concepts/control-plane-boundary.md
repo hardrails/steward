@@ -1,6 +1,6 @@
 ---
 title: Steward and the control-plane boundary
-description: Learn which responsibilities belong to open-source Steward, which belong to a separate orchestration control plane such as Railyard, and why that separation matters.
+description: Learn which responsibilities belong to open-source Steward, which belong to a separate orchestration control plane, and why that separation matters.
 section: Explanation
 ---
 
@@ -8,8 +8,7 @@ section: Explanation
 
 Steward is independently installable open-source node software. A control plane is a
 separately hosted product or operator implementation that coordinates many Steward
-nodes. Railyard is Hardrails' proprietary first-party control plane, but it is a
-consumer—not a dependency—of Steward.
+nodes. It is a consumer—not a dependency—of Steward.
 
 | Steward owns on each node | A control plane owns across the fleet |
 | --- | --- |

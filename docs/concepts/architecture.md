@@ -56,9 +56,8 @@ cannot resurrect a destroyed workload after restart.
 
 ## Control-plane neutrality
 
-Railyard is a proprietary, first-party control plane for Steward fleets. The
-dependency arrow goes from Railyard to Steward's public contract, never from Steward
-to Railyard. Any system can implement the documented API and uplink protocol.
+The dependency arrow goes from an independently operated control plane to Steward's
+public contract. Any system can implement the documented API and uplink protocol.
 
 This separation allows a sovereign operator to audit and build Steward without
 receiving the proprietary control-plane source. It also keeps enterprise functions
