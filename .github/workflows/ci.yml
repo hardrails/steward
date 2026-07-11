@@ -24,6 +24,8 @@ jobs:
         run: go vet ./...
       - name: go test
         run: go test -race ./...
+      - name: node appliance script syntax
+        run: bash -n scripts/install-node.sh scripts/activate-node-release.sh scripts/node-preflight.sh
 
   lint:
     name: golangci-lint
