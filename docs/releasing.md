@@ -202,8 +202,8 @@ gh run watch "$(gh run list --workflow=release.yml --limit=1 --json databaseId -
 gh run download "$(gh run list --workflow=release.yml --limit=1 --json databaseId --jq '.[0].databaseId')" -n steward-dist -D /tmp/steward-dist
 ```
 
-(On a dispatch run the archives are named after the branch and the binaries report
-a pseudo-version, since there is no tag — that is expected; the point is to prove
+(On a dispatch run the archives and binaries use an immutable `dev-<commit>`
+pseudo-version, since there is no tag — that is expected; the point is to prove
 the build, packaging, and checksum steps are sound.)
 
 ## Verifying a published download (for consumers)

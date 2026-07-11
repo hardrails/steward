@@ -19,6 +19,8 @@
 # Env (set automatically by GitHub Actions; optional locally):
 #   GITHUB_REF_TYPE         "tag" enables the strict version assertion below.
 #   GITHUB_REF_NAME         the tag (e.g. v0.1.0); used for artifact names and the assertion.
+#   STEWARD_RELEASE_VERSION explicit path-safe artifact and binary version. CI
+#                           uses the tag, or dev-<commit> for a manual dry-run.
 #   STEWARD_RELEASE_TARGETS whitespace-separated GOOS/GOARCH targets. The default
 #                           remains the complete public matrix. CI narrows this to
 #                           one architecture per native package-building runner.
@@ -38,7 +40,7 @@ fi
 # VERSION labels artifacts and is stamped into both binaries. On a tag push
 # GITHUB_REF_NAME is authoritative; a local dry run falls back to `git describe`,
 # then to "dev" outside any checkout.
-VERSION="${GITHUB_REF_NAME:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
+VERSION="${STEWARD_RELEASE_VERSION:-${GITHUB_REF_NAME:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}}"
 release_ldflags="-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=${VERSION}"
 
 # Fail-fast release-tag gate. The workflow's push trigger is the broad `v*`
