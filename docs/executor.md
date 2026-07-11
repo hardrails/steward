@@ -16,7 +16,7 @@ The separation is a privilege boundary, not a product boundary:
   It admits a deliberately narrow OCI workload and forces the `runsc` runtime.
 - A control plane owns tenants, users, approvals, desired state, rollout policy,
   and profile resolution. Executor contains none of those systems and has no
-  Railyard dependency.
+  dependency on a particular control plane.
 - Inference remains outside both processes behind an operator-managed
   OpenAI-compatible gateway.
 

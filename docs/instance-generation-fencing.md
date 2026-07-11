@@ -339,7 +339,7 @@ brick a legitimately-fresh node; accept-then-enforce-monotonically is the safe c
 
 ### The rollout compatibility matrix
 
-Because the framework/Railyard side and this Steward side ship as separate PRs, the
+Because a control plane and Steward can ship on independent schedules, the
 deployment-ordering question is real. Every cell degrades to today's accepted behavior
 or better — **no synchronized upgrade is required**, and the fix activates only when
 both sides are new:
