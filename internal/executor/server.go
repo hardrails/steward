@@ -196,7 +196,7 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		writeDockerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"runtime_ref": name, "status": "stopped"})
+	writeJSON(w, http.StatusCreated, map[string]string{"runtime_ref": name, "status": "created"})
 }
 
 func writeCapacityError(w http.ResponseWriter, message string) {

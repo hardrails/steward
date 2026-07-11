@@ -186,6 +186,9 @@ func TestProvisionCreatesValidatedWorkload(t *testing.T) {
 	if len(docker.created) != 1 || docker.created[0].ProfileID != "openclaw-v1" {
 		t.Fatalf("creates = %#v", docker.created)
 	}
+	if !strings.Contains(res.Body.String(), `"status":"created"`) {
+		t.Fatalf("created response = %s", res.Body.String())
+	}
 }
 
 func TestProvisionIsIdempotentOnlyForTheSameImmutableWorkload(t *testing.T) {
