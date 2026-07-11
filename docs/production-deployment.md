@@ -189,9 +189,18 @@ set the file's mode for you.
 Apply the same restrictive permissions to the `-state-file` when durable state is
 enabled: once process execution is used (`-enable-process-exec`), an instance's
 `spec` — including any `spec.env` values a caller passes to the child process, which
-may be secrets — is persisted verbatim, in cleartext, in that file. Steward does not
-set its mode for you, so a `0600`, service-user-owned `-state-file` is the control
-that keeps those child-process secrets off other local accounts.
+may be secrets — is persisted verbatim, in cleartext, in that file. Steward creates
+new state snapshots as owner-only files and, with process execution enabled, fails
+startup if an existing file is accessible by group or other users. Keep it `0600`
+and owned by the dedicated Steward service account.
+
+Process execution also fails closed when Steward is root or its inbound listener
+is reachable beyond loopback. Run Steward as an unprivileged service account and,
+for remotely managed nodes, prefer `-disable-inbound-listener` with the authenticated
+outbound uplink. `-allow-root-process-exec` and
+`-allow-nonloopback-process-exec` are dangerous acknowledgements for exceptional
+deployments, not normal production settings; enabling either posture emits a loud
+warning.
 
 ### Rotating a credential without downtime
 

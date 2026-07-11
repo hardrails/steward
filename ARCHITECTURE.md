@@ -5,6 +5,29 @@ over a small HTTP API. This document records the core it always provides,
 which capabilities are opt-in versus on by default, what it deliberately does
 *not* do, and why the most sensitive future capability is kept at arm's length.
 
+## Separation of concerns
+
+Steward is an independently buildable, control-plane-neutral application. A
+proprietary control plane such as Railyard may depend on Steward's public HTTP and
+uplink contracts; the dependency never points back the other way. Steward contains
+no tenant database, user identity system, approval workflow, rollout scheduler,
+private client SDK, or vendor-specific API.
+
+Three runtime boundaries keep higher-risk responsibilities out of this process:
+
+1. The **control plane** owns enterprise identity, tenant authorization, desired
+   state, artifact and skill approval, fleet rollout, and evidence aggregation.
+2. A separate open-source **Steward Executor** owns the Docker socket and admits
+   untrusted OCI images and workload configuration under Docker plus gVisor. It is
+   a host-local execution boundary, not a package linked into Steward.
+3. An operator-managed **OpenAI-compatible inference gateway** owns model routing
+   and inference policy. Steward treats it as outside the lifecycle contract.
+
+The built-in `os/exec` supervisor is therefore a trusted-operator facility, not the
+untrusted tenant workload path. Root and non-loopback startup acknowledgements are
+defense-in-depth against accidental exposure; neither provides sandboxing. Any
+untrusted workload belongs at the external executor boundary.
+
 ## A minimal core, with opt-in capabilities layered on top
 
 Every version of Steward provides one always-on core:
