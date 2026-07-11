@@ -130,6 +130,12 @@ lists only this module. Any private dependency would appear here (and in
 - `steward-executor` additionally requires a Linux host with Docker already
   installed and gVisor registered as Docker runtime `runsc`.
 
+Published Linux archives are also offline-installable node appliances: they include
+both binaries, hardened systemd units, configuration templates, and fail-closed
+install/preflight/rollback utilities. Installation performs no network access and
+does not enable a service until customer credentials and trust material validate.
+See [Disconnected Steward node appliance](docs/node-appliance.md).
+
 ## Contributing
 
 Read [AGENTS.md](AGENTS.md) first — it names the invariants a change must not
