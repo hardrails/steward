@@ -96,6 +96,10 @@ steward-executor \
   -uplink-state-file /var/lib/steward/executor-uplink-state.json
 ```
 
+Initialize that state path once for a newly enrolled node before the first normal
+start (`steward-executor -initialize-uplink-state -uplink-state-file ...`). A
+missing fence on normal startup is fatal, never silently recreated.
+
 The token, credential, state, and optional mTLS client-key files are owner-only.
 Remote plaintext HTTP is rejected unless explicitly acknowledged; private CAs and
 mTLS use the same standard-library TLS implementation as the `steward` uplink.

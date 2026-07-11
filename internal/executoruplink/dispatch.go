@@ -78,6 +78,9 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 			rep.Status = "done"
 			rep.ReportedStatus = current.ReportedStatus
 			rep.Result["replayed"] = true
+			if current.Absent {
+				rep.Result["absent"] = true
+			}
 			return rep
 		}
 	}
@@ -88,8 +91,10 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 		rep.Result["error"] = err.Error()
 		return rep
 	}
+	absent := cmd.Kind == "destroy"
 	if err := d.state.advance(instanceID, position{
-		Generation: cmd.InstanceGeneration, Sequence: cmd.CommandSequence, ReportedStatus: reported,
+		Generation: cmd.InstanceGeneration, Sequence: cmd.CommandSequence,
+		ReportedStatus: reported, Absent: absent,
 	}); err != nil {
 		rep.Result["error"] = "persist command fence: " + err.Error()
 		return rep
@@ -97,6 +102,9 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 	rep.Status = "done"
 	rep.ReportedStatus = reported
 	rep.Result["runtime_ref"] = runtimeRef
+	if absent {
+		rep.Result["absent"] = true
+	}
 	return rep
 }
 
@@ -170,6 +178,14 @@ func (d *dispatcher) call(ctx context.Context, method, target string, body any) 
 		return "running", nil
 	case "created", "exited", "stopped":
 		return "stopped", nil
+	case "restarting":
+		return "provisioning", nil
+	case "removing":
+		return "stopping", nil
+	case "paused":
+		return "hibernated", nil
+	case "dead":
+		return "failed", nil
 	default:
 		return "", fmt.Errorf("local executor returned unsupported status %q", payload.Status)
 	}

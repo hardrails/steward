@@ -167,8 +167,7 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 	observed, err := s.docker.Inspect(r.Context(), name)
 	if err == nil {
 		if !observed.Managed || !observed.Hardened ||
-			observed.Fingerprint != workloadFingerprint(workload) ||
-			observed.Fingerprint != workloadFingerprint(observed.Workload) {
+			observed.Fingerprint != workloadFingerprint(workload) {
 			writeError(w, http.StatusConflict, "workload_conflict", "runtime_ref already belongs to a different workload definition")
 			return
 		}
@@ -297,8 +296,7 @@ func (s *Server) managed(ctx context.Context, name string) (ObservedWorkload, er
 	if !observed.Managed {
 		return ObservedWorkload{}, ErrNotFound
 	}
-	if !observed.Hardened || observed.Fingerprint == "" ||
-		observed.Fingerprint != workloadFingerprint(observed.Workload) {
+	if !observed.Hardened {
 		return ObservedWorkload{}, ErrWorkloadDrift
 	}
 	return observed, nil

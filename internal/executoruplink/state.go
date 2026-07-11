@@ -18,6 +18,7 @@ type position struct {
 	Generation     int64  `json:"generation"`
 	Sequence       int64  `json:"sequence"`
 	ReportedStatus string `json:"reported_status"`
+	Absent         bool   `json:"absent,omitempty"`
 }
 
 type stateFile struct {
@@ -40,7 +41,7 @@ func LoadStateStore(path string) (*StateStore, error) {
 	store := &StateStore{path: path, positions: make(map[string]position)}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return store, nil
+		return nil, fmt.Errorf("uplink state %q is missing; initialize a newly enrolled node once with -initialize-uplink-state before starting the executor", path)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("stat uplink state %q: %w", path, err)
@@ -76,6 +77,48 @@ func LoadStateStore(path string) (*StateStore, error) {
 	}
 	store.positions = state.Positions
 	return store, nil
+}
+
+// InitializeStateStore creates the empty fence for a newly enrolled executor.
+// It is deliberately exclusive: it never overwrites an existing file, and normal
+// startup never recreates a missing file, so losing durable fence state is a loud
+// failure rather than permission to replay an old command against a new workload.
+func InitializeStateStore(path string) error {
+	if path == "" {
+		return errors.New("uplink state file is required")
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("initialize uplink state %q: %w", path, err)
+	}
+	ok := false
+	defer func() {
+		_ = file.Close()
+		if !ok {
+			_ = os.Remove(path)
+		}
+	}()
+	if err := json.NewEncoder(file).Encode(stateFile{
+		Version: stateVersion, Positions: map[string]position{},
+	}); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }
 
 func (s *StateStore) position(instanceID string) (position, bool) {

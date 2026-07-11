@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -48,6 +49,9 @@ const managedWorkloadLabel = "io.hardrails.executor.managed"
 const workloadFingerprintLabel = "io.hardrails.workload-sha256"
 const workspaceTmpfs = "rw,nosuid,nodev,size=67108864"
 const tempTmpfs = "rw,noexec,nosuid,nodev,size=67108864"
+const workloadMemoryLabel = "io.hardrails.memory-bytes"
+const workloadCPULabel = "io.hardrails.cpu-millis"
+const workloadPIDsLabel = "io.hardrails.pids"
 
 func NewDockerHTTP(socket string) *DockerHTTP {
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
@@ -150,6 +154,9 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 			"io.hardrails.tenant":    w.TenantID,
 			"io.hardrails.instance":  w.InstanceID,
 			"io.hardrails.profile":   w.ProfileID,
+			workloadMemoryLabel:      strconv.FormatInt(w.Resources.MemoryBytes, 10),
+			workloadCPULabel:         strconv.FormatInt(w.Resources.CPUMillis, 10),
+			workloadPIDsLabel:        strconv.FormatInt(w.Resources.PIDs, 10),
 		},
 	}
 	return d.call(ctx, http.MethodPost, "/v1.41/containers/create?name="+url.QueryEscape(name), body, http.StatusCreated)
@@ -216,6 +223,12 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 		Fingerprint: labels[workloadFingerprintLabel],
 		Managed:     labels[managedWorkloadLabel] == "true",
 		Hardened: payload.Config.User == "65532:65532" &&
+			validFingerprint(labels[workloadFingerprintLabel]) &&
+			labels["io.hardrails.tenant"] != "" && labels["io.hardrails.instance"] != "" &&
+			labels["io.hardrails.profile"] != "" &&
+			labels[workloadMemoryLabel] == strconv.FormatInt(payload.HostConfig.Memory, 10) &&
+			labels[workloadCPULabel] == strconv.FormatInt(payload.HostConfig.NanoCPUs/1_000_000, 10) &&
+			labels[workloadPIDsLabel] == strconv.FormatInt(payload.HostConfig.Pids, 10) &&
 			payload.Config.WorkingDir == "/workspace" &&
 			contains(payload.Config.Env, "HOME=/workspace") &&
 			contains(payload.Config.Env, "TMPDIR=/tmp") &&
@@ -226,6 +239,14 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			payload.HostConfig.Tmpfs["/workspace"] == workspaceTmpfs,
 		Status: payload.State.Status,
 	}, nil
+}
+
+func validFingerprint(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func workloadFingerprint(w Workload) string {

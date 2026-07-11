@@ -117,11 +117,26 @@ sequence before mutation. For provision it discards any payload identity and der
 `tenant_id` from the enrolled credential expectation and `instance_id` from the
 length-prefixed runtime reference.
 
+Before first start, initialize a newly enrolled node's fence exactly once:
+
+```console
+steward-executor -initialize-uplink-state \
+  -uplink-state-file /var/lib/steward/executor-uplink-state.json
+```
+
+Normal startup requires that file to exist. It never treats a missing file as an
+empty first run: loss or a changed path is a fail-closed startup error, because
+resetting the fence could let a redelivered old command mutate a newer workload.
+Initialization uses exclusive creation and refuses to overwrite an existing file.
+
 The state file records the highest applied `(instance_generation,
 command_sequence)` plus its reported status per instance. It is atomically replaced,
 fsynced, owner-only, and capped at 1 MiB. A stale or repeated command becomes a
 successful no-op with the durable prior status. This prevents an old provision or
 start from resurrecting a destroyed or replaced workload after a process restart.
+A completed destroy also persists and reports `result.absent=true`; although the
+shared lifecycle status vocabulary represents absence as `stopped`, the command's
+terminal result never describes the removed container as merely restartable.
 
 Poll and report bodies are capped at 1 MiB; a poll has at most 128 commands. Failed
 round trips use bounded exponential backoff capped at five minutes. The credential

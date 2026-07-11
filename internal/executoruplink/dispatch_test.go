@@ -24,10 +24,7 @@ func TestDispatcherOverridesTenantAndInstanceAndFencesReplay(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"runtime_ref":"executor-x","status":"created"}`))
 	})
-	store, err := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
 	d := dispatcher{handler: handler, token: "local-token", tenantID: "tenant-a", nodeID: "node-1", state: store}
 	cmd := command{
 		CommandID: "c1", TenantID: "tenant-a", NodeID: "node-1",
@@ -51,7 +48,7 @@ func TestDispatcherOverridesTenantAndInstanceAndFencesReplay(t *testing.T) {
 func TestDispatcherRejectsCrossTenantAndUnknownPayloadFields(t *testing.T) {
 	mutations := 0
 	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { mutations++ })
-	store, _ := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
 	d := dispatcher{handler: handler, token: "token", tenantID: "tenant-a", nodeID: "node-1", state: store}
 	base := command{
 		CommandID: "c1", TenantID: "tenant-b", NodeID: "node-1",
@@ -85,7 +82,7 @@ func TestDispatcherAppliesLifecycleCommandsAndRejectsHibernate(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"runtime_ref": "executor-x", "status": status})
 	})
-	store, _ := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
 	d := dispatcher{handler: handler, token: "token", tenantID: "tenant-a", nodeID: "node-1", state: store}
 	base := command{
 		TenantID: "tenant-a", NodeID: "node-1", RuntimeRef: "uplink:6:node-1:agent-1",
@@ -96,7 +93,14 @@ func TestDispatcherAppliesLifecycleCommandsAndRejectsHibernate(t *testing.T) {
 		cmd.CommandID, cmd.Kind, cmd.CommandSequence = kind, kind, int64(index+1)
 		if rep := d.execute(context.Background(), cmd); rep.Status != "done" {
 			t.Fatalf("%s report=%#v", kind, rep)
+		} else if kind == "destroy" && rep.Result["absent"] != true {
+			t.Fatalf("destroy did not report absence: %#v", rep)
 		}
+	}
+	destroyReplay := base
+	destroyReplay.CommandID, destroyReplay.Kind, destroyReplay.CommandSequence = "destroy", "destroy", 3
+	if rep := d.execute(context.Background(), destroyReplay); rep.Result["absent"] != true || rep.Result["replayed"] != true {
+		t.Fatalf("destroy replay lost absence evidence: %#v", rep)
 	}
 	hibernate := base
 	hibernate.CommandID, hibernate.Kind, hibernate.CommandSequence = "hibernate", "hibernate", 4
@@ -105,5 +109,26 @@ func TestDispatcherAppliesLifecycleCommandsAndRejectsHibernate(t *testing.T) {
 	}
 	if len(paths) != 3 {
 		t.Fatalf("paths=%#v", paths)
+	}
+}
+
+func TestLocalDockerStatesMapToControlPlaneLifecycleStates(t *testing.T) {
+	want := map[string]string{
+		"restarting": "provisioning", "removing": "stopping",
+		"paused": "hibernated", "dead": "failed",
+	}
+	for dockerStatus, reported := range want {
+		t.Run(dockerStatus, func(t *testing.T) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"runtime_ref": "executor-x", "status": dockerStatus,
+				})
+			})
+			d := dispatcher{handler: handler, token: "token"}
+			got, err := d.call(context.Background(), http.MethodPost, "/v1/workloads/executor-x/start", nil)
+			if err != nil || got != reported {
+				t.Fatalf("reported=%q err=%v, want %q", got, err, reported)
+			}
+		})
 	}
 }

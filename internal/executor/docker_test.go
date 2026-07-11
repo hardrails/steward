@@ -81,6 +81,9 @@ func TestCreateSendsNonEscapableDockerPolicy(t *testing.T) {
 	if labels[workloadFingerprintLabel] != workloadFingerprint(w) {
 		t.Fatalf("workload fingerprint label missing: %#v", labels)
 	}
+	if labels[workloadMemoryLabel] != "1048576" || labels[workloadCPULabel] != "250" || labels[workloadPIDsLabel] != "32" {
+		t.Fatalf("resource drift labels missing: %#v", labels)
+	}
 }
 
 func TestRuntimeAvailableReadsDockerRegistry(t *testing.T) {
@@ -106,6 +109,8 @@ func TestInspectProjectsOnlyExecutorOwnedWorkloadState(t *testing.T) {
 				"Labels": map[string]string{
 					managedWorkloadLabel: "true", "io.hardrails.tenant": "tenant-a",
 					"io.hardrails.instance": "agent-1", "io.hardrails.profile": "hermes-v1",
+					workloadFingerprintLabel: strings.Repeat("a", 64),
+					workloadMemoryLabel:      "1048576", workloadCPULabel: "250", workloadPIDsLabel: "32",
 				},
 			},
 			"HostConfig": map[string]any{

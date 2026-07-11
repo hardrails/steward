@@ -30,6 +30,7 @@ func main() {
 	uplinkURL := flag.String("uplink-url", "", "optional control-plane base URL for outbound executor commands")
 	uplinkCredentialFile := flag.String("uplink-credential-file", "", "path to versioned executor uplink credential")
 	uplinkStateFile := flag.String("uplink-state-file", "", "path to durable executor command-fencing state")
+	initializeUplinkState := flag.Bool("initialize-uplink-state", false, "initialize a new empty executor uplink fence and exit")
 	uplinkPollInterval := flag.Duration("uplink-poll-interval", 10*time.Second, "base interval between executor uplink polls")
 	uplinkAllowInsecureHTTP := flag.Bool("uplink-allow-insecure-http", false, "explicitly allow plaintext HTTP to a non-loopback uplink")
 	uplinkTLSCAFile := flag.String("uplink-tls-ca-file", "", "optional PEM CA bundle for the executor uplink")
@@ -45,6 +46,14 @@ func main() {
 	flag.Parse()
 	if *version {
 		fmt.Println("steward-executor " + buildinfo.Resolve())
+		return
+	}
+	if *initializeUplinkState {
+		if err := executoruplink.InitializeStateStore(*uplinkStateFile); err != nil {
+			slog.Error("initialize executor uplink state", "err", err)
+			os.Exit(2)
+		}
+		fmt.Println("initialized executor uplink state " + *uplinkStateFile)
 		return
 	}
 	if *tokenFile == "" {

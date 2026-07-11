@@ -50,7 +50,7 @@ func TestPollerExecutesAuthenticatedCommandAndReports(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"runtime_ref":"executor-x","status":"created"}`))
 	})
-	store, _ := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
 	poller, err := NewPoller(Config{
 		BaseURL: server.URL, CredentialPath: credentialPath, PollInterval: time.Second,
 		Handler: local, LocalToken: "local", State: store,
@@ -74,7 +74,7 @@ func TestPollerExecutesAuthenticatedCommandAndReports(t *testing.T) {
 func TestNewPollerRefusesRemotePlainHTTPByDefault(t *testing.T) {
 	credentialPath := filepath.Join(t.TempDir(), "credential.json")
 	_ = os.WriteFile(credentialPath, []byte(`{"version":1,"tenant_id":"t","node_id":"n","credential":"c"}`), 0o600)
-	store, _ := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
 	_, err := NewPoller(Config{
 		BaseURL: "http://192.0.2.10", CredentialPath: credentialPath, PollInterval: time.Second,
 		Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), LocalToken: "x", State: store,
@@ -97,7 +97,7 @@ func TestPollerRunBacksOffAfterFailureAndStopsWithContext(t *testing.T) {
 		_, _ = w.Write([]byte(`{"commands":[]}`))
 	}))
 	defer server.Close()
-	store, _ := LoadStateStore(filepath.Join(t.TempDir(), "state.json"))
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
 	poller, err := NewPoller(Config{
 		BaseURL: server.URL, CredentialPath: credentialPath, PollInterval: time.Millisecond,
 		Handler:    http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),

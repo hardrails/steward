@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/hardrails/steward/internal/executoruplink"
 )
 
 func TestReadTokenTrimsFileWhitespace(t *testing.T) {
@@ -106,11 +108,15 @@ func TestExecutorMainRunsOutboundOnlyUplink(t *testing.T) {
 	if err := os.WriteFile(credential, []byte(`{"version":1,"tenant_id":"tenant-a","node_id":"executor-1","credential":"opaque"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	statePath := filepath.Join(dir, "state.json")
+	if err := executoruplink.InitializeStateStore(statePath); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command(bin,
 		"-docker-socket", socket, "-token-file", token,
 		"-disable-inbound-listener", "-uplink-url", control.URL,
 		"-uplink-credential-file", credential,
-		"-uplink-state-file", filepath.Join(dir, "state.json"),
+		"-uplink-state-file", statePath,
 		"-uplink-poll-interval", "10ms",
 	)
 	cmd.Env = executorEnv()
@@ -169,6 +175,27 @@ func TestExecutorMainVersionNeedsNoDockerOrCredential(t *testing.T) {
 	output, err := command.CombinedOutput()
 	if err != nil || !strings.HasPrefix(string(output), "steward-executor ") {
 		t.Fatalf("version: err=%v output=%s", err, output)
+	}
+}
+
+func TestExecutorMainInitializesFenceOnceWithoutDocker(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the real executor binary")
+	}
+	bin := buildExecutor(t)
+	path := filepath.Join(t.TempDir(), "state.json")
+	command := exec.Command(bin, "-initialize-uplink-state", "-uplink-state-file", path)
+	command.Env = executorEnv()
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("initialize: %v output=%s", err, output)
+	}
+	if _, err := executoruplink.LoadStateStore(path); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.Command(bin, "-initialize-uplink-state", "-uplink-state-file", path)
+	command.Env = executorEnv()
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("second initialization overwrote fence: %s", output)
 	}
 }
 

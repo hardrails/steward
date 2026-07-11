@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cross-compile Steward for every published target, package each build as a
-# self-contained .tar.gz (both process binaries + LICENSE + README), and write a SHA-256
+# self-contained .tar.gz (the target's usable process binaries + LICENSE + README), and write a SHA-256
 # checksums file over the archives. Dependency-free — only the Go toolchain and
 # POSIX shell utilities — matching Steward's stdlib-only, "buildable by anyone
 # with just the Go toolchain" ethos. The release GitHub Actions workflow
@@ -74,13 +74,17 @@ for target in "${targets[@]}"; do
 	# Neither removes the VCS build metadata Main.Version is derived from.
 	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 		go build -trimpath -ldflags "-s -w" -o "${stage}/steward" ./cmd/steward
-	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-		go build -trimpath -ldflags "-s -w" -o "${stage}/steward-executor" ./cmd/steward-executor
+	files=(steward LICENSE README.md)
+	if [ "$goos" = "linux" ]; then
+		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+			go build -trimpath -ldflags "-s -w" -o "${stage}/steward-executor" ./cmd/steward-executor
+		files=(steward steward-executor LICENSE README.md)
+	fi
 	# Ship the license and readme alongside both binaries so the download is
 	# self-contained and license-compliant.
 	cp LICENSE README.md "${stage}/"
 	tar -C "${stage}" -czf "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz" \
-		steward steward-executor LICENSE README.md
+		"${files[@]}"
 	rm -rf "${stage}"
 done
 

@@ -209,6 +209,17 @@ func TestProvisionIsIdempotentOnlyForTheSameImmutableWorkload(t *testing.T) {
 	if res.Code != http.StatusOK || len(docker.created) != 0 {
 		t.Fatalf("status=%d creates=%d body=%s", res.Code, len(docker.created), res.Body.String())
 	}
+	// Docker may normalize Config.Image during create/inspect. The immutable
+	// admission fingerprint label remains authoritative while mutable resources
+	// and fixed hardening are independently checked by Inspect.
+	docker.observed.Workload.Image = "sha256:normalized-content-id"
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/workloads", strings.NewReader(validWorkload()))
+	req.Header.Set("Authorization", "Bearer secret")
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("normalized image caused false drift: status=%d body=%s", res.Code, res.Body.String())
+	}
 
 	docker.observed.Fingerprint = workloadFingerprint(Workload{ProfileID: "other-profile"})
 	res = httptest.NewRecorder()
