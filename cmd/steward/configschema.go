@@ -59,9 +59,13 @@ func configSchemaJSON() ([]byte, error) {
 // reach) and the value constraints (which encode prepareRuntime's validation
 // rules) are spelled out below.
 //
-// The encoded constraints mirror the real startup validators exactly — no
-// stricter, no looser — so a config the schema accepts is one -check-config would
-// accept and vice versa:
+// The encoded constraints below mirror the startup validators where a rule can be
+// decided from the config file alone. Schema acceptance is an early structural
+// gate, not a promise that the fully resolved node configuration will boot:
+// -check-config additionally applies flag/env precedence, reads credential and
+// state files, inspects the effective UID, and evaluates the resolved listener
+// topology. Those host- and runtime-dependent process-execution guardrails cannot
+// be represented faithfully in a standalone JSON Schema.
 //
 //   - additionalProperties:false mirrors loadConfigFile's DisallowUnknownFields:
 //     an unknown key is a fail-closed startup error today, so the schema rejects
