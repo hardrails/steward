@@ -104,8 +104,9 @@ a rendered config against it with any standard JSON-Schema validator in your
 CI/CD, then run `-check-config` on the node as the final on-box gate — the two are
 complementary: the schema catches a malformed candidate early and offline,
 `-check-config` catches everything the schema deliberately does not (a credential
-file that is missing on *this* node, a `-state-file` path that is unreadable here,
-an `-addr` that will not bind).
+file that is missing on *this* node, a `-state-file` path or permissions that are
+unsafe here, an `-addr` that will not bind, root process execution, or a resolved
+non-loopback process-execution listener).
 
 Two disclosed simplifications in the schema, both erring toward the documented
 canonical form rather than a stricter rule than the validator enforces:
