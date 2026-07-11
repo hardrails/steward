@@ -55,8 +55,8 @@ func TestListenerIsLoopback(t *testing.T) {
 	}{
 		{"127.0.0.1:8080", true},
 		{"[::1]:8080", true},
-		{"localhost:8080", true},
-		{"LOCALHOST:8080", true},
+		{"localhost:8080", false},
+		{"LOCALHOST:8080", false},
 		{"0.0.0.0:8080", false},
 		{"[::]:8080", false},
 		{":8080", false},
@@ -113,6 +113,10 @@ func TestProcessExecRootRequiresAcknowledgement(t *testing.T) {
 }
 
 func TestProcessExecStateFilePermissions(t *testing.T) {
+	originalACLInspector := inspectExtendedACL
+	t.Cleanup(func() { inspectExtendedACL = originalACLInspector })
+	inspectExtendedACL = func(string) (bool, error) { return false, nil }
+
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := os.WriteFile(path, []byte("{\"version\":1,\"instances\":[]}"), 0o644); err != nil {
 		t.Fatal(err)
@@ -128,6 +132,15 @@ func TestProcessExecStateFilePermissions(t *testing.T) {
 	}
 	if err := validateProcessExecStateFile(filepath.Join(t.TempDir(), "first-run.json")); err != nil {
 		t.Fatalf("missing first-run state file rejected: %v", err)
+	}
+
+	inspectExtendedACL = func(string) (bool, error) { return true, nil }
+	if err := validateProcessExecStateFile(path); err == nil || !strings.Contains(err.Error(), "extended access ACL") {
+		t.Fatalf("state file with an extended ACL error=%v, want actionable rejection", err)
+	}
+	inspectExtendedACL = func(string) (bool, error) { return false, errors.New("ACL inspection unavailable") }
+	if err := validateProcessExecStateFile(path); err == nil || !strings.Contains(err.Error(), "ACL inspection unavailable") {
+		t.Fatalf("ACL inspection failure error=%v, want fail-closed rejection", err)
 	}
 }
 

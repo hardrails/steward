@@ -538,22 +538,24 @@ type resolvedConfig struct {
 	processStopGracePeriod      time.Duration
 }
 
-// effectiveUID is a seam for the startup-policy tests. Production always uses
-// os.Geteuid; tests replace it briefly to prove both root and non-root behavior
-// without depending on the account running the test suite.
-var effectiveUID = os.Geteuid
+// effectiveUID and inspectExtendedACL are seams for startup-policy tests.
+// Production always uses the OS implementations; tests replace them briefly to
+// prove fail-closed behavior without depending on the account or filesystem
+// running the suite.
+var (
+	effectiveUID       = os.Geteuid
+	inspectExtendedACL = extendedACLPresent
+)
 
 // listenerIsLoopback reports whether addr names a literal loopback-only listener.
 // It deliberately does not resolve arbitrary hostnames: startup admission must not
-// turn DNS state into a security decision. The conventional localhost name and
-// literal IPv4/IPv6 loopback addresses are the only accepted names.
+// turn DNS state into a security decision. Only literal IPv4/IPv6 loopback
+// addresses are accepted; even "localhost" requires the explicit non-loopback
+// acknowledgement because its host mapping is outside Steward's control.
 func listenerIsLoopback(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
@@ -578,6 +580,13 @@ func validateProcessExecStateFile(path string) error {
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("state file %q permissions are %04o; process execution requires 0600 or stricter (run chmod 600 %q)", path, info.Mode().Perm(), path)
+	}
+	hasACL, err := inspectExtendedACL(path)
+	if err != nil {
+		return fmt.Errorf("inspect state file %q extended ACL: %w", path, err)
+	}
+	if hasACL {
+		return fmt.Errorf("state file %q has an extended access ACL; process execution requires owner-only access (remove the ACL and run chmod 600 %q)", path, path)
 	}
 	return nil
 }
