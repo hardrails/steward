@@ -46,22 +46,30 @@ is a broad glob on purpose: GitHub's tag-filter syntax cannot reliably express
 "semver only", and a filter that silently failed to match the release tag would be
 worse than a broad one — so `scripts/release.sh` enforces the `vX.Y.Z` shape
 itself, failing a stray tag like `vnext` or `v2` fast and loudly before anything is
-built or published.) It runs **two jobs**, split deliberately for least privilege:
+built or published.) It uses four job executions, split deliberately for native
+packaging and least privilege:
 
-1. **`build`** — with a **read-only** token — checks out the release source with
-   full history, then runs `scripts/release.sh`, which rejects a
-   non-semver tag up front, cross-compiles the target matrix, packages each build
+1. **`build / amd64` and `build / arm64`** — each with a **read-only** token and
+   a matching native host — check out the release source with full history, then
+   run `scripts/release.sh`, which rejects a
+   non-semver tag up front, cross-compiles that architecture's Linux and Darwin
+   targets, packages each build
    as a `.tar.gz` (`steward` everywhere, plus `steward-executor` and the offline
    node-appliance assets on Linux, with `LICENSE` + `README.md`), writes a `checksums.txt` of
    SHA-256 sums, builds DEB and RPM node packages for both Linux architectures,
    includes `install-steward.sh`, asserts both binaries self-report the tag, and
-   uploads the whole `dist/` directory as a workflow artifact.
-2. **`publish`** — the only job with a `contents: write` token — runs **only on a
+   uploads that architecture's artifacts. Native hosts are load-bearing here:
+   RPM validates build architecture and will not safely produce an `aarch64`
+   package on an `x86_64` host merely because its payload was cross-compiled.
+2. **`combine`** — still read-only and with **no checkout** — downloads both
+   architecture sets, verifies the complete advertised matrix is present, and
+   writes one SHA-256 manifest over exactly those release files.
+3. **`publish`** — the only job with a `contents: write` token — runs **only on a
    tag push**, checks out **no repository code**, downloads the artifacts the
-   build produced, and creates a GitHub Release named after the tag (auto-generated
+   combine job produced, and creates a GitHub Release named after the tag (auto-generated
    notes, archives, and `checksums.txt` attached).
 
-The split is the point: the job that runs the tagged commit's own code
+The split is the point: the jobs that run the tagged commit's own code
 (`scripts/release.sh`) never holds a token that can publish, and the job that can
 publish runs nothing but `gh release create` against already-built artifacts. So
 an accidentally-tagged bad commit cannot execute with publish permissions.
@@ -169,8 +177,9 @@ ls dist/
 ```
 
 On Ubuntu CI, `dpkg-deb` and `rpmbuild` are both installed and every advertised
-package is mandatory. A maintainer's macOS dry run builds archives and skips native
-packages whose Linux tools are absent; use the CI dry run for the complete matrix.
+package is mandatory; x86 and ARM RPMs are built on matching native runners. A
+maintainer's macOS dry run builds archives and skips native packages whose Linux
+tools are absent; use the CI dry run for the complete matrix.
 
 Run against a tag locally to also exercise the version assertion:
 

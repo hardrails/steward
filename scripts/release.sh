@@ -17,15 +17,23 @@
 #
 # Usage: scripts/release.sh
 # Env (set automatically by GitHub Actions; optional locally):
-#   GITHUB_REF_TYPE  "tag" enables the strict version assertion below.
-#   GITHUB_REF_NAME  the tag (e.g. v0.1.0); used for artifact names and the assertion.
+#   GITHUB_REF_TYPE         "tag" enables the strict version assertion below.
+#   GITHUB_REF_NAME         the tag (e.g. v0.1.0); used for artifact names and the assertion.
+#   STEWARD_RELEASE_TARGETS whitespace-separated GOOS/GOARCH targets. The default
+#                           remains the complete public matrix. CI narrows this to
+#                           one architecture per native package-building runner.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 # The published target matrix: pure-stdlib Go with CGO off, so every target is a
 # trivial cross-compile from any host.
-targets=(linux/amd64 linux/arm64 darwin/amd64 darwin/arm64)
+default_targets="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"
+read -r -a targets <<<"${STEWARD_RELEASE_TARGETS:-$default_targets}"
+if (( ${#targets[@]} == 0 )); then
+	echo "release: STEWARD_RELEASE_TARGETS selected no targets" >&2
+	exit 2
+fi
 
 # VERSION labels artifacts and is stamped into both binaries. On a tag push
 # GITHUB_REF_NAME is authoritative; a local dry run falls back to `git describe`,
