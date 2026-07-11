@@ -130,6 +130,11 @@ func main() {
 		slog.Error("-disable-inbound-listener requires -uplink-url; otherwise the executor has no control channel")
 		os.Exit(2)
 	}
+	// Reaching this point means the same startup path has already opened and
+	// validated the token, Docker socket/runsc runtime, host policy, and -- when
+	// uplink is enabled -- durable fence, TLS files, and credential (NewPoller loads
+	// it). The dry run returns only after those resources are proven readable by the
+	// real process identity; it merely skips polling and listener binding below.
 	if *checkConfig {
 		fmt.Println("executor configuration valid")
 		return
