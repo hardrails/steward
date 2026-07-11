@@ -32,9 +32,10 @@ permissions:
   contents: read
 
 # Tags retain their exact public identity. Manual dry-runs use a path-safe,
-# immutable pseudo-version even when the selected branch contains slashes.
+# installable prerelease identity tied to the immutable commit rather than a
+# branch name, which may contain slashes.
 env:
-  STEWARD_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}
+  STEWARD_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-dev.{0}', github.sha) }}
 
 # Never cancel an in-flight publish; serialize runs per ref instead.
 concurrency:

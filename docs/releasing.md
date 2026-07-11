@@ -202,9 +202,10 @@ gh run watch "$(gh run list --workflow=release.yml --limit=1 --json databaseId -
 gh run download "$(gh run list --workflow=release.yml --limit=1 --json databaseId --jq '.[0].databaseId')" -n steward-dist -D /tmp/steward-dist
 ```
 
-(On a dispatch run the archives and binaries use an immutable `dev-<commit>`
-pseudo-version, since there is no tag — that is expected; the point is to prove
-the build, packaging, and checksum steps are sound.)
+(On a dispatch run the archives and binaries use an immutable
+`v0.0.0-dev.<commit>` prerelease identity, since there is no tag. The shape is
+accepted by the offline installer, so a maintainer can exercise the downloaded
+set as well as inspect it. That identity is never published as a GitHub Release.)
 
 ## Verifying a published download (for consumers)
 
