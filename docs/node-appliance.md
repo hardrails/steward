@@ -50,6 +50,12 @@ The installer:
    or `/etc/systemd/system` overrides; and
 6. leaves both services disabled and stopped.
 
+An exact legacy unit written to `/etc/systemd/system` by the prototype installer is
+migrated automatically. A differing full-unit override is treated as operator-owned:
+installation stops and instructs the operator to move local settings into a standard
+`/etc/systemd/system/<unit>.d/*.conf` drop-in before retrying. It is never silently
+deleted or shadowed by the new vendor unit.
+
 The two service identities intentionally do not share authority. The lifecycle
 supervisor cannot read the Docker socket. The Executor can access Docker, but its
 unit grants no Linux capabilities and applies systemd filesystem, device, namespace,

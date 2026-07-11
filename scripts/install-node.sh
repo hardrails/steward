@@ -103,6 +103,19 @@ if [[ ! -e /etc/steward/executor.env ]]; then
 	install -o root -g root -m 0600 "$root/deploy/config/executor.env" \
 		/etc/steward/executor.env
 fi
+for unit in steward.service steward-executor.service; do
+	legacy="/etc/systemd/system/$unit"
+	if [[ -e $legacy || -L $legacy ]]; then
+		if cmp -s "$legacy" "$root/deploy/systemd/$unit"; then
+			rm -f "$legacy"
+			echo "install-node: migrated legacy installer-owned $legacy"
+		else
+			echo "install-node: refusing modified $legacy because it shadows the packaged vendor unit" >&2
+			echo "  Preserve local settings in /etc/systemd/system/$unit.d/*.conf, then remove the full-unit override and re-run." >&2
+			exit 2
+		fi
+	fi
+done
 install -o root -g root -m 0644 "$root/deploy/systemd/steward.service" \
 	/usr/local/lib/systemd/system/steward.service
 install -o root -g root -m 0644 "$root/deploy/systemd/steward-executor.service" \
