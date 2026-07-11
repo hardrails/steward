@@ -14,6 +14,12 @@ The separation is a privilege boundary, not a product boundary:
 - Inference remains outside both processes behind an operator-managed
   OpenAI-compatible gateway.
 
+`steward-executor -check-config` runs the same token, Docker socket, `runsc`, host
+policy, TLS, credential, durable-fence, and uplink validation as normal startup, then
+prints `executor configuration valid` and exits without binding the host API or
+starting a poll. The disconnected-node preflight uses this action under the actual
+`steward-executor` service identity before an upgrade or rollback.
+
 ## Threat model and fixed policy
 
 Images and every workload field are untrusted. Executor independently rejects

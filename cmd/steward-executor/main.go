@@ -23,6 +23,7 @@ import (
 
 func main() {
 	version := flag.Bool("version", false, "print the Steward Executor version and exit")
+	checkConfig := flag.Bool("check-config", false, "validate configuration and host prerequisites, then exit")
 	addr := flag.String("addr", "127.0.0.1:8090", "host:port to listen on")
 	dockerSocket := flag.String("docker-socket", "/var/run/docker.sock", "Docker Engine Unix socket")
 	tokenFile := flag.String("token-file", "", "path to executor bearer token (required)")
@@ -128,6 +129,10 @@ func main() {
 	if *disableInbound && poller == nil {
 		slog.Error("-disable-inbound-listener requires -uplink-url; otherwise the executor has no control channel")
 		os.Exit(2)
+	}
+	if *checkConfig {
+		fmt.Println("executor configuration valid")
+		return
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

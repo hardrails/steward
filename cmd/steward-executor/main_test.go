@@ -178,6 +178,30 @@ func TestExecutorMainVersionNeedsNoDockerOrCredential(t *testing.T) {
 	}
 }
 
+func TestExecutorMainCheckConfigValidatesWithoutServing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the real executor binary")
+	}
+	bin := buildExecutor(t)
+	addr := freeAddress(t)
+	command := exec.Command(bin,
+		"-check-config",
+		"-docker-socket", fakeDockerSocket(t, true),
+		"-token-file", executorTokenFile(t),
+		"-addr", addr,
+	)
+	command.Env = executorEnv()
+	output, err := command.CombinedOutput()
+	if err != nil || string(output) != "executor configuration valid\n" {
+		t.Fatalf("check config: err=%v output=%s", err, output)
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("check-config bound the listener: %v", err)
+	}
+	listener.Close()
+}
+
 func TestExecutorMainInitializesFenceOnceWithoutDocker(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the real executor binary")
