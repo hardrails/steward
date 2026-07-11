@@ -90,11 +90,17 @@ for target in "${targets[@]}"; do
 	# self-contained and license-compliant.
 	cp LICENSE README.md "${stage}/"
 	# Never carry workstation xattrs (notably macOS provenance) into the sovereign
-	# artifact. Both bsdtar and GNU tar accept --no-xattrs; COPYFILE_DISABLE also
-	# suppresses AppleDouble metadata on macOS.
-	COPYFILE_DISABLE=1 tar --no-xattrs -C "${stage}" \
-		-czf "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz" \
-		"${files[@]}"
+	# artifact. COPYFILE_DISABLE handles macOS; use --no-xattrs where the installed
+	# tar accepts it, without making a local dry run depend on that extension.
+	if tar --no-xattrs -cf /dev/null -T /dev/null >/dev/null 2>&1; then
+		COPYFILE_DISABLE=1 tar --no-xattrs -C "${stage}" \
+			-czf "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz" \
+			"${files[@]}"
+	else
+		COPYFILE_DISABLE=1 tar -C "${stage}" \
+			-czf "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz" \
+			"${files[@]}"
+	fi
 	rm -rf "${stage}"
 done
 
