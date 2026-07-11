@@ -57,8 +57,9 @@ Docker daemon configuration if registration fails.
 
 After package installation, enrollment is transactional through node preflight:
 invalid credentials, modes, CA material, configuration, gVisor, or systemd units
-restore the previous `/etc/steward` files. The durable Executor command fence is
-initialized only when absent and is never reset. A valid target version is then
+restore the previous `/etc/steward` files. A newly created empty Executor fence is
+removed if that same enrollment transaction fails before service start; any
+pre-existing fence is never reset or removed. A valid target version is then
 activated atomically and both services are enabled and started.
 
 ## Unattended install
@@ -78,8 +79,9 @@ sudo bash install-steward.sh \
 ```
 
 This is suitable for cloud-init, Packer, configuration management, or a customer
-golden image. Use `--no-start` to configure and activate without enabling a stopped
-node, `--stage-only` to install an upgrade without configuring or activating it, and
+golden image. Use `--no-start` on an already-stopped node to configure and activate
+without starting it, `--stage-only` to install an upgrade without requiring a
+running Docker daemon or gVisor and without configuring or activating it, and
 `--reuse-configuration` to validate and retain an already-enrolled node during an
 upgrade. `--dry-run` resolves the platform plan without root, downloads, or mutation.
 Every option has a documented `STEWARD_*` environment equivalent in

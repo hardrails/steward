@@ -107,6 +107,8 @@ steward_tmp=
 executor_tmp=
 token_tmp=
 atomic_tmp=
+fence=/var/lib/steward-executor/uplink-state.json
+fence_created=false
 rollback() {
 	status=$?
 	trap - ERR INT TERM
@@ -120,6 +122,9 @@ rollback() {
 				rm -f -- "$target"
 			fi
 		done
+		if [[ $fence_created == true ]]; then
+			rm -f -- "$fence"
+		fi
 		echo "configure-node: preflight failed; restored previous configuration" >&2
 	fi
 	rm -f -- "${steward_tmp:-}" "${executor_tmp:-}" "${token_tmp:-}" "${atomic_tmp:-}"
@@ -184,8 +189,8 @@ elif [[ ! -e /etc/steward/executor-token ]]; then
 	token_tmp=
 fi
 
-fence=/var/lib/steward-executor/uplink-state.json
 if [[ ! -e $fence ]]; then
+	fence_created=true
 	runuser -u steward-executor -- /usr/local/bin/steward-executor \
 		-initialize-uplink-state -uplink-state-file "$fence"
 fi

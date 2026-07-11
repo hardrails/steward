@@ -27,8 +27,8 @@ Node enrollment:
   --ca-file FILE                PEM CA bundle for the control plane
   --executor-token FILE         Host-local token (securely generated if omitted)
   --reuse-configuration         Reuse and validate existing /etc/steward enrollment
-  --stage-only                  Install files only; do not configure or activate
-  --no-start                    Configure and activate, but do not enable stopped services
+  --stage-only                  Install files only; Docker daemon/runsc may be offline
+  --no-start                    On a stopped node, configure/activate without a restart
 
 gVisor:
   --install-gvisor              Install/register gVisor if Docker lacks runsc
@@ -203,6 +203,10 @@ if [[ $stage_only == true && $reuse_configuration == true ]]; then
 	echo "install-steward: --stage-only and --reuse-configuration are mutually exclusive" >&2
 	exit 2
 fi
+if [[ $stage_only == true && $install_gvisor == true ]]; then
+	echo "install-steward: --stage-only and --install-gvisor are mutually exclusive" >&2
+	exit 2
+fi
 if [[ $stage_only == false && $reuse_configuration == false ]]; then
 	for value in "$control_plane_url" "$steward_credential" "$executor_credential" "$ca_file"; do
 		if [[ -z $value ]]; then
@@ -258,22 +262,32 @@ for command in docker systemctl getent useradd runuser; do
 		exit 2
 	}
 done
-docker info >/dev/null 2>&1 || {
-	echo "install-steward: Docker is installed but the daemon is not reachable" >&2
-	exit 2
-}
 
 has_runsc() {
 	docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"runsc"'
 }
-if ! has_runsc && [[ $install_gvisor == false && $non_interactive == false ]]; then
-	if confirm "Docker does not advertise runsc. Install and register official gVisor?" yes; then
-		install_gvisor=true
+
+if [[ $stage_only == false ]]; then
+	docker info >/dev/null 2>&1 || {
+		echo "install-steward: Docker is installed but the daemon is not reachable" >&2
+		exit 2
+	}
+	if [[ $start_services == false ]] && \
+		(systemctl is-active --quiet steward.service || \
+			systemctl is-active --quiet steward-executor.service); then
+		echo "install-steward: --no-start requires both Steward services to be stopped" >&2
+		echo "  Use --stage-only to stage an upgrade without disrupting a running node." >&2
+		exit 2
 	fi
-fi
-if ! has_runsc && [[ $install_gvisor != true ]]; then
-	echo "install-steward: Docker runtime runsc is required; re-run with --install-gvisor" >&2
-	exit 2
+	if ! has_runsc && [[ $install_gvisor == false && $non_interactive == false ]]; then
+		if confirm "Docker does not advertise runsc. Install and register official gVisor?" yes; then
+			install_gvisor=true
+		fi
+	fi
+	if ! has_runsc && [[ $install_gvisor != true ]]; then
+		echo "install-steward: Docker runtime runsc is required; re-run with --install-gvisor" >&2
+		exit 2
+	fi
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/install-steward.XXXXXX")
@@ -443,7 +457,7 @@ if ! confirm "Proceed with host installation?" yes && [[ $non_interactive == fal
 	exit 0
 fi
 
-if ! has_runsc; then install_gvisor_runtime; fi
+if [[ $stage_only == false ]] && ! has_runsc; then install_gvisor_runtime; fi
 
 case "$package_kind" in
 	deb)
@@ -487,10 +501,11 @@ else
 	/usr/local/libexec/steward/configure-node "${configure_args[@]}"
 fi
 
-/usr/local/libexec/steward/activate-node-release "$version" --restart
 if [[ $start_services == true ]]; then
+	/usr/local/libexec/steward/activate-node-release "$version" --restart
 	systemctl enable --now steward.service steward-executor.service
 	echo "install-steward: Steward $version is installed, configured, and running"
 else
+	/usr/local/libexec/steward/activate-node-release "$version"
 	echo "install-steward: Steward $version is installed and active; service enablement was not changed"
 fi
