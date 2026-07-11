@@ -24,8 +24,52 @@ jobs:
         run: go vet ./...
       - name: go test
         run: go test -race ./...
+      - name: Install native RPM build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y rpm
       - name: node appliance script syntax
-        run: bash -n scripts/install-node.sh scripts/activate-node-release.sh scripts/node-preflight.sh
+        run: >-
+          bash -n scripts/install-node.sh scripts/activate-node-release.sh
+          scripts/node-preflight.sh scripts/configure-node.sh
+          scripts/install-steward.sh scripts/uninstall-node.sh
+          scripts/build-deb.sh scripts/build-rpm.sh
+          packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm
+      - name: Installer plan smoke
+        run: |
+          bash scripts/install-steward.sh --non-interactive --dry-run \
+            --stage-only --version v1.2.3 --package deb | grep -q 'package:      deb'
+          bash scripts/install-steward.sh --non-interactive --dry-run \
+            --stage-only --version v1.2.3 --package rpm | grep -q 'package:      rpm'
+          bash scripts/install-steward.sh --non-interactive --dry-run \
+            --stage-only --version v1.2.3 --package tar | grep -q 'package:      tar'
+          if bash scripts/install-steward.sh --non-interactive --dry-run \
+            --version v1.2.3 2>/dev/null; then
+            echo 'full unattended install accepted missing enrollment inputs' >&2
+            exit 1
+          fi
+      - name: Native package smoke
+        run: |
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage" /tmp/steward-node-test.deb /tmp/steward-node-test.rpm' EXIT
+          mkdir -p "$stage/deploy" "$stage/scripts"
+          go build -o "$stage/steward" ./cmd/steward
+          go build -o "$stage/steward-executor" ./cmd/steward-executor
+          cp -R deploy/config deploy/systemd "$stage/deploy/"
+          cp scripts/install-node.sh scripts/activate-node-release.sh \
+            scripts/node-preflight.sh scripts/configure-node.sh \
+            scripts/uninstall-node.sh "$stage/scripts/"
+          cp LICENSE README.md "$stage/"
+          bash scripts/build-deb.sh "$stage" v0.0.0-test "$(go env GOARCH)" \
+            /tmp/steward-node-test.deb
+          bash scripts/build-rpm.sh "$stage" v0.0.0-test "$(go env GOARCH)" \
+            /tmp/steward-node-test.rpm
+          dpkg-deb --info /tmp/steward-node-test.deb
+          dpkg-deb --contents /tmp/steward-node-test.deb | \
+            grep -q './usr/lib/steward-node/release/steward-executor'
+          rpm -qpi /tmp/steward-node-test.rpm
+          rpm -qpl /tmp/steward-node-test.rpm | \
+            grep -q '/usr/lib/steward-node/release/steward-executor'
 
   lint:
     name: golangci-lint

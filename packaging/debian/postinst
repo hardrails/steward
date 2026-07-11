@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+case "${1:-}" in
+	configure)
+		/usr/lib/steward-node/release/scripts/install-node.sh
+		;;
+esac
+
+exit 0

@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+case "${1:-}" in
+	remove | purge)
+		for binary in steward steward-executor; do
+			path="/usr/local/bin/$binary"
+			target=$(readlink "$path" 2>/dev/null || true)
+			case "$target" in
+				/opt/steward/current/* | /opt/steward/releases/*) rm -f "$path" ;;
+			esac
+		done
+		rm -rf /usr/local/libexec/steward
+		rm -f /usr/local/lib/systemd/system/steward.service \
+			/usr/local/lib/systemd/system/steward-executor.service
+		systemctl daemon-reload >/dev/null 2>&1 || true
+		;;
+esac
+
+if [ "${1:-}" = purge ]; then
+	rm -rf /etc/steward
+fi
+
+exit 0

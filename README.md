@@ -130,10 +130,36 @@ lists only this module. Any private dependency would appear here (and in
 - `steward-executor` additionally requires a Linux host with Docker already
   installed and gVisor registered as Docker runtime `runsc`.
 
-Published Linux archives are also offline-installable node appliances: they include
+## Install a node
+
+Published releases include a guided installer plus native DEB and RPM packages for
+`amd64` and `arm64`. Download the installer, inspect it, and run it on the target
+Linux server:
+
+```console
+curl -fsSLo install-steward.sh \
+  https://github.com/hardrails/steward/releases/latest/download/install-steward.sh
+less install-steward.sh
+sudo bash install-steward.sh
+```
+
+It detects Debian/Ubuntu, RHEL-family/Fedora/Amazon Linux/SUSE, or another systemd
+Linux host; selects the native package or universal archive; verifies the selected
+artifact; optionally installs official gVisor when `runsc` is missing; provisions
+operator-supplied enrollment files; runs the real node preflight; and only then
+enables the two services. Docker remains a prerequisite. macOS and Windows builds
+are useful for development but are not Steward Executor node targets.
+
+The same script is deterministic and prompt-free with `--non-interactive`, and
+`--offline-dir` guarantees the Steward artifact path performs no network access.
+Every lower-level package remains independently installable and leaves services
+disabled, which preserves a safe two-phase fleet rollout.
+
+Published Linux archives are offline-installable node appliances too: they include
 both binaries, hardened systemd units, configuration templates, and fail-closed
-install/preflight/rollback utilities. Installation performs no network access and
-does not enable a service until customer credentials and trust material validate.
+install/preflight/activation/uninstall utilities. Package-only installation performs
+no network access and does not enable a service until customer credentials and trust
+material validate.
 See [Disconnected Steward node appliance](docs/node-appliance.md).
 
 ## Contributing
@@ -196,10 +222,10 @@ file, which beats the built-in default):
 (they have no env var):
 
 - `-version` prints the build/version string and exits 0 without binding a port or
-  starting the uplink loop. The string is the VCS revision the Go toolchain stamps
-  into the binary (`go build`/`go install`), falling back to a compiled-in constant
-  when no build metadata is available (for example under `go run`). It is the same
-  value `GET /v1/capabilities` advertises.
+  starting the uplink loop. Published artifacts report their explicitly stamped
+  release tag; `go install` reports its module version; developer builds fall back
+  to a VCS revision and then a compiled-in development version. It is the same value
+  `GET /v1/capabilities` advertises.
 - `-check-config` runs every fail-closed startup check against the fully resolved
   configuration (flags, env vars, and any `-config` file) and then exits 0 (valid)
   or non-zero with the same actionable message a real startup would give —
@@ -730,7 +756,8 @@ $ curl -s -X POST localhost:8080/v1/instances/rt_.../start
 ## Releases
 
 Tagged releases attach cross-platform binaries (`linux/amd64`, `linux/arm64`,
-`darwin/amd64`, `darwin/arm64`) and SHA-256 checksums to a GitHub Release,
+`darwin/amd64`, `darwin/arm64`), Linux DEB/RPM packages, the guided installer,
+and SHA-256 checksums to a GitHub Release,
 built by the [`Release` workflow](.github/workflows/release.yml) when a `vX.Y.Z`
 tag is pushed. You can also install a tagged version straight from source:
 
@@ -739,8 +766,9 @@ go install github.com/hardrails/steward/cmd/steward@vX.Y.Z
 steward -version   # -> steward vX.Y.Z
 ```
 
-A released binary reports its version from the Go toolchain's VCS build metadata,
-so `steward -version` matches the tag it was built from. Maintainers: see
+A released binary carries the tag through an explicit standard-linker stamp, and
+the release job executes both binaries to prove `steward -version` matches it.
+Maintainers: see
 [`docs/releasing.md`](docs/releasing.md) for the full release runbook, the version
 mechanism, and how to dry-run the automation without publishing.
 

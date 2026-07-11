@@ -15,7 +15,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 for path in steward steward-executor deploy/systemd/steward.service \
 	deploy/systemd/steward-executor.service deploy/config/steward.json \
 	deploy/config/executor.env scripts/activate-node-release.sh \
-	scripts/node-preflight.sh; do
+	scripts/node-preflight.sh scripts/configure-node.sh scripts/uninstall-node.sh; do
 	if [[ ! -f "$root/$path" ]]; then
 		echo "install-node: release is missing $path" >&2
 		exit 2
@@ -94,6 +94,10 @@ install -o root -g root -m 0755 "$root/scripts/activate-node-release.sh" \
 	/usr/local/libexec/steward/activate-node-release
 install -o root -g root -m 0755 "$root/scripts/node-preflight.sh" \
 	/usr/local/libexec/steward/node-preflight
+install -o root -g root -m 0755 "$root/scripts/configure-node.sh" \
+	/usr/local/libexec/steward/configure-node
+install -o root -g root -m 0755 "$root/scripts/uninstall-node.sh" \
+	/usr/local/libexec/steward/uninstall-node
 
 if [[ ! -e /etc/steward/steward.json ]]; then
 	install -o root -g steward -m 0640 "$root/deploy/config/steward.json" \

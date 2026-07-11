@@ -7,10 +7,19 @@ import "runtime/debug"
 // metadata (notably go run and go test).
 const Version = "0.1.0"
 
-// Resolve prefers the tagged module version, then the shortened VCS revision,
-// and finally Version. Both steward and steward-executor call this one function
-// so a release can never report two different provenance strings.
+// releaseVersion is set only by scripts/release.sh through the standard Go
+// linker's -X flag. A checkout build's module version is normally "(devel)" and
+// VCS metadata identifies a commit, not the release tag, so a published archive
+// must carry the tag explicitly. Developer builds leave this empty.
+var releaseVersion string
+
+// Resolve prefers an explicit release stamp, then the tagged module version, the
+// shortened VCS revision, and finally Version. Both steward processes call this
+// one function so a release cannot report two different provenance strings.
 func Resolve() string {
+	if releaseVersion != "" {
+		return releaseVersion
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return Version
