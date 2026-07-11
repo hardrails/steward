@@ -1,0 +1,66 @@
+---
+title: APIs and protocol schemas
+description: Authoritative Steward supervisor and Executor OpenAPI contracts, endpoint summaries, authentication, error shapes, and outbound uplink protocol documentation.
+section: Reference
+---
+
+# APIs and protocol schemas
+
+The hand-written OpenAPI documents are the authoritative public HTTP contracts. If
+implementation behavior and a document differ, that is a defect to fix—not an
+undocumented extension to rely on.
+
+- [Steward supervisor OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward.v1.yaml)
+- [Steward Executor OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-executor.v1.yaml)
+- [Raw supervisor YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward.v1.yaml)
+- [Raw Executor YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-executor.v1.yaml)
+
+## Supervisor API
+
+Default base URL: `http://127.0.0.1:8080`
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST /v1/instances` | Idempotently provision lifecycle state |
+| `GET /v1/instances` | List/filter tracked instances |
+| `POST /v1/instances/batch` | Execute a bounded ordered batch |
+| `GET /v1/instances/{runtime_ref}` | Read instance state |
+| `POST .../start`, `.../stop`, `.../hibernate` | Apply a lifecycle transition |
+| `DELETE /v1/instances/{runtime_ref}` | Destroy and release identity |
+| `GET /v1/capabilities` | Discover version and optional capabilities |
+| `GET /v1/healthz`, `GET /v1/readiness` | Liveness and readiness |
+| `GET /metrics` | Optional Prometheus text exposition |
+
+The loopback API has no built-in authentication. Keep it loopback-only, place it
+behind an authenticated host control boundary, or disable it and use the authenticated
+outbound uplink.
+
+## Executor API
+
+Default base URL: `http://127.0.0.1:8090`
+
+Every endpoint except `GET /v1/healthz` requires
+`Authorization: Bearer <token-from-token-file>`.
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST /v1/workloads` | Validate and create a stopped gVisor container |
+| `GET /v1/workloads/{runtime_ref}` | Read observed container state |
+| `POST .../start`, `.../stop` | Idempotent lifecycle operation |
+| `GET .../logs` | Read a combined log tail capped at 1 MiB |
+| `DELETE /v1/workloads/{runtime_ref}` | Idempotently remove a managed workload |
+| `GET /v1/healthz` | Process liveness |
+
+## Common behavior
+
+- Request bodies are bounded before JSON decoding.
+- Unknown fields and trailing JSON are rejected where a body is accepted.
+- All JSON errors use `{"error":"code","message":"human-readable detail"}`.
+- Standard 404/405 and recovered panic responses use the same shape.
+- Lifecycle references are opaque; clients must not parse meaning from them.
+- Uplink delivery invokes the same handlers as direct APIs.
+
+For outbound transport, identity fencing, retry, and reporting details, read
+[Uplink client]({{ '/uplink-client/' | relative_url }}),
+[disable inbound listener]({{ '/disable-inbound-listener/' | relative_url }}), and
+[instance-generation fencing]({{ '/instance-generation-fencing/' | relative_url }}).
