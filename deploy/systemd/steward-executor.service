@@ -1,0 +1,44 @@
+[Unit]
+Description=Steward Docker/gVisor executor
+Documentation=https://github.com/hardrails/steward
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=steward-executor
+Group=steward-executor
+SupplementaryGroups=docker
+UMask=0077
+EnvironmentFile=/etc/steward/executor.env
+ExecStart=/usr/local/bin/steward-executor -token-file=${EXECUTOR_TOKEN_FILE} -docker-socket=${EXECUTOR_DOCKER_SOCKET} -disable-inbound-listener -uplink-url=${EXECUTOR_UPLINK_URL} -uplink-credential-file=${EXECUTOR_UPLINK_CREDENTIAL_FILE} -uplink-state-file=${EXECUTOR_UPLINK_STATE_FILE} -uplink-tls-ca-file=${EXECUTOR_UPLINK_TLS_CA_FILE} -max-memory-bytes=${EXECUTOR_MAX_MEMORY_BYTES} -max-cpu-millis=${EXECUTOR_MAX_CPU_MILLIS} -max-pids=${EXECUTOR_MAX_PIDS} -max-workloads=${EXECUTOR_MAX_WORKLOADS} -max-workloads-per-tenant=${EXECUTOR_MAX_WORKLOADS_PER_TENANT}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+StateDirectory=steward-executor
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

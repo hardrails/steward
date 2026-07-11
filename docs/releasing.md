@@ -45,8 +45,8 @@ built or published.) It runs **two jobs**, split deliberately for least privileg
    history** (`fetch-depth: 0`) so the Go toolchain can stamp the tag as the
    binaries' version (see below), then runs `scripts/release.sh`, which rejects a
    non-semver tag up front, cross-compiles the target matrix, packages each build
-   as a `.tar.gz` (`steward` everywhere, plus `steward-executor` on Linux, with
-   `LICENSE` + `README.md`), writes a `checksums.txt` of
+   as a `.tar.gz` (`steward` everywhere, plus `steward-executor` and the offline
+   node-appliance assets on Linux, with `LICENSE` + `README.md`), writes a `checksums.txt` of
    SHA-256 sums, asserts both binaries self-report the tag, and uploads the whole
    `dist/` directory as a workflow artifact.
 2. **`publish`** — the only job with a `contents: write` token — runs **only on a
@@ -68,11 +68,13 @@ an accidentally-tagged bad commit cannot execute with publish permissions.
 | darwin | amd64  | `steward_vX.Y.Z_darwin_amd64.tar.gz` | `steward` |
 | darwin | arm64  | `steward_vX.Y.Z_darwin_arm64.tar.gz` | `steward` |
 
-Both Steward process binaries are pure–standard-library Go. Executor is shipped in
-each Linux archive—the supported node-server platform—and versioned as an integral
-Steward component. Darwin archives contain only the usable `steward` client/supervisor;
-they do not advertise an Executor that cannot obtain Docker `runsc` on macOS. Adding a
-target requires deciding explicitly whether it can satisfy Executor's host contract.
+Both Steward process binaries are pure–standard-library Go. Executor and the
+systemd/config/install/preflight/activation node-appliance assets are shipped in each
+Linux archive—the supported node-server platform—and versioned as an integral Steward
+component. Darwin archives contain only the usable `steward` client/supervisor; they do
+not advertise an Executor or Linux service installer that cannot obtain Docker `runsc`
+on macOS. Adding a target requires deciding explicitly whether it can satisfy Executor's
+host contract.
 
 ## How the version is derived (and why there is no ldflags injection)
 

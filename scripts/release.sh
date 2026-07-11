@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Cross-compile Steward for every published target, package each build as a
-# self-contained .tar.gz (the target's usable process binaries + LICENSE + README), and write a SHA-256
-# checksums file over the archives. Dependency-free — only the Go toolchain and
+# self-contained .tar.gz (the target's usable process binaries + LICENSE + README;
+# Linux also carries the offline node-appliance assets), and write a SHA-256 checksums
+# file over the archives. Dependency-free — only the Go toolchain and
 # POSIX shell utilities — matching Steward's stdlib-only, "buildable by anyone
 # with just the Go toolchain" ethos. The release GitHub Actions workflow
 # (.github/workflows/release.yml) runs this and then uploads dist/ to a GitHub
@@ -78,13 +79,28 @@ for target in "${targets[@]}"; do
 	if [ "$goos" = "linux" ]; then
 		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 			go build -trimpath -ldflags "-s -w" -o "${stage}/steward-executor" ./cmd/steward-executor
-		files=(steward steward-executor LICENSE README.md)
+		mkdir -p "${stage}/deploy" "${stage}/scripts"
+		cp -R deploy/config deploy/systemd "${stage}/deploy/"
+		cp scripts/install-node.sh scripts/activate-node-release.sh \
+			scripts/node-preflight.sh "${stage}/scripts/"
+		chmod 0755 "${stage}"/scripts/*.sh
+		files=(steward steward-executor LICENSE README.md deploy scripts)
 	fi
 	# Ship the license and readme alongside both binaries so the download is
 	# self-contained and license-compliant.
 	cp LICENSE README.md "${stage}/"
-	tar -C "${stage}" -czf "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz" \
-		"${files[@]}"
+	# Never carry workstation xattrs (notably macOS provenance) into the sovereign
+	# artifact. COPYFILE_DISABLE handles macOS; use --no-xattrs where the installed
+	# tar accepts it, without making a local dry run depend on that extension.
+	if tar --no-xattrs -cf /dev/null -T /dev/null >/dev/null 2>&1; then
+		COPYFILE_DISABLE=1 tar --no-xattrs -C "${stage}" \
+			-czf "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz" \
+			"${files[@]}"
+	else
+		COPYFILE_DISABLE=1 tar -C "${stage}" \
+			-czf "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz" \
+			"${files[@]}"
+	fi
 	rm -rf "${stage}"
 done
 

@@ -178,6 +178,87 @@ func TestExecutorMainVersionNeedsNoDockerOrCredential(t *testing.T) {
 	}
 }
 
+func TestExecutorMainCheckConfigValidatesWithoutServing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the real executor binary")
+	}
+	bin := buildExecutor(t)
+	addr := freeAddress(t)
+	command := exec.Command(bin,
+		"-check-config",
+		"-docker-socket", fakeDockerSocket(t, true),
+		"-token-file", executorTokenFile(t),
+		"-addr", addr,
+	)
+	command.Env = executorEnv()
+	output, err := command.CombinedOutput()
+	if err != nil || string(output) != "executor configuration valid\n" {
+		t.Fatalf("check config: err=%v output=%s", err, output)
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("check-config bound the listener: %v", err)
+	}
+	listener.Close()
+}
+
+func TestExecutorMainCheckConfigValidatesEveryUplinkFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the real executor binary")
+	}
+	bin := buildExecutor(t)
+	dir := t.TempDir()
+	credential := filepath.Join(dir, "credential.json")
+	if err := os.WriteFile(credential, []byte(`{"version":1,"tenant_id":"t","node_id":"n","credential":"opaque"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dir, "state.json")
+	if err := executoruplink.InitializeStateStore(state); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{
+		"-check-config",
+		"-docker-socket", fakeDockerSocket(t, true),
+		"-token-file", executorTokenFile(t),
+		"-disable-inbound-listener",
+		"-uplink-url", "http://127.0.0.1:1",
+		"-uplink-credential-file", credential,
+		"-uplink-state-file", state,
+	}
+	run := func(args ...string) (string, error) {
+		t.Helper()
+		command := exec.Command(bin, args...)
+		command.Env = executorEnv()
+		output, err := command.CombinedOutput()
+		return string(output), err
+	}
+	if output, err := run(base...); err != nil || output != "executor configuration valid\n" {
+		t.Fatalf("valid uplink files: err=%v output=%s", err, output)
+	}
+
+	missingCredential := append([]string(nil), base...)
+	missingCredential[9] = filepath.Join(dir, "missing-credential.json")
+	if output, err := run(missingCredential...); err == nil || !strings.Contains(output, "credential") {
+		t.Fatalf("missing credential passed: err=%v output=%s", err, output)
+	}
+
+	missingState := append([]string(nil), base...)
+	missingState[11] = filepath.Join(dir, "missing-state.json")
+	if output, err := run(missingState...); err == nil || !strings.Contains(output, "state") {
+		t.Fatalf("missing state passed: err=%v output=%s", err, output)
+	}
+
+	badCA := filepath.Join(dir, "bad-ca.pem")
+	if err := os.WriteFile(badCA, []byte("not a PEM CA"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badTLS := append(append([]string(nil), base...), "-uplink-tls-ca-file", badCA)
+	badTLS[7] = "https://control.invalid"
+	if output, err := run(badTLS...); err == nil || !strings.Contains(output, "CA") {
+		t.Fatalf("malformed CA passed: err=%v output=%s", err, output)
+	}
+}
+
 func TestExecutorMainInitializesFenceOnceWithoutDocker(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the real executor binary")

@@ -54,6 +54,13 @@ The sibling `steward-executor` binary is documented separately in
 not a capability flag in this daemon: enabling Executor means starting a second
 service unit with its own identity, state, listener/uplink, and Docker-socket mount.
 
+The Linux release archive packages those two service identities as a disconnected
+node appliance. Versioned binaries live separately from durable state and credentials;
+activation swaps only binary symlinks after both target binaries pass non-serving
+configuration validation. The installer never owns Docker/gVisor installation,
+control-plane deployment, tenant policy, approved OCI images, or inference. See
+[`docs/node-appliance.md`](docs/node-appliance.md).
+
 It explicitly does **not**, by default:
 
 - execute commands or run workloads — real process supervision is **opt-in**
