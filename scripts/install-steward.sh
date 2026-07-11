@@ -180,7 +180,7 @@ if [[ $non_interactive == false ]]; then
 	version=$(prompt "Release version [latest]: " "$version")
 	if [[ $stage_only == false ]]; then
 		if [[ -f /etc/steward/uplink-credential.json && \
-			-f /etc/steward/executor-uplink.json && -f /etc/steward/railyard-ca.pem ]]; then
+			-f /etc/steward/executor-uplink.json && -f /etc/steward/control-plane-ca.pem ]]; then
 			if confirm "Reuse the existing Steward enrollment?" yes; then
 				reuse_configuration=true
 			fi

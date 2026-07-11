@@ -91,7 +91,7 @@ targets=(
 	/etc/steward/uplink-credential.json
 	/etc/steward/executor-uplink.json
 	/etc/steward/executor-token
-	/etc/steward/railyard-ca.pem
+	/etc/steward/control-plane-ca.pem
 )
 for target in "${targets[@]}"; do
 	name=${target##*/}
@@ -175,7 +175,7 @@ install_atomic "$steward_credential" /etc/steward/uplink-credential.json \
 	steward steward 0600
 install_atomic "$executor_credential" /etc/steward/executor-uplink.json \
 	steward-executor steward-executor 0600
-install_atomic "$ca_file" /etc/steward/railyard-ca.pem root root 0644
+install_atomic "$ca_file" /etc/steward/control-plane-ca.pem root root 0644
 if [[ -n $executor_token ]]; then
 	install_atomic "$executor_token" /etc/steward/executor-token \
 		steward-executor steward-executor 0600
