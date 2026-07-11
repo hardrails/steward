@@ -1,176 +1,185 @@
 # Steward
 
-Steward is an open-source node runtime with two deliberately separate binaries:
-`steward`, the lightweight lifecycle supervisor, and `steward-executor`, the
-Docker/gVisor boundary for untrusted tenant workloads. They are released and
-operated as one Steward system but never share a process or Docker authority.
+**Open-source node runtime for isolated, multi-tenant AI agent workloads on Linux.**
 
-Behind a small, fully-documented HTTP API, `steward` provisions, starts,
-stops, hibernates, and destroys real OS processes — signaling them, monitoring
-for an unexpected exit, and, when durable state is enabled, best-effort
-reattaching them across a restart — with the operational maturity a production
-fleet needs: TLS-secured and credential-rotating remote control, per-source rate
-limiting, bounded command backpressure, Prometheus metrics, a command audit log,
-batch operations, and opt-in durable state across a restart.
+[![CI](https://github.com/hardrails/steward/actions/workflows/ci.yml/badge.svg)](https://github.com/hardrails/steward/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/hardrails/steward?display_name=tag)](https://github.com/hardrails/steward/releases/latest)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-f2532d)](https://hardrails.github.io/steward/)
+[![License](https://img.shields.io/github/license/hardrails/steward)](LICENSE)
 
-Real process execution is opt-in via `-enable-process-exec`; with it off,
-Steward is a pure lifecycle-status tracker — a control-plane integration point a
-fleet can build and test against before wiring in real execution. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for the design boundaries and the deferred
-decisions — notably how a future, separately sandboxed computer-use capability
-is kept out of Steward's own process.
+Steward turns a Docker-and-gVisor Linux server into a hardened execution node that
+a remote control plane can manage without receiving Docker access. It is designed
+for enterprise, regulated, defense, critical-infrastructure, and sovereign
+operators who need to run untrusted agent images and configuration on infrastructure
+they control—including disconnected environments.
 
-## The public contract
+Steward is control-plane neutral and independently useful. Railyard is a first-party
+proprietary control plane for Steward fleets, but Steward has **no build-time or
+runtime dependency on Railyard or any other private system**.
 
-[`openapi/steward.v1.yaml`](openapi/steward.v1.yaml) and
-[`openapi/steward-executor.v1.yaml`](openapi/steward-executor.v1.yaml) are the
-authoritative, hand-written public contracts for the two process boundaries. They
-are the audit surface: if a server and its document disagree, the document is the
-spec. CI lints both on every change.
+## Install on a Linux server
 
-## System boundary
+Docker must already be installed. Paste one command; the interactive installer
+detects DEB, RPM, or generic systemd hosts and can install gVisor with your approval:
 
-Steward is control-plane-neutral. Railyard is a first-party consumer of its public
-API and uplink protocol, but Steward does not import, call, or require Railyard—or
-any other private service—to build or run. Another control plane can implement the
-same documented contract, and Steward can be audited and operated on its own.
-
-The ownership split is deliberate:
-
-- **Steward** owns the generic node-local lifecycle contract, bounded state,
-  command delivery, and node-side operational reporting.
-- **The control plane** owns users, tenants, authorization, desired state,
-  approvals, rollout orchestration, and fleet-wide evidence. Those enterprise
-  concerns do not enter Steward's process or dependency graph.
-- **Steward Executor**, the included `steward-executor` sibling binary, owns
-  admission and execution of untrusted OCI workloads through Docker and gVisor.
-  Docker's socket is never mounted into the `steward` process or an agent workload.
-- **Inference** remains an external service reached through an operator-selected
-  OpenAI-compatible gateway; Steward does not schedule or govern models.
-
-Accordingly, `-enable-process-exec` is only for trusted, operator-authored local
-process specifications. Its startup guardrails reduce accidental exposure but do
-not turn `os/exec` into a tenant sandbox. Treat tenant images and workload
-configuration as untrusted and route them through the separate executor boundary.
-
-## Steward Executor
-
-`steward-executor` is part of Steward, not a separate product. It remains a
-separate process because the Docker socket is root-equivalent host authority and
-must not enter the lifecycle supervisor. The binary is control-plane neutral: it
-can accept a loopback host-control API, use its opt-in outbound
-`/executor-uplink` command channel, or run both. Railyard is a first-party consumer
-of that public protocol, never a dependency.
-
-Executor refuses to start unless Docker advertises gVisor's `runsc` runtime. It
-admits only digest-pinned images with mandatory memory, CPU, and PID limits, runs
-them without networking as UID/GID `65532`, drops every Linux capability, sets
-`no-new-privileges`, and uses a read-only root filesystem. Its contract contains
-no privileged mode, host mount, device, Docker socket, raw network, or environment
-injection field. Fixed, bounded tmpfs mounts provide `/workspace` and `/tmp`
-without exposing a host path. Existing containers are accepted as idempotent replays only when
-their immutable workload fingerprint and hardened Docker settings still match.
-
-Build both Steward processes from this repository:
-
-```console
-go build -o steward ./cmd/steward
-go build -o steward-executor ./cmd/steward-executor
-./steward-executor -version
+```bash
+curl -fsSL https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | sudo bash
 ```
 
-Run Executor in host-local API mode:
+The installer asks whether to enroll and activate the node or only stage the
+software. For automation and air-gapped installation, see the
+[installation guide](https://hardrails.github.io/steward/getting-started/).
 
-```console
-steward-executor -token-file /etc/steward/executor-token
+> Piping a script to a root shell trusts GitHub's TLS delivery and the release
+> account. High-assurance operators should download, inspect, and verify the
+> release files before running them; the [air-gapped guide](https://hardrails.github.io/steward/guides/air-gapped/)
+> documents that path.
+
+## The problem Steward solves
+
+AI agents are unusually risky workloads. They combine untrusted or frequently
+changing software, powerful credentials, external communications, durable memory,
+and actions that can affect other systems. Running them directly on a server—or
+giving an orchestration process the Docker socket—collapses too many trust
+boundaries into one compromise domain.
+
+Steward separates those concerns:
+
+| Concern | Steward's answer |
+| --- | --- |
+| Untrusted agent images | A separate Executor admits only digest-pinned OCI images and runs them with Docker + gVisor. |
+| Multiple tenants on one host | Tenant-labelled containers, per-tenant capacity ceilings, no shared host mounts, and a sandbox per workload. |
+| Remote fleet operations | Outbound-only, replay-fenced command channels work behind NAT and inbound firewalls. |
+| Host compromise surface | The lifecycle supervisor never receives the Docker socket; workloads never receive it either. |
+| Sovereign and disconnected sites | Static binaries, offline release artifacts, operator-owned PKI, no phone-home dependency, and reproducible public source. |
+| Vendor independence | Public OpenAPI contracts and zero private package or service dependencies. |
+
+## Who Steward is for
+
+- Platform and security teams operating agent fleets on customer-controlled Linux.
+- Regulated or sovereign organizations that require local authority, auditability,
+  and an air-gapped installation path.
+- Control-plane builders that need a small, stable node contract instead of a
+  vendor-specific runtime SDK.
+- Agent projects such as Hermes Agent and OpenClaw that need a hardened deployment
+  boundary beneath them.
+
+Steward is not an inference server, an agent framework, a hosted control plane, or
+a general-purpose container orchestrator. Inference remains a separate service,
+typically exposed through an operator-selected OpenAI-compatible gateway.
+
+## How it is built
+
+```text
+  Independent control plane (Railyard or another implementation)
+                 |  outbound HTTPS, desired state, evidence
+                 v
+  +---------------- Steward node ----------------+
+  | steward              steward-executor         |
+  | lifecycle + uplink   Docker authority boundary|
+  | no Docker socket              |               |
+  +-------------------------------|---------------+
+                                  v
+                     Docker -> gVisor -> agent OCI image
+                                  |
+                           inference is external
 ```
 
-Or enable outbound-only operation behind NAT/firewalls:
+The release contains two intentionally separate binaries:
 
-```console
-steward-executor \
-  -token-file /etc/steward/executor-token \
-  -disable-inbound-listener \
-  -uplink-url https://control.example \
-  -uplink-credential-file /etc/steward/executor-uplink.json \
-  -uplink-state-file /var/lib/steward/executor-uplink-state.json
-```
+- `steward` is the lightweight lifecycle supervisor and generic uplink client.
+- `steward-executor` is the narrow Docker/gVisor admission and execution boundary.
 
-Initialize that state path once for a newly enrolled node before the first normal
-start (`steward-executor -initialize-uplink-state -uplink-state-file ...`). A
-missing fence on normal startup is fatal, never silently recreated.
+They ship as one system but run as different Unix users and systemd services. Only
+Executor joins the Docker group. The package supplies hardened units, configuration
+validation, preflight, atomic version activation, and rollback utilities.
 
-The token, credential, state, and optional mTLS client-key files are owner-only.
-Remote plaintext HTTP is rejected unless explicitly acknowledged; private CAs and
-mTLS use the same standard-library TLS implementation as the `steward` uplink.
+[Read the architecture](https://hardrails.github.io/steward/concepts/architecture/) ·
+[Read the security model](https://hardrails.github.io/steward/concepts/security-model/) ·
+[Review the public APIs](https://hardrails.github.io/steward/reference/api/)
 
-## Zero private dependencies
+## Hardened defaults
 
-Steward has **zero dependency, at build time or runtime, on any private package,
-API, or tool.** It uses only the Go standard library and the public Go module
-ecosystem. This is the entire point of the repository being public: a
-sovereign or regulated operator can clone *this repository alone* and build and
-run Steward, without access to — or trust in — any vendor-private code.
+Executor refuses to start unless Docker advertises gVisor's `runsc` runtime. Every
+admitted workload has:
 
-This claim is mechanically checkable. The module currently depends on nothing but
-the standard library, so:
+- an immutable `@sha256` image reference;
+- mandatory memory, CPU, PID, host-wide, and per-tenant limits;
+- gVisor isolation, UID/GID `65532`, and every Linux capability dropped;
+- `no-new-privileges`, a read-only root filesystem, and bounded tmpfs;
+- no network, host mount, device, Docker socket, or caller-supplied environment;
+- bounded request bodies and log responses; and
+- drift detection before any lifecycle operation.
+
+These defaults are deliberately restrictive. Security-sensitive capabilities must
+become narrow, explicit grants rather than ambient container privileges.
+
+## Hermes Agent and OpenClaw
+
+Steward is agent-agnostic and can admit OCI images for projects such as
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) and
+[OpenClaw](https://github.com/openclaw/openclaw).
+
+**v0.1 compatibility boundary:** Steward can validate image admission and exercise
+container lifecycle behavior under its hardened policy. Full connected operation is
+not yet available because these agents require some combination of outbound network,
+secrets, persistent state, and listening ports—capabilities Executor v0.1 does not
+grant. Steward does not recommend bypassing that boundary.
+
+- [Hermes Agent compatibility guide](https://hardrails.github.io/steward/guides/hermes-agent/)
+- [OpenClaw compatibility guide](https://hardrails.github.io/steward/guides/openclaw/)
+- [Current limitations and planned grant model](https://hardrails.github.io/steward/limitations/)
+
+## Platform support
+
+Production nodes are systemd Linux on `amd64` or `arm64` with Docker installed.
+The guided installer selects:
+
+- DEB for Debian and Ubuntu families;
+- RPM for RHEL, Rocky, Alma, Fedora, Amazon Linux, Oracle Linux, and SUSE families;
+- a universal archive for other systemd distributions.
+
+macOS release archives are for development; Windows is not a v0.1 release target.
+Neither is an Executor node platform. See the
+[platform matrix](https://hardrails.github.io/steward/reference/platform-support/).
+
+## Verifiable independence
+
+Steward uses the Go standard library and has no third-party Go modules today:
 
 ```console
 $ go list -m all
 github.com/hardrails/steward
 ```
 
-lists only this module. Any private dependency would appear here (and in
-`go.mod`/`go.sum`), so the guarantee cannot silently rot.
+Its public contracts are hand-written and CI-linted:
 
-## Requirements
+- [`openapi/steward.v1.yaml`](openapi/steward.v1.yaml)
+- [`openapi/steward-executor.v1.yaml`](openapi/steward-executor.v1.yaml)
 
-- Go 1.24 or newer to build from source; a server using a published static
-  release binary does not need a Go toolchain.
-- `steward-executor` additionally requires a Linux host with Docker already
-  installed and gVisor registered as Docker runtime `runsc`.
+An operator can clone this repository alone, audit it, build both binaries, and run
+them without access to vendor-private code or infrastructure.
 
-## Install a node
+## Documentation
 
-Published releases include a guided installer plus native DEB and RPM packages for
-`amd64` and `arm64`. Download the installer, inspect it, and run it on the target
-Linux server:
+The [Steward node field manual](https://hardrails.github.io/steward/) is organized
+by task:
 
-```console
-curl -fsSLo install-steward.sh \
-  https://github.com/hardrails/steward/releases/latest/download/install-steward.sh
-less install-steward.sh
-sudo bash install-steward.sh
-```
+- [Install and enroll](https://hardrails.github.io/steward/getting-started/)
+- [Operate workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/)
+- [Deploy without internet access](https://hardrails.github.io/steward/guides/air-gapped/)
+- [Upgrade and roll back](https://hardrails.github.io/steward/guides/upgrades/)
+- [Production deployment](https://hardrails.github.io/steward/production-deployment/)
+- [Configuration reference](https://hardrails.github.io/steward/reference/configuration/)
+- [FAQ](https://hardrails.github.io/steward/faq/)
 
-It detects Debian/Ubuntu, RHEL-family/Fedora/Amazon Linux/SUSE, or another systemd
-Linux host; selects the native package or universal archive; verifies the selected
-artifact; optionally installs official gVisor when `runsc` is missing; provisions
-operator-supplied enrollment files; runs the real node preflight; and only then
-enables the two services. Docker remains a prerequisite. macOS and Windows builds
-are useful for development but are not Steward Executor node targets.
+Machine-oriented documentation is available at
+[`llms.txt`](https://hardrails.github.io/steward/llms.txt).
 
-The same script is deterministic and prompt-free with `--non-interactive`, and
-`--offline-dir` guarantees the Steward artifact path performs no network access.
-Every lower-level package remains independently installable and leaves services
-disabled, which preserves a safe two-phase fleet rollout.
+## Build and contribute
 
-Published Linux archives are offline-installable node appliances too: they include
-both binaries, hardened systemd units, configuration templates, and fail-closed
-install/preflight/activation/uninstall utilities. Package-only installation performs
-no network access and does not enable a service until customer credentials and trust
-material validate.
-See [Disconnected Steward node appliance](docs/node-appliance.md).
-
-## Contributing
-
-Read [AGENTS.md](AGENTS.md) first — it names the invariants a change must not
-regress (zero private dependencies, request-size/instance-count bounds,
-concurrency safety in `internal/runtime`) and the local guard:
-`git config core.hooksPath .githooks` once per clone, run before every commit,
-mirrored by required status checks on `main`.
-
-## Build and test
+Go 1.24 or newer is required to build from source; published Linux binaries are
+static and do not require Go.
 
 ```console
 go build ./...
@@ -178,600 +187,6 @@ go vet ./...
 go test ./...
 ```
 
-## Run
-
-```console
-# Defaults to 127.0.0.1:8080.
-go run ./cmd/steward
-
-# Override the listen address via flag or env var.
-go run ./cmd/steward -addr 127.0.0.1:9090
-STEWARD_ADDR=0.0.0.0:8080 go run ./cmd/steward
-```
-
-Every setting is a flag with a matching `STEWARD_`-prefixed env var, and can also
-be supplied in a JSON [config file](#config-file). Precedence is
-**flag > env var > config file** (a flag beats an env var, which beats the config
-file, which beats the built-in default):
-
-| Flag              | Env var                  | Default          | Purpose                                                                 |
-| ----------------- | ------------------------ | ---------------- | ----------------------------------------------------------------------- |
-| `-addr`                    | `STEWARD_ADDR`                    | `127.0.0.1:8080` | host:port to listen on                                                  |
-| `-log-level`               | `STEWARD_LOG_LEVEL`               | `info`           | log verbosity: one of `debug`, `info`, `warn`, `error` (case-insensitive); a garbage value fails closed at startup |
-| `-max-instances`           | `STEWARD_MAX_INSTANCES`           | `1024`           | maximum tracked instances before Provision returns 503; must be a positive integer (a non-positive value fails closed at startup) |
-| `-max-requests-per-second` | `STEWARD_MAX_REQUESTS_PER_SECOND` | `20`             | max inbound requests/second per source IP before returning 429 (burst is 2x this); `0` or negative disables the per-source limiter |
-| `-state-file`              | `STEWARD_STATE_FILE`              | (unset)          | path to a JSON file for durable state; unset means in-memory only       |
-| `-uplink-url`              | `STEWARD_UPLINK_URL`              | (unset)          | control-plane base URL for the outbound uplink; unset disables it       |
-| `-uplink-credential-file`  | `STEWARD_UPLINK_CREDENTIAL_FILE`  | (unset)          | path to the node's uplink credential JSON; required when `-uplink-url` is set. Must be `0600` or stricter (owner-only); a group- or other-accessible file fails closed at startup — see [Uplink transport security](#uplink-transport-security) |
-| `-uplink-tls-ca-file`      | `STEWARD_UPLINK_TLS_CA_FILE`      | (unset)          | PEM CA bundle used to verify the control plane's TLS certificate; unset verifies against the host's system root CAs |
-| `-uplink-tls-client-cert`  | `STEWARD_UPLINK_TLS_CLIENT_CERT`  | (unset)          | PEM client certificate presented for mutual TLS (mTLS); requires `-uplink-tls-client-key` |
-| `-uplink-tls-client-key`   | `STEWARD_UPLINK_TLS_CLIENT_KEY`   | (unset)          | PEM private key for `-uplink-tls-client-cert`; requires `-uplink-tls-client-cert` |
-| `-uplink-tls-skip-verify`  | `STEWARD_UPLINK_TLS_SKIP_VERIFY`  | `false`          | **INSECURE**: skip verification of the control plane's TLS certificate. Defeats TLS authentication; logged loudly when on. Temporary diagnostics only |
-| `-uplink-poll-interval`    | `STEWARD_UPLINK_POLL_INTERVAL`    | `10s`            | base cadence for uplink polling; jitter is applied on top; clamped to a 5-minute ceiling (the failed-poll backoff cap) |
-| `-uplink-command-queue-depth` | `STEWARD_UPLINK_COMMAND_QUEUE_DEPTH` | `256`     | maximum received-but-not-yet-executed uplink commands held at once (queued plus in-flight); a poll cycle's excess beyond this is rejected and left for the control plane to redeliver, rather than committing the node to unbounded work. Must be a positive integer; only consumed when `-uplink-url` is set — see [Command backpressure](#command-backpressure) |
-| `-disable-inbound-listener` | `STEWARD_DISABLE_INBOUND_LISTENER` | `false`          | do not bind an inbound listener; requires `-uplink-url`                |
-| `-enable-metrics`          | `STEWARD_ENABLE_METRICS`          | `false`          | expose `GET /metrics` (Prometheus text format) on the inbound listener; see [Metrics](#metrics) |
-| `-audit-log-file`          | `STEWARD_AUDIT_LOG_FILE`          | (unset)          | path to a JSON-lines file recording every executed uplink command; unset disables it; see [Command audit log](#command-audit-log) |
-| `-enable-process-exec`     | `STEWARD_ENABLE_PROCESS_EXEC`     | `false`          | run real OS processes for `command`-bearing specs; off by default (pure status tracking). See [Process supervision](#process-supervision) |
-| `-allow-nonloopback-process-exec` | `STEWARD_ALLOW_NONLOOPBACK_PROCESS_EXEC` | `false` | **DANGEROUS acknowledgement**: allow process execution while the inbound listener is reachable beyond loopback; prefer an uplink-only node |
-| `-allow-root-process-exec` | `STEWARD_ALLOW_ROOT_PROCESS_EXEC` | `false` | **DANGEROUS acknowledgement**: allow process execution while Steward is root; prefer a dedicated unprivileged service account |
-| `-process-stop-grace-period` | `STEWARD_PROCESS_STOP_GRACE_PERIOD` | `10s`         | how long a stop waits after SIGTERM before escalating to SIGKILL; must be positive; only used when process execution is enabled |
-| `-config`                  | `STEWARD_CONFIG`                  | (unset)          | path to a JSON [config file](#config-file) supplying any of the settings above; a flag or env var overrides it |
-
-`-version`, `-check-config`, and `-schema` are action flags rather than settings
-(they have no env var):
-
-- `-version` prints the build/version string and exits 0 without binding a port or
-  starting the uplink loop. Published artifacts report their explicitly stamped
-  release tag; `go install` reports its module version; developer builds fall back
-  to a VCS revision and then a compiled-in development version. It is the same value
-  `GET /v1/capabilities` advertises.
-- `-check-config` runs every fail-closed startup check against the fully resolved
-  configuration (flags, env vars, and any `-config` file) and then exits 0 (valid)
-  or non-zero with the same actionable message a real startup would give —
-  **without binding a port, keeping state for real use, or starting the uplink
-  loop**. It answers "will this configuration work?" before a rollout. It validates
-  a `-config` file too:
-
-  ```console
-  # Validate the flags, env, and config file this node would boot with.
-  go run ./cmd/steward -check-config -config /etc/steward/config.json
-  # -> prints "configuration valid" and exits 0, or names the first problem and exits non-zero.
-  ```
-
-- `-schema` prints the JSON Schema (draft 2020-12) for the [config file](#config-file)
-  to stdout and exits 0, without binding a port or starting the uplink loop. It
-  describes the config file's *shape* — every key, its type, and the constraints
-  decidable from the file alone (`additionalProperties: false`, a positive `max_instances`,
-  the `uplink_url` ⇒ `uplink_credential_file` pairing, `disable_inbound_listener:
-  true` ⇒ `uplink_url`) — so fleet tooling can validate a candidate config against a
-  real schema *before* ever invoking `-check-config`. The schema is generated by
-  reflecting over the config struct, so its key and type inventory cannot drift.
-  Host-dependent admission such as effective-UID, listener-topology, and file
-  permission checks remains the job of on-node `-check-config`:
-
-  ```console
-  # Emit the schema your fleet tooling validates candidate configs against.
-  go run ./cmd/steward -schema > steward.config.schema.json
-  ```
-
-By default Steward keeps state in memory and a restart forgets every tracked
-instance. Set `-state-file` to persist state across restarts:
-
-```console
-# Durable state: instances survive a restart. The file is created on first use.
-go run ./cmd/steward -state-file ./steward-state.json
-STEWARD_STATE_FILE=/var/lib/steward/state.json go run ./cmd/steward
-```
-
-Each state-changing operation is written atomically (temp file + rename) using
-only the standard library. On startup Steward loads an existing file before
-serving; a corrupt or unreadable file is a fail-closed startup error naming the
-path and the fix, never a silent empty start.
-
-By default Steward always binds the inbound HTTP listener on `-addr`, even when
-the outbound uplink (`-uplink-url`) is also enabled. A node whose only reason for
-using the uplink is that inbound connections are impossible — behind NAT or a
-firewall — can set `-disable-inbound-listener` to bind nothing inbound; all
-fleet operations then flow through the uplink poll loop only. The flag requires
-`-uplink-url` — a node with neither door open is unreachable and fails closed at
-startup. See [`docs/disable-inbound-listener.md`](docs/disable-inbound-listener.md)
-for the full design.
-
-### Inbound rate limiting
-
-The inbound HTTP listener is unauthenticated by design, so it defends itself from
-denial-of-service the same structural way it bounds request bodies and instance
-count: a per-source (client IP) request-rate limit. Steward keys a hand-rolled,
-standard-library-only token bucket on the connecting IP and, when a source exceeds
-its budget, sheds the request with `429 Too Many Requests` and a `Retry-After`
-header — never touching the request or response body shape of any operation.
-
-The default budget — `20` requests/second per source with a burst of `40` — is
-sized for a control-plane-facing lifecycle API. Railyard drives
-provision/start/stop/hibernate/destroy/status/list at reconciler-and-human pace, so
-a normal reconciliation spike sits well inside the burst and steady traffic well
-under the rate, while a flood from one source is shed in well under a second. The
-limit is per-source, so one abusive IP cannot degrade service for the legitimate
-control plane on another. A 429 is shed before any handler work runs, so it is
-always safe to retry — but whether a bulk operation that exceeds the burst degrades
-gracefully depends on the caller honoring `Retry-After`, not on this limiter alone.
-Raise `-max-requests-per-second` (or `STEWARD_MAX_REQUESTS_PER_SECOND`) for heavier
-bulk operation, or set it to `0` to disable the limiter entirely — appropriate only
-when Steward already sits behind a gateway that rate-limits for it. The per-source
-bucket map is bounded and its idle entries are swept, so a distributed many-IP
-flood cannot grow it without limit.
-
-Because the key is the real TCP peer and never a client-supplied header (an
-unauthenticated caller could forge `X-Forwarded-For` to dodge the limit), a
-deployment that terminates connections behind a shared proxy sees all traffic as one
-source; rate-limit at that proxy and disable Steward's limiter there.
-
-### Metrics
-
-`GET /metrics` is an **opt-in** endpoint (`-enable-metrics` /
-`STEWARD_ENABLE_METRICS`, default off) that renders Steward's operational state in
-the [Prometheus text exposition
-format](https://github.com/prometheus/docs/blob/main/content/docs/instrumenting/exposition_formats.md).
-It reports:
-
-- `steward_instances{status="..."}` — current tracked instances, broken down by
-  status (a gauge, not a counter — no `_total` suffix, since it can go down as
-  well as up).
-- `steward_max_instances` — the configured capacity cap.
-- `steward_uplink_poll_latency_seconds{stat="min"|"max"|"last"}` — the outbound
-  uplink's `/uplink/poll` round-trip latency (present only when `-uplink-url` is
-  set).
-- `steward_uplink_polls_total` — total polls attempted, success and failure alike.
-- `steward_uplink_commands_total{status="success"|"failure"}` — uplink commands
-  executed, by outcome.
-- `steward_uplink_backoff_seconds` — the poll loop's current interval/backoff.
-- `steward_uplink_command_queue_depth` — uplink commands received but not yet
-  executed (queued plus in-flight); a gauge that rises under a burst and drains as
-  the node catches up.
-- `steward_uplink_command_queue_max_depth` — the configured
-  `-uplink-command-queue-depth` cap, so a dashboard can chart current-vs-max
-  backpressure headroom.
-- `steward_uplink_commands_rejected_total` — uplink commands rejected because the
-  queue was full (left for the control plane to redeliver); a sustained non-zero
-  rate means the node is not keeping up with its command backlog.
-
-The `steward_uplink_*` series are present only when the outbound uplink is enabled
-(`-uplink-url`); on an inbound-REST-only node the endpoint still serves the
-instance-count and capacity gauges.
-
-It is off by default and, when enabled, is reachable **only** through the same
-inbound HTTP listener every other endpoint uses — there is no second listener, so
-`/metrics` automatically respects `-disable-inbound-listener` (no listener, no
-`/metrics`) and the per-source rate limiter above. It is built entirely from the
-standard library (`fmt`, `strings`, `net/http`): the Prometheus text format is
-simple enough that the official `prometheus/client_golang` library was not needed
-to stay within the [zero-dependency invariant](#zero-private-dependencies).
-
-### Command audit log
-
-`-audit-log-file` (env `STEWARD_AUDIT_LOG_FILE`, unset by default) appends one
-JSON-lines record to the given file for every uplink command Steward executes to a
-terminal (reported) outcome:
-
-```json
-{"timestamp":"2025-01-01T00:00:00Z","command_id":"cmd-123","instance_id":"agent-1","kind":"provision","status":"success"}
-{"timestamp":"2025-01-01T00:00:05Z","command_id":"cmd-124","instance_id":"agent-1","kind":"stop","status":"failure","error":"stop names an unknown instance"}
-```
-
-`error` is present only on a `"failure"` record. The file is opened once (created
-if missing) and appended to for the life of the process; each record is written
-with a single `os.File.Write` call under a mutex, the same append-only,
-torn-write-tolerant discipline `-state-file`'s crash-safety gives durable state,
-achieved with a different mechanism suited to an append-only log rather than a
-rewritten-in-full snapshot (see [ARCHITECTURE.md](ARCHITECTURE.md) for why). A
-failure to open the file at startup is a fail-closed error naming the path; a
-failure to write a record at runtime is logged at `WARN` and otherwise ignored — the
-audit log is a best-effort operational trail, not a source of truth the tracker or
-control plane depend on, so it must never turn a successful command into a failure.
-
-This covers commands the **outbound uplink** dispatches (provision/start/stop/
-hibernate/destroy), which carry a `command_id`; it does not cover the direct
-inbound REST API, which has no command-id concept of its own. Setting
-`-audit-log-file` with no `-uplink-url` is accepted (the file is still created) but
-logs a startup `WARN`, since no uplink command will ever exist to record.
-
-### Process supervision
-
-By default Steward tracks lifecycle *status* and spawns nothing — starting an
-instance just moves it to `RUNNING`. With `-enable-process-exec` it becomes a real,
-`os/exec`-level process supervisor (in the class of systemd/supervisord), turning an
-instance whose `spec` carries a `command` into an actual OS process it spawns,
-signals, and monitors.
-
-```console
-# Enable real process execution on the default loopback-only listener, with a
-# 15s SIGTERM→SIGKILL grace period. Run this as a non-root service account.
-go run ./cmd/steward -enable-process-exec -process-stop-grace-period 15s
-
-# Provision an instance whose spec is a real command, then start it.
-curl -sX POST localhost:8080/v1/instances \
-  -d '{"instance_id":"worker-1","spec":{"command":"/usr/bin/my-agent","args":["--serve"],"env":{"LOG":"debug"},"working_dir":"/srv"}}'
-# -> the runtime_ref in the response; POST .../{runtime_ref}/start spawns the process.
-```
-
-**The opt-in is backward-compatible by design.** `spec` has always been an opaque
-blob callers fill with arbitrary config, so real execution requires **both**
-`-enable-process-exec` **and** a `command` field in the spec:
-
-- With execution **off** (the default), a spec **without** a `command` is exactly as
-  before (opaque config, no process), and a spec **with** a `command` is rejected
-  with `400 process_exec_disabled` — a caller's intent to run a process is failed
-  loudly, never silently ignored.
-- With execution **on**, a spec without a `command` is still a pure status
-  transition; only a `command`-bearing spec spawns a process.
-
-The interpreted spec fields are `command` (string; its presence is the trigger),
-`args` (string array), `env` (a name→value object), and `working_dir` (string);
-every other key stays opaque.
-
-Lifecycle maps to signals: **start** spawns (or, from hibernation, `SIGCONT`-resumes
-the existing process); **stop** sends `SIGTERM`, waits the grace period, then
-`SIGKILL`; **hibernate** sends `SIGSTOP`; **destroy** terminates the process. An
-already-running start is an idempotent no-op — no duplicate process. A process that
-exits on its own (a crash) moves the instance to `STOPPED` (Steward never emits
-`FAILED`) and records `last_exit_reason: "crashed"` — distinct from a requested
-stop's `"stopped"`/`"killed"` — with a WARN naming it an unexpected exit.
-
-**Security posture** (deliberate): the command is run **directly, never via a
-shell**, so args cannot cause shell injection; the child does **not** inherit
-Steward's environment (which may hold secrets) — only `PATH` plus the spec's `env`;
-and there is **no sandboxing and no resource limiting** in this layer — it is
-process supervision, not the separate, still-deferred sandboxed computer-use worker.
-
-Startup fails closed when process execution would run as root or when its inbound
-listener is reachable beyond loopback. The production default is a dedicated
-unprivileged account plus `-disable-inbound-listener` and the authenticated outbound
-uplink. The `-allow-root-process-exec` and
-`-allow-nonloopback-process-exec` flags are explicit dangerous acknowledgements for
-exceptional deployments; each posture is logged at `WARN`. When process execution
-uses an existing `-state-file`, that file must be `0600` or stricter and carry no
-extended access ACL because it can contain command arguments and environment
-secrets. Steward creates new state snapshots owner-only, but rejects an existing
-file whose mode bits or ACL permit—or could obscure—additional access.
-
-**Restart limitation (honest):** an OS process handle and its stdout/stderr pipes
-cannot survive a Steward restart. The child's `pid` is persisted (when `-state-file`
-is set), and on reload Steward liveness-checks it: a dead pid becomes `STOPPED`
-(`last_exit_reason: "supervision_lost"`); a live pid is **reattached in a degraded,
-liveness-only mode** — Steward can stop/hibernate/resume it by pid but has lost its
-stdout/stderr and can no longer detect a future crash proactively. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for the full design and limits.
-
-### Uplink transport security
-
-The outbound uplink is an HTTP client dialing the control plane, so its transport
-security is a node-side deployment concern configured the same flag > env > file
-way as everything else. Three defenses harden it; all are opt-in except the
-credential-permission check, which is always on when the uplink is enabled.
-
-- **Configurable TLS.** By default the uplink verifies the control plane's
-  certificate against the host's system root CAs and presents no client
-  certificate. A node that talks to a control plane behind a private or internal
-  CA can point `-uplink-tls-ca-file` at a PEM CA bundle to trust it without
-  touching the system trust store, and a deployment that wants mutual TLS can set
-  `-uplink-tls-client-cert` and `-uplink-tls-client-key` (both required together)
-  so the node presents a client certificate. All four settings are validated
-  fail-closed at startup and under `-check-config`: an unreadable CA, a CA file
-  with no usable certificate, or a client cert without its key (or a pair that
-  does not load) is a startup error naming the fix, never a silent fall back to
-  system defaults. The client **private key** is a secret like the credential, so
-  its file must also be `0600` or stricter — a group- or other-accessible key is
-  refused fail-closed (the public certificate needs no such check). It is built
-  with only `crypto/tls` from the standard library —
-  no new dependency. `-uplink-tls-skip-verify` disables certificate verification
-  entirely; it is **insecure** (it defeats TLS authentication and exposes the
-  channel to a man-in-the-middle), defaults off, and logs a loud warning whenever
-  it is set — use it only for a temporary diagnostic, never in production.
-
-- **Bounded poll/report bodies.** The uplink caps every HTTP body it reads or
-  writes at the same 1 MiB the inbound REST API bounds a request body to. A poll
-  response over the cap is a clean, logged rejection — this poll cycle is dropped
-  and retried next, never read unbounded into memory or parsed from a truncated
-  prefix — and a report body over the cap is refused before it is sent (the server
-  redelivers the command via its claim lease). A hostile or buggy control plane
-  therefore cannot make Steward read or send an unbounded body.
-
-- **Secret file permissions.** The uplink credential and the TLS client private
-  key are both secrets, so each file must be `0600` or stricter (owner-only). A
-  file readable or writable by group or others is refused fail-closed — at startup,
-  under `-check-config`, and (for the credential) on the hot-reload watch — with an
-  actionable message naming the path and the `chmod 600` fix. The check is on the
-  mode bits, so it holds even when Steward runs as root.
-
-### Command backpressure
-
-The uplink poll loop puts a **bounded, in-memory queue** between the commands a
-poll returns and the commands the node executes, so a control plane that queues
-work faster than the node can execute it (a burst of provision/start/stop) cannot
-commit the node to unbounded in-flight or queued work. The poll loop is the
-producer and a single background consumer drains and executes the queue, so a slow
-batch never stalls polling.
-
-- **Bounded, with a redelivery-safe overflow.** `-uplink-command-queue-depth`
-  (env `STEWARD_UPLINK_COMMAND_QUEUE_DEPTH`, default `256`, validated positive at
-  startup and under `-check-config`) caps the queued-plus-in-flight command count.
-  When a poll cycle's commands would exceed the cap, the **excess is rejected, not
-  silently dropped**: each rejected command is logged at `WARN` under a grep-able
-  `uplink command queue full:` prefix (the same operator-greppable convention as
-  `sighup reload:`), naming the rejected commands' `command_id`s and `runtime_ref`s.
-  A rejected command is never reported, so the control plane's poll/report protocol
-  redelivers it on a later cycle once the backlog drains — nothing is lost.
-- **Deduplicated across poll cycles.** If a command's `command_id` is already
-  queued or in-flight, a redelivered copy (a report lost in transit, a claim-lease
-  reclaim) is skipped rather than executed a second time. Steward's tracker
-  operations are idempotent in effect regardless, so this is a work-saving guard
-  (it avoids redundant tracker mutations and, with `-state-file`, redundant disk
-  writes), not a correctness fix.
-- **Feeds readiness.** A queue that stays full for several consecutive poll cycles
-  flips `GET /v1/readiness` to `503` (naming the command-queue backlog), so a load
-  balancer or orchestrator stops routing new work to a node that is not keeping up;
-  the node returns to ready on its first clean poll cycle once the backlog drains. A
-  single momentary over-full poll never flips readiness (no flapping). See
-  [Health and readiness](#health-and-readiness).
-
-## Config file
-
-Any setting can live in a JSON config file, pointed at by `-config` (or
-`STEWARD_CONFIG`). It is the lowest-precedence layer: a flag or an env var always
-overrides the same key in the file (**flag > env var > config file**). Keys are
-`snake_case` — the same names as the `STEWARD_`-prefixed env vars, minus the
-prefix — and every key is optional; an omitted key falls back to its env var,
-flag, or built-in default. `uplink_poll_interval` and `process_stop_grace_period`
-are Go duration strings (e.g. `"30s"`, `"1m30s"`).
-
-```json
-{
-  "addr": "0.0.0.0:8080",
-  "max_instances": 512,
-  "log_level": "info",
-  "state_file": "/var/lib/steward/state.json",
-  "uplink_url": "https://control-plane.example",
-  "uplink_credential_file": "/etc/steward/uplink-credential.json",
-  "uplink_poll_interval": "30s",
-  "disable_inbound_listener": false,
-  "enable_process_exec": false,
-  "allow_nonloopback_process_exec": false,
-  "allow_root_process_exec": false,
-  "process_stop_grace_period": "10s"
-}
-```
-
-```console
-go run ./cmd/steward -config /etc/steward/config.json
-
-# A flag or env var still wins over the file — here the listen address is
-# overridden while the rest of the file's settings apply.
-go run ./cmd/steward -config /etc/steward/config.json -addr 127.0.0.1:9090
-```
-
-The file is read fail-closed, the same way the state and credential files are: a
-missing file, malformed JSON, an unknown key (a typo such as `max_instance` for
-`max_instances`), or trailing data is a startup error naming the file and the
-problem, never a silently-ignored or half-applied config. Run
-`steward -check-config -config <path>` to validate it without starting the server.
-
-### Hot-reloading `max_instances` with `SIGHUP`
-
-Sending `SIGHUP` to a running Steward re-reads the `-config` file and hot-reloads
-**`max_instances` only** — the capacity cap — with no restart. Edit the file's
-`max_instances`, `kill -HUP <pid>`, and grep the logs for the `sighup reload:` line
-that records the change:
-
-```console
-# Edit /etc/steward/config.json's max_instances, then:
-kill -HUP "$(pidof steward)"
-# -> logs: sighup reload: max_instances updated old_max_instances=… new_max_instances=…
-```
-
-Scope is deliberately narrow — only `max_instances` reloads. The other settings
-(the listen address, the uplink URL and credential, the state file) are a much
-larger, riskier live-reconfiguration surface and are out of scope; change them with
-a restart. `SIGHUP` never shuts the process down (only `SIGINT`/`SIGTERM` do), and
-the reload is fail-closed: with no `-config` file at startup it is a documented
-no-op, a `max_instances` pinned by the `-max-instances` flag or
-`STEWARD_MAX_INSTANCES` env var still wins over the file (the same
-flag > env > file precedence as startup), and an unreadable or invalid file leaves
-the live cap unchanged — every outcome is logged, never silent.
-
-**Lowering the cap below the current instance count is safe: it evicts nothing.**
-No already-tracked instance is stopped or destroyed; the lower cap simply blocks
-*new* provisions (returning `503`) until ordinary `Destroy` attrition drains the
-count back under the ceiling. This is the same "circuit breaker on growth, not on
-reload" posture Steward already applies when it loads a state file holding more
-instances than its cap — a capacity re-tune must never become an outage.
-
-## API at a glance
-
-| Method | Path                        | Operation                                   |
-| ------ | --------------------------- | ------------------------------------------- |
-| POST   | `/v1/instances`             | Provision (idempotent on `instance_id`)     |
-| GET    | `/v1/instances`             | List tracked instances (sorted by `runtime_ref`; optionally filtered — see below) |
-| POST   | `/v1/instances/batch`       | Execute an ordered batch of lifecycle operations (see below) |
-| GET    | `/v1/instances/{id}`        | Status                                      |
-| POST   | `/v1/instances/{id}/start`  | Start                                       |
-| POST   | `/v1/instances/{id}/stop`   | Stop                                        |
-| POST   | `/v1/instances/{id}/hibernate` | Hibernate                                |
-| DELETE | `/v1/instances/{id}`        | Destroy                                     |
-| GET    | `/v1/capabilities`          | Advertised skills + operational info        |
-| GET    | `/v1/healthz`               | Liveness probe (`{"status": "ok"}`)         |
-| GET    | `/v1/readiness`             | Readiness probe (`200` ready / `503` not ready; see [Health and readiness](#health-and-readiness)) |
-| GET    | `/metrics`                  | Prometheus metrics (opt-in; see [Metrics](#metrics)) |
-
-`{id}` is the opaque `runtime_ref` returned by provisioning. An unknown
-`runtime_ref` returns `404` with `{"error": "unknown_runtime_ref", "message": ...}`.
-
-Every error response carries a stable, machine-readable `error` code drawn from a
-small closed taxonomy — `invalid_request`, `invalid_spec` (a malformed instance
-`spec`), `unknown_runtime_ref`, `invalid_state_transition` (a lifecycle operation
-the instance's current status does not allow — see [Lifecycle transitions](#lifecycle-transitions)),
-`capacity_exceeded`, `request_too_large`, `rate_limited`, `not_found`,
-`method_not_allowed`, and `internal_error`. Each is documented, with its HTTP
-status, as the `Error.error` enum in [`openapi/steward.v1.yaml`](openapi/steward.v1.yaml);
-branch on it (or, more portably, on the HTTP status) rather than on the
-human-facing `message`.
-
-Every response carries an `X-Request-Id` header: a per-request correlation id,
-echoed on the matching structured log line (alongside the client's
-`remote_addr`) so a control-plane failure report can be tied to the exact
-node-side log entry that served it. It is a logging aid, not distributed tracing
-— Steward mints a fresh id per request and never propagates a client-supplied
-one.
-
-`GET /v1/capabilities` advertises the (still-empty in v1) `skills` array plus a
-small slice of operational state for a control-plane dashboard: `version`, the
-current `instance_count`, the configured `max_instances` cap, and `durable_state`
-(a boolean — whether `-state-file` is set, never the path).
-
-By default state is held in memory only and restarting the process forgets all
-tracked instances. Set `-state-file` (or `STEWARD_STATE_FILE`) to persist state
-across restarts; see [Run](#run) above.
-
-### Health and readiness
-
-Steward exposes two distinct probes on the inbound listener:
-
-- **`GET /v1/healthz` — liveness.** A `200 {"status": "ok"}` confirms the process
-  is up and serving. It deliberately does **not** probe the state file (durable
-  state is already fail-closed at startup and on every mutation), so it stays a
-  cheap hot-path check.
-- **`GET /v1/readiness` — readiness (rolling-deployment safety).** A `200
-  {"status": "ready"}` means the instance may receive traffic; a `503
-  {"status": "not_ready", "check": "...", "detail": "..."}` names the first gate
-  that failed so a load balancer or orchestrator drains a not-yet-warm or
-  degraded instance instead of routing to it. The gates, checked in order:
-  1. the instance tracker is initialized;
-  2. when the outbound uplink is enabled, its command queue has **not** been full
-     for several consecutive poll cycles — a node not keeping up with its command
-     backlog is drained until it catches up (see
-     [Command backpressure](#command-backpressure)), while a single momentary
-     over-full poll never flips readiness;
-  3. when the outbound uplink is enabled (`-uplink-url`), it has completed at
-     least one successful poll **or** is not in a persistent-failure state (a
-     rejected credential, or sustained polling failure with no success yet) — a
-     brief transient blip does not flip readiness;
-  4. when durable state is enabled (`-state-file`), its directory is writable —
-     the capability persistence needs. Unlike the liveness probe, readiness
-     deliberately performs this filesystem check, so a state directory gone
-     read-only or full drains the instance even though its process is alive.
-
-Both probes live only on the inbound listener; a `-disable-inbound-listener`
-(uplink-only) node has neither — its liveness and readiness signal is its
-advancing uplink poll logs (see [Uplink client](docs/uplink-client.md)).
-
-### Lifecycle transitions
-
-`start`/`stop`/`hibernate` are validated against the instance's current status.
-Re-applying the same operation is an idempotent no-op (starting an already-`RUNNING`
-instance returns `200` unchanged — this is what keeps a retried/redelivered
-command safe). A transition that assumes a lifecycle step that never happened —
-stopping or hibernating a `PENDING` instance that was never started — is rejected
-with `409 invalid_state_transition` and the instance is left unchanged, rather
-than silently recording a nonsensical status. `provision` stays idempotent on
-`instance_id` and `destroy` is always allowed on a live instance, both unchanged.
-
-By default these transitions are pure status changes. With
-[process supervision](#process-supervision) enabled, a `command`-bearing instance
-also spawns/signals a real OS process on each transition — but the status
-semantics above (including idempotency and the `PENDING` guard) are identical.
-
-### Filtered listing
-
-`GET /v1/instances` accepts three optional query-string filters that compose
-via AND when combined; omitting all three is byte-for-byte the same
-unfiltered response this endpoint always returned:
-
-| Query param           | Matches                                                      |
-| ---------------------- | ------------------------------------------------------------ |
-| `status`               | Exact match against the `Status` enum (`PENDING`, `RUNNING`, `STOPPED`, `HIBERNATED`, `DESTROYED`, `FAILED`) |
-| `instance_id_prefix`   | A plain string prefix of `instance_id`                       |
-| `created_since`        | Instances created at or after this RFC3339 timestamp (inclusive) |
-
-An unrecognized `status` or an unparseable `created_since` is a `400`, never a
-silently-ignored filter:
-
-```console
-$ curl -s 'localhost:8080/v1/instances?status=RUNNING&instance_id_prefix=web-'
-{"instances":[{"instance_id":"web-1","runtime_ref":"rt_...","status":"RUNNING","created_at":"2026-07-10T12:00:00Z"}]}
-```
-
-### Batch operations
-
-`POST /v1/instances/batch` executes an ordered list of `provision`/`start`/
-`stop`/`destroy` operations, one at a time in exactly the given order, and
-returns one result per operation. Each operation is executed through the
-exact same tracker call its single-instance endpoint uses, so it keeps that
-endpoint's own request/response shape and idempotency behavior.
-
-**This is deliberately not a transaction.** A failure in one operation never
-blocks the rest of the batch — if operation 3 of 5 fails, 1, 2, 4, and 5 still
-run — and every outcome is reported at its own index in `results`, never
-silently swallowed. The overall HTTP response is `200` as long as the request
-body itself was well-formed; each operation's own success or failure lives in
-that entry's own `status`/`instance`/`error` fields. Because operations run
-strictly in order against the live tracker, a later operation sees an
-earlier one's effect — for example, destroying an `instance_id` and
-re-provisioning it within the same batch works.
-
-```console
-$ curl -s localhost:8080/v1/instances/batch -d '{
-    "operations": [
-      {"op": "destroy", "runtime_ref": "rt_old..."},
-      {"op": "provision", "instance_id": "agent-1", "spec": {"model": "example"}}
-    ]
-  }'
-{"results":[
-  {"op":"destroy","runtime_ref":"rt_old...","status":200,"instance":{...,"status":"DESTROYED"}},
-  {"op":"provision","instance_id":"agent-1","status":201,"instance":{...,"status":"PENDING"}}
-]}
-```
-
-Retrying an entire batch (for example after a client-side timeout left the
-outcome ambiguous) is safe to the extent each constituent operation already
-is: `provision` stays idempotent on `instance_id`, and `start`/`stop` converge
-on the same terminal state either way — but `destroy` is **not** idempotent
-across a retry, since it releases the `runtime_ref`; replaying a batch that
-already destroyed an instance gets a `404 unknown_runtime_ref` on that
-operation the second time, the same outcome a repeated
-`DELETE /v1/instances/{id}` would give. See
-[`docs/batch-instance-operations.md`](docs/batch-instance-operations.md) for
-the full design.
-
-### Example
-
-```console
-$ curl -s localhost:8080/v1/instances \
-    -d '{"instance_id": "agent-1", "spec": {"model": "example", "memory_mb": 512}}'
-{"instance_id":"agent-1","runtime_ref":"rt_...","status":"PENDING","created_at":"2026-07-10T12:00:00Z","spec":{"model":"example","memory_mb":512}}
-
-$ curl -s -X POST localhost:8080/v1/instances/rt_.../start
-{"instance_id":"agent-1","runtime_ref":"rt_...","status":"RUNNING","created_at":"2026-07-10T12:00:00Z","spec":{...}}
-```
-
-## Releases
-
-Tagged releases attach cross-platform binaries (`linux/amd64`, `linux/arm64`,
-`darwin/amd64`, `darwin/arm64`), Linux DEB/RPM packages, the guided installer,
-and SHA-256 checksums to a GitHub Release,
-built by the [`Release` workflow](.github/workflows/release.yml) when a `vX.Y.Z`
-tag is pushed. You can also install a tagged version straight from source:
-
-```console
-go install github.com/hardrails/steward/cmd/steward@vX.Y.Z
-steward -version   # -> steward vX.Y.Z
-```
-
-A released binary carries the tag through an explicit standard-linker stamp, and
-the release job executes both binaries to prove `steward -version` matches it.
-Maintainers: see
-[`docs/releasing.md`](docs/releasing.md) for the full release runbook, the version
-mechanism, and how to dry-run the automation without publishing.
-
-## License
-
-Apache License 2.0. See [LICENSE](LICENSE).
+Read [`AGENTS.md`](AGENTS.md) before changing code. It documents the security and
+compatibility invariants enforced by review and CI. Steward is licensed under
+[Apache-2.0](LICENSE).
