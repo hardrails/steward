@@ -45,6 +45,8 @@ func TestLoadCredentialFailsClosed(t *testing.T) {
 		{"missing node_id", `{"version":1,"tenant_id":"acme","credential":"tok"}`},
 		{"empty credential", `{"version":1,"tenant_id":"acme","node_id":"node-7","credential":""}`},
 		{"missing credential", `{"version":1,"tenant_id":"acme","node_id":"node-7"}`},
+		{"unknown field", `{"version":1,"tenant_id":"acme","node_id":"node-7","credential":"tok","private_api":"x"}`},
+		{"multiple objects", `{"version":1,"tenant_id":"acme","node_id":"node-7","credential":"tok"} {}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -64,6 +66,28 @@ func TestLoadCredentialFailsClosed(t *testing.T) {
 				t.Errorf("error %q does not name the credential file path %q", err, path)
 			}
 		})
+	}
+}
+
+func TestLoadCredentialRejectsOversizeAndSymlink(t *testing.T) {
+	dir := t.TempDir()
+	oversize := filepath.Join(dir, "oversize.json")
+	if err := os.WriteFile(oversize, []byte(strings.Repeat("x", maxCredentialBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCredential(oversize); err == nil {
+		t.Fatal("oversized credential was accepted")
+	}
+	target := filepath.Join(dir, "target.json")
+	if err := os.WriteFile(target, []byte(`{"version":1,"tenant_id":"t","node_id":"n","credential":"c"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "credential-link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCredential(link); err == nil {
+		t.Fatal("credential symlink was accepted")
 	}
 }
 

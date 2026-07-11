@@ -1,8 +1,11 @@
 # Steward
 
-Steward is a lightweight, always-running **process supervisor for agent
-instances** that runs on a node, managed remotely over HTTP by a separate
-control plane. Behind a small, fully-documented HTTP API it provisions, starts,
+Steward is an open-source node runtime with two deliberately separate binaries:
+`steward`, the lightweight lifecycle supervisor, and `steward-executor`, the
+Docker/gVisor boundary for untrusted tenant workloads. They are released and
+operated as one Steward system but never share a process or Docker authority.
+
+Behind a small, fully-documented HTTP API, `steward` provisions, starts,
 stops, hibernates, and destroys real OS processes — signaling them, monitoring
 for an unexpected exit, and, when durable state is enabled, best-effort
 reattaching them across a restart — with the operational maturity a production
@@ -19,10 +22,11 @@ is kept out of Steward's own process.
 
 ## The public contract
 
-[`openapi/steward.v1.yaml`](openapi/steward.v1.yaml) is the authoritative,
-hand-written public contract for the HTTP API. It is the audit surface: if the
-server and that document disagree, the document is the spec. CI lints it on every
-change.
+[`openapi/steward.v1.yaml`](openapi/steward.v1.yaml) and
+[`openapi/steward-executor.v1.yaml`](openapi/steward-executor.v1.yaml) are the
+authoritative, hand-written public contracts for the two process boundaries. They
+are the audit surface: if a server and its document disagree, the document is the
+spec. CI lints both on every change.
 
 ## System boundary
 
@@ -38,9 +42,9 @@ The ownership split is deliberate:
 - **The control plane** owns users, tenants, authorization, desired state,
   approvals, rollout orchestration, and fleet-wide evidence. Those enterprise
   concerns do not enter Steward's process or dependency graph.
-- **Steward Executor**, a separate open-source host-local service, owns admission
-  and execution of untrusted OCI workloads through Docker and gVisor. Docker's
-  socket is never mounted into Steward or an agent workload.
+- **Steward Executor**, the included `steward-executor` sibling binary, owns
+  admission and execution of untrusted OCI workloads through Docker and gVisor.
+  Docker's socket is never mounted into the `steward` process or an agent workload.
 - **Inference** remains an external service reached through an operator-selected
   OpenAI-compatible gateway; Steward does not schedule or govern models.
 
@@ -48,6 +52,57 @@ Accordingly, `-enable-process-exec` is only for trusted, operator-authored local
 process specifications. Its startup guardrails reduce accidental exposure but do
 not turn `os/exec` into a tenant sandbox. Treat tenant images and workload
 configuration as untrusted and route them through the separate executor boundary.
+
+## Steward Executor
+
+`steward-executor` is part of Steward, not a separate product. It remains a
+separate process because the Docker socket is root-equivalent host authority and
+must not enter the lifecycle supervisor. The binary is control-plane neutral: it
+can accept a loopback host-control API, use its opt-in outbound
+`/executor-uplink` command channel, or run both. Railyard is a first-party consumer
+of that public protocol, never a dependency.
+
+Executor refuses to start unless Docker advertises gVisor's `runsc` runtime. It
+admits only digest-pinned images with mandatory memory, CPU, and PID limits, runs
+them without networking as UID/GID `65532`, drops every Linux capability, sets
+`no-new-privileges`, and uses a read-only root filesystem. Its contract contains
+no privileged mode, host mount, device, Docker socket, raw network, or environment
+injection field. Fixed, bounded tmpfs mounts provide `/workspace` and `/tmp`
+without exposing a host path. Existing containers are accepted as idempotent replays only when
+their immutable workload fingerprint and hardened Docker settings still match.
+
+Build both Steward processes from this repository:
+
+```console
+go build -o steward ./cmd/steward
+go build -o steward-executor ./cmd/steward-executor
+./steward-executor -version
+```
+
+Run Executor in host-local API mode:
+
+```console
+steward-executor -token-file /etc/steward/executor-token
+```
+
+Or enable outbound-only operation behind NAT/firewalls:
+
+```console
+steward-executor \
+  -token-file /etc/steward/executor-token \
+  -disable-inbound-listener \
+  -uplink-url https://control.example \
+  -uplink-credential-file /etc/steward/executor-uplink.json \
+  -uplink-state-file /var/lib/steward/executor-uplink-state.json
+```
+
+Initialize that state path once for a newly enrolled node before the first normal
+start (`steward-executor -initialize-uplink-state -uplink-state-file ...`). A
+missing fence on normal startup is fatal, never silently recreated.
+
+The token, credential, state, and optional mTLS client-key files are owner-only.
+Remote plaintext HTTP is rejected unless explicitly acknowledged; private CAs and
+mTLS use the same standard-library TLS implementation as the `steward` uplink.
 
 ## Zero private dependencies
 
@@ -70,7 +125,10 @@ lists only this module. Any private dependency would appear here (and in
 
 ## Requirements
 
-- Go 1.24 or newer.
+- Go 1.24 or newer to build from source; a server using a published static
+  release binary does not need a Go toolchain.
+- `steward-executor` additionally requires a Linux host with Docker already
+  installed and gVisor registered as Docker runtime `runsc`.
 
 ## Contributing
 

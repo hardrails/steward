@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cross-compile Steward for every published target, package each build as a
-# self-contained .tar.gz (binary + LICENSE + README), and write a SHA-256
+# self-contained .tar.gz (the target's usable process binaries + LICENSE + README), and write a SHA-256
 # checksums file over the archives. Dependency-free — only the Go toolchain and
 # POSIX shell utilities — matching Steward's stdlib-only, "buildable by anyone
 # with just the Go toolchain" ethos. The release GitHub Actions workflow
@@ -10,7 +10,7 @@
 # Version reporting is NOT injected here. The binary derives its own version from
 # Go's VCS build metadata (runtime/debug.ReadBuildInfo -> Main.Version), which
 # resolves to the exact tag when built from a checkout AT that tag — verified
-# empirically, see docs/releasing.md. `Version` in internal/server is a `const`
+# empirically, see docs/releasing.md. `Version` in internal/buildinfo is a `const`
 # that a linker `-ldflags -X` cannot patch anyway, and injection is unnecessary
 # because the tag-derived version is already correct. What this script DOES do is
 # assert, on a tag build, that the binary self-reports the tag — so a build that
@@ -74,11 +74,17 @@ for target in "${targets[@]}"; do
 	# Neither removes the VCS build metadata Main.Version is derived from.
 	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 		go build -trimpath -ldflags "-s -w" -o "${stage}/steward" ./cmd/steward
-	# Ship the license and readme alongside the binary so the download is
+	files=(steward LICENSE README.md)
+	if [ "$goos" = "linux" ]; then
+		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+			go build -trimpath -ldflags "-s -w" -o "${stage}/steward-executor" ./cmd/steward-executor
+		files=(steward steward-executor LICENSE README.md)
+	fi
+	# Ship the license and readme alongside both binaries so the download is
 	# self-contained and license-compliant.
 	cp LICENSE README.md "${stage}/"
 	tar -C "${stage}" -czf "${dist}/steward_${VERSION}_${goos}_${goarch}.tar.gz" \
-		steward LICENSE README.md
+		"${files[@]}"
 	rm -rf "${stage}"
 done
 
@@ -99,20 +105,24 @@ done
 # stamp the tag as the module version (a shallow checkout, a lost tag, or git
 # "dubious ownership" in CI) and we would otherwise publish a binary whose
 # `-version` disagrees with its release. Fail closed and name the fix.
-native="$(mktemp -d)/steward"
-go build -trimpath -ldflags "-s -w" -o "$native" ./cmd/steward
-reported="$("$native" -version | awk '{print $2}')"
-echo "release: host-native binary self-reports version '${reported}'"
+native_dir="$(mktemp -d)"
+go build -trimpath -ldflags "-s -w" -o "$native_dir/steward" ./cmd/steward
+go build -trimpath -ldflags "-s -w" -o "$native_dir/steward-executor" ./cmd/steward-executor
+reported="$("$native_dir/steward" -version | awk '{print $2}')"
+executor_reported="$("$native_dir/steward-executor" -version | awk '{print $2}')"
+echo "release: host-native steward self-reports version '${reported}'"
+echo "release: host-native steward-executor self-reports version '${executor_reported}'"
 if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-	if [ "${reported}" != "${GITHUB_REF_NAME}" ]; then
-		echo "release: FATAL — binary reports '${reported}' but the tag is '${GITHUB_REF_NAME}'." >&2
+	if [ "${reported}" != "${GITHUB_REF_NAME}" ] || [ "${executor_reported}" != "${GITHUB_REF_NAME}" ]; then
+		echo "release: FATAL — steward reports '${reported}' and steward-executor reports '${executor_reported}', but the tag is '${GITHUB_REF_NAME}'." >&2
 		echo "  Go did not stamp the tag as the module version, so the release binaries" >&2
 		echo "  would misreport their version. Ensure the release job checks out the tag" >&2
 		echo "  with full history (actions/checkout fetch-depth: 0). See docs/releasing.md." >&2
 		exit 1
 	fi
-	echo "release: version assertion OK — binary self-reports the tag ${GITHUB_REF_NAME}"
+	echo "release: version assertion OK — both binaries self-report the tag ${GITHUB_REF_NAME}"
 fi
+rm -rf "$native_dir"
 
 echo "release: artifacts in ${dist}/:"
 ls -1 "$dist"

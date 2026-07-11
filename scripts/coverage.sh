@@ -18,12 +18,13 @@
 #      (just the standalone binary's own counters) instead of mixing in the
 #      go-test test-binary's separate coverage pods, so step 2 below has one
 #      unambiguous source to convert.
-#   2. `go tool covdata textfmt` turns the standalone binary's counters into a
+#      `cmd/steward-executor` does the same into a second directory so the two
+#      binaries' distinct coverage metadata never mix.
+#   2. `go tool covdata textfmt` turns each standalone binary's counters into a
 #      text profile.
-#   3. The two profiles are unioned: a source region counts as covered if EITHER
-#      the unit tests or the integration binary covered it. Both instrument the
-#      same package set (-coverpkg=./...), so every region appears in both with
-#      identical spans; the union is honest, not double-counting.
+#   3. The three profiles are unioned: a source region counts as covered if the
+#      unit tests or either integration binary covered it. All instrument the
+#      same package set (-coverpkg=./...), so the union is honest, not double-counting.
 #
 # Usage: scripts/coverage.sh [min-fraction]   (default 0.85)
 # Env:   COVERAGE_OUT   path for the merged profile (default ./coverage.out)
@@ -33,13 +34,16 @@ min="${1:-0.85}"
 out="${COVERAGE_OUT:-coverage.out}"
 
 covdir="$(mktemp -d)"
+executor_covdir="$(mktemp -d)"
 unit="$(mktemp)"
 integration="$(mktemp)"
-trap 'rm -rf "$covdir" "$unit" "$integration"' EXIT
+executor_integration="$(mktemp)"
+trap 'rm -rf "$covdir" "$executor_covdir" "$unit" "$integration" "$executor_integration"' EXIT
 
 # -count=1 forces a real test run (no cache): a cached run would not re-execute
 # the integration subprocess, leaving no coverage data in $covdir.
 STEWARD_TEST_COVERDIR="$covdir" \
+	STEWARD_EXECUTOR_TEST_COVERDIR="$executor_covdir" \
 	go test -count=1 -coverpkg=./... -coverprofile="$unit" ./...
 
 if ! ls "$covdir"/covmeta.* >/dev/null 2>&1; then
@@ -49,6 +53,12 @@ if ! ls "$covdir"/covmeta.* >/dev/null 2>&1; then
 fi
 go tool covdata textfmt -i="$covdir" -o="$integration"
 
+if ! ls "$executor_covdir"/covmeta.* >/dev/null 2>&1; then
+	echo "coverage: no Executor integration coverage data written to $executor_covdir" >&2
+	exit 1
+fi
+go tool covdata textfmt -i="$executor_covdir" -o="$executor_integration"
+
 # Union the unit and integration profiles. Region key is the source span
 # (field 1); the statement count is field 2; field 3 is the hit count.
 awk 'FNR==1 { next }
@@ -56,7 +66,7 @@ awk 'FNR==1 { next }
 	  if ($3+0 > 0) cov[k]=1 }
 	END { print "mode: set"
 	      for (i=1; i<=n; i++) { k=order[i]; print k, stmts[k], (k in cov)?1:0 } }' \
-	"$unit" "$integration" >"$out"
+	"$unit" "$integration" "$executor_integration" >"$out"
 
 total="$(go tool cover -func="$out" | awk '/^total:/ { gsub("%","",$NF); print $NF }')"
 floor="$(awk -v m="$min" 'BEGIN { printf "%.1f", m*100 }')"

@@ -46,7 +46,7 @@ jobs:
         with:
           node-version: "20"
       - name: spectral lint
-        run: npx --yes @stoplight/spectral-cli@6.16.1 lint --fail-severity=error openapi/steward.v1.yaml
+        run: npx --yes @stoplight/spectral-cli@6.16.1 lint --fail-severity=error 'openapi/*.yaml'
 
   coverage:
     name: coverage

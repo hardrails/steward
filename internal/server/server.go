@@ -9,9 +9,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"runtime/debug"
 	"time"
 
+	"github.com/hardrails/steward/internal/buildinfo"
 	"github.com/hardrails/steward/internal/runtime"
 )
 
@@ -20,53 +20,14 @@ import (
 // with 413 before it is buffered into memory.
 const maxRequestBodyBytes = 1 << 20
 
-// Version is the compiled-in fallback Steward version string. It lives here (not
-// in cmd/steward) because the capabilities handler needs it and the command
-// package cannot be imported by this internal package. ResolveVersion prefers
-// the build metadata the Go toolchain stamps into a real `go build`/`go install`
-// (a tagged module version, else the VCS revision) and only falls back to this
-// constant when no such metadata exists (a `go run` or `go test` invocation), so
-// the advertised version reflects the actual build rather than a string nobody
-// remembers to bump.
-const Version = "0.1.0"
+// Version preserves the server package's public fallback constant while sourcing
+// it from the shared buildinfo package used by both Steward process binaries.
+const Version = buildinfo.Version
 
-// ResolveVersion returns the Steward version to advertise, via both GET
-// /v1/capabilities and the `-version` CLI flag. It prefers the build metadata the
-// Go toolchain embeds: the main module's version when the binary was
-// `go install`ed at a tagged version, otherwise the (shortened) VCS revision
-// stamped into any `go build` of a committed tree, suffixed `-dirty` when that
-// tree had uncommitted changes. It falls back to the compiled-in Version constant
-// when no usable build metadata is present — under `go run` or `go test`,
-// debug.ReadBuildInfo reports a "(devel)" main version and no VCS revision — so it
-// never returns an empty string.
+// ResolveVersion is the compatibility wrapper used by capabilities and
+// cmd/steward. buildinfo.Resolve owns the shared provenance algorithm.
 func ResolveVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return Version
-	}
-	if v := info.Main.Version; v != "" && v != "(devel)" {
-		return v
-	}
-	var revision string
-	var modified bool
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case "vcs.revision":
-			revision = setting.Value
-		case "vcs.modified":
-			modified = setting.Value == "true"
-		}
-	}
-	if revision == "" {
-		return Version
-	}
-	if len(revision) > 12 {
-		revision = revision[:12]
-	}
-	if modified {
-		revision += "-dirty"
-	}
-	return revision
+	return buildinfo.Resolve()
 }
 
 type Server struct {
