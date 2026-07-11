@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% assign meta_description = page.description | default: site.description %}
+    <title>{% if page.title %}{{ page.title }} · {% endif %}{{ site.short_title }}</title>
+    <meta name="description" content="{{ meta_description | escape }}">
+    <meta name="theme-color" content="#171814">
+    <link rel="canonical" href="{{ page.url | absolute_url }}">
+    <link rel="icon" href="{{ '/assets/favicon.svg' | relative_url }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}?v={{ site.time | date: '%s' }}">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Steward Documentation">
+    <meta property="og:title" content="{% if page.title %}{{ page.title }} · {% endif %}Steward">
+    <meta property="og:description" content="{{ meta_description | escape }}">
+    <meta property="og:url" content="{{ page.url | absolute_url }}">
+    <meta name="twitter:card" content="summary">
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "TechArticle",
+      "headline": {{ page.title | default: site.title | jsonify }},
+      "description": {{ meta_description | jsonify }},
+      "url": {{ page.url | absolute_url | jsonify }},
+      "isPartOf": {
+        "@type": "SoftwareSourceCode",
+        "name": "Steward",
+        "description": {{ site.description | jsonify }},
+        "codeRepository": "https://github.com/hardrails/steward",
+        "programmingLanguage": "Go",
+        "runtimePlatform": "Linux",
+        "softwareVersion": "{{ site.version }}",
+        "license": "https://www.apache.org/licenses/LICENSE-2.0"
+      }
+    }
+    </script>
+  </head>
+  <body class="{% if page.home %}home{% endif %}">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="{{ '/' | relative_url }}" aria-label="Steward documentation home">
+          <span class="brand-mark" aria-hidden="true">S</span>
+          <span><strong>Steward</strong><small>node field manual</small></span>
+        </a>
+        <nav class="top-nav" aria-label="Primary navigation">
+          <a href="{{ '/getting-started/' | relative_url }}">Start</a>
+          <a href="{{ '/guides/workload-lifecycle/' | relative_url }}">Guides</a>
+          <a href="{{ '/concepts/security-model/' | relative_url }}">Security</a>
+          <a href="{{ '/reference/api/' | relative_url }}">Reference</a>
+          <a class="github-link" href="{{ site.github_url }}">GitHub ↗</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="site-shell">
+      <aside class="side-nav" aria-label="Documentation navigation">
+        <p class="nav-label">Start here</p>
+        <a href="{{ '/getting-started/' | relative_url }}">Install Steward</a>
+        <a href="{{ '/getting-started/enroll/' | relative_url }}">Enroll a node</a>
+        <a href="{{ '/limitations/' | relative_url }}">v0.1 boundaries</a>
+
+        <p class="nav-label">How-to guides</p>
+        <a href="{{ '/guides/workload-lifecycle/' | relative_url }}">Workload lifecycle</a>
+        <a href="{{ '/guides/hermes-agent/' | relative_url }}">Hermes Agent</a>
+        <a href="{{ '/guides/openclaw/' | relative_url }}">OpenClaw</a>
+        <a href="{{ '/guides/air-gapped/' | relative_url }}">Air-gapped install</a>
+        <a href="{{ '/guides/upgrades/' | relative_url }}">Upgrade and rollback</a>
+
+        <p class="nav-label">Understand</p>
+        <a href="{{ '/concepts/architecture/' | relative_url }}">Architecture</a>
+        <a href="{{ '/concepts/security-model/' | relative_url }}">Security model</a>
+        <a href="{{ '/concepts/control-plane-boundary/' | relative_url }}">Control-plane boundary</a>
+
+        <p class="nav-label">Reference</p>
+        <a href="{{ '/reference/platform-support/' | relative_url }}">Platform support</a>
+        <a href="{{ '/reference/configuration/' | relative_url }}">Configuration</a>
+        <a href="{{ '/reference/api/' | relative_url }}">APIs and schemas</a>
+        <a href="{{ '/reference/release-artifacts/' | relative_url }}">Release artifacts</a>
+        <a href="{{ '/faq/' | relative_url }}">FAQ</a>
+      </aside>
+
+      <main id="main-content" class="content" tabindex="-1">
+        {% unless page.home %}
+          <div class="page-kicker">Steward {{ site.version }} · {{ page.section | default: "Documentation" }}</div>
+        {% endunless %}
+        {{ content }}
+        {% unless page.home %}
+          <div class="page-footer-nav">
+            <span>Found a documentation problem?</span>
+            <a href="https://github.com/hardrails/steward/issues/new">Open an issue ↗</a>
+          </div>
+        {% endunless %}
+      </main>
+    </div>
+
+    <footer class="site-footer">
+      <div><strong>Steward</strong> is open source under Apache-2.0.</div>
+      <div><a href="{{ site.github_url }}">Source</a> · <a href="{{ site.release_url }}">Releases</a> · <a href="{{ '/llms.txt' | relative_url }}">llms.txt</a></div>
+    </footer>
+    <script src="{{ '/assets/js/site.js' | relative_url }}?v={{ site.time | date: '%s' }}" defer></script>
+  </body>
+</html>

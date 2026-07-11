@@ -1,3 +1,9 @@
+---
+title: Steward Executor
+description: Detailed behavior, policy, host-local API, outbound uplink, capacity accounting, and deployment invariants for the Docker and gVisor Executor.
+section: Component reference
+---
+
 # Steward Executor
 
 `steward-executor` is Steward's separate Docker/gVisor process for untrusted
@@ -58,7 +64,7 @@ restarting the process cannot reset capacity.
 ## Host-local API mode
 
 The authoritative contract is
-[`openapi/steward-executor.v1.yaml`](../openapi/steward-executor.v1.yaml). The
+[`openapi/steward-executor.v1.yaml`](https://github.com/hardrails/steward/blob/main/openapi/steward-executor.v1.yaml). The
 listener defaults to `127.0.0.1:8090` and every operation except `/v1/healthz`
 requires the token in `-token-file`. That file must be regular, non-empty, and
 owner-only (`0600` or stricter).
