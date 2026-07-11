@@ -1203,6 +1203,23 @@ func assertExitsZero(t *testing.T, cmd *exec.Cmd, wantStdout string) {
 	}
 }
 
+func TestNodeApplianceConfigUsesTheStrictFileShape(t *testing.T) {
+	path := filepath.Join("..", "..", "deploy", "config", "steward.json")
+	config, err := loadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.DisableInboundListener == nil || !*config.DisableInboundListener {
+		t.Fatal("node appliance must default to outbound-only Steward")
+	}
+	if config.EnableProcessExec == nil || *config.EnableProcessExec {
+		t.Fatal("node appliance must keep trusted process execution disabled")
+	}
+	if config.UplinkTLSSkipVerify == nil || *config.UplinkTLSSkipVerify {
+		t.Fatal("node appliance must require uplink TLS verification")
+	}
+}
+
 // TestCheckConfigValid pins task 1's happy path: -check-config validates a good
 // configuration and exits 0 WITHOUT binding a port, serving, or starting/dialing
 // the uplink loop.
