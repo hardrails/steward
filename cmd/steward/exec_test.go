@@ -3,9 +3,14 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestCheckConfigEnableProcessExecValid: -check-config accepts process execution
@@ -17,7 +22,7 @@ func TestCheckConfigEnableProcessExecValid(t *testing.T) {
 	}
 	bin := buildSteward(t)
 
-	cmd := exec.Command(bin, "-check-config", "-enable-process-exec", "-addr", "127.0.0.1:0")
+	cmd := exec.Command(bin, "-check-config", "-enable-process-exec", "-allow-root-process-exec", "-addr", "127.0.0.1:0")
 	cmd.Env = stewardEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -25,6 +30,117 @@ func TestCheckConfigEnableProcessExecValid(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "configuration valid") {
 		t.Errorf("-check-config did not print the validation success line:\n%s", out)
+	}
+}
+
+func processExecTestConfig() resolvedConfig {
+	return resolvedConfig{
+		addr:                    "127.0.0.1:0",
+		maxInstances:            16,
+		uplinkCommandQueueDepth: 16,
+		logLevel:                "info",
+		enableProcessExec:       true,
+		processStopGracePeriod:  time.Second,
+	}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestListenerIsLoopback(t *testing.T) {
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:8080", true},
+		{"[::1]:8080", true},
+		{"localhost:8080", false},
+		{"LOCALHOST:8080", false},
+		{"0.0.0.0:8080", false},
+		{"[::]:8080", false},
+		{":8080", false},
+		{"192.0.2.10:8080", false},
+		{"node.internal:8080", false},
+		{"not-an-address", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.addr, func(t *testing.T) {
+			if got := listenerIsLoopback(tt.addr); got != tt.want {
+				t.Fatalf("listenerIsLoopback(%q)=%v, want %v", tt.addr, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProcessExecNonLoopbackRequiresAcknowledgement(t *testing.T) {
+	originalUID := effectiveUID
+	effectiveUID = func() int { return 1000 }
+	t.Cleanup(func() { effectiveUID = originalUID })
+
+	cfg := processExecTestConfig()
+	cfg.addr = "0.0.0.0:8080"
+	_, _, _, _, err := prepareRuntime(cfg, discardLogger(), true)
+	if err == nil || !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("non-loopback process exec error=%v, want explicit rejection", err)
+	}
+
+	cfg.allowNonLoopbackProcessExec = true
+	_, _, _, auditLogger, err := prepareRuntime(cfg, discardLogger(), true)
+	_ = auditLogger.Close()
+	if err != nil {
+		t.Fatalf("explicitly acknowledged non-loopback process exec: %v", err)
+	}
+}
+
+func TestProcessExecRootRequiresAcknowledgement(t *testing.T) {
+	originalUID := effectiveUID
+	effectiveUID = func() int { return 0 }
+	t.Cleanup(func() { effectiveUID = originalUID })
+
+	cfg := processExecTestConfig()
+	_, _, _, _, err := prepareRuntime(cfg, discardLogger(), true)
+	if err == nil || !strings.Contains(err.Error(), "root") {
+		t.Fatalf("root process exec error=%v, want explicit rejection", err)
+	}
+
+	cfg.allowRootProcessExec = true
+	_, _, _, auditLogger, err := prepareRuntime(cfg, discardLogger(), true)
+	_ = auditLogger.Close()
+	if err != nil {
+		t.Fatalf("explicitly acknowledged root process exec: %v", err)
+	}
+}
+
+func TestProcessExecStateFilePermissions(t *testing.T) {
+	originalACLInspector := inspectExtendedACL
+	t.Cleanup(func() { inspectExtendedACL = originalACLInspector })
+	inspectExtendedACL = func(string) (bool, error) { return false, nil }
+
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte("{\"version\":1,\"instances\":[]}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProcessExecStateFile(path); err == nil || !strings.Contains(err.Error(), "0600") {
+		t.Fatalf("0644 state file error=%v, want actionable rejection", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProcessExecStateFile(path); err != nil {
+		t.Fatalf("0600 state file rejected: %v", err)
+	}
+	if err := validateProcessExecStateFile(filepath.Join(t.TempDir(), "first-run.json")); err != nil {
+		t.Fatalf("missing first-run state file rejected: %v", err)
+	}
+
+	inspectExtendedACL = func(string) (bool, error) { return true, nil }
+	if err := validateProcessExecStateFile(path); err == nil || !strings.Contains(err.Error(), "extended access ACL") {
+		t.Fatalf("state file with an extended ACL error=%v, want actionable rejection", err)
+	}
+	inspectExtendedACL = func(string) (bool, error) { return false, errors.New("ACL inspection unavailable") }
+	if err := validateProcessExecStateFile(path); err == nil || !strings.Contains(err.Error(), "ACL inspection unavailable") {
+		t.Fatalf("ACL inspection failure error=%v, want fail-closed rejection", err)
 	}
 }
 
@@ -130,5 +246,11 @@ func TestSchemaIncludesProcessExecFields(t *testing.T) {
 	}
 	if got := schema.Properties["process_stop_grace_period"]["type"]; got != "string" {
 		t.Errorf("process_stop_grace_period type=%v, want string", got)
+	}
+	if got := schema.Properties["allow_nonloopback_process_exec"]["type"]; got != "boolean" {
+		t.Errorf("allow_nonloopback_process_exec type=%v, want boolean", got)
+	}
+	if got := schema.Properties["allow_root_process_exec"]["type"]; got != "boolean" {
+		t.Errorf("allow_root_process_exec type=%v, want boolean", got)
 	}
 }

@@ -95,6 +95,16 @@ func main() {
 		logger.Error("configure process execution", "err", err)
 		os.Exit(1)
 	}
+	allowNonLoopbackProcessExecDefault, err := envBool("STEWARD_ALLOW_NONLOOPBACK_PROCESS_EXEC", false)
+	if err != nil {
+		logger.Error("configure non-loopback process execution acknowledgement", "err", err)
+		os.Exit(1)
+	}
+	allowRootProcessExecDefault, err := envBool("STEWARD_ALLOW_ROOT_PROCESS_EXEC", false)
+	if err != nil {
+		logger.Error("configure root process execution acknowledgement", "err", err)
+		os.Exit(1)
+	}
 
 	// STEWARD_PROCESS_STOP_GRACE_PERIOD is how long a stop waits after SIGTERM before
 	// escalating to SIGKILL. Like the poll interval it gets the fail-closed
@@ -149,6 +159,10 @@ func main() {
 		"optional path to a JSON-lines file recording one record per executed uplink command (timestamp, command_id, instance_id, kind, status, and error detail on failure); empty disables command auditing")
 	enableProcessExec := flag.Bool("enable-process-exec", enableProcessExecDefault,
 		"enable real OS-process supervision: when on, an instance whose spec has a \"command\" field spawns and supervises an actual process on start (SIGTERM/SIGKILL on stop, SIGSTOP/SIGCONT on hibernate/resume). Off by default (pure status tracking). Provisioning a command-bearing spec is REJECTED with 400 while this is off. Spawned commands run with STEWARD'S OWN user and privileges (no privilege drop, no sandbox) — if Steward runs as root, they run as root, so run Steward as an unprivileged, dedicated user. No sandboxing or resource limits — see ARCHITECTURE.md.")
+	allowNonLoopbackProcessExec := flag.Bool("allow-nonloopback-process-exec", allowNonLoopbackProcessExecDefault,
+		"DANGEROUS acknowledgement: permit process execution while the inbound listener is reachable beyond loopback. Off by default; prefer -disable-inbound-listener with the authenticated outbound uplink, or bind -addr to loopback.")
+	allowRootProcessExec := flag.Bool("allow-root-process-exec", allowRootProcessExecDefault,
+		"DANGEROUS acknowledgement: permit process execution while Steward runs as root. Off by default; prefer an unprivileged dedicated service account.")
 	processStopGracePeriod := flag.Duration("process-stop-grace-period", processStopGraceDefault,
 		"how long a stop waits after SIGTERM before escalating to SIGKILL, when process execution is enabled; must be positive")
 	logLevel := flag.String("log-level", envOr("STEWARD_LOG_LEVEL", "info"),
@@ -263,6 +277,12 @@ func main() {
 	if fc.EnableProcessExec != nil && fileMayFill("enable-process-exec", "STEWARD_ENABLE_PROCESS_EXEC") {
 		*enableProcessExec = *fc.EnableProcessExec
 	}
+	if fc.AllowNonLoopbackProcessExec != nil && fileMayFill("allow-nonloopback-process-exec", "STEWARD_ALLOW_NONLOOPBACK_PROCESS_EXEC") {
+		*allowNonLoopbackProcessExec = *fc.AllowNonLoopbackProcessExec
+	}
+	if fc.AllowRootProcessExec != nil && fileMayFill("allow-root-process-exec", "STEWARD_ALLOW_ROOT_PROCESS_EXEC") {
+		*allowRootProcessExec = *fc.AllowRootProcessExec
+	}
 	// process_stop_grace_period is carried as a Go duration string (like
 	// uplink_poll_interval), parsed here the same way; a malformed value is a
 	// fail-closed startup error naming the file and the bad value.
@@ -290,23 +310,25 @@ func main() {
 	}
 
 	cfg := resolvedConfig{
-		addr:                    *addr,
-		maxInstances:            *maxInstances,
-		stateFile:               *stateFile,
-		uplinkURL:               *uplinkURL,
-		uplinkCredentialFile:    *uplinkCredentialFile,
-		uplinkTLSCAFile:         *uplinkTLSCAFile,
-		uplinkTLSClientCert:     *uplinkTLSClientCert,
-		uplinkTLSClientKey:      *uplinkTLSClientKey,
-		uplinkTLSSkipVerify:     *uplinkTLSSkipVerify,
-		uplinkPollInterval:      *uplinkPollInterval,
-		uplinkCommandQueueDepth: *uplinkCommandQueueDepth,
-		disableInbound:          *disableInbound,
-		enableMetrics:           *enableMetrics,
-		auditLogFile:            *auditLogFile,
-		logLevel:                *logLevel,
-		enableProcessExec:       *enableProcessExec,
-		processStopGracePeriod:  *processStopGracePeriod,
+		addr:                        *addr,
+		maxInstances:                *maxInstances,
+		stateFile:                   *stateFile,
+		uplinkURL:                   *uplinkURL,
+		uplinkCredentialFile:        *uplinkCredentialFile,
+		uplinkTLSCAFile:             *uplinkTLSCAFile,
+		uplinkTLSClientCert:         *uplinkTLSClientCert,
+		uplinkTLSClientKey:          *uplinkTLSClientKey,
+		uplinkTLSSkipVerify:         *uplinkTLSSkipVerify,
+		uplinkPollInterval:          *uplinkPollInterval,
+		uplinkCommandQueueDepth:     *uplinkCommandQueueDepth,
+		disableInbound:              *disableInbound,
+		enableMetrics:               *enableMetrics,
+		auditLogFile:                *auditLogFile,
+		logLevel:                    *logLevel,
+		enableProcessExec:           *enableProcessExec,
+		allowNonLoopbackProcessExec: *allowNonLoopbackProcessExec,
+		allowRootProcessExec:        *allowRootProcessExec,
+		processStopGracePeriod:      *processStopGracePeriod,
 	}
 
 	// -check-config is a dry run: it exercises the exact same validation-and-build
@@ -495,23 +517,78 @@ func main() {
 // the single input both the real startup path and the -check-config dry run
 // validate and build from, so the two can never diverge on what a valid config is.
 type resolvedConfig struct {
-	addr                    string
-	maxInstances            int
-	stateFile               string
-	uplinkURL               string
-	uplinkCredentialFile    string
-	uplinkTLSCAFile         string
-	uplinkTLSClientCert     string
-	uplinkTLSClientKey      string
-	uplinkTLSSkipVerify     bool
-	uplinkPollInterval      time.Duration
-	uplinkCommandQueueDepth int
-	disableInbound          bool
-	enableMetrics           bool
-	auditLogFile            string
-	logLevel                string
-	enableProcessExec       bool
-	processStopGracePeriod  time.Duration
+	addr                        string
+	maxInstances                int
+	stateFile                   string
+	uplinkURL                   string
+	uplinkCredentialFile        string
+	uplinkTLSCAFile             string
+	uplinkTLSClientCert         string
+	uplinkTLSClientKey          string
+	uplinkTLSSkipVerify         bool
+	uplinkPollInterval          time.Duration
+	uplinkCommandQueueDepth     int
+	disableInbound              bool
+	enableMetrics               bool
+	auditLogFile                string
+	logLevel                    string
+	enableProcessExec           bool
+	allowNonLoopbackProcessExec bool
+	allowRootProcessExec        bool
+	processStopGracePeriod      time.Duration
+}
+
+// effectiveUID and inspectExtendedACL are seams for startup-policy tests.
+// Production always uses the OS implementations; tests replace them briefly to
+// prove fail-closed behavior without depending on the account or filesystem
+// running the suite.
+var (
+	effectiveUID       = os.Geteuid
+	inspectExtendedACL = extendedACLPresent
+)
+
+// listenerIsLoopback reports whether addr names a literal loopback-only listener.
+// It deliberately does not resolve arbitrary hostnames: startup admission must not
+// turn DNS state into a security decision. Only literal IPv4/IPv6 loopback
+// addresses are accepted; even "localhost" requires the explicit non-loopback
+// acknowledgement because its host mapping is outside Steward's control.
+func listenerIsLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// validateProcessExecStateFile rejects an existing durable-state file that is
+// accessible to group or other users. Command-bearing specs and supervised PIDs
+// are operationally sensitive; newly-created snapshots are already 0600, but an
+// operator-supplied pre-existing file must meet the same standard before it is
+// trusted. A missing file is valid first-run state and will be created securely by
+// the runtime persister.
+func validateProcessExecStateFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect state file %q permissions: %w", path, err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("state file %q permissions are %04o; process execution requires 0600 or stricter (run chmod 600 %q)", path, info.Mode().Perm(), path)
+	}
+	hasACL, err := inspectExtendedACL(path)
+	if err != nil {
+		return fmt.Errorf("inspect state file %q extended ACL: %w", path, err)
+	}
+	if hasACL {
+		return fmt.Errorf("state file %q has an extended access ACL; process execution requires owner-only access (remove the ACL and run chmod 600 %q)", path, path)
+	}
+	return nil
 }
 
 // prepareRuntime runs every fail-closed startup check against cfg and builds the
@@ -624,6 +701,44 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 			"value", cfg.processStopGracePeriod.String(),
 			"hint", "-process-stop-grace-period (or STEWARD_PROCESS_STOP_GRACE_PERIOD) must be a positive duration, e.g. \"10s\"; omit it to use the default 10s")
 		return logger, nil, nil, nil, fmt.Errorf("invalid -process-stop-grace-period %s", cfg.processStopGracePeriod)
+	}
+
+	// A directly reachable command-execution endpoint is too dangerous as an
+	// accidental default. Loopback and uplink-only nodes are admitted; any broader
+	// inbound bind requires an explicit, loudly logged acknowledgement. Steward does
+	// not implement authentication itself, so the preferred sovereign topology is an
+	// authenticated outbound uplink with no inbound listener.
+	if cfg.enableProcessExec && !cfg.disableInbound && !listenerIsLoopback(cfg.addr) {
+		if !cfg.allowNonLoopbackProcessExec {
+			logger.Error("process execution with a non-loopback inbound listener is blocked",
+				"addr", cfg.addr,
+				"hint", "use -disable-inbound-listener with the authenticated outbound uplink, bind -addr to loopback, or explicitly acknowledge the risk with -allow-nonloopback-process-exec")
+			return logger, nil, nil, nil, fmt.Errorf("process execution blocked on non-loopback listener %q", cfg.addr)
+		}
+		logger.Warn("DANGEROUS: process execution is exposed through a non-loopback inbound listener",
+			"addr", cfg.addr,
+			"acknowledgement", "allow-nonloopback-process-exec")
+	}
+
+	// Steward executes commands with its own identity and intentionally contains no
+	// privilege-dropping machinery. Root therefore turns every accepted command into
+	// root code execution; require a separate acknowledgement rather than allowing a
+	// service-manager or container default to create that posture silently.
+	if cfg.enableProcessExec && effectiveUID() == 0 {
+		if !cfg.allowRootProcessExec {
+			logger.Error("process execution while running as root is blocked",
+				"hint", "run Steward as an unprivileged dedicated user, or explicitly acknowledge the risk with -allow-root-process-exec")
+			return logger, nil, nil, nil, errors.New("process execution blocked while running as root")
+		}
+		logger.Warn("DANGEROUS: process execution is running with root privileges",
+			"acknowledgement", "allow-root-process-exec")
+	}
+
+	if cfg.enableProcessExec {
+		if err := validateProcessExecStateFile(cfg.stateFile); err != nil {
+			logger.Error("unsafe process-execution state file", "err", err)
+			return logger, nil, nil, nil, err
+		}
 	}
 
 	// LoadTracker restores any existing state (validating the file) before the server
@@ -865,21 +980,23 @@ func parseLogLevel(s string) (slog.Level, error) {
 // var suffixes. uplink_poll_interval is a Go duration string (e.g. "30s"), parsed
 // the same way the flag and env var parse theirs.
 type fileConfig struct {
-	Addr                    *string `json:"addr"`
-	MaxInstances            *int    `json:"max_instances"`
-	StateFile               *string `json:"state_file"`
-	UplinkURL               *string `json:"uplink_url"`
-	UplinkCredentialFile    *string `json:"uplink_credential_file"`
-	UplinkTLSCAFile         *string `json:"uplink_tls_ca_file"`
-	UplinkTLSClientCert     *string `json:"uplink_tls_client_cert"`
-	UplinkTLSClientKey      *string `json:"uplink_tls_client_key"`
-	UplinkTLSSkipVerify     *bool   `json:"uplink_tls_skip_verify"`
-	UplinkPollInterval      *string `json:"uplink_poll_interval"`
-	UplinkCommandQueueDepth *int    `json:"uplink_command_queue_depth"`
-	DisableInboundListener  *bool   `json:"disable_inbound_listener"`
-	LogLevel                *string `json:"log_level"`
-	EnableProcessExec       *bool   `json:"enable_process_exec"`
-	ProcessStopGracePeriod  *string `json:"process_stop_grace_period"`
+	Addr                        *string `json:"addr"`
+	MaxInstances                *int    `json:"max_instances"`
+	StateFile                   *string `json:"state_file"`
+	UplinkURL                   *string `json:"uplink_url"`
+	UplinkCredentialFile        *string `json:"uplink_credential_file"`
+	UplinkTLSCAFile             *string `json:"uplink_tls_ca_file"`
+	UplinkTLSClientCert         *string `json:"uplink_tls_client_cert"`
+	UplinkTLSClientKey          *string `json:"uplink_tls_client_key"`
+	UplinkTLSSkipVerify         *bool   `json:"uplink_tls_skip_verify"`
+	UplinkPollInterval          *string `json:"uplink_poll_interval"`
+	UplinkCommandQueueDepth     *int    `json:"uplink_command_queue_depth"`
+	DisableInboundListener      *bool   `json:"disable_inbound_listener"`
+	LogLevel                    *string `json:"log_level"`
+	EnableProcessExec           *bool   `json:"enable_process_exec"`
+	AllowNonLoopbackProcessExec *bool   `json:"allow_nonloopback_process_exec"`
+	AllowRootProcessExec        *bool   `json:"allow_root_process_exec"`
+	ProcessStopGracePeriod      *string `json:"process_stop_grace_period"`
 }
 
 // loadConfigFile reads and parses the JSON config file at path, fail-closed. It

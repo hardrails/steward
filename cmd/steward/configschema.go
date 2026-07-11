@@ -18,21 +18,23 @@ import (
 // appears in the schema (typed, just undescribed), so a forgotten entry degrades
 // gracefully rather than dropping the property.
 var configFieldDescriptions = map[string]string{
-	"addr":                       "host:port the inbound HTTP listener binds, e.g. \"127.0.0.1:8080\" or \":8080\". Only validated (and bound) when the inbound listener is enabled.",
-	"max_instances":              "maximum number of tracked instances before Provision returns 503; must be a positive integer. A live SIGHUP re-read of this file hot-reloads this value (only).",
-	"state_file":                 "path to a JSON file for durable instance state; omit for in-memory only (state is lost on restart).",
-	"uplink_url":                 "control-plane base URL for the outbound uplink (an absolute http(s) URL); omit to disable the uplink (inbound REST only). When set, uplink_credential_file is required.",
-	"uplink_credential_file":     "path to the node's uplink credential JSON; required when uplink_url is set.",
-	"uplink_tls_ca_file":         "path to a PEM CA bundle used to verify the control plane's TLS certificate; omit to verify against the host's system root CAs.",
-	"uplink_tls_client_cert":     "path to a PEM client certificate presented for mutual TLS (mTLS); requires uplink_tls_client_key.",
-	"uplink_tls_client_key":      "path to the PEM private key for uplink_tls_client_cert; requires uplink_tls_client_cert.",
-	"uplink_tls_skip_verify":     "INSECURE: when true, skip verification of the control plane's TLS certificate. Defeats TLS authentication and exposes the uplink to a man-in-the-middle; off by default and logged loudly when on. For temporary diagnostics only.",
-	"uplink_poll_interval":       "base cadence for uplink polling as a Go duration string (time.ParseDuration format, e.g. \"30s\", \"1m30s\"); jitter is applied on top and it is clamped to a 5-minute ceiling.",
-	"uplink_command_queue_depth": "maximum number of received-but-not-yet-executed uplink commands held at once (queued plus in-flight); a poll cycle's excess beyond this is rejected and left for the control plane to redeliver. Must be a positive integer; only consumed when uplink_url is set.",
-	"disable_inbound_listener":   "when true, bind no inbound HTTP listener at all; requires uplink_url so the node is still reachable via the outbound uplink.",
-	"log_level":                  "log verbosity: one of debug, info, warn, error. The real validator additionally accepts other letter casing and surrounding whitespace; this schema documents the canonical lowercase form.",
-	"enable_process_exec":        "when true, enable real OS-process supervision: an instance whose spec has a \"command\" field spawns and supervises an actual process on start. Off by default (pure status tracking); provisioning a command-bearing spec is rejected with 400 while off. No sandboxing or resource limits.",
-	"process_stop_grace_period":  "how long a stop waits after SIGTERM before escalating to SIGKILL, as a Go duration string (e.g. \"10s\"); must be positive. Only used when enable_process_exec is true.",
+	"addr":                           "host:port the inbound HTTP listener binds, e.g. \"127.0.0.1:8080\" or \":8080\". Only validated (and bound) when the inbound listener is enabled.",
+	"max_instances":                  "maximum number of tracked instances before Provision returns 503; must be a positive integer. A live SIGHUP re-read of this file hot-reloads this value (only).",
+	"state_file":                     "path to a JSON file for durable instance state; omit for in-memory only (state is lost on restart).",
+	"uplink_url":                     "control-plane base URL for the outbound uplink (an absolute http(s) URL); omit to disable the uplink (inbound REST only). When set, uplink_credential_file is required.",
+	"uplink_credential_file":         "path to the node's uplink credential JSON; required when uplink_url is set.",
+	"uplink_tls_ca_file":             "path to a PEM CA bundle used to verify the control plane's TLS certificate; omit to verify against the host's system root CAs.",
+	"uplink_tls_client_cert":         "path to a PEM client certificate presented for mutual TLS (mTLS); requires uplink_tls_client_key.",
+	"uplink_tls_client_key":          "path to the PEM private key for uplink_tls_client_cert; requires uplink_tls_client_cert.",
+	"uplink_tls_skip_verify":         "INSECURE: when true, skip verification of the control plane's TLS certificate. Defeats TLS authentication and exposes the uplink to a man-in-the-middle; off by default and logged loudly when on. For temporary diagnostics only.",
+	"uplink_poll_interval":           "base cadence for uplink polling as a Go duration string (time.ParseDuration format, e.g. \"30s\", \"1m30s\"); jitter is applied on top and it is clamped to a 5-minute ceiling.",
+	"uplink_command_queue_depth":     "maximum number of received-but-not-yet-executed uplink commands held at once (queued plus in-flight); a poll cycle's excess beyond this is rejected and left for the control plane to redeliver. Must be a positive integer; only consumed when uplink_url is set.",
+	"disable_inbound_listener":       "when true, bind no inbound HTTP listener at all; requires uplink_url so the node is still reachable via the outbound uplink.",
+	"log_level":                      "log verbosity: one of debug, info, warn, error. The real validator additionally accepts other letter casing and surrounding whitespace; this schema documents the canonical lowercase form.",
+	"enable_process_exec":            "when true, enable real OS-process supervision: an instance whose spec has a \"command\" field spawns and supervises an actual process on start. Off by default (pure status tracking); provisioning a command-bearing spec is rejected with 400 while off. No sandboxing or resource limits.",
+	"allow_nonloopback_process_exec": "DANGEROUS acknowledgement: permit process execution while the inbound listener is reachable beyond loopback. Off by default; prefer disable_inbound_listener with the authenticated outbound uplink, or bind addr to loopback.",
+	"allow_root_process_exec":        "DANGEROUS acknowledgement: permit process execution while Steward runs as root. Off by default; prefer an unprivileged dedicated service account.",
+	"process_stop_grace_period":      "how long a stop waits after SIGTERM before escalating to SIGKILL, as a Go duration string (e.g. \"10s\"); must be positive. Only used when enable_process_exec is true.",
 }
 
 // configSchemaJSON returns the pretty-printed JSON Schema (draft 2020-12) for the
@@ -57,9 +59,13 @@ func configSchemaJSON() ([]byte, error) {
 // reach) and the value constraints (which encode prepareRuntime's validation
 // rules) are spelled out below.
 //
-// The encoded constraints mirror the real startup validators exactly — no
-// stricter, no looser — so a config the schema accepts is one -check-config would
-// accept and vice versa:
+// The encoded constraints below mirror the startup validators where a rule can be
+// decided from the config file alone. Schema acceptance is an early structural
+// gate, not a promise that the fully resolved node configuration will boot:
+// -check-config additionally applies flag/env precedence, reads credential and
+// state files, inspects the effective UID, and evaluates the resolved listener
+// topology. Those host- and runtime-dependent process-execution guardrails cannot
+// be represented faithfully in a standalone JSON Schema.
 //
 //   - additionalProperties:false mirrors loadConfigFile's DisallowUnknownFields:
 //     an unknown key is a fail-closed startup error today, so the schema rejects

@@ -104,8 +104,9 @@ a rendered config against it with any standard JSON-Schema validator in your
 CI/CD, then run `-check-config` on the node as the final on-box gate — the two are
 complementary: the schema catches a malformed candidate early and offline,
 `-check-config` catches everything the schema deliberately does not (a credential
-file that is missing on *this* node, a `-state-file` path that is unreadable here,
-an `-addr` that will not bind).
+file that is missing on *this* node, a `-state-file` path or permissions that are
+unsafe here, an `-addr` that will not bind, root process execution, or a resolved
+non-loopback process-execution listener).
 
 Two disclosed simplifications in the schema, both erring toward the documented
 canonical form rather than a stricter rule than the validator enforces:
@@ -189,9 +190,19 @@ set the file's mode for you.
 Apply the same restrictive permissions to the `-state-file` when durable state is
 enabled: once process execution is used (`-enable-process-exec`), an instance's
 `spec` — including any `spec.env` values a caller passes to the child process, which
-may be secrets — is persisted verbatim, in cleartext, in that file. Steward does not
-set its mode for you, so a `0600`, service-user-owned `-state-file` is the control
-that keeps those child-process secrets off other local accounts.
+may be secrets — is persisted verbatim, in cleartext, in that file. Steward creates
+new state snapshots as owner-only files and, with process execution enabled, fails
+startup if an existing file is accessible by group or other users or carries an
+extended access ACL. Keep it `0600`, ACL-free, and owned by the dedicated Steward
+service account.
+
+Process execution also fails closed when Steward is root or its inbound listener
+is reachable beyond loopback. Run Steward as an unprivileged service account and,
+for remotely managed nodes, prefer `-disable-inbound-listener` with the authenticated
+outbound uplink. `-allow-root-process-exec` and
+`-allow-nonloopback-process-exec` are dangerous acknowledgements for exceptional
+deployments, not normal production settings; enabling either posture emits a loud
+warning.
 
 ### Rotating a credential without downtime
 
