@@ -16,9 +16,9 @@ import (
 // runtime_ref: uplink:<len(node_id)>:<node_id>:<instance_id>. It is a length-
 // prefixed (netstring) node_id so the boundary between node_id and instance_id is
 // fixed regardless of content, and instance_id — the terminal segment — may itself
-// contain colons. This is the injective inverse of the control plane's
-// hardrails_runtime.node_uplink.core.format_runtime_ref; the client only ever
-// parses it (it never mints one), so only the parse direction lives here.
+// contain colons. This is the injective inverse of the public control-plane
+// runtime-reference format; the client only ever parses it (it never mints one),
+// so only the parse direction lives here.
 const runtimeRefPrefix = "uplink:"
 
 // CommandKind values are the wire strings for the five queued lifecycle intents,
@@ -97,8 +97,8 @@ type Tracker interface {
 
 // reportedStatus translates Steward's own UPPERCASE Status vocabulary (which must
 // not be renamed — the direct-REST contract depends on it) into the wire's
-// lowercase reported_status (a hardrails_runtime AgentInstanceStatus). DESTROYED
-// maps to "stopped" because AgentInstanceStatus has no "destroyed" member and
+// lowercase reported_status wire vocabulary. DESTROYED maps to "stopped" because
+// the wire vocabulary has no "destroyed" member and
 // "stopped" is the closest "no longer running" match (confirmed against the
 // control-plane side, not a placeholder). It returns ok=false for a status outside
 // the known set, which the tracker never produces.

@@ -6,7 +6,7 @@ info:
     Public host-local contract for Steward's separate Docker/gVisor executor
     process. The control plane supplies a fully resolved generic OCI workload;
     Executor independently enforces immutable images, resource ceilings, and
-    non-escapable sandbox settings. Railyard is one consumer, not a dependency.
+    non-escapable sandbox settings. Any compatible control plane can consume it.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

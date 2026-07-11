@@ -180,7 +180,7 @@ type errorResponse struct {
 // the set small, named, and drift-proof.
 //
 // The HTTP status each code travels with is fixed by the handler that emits it
-// (see the writeError calls below); railyard's Steward adapter branches on the
+// (see the writeError calls below); a control-plane adapter branches on the
 // HTTP status, not on these strings, so the strings describe the failure to a
 // human without being a load-bearing wire ABI.
 const (

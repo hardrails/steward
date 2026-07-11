@@ -468,9 +468,8 @@ func (p *Poller) consume(ctx context.Context) {
 // ONLY start; see below) that failed only because their instance was not yet known
 // to the tracker.
 //
-// Reordering the batch is wrong. The server's claim query
-// (node_uplink._orm.claim_pending_commands) has no ORDER BY, so the batch order is
-// not guaranteed causal; more importantly, a single poll can carry a REPLACE —
+// Reordering the batch is wrong. The wire contract does not guarantee causal batch
+// order; more importantly, a single poll can carry a REPLACE —
 // destroy(x) then provision(x) — and hoisting the provision ahead of the destroy
 // would run them out of order and leave x destroyed instead of recreated.
 // Processing in the given order and retrying a start's unknown-instance miss once
@@ -478,7 +477,7 @@ func (p *Poller) consume(ctx context.Context) {
 // original start-before-its-own-provision concern (the retry runs after the sibling
 // provision), with no server-side wire change and no unbounded loop. (A wire-level
 // ordering guarantee — an epoch/generation or causal sequence on runtime_ref — is a
-// separate cross-repo follow-up in the node_uplink primitive, not built here.)
+// separate protocol concern, not built here.)
 //
 // stop/hibernate deliberately do NOT get this deferral (a hosted review finding
 // that narrowed an earlier, too-broad version of this fix): there is no legitimate
