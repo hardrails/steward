@@ -45,8 +45,9 @@ The installer:
    adding only the Executor identity to the root-equivalent Docker group;
 4. copies immutable binaries under `/opt/steward/releases/<version>` and atomically
    selects both through one `/opt/steward/current` symlink;
-5. installs systemd units and configuration templates without overwriting an
-   operator's existing configuration; and
+5. installs vendor systemd units under `/usr/local/lib/systemd/system` and
+   configuration templates without overwriting an operator's existing configuration
+   or `/etc/systemd/system` overrides; and
 6. leaves both services disabled and stopped.
 
 The two service identities intentionally do not share authority. The lifecycle
@@ -100,16 +101,18 @@ separate Executor/gVisor boundary.
 ## Upgrade and rollback
 
 Installing another archive preserves the prior release directory and existing
-configuration. The installer selects the new version but still does not restart a
-running service. After preflight, activate or roll back atomically:
+configuration. A first install selects its binaries only so the disabled node can be
+configured; a later install only stages the new version and does not change or restart
+the active release. Activate or roll back atomically:
 
 ```console
 sudo /usr/local/libexec/steward/activate-node-release v0.2.0 --restart
 sudo /usr/local/libexec/steward/activate-node-release v0.1.0 --restart
 ```
 
-With `--restart`, the target binaries must pass preflight before the single active
-release symlink changes. `systemctl try-restart` restarts only services that were already running; it
+Every activation runs the target binaries through full node preflight before the
+single active-release symlink changes. `--restart` additionally uses
+`systemctl try-restart`, which restarts only services that were already running and
 never turns an intentionally disabled service on. Node state, credentials, audit log,
 and Executor fence live outside the release directory and survive either direction.
 

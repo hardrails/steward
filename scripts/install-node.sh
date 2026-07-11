@@ -86,7 +86,8 @@ install -o root -g root -m 0755 "$incoming/steward" "$release_dir/steward"
 install -o root -g root -m 0755 "$incoming/steward-executor" "$release_dir/steward-executor"
 rm -rf "$incoming"
 trap - EXIT
-install -d -o root -g root -m 0755 /etc/steward /usr/local/libexec/steward
+install -d -o root -g root -m 0755 /etc/steward /usr/local/bin /usr/local/libexec/steward \
+	/usr/local/lib/systemd/system
 install -d -o steward -g steward -m 0700 /var/lib/steward /var/log/steward
 install -d -o steward-executor -g steward-executor -m 0700 /var/lib/steward-executor
 install -o root -g root -m 0755 "$root/scripts/activate-node-release.sh" \
@@ -103,15 +104,42 @@ if [[ ! -e /etc/steward/executor.env ]]; then
 		/etc/steward/executor.env
 fi
 install -o root -g root -m 0644 "$root/deploy/systemd/steward.service" \
-	/etc/systemd/system/steward.service
+	/usr/local/lib/systemd/system/steward.service
 install -o root -g root -m 0644 "$root/deploy/systemd/steward-executor.service" \
-	/etc/systemd/system/steward-executor.service
+	/usr/local/lib/systemd/system/steward-executor.service
 
-"/usr/local/libexec/steward/activate-node-release" "$steward_version"
+if [[ -e /opt/steward/current || -L /opt/steward/current ]]; then
+	current_target=$(readlink /opt/steward/current 2>/dev/null || true)
+	case "$current_target" in
+	/opt/steward/releases/*) ;;
+	*)
+		echo "install-node: refusing unmanaged /opt/steward/current" >&2
+		exit 2
+		;;
+	esac
+	selection="staged; the active release was not changed"
+else
+	current_tmp="/opt/steward/.current.new.$$"
+	rm -f "$current_tmp"
+	ln -s "$release_dir" "$current_tmp"
+	mv -Tf "$current_tmp" /opt/steward/current
+	selection="selected for first-time configuration"
+fi
+for binary in steward steward-executor; do
+	tmp="/usr/local/bin/.${binary}.new.$$"
+	rm -f "$tmp"
+	ln -s "/opt/steward/current/$binary" "$tmp"
+	mv -Tf "$tmp" "/usr/local/bin/$binary"
+done
 systemctl daemon-reload
 
-echo "install-node: installed Steward $steward_version"
+echo "install-node: installed Steward $steward_version ($selection)"
 echo "install-node: services remain disabled and stopped"
-echo "install-node: install customer credentials and CA material, initialize the Executor fence, then run:"
-echo "  /usr/local/libexec/steward/node-preflight"
-echo "  systemctl enable --now steward steward-executor"
+if [[ $selection == selected* ]]; then
+	echo "install-node: install customer credentials and CA material, initialize the Executor fence, then run:"
+	echo "  /usr/local/libexec/steward/node-preflight"
+	echo "  systemctl enable --now steward steward-executor"
+else
+	echo "install-node: activate after provisioning trust material (activation runs full preflight):"
+	echo "  /usr/local/libexec/steward/activate-node-release $steward_version --restart"
+fi
