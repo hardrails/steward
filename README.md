@@ -340,9 +340,10 @@ unprivileged account plus `-disable-inbound-listener` and the authenticated outb
 uplink. The `-allow-root-process-exec` and
 `-allow-nonloopback-process-exec` flags are explicit dangerous acknowledgements for
 exceptional deployments; each posture is logged at `WARN`. When process execution
-uses an existing `-state-file`, that file must be `0600` or stricter because it can
-contain command arguments and environment secrets. Steward creates new state
-snapshots owner-only, but rejects an existing group- or other-accessible file.
+uses an existing `-state-file`, that file must be `0600` or stricter and carry no
+extended access ACL because it can contain command arguments and environment
+secrets. Steward creates new state snapshots owner-only, but rejects an existing
+file whose mode bits or ACL permit—or could obscure—additional access.
 
 **Restart limitation (honest):** an OS process handle and its stdout/stderr pipes
 cannot survive a Steward restart. The child's `pid` is persisted (when `-state-file`
