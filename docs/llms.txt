@@ -1,0 +1,45 @@
+# Steward
+
+> Steward is an open-source, control-plane-neutral Linux node runtime for isolated,
+> multi-tenant AI agent workloads. It separates lifecycle supervision from a narrow
+> Docker/gVisor execution boundary and supports disconnected operation. Railyard is
+> a proprietary first-party control plane, not a Steward dependency.
+
+Version documented: v0.1.0
+License: Apache-2.0
+Source: https://github.com/hardrails/steward
+Documentation: https://hardrails.github.io/steward/
+
+## Start here
+
+- [Overview](https://hardrails.github.io/steward/): Product purpose, boundary, and documentation map
+- [Install](https://hardrails.github.io/steward/getting-started/): Interactive and unattended Linux installation
+- [Limitations](https://hardrails.github.io/steward/limitations/): Exact v0.1 capability boundary
+- [FAQ](https://hardrails.github.io/steward/faq/): Common product and operational questions
+
+## How-to guides
+
+- [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
+- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): v0.1 image/lifecycle compatibility procedure
+- [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): v0.1 image/lifecycle compatibility procedure
+- [Air-gapped installation](https://hardrails.github.io/steward/guides/air-gapped/): Offline import and verification
+- [Upgrade and rollback](https://hardrails.github.io/steward/guides/upgrades/): Atomic release activation
+
+## Explanation
+
+- [Architecture](https://hardrails.github.io/steward/concepts/architecture/): Process and system boundaries
+- [Security model](https://hardrails.github.io/steward/concepts/security-model/): Trust, isolation, and residual risks
+- [Control-plane boundary](https://hardrails.github.io/steward/concepts/control-plane-boundary/): Steward versus Railyard or another control plane
+
+## Reference
+
+- [Platform support](https://hardrails.github.io/steward/reference/platform-support/): Supported hosts and artifacts
+- [Configuration](https://hardrails.github.io/steward/reference/configuration/): Flags, defaults, paths, and validation
+- [APIs](https://hardrails.github.io/steward/reference/api/): Authoritative OpenAPI contracts
+- [Release artifacts](https://hardrails.github.io/steward/reference/release-artifacts/): Filenames and checksum verification
+
+## Important v0.1 fact
+
+Steward v0.1 can admit and lifecycle-test Hermes Agent and OpenClaw images but cannot
+yet run either as a connected persistent service. Executor v0.1 intentionally has no
+outbound network, secret injection, durable volume, or published-port grants.

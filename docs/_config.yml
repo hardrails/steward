@@ -1,0 +1,24 @@
+title: Steward Documentation
+short_title: Steward
+description: Open-source, control-plane-neutral runtime for operating isolated AI agent workloads on Linux with Docker and gVisor.
+url: https://hardrails.github.io
+baseurl: /steward
+repository: hardrails/steward
+version: 0.1.0
+license_url: https://github.com/hardrails/steward/blob/main/LICENSE
+github_url: https://github.com/hardrails/steward
+release_url: https://github.com/hardrails/steward/releases/latest
+markdown: kramdown
+highlighter: rouge
+permalink: pretty
+strict_front_matter: true
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+exclude:
+  - README.md
