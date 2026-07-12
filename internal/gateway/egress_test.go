@@ -64,6 +64,21 @@ func TestEgressProxyHTTPConnectDenialAuditAndLifecycle(t *testing.T) {
 		EgressRouteIDs: []string{"public-web"}}
 	controlRequest(t, server, http.MethodPost, "/v1/grants", grant, http.StatusCreated)
 	controlRequest(t, server, http.MethodPost, "/v1/grants/"+grant.GrantID+"/activate", nil, http.StatusOK)
+	replacement := grant
+	replacement.Generation = 2
+	replacement.EgressRouteIDs = nil
+	replacement.Service = true
+	controlRequest(t, server, http.MethodPost, "/v1/grants", replacement, http.StatusConflict)
+	current := server.grants[grant.GrantID]
+	if !current.Active || !GrantsEqual(current, Grant{GrantID: grant.GrantID, TenantID: grant.TenantID, InstanceID: grant.InstanceID,
+		Generation: grant.Generation, EgressRouteIDs: grant.EgressRouteIDs, Active: true}) {
+		t.Fatalf("active replacement changed grant: %#v", current)
+	}
+	select {
+	case <-server.egressLeases[grant.GrantID].context.Done():
+		t.Fatal("rejected replacement revoked unchanged active authority")
+	default:
+	}
 
 	proxyURL, _ := url.Parse("http://steward-relay:8082")
 	roots := x509.NewCertPool()

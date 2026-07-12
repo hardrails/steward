@@ -306,6 +306,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	current, hadCurrent := s.grants[grant.GrantID]
 	if hadCurrent {
+		if current.Active {
+			writeGatewayError(w, http.StatusConflict, "grant_active", "active gateway grant must be deactivated before replacement")
+			return
+		}
 		if grant.Generation < current.Generation {
 			writeGatewayError(w, http.StatusConflict, "generation_rollback", "gateway grant generation rollback")
 			return
