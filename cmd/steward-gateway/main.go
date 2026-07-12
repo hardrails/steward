@@ -33,12 +33,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "steward-gateway "+buildinfo.Resolve())
 		return 0
 	}
-	config, routes, token, err := gateway.LoadConfig(*configPath)
+	config, routes, egressRoutes, token, err := gateway.LoadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintln(stderr, "steward-gateway: load configuration:", err)
 		return 2
 	}
-	server, err := gateway.Open(config, routes, token)
+	server, err := gateway.Open(config, routes, egressRoutes, token)
 	if err != nil {
 		fmt.Fprintln(stderr, "steward-gateway: open:", err)
 		return 2
@@ -47,6 +47,27 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "gateway configuration valid")
 		return 0
 	}
+	reloads := make(chan os.Signal, 1)
+	signal.Notify(reloads, syscall.SIGHUP)
+	defer signal.Stop(reloads)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-reloads:
+				nextConfig, nextRoutes, nextEgressRoutes, nextToken, loadErr := gateway.LoadConfig(*configPath)
+				if loadErr == nil {
+					loadErr = server.Reload(nextConfig, nextRoutes, nextEgressRoutes, nextToken)
+				}
+				if loadErr != nil {
+					fmt.Fprintln(stderr, "steward-gateway: reload rejected:", loadErr)
+				} else {
+					fmt.Fprintln(stderr, "steward-gateway: configuration reloaded")
+				}
+			}
+		}
+	}()
 	if err := server.Start(ctx); err != nil {
 		fmt.Fprintln(stderr, "steward-gateway: run:", err)
 		return 1

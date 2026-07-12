@@ -236,7 +236,7 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 			return toolFailure("intent_json must be one strict instance intent"), nil
 		}
 		value, err = s.node.Admit(ctx, capsule, intent)
-	case "steward_status", "steward_logs", "steward_start", "steward_stop", "steward_destroy":
+	case "steward_status", "steward_logs", "steward_egress", "steward_start", "steward_stop", "steward_destroy":
 		var arguments runtimeArgs
 		if decodeArguments(call.Arguments, &arguments) != nil || arguments.RuntimeRef == "" {
 			return toolFailure(call.Name + " requires runtime_ref"), nil
@@ -246,6 +246,14 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 			value, err = s.node.Status(ctx, arguments.RuntimeRef)
 		case "steward_logs":
 			value, err = s.node.Logs(ctx, arguments.RuntimeRef)
+		case "steward_egress":
+			egress, ok := s.node.(interface {
+				EgressStats(context.Context, string) (nodeclient.EgressStats, error)
+			})
+			if !ok {
+				return toolFailure("egress statistics are unavailable"), nil
+			}
+			value, err = egress.EgressStats(ctx, arguments.RuntimeRef)
 		case "steward_start":
 			value, err = s.node.Start(ctx, arguments.RuntimeRef)
 		case "steward_stop":
@@ -315,6 +323,7 @@ func tools() []any {
 		}, false, false, true),
 		tool("steward_status", "Inspect agent", "Read the current bounded runtime status.", runtimeSchema, true, false, true),
 		tool("steward_logs", "Read agent logs", "Read the bounded tail of agent stdout and stderr.", runtimeSchema, true, false, true),
+		tool("steward_egress", "Inspect agent egress", "Read bounded allow/deny counters and the last destination for the signed egress grant.", runtimeSchema, true, false, true),
 		tool("steward_start", "Start agent", "Start an admitted agent workload.", runtimeSchema, false, false, true),
 		tool("steward_stop", "Stop agent", "Stop an admitted agent workload.", runtimeSchema, false, true, true),
 		tool("steward_destroy", "Destroy agent", "Destroy the admitted workload while retaining separately managed lineage state.", runtimeSchema, false, true, true),

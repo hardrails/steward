@@ -178,6 +178,8 @@ func TestPolicyValidationRejectsEveryBoundedShape(t *testing.T) {
 		{"tenant ceiling", func(p *SitePolicy) { p.Tenants[0].ResourceCeiling.CPUMillis = 0 }},
 		{"route", func(p *SitePolicy) { p.Tenants[0].InferenceRouteIDs = []string{""} }},
 		{"service", func(p *SitePolicy) { p.Tenants[0].ServiceIDs = []string{""} }},
+		{"egress route", func(p *SitePolicy) { p.Tenants[0].EgressRouteIDs = []string{"bad route"} }},
+		{"duplicate egress route", func(p *SitePolicy) { p.Tenants[0].EgressRouteIDs = []string{"web", "web"} }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			policy := testPolicy(public)
@@ -186,6 +188,40 @@ func TestPolicyValidationRejectsEveryBoundedShape(t *testing.T) {
 				t.Fatal("invalid policy accepted")
 			}
 		})
+	}
+}
+
+func TestEgressCapabilityIntersectionAndCanonicalRoutes(t *testing.T) {
+	public, _, _ := ed25519.GenerateKey(rand.Reader)
+	capsule, policy := testCapsule(), testPolicy(public)
+	capsule.Capabilities.Egress = true
+	policy.Tenants[0].EgressRouteIDs = []string{"package-mirrors", "public-web"}
+	intent := testIntent(testDigest('d'))
+	intent.Capabilities.Egress = true
+	intent.EgressRouteIDs = []string{"public-web", "package-mirrors"}
+	effective, err := Intersect(capsule, testDigest('d'), policy, testDigest('e'), "publisher-1", "site-root", intent,
+		AuthenticatedIdentity{TenantID: "tenant-a", NodeID: "node-a"}, PersistedFences{}, DefaultProfiles())
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := CanonicalRouteIDs(effective.Intent.EgressRouteIDs)
+	if len(canonical) != 2 || canonical[0] != "package-mirrors" || canonical[1] != "public-web" {
+		t.Fatalf("canonical routes=%v", canonical)
+	}
+	for _, mutate := range []func(*InstanceIntent, *ProfileCapsule){
+		func(intent *InstanceIntent, _ *ProfileCapsule) { intent.EgressRouteIDs = []string{"unknown"} },
+		func(intent *InstanceIntent, _ *ProfileCapsule) {
+			intent.EgressRouteIDs = []string{"public-web", "public-web"}
+		},
+		func(intent *InstanceIntent, _ *ProfileCapsule) { intent.Capabilities.Egress = false },
+		func(_ *InstanceIntent, capsule *ProfileCapsule) { capsule.Capabilities.Egress = false },
+	} {
+		changedIntent, changedCapsule := intent, capsule
+		mutate(&changedIntent, &changedCapsule)
+		if _, err := Intersect(changedCapsule, testDigest('d'), policy, testDigest('e'), "publisher-1", "site-root", changedIntent,
+			AuthenticatedIdentity{TenantID: "tenant-a", NodeID: "node-a"}, PersistedFences{}, DefaultProfiles()); err == nil {
+			t.Fatal("invalid egress authority accepted")
+		}
 	}
 }
 

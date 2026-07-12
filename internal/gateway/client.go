@@ -54,6 +54,17 @@ func (c *ControlClient) Inspect(ctx context.Context, grantID string) (Grant, err
 	return grant, nil
 }
 
+func (c *ControlClient) EgressStats(ctx context.Context, grantID string) (EgressStats, error) {
+	if !validGrantID(grantID) {
+		return EgressStats{}, errors.New("invalid gateway grant ID")
+	}
+	var stats EgressStats
+	if err := c.callInto(ctx, http.MethodGet, "/v1/grants/"+url.PathEscape(grantID)+"/egress", nil, http.StatusOK, &stats); err != nil {
+		return EgressStats{}, err
+	}
+	return stats, nil
+}
+
 func (c *ControlClient) Activate(ctx context.Context, grantID string) error {
 	return c.grantAction(ctx, grantID, "activate")
 }

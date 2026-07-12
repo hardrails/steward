@@ -27,12 +27,14 @@ func TestControlClientCoversBoundedGrantLifecycle(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/grants":
 			var received Grant
 			_ = json.NewDecoder(r.Body).Decode(&received)
-			if received != grant {
+			if !grantsEqual(received, grant) {
 				t.Errorf("grant=%#v", received)
 			}
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/grants/"+grant.GrantID:
 			_ = json.NewEncoder(w).Encode(grant)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/grants/"+grant.GrantID+"/egress":
+			_ = json.NewEncoder(w).Encode(EgressStats{Allowed: 3})
 		case r.Method == http.MethodPost && (r.URL.Path == "/v1/grants/"+grant.GrantID+"/activate" || r.URL.Path == "/v1/grants/"+grant.GrantID+"/deactivate"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"active": true})
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/grants/"+grant.GrantID:
@@ -52,7 +54,7 @@ func TestControlClientCoversBoundedGrantLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := client.Inspect(ctx, grant.GrantID)
-	if err != nil || got != grant {
+	if err != nil || !grantsEqual(got, grant) {
 		t.Fatalf("inspect=%#v err=%v", got, err)
 	}
 	if err := client.Activate(ctx, grant.GrantID); err != nil {
@@ -60,6 +62,10 @@ func TestControlClientCoversBoundedGrantLifecycle(t *testing.T) {
 	}
 	if err := client.Deactivate(ctx, grant.GrantID); err != nil {
 		t.Fatal(err)
+	}
+	stats, err := client.EgressStats(ctx, grant.GrantID)
+	if err != nil || stats.Allowed != 3 {
+		t.Fatalf("stats=%#v err=%v", stats, err)
 	}
 	if err := client.Unregister(ctx, grant.GrantID); err != nil {
 		t.Fatal(err)

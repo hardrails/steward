@@ -133,6 +133,15 @@ func (f *gatewayFixture) Inspect(_ context.Context, id string) (gateway.Grant, e
 	}
 	return grant, nil
 }
+func (f *gatewayFixture) EgressStats(_ context.Context, id string) (gateway.EgressStats, error) {
+	if f.inspectErr != nil {
+		return gateway.EgressStats{}, f.inspectErr
+	}
+	if _, ok := f.grants[id]; !ok {
+		return gateway.EgressStats{}, errors.New("missing")
+	}
+	return gateway.EgressStats{Allowed: 1}, nil
+}
 func (f *gatewayFixture) Activate(_ context.Context, id string) error {
 	if f.activateErr != nil {
 		if f.activateApplies {
@@ -162,6 +171,27 @@ func (f *gatewayFixture) Unregister(_ context.Context, id string) error {
 	}
 	delete(f.grants, id)
 	return nil
+}
+
+func TestDesiredRelayMountsGrantDirectoryForEgressOnly(t *testing.T) {
+	addresses := NetworkSpecFor("tenant-a", "egress-only", 1)
+	grantID := gateway.GrantID("tenant-a", "egress-only", 1)
+	server := &Server{secure: &secureAdmission{
+		grantRoot:  "/run/steward-gateway/grants",
+		relayImage: "sha256:" + strings.Repeat("a", 64),
+		relayGID:   1234,
+	}}
+	workload := Workload{TenantID: "tenant-a", InstanceID: "egress-only", Runtime: &RuntimeGrant{
+		NetworkName: addresses.Name, GrantID: grantID, Generation: 1,
+		EgressRouteIDs: []string{"public-web"}, RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
+	}}
+	want := server.desiredRelay(workload)
+	if !want.Egress || want.Inference || want.GrantDir != gateway.GrantDirectory(server.secure.grantRoot, grantID) {
+		t.Fatalf("egress-only relay=%#v", want)
+	}
+	if err := validateRelaySpec(want); err != nil {
+		t.Fatalf("egress-only relay rejected: %v", err)
+	}
 }
 
 func TestRuntimeTopologyHappyPathAndLifecycle(t *testing.T) {

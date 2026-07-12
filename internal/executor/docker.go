@@ -95,6 +95,7 @@ const runtimeServicePortLabel = "io.hardrails.runtime.service-port"
 const runtimeGenerationLabel = "io.hardrails.runtime.generation"
 const runtimeRelayIPLabel = "io.hardrails.runtime.relay-ip"
 const runtimeAgentIPLabel = "io.hardrails.runtime.agent-ip"
+const runtimeEgressRoutesLabel = "io.hardrails.runtime.egress-routes"
 
 func NewDockerHTTP(socket string) *DockerHTTP {
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
@@ -212,12 +213,24 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		labels[runtimeServicePortLabel] = strconv.Itoa(w.Runtime.ServicePort)
 		labels[runtimeRelayIPLabel] = w.Runtime.RelayIP
 		labels[runtimeAgentIPLabel] = w.Runtime.AgentIP
+		labels[runtimeEgressRoutesLabel] = strings.Join(w.Runtime.EgressRouteIDs, ",")
 	}
 	environment := []string{"HOME=" + home, "TMPDIR=/tmp"}
 	if w.Runtime != nil && w.Runtime.Inference {
 		environment = append(environment,
 			"OPENAI_BASE_URL=http://steward-relay:8080/v1", "OPENAI_API_BASE=http://steward-relay:8080/v1",
 			"OPENAI_API_KEY=steward-local", "OPENAI_MODEL="+w.Runtime.ModelAlias)
+	}
+	if w.Runtime != nil && len(w.Runtime.EgressRouteIDs) > 0 {
+		const proxy = "http://steward-relay:8082"
+		const noProxy = "steward-relay,agent,localhost,127.0.0.1"
+		environment = append(environment, "STEWARD_EGRESS_PROXY="+proxy,
+			"HTTP_PROXY="+proxy, "HTTPS_PROXY="+proxy, "NO_PROXY="+noProxy,
+			"http_proxy="+proxy, "https_proxy="+proxy, "no_proxy="+noProxy)
+	}
+	dns := []string(nil)
+	if w.Runtime != nil && len(w.Runtime.EgressRouteIDs) > 0 {
+		dns = []string{"127.0.0.1"}
 	}
 	body := map[string]any{
 		"Image":          w.Image,
@@ -238,6 +251,7 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 			"Tmpfs":          tmpfs,
 			"Mounts":         mounts,
 			"ExtraHosts":     runtimeExtraHosts(w.Runtime),
+			"Dns":            dns,
 		},
 		"Labels":           labels,
 		"NetworkingConfig": networkingConfig,
@@ -289,6 +303,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			SecurityOpt []string          `json:"SecurityOpt"`
 			Tmpfs       map[string]string `json:"Tmpfs"`
 			ExtraHosts  []string          `json:"ExtraHosts"`
+			DNS         []string          `json:"Dns"`
 		} `json:"HostConfig"`
 		State struct {
 			Status string `json:"Status"`
@@ -325,8 +340,10 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			NetworkName: labels[runtimeNetworkLabel], GrantID: labels[runtimeGrantLabel],
 			Generation: generation, Inference: inference, RouteID: labels[runtimeRouteLabel], ModelAlias: labels[runtimeModelLabel], ServicePort: servicePort,
 			RelayIP: labels[runtimeRelayIPLabel], AgentIP: labels[runtimeAgentIPLabel],
+			EgressRouteIDs: splitRouteIDs(labels[runtimeEgressRoutesLabel]),
 		}
 		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil && generation > 0 &&
+			validEgressRouteIDs(runtimeGrant.EgressRouteIDs) &&
 			payload.HostConfig.NetworkMode == runtimeGrant.NetworkName &&
 			strings.HasPrefix(runtimeGrant.NetworkName, "steward-net-") && strings.HasPrefix(runtimeGrant.GrantID, "grant-") &&
 			contains(payload.HostConfig.ExtraHosts, "steward-relay:"+runtimeGrant.RelayIP) &&
@@ -335,6 +352,15 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			runtimeHardened = runtimeHardened && contains(payload.Config.Env, "OPENAI_BASE_URL=http://steward-relay:8080/v1") &&
 				contains(payload.Config.Env, "OPENAI_API_BASE=http://steward-relay:8080/v1") &&
 				contains(payload.Config.Env, "OPENAI_API_KEY=steward-local") && contains(payload.Config.Env, "OPENAI_MODEL="+runtimeGrant.ModelAlias)
+		}
+		if len(runtimeGrant.EgressRouteIDs) > 0 {
+			const proxy = "http://steward-relay:8082"
+			const noProxy = "steward-relay,agent,localhost,127.0.0.1"
+			runtimeHardened = runtimeHardened && len(payload.HostConfig.DNS) == 1 && payload.HostConfig.DNS[0] == "127.0.0.1" &&
+				contains(payload.Config.Env, "STEWARD_EGRESS_PROXY="+proxy) &&
+				contains(payload.Config.Env, "HTTP_PROXY="+proxy) && contains(payload.Config.Env, "HTTPS_PROXY="+proxy) &&
+				contains(payload.Config.Env, "NO_PROXY="+noProxy) && contains(payload.Config.Env, "http_proxy="+proxy) &&
+				contains(payload.Config.Env, "https_proxy="+proxy) && contains(payload.Config.Env, "no_proxy="+noProxy)
 		}
 	}
 	return ObservedWorkload{
@@ -371,6 +397,25 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			payload.HostConfig.Tmpfs["/tmp"] == tempTmpfs,
 		Status: payload.State.Status,
 	}, nil
+}
+
+func splitRouteIDs(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, ",")
+}
+
+func validEgressRouteIDs(routes []string) bool {
+	if len(routes) > 32 {
+		return false
+	}
+	for index, route := range routes {
+		if !egressRouteID.MatchString(route) || index > 0 && routes[index-1] >= route {
+			return false
+		}
+	}
+	return true
 }
 
 func validFingerprint(value string) bool {

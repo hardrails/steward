@@ -36,6 +36,10 @@ func (n *fakeNode) Logs(context.Context, string) (nodeclient.State, error) {
 	}
 	return nodeclient.State{RuntimeRef: runtimeRef(), Status: "running", Logs: logs}, nil
 }
+func (n *fakeNode) EgressStats(context.Context, string) (nodeclient.EgressStats, error) {
+	n.calls = append(n.calls, "egress")
+	return nodeclient.EgressStats{Allowed: 2, Denied: 1}, n.err
+}
 func (n *fakeNode) Start(context.Context, string) (nodeclient.State, error) {
 	n.calls = append(n.calls, "start")
 	return nodeclient.State{RuntimeRef: runtimeRef(), Status: "running"}, nil

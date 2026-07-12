@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/hardrails/steward/internal/dsse"
@@ -16,15 +18,17 @@ import (
 const maxConfigBytes = 1 << 20
 
 type Config struct {
-	Version          int     `json:"version"`
-	ControlSocket    string  `json:"control_socket"`
-	ServiceAddress   string  `json:"service_address"`
-	ServiceTokenFile string  `json:"service_token_file"`
-	StateFile        string  `json:"state_file"`
-	GrantRoot        string  `json:"grant_root"`
-	ExecutorGID      int     `json:"executor_gid"`
-	RelayGID         int     `json:"relay_gid"`
-	Routes           []Route `json:"routes"`
+	Version          int           `json:"version"`
+	ControlSocket    string        `json:"control_socket"`
+	ServiceAddress   string        `json:"service_address"`
+	ServiceTokenFile string        `json:"service_token_file"`
+	StateFile        string        `json:"state_file"`
+	GrantRoot        string        `json:"grant_root"`
+	ExecutorGID      int           `json:"executor_gid"`
+	RelayGID         int           `json:"relay_gid"`
+	Routes           []Route       `json:"routes"`
+	EgressAuditFile  string        `json:"egress_audit_file,omitempty"`
+	EgressRoutes     []EgressRoute `json:"egress_routes,omitempty"`
 }
 
 type Route struct {
@@ -40,30 +44,59 @@ type loadedRoute struct {
 	credential string
 }
 
-func LoadConfig(path string) (Config, map[string]loadedRoute, string, error) {
+type EgressRoute struct {
+	ID               string              `json:"id"`
+	Destinations     []EgressDestination `json:"destinations"`
+	MaxConcurrent    int                 `json:"max_concurrent"`
+	MaxRequestBytes  int64               `json:"max_request_bytes"`
+	MaxResponseBytes int64               `json:"max_response_bytes"`
+	MaxTunnelSeconds int                 `json:"max_tunnel_seconds"`
+}
+
+type EgressDestination struct {
+	Host         string   `json:"host"`
+	Ports        []int    `json:"ports"`
+	AllowedCIDRs []string `json:"allowed_cidrs,omitempty"`
+}
+
+type loadedEgressDestination struct {
+	EgressDestination
+	prefixes []netip.Prefix
+}
+
+type loadedEgressRoute struct {
+	EgressRoute
+	destinations []loadedEgressDestination
+}
+
+func LoadConfig(path string) (Config, map[string]loadedRoute, map[string]loadedEgressRoute, string, error) {
 	raw, err := nodeclient.ReadBounded(path, maxConfigBytes)
 	if err != nil {
-		return Config{}, nil, "", err
+		return Config{}, nil, nil, "", err
 	}
 	var config Config
 	if err := dsse.DecodeStrictInto(raw, maxConfigBytes, &config); err != nil {
-		return Config{}, nil, "", fmt.Errorf("decode gateway config: %w", err)
+		return Config{}, nil, nil, "", fmt.Errorf("decode gateway config: %w", err)
 	}
 	routes, err := config.validateAndLoadRoutes()
 	if err != nil {
-		return Config{}, nil, "", err
+		return Config{}, nil, nil, "", err
+	}
+	egressRoutes, err := config.validateEgressRoutes()
+	if err != nil {
+		return Config{}, nil, nil, "", err
 	}
 	token, err := nodeclient.ReadToken(config.ServiceTokenFile)
 	if err != nil {
-		return Config{}, nil, "", fmt.Errorf("read gateway service token: %w", err)
+		return Config{}, nil, nil, "", fmt.Errorf("read gateway service token: %w", err)
 	}
-	return config, routes, token, nil
+	return config, routes, egressRoutes, token, nil
 }
 
 func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 	if c.Version != 1 || !absoluteClean(c.ControlSocket) || !absoluteClean(c.StateFile) || !absoluteClean(c.GrantRoot) ||
-		!absoluteClean(c.ServiceTokenFile) || c.ExecutorGID <= 0 || c.RelayGID <= 0 || len(c.Routes) == 0 || len(c.Routes) > 128 {
-		return nil, errors.New("gateway config requires version 1, absolute control/state/grant/token paths, and 1 to 128 routes")
+		!absoluteClean(c.ServiceTokenFile) || c.ExecutorGID <= 0 || c.RelayGID <= 0 || len(c.Routes) > 128 {
+		return nil, errors.New("gateway config requires version 1, absolute control/state/grant/token paths, and at most 128 inference routes")
 	}
 	// Linux sockaddr_un.sun_path is 108 bytes including the terminator. Keep a
 	// conservative cross-platform ceiling for both the control and derived grant
@@ -101,6 +134,79 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 		loaded[route.ID] = loadedRoute{Route: route, base: base, credential: credential}
 	}
 	return loaded, nil
+}
+
+var egressHostPattern = regexp.MustCompile(`^(?:\*\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+
+func (c Config) validateEgressRoutes() (map[string]loadedEgressRoute, error) {
+	if len(c.EgressRoutes) > 128 {
+		return nil, errors.New("gateway config permits at most 128 egress routes")
+	}
+	if len(c.EgressRoutes) > 0 && !absoluteClean(c.EgressAuditFile) {
+		return nil, errors.New("egress routes require an absolute egress_audit_file")
+	}
+	loaded := make(map[string]loadedEgressRoute, len(c.EgressRoutes))
+	for _, route := range c.EgressRoutes {
+		if !routeID(route.ID) || route.MaxConcurrent < 1 || route.MaxConcurrent > 256 ||
+			route.MaxRequestBytes < 1 || route.MaxRequestBytes > 1<<30 ||
+			route.MaxResponseBytes < 1 || route.MaxResponseBytes > 1<<30 ||
+			route.MaxTunnelSeconds < 1 || route.MaxTunnelSeconds > 86400 ||
+			len(route.Destinations) == 0 || len(route.Destinations) > 128 {
+			return nil, fmt.Errorf("egress route %q has invalid limits or destinations", route.ID)
+		}
+		if _, exists := loaded[route.ID]; exists {
+			return nil, fmt.Errorf("duplicate egress route %q", route.ID)
+		}
+		entry := loadedEgressRoute{EgressRoute: route, destinations: make([]loadedEgressDestination, 0, len(route.Destinations))}
+		seen := make(map[string]struct{}, len(route.Destinations))
+		for _, destination := range route.Destinations {
+			host := strings.ToLower(destination.Host)
+			if len(host) > 253 || (!egressHostPattern.MatchString(host) && net.ParseIP(host) == nil) || len(destination.Ports) == 0 || len(destination.Ports) > 16 {
+				return nil, fmt.Errorf("egress route %q has invalid destination", route.ID)
+			}
+			ports := make(map[int]struct{}, len(destination.Ports))
+			for _, port := range destination.Ports {
+				if port < 1 || port > 65535 {
+					return nil, fmt.Errorf("egress route %q has invalid destination port", route.ID)
+				}
+				ports[port] = struct{}{}
+			}
+			if len(ports) != len(destination.Ports) {
+				return nil, fmt.Errorf("egress route %q has duplicate destination port", route.ID)
+			}
+			key := host + fmt.Sprint(destination.Ports)
+			if _, exists := seen[key]; exists {
+				return nil, fmt.Errorf("egress route %q has duplicate destination", route.ID)
+			}
+			seen[key] = struct{}{}
+			item := loadedEgressDestination{EgressDestination: destination}
+			item.Host = host
+			for _, cidr := range destination.AllowedCIDRs {
+				prefix, err := netip.ParsePrefix(cidr)
+				if err != nil || prefix.String() != cidr || prefix.Masked() != prefix {
+					return nil, fmt.Errorf("egress route %q has invalid canonical allowed CIDR", route.ID)
+				}
+				item.prefixes = append(item.prefixes, prefix)
+			}
+			entry.destinations = append(entry.destinations, item)
+		}
+		loaded[route.ID] = entry
+	}
+	return loaded, nil
+}
+
+func routeID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for i, character := range value {
+		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' || character >= '0' && character <= '9' ||
+			(i > 0 && (character == '.' || character == '_' || character == '-')) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func readCredential(path string) (string, error) {

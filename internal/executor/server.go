@@ -66,6 +66,7 @@ type GatewayControl interface {
 	Activate(context.Context, string) error
 	Deactivate(context.Context, string) error
 	Unregister(context.Context, string) error
+	EgressStats(context.Context, string) (gateway.EgressStats, error)
 }
 
 // SecureAdmissionConfig enables the signed admission path. All fields are
@@ -193,6 +194,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/workloads/{id}", s.destroy)
 	mux.HandleFunc("GET /v1/workloads/{id}", s.status)
 	mux.HandleFunc("GET /v1/workloads/{id}/logs", s.logs)
+	mux.HandleFunc("GET /v1/workloads/{id}/egress", s.egressStats)
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -205,14 +207,16 @@ type secureProvisionRequest struct {
 }
 
 type secureProvisionResponse struct {
-	RuntimeRef    string `json:"runtime_ref"`
-	Status        string `json:"status"`
-	CapsuleDigest string `json:"capsule_digest"`
-	PolicyDigest  string `json:"policy_digest"`
-	Generation    uint64 `json:"generation"`
-	EvidenceKeyID string `json:"evidence_key_id"`
-	GrantID       string `json:"grant_id,omitempty"`
-	ServicePath   string `json:"service_path,omitempty"`
+	RuntimeRef     string   `json:"runtime_ref"`
+	Status         string   `json:"status"`
+	CapsuleDigest  string   `json:"capsule_digest"`
+	PolicyDigest   string   `json:"policy_digest"`
+	Generation     uint64   `json:"generation"`
+	EvidenceKeyID  string   `json:"evidence_key_id"`
+	GrantID        string   `json:"grant_id,omitempty"`
+	ServicePath    string   `json:"service_path,omitempty"`
+	EgressProxy    string   `json:"egress_proxy,omitempty"`
+	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
 }
 
 type purgeStateRequest struct {
@@ -285,9 +289,9 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 	// Every mount, network and grant identifier is Executor-derived. The signed
 	// request selects only finite capabilities already authorized by capsule and
 	// site policy; it never supplies a host path or Docker topology primitive.
-	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service {
+	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service || effective.Intent.Capabilities.Egress {
 		if s.secure.topology == nil || s.secure.gateway == nil {
-			writeError(w, http.StatusNotImplemented, "capability_unavailable", "inference and service capabilities require the configured v1.3 gateway topology")
+			writeError(w, http.StatusNotImplemented, "capability_unavailable", "inference, service, and egress capabilities require the configured gateway topology")
 			return
 		}
 		workload.Runtime = &RuntimeGrant{
@@ -295,7 +299,8 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 			GrantID:     gateway.GrantID(effective.Intent.TenantID, effective.Intent.InstanceID, effective.Intent.Generation),
 			Generation:  effective.Intent.Generation,
 			Inference:   effective.Intent.Capabilities.Inference, ModelAlias: effective.Intent.ModelAlias,
-			RouteID: effective.Intent.InferenceRouteID,
+			RouteID:        effective.Intent.InferenceRouteID,
+			EgressRouteIDs: admission.CanonicalRouteIDs(effective.Intent.EgressRouteIDs),
 		}
 		addresses := NetworkSpecFor(effective.Intent.TenantID, effective.Intent.InstanceID, effective.Intent.Generation)
 		workload.Runtime.RelayIP, workload.Runtime.AgentIP = addresses.RelayIP, addresses.AgentIP
@@ -744,11 +749,15 @@ func (s *Server) writeSecureResponse(w http.ResponseWriter, status int, runtimeR
 		PolicyDigest: effective.PolicyDigest, Generation: effective.Intent.Generation,
 		EvidenceKeyID: evidence.KeyID(s.secure.evidence.PublicKey()),
 	}
-	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service {
+	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service || effective.Intent.Capabilities.Egress {
 		response.GrantID = gateway.GrantID(effective.Intent.TenantID, effective.Intent.InstanceID, effective.Intent.Generation)
 	}
 	if effective.Intent.Capabilities.Service {
 		response.ServicePath = "/v1/services/" + response.GrantID + "/"
+	}
+	if effective.Intent.Capabilities.Egress {
+		response.EgressProxy = "http://steward-relay:8082"
+		response.EgressRouteIDs = admission.CanonicalRouteIDs(effective.Intent.EgressRouteIDs)
 	}
 	writeJSON(w, status, response)
 }
@@ -1187,7 +1196,12 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		writeDockerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": observed.Status})
+	response := map[string]any{"runtime_ref": name, "status": observed.Status}
+	if observed.Workload.Runtime != nil && len(observed.Workload.Runtime.EgressRouteIDs) > 0 {
+		response["egress_proxy"] = "http://steward-relay:8082"
+		response["egress_route_ids"] = observed.Workload.Runtime.EgressRouteIDs
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
@@ -1206,6 +1220,29 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "logs": logs})
+}
+
+func (s *Server) egressStats(w http.ResponseWriter, r *http.Request) {
+	name, ok := runtimeRef(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_runtime_ref", "invalid executor runtime_ref")
+		return
+	}
+	observed, err := s.managed(r.Context(), name)
+	if err != nil {
+		writeDockerError(w, err)
+		return
+	}
+	if s.secure == nil || s.secure.gateway == nil || observed.Workload.Runtime == nil || len(observed.Workload.Runtime.EgressRouteIDs) == 0 {
+		writeError(w, http.StatusNotFound, "egress_unavailable", "workload has no signed egress grant")
+		return
+	}
+	stats, err := s.secure.gateway.EgressStats(r.Context(), observed.Workload.Runtime.GrantID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func (s *Server) managed(ctx context.Context, name string) (ObservedWorkload, error) {

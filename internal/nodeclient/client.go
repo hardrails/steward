@@ -30,15 +30,27 @@ type Client struct {
 }
 
 type State struct {
-	RuntimeRef    string `json:"runtime_ref"`
-	Status        string `json:"status"`
-	CapsuleDigest string `json:"capsule_digest,omitempty"`
-	PolicyDigest  string `json:"policy_digest,omitempty"`
-	Generation    uint64 `json:"generation,omitempty"`
-	EvidenceKeyID string `json:"evidence_key_id,omitempty"`
-	GrantID       string `json:"grant_id,omitempty"`
-	ServicePath   string `json:"service_path,omitempty"`
-	Logs          string `json:"logs,omitempty"`
+	RuntimeRef     string   `json:"runtime_ref"`
+	Status         string   `json:"status"`
+	CapsuleDigest  string   `json:"capsule_digest,omitempty"`
+	PolicyDigest   string   `json:"policy_digest,omitempty"`
+	Generation     uint64   `json:"generation,omitempty"`
+	EvidenceKeyID  string   `json:"evidence_key_id,omitempty"`
+	GrantID        string   `json:"grant_id,omitempty"`
+	ServicePath    string   `json:"service_path,omitempty"`
+	Logs           string   `json:"logs,omitempty"`
+	EgressProxy    string   `json:"egress_proxy,omitempty"`
+	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
+}
+
+type EgressStats struct {
+	Allowed         uint64 `json:"allowed"`
+	Denied          uint64 `json:"denied"`
+	BytesFromAgent  uint64 `json:"bytes_from_agent"`
+	BytesToAgent    uint64 `json:"bytes_to_agent"`
+	LastDestination string `json:"last_destination,omitempty"`
+	LastDecision    string `json:"last_decision,omitempty"`
+	LastObservedAt  string `json:"last_observed_at,omitempty"`
 }
 
 type StatePurge struct {
@@ -126,6 +138,14 @@ func (c *Client) Logs(ctx context.Context, runtimeRef string) (State, error) {
 		return State{}, err
 	}
 	return state, nil
+}
+
+func (c *Client) EgressStats(ctx context.Context, runtimeRef string) (EgressStats, error) {
+	var stats EgressStats
+	if err := c.do(ctx, http.MethodGet, "/v1/workloads/"+runtimeRef+"/egress", nil, &stats); err != nil {
+		return EgressStats{}, err
+	}
+	return stats, nil
 }
 
 func (c *Client) Start(ctx context.Context, runtimeRef string) (State, error) {
@@ -256,7 +276,7 @@ func validRuntimePath(path string) bool {
 	rest := strings.TrimPrefix(path, prefix)
 	if separator := strings.IndexByte(rest, '/'); separator >= 0 {
 		suffix := rest[separator:]
-		if suffix != "/start" && suffix != "/stop" && suffix != "/logs" {
+		if suffix != "/start" && suffix != "/stop" && suffix != "/logs" && suffix != "/egress" {
 			return false
 		}
 		rest = rest[:separator]

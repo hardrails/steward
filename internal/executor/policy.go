@@ -46,15 +46,16 @@ type StateMount struct {
 }
 
 type RuntimeGrant struct {
-	NetworkName string `json:"network_name"`
-	GrantID     string `json:"grant_id"`
-	Generation  uint64 `json:"generation"`
-	Inference   bool   `json:"inference"`
-	RouteID     string `json:"route_id,omitempty"`
-	RelayIP     string `json:"relay_ip"`
-	AgentIP     string `json:"agent_ip"`
-	ModelAlias  string `json:"model_alias,omitempty"`
-	ServicePort int    `json:"service_port,omitempty"`
+	NetworkName    string   `json:"network_name"`
+	GrantID        string   `json:"grant_id"`
+	Generation     uint64   `json:"generation"`
+	Inference      bool     `json:"inference"`
+	RouteID        string   `json:"route_id,omitempty"`
+	RelayIP        string   `json:"relay_ip"`
+	AgentIP        string   `json:"agent_ip"`
+	ModelAlias     string   `json:"model_alias,omitempty"`
+	ServicePort    int      `json:"service_port,omitempty"`
+	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
 }
 
 // Resources are mandatory cgroup limits. Docker has no resource limits by default,
@@ -170,8 +171,14 @@ func (w Workload) Validate() error {
 			(w.Runtime.Inference && !boundedText(w.Runtime.ModelAlias, 256)) ||
 			(w.Runtime.Inference && !boundedText(w.Runtime.RouteID, 128)) ||
 			(!w.Runtime.Inference && (w.Runtime.ModelAlias != "" || w.Runtime.RouteID != "")) ||
-			!w.Runtime.Inference && w.Runtime.ServicePort == 0 {
+			(!w.Runtime.Inference && w.Runtime.ServicePort == 0 && len(w.Runtime.EgressRouteIDs) == 0) ||
+			len(w.Runtime.EgressRouteIDs) > 32 {
 			return &PolicyError{"internal runtime capability topology is invalid"}
+		}
+		for index, route := range w.Runtime.EgressRouteIDs {
+			if !egressRouteID.MatchString(route) || index > 0 && w.Runtime.EgressRouteIDs[index-1] >= route {
+				return &PolicyError{"internal egress routes are invalid"}
+			}
 		}
 		addresses := NetworkSpecFor(w.TenantID, w.InstanceID, w.Runtime.Generation)
 		if w.Runtime.NetworkName != addresses.Name || w.Runtime.RelayIP != addresses.RelayIP || w.Runtime.AgentIP != addresses.AgentIP {
@@ -204,3 +211,5 @@ func boundedText(value string, limit int) bool {
 
 var ErrNotFound = errors.New("unknown workload")
 var ErrWorkloadDrift = errors.New("executor workload has drifted from its admitted definition")
+
+var egressRouteID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -75,6 +76,7 @@ type Capabilities struct {
 	State     bool `json:"state"`
 	Inference bool `json:"inference"`
 	Service   bool `json:"service"`
+	Egress    bool `json:"egress"`
 }
 
 type ArtifactDigest struct {
@@ -108,6 +110,7 @@ type InstanceIntent struct {
 	InferenceRouteID string         `json:"inference_route_id,omitempty"`
 	ModelAlias       string         `json:"model_alias,omitempty"`
 	ServiceID        string         `json:"service_id,omitempty"`
+	EgressRouteIDs   []string       `json:"egress_route_ids,omitempty"`
 }
 
 type AuthenticatedIdentity struct {
@@ -142,6 +145,7 @@ type TenantRule struct {
 	ResourceCeiling   ResourceLimits `json:"resource_ceiling"`
 	InferenceRouteIDs []string       `json:"inference_route_ids,omitempty"`
 	ServiceIDs        []string       `json:"service_ids,omitempty"`
+	EgressRouteIDs    []string       `json:"egress_route_ids,omitempty"`
 }
 
 // PersistedFences are supplied by the durable executor journal. Equality is
@@ -284,11 +288,37 @@ func validateRequestedCapabilities(intent InstanceIntent, capsule ProfileCapsule
 	} else if intent.ServiceID != "" {
 		return deny("service ID requires service capability")
 	}
+	if intent.Capabilities.Egress {
+		if len(intent.EgressRouteIDs) == 0 || len(intent.EgressRouteIDs) > 32 {
+			return deny("egress capability requires 1 to 32 route IDs")
+		}
+		seen := make(map[string]struct{}, len(intent.EgressRouteIDs))
+		for _, route := range intent.EgressRouteIDs {
+			if !routeID(route) || !contains(tenant.EgressRouteIDs, route) {
+				return deny("egress route is not authorized")
+			}
+			if _, exists := seen[route]; exists {
+				return deny("duplicate egress route")
+			}
+			seen[route] = struct{}{}
+		}
+	} else if len(intent.EgressRouteIDs) != 0 {
+		return deny("egress routes require egress capability")
+	}
 	return nil
 }
 
 func (c Capabilities) SubsetOf(maximum Capabilities) bool {
-	return (!c.State || maximum.State) && (!c.Inference || maximum.Inference) && (!c.Service || maximum.Service)
+	return (!c.State || maximum.State) && (!c.Inference || maximum.Inference) &&
+		(!c.Service || maximum.Service) && (!c.Egress || maximum.Egress)
+}
+
+// CanonicalRouteIDs returns a detached, sorted route set for fingerprints and
+// gateway grants. Admission rejects duplicates, so sorting cannot change meaning.
+func CanonicalRouteIDs(routes []string) []string {
+	result := append([]string(nil), routes...)
+	slices.Sort(result)
+	return result
 }
 
 func (c ProfileCapsule) Validate(now time.Time) error {
@@ -412,9 +442,26 @@ func (p SitePolicy) Validate() error {
 				return deny("invalid service ID")
 			}
 		}
+		if len(tenant.EgressRouteIDs) > 128 {
+			return deny("tenant has too many egress routes")
+		}
+		seenRoutes := make(map[string]struct{}, len(tenant.EgressRouteIDs))
+		for _, route := range tenant.EgressRouteIDs {
+			if !routeID(route) {
+				return deny("invalid egress route")
+			}
+			if _, exists := seenRoutes[route]; exists {
+				return deny("duplicate tenant egress route")
+			}
+			seenRoutes[route] = struct{}{}
+		}
 	}
 	return nil
 }
+
+var routeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func routeID(value string) bool { return routeIDPattern.MatchString(value) }
 
 func (i InstanceIntent) Validate(caller AuthenticatedIdentity) error {
 	if !bounded(i.TenantID, 128) || !bounded(i.NodeID, 128) || !bounded(i.InstanceID, 256) || !bounded(i.LineageID, 256) || i.Generation == 0 || !digest(i.CapsuleDigest) {

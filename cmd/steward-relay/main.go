@@ -35,6 +35,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	version := flags.Bool("version", false, "print the Steward Relay version and exit")
 	inferenceAddress := flags.String("inference-addr", ":8080", "private-network inference listener")
 	inferenceSocket := flags.String("inference-socket", "", "mounted per-grant gateway Unix socket")
+	egressAddress := flags.String("egress-addr", ":8082", "private-network HTTP(S) proxy listener")
+	egressSocket := flags.String("egress-socket", "", "mounted per-grant gateway egress Unix socket")
 	serviceAddress := flags.String("service-addr", ":8081", "loopback-published service relay listener")
 	serviceTarget := flags.String("service-target", "", "fixed private agent service origin")
 	if err := flags.Parse(args); err != nil {
@@ -44,11 +46,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "steward-relay "+buildinfo.Resolve())
 		return 0
 	}
-	if *inferenceSocket == "" && *serviceTarget == "" {
-		fmt.Fprintln(stderr, "steward-relay: at least one of -inference-socket or -service-target is required")
+	if *inferenceSocket == "" && *serviceTarget == "" && *egressSocket == "" {
+		fmt.Fprintln(stderr, "steward-relay: at least one gateway or service socket is required")
 		return 2
 	}
 	var servers []*http.Server
+	var egressListener net.Listener
 	if *inferenceSocket != "" {
 		servers = append(servers, &http.Server{
 			Addr: *inferenceAddress, Handler: inferenceProxy(*inferenceSocket),
@@ -72,8 +75,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second,
 		})
 	}
+	if *egressSocket != "" {
+		var err error
+		egressListener, err = net.Listen("tcp", *egressAddress)
+		if err != nil {
+			fmt.Fprintln(stderr, "steward-relay: egress listener:", err)
+			return 1
+		}
+	}
 	var wait sync.WaitGroup
-	errorsCh := make(chan error, len(servers))
+	errorsCh := make(chan error, len(servers)+1)
 	for _, server := range servers {
 		wait.Add(1)
 		go func(server *http.Server) {
@@ -82,6 +93,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 				errorsCh <- err
 			}
 		}(server)
+	}
+	if egressListener != nil {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if err := serveEgressBridge(ctx, egressListener, *egressSocket); err != nil && ctx.Err() == nil {
+				errorsCh <- err
+			}
+		}()
 	}
 	select {
 	case <-ctx.Done():
@@ -94,8 +114,55 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	for _, server := range servers {
 		_ = server.Shutdown(shutdown)
 	}
+	if egressListener != nil {
+		_ = egressListener.Close()
+	}
 	wait.Wait()
 	return 0
+}
+
+func serveEgressBridge(ctx context.Context, listener net.Listener, socket string) error {
+	connections := make(chan struct{}, 128)
+	go func() { <-ctx.Done(); _ = listener.Close() }()
+	for {
+		connection, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		select {
+		case connections <- struct{}{}:
+			go func(agent net.Conn) {
+				defer func() { <-connections }()
+				bridgeEgress(agent, socket)
+			}(connection)
+		default:
+			_ = connection.Close()
+		}
+	}
+}
+
+func bridgeEgress(agent net.Conn, socket string) {
+	defer agent.Close()
+	gateway, err := (&net.Dialer{Timeout: 3 * time.Second}).Dial("unix", socket)
+	if err != nil {
+		return
+	}
+	defer gateway.Close()
+	var wait sync.WaitGroup
+	wait.Add(2)
+	copyOneWay := func(destination, source net.Conn) {
+		defer wait.Done()
+		_, _ = io.Copy(destination, source)
+		if tcp, ok := destination.(*net.TCPConn); ok {
+			_ = tcp.CloseWrite()
+		}
+	}
+	go copyOneWay(gateway, agent)
+	go copyOneWay(agent, gateway)
+	wait.Wait()
 }
 
 func inferenceProxy(socket string) http.Handler {

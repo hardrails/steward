@@ -34,14 +34,14 @@ func TestLoadConfigValidatesRoutesAndSecretPermissions(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, routes, serviceToken, err := LoadConfig(path)
+	loaded, routes, _, serviceToken, err := LoadConfig(path)
 	if err != nil || loaded.Version != 1 || serviceToken != "service-secret" || routes["local"].credential != "route-secret" {
 		t.Fatalf("loaded=%#v routes=%#v token=%q err=%v", loaded, routes, serviceToken, err)
 	}
 	if err := os.Chmod(credential, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := LoadConfig(path); err == nil {
+	if _, _, _, _, err := LoadConfig(path); err == nil {
 		t.Fatal("permissive route credential accepted")
 	}
 }
@@ -65,6 +65,38 @@ func TestConfigRejectsUnsafeOriginsAndAddresses(t *testing.T) {
 		mutate(&config)
 		if _, err := config.validateAndLoadRoutes(); err == nil {
 			t.Fatalf("invalid config accepted: %#v", config)
+		}
+	}
+}
+
+func TestConfigValidatesBoundedEgressRoutes(t *testing.T) {
+	base := Config{EgressAuditFile: "/var/lib/steward-gateway/egress.jsonl", EgressRoutes: []EgressRoute{{
+		ID: "package-mirrors", MaxConcurrent: 8, MaxRequestBytes: 4 << 20, MaxResponseBytes: 256 << 20, MaxTunnelSeconds: 300,
+		Destinations: []EgressDestination{{Host: "*.example.com", Ports: []int{443}}, {Host: "10.1.2.3", Ports: []int{8080}, AllowedCIDRs: []string{"10.1.0.0/16"}}},
+	}}}
+	loaded, err := base.validateEgressRoutes()
+	if err != nil || len(loaded) != 1 || len(loaded["package-mirrors"].destinations) != 2 {
+		t.Fatalf("loaded=%#v err=%v", loaded, err)
+	}
+	for _, mutate := range []func(*Config){
+		func(config *Config) { config.EgressAuditFile = "relative" },
+		func(config *Config) { config.EgressRoutes[0].ID = "bad route" },
+		func(config *Config) { config.EgressRoutes[0].MaxConcurrent = 0 },
+		func(config *Config) { config.EgressRoutes[0].MaxRequestBytes = 0 },
+		func(config *Config) { config.EgressRoutes[0].MaxResponseBytes = 1<<30 + 1 },
+		func(config *Config) { config.EgressRoutes[0].MaxTunnelSeconds = 0 },
+		func(config *Config) { config.EgressRoutes[0].Destinations = nil },
+		func(config *Config) { config.EgressRoutes[0].Destinations[0].Host = "*example.com" },
+		func(config *Config) { config.EgressRoutes[0].Destinations[0].Ports = []int{0} },
+		func(config *Config) { config.EgressRoutes[0].Destinations[0].AllowedCIDRs = []string{"10.0.0.1/8"} },
+		func(config *Config) { config.EgressRoutes = append(config.EgressRoutes, config.EgressRoutes[0]) },
+	} {
+		config := base
+		config.EgressRoutes = append([]EgressRoute(nil), base.EgressRoutes...)
+		config.EgressRoutes[0].Destinations = append([]EgressDestination(nil), base.EgressRoutes[0].Destinations...)
+		mutate(&config)
+		if _, err := config.validateEgressRoutes(); err == nil {
+			t.Fatalf("invalid egress config accepted: %#v", config)
 		}
 	}
 }
