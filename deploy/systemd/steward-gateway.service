@@ -16,7 +16,10 @@ Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
 RuntimeDirectory=steward-gateway
-RuntimeDirectoryMode=0750
+# Executor needs search permission to reach the group-protected control socket.
+# Other users can traverse this fixed path but cannot list it or open the 0660 socket.
+RuntimeDirectoryMode=0751
+RuntimeDirectoryPreserve=yes
 StateDirectory=steward-gateway
 StateDirectoryMode=0700
 

@@ -3,7 +3,7 @@ set -e
 
 case "${1:-}" in
 	configure)
-		/usr/lib/steward-node/release/scripts/install-node.sh
+		/usr/lib/steward-node/release/scripts/install-node.sh --expected-version '@RELEASE_VERSION@'
 		;;
 esac
 

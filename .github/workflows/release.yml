@@ -13,7 +13,7 @@ name: Release
 # and only attaches the already-built artifacts to a GitHub Release.
 #
 # scripts/release.sh stamps the release tag into all binaries with the standard Go
-# linker and independently executes all three to assert the result before publishing.
+# linker and independently executes all six to assert the result before publishing.
 
 on:
   push:
@@ -65,6 +65,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Require tag commit on origin/main
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          tagged_commit=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          if ! git merge-base --is-ancestor "$tagged_commit" refs/remotes/origin/main; then
+            echo "release: tagged commit $tagged_commit is not reachable from protected origin/main" >&2
+            exit 1
+          fi
+          echo "release: tagged commit $tagged_commit is reachable from protected origin/main"
+
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
@@ -77,9 +90,8 @@ jobs:
           sudo apt-get install --no-install-recommends -y rpm
 
       # Cross-compiles the target matrix, packages each as a .tar.gz, writes
-      # checksums.txt, and (on a tag build) asserts the binary self-reports the
-      # tag — failing the whole release here if it does not. All output lands in
-      # dist/.
+      # checksums.txt, and asserts that all six binaries self-report the stamped
+      # version on tag builds and manual dry-runs. All output lands in dist/.
       - name: Build release artifacts
         env:
           # rpmbuild validates the host architecture even though Steward's Go
@@ -87,6 +99,23 @@ jobs:
           # Darwin targets so every RPM is produced on a compatible host.
           STEWARD_RELEASE_TARGETS: linux/${{ matrix.goarch }} darwin/${{ matrix.goarch }}
         run: bash scripts/release.sh
+
+      - name: Verify embedded node release manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="dist/steward_${STEWARD_RELEASE_VERSION}_linux_${{ matrix.goarch }}.tar.gz"
+          manifest=$(tar -xOf "$archive" release.json)
+          grep -Fxq '  "schema": "steward.release.v2",' <<<"$manifest"
+          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 2, "write": 2},' <<<"$manifest"
+          grep -Fxq '    "admission_fence": {"read_min": 1, "read_max": 2, "write": 2},' <<<"$manifest"
+          grep -Fxq "  \"version\": \"${STEWARD_RELEASE_VERSION}\"," <<<"$manifest"
+          grep -Fxq '  "os": "linux",' <<<"$manifest"
+          grep -Fxq "  \"arch\": \"${{ matrix.goarch }}\"," <<<"$manifest"
+          dpkg-deb --contents "dist/steward-node_${STEWARD_RELEASE_VERSION}_${{ matrix.goarch }}.deb" | \
+            grep -q './usr/lib/steward-node/release/release.json'
+          rpm -qpl "dist/steward-node_${STEWARD_RELEASE_VERSION}_${{ matrix.goarch }}.rpm" | \
+            grep -q '/usr/lib/steward-node/release/release.json'
 
       - name: Keep one installer copy
         if: matrix.goarch == 'arm64'
@@ -126,15 +155,15 @@ jobs:
         run: |
           set -euo pipefail
           expected=(
-            steward_${STEWARD_RELEASE_VERSION}_linux_amd64.tar.gz
-            steward_${STEWARD_RELEASE_VERSION}_linux_arm64.tar.gz
-            steward_${STEWARD_RELEASE_VERSION}_darwin_amd64.tar.gz
-            steward_${STEWARD_RELEASE_VERSION}_darwin_arm64.tar.gz
-            steward-node_${STEWARD_RELEASE_VERSION}_amd64.deb
-            steward-node_${STEWARD_RELEASE_VERSION}_arm64.deb
-            steward-node_${STEWARD_RELEASE_VERSION}_amd64.rpm
-            steward-node_${STEWARD_RELEASE_VERSION}_arm64.rpm
-            install-steward.sh
+            "steward_${STEWARD_RELEASE_VERSION}_linux_amd64.tar.gz"
+            "steward_${STEWARD_RELEASE_VERSION}_linux_arm64.tar.gz"
+            "steward_${STEWARD_RELEASE_VERSION}_darwin_amd64.tar.gz"
+            "steward_${STEWARD_RELEASE_VERSION}_darwin_arm64.tar.gz"
+            "steward-node_${STEWARD_RELEASE_VERSION}_amd64.deb"
+            "steward-node_${STEWARD_RELEASE_VERSION}_arm64.deb"
+            "steward-node_${STEWARD_RELEASE_VERSION}_amd64.rpm"
+            "steward-node_${STEWARD_RELEASE_VERSION}_arm64.rpm"
+            "install-steward.sh"
           )
           for artifact in "${expected[@]}"; do
             test -f "dist/$artifact" || {

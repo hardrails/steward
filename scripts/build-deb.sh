@@ -22,7 +22,8 @@ for path in steward stewardctl steward-mcp steward-executor steward-gateway stew
 	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
 	deploy/config/gateway.json.in scripts/install-node.sh \
 	scripts/activate-node-release.sh scripts/node-preflight.sh \
-	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh scripts/build-relay-image.sh LICENSE README.md; do
+	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh \
+	scripts/node-removal-guard.sh scripts/build-relay-image.sh release.json LICENSE README.md; do
 	if [[ ! -f "$stage/$path" ]]; then
 		echo "build-deb: stage is missing $path" >&2
 		exit 2
@@ -60,13 +61,17 @@ install -d -m 0755 "$package_root/DEBIAN" \
 	"$package_root/usr/share/doc/steward-node"
 cp -R "$stage/steward" "$stage/stewardctl" "$stage/steward-mcp" "$stage/steward-executor" \
 	"$stage/steward-gateway" "$stage/steward-relay" "$stage/deploy" "$stage/scripts" \
+	"$stage/release.json" \
 	"$package_root/usr/lib/steward-node/release/"
 install -m 0644 "$stage/LICENSE" "$package_root/usr/share/doc/steward-node/copyright"
 install -m 0644 "$stage/README.md" "$package_root/usr/share/doc/steward-node/README.md"
 
 sed -e "s/@VERSION@/$deb_version/g" -e "s/@ARCH@/$deb_arch/g" \
 	"$repo/packaging/debian/control.in" >"$package_root/DEBIAN/control"
-for script in postinst prerm postrm; do
+sed -e "s/@RELEASE_VERSION@/$version/g" "$repo/packaging/debian/postinst" \
+	>"$package_root/DEBIAN/postinst"
+chmod 0755 "$package_root/DEBIAN/postinst"
+for script in prerm postrm; do
 	install -m 0755 "$repo/packaging/debian/$script" "$package_root/DEBIAN/$script"
 done
 

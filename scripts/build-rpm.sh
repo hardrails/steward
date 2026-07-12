@@ -22,7 +22,8 @@ for path in steward stewardctl steward-mcp steward-executor steward-gateway stew
 	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
 	deploy/config/gateway.json.in scripts/install-node.sh \
 	scripts/activate-node-release.sh scripts/node-preflight.sh \
-	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh scripts/build-relay-image.sh LICENSE README.md; do
+	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh \
+	scripts/node-removal-guard.sh scripts/build-relay-image.sh release.json LICENSE README.md; do
 	if [[ ! -f "$stage/$path" ]]; then
 		echo "build-rpm: stage is missing $path" >&2
 		exit 2
@@ -63,6 +64,7 @@ cp "$stage/LICENSE" "$stage/README.md" "$topdir/SOURCES/"
 sed -e "s/@VERSION@/$rpm_version/g" \
 	-e "s/@RELEASE@/$rpm_release/g" \
 	-e "s/@ARCH@/$rpm_arch/g" \
+	-e "s/@RELEASE_VERSION@/$version/g" \
 	"$repo/packaging/rpm/steward-node.spec.in" >"$topdir/SPECS/steward-node.spec"
 
 rpmbuild --define "_topdir $topdir" --target "$rpm_arch" \

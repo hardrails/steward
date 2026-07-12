@@ -17,7 +17,7 @@ Artifact source:
   --version VERSION             Release tag (default: latest)
   --offline-dir DIR             Directory containing checksums.txt and release assets
   --artifact FILE               Exact DEB, RPM, or Linux tar.gz to install
-  --checksums FILE              SHA-256 manifest (required with --artifact)
+  --checksums FILE              SHA-256 manifest; --artifact defaults to checksums.txt beside it
   --package auto|deb|rpm|tar    Override host package selection
 
 Node enrollment:
@@ -26,6 +26,11 @@ Node enrollment:
   --executor-credential FILE    Executor uplink credential JSON
   --ca-file FILE                PEM CA bundle for the control plane
   --executor-token FILE         Host-local token (securely generated if omitted)
+  --admission-policy FILE       Signed site policy (with both site-root flags)
+  --site-root-public-key FILE   Base64 Ed25519 site-root public key
+  --site-root-key-id ID         Signature key ID used by the policy
+  --node-id ID                  Stable node ID (machine-derived if omitted)
+  --allow-host-admin-intent     Let the host token select signed tenant intent
   --local-only                  Use loopback HTTP, CLI, and MCP without remote enrollment
   --reuse-configuration         Reuse and validate existing /etc/steward enrollment
   --stage-only                  Install files only; Docker daemon/runsc may be offline
@@ -46,6 +51,8 @@ Environment variables matching automation flags are also accepted: STEWARD_VERSI
 STEWARD_OFFLINE_DIR, STEWARD_ARTIFACT, STEWARD_CHECKSUMS,
 STEWARD_CONTROL_PLANE_URL, STEWARD_CREDENTIAL_FILE,
 STEWARD_EXECUTOR_CREDENTIAL_FILE, STEWARD_CA_FILE, STEWARD_EXECUTOR_TOKEN_FILE,
+STEWARD_ADMISSION_POLICY_FILE, STEWARD_SITE_ROOT_PUBLIC_KEY_FILE,
+STEWARD_SITE_ROOT_KEY_ID, STEWARD_NODE_ID, STEWARD_ALLOW_HOST_ADMIN_INTENT,
 STEWARD_LOCAL_ONLY, STEWARD_INSTALL_GVISOR, STEWARD_GVISOR_DIR, and STEWARD_GVISOR_VERSION.
 
 Supported node targets: Debian/Ubuntu (DEB), RHEL/Rocky/Alma/Fedora/Amazon Linux/
@@ -64,6 +71,11 @@ steward_credential=${STEWARD_CREDENTIAL_FILE:-}
 executor_credential=${STEWARD_EXECUTOR_CREDENTIAL_FILE:-}
 ca_file=${STEWARD_CA_FILE:-}
 executor_token=${STEWARD_EXECUTOR_TOKEN_FILE:-}
+admission_policy=${STEWARD_ADMISSION_POLICY_FILE:-}
+site_root=${STEWARD_SITE_ROOT_PUBLIC_KEY_FILE:-}
+site_root_key_id=${STEWARD_SITE_ROOT_KEY_ID:-}
+node_id=${STEWARD_NODE_ID:-}
+allow_host_admin=${STEWARD_ALLOW_HOST_ADMIN_INTENT:-false}
 gvisor_dir=${STEWARD_GVISOR_DIR:-}
 gvisor_version=${STEWARD_GVISOR_VERSION:-latest}
 install_gvisor=${STEWARD_INSTALL_GVISOR:-false}
@@ -74,6 +86,22 @@ local_only=${STEWARD_LOCAL_ONLY:-false}
 start_services=true
 assume_yes=false
 dry_run=false
+
+valid_release_version() {
+	local candidate=$1 core prerelease identifier
+	[[ $candidate =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]] || return 1
+	core=${candidate#v}
+	if [[ $core == *-* ]]; then
+		prerelease=${core#*-}
+		IFS=. read -r -a identifiers <<<"$prerelease"
+		for identifier in "${identifiers[@]}"; do
+			if [[ $identifier =~ ^[0-9]+$ && $identifier == 0[0-9]* ]]; then
+				return 1
+			fi
+		done
+	fi
+	return 0
+}
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -87,6 +115,11 @@ while [[ $# -gt 0 ]]; do
 		--executor-credential) executor_credential=${2:-}; shift 2 ;;
 		--ca-file) ca_file=${2:-}; shift 2 ;;
 		--executor-token) executor_token=${2:-}; shift 2 ;;
+		--admission-policy) admission_policy=${2:-}; shift 2 ;;
+		--site-root-public-key) site_root=${2:-}; shift 2 ;;
+		--site-root-key-id) site_root_key_id=${2:-}; shift 2 ;;
+		--node-id) node_id=${2:-}; shift 2 ;;
+		--allow-host-admin-intent) allow_host_admin=true; shift ;;
 		--local-only) local_only=true; shift ;;
 		--reuse-configuration) reuse_configuration=true; shift ;;
 		--stage-only) stage_only=true; shift ;;
@@ -110,6 +143,9 @@ case "$install_gvisor" in true | false) ;; *)
 esac
 case "$local_only" in true | false) ;; *)
 	echo "install-steward: STEWARD_LOCAL_ONLY must be true or false" >&2; exit 2 ;;
+esac
+case "$allow_host_admin" in true | false) ;; *)
+	echo "install-steward: STEWARD_ALLOW_HOST_ADMIN_INTENT must be true or false" >&2; exit 2 ;;
 esac
 if [[ $gvisor_version != latest && ! $gvisor_version =~ ^[0-9]{8}(\.[0-9]+)?$ ]]; then
 	echo "install-steward: --gvisor-version must be latest, YYYYMMDD, or YYYYMMDD.N" >&2
@@ -181,18 +217,27 @@ if [[ $non_interactive == false && ! -r /dev/tty ]]; then
 	exit 2
 fi
 if [[ $non_interactive == false ]]; then
+	remote_inputs_supplied=false
+	for value in "$control_plane_url" "$steward_credential" "$executor_credential" "$ca_file"; do
+		[[ -z $value ]] || remote_inputs_supplied=true
+	done
 	echo "Steward guided node installation"
 	echo "Detected: $os_id on $machine -> $package_kind package"
 	version=$(prompt "Release version [latest]: " "$version")
 	if [[ $stage_only == false ]]; then
-		if [[ -f /etc/steward/uplink-credential.json && \
+		if [[ $remote_inputs_supplied == false && $local_only == false && \
+			-f /etc/steward/uplink-credential.json && \
 			-f /etc/steward/executor-uplink.json ]]; then
 			if confirm "Reuse the existing Steward enrollment?" yes; then
 				reuse_configuration=true
 			fi
 		fi
 		if [[ $reuse_configuration == false ]]; then
-			if confirm "Configure this as a local-only node (HTTP, CLI, and MCP)?" yes; then
+			if [[ $remote_inputs_supplied == true ]]; then
+			echo "Using the supplied remote-enrollment inputs."
+			elif [[ $local_only == true ]]; then
+				:
+			elif confirm "Configure this as a local-only node (HTTP, CLI, and MCP)?" yes; then
 				local_only=true
 			elif ! confirm "Configure remote enrollment and activate this node now?" yes; then
 				stage_only=true
@@ -203,16 +248,74 @@ if [[ $non_interactive == false ]]; then
 				ca_file=$(prompt "Control-plane CA PEM path: " "$ca_file")
 				executor_token=$(prompt "Existing Executor token path [generate one]: " "$executor_token")
 			fi
+			if [[ $local_only == false && $stage_only == false && -z $admission_policy && -z $site_root && -z $site_root_key_id ]]; then
+				admission_answer=$(prompt "Configure signed multi-tenant admission now? [y/N] " "no")
+				case "$admission_answer" in
+				y | Y | yes | YES | Yes)
+					admission_policy=$(prompt "Signed site-policy DSSE path: " "$admission_policy")
+					site_root=$(prompt "Site-root public key path: " "$site_root")
+					site_root_key_id=$(prompt "Site-root key ID: " "$site_root_key_id")
+					node_id=$(prompt "Stable node ID [derive from machine-id]: " "$node_id")
+					;;
+				esac
+			fi
 		fi
 	fi
 fi
+
+remote_inputs_supplied=false
+for value in "$control_plane_url" "$steward_credential" "$executor_credential" "$ca_file"; do
+	[[ -z $value ]] || remote_inputs_supplied=true
+done
 
 if [[ $stage_only == true && $reuse_configuration == true ]]; then
 	echo "install-steward: --stage-only and --reuse-configuration are mutually exclusive" >&2
 	exit 2
 fi
+if [[ $local_only == true && $remote_inputs_supplied == true ]]; then
+	echo "install-steward: --local-only cannot be combined with remote-enrollment inputs" >&2
+	exit 2
+fi
+if [[ $reuse_configuration == true && $remote_inputs_supplied == true ]]; then
+	echo "install-steward: --reuse-configuration cannot replace enrollment inputs in the same run" >&2
+	exit 2
+fi
 if [[ $local_only == true && $reuse_configuration == true ]]; then
 	echo "install-steward: --local-only and --reuse-configuration are mutually exclusive" >&2
+	exit 2
+fi
+admission_required=0
+for value in "$admission_policy" "$site_root" "$site_root_key_id"; do
+	[[ -z $value ]] || ((admission_required += 1))
+done
+if (( admission_required != 0 && admission_required != 3 )); then
+	echo "install-steward: signed admission requires --admission-policy, --site-root-public-key, and --site-root-key-id together" >&2
+	exit 2
+fi
+if (( admission_required == 0 )) && { [[ -n $node_id ]] || [[ $allow_host_admin == true ]]; }; then
+	echo "install-steward: --node-id and --allow-host-admin-intent require signed admission trust inputs" >&2
+	exit 2
+fi
+if (( admission_required == 3 )); then
+	[[ $site_root_key_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$ ]] || {
+		echo "install-steward: invalid --site-root-key-id" >&2
+		exit 2
+	}
+	if [[ -n $node_id && ! $node_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+		echo "install-steward: invalid --node-id" >&2
+		exit 2
+	fi
+fi
+if [[ $stage_only == true && $admission_required -ne 0 ]]; then
+	echo "install-steward: --stage-only cannot configure signed admission; deliver trust after staging" >&2
+	exit 2
+fi
+if [[ $stage_only == true && $remote_inputs_supplied == true ]]; then
+	echo "install-steward: --stage-only cannot consume remote-enrollment inputs" >&2
+	exit 2
+fi
+if [[ $reuse_configuration == true && $admission_required -ne 0 ]]; then
+	echo "install-steward: --reuse-configuration cannot replace signed admission in the same run" >&2
 	exit 2
 fi
 if [[ $stage_only == true && $install_gvisor == true ]]; then
@@ -228,7 +331,7 @@ if [[ $stage_only == false && $reuse_configuration == false && $local_only == fa
 	done
 fi
 
-if [[ $version != latest && ! $version =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+if [[ $version != latest ]] && ! valid_release_version "$version"; then
 	echo "install-steward: version must be latest or a vX.Y.Z release tag" >&2
 	exit 2
 fi
@@ -257,6 +360,7 @@ if [[ $dry_run == true ]]; then
 	echo "  version:      $version"
 	echo "  source:       ${artifact:-${offline_dir:-$release_url}}"
 	echo "  enrollment:   $enrollment_plan"
+	echo "  admission:    $([[ $admission_required -eq 3 ]] && printf 'signed' || printf 'unchanged')"
 	echo "  service start: $start_services"
 	echo "  gVisor install: $install_gvisor"
 	exit 0
@@ -277,6 +381,32 @@ for command in docker systemctl getent useradd runuser; do
 	}
 done
 
+# Fail before downloading or installing a package when enrollment material is
+# not actually available. Dry-run intentionally exits above this point so CI
+# and operators can inspect plans with placeholder paths.
+if [[ $stage_only == false && $reuse_configuration == false ]]; then
+	if [[ $local_only == false ]]; then
+		for input in "$steward_credential" "$executor_credential" "$ca_file"; do
+			if [[ ! -f $input || ! -r $input ]]; then
+				echo "install-steward: enrollment input is not a readable regular file: $input" >&2
+				exit 2
+			fi
+		done
+	fi
+	if [[ -n $executor_token && ( ! -f $executor_token || ! -r $executor_token ) ]]; then
+		echo "install-steward: Executor token is not a readable regular file: $executor_token" >&2
+		exit 2
+	fi
+	if (( admission_required == 3 )); then
+		for input in "$admission_policy" "$site_root"; do
+			if [[ ! -f $input || ! -r $input || -L $input ]]; then
+				echo "install-steward: admission trust input must be a readable regular file, not a symlink: $input" >&2
+				exit 2
+			fi
+		done
+	fi
+fi
+
 has_runsc() {
 	docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"runsc"'
 }
@@ -290,7 +420,7 @@ if [[ $stage_only == false ]]; then
 		(systemctl is-active --quiet steward.service || \
 			systemctl is-active --quiet steward-executor.service || \
 			systemctl is-active --quiet steward-gateway.service); then
-		echo "install-steward: --no-start requires both Steward services to be stopped" >&2
+		echo "install-steward: --no-start requires all three Steward services to be stopped" >&2
 		echo "  Use --stage-only to stage an upgrade without disrupting a running node." >&2
 		exit 2
 	fi
@@ -344,7 +474,7 @@ verify_sha256() {
 install_deb() {
 	local output="$work/dpkg-install.log" status deadline=$((SECONDS + 60))
 	while true; do
-		if dpkg -i "$artifact" >"$output" 2>&1; then
+		if STEWARD_EXPECTED_VERSION="$version" dpkg -i "$artifact" >"$output" 2>&1; then
 			cat "$output"
 			return 0
 		else
@@ -458,7 +588,7 @@ elif [[ -z $artifact ]]; then
 		checksums=${checksums:-"$(dirname "$artifact")/checksums.txt"}
 fi
 
-if [[ ! $version =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+if ! valid_release_version "$version"; then
 	echo "install-steward: resolved artifact version is not a valid release tag: $version" >&2
 	exit 2
 fi
@@ -481,7 +611,7 @@ case "$package_kind" in
 		;;
 	rpm)
 		command -v rpm >/dev/null || { echo "install-steward: rpm is required" >&2; exit 2; }
-		rpm -Uvh "$artifact"
+		STEWARD_EXPECTED_VERSION="$version" rpm -Uvh "$artifact"
 		;;
 	tar)
 		archive_dir="$work/archive"
@@ -491,9 +621,21 @@ case "$package_kind" in
 			exit 1
 		fi
 		tar -xzf "$artifact" -C "$archive_dir"
-		bash "$archive_dir/scripts/install-node.sh"
+		STEWARD_EXPECTED_VERSION="$version" bash "$archive_dir/scripts/install-node.sh" \
+			--expected-version "$version"
 		;;
 esac
+
+installed_manifest="/opt/steward/releases/$version/release.json"
+if [[ ! -f $installed_manifest || -L $installed_manifest ]]; then
+	echo "install-steward: installed release is missing regular file $installed_manifest" >&2
+	exit 1
+fi
+installed_version=$(sed -n 's/^  "version": "\([^"]*\)",$/\1/p' "$installed_manifest")
+if [[ $installed_version != "$version" ]]; then
+	echo "install-steward: installed manifest reports '${installed_version:-<invalid>}', expected '$version'" >&2
+	exit 1
+fi
 
 if [[ $stage_only == true ]]; then
 	echo "install-steward: $version is installed but not configured or started; upgrades remain staged"
@@ -517,14 +659,23 @@ else
 	if [[ -n $executor_token ]]; then
 		configure_args+=(--executor-token "$executor_token")
 	fi
+	if (( admission_required == 3 )); then
+		configure_args+=(
+			--admission-policy "$admission_policy"
+			--site-root-public-key "$site_root"
+			--site-root-key-id "$site_root_key_id"
+		)
+		[[ -z $node_id ]] || configure_args+=(--node-id "$node_id")
+		[[ $allow_host_admin == false ]] || configure_args+=(--allow-host-admin-intent)
+	fi
 	/usr/local/libexec/steward/configure-node "${configure_args[@]}"
 fi
 
 if [[ $start_services == true ]]; then
-	/usr/local/libexec/steward/activate-node-release "$version" --restart
+	"/opt/steward/releases/$version/integration/scripts/activate-node-release.sh" "$version" --restart
 	systemctl enable --now steward-gateway.service steward.service steward-executor.service
 	echo "install-steward: Steward $version is installed, configured, and running"
 else
-	/usr/local/libexec/steward/activate-node-release "$version"
+	"/opt/steward/releases/$version/integration/scripts/activate-node-release.sh" "$version"
 	echo "install-steward: Steward $version is installed and active; service enablement was not changed"
 fi

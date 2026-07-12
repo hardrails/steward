@@ -18,8 +18,9 @@ case "${1:-}" in
 		;;
 esac
 
-if [ "${1:-}" = purge ]; then
-	rm -rf /etc/steward
+if [ "${1:-}" = purge ] && [ -d /etc/steward ]; then
+	echo "steward-node: preserving /etc/steward because package purge does not retire durable node identity" >&2
+	echo "  Use the versioned uninstall-node helper with --purge-config --purge-data for an explicit guarded retirement." >&2
 fi
 
 exit 0

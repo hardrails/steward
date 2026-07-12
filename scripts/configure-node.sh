@@ -12,6 +12,13 @@ Remote enrollment (omit with --local-only):
   --executor-credential FILE    Executor uplink credential JSON
   --ca-file FILE                PEM CA bundle for the control plane
 
+Signed admission (all trust inputs are optional as one group):
+  --admission-policy FILE       Site-root-signed site policy DSSE envelope
+  --site-root-public-key FILE   Base64 Ed25519 site-root public key
+  --site-root-key-id ID         Signature key ID used by the policy
+  --node-id ID                  Stable node ID (machine-derived if omitted)
+  --allow-host-admin-intent     Let the host token select signed tenant intent
+
 Optional:
   --local-only                 Configure loopback HTTP, CLI, and MCP without an uplink
   --executor-token FILE         Existing host-local bearer token; generated if omitted
@@ -19,7 +26,8 @@ Optional:
   -h, --help                    Show this help
 
 The operation is transactional through preflight: invalid input restores the
-previous files under /etc/steward. Existing Executor fence state is never reset.
+previous files under /etc/steward and removes state files created by this run.
+Existing Executor fence, journal, and evidence state is never reset.
 EOF
 }
 
@@ -28,6 +36,11 @@ steward_credential=
 executor_credential=
 ca_file=
 executor_token=
+admission_policy=
+site_root=
+site_root_key_id=
+node_id=
+allow_host_admin=false
 start_services=true
 local_only=false
 while [[ $# -gt 0 ]]; do
@@ -37,6 +50,11 @@ while [[ $# -gt 0 ]]; do
 		--executor-credential) executor_credential=${2:-}; shift 2 ;;
 		--ca-file) ca_file=${2:-}; shift 2 ;;
 		--executor-token) executor_token=${2:-}; shift 2 ;;
+		--admission-policy) admission_policy=${2:-}; shift 2 ;;
+		--site-root-public-key) site_root=${2:-}; shift 2 ;;
+		--site-root-key-id) site_root_key_id=${2:-}; shift 2 ;;
+		--node-id) node_id=${2:-}; shift 2 ;;
+		--allow-host-admin-intent) allow_host_admin=true; shift ;;
 		--local-only) local_only=true; shift ;;
 		--no-start) start_services=false; shift ;;
 		-h | --help) usage; exit 0 ;;
@@ -79,6 +97,34 @@ if [[ -n $executor_token && ( ! -f $executor_token || ! -r $executor_token ) ]];
 	echo "configure-node: Executor token is not a readable regular file: $executor_token" >&2
 	exit 2
 fi
+admission_required=0
+for value in "$admission_policy" "$site_root" "$site_root_key_id"; do
+	[[ -z $value ]] || ((admission_required += 1))
+done
+if (( admission_required != 0 && admission_required != 3 )); then
+	echo "configure-node: signed admission requires --admission-policy, --site-root-public-key, and --site-root-key-id together" >&2
+	exit 2
+fi
+if (( admission_required == 0 )) && { [[ -n $node_id ]] || [[ $allow_host_admin == true ]]; }; then
+	echo "configure-node: --node-id and --allow-host-admin-intent require signed admission trust inputs" >&2
+	exit 2
+fi
+if (( admission_required == 3 )); then
+	for input in "$admission_policy" "$site_root"; do
+		if [[ ! -f $input || ! -r $input || -L $input ]]; then
+			echo "configure-node: admission trust input must be a readable regular file, not a symlink: $input" >&2
+			exit 2
+		fi
+	done
+	[[ $site_root_key_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$ ]] || {
+		echo "configure-node: invalid --site-root-key-id" >&2
+		exit 2
+	}
+	if [[ -n $node_id && ! $node_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+		echo "configure-node: invalid --node-id" >&2
+		exit 2
+	fi
+fi
 for identity in steward steward-executor steward-gateway; do
 	id "$identity" >/dev/null 2>&1 || {
 		echo "configure-node: missing service identity $identity; install Steward first" >&2
@@ -92,6 +138,10 @@ for path in /etc/steward/steward.json /etc/steward/executor.env \
 		exit 2
 	fi
 done
+if (( admission_required == 3 )) && [[ ! -x /usr/local/libexec/steward/configure-admission ]]; then
+	echo "configure-node: missing signed-admission configurator; install Steward first" >&2
+	exit 2
+fi
 
 install -d -o root -g root -m 0755 /etc/steward
 backup_dir=$(mktemp -d /etc/steward/.configure-backup.XXXXXX)
@@ -103,6 +153,10 @@ targets=(
 	/etc/steward/executor-uplink.json
 	/etc/steward/executor-token
 	/etc/steward/control-plane-ca.pem
+	/etc/steward/site-policy.dsse.json
+	/etc/steward/site-root.public
+	/etc/steward/node-receipts.private.pem
+	/etc/steward/node-receipts.public
 )
 for target in "${targets[@]}"; do
 	name=${target##*/}
@@ -118,8 +172,14 @@ steward_tmp=
 executor_tmp=
 token_tmp=
 atomic_tmp=
-fence=/var/lib/steward-executor/uplink-state.json
-fence_created=false
+uplink_fence=/var/lib/steward-executor/uplink-state.json
+admission_fence=/var/lib/steward-executor/admission-fences.bin
+operation_journal=/var/lib/steward-executor/operation-journal.bin
+evidence_log=/var/lib/steward-executor/evidence.bin
+uplink_fence_created=false
+admission_fence_created=false
+operation_journal_created=false
+evidence_log_created=false
 rollback() {
 	status=$?
 	trap - ERR INT TERM
@@ -133,9 +193,10 @@ rollback() {
 				rm -f -- "$target"
 			fi
 		done
-		if [[ $fence_created == true ]]; then
-			rm -f -- "$fence"
-		fi
+		[[ $uplink_fence_created == false ]] || rm -f -- "$uplink_fence"
+		[[ $admission_fence_created == false ]] || rm -f -- "$admission_fence"
+		[[ $operation_journal_created == false ]] || rm -f -- "$operation_journal"
+		[[ $evidence_log_created == false ]] || rm -f -- "$evidence_log"
 		echo "configure-node: preflight failed; restored previous configuration" >&2
 	fi
 	rm -f -- "${steward_tmp:-}" "${executor_tmp:-}" "${token_tmp:-}" "${atomic_tmp:-}"
@@ -236,22 +297,65 @@ elif [[ ! -e /etc/steward/executor-token ]]; then
 	token_tmp=
 fi
 
-# A fresh package ships an empty positive-capability topology. Derive the relay
-# image from the already checksum-verified Steward binary, build it with no build
-# network, pin the resulting image digest, and configure the four narrow Executor
-# arguments. Preserve an existing non-empty operator-managed topology.
-gateway_line=$(grep -v '^[[:space:]]*#' /etc/steward/executor-gateway.env 2>/dev/null | grep -v '^[[:space:]]*$' || true)
-if [[ -z $gateway_line || $gateway_line == EXECUTOR_GATEWAY_ARGS= ]]; then
-	/usr/local/libexec/steward/build-relay-image --configure
-	derived_relay=true
-else
-	derived_relay=false
+if [[ $local_only == false && ! -e $uplink_fence && ! -L $uplink_fence ]]; then
+	uplink_fence_created=true
+	runuser -u steward-executor -- /usr/local/bin/steward-executor \
+		-initialize-uplink-state -uplink-state-file "$uplink_fence"
 fi
 
-if [[ $local_only == false && ! -e $fence ]]; then
-	fence_created=true
-	runuser -u steward-executor -- /usr/local/bin/steward-executor \
-		-initialize-uplink-state -uplink-state-file "$fence"
+# Install admission trust inside this outer transaction when supplied. The
+# helper performs its own semantic verification and local rollback; this script
+# additionally owns every file it could create so a later failure restores the
+# entire node, not just the nested step.
+if (( admission_required == 3 )); then
+	[[ -e $admission_fence || -L $admission_fence ]] || admission_fence_created=true
+	[[ -e $operation_journal || -L $operation_journal ]] || operation_journal_created=true
+	[[ -e $evidence_log || -L $evidence_log ]] || evidence_log_created=true
+	admission_args=(
+		--policy "$admission_policy"
+		--site-root-public-key "$site_root"
+		--site-root-key-id "$site_root_key_id"
+		--no-restart
+	)
+	[[ -z $node_id ]] || admission_args+=(--node-id "$node_id")
+	[[ $allow_host_admin == false ]] || admission_args+=(--allow-host-admin-intent)
+	/usr/local/libexec/steward/configure-admission "${admission_args[@]}"
+fi
+
+admission_env_complete() {
+	awk -F= '
+		BEGIN {
+			required["EXECUTOR_ADMISSION_POLICY_FILE"] = 1
+			required["EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE"] = 1
+			required["EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID"] = 1
+			required["EXECUTOR_ADMISSION_NODE_ID"] = 1
+			required["EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE"] = 1
+		}
+		$1 in required {
+			if (seen[$1]++) bad = 1
+			if (length(substr($0, index($0, "=") + 1)) > 0) set++
+		}
+		END {
+			if (bad) exit 2
+			exit set == 5 ? 0 : 1
+		}
+	' /etc/steward/executor.env
+}
+
+# A fresh package ships an empty positive-capability topology. Derive it only
+# after all signed-admission inputs exist. Gateway arguments themselves request
+# secure admission, so installing them on a legacy or half-enrolled node makes
+# the Executor correctly fail closed.
+derived_relay=false
+if admission_env_complete; then
+	[[ -e $operation_journal || -L $operation_journal ]] || operation_journal_created=true
+	[[ -e $evidence_log || -L $evidence_log ]] || evidence_log_created=true
+	gateway_line=$(grep -v '^[[:space:]]*#' /etc/steward/executor-gateway.env 2>/dev/null | grep -v '^[[:space:]]*$' || true)
+	if [[ -z $gateway_line || $gateway_line == EXECUTOR_GATEWAY_ARGS= ]]; then
+		/usr/local/libexec/steward/node-preflight
+		/usr/local/libexec/steward/build-relay-image --configure
+		derived_relay=true
+	fi
 fi
 /usr/local/libexec/steward/node-preflight
 
@@ -259,7 +363,10 @@ committed=true
 trap - ERR INT TERM
 rm -rf -- "$backup_dir"
 if [[ $start_services == true ]]; then
-	systemctl enable --now steward-gateway.service steward.service steward-executor.service
+	systemctl enable steward-gateway.service steward.service steward-executor.service
+	# enable --now does not reload an already-active service. A configurator run
+	# must make the validated files effective, including on a re-enrolled node.
+	systemctl restart steward-gateway.service steward.service steward-executor.service
 	echo "configure-node: Steward is configured, validated, enabled, and running"
 else
 	echo "configure-node: Steward is configured and validated; service state was not changed"
