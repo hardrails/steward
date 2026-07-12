@@ -26,7 +26,9 @@ func TestLoadConfigValidatesRoutesAndSecretPermissions(t *testing.T) {
 		Version: 1, ControlSocket: filepath.Join(directory, "control.sock"),
 		ServiceAddress: "127.0.0.1:8092", ServiceTokenFile: token,
 		StateFile: filepath.Join(directory, "state.json"), GrantRoot: filepath.Join(directory, "grants"),
-		ExecutorGID: os.Getgid(), RelayGID: os.Getgid(),
+		// Configuration deliberately rejects root group IDs. Use a stable
+		// non-root fixture so the test also runs inside a root build container.
+		ExecutorGID: 1, RelayGID: 1,
 		Routes: []Route{{ID: "local", BaseURL: "http://127.0.0.1:11434/v1", CredentialFile: credential, MaxConcurrent: 2}},
 	}
 	raw, _ := json.Marshal(config)
@@ -54,6 +56,9 @@ func TestConfigRejectsUnsafeOriginsAndAddresses(t *testing.T) {
 	}
 	for _, mutate := range []func(*Config){
 		func(config *Config) { config.ServiceAddress = "0.0.0.0:8092" },
+		func(config *Config) { config.ServiceAddress = "127.0.0.1:0" },
+		func(config *Config) { config.ServiceAddress = "127.0.0.1:65536" },
+		func(config *Config) { config.ServiceAddress = "127.0.0.1:not-a-port" },
 		func(config *Config) { config.Routes[0].BaseURL = "file:///etc/passwd" },
 		func(config *Config) { config.Routes[0].BaseURL = "http://user@example.test" },
 		func(config *Config) { config.Routes[0].BaseURL = "http://example.test/path" },

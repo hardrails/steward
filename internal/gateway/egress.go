@@ -9,9 +9,10 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
+
+const tlsClientHelloTimeout = 5 * time.Second
 
 func (s *Server) listenEgressGrantLocked(id string) error {
 	if listener := s.egressListeners[id]; listener != nil {
@@ -26,7 +27,7 @@ func (s *Server) listenEgressGrantLocked(id string) error {
 	s.egressListeners[id] = listener
 	server := &http.Server{
 		Handler: s.egressHandler(id), ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout: 30 * time.Second,
+		IdleTimeout: 30 * time.Second, MaxHeaderBytes: maxHTTPHeaderBytes,
 	}
 	go func() { _ = server.Serve(listener) }()
 	return nil
@@ -195,37 +196,20 @@ func containsPort(ports []int, port int) bool {
 func resolveAllowedIP(ctx context.Context, host string, destination loadedEgressDestination) (netip.Addr, error) {
 	var addresses []netip.Addr
 	if literal, err := netip.ParseAddr(host); err == nil {
-		addresses = []netip.Addr{literal.Unmap()}
+		addresses = []netip.Addr{literal}
 	} else {
 		resolved, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		if err != nil {
 			return netip.Addr{}, err
 		}
-		for _, address := range resolved {
-			addresses = append(addresses, address.Unmap())
-		}
+		addresses = append(addresses, resolved...)
 	}
 	for _, address := range addresses {
 		if addressAllowed(address, destination.prefixes) {
-			return address, nil
+			return address.Unmap(), nil
 		}
 	}
 	return netip.Addr{}, errors.New("no allowed address")
-}
-
-func addressAllowed(address netip.Addr, prefixes []netip.Prefix) bool {
-	if !address.IsValid() || address.IsUnspecified() || address.IsLinkLocalMulticast() || address.IsMulticast() {
-		return false
-	}
-	if len(prefixes) > 0 {
-		for _, prefix := range prefixes {
-			if prefix.Contains(address) {
-				return true
-			}
-		}
-		return false
-	}
-	return address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast()
 }
 
 func (s *Server) proxyHTTP(w http.ResponseWriter, incoming *http.Request, grant Grant, routeID string, route loadedEgressRoute, host string, port int, ip netip.Addr) {
@@ -247,7 +231,8 @@ func (s *Server) proxyHTTP(w http.ResponseWriter, incoming *http.Request, grant 
 	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
 	transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
-	}, ResponseHeaderTimeout: 30 * time.Second, IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: 10 * time.Second}
+	}, ResponseHeaderTimeout: 30 * time.Second, MaxResponseHeaderBytes: maxHTTPHeaderBytes,
+		IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: 10 * time.Second}
 	defer transport.CloseIdleConnections()
 	response, err := transport.RoundTrip(request)
 	if err != nil {
@@ -262,15 +247,14 @@ func (s *Server) proxyHTTP(w http.ResponseWriter, incoming *http.Request, grant 
 		return
 	}
 	copyHeaders(w.Header(), response.Header)
+	unknownLength := prepareBoundedHTTPResponse(w, response.ContentLength)
 	w.WriteHeader(response.StatusCode)
-	written, copyErr := io.Copy(w, io.LimitReader(response.Body, route.MaxResponseBytes+1))
-	reason := "completed"
-	if copyErr != nil {
-		reason = "stream_failed"
-	} else if written > route.MaxResponseBytes {
-		reason = "response_too_large"
+	result := copyHTTPResponseBody(w, response.Body, route.MaxResponseBytes, unknownLength)
+	s.finishEgress(grant, routeID, result.reason, incoming.Method, host, port,
+		max64(incoming.ContentLength, 0), min64(result.written, route.MaxResponseBytes))
+	if result.abort {
+		panic(http.ErrAbortHandler)
 	}
-	s.finishEgress(grant, routeID, reason, incoming.Method, host, port, max64(incoming.ContentLength, 0), min64(written, route.MaxResponseBytes))
 }
 
 func (s *Server) proxyConnect(w http.ResponseWriter, incoming *http.Request, grant Grant, routeID string, route loadedEgressRoute, host string, port int, ip netip.Addr) {
@@ -286,8 +270,12 @@ func (s *Server) proxyConnect(w http.ResponseWriter, incoming *http.Request, gra
 	defer agent.Close()
 	stopAgent := context.AfterFunc(incoming.Context(), func() { _ = agent.Close() })
 	defer stopAgent()
-	deadline := time.Now().Add(time.Duration(route.MaxTunnelSeconds) * time.Second)
-	_ = agent.SetDeadline(deadline)
+	now := time.Now()
+	deadline := now.Add(time.Duration(route.MaxTunnelSeconds) * time.Second)
+	helloDeadline := boundedTLSClientHelloDeadline(now, deadline)
+	// A CONNECT slot receives only a short handshake window until the TLS SNI
+	// proves that the encrypted destination matches the signed route.
+	_ = agent.SetDeadline(helloDeadline)
 	_, _ = buffer.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
 	if err := buffer.Flush(); err != nil {
 		return
@@ -301,6 +289,7 @@ func (s *Server) proxyConnect(w http.ResponseWriter, incoming *http.Request, gra
 		s.denyEgress(grant, "byte_limit", incoming.Method, host, port)
 		return
 	}
+	_ = agent.SetDeadline(deadline)
 	if err := s.recordEgressAllow(grant, routeID, incoming.Method, host, port); err != nil {
 		s.updateEgressStats(grant.GrantID, egressAuditEvent{Decision: "deny", Reason: "audit_unavailable", Host: host, Port: port})
 		return
@@ -318,22 +307,56 @@ func (s *Server) proxyConnect(w http.ResponseWriter, incoming *http.Request, gra
 		s.finishEgress(grant, routeID, "upstream_unavailable", incoming.Method, host, port, int64(len(clientHello)), 0)
 		return
 	}
-	var wait sync.WaitGroup
 	fromAgent := int64(len(clientHello))
-	var remainingFromAgent, toAgent int64
-	wait.Add(2)
-	go func() {
-		defer wait.Done()
-		remainingFromAgent, _ = copyBounded(upstream, buffer.Reader, route.MaxRequestBytes-fromAgent)
-	}()
-	go func() { defer wait.Done(); toAgent, _ = copyBounded(agent, upstream, route.MaxResponseBytes) }()
-	wait.Wait()
+	remainingFromAgent, toAgent := bridgeConnect(agent, buffer.Reader, upstream, route.MaxRequestBytes-fromAgent, route.MaxResponseBytes)
 	fromAgent += remainingFromAgent
 	reason := "completed"
 	if fromAgent > route.MaxRequestBytes || toAgent > route.MaxResponseBytes {
 		reason = "byte_limit"
 	}
 	s.finishEgress(grant, routeID, reason, incoming.Method, host, port, min64(fromAgent, route.MaxRequestBytes), min64(toAgent, route.MaxResponseBytes))
+}
+
+func boundedTLSClientHelloDeadline(now, tunnelDeadline time.Time) time.Time {
+	helloDeadline := now.Add(tlsClientHelloTimeout)
+	if tunnelDeadline.Before(helloDeadline) {
+		return tunnelDeadline
+	}
+	return helloDeadline
+}
+
+type connectCopyResult struct {
+	fromAgent bool
+	written   int64
+}
+
+// bridgeConnect closes both peers as soon as either copy finishes. Without
+// peer cancellation, a half-open or failed tunnel can retain its route slot
+// until the full (potentially 24-hour) tunnel deadline.
+func bridgeConnect(agent net.Conn, agentReader io.Reader, upstream net.Conn, maxFromAgent, maxToAgent int64) (int64, int64) {
+	results := make(chan connectCopyResult, 2)
+	go func() {
+		written, _ := copyBounded(upstream, agentReader, maxFromAgent)
+		results <- connectCopyResult{fromAgent: true, written: written}
+	}()
+	go func() {
+		written, _ := copyBounded(agent, upstream, maxToAgent)
+		results <- connectCopyResult{written: written}
+	}()
+
+	first := <-results
+	_ = agent.Close()
+	_ = upstream.Close()
+	second := <-results
+	var fromAgent, toAgent int64
+	for _, result := range []connectCopyResult{first, second} {
+		if result.fromAgent {
+			fromAgent = result.written
+		} else {
+			toAgent = result.written
+		}
+	}
+	return fromAgent, toAgent
 }
 
 func writeAllBytes(destination io.Writer, value []byte) error {
@@ -358,7 +381,19 @@ func tlsServerNameAllowed(host, serverName string) bool {
 }
 
 func copyBounded(destination io.Writer, source io.Reader, maximum int64) (int64, error) {
-	return io.Copy(destination, io.LimitReader(source, maximum+1))
+	written, err := io.Copy(destination, io.LimitReader(source, maximum))
+	if err != nil || written < maximum {
+		return written, err
+	}
+	var probe [1]byte
+	count, probeErr := io.ReadFull(source, probe[:])
+	if count > 0 {
+		return written + int64(count), nil
+	}
+	if errors.Is(probeErr, io.EOF) || errors.Is(probeErr, io.ErrUnexpectedEOF) {
+		return written, nil
+	}
+	return written, probeErr
 }
 
 func (s *Server) denyEgress(grant Grant, reason, method, host string, port int) {

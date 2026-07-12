@@ -276,21 +276,27 @@ func TestGatewayReloadFencesGrantedRoutesAndRuntimePaths(t *testing.T) {
 	defer server.audit.Close()
 	grant := Grant{GrantID: GrantID("tenant", "agent", 1), TenantID: "tenant", InstanceID: "agent", Generation: 1, EgressRouteIDs: []string{"web"}}
 	server.grants[grant.GrantID] = grant
+	server.policyDigests[grant.GrantID] = server.routePolicyDigestLocked(grant)
+	server.credentialDigests[grant.GrantID] = routeCredentialBindingDigest(grant, server.routes)
 	changed := config
 	changed.EgressRoutes = append([]EgressRoute(nil), config.EgressRoutes...)
 	changed.EgressRoutes[0].MaxConcurrent = 2
 	changedRoutes, _ := changed.validateEgressRoutes()
-	server.egressSemaphores["web"] <- struct{}{}
-	if err := server.Reload(changed, nil, changedRoutes, "token-b"); err == nil || !strings.Contains(err.Error(), "busy egress route") {
-		t.Fatalf("busy limit change accepted: %v", err)
+	if err := server.Reload(changed, nil, changedRoutes, "token-b"); err == nil || !strings.Contains(err.Error(), "retained grant") {
+		t.Fatalf("retained route limit change accepted: %v", err)
 	}
 	if cap(server.egressSemaphores["web"]) != 1 {
 		t.Fatal("failed reload changed the live egress semaphore")
 	}
-	<-server.egressSemaphores["web"]
+	delete(server.grants, grant.GrantID)
+	delete(server.policyDigests, grant.GrantID)
+	delete(server.credentialDigests, grant.GrantID)
 	if err := server.Reload(changed, nil, changedRoutes, "token-b"); err != nil || cap(server.egressSemaphores["web"]) != 2 {
-		t.Fatalf("reload err=%v capacity=%d", err, cap(server.egressSemaphores["web"]))
+		t.Fatalf("unreferenced route reload err=%v capacity=%d", err, cap(server.egressSemaphores["web"]))
 	}
+	server.grants[grant.GrantID] = grant
+	server.policyDigests[grant.GrantID] = server.routePolicyDigestLocked(grant)
+	server.credentialDigests[grant.GrantID] = routeCredentialBindingDigest(grant, server.routes)
 	if err := server.Reload(changed, nil, nil, "token-b"); err == nil || !strings.Contains(err.Error(), "removes egress route") {
 		t.Fatalf("granted route removal accepted: %v", err)
 	}
@@ -305,6 +311,22 @@ func TestEgressHTTPFailureModesAreBoundedAndFailClosed(t *testing.T) {
 		if r.URL.Path == "/large" {
 			w.Header().Set("Content-Length", "20")
 			_, _ = w.Write([]byte("01234567890123456789"))
+			return
+		}
+		if r.URL.Path == "/stream-large" {
+			w.(http.Flusher).Flush()
+			_, _ = w.Write([]byte("012345"))
+			return
+		}
+		if r.URL.Path == "/stream-fail" {
+			connection, buffer, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Errorf("hijack truncated response: %v", err)
+				return
+			}
+			defer connection.Close()
+			_, _ = buffer.WriteString("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n12")
+			_ = buffer.Flush()
 			return
 		}
 		_, _ = w.Write([]byte("ok"))
@@ -357,6 +379,24 @@ func TestEgressHTTPFailureModesAreBoundedAndFailClosed(t *testing.T) {
 	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "response_too_large") {
 		t.Fatalf("response limit status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+	request = httptest.NewRequest(http.MethodGet, upstream.URL+"/stream-large", nil)
+	recorder = httptest.NewRecorder()
+	expectHTTPAbort(t, func() { handler.ServeHTTP(recorder, request) })
+	stats := server.egressStats[grant.GrantID]
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "01234" ||
+		recorder.Header().Get(streamStatusTrailer) != "response_too_large" ||
+		stats.LastDecision != "terminal:response_too_large" || stats.BytesToAgent != 5 {
+		t.Fatalf("stream limit status=%d body=%q stats=%#v", recorder.Code, recorder.Body.String(), stats)
+	}
+	request = httptest.NewRequest(http.MethodGet, upstream.URL+"/stream-fail", nil)
+	recorder = httptest.NewRecorder()
+	expectHTTPAbort(t, func() { handler.ServeHTTP(recorder, request) })
+	stats = server.egressStats[grant.GrantID]
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "12" ||
+		recorder.Header().Get(streamStatusTrailer) != "stream_failed" ||
+		stats.LastDecision != "terminal:stream_failed" {
+		t.Fatalf("stream failure status=%d body=%q stats=%#v", recorder.Code, recorder.Body.String(), stats)
+	}
 	if err := audit.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -366,6 +406,58 @@ func TestEgressHTTPFailureModesAreBoundedAndFailClosed(t *testing.T) {
 	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "audit_unavailable") {
 		t.Fatalf("audit status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+}
+
+func TestConnectCopyBoundedNeverForwardsTheProbeByte(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		source  string
+		wantN   int64
+		wantOut string
+	}{
+		{name: "below limit", source: "1234", wantN: 4, wantOut: "1234"},
+		{name: "exact limit", source: "12345", wantN: 5, wantOut: "12345"},
+		{name: "over limit", source: "123456", wantN: 6, wantOut: "12345"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var destination strings.Builder
+			written, err := copyBounded(&destination, strings.NewReader(test.source), 5)
+			if err != nil || written != test.wantN || destination.String() != test.wantOut {
+				t.Fatalf("written=%d output=%q err=%v", written, destination.String(), err)
+			}
+		})
+	}
+}
+
+func TestConnectHandshakeDeadlineAndBridgePeerCancellation(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	longTunnel := now.Add(time.Hour)
+	if got := boundedTLSClientHelloDeadline(now, longTunnel); got != now.Add(tlsClientHelloTimeout) {
+		t.Fatalf("long tunnel hello deadline=%v", got)
+	}
+	shortTunnel := now.Add(time.Second)
+	if got := boundedTLSClientHelloDeadline(now, shortTunnel); got != shortTunnel {
+		t.Fatalf("short tunnel hello deadline=%v", got)
+	}
+
+	agent, agentPeer := net.Pipe()
+	upstream, upstreamPeer := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		bridgeConnect(agent, agent, upstream, 1024, 1024)
+		close(done)
+	}()
+	_ = upstreamPeer.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("one closed CONNECT direction left its peer copy blocked")
+	}
+	_ = agentPeer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := agentPeer.Read(make([]byte, 1)); err == nil {
+		t.Fatal("CONNECT bridge did not close the opposite peer")
+	}
+	_ = agentPeer.Close()
 }
 
 func TestResolveAllowedIPAndProxyDestinationValidation(t *testing.T) {

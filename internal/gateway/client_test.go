@@ -32,7 +32,7 @@ func TestControlClientCoversBoundedGrantLifecycle(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/grants/"+grant.GrantID:
-			_ = json.NewEncoder(w).Encode(grant)
+			_ = json.NewEncoder(w).Encode(GrantInspection{Grant: grant, RoutePolicyDigest: "sha256:test"})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/grants/"+grant.GrantID+"/egress":
 			_ = json.NewEncoder(w).Encode(EgressStats{Allowed: 3})
 		case r.Method == http.MethodPost && (r.URL.Path == "/v1/grants/"+grant.GrantID+"/activate" || r.URL.Path == "/v1/grants/"+grant.GrantID+"/deactivate"):
@@ -56,6 +56,10 @@ func TestControlClientCoversBoundedGrantLifecycle(t *testing.T) {
 	got, err := client.Inspect(ctx, grant.GrantID)
 	if err != nil || !grantsEqual(got, grant) {
 		t.Fatalf("inspect=%#v err=%v", got, err)
+	}
+	inspection, err := client.InspectWithPolicy(ctx, grant.GrantID)
+	if err != nil || !grantsEqual(inspection.Grant, grant) || inspection.RoutePolicyDigest != "sha256:test" {
+		t.Fatalf("policy inspection=%#v err=%v", inspection, err)
 	}
 	if err := client.Activate(ctx, grant.GrantID); err != nil {
 		t.Fatal(err)

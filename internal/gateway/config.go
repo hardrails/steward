@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/hardrails/steward/internal/dsse"
@@ -104,8 +105,9 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 	if len(c.ControlSocket) > 103 || len(inferenceSocketPath(c.GrantRoot, "grant-"+strings.Repeat("a", 64))) > 103 {
 		return nil, errors.New("gateway Unix socket paths must not exceed 103 bytes")
 	}
-	host, _, err := net.SplitHostPort(c.ServiceAddress)
-	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+	host, portText, err := net.SplitHostPort(c.ServiceAddress)
+	port, portErr := strconv.Atoi(portText)
+	if err != nil || portErr != nil || port < 1 || port > 65535 || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return nil, errors.New("gateway service_address must be an explicit loopback IP and port")
 	}
 	loaded := make(map[string]loadedRoute, len(c.Routes))
