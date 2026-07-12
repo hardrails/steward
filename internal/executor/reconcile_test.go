@@ -757,19 +757,75 @@ func TestReconcilePolicyRotationRevokesInSafeOrder(t *testing.T) {
 	}
 }
 
-func TestReconcileNeverOperatesDriftedWorkload(t *testing.T) {
-	rig := newReconcileRig(t, false)
+func TestReconcileContainsExactManagedWorkloadWithHardeningDrift(t *testing.T) {
+	rig := newReconcileRig(t, true)
 	rig.docker.setHardened(false)
 	before := rig.config.Evidence.NextSequence()
+
 	report, err := rig.server.Reconcile(context.Background())
-	if !errors.Is(err, ErrReconciliationIncomplete) || report.Ready || len(report.Failures) != 1 || report.Failures[0].Code != "workload_drift" {
+	if !errors.Is(err, ErrReconciliationIncomplete) || report.Ready || report.Changed != 1 || report.Revoked != 0 ||
+		len(report.Failures) != 1 || report.Failures[0].Code != "workload_drift" {
 		t.Fatalf("report=%#v err=%v", report, err)
 	}
-	if events := rig.recorder.snapshot(); len(events) != 0 {
-		t.Fatalf("mutations = %#v", events)
+	if events := strings.Join(rig.recorder.snapshot(), ","); events != "deactivate_grant,stop_agent,stop_relay" {
+		t.Fatalf("containment order=%q", events)
 	}
-	if rig.config.Evidence.NextSequence() != before || len(rig.config.Journal.Pending()) != 0 {
-		t.Fatal("drift validation must not journal or receipt a mutation")
+	agent, relay := rig.docker.states()
+	grant, _ := rig.gateway.grant(rig.recordGrantID())
+	if !stoppedStatus(agent) || !stoppedStatus(relay) || grant.Active {
+		t.Fatalf("agent=%q relay=%q grant=%#v", agent, relay, grant)
+	}
+	if rig.config.Evidence.NextSequence() != before+2 || len(rig.config.Journal.Pending()) != 0 {
+		t.Fatal("hardening-drift containment must be journaled, receipted, and settled")
+	}
+
+	next := rig.config.Evidence.NextSequence()
+	second, err := rig.server.Reconcile(context.Background())
+	if !errors.Is(err, ErrReconciliationIncomplete) || second.Ready || second.Changed != 0 ||
+		len(second.Failures) != 1 || second.Failures[0].Code != "workload_drift" ||
+		rig.config.Evidence.NextSequence() != next || len(rig.config.Journal.Pending()) != 0 {
+		t.Fatalf("second report=%#v err=%v next=%d pending=%#v", second, err, rig.config.Evidence.NextSequence(), rig.config.Journal.Pending())
+	}
+}
+
+func TestReconcileNeverOperatesUnmanagedOrIdentityMismatchedWorkload(t *testing.T) {
+	tests := []struct {
+		name     string
+		wantCode string
+		mutate   func(*reconcileRig)
+	}{
+		{name: "unmanaged", wantCode: "workload_drift", mutate: func(rig *reconcileRig) {
+			rig.docker.agent.Managed = false
+			rig.docker.agent.Hardened = false
+		}},
+		{name: "identity mismatch", wantCode: "workload_identity_drift", mutate: func(rig *reconcileRig) {
+			rig.docker.agent.Hardened = false
+			rig.docker.agent.Fingerprint = strings.Repeat("f", 64)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rig := newReconcileRig(t, true)
+			test.mutate(rig)
+			before := rig.config.Evidence.NextSequence()
+
+			report, err := rig.server.Reconcile(context.Background())
+			if !errors.Is(err, ErrReconciliationIncomplete) || report.Ready || report.Changed != 0 ||
+				len(report.Failures) != 1 || report.Failures[0].Code != test.wantCode {
+				t.Fatalf("report=%#v err=%v", report, err)
+			}
+			if events := rig.recorder.snapshot(); len(events) != 0 {
+				t.Fatalf("mutations=%#v", events)
+			}
+			agent, relay := rig.docker.states()
+			grant, _ := rig.gateway.grant(rig.recordGrantID())
+			if agent != "running" || relay != "running" || !grant.Active {
+				t.Fatalf("untrusted object was mutated: agent=%q relay=%q grant=%#v", agent, relay, grant)
+			}
+			if rig.config.Evidence.NextSequence() != before || len(rig.config.Journal.Pending()) != 0 {
+				t.Fatal("untrusted object validation must not journal or receipt a mutation")
+			}
+		})
 	}
 }
 

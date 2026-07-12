@@ -244,17 +244,17 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 	if err != nil {
 		return plan, reconciliationError("workload_inspect", "inspect signed workload: %v", err)
 	}
-	if !observed.Managed || !observed.Hardened {
+	if !observed.Managed {
 		return plan, reconciliationError("workload_drift", "signed workload is not exactly managed and hardened")
 	}
-	if observed.Workload.TenantID != record.TenantID || observed.Workload.InstanceID != record.InstanceID ||
-		observed.Fingerprint != strings.TrimPrefix(record.WorkloadDigest, "sha256:") ||
-		observed.Fingerprint != workloadFingerprint(observed.Workload) ||
-		observed.ImageID != record.ImageConfigDigest || observed.Workload.ImageConfigDigest != record.ImageConfigDigest {
+	if !s.containmentIdentityMatches(plan.runtimeRef, observed, record) {
 		return plan, reconciliationError("workload_identity_drift", "signed workload tuple, fingerprint, or image config does not match its fence")
 	}
 	plan.workload = observed.Workload
 	plan.revoked = record.PolicyDigest != dsse.Digest(s.secure.policyEnvelope)
+	if !observed.Hardened {
+		return s.containReconciliation(ctx, plan, observed, "workload_drift", "signed workload is not exactly managed and hardened")
+	}
 	if plan.revoked {
 		plan.stopAgent = !stoppedStatus(observed.Status)
 	} else {
@@ -373,11 +373,12 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 
 // containReconciliation turns proven isolation drift into a narrow fail-closed
 // mutation. The agent container was already proven to be the exact signed,
-// hardened object before this helper is called, so stopping it is safe. Drifted
-// networks, volumes, and relays are never adopted, recreated, or removed. The
-// deterministic gateway grant is deactivated when it is active (or when its
-// state cannot be observed), preventing a compromised relay from retaining
-// inference, service, or egress authority.
+// managed object before this helper is called, so stopping it is safe even when
+// its hardening has drifted. Hardening drift never grants start or adoption
+// authority. Drifted networks, volumes, and relays are never adopted, recreated,
+// or removed. The deterministic gateway grant is deactivated when it is active
+// (or when its state cannot be observed), preventing a compromised relay from
+// retaining inference, service, or egress authority.
 func (s *Server) containReconciliation(ctx context.Context, plan reconcilePlan, observed ObservedWorkload, code, message string) (reconcilePlan, error) {
 	plan.containment = true
 	plan.degraded = reconciliationError(code, "%s", message)
@@ -439,7 +440,13 @@ func (s *Server) applyReconciliation(ctx context.Context, plan reconcilePlan) er
 			}
 		}
 		if plan.stopAgent {
-			if err := s.stopWorkloadAndConfirm(ctx, plan.runtimeRef, plan.workload); err != nil {
+			stopAgent := func() error {
+				if plan.containment {
+					return s.stopWorkloadForContainmentAndConfirm(ctx, plan.runtimeRef, plan.record)
+				}
+				return s.stopWorkloadAndConfirm(ctx, plan.runtimeRef, plan.workload)
+			}
+			if err := stopAgent(); err != nil {
 				mutationErrors = append(mutationErrors, fmt.Errorf("stop revoked workload: %w", err))
 			}
 		}
@@ -540,10 +547,10 @@ func (s *Server) verifyReconciliationContainment(ctx context.Context, plan recon
 	if err != nil {
 		return fmt.Errorf("inspect contained workload: %w", err)
 	}
-	if !observed.Managed || !observed.Hardened || observed.Workload.TenantID != plan.record.TenantID ||
-		observed.Workload.InstanceID != plan.record.InstanceID || observed.Fingerprint != strings.TrimPrefix(plan.record.WorkloadDigest, "sha256:") ||
-		observed.Fingerprint != workloadFingerprint(observed.Workload) || observed.ImageID != plan.record.ImageConfigDigest ||
-		observed.Workload.ImageConfigDigest != plan.record.ImageConfigDigest || !stoppedStatus(observed.Status) {
+	// Hardened is deliberately omitted here. Containment must be able to prove
+	// that the exact signed object is stopped after hardening itself has drifted.
+	// The full signed identity remains mandatory before the mutation and here.
+	if !s.containmentIdentityMatches(plan.runtimeRef, observed, plan.record) || !stoppedStatus(observed.Status) {
 		return errors.New("contained workload identity or stopped state is not exact")
 	}
 	if plan.stopRelay {
@@ -568,6 +575,31 @@ func (s *Server) verifyReconciliationContainment(ctx context.Context, plan recon
 		}
 	}
 	return nil
+}
+
+// stopWorkloadForContainmentAndConfirm is narrower than the ordinary lifecycle
+// confirmer: it accepts a hardening-drifted container only when its complete
+// managed identity still matches the signed fence. It can only stop authority;
+// normal start, stop, and adoption paths continue to require Hardened.
+func (s *Server) stopWorkloadForContainmentAndConfirm(ctx context.Context, runtimeRef string, record admission.FenceRecord) error {
+	stopErr := boundedDockerStop(ctx, s.docker, runtimeRef)
+	observed, inspectErr := s.docker.Inspect(ctx, runtimeRef)
+	if inspectErr != nil {
+		if stopErr != nil {
+			return fmt.Errorf("stop contained workload: %v; inspect stopped workload: %w", stopErr, inspectErr)
+		}
+		return fmt.Errorf("inspect stopped workload for containment: %w", inspectErr)
+	}
+	if !s.containmentIdentityMatches(runtimeRef, observed, record) {
+		return errors.New("contained workload identity changed during lifecycle transition")
+	}
+	if stoppedStatus(observed.Status) {
+		return nil
+	}
+	if stopErr != nil {
+		return fmt.Errorf("stop contained workload: %v; Docker status remains %q", stopErr, observed.Status)
+	}
+	return fmt.Errorf("contained workload did not reach an exact stopped state; Docker status is %q", observed.Status)
 }
 
 func desiredStatus(status string) (running bool, known bool) {
