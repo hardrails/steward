@@ -3,7 +3,7 @@ set -e
 
 case "${1:-}" in
 	remove | purge)
-		for binary in steward steward-executor; do
+		for binary in steward stewardctl steward-executor; do
 			path="/usr/local/bin/$binary"
 			target=$(readlink "$path" 2>/dev/null || true)
 			case "$target" in

@@ -17,7 +17,7 @@ if [[ ! $version =~ ^[A-Za-z0-9._+-]+$ ]]; then
 	exit 2
 fi
 release_dir="/opt/steward/releases/$version"
-for binary in steward steward-executor; do
+for binary in steward stewardctl steward-executor; do
 	path="$release_dir/$binary"
 	if [[ ! -x $path ]]; then
 		echo "activate-node-release: missing executable $path" >&2
@@ -43,7 +43,7 @@ mv -Tf "$current_tmp" /opt/steward/current
 # These stable entry points are installed once (or repair an old direct-release
 # symlink). Every later activation changes only /opt/steward/current, so both
 # process names cross the version boundary in one atomic rename.
-for binary in steward steward-executor; do
+for binary in steward stewardctl steward-executor; do
 	tmp="/usr/local/bin/.${binary}.new.$$"
 	rm -f "$tmp"
 	ln -s "/opt/steward/current/$binary" "$tmp"

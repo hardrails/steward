@@ -44,6 +44,7 @@ Every endpoint except `GET /v1/healthz` requires
 
 | Method and path | Purpose |
 | --- | --- |
+| `POST /v1/admissions` | Verify capsule + local policy + fenced intent, journal the mutation, and create a receipt-bound workload |
 | `POST /v1/workloads` | Validate and create a stopped gVisor container |
 | `GET /v1/workloads/{runtime_ref}` | Read observed container state |
 | `POST .../start`, `.../stop` | Idempotent lifecycle operation |
@@ -55,10 +56,19 @@ Every endpoint except `GET /v1/healthz` requires
 
 - Request bodies are bounded before JSON decoding.
 - Unknown fields and trailing JSON are rejected where a body is accepted.
+- Signed-admission envelopes and payloads also reject duplicate JSON members.
 - All JSON errors use `{"error":"code","message":"human-readable detail"}`.
 - Standard 404/405 and recovered panic responses use the same shape.
 - Lifecycle references are opaque; clients must not parse meaning from them.
 - Uplink delivery invokes the same handlers as direct APIs.
+
+The outbound Executor command kind `admit` carries the exact
+`capsule_dsse_base64` plus instance `intent` object documented by the OpenAPI
+schema. Its tenant, node, instance, and generation must match the enrolled uplink
+command identity. Positive capability requests return HTTP 501 in v1.2.
+When signed admission is configured, legacy `POST /v1/workloads` creation is
+disabled. Uplink-authenticated start, stop, and destroy carry the same tenant/node/
+generation principal into the lifecycle journal and receipt chain.
 
 For outbound transport, identity fencing, retry, and reporting details, read
 [Uplink client]({{ '/uplink-client/' | relative_url }}),

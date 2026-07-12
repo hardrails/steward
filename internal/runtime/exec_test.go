@@ -453,10 +453,7 @@ func TestHibernateSuspendsAndStartResumes(t *testing.T) {
 
 	// Wait for the helper to actually start ticking (the re-exec'd binary can be slow
 	// to warm up under the race detector), then confirm the file is growing.
-	waitFileExists(t, tickFile, 10*time.Second)
-	if fileSize(t, tickFile) == 0 {
-		t.Fatal("tick file never grew; the helper is not writing")
-	}
+	waitFileNonEmpty(t, tickFile, 10*time.Second)
 
 	if _, err := tr.Hibernate(ref); err != nil {
 		t.Fatalf("hibernate: %v", err)
@@ -523,7 +520,7 @@ func TestResumePersistFailureReSuspendsProcess(t *testing.T) {
 	if _, err := tr.Start(ref); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitFileExists(t, tickFile, 10*time.Second)
+	waitFileNonEmpty(t, tickFile, 10*time.Second)
 	if _, err := tr.Hibernate(ref); err != nil {
 		t.Fatalf("hibernate: %v", err)
 	}
@@ -1067,6 +1064,18 @@ func waitFileExists(t *testing.T, path string, timeout time.Duration) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("file %s never appeared within %s", path, timeout)
+}
+
+func waitFileNonEmpty(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("file %s never became non-empty within %s", path, timeout)
 }
 
 func fileSize(t *testing.T, path string) int64 {

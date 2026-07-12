@@ -43,7 +43,7 @@ fi
 
 %postun
 if [ "$1" -eq 0 ]; then
-    for binary in steward steward-executor; do
+    for binary in steward stewardctl steward-executor; do
         path="/usr/local/bin/$binary"
         target=$(readlink "$path" 2>/dev/null || true)
         case "$target" in

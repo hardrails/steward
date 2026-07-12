@@ -34,6 +34,7 @@ jobs:
           scripts/node-preflight.sh scripts/configure-node.sh
           scripts/install-steward.sh scripts/uninstall-node.sh
           scripts/build-deb.sh scripts/build-rpm.sh
+          scripts/signed-admission-acceptance.sh
           packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm
       - name: Installer plan smoke
         run: |
@@ -55,6 +56,7 @@ jobs:
           mkdir -p "$stage/deploy" "$stage/scripts"
           go build -o "$stage/steward" ./cmd/steward
           go build -o "$stage/steward-executor" ./cmd/steward-executor
+          go build -o "$stage/stewardctl" ./cmd/stewardctl
           cp -R deploy/config deploy/systemd "$stage/deploy/"
           cp scripts/install-node.sh scripts/activate-node-release.sh \
             scripts/node-preflight.sh scripts/configure-node.sh \
@@ -67,9 +69,13 @@ jobs:
           dpkg-deb --info /tmp/steward-node-test.deb
           dpkg-deb --contents /tmp/steward-node-test.deb | \
             grep -q './usr/lib/steward-node/release/steward-executor'
+          dpkg-deb --contents /tmp/steward-node-test.deb | \
+            grep -q './usr/lib/steward-node/release/stewardctl'
           rpm -qpi /tmp/steward-node-test.rpm
           rpm -qpl /tmp/steward-node-test.rpm | \
             grep -q '/usr/lib/steward-node/release/steward-executor'
+          rpm -qpl /tmp/steward-node-test.rpm | \
+            grep -q '/usr/lib/steward-node/release/stewardctl'
 
   lint:
     name: golangci-lint

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Executor API
-  version: "1.0.0"
+  version: "1.2.0"
   description: |
     Public host-local contract for Steward's separate Docker/gVisor executor
     process. The control plane supplies a fully resolved generic OCI workload;
@@ -21,6 +21,8 @@ security:
 tags:
   - name: workloads
     description: Tenant-scoped OCI workload lifecycle.
+  - name: admission
+    description: Signed, locally bounded deployment admission and receipts.
   - name: health
     description: Executor process liveness.
 paths:
@@ -51,7 +53,8 @@ paths:
         Creates a stopped Docker container under gVisor. Replaying the exact
         tenant, instance, and immutable workload returns the existing container
         with 200 only when its stored fingerprint and hardened Docker settings
-        still match; any drift returns 409.
+        still match; any drift returns 409. This compatibility endpoint is
+        disabled when signed admission is configured.
       requestBody:
         required: true
         content:
@@ -75,6 +78,12 @@ paths:
           $ref: "#/components/responses/InvalidRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Signed admission is configured; use `/v1/admissions`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
@@ -93,6 +102,65 @@ paths:
                 $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/admissions:
+    post:
+      tags: [admission]
+      operationId: admitSignedWorkload
+      summary: Admit a signed profile capsule for one tenant instance
+      description: |
+        Verifies the exact publisher-signed capsule against the configured
+        site-root-signed policy, binds it to the host-authenticated instance
+        intent, applies policy and generation rollback fences, journals the
+        Docker mutation, and appends signed node-local receipts. V1.2 accepts
+        no positive runtime capabilities; state, inference, and service requests
+        return 501 rather than weakening the no-network sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignedAdmissionRequest"
+      responses:
+        "200":
+          description: Exact idempotent replay of an existing admitted workload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignedAdmissionState"
+        "201":
+          description: Signed admission committed and workload created stopped.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignedAdmissionState"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Capsule, site policy, caller binding, or rollback fence denied admission.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/WorkloadDrift"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "501":
+          description: A signed positive capability is valid but its runtime enforcement is not available in V1.2.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "503":
+          description: Signed admission is unconfigured, capacity is exhausted, or durable journal/evidence state requires recovery.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/workloads/{runtime_ref}:
     parameters:
       - $ref: "#/components/parameters/RuntimeRef"
@@ -134,12 +202,24 @@ paths:
           $ref: "#/components/responses/InvalidRuntimeRef"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Workload is not bound to the authenticated signed admission principal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
           $ref: "#/components/responses/WorkloadDrift"
         "502":
           $ref: "#/components/responses/DockerError"
+        "503":
+          description: Journal, receipt, or reconciliation state prevents a safe mutation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/workloads/{runtime_ref}/start:
@@ -161,6 +241,12 @@ paths:
           $ref: "#/components/responses/InvalidRuntimeRef"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Workload is not bound to the authenticated signed admission principal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/NotFound"
         "405":
@@ -169,6 +255,12 @@ paths:
           $ref: "#/components/responses/WorkloadDrift"
         "502":
           $ref: "#/components/responses/DockerError"
+        "503":
+          description: Journal, receipt, or reconciliation state prevents a safe mutation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/workloads/{runtime_ref}/stop:
@@ -190,6 +282,12 @@ paths:
           $ref: "#/components/responses/InvalidRuntimeRef"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Workload is not bound to the authenticated signed admission principal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/NotFound"
         "405":
@@ -198,6 +296,12 @@ paths:
           $ref: "#/components/responses/WorkloadDrift"
         "502":
           $ref: "#/components/responses/DockerError"
+        "503":
+          description: Journal, receipt, or reconciliation state prevents a safe mutation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/workloads/{runtime_ref}/logs:
@@ -276,6 +380,107 @@ components:
           $ref: "#/components/schemas/Resources"
         egress:
           $ref: "#/components/schemas/Egress"
+    SignedAdmissionRequest:
+      type: object
+      additionalProperties: false
+      required: [capsule_dsse_base64, intent]
+      properties:
+        capsule_dsse_base64:
+          type: string
+          format: byte
+          minLength: 1
+          maxLength: 1048576
+          description: Exact JSON DSSE envelope encoded with standard base64.
+        intent:
+          $ref: "#/components/schemas/InstanceIntent"
+    InstanceIntent:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - node_id
+        - instance_id
+        - lineage_id
+        - generation
+        - capsule_digest
+        - resources
+        - capabilities
+        - state_disposition
+      properties:
+        tenant_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        node_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        instance_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        lineage_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        capsule_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        resources:
+          $ref: "#/components/schemas/Resources"
+        capabilities:
+          $ref: "#/components/schemas/Capabilities"
+        state_disposition:
+          type: string
+          enum: [none, new, resume]
+        inference_route_id:
+          type: string
+          maxLength: 128
+        model_alias:
+          type: string
+          maxLength: 256
+        service_id:
+          type: string
+          maxLength: 128
+    Capabilities:
+      type: object
+      additionalProperties: false
+      required: [state, inference, service]
+      properties:
+        state:
+          type: boolean
+        inference:
+          type: boolean
+        service:
+          type: boolean
+      description: V1.2 runtime admission requires all values false.
+    SignedAdmissionState:
+      type: object
+      additionalProperties: false
+      required: [runtime_ref, status, capsule_digest, policy_digest, generation, evidence_key_id]
+      properties:
+        runtime_ref:
+          type: string
+          pattern: "^executor-[a-f0-9]{64}$"
+        status:
+          type: string
+        capsule_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        policy_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        evidence_key_id:
+          type: string
+          pattern: "^[a-f0-9]{32}$"
     Resources:
       type: object
       additionalProperties: false

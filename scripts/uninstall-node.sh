@@ -30,7 +30,7 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 systemctl disable --now steward.service steward-executor.service >/dev/null 2>&1 || true
-for binary in steward steward-executor; do
+for binary in steward stewardctl steward-executor; do
 	path="/usr/local/bin/$binary"
 	target=$(readlink "$path" 2>/dev/null || true)
 	case "$target" in

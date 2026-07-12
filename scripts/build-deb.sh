@@ -17,7 +17,7 @@ command -v dpkg-deb >/dev/null || {
 	echo "build-deb: dpkg-deb is required" >&2
 	exit 2
 }
-for path in steward steward-executor deploy/config/steward.json \
+for path in steward stewardctl steward-executor deploy/config/steward.json \
 	deploy/config/executor.env deploy/systemd/steward.service \
 	deploy/systemd/steward-executor.service scripts/install-node.sh \
 	scripts/activate-node-release.sh scripts/node-preflight.sh \
@@ -57,7 +57,7 @@ trap cleanup EXIT HUP INT TERM
 install -d -m 0755 "$package_root/DEBIAN" \
 	"$package_root/usr/lib/steward-node/release" \
 	"$package_root/usr/share/doc/steward-node"
-cp -R "$stage/steward" "$stage/steward-executor" "$stage/deploy" "$stage/scripts" \
+cp -R "$stage/steward" "$stage/stewardctl" "$stage/steward-executor" "$stage/deploy" "$stage/scripts" \
 	"$package_root/usr/lib/steward-node/release/"
 install -m 0644 "$stage/LICENSE" "$package_root/usr/share/doc/steward-node/copyright"
 install -m 0644 "$stage/README.md" "$package_root/usr/share/doc/steward-node/README.md"

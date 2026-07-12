@@ -76,7 +76,7 @@ secrets on the command line:
 ```console
 sudo bash install-steward.sh \
   --non-interactive \
-  --version v0.1.0 \
+  --version v1.2.0 \
   --install-gvisor \
   --control-plane-url https://control.customer.example \
   --steward-credential /secure/enrollment/steward.json \
@@ -102,7 +102,7 @@ and its pinned trust key before importing these files into the facility.
 
 ```console
 sudo bash install-steward.sh \
-  --offline-dir /media/steward-v0.1.0 \
+  --offline-dir /media/steward-v1.2.0 \
   --control-plane-url https://control.customer.example \
   --steward-credential /media/enrollment/steward.json \
   --executor-credential /media/enrollment/executor.json \
@@ -119,7 +119,7 @@ directly (`dpkg -i ...deb` or `rpm -Uvh ...rpm`). The universal equivalent remai
 
 ```console
 sha256sum -c checksums.txt
-tar -xzf steward_v0.1.0_linux_amd64.tar.gz
+tar -xzf steward_v1.2.0_linux_amd64.tar.gz
 sudo bash scripts/install-node.sh
 ```
 
@@ -182,7 +182,7 @@ sudo /usr/local/libexec/steward/node-preflight
 sudo systemctl enable --now steward steward-executor
 ```
 
-Preflight checks the real service identities, Docker `runsc`, both binaries, every
+Preflight checks the real service identities, Docker `runsc`, all three binaries, every
 required Executor setting, credential/state/CA readability and permissions through
 the binaries' own validators, and both installed systemd units. Neither binary binds
 a listener or starts an uplink poll during its configuration check.
@@ -199,8 +199,8 @@ configured; a later install only stages the new version and does not change or r
 the active release. Activate or roll back atomically:
 
 ```console
-sudo /usr/local/libexec/steward/activate-node-release v0.1.0 --restart
-sudo /usr/local/libexec/steward/activate-node-release v0.1.0 --restart
+sudo /usr/local/libexec/steward/activate-node-release v1.2.0 --restart
+sudo /usr/local/libexec/steward/activate-node-release v1.2.0 --restart
 ```
 
 Every activation runs the target binaries through full node preflight before the
@@ -217,7 +217,7 @@ requires a separate operator-approved recovery procedure.
 The guided upgrade equivalent is:
 
 ```console
-sudo bash install-steward.sh --version v0.1.0 --reuse-configuration
+sudo bash install-steward.sh --version v1.2.0 --reuse-configuration
 ```
 
 ## Removal

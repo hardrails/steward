@@ -17,7 +17,7 @@ command -v rpmbuild >/dev/null || {
 	echo "build-rpm: rpmbuild is required" >&2
 	exit 2
 }
-for path in steward steward-executor deploy/config/steward.json \
+for path in steward stewardctl steward-executor deploy/config/steward.json \
 	deploy/config/executor.env deploy/systemd/steward.service \
 	deploy/systemd/steward-executor.service scripts/install-node.sh \
 	scripts/activate-node-release.sh scripts/node-preflight.sh \

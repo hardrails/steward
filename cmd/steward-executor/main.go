@@ -4,6 +4,10 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,9 +19,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/buildinfo"
+	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/executor"
 	"github.com/hardrails/steward/internal/executoruplink"
+	"github.com/hardrails/steward/internal/journal"
 	stewarduplink "github.com/hardrails/steward/internal/uplink"
 )
 
@@ -44,6 +51,17 @@ func main() {
 	maxPIDs := flag.Int64("max-pids", defaults.MaxPIDs, "maximum processes for one workload")
 	maxWorkloads := flag.Int("max-workloads", defaults.MaxWorkloads, "maximum executor-managed workloads on this host")
 	maxWorkloadsPerTenant := flag.Int("max-workloads-per-tenant", defaults.MaxWorkloadsPerTenant, "maximum executor-managed workloads for one tenant")
+	admissionPolicyFile := flag.String("admission-policy-file", "", "signed site-policy DSSE file; enables v1.2 signed admission")
+	admissionSiteRootFile := flag.String("admission-site-root-public-key-file", "", "base64 Ed25519 site-root public key")
+	admissionSiteRootKeyID := flag.String("admission-site-root-key-id", "", "site-root key ID used by the signed policy")
+	admissionNodeID := flag.String("admission-node-id", "", "stable local node ID bound by instance intents and receipts")
+	admissionFenceFile := flag.String("admission-fence-file", "/var/lib/steward-executor/admission-fences.bin", "durable admission high-water store")
+	initializeAdmissionFence := flag.Bool("initialize-admission-fence", false, "create a new empty admission fence store and exit")
+	admissionAllowHostAdmin := flag.Bool("admission-allow-host-admin-intent", false, "allow the host-wide local bearer credential to select an intent tenant")
+	admissionJournalFile := flag.String("admission-journal-file", "/var/lib/steward-executor/operation-journal.bin", "durable host mutation journal")
+	admissionEvidenceFile := flag.String("admission-evidence-file", "/var/lib/steward-executor/evidence.bin", "signed enforcement receipt chain")
+	admissionEvidenceKeyFile := flag.String("admission-evidence-key-file", "", "PKCS#8 PEM Ed25519 node receipt private key")
+	admissionEvidenceEpoch := flag.Uint64("admission-evidence-epoch", 1, "receipt key epoch")
 	flag.Parse()
 	if *version {
 		fmt.Println("steward-executor " + buildinfo.Resolve())
@@ -55,6 +73,14 @@ func main() {
 			os.Exit(2)
 		}
 		fmt.Println("initialized executor uplink state " + *uplinkStateFile)
+		return
+	}
+	if *initializeAdmissionFence {
+		if err := admission.InitializeFenceStore(*admissionFenceFile); err != nil {
+			slog.Error("initialize admission fence", "err", err)
+			os.Exit(2)
+		}
+		fmt.Println("initialized admission fence " + *admissionFenceFile)
 		return
 	}
 	if *tokenFile == "" {
@@ -87,6 +113,61 @@ func main() {
 	if err != nil {
 		slog.Error("configure executor", "err", err)
 		os.Exit(2)
+	}
+	var operationJournal *journal.Journal
+	var receiptLog *evidence.Log
+	admissionRequested := *admissionPolicyFile != "" || *admissionSiteRootFile != "" ||
+		*admissionSiteRootKeyID != "" || *admissionNodeID != "" || *admissionEvidenceKeyFile != "" ||
+		*admissionAllowHostAdmin
+	if admissionRequested {
+		if *admissionPolicyFile == "" || *admissionSiteRootFile == "" || *admissionSiteRootKeyID == "" ||
+			*admissionNodeID == "" || *admissionEvidenceKeyFile == "" {
+			slog.Error("signed admission requires policy, site-root key and ID, node ID, and evidence key")
+			os.Exit(2)
+		}
+		policyEnvelope, err := readSecureArtifact(*admissionPolicyFile, false, 1<<20)
+		if err != nil {
+			slog.Error("read signed site policy", "err", err)
+			os.Exit(2)
+		}
+		siteRoot, err := readEd25519PublicKey(*admissionSiteRootFile)
+		if err != nil {
+			slog.Error("read admission site-root public key", "err", err)
+			os.Exit(2)
+		}
+		receiptPrivate, err := readEd25519PrivateKey(*admissionEvidenceKeyFile)
+		if err != nil {
+			slog.Error("read evidence private key", "err", err)
+			os.Exit(2)
+		}
+		fences, err := admission.OpenFenceStore(*admissionFenceFile)
+		if err != nil {
+			slog.Error("open admission fence store", "err", err)
+			os.Exit(2)
+		}
+		operationJournal, err = journal.Open(*admissionJournalFile)
+		if err != nil {
+			slog.Error("open operation journal", "err", err)
+			os.Exit(2)
+		}
+		defer operationJournal.Close()
+		receiptLog, err = evidence.Open(*admissionEvidenceFile, receiptPrivate, *admissionNodeID, *admissionEvidenceEpoch)
+		if err != nil {
+			slog.Error("open evidence log", "err", err)
+			os.Exit(2)
+		}
+		defer receiptLog.Close()
+		if err := server.EnableSecureAdmission(executor.SecureAdmissionConfig{
+			PolicyEnvelope: policyEnvelope,
+			SiteRoots: map[string]ed25519.PublicKey{
+				*admissionSiteRootKeyID: siteRoot,
+			},
+			NodeID: *admissionNodeID, Fences: fences, Journal: operationJournal, Evidence: receiptLog,
+			AllowHostAdminIntent: *admissionAllowHostAdmin,
+		}); err != nil {
+			slog.Error("configure signed admission", "err", err)
+			os.Exit(2)
+		}
 	}
 	handler := server.Handler()
 	var poller *executoruplink.Poller
@@ -169,6 +250,59 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+func readSecureArtifact(path string, secret bool, limit int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("artifact must be a regular file")
+	}
+	if secret {
+		if info.Mode().Perm()&0o077 != 0 {
+			return nil, errors.New("secret file must have mode 0600 or stricter")
+		}
+	} else if info.Mode().Perm()&0o022 != 0 {
+		return nil, errors.New("trust file must not be group/world writable")
+	}
+	if info.Size() <= 0 || info.Size() > limit {
+		return nil, errors.New("artifact is empty or exceeds its size limit")
+	}
+	return os.ReadFile(path)
+}
+
+func readEd25519PublicKey(path string) (ed25519.PublicKey, error) {
+	raw, err := readSecureArtifact(path, false, 16<<10)
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(decoded) != ed25519.PublicKeySize {
+		return nil, errors.New("public key must be base64 Ed25519")
+	}
+	return ed25519.PublicKey(decoded), nil
+}
+
+func readEd25519PrivateKey(path string) (ed25519.PrivateKey, error) {
+	raw, err := readSecureArtifact(path, true, 16<<10)
+	if err != nil {
+		return nil, err
+	}
+	block, rest := pem.Decode(raw)
+	if block == nil || len(strings.TrimSpace(string(rest))) != 0 {
+		return nil, errors.New("private key must contain one PEM block")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	private, ok := parsed.(ed25519.PrivateKey)
+	if !ok {
+		return nil, errors.New("private key is not Ed25519")
+	}
+	return private, nil
 }
 
 func readToken(path string) (string, error) {

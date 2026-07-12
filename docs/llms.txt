@@ -1,11 +1,11 @@
 # Steward
 
-> Steward is an open-source, control-plane-neutral Linux node runtime for isolated,
-> multi-tenant AI agent workloads. It separates lifecycle supervision from a narrow
-> Docker/gVisor execution boundary, supports disconnected operation, and has no
-> dependency on a particular control plane.
+> Steward is an open-source, control-plane-neutral sovereign admission and Linux
+> execution runtime for AI agents. It combines signed local policy, tenant-bound
+> instance intent, Docker/gVisor enforcement, rollback fences, and offline-verifiable
+> node receipts without depending on a particular control plane.
 
-Version documented: v0.1.0
+Version documented: v1.2.0
 License: Apache-2.0
 Source: https://github.com/hardrails/steward
 Documentation: https://hardrails.github.io/steward/
@@ -14,14 +14,17 @@ Documentation: https://hardrails.github.io/steward/
 
 - [Overview](https://hardrails.github.io/steward/): Product purpose, boundary, and documentation map
 - [Install](https://hardrails.github.io/steward/getting-started/): Interactive and unattended Linux installation
-- [Limitations](https://hardrails.github.io/steward/limitations/): Exact v0.1 capability boundary
+- [Why Steward exists](https://hardrails.github.io/steward/product/positioning/): Product thesis and proof boundary
+- [Market analysis](https://hardrails.github.io/steward/product/market-analysis/): Dated competitive matrix and research signals
+- [Limitations](https://hardrails.github.io/steward/limitations/): Exact v1.2 capability boundary
 - [FAQ](https://hardrails.github.io/steward/faq/): Common product and operational questions
 
 ## How-to guides
 
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
-- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): v0.1 image/lifecycle compatibility procedure
-- [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): v0.1 image/lifecycle compatibility procedure
+- [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
+- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): v1.2 image/lifecycle compatibility procedure
+- [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): v1.2 image/lifecycle compatibility procedure
 - [Air-gapped installation](https://hardrails.github.io/steward/guides/air-gapped/): Offline import and verification
 - [Upgrade and rollback](https://hardrails.github.io/steward/guides/upgrades/): Atomic release activation
 
@@ -38,8 +41,9 @@ Documentation: https://hardrails.github.io/steward/
 - [APIs](https://hardrails.github.io/steward/reference/api/): Authoritative OpenAPI contracts
 - [Release artifacts](https://hardrails.github.io/steward/reference/release-artifacts/): Filenames and checksum verification
 
-## Important v0.1 fact
+## Important v1.2 fact
 
-Steward v0.1 can admit and lifecycle-test Hermes Agent and OpenClaw images but cannot
-yet run either as a connected persistent service. Executor v0.1 intentionally has no
-outbound network, secret injection, durable volume, or published-port grants.
+Steward v1.2 can cryptographically admit and lifecycle-test Hermes Agent and
+OpenClaw images but cannot yet run either as a connected persistent service.
+Signed state, inference, and service ceilings exist in the artifact contract, but
+Executor intentionally returns HTTP 501 until their isolated enforcement paths ship.

@@ -25,16 +25,16 @@ git pull origin main
 #    ONLY the version reported under `go run`/`go test`; a real tagged build does
 #    not use it (see "How the version is derived" below). Skip if it already
 #    matches the release you are cutting.
-#    -> internal/buildinfo/version.go: const Version = "0.1.0"
+#    -> internal/buildinfo/version.go: const Version = "1.2.0"
 
 # 3. Tag the release commit and push the tag. The tag push is what triggers the
 #    Release workflow.
-git tag v0.1.0
-git push origin v0.1.0
+git tag v1.2.0
+git push origin v1.2.0
 
 # 4. Watch the run; it publishes the GitHub Release when green.
 gh run watch "$(gh run list --workflow=release.yml --limit=1 --json databaseId --jq '.[0].databaseId')"
-gh release view v0.1.0 --web
+gh release view v1.2.0 --web
 ```
 
 That is the whole flow. Everything below is the detail behind it.
@@ -54,10 +54,10 @@ packaging and least privilege:
    run `scripts/release.sh`, which rejects a
    non-semver tag up front, cross-compiles that architecture's Linux and Darwin
    targets, packages each build
-   as a `.tar.gz` (`steward` everywhere, plus `steward-executor` and the offline
+   as a `.tar.gz` (`steward` and `stewardctl` everywhere, plus `steward-executor` and the offline
    node-appliance assets on Linux, with `LICENSE` + `README.md`), writes a `checksums.txt` of
    SHA-256 sums, builds DEB and RPM node packages for both Linux architectures,
-   includes `install-steward.sh`, asserts both binaries self-report the tag, and
+   includes `install-steward.sh`, asserts all three binaries self-report the tag, and
    uploads that architecture's artifacts. Native hosts are load-bearing here:
    RPM validates build architecture and will not safely produce an `aarch64`
    package on an `x86_64` host merely because its payload was cross-compiled.
@@ -78,21 +78,21 @@ an accidentally-tagged bad commit cannot execute with publish permissions.
 
 | GOOS   | GOARCH | Archive                              | Processes |
 | ------ | ------ | ------------------------------------ | --------- |
-| linux  | amd64  | `steward_vX.Y.Z_linux_amd64.tar.gz`  | `steward`, `steward-executor` |
-| linux  | arm64  | `steward_vX.Y.Z_linux_arm64.tar.gz`  | `steward`, `steward-executor` |
-| darwin | amd64  | `steward_vX.Y.Z_darwin_amd64.tar.gz` | `steward` |
-| darwin | arm64  | `steward_vX.Y.Z_darwin_arm64.tar.gz` | `steward` |
+| linux  | amd64  | `steward_vX.Y.Z_linux_amd64.tar.gz`  | `steward`, `steward-executor`, `stewardctl` |
+| linux  | arm64  | `steward_vX.Y.Z_linux_arm64.tar.gz`  | `steward`, `steward-executor`, `stewardctl` |
+| darwin | amd64  | `steward_vX.Y.Z_darwin_amd64.tar.gz` | `steward`, `stewardctl` |
+| darwin | arm64  | `steward_vX.Y.Z_darwin_arm64.tar.gz` | `steward`, `stewardctl` |
 
 Each Linux row additionally produces
 `steward-node_vX.Y.Z_<arch>.deb` and
 `steward-node_vX.Y.Z_<arch>.rpm`. `install-steward.sh` is architecture-independent
 and selects among those packages and the archive at runtime.
 
-Both Steward process binaries are pure–standard-library Go. Executor and the
+All Steward binaries are pure–standard-library Go. Executor and the
 systemd/config/install/preflight/activation node-appliance assets are shipped in each
 Linux archive—the supported node-server platform—and versioned as an integral Steward
-component. Darwin archives contain only the usable `steward` client/supervisor; they do
-not advertise an Executor or Linux service installer that cannot obtain Docker `runsc`
+component. Darwin archives contain the usable `steward` client/supervisor and
+offline `stewardctl`; they do not advertise an Executor or Linux service installer that cannot obtain Docker `runsc`
 on macOS. Adding a target requires deciding explicitly whether it can satisfy Executor's
 host contract.
 
@@ -105,7 +105,7 @@ host contract.
 2. **`debug.ReadBuildInfo().Main.Version`** — used by a versioned `go install`.
 3. **VCS revision** — the commit SHA (`-dirty` when the tree had uncommitted
    changes), stamped by any `go build` of a committed tree.
-4. **`const Version`** (`"0.1.0"`) — the development fallback when there is no build
+4. **`const Version`** (`"1.2.0"`) — the development fallback when there is no build
    metadata at all (`go run`, `go test`, or a build with VCS stamping disabled).
 
 The explicit first level is load-bearing. A local-module checkout normally has
@@ -116,18 +116,18 @@ still agree exactly, so the release tag is passed directly to every cross-build:
 
 ```console
 go build -trimpath \
-  -ldflags "-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=v0.1.0" \
+  -ldflags "-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=v1.2.0" \
   ./cmd/steward
 ```
 
 The release script then builds host-native copies through the same path, executes
 both `steward -version` and `steward-executor -version`, and fails before publishing
 unless both equal `GITHUB_REF_NAME`. This guards the linker symbol, import path, and
-both entry points rather than assuming a successful `go build` implies the version
+all three entry points rather than assuming a successful `go build` implies the version
 arrived.
 
-A canonical `go install github.com/hardrails/steward/cmd/steward@v0.1.0` still
-reports `v0.1.0` through `Main.Version` without release flags. The shared fallback
+A canonical `go install github.com/hardrails/steward/cmd/steward@v1.2.0` still
+reports `v1.2.0` through `Main.Version` without release flags. The shared fallback
 constant matters only for metadata-free developer invocations; keep it roughly in
 step for tidiness, but it does not identify published artifacts.
 
@@ -151,7 +151,7 @@ scripts, instead of goreleaser, nfpm, fpm, or a self-extracting installer:
 - **Locally and fully verifiable.** `scripts/release.sh` is the exact build CI
   runs; a maintainer can dry-run the whole thing on their laptop. The build was
   validated end-to-end (all four targets cross-compiled, each self-reporting
-  `v0.1.0` from a tagged checkout) before this workflow was committed.
+  `v1.2.0` from a tagged checkout) before this workflow was committed.
 - **Smaller trusted-action surface.** The workflow pins only `actions/checkout`,
   `actions/setup-go`, and `actions/{upload,download}-artifact` to full commit SHAs
   — the same supply-chain discipline the rest of CI already uses — and publishes
@@ -184,7 +184,7 @@ tools are absent; use the CI dry run for the complete matrix.
 Run against a tag locally to also exercise the version assertion:
 
 ```console
-GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v0.1.0 bash scripts/release.sh
+GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v1.2.0 bash scripts/release.sh
 ```
 
 ### On GitHub (`workflow_dispatch`)
@@ -211,17 +211,19 @@ set as well as inspect it. That identity is never published as a GitHub Release.
 
 ```console
 # Download the archive and the checksums for the release, then verify.
-gh release download v0.1.0 --repo hardrails/steward
+gh release download v1.2.0 --repo hardrails/steward
 sha256sum -c checksums.txt      # macOS: shasum -a 256 -c checksums.txt
-tar -xzf steward_v0.1.0_linux_amd64.tar.gz
-./steward -version              # -> steward v0.1.0
+tar -xzf steward_v1.2.0_linux_amd64.tar.gz
+./steward -version              # -> steward v1.2.0
 # On Linux, steward-executor is in the same verified archive.
 ```
 
 ## Pre-flight checklist
 
 - [ ] `main` is green (all required checks pass) at the commit you will tag.
-- [ ] The tag is a valid semver `vX.Y.Z` (a pre-release such as `v0.1.0-rc.1`
+- [ ] `scripts/signed-admission-acceptance.sh` passes on a Linux Docker host with
+      `runsc`, using the exact release binaries and an already-local pinned image.
+- [ ] The tag is a valid semver `vX.Y.Z` (a pre-release such as `v1.2.0-rc.1`
       is auto-marked as a GitHub pre-release; a hyphen in the tag is the signal).
 - [ ] You are tagging the intended commit (`git log -1`).
 - [ ] (Optional) `const Version` in `internal/buildinfo/version.go` is not
@@ -233,11 +235,11 @@ A release is a tag plus a GitHub Release. If something is wrong:
 
 ```console
 # Remove the GitHub Release and delete the tag locally and on the remote.
-gh release delete v0.1.0 --repo hardrails/steward --yes
-git push origin :refs/tags/v0.1.0
-git tag -d v0.1.0
+gh release delete v1.2.0 --repo hardrails/steward --yes
+git push origin :refs/tags/v1.2.0
+git tag -d v1.2.0
 ```
 
-Then fix forward and tag again. Prefer a new patch tag (`v0.1.1`) over re-pointing
+Then fix forward and tag again. Prefer a new patch tag (`v1.2.1`) over re-pointing
 an already-published tag: consumers and the Go module proxy may have cached the
 old tag, and a moved tag is a supply-chain surprise.

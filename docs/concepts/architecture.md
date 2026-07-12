@@ -1,6 +1,6 @@
 ---
 title: Steward architecture
-description: Understand Steward's two-process node architecture, remote control-plane boundary, Docker and gVisor isolation path, and separately controlled inference.
+description: Understand Steward's service separation, signed local admission path, Docker and gVisor isolation, offline receipts, and separately controlled inference.
 section: Explanation
 ---
 
@@ -11,8 +11,8 @@ the privileged host interface to two small processes with different identities a
 different authority.
 
 ```text
-Control plane
-  owns users, tenants, policy, desired state, approvals, rollout, fleet evidence
+Independent control plane or host operator
+  owns users, desired state, approvals, rollout; submits tenant-bound intent
        |
        | outbound HTTPS command channels
        v
@@ -21,12 +21,14 @@ Linux node
   lifecycle supervisor       OCI admission boundary
   generic uplink             Docker socket access
   no Docker authority        fixed gVisor policy
+                              journal + fences + receipts
        |                            |
        +------ node status ---------+
                                     v
                            tenant agent container
                            Docker runtime: runsc
 
+Offline stewardctl: keys, signed capsule/policy, receipt verification
 Inference gateway: a separate operator-controlled system
 ```
 
@@ -53,6 +55,18 @@ handler as direct mode, preventing two policy implementations from drifting.
 Commands carry generation and sequence fences. Executor persists its highest
 accepted position before reporting completion, so a delayed or replayed command
 cannot resurrect a destroyed workload after restart.
+
+## Signed local admission
+
+The opt-in v1.2 path separates three authorities: a publisher signs a reusable
+profile capsule, the site root signs local policy, and an authenticated caller
+submits a tenant/node/instance intent. Executor admits only their intersection.
+It persists policy-epoch and instance-generation high-water marks, journals the
+Docker mutation before effect, and appends Ed25519-signed hash-linked receipts.
+
+`stewardctl` is an offline CLI, not a daemon. It can create keys, sign or verify
+capsules and policies, and verify a copied receipt chain without contacting the
+node, control plane, publisher, or a transparency service.
 
 ## Control-plane neutrality
 

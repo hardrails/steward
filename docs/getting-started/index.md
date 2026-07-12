@@ -47,7 +47,7 @@ steward-executor -version
 systemctl status steward steward-executor --no-pager
 ```
 
-Both binaries should report the same release. Staged services should be inactive;
+All three binaries should report the same release. Staged services should be inactive;
 packages deliberately do not start an unenrolled node.
 
 ## Inspect before piping to root
@@ -97,7 +97,7 @@ or read the [platform support matrix]({{ '/reference/platform-support/' | relati
 - Adds dedicated `steward` and `steward-executor` service identities.
 - Gives only Executor membership in the Docker group.
 - Installs immutable versions under `/opt/steward/releases/`.
-- Selects both binaries through one atomic `/opt/steward/current` symlink.
+- Selects all three binaries through one atomic `/opt/steward/current` symlink.
 - Installs hardened vendor units and configuration templates.
 - Preserves operator-owned configuration and systemd drop-ins.
 - Runs fail-closed preflight before activation.

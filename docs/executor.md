@@ -49,7 +49,7 @@ tmpfs mounts at `/workspace` and `/tmp`, forces `HOME=/workspace` and
 `TMPDIR=/tmp`, and starts in `/workspace`. This gives Hermes, OpenClaw, and other
 agents bounded ephemeral scratch space without exposing a host path or allowing a
 tenant to choose a mount. Durable workspace and secret grants remain separate,
-explicit future contracts; V1 images must contain their immutable approved content.
+explicit future contracts; v1.2 images must contain their immutable approved content.
 
 Executor labels each container with a SHA-256 fingerprint of the complete admitted
 workload. An idempotent provision replay succeeds only when both that fingerprint
@@ -79,6 +79,28 @@ The listener has bounded read, write, header, and idle timeouts. Request bodies 
 log responses are capped at 1 MiB. All errors, including standard 404/405 and a
 recovered panic, use `{"error":"...","message":"..."}`.
 
+## Signed admission and receipts
+
+When the complete `-admission-*` trust configuration is present, Executor enables
+`POST /v1/admissions`. It verifies a publisher-signed reusable capsule through the
+site-root-signed policy, binds the request to tenant/node/instance/generation,
+intersects all resource ceilings, and rejects policy or instance rollback.
+
+Before Docker mutation it fsyncs a fixed-format operation journal and a signed
+pre-effect receipt. It creates and inspects the container, writes a signed commit
+receipt, advances high-water state, and marks the journal committed. Startup
+refuses a changed receipt key, a corrupt chain, or an unresolved prepared
+operation. `stewardctl evidence verify` checks a copied chain offline.
+
+Once configured, signed mode disables legacy `POST /v1/workloads` creation.
+Authenticated start, stop, and destroy operations are journaled and receipted;
+destroy persists a generation tombstone. Direct tenant selection is disabled unless
+the operator explicitly enables `-admission-allow-host-admin-intent` as a
+host-administrator break-glass path.
+
+This path does not make broader workload capabilities available: positive state,
+inference, or service requests return 501 in v1.2. See [the signed-admission guide]({{ '/guides/signed-admission/' | relative_url }}) and [release boundaries]({{ '/limitations/' | relative_url }}).
+
 ## Outbound Executor uplink
 
 For nodes behind NAT or an inbound firewall, `-uplink-url` enables a generic,
@@ -97,6 +119,11 @@ The credential is a versioned owner-only JSON file:
   "credential": "opaque-control-plane-bearer"
 }
 ```
+
+For signed admission, command kind `admit` carries the OpenAPI
+`SignedAdmissionRequest` as its payload. Executor requires the intent's tenant,
+node, instance, and generation to match the enrolled command envelope before it
+invokes `/v1/admissions`; a body cannot relabel itself across those boundaries.
 
 Executor posts `{}` to `/executor-uplink/poll` and reports each terminal outcome to
 `/executor-uplink/report`. A command has this additive JSON shape:

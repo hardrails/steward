@@ -1,6 +1,6 @@
 # Steward
 
-**Open-source node runtime for isolated, multi-tenant AI agent workloads on Linux.**
+**Open-source sovereign admission and execution runtime for AI agents on Linux.**
 
 [![CI](https://github.com/hardrails/steward/actions/workflows/ci.yml/badge.svg)](https://github.com/hardrails/steward/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/hardrails/steward?display_name=tag)](https://github.com/hardrails/steward/releases/latest)
@@ -8,10 +8,16 @@
 [![License](https://img.shields.io/github/license/hardrails/steward)](LICENSE)
 
 Steward turns a Docker-and-gVisor Linux server into a hardened execution node that
-a remote control plane can manage without receiving Docker access. It is designed
-for enterprise, regulated, defense, critical-infrastructure, and sovereign
-operators who need to run untrusted agent images and configuration on infrastructure
-they control—including disconnected environments.
+admits immutable agent workloads under local authority. It is designed for
+enterprise, regulated, defense, critical-infrastructure, and sovereign operators
+who cannot accept “the platform said it was allowed” as their only evidence.
+
+The hard question is no longer merely *can this agent be sandboxed?* It is: **which
+artifact was authorized for which tenant, under which local policy, and what did
+the node actually enforce?** When its opt-in signed admission path is configured,
+Steward v1.2 uses signed profile capsules,
+site-root policy, tenant-bound instance intents, rollback fences, a crash-detecting
+operation journal, and signed receipts that can be verified offline.
 
 Steward is control-plane neutral and independently useful. It has **no build-time or
 runtime dependency on any private system**.
@@ -47,6 +53,9 @@ Steward separates those concerns:
 | Concern | Steward's answer |
 | --- | --- |
 | Untrusted agent images | A separate Executor admits only digest-pinned OCI images and runs them with Docker + gVisor. |
+| Who authorized this deployment? | A publisher-signed capsule is intersected with site-root-signed policy and a tenant/node-bound instance intent. |
+| Stale or replaced authority | Durable policy-epoch and `(tenant, instance)` generation fences reject rollback. |
+| Auditor independence | Executor emits signed, hash-linked, node-local enforcement receipts; `stewardctl` verifies them without a network. |
 | Multiple tenants on one host | Tenant-labelled containers, per-tenant capacity ceilings, no shared host mounts, and a sandbox per workload. |
 | Remote fleet operations | Outbound-only, replay-fenced command channels work behind NAT and inbound firewalls. |
 | Host compromise surface | The lifecycle supervisor never receives the Docker socket; workloads never receive it either. |
@@ -84,14 +93,17 @@ typically exposed through an operator-selected OpenAI-compatible gateway.
                            inference is external
 ```
 
-The release contains two intentionally separate binaries:
+The release contains three binaries:
 
 - `steward` is the lightweight lifecycle supervisor and generic uplink client.
 - `steward-executor` is the narrow Docker/gVisor admission and execution boundary.
+- `stewardctl` creates and verifies offline keys, signed capsules, site policies,
+  and receipt chains.
 
-They ship as one system but run as different Unix users and systemd services. Only
-Executor joins the Docker group. The package supplies hardened units, configuration
-validation, preflight, atomic version activation, and rollback utilities.
+They ship as one system. `steward` and `steward-executor` run as different Unix
+users and systemd services; `stewardctl` is an offline CLI. Only Executor joins the
+Docker group. The package supplies hardened units, configuration validation,
+preflight, atomic version activation, and rollback utilities.
 
 [Read the architecture](https://hardrails.github.io/steward/concepts/architecture/) ·
 [Read the security model](https://hardrails.github.io/steward/concepts/security-model/) ·
@@ -113,21 +125,34 @@ admitted workload has:
 These defaults are deliberately restrictive. Security-sensitive capabilities must
 become narrow, explicit grants rather than ambient container privileges.
 
+## What is differentiated—and what is not
+
+gVisor, microVMs, lifecycle APIs, egress allowlists, secret injection, snapshots,
+and JSON audit logs are important, but they are increasingly standard across agent
+sandbox products. Steward's v1.2 wedge is the **authorization-to-enforcement
+receipt chain**: operator-owned keys and policy, tenant-bound deployment intent,
+immutable artifact admission, replay fencing, and offline-verifiable node receipts.
+
+This is deliberately a bounded claim. Receipts record what Steward accepted and
+enforced; they are not prompt transcripts and do not prove model honesty, semantic
+tool behavior, or an uncompromised host. Read [why Steward exists](https://hardrails.github.io/steward/product/positioning/)
+and the [dated market analysis](https://hardrails.github.io/steward/product/market-analysis/).
+
 ## Hermes Agent and OpenClaw
 
 Steward is agent-agnostic and can admit OCI images for projects such as
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) and
 [OpenClaw](https://github.com/openclaw/openclaw).
 
-**v0.1 compatibility boundary:** Steward can validate image admission and exercise
+**v1.2 compatibility boundary:** Steward can validate signed image admission and exercise
 container lifecycle behavior under its hardened policy. Full connected operation is
 not yet available because these agents require some combination of outbound network,
-secrets, persistent state, and listening ports—capabilities Executor v0.1 does not
+secrets, persistent state, and listening ports—capabilities Executor v1.2 does not
 grant. Steward does not recommend bypassing that boundary.
 
 - [Hermes Agent compatibility guide](https://hardrails.github.io/steward/guides/hermes-agent/)
 - [OpenClaw compatibility guide](https://hardrails.github.io/steward/guides/openclaw/)
-- [Current limitations and planned grant model](https://hardrails.github.io/steward/limitations/)
+- [Current limitations and capability roadmap](https://hardrails.github.io/steward/limitations/)
 
 ## Platform support
 
@@ -138,7 +163,7 @@ The guided installer selects:
 - RPM for RHEL, Rocky, Alma, Fedora, Amazon Linux, Oracle Linux, and SUSE families;
 - a universal archive for other systemd distributions.
 
-macOS release archives are for development; Windows is not a v0.1 release target.
+macOS release archives are for development; Windows is not a v1.2 release target.
 Neither is an Executor node platform. See the
 [platform matrix](https://hardrails.github.io/steward/reference/platform-support/).
 
@@ -156,7 +181,7 @@ Its public contracts are hand-written and CI-linted:
 - [`openapi/steward.v1.yaml`](openapi/steward.v1.yaml)
 - [`openapi/steward-executor.v1.yaml`](openapi/steward-executor.v1.yaml)
 
-An operator can clone this repository alone, audit it, build both binaries, and run
+An operator can clone this repository alone, audit it, build all three binaries, and run
 them without access to vendor-private code or infrastructure.
 
 ## Documentation

@@ -35,6 +35,7 @@ type Docker interface {
 // idempotent replay.
 type ObservedWorkload struct {
 	Workload    Workload
+	ImageID     string
 	Fingerprint string
 	Managed     bool
 	Hardened    bool
@@ -179,6 +180,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 		return ObservedWorkload{}, dockerError(resp)
 	}
 	var payload struct {
+		Image  string `json:"Image"`
 		Config struct {
 			Image      string            `json:"Image"`
 			Cmd        []string          `json:"Cmd"`
@@ -207,6 +209,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 	}
 	labels := payload.Config.Labels
 	return ObservedWorkload{
+		ImageID: payload.Image,
 		Workload: Workload{
 			TenantID:   labels["io.hardrails.tenant"],
 			InstanceID: labels["io.hardrails.instance"],
