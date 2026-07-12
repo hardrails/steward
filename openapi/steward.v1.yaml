@@ -9,11 +9,12 @@ info:
 
     By default state is held in memory only and restarting the process forgets
     all tracked instances. An operator may opt into durable state (the server's
-    `-state-file` flag), which persists state across restarts. Persistence is a
-    server-side deployment concern: the only place this HTTP contract reflects it
-    is the boolean `durable_state` field of `GET /v1/capabilities`, which reports
-    *whether* persistence is enabled (never the file path). It otherwise changes
-    no instance request or response shape or status code below.
+    `-state-file` flag), which persists state across restarts. The
+    `durable_state` field of `GET /v1/capabilities` reports whether persistence is
+    enabled without exposing the path. `GET /v1/readiness` also checks whether the
+    state-file directory remains writable and returns 503 with `check=state_file`
+    when durable mutations cannot be recorded. Persistence does not change an
+    instance request or success-response shape.
 
     `GET /metrics` is likewise opt-in (the server's `-enable-metrics` flag) and
     off by default; unlike every other operation here its response is
@@ -183,7 +184,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/BatchResponse"
         "400":
-          description: The request body was malformed or was not a JSON object with an `operations` array.
+          description: The request body was malformed, was not a JSON object with an `operations` array, or contained more than 256 operations.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -206,6 +207,7 @@ paths:
       tags: [instances]
       operationId: getInstance
       summary: Get instance status
+      description: Returns the current tracked state for one `runtime_ref`.
       responses:
         "200":
           description: The current state of the instance.
@@ -297,10 +299,13 @@ paths:
         Stopping an already-`STOPPED` instance is an idempotent no-op (`200`).
         Stopping a `PENDING` instance — one that has never started — is rejected
         with `409 invalid_state_transition` rather than silently recording a
-        nonsensical `STOPPED`.
+        nonsensical `STOPPED`. Process-backed stop releases the tracker lock while
+        waiting for termination. If a concurrent start creates a newer process in
+        that interval, stop returns that newer `RUNNING` state instead of orphaning
+        it or falsely reporting it stopped.
       responses:
         "200":
-          description: The updated instance (`STOPPED`).
+          description: The updated instance, normally `STOPPED`; it can be `RUNNING` when a concurrent start superseded a process-backed stop.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -391,12 +396,13 @@ paths:
         and the HTTP server is serving requests.
 
         This is deliberately liveness only: it does not probe the durable-state
-        file even when `-state-file` is configured. Durable state is already
-        fail-closed at startup (an unreadable or corrupt file aborts boot) and on
-        every mutation (a failed persist rolls back and returns an error), so a
-        broken state file surfaces there — not as a healthy probe masking a doomed
-        node — and re-probing it here on a hot, frequently-polled path would add
-        cost without adding a guarantee.
+        file even when `-state-file` is configured. Durable state is fail-closed at
+        startup: an unreadable or corrupt file aborts boot. Mutation persistence
+        failures return an error and roll back where the external effect is still
+        reversible. A process that has already stopped cannot be resurrected; in
+        that case memory records `STOPPED` while the state file may lag. Readiness,
+        rather than this hot liveness path, checks whether the state directory
+        remains writable.
       responses:
         "200":
           description: The process is up and serving.
@@ -730,6 +736,14 @@ components:
             re-provision of the same still-live `instance_id` (which returns
             the original `created_at` unchanged, not a fresh one). This is the
             field `created_since` on `listInstances` filters against.
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Control-plane lineage generation adopted from an outbound uplink
+            command. Present only when generation fencing is in use; omitted
+            for instances provisioned through the direct REST API.
         spec:
           $ref: "#/components/schemas/Spec"
         pid:
@@ -747,6 +761,13 @@ components:
             SIGKILL escalation) reports -1. Omitted when the instance never ran a
             process or its exit code is unknown (a reattached orphan, or lost
             supervision across a restart).
+        proc_start_token:
+          type: string
+          description: |
+            Operating-system start-time witness for `pid`, used to detect PID
+            reuse before Steward reattaches to a process after restart. Present
+            only for a supervised process when the witness was available. It is
+            an opaque identity value, not a credential or wall-clock timestamp.
         last_exit_reason:
           type: string
           description: |
@@ -829,12 +850,7 @@ components:
           $ref: "#/components/schemas/Spec"
     BatchOperationKind:
       type: string
-      description: Which lifecycle verb a `BatchOperation` runs.
-      enum:
-        - provision
-        - start
-        - stop
-        - destroy
+      description: Which lifecycle verb a `BatchOperation` requests. Recognized values are `provision`, `start`, `stop`, and `destroy`; any other string produces a per-operation 400 result while the batch continues.
     BatchOperation:
       type: object
       required:
@@ -868,9 +884,11 @@ components:
       properties:
         operations:
           type: array
+          maxItems: 256
           description: |
             An ordered list of operations, executed one at a time in exactly
-            this order. An empty array is valid and yields an empty `results`.
+            this order. At most 256 operations are accepted. An empty array
+            is valid and yields an empty `results`.
           items:
             $ref: "#/components/schemas/BatchOperation"
     BatchOperationResult:

@@ -202,6 +202,19 @@ func TestDispatchForeignNodeIDRejected(t *testing.T) {
 	}
 }
 
+func TestDispatchRejectsExplicitNodeIDThatDisagreesWithRuntimeRef(t *testing.T) {
+	d, tr := newDispatcher(t)
+	command := cmd("c1", "node-7", "agent-1", kindProvision, `{"model":"opus"}`, 1)
+	command.NodeID = "node-99"
+	rep, retry, fenced := d.execute(command)
+	if rep.Status != statusFailed || retry || fenced {
+		t.Fatalf("mismatched node identity: report=%+v retry=%t fenced=%t", rep, retry, fenced)
+	}
+	if tr.Len() != 0 {
+		t.Fatalf("tracker holds %d after mismatched node identity, want 0", tr.Len())
+	}
+}
+
 // spyTracker records whether Provision was called; every other method delegates to
 // an embedded real tracker so it stays a faithful stand-in.
 type spyTracker struct {

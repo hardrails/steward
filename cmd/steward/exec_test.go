@@ -112,7 +112,7 @@ func TestProcessExecRootRequiresAcknowledgement(t *testing.T) {
 	}
 }
 
-func TestProcessExecStateFilePermissions(t *testing.T) {
+func TestDurableStateFilePermissions(t *testing.T) {
 	originalACLInspector := inspectExtendedACL
 	t.Cleanup(func() { inspectExtendedACL = originalACLInspector })
 	inspectExtendedACL = func(string) (bool, error) { return false, nil }
@@ -121,25 +121,32 @@ func TestProcessExecStateFilePermissions(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{\"version\":1,\"instances\":[]}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateProcessExecStateFile(path); err == nil || !strings.Contains(err.Error(), "0600") {
+	if err := validateDurableStateFile(path); err == nil || !strings.Contains(err.Error(), "0600") {
 		t.Fatalf("0644 state file error=%v, want actionable rejection", err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateProcessExecStateFile(path); err != nil {
+	if err := validateDurableStateFile(path); err != nil {
 		t.Fatalf("0600 state file rejected: %v", err)
 	}
-	if err := validateProcessExecStateFile(filepath.Join(t.TempDir(), "first-run.json")); err != nil {
+	if err := validateDurableStateFile(filepath.Join(t.TempDir(), "first-run.json")); err != nil {
 		t.Fatalf("missing first-run state file rejected: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "state-link.json")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDurableStateFile(link); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("symlink state file error=%v, want rejection", err)
 	}
 
 	inspectExtendedACL = func(string) (bool, error) { return true, nil }
-	if err := validateProcessExecStateFile(path); err == nil || !strings.Contains(err.Error(), "extended access ACL") {
+	if err := validateDurableStateFile(path); err == nil || !strings.Contains(err.Error(), "extended access ACL") {
 		t.Fatalf("state file with an extended ACL error=%v, want actionable rejection", err)
 	}
 	inspectExtendedACL = func(string) (bool, error) { return false, errors.New("ACL inspection unavailable") }
-	if err := validateProcessExecStateFile(path); err == nil || !strings.Contains(err.Error(), "ACL inspection unavailable") {
+	if err := validateDurableStateFile(path); err == nil || !strings.Contains(err.Error(), "ACL inspection unavailable") {
 		t.Fatalf("ACL inspection failure error=%v, want fail-closed rejection", err)
 	}
 }

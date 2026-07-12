@@ -311,6 +311,22 @@ func TestProvisionAllowsOpaqueSpecWhenExecDisabled(t *testing.T) {
 	}
 }
 
+func TestProvisionReplayPrecedesProcessExecValidation(t *testing.T) {
+	tr := NewTracker(0)
+	original, created, err := tr.Provision("a", 0, json.RawMessage(`{"owner":"a"}`))
+	if err != nil || !created {
+		t.Fatalf("initial provision: created=%v err=%v", created, err)
+	}
+
+	replayed, created, err := tr.Provision("a", 0, json.RawMessage(`{"command":"/bin/echo"}`))
+	if err != nil || created {
+		t.Fatalf("idempotent replay: created=%v err=%v", created, err)
+	}
+	if replayed.RuntimeRef != original.RuntimeRef || string(replayed.Spec) != string(original.Spec) {
+		t.Fatalf("replay changed instance: got=%+v want=%+v", replayed, original)
+	}
+}
+
 func TestProvisionAllowsCommandSpecWhenExecEnabled(t *testing.T) {
 	tr, _ := execTracker(t, time.Second)
 	inst, created, err := tr.Provision("a", 0, json.RawMessage(`{"command":"/bin/echo","args":["hi"]}`))
