@@ -24,6 +24,26 @@ variable "installer_sha256" {
   }
 }
 
+variable "release_mirror" {
+  description = "Optional fully pinned release package and checksum manifest from an operator-controlled mirror."
+  type = object({
+    artifact_url    = string
+    artifact_sha256 = string
+    manifest_url    = string
+    manifest_sha256 = string
+  })
+  default = null
+  validation {
+    condition = var.release_mirror == null || (
+      can(regex("^https?://[^[:space:]]+\\.(deb|rpm|tar\\.gz)([?#][^[:space:]]*)?$", var.release_mirror.artifact_url)) &&
+      can(regex("^[a-f0-9]{64}$", var.release_mirror.artifact_sha256)) &&
+      can(regex("^https?://[^[:space:]]+$", var.release_mirror.manifest_url)) &&
+      can(regex("^[a-f0-9]{64}$", var.release_mirror.manifest_sha256))
+    )
+    error_message = "release_mirror must contain HTTP(S) artifact/manifest URLs and lowercase SHA-256 pins; the artifact URL must end in .deb, .rpm, or .tar.gz."
+  }
+}
+
 variable "bootstrap_mode" {
   description = "stage installs files without credentials; local creates a loopback-only node."
   type        = string
