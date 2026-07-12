@@ -17,11 +17,12 @@ command -v rpmbuild >/dev/null || {
 	echo "build-rpm: rpmbuild is required" >&2
 	exit 2
 }
-for path in steward stewardctl steward-executor deploy/config/steward.json \
-	deploy/config/executor.env deploy/systemd/steward.service \
-	deploy/systemd/steward-executor.service scripts/install-node.sh \
+for path in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/config/steward.json deploy/config/steward-local.json \
+	deploy/config/executor.env deploy/config/executor-gateway.env deploy/systemd/steward.service \
+	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
+	deploy/config/gateway.json.in scripts/install-node.sh \
 	scripts/activate-node-release.sh scripts/node-preflight.sh \
-	scripts/configure-node.sh scripts/uninstall-node.sh LICENSE README.md; do
+	scripts/configure-node.sh scripts/uninstall-node.sh scripts/build-relay-image.sh LICENSE README.md; do
 	if [[ ! -f "$stage/$path" ]]; then
 		echo "build-rpm: stage is missing $path" >&2
 		exit 2

@@ -17,11 +17,12 @@ command -v dpkg-deb >/dev/null || {
 	echo "build-deb: dpkg-deb is required" >&2
 	exit 2
 }
-for path in steward stewardctl steward-executor deploy/config/steward.json \
-	deploy/config/executor.env deploy/systemd/steward.service \
-	deploy/systemd/steward-executor.service scripts/install-node.sh \
+for path in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/config/steward.json deploy/config/steward-local.json \
+	deploy/config/executor.env deploy/config/executor-gateway.env deploy/systemd/steward.service \
+	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
+	deploy/config/gateway.json.in scripts/install-node.sh \
 	scripts/activate-node-release.sh scripts/node-preflight.sh \
-	scripts/configure-node.sh scripts/uninstall-node.sh LICENSE README.md; do
+	scripts/configure-node.sh scripts/uninstall-node.sh scripts/build-relay-image.sh LICENSE README.md; do
 	if [[ ! -f "$stage/$path" ]]; then
 		echo "build-deb: stage is missing $path" >&2
 		exit 2
@@ -57,7 +58,8 @@ trap cleanup EXIT HUP INT TERM
 install -d -m 0755 "$package_root/DEBIAN" \
 	"$package_root/usr/lib/steward-node/release" \
 	"$package_root/usr/share/doc/steward-node"
-cp -R "$stage/steward" "$stage/stewardctl" "$stage/steward-executor" "$stage/deploy" "$stage/scripts" \
+cp -R "$stage/steward" "$stage/stewardctl" "$stage/steward-mcp" "$stage/steward-executor" \
+	"$stage/steward-gateway" "$stage/steward-relay" "$stage/deploy" "$stage/scripts" \
 	"$package_root/usr/lib/steward-node/release/"
 install -m 0644 "$stage/LICENSE" "$package_root/usr/share/doc/steward-node/copyright"
 install -m 0644 "$stage/README.md" "$package_root/usr/share/doc/steward-node/README.md"

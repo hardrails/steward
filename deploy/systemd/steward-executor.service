@@ -1,7 +1,7 @@
 [Unit]
 Description=Steward Docker/gVisor executor
 Documentation=https://github.com/hardrails/steward
-After=docker.service network-online.target
+After=docker.service network-online.target steward-gateway.service
 Requires=docker.service
 Wants=network-online.target
 
@@ -12,7 +12,8 @@ Group=steward-executor
 SupplementaryGroups=docker
 UMask=0077
 EnvironmentFile=/etc/steward/executor.env
-ExecStart=/usr/local/bin/steward-executor -token-file=${EXECUTOR_TOKEN_FILE} -docker-socket=${EXECUTOR_DOCKER_SOCKET} -disable-inbound-listener -uplink-url=${EXECUTOR_UPLINK_URL} -uplink-credential-file=${EXECUTOR_UPLINK_CREDENTIAL_FILE} -uplink-state-file=${EXECUTOR_UPLINK_STATE_FILE} -uplink-tls-ca-file=${EXECUTOR_UPLINK_TLS_CA_FILE} -max-memory-bytes=${EXECUTOR_MAX_MEMORY_BYTES} -max-cpu-millis=${EXECUTOR_MAX_CPU_MILLIS} -max-pids=${EXECUTOR_MAX_PIDS} -max-workloads=${EXECUTOR_MAX_WORKLOADS} -max-workloads-per-tenant=${EXECUTOR_MAX_WORKLOADS_PER_TENANT} -admission-policy-file=${EXECUTOR_ADMISSION_POLICY_FILE} -admission-site-root-public-key-file=${EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE} -admission-site-root-key-id=${EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID} -admission-node-id=${EXECUTOR_ADMISSION_NODE_ID} -admission-evidence-key-file=${EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE}
+EnvironmentFile=-/etc/steward/executor-gateway.env
+ExecStart=/usr/local/bin/steward-executor -token-file=${EXECUTOR_TOKEN_FILE} -docker-socket=${EXECUTOR_DOCKER_SOCKET} -addr=127.0.0.1:8090 -uplink-url=${EXECUTOR_UPLINK_URL} -uplink-credential-file=${EXECUTOR_UPLINK_CREDENTIAL_FILE} -uplink-state-file=${EXECUTOR_UPLINK_STATE_FILE} -uplink-tls-ca-file=${EXECUTOR_UPLINK_TLS_CA_FILE} -max-memory-bytes=${EXECUTOR_MAX_MEMORY_BYTES} -max-cpu-millis=${EXECUTOR_MAX_CPU_MILLIS} -max-pids=${EXECUTOR_MAX_PIDS} -max-workloads=${EXECUTOR_MAX_WORKLOADS} -max-workloads-per-tenant=${EXECUTOR_MAX_WORKLOADS_PER_TENANT} -admission-policy-file=${EXECUTOR_ADMISSION_POLICY_FILE} -admission-site-root-public-key-file=${EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE} -admission-site-root-key-id=${EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID} -admission-node-id=${EXECUTOR_ADMISSION_NODE_ID} -admission-evidence-key-file=${EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE} $EXECUTOR_GATEWAY_ARGS
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s

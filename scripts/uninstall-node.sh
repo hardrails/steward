@@ -29,8 +29,8 @@ if [[ ${EUID} -ne 0 ]]; then
 	exit 2
 fi
 
-systemctl disable --now steward.service steward-executor.service >/dev/null 2>&1 || true
-for binary in steward stewardctl steward-executor; do
+systemctl disable --now steward.service steward-executor.service steward-gateway.service >/dev/null 2>&1 || true
+for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 	path="/usr/local/bin/$binary"
 	target=$(readlink "$path" 2>/dev/null || true)
 	case "$target" in
@@ -38,13 +38,14 @@ for binary in steward stewardctl steward-executor; do
 	esac
 done
 rm -f /usr/local/lib/systemd/system/steward.service \
-	/usr/local/lib/systemd/system/steward-executor.service
+	/usr/local/lib/systemd/system/steward-executor.service \
+	/usr/local/lib/systemd/system/steward-gateway.service
 rm -rf /usr/local/libexec/steward
 systemctl daemon-reload >/dev/null 2>&1 || true
 
 if [[ $purge_config == true ]]; then rm -rf /etc/steward; fi
 if [[ $purge_data == true ]]; then
-	rm -rf /opt/steward /var/lib/steward /var/lib/steward-executor /var/log/steward
+	rm -rf /opt/steward /var/lib/steward /var/lib/steward-executor /var/lib/steward-gateway /var/log/steward
 fi
 echo "uninstall-node: Steward integration removed"
 if [[ $purge_config == false || $purge_data == false ]]; then

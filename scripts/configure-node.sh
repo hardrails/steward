@@ -6,13 +6,14 @@ usage() {
 	cat <<'EOF'
 Usage: configure-node.sh OPTIONS
 
-Required:
+Remote enrollment (omit with --local-only):
   --control-plane-url URL       HTTPS control-plane base URL
   --steward-credential FILE     Steward uplink credential JSON
   --executor-credential FILE    Executor uplink credential JSON
   --ca-file FILE                PEM CA bundle for the control plane
 
 Optional:
+  --local-only                 Configure loopback HTTP, CLI, and MCP without an uplink
   --executor-token FILE         Existing host-local bearer token; generated if omitted
   --no-start                    Validate and configure, but leave services stopped
   -h, --help                    Show this help
@@ -28,6 +29,7 @@ executor_credential=
 ca_file=
 executor_token=
 start_services=true
+local_only=false
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--control-plane-url) control_plane_url=${2:-}; shift 2 ;;
@@ -35,6 +37,7 @@ while [[ $# -gt 0 ]]; do
 		--executor-credential) executor_credential=${2:-}; shift 2 ;;
 		--ca-file) ca_file=${2:-}; shift 2 ;;
 		--executor-token) executor_token=${2:-}; shift 2 ;;
+		--local-only) local_only=true; shift ;;
 		--no-start) start_services=false; shift ;;
 		-h | --help) usage; exit 0 ;;
 		*) echo "configure-node: unknown option $1" >&2; usage >&2; exit 2 ;;
@@ -49,7 +52,7 @@ if [[ $(uname -s) != Linux ]]; then
 	echo "configure-node: Linux is required" >&2
 	exit 2
 fi
-if [[ $control_plane_url != https://* ]]; then
+if [[ $local_only == false && $control_plane_url != https://* ]]; then
 	echo "configure-node: --control-plane-url must use HTTPS" >&2
 	exit 2
 fi
@@ -59,17 +62,24 @@ case "$control_plane_url" in
 		exit 2
 		;;
 esac
-for input in "$steward_credential" "$executor_credential" "$ca_file"; do
-	if [[ -z $input || ! -f $input || ! -r $input ]]; then
-		echo "configure-node: required input is not a readable regular file: ${input:-<unset>}" >&2
+if [[ $local_only == true ]]; then
+	if [[ -n $control_plane_url || -n $steward_credential || -n $executor_credential || -n $ca_file ]]; then
+		echo "configure-node: --local-only cannot be combined with remote enrollment inputs" >&2
 		exit 2
 	fi
-done
+else
+	for input in "$steward_credential" "$executor_credential" "$ca_file"; do
+		if [[ -z $input || ! -f $input || ! -r $input ]]; then
+			echo "configure-node: required input is not a readable regular file: ${input:-<unset>}" >&2
+			exit 2
+		fi
+	done
+fi
 if [[ -n $executor_token && ( ! -f $executor_token || ! -r $executor_token ) ]]; then
 	echo "configure-node: Executor token is not a readable regular file: $executor_token" >&2
 	exit 2
 fi
-for identity in steward steward-executor; do
+for identity in steward steward-executor steward-gateway; do
 	id "$identity" >/dev/null 2>&1 || {
 		echo "configure-node: missing service identity $identity; install Steward first" >&2
 		exit 2
@@ -134,7 +144,19 @@ rollback() {
 trap rollback ERR INT TERM
 
 steward_tmp=$(mktemp /etc/steward/.steward.json.XXXXXX)
-awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" '
+if [[ $local_only == true ]]; then
+	printf '%s\n' '{' \
+		'  "addr": "127.0.0.1:8080",' \
+		'  "disable_inbound_listener": false,' \
+		'  "enable_process_exec": false,' \
+		'  "log_level": "info",' \
+		'  "max_instances": 1024,' \
+		'  "state_file": "/var/lib/steward/state.json"' \
+		'}' >"$steward_tmp"
+	chown root:steward "$steward_tmp"
+	chmod 0640 "$steward_tmp"
+else
+	awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" '
 	/^[[:space:]]*"uplink_url"[[:space:]]*:/ {
 		comma = ($0 ~ /,[[:space:]]*$/) ? "," : ""
 		printf "  \"uplink_url\": \"%s\"%s\n", url, comma
@@ -150,25 +172,36 @@ awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" '
 	{ print }
 	END { if (!found_url || !found_ca) exit 3 }
 ' /etc/steward/steward.json >"$steward_tmp"
-chown root:steward "$steward_tmp"
-chmod 0640 "$steward_tmp"
+	chown root:steward "$steward_tmp"
+	chmod 0640 "$steward_tmp"
+fi
 mv -f "$steward_tmp" /etc/steward/steward.json
 steward_tmp=
 
 executor_tmp=$(mktemp /etc/steward/.executor.env.XXXXXX)
-awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" '
+awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" -v local_only="$local_only" '
 	/^EXECUTOR_UPLINK_URL=/ {
-		print "EXECUTOR_UPLINK_URL=" url
+		print "EXECUTOR_UPLINK_URL=" (local_only == "true" ? "" : url)
 		found_url = 1
 		next
 	}
+	/^EXECUTOR_UPLINK_CREDENTIAL_FILE=/ {
+		print "EXECUTOR_UPLINK_CREDENTIAL_FILE=" (local_only == "true" ? "" : "/etc/steward/executor-uplink.json")
+		found_credential = 1
+		next
+	}
+	/^EXECUTOR_UPLINK_STATE_FILE=/ {
+		print "EXECUTOR_UPLINK_STATE_FILE=" (local_only == "true" ? "" : "/var/lib/steward-executor/uplink-state.json")
+		found_state = 1
+		next
+	}
 	/^EXECUTOR_UPLINK_TLS_CA_FILE=/ {
-		print "EXECUTOR_UPLINK_TLS_CA_FILE=" ca
+		print "EXECUTOR_UPLINK_TLS_CA_FILE=" (local_only == "true" ? "" : ca)
 		found_ca = 1
 		next
 	}
 	{ print }
-	END { if (!found_url || !found_ca) exit 3 }
+	END { if (!found_url || !found_credential || !found_state || !found_ca) exit 3 }
 ' /etc/steward/executor.env >"$executor_tmp"
 chown root:root "$executor_tmp"
 chmod 0600 "$executor_tmp"
@@ -182,11 +215,13 @@ install_atomic() {
 	mv -f "$atomic_tmp" "$target"
 	atomic_tmp=
 }
-install_atomic "$steward_credential" /etc/steward/uplink-credential.json \
-	steward steward 0600
-install_atomic "$executor_credential" /etc/steward/executor-uplink.json \
-	steward-executor steward-executor 0600
-install_atomic "$ca_file" /etc/steward/control-plane-ca.pem root root 0644
+if [[ $local_only == false ]]; then
+	install_atomic "$steward_credential" /etc/steward/uplink-credential.json \
+		steward steward 0600
+	install_atomic "$executor_credential" /etc/steward/executor-uplink.json \
+		steward-executor steward-executor 0600
+	install_atomic "$ca_file" /etc/steward/control-plane-ca.pem root root 0644
+fi
 if [[ -n $executor_token ]]; then
 	install_atomic "$executor_token" /etc/steward/executor-token \
 		steward-executor steward-executor 0600
@@ -200,7 +235,7 @@ elif [[ ! -e /etc/steward/executor-token ]]; then
 	token_tmp=
 fi
 
-if [[ ! -e $fence ]]; then
+if [[ $local_only == false && ! -e $fence ]]; then
 	fence_created=true
 	runuser -u steward-executor -- /usr/local/bin/steward-executor \
 		-initialize-uplink-state -uplink-state-file "$fence"
@@ -211,7 +246,7 @@ committed=true
 trap - ERR INT TERM
 rm -rf -- "$backup_dir"
 if [[ $start_services == true ]]; then
-	systemctl enable --now steward.service steward-executor.service
+	systemctl enable --now steward-gateway.service steward.service steward-executor.service
 	echo "configure-node: Steward is configured, validated, enabled, and running"
 else
 	echo "configure-node: Steward is configured and validated; service state was not changed"

@@ -3,7 +3,7 @@ set -e
 
 case "${1:-}" in
 	remove | purge)
-		for binary in steward stewardctl steward-executor; do
+		for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 			path="/usr/local/bin/$binary"
 			target=$(readlink "$path" 2>/dev/null || true)
 			case "$target" in
@@ -12,7 +12,8 @@ case "${1:-}" in
 		done
 		rm -rf /usr/local/libexec/steward
 		rm -f /usr/local/lib/systemd/system/steward.service \
-			/usr/local/lib/systemd/system/steward-executor.service
+			/usr/local/lib/systemd/system/steward-executor.service \
+			/usr/local/lib/systemd/system/steward-gateway.service
 		systemctl daemon-reload >/dev/null 2>&1 || true
 		;;
 esac
