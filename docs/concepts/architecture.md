@@ -58,7 +58,7 @@ cannot resurrect a destroyed workload after restart.
 
 ## Signed local admission
 
-The opt-in v1.2 path separates three authorities: a publisher signs a reusable
+The opt-in v1.3 path separates three authorities: a publisher signs a reusable
 profile capsule, the site root signs local policy, and an authenticated caller
 submits a tenant/node/instance intent. Executor admits only their intersection.
 It persists policy-epoch and instance-generation high-water marks, journals the

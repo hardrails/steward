@@ -1,15 +1,15 @@
 ---
-title: Steward v1.2 boundaries
-description: Exact Steward v1.2 guarantees, signed-admission capabilities, residual risks, and deliberately unavailable runtime grants.
+title: Steward v1.3 boundaries
+description: Exact Steward v1.3 guarantees, positive capability controls, residual risks, and deliberately unavailable authority.
 section: Release boundary
 ---
 
-# Steward v1.2 boundaries
+# Steward v1.3 boundaries
 
-v1.2 adds the sovereign authorization core: strict DSSE/Ed25519 profile capsules,
+v1.3 combines the sovereign authorization core—strict DSSE/Ed25519 profile capsules,
 site-root-signed policy, tenant/node/instance intent, policy and generation fences,
 a fsynced host-mutation journal, signed hash-linked receipts, and offline
-`stewardctl` verification. It retains the fixed Docker+gVisor workload boundary.
+verification—with useful state, inference, service, direct CLI, and MCP operations.
 
 ## What a receipt means
 
@@ -26,7 +26,7 @@ that matters. Without a TPM/TEE or external anchor, a hostile host root can repl
 the key, log, and software together. Receipts are tamper-evident inside the
 documented node trust boundary, not globally non-repudiable.
 
-In v1.2 the receipt key is loaded by the Docker-authorized Executor process; there
+In v1.3 the receipt key is loaded by the Docker-authorized Executor process; there
 is no separate signer service or Unix identity. Compromise of Executor can therefore
 forge node-local receipts. Separating Docker authority from receipt-signing authority
 is future hardening, not a property claimed by this release.
@@ -41,17 +41,18 @@ signed policy, site-root public key, node identity, durable fence/journal paths,
 and evidence private key. Partial configuration fails startup. A fence must be
 initialized explicitly once; a missing fence is never recreated during startup.
 
-The packaged service remains outbound-only. An independent control plane can send
+The packaged Executor also exposes a bearer-protected loopback API for
+`stewardctl node` and `steward-mcp`. An independent control plane can send
 the `admit` command through the authenticated Executor uplink, or an operator can
 enable the loopback API plus the explicit host-admin-intent flag. The local bearer
 token is a host-administrator credential, not tenant end-user authentication.
 
-## Not available in v1.2
+## Not available in v1.3
 
 - Outbound network or hostname allowlists
-- Persistent tenant volumes or state resume
-- Inference credential brokering
-- Published container ports or service ingress
+- Arbitrary outbound network or arbitrary inference destinations
+- Arbitrary state paths, host bind mounts, or automatic state deletion
+- Raw published agent ports, public ingress, or tenant end-user authentication
 - Secret, arbitrary environment-variable, or file injection
 - Per-workload UID/GID selection
 - GPU or other device assignment
@@ -62,20 +63,18 @@ token is a host-administrator credential, not tenant end-user authentication.
 - Automatic recovery of an ambiguous prepared journal operation
 - Container checkpoint/restore, Kubernetes, or multi-host placement
 
-The signed capsule format contains `state`, `inference`, and `service` ceilings so
-future releases can preserve authorization compatibility. v1.2 returns HTTP 501
-when an intent requests any of them. It does not pretend a signed boolean is an
-implemented isolation control.
+The signed capsule format contains `state`, `inference`, and `service` ceilings.
+v1.3 enforces them only when the complete Docker volume or gateway/relay topology
+is configured. Otherwise it returns HTTP 501; a signed boolean is never treated
+as an implemented isolation control.
 
-## Runtime roadmap
+## Runtime hardening still ahead
 
 The next capability work must preserve deny-by-default operation:
 
-1. tenant-and-lineage-scoped state volumes with explicit new/resume/purge intent;
-2. a credential-hiding local inference gateway and per-instance relay with no
-   generic proxy or direct egress;
-3. authenticated local service ingress through the same paired relay, never a raw
-   Docker host-port binding; and
+1. encrypted or externally managed state backends without caller-selected host paths;
+2. stronger receipt-key isolation and optional external evidence anchoring;
+3. finer authenticated service principals beyond the host-wide local token; and
 4. verified OCI-layout import that binds manifest, platform, config digest, local
    Docker image identity, profile adapter, and receipt.
 

@@ -6,7 +6,7 @@ section: How-to guide
 
 # Configure signed admission and offline receipts
 
-This guide enables the opt-in v1.2 authority chain. Run the authoring steps on an
+This guide enables the opt-in signed authority chain. Run the authoring steps on an
 operator workstation with `stewardctl`; carry only the required public artifacts
 and the node receipt key into the site through your approved transfer process.
 

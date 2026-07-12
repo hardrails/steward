@@ -1,6 +1,6 @@
 ---
 title: Frequently asked questions
-description: Answers about Steward's purpose, control-plane neutrality, Docker and gVisor requirements, tenant isolation, air-gapped operation, agent support, and v1.2 scope.
+description: Answers about Steward's purpose, control-plane neutrality, Docker and gVisor requirements, tenant isolation, air-gapped operation, agent support, and current scope.
 section: Reference
 ---
 
@@ -53,7 +53,7 @@ It answers why a workload was allowed. Executor verifies a reusable
 publisher-signed profile capsule, a site-root-signed local policy, and an
 instance intent bound to tenant, node, instance, and generation. It then journals
 the mutation and emits signed receipts that `stewardctl` can verify offline. This
-is opt-in in v1.2; see [the how-to]({{ '/guides/signed-admission/' | relative_url }}).
+is opt-in; see [the how-to]({{ '/guides/signed-admission/' | relative_url }}).
 
 ## Do receipts prove everything an agent did?
 
@@ -61,17 +61,19 @@ No. They bind Steward's admission and mutation records. They exclude prompts,
 model responses, agent logs, and semantic tool actions. A host-root compromise is
 also outside the node-local receipt trust boundary.
 
-## Can v1.2 run Hermes Agent or OpenClaw?
+## Can Steward run Hermes Agent or OpenClaw?
 
-It can test image admission and offline lifecycle behavior. It cannot yet run them
-as connected persistent services because Executor v1.2 grants no egress, secrets,
-durable storage, or published ports. See the [Hermes]({{ '/guides/hermes-agent/' | relative_url }})
+Yes. Steward can run approved Hermes Agent and OpenClaw images as connected,
+persistent services through v1.3's finite inference, service, and state
+capabilities. Arbitrary egress, arbitrary secret injection, host mounts, and raw
+published Docker ports remain outside the contract. See the [Hermes]({{ '/guides/hermes-agent/' | relative_url }})
 and [OpenClaw]({{ '/guides/openclaw/' | relative_url }}) guides.
 
 ## Where do models run?
 
-Outside Steward. An operator may provide local models through a separately managed
-OpenAI-compatible gateway. Steward does not schedule inference or hold model policy.
+Outside Steward. An operator provides local models through a separately managed
+OpenAI-compatible origin. Steward brokers only site-configured routes and credentials;
+it does not schedule inference.
 
 ## Does Steward work without internet access?
 

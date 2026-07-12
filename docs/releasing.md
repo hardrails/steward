@@ -29,12 +29,12 @@ git pull origin main
 
 # 3. Tag the release commit and push the tag. The tag push is what triggers the
 #    Release workflow.
-git tag v1.2.0
-git push origin v1.2.0
+git tag v1.3.0
+git push origin v1.3.0
 
 # 4. Watch the run; it publishes the GitHub Release when green.
 gh run watch "$(gh run list --workflow=release.yml --limit=1 --json databaseId --jq '.[0].databaseId')"
-gh release view v1.2.0 --web
+gh release view v1.3.0 --web
 ```
 
 That is the whole flow. Everything below is the detail behind it.
@@ -116,7 +116,7 @@ still agree exactly, so the release tag is passed directly to every cross-build:
 
 ```console
 go build -trimpath \
-  -ldflags "-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=v1.2.0" \
+  -ldflags "-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=v1.3.0" \
   ./cmd/steward
 ```
 
@@ -126,8 +126,8 @@ unless both equal `GITHUB_REF_NAME`. This guards the linker symbol, import path,
 all three entry points rather than assuming a successful `go build` implies the version
 arrived.
 
-A canonical `go install github.com/hardrails/steward/cmd/steward@v1.2.0` still
-reports `v1.2.0` through `Main.Version` without release flags. The shared fallback
+A canonical `go install github.com/hardrails/steward/cmd/steward@v1.3.0` still
+reports `v1.3.0` through `Main.Version` without release flags. The shared fallback
 constant matters only for metadata-free developer invocations; keep it roughly in
 step for tidiness, but it does not identify published artifacts.
 
@@ -151,7 +151,7 @@ scripts, instead of goreleaser, nfpm, fpm, or a self-extracting installer:
 - **Locally and fully verifiable.** `scripts/release.sh` is the exact build CI
   runs; a maintainer can dry-run the whole thing on their laptop. The build was
   validated end-to-end (all four targets cross-compiled, each self-reporting
-  `v1.2.0` from a tagged checkout) before this workflow was committed.
+  `v1.3.0` from a tagged checkout) before this workflow was committed.
 - **Smaller trusted-action surface.** The workflow pins only `actions/checkout`,
   `actions/setup-go`, and `actions/{upload,download}-artifact` to full commit SHAs
   — the same supply-chain discipline the rest of CI already uses — and publishes
@@ -184,7 +184,7 @@ tools are absent; use the CI dry run for the complete matrix.
 Run against a tag locally to also exercise the version assertion:
 
 ```console
-GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v1.2.0 bash scripts/release.sh
+GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v1.3.0 bash scripts/release.sh
 ```
 
 ### On GitHub (`workflow_dispatch`)
@@ -211,10 +211,10 @@ set as well as inspect it. That identity is never published as a GitHub Release.
 
 ```console
 # Download the archive and the checksums for the release, then verify.
-gh release download v1.2.0 --repo hardrails/steward
+gh release download v1.3.0 --repo hardrails/steward
 sha256sum -c checksums.txt      # macOS: shasum -a 256 -c checksums.txt
-tar -xzf steward_v1.2.0_linux_amd64.tar.gz
-./steward -version              # -> steward v1.2.0
+tar -xzf steward_v1.3.0_linux_amd64.tar.gz
+./steward -version              # -> steward v1.3.0
 # On Linux, steward-executor is in the same verified archive.
 ```
 
@@ -223,7 +223,7 @@ tar -xzf steward_v1.2.0_linux_amd64.tar.gz
 - [ ] `main` is green (all required checks pass) at the commit you will tag.
 - [ ] `scripts/signed-admission-acceptance.sh` passes on a Linux Docker host with
       `runsc`, using the exact release binaries and an already-local pinned image.
-- [ ] The tag is a valid semver `vX.Y.Z` (a pre-release such as `v1.2.0-rc.1`
+- [ ] The tag is a valid semver `vX.Y.Z` (a pre-release such as `v1.3.0-rc.1`
       is auto-marked as a GitHub pre-release; a hyphen in the tag is the signal).
 - [ ] You are tagging the intended commit (`git log -1`).
 - [ ] (Optional) `const Version` in `internal/buildinfo/version.go` is not
@@ -235,9 +235,9 @@ A release is a tag plus a GitHub Release. If something is wrong:
 
 ```console
 # Remove the GitHub Release and delete the tag locally and on the remote.
-gh release delete v1.2.0 --repo hardrails/steward --yes
-git push origin :refs/tags/v1.2.0
-git tag -d v1.2.0
+gh release delete v1.3.0 --repo hardrails/steward --yes
+git push origin :refs/tags/v1.3.0
+git tag -d v1.3.0
 ```
 
 Then fix forward and tag again. Prefer a new patch tag (`v1.2.1`) over re-pointing
