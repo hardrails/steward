@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"bytes"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -135,6 +136,61 @@ func TestJournalRejectsBadOperationsAndClosedWrites(t *testing.T) {
 	}
 	if err := log.Compensate("closed"); err == nil {
 		t.Fatal("Compensate after Close succeeded")
+	}
+}
+
+func TestOpenForValidationIsStrictlyReadOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operations.log")
+	log, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Prepare("pending", "tenant/instance", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	validation, err := OpenForValidation(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := validation.Pending(); len(pending) != 1 || pending[0].ID != "pending" {
+		t.Fatalf("pending = %#v", pending)
+	}
+	if _, err := validation.Prepare("new", "tenant/other", 2); err == nil || !strings.Contains(err.Error(), "validation only") {
+		t.Fatalf("read-only Prepare error = %v", err)
+	}
+	if err := validation.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) || beforeInfo.Mode() != afterInfo.Mode() || !beforeInfo.ModTime().Equal(afterInfo.ModTime()) {
+		t.Fatal("read-only validation changed journal bytes or metadata")
+	}
+	missing := filepath.Join(filepath.Dir(path), "missing.log")
+	if _, err := OpenForValidation(missing); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing journal error = %v", err)
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("validation created missing journal: %v", err)
 	}
 }
 

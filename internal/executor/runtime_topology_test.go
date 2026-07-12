@@ -9,6 +9,8 @@ import (
 	"github.com/hardrails/steward/internal/gateway"
 )
 
+var testGatewayRoutePolicyDigest = "sha256:" + strings.Repeat("e", 64)
+
 type topologyFixture struct {
 	agent             ObservedWorkload
 	network           *ObservedNetwork
@@ -21,8 +23,11 @@ type topologyFixture struct {
 	removeRelayNoop   bool
 	startErrAt        int
 	stopErrAt         int
+	startAppliesOnErr bool
+	stopAppliesOnErr  bool
 	startCalls        int
 	stopCalls         int
+	onStart           func(string)
 }
 
 func (f *topologyFixture) RuntimeAvailable(context.Context, string) (bool, error)   { return true, nil }
@@ -34,7 +39,8 @@ func (f *topologyFixture) Create(context.Context, string, Workload) error { retu
 func (f *topologyFixture) Logs(context.Context, string) (string, error)   { return "", nil }
 func (f *topologyFixture) Start(_ context.Context, name string) error {
 	f.startCalls++
-	if f.startErrAt == f.startCalls {
+	failed := f.startErrAt == f.startCalls
+	if failed && !f.startAppliesOnErr {
 		return errors.New("start failure")
 	}
 	if strings.HasPrefix(name, "steward-relay-") {
@@ -42,17 +48,27 @@ func (f *topologyFixture) Start(_ context.Context, name string) error {
 	} else {
 		f.agent.Status = "running"
 	}
+	if f.onStart != nil {
+		f.onStart(name)
+	}
+	if failed {
+		return errors.New("start response lost")
+	}
 	return nil
 }
 func (f *topologyFixture) Stop(_ context.Context, name string) error {
 	f.stopCalls++
-	if f.stopErrAt == f.stopCalls {
+	failed := f.stopErrAt == f.stopCalls
+	if failed && !f.stopAppliesOnErr {
 		return errors.New("stop failure")
 	}
 	if strings.HasPrefix(name, "steward-relay-") {
 		f.relay.Status, f.relay.IPAddress = "exited", ""
 	} else {
 		f.agent.Status = "exited"
+	}
+	if failed {
+		return errors.New("stop response lost")
 	}
 	return nil
 }
@@ -77,7 +93,8 @@ func (f *topologyFixture) CreateNetwork(_ context.Context, spec NetworkSpec) err
 	if f.createNetworkErr != nil {
 		return f.createNetworkErr
 	}
-	f.network = &ObservedNetwork{NetworkSpec: spec, Managed: true, Internal: true}
+	allocated := testNetworkSpec(spec.TenantID, spec.InstanceID, spec.Generation)
+	f.network = &ObservedNetwork{NetworkSpec: allocated, Managed: true, Internal: true}
 	return nil
 }
 func (f *topologyFixture) RemoveNetwork(context.Context, string) error {
@@ -106,22 +123,24 @@ func (f *topologyFixture) InspectRelay(context.Context, string) (ObservedRelay, 
 type gatewayFixture struct {
 	grants          map[string]gateway.Grant
 	registerErr     error
+	registerApplies bool
 	inspectErr      error
 	activateErr     error
 	activateApplies bool
 	deactivateErr   error
 	unregisterErr   error
+	policyDigest    string
 }
 
 func (f *gatewayFixture) Register(_ context.Context, grant gateway.Grant) error {
-	if f.registerErr != nil {
+	if f.registerErr != nil && !f.registerApplies {
 		return f.registerErr
 	}
 	if current, ok := f.grants[grant.GrantID]; ok && current.Active {
 		return errors.New("active")
 	}
 	f.grants[grant.GrantID] = grant
-	return nil
+	return f.registerErr
 }
 func (f *gatewayFixture) Inspect(_ context.Context, id string) (gateway.Grant, error) {
 	if f.inspectErr != nil {
@@ -132,6 +151,20 @@ func (f *gatewayFixture) Inspect(_ context.Context, id string) (gateway.Grant, e
 		return gateway.Grant{}, errors.New("missing")
 	}
 	return grant, nil
+}
+func (f *gatewayFixture) InspectWithPolicy(ctx context.Context, id string) (gateway.GrantInspection, error) {
+	grant, err := f.Inspect(ctx, id)
+	if err != nil {
+		return gateway.GrantInspection{}, err
+	}
+	digest := ""
+	if grant.RouteID != "" || len(grant.EgressRouteIDs) != 0 {
+		digest = f.policyDigest
+		if digest == "" {
+			digest = testGatewayRoutePolicyDigest
+		}
+	}
+	return gateway.GrantInspection{Grant: grant, RoutePolicyDigest: digest}, nil
 }
 func (f *gatewayFixture) EgressStats(_ context.Context, id string) (gateway.EgressStats, error) {
 	if f.inspectErr != nil {
@@ -174,7 +207,7 @@ func (f *gatewayFixture) Unregister(_ context.Context, id string) error {
 }
 
 func TestDesiredRelayMountsGrantDirectoryForEgressOnly(t *testing.T) {
-	addresses := NetworkSpecFor("tenant-a", "egress-only", 1)
+	addresses := testNetworkSpec("tenant-a", "egress-only", 1)
 	grantID := gateway.GrantID("tenant-a", "egress-only", 1)
 	server := &Server{secure: &secureAdmission{
 		grantRoot:  "/run/steward-gateway/grants",
@@ -183,6 +216,7 @@ func TestDesiredRelayMountsGrantDirectoryForEgressOnly(t *testing.T) {
 	}}
 	workload := Workload{TenantID: "tenant-a", InstanceID: "egress-only", Runtime: &RuntimeGrant{
 		NetworkName: addresses.Name, GrantID: grantID, Generation: 1,
+		Subnet: addresses.Subnet, Gateway: addresses.Gateway,
 		EgressRouteIDs: []string{"public-web"}, RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
 	}}
 	want := server.desiredRelay(workload)
@@ -194,17 +228,43 @@ func TestDesiredRelayMountsGrantDirectoryForEgressOnly(t *testing.T) {
 	}
 }
 
+func TestDesiredRelayMountsGrantDirectoryForServiceOnly(t *testing.T) {
+	addresses := testNetworkSpec("tenant-a", "service-only", 1)
+	grantID := gateway.GrantID("tenant-a", "service-only", 1)
+	server := &Server{secure: &secureAdmission{
+		grantRoot:  "/run/steward-gateway/grants",
+		relayImage: "sha256:" + strings.Repeat("a", 64),
+		relayGID:   1234,
+	}}
+	workload := Workload{TenantID: "tenant-a", InstanceID: "service-only", Runtime: &RuntimeGrant{
+		NetworkName: addresses.Name, GrantID: grantID, Generation: 1, ServicePort: 8080,
+		Subnet: addresses.Subnet, Gateway: addresses.Gateway,
+		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
+	}}
+	want := server.desiredRelay(workload)
+	if want.Egress || want.Inference || want.ServicePort != 8080 ||
+		want.GrantDir != gateway.GrantDirectory(server.secure.grantRoot, grantID) {
+		t.Fatalf("service-only relay=%#v", want)
+	}
+	if err := validateRelaySpec(want); err != nil {
+		t.Fatalf("service-only relay rejected: %v", err)
+	}
+}
+
 func TestRuntimeTopologyHappyPathAndLifecycle(t *testing.T) {
-	addresses := NetworkSpecFor("tenant-a", "agent-a", 2)
+	addresses := testNetworkSpec("tenant-a", "agent-a", 2)
 	workload := Workload{
 		TenantID: "tenant-a", InstanceID: "agent-a", ProfileID: "generic-v1@v1",
 		Runtime: &RuntimeGrant{
 			NetworkName: addresses.Name, GrantID: gateway.GrantID("tenant-a", "agent-a", 2), Generation: 2,
 			Inference: true, RouteID: "local-openai", ModelAlias: "model", ServicePort: 8080,
+			Subnet: addresses.Subnet, Gateway: addresses.Gateway,
 			RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
 		},
 	}
-	docker := &topologyFixture{agent: ObservedWorkload{Workload: workload, Managed: true, Hardened: true, Status: "created"}}
+	docker := &topologyFixture{agent: ObservedWorkload{
+		Workload: workload, Fingerprint: workloadFingerprint(workload), Managed: true, Hardened: true, Status: "created",
+	}}
 	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
 	server := &Server{docker: docker, secure: &secureAdmission{
 		topology: docker, gateway: grants, relayImage: "sha256:" + strings.Repeat("a", 64),
@@ -220,16 +280,16 @@ func TestRuntimeTopologyHappyPathAndLifecycle(t *testing.T) {
 	if !server.runtimeTopologyMatches(ctx, workload, false) {
 		t.Fatal("stopped topology mismatch")
 	}
-	if err := server.applyRuntimeTransition(ctx, "executor-agent", workload, true); err != nil {
+	if err := server.applyRuntimeTransition(ctx, "executor-agent", workload, true, testGatewayRoutePolicyDigest); err != nil {
 		t.Fatal(err)
 	}
 	if !server.runtimeLifecycleMatches(ctx, workload, true) || !server.runtimeTopologyMatches(ctx, workload, true) {
 		t.Fatal("running topology mismatch")
 	}
-	if got := relayServiceURL(*docker.relay); got != "http://"+addresses.RelayIP+":8081" {
+	if got := grants.grants[workload.Runtime.GrantID].ServiceURL; got != gateway.ServiceSocketURL(server.secure.grantRoot, workload.Runtime.GrantID) {
 		t.Fatalf("service URL=%q", got)
 	}
-	if !server.restoreRuntimeLifecycle(ctx, "executor-agent", workload, false) {
+	if !server.restoreRuntimeLifecycle(ctx, "executor-agent", workload, false, testGatewayRoutePolicyDigest) {
 		t.Fatal("restore stop failed")
 	}
 	if !server.removeRuntimeTopology(ctx, workload) || len(grants.grants) != 0 || docker.network != nil || docker.relay != nil {
@@ -284,7 +344,9 @@ func TestRuntimeTopologyPreparationAndCompletionFailures(t *testing.T) {
 func TestRuntimeTransitionAndCleanupFailures(t *testing.T) {
 	workload := runtimeTopologyWorkload()
 	makeReady := func() (*topologyFixture, *gatewayFixture, *Server) {
-		docker := &topologyFixture{agent: ObservedWorkload{Workload: workload, Managed: true, Hardened: true, Status: "created"}}
+		docker := &topologyFixture{agent: ObservedWorkload{
+			Workload: workload, Fingerprint: workloadFingerprint(workload), Managed: true, Hardened: true, Status: "created",
+		}}
 		grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
 		server := runtimeTopologyServer(docker, grants)
 		if err := server.prepareRuntimeTopology(context.Background(), workload); err != nil {
@@ -301,7 +363,6 @@ func TestRuntimeTransitionAndCleanupFailures(t *testing.T) {
 		start  bool
 	}{
 		{name: "relay start", start: true, mutate: func(d *topologyFixture, _ *gatewayFixture) { d.startErrAt = 1 }},
-		{name: "missing relay address", start: true, mutate: func(d *topologyFixture, _ *gatewayFixture) { d.relay.Spec.RelayIP = "" }},
 		{name: "service bind", start: true, mutate: func(_ *topologyFixture, g *gatewayFixture) { g.registerErr = errors.New("bind") }},
 		{name: "grant activate", start: true, mutate: func(_ *topologyFixture, g *gatewayFixture) { g.activateErr = errors.New("activate") }},
 		{name: "agent start", start: true, mutate: func(d *topologyFixture, _ *gatewayFixture) { d.startErrAt = 2 }},
@@ -321,26 +382,28 @@ func TestRuntimeTransitionAndCleanupFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			docker, grants, server := makeReady()
 			if !test.start {
-				if err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, true); err != nil {
+				if err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, true, testGatewayRoutePolicyDigest); err != nil {
 					t.Fatal(err)
 				}
 				docker.startCalls, docker.stopCalls = 0, 0
 			}
 			test.mutate(docker, grants)
-			if err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, test.start); err == nil {
+			if err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, test.start, testGatewayRoutePolicyDigest); err == nil {
 				t.Fatal("expected transition failure")
 			}
 		})
 	}
-	t.Run("ambiguous activation never points at stopped backends", func(t *testing.T) {
+	t.Run("ambiguous activation containment never widens on deactivation failure", func(t *testing.T) {
 		docker, grants, server := makeReady()
 		grants.activateErr, grants.activateApplies, grants.deactivateErr = errors.New("response lost"), true, errors.New("gateway unavailable")
-		if err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, true); err == nil {
+		err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, true, testGatewayRoutePolicyDigest)
+		var failed *runtimeFailedStart
+		if !errors.As(err, &failed) || failed.contained {
 			t.Fatal("ambiguous activation accepted")
 		}
 		grant := grants.grants[workload.Runtime.GrantID]
-		if !grant.Active || docker.agent.Status != "running" || docker.relay.Status != "running" {
-			t.Fatalf("active grant points at stopped backend: grant=%#v agent=%s relay=%s", grant, docker.agent.Status, docker.relay.Status)
+		if !grant.Active || !stoppedStatus(docker.agent.Status) || !stoppedStatus(docker.relay.Status) {
+			t.Fatalf("failed start widened during containment: grant=%#v agent=%s relay=%s", grant, docker.agent.Status, docker.relay.Status)
 		}
 	})
 	t.Run("cleanup failures", func(t *testing.T) {
@@ -357,11 +420,170 @@ func TestRuntimeTransitionAndCleanupFailures(t *testing.T) {
 	})
 }
 
+func TestAuthorityWideningPrimitiveRejectsTopologyDrift(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*topologyFixture, *gatewayFixture, Workload)
+		want   runtimeTopologyComponent
+	}{
+		{name: "network", want: runtimeTopologyNetwork, mutate: func(d *topologyFixture, _ *gatewayFixture, _ Workload) {
+			d.network.Internal = false
+		}},
+		{name: "relay", want: runtimeTopologyRelay, mutate: func(d *topologyFixture, _ *gatewayFixture, _ Workload) {
+			d.relay.Hardened = false
+		}},
+		{name: "Gateway grant", want: runtimeTopologyGateway, mutate: func(_ *topologyFixture, g *gatewayFixture, workload Workload) {
+			grant := g.grants[workload.Runtime.GrantID]
+			grant.TenantID = "other-tenant"
+			g.grants[workload.Runtime.GrantID] = grant
+		}},
+		{name: "active Gateway grant", want: runtimeTopologyGateway, mutate: func(_ *topologyFixture, g *gatewayFixture, workload Workload) {
+			grant := g.grants[workload.Runtime.GrantID]
+			grant.Active = true
+			g.grants[workload.Runtime.GrantID] = grant
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workload, docker, grants, server := readyRuntimeTopology(t)
+			test.mutate(docker, grants, workload)
+			err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, true, testGatewayRoutePolicyDigest)
+			var failure *runtimeTopologyFailure
+			var phase *runtimeStartProofFailure
+			if !errors.As(err, &failure) || failure.unavailable || failure.component != test.want ||
+				!errors.As(err, &phase) {
+				t.Fatalf("transition error=%v failure=%#v", err, failure)
+			}
+			if docker.startCalls != 0 {
+				t.Fatalf("drifted topology received %d start mutations", docker.startCalls)
+			}
+		})
+	}
+}
+
+func TestFailedStartResponseLossIsMonotonicallyContained(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*topologyFixture, *gatewayFixture)
+	}{
+		{name: "relay start applied", mutate: func(d *topologyFixture, _ *gatewayFixture) {
+			d.startErrAt, d.startAppliesOnErr = 1, true
+		}},
+		{name: "Gateway register applied", mutate: func(_ *topologyFixture, g *gatewayFixture) {
+			g.registerErr, g.registerApplies = errors.New("register response lost"), true
+		}},
+		{name: "agent start applied", mutate: func(d *topologyFixture, _ *gatewayFixture) {
+			d.startErrAt, d.startAppliesOnErr = 2, true
+		}},
+		{name: "Gateway activation applied", mutate: func(_ *topologyFixture, g *gatewayFixture) {
+			g.activateErr, g.activateApplies = errors.New("activation response lost"), true
+		}},
+		{name: "containment stop applied", mutate: func(d *topologyFixture, _ *gatewayFixture) {
+			d.startErrAt, d.startAppliesOnErr = 2, true
+			d.stopErrAt, d.stopAppliesOnErr = 1, true
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workload, docker, grants, server := readyRuntimeTopology(t)
+			test.mutate(docker, grants)
+			err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, true, testGatewayRoutePolicyDigest)
+			var failed *runtimeFailedStart
+			if !errors.As(err, &failed) || !failed.contained {
+				t.Fatalf("failed start=%v state=%#v", err, failed)
+			}
+			grant := grants.grants[workload.Runtime.GrantID]
+			if grant.Active || !stoppedStatus(docker.agent.Status) || !stoppedStatus(docker.relay.Status) {
+				t.Fatalf("grant=%#v agent=%q relay=%q", grant, docker.agent.Status, docker.relay.Status)
+			}
+		})
+	}
+}
+
+func TestFailedStartContainmentFailureNeverWidensAuthority(t *testing.T) {
+	workload, docker, grants, server := readyRuntimeTopology(t)
+	docker.startErrAt, docker.startAppliesOnErr = 2, true
+	docker.stopErrAt = 1
+	err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, true, testGatewayRoutePolicyDigest)
+	var failed *runtimeFailedStart
+	if !errors.As(err, &failed) || failed.contained {
+		t.Fatalf("failed start=%v state=%#v", err, failed)
+	}
+	grant := grants.grants[workload.Runtime.GrantID]
+	if grant.Active || docker.agent.Status != "running" || !stoppedStatus(docker.relay.Status) {
+		t.Fatalf("containment grant=%#v agent=%q relay=%q", grant, docker.agent.Status, docker.relay.Status)
+	}
+	if docker.startCalls != 2 {
+		t.Fatalf("containment issued a widening start; calls=%d", docker.startCalls)
+	}
+}
+
+func TestRestoreCannotBypassRuntimeTopologyProof(t *testing.T) {
+	workload, docker, _, server := readyRuntimeTopology(t)
+	docker.network.Internal = false
+	if server.restoreRuntimeLifecycle(context.Background(), "executor-agent", workload, true, testGatewayRoutePolicyDigest) {
+		t.Fatal("restore widened authority on a drifted network")
+	}
+	if docker.startCalls != 0 {
+		t.Fatalf("restore issued %d start mutations", docker.startCalls)
+	}
+}
+
+func TestStartedTopologyPostconditionContainsNetworkDrift(t *testing.T) {
+	workload, docker, grants, server := readyRuntimeTopology(t)
+	docker.onStart = func(name string) {
+		if !strings.HasPrefix(name, "steward-relay-") {
+			docker.network.Internal = false
+		}
+	}
+	err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, true, testGatewayRoutePolicyDigest)
+	var failure *runtimeTopologyFailure
+	var failed *runtimeFailedStart
+	if !errors.As(err, &failure) || failure.component != runtimeTopologyNetwork || failure.unavailable ||
+		!errors.As(err, &failed) || !failed.contained || !failed.topologyReconciliation {
+		t.Fatalf("postcondition error=%v failure=%#v", err, failure)
+	}
+	grant := grants.grants[workload.Runtime.GrantID]
+	if grant.Active || !stoppedStatus(docker.agent.Status) || !stoppedStatus(docker.relay.Status) {
+		t.Fatalf("postcondition rollback grant=%#v agent=%q relay=%q", grant, docker.agent.Status, docker.relay.Status)
+	}
+}
+
+func TestTopologyProofPreservesInspectionUnavailable(t *testing.T) {
+	workload, docker, _, server := readyRuntimeTopology(t)
+	docker.inspectNetworkErr = errors.New("Docker socket timeout")
+	err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, true, testGatewayRoutePolicyDigest)
+	var failure *runtimeTopologyFailure
+	if !errors.As(err, &failure) || !failure.unavailable || failure.component != runtimeTopologyNetwork ||
+		!strings.Contains(err.Error(), "Docker socket timeout") {
+		t.Fatalf("inspection error=%v failure=%#v", err, failure)
+	}
+	if docker.startCalls != 0 {
+		t.Fatalf("unavailable inspection received %d start mutations", docker.startCalls)
+	}
+}
+
+func readyRuntimeTopology(t *testing.T) (Workload, *topologyFixture, *gatewayFixture, *Server) {
+	t.Helper()
+	workload := runtimeTopologyWorkload()
+	docker := &topologyFixture{agent: ObservedWorkload{
+		Workload: workload, Fingerprint: workloadFingerprint(workload), Managed: true, Hardened: true, Status: "created",
+	}}
+	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
+	server := runtimeTopologyServer(docker, grants)
+	if err := server.prepareRuntimeTopology(context.Background(), workload); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.completeRuntimeTopology(context.Background(), workload); err != nil {
+		t.Fatal(err)
+	}
+	return workload, docker, grants, server
+}
+
 func runtimeTopologyWorkload() Workload {
-	addresses := NetworkSpecFor("tenant-a", "agent-a", 2)
+	addresses := testNetworkSpec("tenant-a", "agent-a", 2)
 	return Workload{TenantID: "tenant-a", InstanceID: "agent-a", ProfileID: "generic-v1@v1", Runtime: &RuntimeGrant{
 		NetworkName: addresses.Name, GrantID: gateway.GrantID("tenant-a", "agent-a", 2), Generation: 2,
 		Inference: true, RouteID: "local-openai", ModelAlias: "model", ServicePort: 8080,
+		Subnet: addresses.Subnet, Gateway: addresses.Gateway,
 		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
 	}}
 }

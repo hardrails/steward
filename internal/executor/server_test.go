@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/dsse"
@@ -23,19 +24,23 @@ import (
 )
 
 type fakeDocker struct {
-	created  []Workload
-	observed *ObservedWorkload
-	err      error
-	total    int
-	tenant   int
-	starts   int
-	removes  int
+	created   []Workload
+	observed  *ObservedWorkload
+	err       error
+	createErr error
+	total     int
+	tenant    int
+	starts    int
+	removes   int
+	logs      string
 }
 
 type secureDocker struct {
 	fakeDocker
 	name      string
 	imageID   string
+	imageErr  error
+	volumes   []string
 	createErr error
 	startErr  error
 	stopErr   error
@@ -45,10 +50,29 @@ type secureDocker struct {
 	onStop    func()
 	onRemove  func()
 	startNoop bool
-	volume    *ObservedStateVolume
-	volumeErr error
-	network   *ObservedNetwork
-	relay     *ObservedRelay
+	stopNoop  bool
+	stopCalls int
+	// stopAppliesOnError models Docker applying a stop before its response is
+	// lost. Lifecycle code must trust the exact reinspection, not the error alone.
+	stopAppliesOnError bool
+	volume             *ObservedStateVolume
+	volumeErr          error
+	network            *ObservedNetwork
+	relay              *ObservedRelay
+}
+
+func (d *secureDocker) InspectImage(context.Context, string) (ObservedImage, error) {
+	if d.imageErr != nil {
+		return ObservedImage{}, d.imageErr
+	}
+	imageID := d.imageID
+	if imageID == "" {
+		imageID = "sha256:" + strings.Repeat("b", 64)
+	}
+	return ObservedImage{
+		ID: imageID, OS: "linux", Architecture: "amd64", ConfigPresent: true,
+		DeclaredVolumes: append([]string(nil), d.volumes...),
+	}, nil
 }
 
 func (d *secureDocker) InspectNetwork(context.Context, string) (ObservedNetwork, error) {
@@ -58,7 +82,8 @@ func (d *secureDocker) InspectNetwork(context.Context, string) (ObservedNetwork,
 	return *d.network, nil
 }
 func (d *secureDocker) CreateNetwork(_ context.Context, spec NetworkSpec) error {
-	d.network = &ObservedNetwork{NetworkSpec: spec, Managed: true, Internal: true}
+	allocated := testNetworkSpec(spec.TenantID, spec.InstanceID, spec.Generation)
+	d.network = &ObservedNetwork{NetworkSpec: allocated, Managed: true, Internal: true}
 	return nil
 }
 func (d *secureDocker) RemoveNetwork(context.Context, string) error { d.network = nil; return nil }
@@ -109,18 +134,21 @@ func (d *secureDocker) Start(context.Context, string) error {
 }
 
 func (d *secureDocker) Stop(context.Context, string) error {
-	if d.stopErr != nil {
+	d.stopCalls++
+	if d.stopErr != nil && !d.stopAppliesOnError {
 		return d.stopErr
 	}
-	if d.relay != nil && d.observed != nil && d.relay.Status == "running" && d.observed.Status != "running" {
-		d.relay.Status, d.relay.IPAddress = "exited", ""
-	} else if d.observed != nil {
-		d.observed.Status = "exited"
+	if !d.stopNoop {
+		if d.relay != nil && d.observed != nil && d.relay.Status == "running" && d.observed.Status != "running" {
+			d.relay.Status, d.relay.IPAddress = "exited", ""
+		} else if d.observed != nil {
+			d.observed.Status = "exited"
+		}
 	}
 	if d.onStop != nil {
 		d.onStop()
 	}
-	return nil
+	return d.stopErr
 }
 
 func (d *secureDocker) Remove(context.Context, string) error {
@@ -177,16 +205,13 @@ func TestSecureAdmissionRejectsLocalConfigDigestMismatch(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer secret")
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusInternalServerError || docker.removes != 1 || len(config.Journal.Pending()) != 0 {
-		t.Fatalf("status=%d removes=%d pending=%#v body=%s", response.Code, docker.removes, config.Journal.Pending(), response.Body.String())
+	if response.Code != http.StatusConflict || len(docker.created) != 0 || docker.removes != 0 || len(config.Journal.Pending()) != 0 {
+		t.Fatalf("status=%d creates=%d removes=%d pending=%#v body=%s", response.Code, len(docker.created), docker.removes, config.Journal.Pending(), response.Body.String())
 	}
 }
 
-func TestSecureAdmissionLeavesJournalPendingWhenRejectedContainerCannotBeRemoved(t *testing.T) {
-	docker := &secureDocker{
-		imageID:   "sha256:" + strings.Repeat("c", 64),
-		removeErr: errors.New("remove failed"),
-	}
+func TestSecureAdmissionRejectsDeclaredImageVolumesBeforeMutation(t *testing.T) {
+	docker := &secureDocker{volumes: []string{"/hidden-state"}}
 	server, _ := NewServer(docker, "secret", nil)
 	capsule, intent, config := secureAdmissionFixture(t)
 	if err := server.EnableSecureAdmission(config); err != nil {
@@ -197,8 +222,8 @@ func TestSecureAdmissionLeavesJournalPendingWhenRejectedContainerCannotBeRemoved
 	request.Header.Set("Authorization", "Bearer secret")
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusServiceUnavailable || len(config.Journal.Pending()) != 1 || docker.observed == nil {
-		t.Fatalf("status=%d pending=%#v observed=%#v body=%s", response.Code, config.Journal.Pending(), docker.observed, response.Body.String())
+	if response.Code != http.StatusConflict || len(config.Journal.Pending()) != 0 || len(docker.created) != 0 || docker.observed != nil {
+		t.Fatalf("status=%d pending=%#v creates=%d observed=%#v body=%s", response.Code, config.Journal.Pending(), len(docker.created), docker.observed, response.Body.String())
 	}
 }
 
@@ -277,13 +302,22 @@ func (d *fakeDocker) WorkloadCounts(context.Context, string) (int, int, error) {
 }
 func (d *fakeDocker) Create(_ context.Context, _ string, w Workload) error {
 	d.created = append(d.created, w)
-	return d.err
+	return d.createErr
 }
 
 type capacityDocker struct {
 	mu       sync.Mutex
 	created  int
 	tenantID string
+}
+
+type aggregateCapacityDocker struct {
+	fakeDocker
+	usage CapacityUsage
+}
+
+func (d *aggregateCapacityDocker) CapacityUsage(context.Context, string) (CapacityUsage, error) {
+	return d.usage, d.err
 }
 
 func (d *capacityDocker) RuntimeAvailable(context.Context, string) (bool, error) { return true, nil }
@@ -318,7 +352,12 @@ func (d *fakeDocker) Remove(context.Context, string) error {
 	d.removes++
 	return d.err
 }
-func (d *fakeDocker) Logs(context.Context, string) (string, error) { return "hello\n", d.err }
+func (d *fakeDocker) Logs(context.Context, string) (string, error) {
+	if d.logs != "" {
+		return d.logs, d.err
+	}
+	return "hello\n", d.err
+}
 
 func validWorkload() string {
 	return `{"instance_id":"tenant-a/agent-1","tenant_id":"tenant-a","profile_id":"openclaw-v1","image":"registry.local/openclaw@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","command":["agent"],"resources":{"memory_bytes":1048576,"cpu_millis":100,"pids":64},"egress":{}}`
@@ -395,10 +434,20 @@ func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing
 	var admitted secureProvisionResponse
 	if err := json.NewDecoder(response.Body).Decode(&admitted); err != nil || admitted.EgressProxy != "http://steward-relay:8082" ||
 		len(admitted.EgressRouteIDs) != 1 || admitted.EgressRouteIDs[0] != "public-web" || !docker.relay.Spec.Egress ||
-		len(docker.observed.Workload.Runtime.EgressRouteIDs) != 1 {
+		admitted.RoutePolicyDigest != "sha256:"+strings.Repeat("e", 64) || len(docker.observed.Workload.Runtime.EgressRouteIDs) != 1 {
 		t.Fatalf("egress admission=%#v relay=%#v workload=%#v err=%v", admitted, docker.relay, docker.observed.Workload, err)
 	}
+	committedFence, ok := config.Fences.Record(intent.TenantID, intent.InstanceID)
+	if !ok || committedFence.RoutePolicyDigest != admitted.RoutePolicyDigest {
+		t.Fatalf("committed route policy=%q response=%q", committedFence.RoutePolicyDigest, admitted.RoutePolicyDigest)
+	}
 	ref := RuntimeRef(intent.TenantID, intent.InstanceID)
+	grants.policyDigest = "sha256:" + strings.Repeat("f", 64)
+	assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+ref+"/start", context.Background(), http.StatusConflict)
+	if docker.observed.Status == "running" || docker.relay.Status == "running" || grants.grants[docker.observed.Workload.Runtime.GrantID].Active {
+		t.Fatal("route policy mismatch did not fail closed before lifecycle mutation")
+	}
+	grants.policyDigest = admitted.RoutePolicyDigest
 	assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+ref+"/start", context.Background(), http.StatusOK)
 	if !grants.grants[docker.observed.Workload.Runtime.GrantID].Active || docker.observed.Status != "running" || docker.relay.Status != "running" {
 		t.Fatalf("runtime not activated: agent=%#v relay=%#v grants=%#v", docker.observed, docker.relay, grants.grants)
@@ -430,6 +479,29 @@ func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing
 	assertLifecycleStatus(t, server, http.MethodDelete, "/v1/workloads/"+ref, context.Background(), http.StatusNoContent)
 	if docker.network != nil || docker.relay != nil || len(grants.grants) != 0 {
 		t.Fatalf("runtime topology retained: network=%#v relay=%#v grants=%#v", docker.network, docker.relay, grants.grants)
+	}
+}
+
+func TestSecureAdmissionRejectsUnquotaedStateByDefault(t *testing.T) {
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{State: true})
+	intent.Capabilities.State = true
+	intent.StateDisposition = "new"
+	config.AllowUnquotaedStateOnDedicatedHost = false
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{
+		CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusNotImplemented || !strings.Contains(response.Body.String(), "no hard byte or inode quota") ||
+		len(docker.created) != 0 || len(config.Journal.Pending()) != 0 || config.Evidence.NextSequence() != 1 {
+		t.Fatalf("status=%d creates=%d pending=%#v next_receipt=%d body=%s", response.Code, len(docker.created), config.Journal.Pending(), config.Evidence.NextSequence(), response.Body.String())
 	}
 }
 
@@ -523,6 +595,34 @@ func TestSecureLifecycleIsJournaledReceiptedAndTombstoned(t *testing.T) {
 	}
 }
 
+func TestPolicyRotationRevokesStartButNeverBricksCleanup(t *testing.T) {
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	handler := server.Handler()
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatal(response.Body.String())
+	}
+	ref := RuntimeRef(intent.TenantID, intent.InstanceID)
+	assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+ref+"/start", context.Background(), http.StatusOK)
+
+	// A newly installed policy has not reauthorized this exact admission record.
+	// Starting must fail closed, while stop and destroy remain available so a
+	// policy rotation can never strand a running workload.
+	server.secure.policyEnvelope = append(append([]byte(nil), server.secure.policyEnvelope...), '\n')
+	assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+ref+"/stop", context.Background(), http.StatusOK)
+	assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+ref+"/start", context.Background(), http.StatusForbidden)
+	assertLifecycleStatus(t, server, http.MethodDelete, "/v1/workloads/"+ref, context.Background(), http.StatusNoContent)
+}
+
 func TestSecureAdmissionRejectsTamperAndCapabilitiesBeforeDocker(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -603,6 +703,44 @@ func TestSecureAdmissionCreatesAndResumesTenantLineageState(t *testing.T) {
 	}
 }
 
+func TestSecureAdmissionExclusivelyLeasesWritableStateLineage(t *testing.T) {
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	intent.InstanceID = "agent-2"
+	intent.Capabilities.State = true
+	intent.StateDisposition = "resume"
+	docker.volume = &ObservedStateVolume{Managed: true, StateVolumeSpec: StateVolumeSpec{
+		Name: StateVolumeName(intent.TenantID, intent.LineageID), TenantID: intent.TenantID, LineageID: intent.LineageID,
+	}}
+	if err := config.Fences.Commit(admission.FenceRecord{
+		TenantID: intent.TenantID, InstanceID: "agent-1", Generation: 1,
+		CapsuleDigest: intent.CapsuleDigest, PolicyDigest: dsse.Digest(config.PolicyEnvelope),
+		LineageID: intent.LineageID, WorkloadDigest: "sha256:" + strings.Repeat("c", 64),
+		ImageConfigDigest: "sha256:" + strings.Repeat("b", 64), Present: true,
+	}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Evidence.Append(evidence.Event{
+		Type: evidence.AdmissionAllow, TenantID: intent.TenantID, RuntimeRef: RuntimeRef(intent.TenantID, "agent-1"),
+		CapsuleDigest: intent.CapsuleDigest, PolicyDigest: dsse.Digest(config.PolicyEnvelope), Generation: 1,
+		GrantID: "workload", Outcome: evidence.Allowed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || len(docker.created) != 0 || len(config.Journal.Pending()) != 0 {
+		t.Fatalf("status=%d creates=%d pending=%#v body=%s", response.Code, len(docker.created), config.Journal.Pending(), response.Body.String())
+	}
+}
+
 func TestSecureStateSurvivesDestroyAndRequiresExplicitReceiptedPurge(t *testing.T) {
 	docker := &secureDocker{}
 	server, _ := NewServer(docker, "secret", nil)
@@ -678,6 +816,43 @@ func TestSecureStatePurgeRejectsLiveOrCrossTenantLineage(t *testing.T) {
 		if response.Code != http.StatusConflict && response.Code != http.StatusNotFound {
 			t.Fatalf("purge=%#v status=%d body=%s", purge, response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestStatePurgeRechecksLineageUnderProvisionLock(t *testing.T) {
+	server, docker, intent, config := destroyedStateServer(t)
+	purge, _ := json.Marshal(purgeStateRequest{
+		TenantID: intent.TenantID, NodeID: intent.NodeID, LineageID: intent.LineageID, Generation: intent.Generation,
+	})
+	server.provisionMu.Lock()
+	responseDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/v1/state/purge", bytes.NewReader(purge))
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		responseDone <- response
+	}()
+
+	// A concurrent resume/provision commits its live lease while holding the
+	// same host-mutation lock. Purge must not have snapshotted the absent lineage
+	// before waiting for that lock.
+	time.Sleep(20 * time.Millisecond)
+	record, ok := config.Fences.Record(intent.TenantID, intent.InstanceID)
+	if !ok {
+		server.provisionMu.Unlock()
+		t.Fatal("destroyed lineage fence is missing")
+	}
+	record.Present = true
+	if err := config.Fences.Commit(record, config.Fences.Fences(intent.TenantID, intent.InstanceID).PolicyEpoch); err != nil {
+		server.provisionMu.Unlock()
+		t.Fatal(err)
+	}
+	server.provisionMu.Unlock()
+
+	response := <-responseDone
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "state_in_use") || docker.volume == nil {
+		t.Fatalf("purge raced live lineage: status=%d volume=%#v body=%s", response.Code, docker.volume, response.Body.String())
 	}
 }
 
@@ -1003,8 +1178,12 @@ func TestEnableSecureAdmissionRejectsBrokenAuthorityState(t *testing.T) {
 		if _, err := config.Journal.Prepare("pending", "target", 1); err != nil {
 			t.Fatal(err)
 		}
-		if err := server.EnableSecureAdmission(config); err == nil {
-			t.Fatal("pending journal accepted")
+		if err := server.EnableSecureAdmission(config); err != nil {
+			t.Fatalf("pending journal must permit degraded startup: %v", err)
+		}
+		report, err := server.Reconcile(context.Background())
+		if !errors.Is(err, ErrReconciliationIncomplete) || report.Ready || len(report.Failures) != 1 || report.Failures[0].Code != "journal_pending" {
+			t.Fatalf("report=%#v err=%v", report, err)
 		}
 	})
 	t.Run("empty evidence with fences", func(t *testing.T) {
@@ -1142,6 +1321,24 @@ func TestSecureProvisionLeavesAmbiguousDockerCreatePrepared(t *testing.T) {
 	}
 }
 
+func TestSecureProvisionMapsMissingCreateDependencyToConflict(t *testing.T) {
+	docker := &secureDocker{createErr: ErrNotFound}
+	docker.onCreate = func() { docker.observed = nil }
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "workload_dependency_unavailable") || len(config.Journal.Pending()) != 0 {
+		t.Fatalf("status=%d pending=%#v body=%s", response.Code, config.Journal.Pending(), response.Body.String())
+	}
+}
+
 func TestSecureProvisionCapacityAndCommitFailures(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -1262,6 +1459,56 @@ func TestSecureTransitionFailureModes(t *testing.T) {
 	assertLifecycleStatus(t, mustSecureServer(t), http.MethodPost, "/v1/workloads/not-a-ref/start", context.Background(), http.StatusBadRequest)
 }
 
+func TestFailedStartActivationResponseLossUsesMonotonicContainment(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		deactivationFails bool
+		wantStatus        int
+		wantPending       int
+	}{
+		{name: "contained", wantStatus: http.StatusBadGateway},
+		{name: "containment unprovable", deactivationFails: true, wantStatus: http.StatusServiceUnavailable, wantPending: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, docker, grants, config, runtimeRef := admittedRuntimeCapabilityServer(t)
+			grants.activateErr = errors.New("activation response lost")
+			grants.activateApplies = true
+			if test.deactivationFails {
+				grants.deactivateErr = errors.New("deactivation unavailable")
+			}
+
+			request := httptest.NewRequest(http.MethodPost, "/v1/workloads/"+runtimeRef+"/start", nil)
+			request.Header.Set("Authorization", "Bearer secret")
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if pending := config.Journal.Pending(); len(pending) != test.wantPending {
+				t.Fatalf("pending=%#v want=%d", pending, test.wantPending)
+			}
+			grant := grants.grants[docker.observed.Workload.Runtime.GrantID]
+			if !stoppedStatus(docker.observed.Status) || !stoppedStatus(docker.relay.Status) || grant.Active != test.deactivationFails {
+				t.Fatalf("agent=%q relay=%q grant=%#v", docker.observed.Status, docker.relay.Status, grant)
+			}
+			if docker.starts != 2 {
+				t.Fatalf("failed-start recovery issued a widening start; starts=%d", docker.starts)
+			}
+			server.reconcileMu.RLock()
+			report := cloneReconcileReport(server.reconcileReport)
+			attempted := server.reconcileAttempted
+			server.reconcileMu.RUnlock()
+			if test.deactivationFails {
+				if !attempted || report.Ready || len(report.Failures) == 0 || report.Failures[len(report.Failures)-1].Code != "containment_incomplete" {
+					t.Fatalf("degraded report=%#v attempted=%t", report, attempted)
+				}
+			} else if attempted {
+				t.Fatalf("exactly contained ordinary start failure degraded readiness: %#v", report)
+			}
+		})
+	}
+}
+
 func TestSecureDestroyFailureModes(t *testing.T) {
 	t.Run("docker remove failure", func(t *testing.T) {
 		docker := &secureDocker{removeErr: errors.New("remove failed")}
@@ -1323,6 +1570,34 @@ func admittedSecureServer(t *testing.T, docker *secureDocker) (*Server, admissio
 	return server, intent, config, RuntimeRef(intent.TenantID, intent.InstanceID)
 }
 
+func admittedRuntimeCapabilityServer(
+	t *testing.T,
+) (*Server, *secureDocker, *gatewayFixture, SecureAdmissionConfig, string) {
+	t.Helper()
+	docker := &secureDocker{}
+	server, err := NewServer(docker, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true})
+	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
+	config.Topology, config.Gateway = docker, grants
+	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+	config.GrantRoot, config.RelayGID = "/run/steward-gateway/grants", 1234
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("admit status=%d body=%s", response.Code, response.Body.String())
+	}
+	return server, docker, grants, config, RuntimeRef(intent.TenantID, intent.InstanceID)
+}
+
 func mustSecureServer(t *testing.T) *Server {
 	t.Helper()
 	server, _ := NewServer(&secureDocker{}, "secret", nil)
@@ -1364,7 +1639,8 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 		Tenants: []admission.TenantRule{{
 			TenantID: "tenant-a", PublisherKeyIDs: []string{"publisher-a"},
 			ResourceCeiling:   admission.ResourceLimits{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 32},
-			InferenceRouteIDs: []string{"local"}, ServiceIDs: []string{"agent-api"}, EgressRouteIDs: []string{"public-web"},
+			InferenceRouteIDs: []string{"local"}, InferenceModelAliases: []string{"private-model"},
+			ServiceIDs: []string{"agent-api"}, EgressRouteIDs: []string{"public-web"},
 		}},
 	}
 	policyPayload, _ := json.Marshal(policy)
@@ -1429,6 +1705,7 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 	return capsuleEnvelope, intent, SecureAdmissionConfig{
 		PolicyEnvelope: policyEnvelope, SiteRoots: map[string]ed25519.PublicKey{"site-root": sitePrivate.Public().(ed25519.PublicKey)},
 		NodeID: "node-a", Fences: fences, Journal: operations, Evidence: receipts, AllowHostAdminIntent: true,
+		AllowUnquotaedStateOnDedicatedHost: true,
 	}
 }
 
@@ -1539,6 +1816,18 @@ func TestProvisionCreatesValidatedWorkload(t *testing.T) {
 	}
 }
 
+func TestProvisionMapsMissingCreateDependencyToConflict(t *testing.T) {
+	docker := &fakeDocker{createErr: ErrNotFound}
+	server, _ := NewServer(docker, "secret", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/workloads", strings.NewReader(validWorkload()))
+	req.Header.Set("Authorization", "Bearer secret")
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusConflict || !strings.Contains(res.Body.String(), "workload_dependency_unavailable") {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
 func TestProvisionIsIdempotentOnlyForTheSameImmutableWorkload(t *testing.T) {
 	w := Workload{
 		InstanceID: "tenant-a/agent-1", TenantID: "tenant-a", ProfileID: "openclaw-v1",
@@ -1585,17 +1874,67 @@ func TestNewServerRejectsInvalidHostPolicy(t *testing.T) {
 	if _, err := NewServerWithPolicy(&fakeDocker{}, "secret", policy, nil); err == nil {
 		t.Fatal("NewServerWithPolicy accepted a tenant cap above the global cap")
 	}
+	policy = DefaultHostPolicy()
+	policy.MaxTenantMemoryBytes = policy.MaxTotalMemoryBytes + 1
+	if _, err := NewServerWithPolicy(&fakeDocker{}, "secret", policy, nil); err == nil {
+		t.Fatal("NewServerWithPolicy accepted a tenant resource cap above the host cap")
+	}
+}
+
+func TestAggregateCapacityEnforcesHostTenantAndRelayReservations(t *testing.T) {
+	workload := Workload{TenantID: "tenant-a", Resources: Resources{MemoryBytes: 10, CPUMillis: 20, PIDs: 30}}
+	for _, test := range []struct {
+		name    string
+		usage   CapacityUsage
+		runtime bool
+		adjust  func(*HostPolicy)
+		want    string
+	}{
+		{"host memory", CapacityUsage{Host: CapacityReservation{MemoryBytes: 91}}, false, func(policy *HostPolicy) { policy.MaxTotalMemoryBytes = 100 }, "host memory capacity is exhausted"},
+		{"host CPU", CapacityUsage{Host: CapacityReservation{CPUMillis: 81}}, false, func(policy *HostPolicy) { policy.MaxTotalCPUMillis = 100 }, "host CPU capacity is exhausted"},
+		{"host PIDs", CapacityUsage{Host: CapacityReservation{PIDs: 71}}, false, func(policy *HostPolicy) { policy.MaxTotalPIDs = 100 }, "host process capacity is exhausted"},
+		{"tenant memory", CapacityUsage{Tenant: CapacityReservation{MemoryBytes: 91}}, false, func(policy *HostPolicy) { policy.MaxTenantMemoryBytes = 100 }, "tenant memory capacity is exhausted"},
+		{"tenant CPU", CapacityUsage{Tenant: CapacityReservation{CPUMillis: 81}}, false, func(policy *HostPolicy) { policy.MaxTenantCPUMillis = 100 }, "tenant CPU capacity is exhausted"},
+		{"tenant PIDs", CapacityUsage{Tenant: CapacityReservation{PIDs: 71}}, false, func(policy *HostPolicy) { policy.MaxTenantPIDs = 100 }, "tenant process capacity is exhausted"},
+		{"relay overhead", CapacityUsage{}, true, func(policy *HostPolicy) {
+			policy.MaxTotalMemoryBytes = workload.Resources.MemoryBytes + defaultRelayMemory - 1
+		}, "host memory capacity is exhausted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := workload
+			if test.runtime {
+				candidate.Runtime = &RuntimeGrant{}
+			}
+			policy := DefaultHostPolicy()
+			test.adjust(&policy)
+			// Keep tenant ceilings within any lowered host ceiling unless this
+			// case intentionally tests a tenant-specific limit.
+			if policy.MaxTenantMemoryBytes > policy.MaxTotalMemoryBytes {
+				policy.MaxTenantMemoryBytes = policy.MaxTotalMemoryBytes
+			}
+			if policy.MaxTenantCPUMillis > policy.MaxTotalCPUMillis {
+				policy.MaxTenantCPUMillis = policy.MaxTotalCPUMillis
+			}
+			if policy.MaxTenantPIDs > policy.MaxTotalPIDs {
+				policy.MaxTenantPIDs = policy.MaxTotalPIDs
+			}
+			server, err := NewServerWithPolicy(&aggregateCapacityDocker{usage: test.usage}, "secret", policy, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			message, err := server.capacityMessage(context.Background(), candidate)
+			if err != nil || message != test.want {
+				t.Fatalf("message=%q want=%q err=%v", message, test.want, err)
+			}
+		})
+	}
 }
 
 func TestProvisionRejectsResourcesAboveHostCeilings(t *testing.T) {
 	docker := &fakeDocker{}
-	policy := HostPolicy{
-		MaxMemoryBytes:        1 << 20,
-		MaxCPUMillis:          100,
-		MaxPIDs:               64,
-		MaxWorkloads:          4,
-		MaxWorkloadsPerTenant: 2,
-	}
+	policy := DefaultHostPolicy()
+	policy.MaxMemoryBytes, policy.MaxCPUMillis, policy.MaxPIDs = 1<<20, 100, 64
+	policy.MaxWorkloads, policy.MaxWorkloadsPerTenant = 4, 2
 	server, err := NewServerWithPolicy(docker, "secret", policy, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1612,13 +1951,9 @@ func TestProvisionRejectsResourcesAboveHostCeilings(t *testing.T) {
 
 func TestProvisionGlobalCapacityIsAtomicUnderConcurrency(t *testing.T) {
 	docker := &capacityDocker{tenantID: "tenant-a"}
-	policy := HostPolicy{
-		MaxMemoryBytes:        1 << 20,
-		MaxCPUMillis:          100,
-		MaxPIDs:               64,
-		MaxWorkloads:          1,
-		MaxWorkloadsPerTenant: 1,
-	}
+	policy := DefaultHostPolicy()
+	policy.MaxMemoryBytes, policy.MaxCPUMillis, policy.MaxPIDs = 1<<20, 100, 64
+	policy.MaxWorkloads, policy.MaxWorkloadsPerTenant = 1, 1
 	server, err := NewServerWithPolicy(docker, "secret", policy, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1658,13 +1993,9 @@ func TestProvisionGlobalCapacityIsAtomicUnderConcurrency(t *testing.T) {
 
 func TestProvisionEnforcesTenantCapacitySeparatelyFromGlobalCapacity(t *testing.T) {
 	docker := &fakeDocker{total: 1, tenant: 1}
-	policy := HostPolicy{
-		MaxMemoryBytes:        1 << 20,
-		MaxCPUMillis:          100,
-		MaxPIDs:               64,
-		MaxWorkloads:          4,
-		MaxWorkloadsPerTenant: 1,
-	}
+	policy := DefaultHostPolicy()
+	policy.MaxMemoryBytes, policy.MaxCPUMillis, policy.MaxPIDs = 1<<20, 100, 64
+	policy.MaxWorkloads, policy.MaxWorkloadsPerTenant = 4, 1
 	server, err := NewServerWithPolicy(docker, "secret", policy, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1779,6 +2110,24 @@ func TestLogsAreAvailableOnlyForExecutorRuntimeRefs(t *testing.T) {
 	server.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "hello") {
 		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestLogsRejectJSONExpansionBeyondResponseLimit(t *testing.T) {
+	docker := &fakeDocker{observed: &ObservedWorkload{
+		Fingerprint: workloadFingerprint(Workload{}), Managed: true, Hardened: true, Status: "running",
+	}, logs: strings.Repeat("\x00", maxLogBytes/2)}
+	server, _ := NewServer(docker, "secret", nil)
+	ref := RuntimeRef("tenant-a", "agent-1")
+	req := httptest.NewRequest(http.MethodGet, "/v1/workloads/"+ref+"/logs", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusBadGateway || !strings.Contains(res.Body.String(), "encoded Docker log response exceeds") {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	if res.Body.Len() > maxLogBytes {
+		t.Fatalf("error response exceeded cap: %d", res.Body.Len())
 	}
 }
 

@@ -7,11 +7,14 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +33,26 @@ type Docker interface {
 	Logs(context.Context, string) (string, error)
 }
 
+// CapacityDocker reports durable resource reservations reconstructed from all
+// executor-managed containers, including stopped containers and the fixed relay
+// overhead for every capability-bearing workload. Docker remains the inventory
+// authority across Executor restarts; in-memory counters are not trusted.
+type CapacityDocker interface {
+	CapacityUsage(context.Context, string) (CapacityUsage, error)
+}
+
+type CapacityReservation struct {
+	Workloads   int
+	MemoryBytes int64
+	CPUMillis   int64
+	PIDs        int64
+}
+
+type CapacityUsage struct {
+	Host   CapacityReservation
+	Tenant CapacityReservation
+}
+
 // StateDocker is the additional narrow Docker surface used only after signed
 // admission has granted persistent state. Legacy workload requests cannot
 // reach these methods because StateMount is not part of their JSON contract.
@@ -37,6 +60,25 @@ type StateDocker interface {
 	InspectStateVolume(context.Context, string) (ObservedStateVolume, error)
 	CreateStateVolume(context.Context, StateVolumeSpec) error
 	RemoveStateVolume(context.Context, string) error
+}
+
+// ImageDocker is the optional, narrow image-inspection surface required by
+// signed admission. Keeping it separate preserves compatibility with legacy
+// Docker test doubles while making pre-mutation image verification mandatory
+// for the secure path.
+type ImageDocker interface {
+	InspectImage(context.Context, string) (ObservedImage, error)
+}
+
+// ObservedImage is the security-relevant projection of Docker image inspect.
+// DeclaredVolumes is sorted so policy decisions and tests are deterministic.
+type ObservedImage struct {
+	ID              string
+	OS              string
+	Architecture    string
+	Variant         string
+	DeclaredVolumes []string
+	ConfigPresent   bool
 }
 
 type StateVolumeSpec struct {
@@ -56,6 +98,13 @@ type dockerMount struct {
 	Source      string `json:"Source"`
 	Destination string `json:"Destination"`
 	RW          bool   `json:"RW"`
+}
+
+type dockerEndpoint struct {
+	IPAddress  string `json:"IPAddress"`
+	IPAMConfig *struct {
+		IPv4Address string `json:"IPv4Address"`
+	} `json:"IPAMConfig"`
 }
 
 // ObservedWorkload is the executor-owned subset of Docker inspect state. Keeping
@@ -79,9 +128,12 @@ const managedWorkloadLabel = "io.hardrails.executor.managed"
 const workloadFingerprintLabel = "io.hardrails.workload-sha256"
 const workspaceTmpfs = "rw,nosuid,nodev,size=67108864"
 const tempTmpfs = "rw,noexec,nosuid,nodev,size=67108864"
+const privateShmBytes int64 = 64 << 20
 const workloadMemoryLabel = "io.hardrails.memory-bytes"
 const workloadCPULabel = "io.hardrails.cpu-millis"
 const workloadPIDsLabel = "io.hardrails.pids"
+const workloadImageReferenceLabel = "io.hardrails.image.reference"
+const workloadImageConfigLabel = "io.hardrails.image.config"
 const managedStateLabel = "io.hardrails.state.managed"
 const stateLineageLabel = "io.hardrails.state.lineage"
 const stateVolumeLabel = "io.hardrails.state.volume"
@@ -93,16 +145,161 @@ const runtimeModelLabel = "io.hardrails.runtime.model"
 const runtimeRouteLabel = "io.hardrails.runtime.route"
 const runtimeServicePortLabel = "io.hardrails.runtime.service-port"
 const runtimeGenerationLabel = "io.hardrails.runtime.generation"
+const runtimeSubnetLabel = "io.hardrails.runtime.subnet"
+const runtimeGatewayLabel = "io.hardrails.runtime.gateway"
 const runtimeRelayIPLabel = "io.hardrails.runtime.relay-ip"
 const runtimeAgentIPLabel = "io.hardrails.runtime.agent-ip"
 const runtimeEgressRoutesLabel = "io.hardrails.runtime.egress-routes"
 
+type dockerRestartPolicy struct {
+	Name              string `json:"Name"`
+	MaximumRetryCount int    `json:"MaximumRetryCount"`
+}
+
+// dockerClosedHostPolicy is the Docker-owned portion of the isolation envelope
+// shared by untrusted agents and trusted per-instance relays. Docker API v1.41
+// spells a private PID and UTS namespace as an empty mode; unlike omission from
+// our create map, those empty values are sent deliberately. IPC and cgroup
+// namespaces have explicit private modes and must never inherit daemon defaults.
+type dockerClosedHostPolicy struct {
+	ContainerIDFile   string              `json:"ContainerIDFile"`
+	RestartPolicy     dockerRestartPolicy `json:"RestartPolicy"`
+	AutoRemove        bool                `json:"AutoRemove"`
+	VolumeDriver      string              `json:"VolumeDriver"`
+	VolumesFrom       []string            `json:"VolumesFrom"`
+	CgroupnsMode      string              `json:"CgroupnsMode"`
+	DNSOptions        []string            `json:"DnsOptions"`
+	DNSSearch         []string            `json:"DnsSearch"`
+	GroupAdd          []string            `json:"GroupAdd"`
+	IpcMode           string              `json:"IpcMode"`
+	Cgroup            string              `json:"Cgroup"`
+	Links             []string            `json:"Links"`
+	OomScoreAdj       int                 `json:"OomScoreAdj"`
+	PidMode           string              `json:"PidMode"`
+	UTSMode           string              `json:"UTSMode"`
+	UsernsMode        string              `json:"UsernsMode"`
+	ShmSize           int64               `json:"ShmSize"`
+	Sysctls           map[string]string   `json:"Sysctls"`
+	StorageOpt        map[string]string   `json:"StorageOpt"`
+	CgroupParent      string              `json:"CgroupParent"`
+	DeviceCgroupRules []string            `json:"DeviceCgroupRules"`
+	OomKillDisable    bool                `json:"OomKillDisable"`
+}
+
+func enforceClosedDockerHostPolicy(host map[string]any) map[string]any {
+	host["PidMode"] = ""
+	host["IpcMode"] = "private"
+	host["UTSMode"] = ""
+	host["CgroupnsMode"] = "private"
+	host["UsernsMode"] = ""
+	host["Cgroup"] = ""
+	host["RestartPolicy"] = map[string]any{"Name": "no", "MaximumRetryCount": 0}
+	host["AutoRemove"] = false
+	host["OomKillDisable"] = false
+	host["OomScoreAdj"] = 0
+	host["ContainerIDFile"] = ""
+	host["CgroupParent"] = ""
+	host["VolumeDriver"] = ""
+	host["VolumesFrom"] = []string{}
+	host["Links"] = []string{}
+	host["GroupAdd"] = []string{}
+	host["DeviceCgroupRules"] = []string{}
+	host["DnsOptions"] = []string{}
+	host["DnsSearch"] = []string{}
+	host["StorageOpt"] = map[string]string{}
+	host["Sysctls"] = map[string]string{}
+	host["ShmSize"] = privateShmBytes
+	return host
+}
+
+func (p dockerClosedHostPolicy) namespacesHardened() bool {
+	return p.PidMode == "" && p.IpcMode == "private" && p.UTSMode == "" && p.CgroupnsMode == "private" &&
+		p.UsernsMode == "" && p.Cgroup == ""
+}
+
+func (p dockerClosedHostPolicy) lifecycleHardened() bool {
+	return p.RestartPolicy.Name == "no" && p.RestartPolicy.MaximumRetryCount == 0 &&
+		!p.AutoRemove && !p.OomKillDisable && p.OomScoreAdj == 0
+}
+
+func (p dockerClosedHostPolicy) hostAttachmentsHardened() bool {
+	return p.ContainerIDFile == "" && p.CgroupParent == "" && p.VolumeDriver == "" &&
+		len(p.VolumesFrom) == 0 && len(p.Links) == 0 && len(p.GroupAdd) == 0 && len(p.DeviceCgroupRules) == 0 &&
+		len(p.DNSOptions) == 0 && len(p.DNSSearch) == 0 && len(p.StorageOpt) == 0 && len(p.Sysctls) == 0 &&
+		p.ShmSize == privateShmBytes
+}
+
+const dockerLogDriver = "local"
+const dockerLogMaxSize = "10m"
+const dockerLogMaxFiles = "3"
+const dockerLogCompress = "true"
+
 func NewDockerHTTP(socket string) *DockerHTTP {
+	return NewDockerHTTPWithTimeout(socket, 10*time.Second)
+}
+
+// NewDockerHTTPWithTimeout permits bounded long-running administrative calls,
+// such as an offline image import, without weakening Executor's short runtime
+// operation deadline. Callers still control cancellation through context.
+func NewDockerHTTPWithTimeout(socket string, timeout time.Duration) *DockerHTTP {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return dialer.DialContext(ctx, "unix", socket)
 	}}
-	return &DockerHTTP{client: &http.Client{Transport: transport, Timeout: 10 * time.Second}}
+	return &DockerHTTP{client: &http.Client{Transport: transport, Timeout: timeout}}
+}
+
+// LoadImage streams one already-verified Docker/OCI archive into the local
+// daemon. Authorization and archive verification belong to stewardctl; this
+// narrow method only performs Docker's native content import and checks its
+// bounded result stream for daemon-reported errors.
+func (d *DockerHTTP) LoadImage(ctx context.Context, archive io.Reader) error {
+	if archive == nil {
+		return &PolicyError{"image archive reader is required"}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/v1.41/images/load?quiet=1", archive)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-tar")
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return dockerError(resp)
+	}
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return fmt.Errorf("read Docker image import response: %w", err)
+	}
+	if len(responseBody) > 1<<20 {
+		return errors.New("Docker image import response exceeds 1 MiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	for {
+		var message struct {
+			Error       string `json:"error"`
+			ErrorDetail struct {
+				Message string `json:"message"`
+			} `json:"errorDetail"`
+		}
+		if err := decoder.Decode(&message); errors.Is(err, io.EOF) {
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("decode Docker image import response: %w", err)
+		}
+		if message.ErrorDetail.Message != "" {
+			return errors.New(message.ErrorDetail.Message)
+		}
+		if message.Error != "" {
+			return errors.New(message.Error)
+		}
+	}
 }
 
 // RuntimeAvailable checks Docker's own runtime registry at startup. A missing
@@ -136,39 +333,185 @@ func (d *DockerHTTP) RuntimeAvailable(ctx context.Context, runtime string) (bool
 // socket remains the authoritative host inventory; containers created outside this
 // narrow executor contract intentionally do not consume its admission capacity.
 func (d *DockerHTTP) WorkloadCounts(ctx context.Context, tenantID string) (int, int, error) {
-	filters, err := json.Marshal(map[string][]string{
-		"label": {managedWorkloadLabel + "=true"},
-	})
+	containers, err := d.managedWorkloadSummaries(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		"http://docker/v1.41/containers/json?all=true&filters="+url.QueryEscape(string(filters)), nil)
-	if err != nil {
-		return 0, 0, err
-	}
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, 0, dockerError(resp)
-	}
-	var containers []struct {
-		Labels map[string]string `json:"Labels"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&containers); err != nil {
-		return 0, 0, err
-	}
-	total := len(containers)
 	tenant := 0
 	for _, container := range containers {
 		if container.Labels["io.hardrails.tenant"] == tenantID {
 			tenant++
 		}
 	}
-	return total, tenant, nil
+	return len(containers), tenant, nil
+}
+
+type managedWorkloadSummary struct {
+	Labels map[string]string `json:"Labels"`
+}
+
+func (d *DockerHTTP) managedWorkloadSummaries(ctx context.Context) ([]managedWorkloadSummary, error) {
+	filters, err := json.Marshal(map[string][]string{
+		"label": {managedWorkloadLabel + "=true"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"http://docker/v1.41/containers/json?all=true&filters="+url.QueryEscape(string(filters)), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, dockerError(resp)
+	}
+	var containers []managedWorkloadSummary
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&containers); err != nil {
+		return nil, err
+	}
+	return containers, nil
+}
+
+func (d *DockerHTTP) CapacityUsage(ctx context.Context, tenantID string) (CapacityUsage, error) {
+	containers, err := d.managedWorkloadSummaries(ctx)
+	if err != nil {
+		return CapacityUsage{}, err
+	}
+	var usage CapacityUsage
+	for _, container := range containers {
+		reservation, tenant, err := reservationFromLabels(container.Labels)
+		if err != nil {
+			return CapacityUsage{}, err
+		}
+		if err := addReservation(&usage.Host, reservation); err != nil {
+			return CapacityUsage{}, err
+		}
+		if tenant == tenantID {
+			if err := addReservation(&usage.Tenant, reservation); err != nil {
+				return CapacityUsage{}, err
+			}
+		}
+	}
+	return usage, nil
+}
+
+func reservationFromLabels(labels map[string]string) (CapacityReservation, string, error) {
+	tenant := labels["io.hardrails.tenant"]
+	if !boundedText(tenant, 128) {
+		return CapacityReservation{}, "", errors.New("managed workload has an invalid tenant capacity label")
+	}
+	memory, memoryErr := strconv.ParseInt(labels[workloadMemoryLabel], 10, 64)
+	cpu, cpuErr := strconv.ParseInt(labels[workloadCPULabel], 10, 64)
+	pids, pidsErr := strconv.ParseInt(labels[workloadPIDsLabel], 10, 64)
+	if memoryErr != nil || cpuErr != nil || pidsErr != nil || memory <= 0 || cpu <= 0 || pids <= 0 {
+		return CapacityReservation{}, "", errors.New("managed workload has invalid resource capacity labels")
+	}
+	reservation := CapacityReservation{Workloads: 1, MemoryBytes: memory, CPUMillis: cpu, PIDs: pids}
+	runtimeLabels := []string{runtimeGrantLabel, runtimeInferenceLabel, runtimeModelLabel, runtimeRouteLabel,
+		runtimeServicePortLabel, runtimeGenerationLabel, runtimeSubnetLabel, runtimeGatewayLabel,
+		runtimeRelayIPLabel, runtimeAgentIPLabel, runtimeEgressRoutesLabel}
+	hasRuntimeMetadata := labels[runtimeNetworkLabel] != ""
+	for _, key := range runtimeLabels {
+		hasRuntimeMetadata = hasRuntimeMetadata || labels[key] != ""
+	}
+	if hasRuntimeMetadata {
+		if len(labels[runtimeNetworkLabel]) != len("steward-net-")+64 || !strings.HasPrefix(labels[runtimeNetworkLabel], "steward-net-") {
+			return CapacityReservation{}, "", errors.New("managed workload has invalid runtime capacity labels")
+		}
+		var err error
+		reservation.MemoryBytes, err = checkedCapacityAdd(reservation.MemoryBytes, defaultRelayMemory)
+		if err != nil {
+			return CapacityReservation{}, "", err
+		}
+		reservation.CPUMillis, err = checkedCapacityAdd(reservation.CPUMillis, defaultRelayCPU)
+		if err != nil {
+			return CapacityReservation{}, "", err
+		}
+		reservation.PIDs, err = checkedCapacityAdd(reservation.PIDs, defaultRelayPIDs)
+		if err != nil {
+			return CapacityReservation{}, "", err
+		}
+	}
+	return reservation, tenant, nil
+}
+
+func addReservation(total *CapacityReservation, add CapacityReservation) error {
+	if total.Workloads > math.MaxInt-add.Workloads {
+		return errors.New("managed workload count overflows capacity accounting")
+	}
+	total.Workloads += add.Workloads
+	var err error
+	if total.MemoryBytes, err = checkedCapacityAdd(total.MemoryBytes, add.MemoryBytes); err != nil {
+		return err
+	}
+	if total.CPUMillis, err = checkedCapacityAdd(total.CPUMillis, add.CPUMillis); err != nil {
+		return err
+	}
+	if total.PIDs, err = checkedCapacityAdd(total.PIDs, add.PIDs); err != nil {
+		return err
+	}
+	return nil
+}
+
+func checkedCapacityAdd(left, right int64) (int64, error) {
+	if left < 0 || right < 0 || left > math.MaxInt64-right {
+		return 0, errors.New("managed workload resources overflow capacity accounting")
+	}
+	return left + right, nil
+}
+
+// InspectImage resolves one exact config digest through Docker and projects only
+// the fields needed by signed admission. Looking up by config ID is intentional:
+// offline docker load preserves content IDs but may not preserve repository
+// digests. The signed repository and manifest remain provenance identities.
+func (d *DockerHTTP) InspectImage(ctx context.Context, configDigest string) (ObservedImage, error) {
+	if !imageConfigDigest.MatchString(configDigest) {
+		return ObservedImage{}, &PolicyError{"image inspection requires an exact sha256 config digest"}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/v1.41/images/"+pathEscape(configDigest)+"/json", nil)
+	if err != nil {
+		return ObservedImage{}, err
+	}
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return ObservedImage{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ObservedImage{}, ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return ObservedImage{}, dockerError(resp)
+	}
+	var payload struct {
+		ID           string `json:"Id"`
+		OS           string `json:"Os"`
+		Architecture string `json:"Architecture"`
+		Variant      string `json:"Variant"`
+		Config       *struct {
+			Volumes map[string]json.RawMessage `json:"Volumes"`
+		} `json:"Config"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
+		return ObservedImage{}, err
+	}
+	observed := ObservedImage{
+		ID: payload.ID, OS: payload.OS, Architecture: payload.Architecture,
+		Variant: payload.Variant, ConfigPresent: payload.Config != nil,
+	}
+	if payload.Config != nil {
+		observed.DeclaredVolumes = make([]string, 0, len(payload.Config.Volumes))
+		for volume := range payload.Config.Volumes {
+			observed.DeclaredVolumes = append(observed.DeclaredVolumes, volume)
+		}
+		slices.Sort(observed.DeclaredVolumes)
+	}
+	return observed, nil
 }
 
 func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error {
@@ -185,6 +528,12 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		workloadMemoryLabel:      strconv.FormatInt(w.Resources.MemoryBytes, 10),
 		workloadCPULabel:         strconv.FormatInt(w.Resources.CPUMillis, 10),
 		workloadPIDsLabel:        strconv.FormatInt(w.Resources.PIDs, 10),
+	}
+	image := w.Image
+	if w.ImageConfigDigest != "" {
+		image = w.ImageConfigDigest
+		labels[workloadImageReferenceLabel] = w.Image
+		labels[workloadImageConfigLabel] = w.ImageConfigDigest
 	}
 	if w.State != nil {
 		layout := profileLayoutFor(w.ProfileID)
@@ -211,6 +560,8 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		labels[runtimeModelLabel] = w.Runtime.ModelAlias
 		labels[runtimeRouteLabel] = w.Runtime.RouteID
 		labels[runtimeServicePortLabel] = strconv.Itoa(w.Runtime.ServicePort)
+		labels[runtimeSubnetLabel] = w.Runtime.Subnet
+		labels[runtimeGatewayLabel] = w.Runtime.Gateway
 		labels[runtimeRelayIPLabel] = w.Runtime.RelayIP
 		labels[runtimeAgentIPLabel] = w.Runtime.AgentIP
 		labels[runtimeEgressRoutesLabel] = strings.Join(w.Runtime.EgressRouteIDs, ",")
@@ -229,17 +580,17 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 			"http_proxy="+proxy, "https_proxy="+proxy, "no_proxy="+noProxy)
 	}
 	dns := []string(nil)
-	if w.Runtime != nil && len(w.Runtime.EgressRouteIDs) > 0 {
+	if w.Runtime != nil {
 		dns = []string{"127.0.0.1"}
 	}
 	body := map[string]any{
-		"Image":          w.Image,
+		"Image":          image,
 		"Cmd":            w.Command,
 		"Env":            environment,
 		"User":           "65532:65532",
 		"WorkingDir":     workingDirectory,
 		"ReadonlyRootfs": true,
-		"HostConfig": map[string]any{
+		"HostConfig": enforceClosedDockerHostPolicy(map[string]any{
 			"Runtime":        "runsc",
 			"NetworkMode":    networkMode,
 			"ReadonlyRootfs": true,
@@ -247,12 +598,16 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 			"SecurityOpt":    []string{"no-new-privileges:true"},
 			"PidsLimit":      w.Resources.PIDs,
 			"Memory":         w.Resources.MemoryBytes,
+			"MemorySwap":     w.Resources.MemoryBytes,
 			"NanoCPUs":       w.Resources.CPUMillis * 1_000_000,
 			"Tmpfs":          tmpfs,
 			"Mounts":         mounts,
 			"ExtraHosts":     runtimeExtraHosts(w.Runtime),
 			"Dns":            dns,
-		},
+			"LogConfig": map[string]any{"Type": dockerLogDriver, "Config": map[string]string{
+				"max-size": dockerLogMaxSize, "max-file": dockerLogMaxFiles, "compress": dockerLogCompress,
+			}},
+		}),
 		"Labels":           labels,
 		"NetworkingConfig": networkingConfig,
 	}
@@ -293,45 +648,66 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			Labels     map[string]string `json:"Labels"`
 		} `json:"Config"`
 		HostConfig struct {
-			Memory      int64             `json:"Memory"`
-			NanoCPUs    int64             `json:"NanoCpus"`
-			Pids        int64             `json:"PidsLimit"`
-			Runtime     string            `json:"Runtime"`
-			NetworkMode string            `json:"NetworkMode"`
-			Readonly    bool              `json:"ReadonlyRootfs"`
-			CapDrop     []string          `json:"CapDrop"`
-			SecurityOpt []string          `json:"SecurityOpt"`
-			Tmpfs       map[string]string `json:"Tmpfs"`
-			ExtraHosts  []string          `json:"ExtraHosts"`
-			DNS         []string          `json:"Dns"`
+			dockerClosedHostPolicy
+			Memory          int64                      `json:"Memory"`
+			MemorySwap      int64                      `json:"MemorySwap"`
+			NanoCPUs        int64                      `json:"NanoCpus"`
+			Pids            int64                      `json:"PidsLimit"`
+			Runtime         string                     `json:"Runtime"`
+			NetworkMode     string                     `json:"NetworkMode"`
+			Readonly        bool                       `json:"ReadonlyRootfs"`
+			CapDrop         []string                   `json:"CapDrop"`
+			SecurityOpt     []string                   `json:"SecurityOpt"`
+			Tmpfs           map[string]string          `json:"Tmpfs"`
+			ExtraHosts      []string                   `json:"ExtraHosts"`
+			DNS             []string                   `json:"Dns"`
+			Privileged      bool                       `json:"Privileged"`
+			CapAdd          []string                   `json:"CapAdd"`
+			Binds           []string                   `json:"Binds"`
+			Devices         []json.RawMessage          `json:"Devices"`
+			DeviceRequests  []json.RawMessage          `json:"DeviceRequests"`
+			PortBindings    map[string]json.RawMessage `json:"PortBindings"`
+			PublishAllPorts bool                       `json:"PublishAllPorts"`
+			LogConfig       struct {
+				Type   string            `json:"Type"`
+				Config map[string]string `json:"Config"`
+			} `json:"LogConfig"`
 		} `json:"HostConfig"`
 		State struct {
 			Status string `json:"Status"`
 		} `json:"State"`
 		Mounts          []dockerMount `json:"Mounts"`
 		NetworkSettings struct {
-			Networks map[string]struct {
-				IPAddress string `json:"IPAddress"`
-			} `json:"Networks"`
+			Networks map[string]dockerEndpoint `json:"Networks"`
 		} `json:"NetworkSettings"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
 		return ObservedWorkload{}, err
 	}
 	labels := payload.Config.Labels
+	imageReference := payload.Config.Image
+	configuredImageID := ""
+	imageHardened := true
+	if labels[workloadImageReferenceLabel] != "" || labels[workloadImageConfigLabel] != "" {
+		imageReference = labels[workloadImageReferenceLabel]
+		configuredImageID = labels[workloadImageConfigLabel]
+		imageHardened = imageDigest.MatchString(imageReference) && imageConfigDigest.MatchString(configuredImageID) &&
+			payload.Config.Image == configuredImageID && payload.Image == configuredImageID
+	}
 	var state *StateMount
 	stateHardened := labels[stateVolumeLabel] == "" && labels[statePathLabel] == "" &&
 		payload.Config.WorkingDir == "/workspace" && contains(payload.Config.Env, "HOME=/workspace") &&
-		payload.HostConfig.Tmpfs["/workspace"] == workspaceTmpfs
+		exactStringMap(payload.HostConfig.Tmpfs, map[string]string{"/tmp": tempTmpfs, "/workspace": workspaceTmpfs}) && len(payload.Mounts) == 0
 	if labels[stateVolumeLabel] != "" || labels[statePathLabel] != "" {
 		state = &StateMount{VolumeName: labels[stateVolumeLabel], Path: labels[statePathLabel]}
 		layout := profileLayoutFor(labels["io.hardrails.profile"])
 		stateHardened = state.Path == layout.StatePath && strings.HasPrefix(state.VolumeName, "steward-state-") &&
 			payload.Config.WorkingDir == layout.WorkDir && contains(payload.Config.Env, "HOME="+layout.Home) &&
-			payload.HostConfig.Tmpfs["/workspace"] == "" && hasExactStateMount(payload.Mounts, *state)
+			exactStringMap(payload.HostConfig.Tmpfs, map[string]string{"/tmp": tempTmpfs}) && hasExactStateMount(payload.Mounts, *state)
 	}
 	var runtimeGrant *RuntimeGrant
-	runtimeHardened := payload.HostConfig.NetworkMode == "none" && labels[runtimeNetworkLabel] == "" && labels[runtimeGrantLabel] == ""
+	runtimeHardened := payload.HostConfig.NetworkMode == "none" && labels[runtimeNetworkLabel] == "" && labels[runtimeGrantLabel] == "" &&
+		hasExactNetwork(payload.NetworkSettings.Networks, "none", "", false) && len(payload.HostConfig.ExtraHosts) == 0 && len(payload.HostConfig.DNS) == 0
 	if labels[runtimeNetworkLabel] != "" || labels[runtimeGrantLabel] != "" {
 		servicePort, serviceErr := strconv.Atoi(labels[runtimeServicePortLabel])
 		inference, inferenceErr := strconv.ParseBool(labels[runtimeInferenceLabel])
@@ -339,15 +715,19 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 		runtimeGrant = &RuntimeGrant{
 			NetworkName: labels[runtimeNetworkLabel], GrantID: labels[runtimeGrantLabel],
 			Generation: generation, Inference: inference, RouteID: labels[runtimeRouteLabel], ModelAlias: labels[runtimeModelLabel], ServicePort: servicePort,
+			Subnet: labels[runtimeSubnetLabel], Gateway: labels[runtimeGatewayLabel],
 			RelayIP: labels[runtimeRelayIPLabel], AgentIP: labels[runtimeAgentIPLabel],
 			EgressRouteIDs: splitRouteIDs(labels[runtimeEgressRoutesLabel]),
 		}
 		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil && generation > 0 &&
 			validEgressRouteIDs(runtimeGrant.EgressRouteIDs) &&
+			runtimeAllocationMatches(NetworkSpecFor(labels["io.hardrails.tenant"], labels["io.hardrails.instance"], generation),
+				runtimeGrant.Subnet, runtimeGrant.Gateway, runtimeGrant.RelayIP, runtimeGrant.AgentIP) &&
 			payload.HostConfig.NetworkMode == runtimeGrant.NetworkName &&
 			strings.HasPrefix(runtimeGrant.NetworkName, "steward-net-") && strings.HasPrefix(runtimeGrant.GrantID, "grant-") &&
-			contains(payload.HostConfig.ExtraHosts, "steward-relay:"+runtimeGrant.RelayIP) &&
-			(payload.State.Status != "running" || payload.NetworkSettings.Networks[runtimeGrant.NetworkName].IPAddress == runtimeGrant.AgentIP)
+			exactStrings(payload.HostConfig.ExtraHosts, []string{"steward-relay:" + runtimeGrant.RelayIP}) &&
+			len(payload.HostConfig.DNS) == 1 && payload.HostConfig.DNS[0] == "127.0.0.1" &&
+			hasExactNetwork(payload.NetworkSettings.Networks, runtimeGrant.NetworkName, runtimeGrant.AgentIP, payload.State.Status == "running")
 		if runtimeGrant.Inference {
 			runtimeHardened = runtimeHardened && contains(payload.Config.Env, "OPENAI_BASE_URL=http://steward-relay:8080/v1") &&
 				contains(payload.Config.Env, "OPENAI_API_BASE=http://steward-relay:8080/v1") &&
@@ -356,7 +736,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 		if len(runtimeGrant.EgressRouteIDs) > 0 {
 			const proxy = "http://steward-relay:8082"
 			const noProxy = "steward-relay,agent,localhost,127.0.0.1"
-			runtimeHardened = runtimeHardened && len(payload.HostConfig.DNS) == 1 && payload.HostConfig.DNS[0] == "127.0.0.1" &&
+			runtimeHardened = runtimeHardened &&
 				contains(payload.Config.Env, "STEWARD_EGRESS_PROXY="+proxy) &&
 				contains(payload.Config.Env, "HTTP_PROXY="+proxy) && contains(payload.Config.Env, "HTTPS_PROXY="+proxy) &&
 				contains(payload.Config.Env, "NO_PROXY="+noProxy) && contains(payload.Config.Env, "http_proxy="+proxy) &&
@@ -366,11 +746,12 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 	return ObservedWorkload{
 		ImageID: payload.Image,
 		Workload: Workload{
-			TenantID:   labels["io.hardrails.tenant"],
-			InstanceID: labels["io.hardrails.instance"],
-			ProfileID:  labels["io.hardrails.profile"],
-			Image:      payload.Config.Image,
-			Command:    payload.Config.Cmd,
+			TenantID:          labels["io.hardrails.tenant"],
+			InstanceID:        labels["io.hardrails.instance"],
+			ProfileID:         labels["io.hardrails.profile"],
+			Image:             imageReference,
+			ImageConfigDigest: configuredImageID,
+			Command:           payload.Config.Cmd,
 			Resources: Resources{
 				MemoryBytes: payload.HostConfig.Memory,
 				CPUMillis:   payload.HostConfig.NanoCPUs / 1_000_000,
@@ -382,7 +763,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 		},
 		Fingerprint: labels[workloadFingerprintLabel],
 		Managed:     labels[managedWorkloadLabel] == "true",
-		Hardened: payload.Config.User == "65532:65532" &&
+		Hardened: imageHardened && payload.Config.User == "65532:65532" &&
 			validFingerprint(labels[workloadFingerprintLabel]) &&
 			labels["io.hardrails.tenant"] != "" && labels["io.hardrails.instance"] != "" &&
 			labels["io.hardrails.profile"] != "" &&
@@ -392,9 +773,15 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			stateHardened &&
 			contains(payload.Config.Env, "TMPDIR=/tmp") &&
 			payload.HostConfig.Runtime == "runsc" && runtimeHardened &&
-			payload.HostConfig.Readonly && contains(payload.HostConfig.CapDrop, "ALL") &&
-			contains(payload.HostConfig.SecurityOpt, "no-new-privileges:true") &&
-			payload.HostConfig.Tmpfs["/tmp"] == tempTmpfs,
+			payload.HostConfig.namespacesHardened() && payload.HostConfig.lifecycleHardened() &&
+			payload.HostConfig.hostAttachmentsHardened() &&
+			payload.HostConfig.Readonly && exactStrings(payload.HostConfig.CapDrop, []string{"ALL"}) &&
+			exactStrings(payload.HostConfig.SecurityOpt, []string{"no-new-privileges:true"}) &&
+			payload.HostConfig.MemorySwap == payload.HostConfig.Memory &&
+			!payload.HostConfig.Privileged && len(payload.HostConfig.CapAdd) == 0 && len(payload.HostConfig.Binds) == 0 &&
+			len(payload.HostConfig.Devices) == 0 && len(payload.HostConfig.DeviceRequests) == 0 &&
+			len(payload.HostConfig.PortBindings) == 0 && !payload.HostConfig.PublishAllPorts &&
+			exactLogConfig(payload.HostConfig.LogConfig.Type, payload.HostConfig.LogConfig.Config),
 		Status: payload.State.Status,
 	}, nil
 }
@@ -428,27 +815,66 @@ func validFingerprint(value string) bool {
 
 func workloadFingerprint(w Workload) string {
 	raw, _ := json.Marshal(struct {
-		InstanceID string        `json:"instance_id"`
-		TenantID   string        `json:"tenant_id"`
-		ProfileID  string        `json:"profile_id"`
-		Image      string        `json:"image"`
-		Command    []string      `json:"command,omitempty"`
-		Resources  Resources     `json:"resources"`
-		Egress     Egress        `json:"egress"`
-		State      *StateMount   `json:"state,omitempty"`
-		Runtime    *RuntimeGrant `json:"runtime,omitempty"`
-	}{w.InstanceID, w.TenantID, w.ProfileID, w.Image, w.Command, w.Resources, w.Egress, w.State, w.Runtime})
+		InstanceID        string        `json:"instance_id"`
+		TenantID          string        `json:"tenant_id"`
+		ProfileID         string        `json:"profile_id"`
+		Image             string        `json:"image"`
+		Command           []string      `json:"command,omitempty"`
+		Resources         Resources     `json:"resources"`
+		Egress            Egress        `json:"egress"`
+		State             *StateMount   `json:"state,omitempty"`
+		Runtime           *RuntimeGrant `json:"runtime,omitempty"`
+		ImageConfigDigest string        `json:"image_config_digest,omitempty"`
+	}{w.InstanceID, w.TenantID, w.ProfileID, w.Image, w.Command, w.Resources, w.Egress, w.State, w.Runtime, w.ImageConfigDigest})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
 
 func hasExactStateMount(mounts []dockerMount, want StateMount) bool {
-	for _, mount := range mounts {
-		if mount.Type == "volume" && mount.Name == want.VolumeName && mount.Destination == want.Path && mount.RW {
-			return true
+	return len(mounts) == 1 && mounts[0].Type == "volume" && mounts[0].Name == want.VolumeName &&
+		mounts[0].Destination == want.Path && mounts[0].RW
+}
+
+func hasExactNetwork(networks map[string]dockerEndpoint, name, ip string, requireIP bool) bool {
+	if len(networks) != 1 {
+		return false
+	}
+	endpoint, ok := networks[name]
+	configuredIP := ""
+	if endpoint.IPAMConfig != nil {
+		configuredIP = endpoint.IPAMConfig.IPv4Address
+	}
+	return ok && configuredIP == ip && (!requireIP || endpoint.IPAddress == ip)
+}
+
+func exactStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+func exactStringMap(got, want map[string]string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for key, value := range want {
+		if got[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func exactLogConfig(driver string, config map[string]string) bool {
+	return driver == dockerLogDriver && exactStringMap(config, map[string]string{
+		"max-size": dockerLogMaxSize, "max-file": dockerLogMaxFiles, "compress": dockerLogCompress,
+	})
 }
 
 func StateVolumeName(tenantID, lineageID string) string {
@@ -511,7 +937,7 @@ func (d *DockerHTTP) Stop(ctx context.Context, name string) error {
 	return d.call(ctx, http.MethodPost, "/v1.41/containers/"+pathEscape(name)+"/stop?t=10", nil, http.StatusNoContent)
 }
 func (d *DockerHTTP) Remove(ctx context.Context, name string) error {
-	return d.call(ctx, http.MethodDelete, "/v1.41/containers/"+pathEscape(name)+"?force=true", nil, http.StatusNoContent)
+	return d.call(ctx, http.MethodDelete, "/v1.41/containers/"+pathEscape(name)+"?force=true&v=true", nil, http.StatusNoContent)
 }
 
 const maxLogBytes = 1 << 20

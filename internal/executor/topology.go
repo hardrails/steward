@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"strconv"
@@ -74,6 +75,8 @@ const managedNetworkLabel = "io.hardrails.network.managed"
 const networkGenerationLabel = "io.hardrails.network.generation"
 const managedRelayLabel = "io.hardrails.relay.managed"
 const relayFingerprintLabel = "io.hardrails.relay-sha256"
+const isolatedGatewayOption = "com.docker.network.bridge.gateway_mode_ipv4"
+const isolatedGatewayMode = "isolated"
 
 func NetworkName(tenantID, instanceID string, generation uint64) string {
 	sum := sha256.Sum256([]byte(tenantID + "\x00" + instanceID + "\x00" + strconv.FormatUint(generation, 10)))
@@ -81,14 +84,69 @@ func NetworkName(tenantID, instanceID string, generation uint64) string {
 }
 
 func NetworkSpecFor(tenantID, instanceID string, generation uint64) NetworkSpec {
-	sum := sha256.Sum256([]byte(tenantID + "\x00" + instanceID + "\x00" + strconv.FormatUint(generation, 10)))
-	base := int(sum[2] & 0xf8)
-	prefix := "10." + strconv.Itoa(int(sum[0])) + "." + strconv.Itoa(int(sum[1])) + "."
 	return NetworkSpec{
 		Name: NetworkName(tenantID, instanceID, generation), TenantID: tenantID, InstanceID: instanceID, Generation: generation,
-		Subnet: prefix + strconv.Itoa(base) + "/29", Gateway: prefix + strconv.Itoa(base+1),
-		RelayIP: prefix + strconv.Itoa(base+2), AgentIP: prefix + strconv.Itoa(base+3),
 	}
+}
+
+// networkSpecFromIPAM binds a Docker-selected private subnet to Steward's two
+// fixed endpoints. Docker, not tenant-controlled identity text, selects the
+// subnet from the operator-configured daemon address pools and excludes existing
+// Docker networks. The fresh non-attachable network contains only these two
+// containers, so the first two usable addresses are unambiguous. Docker omits
+// IPAM.Config.Gateway for gateway_mode_ipv4=isolated because the host bridge has
+// no address. If an Engine reports a gateway, Steward validates and skips it.
+func networkSpecFromIPAM(identity NetworkSpec, subnet, gateway string) (NetworkSpec, error) {
+	want := NetworkSpecFor(identity.TenantID, identity.InstanceID, identity.Generation)
+	if identity.Name != want.Name || identity.TenantID != want.TenantID || identity.InstanceID != want.InstanceID ||
+		identity.Generation != want.Generation {
+		return NetworkSpec{}, errors.New("network identity is invalid")
+	}
+	prefix, err := netip.ParsePrefix(subnet)
+	if err != nil || !prefix.Addr().Is4() || prefix.Bits() > 29 {
+		return NetworkSpec{}, errors.New("Docker allocated an unsupported network subnet")
+	}
+	prefix = prefix.Masked()
+	var gatewayAddress netip.Addr
+	if gateway != "" {
+		gatewayAddress, err = netip.ParseAddr(gateway)
+		if err != nil || !gatewayAddress.Is4() || !gatewayAddress.IsPrivate() || !prefix.Contains(gatewayAddress) ||
+			gatewayAddress == prefix.Addr() || !prefix.Contains(gatewayAddress.Next()) {
+			return NetworkSpec{}, errors.New("Docker allocated an unsupported network gateway")
+		}
+	}
+	endpoints := make([]netip.Addr, 0, 2)
+	for candidate := prefix.Addr().Next(); prefix.Contains(candidate) && len(endpoints) < 2; candidate = candidate.Next() {
+		// The final address in an IPv4 prefix is the broadcast address.
+		if !prefix.Contains(candidate.Next()) {
+			break
+		}
+		if !gatewayAddress.IsValid() || candidate != gatewayAddress {
+			endpoints = append(endpoints, candidate)
+		}
+	}
+	if len(endpoints) != 2 || !endpoints[0].IsPrivate() || !endpoints[1].IsPrivate() {
+		return NetworkSpec{}, errors.New("Docker network has fewer than two private workload addresses")
+	}
+	want.Subnet = prefix.String()
+	if gatewayAddress.IsValid() {
+		want.Gateway = gatewayAddress.String()
+	}
+	want.RelayIP, want.AgentIP = endpoints[0].String(), endpoints[1].String()
+	return want, nil
+}
+
+func validRuntimeAddresses(relay, agent string) bool {
+	relayAddress, relayErr := netip.ParseAddr(relay)
+	agentAddress, agentErr := netip.ParseAddr(agent)
+	return relayErr == nil && agentErr == nil && relayAddress.Is4() && agentAddress.Is4() &&
+		relayAddress.IsPrivate() && agentAddress.IsPrivate() && relayAddress != agentAddress
+}
+
+func runtimeAllocationMatches(identity NetworkSpec, subnet, gateway, relay, agent string) bool {
+	allocated, err := networkSpecFromIPAM(identity, subnet, gateway)
+	return err == nil && allocated.Subnet == subnet && allocated.Gateway == gateway &&
+		allocated.RelayIP == relay && allocated.AgentIP == agent
 }
 
 func RelayName(tenantID, instanceID string, generation uint64) string {
@@ -102,8 +160,8 @@ func (d *DockerHTTP) CreateNetwork(ctx context.Context, spec NetworkSpec) error 
 		return &PolicyError{"internal network specification is invalid"}
 	}
 	body := map[string]any{
-		"Name": spec.Name, "CheckDuplicate": true, "Internal": true, "Attachable": false,
-		"IPAM": map[string]any{"Driver": "default", "Config": []map[string]string{{"Subnet": spec.Subnet, "Gateway": spec.Gateway}}},
+		"Name": spec.Name, "Driver": "bridge", "CheckDuplicate": true, "Internal": true, "Attachable": false,
+		"Options": map[string]string{isolatedGatewayOption: isolatedGatewayMode},
 		"Labels": map[string]string{
 			managedNetworkLabel: "true", "io.hardrails.tenant": spec.TenantID,
 			"io.hardrails.instance": spec.InstanceID, networkGenerationLabel: strconv.FormatUint(spec.Generation, 10),
@@ -130,8 +188,10 @@ func (d *DockerHTTP) InspectNetwork(ctx context.Context, name string) (ObservedN
 	}
 	var payload struct {
 		Name       string            `json:"Name"`
+		Driver     string            `json:"Driver"`
 		Internal   bool              `json:"Internal"`
 		Attachable bool              `json:"Attachable"`
+		Options    map[string]string `json:"Options"`
 		Labels     map[string]string `json:"Labels"`
 		IPAM       struct {
 			Config []struct{ Subnet, Gateway string }
@@ -148,12 +208,18 @@ func (d *DockerHTTP) InspectNetwork(ctx context.Context, name string) (ObservedN
 		Name: payload.Name, TenantID: payload.Labels["io.hardrails.tenant"],
 		InstanceID: payload.Labels["io.hardrails.instance"], Generation: generation,
 	}
-	want := NetworkSpecFor(observed.TenantID, observed.InstanceID, observed.Generation)
-	if len(payload.IPAM.Config) == 1 {
-		observed.Subnet, observed.Gateway = payload.IPAM.Config[0].Subnet, payload.IPAM.Config[0].Gateway
+	if len(payload.IPAM.Config) != 1 {
+		return ObservedNetwork{}, errors.New("managed network must have exactly one Docker IPAM allocation")
 	}
-	observed.RelayIP, observed.AgentIP = want.RelayIP, want.AgentIP
-	return ObservedNetwork{NetworkSpec: observed, Managed: payload.Labels[managedNetworkLabel] == "true" && !payload.Attachable, Internal: payload.Internal}, nil
+	observed, err = networkSpecFromIPAM(observed, payload.IPAM.Config[0].Subnet, payload.IPAM.Config[0].Gateway)
+	if err != nil {
+		return ObservedNetwork{}, err
+	}
+	return ObservedNetwork{
+		NetworkSpec: observed,
+		Managed:     payload.Labels[managedNetworkLabel] == "true" && !payload.Attachable,
+		Internal:    payload.Internal && payload.Driver == "bridge" && payload.Options[isolatedGatewayOption] == isolatedGatewayMode,
+	}, nil
 }
 
 func (d *DockerHTTP) RemoveNetwork(ctx context.Context, name string) error {
@@ -164,19 +230,10 @@ func (d *DockerHTTP) CreateRelay(ctx context.Context, spec RelaySpec) error {
 	if err := validateRelaySpec(spec); err != nil {
 		return err
 	}
-	command := make([]string, 0, 2)
+	command := relayCommand(spec)
 	mounts := []map[string]any(nil)
-	if spec.Inference || spec.Egress {
+	if spec.Inference || spec.Egress || spec.ServicePort > 0 {
 		mounts = []map[string]any{{"Type": "bind", "Source": spec.GrantDir, "Target": "/run/steward-grant", "ReadOnly": false}}
-	}
-	if spec.Inference {
-		command = append(command, "-inference-socket=/run/steward-grant/i.sock")
-	}
-	if spec.Egress {
-		command = append(command, "-egress-socket=/run/steward-grant/e.sock")
-	}
-	if spec.ServicePort > 0 {
-		command = append(command, "-service-target=http://agent:"+strconv.Itoa(spec.ServicePort))
 	}
 	body := map[string]any{
 		"Image": spec.Image, "Cmd": command, "User": "65532:" + strconv.Itoa(spec.RelayGID),
@@ -187,13 +244,16 @@ func (d *DockerHTTP) CreateRelay(ctx context.Context, spec RelaySpec) error {
 			networkGenerationLabel: strconv.FormatUint(spec.Generation, 10),
 			runtimeNetworkLabel:    spec.NetworkName, runtimeGrantLabel: spec.GrantID,
 		},
-		"HostConfig": map[string]any{
+		"HostConfig": enforceClosedDockerHostPolicy(map[string]any{
 			"Runtime": "runc", "NetworkMode": spec.NetworkName, "ReadonlyRootfs": true,
 			"CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges:true"},
-			"PidsLimit": spec.PIDs, "Memory": spec.MemoryBytes, "NanoCPUs": spec.CPUMillis * 1_000_000,
+			"PidsLimit": spec.PIDs, "Memory": spec.MemoryBytes, "MemorySwap": spec.MemoryBytes, "NanoCPUs": spec.CPUMillis * 1_000_000,
 			"Tmpfs": map[string]string{"/tmp": tempTmpfs}, "Mounts": mounts,
-			"ExtraHosts": []string{"agent:" + spec.AgentIP},
-		},
+			"ExtraHosts": []string{"agent:" + spec.AgentIP}, "Dns": []string{"127.0.0.1"},
+			"LogConfig": map[string]any{"Type": dockerLogDriver, "Config": map[string]string{
+				"max-size": dockerLogMaxSize, "max-file": dockerLogMaxFiles, "compress": dockerLogCompress,
+			}},
+		}),
 		"NetworkingConfig": map[string]any{"EndpointsConfig": map[string]any{
 			spec.NetworkName: map[string]any{"Aliases": []string{"steward-relay"}, "IPAMConfig": map[string]string{"IPv4Address": spec.RelayIP}},
 		}},
@@ -227,23 +287,34 @@ func (d *DockerHTTP) InspectRelay(ctx context.Context, name string) (ObservedRel
 			Labels     map[string]string `json:"Labels"`
 		}
 		HostConfig struct {
-			Memory         int64             `json:"Memory"`
-			NanoCPUs       int64             `json:"NanoCpus"`
-			PidsLimit      int64             `json:"PidsLimit"`
-			Runtime        string            `json:"Runtime"`
-			NetworkMode    string            `json:"NetworkMode"`
-			ReadonlyRootfs bool              `json:"ReadonlyRootfs"`
-			CapDrop        []string          `json:"CapDrop"`
-			SecurityOpt    []string          `json:"SecurityOpt"`
-			Tmpfs          map[string]string `json:"Tmpfs"`
-			PortBindings   map[string]any    `json:"PortBindings"`
-			ExtraHosts     []string          `json:"ExtraHosts"`
+			dockerClosedHostPolicy
+			Memory          int64             `json:"Memory"`
+			MemorySwap      int64             `json:"MemorySwap"`
+			NanoCPUs        int64             `json:"NanoCpus"`
+			PidsLimit       int64             `json:"PidsLimit"`
+			Runtime         string            `json:"Runtime"`
+			NetworkMode     string            `json:"NetworkMode"`
+			ReadonlyRootfs  bool              `json:"ReadonlyRootfs"`
+			CapDrop         []string          `json:"CapDrop"`
+			SecurityOpt     []string          `json:"SecurityOpt"`
+			Tmpfs           map[string]string `json:"Tmpfs"`
+			PortBindings    map[string]any    `json:"PortBindings"`
+			ExtraHosts      []string          `json:"ExtraHosts"`
+			DNS             []string          `json:"Dns"`
+			Privileged      bool              `json:"Privileged"`
+			CapAdd          []string          `json:"CapAdd"`
+			Binds           []string          `json:"Binds"`
+			Devices         []json.RawMessage `json:"Devices"`
+			DeviceRequests  []json.RawMessage `json:"DeviceRequests"`
+			PublishAllPorts bool              `json:"PublishAllPorts"`
+			LogConfig       struct {
+				Type   string            `json:"Type"`
+				Config map[string]string `json:"Config"`
+			} `json:"LogConfig"`
 		}
 		Mounts          []dockerMount
 		NetworkSettings struct {
-			Networks map[string]struct {
-				IPAddress string `json:"IPAddress"`
-			} `json:"Networks"`
+			Networks map[string]dockerEndpoint `json:"Networks"`
 		}
 		State struct{ Status string }
 	}
@@ -252,7 +323,12 @@ func (d *DockerHTTP) InspectRelay(ctx context.Context, name string) (ObservedRel
 	}
 	labels := payload.Config.Labels
 	generation, _ := strconv.ParseUint(labels[networkGenerationLabel], 10, 64)
-	ipAddress := payload.NetworkSettings.Networks[labels[runtimeNetworkLabel]].IPAddress
+	endpoint := payload.NetworkSettings.Networks[labels[runtimeNetworkLabel]]
+	ipAddress := endpoint.IPAddress
+	configuredIP := ""
+	if endpoint.IPAMConfig != nil {
+		configuredIP = endpoint.IPAMConfig.IPv4Address
+	}
 	spec := RelaySpec{
 		Name: name, Image: payload.Config.Image, NetworkName: labels[runtimeNetworkLabel], GrantID: labels[runtimeGrantLabel],
 		TenantID: labels["io.hardrails.tenant"], InstanceID: labels["io.hardrails.instance"], Generation: generation,
@@ -261,13 +337,17 @@ func (d *DockerHTTP) InspectRelay(ctx context.Context, name string) (ObservedRel
 		ServicePort: serviceTargetPort(payload.Config.Cmd), MemoryBytes: payload.HostConfig.Memory,
 		CPUMillis: payload.HostConfig.NanoCPUs / 1_000_000, PIDs: payload.HostConfig.PidsLimit,
 	}
-	addresses := NetworkSpecFor(spec.TenantID, spec.InstanceID, spec.Generation)
-	spec.RelayIP, spec.AgentIP = addresses.RelayIP, addresses.AgentIP
-	if spec.Inference || spec.Egress {
-		for _, mount := range payload.Mounts {
-			if mount.Type == "bind" && mount.Destination == "/run/steward-grant" && mount.RW {
-				spec.GrantDir = mount.Source
-			}
+	// Docker leaves IPAddress empty until a created container starts. The
+	// immutable IPAMConfig retains the static address supplied at create time,
+	// so it is the authoritative relay identity in every lifecycle state.
+	spec.RelayIP = configuredIP
+	if len(payload.HostConfig.ExtraHosts) == 1 && strings.HasPrefix(payload.HostConfig.ExtraHosts[0], "agent:") {
+		spec.AgentIP = strings.TrimPrefix(payload.HostConfig.ExtraHosts[0], "agent:")
+	}
+	if (spec.Inference || spec.Egress || spec.ServicePort > 0) && len(payload.Mounts) == 1 {
+		mount := payload.Mounts[0]
+		if mount.Type == "bind" && mount.Destination == "/run/steward-grant" && mount.RW {
+			spec.GrantDir = mount.Source
 		}
 	}
 	fingerprint := labels[relayFingerprintLabel]
@@ -281,20 +361,41 @@ func (d *DockerHTTP) InspectRelay(ctx context.Context, name string) (ObservedRel
 	checkRelay(validFingerprint(fingerprint), "fingerprint_shape")
 	checkRelay(payload.Config.User == "65532:"+strconv.Itoa(spec.RelayGID), "user")
 	checkRelay(payload.Config.WorkingDir == "/", "working_dir")
+	checkRelay(exactStrings(payload.Config.Cmd, relayCommand(spec)), "command")
 	checkRelay(payload.HostConfig.Runtime == "runc", "runtime")
 	checkRelay(payload.HostConfig.NetworkMode == spec.NetworkName, "network")
+	checkRelay(payload.HostConfig.namespacesHardened(), "namespace_policy")
+	checkRelay(payload.HostConfig.lifecycleHardened(), "lifecycle_policy")
+	checkRelay(payload.HostConfig.hostAttachmentsHardened(), "host_attachment_policy")
 	checkRelay(payload.HostConfig.ReadonlyRootfs, "read_only_root")
-	checkRelay(contains(payload.HostConfig.CapDrop, "ALL"), "cap_drop")
-	checkRelay(contains(payload.HostConfig.SecurityOpt, "no-new-privileges:true"), "no_new_privileges")
-	checkRelay(payload.HostConfig.Tmpfs["/tmp"] == tempTmpfs, "tmpfs")
+	checkRelay(exactStrings(payload.HostConfig.CapDrop, []string{"ALL"}), "cap_drop")
+	checkRelay(exactStrings(payload.HostConfig.SecurityOpt, []string{"no-new-privileges:true"}), "no_new_privileges")
+	checkRelay(exactStringMap(payload.HostConfig.Tmpfs, map[string]string{"/tmp": tempTmpfs}), "tmpfs")
+	checkRelay(payload.HostConfig.MemorySwap == payload.HostConfig.Memory, "memory_swap")
 	checkRelay(len(payload.HostConfig.PortBindings) == 0, "published_ports")
-	checkRelay(contains(payload.HostConfig.ExtraHosts, "agent:"+spec.AgentIP), "agent_host")
-	checkRelay(payload.State.Status != "running" || ipAddress == spec.RelayIP, "relay_ip")
+	checkRelay(!payload.HostConfig.PublishAllPorts, "publish_all_ports")
+	checkRelay(!payload.HostConfig.Privileged, "privileged")
+	checkRelay(len(payload.HostConfig.CapAdd) == 0, "cap_add")
+	checkRelay(len(payload.HostConfig.Binds) == 0, "binds")
+	checkRelay(len(payload.HostConfig.Devices) == 0 && len(payload.HostConfig.DeviceRequests) == 0, "devices")
+	checkRelay(exactStrings(payload.HostConfig.ExtraHosts, []string{"agent:" + spec.AgentIP}), "agent_host")
+	checkRelay(exactStrings(payload.HostConfig.DNS, []string{"127.0.0.1"}), "dns")
+	checkRelay(exactLogConfig(payload.HostConfig.LogConfig.Type, payload.HostConfig.LogConfig.Config), "log_config")
+	checkRelay(hasExactRelayMounts(payload.Mounts, spec), "mounts")
+	checkRelay(hasExactNetwork(payload.NetworkSettings.Networks, spec.NetworkName, spec.RelayIP, payload.State.Status == "running"), "networks")
 	checkRelay(relayFingerprint(spec) == fingerprint, "fingerprint")
 	hardened := len(drift) == 0
 	return ObservedRelay{Spec: spec, ImageID: payload.Image, Fingerprint: fingerprint,
 		Managed: labels[managedRelayLabel] == "true", Hardened: hardened, Status: payload.State.Status, IPAddress: ipAddress,
 		Drift: strings.Join(drift, ",")}, nil
+}
+
+func hasExactRelayMounts(mounts []dockerMount, spec RelaySpec) bool {
+	if !spec.Inference && !spec.Egress && spec.ServicePort == 0 {
+		return len(mounts) == 0
+	}
+	return len(mounts) == 1 && mounts[0].Type == "bind" && mounts[0].Source == spec.GrantDir &&
+		mounts[0].Destination == "/run/steward-grant" && mounts[0].RW
 }
 
 func validateRelaySpec(spec RelaySpec) error {
@@ -306,17 +407,30 @@ func validateRelaySpec(spec RelaySpec) error {
 		spec.ServicePort < 0 || spec.ServicePort > 65535 || !spec.Inference && !spec.Egress && spec.ServicePort == 0 {
 		return &PolicyError{"internal relay specification is invalid"}
 	}
-	addresses := NetworkSpecFor(spec.TenantID, spec.InstanceID, spec.Generation)
-	if spec.RelayIP != addresses.RelayIP || spec.AgentIP != addresses.AgentIP {
+	if !validRuntimeAddresses(spec.RelayIP, spec.AgentIP) {
 		return &PolicyError{"internal relay addresses are invalid"}
 	}
-	if (spec.Inference || spec.Egress) && !validGrantDirectory(spec.GrantDir) {
+	if (spec.Inference || spec.Egress || spec.ServicePort > 0) && !validGrantDirectory(spec.GrantDir) {
 		return &PolicyError{"internal capability grant directory is invalid"}
 	}
-	if !spec.Inference && !spec.Egress && spec.GrantDir != "" {
-		return &PolicyError{"service-only relay cannot receive a capability grant directory"}
+	if !spec.Inference && !spec.Egress && spec.ServicePort == 0 && spec.GrantDir != "" {
+		return &PolicyError{"relay without capabilities cannot receive a capability grant directory"}
 	}
 	return nil
+}
+
+func relayCommand(spec RelaySpec) []string {
+	command := make([]string, 0, 4)
+	if spec.Inference {
+		command = append(command, "-inference-socket=/run/steward-grant/i.sock")
+	}
+	if spec.Egress {
+		command = append(command, "-egress-socket=/run/steward-grant/e.sock")
+	}
+	if spec.ServicePort > 0 {
+		command = append(command, "-service-socket=/run/steward-grant/s.sock", "-service-target=http://agent:"+strconv.Itoa(spec.ServicePort))
+	}
+	return command
 }
 
 func relayFingerprint(spec RelaySpec) string {

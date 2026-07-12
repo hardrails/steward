@@ -30,17 +30,18 @@ type Client struct {
 }
 
 type State struct {
-	RuntimeRef     string   `json:"runtime_ref"`
-	Status         string   `json:"status"`
-	CapsuleDigest  string   `json:"capsule_digest,omitempty"`
-	PolicyDigest   string   `json:"policy_digest,omitempty"`
-	Generation     uint64   `json:"generation,omitempty"`
-	EvidenceKeyID  string   `json:"evidence_key_id,omitempty"`
-	GrantID        string   `json:"grant_id,omitempty"`
-	ServicePath    string   `json:"service_path,omitempty"`
-	Logs           string   `json:"logs,omitempty"`
-	EgressProxy    string   `json:"egress_proxy,omitempty"`
-	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
+	RuntimeRef        string   `json:"runtime_ref"`
+	Status            string   `json:"status"`
+	CapsuleDigest     string   `json:"capsule_digest,omitempty"`
+	PolicyDigest      string   `json:"policy_digest,omitempty"`
+	Generation        uint64   `json:"generation,omitempty"`
+	EvidenceKeyID     string   `json:"evidence_key_id,omitempty"`
+	GrantID           string   `json:"grant_id,omitempty"`
+	ServicePath       string   `json:"service_path,omitempty"`
+	Logs              string   `json:"logs,omitempty"`
+	EgressProxy       string   `json:"egress_proxy,omitempty"`
+	EgressRouteIDs    []string `json:"egress_route_ids,omitempty"`
+	RoutePolicyDigest string   `json:"route_policy_digest,omitempty"`
 }
 
 type EgressStats struct {

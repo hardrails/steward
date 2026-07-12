@@ -103,6 +103,7 @@ func TestFenceStoreRejectsInvalidCommitsAndPolicyRollback(t *testing.T) {
 		func(r *FenceRecord) { r.LineageID = "" },
 		func(r *FenceRecord) { r.WorkloadDigest = "bad" },
 		func(r *FenceRecord) { r.ImageConfigDigest = "bad" },
+		func(r *FenceRecord) { r.RoutePolicyDigest = "bad" },
 	} {
 		record := base
 		mutate(&record)
@@ -115,6 +116,7 @@ func TestFenceStoreRejectsInvalidCommitsAndPolicyRollback(t *testing.T) {
 		func(r *FenceRecord) { r.LineageID = "other" },
 		func(r *FenceRecord) { r.WorkloadDigest = "sha256:" + repeatHex('e') },
 		func(r *FenceRecord) { r.ImageConfigDigest = "sha256:" + repeatHex('e') },
+		func(r *FenceRecord) { r.RoutePolicyDigest = "sha256:" + repeatHex('e') },
 	} {
 		record := base
 		mutate(&record)
@@ -185,6 +187,7 @@ func TestFenceStoreRejectsMalformedRecords(t *testing.T) {
 		raw = appendFenceText(raw, record.LineageID)
 		raw = appendFenceText(raw, record.WorkloadDigest)
 		raw = appendFenceText(raw, record.ImageConfigDigest)
+		raw = appendFenceText(raw, record.RoutePolicyDigest)
 		return append(raw, present)
 	}
 
@@ -196,6 +199,7 @@ func TestFenceStoreRejectsMalformedRecords(t *testing.T) {
 		"lineage":        func(record *FenceRecord) { record.LineageID = "" },
 		"workloadDigest": func(record *FenceRecord) { record.WorkloadDigest = "invalid" },
 		"imageDigest":    func(record *FenceRecord) { record.ImageConfigDigest = "invalid" },
+		"routeDigest":    func(record *FenceRecord) { record.RoutePolicyDigest = "invalid" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			record := valid
@@ -213,6 +217,34 @@ func TestFenceStoreRejectsMalformedRecords(t *testing.T) {
 		raw = append(raw, recordBytes...)
 		write(t, raw)
 	})
+}
+
+func TestFenceStoreLoadsLegacyRecordWithoutInventingRoutePolicy(t *testing.T) {
+	record := testFenceRecord("tenant", "instance", 1)
+	raw := []byte{'S', 'T', 'F', 'N', legacyFenceVersion}
+	raw = binary.BigEndian.AppendUint64(raw, 1)
+	raw = binary.BigEndian.AppendUint32(raw, 1)
+	raw = appendFenceText(raw, record.TenantID)
+	raw = appendFenceText(raw, record.InstanceID)
+	raw = binary.BigEndian.AppendUint64(raw, record.Generation)
+	raw = appendFenceText(raw, record.CapsuleDigest)
+	raw = appendFenceText(raw, record.PolicyDigest)
+	raw = appendFenceText(raw, record.LineageID)
+	raw = appendFenceText(raw, record.WorkloadDigest)
+	raw = appendFenceText(raw, record.ImageConfigDigest)
+	raw = append(raw, 1)
+	path := filepath.Join(t.TempDir(), "fences.bin")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenFenceStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok := store.Record(record.TenantID, record.InstanceID)
+	if !ok || loaded.RoutePolicyDigest != "" {
+		t.Fatalf("legacy route policy binding = %q, want empty fail-closed marker", loaded.RoutePolicyDigest)
+	}
 }
 
 func TestFenceStorePathAndEncodingBounds(t *testing.T) {
@@ -263,7 +295,7 @@ func testFenceRecord(tenant, instance string, generation uint64) FenceRecord {
 		TenantID: tenant, InstanceID: instance, Generation: generation,
 		CapsuleDigest: "sha256:" + repeatHex('a'), PolicyDigest: "sha256:" + repeatHex('b'),
 		LineageID: "lineage", WorkloadDigest: "sha256:" + repeatHex('c'),
-		ImageConfigDigest: "sha256:" + repeatHex('d'), Present: true,
+		ImageConfigDigest: "sha256:" + repeatHex('d'), RoutePolicyDigest: "sha256:" + repeatHex('f'), Present: true,
 	}
 }
 

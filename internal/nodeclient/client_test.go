@@ -30,7 +30,7 @@ func TestClientDrivesBoundedExecutorContract(t *testing.T) {
 				t.Fatal("invalid admission body")
 			}
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"runtime_ref":"` + runtimeRef + `","status":"created","capsule_digest":"sha256:a","policy_digest":"sha256:b","generation":1,"evidence_key_id":"key"}`))
+			_, _ = w.Write([]byte(`{"runtime_ref":"` + runtimeRef + `","status":"created","capsule_digest":"sha256:a","policy_digest":"sha256:b","generation":1,"evidence_key_id":"key","route_policy_digest":"sha256:route"}`))
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/logs"):
 			_, _ = w.Write([]byte(`{"runtime_ref":"` + runtimeRef + `","status":"running","logs":"hello"}`))
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/egress"):
@@ -47,7 +47,7 @@ func TestClientDrivesBoundedExecutorContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, err := client.Admit(context.Background(), []byte("capsule"), admission.InstanceIntent{TenantID: "tenant"})
-	if err != nil || state.RuntimeRef != runtimeRef || state.Generation != 1 {
+	if err != nil || state.RuntimeRef != runtimeRef || state.Generation != 1 || state.RoutePolicyDigest != "sha256:route" {
 		t.Fatalf("state=%#v err=%v", state, err)
 	}
 	for _, operation := range []func(context.Context, string) (State, error){client.Status, client.Logs, client.Start, client.Stop} {

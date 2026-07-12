@@ -50,11 +50,12 @@ type record struct {
 // terminal transition is intentionally returned by Pending after restart; the
 // owner must reconcile it before admitting a new conflicting mutation.
 type Journal struct {
-	mu      sync.Mutex
-	path    string
-	file    *os.File
-	next    uint64
-	entries map[string]record
+	mu       sync.Mutex
+	path     string
+	file     *os.File
+	readOnly bool
+	next     uint64
+	entries  map[string]record
 }
 
 // Open creates a new owner-only journal or verifies and recovers an existing
@@ -95,6 +96,48 @@ func Open(path string) (*Journal, error) {
 		return nil, fmt.Errorf("recover journal %q: %w", path, err)
 	}
 	return &Journal{path: path, file: f, next: next, entries: entries}, nil
+}
+
+// OpenForValidation verifies and recovers an existing journal without opening
+// it for append or changing any file metadata. It is intended for preflight
+// checks that must exercise the same recovery rules as startup without
+// creating a missing durable journal.
+func OpenForValidation(path string) (*Journal, error) {
+	if path == "" {
+		return nil, errors.New("journal path is required")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("journal %q is missing; initialize durable admission state before validation", path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("stat journal %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("journal %q must be a regular file with mode 0600 or stricter", path)
+	}
+	if info.Size() > maxJournalBytes {
+		return nil, fmt.Errorf("journal %q exceeds %d bytes", path, maxJournalBytes)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open journal %q for validation: %w", path, err)
+	}
+	openedInfo, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("stat opened journal %q: %w", path, err)
+	}
+	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0o077 != 0 || openedInfo.Size() > maxJournalBytes {
+		_ = f.Close()
+		return nil, fmt.Errorf("journal %q changed while it was opened for validation", path)
+	}
+	entries, next, err := scan(f)
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("recover journal %q: %w", path, err)
+	}
+	return &Journal{path: path, file: f, readOnly: true, next: next, entries: entries}, nil
 }
 
 // Prepare durably records work before the caller performs an external side
@@ -165,6 +208,14 @@ func (j *Journal) Pending() []Operation {
 	return pending
 }
 
+// FormatVersion returns the record version observed in a non-empty journal.
+// An empty journal has no on-disk version byte, so observed is false.
+func (j *Journal) FormatVersion() (version int, observed bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return journalVersion, j.next > 1
+}
+
 // Close releases the journal file. The journal has already fsynced every
 // accepted transition, so Close performs no implicit state transition.
 func (j *Journal) Close() error {
@@ -179,6 +230,9 @@ func (j *Journal) Close() error {
 }
 
 func (j *Journal) append(value record) error {
+	if j.readOnly {
+		return errors.New("journal is open for validation only")
+	}
 	payload, err := marshal(value)
 	if err != nil {
 		return err

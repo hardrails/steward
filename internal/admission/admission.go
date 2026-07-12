@@ -6,6 +6,7 @@ package admission
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -20,7 +21,9 @@ import (
 const (
 	CapsulePayloadType = "application/vnd.steward.capsule.v1+json"
 	PolicyPayloadType  = "application/vnd.steward.site-policy.v1+json"
+	CommandPayloadType = "application/vnd.steward.executor-command.v2+json"
 	SchemaV1           = "steward.admission.v1"
+	CommandSchemaV2    = "steward.executor-command.v2"
 )
 
 var (
@@ -122,11 +125,12 @@ type AuthenticatedIdentity struct {
 // scheduling policy to tenants without requiring a site co-signature on every
 // reusable publisher capsule.
 type SitePolicy struct {
-	SchemaVersion string          `json:"schema_version"`
-	PolicyID      string          `json:"policy_id"`
-	PolicyEpoch   uint64          `json:"policy_epoch"`
-	Publishers    []PublisherRule `json:"publishers"`
-	Tenants       []TenantRule    `json:"tenants"`
+	SchemaVersion          string          `json:"schema_version"`
+	PolicyID               string          `json:"policy_id"`
+	PolicyEpoch            uint64          `json:"policy_epoch"`
+	SiteCleanupCommandKeys []CommandKey    `json:"site_cleanup_command_keys,omitempty"`
+	Publishers             []PublisherRule `json:"publishers"`
+	Tenants                []TenantRule    `json:"tenants"`
 }
 
 type PublisherRule struct {
@@ -140,12 +144,44 @@ type PublisherRule struct {
 }
 
 type TenantRule struct {
-	TenantID          string         `json:"tenant_id"`
-	PublisherKeyIDs   []string       `json:"publisher_key_ids"`
-	ResourceCeiling   ResourceLimits `json:"resource_ceiling"`
-	InferenceRouteIDs []string       `json:"inference_route_ids,omitempty"`
-	ServiceIDs        []string       `json:"service_ids,omitempty"`
-	EgressRouteIDs    []string       `json:"egress_route_ids,omitempty"`
+	TenantID              string         `json:"tenant_id"`
+	PublisherKeyIDs       []string       `json:"publisher_key_ids"`
+	ResourceCeiling       ResourceLimits `json:"resource_ceiling"`
+	InferenceRouteIDs     []string       `json:"inference_route_ids,omitempty"`
+	InferenceModelAliases []string       `json:"inference_model_aliases,omitempty"`
+	ServiceIDs            []string       `json:"service_ids,omitempty"`
+	EgressRouteIDs        []string       `json:"egress_route_ids,omitempty"`
+	CommandKeys           []CommandKey   `json:"command_keys,omitempty"`
+}
+
+// CommandKey grants one Ed25519 key authority over only the named Executor
+// operations. Tenant command keys live inside a tenant rule; site cleanup keys
+// live at the policy root and are further restricted to cleanup operations.
+// Keeping command authority in signed site policy lets a node-scoped uplink
+// transport commands without turning its bearer token into execution authority.
+type CommandKey struct {
+	KeyID      string   `json:"key_id"`
+	PublicKey  string   `json:"public_key"`
+	Operations []string `json:"operations"`
+}
+
+// CommandStatement is the exact payload carried by a DSSE command envelope.
+// Identity, ordering, validity time, operation, and payload are signed as one
+// bounded statement; none may be supplied by an unsigned transport wrapper.
+type CommandStatement struct {
+	SchemaVersion      string          `json:"schema_version"`
+	CommandID          string          `json:"command_id"`
+	TenantID           string          `json:"tenant_id"`
+	NodeID             string          `json:"node_id"`
+	InstanceID         string          `json:"instance_id"`
+	RuntimeRef         string          `json:"runtime_ref"`
+	Kind               string          `json:"kind"`
+	ClaimGeneration    uint64          `json:"claim_generation"`
+	InstanceGeneration uint64          `json:"instance_generation"`
+	CommandSequence    uint64          `json:"command_sequence"`
+	IssuedAt           string          `json:"issued_at"`
+	ExpiresAt          string          `json:"expires_at"`
+	Payload            json.RawMessage `json:"payload"`
 }
 
 // PersistedFences are supplied by the durable executor journal. Equality is
@@ -168,40 +204,112 @@ type EffectiveAdmission struct {
 	EffectiveResources ResourceLimits
 }
 
+// VerifiedCapsuleImport is the tenant-independent result of authenticating an
+// offline capsule against a site-root-signed policy. It is suitable for an OCI
+// import gate: artifact and publisher authority are established here, while a
+// later admission still must bind a tenant, node, instance, and generation.
+type VerifiedCapsuleImport struct {
+	Capsule        ProfileCapsule
+	SitePolicy     SitePolicy
+	Profile        Profile
+	CapsuleDigest  string
+	PolicyDigest   string
+	PublisherKeyID string
+	SiteRootKeyID  string
+}
+
+// VerifiedSitePolicy is the authenticated result of opening a site-policy DSSE
+// envelope with an operator-provided site root. Callers wiring command transport
+// should pass Policy to the uplink only from this result, never from raw JSON.
+type VerifiedSitePolicy struct {
+	Policy        SitePolicy
+	PolicyDigest  string
+	SiteRootKeyID string
+}
+
+func VerifySitePolicy(policyEnvelope []byte, siteRoots map[string]ed25519.PublicKey) (VerifiedSitePolicy, error) {
+	policyPayload, siteRootKeyID, err := dsse.Verify(policyEnvelope, PolicyPayloadType, siteRoots)
+	if err != nil {
+		return VerifiedSitePolicy{}, deny("verify site policy: %v", err)
+	}
+	var policy SitePolicy
+	if err := dsse.DecodeStrictInto(policyPayload, dsse.DefaultMaxEnvelopeBytes, &policy); err != nil {
+		return VerifiedSitePolicy{}, deny("decode site policy: %v", err)
+	}
+	if err := policy.Validate(); err != nil {
+		return VerifiedSitePolicy{}, err
+	}
+	return VerifiedSitePolicy{
+		Policy: policy, PolicyDigest: dsse.Digest(policyEnvelope), SiteRootKeyID: siteRootKeyID,
+	}, nil
+}
+
+// VerifyCapsuleForImport verifies the site policy, publisher signature,
+// revocation state, built-in profile shape, repository, and optional manifest
+// allowlist without selecting a tenant or accepting an instance intent.
+func VerifyCapsuleForImport(capsuleEnvelope, policyEnvelope []byte, siteRoots map[string]ed25519.PublicKey, now time.Time, profiles Registry) (VerifiedCapsuleImport, error) {
+	verifiedPolicy, err := VerifySitePolicy(policyEnvelope, siteRoots)
+	if err != nil {
+		return VerifiedCapsuleImport{}, err
+	}
+	policy := verifiedPolicy.Policy
+	publisherKeys, err := policy.PublisherKeys()
+	if err != nil {
+		return VerifiedCapsuleImport{}, err
+	}
+	capsulePayload, publisherKeyID, err := dsse.Verify(capsuleEnvelope, CapsulePayloadType, publisherKeys)
+	if err != nil {
+		return VerifiedCapsuleImport{}, deny("verify profile capsule: %v", err)
+	}
+	var capsule ProfileCapsule
+	if err := dsse.DecodeStrictInto(capsulePayload, dsse.DefaultMaxEnvelopeBytes, &capsule); err != nil {
+		return VerifiedCapsuleImport{}, deny("decode profile capsule: %v", err)
+	}
+	if err := capsule.Validate(now); err != nil {
+		return VerifiedCapsuleImport{}, err
+	}
+	if capsule.PublisherKeyID != publisherKeyID {
+		return VerifiedCapsuleImport{}, deny("capsule publisher key ID does not match verified signature")
+	}
+	publisher, ok := policy.publisher(publisherKeyID)
+	if !ok || publisher.Revoked {
+		return VerifiedCapsuleImport{}, deny("publisher is absent or revoked")
+	}
+	if !containsProfile(publisher.AllowedProfiles, capsule.Profile) {
+		return VerifiedCapsuleImport{}, deny("profile is not authorized for publisher")
+	}
+	if !contains(publisher.AllowedRepositories, capsule.Image.Repository) {
+		return VerifiedCapsuleImport{}, deny("image repository is not authorized")
+	}
+	if len(publisher.AllowedManifestDigests) > 0 && !contains(publisher.AllowedManifestDigests, capsule.Image.ManifestDigest) {
+		return VerifiedCapsuleImport{}, deny("image manifest digest is not authorized")
+	}
+	profile, ok := profiles.Lookup(capsule.Profile)
+	if !ok {
+		return VerifiedCapsuleImport{}, deny("unknown built-in profile")
+	}
+	if capsule.State.Path != profile.StatePath || capsule.State.SchemaVersion != profile.StateSchemaVersion {
+		return VerifiedCapsuleImport{}, deny("capsule state shape differs from built-in profile")
+	}
+	return VerifiedCapsuleImport{
+		Capsule: capsule, SitePolicy: policy, Profile: profile,
+		CapsuleDigest: dsse.Digest(capsuleEnvelope), PolicyDigest: verifiedPolicy.PolicyDigest,
+		PublisherKeyID: publisherKeyID, SiteRootKeyID: verifiedPolicy.SiteRootKeyID,
+	}, nil
+}
+
 // VerifyAndAdmit authenticates the signed policy first, verifies a capsule only
 // with a policy-authorized publisher key, then applies finite authority
 // intersection to a caller-bound intent.
 func VerifyAndAdmit(capsuleEnvelope, policyEnvelope []byte, siteRoots map[string]ed25519.PublicKey, intent InstanceIntent, caller AuthenticatedIdentity, fences PersistedFences, now time.Time, profiles Registry) (EffectiveAdmission, error) {
-	policyPayload, siteRootKeyID, err := dsse.Verify(policyEnvelope, PolicyPayloadType, siteRoots)
-	if err != nil {
-		return EffectiveAdmission{}, deny("verify site policy: %v", err)
-	}
-	var policy SitePolicy
-	if err := dsse.DecodeStrictInto(policyPayload, dsse.DefaultMaxEnvelopeBytes, &policy); err != nil {
-		return EffectiveAdmission{}, deny("decode site policy: %v", err)
-	}
-	if err := policy.Validate(); err != nil {
-		return EffectiveAdmission{}, err
-	}
-	publisherKeys, err := policy.PublisherKeys()
+	verified, err := VerifyCapsuleForImport(capsuleEnvelope, policyEnvelope, siteRoots, now, profiles)
 	if err != nil {
 		return EffectiveAdmission{}, err
 	}
-	capsulePayload, publisherKeyID, err := dsse.Verify(capsuleEnvelope, CapsulePayloadType, publisherKeys)
-	if err != nil {
-		return EffectiveAdmission{}, deny("verify profile capsule: %v", err)
-	}
-	var capsule ProfileCapsule
-	if err := dsse.DecodeStrictInto(capsulePayload, dsse.DefaultMaxEnvelopeBytes, &capsule); err != nil {
-		return EffectiveAdmission{}, deny("decode profile capsule: %v", err)
-	}
-	if err := capsule.Validate(now); err != nil {
-		return EffectiveAdmission{}, err
-	}
-	if capsule.PublisherKeyID != publisherKeyID {
-		return EffectiveAdmission{}, deny("capsule publisher key ID does not match verified signature")
-	}
-	return Intersect(capsule, dsse.Digest(capsuleEnvelope), policy, dsse.Digest(policyEnvelope), publisherKeyID, siteRootKeyID, intent, caller, fences, profiles)
+	return Intersect(
+		verified.Capsule, verified.CapsuleDigest, verified.SitePolicy, verified.PolicyDigest,
+		verified.PublisherKeyID, verified.SiteRootKeyID, intent, caller, fences, profiles,
+	)
 }
 
 // Intersect applies only deterministic local checks, making it reusable by an
@@ -275,8 +383,9 @@ func validateRequestedCapabilities(intent InstanceIntent, capsule ProfileCapsule
 		return deny("state disposition requires state capability")
 	}
 	if intent.Capabilities.Inference {
-		if !bounded(intent.InferenceRouteID, 128) || !bounded(intent.ModelAlias, 256) || !contains(tenant.InferenceRouteIDs, intent.InferenceRouteID) {
-			return deny("inference route is not authorized")
+		if !bounded(intent.InferenceRouteID, 128) || !bounded(intent.ModelAlias, 256) ||
+			!contains(tenant.InferenceRouteIDs, intent.InferenceRouteID) || !contains(tenant.InferenceModelAliases, intent.ModelAlias) {
+			return deny("inference route or model alias is not authorized")
 		}
 	} else if intent.InferenceRouteID != "" || intent.ModelAlias != "" {
 		return deny("inference route requires inference capability")
@@ -378,7 +487,7 @@ func (c ProfileCapsule) Validate(now time.Time) error {
 }
 
 func (p SitePolicy) Validate() error {
-	if p.SchemaVersion != SchemaV1 || !bounded(p.PolicyID, 128) || p.PolicyEpoch == 0 || len(p.Publishers) == 0 || len(p.Publishers) > 128 || len(p.Tenants) == 0 || len(p.Tenants) > 1024 {
+	if p.SchemaVersion != SchemaV1 || !bounded(p.PolicyID, 128) || p.PolicyEpoch == 0 || len(p.Publishers) == 0 || len(p.Publishers) > 128 || len(p.Tenants) > 1024 {
 		return deny("invalid site policy identity")
 	}
 	seenPublishers := map[string]struct{}{}
@@ -415,6 +524,44 @@ func (p SitePolicy) Validate() error {
 			}
 		}
 	}
+	if len(p.SiteCleanupCommandKeys) > 32 {
+		return deny("site has too many cleanup command keys")
+	}
+	seenSiteCleanupKeys := make(map[string]struct{}, len(p.SiteCleanupCommandKeys))
+	for _, commandKey := range p.SiteCleanupCommandKeys {
+		if !bounded(commandKey.KeyID, 256) || !bounded(commandKey.PublicKey, 1024) {
+			return deny("invalid site cleanup command key")
+		}
+		if _, exists := seenSiteCleanupKeys[commandKey.KeyID]; exists {
+			return deny("duplicate site cleanup command key ID")
+		}
+		seenSiteCleanupKeys[commandKey.KeyID] = struct{}{}
+		if _, err := decodePublicKey(commandKey.PublicKey); err != nil {
+			return deny("invalid site cleanup command public key")
+		}
+		if len(commandKey.Operations) == 0 || len(commandKey.Operations) > len(cleanupCommandOperations) {
+			return deny("site cleanup command key has invalid operation scope")
+		}
+		seenOperations := make(map[string]struct{}, len(commandKey.Operations))
+		for _, operation := range commandKey.Operations {
+			if !bounded(operation, 32) {
+				return deny("site cleanup command key has invalid operation")
+			}
+			if _, supported := cleanupCommandOperations[operation]; !supported {
+				return deny("site cleanup command key names non-cleanup operation")
+			}
+			if _, exists := seenOperations[operation]; exists {
+				return deny("site cleanup command key has duplicate operation")
+			}
+			seenOperations[operation] = struct{}{}
+		}
+	}
+	// A cleanup-key-bearing policy may deliberately contain zero tenants as an
+	// emergency admission lockdown. Existing signed workloads remain removable,
+	// while no tenant can admit or restart work under the replacement policy.
+	if len(p.Tenants) == 0 && len(p.SiteCleanupCommandKeys) == 0 {
+		return deny("invalid site policy identity")
+	}
 	seenTenants := map[string]struct{}{}
 	for _, tenant := range p.Tenants {
 		if !bounded(tenant.TenantID, 128) || len(tenant.PublisherKeyIDs) == 0 || len(tenant.PublisherKeyIDs) > 64 {
@@ -432,10 +579,29 @@ func (p SitePolicy) Validate() error {
 				return deny("tenant names unknown publisher")
 			}
 		}
+		if len(tenant.InferenceRouteIDs) > 128 || len(tenant.InferenceModelAliases) > 128 ||
+			(len(tenant.InferenceRouteIDs) == 0) != (len(tenant.InferenceModelAliases) == 0) {
+			return deny("tenant inference routes and model aliases must be configured together")
+		}
+		seenInferenceRoutes := make(map[string]struct{}, len(tenant.InferenceRouteIDs))
 		for _, route := range tenant.InferenceRouteIDs {
 			if !bounded(route, 128) {
 				return deny("invalid inference route")
 			}
+			if _, exists := seenInferenceRoutes[route]; exists {
+				return deny("duplicate tenant inference route")
+			}
+			seenInferenceRoutes[route] = struct{}{}
+		}
+		seenModelAliases := make(map[string]struct{}, len(tenant.InferenceModelAliases))
+		for _, alias := range tenant.InferenceModelAliases {
+			if !bounded(alias, 256) {
+				return deny("invalid inference model alias")
+			}
+			if _, exists := seenModelAliases[alias]; exists {
+				return deny("duplicate tenant inference model alias")
+			}
+			seenModelAliases[alias] = struct{}{}
 		}
 		for _, service := range tenant.ServiceIDs {
 			if !bounded(service, 128) {
@@ -455,11 +621,54 @@ func (p SitePolicy) Validate() error {
 			}
 			seenRoutes[route] = struct{}{}
 		}
+		if len(tenant.CommandKeys) > 32 {
+			return deny("tenant has too many command keys")
+		}
+		seenCommandKeys := make(map[string]struct{}, len(tenant.CommandKeys))
+		for _, commandKey := range tenant.CommandKeys {
+			if !bounded(commandKey.KeyID, 256) || !bounded(commandKey.PublicKey, 1024) {
+				return deny("invalid tenant command key")
+			}
+			if _, exists := seenCommandKeys[commandKey.KeyID]; exists {
+				return deny("duplicate tenant command key ID")
+			}
+			if _, exists := seenSiteCleanupKeys[commandKey.KeyID]; exists {
+				return deny("tenant command key ID collides with site cleanup command key")
+			}
+			seenCommandKeys[commandKey.KeyID] = struct{}{}
+			if _, err := decodePublicKey(commandKey.PublicKey); err != nil {
+				return deny("invalid tenant command public key")
+			}
+			if len(commandKey.Operations) == 0 || len(commandKey.Operations) > len(commandOperations) {
+				return deny("tenant command key has invalid operation scope")
+			}
+			seenOperations := make(map[string]struct{}, len(commandKey.Operations))
+			for _, operation := range commandKey.Operations {
+				if !bounded(operation, 32) {
+					return deny("tenant command key has invalid operation")
+				}
+				if _, supported := commandOperations[operation]; !supported {
+					return deny("tenant command key names unsupported operation")
+				}
+				if _, exists := seenOperations[operation]; exists {
+					return deny("tenant command key has duplicate operation")
+				}
+				seenOperations[operation] = struct{}{}
+			}
+		}
 	}
 	return nil
 }
 
 var routeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+var commandOperations = map[string]struct{}{
+	"admit": {}, "start": {}, "stop": {}, "destroy": {}, "read": {}, "purge": {},
+}
+
+var cleanupCommandOperations = map[string]struct{}{
+	"stop": {}, "destroy": {}, "purge": {},
+}
 
 func routeID(value string) bool { return routeIDPattern.MatchString(value) }
 
@@ -507,6 +716,99 @@ func (p SitePolicy) PublisherKeys() (map[string]ed25519.PublicKey, error) {
 		keys[publisher.KeyID] = key
 	}
 	return keys, nil
+}
+
+// TrustedCommandKeys returns tenant keys whose signed policy scope includes the
+// operation and, for stop/destroy/purge only, site-owned cleanup keys. Cleanup
+// keys are independent of tenant rules so the site can contain or remove a
+// workload after revoking that tenant's compromised authority. Callers should
+// pass this result directly to DSSE verification; selecting a tenant or
+// operation from an unverified command is safe only for key routing, never as
+// authorization by itself.
+func (p SitePolicy) TrustedCommandKeys(tenantID, operation string) (map[string]ed25519.PublicKey, error) {
+	if _, ok := commandOperations[operation]; !ok {
+		return nil, deny("unsupported command operation")
+	}
+	tenant, ok := p.tenant(tenantID)
+	_, cleanupOperation := cleanupCommandOperations[operation]
+	if !ok && !cleanupOperation {
+		return nil, deny("unknown command tenant")
+	}
+	keys := make(map[string]ed25519.PublicKey)
+	if ok {
+		for _, commandKey := range tenant.CommandKeys {
+			if !contains(commandKey.Operations, operation) {
+				continue
+			}
+			key, err := decodePublicKey(commandKey.PublicKey)
+			if err != nil {
+				return nil, deny("decode tenant command key: %v", err)
+			}
+			keys[commandKey.KeyID] = key
+		}
+	}
+	if cleanupOperation {
+		for _, commandKey := range p.SiteCleanupCommandKeys {
+			if !contains(commandKey.Operations, operation) {
+				continue
+			}
+			if _, exists := keys[commandKey.KeyID]; exists {
+				return nil, deny("command key ID collision")
+			}
+			key, err := decodePublicKey(commandKey.PublicKey)
+			if err != nil {
+				return nil, deny("decode site cleanup command key: %v", err)
+			}
+			keys[commandKey.KeyID] = key
+		}
+	}
+	if len(keys) == 0 {
+		return nil, deny("site policy has no key authorized for command tenant and operation")
+	}
+	return keys, nil
+}
+
+const (
+	maxCommandPayloadBytes = 256 << 10
+	maxCommandLifetime     = 15 * time.Minute
+	maxCommandClockSkew    = 2 * time.Minute
+)
+
+// Validate checks the signed command's finite schema and validity window. The
+// runtime-reference grammar is deliberately validated by the uplink package,
+// which owns that wire namespace; this method still bounds it before routing.
+func (c CommandStatement) Validate(now time.Time) error {
+	if c.SchemaVersion != CommandSchemaV2 || !bounded(c.CommandID, 256) ||
+		!bounded(c.TenantID, 128) || !bounded(c.NodeID, 128) ||
+		!bounded(c.InstanceID, 256) || !bounded(c.RuntimeRef, 1024) {
+		return deny("invalid command identity")
+	}
+	if _, ok := commandOperations[c.Kind]; !ok {
+		return deny("unsupported command operation")
+	}
+	if c.ClaimGeneration == 0 || c.InstanceGeneration == 0 || c.CommandSequence == 0 {
+		return deny("command generations and sequence must be positive")
+	}
+	if len(c.Payload) == 0 || len(c.Payload) > maxCommandPayloadBytes || !json.Valid(c.Payload) {
+		return deny("invalid command payload")
+	}
+	issued, err := time.Parse(time.RFC3339Nano, c.IssuedAt)
+	if err != nil {
+		return deny("invalid command issue time")
+	}
+	expires, err := time.Parse(time.RFC3339Nano, c.ExpiresAt)
+	if err != nil || !expires.After(issued) || expires.Sub(issued) > maxCommandLifetime {
+		return deny("invalid command expiry")
+	}
+	if !now.IsZero() {
+		if issued.After(now.Add(maxCommandClockSkew)) {
+			return deny("command issue time is too far in the future")
+		}
+		if !expires.After(now) {
+			return deny("command has expired according to node time")
+		}
+	}
+	return nil
 }
 
 func (p SitePolicy) publisher(keyID string) (PublisherRule, bool) {

@@ -12,13 +12,14 @@ import (
 )
 
 const (
-	fenceVersion  = 1
-	maxFenceBytes = 4 << 20
+	legacyFenceVersion = 1
+	fenceVersion       = 2
+	maxFenceBytes      = 4 << 20
 )
 
 // FenceRecord is the durable high-water mark for one tenant-scoped instance.
-// CapsuleDigest makes an equal-generation retry idempotent only for the same
-// admitted artifact.
+// CapsuleDigest and RoutePolicyDigest make an equal-generation retry
+// idempotent only for the same admitted artifact and gateway semantics.
 type FenceRecord struct {
 	TenantID          string
 	InstanceID        string
@@ -28,6 +29,7 @@ type FenceRecord struct {
 	LineageID         string
 	WorkloadDigest    string
 	ImageConfigDigest string
+	RoutePolicyDigest string
 	Present           bool
 }
 
@@ -35,10 +37,11 @@ type FenceRecord struct {
 // owner-only, atomically replaced snapshot. It is small by design: the
 // executor's host capacity bounds the number of live instance records.
 type FenceStore struct {
-	mu          sync.Mutex
-	path        string
-	policyEpoch uint64
-	byInstance  map[string]FenceRecord
+	mu            sync.Mutex
+	path          string
+	formatVersion int
+	policyEpoch   uint64
+	byInstance    map[string]FenceRecord
 }
 
 // OpenFenceStore loads an existing strict snapshot. Initialization is separate.
@@ -148,6 +151,15 @@ func (s *FenceStore) Records() []FenceRecord {
 	return records
 }
 
+// FormatVersion returns the version read from the durable snapshot. The value
+// changes to the current writer version after a successful persisted mutation.
+// It is intended for read-only upgrade compatibility checks.
+func (s *FenceStore) FormatVersion() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.formatVersion
+}
+
 func (s *FenceStore) Count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -160,7 +172,7 @@ func (s *FenceStore) Commit(record FenceRecord, policyEpoch uint64) error {
 	if !bounded(record.TenantID, 128) || !bounded(record.InstanceID, 256) ||
 		record.Generation == 0 || !digest(record.CapsuleDigest) || !digest(record.PolicyDigest) ||
 		!bounded(record.LineageID, 256) || !digest(record.WorkloadDigest) ||
-		!digest(record.ImageConfigDigest) || policyEpoch == 0 {
+		!digest(record.ImageConfigDigest) || record.RoutePolicyDigest != "" && !digest(record.RoutePolicyDigest) || policyEpoch == 0 {
 		return errors.New("invalid fence record")
 	}
 	s.mu.Lock()
@@ -176,7 +188,7 @@ func (s *FenceStore) Commit(record FenceRecord, policyEpoch uint64) error {
 	if record.Generation == current.Generation && current.Generation != 0 &&
 		(current.CapsuleDigest != record.CapsuleDigest || current.PolicyDigest != record.PolicyDigest ||
 			current.LineageID != record.LineageID || current.WorkloadDigest != record.WorkloadDigest ||
-			current.ImageConfigDigest != record.ImageConfigDigest) {
+			current.ImageConfigDigest != record.ImageConfigDigest || current.RoutePolicyDigest != record.RoutePolicyDigest) {
 		return errors.New("equal generation identifies a different signed lineage")
 	}
 	oldEpoch, oldRecord := s.policyEpoch, current
@@ -236,7 +248,11 @@ func (s *FenceStore) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	return closeErr
+	if closeErr != nil {
+		return closeErr
+	}
+	s.formatVersion = fenceVersion
+	return nil
 }
 
 func (s *FenceStore) encode() ([]byte, error) {
@@ -265,6 +281,7 @@ func (s *FenceStore) encode() ([]byte, error) {
 		raw = appendFenceText(raw, record.LineageID)
 		raw = appendFenceText(raw, record.WorkloadDigest)
 		raw = appendFenceText(raw, record.ImageConfigDigest)
+		raw = appendFenceText(raw, record.RoutePolicyDigest)
 		if record.Present {
 			raw = append(raw, 1)
 		} else {
@@ -278,9 +295,10 @@ func (s *FenceStore) encode() ([]byte, error) {
 }
 
 func (s *FenceStore) decode(raw []byte) error {
-	if len(raw) < 17 || string(raw[:4]) != "STFN" || raw[4] != fenceVersion {
+	if len(raw) < 17 || string(raw[:4]) != "STFN" || (raw[4] != legacyFenceVersion && raw[4] != fenceVersion) {
 		return errors.New("invalid fence store header")
 	}
+	version := raw[4]
 	s.policyEpoch = binary.BigEndian.Uint64(raw[5:13])
 	count := binary.BigEndian.Uint32(raw[13:17])
 	raw = raw[17:]
@@ -311,8 +329,18 @@ func (s *FenceStore) decode(raw []byte) error {
 			return errors.New("invalid fence workload digest")
 		}
 		imageConfigDigest, rest, ok := takeFenceText(rest, 128)
-		if !ok || !digest(imageConfigDigest) || len(rest) < 1 || rest[0] > 1 {
+		if !ok || !digest(imageConfigDigest) {
 			return errors.New("invalid fence image config digest")
+		}
+		routePolicyDigest := ""
+		if version == fenceVersion {
+			routePolicyDigest, rest, ok = takeOptionalFenceDigest(rest)
+			if !ok {
+				return errors.New("invalid fence route policy digest")
+			}
+		}
+		if len(rest) < 1 || rest[0] > 1 {
+			return errors.New("invalid fence presence")
 		}
 		present := rest[0] == 1
 		rest = rest[1:]
@@ -323,13 +351,15 @@ func (s *FenceStore) decode(raw []byte) error {
 		s.byInstance[key] = FenceRecord{
 			TenantID: tenant, InstanceID: instance, Generation: generation,
 			CapsuleDigest: capsule, PolicyDigest: policy, LineageID: lineage,
-			WorkloadDigest: workloadDigest, ImageConfigDigest: imageConfigDigest, Present: present,
+			WorkloadDigest: workloadDigest, ImageConfigDigest: imageConfigDigest,
+			RoutePolicyDigest: routePolicyDigest, Present: present,
 		}
 		raw = rest
 	}
 	if len(raw) != 0 {
 		return errors.New("trailing fence store bytes")
 	}
+	s.formatVersion = int(version)
 	return nil
 }
 
@@ -350,6 +380,24 @@ func takeFenceText(raw []byte, limit int) (string, []byte, bool) {
 	}
 	value := string(raw[2 : 2+length])
 	if strings.ContainsRune(value, '\x00') {
+		return "", nil, false
+	}
+	return value, raw[2+length:], true
+}
+
+func takeOptionalFenceDigest(raw []byte) (string, []byte, bool) {
+	if len(raw) < 2 {
+		return "", nil, false
+	}
+	length := int(binary.BigEndian.Uint16(raw[:2]))
+	if length == 0 {
+		return "", raw[2:], true
+	}
+	if length > 128 || len(raw) < 2+length {
+		return "", nil, false
+	}
+	value := string(raw[2 : 2+length])
+	if !digest(value) {
 		return "", nil, false
 	}
 	return value, raw[2+length:], true
