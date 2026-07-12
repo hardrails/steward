@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "control_socket": "/run/steward-gateway/control.sock",
+  "service_address": "127.0.0.1:8091",
+  "service_token_file": "/etc/steward/gateway-service-token",
+  "state_file": "/var/lib/steward-gateway/grants.json",
+  "grant_root": "/run/steward-gateway/grants",
+  "executor_gid": @EXECUTOR_GID@,
+  "relay_gid": @RELAY_GID@,
+  "routes": [
+    {
+      "id": "local-openai",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "max_concurrent": 8
+    }
+  ]
+}

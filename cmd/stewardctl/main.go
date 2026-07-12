@@ -2,10 +2,12 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -20,6 +22,7 @@ import (
 	"github.com/hardrails/steward/internal/buildinfo"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/evidence"
+	"github.com/hardrails/steward/internal/nodeclient"
 )
 
 const maxArtifactBytes = dsse.DefaultMaxEnvelopeBytes
@@ -48,6 +51,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return artifact(arguments[1:], stdout, admission.PolicyPayloadType)
 	case "evidence":
 		return verifyEvidence(arguments[1:], stdout)
+	case "node":
+		return nodeCommand(arguments[1:], stdout)
 	default:
 		return usage(stderr)
 	}
@@ -58,7 +63,98 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl capsule sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify -in FILE -public-key FILE -node-id ID [-epoch N]")
+	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|start|stop|destroy|purge-state ...")
 	return errors.New("invalid command")
+}
+
+func nodeCommand(arguments []string, stdout io.Writer) error {
+	if len(arguments) == 0 {
+		return errors.New("node command requires admit, status, logs, start, stop, destroy, or purge-state")
+	}
+	action := arguments[0]
+	flags := flag.NewFlagSet("node "+action, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	nodeURL := flags.String("node-url", "http://127.0.0.1:8090", "loopback Executor origin")
+	tokenFile := flags.String("token-file", "", "owner-only Executor token")
+	runtimeRef := flags.String("runtime-ref", "", "opaque executor runtime ref")
+	capsulePath := flags.String("capsule", "", "signed capsule DSSE envelope")
+	intentPath := flags.String("intent", "", "strict instance intent JSON")
+	tenantID := flags.String("tenant-id", "", "signed tenant identity")
+	nodeID := flags.String("node-id", "", "signed node identity")
+	lineageID := flags.String("lineage-id", "", "state lineage identity")
+	generation := flags.Uint64("generation", 0, "signed instance generation")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	if *tokenFile == "" || flags.NArg() != 0 {
+		return errors.New("node command requires -token-file and no positional arguments")
+	}
+	client, err := nodeclient.NewFromTokenFile(*nodeURL, *tokenFile)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var result any
+	switch action {
+	case "admit":
+		if *capsulePath == "" || *intentPath == "" || *runtimeRef != "" {
+			return errors.New("node admit requires -capsule and -intent")
+		}
+		capsule, err := nodeclient.ReadBounded(*capsulePath, dsse.DefaultMaxEnvelopeBytes)
+		if err != nil {
+			return err
+		}
+		intentRaw, err := nodeclient.ReadBounded(*intentPath, maxArtifactBytes)
+		if err != nil {
+			return err
+		}
+		var intent admission.InstanceIntent
+		if err := dsse.DecodeStrictInto(intentRaw, maxArtifactBytes, &intent); err != nil {
+			return fmt.Errorf("decode instance intent: %w", err)
+		}
+		result, err = client.Admit(ctx, capsule, intent)
+		if err != nil {
+			return err
+		}
+	case "status", "logs", "start", "stop", "destroy":
+		if *runtimeRef == "" || *capsulePath != "" || *intentPath != "" {
+			return fmt.Errorf("node %s requires -runtime-ref", action)
+		}
+		switch action {
+		case "status":
+			result, err = client.Status(ctx, *runtimeRef)
+		case "logs":
+			result, err = client.Logs(ctx, *runtimeRef)
+		case "start":
+			result, err = client.Start(ctx, *runtimeRef)
+		case "stop":
+			result, err = client.Stop(ctx, *runtimeRef)
+		case "destroy":
+			err = client.Destroy(ctx, *runtimeRef)
+			result = map[string]any{"runtime_ref": *runtimeRef, "destroyed": err == nil}
+		}
+		if err != nil {
+			return err
+		}
+	case "purge-state":
+		if *tenantID == "" || *nodeID == "" || *lineageID == "" || *generation == 0 ||
+			*runtimeRef != "" || *capsulePath != "" || *intentPath != "" {
+			return errors.New("node purge-state requires -tenant-id, -node-id, -lineage-id, and -generation")
+		}
+		err = client.PurgeState(ctx, nodeclient.StatePurge{
+			TenantID: *tenantID, NodeID: *nodeID, LineageID: *lineageID, Generation: *generation,
+		})
+		result = map[string]any{"tenant_id": *tenantID, "lineage_id": *lineageID, "purged": err == nil}
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported node command %q", action)
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(result)
 }
 
 func verifyEvidence(arguments []string, stdout io.Writer) error {

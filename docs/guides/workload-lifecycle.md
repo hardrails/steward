@@ -6,10 +6,9 @@ section: How-to guide
 
 # Operate an Executor workload
 
-Use this procedure to test a preloaded OCI image against Steward's fixed v1.2
-sandbox. It targets the optional host-local Executor API at `127.0.0.1:8090`.
-Packaged nodes default to outbound-only control-plane operation, so enable the local
-listener in an operator-owned systemd drop-in before using this procedure.
+Use this procedure to test a preloaded OCI image against Steward's fixed
+sandbox. It targets the host-local Executor API at `127.0.0.1:8090`. Packaged
+nodes bind it to loopback only; never expose that listener on a routable address.
 
 ## 1. Prepare a host-local token
 
@@ -104,7 +103,7 @@ curl --fail-with-body -sS -X DELETE \
 
 Destroy is idempotent and returns HTTP 204 when the managed workload is absent.
 
-## Fixed v1.2 sandbox
+## Fixed sandbox
 
 The request cannot ask for network, environment variables, mounts, devices,
 privileged mode, a different runtime, or a different container user. Those fields

@@ -26,6 +26,7 @@ Node enrollment:
   --executor-credential FILE    Executor uplink credential JSON
   --ca-file FILE                PEM CA bundle for the control plane
   --executor-token FILE         Host-local token (securely generated if omitted)
+  --local-only                  Use loopback HTTP, CLI, and MCP without remote enrollment
   --reuse-configuration         Reuse and validate existing /etc/steward enrollment
   --stage-only                  Install files only; Docker daemon/runsc may be offline
   --no-start                    On a stopped node, configure/activate without a restart
@@ -45,7 +46,7 @@ Environment variables matching automation flags are also accepted: STEWARD_VERSI
 STEWARD_OFFLINE_DIR, STEWARD_ARTIFACT, STEWARD_CHECKSUMS,
 STEWARD_CONTROL_PLANE_URL, STEWARD_CREDENTIAL_FILE,
 STEWARD_EXECUTOR_CREDENTIAL_FILE, STEWARD_CA_FILE, STEWARD_EXECUTOR_TOKEN_FILE,
-STEWARD_INSTALL_GVISOR, STEWARD_GVISOR_DIR, and STEWARD_GVISOR_VERSION.
+STEWARD_LOCAL_ONLY, STEWARD_INSTALL_GVISOR, STEWARD_GVISOR_DIR, and STEWARD_GVISOR_VERSION.
 
 Supported node targets: Debian/Ubuntu (DEB), RHEL/Rocky/Alma/Fedora/Amazon Linux/
 SUSE (RPM), and other systemd Linux distributions (tar), on amd64 or arm64.
@@ -69,6 +70,7 @@ install_gvisor=${STEWARD_INSTALL_GVISOR:-false}
 non_interactive=false
 stage_only=false
 reuse_configuration=false
+local_only=${STEWARD_LOCAL_ONLY:-false}
 start_services=true
 assume_yes=false
 dry_run=false
@@ -85,6 +87,7 @@ while [[ $# -gt 0 ]]; do
 		--executor-credential) executor_credential=${2:-}; shift 2 ;;
 		--ca-file) ca_file=${2:-}; shift 2 ;;
 		--executor-token) executor_token=${2:-}; shift 2 ;;
+		--local-only) local_only=true; shift ;;
 		--reuse-configuration) reuse_configuration=true; shift ;;
 		--stage-only) stage_only=true; shift ;;
 		--no-start) start_services=false; shift ;;
@@ -104,6 +107,9 @@ case "$package_kind" in auto | deb | rpm | tar) ;; *)
 esac
 case "$install_gvisor" in true | false) ;; *)
 	echo "install-steward: STEWARD_INSTALL_GVISOR must be true or false" >&2; exit 2 ;;
+esac
+case "$local_only" in true | false) ;; *)
+	echo "install-steward: STEWARD_LOCAL_ONLY must be true or false" >&2; exit 2 ;;
 esac
 if [[ $gvisor_version != latest && ! $gvisor_version =~ ^[0-9]{8}(\.[0-9]+)?$ ]]; then
 	echo "install-steward: --gvisor-version must be latest, YYYYMMDD, or YYYYMMDD.N" >&2
@@ -186,7 +192,9 @@ if [[ $non_interactive == false ]]; then
 			fi
 		fi
 		if [[ $reuse_configuration == false ]]; then
-			if ! confirm "Configure enrollment and activate this node now?" yes; then
+			if confirm "Configure this as a local-only node (HTTP, CLI, and MCP)?" yes; then
+				local_only=true
+			elif ! confirm "Configure remote enrollment and activate this node now?" yes; then
 				stage_only=true
 			else
 				control_plane_url=$(prompt "Control-plane HTTPS URL: " "$control_plane_url")
@@ -203,11 +211,15 @@ if [[ $stage_only == true && $reuse_configuration == true ]]; then
 	echo "install-steward: --stage-only and --reuse-configuration are mutually exclusive" >&2
 	exit 2
 fi
+if [[ $local_only == true && $reuse_configuration == true ]]; then
+	echo "install-steward: --local-only and --reuse-configuration are mutually exclusive" >&2
+	exit 2
+fi
 if [[ $stage_only == true && $install_gvisor == true ]]; then
 	echo "install-steward: --stage-only and --install-gvisor are mutually exclusive" >&2
 	exit 2
 fi
-if [[ $stage_only == false && $reuse_configuration == false ]]; then
+if [[ $stage_only == false && $reuse_configuration == false && $local_only == false ]]; then
 	for value in "$control_plane_url" "$steward_credential" "$executor_credential" "$ca_file"; do
 		if [[ -z $value ]]; then
 			echo "install-steward: full installation requires enrollment inputs (or --reuse-configuration)" >&2
@@ -234,6 +246,8 @@ if [[ $dry_run == true ]]; then
 		enrollment_plan=staged-only
 	elif [[ $reuse_configuration == true ]]; then
 		enrollment_plan=reuse-existing
+	elif [[ $local_only == true ]]; then
+		enrollment_plan=local-only
 	else
 		enrollment_plan=provision-new
 	fi
@@ -274,7 +288,8 @@ if [[ $stage_only == false ]]; then
 	}
 	if [[ $start_services == false ]] && \
 		(systemctl is-active --quiet steward.service || \
-			systemctl is-active --quiet steward-executor.service); then
+			systemctl is-active --quiet steward-executor.service || \
+			systemctl is-active --quiet steward-gateway.service); then
 		echo "install-steward: --no-start requires both Steward services to be stopped" >&2
 		echo "  Use --stage-only to stage an upgrade without disrupting a running node." >&2
 		exit 2
@@ -488,13 +503,17 @@ fi
 if [[ $reuse_configuration == true ]]; then
 	/usr/local/libexec/steward/node-preflight
 else
-	configure_args=(
-		--control-plane-url "$control_plane_url"
-		--steward-credential "$steward_credential"
-		--executor-credential "$executor_credential"
-		--ca-file "$ca_file"
-		--no-start
-	)
+	if [[ $local_only == true ]]; then
+		configure_args=(--local-only --no-start)
+	else
+		configure_args=(
+			--control-plane-url "$control_plane_url"
+			--steward-credential "$steward_credential"
+			--executor-credential "$executor_credential"
+			--ca-file "$ca_file"
+			--no-start
+		)
+	fi
 	if [[ -n $executor_token ]]; then
 		configure_args+=(--executor-token "$executor_token")
 	fi
@@ -503,7 +522,7 @@ fi
 
 if [[ $start_services == true ]]; then
 	/usr/local/libexec/steward/activate-node-release "$version" --restart
-	systemctl enable --now steward.service steward-executor.service
+	systemctl enable --now steward-gateway.service steward.service steward-executor.service
 	echo "install-steward: Steward $version is installed, configured, and running"
 else
 	/usr/local/libexec/steward/activate-node-release "$version"

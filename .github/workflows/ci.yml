@@ -39,13 +39,13 @@ jobs:
       - name: Installer plan smoke
         run: |
           bash scripts/install-steward.sh --non-interactive --dry-run \
-            --stage-only --version v1.2.3 --package deb | grep -q 'package:      deb'
+            --stage-only --version v1.3.3 --package deb | grep -q 'package:      deb'
           bash scripts/install-steward.sh --non-interactive --dry-run \
-            --stage-only --version v1.2.3 --package rpm | grep -q 'package:      rpm'
+            --stage-only --version v1.3.3 --package rpm | grep -q 'package:      rpm'
           bash scripts/install-steward.sh --non-interactive --dry-run \
-            --stage-only --version v1.2.3 --package tar | grep -q 'package:      tar'
+            --stage-only --version v1.3.3 --package tar | grep -q 'package:      tar'
           if bash scripts/install-steward.sh --non-interactive --dry-run \
-            --version v1.2.3 2>/dev/null; then
+            --version v1.3.3 2>/dev/null; then
             echo 'full unattended install accepted missing enrollment inputs' >&2
             exit 1
           fi
@@ -57,10 +57,13 @@ jobs:
           go build -o "$stage/steward" ./cmd/steward
           go build -o "$stage/steward-executor" ./cmd/steward-executor
           go build -o "$stage/stewardctl" ./cmd/stewardctl
+          go build -o "$stage/steward-mcp" ./cmd/steward-mcp
+          go build -o "$stage/steward-gateway" ./cmd/steward-gateway
+          go build -o "$stage/steward-relay" ./cmd/steward-relay
           cp -R deploy/config deploy/systemd "$stage/deploy/"
           cp scripts/install-node.sh scripts/activate-node-release.sh \
             scripts/node-preflight.sh scripts/configure-node.sh \
-            scripts/uninstall-node.sh "$stage/scripts/"
+            scripts/uninstall-node.sh scripts/build-relay-image.sh "$stage/scripts/"
           cp LICENSE README.md "$stage/"
           bash scripts/build-deb.sh "$stage" v0.0.0-test "$(go env GOARCH)" \
             /tmp/steward-node-test.deb
@@ -71,11 +74,17 @@ jobs:
             grep -q './usr/lib/steward-node/release/steward-executor'
           dpkg-deb --contents /tmp/steward-node-test.deb | \
             grep -q './usr/lib/steward-node/release/stewardctl'
+          dpkg-deb --contents /tmp/steward-node-test.deb | \
+            grep -q './usr/lib/steward-node/release/steward-mcp'
+          dpkg-deb --contents /tmp/steward-node-test.deb | \
+            grep -q './usr/lib/steward-node/release/steward-gateway'
           rpm -qpi /tmp/steward-node-test.rpm
           rpm -qpl /tmp/steward-node-test.rpm | \
             grep -q '/usr/lib/steward-node/release/steward-executor'
           rpm -qpl /tmp/steward-node-test.rpm | \
             grep -q '/usr/lib/steward-node/release/stewardctl'
+          rpm -qpl /tmp/steward-node-test.rpm | \
+            grep -q '/usr/lib/steward-node/release/steward-mcp'
 
   lint:
     name: golangci-lint

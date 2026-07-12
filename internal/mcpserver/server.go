@@ -1,0 +1,367 @@
+// Package mcpserver implements Steward's deliberately narrow MCP stdio tools
+// adapter. It supports the MCP 2025-11-25 lifecycle and tools capability while
+// delegating every operation to the public loopback Executor contract.
+package mcpserver
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/nodeclient"
+)
+
+const ProtocolVersion = "2025-11-25"
+const maxMessageBytes = 1 << 20
+const maxToolResultBytes = 1 << 20
+
+type Node interface {
+	Admit(context.Context, []byte, admission.InstanceIntent) (nodeclient.State, error)
+	Status(context.Context, string) (nodeclient.State, error)
+	Logs(context.Context, string) (nodeclient.State, error)
+	Start(context.Context, string) (nodeclient.State, error)
+	Stop(context.Context, string) (nodeclient.State, error)
+	Destroy(context.Context, string) error
+	PurgeState(context.Context, nodeclient.StatePurge) error
+}
+
+type Server struct {
+	node    Node
+	version string
+}
+
+func New(node Node, version string) (*Server, error) {
+	if node == nil {
+		return nil, errors.New("MCP node client is required")
+	}
+	if strings.TrimSpace(version) == "" {
+		return nil, errors.New("MCP server version is required")
+	}
+	return &Server{node: node, version: version}, nil
+}
+
+type request struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type response struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Result  any             `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
+}
+
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (s *Server) Serve(ctx context.Context, input io.Reader, output, logWriter io.Writer) error {
+	if input == nil || output == nil || logWriter == nil {
+		return errors.New("MCP input, output, and log writer are required")
+	}
+	scanner := bufio.NewScanner(input)
+	scanner.Buffer(make([]byte, 64<<10), maxMessageBytes)
+	encoder := json.NewEncoder(output)
+	encoder.SetEscapeHTML(false)
+	initializedResponse := false
+	initialized := false
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var message request
+		if err := dsse.DecodeStrictInto(line, maxMessageBytes, &message); err != nil {
+			if err := encoder.Encode(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: -32700, Message: "Parse error"}}); err != nil {
+				return err
+			}
+			continue
+		}
+		if message.JSONRPC != "2.0" || strings.TrimSpace(message.Method) == "" || !validID(message.ID) {
+			if len(message.ID) != 0 {
+				if err := encoder.Encode(response{JSONRPC: "2.0", ID: normalizedID(message.ID), Error: &rpcError{Code: -32600, Message: "Invalid Request"}}); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		isNotification := len(message.ID) == 0
+		if isNotification {
+			if message.Method == "notifications/initialized" && initializedResponse {
+				initialized = true
+			}
+			continue
+		}
+		var result any
+		var callErr *rpcError
+		switch message.Method {
+		case "initialize":
+			if initializedResponse {
+				callErr = &rpcError{Code: -32600, Message: "initialize may only be called once"}
+				break
+			}
+			if err := validateInitialize(message.Params); err != nil {
+				callErr = &rpcError{Code: -32602, Message: err.Error()}
+				break
+			}
+			initializedResponse = true
+			result = map[string]any{
+				"protocolVersion": ProtocolVersion,
+				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+				"serverInfo": map[string]any{
+					"name": "steward-mcp", "title": "Steward Node Operations", "version": s.version,
+					"description": "Manage one locally authorized Steward node through its public enforcement boundary.",
+				},
+				"instructions": "Use read tools freely. Confirm create, stop, destroy, and other lifecycle mutations with the operator before invoking them.",
+			}
+		case "ping":
+			result = map[string]any{}
+		case "tools/list":
+			if !initialized {
+				callErr = &rpcError{Code: -32002, Message: "MCP session is not initialized"}
+				break
+			}
+			result = map[string]any{"tools": tools()}
+		case "tools/call":
+			if !initialized {
+				callErr = &rpcError{Code: -32002, Message: "MCP session is not initialized"}
+				break
+			}
+			result, callErr = s.callTool(ctx, message.Params)
+		default:
+			callErr = &rpcError{Code: -32601, Message: "Method not found"}
+		}
+		if callErr != nil {
+			if err := encoder.Encode(response{JSONRPC: "2.0", ID: message.ID, Error: callErr}); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := encoder.Encode(response{JSONRPC: "2.0", ID: message.ID, Result: result}); err != nil {
+			return err
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(logWriter, "steward-mcp: input exceeds 1 MiB or cannot be read")
+		return err
+	}
+	return nil
+}
+
+type initializeParams struct {
+	ProtocolVersion string          `json:"protocolVersion"`
+	Capabilities    json.RawMessage `json:"capabilities"`
+	ClientInfo      clientInfo      `json:"clientInfo"`
+	Meta            json.RawMessage `json:"_meta,omitempty"`
+}
+
+type clientInfo struct {
+	Name        string          `json:"name"`
+	Title       string          `json:"title,omitempty"`
+	Version     string          `json:"version"`
+	Description string          `json:"description,omitempty"`
+	Icons       json.RawMessage `json:"icons,omitempty"`
+	WebsiteURL  string          `json:"websiteUrl,omitempty"`
+}
+
+func validateInitialize(raw []byte) error {
+	var params initializeParams
+	if err := dsse.DecodeStrictInto(raw, maxMessageBytes, &params); err != nil {
+		return errors.New("invalid initialize parameters")
+	}
+	if params.ProtocolVersion == "" || params.ClientInfo.Name == "" || params.ClientInfo.Version == "" || len(params.Capabilities) == 0 {
+		return errors.New("initialize requires protocolVersion, capabilities, and clientInfo")
+	}
+	return nil
+}
+
+type toolCall struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Meta      json.RawMessage `json:"_meta,omitempty"`
+}
+
+type runtimeArgs struct {
+	RuntimeRef string `json:"runtime_ref"`
+}
+
+type admitArgs struct {
+	CapsuleDSSEBase64 string `json:"capsule_dsse_base64"`
+	IntentJSON        string `json:"intent_json"`
+}
+
+type purgeStateArgs struct {
+	TenantID   string `json:"tenant_id"`
+	NodeID     string `json:"node_id"`
+	LineageID  string `json:"lineage_id"`
+	Generation uint64 `json:"generation"`
+}
+
+func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
+	var call toolCall
+	if err := dsse.DecodeStrictInto(raw, maxMessageBytes, &call); err != nil || call.Name == "" {
+		return nil, &rpcError{Code: -32602, Message: "invalid tool call parameters"}
+	}
+	var value any
+	var err error
+	switch call.Name {
+	case "steward_admit":
+		var arguments admitArgs
+		if decodeArguments(call.Arguments, &arguments) != nil || arguments.CapsuleDSSEBase64 == "" || arguments.IntentJSON == "" {
+			return toolFailure("steward_admit requires capsule_dsse_base64 and intent_json"), nil
+		}
+		capsule, decodeErr := base64.StdEncoding.DecodeString(arguments.CapsuleDSSEBase64)
+		if decodeErr != nil || len(capsule) == 0 || len(capsule) > 512<<10 {
+			return toolFailure("capsule_dsse_base64 is invalid or exceeds 512 KiB"), nil
+		}
+		var intent admission.InstanceIntent
+		if decodeErr := dsse.DecodeStrictInto([]byte(arguments.IntentJSON), maxMessageBytes, &intent); decodeErr != nil {
+			return toolFailure("intent_json must be one strict instance intent"), nil
+		}
+		value, err = s.node.Admit(ctx, capsule, intent)
+	case "steward_status", "steward_logs", "steward_start", "steward_stop", "steward_destroy":
+		var arguments runtimeArgs
+		if decodeArguments(call.Arguments, &arguments) != nil || arguments.RuntimeRef == "" {
+			return toolFailure(call.Name + " requires runtime_ref"), nil
+		}
+		switch call.Name {
+		case "steward_status":
+			value, err = s.node.Status(ctx, arguments.RuntimeRef)
+		case "steward_logs":
+			value, err = s.node.Logs(ctx, arguments.RuntimeRef)
+		case "steward_start":
+			value, err = s.node.Start(ctx, arguments.RuntimeRef)
+		case "steward_stop":
+			value, err = s.node.Stop(ctx, arguments.RuntimeRef)
+		case "steward_destroy":
+			err = s.node.Destroy(ctx, arguments.RuntimeRef)
+			value = map[string]any{"runtime_ref": arguments.RuntimeRef, "destroyed": err == nil}
+		}
+	case "steward_purge_state":
+		var arguments purgeStateArgs
+		if decodeArguments(call.Arguments, &arguments) != nil || arguments.TenantID == "" || arguments.NodeID == "" || arguments.LineageID == "" || arguments.Generation == 0 {
+			return toolFailure("steward_purge_state requires tenant_id, node_id, lineage_id, and generation"), nil
+		}
+		err = s.node.PurgeState(ctx, nodeclient.StatePurge{
+			TenantID: arguments.TenantID, NodeID: arguments.NodeID, LineageID: arguments.LineageID, Generation: arguments.Generation,
+		})
+		value = map[string]any{"tenant_id": arguments.TenantID, "lineage_id": arguments.LineageID, "purged": err == nil}
+	default:
+		return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+	}
+	if err != nil {
+		return toolFailure(err.Error()), nil
+	}
+	encoded, marshalErr := json.Marshal(value)
+	if marshalErr != nil {
+		return toolFailure("encode tool result"), nil
+	}
+	if len(encoded) > maxToolResultBytes {
+		return toolFailure("tool result exceeds 1 MiB"), nil
+	}
+	return map[string]any{
+		"content":           []any{map[string]any{"type": "text", "text": string(encoded)}},
+		"structuredContent": value,
+		"isError":           false,
+	}, nil
+}
+
+func decodeArguments(raw []byte, target any) error {
+	if len(raw) == 0 {
+		raw = []byte("{}")
+	}
+	return dsse.DecodeStrictInto(raw, maxMessageBytes, target)
+}
+
+func toolFailure(message string) any {
+	if len(message) > 4096 {
+		message = message[:4096]
+	}
+	return map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": message}},
+		"isError": true,
+	}
+}
+
+func tools() []any {
+	runtimeSchema := map[string]any{
+		"type": "object", "additionalProperties": false, "required": []string{"runtime_ref"},
+		"properties": map[string]any{"runtime_ref": map[string]any{"type": "string", "pattern": "^executor-[a-f0-9]{64}$"}},
+	}
+	return []any{
+		tool("steward_admit", "Admit signed agent", "Admit one publisher-signed capsule and tenant-bound intent on the configured Steward node.", map[string]any{
+			"type": "object", "additionalProperties": false, "required": []string{"capsule_dsse_base64", "intent_json"},
+			"properties": map[string]any{
+				"capsule_dsse_base64": map[string]any{"type": "string", "description": "Base64 of the exact signed capsule envelope."},
+				"intent_json":         map[string]any{"type": "string", "description": "Strict JSON instance intent authenticated by the configured node path."},
+			},
+		}, false, false, true),
+		tool("steward_status", "Inspect agent", "Read the current bounded runtime status.", runtimeSchema, true, false, true),
+		tool("steward_logs", "Read agent logs", "Read the bounded tail of agent stdout and stderr.", runtimeSchema, true, false, true),
+		tool("steward_start", "Start agent", "Start an admitted agent workload.", runtimeSchema, false, false, true),
+		tool("steward_stop", "Stop agent", "Stop an admitted agent workload.", runtimeSchema, false, true, true),
+		tool("steward_destroy", "Destroy agent", "Destroy the admitted workload while retaining separately managed lineage state.", runtimeSchema, false, true, true),
+		tool("steward_purge_state", "Purge agent state", "Permanently remove one absent, signed tenant lineage state volume.", map[string]any{
+			"type": "object", "additionalProperties": false,
+			"required": []string{"tenant_id", "node_id", "lineage_id", "generation"},
+			"properties": map[string]any{
+				"tenant_id":  map[string]any{"type": "string", "minLength": 1, "maxLength": 128},
+				"node_id":    map[string]any{"type": "string", "minLength": 1, "maxLength": 128},
+				"lineage_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 256},
+				"generation": map[string]any{"type": "integer", "minimum": 1},
+			},
+		}, false, true, true),
+	}
+}
+
+func tool(name, title, description string, schema map[string]any, readOnly, destructive, idempotent bool) map[string]any {
+	return map[string]any{
+		"name": name, "title": title, "description": description, "inputSchema": schema,
+		"annotations": map[string]any{
+			"title": title, "readOnlyHint": readOnly, "destructiveHint": destructive,
+			"idempotentHint": idempotent, "openWorldHint": false,
+		},
+	}
+}
+
+func validID(raw []byte) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return false
+	}
+	switch value.(type) {
+	case string, json.Number, nil:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedID(raw []byte) json.RawMessage {
+	if validID(raw) && len(raw) != 0 {
+		return raw
+	}
+	return json.RawMessage("null")
+}

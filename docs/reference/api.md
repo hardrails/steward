@@ -45,12 +45,20 @@ Every endpoint except `GET /v1/healthz` requires
 | Method and path | Purpose |
 | --- | --- |
 | `POST /v1/admissions` | Verify capsule + local policy + fenced intent, journal the mutation, and create a receipt-bound workload |
+| `POST /v1/state/purge` | Permanently purge an inactive, authorized state lineage with a receipt |
 | `POST /v1/workloads` | Validate and create a stopped gVisor container |
 | `GET /v1/workloads/{runtime_ref}` | Read observed container state |
 | `POST .../start`, `.../stop` | Idempotent lifecycle operation |
 | `GET .../logs` | Read a combined log tail capped at 1 MiB |
 | `DELETE /v1/workloads/{runtime_ref}` | Idempotently remove a managed workload |
 | `GET /v1/healthz` | Process liveness |
+
+## MCP server
+
+`steward-mcp` implements MCP revision `2025-11-25` over stdio. It exposes
+admit, status, logs, start, stop, destroy, and state-purge tools by calling the
+same loopback Executor API. It is an operations adapter, not another authority
+or a remotely exposed MCP endpoint. See [MCP setup]({{ '/guides/mcp/' | relative_url }}).
 
 ## Common behavior
 
@@ -65,7 +73,8 @@ Every endpoint except `GET /v1/healthz` requires
 The outbound Executor command kind `admit` carries the exact
 `capsule_dsse_base64` plus instance `intent` object documented by the OpenAPI
 schema. Its tenant, node, instance, and generation must match the enrolled uplink
-command identity. Positive capability requests return HTTP 501 in v1.2.
+command identity. Positive capability requests are enforced through the configured
+state or gateway/relay topology and return HTTP 501 if that topology is absent.
 When signed admission is configured, legacy `POST /v1/workloads` creation is
 disabled. Uplink-authenticated start, stop, and destroy carry the same tenant/node/
 generation principal into the lifecycle journal and receipt chain.

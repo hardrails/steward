@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -27,6 +28,34 @@ type Docker interface {
 	Stop(context.Context, string) error
 	Remove(context.Context, string) error
 	Logs(context.Context, string) (string, error)
+}
+
+// StateDocker is the additional narrow Docker surface used only after signed
+// admission has granted persistent state. Legacy workload requests cannot
+// reach these methods because StateMount is not part of their JSON contract.
+type StateDocker interface {
+	InspectStateVolume(context.Context, string) (ObservedStateVolume, error)
+	CreateStateVolume(context.Context, StateVolumeSpec) error
+	RemoveStateVolume(context.Context, string) error
+}
+
+type StateVolumeSpec struct {
+	Name      string
+	TenantID  string
+	LineageID string
+}
+
+type ObservedStateVolume struct {
+	StateVolumeSpec
+	Managed bool
+}
+
+type dockerMount struct {
+	Type        string `json:"Type"`
+	Name        string `json:"Name"`
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+	RW          bool   `json:"RW"`
 }
 
 // ObservedWorkload is the executor-owned subset of Docker inspect state. Keeping
@@ -53,6 +82,19 @@ const tempTmpfs = "rw,noexec,nosuid,nodev,size=67108864"
 const workloadMemoryLabel = "io.hardrails.memory-bytes"
 const workloadCPULabel = "io.hardrails.cpu-millis"
 const workloadPIDsLabel = "io.hardrails.pids"
+const managedStateLabel = "io.hardrails.state.managed"
+const stateLineageLabel = "io.hardrails.state.lineage"
+const stateVolumeLabel = "io.hardrails.state.volume"
+const statePathLabel = "io.hardrails.state.path"
+const runtimeNetworkLabel = "io.hardrails.runtime.network"
+const runtimeGrantLabel = "io.hardrails.runtime.grant"
+const runtimeInferenceLabel = "io.hardrails.runtime.inference"
+const runtimeModelLabel = "io.hardrails.runtime.model"
+const runtimeRouteLabel = "io.hardrails.runtime.route"
+const runtimeServicePortLabel = "io.hardrails.runtime.service-port"
+const runtimeGenerationLabel = "io.hardrails.runtime.generation"
+const runtimeRelayIPLabel = "io.hardrails.runtime.relay-ip"
+const runtimeAgentIPLabel = "io.hardrails.runtime.agent-ip"
 
 func NewDockerHTTP(socket string) *DockerHTTP {
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
@@ -129,38 +171,85 @@ func (d *DockerHTTP) WorkloadCounts(ctx context.Context, tenantID string) (int, 
 }
 
 func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error {
+	home := "/workspace"
+	workingDirectory := "/workspace"
+	tmpfs := map[string]string{"/tmp": tempTmpfs, "/workspace": workspaceTmpfs}
+	mounts := []map[string]any(nil)
+	labels := map[string]string{
+		managedWorkloadLabel:     "true",
+		workloadFingerprintLabel: workloadFingerprint(w),
+		"io.hardrails.tenant":    w.TenantID,
+		"io.hardrails.instance":  w.InstanceID,
+		"io.hardrails.profile":   w.ProfileID,
+		workloadMemoryLabel:      strconv.FormatInt(w.Resources.MemoryBytes, 10),
+		workloadCPULabel:         strconv.FormatInt(w.Resources.CPUMillis, 10),
+		workloadPIDsLabel:        strconv.FormatInt(w.Resources.PIDs, 10),
+	}
+	if w.State != nil {
+		layout := profileLayoutFor(w.ProfileID)
+		home = layout.Home
+		workingDirectory = layout.WorkDir
+		tmpfs = map[string]string{"/tmp": tempTmpfs}
+		mounts = []map[string]any{{
+			"Type": "volume", "Source": w.State.VolumeName, "Target": w.State.Path, "ReadOnly": false,
+		}}
+		labels[stateVolumeLabel] = w.State.VolumeName
+		labels[statePathLabel] = w.State.Path
+	}
+	networkMode := "none"
+	var networkingConfig map[string]any
+	if w.Runtime != nil {
+		networkMode = w.Runtime.NetworkName
+		networkingConfig = map[string]any{"EndpointsConfig": map[string]any{
+			w.Runtime.NetworkName: map[string]any{"Aliases": []string{"agent"}, "IPAMConfig": map[string]string{"IPv4Address": w.Runtime.AgentIP}},
+		}}
+		labels[runtimeNetworkLabel] = w.Runtime.NetworkName
+		labels[runtimeGrantLabel] = w.Runtime.GrantID
+		labels[runtimeGenerationLabel] = strconv.FormatUint(w.Runtime.Generation, 10)
+		labels[runtimeInferenceLabel] = strconv.FormatBool(w.Runtime.Inference)
+		labels[runtimeModelLabel] = w.Runtime.ModelAlias
+		labels[runtimeRouteLabel] = w.Runtime.RouteID
+		labels[runtimeServicePortLabel] = strconv.Itoa(w.Runtime.ServicePort)
+		labels[runtimeRelayIPLabel] = w.Runtime.RelayIP
+		labels[runtimeAgentIPLabel] = w.Runtime.AgentIP
+	}
+	environment := []string{"HOME=" + home, "TMPDIR=/tmp"}
+	if w.Runtime != nil && w.Runtime.Inference {
+		environment = append(environment,
+			"OPENAI_BASE_URL=http://steward-relay:8080/v1", "OPENAI_API_BASE=http://steward-relay:8080/v1",
+			"OPENAI_API_KEY=steward-local", "OPENAI_MODEL="+w.Runtime.ModelAlias)
+	}
 	body := map[string]any{
 		"Image":          w.Image,
 		"Cmd":            w.Command,
-		"Env":            []string{"HOME=/workspace", "TMPDIR=/tmp"},
+		"Env":            environment,
 		"User":           "65532:65532",
-		"WorkingDir":     "/workspace",
+		"WorkingDir":     workingDirectory,
 		"ReadonlyRootfs": true,
 		"HostConfig": map[string]any{
 			"Runtime":        "runsc",
-			"NetworkMode":    "none",
+			"NetworkMode":    networkMode,
 			"ReadonlyRootfs": true,
 			"CapDrop":        []string{"ALL"},
 			"SecurityOpt":    []string{"no-new-privileges:true"},
 			"PidsLimit":      w.Resources.PIDs,
 			"Memory":         w.Resources.MemoryBytes,
 			"NanoCPUs":       w.Resources.CPUMillis * 1_000_000,
-			"Tmpfs": map[string]string{
-				"/tmp": tempTmpfs, "/workspace": workspaceTmpfs,
-			},
+			"Tmpfs":          tmpfs,
+			"Mounts":         mounts,
+			"ExtraHosts":     runtimeExtraHosts(w.Runtime),
 		},
-		"Labels": map[string]string{
-			managedWorkloadLabel:     "true",
-			workloadFingerprintLabel: workloadFingerprint(w),
-			"io.hardrails.tenant":    w.TenantID,
-			"io.hardrails.instance":  w.InstanceID,
-			"io.hardrails.profile":   w.ProfileID,
-			workloadMemoryLabel:      strconv.FormatInt(w.Resources.MemoryBytes, 10),
-			workloadCPULabel:         strconv.FormatInt(w.Resources.CPUMillis, 10),
-			workloadPIDsLabel:        strconv.FormatInt(w.Resources.PIDs, 10),
-		},
+		"Labels":           labels,
+		"NetworkingConfig": networkingConfig,
 	}
 	return d.call(ctx, http.MethodPost, "/v1.41/containers/create?name="+url.QueryEscape(name), body, http.StatusCreated)
+}
+
+func runtimeExtraHosts(runtime *RuntimeGrant) []string {
+	if runtime == nil {
+		return nil
+	}
+	return []string{"steward-relay:" + runtime.RelayIP}
 }
 
 func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload, error) {
@@ -199,15 +288,55 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			CapDrop     []string          `json:"CapDrop"`
 			SecurityOpt []string          `json:"SecurityOpt"`
 			Tmpfs       map[string]string `json:"Tmpfs"`
+			ExtraHosts  []string          `json:"ExtraHosts"`
 		} `json:"HostConfig"`
 		State struct {
 			Status string `json:"Status"`
 		} `json:"State"`
+		Mounts          []dockerMount `json:"Mounts"`
+		NetworkSettings struct {
+			Networks map[string]struct {
+				IPAddress string `json:"IPAddress"`
+			} `json:"Networks"`
+		} `json:"NetworkSettings"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
 		return ObservedWorkload{}, err
 	}
 	labels := payload.Config.Labels
+	var state *StateMount
+	stateHardened := labels[stateVolumeLabel] == "" && labels[statePathLabel] == "" &&
+		payload.Config.WorkingDir == "/workspace" && contains(payload.Config.Env, "HOME=/workspace") &&
+		payload.HostConfig.Tmpfs["/workspace"] == workspaceTmpfs
+	if labels[stateVolumeLabel] != "" || labels[statePathLabel] != "" {
+		state = &StateMount{VolumeName: labels[stateVolumeLabel], Path: labels[statePathLabel]}
+		layout := profileLayoutFor(labels["io.hardrails.profile"])
+		stateHardened = state.Path == layout.StatePath && strings.HasPrefix(state.VolumeName, "steward-state-") &&
+			payload.Config.WorkingDir == layout.WorkDir && contains(payload.Config.Env, "HOME="+layout.Home) &&
+			payload.HostConfig.Tmpfs["/workspace"] == "" && hasExactStateMount(payload.Mounts, *state)
+	}
+	var runtimeGrant *RuntimeGrant
+	runtimeHardened := payload.HostConfig.NetworkMode == "none" && labels[runtimeNetworkLabel] == "" && labels[runtimeGrantLabel] == ""
+	if labels[runtimeNetworkLabel] != "" || labels[runtimeGrantLabel] != "" {
+		servicePort, serviceErr := strconv.Atoi(labels[runtimeServicePortLabel])
+		inference, inferenceErr := strconv.ParseBool(labels[runtimeInferenceLabel])
+		generation, generationErr := strconv.ParseUint(labels[runtimeGenerationLabel], 10, 64)
+		runtimeGrant = &RuntimeGrant{
+			NetworkName: labels[runtimeNetworkLabel], GrantID: labels[runtimeGrantLabel],
+			Generation: generation, Inference: inference, RouteID: labels[runtimeRouteLabel], ModelAlias: labels[runtimeModelLabel], ServicePort: servicePort,
+			RelayIP: labels[runtimeRelayIPLabel], AgentIP: labels[runtimeAgentIPLabel],
+		}
+		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil && generation > 0 &&
+			payload.HostConfig.NetworkMode == runtimeGrant.NetworkName &&
+			strings.HasPrefix(runtimeGrant.NetworkName, "steward-net-") && strings.HasPrefix(runtimeGrant.GrantID, "grant-") &&
+			contains(payload.HostConfig.ExtraHosts, "steward-relay:"+runtimeGrant.RelayIP) &&
+			(payload.State.Status != "running" || payload.NetworkSettings.Networks[runtimeGrant.NetworkName].IPAddress == runtimeGrant.AgentIP)
+		if runtimeGrant.Inference {
+			runtimeHardened = runtimeHardened && contains(payload.Config.Env, "OPENAI_BASE_URL=http://steward-relay:8080/v1") &&
+				contains(payload.Config.Env, "OPENAI_API_BASE=http://steward-relay:8080/v1") &&
+				contains(payload.Config.Env, "OPENAI_API_KEY=steward-local") && contains(payload.Config.Env, "OPENAI_MODEL="+runtimeGrant.ModelAlias)
+		}
+	}
 	return ObservedWorkload{
 		ImageID: payload.Image,
 		Workload: Workload{
@@ -221,7 +350,9 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 				CPUMillis:   payload.HostConfig.NanoCPUs / 1_000_000,
 				PIDs:        payload.HostConfig.Pids,
 			},
-			Egress: Egress{},
+			Egress:  Egress{},
+			State:   state,
+			Runtime: runtimeGrant,
 		},
 		Fingerprint: labels[workloadFingerprintLabel],
 		Managed:     labels[managedWorkloadLabel] == "true",
@@ -232,14 +363,12 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			labels[workloadMemoryLabel] == strconv.FormatInt(payload.HostConfig.Memory, 10) &&
 			labels[workloadCPULabel] == strconv.FormatInt(payload.HostConfig.NanoCPUs/1_000_000, 10) &&
 			labels[workloadPIDsLabel] == strconv.FormatInt(payload.HostConfig.Pids, 10) &&
-			payload.Config.WorkingDir == "/workspace" &&
-			contains(payload.Config.Env, "HOME=/workspace") &&
+			stateHardened &&
 			contains(payload.Config.Env, "TMPDIR=/tmp") &&
-			payload.HostConfig.Runtime == "runsc" && payload.HostConfig.NetworkMode == "none" &&
+			payload.HostConfig.Runtime == "runsc" && runtimeHardened &&
 			payload.HostConfig.Readonly && contains(payload.HostConfig.CapDrop, "ALL") &&
 			contains(payload.HostConfig.SecurityOpt, "no-new-privileges:true") &&
-			payload.HostConfig.Tmpfs["/tmp"] == tempTmpfs &&
-			payload.HostConfig.Tmpfs["/workspace"] == workspaceTmpfs,
+			payload.HostConfig.Tmpfs["/tmp"] == tempTmpfs,
 		Status: payload.State.Status,
 	}, nil
 }
@@ -253,9 +382,72 @@ func validFingerprint(value string) bool {
 }
 
 func workloadFingerprint(w Workload) string {
-	raw, _ := json.Marshal(w)
+	raw, _ := json.Marshal(struct {
+		InstanceID string        `json:"instance_id"`
+		TenantID   string        `json:"tenant_id"`
+		ProfileID  string        `json:"profile_id"`
+		Image      string        `json:"image"`
+		Command    []string      `json:"command,omitempty"`
+		Resources  Resources     `json:"resources"`
+		Egress     Egress        `json:"egress"`
+		State      *StateMount   `json:"state,omitempty"`
+		Runtime    *RuntimeGrant `json:"runtime,omitempty"`
+	}{w.InstanceID, w.TenantID, w.ProfileID, w.Image, w.Command, w.Resources, w.Egress, w.State, w.Runtime})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+func hasExactStateMount(mounts []dockerMount, want StateMount) bool {
+	for _, mount := range mounts {
+		if mount.Type == "volume" && mount.Name == want.VolumeName && mount.Destination == want.Path && mount.RW {
+			return true
+		}
+	}
+	return false
+}
+
+func StateVolumeName(tenantID, lineageID string) string {
+	sum := sha256.Sum256([]byte(tenantID + "\x00" + lineageID))
+	return "steward-state-" + hex.EncodeToString(sum[:])
+}
+
+func (d *DockerHTTP) InspectStateVolume(ctx context.Context, name string) (ObservedStateVolume, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/v1.41/volumes/"+pathEscape(name), nil)
+	if err != nil {
+		return ObservedStateVolume{}, err
+	}
+	response, err := d.client.Do(req)
+	if err != nil {
+		return ObservedStateVolume{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return ObservedStateVolume{}, ErrNotFound
+	}
+	if response.StatusCode != http.StatusOK {
+		return ObservedStateVolume{}, dockerError(response)
+	}
+	var payload struct {
+		Name   string            `json:"Name"`
+		Labels map[string]string `json:"Labels"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
+		return ObservedStateVolume{}, err
+	}
+	return ObservedStateVolume{StateVolumeSpec: StateVolumeSpec{
+		Name: payload.Name, TenantID: payload.Labels["io.hardrails.tenant"], LineageID: payload.Labels[stateLineageLabel],
+	}, Managed: payload.Labels[managedStateLabel] == "true"}, nil
+}
+
+func (d *DockerHTTP) CreateStateVolume(ctx context.Context, spec StateVolumeSpec) error {
+	body := map[string]any{"Name": spec.Name, "Labels": map[string]string{
+		managedStateLabel: "true", "io.hardrails.tenant": spec.TenantID, stateLineageLabel: spec.LineageID,
+	}}
+	return d.call(ctx, http.MethodPost, "/v1.41/volumes/create", body, http.StatusCreated)
+}
+
+func (d *DockerHTTP) RemoveStateVolume(ctx context.Context, name string) error {
+	return d.call(ctx, http.MethodDelete, "/v1.41/volumes/"+pathEscape(name), nil, http.StatusNoContent)
 }
 
 func contains(values []string, want string) bool {

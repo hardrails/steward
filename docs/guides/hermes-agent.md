@@ -1,79 +1,70 @@
 ---
 title: Hermes Agent on Steward
-description: Safely evaluate a digest-pinned NousResearch Hermes Agent image under Steward Executor v1.2 and understand what is required for full connected operation.
+description: Build and admit a digest-pinned Hermes Agent profile with persistent /opt/data state and brokered OpenAI-compatible inference.
 section: Agent compatibility
 ---
 
 # Hermes Agent on Steward
 
-<div class="callout warning">
-  <strong>Compatibility status: lifecycle validation only</strong>
-  Steward v1.2 can admit and start a Hermes Agent image under its hardened sandbox.
-  It cannot yet provide the network, secrets, persistent <code>/opt/data</code>, or
-  gateway ports required for a useful connected Hermes deployment.
-</div>
+Steward v1.3 has a built-in `hermes-v1@v1` layout: persistent state is mounted at
+`/opt/data`, `HOME` is `/opt/data/home`, and OpenAI-compatible requests are routed
+to the per-instance relay. This matches Hermes' documented state and custom-model
+interfaces without exposing the real model credential to Hermes.
 
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) is an independent agent
-runtime. Its official Docker workflow stores configuration, credentials, memories,
-skills, and sessions under `/opt/data`, and connected use requires model and tool
-network access. Steward v1.2 deliberately supplies neither persistent host storage
-nor network access.
+Hermes is independently developed. Pin an upstream release and review its current
+[Docker guide](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/docker.md)
+and [configuration reference](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/configuration.md)
+before producing an approved capsule.
 
-## Validate the image boundary
+## Prepare a compatible immutable image
 
-Run this on a Steward Linux node with Docker and `runsc`. Select and record an
-explicit upstream version; do not automate against a floating tag in production.
+The official image normally starts an s6 root entrypoint that reconciles ownership.
+Steward always runs the agent as UID/GID `65532`, so approve a small derivative
+that pre-creates the state tree and starts Hermes directly:
 
-```console
-HERMES_TAG=<approved-version>
-docker pull "nousresearch/hermes-agent:$HERMES_TAG"
-HERMES_IMAGE=$(docker image inspect --format '{% raw %}{{index .RepoDigests 0}}{% endraw %}' \
-  "nousresearch/hermes-agent:$HERMES_TAG")
-printf '%s\n' "$HERMES_IMAGE"
+```dockerfile
+FROM nousresearch/hermes-agent@sha256:REPLACE_WITH_REVIEWED_DIGEST
+USER root
+RUN mkdir -p /opt/data/home && chown -R 65532:65532 /opt/data
+USER 65532:65532
+ENV HOME=/opt/data/home
+ENTRYPOINT ["/opt/hermes/.venv/bin/hermes"]
 ```
 
-First test the image directly under the same non-negotiable container controls used
-by Executor. Adapt the final command if the pinned upstream release changes its CLI:
+Build this in your trusted image pipeline, scan it, push or export it, and use its
+immutable repository digest plus Docker config digest in the signed capsule.
+Tags are not admitted.
 
-```console
-docker run --rm \
-  --runtime runsc \
-  --network none \
-  --read-only \
-  --user 65532:65532 \
-  --cap-drop ALL \
-  --security-opt no-new-privileges:true \
-  --tmpfs /workspace:rw,nosuid,nodev,size=67108864 \
-  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=67108864 \
-  --workdir /workspace \
-  "$HERMES_IMAGE" hermes --help
+## Author the capsule and intent
+
+Use profile `hermes-v1@v1`, state shape `{"schema_version":"v1","path":"/opt/data"}`,
+and a command verified against the pinned release. Start with `--help`; for a
+gateway deployment, the current upstream command is `gateway run`.
+
+Set the capsule capability ceilings you have reviewed. A useful local-model intent
+typically requests:
+
+```json
+{
+  "capabilities": {"state": true, "inference": true, "service": false},
+  "state_disposition": "new",
+  "inference_route_id": "local-openai",
+  "model_alias": "approved-model"
+}
 ```
 
-Then follow [Operate an Executor workload]({{ '/guides/workload-lifecycle/' | relative_url }})
-with:
+Hermes documents `OPENAI_BASE_URL` and `OPENAI_API_KEY` for custom compatible
+endpoints. Steward injects a private relay base URL and a non-secret sentinel key;
+the host gateway replaces that value with the configured upstream credential.
 
-- `profile_id`: `hermes-compat-v1`
-- `image`: the value of `$HERMES_IMAGE`
-- `command`: `['hermes', '--help']`, adjusted only to the pinned image's documented CLI
+Admit and start with `stewardctl node` or the MCP tools. Destroy retains
+`/opt/data`; a higher generation can request `resume`. See
+[positive-capability setup]({{ '/guides/positive-capabilities/' | relative_url }}).
 
-A successful test proves the image can enter the v1.2 sandbox and execute the chosen
-offline command. It does **not** prove a gateway, messaging integration, browser
-tool, model call, or persistent memory works.
+## Deliberate limits
 
-## Why the normal Hermes setup does not fit v1.2
-
-The upstream setup command mounts a durable host directory at `/opt/data` and writes
-secrets and configuration there. The gateway also needs outbound connections and
-normally exposes a service port. Executor's public v1.2 contract has no field for
-any of those capabilities, so a control plane cannot smuggle them through.
-
-Full Hermes operation belongs behind future, auditable grants:
-
-1. tenant-scoped durable volume claims;
-2. opaque secret references resolved only on the node;
-3. destination-constrained egress through a tenant-aware proxy; and
-4. explicit service/port publication with authenticated ingress.
-
-Until those contracts exist, use Hermes' [official Docker guide](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/docker.md)
-outside Steward for functional evaluation. Treat that as a different security
-boundary; do not weaken Executor or expose the Docker socket to bridge the gap.
+Hermes skills that download packages, call arbitrary web APIs, launch a browser,
+mount host projects, use Docker, or connect directly to Telegram/Discord/Slack do
+not work through the inference-only grant. Add those only when Steward has an
+explicit enforcement contract for them; do not enable general container networking
+as a workaround.

@@ -12,10 +12,13 @@ if [[ $(uname -s) != Linux ]]; then
 fi
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-for path in steward stewardctl steward-executor deploy/systemd/steward.service \
+for path in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/systemd/steward.service \
 	deploy/systemd/steward-executor.service deploy/config/steward.json \
-	deploy/config/executor.env scripts/activate-node-release.sh \
-	scripts/node-preflight.sh scripts/configure-node.sh scripts/uninstall-node.sh; do
+	deploy/config/steward-local.json \
+	deploy/systemd/steward-gateway.service deploy/config/gateway.json.in \
+	deploy/config/executor.env deploy/config/executor-gateway.env scripts/activate-node-release.sh \
+	scripts/node-preflight.sh scripts/configure-node.sh scripts/uninstall-node.sh \
+	scripts/build-relay-image.sh; do
 	if [[ ! -f "$root/$path" ]]; then
 		echo "install-node: release is missing $path" >&2
 		exit 2
@@ -34,6 +37,13 @@ if ! id steward-executor >/dev/null 2>&1; then
 		--groups docker steward-executor
 else
 	usermod --append --groups docker steward-executor
+fi
+getent group steward-relay >/dev/null || groupadd --system steward-relay
+if ! id steward-gateway >/dev/null 2>&1; then
+	useradd --system --home-dir /var/lib/steward-gateway --shell /usr/sbin/nologin \
+		--groups steward-executor,steward-relay steward-gateway
+else
+	usermod --append --groups steward-executor,steward-relay steward-gateway
 fi
 if [[ $(id -u steward) -eq 0 || $(id -u steward-executor) -eq 0 || \
 	$(id -u steward) -eq $(id -u steward-executor) ]]; then
@@ -55,11 +65,17 @@ trap 'rm -rf "$incoming"' EXIT
 chmod 0755 "$incoming"
 install -o root -g root -m 0755 "$root/steward" "$incoming/steward"
 install -o root -g root -m 0755 "$root/stewardctl" "$incoming/stewardctl"
-install -o root -g root -m 0755 "$root/steward-executor" "$incoming/steward-executor"
+for binary in steward-executor steward-gateway steward-relay steward-mcp; do
+	install -o root -g root -m 0755 "$root/$binary" "$incoming/$binary"
+done
 steward_version=$(runuser -u steward -- "$incoming/steward" -version | awk '{print $2}')
 ctl_version=$(runuser -u steward -- "$incoming/stewardctl" -version | awk '{print $2}')
 executor_version=$(runuser -u steward -- "$incoming/steward-executor" -version | awk '{print $2}')
-if [[ -z $steward_version || $steward_version != "$executor_version" || $steward_version != "$ctl_version" ]]; then
+gateway_version=$(runuser -u steward -- "$incoming/steward-gateway" -version | awk '{print $2}')
+relay_version=$(runuser -u steward -- "$incoming/steward-relay" -version | awk '{print $2}')
+mcp_version=$(runuser -u steward -- "$incoming/steward-mcp" -version | awk '{print $2}')
+if [[ -z $steward_version || $steward_version != "$executor_version" || $steward_version != "$ctl_version" || \
+	$steward_version != "$gateway_version" || $steward_version != "$relay_version" || $steward_version != "$mcp_version" ]]; then
 	echo "install-node: Steward process versions do not match" >&2
 	exit 2
 fi
@@ -68,7 +84,7 @@ if [[ ! $steward_version =~ ^[A-Za-z0-9._+-]+$ ]]; then
 	exit 2
 fi
 
-for binary in steward stewardctl steward-executor; do
+for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 	active="/usr/local/bin/$binary"
 	if [[ -e $active || -L $active ]]; then
 		target=$(readlink "$active" 2>/dev/null || true)
@@ -86,13 +102,16 @@ release_dir="/opt/steward/releases/$steward_version"
 install -d -o root -g root -m 0755 "$release_dir"
 install -o root -g root -m 0755 "$incoming/steward" "$release_dir/steward"
 install -o root -g root -m 0755 "$incoming/stewardctl" "$release_dir/stewardctl"
-install -o root -g root -m 0755 "$incoming/steward-executor" "$release_dir/steward-executor"
+for binary in steward-executor steward-gateway steward-relay steward-mcp; do
+	install -o root -g root -m 0755 "$incoming/$binary" "$release_dir/$binary"
+done
 rm -rf "$incoming"
 trap - EXIT
 install -d -o root -g root -m 0755 /etc/steward /usr/local/bin /usr/local/libexec/steward \
 	/usr/local/lib/systemd/system
 install -d -o steward -g steward -m 0700 /var/lib/steward /var/log/steward
 install -d -o steward-executor -g steward-executor -m 0700 /var/lib/steward-executor
+install -d -o steward-gateway -g steward-gateway -m 0700 /var/lib/steward-gateway
 install -o root -g root -m 0755 "$root/scripts/activate-node-release.sh" \
 	/usr/local/libexec/steward/activate-node-release
 install -o root -g root -m 0755 "$root/scripts/node-preflight.sh" \
@@ -101,6 +120,8 @@ install -o root -g root -m 0755 "$root/scripts/configure-node.sh" \
 	/usr/local/libexec/steward/configure-node
 install -o root -g root -m 0755 "$root/scripts/uninstall-node.sh" \
 	/usr/local/libexec/steward/uninstall-node
+install -o root -g root -m 0755 "$root/scripts/build-relay-image.sh" \
+	/usr/local/libexec/steward/build-relay-image
 
 if [[ ! -e /etc/steward/steward.json ]]; then
 	install -o root -g steward -m 0640 "$root/deploy/config/steward.json" \
@@ -110,7 +131,24 @@ if [[ ! -e /etc/steward/executor.env ]]; then
 	install -o root -g root -m 0600 "$root/deploy/config/executor.env" \
 		/etc/steward/executor.env
 fi
-for unit in steward.service steward-executor.service; do
+if [[ ! -e /etc/steward/executor-gateway.env ]]; then
+	install -o root -g root -m 0600 "$root/deploy/config/executor-gateway.env" \
+		/etc/steward/executor-gateway.env
+fi
+if [[ ! -e /etc/steward/gateway-service-token ]]; then
+	od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >/etc/steward/gateway-service-token
+	printf '\n' >>/etc/steward/gateway-service-token
+	chown steward-gateway:steward-gateway /etc/steward/gateway-service-token
+	chmod 0600 /etc/steward/gateway-service-token
+fi
+if [[ ! -e /etc/steward/gateway.json ]]; then
+	sed -e "s/@EXECUTOR_GID@/$(id -g steward-executor)/g" \
+		-e "s/@RELAY_GID@/$(getent group steward-relay | cut -d: -f3)/g" \
+		"$root/deploy/config/gateway.json.in" >/etc/steward/gateway.json
+	chown root:steward-gateway /etc/steward/gateway.json
+	chmod 0640 /etc/steward/gateway.json
+fi
+for unit in steward.service steward-executor.service steward-gateway.service; do
 	legacy="/etc/systemd/system/$unit"
 	if [[ -e $legacy || -L $legacy ]]; then
 		if cmp -s "$legacy" "$root/deploy/systemd/$unit"; then
@@ -127,6 +165,8 @@ install -o root -g root -m 0644 "$root/deploy/systemd/steward.service" \
 	/usr/local/lib/systemd/system/steward.service
 install -o root -g root -m 0644 "$root/deploy/systemd/steward-executor.service" \
 	/usr/local/lib/systemd/system/steward-executor.service
+install -o root -g root -m 0644 "$root/deploy/systemd/steward-gateway.service" \
+	/usr/local/lib/systemd/system/steward-gateway.service
 
 if [[ -e /opt/steward/current || -L /opt/steward/current ]]; then
 	current_target=$(readlink /opt/steward/current 2>/dev/null || true)
@@ -145,7 +185,7 @@ else
 	mv -Tf "$current_tmp" /opt/steward/current
 	selection="selected for first-time configuration"
 fi
-for binary in steward stewardctl steward-executor; do
+for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 	tmp="/usr/local/bin/.${binary}.new.$$"
 	rm -f "$tmp"
 	ln -s "/opt/steward/current/$binary" "$tmp"
@@ -158,7 +198,7 @@ echo "install-node: services remain disabled and stopped"
 if [[ $selection == selected* ]]; then
 	echo "install-node: install customer credentials and CA material, initialize the Executor fence, then run:"
 	echo "  /usr/local/libexec/steward/node-preflight"
-	echo "  systemctl enable --now steward steward-executor"
+	echo "  systemctl enable --now steward-gateway steward steward-executor"
 else
 	echo "install-node: activate after provisioning trust material (activation runs full preflight):"
 	echo "  /usr/local/libexec/steward/activate-node-release $steward_version --restart"

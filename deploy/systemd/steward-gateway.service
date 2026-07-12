@@ -1,0 +1,44 @@
+[Unit]
+Description=Steward capability gateway
+Documentation=https://github.com/hardrails/steward
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=steward-gateway
+Group=steward-gateway
+SupplementaryGroups=steward-executor steward-relay
+UMask=0077
+ExecStart=/usr/local/bin/steward-gateway -config=/etc/steward/gateway.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+RuntimeDirectory=steward-gateway
+RuntimeDirectoryMode=0750
+StateDirectory=steward-gateway
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

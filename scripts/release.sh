@@ -98,18 +98,24 @@ for target in "${targets[@]}"; do
 		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward" ./cmd/steward
 	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/stewardctl" ./cmd/stewardctl
-	files=(steward stewardctl LICENSE README.md)
+	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-mcp" ./cmd/steward-mcp
+	files=(steward stewardctl steward-mcp LICENSE README.md)
 	if [ "$goos" = "linux" ]; then
 		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-executor" ./cmd/steward-executor
+		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-gateway" ./cmd/steward-gateway
+		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-relay" ./cmd/steward-relay
 		mkdir -p "${stage}/deploy" "${stage}/scripts"
 		cp -R deploy/config deploy/systemd "${stage}/deploy/"
 		cp scripts/install-node.sh scripts/activate-node-release.sh \
 			scripts/node-preflight.sh scripts/configure-node.sh \
-			scripts/uninstall-node.sh \
+			scripts/uninstall-node.sh scripts/build-relay-image.sh \
 			"${stage}/scripts/"
 		chmod 0755 "${stage}"/scripts/*.sh
-		files=(steward stewardctl steward-executor LICENSE README.md deploy scripts)
+		files=(steward stewardctl steward-mcp steward-executor steward-gateway steward-relay LICENSE README.md deploy scripts)
 	fi
 	# Ship the license and readme alongside all three binaries so the download is
 	# self-contained and license-compliant.
@@ -170,21 +176,30 @@ native_dir="$(mktemp -d)"
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward" ./cmd/steward
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-executor" ./cmd/steward-executor
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/stewardctl" ./cmd/stewardctl
+go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-mcp" ./cmd/steward-mcp
+go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-gateway" ./cmd/steward-gateway
+go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-relay" ./cmd/steward-relay
 reported="$("$native_dir/steward" -version | awk '{print $2}')"
 executor_reported="$("$native_dir/steward-executor" -version | awk '{print $2}')"
 ctl_reported="$("$native_dir/stewardctl" -version | awk '{print $2}')"
+mcp_reported="$("$native_dir/steward-mcp" -version | awk '{print $2}')"
+gateway_reported="$("$native_dir/steward-gateway" -version | awk '{print $2}')"
+relay_reported="$("$native_dir/steward-relay" -version | awk '{print $2}')"
 echo "release: host-native steward self-reports version '${reported}'"
 echo "release: host-native steward-executor self-reports version '${executor_reported}'"
 echo "release: host-native stewardctl self-reports version '${ctl_reported}'"
+echo "release: host-native steward-mcp self-reports version '${mcp_reported}'"
+echo "release: host-native steward-gateway self-reports version '${gateway_reported}'"
+echo "release: host-native steward-relay self-reports version '${relay_reported}'"
 if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-	if [ "${reported}" != "${GITHUB_REF_NAME}" ] || [ "${executor_reported}" != "${GITHUB_REF_NAME}" ] || [ "${ctl_reported}" != "${GITHUB_REF_NAME}" ]; then
-		echo "release: FATAL — release binaries report '${reported}', '${executor_reported}', and '${ctl_reported}', but the tag is '${GITHUB_REF_NAME}'." >&2
+	if [ "${reported}" != "${GITHUB_REF_NAME}" ] || [ "${executor_reported}" != "${GITHUB_REF_NAME}" ] || [ "${ctl_reported}" != "${GITHUB_REF_NAME}" ] || [ "${mcp_reported}" != "${GITHUB_REF_NAME}" ] || [ "${gateway_reported}" != "${GITHUB_REF_NAME}" ] || [ "${relay_reported}" != "${GITHUB_REF_NAME}" ]; then
+		echo "release: FATAL — one or more release binaries do not report tag '${GITHUB_REF_NAME}'." >&2
 		echo "  The explicit release-version linker stamp did not reach all three binaries," >&2
 		echo "  so the artifacts would misreport their version. Ensure scripts/release.sh" >&2
 		echo "  supplies release_ldflags to all three entry points. See docs/releasing.md." >&2
 		exit 1
 	fi
-	echo "release: version assertion OK — all three binaries self-report the tag ${GITHUB_REF_NAME}"
+	echo "release: version assertion OK — all six binaries self-report the tag ${GITHUB_REF_NAME}"
 fi
 rm -rf "$native_dir"
 

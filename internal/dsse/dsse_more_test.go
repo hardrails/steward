@@ -4,9 +4,25 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestDecodeStrictIntoSupportsBoundedRawMessageWithoutDuplicateKeys(t *testing.T) {
+	var target struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := DecodeStrictInto([]byte(`{"payload":{"nested":[1,true,null]}}`), 1024, &target); err != nil {
+		t.Fatal(err)
+	}
+	if string(target.Payload) != `{"nested":[1,true,null]}` {
+		t.Fatalf("payload=%s", target.Payload)
+	}
+	if err := DecodeStrictInto([]byte(`{"payload":{"nested":1,"nested":2}}`), 1024, &target); err == nil {
+		t.Fatal("duplicate raw-message key accepted")
+	}
+}
 
 func TestSignAndParseRejectInvalidBoundsAndSignatures(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)

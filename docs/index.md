@@ -20,7 +20,7 @@ home: true
 
 <div class="grid">
   <article class="card"><span class="number">01 / AUTHORIZE</span><h3>Why may this run?</h3><p>The opt-in signed path intersects publisher capsule, site-root policy, and tenant-bound intent locally. Stale generations and policy rollback are denied.</p><a href="{{ '/guides/signed-admission/' | relative_url }}">Signed admission →</a></article>
-  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor admits only immutable, resource-bounded images and applies a fixed no-network Docker + gVisor sandbox.</p><a href="{{ '/concepts/security-model/' | relative_url }}">Security model →</a></article>
+  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor admits immutable, resource-bounded images and grants only lineage state, one inference route, and one declared service through isolated topology.</p><a href="{{ '/concepts/security-model/' | relative_url }}">Security model →</a></article>
   <article class="card"><span class="number">03 / VERIFY</span><h3>What did the node enforce?</h3><p>Signed, hash-linked receipts bind the accepted artifact, policy, generation, and mutation outcome for offline verification.</p><a href="{{ '/product/positioning/' | relative_url }}">Why Steward exists →</a></article>
 </div>
 
@@ -49,15 +49,16 @@ home: true
   <div><small>Sandbox</small><strong>Agent OCI image</strong><p>Docker + gVisor, fixed least privilege</p></div>
 </div>
 
-Inference is intentionally outside this boundary. Operators can expose local models
-through a separately controlled OpenAI-compatible gateway.
+Model serving remains separately controlled. Steward's local gateway brokers an
+operator-selected OpenAI-compatible route without placing its real credential in
+the agent container.
 
-## Agent compatibility in v1.2
+## Agent compatibility in v1.3
 
-Steward is designed to host agent runtimes such as Hermes Agent and OpenClaw, but
-v1.2 supports signed image admission and lifecycle validation. The connected,
-persistent operation these agents need requires future explicit grants for egress,
-secrets, storage, and ports.
+Steward can host constrained Hermes Agent and OpenClaw images with persistent
+state, a local OpenAI-compatible route, and one declared private service. Images
+that require arbitrary egress, raw secrets, host mounts, privileged mode, or
+undeclared ports remain outside the boundary.
 
 <div class="callout warning">
   <strong>Do not erase the boundary</strong>
@@ -68,7 +69,9 @@ secrets, storage, and ports.
 
 [Test Hermes Agent compatibility]({{ '/guides/hermes-agent/' | relative_url }}) ·
 [Test OpenClaw compatibility]({{ '/guides/openclaw/' | relative_url }}) ·
-[Read all v1.2 limitations]({{ '/limitations/' | relative_url }})
+[Configure positive capabilities]({{ '/guides/positive-capabilities/' | relative_url }}) ·
+[Connect an MCP client]({{ '/guides/mcp/' | relative_url }}) ·
+[Read all v1.3 limitations]({{ '/limitations/' | relative_url }})
 
 ## Market position
 

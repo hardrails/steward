@@ -17,7 +17,7 @@ if [[ ! $version =~ ^[A-Za-z0-9._+-]+$ ]]; then
 	exit 2
 fi
 release_dir="/opt/steward/releases/$version"
-for binary in steward stewardctl steward-executor; do
+for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 	path="$release_dir/$binary"
 	if [[ ! -x $path ]]; then
 		echo "activate-node-release: missing executable $path" >&2
@@ -32,6 +32,7 @@ done
 
 STEWARD_BIN="$release_dir/steward" \
 	STEWARD_EXECUTOR_BIN="$release_dir/steward-executor" \
+	STEWARD_GATEWAY_BIN="$release_dir/steward-gateway" \
 	/usr/local/libexec/steward/node-preflight
 
 install -d -o root -g root -m 0755 /opt/steward /usr/local/bin
@@ -43,7 +44,7 @@ mv -Tf "$current_tmp" /opt/steward/current
 # These stable entry points are installed once (or repair an old direct-release
 # symlink). Every later activation changes only /opt/steward/current, so both
 # process names cross the version boundary in one atomic rename.
-for binary in steward stewardctl steward-executor; do
+for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 	tmp="/usr/local/bin/.${binary}.new.$$"
 	rm -f "$tmp"
 	ln -s "/opt/steward/current/$binary" "$tmp"
@@ -51,6 +52,6 @@ for binary in steward stewardctl steward-executor; do
 done
 
 if [[ ${2:-} == --restart ]]; then
-	systemctl try-restart steward-executor.service steward.service
+	systemctl try-restart steward-gateway.service steward-executor.service steward.service
 fi
 echo "activate-node-release: active version is $version"

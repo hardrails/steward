@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -17,6 +18,7 @@ import (
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/evidence"
+	"github.com/hardrails/steward/internal/gateway"
 	"github.com/hardrails/steward/internal/journal"
 )
 
@@ -43,6 +45,32 @@ type secureDocker struct {
 	onStop    func()
 	onRemove  func()
 	startNoop bool
+	volume    *ObservedStateVolume
+	volumeErr error
+	network   *ObservedNetwork
+	relay     *ObservedRelay
+}
+
+func (d *secureDocker) InspectNetwork(context.Context, string) (ObservedNetwork, error) {
+	if d.network == nil {
+		return ObservedNetwork{}, ErrNotFound
+	}
+	return *d.network, nil
+}
+func (d *secureDocker) CreateNetwork(_ context.Context, spec NetworkSpec) error {
+	d.network = &ObservedNetwork{NetworkSpec: spec, Managed: true, Internal: true}
+	return nil
+}
+func (d *secureDocker) RemoveNetwork(context.Context, string) error { d.network = nil; return nil }
+func (d *secureDocker) CreateRelay(_ context.Context, spec RelaySpec) error {
+	d.relay = &ObservedRelay{Spec: spec, Fingerprint: relayFingerprint(spec), Managed: true, Hardened: true, Status: "created"}
+	return nil
+}
+func (d *secureDocker) InspectRelay(context.Context, string) (ObservedRelay, error) {
+	if d.relay == nil {
+		return ObservedRelay{}, ErrNotFound
+	}
+	return *d.relay, nil
 }
 
 func (d *secureDocker) Create(_ context.Context, name string, workload Workload) error {
@@ -68,7 +96,11 @@ func (d *secureDocker) Start(context.Context, string) error {
 	}
 	d.starts++
 	if !d.startNoop {
-		d.observed.Status = "running"
+		if d.relay != nil && d.observed != nil && d.relay.Spec.Name != d.name && d.relay.Status != "running" {
+			d.relay.Status, d.relay.IPAddress = "running", d.relay.Spec.RelayIP
+		} else if d.observed != nil {
+			d.observed.Status = "running"
+		}
 	}
 	if d.onStart != nil {
 		d.onStart()
@@ -80,7 +112,11 @@ func (d *secureDocker) Stop(context.Context, string) error {
 	if d.stopErr != nil {
 		return d.stopErr
 	}
-	d.observed.Status = "exited"
+	if d.relay != nil && d.observed != nil && d.relay.Status == "running" && d.observed.Status != "running" {
+		d.relay.Status, d.relay.IPAddress = "exited", ""
+	} else if d.observed != nil {
+		d.observed.Status = "exited"
+	}
 	if d.onStop != nil {
 		d.onStop()
 	}
@@ -92,10 +128,40 @@ func (d *secureDocker) Remove(context.Context, string) error {
 		return d.removeErr
 	}
 	d.removes++
-	d.observed = nil
+	if d.relay != nil && d.observed == nil {
+		d.relay = nil
+	} else {
+		d.observed = nil
+	}
 	if d.onRemove != nil {
 		d.onRemove()
 	}
+	return nil
+}
+
+func (d *secureDocker) InspectStateVolume(context.Context, string) (ObservedStateVolume, error) {
+	if d.volume != nil {
+		return *d.volume, d.volumeErr
+	}
+	if d.volumeErr != nil {
+		return ObservedStateVolume{}, d.volumeErr
+	}
+	return ObservedStateVolume{}, ErrNotFound
+}
+
+func (d *secureDocker) CreateStateVolume(_ context.Context, spec StateVolumeSpec) error {
+	if d.volumeErr != nil {
+		return d.volumeErr
+	}
+	d.volume = &ObservedStateVolume{StateVolumeSpec: spec, Managed: true}
+	return nil
+}
+
+func (d *secureDocker) RemoveStateVolume(context.Context, string) error {
+	if d.volumeErr != nil {
+		return d.volumeErr
+	}
+	d.volume = nil
 	return nil
 }
 
@@ -307,6 +373,37 @@ func TestSecureAdmissionCreatesOnlyFromSignedIntersection(t *testing.T) {
 	}
 }
 
+func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing.T) {
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true, Service: true})
+	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
+	config.Topology, config.Gateway = docker, grants
+	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+	config.GrantRoot, config.RelayGID = "/run/steward-gateway/grants", 1234
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || docker.network == nil || docker.relay == nil || len(grants.grants) != 1 {
+		t.Fatalf("admit status=%d network=%#v relay=%#v grants=%#v body=%s", response.Code, docker.network, docker.relay, grants.grants, response.Body.String())
+	}
+	ref := RuntimeRef(intent.TenantID, intent.InstanceID)
+	assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+ref+"/start", context.Background(), http.StatusOK)
+	if !grants.grants[docker.observed.Workload.Runtime.GrantID].Active || docker.observed.Status != "running" || docker.relay.Status != "running" {
+		t.Fatalf("runtime not activated: agent=%#v relay=%#v grants=%#v", docker.observed, docker.relay, grants.grants)
+	}
+	assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+ref+"/stop", context.Background(), http.StatusOK)
+	assertLifecycleStatus(t, server, http.MethodDelete, "/v1/workloads/"+ref, context.Background(), http.StatusNoContent)
+	if docker.network != nil || docker.relay != nil || len(grants.grants) != 0 {
+		t.Fatalf("runtime topology retained: network=%#v relay=%#v grants=%#v", docker.network, docker.relay, grants.grants)
+	}
+}
+
 func TestSecureLifecycleIsJournaledReceiptedAndTombstoned(t *testing.T) {
 	docker := &secureDocker{}
 	server, _ := NewServer(docker, "secret", nil)
@@ -371,10 +468,6 @@ func TestSecureAdmissionRejectsTamperAndCapabilitiesBeforeDocker(t *testing.T) {
 		{name: "tampered capsule", status: http.StatusForbidden, mutate: func(raw *[]byte, _ *admission.InstanceIntent) {
 			(*raw)[len(*raw)-2] ^= 1
 		}},
-		{name: "unimplemented capability", status: http.StatusNotImplemented, mutate: func(_ *[]byte, intent *admission.InstanceIntent) {
-			intent.Capabilities.State = true
-			intent.StateDisposition = "new"
-		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			docker := &secureDocker{}
@@ -393,6 +486,281 @@ func TestSecureAdmissionRejectsTamperAndCapabilitiesBeforeDocker(t *testing.T) {
 				t.Fatalf("status=%d creates=%d body=%s", response.Code, len(docker.created), response.Body.String())
 			}
 		})
+	}
+}
+
+func TestSecureAdmissionRejectsStateWithoutCapableDockerBackend(t *testing.T) {
+	docker := &fakeDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	intent.Capabilities.State = true
+	intent.StateDisposition = "new"
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusNotImplemented || len(docker.created) != 0 {
+		t.Fatalf("status=%d creates=%d body=%s", response.Code, len(docker.created), response.Body.String())
+	}
+}
+
+func TestSecureAdmissionCreatesAndResumesTenantLineageState(t *testing.T) {
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	intent.Capabilities.State = true
+	intent.StateDisposition = "new"
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || docker.volume == nil || docker.observed.Workload.State == nil {
+		t.Fatalf("status=%d volume=%#v observed=%#v body=%s", response.Code, docker.volume, docker.observed, response.Body.String())
+	}
+	wantName := StateVolumeName(intent.TenantID, intent.LineageID)
+	if docker.volume.Name != wantName || docker.observed.Workload.State.VolumeName != wantName {
+		t.Fatalf("volume=%#v workload=%#v", docker.volume, docker.observed.Workload.State)
+	}
+	// Exact replay remains idempotent even though the original disposition was new.
+	request = httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("replay status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSecureStateSurvivesDestroyAndRequiresExplicitReceiptedPurge(t *testing.T) {
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	intent.Capabilities.State = true
+	intent.StateDisposition = "new"
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	handler := server.Handler()
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("admit status=%d body=%s", response.Code, response.Body.String())
+	}
+	ref := RuntimeRef(intent.TenantID, intent.InstanceID)
+	request = httptest.NewRequest(http.MethodDelete, "/v1/workloads/"+ref, nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || docker.volume == nil {
+		t.Fatalf("destroy status=%d volume=%#v body=%s", response.Code, docker.volume, response.Body.String())
+	}
+	purge, _ := json.Marshal(purgeStateRequest{
+		TenantID: intent.TenantID, NodeID: intent.NodeID, LineageID: intent.LineageID, Generation: intent.Generation,
+	})
+	request = httptest.NewRequest(http.MethodPost, "/v1/state/purge", strings.NewReader(string(purge)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || docker.volume != nil || len(config.Journal.Pending()) != 0 {
+		t.Fatalf("purge status=%d volume=%#v pending=%#v body=%s", response.Code, docker.volume, config.Journal.Pending(), response.Body.String())
+	}
+	// Purge is idempotent for the already-authorized absent lineage.
+	request = httptest.NewRequest(http.MethodPost, "/v1/state/purge", strings.NewReader(string(purge)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("repeat purge status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSecureStatePurgeRejectsLiveOrCrossTenantLineage(t *testing.T) {
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	intent.Capabilities.State = true
+	intent.StateDisposition = "new"
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatal(response.Body.String())
+	}
+	for _, purge := range []purgeStateRequest{
+		{TenantID: intent.TenantID, NodeID: intent.NodeID, LineageID: intent.LineageID, Generation: 1},
+		{TenantID: "tenant-b", NodeID: intent.NodeID, LineageID: intent.LineageID, Generation: 1},
+	} {
+		raw, _ := json.Marshal(purge)
+		request = httptest.NewRequest(http.MethodPost, "/v1/state/purge", strings.NewReader(string(raw)))
+		request.Header.Set("Authorization", "Bearer secret")
+		response = httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusConflict && response.Code != http.StatusNotFound {
+			t.Fatalf("purge=%#v status=%d body=%s", purge, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestStatePurgeFailsClosedAcrossBoundaryErrors(t *testing.T) {
+	t.Run("secure admission unavailable", func(t *testing.T) {
+		server, _ := NewServer(&secureDocker{}, "secret", nil)
+		assertStatePurge(t, server, purgeStateRequest{TenantID: "t", NodeID: "n", LineageID: "l", Generation: 1}, context.Background(), http.StatusServiceUnavailable)
+	})
+	t.Run("state backend unavailable", func(t *testing.T) {
+		server, _ := NewServer(&fakeDocker{}, "secret", nil)
+		_, _, config := secureAdmissionFixture(t)
+		if err := server.EnableSecureAdmission(config); err != nil {
+			t.Fatal(err)
+		}
+		assertStatePurge(t, server, purgeStateRequest{TenantID: "t", NodeID: "node-a", LineageID: "l", Generation: 1}, context.Background(), http.StatusNotImplemented)
+	})
+	t.Run("invalid body", func(t *testing.T) {
+		server := mustSecureServer(t)
+		request := httptest.NewRequest(http.MethodPost, "/v1/state/purge", strings.NewReader(`{"tenant_id":"t"}`))
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+	for _, test := range []struct {
+		name   string
+		mutate func(*Server, *secureDocker, admission.InstanceIntent, SecureAdmissionConfig) (purgeStateRequest, context.Context)
+		want   int
+	}{
+		{name: "wrong node", want: http.StatusForbidden, mutate: func(_ *Server, _ *secureDocker, intent admission.InstanceIntent, _ SecureAdmissionConfig) (purgeStateRequest, context.Context) {
+			return purgeStateRequest{TenantID: intent.TenantID, NodeID: "other", LineageID: intent.LineageID, Generation: intent.Generation}, context.Background()
+		}},
+		{name: "principal required", want: http.StatusForbidden, mutate: func(server *Server, _ *secureDocker, intent admission.InstanceIntent, _ SecureAdmissionConfig) (purgeStateRequest, context.Context) {
+			server.secure.allowHostAdmin = false
+			return purgeStateRequest{TenantID: intent.TenantID, NodeID: intent.NodeID, LineageID: intent.LineageID, Generation: intent.Generation}, context.Background()
+		}},
+		{name: "principal mismatch", want: http.StatusForbidden, mutate: func(server *Server, _ *secureDocker, intent admission.InstanceIntent, _ SecureAdmissionConfig) (purgeStateRequest, context.Context) {
+			server.secure.allowHostAdmin = false
+			request := purgeStateRequest{TenantID: intent.TenantID, NodeID: intent.NodeID, LineageID: intent.LineageID, Generation: intent.Generation}
+			return request, WithAdmissionPrincipal(context.Background(), intent.TenantID, intent.NodeID, intent.Generation+1)
+		}},
+		{name: "pending mutation", want: http.StatusServiceUnavailable, mutate: func(_ *Server, _ *secureDocker, intent admission.InstanceIntent, config SecureAdmissionConfig) (purgeStateRequest, context.Context) {
+			_, _ = config.Journal.Prepare("pending-purge-test", "other", intent.Generation)
+			return purgeStateRequest{TenantID: intent.TenantID, NodeID: intent.NodeID, LineageID: intent.LineageID, Generation: intent.Generation}, context.Background()
+		}},
+		{name: "inspect failure", want: http.StatusBadGateway, mutate: func(_ *Server, docker *secureDocker, intent admission.InstanceIntent, _ SecureAdmissionConfig) (purgeStateRequest, context.Context) {
+			docker.volumeErr = errors.New("volume inspect failed")
+			return purgeStateRequest{TenantID: intent.TenantID, NodeID: intent.NodeID, LineageID: intent.LineageID, Generation: intent.Generation}, context.Background()
+		}},
+		{name: "volume drift", want: http.StatusConflict, mutate: func(_ *Server, docker *secureDocker, intent admission.InstanceIntent, _ SecureAdmissionConfig) (purgeStateRequest, context.Context) {
+			docker.volume.TenantID = "other"
+			return purgeStateRequest{TenantID: intent.TenantID, NodeID: intent.NodeID, LineageID: intent.LineageID, Generation: intent.Generation}, context.Background()
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, docker, intent, config := destroyedStateServer(t)
+			request, ctx := test.mutate(server, docker, intent, config)
+			assertStatePurge(t, server, request, ctx, test.want)
+		})
+	}
+}
+
+func destroyedStateServer(t *testing.T) (*Server, *secureDocker, admission.InstanceIntent, SecureAdmissionConfig) {
+	t.Helper()
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	intent.Capabilities.State = true
+	intent.StateDisposition = "new"
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("admit status=%d body=%s", response.Code, response.Body.String())
+	}
+	assertLifecycleStatus(t, server, http.MethodDelete, "/v1/workloads/"+RuntimeRef(intent.TenantID, intent.InstanceID), context.Background(), http.StatusNoContent)
+	return server, docker, intent, config
+}
+
+func assertStatePurge(t *testing.T, server *Server, purge purgeStateRequest, ctx context.Context, want int) {
+	t.Helper()
+	raw, _ := json.Marshal(purge)
+	request := httptest.NewRequest(http.MethodPost, "/v1/state/purge", bytes.NewReader(raw)).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != want {
+		t.Fatalf("purge status=%d want=%d body=%s", response.Code, want, response.Body.String())
+	}
+}
+
+func TestSecureAdmissionStateDispositionAndOwnershipFailures(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		disposition string
+		volume      *ObservedStateVolume
+		want        int
+	}{
+		{name: "resume missing", disposition: "resume", want: http.StatusConflict},
+		{name: "new exists", disposition: "new", want: http.StatusConflict, volume: &ObservedStateVolume{Managed: true}},
+		{name: "wrong owner", disposition: "resume", want: http.StatusConflict, volume: &ObservedStateVolume{Managed: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			docker := &secureDocker{volume: test.volume}
+			server, _ := NewServer(docker, "secret", nil)
+			capsule, intent, config := secureAdmissionFixture(t)
+			intent.Capabilities.State = true
+			intent.StateDisposition = test.disposition
+			if docker.volume != nil && test.name == "new exists" {
+				docker.volume.StateVolumeSpec = StateVolumeSpec{Name: StateVolumeName(intent.TenantID, intent.LineageID), TenantID: intent.TenantID, LineageID: intent.LineageID}
+			}
+			if docker.volume != nil && test.name == "wrong owner" {
+				docker.volume.StateVolumeSpec = StateVolumeSpec{Name: StateVolumeName(intent.TenantID, intent.LineageID), TenantID: "other", LineageID: intent.LineageID}
+			}
+			if err := server.EnableSecureAdmission(config); err != nil {
+				t.Fatal(err)
+			}
+			body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+			request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+			request.Header.Set("Authorization", "Bearer secret")
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			if response.Code != test.want || len(docker.created) != 0 {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestStateRollbackHelpersConfirmAbsence(t *testing.T) {
+	if got := (&stateAdmissionError{Message: "state error"}).Error(); got != "state error" {
+		t.Fatalf("error=%q", got)
+	}
+	docker := &secureDocker{volume: &ObservedStateVolume{Managed: true}}
+	if !removeAndConfirmStateAbsent(context.Background(), docker, "state") || docker.volume != nil {
+		t.Fatal("successful removal was not confirmed")
+	}
+	docker = &secureDocker{volumeErr: errors.New("remove failed")}
+	if removeAndConfirmStateAbsent(context.Background(), docker, "state") {
+		t.Fatal("ambiguous removal accepted")
 	}
 }
 
@@ -469,6 +837,95 @@ func TestSecureAdmissionUnavailableAndStrictRequestErrors(t *testing.T) {
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("configured status=%d body=%s", response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestSecureAdmissionBoundaryAndCapabilityFailures(t *testing.T) {
+	t.Run("oversized body", func(t *testing.T) {
+		server := mustSecureServer(t)
+		request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(strings.Repeat("x", maxBodyBytes+1)))
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+	for _, test := range []struct {
+		name   string
+		mutate func(*admission.InstanceIntent) context.Context
+	}{
+		{name: "wrong node", mutate: func(intent *admission.InstanceIntent) context.Context {
+			intent.NodeID = "other"
+			return context.Background()
+		}},
+		{name: "principal generation", mutate: func(intent *admission.InstanceIntent) context.Context {
+			return WithAdmissionPrincipal(context.Background(), intent.TenantID, intent.NodeID, intent.Generation+1)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, _ := NewServer(&secureDocker{}, "secret", nil)
+			capsule, intent, config := secureAdmissionFixture(t)
+			if err := server.EnableSecureAdmission(config); err != nil {
+				t.Fatal(err)
+			}
+			ctx := test.mutate(&intent)
+			body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+			request := httptest.NewRequest(http.MethodPost, "/v1/admissions", bytes.NewReader(body)).WithContext(ctx)
+			request.Header.Set("Authorization", "Bearer secret")
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	t.Run("runtime topology unavailable", func(t *testing.T) {
+		server, _ := NewServer(&secureDocker{}, "secret", nil)
+		capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true, Service: true})
+		if err := server.EnableSecureAdmission(config); err != nil {
+			t.Fatal(err)
+		}
+		assertAdmissionResponse(t, server, capsule, intent, context.Background(), http.StatusNotImplemented)
+	})
+	t.Run("state backend unavailable", func(t *testing.T) {
+		server, _ := NewServer(&fakeDocker{}, "secret", nil)
+		capsule, intent, config := secureAdmissionFixture(t)
+		intent.Capabilities.State, intent.StateDisposition = true, "new"
+		if err := server.EnableSecureAdmission(config); err != nil {
+			t.Fatal(err)
+		}
+		assertAdmissionResponse(t, server, capsule, intent, context.Background(), http.StatusNotImplemented)
+	})
+	t.Run("pending host mutation", func(t *testing.T) {
+		server, _ := NewServer(&secureDocker{}, "secret", nil)
+		capsule, intent, config := secureAdmissionFixture(t)
+		if err := server.EnableSecureAdmission(config); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = config.Journal.Prepare("pending-admission-test", "other", 1)
+		assertAdmissionResponse(t, server, capsule, intent, context.Background(), http.StatusServiceUnavailable)
+	})
+	t.Run("docker inspect unavailable", func(t *testing.T) {
+		docker := &secureDocker{fakeDocker: fakeDocker{err: errors.New("inspect unavailable")}}
+		server, _ := NewServer(docker, "secret", nil)
+		capsule, intent, config := secureAdmissionFixture(t)
+		if err := server.EnableSecureAdmission(config); err != nil {
+			t.Fatal(err)
+		}
+		assertAdmissionResponse(t, server, capsule, intent, context.Background(), http.StatusBadGateway)
+	})
+}
+
+func assertAdmissionResponse(t *testing.T, server *Server, capsule []byte, intent admission.InstanceIntent, ctx context.Context, want int) {
+	t.Helper()
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", bytes.NewReader(body)).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != want {
+		t.Fatalf("admission status=%d want=%d body=%s", response.Code, want, response.Body.String())
 	}
 }
 
@@ -824,6 +1281,10 @@ func assertLifecycleStatus(t *testing.T, server *Server, method, target string, 
 }
 
 func secureAdmissionFixture(t *testing.T) ([]byte, admission.InstanceIntent, SecureAdmissionConfig) {
+	return secureAdmissionFixtureFor(t, admission.Capabilities{State: true})
+}
+
+func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities) ([]byte, admission.InstanceIntent, SecureAdmissionConfig) {
 	t.Helper()
 	_, sitePrivate, _ := ed25519.GenerateKey(rand.Reader)
 	publisherPublic, publisherPrivate, _ := ed25519.GenerateKey(rand.Reader)
@@ -838,7 +1299,8 @@ func secureAdmissionFixture(t *testing.T) ([]byte, admission.InstanceIntent, Sec
 		}},
 		Tenants: []admission.TenantRule{{
 			TenantID: "tenant-a", PublisherKeyIDs: []string{"publisher-a"},
-			ResourceCeiling: admission.ResourceLimits{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 32},
+			ResourceCeiling:   admission.ResourceLimits{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 32},
+			InferenceRouteIDs: []string{"local"}, ServiceIDs: []string{"agent-api"},
 		}},
 	}
 	policyPayload, _ := json.Marshal(policy)
@@ -853,8 +1315,11 @@ func secureAdmissionFixture(t *testing.T) ([]byte, admission.InstanceIntent, Sec
 			Platform:     admission.Platform{OS: "linux", Architecture: "amd64"},
 		},
 		Command: []string{"agent"}, Resources: admission.ResourceLimits{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 32},
-		Capabilities: admission.Capabilities{State: true},
-		State:        admission.StateShape{SchemaVersion: "v1", Path: "/state"},
+		Capabilities: capabilities,
+	}
+	capsule.State = admission.StateShape{SchemaVersion: "v1", Path: "/state"}
+	if capabilities.Service {
+		capsule.Service = admission.ServiceShape{ID: "agent-api", Port: 8080}
 	}
 	capsulePayload, _ := json.Marshal(capsule)
 	capsuleSigned, _ := dsse.Sign(admission.CapsulePayloadType, capsulePayload, "publisher-a", publisherPrivate)
@@ -863,7 +1328,17 @@ func secureAdmissionFixture(t *testing.T) ([]byte, admission.InstanceIntent, Sec
 		TenantID: "tenant-a", NodeID: "node-a", InstanceID: "agent-1", LineageID: "lineage-a",
 		Generation: 1, CapsuleDigest: dsse.Digest(capsuleEnvelope),
 		Resources:        admission.ResourceLimits{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 32},
+		Capabilities:     capabilities,
 		StateDisposition: "none",
+	}
+	if capabilities.State {
+		intent.Capabilities.State = false
+	}
+	if capabilities.Inference {
+		intent.InferenceRouteID, intent.ModelAlias = "local", "private-model"
+	}
+	if capabilities.Service {
+		intent.ServiceID = "agent-api"
 	}
 	dir := t.TempDir()
 	if err := admission.InitializeFenceStore(filepath.Join(dir, "fences.bin")); err != nil {
@@ -1237,6 +1712,78 @@ func TestLogsAreAvailableOnlyForExecutorRuntimeRefs(t *testing.T) {
 	server.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "hello") {
 		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestLegacyLifecycleStatusLogsAndIdempotency(t *testing.T) {
+	ref := RuntimeRef("tenant-a", "agent-1")
+	docker := &secureDocker{fakeDocker: fakeDocker{observed: &ObservedWorkload{
+		Workload: Workload{TenantID: "tenant-a", InstanceID: "agent-1"}, Managed: true, Hardened: true, Status: "created",
+	}}}
+	server, _ := NewServer(docker, "secret", nil)
+	handler := server.Handler()
+	requests := []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{http.MethodGet, "/v1/workloads/" + ref, http.StatusOK},
+		{http.MethodPost, "/v1/workloads/" + ref + "/start", http.StatusOK},
+		{http.MethodPost, "/v1/workloads/" + ref + "/start", http.StatusOK},
+		{http.MethodGet, "/v1/workloads/" + ref + "/logs", http.StatusOK},
+		{http.MethodPost, "/v1/workloads/" + ref + "/stop", http.StatusOK},
+		{http.MethodPost, "/v1/workloads/" + ref + "/stop", http.StatusOK},
+		{http.MethodDelete, "/v1/workloads/" + ref, http.StatusNoContent},
+		{http.MethodDelete, "/v1/workloads/" + ref, http.StatusNoContent},
+	}
+	for _, test := range requests {
+		request := httptest.NewRequest(test.method, test.path, nil)
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != test.want {
+			t.Fatalf("%s %s status=%d body=%s", test.method, test.path, response.Code, response.Body.String())
+		}
+	}
+	if docker.starts != 1 || docker.removes != 1 {
+		t.Fatalf("starts=%d removes=%d", docker.starts, docker.removes)
+	}
+}
+
+func TestLegacyLifecycleDockerFailuresAndInvalidRefs(t *testing.T) {
+	ref := RuntimeRef("tenant-a", "agent-1")
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+		docker *secureDocker
+		want   int
+	}{
+		{name: "invalid start", method: http.MethodPost, path: "/v1/workloads/not-a-ref/start", docker: &secureDocker{}, want: http.StatusBadRequest},
+		{name: "invalid stop", method: http.MethodPost, path: "/v1/workloads/not-a-ref/stop", docker: &secureDocker{}, want: http.StatusBadRequest},
+		{name: "invalid status", method: http.MethodGet, path: "/v1/workloads/not-a-ref", docker: &secureDocker{}, want: http.StatusBadRequest},
+		{name: "invalid logs", method: http.MethodGet, path: "/v1/workloads/not-a-ref/logs", docker: &secureDocker{}, want: http.StatusBadRequest},
+		{name: "start failure", method: http.MethodPost, path: "/v1/workloads/" + ref + "/start", docker: &secureDocker{startErr: errors.New("start")}, want: http.StatusBadGateway},
+		{name: "stop failure", method: http.MethodPost, path: "/v1/workloads/" + ref + "/stop", docker: &secureDocker{stopErr: errors.New("stop")}, want: http.StatusBadGateway},
+		{name: "remove failure", method: http.MethodDelete, path: "/v1/workloads/" + ref, docker: &secureDocker{removeErr: errors.New("remove")}, want: http.StatusBadGateway},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if strings.Contains(test.name, "failure") {
+				status := "created"
+				if test.name == "stop failure" {
+					status = "running"
+				}
+				test.docker.observed = &ObservedWorkload{Managed: true, Hardened: true, Status: status}
+			}
+			server, _ := NewServer(test.docker, "secret", nil)
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request.Header.Set("Authorization", "Bearer secret")
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			if response.Code != test.want {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

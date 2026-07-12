@@ -17,8 +17,8 @@ The separation is a privilege boundary, not a product boundary:
 - A control plane owns tenants, users, approvals, desired state, rollout policy,
   and profile resolution. Executor contains none of those systems and has no
   dependency on a particular control plane.
-- Inference remains outside both processes behind an operator-managed
-  OpenAI-compatible gateway.
+- `steward-gateway` and a per-instance `steward-relay` broker one approved
+  OpenAI-compatible inference route and one declared service without general egress.
 
 `steward-executor -check-config` runs the same token, Docker socket, `runsc`, host
 policy, TLS, credential, durable-fence, and uplink validation as normal startup, then
@@ -29,7 +29,7 @@ starting a poll. The disconnected-node preflight uses this action under the actu
 ## Threat model and fixed policy
 
 Images and every workload field are untrusted. Executor independently rejects
-mutable image tags, zero or over-ceiling resource limits, networking, environment
+mutable image tags, zero or over-ceiling resource limits, general networking, environment
 injection, and unknown JSON fields. The API has no representation for privileged
 mode, host mounts, devices, Docker socket access, host networking, added
 capabilities, or writable-root requests.
@@ -37,7 +37,8 @@ capabilities, or writable-root requests.
 Every admitted container is created with:
 
 - Docker runtime `runsc` (gVisor), verified available before Executor starts;
-- network mode `none`;
+- network mode `none`, or an Executor-derived internal per-instance network when
+  a signed inference/service grant requires the trusted relay;
 - read-only root filesystem;
 - UID/GID `65532:65532`;
 - all Linux capabilities dropped;
@@ -48,8 +49,9 @@ The image stays read-only, while Executor supplies fixed, non-configurable 64 Mi
 tmpfs mounts at `/workspace` and `/tmp`, forces `HOME=/workspace` and
 `TMPDIR=/tmp`, and starts in `/workspace`. This gives Hermes, OpenClaw, and other
 agents bounded ephemeral scratch space without exposing a host path or allowing a
-tenant to choose a mount. Durable workspace and secret grants remain separate,
-explicit future contracts; v1.2 images must contain their immutable approved content.
+tenant to choose a mount. A signed state grant replaces `/workspace` with one
+Executor-derived lineage volume at `/state`; raw secret and arbitrary file
+injection remain unavailable, so images must contain their approved content.
 
 Executor labels each container with a SHA-256 fingerprint of the complete admitted
 workload. An idempotent provision replay succeeds only when both that fingerprint
@@ -98,8 +100,11 @@ destroy persists a generation tombstone. Direct tenant selection is disabled unl
 the operator explicitly enables `-admission-allow-host-admin-intent` as a
 host-administrator break-glass path.
 
-This path does not make broader workload capabilities available: positive state,
-inference, or service requests return 501 in v1.2. See [the signed-admission guide]({{ '/guides/signed-admission/' | relative_url }}) and [release boundaries]({{ '/limitations/' | relative_url }}).
+State grants use an Executor-derived lineage volume. Inference and service grants
+use the configured gateway and hardened relay; partial configuration fails closed.
+See [positive-capability setup]({{ '/guides/positive-capabilities/' | relative_url }}),
+[the signed-admission guide]({{ '/guides/signed-admission/' | relative_url }}), and
+[release boundaries]({{ '/limitations/' | relative_url }}).
 
 ## Outbound Executor uplink
 

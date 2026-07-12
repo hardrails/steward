@@ -1,0 +1,8 @@
+{
+  "addr": "127.0.0.1:8080",
+  "disable_inbound_listener": false,
+  "enable_process_exec": false,
+  "log_level": "info",
+  "max_instances": 1024,
+  "state_file": "/var/lib/steward/state.json"
+}

@@ -24,6 +24,7 @@ import (
 	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/executor"
 	"github.com/hardrails/steward/internal/executoruplink"
+	"github.com/hardrails/steward/internal/gateway"
 	"github.com/hardrails/steward/internal/journal"
 	stewarduplink "github.com/hardrails/steward/internal/uplink"
 )
@@ -51,7 +52,7 @@ func main() {
 	maxPIDs := flag.Int64("max-pids", defaults.MaxPIDs, "maximum processes for one workload")
 	maxWorkloads := flag.Int("max-workloads", defaults.MaxWorkloads, "maximum executor-managed workloads on this host")
 	maxWorkloadsPerTenant := flag.Int("max-workloads-per-tenant", defaults.MaxWorkloadsPerTenant, "maximum executor-managed workloads for one tenant")
-	admissionPolicyFile := flag.String("admission-policy-file", "", "signed site-policy DSSE file; enables v1.2 signed admission")
+	admissionPolicyFile := flag.String("admission-policy-file", "", "signed site-policy DSSE file; enables signed admission")
 	admissionSiteRootFile := flag.String("admission-site-root-public-key-file", "", "base64 Ed25519 site-root public key")
 	admissionSiteRootKeyID := flag.String("admission-site-root-key-id", "", "site-root key ID used by the signed policy")
 	admissionNodeID := flag.String("admission-node-id", "", "stable local node ID bound by instance intents and receipts")
@@ -62,6 +63,10 @@ func main() {
 	admissionEvidenceFile := flag.String("admission-evidence-file", "/var/lib/steward-executor/evidence.bin", "signed enforcement receipt chain")
 	admissionEvidenceKeyFile := flag.String("admission-evidence-key-file", "", "PKCS#8 PEM Ed25519 node receipt private key")
 	admissionEvidenceEpoch := flag.Uint64("admission-evidence-epoch", 1, "receipt key epoch")
+	gatewayControlSocket := flag.String("gateway-control-socket", "", "Steward Gateway Unix control socket; enables inference and service grants")
+	gatewayGrantRoot := flag.String("gateway-grant-root", "/run/steward-gateway/grants", "host directory containing per-grant inference sockets")
+	relayImage := flag.String("relay-image", "", "immutable steward-relay image reference required with gateway topology")
+	relayGID := flag.Int("relay-gid", 0, "host group ID allowed to read per-grant inference sockets")
 	flag.Parse()
 	if *version {
 		fmt.Println("steward-executor " + buildinfo.Resolve())
@@ -118,7 +123,7 @@ func main() {
 	var receiptLog *evidence.Log
 	admissionRequested := *admissionPolicyFile != "" || *admissionSiteRootFile != "" ||
 		*admissionSiteRootKeyID != "" || *admissionNodeID != "" || *admissionEvidenceKeyFile != "" ||
-		*admissionAllowHostAdmin
+		*admissionAllowHostAdmin || *gatewayControlSocket != "" || *relayImage != "" || *relayGID != 0
 	if admissionRequested {
 		if *admissionPolicyFile == "" || *admissionSiteRootFile == "" || *admissionSiteRootKeyID == "" ||
 			*admissionNodeID == "" || *admissionEvidenceKeyFile == "" {
@@ -157,6 +162,22 @@ func main() {
 			os.Exit(2)
 		}
 		defer receiptLog.Close()
+		var topology executor.TopologyDocker
+		var gatewayControl executor.GatewayControl
+		configuredGrantRoot := ""
+		if *gatewayControlSocket != "" || *relayImage != "" || *relayGID != 0 {
+			if *gatewayControlSocket == "" || *relayImage == "" || *relayGID <= 0 {
+				slog.Error("gateway topology requires control socket, immutable relay image, and positive relay GID")
+				os.Exit(2)
+			}
+			client, err := gateway.NewControlClient(*gatewayControlSocket)
+			if err != nil {
+				slog.Error("configure gateway control client", "err", err)
+				os.Exit(2)
+			}
+			topology, gatewayControl = docker, client
+			configuredGrantRoot = *gatewayGrantRoot
+		}
 		if err := server.EnableSecureAdmission(executor.SecureAdmissionConfig{
 			PolicyEnvelope: policyEnvelope,
 			SiteRoots: map[string]ed25519.PublicKey{
@@ -164,6 +185,8 @@ func main() {
 			},
 			NodeID: *admissionNodeID, Fences: fences, Journal: operationJournal, Evidence: receiptLog,
 			AllowHostAdminIntent: *admissionAllowHostAdmin,
+			Topology:             topology, Gateway: gatewayControl, RelayImage: *relayImage,
+			GrantRoot: configuredGrantRoot, RelayGID: *relayGID,
 		}); err != nil {
 			slog.Error("configure signed admission", "err", err)
 			os.Exit(2)
