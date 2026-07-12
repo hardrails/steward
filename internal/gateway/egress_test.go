@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -97,6 +99,14 @@ func TestEgressProxyHTTPConnectDenialAuditAndLifecycle(t *testing.T) {
 		t.Fatalf("HTTPS proxy status=%d body=%q", response.StatusCode, body)
 	}
 	transport.CloseIdleConnections()
+	if connection, err := openProxyTLS(egressSocketPath(config.GrantRoot, grant.GrantID), net.JoinHostPort("127.0.0.1", strconv.Itoa(tlsPort)), "other.example"); err == nil {
+		_ = connection.Close()
+		t.Fatal("CONNECT accepted TLS SNI outside the approved IP destination")
+	}
+	activeTunnel, err := openProxyTLS(egressSocketPath(config.GrantRoot, grant.GrantID), net.JoinHostPort("127.0.0.1", strconv.Itoa(tlsPort)), "")
+	if err != nil {
+		t.Fatalf("open revocation test tunnel: %v", err)
+	}
 
 	deniedPort := httpPort + 1
 	if deniedPort == tlsPort {
@@ -126,6 +136,11 @@ func TestEgressProxyHTTPConnectDenialAuditAndLifecycle(t *testing.T) {
 		t.Fatalf("unsafe or incomplete audit: %s", text)
 	}
 	controlRequest(t, server, http.MethodPost, "/v1/grants/"+grant.GrantID+"/deactivate", nil, http.StatusOK)
+	_ = activeTunnel.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := activeTunnel.Read(make([]byte, 1)); err == nil {
+		t.Fatal("deactivated grant left an established CONNECT tunnel open")
+	}
+	_ = activeTunnel.Close()
 	response, err = client.Get(httpUpstream.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -134,6 +149,80 @@ func TestEgressProxyHTTPConnectDenialAuditAndLifecycle(t *testing.T) {
 		t.Fatalf("inactive status=%d", response.StatusCode)
 	}
 	_ = response.Body.Close()
+	controlRequest(t, server, http.MethodPost, "/v1/grants/"+grant.GrantID+"/activate", nil, http.StatusOK)
+	destroyTunnel, err := openProxyTLS(egressSocketPath(config.GrantRoot, grant.GrantID), net.JoinHostPort("127.0.0.1", strconv.Itoa(tlsPort)), "")
+	if err != nil {
+		t.Fatalf("open unregister test tunnel: %v", err)
+	}
+	controlRequest(t, server, http.MethodDelete, "/v1/grants/"+grant.GrantID, nil, http.StatusNoContent)
+	_ = destroyTunnel.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := destroyTunnel.Read(make([]byte, 1)); err == nil {
+		t.Fatal("unregistered grant left an established CONNECT tunnel open")
+	}
+	_ = destroyTunnel.Close()
+}
+
+func TestEgressDeactivationCancelsInflightHTTPRequest(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-request.Context().Done()
+		close(canceled)
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	port := mustPort(t, parsed.Port())
+	directory, err := os.MkdirTemp("/tmp", "ger-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	config := Config{StateFile: filepath.Join(directory, "state.json"), GrantRoot: filepath.Join(directory, "grants"),
+		RelayGID: os.Getgid(), EgressAuditFile: filepath.Join(directory, "egress.jsonl"), EgressRoutes: []EgressRoute{{
+			ID: "web", MaxConcurrent: 1, MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20, MaxTunnelSeconds: 30,
+			Destinations: []EgressDestination{{Host: "127.0.0.1", Ports: []int{port}, AllowedCIDRs: []string{"127.0.0.0/8"}}},
+		}}}
+	routes, err := config.validateEgressRoutes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := Open(config, nil, routes, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { server.closeGrantListeners(); _ = server.audit.Close() }()
+	grant := Grant{GrantID: GrantID("tenant", "http-agent", 1), TenantID: "tenant", InstanceID: "http-agent", Generation: 1, EgressRouteIDs: []string{"web"}}
+	controlRequest(t, server, http.MethodPost, "/v1/grants", grant, http.StatusCreated)
+	controlRequest(t, server, http.MethodPost, "/v1/grants/"+grant.GrantID+"/activate", nil, http.StatusOK)
+	proxyURL, _ := url.Parse("http://steward-relay:8082")
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL), DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", egressSocketPath(config.GrantRoot, grant.GrantID))
+	}}, Timeout: 5 * time.Second}
+	result := make(chan struct{}, 1)
+	go func() {
+		response, _ := client.Get(upstream.URL)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		result <- struct{}{}
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream request did not start")
+	}
+	controlRequest(t, server, http.MethodPost, "/v1/grants/"+grant.GrantID+"/deactivate", nil, http.StatusOK)
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deactivation did not cancel the upstream HTTP context")
+	}
+	select {
+	case <-result:
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight HTTP request survived deactivation")
+	}
 }
 
 func TestEgressDestinationMatchingAndAddressSafety(t *testing.T) {
@@ -360,12 +449,9 @@ func TestEgressConnectFailuresAndHelperEdges(t *testing.T) {
 		t.Fatalf("non-hijacker status=%d", recorder.Code)
 	}
 	_ = listener.Close()
-	request = httptest.NewRequest(http.MethodConnect, "http://proxy", nil)
-	request.Host = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	recorder = httptest.NewRecorder()
-	server.egressHandler(grant.GrantID).ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusBadGateway {
-		t.Fatalf("closed upstream status=%d", recorder.Code)
+	if !tlsServerNameAllowed("api.example.com", "api.example.com") || tlsServerNameAllowed("api.example.com", "other.example.com") ||
+		!tlsServerNameAllowed("127.0.0.1", "") || tlsServerNameAllowed("127.0.0.1", "api.example.com") {
+		t.Fatal("CONNECT TLS server-name policy is incorrect")
 	}
 	if !GrantsEqual(grant, grant) || min64(2, 1) != 1 || min64(1, 2) != 1 || max64(2, 1) != 2 || max64(1, 2) != 2 {
 		t.Fatal("gateway helper result is incorrect")
@@ -383,6 +469,45 @@ func TestEgressConnectFailuresAndHelperEdges(t *testing.T) {
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("missing stats status=%d", recorder.Code)
 	}
+}
+
+type bufferedTestConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedTestConn) Read(value []byte) (int, error) { return c.reader.Read(value) }
+
+func openProxyTLS(socket, authority, serverName string) (*tls.Conn, error) {
+	raw, err := (&net.Dialer{Timeout: time.Second}).Dial("unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fmt.Fprintf(raw, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", authority, authority); err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	reader := bufio.NewReader(raw)
+	response, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_ = raw.Close()
+		return nil, fmt.Errorf("CONNECT status %d", response.StatusCode)
+	}
+	connection := tls.Client(&bufferedTestConn{Conn: raw, reader: reader}, &tls.Config{
+		InsecureSkipVerify: true, // #nosec G402 -- the test isolates proxy policy, not certificate trust.
+		MinVersion:         tls.VersionTLS12,
+		ServerName:         serverName,
+	})
+	if err := connection.Handshake(); err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	return connection, nil
 }
 
 func controlRequest(t *testing.T, server *Server, method, path string, value any, want int) []byte {

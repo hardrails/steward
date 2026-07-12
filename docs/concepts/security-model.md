@@ -67,7 +67,9 @@ agent explanations are not part of the receipt contract.
 
 Egress does not make the agent a network peer. Proxy-aware HTTP/SSE and HTTPS/WSS
 work; raw TCP, UDP, ICMP, SOCKS, and proxy-unaware programs do not. HTTPS CONNECT is
-not decrypted, so path/method policy applies only where the Gateway sees HTTP.
+bound to the visible TLS ClientHello server name but is not decrypted, so path/method
+policy applies only where the Gateway sees HTTP. Grant deactivation closes in-flight
+HTTP requests and CONNECT streams instead of waiting for their route lifetime.
 
 ## Security boundary exclusions
 

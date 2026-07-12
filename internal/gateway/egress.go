@@ -65,6 +65,7 @@ func (s *Server) egressHandler(id string) http.Handler {
 			writeGatewayError(w, http.StatusForbidden, "route_denied", "destination is not allowed by the active egress grant")
 			return
 		}
+		lease := s.egressLeaseLocked(id)
 		select {
 		case semaphore <- struct{}{}:
 			s.mu.Unlock()
@@ -81,6 +82,8 @@ func (s *Server) egressHandler(id string) http.Handler {
 		_ = controller.SetWriteDeadline(deadline)
 		requestContext, cancel := context.WithDeadline(r.Context(), deadline)
 		defer cancel()
+		stopRevocation := context.AfterFunc(lease, cancel)
+		defer stopRevocation()
 		r = r.WithContext(requestContext)
 		ip, err := resolveAllowedIP(r.Context(), host, destination)
 		if err != nil {
@@ -88,20 +91,27 @@ func (s *Server) egressHandler(id string) http.Handler {
 			writeGatewayError(w, http.StatusForbidden, "address_denied", "destination did not resolve to an allowed address")
 			return
 		}
-		allowed := egressAuditEvent{Decision: "allow", Reason: "route_allowed", GrantID: grant.GrantID,
-			TenantID: grant.TenantID, InstanceID: grant.InstanceID, RouteID: routeID,
-			Method: r.Method, Host: host, Port: port}
-		if err := s.audit.Append(allowed); err != nil {
-			writeGatewayError(w, http.StatusServiceUnavailable, "audit_unavailable", "egress audit record could not be persisted")
-			return
-		}
-		s.updateEgressStats(grant.GrantID, allowed)
 		if r.Method == http.MethodConnect {
 			s.proxyConnect(w, r, grant, routeID, route, host, port, ip)
 			return
 		}
+		if err := s.recordEgressAllow(grant, routeID, r.Method, host, port); err != nil {
+			writeGatewayError(w, http.StatusServiceUnavailable, "audit_unavailable", "egress audit record could not be persisted")
+			return
+		}
 		s.proxyHTTP(w, r, grant, routeID, route, host, port, ip)
 	})
+}
+
+func (s *Server) recordEgressAllow(grant Grant, routeID, method, host string, port int) error {
+	event := egressAuditEvent{Decision: "allow", Reason: "route_allowed", GrantID: grant.GrantID,
+		TenantID: grant.TenantID, InstanceID: grant.InstanceID, RouteID: routeID,
+		Method: method, Host: host, Port: port}
+	if err := s.audit.Append(event); err != nil {
+		return err
+	}
+	s.updateEgressStats(grant.GrantID, event)
+	return nil
 }
 
 func proxyDestination(request *http.Request) (string, int, error) {
@@ -264,43 +274,87 @@ func (s *Server) proxyHTTP(w http.ResponseWriter, incoming *http.Request, grant 
 }
 
 func (s *Server) proxyConnect(w http.ResponseWriter, incoming *http.Request, grant Grant, routeID string, route loadedEgressRoute, host string, port int, ip netip.Addr) {
-	upstream, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(incoming.Context(), "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
-	if err != nil {
-		s.finishEgress(grant, routeID, "upstream_unavailable", incoming.Method, host, port, 0, 0)
-		writeGatewayError(w, http.StatusBadGateway, "upstream_unavailable", "configured egress destination failed")
-		return
-	}
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
-		_ = upstream.Close()
 		writeGatewayError(w, http.StatusInternalServerError, "tunnel_unavailable", "egress tunnel is unavailable")
 		return
 	}
 	agent, buffer, err := hijacker.Hijack()
 	if err != nil {
-		_ = upstream.Close()
 		return
 	}
 	defer agent.Close()
-	defer upstream.Close()
+	stopAgent := context.AfterFunc(incoming.Context(), func() { _ = agent.Close() })
+	defer stopAgent()
 	deadline := time.Now().Add(time.Duration(route.MaxTunnelSeconds) * time.Second)
 	_ = agent.SetDeadline(deadline)
-	_ = upstream.SetDeadline(deadline)
 	_, _ = buffer.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
 	if err := buffer.Flush(); err != nil {
 		return
 	}
+	clientHello, serverName, err := readTLSClientHello(buffer.Reader)
+	if err != nil || !tlsServerNameAllowed(host, serverName) {
+		s.denyEgress(grant, "tls_server_name_denied", incoming.Method, host, port)
+		return
+	}
+	if int64(len(clientHello)) > route.MaxRequestBytes {
+		s.denyEgress(grant, "byte_limit", incoming.Method, host, port)
+		return
+	}
+	if err := s.recordEgressAllow(grant, routeID, incoming.Method, host, port); err != nil {
+		s.updateEgressStats(grant.GrantID, egressAuditEvent{Decision: "deny", Reason: "audit_unavailable", Host: host, Port: port})
+		return
+	}
+	upstream, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(incoming.Context(), "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
+	if err != nil {
+		s.finishEgress(grant, routeID, "upstream_unavailable", incoming.Method, host, port, int64(len(clientHello)), 0)
+		return
+	}
+	defer upstream.Close()
+	stopUpstream := context.AfterFunc(incoming.Context(), func() { _ = upstream.Close() })
+	defer stopUpstream()
+	_ = upstream.SetDeadline(deadline)
+	if err := writeAllBytes(upstream, clientHello); err != nil {
+		s.finishEgress(grant, routeID, "upstream_unavailable", incoming.Method, host, port, int64(len(clientHello)), 0)
+		return
+	}
 	var wait sync.WaitGroup
-	var fromAgent, toAgent int64
+	fromAgent := int64(len(clientHello))
+	var remainingFromAgent, toAgent int64
 	wait.Add(2)
-	go func() { defer wait.Done(); fromAgent, _ = copyBounded(upstream, buffer.Reader, route.MaxRequestBytes) }()
+	go func() {
+		defer wait.Done()
+		remainingFromAgent, _ = copyBounded(upstream, buffer.Reader, route.MaxRequestBytes-fromAgent)
+	}()
 	go func() { defer wait.Done(); toAgent, _ = copyBounded(agent, upstream, route.MaxResponseBytes) }()
 	wait.Wait()
+	fromAgent += remainingFromAgent
 	reason := "completed"
 	if fromAgent > route.MaxRequestBytes || toAgent > route.MaxResponseBytes {
 		reason = "byte_limit"
 	}
 	s.finishEgress(grant, routeID, reason, incoming.Method, host, port, min64(fromAgent, route.MaxRequestBytes), min64(toAgent, route.MaxResponseBytes))
+}
+
+func writeAllBytes(destination io.Writer, value []byte) error {
+	for len(value) > 0 {
+		written, err := destination.Write(value)
+		if err != nil {
+			return err
+		}
+		if written < 1 {
+			return io.ErrShortWrite
+		}
+		value = value[written:]
+	}
+	return nil
+}
+
+func tlsServerNameAllowed(host, serverName string) bool {
+	if net.ParseIP(host) != nil {
+		return serverName == ""
+	}
+	return serverName == host
 }
 
 func copyBounded(destination io.Writer, source io.Reader, maximum int64) (int64, error) {

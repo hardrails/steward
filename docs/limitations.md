@@ -58,9 +58,10 @@ networking. Gateway resolves the hostname and dials the exact checked IP, blocki
 private, loopback, link-local, multicast, and unspecified addresses unless the host
 operator pins an explicit CIDR. Agent DNS is disabled for egress-bearing workloads.
 
-HTTPS uses standard `CONNECT`. Steward can enforce hostname, port, address, bytes,
-time, and concurrency, but it does not intercept TLS and therefore cannot enforce
-HTTP paths or methods inside an HTTPS tunnel. The JSONL audit deliberately omits URL
+HTTPS uses standard `CONNECT`. Steward binds the visible TLS ClientHello server
+name to the approved CONNECT hostname and enforces port, address, bytes, time, and
+concurrency, but it does not intercept TLS and therefore cannot enforce HTTP paths
+or methods inside an HTTPS tunnel. The JSONL audit deliberately omits URL
 paths, queries, headers, bodies, and credentials. Generic credentials remain owned
 by the agent's approved state; only the inference broker hides an upstream token.
 

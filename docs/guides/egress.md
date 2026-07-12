@@ -139,8 +139,11 @@ used as an exfiltration path. Software that ignores proxy variables will fail;
 Steward does not silently add transparent interception.
 
 HTTPS uses standard `CONNECT`. Gateway checks route, hostname, port, resolved IP,
-concurrency, byte ceilings, and lifetime before opening the tunnel. It does not
-decrypt TLS, so it cannot inspect paths or methods inside that tunnel. End-to-end
+concurrency, byte ceilings, and lifetime, then requires the bounded TLS ClientHello
+server name to equal the CONNECT hostname before dialing upstream. An explicitly
+approved IP requires an empty server name. Gateway does not decrypt TLS, so it
+cannot inspect paths or methods inside that tunnel. Deactivating the grant cancels
+established HTTP requests and CONNECT streams. End-to-end
 Authorization and Cookie headers belong to the agent and destination; Steward does
 not log them or inject generic credentials.
 

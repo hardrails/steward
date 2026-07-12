@@ -52,6 +52,11 @@ type snapshot struct {
 	Grants  []Grant `json:"grants"`
 }
 
+type egressLease struct {
+	context context.Context
+	cancel  context.CancelFunc
+}
+
 type Server struct {
 	mu               sync.Mutex
 	config           Config
@@ -63,6 +68,7 @@ type Server struct {
 	listeners        map[string]net.Listener
 	egressListeners  map[string]net.Listener
 	egressStats      map[string]EgressStats
+	egressLeases     map[string]egressLease
 	audit            *auditLog
 	tokenHash        [sha256.Size]byte
 	client           *http.Client
@@ -86,7 +92,7 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		config: config, routes: routes, egressRoutes: egressRoutes, semaphores: make(map[string]chan struct{}, len(routes)),
 		egressSemaphores: make(map[string]chan struct{}, len(egressRoutes)),
 		grants:           make(map[string]Grant), listeners: make(map[string]net.Listener), egressListeners: make(map[string]net.Listener),
-		egressStats: make(map[string]EgressStats), audit: audit,
+		egressStats: make(map[string]EgressStats), egressLeases: make(map[string]egressLease), audit: audit,
 		tokenHash: sha256.Sum256([]byte("Bearer " + serviceToken)),
 		client: &http.Client{Transport: transport, Timeout: 2 * time.Minute,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
@@ -399,6 +405,11 @@ func (s *Server) setActive(w http.ResponseWriter, id string, active bool) {
 		writeGatewayError(w, http.StatusServiceUnavailable, "state_unavailable", err.Error())
 		return
 	}
+	if active && len(grant.EgressRouteIDs) > 0 {
+		s.egressLeaseLocked(id)
+	} else {
+		s.revokeEgressLocked(id)
+	}
 	writeJSON(w, http.StatusOK, s.response(grant))
 }
 
@@ -417,6 +428,7 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 		writeGatewayError(w, http.StatusServiceUnavailable, "state_unavailable", err.Error())
 		return
 	}
+	s.revokeEgressLocked(id)
 	if listener := s.listeners[id]; listener != nil {
 		_ = listener.Close()
 		delete(s.listeners, id)
@@ -742,6 +754,9 @@ func (s *Server) persistLocked() error {
 func (s *Server) closeGrantListeners() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for id := range s.egressLeases {
+		s.revokeEgressLocked(id)
+	}
 	for id, listener := range s.listeners {
 		_ = listener.Close()
 		delete(s.listeners, id)
@@ -749,6 +764,25 @@ func (s *Server) closeGrantListeners() {
 	for id, listener := range s.egressListeners {
 		_ = listener.Close()
 		delete(s.egressListeners, id)
+	}
+}
+
+func (s *Server) egressLeaseLocked(id string) context.Context {
+	if lease, ok := s.egressLeases[id]; ok {
+		return lease.context
+	}
+	if s.egressLeases == nil {
+		s.egressLeases = make(map[string]egressLease)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.egressLeases[id] = egressLease{context: ctx, cancel: cancel}
+	return ctx
+}
+
+func (s *Server) revokeEgressLocked(id string) {
+	if lease, ok := s.egressLeases[id]; ok {
+		lease.cancel()
+		delete(s.egressLeases, id)
 	}
 }
 

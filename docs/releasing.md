@@ -224,7 +224,7 @@ tar -xzf steward_v1.4.0_linux_amd64.tar.gz
 - [ ] `scripts/signed-admission-acceptance.sh` passes on a Linux Docker host with
       `runsc`, using the exact release binaries and an already-local pinned image.
 - [ ] `scripts/v14-egress-acceptance.sh` passes with a preloaded digest-pinned
-      image containing `sleep` and `wget`; it proves HTTP, HTTPS CONNECT, denial,
+      image containing `/bin/sleep` and `curl`; it proves HTTP, HTTPS CONNECT, denial,
       DNS isolation, audit, statistics, lifecycle, and receipts through real gVisor.
 - [ ] The tag is a valid semver `vX.Y.Z` (a pre-release such as `v1.4.0-rc.1`
       is auto-marked as a GitHub pre-release; a hyphen in the tag is the signal).
