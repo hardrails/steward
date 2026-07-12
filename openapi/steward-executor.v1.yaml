@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Executor API
-  version: "1.2.0"
+  version: "1.3.0"
   description: |
     Public host-local contract for Steward's separate Docker/gVisor executor
     process. The control plane supplies a fully resolved generic OCI workload;
@@ -23,6 +23,8 @@ tags:
     description: Tenant-scoped OCI workload lifecycle.
   - name: admission
     description: Signed, locally bounded deployment admission and receipts.
+  - name: state
+    description: Explicit lifecycle for tenant-lineage persistent state.
   - name: health
     description: Executor process liveness.
 paths:
@@ -111,9 +113,9 @@ paths:
         Verifies the exact publisher-signed capsule against the configured
         site-root-signed policy, binds it to the host-authenticated instance
         intent, applies policy and generation rollback fences, journals the
-        Docker mutation, and appends signed node-local receipts. V1.2 accepts
-        no positive runtime capabilities; state, inference, and service requests
-        return 501 rather than weakening the no-network sandbox.
+        Docker mutation, and appends signed node-local receipts. V1.3 can grant
+        persistent state, brokered inference, and one declared private service
+        only when the corresponding local enforcement topology is configured.
       requestBody:
         required: true
         content:
@@ -148,7 +150,7 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
         "501":
-          description: A signed positive capability is valid but its runtime enforcement is not available in V1.2.
+          description: A signed positive capability is valid but its required local V1.3 enforcement topology is not configured.
           content:
             application/json:
               schema:
@@ -157,6 +159,61 @@ paths:
           $ref: "#/components/responses/DockerError"
         "503":
           description: Signed admission is unconfigured, capacity is exhausted, or durable journal/evidence state requires recovery.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/state/purge:
+    post:
+      tags: [state]
+      operationId: purgeStateLineage
+      summary: Permanently purge an inactive persistent-state lineage
+      description: |
+        Removes the Executor-derived named volume only after authenticated
+        tenant/node/generation binding, a committed absent workload tombstone,
+        exact managed-volume ownership verification, a durable journal prepare,
+        and a signed purge receipt. Active or drifted state is never removed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StatePurgeRequest"
+      responses:
+        "204":
+          description: State is absent; repeated authorized purges are idempotent.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Request is not bound to the authenticated signed lineage generation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: State is active or its managed tenant-lineage ownership has drifted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "501":
+          description: The configured Docker backend does not support managed state volumes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "503":
+          description: Signed admission, journal, evidence, or reconciliation state is unavailable.
           content:
             application/json:
               schema:
@@ -457,7 +514,28 @@ components:
           type: boolean
         service:
           type: boolean
-      description: V1.2 runtime admission requires all values false.
+      description: Positive capabilities require their configured V1.3 enforcement topology; otherwise admission fails closed with 501.
+    StatePurgeRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, node_id, lineage_id, generation]
+      properties:
+        tenant_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        node_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        lineage_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
     SignedAdmissionState:
       type: object
       additionalProperties: false
@@ -481,6 +559,12 @@ components:
         evidence_key_id:
           type: string
           pattern: "^[a-f0-9]{32}$"
+        grant_id:
+          type: string
+          pattern: "^grant-[a-f0-9]{64}$"
+        service_path:
+          type: string
+          pattern: "^/v1/services/grant-[a-f0-9]{64}/$"
     Resources:
       type: object
       additionalProperties: false

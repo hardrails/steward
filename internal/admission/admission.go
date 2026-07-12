@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -510,8 +512,29 @@ func bounded(value string, limit int) bool {
 func absolutePath(value string) bool {
 	return len(value) <= 512 && strings.HasPrefix(value, "/") && !strings.Contains(value, "//") && !strings.Contains(value, "..") && !strings.ContainsRune(value, '\x00')
 }
+
+var repositoryComponent = regexp.MustCompile(`^[a-z0-9]+(?:[._-]+[a-z0-9]+)*$`)
+
 func repositoryName(value string) bool {
-	return bounded(value, 512) && !strings.ContainsAny(value, "@:\\") && !strings.Contains(value, "//")
+	if !bounded(value, 512) || strings.ContainsAny(value, "@\\") || strings.Contains(value, "://") ||
+		strings.HasPrefix(value, "/") || strings.HasSuffix(value, "/") || strings.Contains(value, "//") {
+		return false
+	}
+	parts := strings.Split(value, "/")
+	for index, part := range parts {
+		if index == 0 && strings.Contains(part, ":") {
+			host, port, ok := strings.Cut(part, ":")
+			value, err := strconv.Atoi(port)
+			if !ok || strings.Contains(port, ":") || !repositoryComponent.MatchString(host) || err != nil || value < 1 || value > 65535 {
+				return false
+			}
+			continue
+		}
+		if !repositoryComponent.MatchString(part) {
+			return false
+		}
+	}
+	return true
 }
 func digest(value string) bool {
 	if !strings.HasPrefix(value, sha256DigestPrefix) || len(value) != len(sha256DigestPrefix)+64 {
@@ -555,5 +578,9 @@ func (r StaticRegistry) Lookup(ref ProfileRef) (Profile, bool) {
 }
 
 func DefaultProfiles() StaticRegistry {
-	return StaticRegistry{{Ref: ProfileRef{ID: "generic-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/state", StateSchemaVersion: "v1"}}
+	return StaticRegistry{
+		{Ref: ProfileRef{ID: "generic-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/state", StateSchemaVersion: "v1"},
+		{Ref: ProfileRef{ID: "hermes-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/opt/data", StateSchemaVersion: "v1"},
+		{Ref: ProfileRef{ID: "openclaw-v1", Version: "v1"}, UID: 65532, GID: 65532, StatePath: "/home/node/.openclaw", StateSchemaVersion: "v1"},
+	}
 }

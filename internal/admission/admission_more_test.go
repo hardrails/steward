@@ -222,3 +222,30 @@ func TestIntersectRejectsRemainingAuthorityEdges(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultProfilesIncludeFixedAgentStateLayouts(t *testing.T) {
+	profiles := DefaultProfiles()
+	for _, test := range []struct{ id, path string }{
+		{"generic-v1", "/state"},
+		{"hermes-v1", "/opt/data"},
+		{"openclaw-v1", "/home/node/.openclaw"},
+	} {
+		profile, ok := profiles.Lookup(ProfileRef{ID: test.id, Version: "v1"})
+		if !ok || profile.StatePath != test.path || profile.UID != 65532 || profile.GID != 65532 {
+			t.Fatalf("profile %s = %#v, %v", test.id, profile, ok)
+		}
+	}
+}
+
+func TestRepositoryNameAllowsAirGapRegistryPortButNotTags(t *testing.T) {
+	for _, valid := range []string{"busybox", "registry.local/agents/hermes", "127.0.0.1:5000/steward/agent"} {
+		if !repositoryName(valid) {
+			t.Fatalf("valid repository rejected: %q", valid)
+		}
+	}
+	for _, invalid := range []string{"https://registry/agent", "registry/agent:latest", "user@registry/agent", "registry:0/agent", "registry:70000/agent", "registry//agent"} {
+		if repositoryName(invalid) {
+			t.Fatalf("invalid repository accepted: %q", invalid)
+		}
+	}
+}

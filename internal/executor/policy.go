@@ -17,6 +17,7 @@ type PolicyError struct{ Message string }
 func (e *PolicyError) Error() string { return e.Message }
 
 var imageDigest = regexp.MustCompile(`^.+@sha256:[a-f0-9]{64}$`)
+var relayImageDigest = regexp.MustCompile(`^(?:.+@)?sha256:[a-f0-9]{64}$`)
 
 // Workload is the complete, intentionally small request accepted by the privileged
 // executor. Image references must be immutable digests; tags are never accepted.
@@ -30,6 +31,30 @@ type Workload struct {
 	Command    []string  `json:"command,omitempty"`
 	Resources  Resources `json:"resources"`
 	Egress     Egress    `json:"egress"`
+	// State is trusted Executor-derived topology. It is intentionally excluded
+	// from the public JSON request contract so legacy callers cannot select a
+	// volume or host path.
+	State *StateMount `json:"-"`
+	// Runtime is the trusted, derived positive-capability topology. Like State,
+	// it cannot be supplied through the public workload JSON contract.
+	Runtime *RuntimeGrant `json:"-"`
+}
+
+type StateMount struct {
+	VolumeName string `json:"volume_name"`
+	Path       string `json:"path"`
+}
+
+type RuntimeGrant struct {
+	NetworkName string `json:"network_name"`
+	GrantID     string `json:"grant_id"`
+	Generation  uint64 `json:"generation"`
+	Inference   bool   `json:"inference"`
+	RouteID     string `json:"route_id,omitempty"`
+	RelayIP     string `json:"relay_ip"`
+	AgentIP     string `json:"agent_ip"`
+	ModelAlias  string `json:"model_alias,omitempty"`
+	ServicePort int    `json:"service_port,omitempty"`
 }
 
 // Resources are mandatory cgroup limits. Docker has no resource limits by default,
@@ -131,7 +156,46 @@ func (w Workload) Validate() error {
 	if len(w.Egress.AllowedHosts) != 0 {
 		return &PolicyError{"egress allowlists require the tenant egress proxy and are not enabled"}
 	}
+	if w.State != nil {
+		if !strings.HasPrefix(w.State.VolumeName, "steward-state-") || len(w.State.VolumeName) != len("steward-state-")+64 ||
+			w.State.Path != profileLayoutFor(w.ProfileID).StatePath {
+			return &PolicyError{"internal state mount is invalid"}
+		}
+	}
+	if w.Runtime != nil {
+		if !strings.HasPrefix(w.Runtime.NetworkName, "steward-net-") || len(w.Runtime.NetworkName) != len("steward-net-")+64 ||
+			!strings.HasPrefix(w.Runtime.GrantID, "grant-") || len(w.Runtime.GrantID) != len("grant-")+64 ||
+			w.Runtime.Generation == 0 ||
+			w.Runtime.ServicePort < 0 || w.Runtime.ServicePort > 65535 ||
+			(w.Runtime.Inference && !boundedText(w.Runtime.ModelAlias, 256)) ||
+			(w.Runtime.Inference && !boundedText(w.Runtime.RouteID, 128)) ||
+			(!w.Runtime.Inference && (w.Runtime.ModelAlias != "" || w.Runtime.RouteID != "")) ||
+			!w.Runtime.Inference && w.Runtime.ServicePort == 0 {
+			return &PolicyError{"internal runtime capability topology is invalid"}
+		}
+		addresses := NetworkSpecFor(w.TenantID, w.InstanceID, w.Runtime.Generation)
+		if w.Runtime.NetworkName != addresses.Name || w.Runtime.RelayIP != addresses.RelayIP || w.Runtime.AgentIP != addresses.AgentIP {
+			return &PolicyError{"internal runtime addresses are invalid"}
+		}
+	}
 	return nil
+}
+
+type profileLayout struct {
+	StatePath string
+	Home      string
+	WorkDir   string
+}
+
+func profileLayoutFor(profileID string) profileLayout {
+	switch profileID {
+	case "hermes-v1@v1":
+		return profileLayout{StatePath: "/opt/data", Home: "/opt/data/home", WorkDir: "/opt/data"}
+	case "openclaw-v1@v1":
+		return profileLayout{StatePath: "/home/node/.openclaw", Home: "/home/node", WorkDir: "/home/node/.openclaw/workspace"}
+	default:
+		return profileLayout{StatePath: "/state", Home: "/state", WorkDir: "/state"}
+	}
 }
 
 func boundedText(value string, limit int) bool {
