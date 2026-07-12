@@ -7,11 +7,13 @@
   "grant_root": "/run/steward-gateway/grants",
   "executor_gid": @EXECUTOR_GID@,
   "relay_gid": @RELAY_GID@,
+  "egress_audit_file": "/var/lib/steward-gateway/egress-audit.jsonl",
   "routes": [
     {
       "id": "local-openai",
       "base_url": "http://127.0.0.1:11434/v1",
       "max_concurrent": 8
     }
-  ]
+  ],
+  "egress_routes": []
 }

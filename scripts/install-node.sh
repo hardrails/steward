@@ -18,7 +18,7 @@ for path in steward stewardctl steward-mcp steward-executor steward-gateway stew
 	deploy/systemd/steward-gateway.service deploy/config/gateway.json.in \
 	deploy/config/executor.env deploy/config/executor-gateway.env scripts/activate-node-release.sh \
 	scripts/node-preflight.sh scripts/configure-node.sh scripts/uninstall-node.sh \
-	scripts/build-relay-image.sh; do
+	scripts/build-relay-image.sh scripts/configure-admission.sh; do
 	if [[ ! -f "$root/$path" ]]; then
 		echo "install-node: release is missing $path" >&2
 		exit 2
@@ -118,6 +118,8 @@ install -o root -g root -m 0755 "$root/scripts/node-preflight.sh" \
 	/usr/local/libexec/steward/node-preflight
 install -o root -g root -m 0755 "$root/scripts/configure-node.sh" \
 	/usr/local/libexec/steward/configure-node
+install -o root -g root -m 0755 "$root/scripts/configure-admission.sh" \
+	/usr/local/libexec/steward/configure-admission
 install -o root -g root -m 0755 "$root/scripts/uninstall-node.sh" \
 	/usr/local/libexec/steward/uninstall-node
 install -o root -g root -m 0755 "$root/scripts/build-relay-image.sh" \

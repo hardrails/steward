@@ -11,6 +11,7 @@ Group=steward-gateway
 SupplementaryGroups=steward-executor steward-relay
 UMask=0077
 ExecStart=/usr/local/bin/steward-gateway -config=/etc/steward/gateway.json
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
