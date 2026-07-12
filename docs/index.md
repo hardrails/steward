@@ -20,7 +20,7 @@ home: true
 
 <div class="grid">
   <article class="card"><span class="number">01 / AUTHORIZE</span><h3>Why may this run?</h3><p>The opt-in signed path intersects publisher capsule, site-root policy, and tenant-bound intent locally. Stale generations and policy rollback are denied.</p><a href="{{ '/guides/signed-admission/' | relative_url }}">Signed admission →</a></article>
-  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor admits immutable, resource-bounded images and grants only lineage state, one inference route, and one declared service through isolated topology.</p><a href="{{ '/concepts/security-model/' | relative_url }}">Security model →</a></article>
+  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor admits immutable, resource-bounded images and grants only lineage state, approved inference/service paths, and signed named HTTP(S) routes.</p><a href="{{ '/concepts/security-model/' | relative_url }}">Security model →</a></article>
   <article class="card"><span class="number">03 / VERIFY</span><h3>What did the node enforce?</h3><p>Signed, hash-linked receipts bind the accepted artifact, policy, generation, and mutation outcome for offline verification.</p><a href="{{ '/product/positioning/' | relative_url }}">Why Steward exists →</a></article>
 </div>
 
@@ -53,12 +53,13 @@ Model serving remains separately controlled. Steward's local gateway brokers an
 operator-selected OpenAI-compatible route without placing its real credential in
 the agent container.
 
-## Agent compatibility in v1.3
+## Agent compatibility in v1.4
 
 Steward can host constrained Hermes Agent and OpenClaw images with persistent
-state, a local OpenAI-compatible route, and one declared private service. Images
-that require arbitrary egress, raw secrets, host mounts, privileged mode, or
-undeclared ports remain outside the boundary.
+state, a local OpenAI-compatible route, one declared private service, and standard
+HTTP(S) proxy access through named, signed routes. Images that require raw TCP/UDP,
+transparent interception, raw secrets, host mounts, privileged mode, or undeclared
+ports remain outside the boundary.
 
 <div class="callout warning">
   <strong>Do not erase the boundary</strong>
@@ -70,8 +71,10 @@ undeclared ports remain outside the boundary.
 [Test Hermes Agent compatibility]({{ '/guides/hermes-agent/' | relative_url }}) ·
 [Test OpenClaw compatibility]({{ '/guides/openclaw/' | relative_url }}) ·
 [Configure positive capabilities]({{ '/guides/positive-capabilities/' | relative_url }}) ·
+[Configure egress]({{ '/guides/egress/' | relative_url }}) ·
+[Bootstrap with Terraform]({{ '/guides/terraform/' | relative_url }}) ·
 [Connect an MCP client]({{ '/guides/mcp/' | relative_url }}) ·
-[Read all v1.3 limitations]({{ '/limitations/' | relative_url }})
+[Read all v1.4 limitations]({{ '/limitations/' | relative_url }})
 
 ## Market position
 

@@ -1,12 +1,12 @@
 ---
 title: Why Steward exists
-description: "The V1.3 product direction: operator-owned admission, constrained useful agent execution, and offline-verifiable runtime receipts."
+description: "The V1.4 product direction: operator-owned admission, useful signed egress, secure automation, and offline-verifiable runtime receipts."
 section: Product
 ---
 
 # Why Steward exists
 
-> Status: V1.3 release position, dated 2026-07-11. Shipped and planned
+> Status: V1.4 release position, dated 2026-07-11. Shipped and planned
 > capabilities are separated explicitly below.
 
 Autonomous agents are useful because they can act: run code, retain state, call
@@ -15,7 +15,7 @@ before an agent starts, someone needs to know which tenant it serves, which
 artifact is allowed, which authority it receives, and what the local runtime
 actually enforced.
 
-A sandbox is important, but it answers only part of that question. Steward V1.3
+A sandbox is important, but it answers only part of that question. Steward V1.4
 is designed as the local execution authority that connects an operator's
 admission decision to a constrained workload and a receipt the operator can
 verify without contacting a vendor.
@@ -28,7 +28,7 @@ an operator can:
 1. admit a signed, immutable agent profile for a tenant, node, and instance;
 2. intersect that capsule with site-root-signed policy and local resource limits;
 3. run the agent in a tenant-labelled, gVisor-sandboxed Docker workload with
-   no general egress, while narrowly granting state, inference, or service access; and
+   no ambient network, while narrowly granting state, inference, service, or named HTTP(S) routes; and
 4. export a node-local, tamper-evident receipt of the inputs accepted and the
    enforcement decisions recorded.
 
@@ -36,7 +36,7 @@ This is intended to let an operator keep control of keys, policy, artifacts,
 infrastructure, and evidence when external services are unavailable. It does
 not ask the operator to trust an agent's own narrative about what it did.
 
-## The V1.3 control path
+## The V1.4 control path
 
 ```text
 publisher-signed profile capsule
@@ -62,7 +62,7 @@ The three inputs have different jobs:
   Docker option, or caller-selected privilege.
 - A **site policy** is rooted in the operator's local trust. It scopes allowed
   publishers, tenants, profiles, repositories or exact image digests, resource
-  ceilings, inference route IDs, service IDs, and publisher revocation state.
+  ceilings, inference route IDs, service IDs, egress route IDs, and publisher revocation state.
 - An **instance intent** is authenticated separately. Its caller identity binds
   the tenant and node; a generation fence is keyed by `(tenant_id, instance_id)`
   so a stale request cannot replace a newer workload.
@@ -73,7 +73,7 @@ does not choose a tenant's schedule or identity.
 
 ## A receipt is not an agent transcript
 
-The V1.3 receipt is evidence from Steward's enforceable boundary. It binds the
+The V1.4 receipt is evidence from Steward's enforceable boundary. It binds the
 capsule and policy digests, instance generation, capability grant, lifecycle
 and gateway decisions, and bounded outcomes. It deliberately excludes prompts,
 model responses, agent logs, semantic tool actions, and secrets.
@@ -85,15 +85,15 @@ claimed, or that every semantic action inside a container was safe.
 
 The receipt is tamper-evident within the supplied chain and node trust boundary, not globally
 tamper-proof. Host root, the host kernel, Docker, gVisor, the local signing-key
-protection, and the operator's configuration remain trusted. V1.3 does not
+protection, and the operator's configuration remain trusted. V1.4 does not
 claim hardware attestation, protection from a hostile host administrator,
 cross-node anchoring, complete-suffix detection without an external checkpoint, or
-formal certification. The v1.3 receipt key is co-located in Executor rather than
+formal certification. The v1.4 receipt key is co-located in Executor rather than
 isolated behind a separate signing service.
 
 ## Useful without becoming ambient
 
-V1.3 ships the enforcement path for three positive grants. An authenticated field
+V1.4 ships the enforcement path for four positive grants. An authenticated field
 still does nothing by itself: if the complete local topology is absent, admission
 fails closed. When configured, Steward grants only:
 
@@ -106,13 +106,16 @@ fails closed. When configured, Steward grants only:
 - **Service**: one declared agent port reached through the paired relay and an
   authenticated local gateway. A service endpoint is not, by itself, end-user
   authentication or public exposure.
+- **Egress**: named HTTP(S) routes selected through publisher/tenant/intent
+  intersection and mapped by the host operator to hostnames, ports, checked IPs,
+  concurrency, byte, and time ceilings. The agent gets a standard proxy, not a raw
+  network interface.
 
 These are shipped contracts, including lifecycle ordering, drift inspection,
-rollback, journaling, and explicit receipted state purge. There is no general
-Internet egress, arbitrary TCP proxy, `CONNECT`, wildcard
-destination, browser automation, interactive shell, device grant, arbitrary
-environment variable, or caller-controlled host mount. Those omissions are
-what make the positive grants reviewable.
+rollback, journaling, and explicit receipted state purge. There is no raw TCP/UDP,
+transparent interception, open/default-allow route, TLS MITM, browser automation,
+interactive shell, device grant, arbitrary environment variable, or
+caller-controlled host mount. Those omissions keep the grants reviewable.
 
 ## What Steward is not trying to replace
 

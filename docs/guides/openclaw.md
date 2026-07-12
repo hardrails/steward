@@ -6,7 +6,7 @@ section: Agent compatibility
 
 # OpenClaw on Steward
 
-Steward v1.3 has a built-in `openclaw-v1@v1` layout. It mounts the lineage volume
+Steward v1.4 has a built-in `openclaw-v1@v1` layout. It mounts the lineage volume
 at `/home/node/.openclaw`, sets `HOME=/home/node`, and can grant one declared
 OpenClaw service port plus one brokered OpenAI-compatible model route.
 
@@ -56,7 +56,8 @@ in [positive-capability setup]({{ '/guides/positive-capabilities/' | relative_ur
 
 ## Deliberate limits
 
-Messaging channels, plugin downloads, browser control, arbitrary web access,
+OpenClaw's proxy-aware HTTP(S) integrations and plugin sources can use explicitly
+named signed routes; follow [signed egress]({{ '/guides/egress/' | relative_url }})
+and authorize each hostname/port. Raw messaging protocols, browser control,
 Docker-based nested sandboxes, extra mounts, mDNS, and undeclared ports are not
-provided by the state/inference/service grants. OpenClaw can be useful with a local
-model and private gateway while those broader capabilities remain denied.
+provided. A route is not permission to enable ambient container networking.

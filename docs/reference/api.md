@@ -50,13 +50,14 @@ Every endpoint except `GET /v1/healthz` requires
 | `GET /v1/workloads/{runtime_ref}` | Read observed container state |
 | `POST .../start`, `.../stop` | Idempotent lifecycle operation |
 | `GET .../logs` | Read a combined log tail capped at 1 MiB |
+| `GET .../egress` | Read bounded allow/deny, byte, and last-destination statistics for a signed egress grant |
 | `DELETE /v1/workloads/{runtime_ref}` | Idempotently remove a managed workload |
 | `GET /v1/healthz` | Process liveness |
 
 ## MCP server
 
 `steward-mcp` implements MCP revision `2025-11-25` over stdio. It exposes
-admit, status, logs, start, stop, destroy, and state-purge tools by calling the
+admit, status, logs, egress statistics, start, stop, destroy, and state-purge tools by calling the
 same loopback Executor API. It is an operations adapter, not another authority
 or a remotely exposed MCP endpoint. See [MCP setup]({{ '/guides/mcp/' | relative_url }}).
 

@@ -4,7 +4,7 @@ description: Open-source, control-plane-neutral runtime for operating isolated A
 url: https://hardrails.github.io
 baseurl: /steward
 repository: hardrails/steward
-version: 1.3.0
+version: 1.4.0
 license_url: https://github.com/hardrails/steward/blob/main/LICENSE
 github_url: https://github.com/hardrails/steward
 release_url: https://github.com/hardrails/steward/releases/latest

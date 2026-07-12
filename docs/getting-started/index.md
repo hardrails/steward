@@ -47,7 +47,7 @@ steward-executor -version
 systemctl status steward steward-executor --no-pager
 ```
 
-All three binaries should report the same release. Staged services should be inactive;
+All six binaries should report the same release. Staged services should be inactive;
 packages deliberately do not start an unenrolled node.
 
 ## Inspect before piping to root
@@ -92,15 +92,20 @@ Run `bash install-steward.sh --help` for every automation option and environment
 equivalent. Continue with [node enrollment]({{ '/getting-started/enroll/' | relative_url }})
 or read the [platform support matrix]({{ '/reference/platform-support/' | relative_url }}).
 
+For Terraform, use the shipped secret-free cloud-init module rather than putting
+enrollment credentials in state. See [Terraform bootstrap]({{ '/guides/terraform/' | relative_url }}).
+
 ## What the installer changes
 
-- Adds dedicated `steward` and `steward-executor` service identities.
+- Adds dedicated supervisor, Executor, Gateway, and relay-group identities.
 - Gives only Executor membership in the Docker group.
 - Installs immutable versions under `/opt/steward/releases/`.
-- Selects all three binaries through one atomic `/opt/steward/current` symlink.
+- Selects all six binaries through one atomic `/opt/steward/current` symlink.
 - Installs hardened vendor units and configuration templates.
 - Preserves operator-owned configuration and systemd drop-ins.
 - Runs fail-closed preflight before activation.
+- Builds the trusted relay from the shipped static binary with no build network and
+  pins its derived Docker image digest automatically.
 
 It does not install Docker, pull an agent image, invent enrollment credentials, or
 embed a vendor control-plane endpoint.

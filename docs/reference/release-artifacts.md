@@ -31,8 +31,8 @@ archives contain `steward`, `stewardctl`, `steward-mcp`, the license, and README
 ## Verify a downloaded release
 
 ```console
-gh release download v1.3.0 --repo hardrails/steward --dir steward-v1.3.0
-cd steward-v1.3.0
+gh release download v1.4.0 --repo hardrails/steward --dir steward-v1.4.0
+cd steward-v1.4.0
 sha256sum -c checksums.txt
 ```
 

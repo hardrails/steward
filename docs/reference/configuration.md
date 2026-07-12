@@ -83,7 +83,7 @@ explicit flags and binds the authenticated API to loopback. Set
 | `-max-pids` | `128` | Per-workload process ceiling |
 | `-max-workloads` | `32` | Managed workload cap for the host |
 | `-max-workloads-per-tenant` | `4` | Managed workload cap per tenant |
-| `-admission-policy-file` | empty | Signed site-policy DSSE; enables v1.3 signed admission |
+| `-admission-policy-file` | empty | Signed site-policy DSSE; enables v1.4 signed admission |
 | `-admission-site-root-public-key-file` | empty | Base64 Ed25519 site-root public key |
 | `-admission-site-root-key-id` | empty | Required signature key ID for the site policy |
 | `-admission-node-id` | empty | Stable node ID bound into intents and receipts |
@@ -109,13 +109,22 @@ unit accepts the matching optional `EXECUTOR_ADMISSION_*` values from
 `/etc/steward/executor.env`. See [signed admission and receipts]({{ '/guides/signed-admission/' | relative_url }}).
 
 The optional `/etc/steward/executor-gateway.env` contains the four gateway/relay
-arguments as one root-owned value. Generate a scratch relay image and configure
-that file with `build-relay-image --configure`; partial topology fails startup.
+arguments as one root-owned value. A fresh configuration builds the scratch relay
+with no build network and writes its immutable digest automatically. Use
+`build-relay-image --configure` to replace it deliberately; partial topology fails startup.
 
 `steward-gateway` uses strict JSON at `/etc/steward/gateway.json`. It requires
-clean absolute socket/state/token paths, numeric Executor/relay GIDs, a loopback
-service address, and 1–128 exact OpenAI-compatible routes. Each route has an ID,
-an HTTP(S) origin, an optional owner-only credential file, and a concurrency cap.
+clean absolute socket/state/token/audit paths, numeric Executor/relay GIDs, a loopback
+service address, and up to 128 exact OpenAI-compatible routes. Each inference route
+has an ID, HTTP(S) origin, optional owner-only credential file, and concurrency cap.
+
+`egress_routes` contains up to 128 named HTTP(S) proxy policies. Each route requires
+1–128 destinations (`host`, `ports`, optional canonical `allowed_cidrs`) plus
+`max_concurrent`, `max_request_bytes`, `max_response_bytes`, and
+`max_tunnel_seconds`. Use `stewardctl gateway route set` for atomic authoring and
+`systemctl reload steward-gateway` for live activation. Reload may change routes and
+the service token, but not socket, state, identity, grant, or audit paths; removing a
+route referenced by a persisted grant is rejected.
 
 `steward-mcp` accepts `-node-url` (loopback HTTP origin) and `-token-file`
 (owner-only Executor bearer token). It has no listening network transport.
