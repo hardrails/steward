@@ -25,6 +25,7 @@ const (
 var (
 	ErrMalformedEnvelope  = errors.New("malformed DSSE envelope")
 	ErrNoTrustedSignature = errors.New("DSSE envelope has no trusted valid signature")
+	rawMessageType        = reflect.TypeOf(json.RawMessage{})
 )
 
 // Envelope is the JSON DSSE envelope. Payload is standard base64 encoded.
@@ -211,6 +212,9 @@ func validateJSONValue(decoder *json.Decoder, expected reflect.Type, depth int) 
 		}
 		return fmt.Errorf("null is not valid for %s", expected)
 	}
+	if expected == rawMessageType {
+		return validateArbitraryJSON(decoder, token, depth)
+	}
 	switch expected.Kind() {
 	case reflect.Struct:
 		if token != json.Delim('{') {
@@ -275,6 +279,71 @@ func validateJSONValue(decoder *json.Decoder, expected reflect.Type, depth int) 
 		return fmt.Errorf("unsupported strict JSON type %s", expected)
 	}
 	return nil
+}
+
+// validateArbitraryJSON is used only for json.RawMessage fields inside an
+// otherwise exact typed envelope. It preserves extension payloads while still
+// rejecting duplicate object keys and excessive nesting.
+func validateArbitraryJSON(decoder *json.Decoder, token json.Token, depth int) error {
+	if depth > 32 {
+		return errors.New("JSON nesting exceeds limit")
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		switch token.(type) {
+		case nil, string, bool, json.Number:
+			return nil
+		default:
+			return errors.New("unsupported JSON token")
+		}
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("object key is not a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("duplicate JSON field %q", key)
+			}
+			seen[key] = struct{}{}
+			value, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			if err := validateArbitraryJSON(decoder, value, depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return errors.New("unterminated object")
+		}
+		return nil
+	case '[':
+		for decoder.More() {
+			value, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			if err := validateArbitraryJSON(decoder, value, depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return errors.New("unterminated array")
+		}
+		return nil
+	default:
+		return errors.New("unexpected JSON delimiter")
+	}
 }
 
 func jsonFields(t reflect.Type) map[string]reflect.StructField {
