@@ -417,12 +417,28 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, r
 }
 
 func (s *Server) proxyService(w http.ResponseWriter, incoming *http.Request, grant Grant, path string) {
-	if incoming.Method == http.MethodConnect || strings.Contains(path, "..") {
+	if incoming.Method == http.MethodConnect || !safeServicePath(path) {
 		writeGatewayError(w, http.StatusForbidden, "service_denied", "service method or path is not allowed")
 		return
 	}
 	base, _ := url.Parse(grant.ServiceURL)
 	s.proxy(w, incoming, base, path, "", true)
+}
+
+// safeServicePath rejects both direct and nested-encoded traversal syntax.
+// net/http has already decoded one layer into URL.Path, so a remaining percent
+// sign is a second decoding opportunity for an agent framework or its router.
+// Literal percent characters are deliberately outside the v1 service contract.
+func safeServicePath(path string) bool {
+	if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "%\\\x00") {
+		return false
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.URL, path, credential string, service bool) {

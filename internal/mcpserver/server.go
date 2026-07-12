@@ -21,6 +21,7 @@ import (
 
 const ProtocolVersion = "2025-11-25"
 const maxMessageBytes = 1 << 20
+const maxToolResultBytes = 1 << 20
 
 type Node interface {
 	Admit(context.Context, []byte, admission.InstanceIntent) (nodeclient.State, error)
@@ -272,8 +273,8 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 	if marshalErr != nil {
 		return toolFailure("encode tool result"), nil
 	}
-	if len(encoded) > 900<<10 {
-		return toolFailure("tool result exceeds 900 KiB"), nil
+	if len(encoded) > maxToolResultBytes {
+		return toolFailure("tool result exceeds 1 MiB"), nil
 	}
 	return map[string]any{
 		"content":           []any{map[string]any{"type": "text", "text": string(encoded)}},

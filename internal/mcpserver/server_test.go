@@ -17,6 +17,7 @@ type fakeNode struct {
 	calls     []string
 	destroyed string
 	err       error
+	logs      string
 }
 
 func (n *fakeNode) Admit(_ context.Context, _ []byte, intent admission.InstanceIntent) (nodeclient.State, error) {
@@ -29,7 +30,11 @@ func (n *fakeNode) Status(context.Context, string) (nodeclient.State, error) {
 }
 func (n *fakeNode) Logs(context.Context, string) (nodeclient.State, error) {
 	n.calls = append(n.calls, "logs")
-	return nodeclient.State{RuntimeRef: runtimeRef(), Status: "running", Logs: "hello"}, nil
+	logs := n.logs
+	if logs == "" {
+		logs = "hello"
+	}
+	return nodeclient.State{RuntimeRef: runtimeRef(), Status: "running", Logs: logs}, nil
 }
 func (n *fakeNode) Start(context.Context, string) (nodeclient.State, error) {
 	n.calls = append(n.calls, "start")
@@ -219,6 +224,19 @@ func TestMCPValidationAndArgumentFailures(t *testing.T) {
 	}
 	if string(normalizedID(json.RawMessage(`"id"`))) != `"id"` || string(normalizedID(json.RawMessage(`{}`))) != "null" {
 		t.Fatal("ID normalization mismatch")
+	}
+}
+
+func TestMCPLogsPreserveValidNearLimitNodeOutput(t *testing.T) {
+	node := &fakeNode{logs: strings.Repeat("x", 950<<10)}
+	server, _ := New(node, "v1")
+	result, rpcErr := server.callTool(context.Background(), json.RawMessage(`{"name":"steward_logs","arguments":{"runtime_ref":"`+runtimeRef()+`"}}`))
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	raw := string(mustJSON(t, result))
+	if strings.Contains(raw, `"isError":true`) || !strings.Contains(raw, strings.Repeat("x", 1024)) {
+		t.Fatal("valid near-limit logs were rejected")
 	}
 }
 

@@ -269,6 +269,12 @@ func TestRuntimeTransitionAndCleanupFailures(t *testing.T) {
 		{name: "service bind", start: true, mutate: func(_ *topologyFixture, g *gatewayFixture) { g.registerErr = errors.New("bind") }},
 		{name: "grant activate", start: true, mutate: func(_ *topologyFixture, g *gatewayFixture) { g.activateErr = errors.New("activate") }},
 		{name: "agent start", start: true, mutate: func(d *topologyFixture, _ *gatewayFixture) { d.startErrAt = 2 }},
+		{name: "agent start rollback deactivation", start: true, mutate: func(d *topologyFixture, g *gatewayFixture) {
+			d.startErrAt, g.deactivateErr = 2, errors.New("deactivate")
+		}},
+		{name: "agent start rollback relay stop", start: true, mutate: func(d *topologyFixture, _ *gatewayFixture) {
+			d.startErrAt, d.stopErrAt = 2, 1
+		}},
 		{name: "grant deactivate", start: false, mutate: func(_ *topologyFixture, g *gatewayFixture) { g.deactivateErr = errors.New("deactivate") }},
 		{name: "agent stop", start: false, mutate: func(d *topologyFixture, _ *gatewayFixture) { d.stopErrAt = 1 }},
 		{name: "relay stop", start: false, mutate: func(d *topologyFixture, _ *gatewayFixture) { d.stopErrAt = 2 }},

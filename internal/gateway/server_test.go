@@ -101,6 +101,8 @@ func TestGrantInferenceAndServiceFlow(t *testing.T) {
 	for _, denied := range []*http.Request{
 		httptest.NewRequest(http.MethodConnect, "/v1/services/"+grant.GrantID+"/health", nil),
 		httptest.NewRequest(http.MethodGet, "/v1/services/"+grant.GrantID+"/../secret", nil),
+		httptest.NewRequest(http.MethodGet, "/v1/services/"+grant.GrantID+"/%252e%252e/secret", nil),
+		httptest.NewRequest(http.MethodGet, "/v1/services/"+grant.GrantID+"/..%255csecret", nil),
 	} {
 		denied.Header.Set("Authorization", "Bearer service-secret")
 		response = httptest.NewRecorder()

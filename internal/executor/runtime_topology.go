@@ -190,8 +190,15 @@ func (s *Server) applyRuntimeTransition(ctx context.Context, runtimeRef string, 
 			return fmt.Errorf("activate gateway grant: %w", err)
 		}
 		if err := s.docker.Start(ctx, runtimeRef); err != nil {
-			_ = s.secure.gateway.Deactivate(ctx, workload.Runtime.GrantID)
-			_ = s.docker.Stop(ctx, relay)
+			if deactivateErr := s.secure.gateway.Deactivate(ctx, workload.Runtime.GrantID); deactivateErr != nil {
+				// Keep the relay running while the grant is still active. The caller
+				// observes a failed transition and leaves its journal prepared; later
+				// mutations remain fenced until reconciliation can deactivate it.
+				return fmt.Errorf("start agent: %v; rollback gateway deactivation: %w", err, deactivateErr)
+			}
+			if stopErr := s.docker.Stop(ctx, relay); stopErr != nil {
+				return fmt.Errorf("start agent: %v; rollback trusted relay stop: %w", err, stopErr)
+			}
 			return err
 		}
 		return nil

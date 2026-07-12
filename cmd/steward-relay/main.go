@@ -63,6 +63,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		proxy := httputil.NewSingleHostReverseProxy(target)
 		proxy.Transport = &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext, ResponseHeaderTimeout: 30 * time.Second}
+		// The host Gateway reaches this listener through the relay's fixed private
+		// IP, so it cannot bind loopback. Isolation comes from the Executor-derived,
+		// internal, non-attachable per-instance network: its only peers are this
+		// trusted relay and the one agent that already owns the target service.
 		servers = append(servers, &http.Server{
 			Addr: *serviceAddress, Handler: proxy,
 			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second,
