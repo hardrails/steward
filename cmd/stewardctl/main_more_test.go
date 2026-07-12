@@ -24,6 +24,9 @@ func TestRunVersionAndRejectsInvalidCommands(t *testing.T) {
 		{"policy", "unknown"},
 		{"evidence"},
 		{"evidence", "verify", "-in", "missing"},
+		{"image"},
+		{"image", "inspect"},
+		{"image", "import"},
 	} {
 		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 			t.Fatalf("invalid command accepted: %#v", arguments)
