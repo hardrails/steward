@@ -116,6 +116,26 @@ func TestSecureAdmissionRejectsLocalConfigDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestSecureAdmissionLeavesJournalPendingWhenRejectedContainerCannotBeRemoved(t *testing.T) {
+	docker := &secureDocker{
+		imageID:   "sha256:" + strings.Repeat("c", 64),
+		removeErr: errors.New("remove failed"),
+	}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixture(t)
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(secureProvisionRequest{CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule), Intent: intent})
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || len(config.Journal.Pending()) != 1 || docker.observed == nil {
+		t.Fatalf("status=%d pending=%#v observed=%#v body=%s", response.Code, config.Journal.Pending(), docker.observed, response.Body.String())
+	}
+}
+
 func TestSecureAdmissionDoesNotAdoptLegacyLookalike(t *testing.T) {
 	capsule, intent, config := secureAdmissionFixture(t)
 	workload := Workload{
@@ -695,6 +715,15 @@ func TestSecureTransitionFailureModes(t *testing.T) {
 		assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+runtimeRef+"/start", context.Background(), http.StatusInternalServerError)
 		if len(config.Journal.Pending()) != 0 {
 			t.Fatal("unexpected state was not compensated")
+		}
+	})
+	t.Run("failed rollback remains pending", func(t *testing.T) {
+		docker := &secureDocker{startNoop: true}
+		docker.onStop = func() { docker.err = errors.New("inspect failed") }
+		server, _, config, runtimeRef := admittedSecureServer(t, docker)
+		assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+runtimeRef+"/start", context.Background(), http.StatusServiceUnavailable)
+		if len(config.Journal.Pending()) != 1 {
+			t.Fatal("ambiguous lifecycle rollback did not remain pending")
 		}
 	})
 	for _, target := range []string{"evidence", "journal"} {

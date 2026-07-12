@@ -339,7 +339,10 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 	if err != nil || !observed.Managed || !observed.Hardened ||
 		observed.Fingerprint != workloadFingerprint(workload) ||
 		observed.ImageID != effective.Capsule.Image.ConfigDigest {
-		_ = s.docker.Remove(r.Context(), name)
+		if !s.removeAndConfirmAbsent(r.Context(), name) {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "rejected workload could not be removed; operation remains prepared")
+			return
+		}
 		s.recordCompensation(opID, prepared, "inspect_failed")
 		writeError(w, http.StatusInternalServerError, "enforcement_failed", "created workload did not match admitted hardened state")
 		return
@@ -348,7 +351,10 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 	committed.Type = evidence.JournalCommit
 	committed.Outcome = evidence.Committed
 	if _, err := s.secure.evidence.Append(committed); err != nil {
-		_ = s.docker.Remove(r.Context(), name)
+		if !s.removeAndConfirmAbsent(r.Context(), name) {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "commit receipt failed and workload rollback is ambiguous; operation remains prepared")
+			return
+		}
 		_ = s.secure.journal.Compensate(opID)
 		writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", "commit receipt could not be persisted; workload was removed")
 		return
@@ -360,7 +366,10 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 		WorkloadDigest:    "sha256:" + workloadFingerprint(workload),
 		ImageConfigDigest: effective.Capsule.Image.ConfigDigest, Present: true,
 	}, effective.SitePolicy.PolicyEpoch); err != nil {
-		_ = s.docker.Remove(r.Context(), name)
+		if !s.removeAndConfirmAbsent(r.Context(), name) {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "fence commit failed and workload rollback is ambiguous; operation remains prepared")
+			return
+		}
 		s.recordCompensation(opID, prepared, "fence_commit")
 		writeError(w, http.StatusServiceUnavailable, "fence_unavailable", err.Error())
 		return
@@ -381,6 +390,19 @@ func (s *Server) recordCompensation(opID string, prepared evidence.Event, code s
 	compensated.ErrorCode = code
 	_, _ = s.secure.evidence.Append(compensated)
 	_ = s.secure.journal.Compensate(opID)
+}
+
+// removeAndConfirmAbsent is used only while compensating a prepared secure
+// operation. A failed or ambiguous rollback deliberately leaves the journal
+// pending so restart and every later mutation fail closed for reconciliation.
+func (s *Server) removeAndConfirmAbsent(ctx context.Context, name string) bool {
+	removeErr := s.docker.Remove(ctx, name)
+	if removeErr != nil && !errors.Is(removeErr, ErrNotFound) {
+		_, inspectErr := s.docker.Inspect(ctx, name)
+		return errors.Is(inspectErr, ErrNotFound)
+	}
+	_, inspectErr := s.docker.Inspect(ctx, name)
+	return errors.Is(inspectErr, ErrNotFound)
 }
 
 func (s *Server) writeSecureResponse(w http.ResponseWriter, status int, runtimeRef, runtimeStatus string, effective admission.EffectiveAdmission) {
@@ -641,10 +663,9 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 		return
 	}
 	if !expected {
-		if action == "start" {
-			_ = s.docker.Stop(r.Context(), name)
-		} else {
-			_ = s.docker.Start(r.Context(), name)
+		if !s.restoreLifecycleState(r.Context(), name, observed.Status == "running") {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "unexpected lifecycle result could not be rolled back; operation remains prepared")
+			return
 		}
 		s.recordCompensation(opID, prepared, "inspect_failed")
 		writeError(w, http.StatusInternalServerError, "enforcement_failed", "lifecycle result did not match the requested state")
@@ -659,10 +680,9 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 		committed.Type = evidence.LifecycleStop
 	}
 	if _, err := s.secure.evidence.Append(committed); err != nil {
-		if action == "start" {
-			_ = s.docker.Stop(r.Context(), name)
-		} else {
-			_ = s.docker.Start(r.Context(), name)
+		if !s.restoreLifecycleState(r.Context(), name, observed.Status == "running") {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "lifecycle receipt failed and prior state could not be restored; operation remains prepared")
+			return
 		}
 		_ = s.secure.journal.Compensate(opID)
 		writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", "lifecycle receipt could not be persisted; prior state was requested")
@@ -673,6 +693,16 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": final.Status})
+}
+
+func (s *Server) restoreLifecycleState(ctx context.Context, name string, wantRunning bool) bool {
+	if wantRunning {
+		_ = s.docker.Start(ctx, name)
+	} else {
+		_ = s.docker.Stop(ctx, name)
+	}
+	observed, err := s.managed(ctx, name)
+	return err == nil && (observed.Status == "running") == wantRunning
 }
 
 func (s *Server) destroy(w http.ResponseWriter, r *http.Request) {
