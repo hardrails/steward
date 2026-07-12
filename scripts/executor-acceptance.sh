@@ -101,6 +101,15 @@ expect_status 503 -X POST http://127.0.0.1:8090/v1/workloads \
 for ref in "$first_ref" "$second_ref"; do
   test "$(docker inspect --format '{{.HostConfig.Runtime}}' "$ref")" = runsc
   test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$ref")" = none
+  test "$(docker inspect --format '{{.HostConfig.IpcMode}}' "$ref")" = private
+  test "$(docker inspect --format '{{.HostConfig.CgroupnsMode}}' "$ref")" = private
+  test -z "$(docker inspect --format '{{.HostConfig.PidMode}}' "$ref")"
+  test -z "$(docker inspect --format '{{.HostConfig.UTSMode}}' "$ref")"
+  test "$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$ref")" = no
+  test "$(docker inspect --format '{{.HostConfig.AutoRemove}}' "$ref")" = false
+  test "$(docker inspect --format '{{.HostConfig.OomKillDisable}}' "$ref")" = false
+  test "$(docker inspect --format '{{.HostConfig.OomScoreAdj}}' "$ref")" = 0
+  test "$(docker inspect --format '{{.HostConfig.ShmSize}}' "$ref")" = 67108864
   test "$(docker inspect --format '{{.Config.User}}' "$ref")" = 65532:65532
   test "$(docker inspect --format '{{.Config.WorkingDir}}' "$ref")" = /workspace
   test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$ref")" = true

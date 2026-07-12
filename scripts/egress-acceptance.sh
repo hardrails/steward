@@ -1,16 +1,36 @@
 #!/usr/bin/env bash
-# Real Docker+gVisor proof for v1.4 signed HTTP(S) egress and lifecycle enforcement.
+# Real Docker+gVisor proof for signed HTTP(S) egress and lifecycle enforcement.
 set -euo pipefail
 
+[[ ${STEWARD_ACCEPT_DISPOSABLE_HOST_RISK:-} == YES ]] || {
+	echo "set STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES after confirming this is a disposable acceptance host" >&2
+	exit 2
+}
 docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || { echo "runsc is required" >&2; exit 2; }
 command -v openssl >/dev/null || { echo "openssl is required" >&2; exit 2; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 2; }
-: "${V14_IMAGE:?set V14_IMAGE to a preloaded repository@sha256 image containing /bin/sleep and curl}"
-[[ $V14_IMAGE == *@sha256:* ]] || { echo "V14_IMAGE must be digest pinned" >&2; exit 2; }
+: "${EGRESS_IMAGE:?set EGRESS_IMAGE to a preloaded repository@sha256 image containing /bin/sleep and curl}"
+[[ $EGRESS_IMAGE == *@sha256:* ]] || { echo "EGRESS_IMAGE must be digest pinned" >&2; exit 2; }
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 work=$(mktemp -d)
 runtime_ref=
+run_id=${STEWARD_ACCEPTANCE_RUN_ID:-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}
+[[ $run_id =~ ^[a-f0-9]{16}$ ]] || { echo "STEWARD_ACCEPTANCE_RUN_ID must be 16 lowercase hexadecimal characters" >&2; exit 2; }
+tenant_id="acceptance-$run_id"
+instance_id="agent-$run_id"
+lineage_id="lineage-$run_id"
+node_id="node-$run_id"
+
+assert_private_namespaces() {
+	local name=$1
+	test "$(docker inspect --format '{{.HostConfig.IpcMode}}' "$name")" = private
+	test "$(docker inspect --format '{{.HostConfig.CgroupnsMode}}' "$name")" = private
+	test -z "$(docker inspect --format '{{.HostConfig.PidMode}}' "$name")"
+	test -z "$(docker inspect --format '{{.HostConfig.UTSMode}}' "$name")"
+	test "$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name")" = no
+}
+
 cleanup() {
 	status=$?
 	[[ -z ${runtime_ref:-} || -z ${token:-} ]] || curl -sS -X DELETE "http://127.0.0.1:18090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null || true
@@ -25,19 +45,25 @@ cleanup() {
 			fi
 		done
 	fi
-	[[ -z ${relay_image:-} ]] || docker image rm "$relay_image" >/dev/null 2>&1 || true
-	docker container prune -f --filter label=io.hardrails.relay.managed=true >/dev/null 2>&1 || true
-	docker network prune -f --filter label=io.hardrails.network.managed=true >/dev/null 2>&1 || true
+	docker ps -aq \
+		--filter label=io.hardrails.relay.managed=true \
+		--filter "label=io.hardrails.tenant=$tenant_id" \
+		--filter "label=io.hardrails.instance=$instance_id" | xargs -r docker rm -f >/dev/null 2>&1 || true
+	docker network ls -q \
+		--filter label=io.hardrails.network.managed=true \
+		--filter "label=io.hardrails.tenant=$tenant_id" \
+		--filter "label=io.hardrails.instance=$instance_id" | xargs -r docker network rm >/dev/null 2>&1 || true
+	[[ -z ${relay_tag:-} ]] || docker image rm "$relay_tag" >/dev/null 2>&1 || true
 	rm -rf "$work"
 }
 trap cleanup EXIT
 
 for package in steward-executor steward-gateway steward-relay stewardctl; do
-	if [[ -n ${V14_BIN_DIR:-} ]]; then
-		[[ -f $V14_BIN_DIR/$package ]] || { echo "V14_BIN_DIR is missing $package" >&2; exit 2; }
-		install -m 0755 "$V14_BIN_DIR/$package" "$work/$package"
+	if [[ -n ${ACCEPTANCE_BIN_DIR:-} ]]; then
+		[[ -f $ACCEPTANCE_BIN_DIR/$package ]] || { echo "ACCEPTANCE_BIN_DIR is missing $package" >&2; exit 2; }
+		install -m 0755 "$ACCEPTANCE_BIN_DIR/$package" "$work/$package"
 	else
-		command -v go >/dev/null || { echo "go or V14_BIN_DIR with Linux binaries is required" >&2; exit 2; }
+		command -v go >/dev/null || { echo "go or ACCEPTANCE_BIN_DIR with Linux binaries is required" >&2; exit 2; }
 		(cd "$root" && go build -o "$work/$package" "./cmd/$package")
 	fi
 done
@@ -66,8 +92,9 @@ curl --noproxy '*' -fsS "http://$bridge_ip:18082/" | grep -q steward-egress-ok
 
 install -m 0755 "$work/steward-relay" "$work/relay"
 printf '%s\n' 'FROM scratch' 'COPY relay /steward-relay' 'USER 65532:65532' 'ENTRYPOINT ["/steward-relay"]' >"$work/Relayfile"
-docker build --network=none --pull=false --provenance=false -q -f "$work/Relayfile" -t steward-v14-egress-relay:latest "$work" >/dev/null
-relay_image=$(docker image inspect --format '{{.Id}}' steward-v14-egress-relay:latest)
+relay_tag="steward-egress-relay-acceptance:$run_id"
+docker build --network=none --pull=false --provenance=false -q -f "$work/Relayfile" -t "$relay_tag" "$work" >/dev/null
+relay_image=$(docker image inspect --format '{{.Id}}' "$relay_tag")
 
 printf '%s\n' service-token >"$work/service-token"
 chmod 0600 "$work/service-token"
@@ -98,23 +125,27 @@ for _ in $(seq 1 30); do [[ -S $work/gateway/control.sock ]] && break; sleep 1; 
 "$work/stewardctl" keygen -private-out "$work/publisher.private" -public-out "$work/publisher.public" >/dev/null
 "$work/stewardctl" keygen -private-out "$work/receipts.private" -public-out "$work/receipts.public" >/dev/null
 publisher_public=$(tr -d '\n' <"$work/publisher.public")
-manifest_digest=${V14_IMAGE##*@}
-repository=${V14_IMAGE%@*}
-config_digest=$(docker image inspect --format '{{.Id}}' "$V14_IMAGE")
-architecture=$(docker image inspect --format '{{.Architecture}}' "$V14_IMAGE")
+manifest_digest=${EGRESS_IMAGE##*@}
+repository=${EGRESS_IMAGE%@*}
+config_digest=$(docker image inspect --format '{{.Id}}' "$EGRESS_IMAGE")
+architecture=$(docker image inspect --format '{{.Architecture}}' "$EGRESS_IMAGE")
+variant=$(docker image inspect --format '{{.Variant}}' "$EGRESS_IMAGE")
+[[ $variant != '<no value>' ]] || variant=
+platform="\"os\":\"linux\",\"architecture\":\"$architecture\""
+[[ -z $variant ]] || platform+=",\"variant\":\"$variant\""
 printf '%s\n' "{
- \"schema_version\":\"steward.admission.v1\",\"policy_id\":\"v14-egress\",\"policy_epoch\":1,
+ \"schema_version\":\"steward.admission.v1\",\"policy_id\":\"egress-acceptance\",\"policy_epoch\":1,
  \"publishers\":[{\"key_id\":\"publisher\",\"public_key\":\"$publisher_public\",\"revoked\":false,
    \"allowed_profiles\":[{\"id\":\"generic-v1\",\"version\":\"v1\"}],\"allowed_repositories\":[\"$repository\"],
    \"allowed_manifest_digests\":[\"$manifest_digest\"],\"resource_ceiling\":{\"memory_bytes\":67108864,\"cpu_millis\":100,\"pids\":32}}],
- \"tenants\":[{\"tenant_id\":\"tenant-a\",\"publisher_key_ids\":[\"publisher\"],
+ \"tenants\":[{\"tenant_id\":\"$tenant_id\",\"publisher_key_ids\":[\"publisher\"],
    \"resource_ceiling\":{\"memory_bytes\":67108864,\"cpu_millis\":100,\"pids\":32},\"egress_route_ids\":[\"acceptance-web\"]}]
 }" >"$work/policy.json"
 "$work/stewardctl" policy sign -in "$work/policy.json" -out "$work/policy.dsse.json" -key "$work/site.private" -key-id site-root >/dev/null
 printf '%s\n' "{
- \"schema_version\":\"steward.admission.v1\",\"capsule_id\":\"v14-agent\",\"publisher_key_id\":\"publisher\",
+ \"schema_version\":\"steward.admission.v1\",\"capsule_id\":\"egress-agent\",\"publisher_key_id\":\"publisher\",
  \"profile\":{\"id\":\"generic-v1\",\"version\":\"v1\"},
- \"image\":{\"repository\":\"$repository\",\"manifest_digest\":\"$manifest_digest\",\"config_digest\":\"$config_digest\",\"platform\":{\"os\":\"linux\",\"architecture\":\"$architecture\"}},
+ \"image\":{\"repository\":\"$repository\",\"manifest_digest\":\"$manifest_digest\",\"config_digest\":\"$config_digest\",\"platform\":{$platform}},
  \"command\":[\"/bin/sleep\",\"300\"],\"resources\":{\"memory_bytes\":67108864,\"cpu_millis\":100,\"pids\":32},
  \"capabilities\":{\"state\":false,\"inference\":false,\"service\":false,\"egress\":true},
  \"state\":{\"schema_version\":\"v1\",\"path\":\"/state\"},\"service\":{}
@@ -126,14 +157,19 @@ token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 printf '%s\n' "$token" >"$work/token"; chmod 0600 "$work/token" "$work/receipts.private"
 "$work/steward-executor" -initialize-admission-fence -admission-fence-file "$work/fences.bin" >/dev/null
 "$work/steward-executor" -addr 127.0.0.1:18090 -token-file "$work/token" -admission-policy-file "$work/policy.dsse.json" \
-	-admission-site-root-public-key-file "$work/site.public" -admission-site-root-key-id site-root -admission-node-id node-a \
+	-admission-site-root-public-key-file "$work/site.public" -admission-site-root-key-id site-root -admission-node-id "$node_id" \
 	-admission-allow-host-admin-intent -admission-fence-file "$work/fences.bin" -admission-journal-file "$work/journal.bin" \
 	-admission-evidence-file "$work/evidence.bin" -admission-evidence-key-file "$work/receipts.private" \
 	-gateway-control-socket "$work/gateway/control.sock" -gateway-grant-root "$work/grants" -relay-image "$relay_image" -relay-gid "$gid" \
 	>"$work/executor.log" 2>&1 & executor_pid=$!
-for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:18090/v1/healthz >/dev/null 2>&1 && break; sleep 1; done
+for _ in $(seq 1 30); do
+	kill -0 "$executor_pid" 2>/dev/null || { echo "Executor exited during startup" >&2; exit 1; }
+	curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:18090/v1/readiness >/dev/null 2>&1 && break
+	sleep 1
+done
+curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:18090/v1/readiness >/dev/null
 
-payload="{\"capsule_dsse_base64\":\"$capsule_base64\",\"intent\":{\"tenant_id\":\"tenant-a\",\"node_id\":\"node-a\",\"instance_id\":\"agent-1\",\"lineage_id\":\"lineage-1\",\"generation\":1,\"capsule_digest\":\"$capsule_digest\",\"resources\":{\"memory_bytes\":67108864,\"cpu_millis\":100,\"pids\":32},\"capabilities\":{\"state\":false,\"inference\":false,\"service\":false,\"egress\":true},\"state_disposition\":\"none\",\"egress_route_ids\":[\"acceptance-web\"]}}"
+payload="{\"capsule_dsse_base64\":\"$capsule_base64\",\"intent\":{\"tenant_id\":\"$tenant_id\",\"node_id\":\"$node_id\",\"instance_id\":\"$instance_id\",\"lineage_id\":\"$lineage_id\",\"generation\":1,\"capsule_digest\":\"$capsule_digest\",\"resources\":{\"memory_bytes\":67108864,\"cpu_millis\":100,\"pids\":32},\"capabilities\":{\"state\":false,\"inference\":false,\"service\":false,\"egress\":true},\"state_disposition\":\"none\",\"egress_route_ids\":[\"acceptance-web\"]}}"
 admission_status=$(curl -sS -o "$work/admission-response.json" -w '%{http_code}' -X POST http://127.0.0.1:18090/v1/admissions \
 	-H 'Content-Type: application/json' -H "Authorization: Bearer $token" --data-binary "$payload")
 if [[ $admission_status != 200 && $admission_status != 201 ]]; then
@@ -145,6 +181,18 @@ runtime_ref=$(sed -n 's/.*"runtime_ref":"\([^"]*\)".*/\1/p' <<<"$response")
 [[ $response == *'"egress_proxy":"http://steward-relay:8082"'* && -n $runtime_ref ]]
 curl -fsS -X POST "http://127.0.0.1:18090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
 
+assert_private_namespaces "$runtime_ref"
+relay_ref=$(docker ps -q --filter label=io.hardrails.relay.managed=true \
+	--filter "label=io.hardrails.tenant=$tenant_id" --filter "label=io.hardrails.instance=$instance_id")
+test -n "$relay_ref"
+assert_private_namespaces "$relay_ref"
+agent_network=$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$runtime_ref")
+relay_network=$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$relay_ref")
+test -n "$agent_network" && test "$agent_network" != none && test "$agent_network" = "$relay_network"
+test "$(docker network inspect --format '{{.Internal}}' "$agent_network")" = true
+test "$(docker network inspect --format '{{.Attachable}}' "$agent_network")" = false
+test "$(docker network inspect --format '{{.Driver}}' "$agent_network")" = bridge
+test "$(docker network inspect --format '{{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}}' "$agent_network")" = isolated
 docker inspect --format '{{json .HostConfig.Dns}}' "$runtime_ref" | grep -q '"127.0.0.1"'
 if docker exec "$runtime_ref" curl --noproxy '*' --connect-timeout 2 -fsS "http://$bridge_ip:18082/direct-bypass" >/dev/null 2>&1; then
 	echo "agent bypassed the relay from its internal network" >&2
@@ -169,5 +217,5 @@ curl -fsS -X POST "http://127.0.0.1:18090/v1/workloads/$runtime_ref/start" -H "A
 docker exec "$runtime_ref" curl -kfsS "https://$bridge_ip:18443/" | grep -q steward-egress-ok
 curl -fsS -X DELETE "http://127.0.0.1:18090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 runtime_ref=
-"$work/stewardctl" evidence verify -in "$work/evidence.bin" -public-key "$work/receipts.public" -node-id node-a | grep -q 'valid evidence chain'
-echo "v1.4 egress acceptance passed: gVisor, HTTP, HTTPS CONNECT, denial, DNS isolation, audit, stats, lifecycle, and receipts verified."
+"$work/stewardctl" evidence verify -in "$work/evidence.bin" -public-key "$work/receipts.public" -node-id "$node_id" | grep -q 'valid evidence chain'
+echo "egress acceptance passed: gVisor, HTTP, HTTPS CONNECT, denial, DNS isolation, audit, stats, lifecycle, and receipts verified."

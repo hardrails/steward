@@ -32,24 +32,53 @@ jobs:
         run: >-
           bash -n scripts/install-node.sh scripts/activate-node-release.sh
           scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh
-          scripts/install-steward.sh scripts/uninstall-node.sh
+          scripts/install-steward.sh scripts/uninstall-node.sh scripts/node-removal-guard.sh
           scripts/build-deb.sh scripts/build-rpm.sh
+          scripts/write-release-manifest.sh
+          scripts/node-upgrade-smoke.sh
+          scripts/check-docs-consistency.sh
           scripts/signed-admission-acceptance.sh
-          scripts/v14-egress-acceptance.sh
+          scripts/egress-acceptance.sh scripts/positive-capabilities-acceptance.sh
           packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm
+      - name: Node upgrade transaction smoke
+        run: STEWARD_REQUIRE_ROOT_SMOKE=1 bash scripts/node-upgrade-smoke.sh
+      - name: Documentation consistency
+        run: bash scripts/check-docs-consistency.sh
       - name: Installer plan smoke
         run: |
           bash scripts/install-steward.sh --non-interactive --dry-run \
-            --stage-only --version v1.3.3 --package deb | grep -q 'package:      deb'
+            --stage-only --version v0.0.0 --package deb | grep -q 'package:      deb'
           bash scripts/install-steward.sh --non-interactive --dry-run \
-            --stage-only --version v1.3.3 --package rpm | grep -q 'package:      rpm'
+            --stage-only --version v0.0.0 --package rpm | grep -q 'package:      rpm'
           bash scripts/install-steward.sh --non-interactive --dry-run \
-            --stage-only --version v1.3.3 --package tar | grep -q 'package:      tar'
+            --stage-only --version v0.0.0 --package tar | grep -q 'package:      tar'
           if bash scripts/install-steward.sh --non-interactive --dry-run \
-            --version v1.3.3 2>/dev/null; then
+            --version v0.0.0 2>/dev/null; then
             echo 'full unattended install accepted missing enrollment inputs' >&2
             exit 1
           fi
+          bash scripts/install-steward.sh --non-interactive --dry-run \
+            --local-only --version v0.0.0 --package tar \
+            --admission-policy /trust/policy.dsse.json \
+            --site-root-public-key /trust/site-root.public \
+            --site-root-key-id site-root --node-id node-1 | grep -q 'admission:    signed'
+          if bash scripts/install-steward.sh --non-interactive --dry-run \
+            --stage-only --version v0.0.0 --install-gvisor 2>/dev/null; then
+            echo 'staged install accepted an impossible gVisor request' >&2
+            exit 1
+          fi
+          if bash scripts/install-steward.sh --non-interactive --dry-run \
+            --local-only --version v0.0.0 --admission-policy /trust/policy.dsse.json 2>/dev/null; then
+            echo 'installer accepted partial signed-admission trust' >&2
+            exit 1
+          fi
+          if bash scripts/install-steward.sh --non-interactive --dry-run \
+            --stage-only --version v0.0.0-01 2>/dev/null; then
+            echo 'installer accepted a leading-zero numeric prerelease identifier' >&2
+            exit 1
+          fi
+          bash scripts/install-steward.sh --non-interactive --dry-run \
+            --stage-only --version v0.0.0-rc.1 --package tar | grep -q 'version:      v0.0.0-rc.1'
       - name: Native package smoke
         run: |
           stage=$(mktemp -d)
@@ -64,8 +93,13 @@ jobs:
           cp -R deploy/config deploy/systemd "$stage/deploy/"
           cp scripts/install-node.sh scripts/activate-node-release.sh \
             scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh \
-            scripts/uninstall-node.sh scripts/build-relay-image.sh "$stage/scripts/"
+            scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh "$stage/scripts/"
           cp LICENSE README.md "$stage/"
+          bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)"
+          cp "$stage/release.json" "$stage/release.first.json"
+          bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)"
+          cmp "$stage/release.first.json" "$stage/release.json"
+          rm "$stage/release.first.json"
           bash scripts/build-deb.sh "$stage" v0.0.0-test "$(go env GOARCH)" \
             /tmp/steward-node-test.deb
           bash scripts/build-rpm.sh "$stage" v0.0.0-test "$(go env GOARCH)" \
@@ -79,6 +113,10 @@ jobs:
             grep -q './usr/lib/steward-node/release/steward-mcp'
           dpkg-deb --contents /tmp/steward-node-test.deb | \
             grep -q './usr/lib/steward-node/release/steward-gateway'
+          dpkg-deb --contents /tmp/steward-node-test.deb | \
+            grep -q './usr/lib/steward-node/release/release.json'
+          dpkg-deb --ctrl-tarfile /tmp/steward-node-test.deb | \
+            tar -xOf - ./postinst | grep -q -- "--expected-version 'v0.0.0-test'"
           rpm -qpi /tmp/steward-node-test.rpm
           rpm -qpl /tmp/steward-node-test.rpm | \
             grep -q '/usr/lib/steward-node/release/steward-executor'
@@ -86,6 +124,10 @@ jobs:
             grep -q '/usr/lib/steward-node/release/stewardctl'
           rpm -qpl /tmp/steward-node-test.rpm | \
             grep -q '/usr/lib/steward-node/release/steward-mcp'
+          rpm -qpl /tmp/steward-node-test.rpm | \
+            grep -q '/usr/lib/steward-node/release/release.json'
+          rpm -qp --scripts /tmp/steward-node-test.rpm | \
+            grep -q -- "--expected-version 'v0.0.0-test'"
 
   lint:
     name: golangci-lint
@@ -142,7 +184,7 @@ jobs:
       - name: install gremlins (pinned)
         run: go install github.com/go-gremlins/gremlins/cmd/gremlins@e05b1d47b8c55748e50abc28ff6b132c536bacca # v0.6.0
       - name: mutation testing (efficacy >= 70%)
-        run: "$(go env GOPATH)/bin/gremlins unleash ."
+        run: '"$(go env GOPATH)/bin/gremlins" unleash .'
 
   smoke:
     name: smoke
