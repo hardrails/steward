@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -40,6 +41,7 @@ func main() {
 	uplinkCredentialFile := flag.String("uplink-credential-file", "", "path to versioned executor uplink credential")
 	uplinkStateFile := flag.String("uplink-state-file", "", "path to durable executor command-fencing state")
 	initializeUplinkState := flag.Bool("initialize-uplink-state", false, "initialize a new empty executor uplink fence and exit")
+	migrateUplinkStateTenant := flag.String("migrate-uplink-state-v1-tenant", "", "explicitly bind a version-1 uplink fence to this tenant and migrate it to version 2")
 	uplinkPollInterval := flag.Duration("uplink-poll-interval", 10*time.Second, "base interval between executor uplink polls")
 	uplinkAllowInsecureHTTP := flag.Bool("uplink-allow-insecure-http", false, "explicitly allow plaintext HTTP to a non-loopback uplink")
 	uplinkTLSCAFile := flag.String("uplink-tls-ca-file", "", "optional PEM CA bundle for the executor uplink")
@@ -52,6 +54,13 @@ func main() {
 	maxPIDs := flag.Int64("max-pids", defaults.MaxPIDs, "maximum processes for one workload")
 	maxWorkloads := flag.Int("max-workloads", defaults.MaxWorkloads, "maximum executor-managed workloads on this host")
 	maxWorkloadsPerTenant := flag.Int("max-workloads-per-tenant", defaults.MaxWorkloadsPerTenant, "maximum executor-managed workloads for one tenant")
+	maxTotalMemoryBytes := flag.Int64("max-total-memory-bytes", defaults.MaxTotalMemoryBytes, "maximum memory reserved by all managed workloads and relays")
+	maxTotalCPUMillis := flag.Int64("max-total-cpu-millis", defaults.MaxTotalCPUMillis, "maximum CPU millicores reserved by all managed workloads and relays")
+	maxTotalPIDs := flag.Int64("max-total-pids", defaults.MaxTotalPIDs, "maximum processes reserved by all managed workloads and relays")
+	maxTenantMemoryBytes := flag.Int64("max-tenant-memory-bytes", defaults.MaxTenantMemoryBytes, "maximum memory reserved for one tenant's workloads and relays")
+	maxTenantCPUMillis := flag.Int64("max-tenant-cpu-millis", defaults.MaxTenantCPUMillis, "maximum CPU millicores reserved for one tenant's workloads and relays")
+	maxTenantPIDs := flag.Int64("max-tenant-pids", defaults.MaxTenantPIDs, "maximum processes reserved for one tenant's workloads and relays")
+	allowUnquotaedState := flag.Bool("allow-unquotaed-state-on-dedicated-host", false, "INSECURE on shared hosts: allow persistent Docker volumes without hard byte or inode quotas")
 	admissionPolicyFile := flag.String("admission-policy-file", "", "signed site-policy DSSE file; enables signed admission")
 	admissionSiteRootFile := flag.String("admission-site-root-public-key-file", "", "base64 Ed25519 site-root public key")
 	admissionSiteRootKeyID := flag.String("admission-site-root-key-id", "", "site-root key ID used by the signed policy")
@@ -63,14 +72,18 @@ func main() {
 	admissionEvidenceFile := flag.String("admission-evidence-file", "/var/lib/steward-executor/evidence.bin", "signed enforcement receipt chain")
 	admissionEvidenceKeyFile := flag.String("admission-evidence-key-file", "", "PKCS#8 PEM Ed25519 node receipt private key")
 	admissionEvidenceEpoch := flag.Uint64("admission-evidence-epoch", 1, "receipt key epoch")
-	gatewayControlSocket := flag.String("gateway-control-socket", "", "Steward Gateway Unix control socket; enables inference and service grants")
-	gatewayGrantRoot := flag.String("gateway-grant-root", "/run/steward-gateway/grants", "host directory containing per-grant inference sockets")
+	gatewayControlSocket := flag.String("gateway-control-socket", "", "Steward Gateway Unix control socket; enables inference, service, and egress grants")
+	gatewayGrantRoot := flag.String("gateway-grant-root", "/run/steward-gateway/grants", "host directory containing per-grant capability sockets")
 	relayImage := flag.String("relay-image", "", "immutable steward-relay image reference required with gateway topology")
-	relayGID := flag.Int("relay-gid", 0, "host group ID allowed to read per-grant inference sockets")
+	relayGID := flag.Int("relay-gid", 0, "host group ID used for per-grant relay socket access")
 	flag.Parse()
 	if *version {
 		fmt.Println("steward-executor " + buildinfo.Resolve())
 		return
+	}
+	if *initializeUplinkState && *migrateUplinkStateTenant != "" {
+		slog.Error("uplink state initialization and migration are mutually exclusive")
+		os.Exit(2)
 	}
 	if *initializeUplinkState {
 		if err := executoruplink.InitializeStateStore(*uplinkStateFile); err != nil {
@@ -78,6 +91,15 @@ func main() {
 			os.Exit(2)
 		}
 		fmt.Println("initialized executor uplink state " + *uplinkStateFile)
+		return
+	}
+	if *migrateUplinkStateTenant != "" {
+		backup, err := executoruplink.MigrateStateStoreV1ToV2(*uplinkStateFile, *migrateUplinkStateTenant)
+		if err != nil {
+			slog.Error("migrate executor uplink state", "err", err)
+			os.Exit(2)
+		}
+		fmt.Printf("migrated executor uplink state %s; preserved version-1 backup %s\n", *uplinkStateFile, backup)
 		return
 	}
 	if *initializeAdmissionFence {
@@ -113,6 +135,12 @@ func main() {
 		MaxPIDs:               *maxPIDs,
 		MaxWorkloads:          *maxWorkloads,
 		MaxWorkloadsPerTenant: *maxWorkloadsPerTenant,
+		MaxTotalMemoryBytes:   *maxTotalMemoryBytes,
+		MaxTotalCPUMillis:     *maxTotalCPUMillis,
+		MaxTotalPIDs:          *maxTotalPIDs,
+		MaxTenantMemoryBytes:  *maxTenantMemoryBytes,
+		MaxTenantCPUMillis:    *maxTenantCPUMillis,
+		MaxTenantPIDs:         *maxTenantPIDs,
 	}
 	server, err := executor.NewServerWithPolicy(docker, token, policy, slog.Default())
 	if err != nil {
@@ -121,9 +149,12 @@ func main() {
 	}
 	var operationJournal *journal.Journal
 	var receiptLog *evidence.Log
+	var commandPolicy *admission.SitePolicy
+	secureExecutor := false
+	secureNodeID := ""
 	admissionRequested := *admissionPolicyFile != "" || *admissionSiteRootFile != "" ||
 		*admissionSiteRootKeyID != "" || *admissionNodeID != "" || *admissionEvidenceKeyFile != "" ||
-		*admissionAllowHostAdmin || *gatewayControlSocket != "" || *relayImage != "" || *relayGID != 0
+		*admissionAllowHostAdmin || *allowUnquotaedState || *gatewayControlSocket != "" || *relayImage != "" || *relayGID != 0
 	if admissionRequested {
 		if *admissionPolicyFile == "" || *admissionSiteRootFile == "" || *admissionSiteRootKeyID == "" ||
 			*admissionNodeID == "" || *admissionEvidenceKeyFile == "" {
@@ -140,6 +171,17 @@ func main() {
 			slog.Error("read admission site-root public key", "err", err)
 			os.Exit(2)
 		}
+		verifiedPolicy, err := admission.VerifySitePolicy(policyEnvelope, map[string]ed25519.PublicKey{
+			*admissionSiteRootKeyID: siteRoot,
+		})
+		if err != nil {
+			slog.Error("verify signed site policy", "err", err)
+			os.Exit(2)
+		}
+		if *allowUnquotaedState && len(verifiedPolicy.Policy.Tenants) != 1 {
+			slog.Error("unquotaed persistent state requires a signed site policy with exactly one tenant")
+			os.Exit(2)
+		}
 		receiptPrivate, err := readEd25519PrivateKey(*admissionEvidenceKeyFile)
 		if err != nil {
 			slog.Error("read evidence private key", "err", err)
@@ -150,13 +192,23 @@ func main() {
 			slog.Error("open admission fence store", "err", err)
 			os.Exit(2)
 		}
-		operationJournal, err = journal.Open(*admissionJournalFile)
+		if *checkConfig {
+			operationJournal, err = journal.OpenForValidation(*admissionJournalFile)
+		} else {
+			operationJournal, err = journal.Open(*admissionJournalFile)
+		}
 		if err != nil {
 			slog.Error("open operation journal", "err", err)
 			os.Exit(2)
 		}
 		defer operationJournal.Close()
-		receiptLog, err = evidence.Open(*admissionEvidenceFile, receiptPrivate, *admissionNodeID, *admissionEvidenceEpoch)
+		if *checkConfig {
+			receiptLog, err = evidence.OpenForValidation(
+				*admissionEvidenceFile, receiptPrivate.Public().(ed25519.PublicKey), *admissionNodeID, *admissionEvidenceEpoch,
+			)
+		} else {
+			receiptLog, err = evidence.Open(*admissionEvidenceFile, receiptPrivate, *admissionNodeID, *admissionEvidenceEpoch)
+		}
 		if err != nil {
 			slog.Error("open evidence log", "err", err)
 			os.Exit(2)
@@ -184,13 +236,24 @@ func main() {
 				*admissionSiteRootKeyID: siteRoot,
 			},
 			NodeID: *admissionNodeID, Fences: fences, Journal: operationJournal, Evidence: receiptLog,
-			AllowHostAdminIntent: *admissionAllowHostAdmin,
-			Topology:             topology, Gateway: gatewayControl, RelayImage: *relayImage,
+			AllowHostAdminIntent:               *admissionAllowHostAdmin,
+			AllowUnquotaedStateOnDedicatedHost: *allowUnquotaedState,
+			Topology:                           topology, Gateway: gatewayControl, RelayImage: *relayImage,
 			GrantRoot: configuredGrantRoot, RelayGID: *relayGID,
 		}); err != nil {
 			slog.Error("configure signed admission", "err", err)
 			os.Exit(2)
 		}
+		if *checkConfig && len(operationJournal.Pending()) != 0 {
+			slog.Error("executor configuration is valid but the operation journal has pending work; normal startup will run in degraded containment mode")
+			os.Exit(2)
+		}
+		if *allowUnquotaedState {
+			slog.Warn("unquotaed persistent state is enabled; this mode is only safe on a dedicated single-tenant host")
+		}
+		commandPolicy = &verifiedPolicy.Policy
+		secureExecutor = true
+		secureNodeID = *admissionNodeID
 	}
 	handler := server.Handler()
 	var poller *executoruplink.Poller
@@ -215,11 +278,18 @@ func main() {
 		if *uplinkTLSSkipVerify {
 			slog.Warn("executor uplink TLS verification is disabled")
 		}
+		parsedUplink, err := url.Parse(*uplinkURL)
+		if err != nil {
+			slog.Error("parse executor uplink URL", "err", err)
+			os.Exit(2)
+		}
 		poller, err = executoruplink.NewPoller(executoruplink.Config{
 			BaseURL: *uplinkURL, CredentialPath: *uplinkCredentialFile,
 			PollInterval: *uplinkPollInterval, AllowInsecureHTTP: *uplinkAllowInsecureHTTP,
 			HTTPClient: httpClient, Handler: handler, LocalToken: token, State: state,
-			Logger: slog.Default(),
+			Logger: slog.Default(), SecureExecutor: secureExecutor, SecureNodeID: secureNodeID,
+			ProtectedTransport: parsedUplink.Scheme == "https" && !*uplinkTLSSkipVerify,
+			CommandPolicy:      commandPolicy,
 		})
 		if err != nil {
 			slog.Error("configure executor uplink", "err", err)
@@ -246,6 +316,22 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if secureExecutor {
+		reconcileContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		report, err := server.Reconcile(reconcileContext)
+		cancel()
+		if err != nil {
+			slog.Warn("initial executor reconciliation is incomplete; starting in degraded containment mode", "err", err,
+				"checked", report.Checked, "changed", report.Changed,
+				"revoked", report.Revoked, "failures", len(report.Failures)+report.DroppedFailures)
+		}
+		go func() {
+			if err := server.RunReconciler(ctx, 30*time.Second); err != nil && ctx.Err() == nil {
+				slog.Error("executor reconciler stopped", "err", err)
+				stop()
+			}
+		}()
+	}
 	if poller != nil {
 		go poller.Run(ctx)
 	}

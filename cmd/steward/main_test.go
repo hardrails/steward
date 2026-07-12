@@ -334,6 +334,27 @@ func TestDisableInboundListenerWithoutUplinkExitsNonZero(t *testing.T) {
 	}
 }
 
+func TestListenerFailureExitsNonZero(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a binary; skipped in -short")
+	}
+	bin := buildSteward(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	cmd := exec.Command(bin, "-addr", listener.Addr().String())
+	cmd.Env = stewardEnv()
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("listener failure exited zero: %s", output)
+	}
+	if !strings.Contains(string(output), "server error") || !strings.Contains(string(output), "address already in use") {
+		t.Fatalf("listener failure was not actionable: err=%v output=%s", err, output)
+	}
+}
+
 // TestDisableInboundListenerMalformedEnvExitsNonZero is the hosted-review
 // finding (P2/security, "Invalid Disable Env Binds"): STEWARD_DISABLE_INBOUND_LISTENER
 // is access-control-relevant, so a set-but-unparseable value ("yes", "on", a
@@ -1294,6 +1315,10 @@ func TestCheckConfigInvalidMatchesRealStartup(t *testing.T) {
 	if err := os.WriteFile(corruptState, []byte("not valid steward state json"), 0o600); err != nil {
 		t.Fatalf("write corrupt state file: %v", err)
 	}
+	unsafeState := filepath.Join(t.TempDir(), "unsafe-state.json")
+	if err := os.WriteFile(unsafeState, []byte(`{"version":1,"instances":[]}`), 0o644); err != nil {
+		t.Fatalf("write unsafe state file: %v", err)
+	}
 
 	cases := []struct {
 		name string
@@ -1306,6 +1331,7 @@ func TestCheckConfigInvalidMatchesRealStartup(t *testing.T) {
 		{"missing credential file", []string{"-uplink-url", "http://control-plane.example", "-uplink-credential-file", missingCred}, []string{missingCred}},
 		{"uplink url without credential file", []string{"-uplink-url", "http://control-plane.example"}, []string{"-uplink-credential-file"}},
 		{"corrupt state file", []string{"-state-file", corruptState}, []string{corruptState}},
+		{"unsafe state permissions", []string{"-state-file", unsafeState}, []string{unsafeState, "0600"}},
 		{"malformed addr", []string{"-addr", "0.0.0.0.8080"}, []string{"0.0.0.0.8080"}},
 		{"addr port out of range", []string{"-addr", "127.0.0.1:99999"}, []string{"127.0.0.1:99999", "99999"}},
 	}

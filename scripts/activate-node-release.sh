@@ -1,57 +1,513 @@
 #!/usr/bin/env bash
-# Atomically select an already-installed Steward node version; optionally restart.
-set -euo pipefail
+# Validate and select one complete Steward node release as a serialized transaction.
+set -Eeuo pipefail
+
+usage() {
+	cat <<'EOF' >&2
+usage: activate-node-release VERSION [--restart|--no-restart]
+
+--restart preserves the active/inactive state of each Steward service while
+switching releases. --no-restart, and the backwards-compatible default, are
+accepted only when all Steward services are already inactive.
+EOF
+}
 
 if [[ ${EUID} -ne 0 ]]; then
 	echo "activate-node-release: run as root" >&2
 	exit 2
 fi
-if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && $2 != --restart ) ]]; then
-	echo "usage: activate-node-release VERSION [--restart]" >&2
-	exit 2
-fi
-
+if [[ $# -lt 1 || $# -gt 2 ]]; then usage; exit 2; fi
 version=$1
-if [[ ! $version =~ ^[A-Za-z0-9._+-]+$ ]]; then
-	echo "activate-node-release: unsafe version string '$version'" >&2
+restart=false
+case "${2:-}" in
+	"") ;;
+	--restart) restart=true ;;
+	--no-restart) restart=false ;;
+	*) usage; exit 2 ;;
+esac
+
+valid_release_version() {
+	local candidate=$1 core prerelease identifier
+	[[ $candidate =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]] || return 1
+	core=${candidate#v}
+	if [[ $core == *-* ]]; then
+		prerelease=${core#*-}
+		IFS=. read -r -a identifiers <<<"$prerelease"
+		for identifier in "${identifiers[@]}"; do
+			[[ $identifier =~ ^[0-9]+$ && $identifier == 0[0-9]* ]] && return 1
+		done
+	fi
+	return 0
+}
+if ! valid_release_version "$version"; then
+	echo "activate-node-release: version must be an installable vX.Y.Z release tag" >&2
 	exit 2
 fi
+case "$(uname -m)" in
+	x86_64 | amd64) goarch=amd64 ;;
+	aarch64 | arm64) goarch=arm64 ;;
+	*) echo "activate-node-release: unsupported architecture $(uname -m)" >&2; exit 2 ;;
+esac
+
 release_dir="/opt/steward/releases/$version"
-for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
-	path="$release_dir/$binary"
-	if [[ ! -x $path ]]; then
-		echo "activate-node-release: missing executable $path" >&2
+release_files=(
+	steward
+	steward-executor
+	steward-gateway
+	steward-mcp
+	steward-relay
+	stewardctl
+	integration/deploy/config/executor-gateway.env
+	integration/deploy/config/executor.env
+	integration/deploy/config/gateway.json.in
+	integration/deploy/config/steward-local.json
+	integration/deploy/config/steward.json
+	integration/deploy/systemd/steward-executor.service
+	integration/deploy/systemd/steward-gateway.service
+	integration/deploy/systemd/steward.service
+	integration/scripts/activate-node-release.sh
+	integration/scripts/build-relay-image.sh
+	integration/scripts/configure-admission.sh
+	integration/scripts/configure-node.sh
+	integration/scripts/install-node.sh
+	integration/scripts/node-preflight.sh
+	integration/scripts/node-removal-guard.sh
+	integration/scripts/uninstall-node.sh
+)
+
+hash_file() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{print $1}'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk '{print $1}'
+	else
+		echo "activate-node-release: sha256sum or shasum is required" >&2
 		exit 2
 	fi
-	reported=$(runuser -u steward -- "$path" -version | awk '{print $2}')
+}
+
+write_canonical_manifest() {
+	local output=$1 logical path suffix index last_index
+	{
+		printf '{\n'
+		printf '  "schema": "steward.release.v2",\n'
+		printf '  "version": "%s",\n' "$version"
+		printf '  "os": "linux",\n'
+		printf '  "arch": "%s",\n' "$goarch"
+		printf '  "state_formats": {\n'
+		printf '    "admission_fence": {"read_min": 1, "read_max": 2, "write": 2},\n'
+		printf '    "evidence_log": {"read_min": 1, "read_max": 1, "write": 1},\n'
+		printf '    "gateway_state": {"read_min": 1, "read_max": 2, "write": 2},\n'
+		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
+		printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
+		printf '    "uplink_state": {"read_min": 2, "read_max": 2, "write": 2}\n'
+		printf '  },\n'
+		printf '  "files": {\n'
+		last_index=$((${#release_files[@]} - 1))
+		for index in "${!release_files[@]}"; do
+			logical=${release_files[$index]}
+			path="$release_dir/$logical"
+			if [[ ! -f $path || -L $path ]]; then
+				echo "activate-node-release: release is missing regular file $logical" >&2
+				return 2
+			fi
+			suffix=,
+			(( index == last_index )) && suffix=
+			printf '    "%s": "%s"%s\n' "$logical" "$(hash_file "$path")" "$suffix"
+		done
+		printf '  }\n'
+		printf '}\n'
+	} >"$output"
+}
+
+if [[ ! -d $release_dir || -L $release_dir ]]; then
+	echo "activate-node-release: release directory is missing or invalid: $release_dir" >&2
+	exit 2
+fi
+manifest="$release_dir/release.json"
+if [[ ! -f $manifest || -L $manifest ]]; then
+	echo "activate-node-release: release is missing regular file release.json" >&2
+	exit 2
+fi
+manifest_version=$(sed -n 's/^  "version": "\([^"]*\)",$/\1/p' "$manifest")
+if [[ $manifest_version != "$version" ]]; then
+	echo "activate-node-release: release.json reports '${manifest_version:-<invalid>}', expected '$version'" >&2
+	exit 2
+fi
+expected_manifest=$(mktemp)
+write_canonical_manifest "$expected_manifest"
+if ! cmp -s "$manifest" "$expected_manifest"; then
+	rm -f "$expected_manifest"
+	echo "activate-node-release: release.json does not match the target or release files" >&2
+	exit 2
+fi
+rm -f "$expected_manifest"
+if find "$release_dir" -mindepth 1 -type l -print -quit | grep -q . ||
+	find "$release_dir" -mindepth 1 ! -type f ! -type d -print -quit | grep -q .; then
+	echo "activate-node-release: immutable release contains a symlink or special file" >&2
+	exit 2
+fi
+file_count=$(find "$release_dir" -mindepth 1 -type f | wc -l)
+if [[ $file_count -ne $((${#release_files[@]} + 1)) ]]; then
+	echo "activate-node-release: immutable release contains unexpected files" >&2
+	exit 2
+fi
+for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+	reported=$(runuser -u steward -- "$release_dir/$binary" -version | awk '{print $2}')
 	if [[ $reported != "$version" ]]; then
 		echo "activate-node-release: $binary reports '$reported', expected '$version'" >&2
 		exit 2
 	fi
 done
 
+install -d -o root -g root -m 0755 /run/lock
+exec 9>/run/lock/steward-node-activation.lock
+if ! flock -w 60 9; then
+	echo "activate-node-release: another node activation did not finish within 60 seconds" >&2
+	exit 1
+fi
+
+previous_current=
+if [[ -e /opt/steward/current || -L /opt/steward/current ]]; then
+	previous_current=$(readlink /opt/steward/current 2>/dev/null || true)
+	case "$previous_current" in
+		/opt/steward/releases/*)
+			[[ -d $previous_current && ! -L $previous_current ]] || {
+				echo "activate-node-release: active release target is missing or invalid: $previous_current" >&2
+				exit 2
+			}
+			;;
+		*) echo "activate-node-release: refusing unmanaged /opt/steward/current" >&2; exit 2 ;;
+	esac
+fi
+transition=true
+[[ $previous_current == "$release_dir" ]] && transition=false
+
+was_gateway=false
+was_steward=false
+was_executor=false
+systemctl is-active --quiet steward-gateway.service && was_gateway=true
+systemctl is-active --quiet steward.service && was_steward=true
+systemctl is-active --quiet steward-executor.service && was_executor=true
+if [[ $restart == false && ( $was_gateway == true || $was_steward == true || $was_executor == true ) ]]; then
+	echo "activate-node-release: --no-restart is unsafe while a Steward service is active" >&2
+	echo "  Re-run with --restart, or stop Gateway, Steward, and Executor first." >&2
+	exit 2
+fi
+
+gateway_env=/etc/steward/executor-gateway.env
+gateway_env_backup=$(mktemp -d /run/steward-relay-selector.XXXXXX)
+trap 'rm -rf -- "$gateway_env_backup"' EXIT
+gateway_env_present=false
+if [[ -e $gateway_env || -L $gateway_env ]]; then
+	cp -a -- "$gateway_env" "$gateway_env_backup/executor-gateway.env"
+	gateway_env_present=true
+fi
+topology_enabled=false
+if [[ ( -e $gateway_env || -L $gateway_env ) && ! -r $gateway_env ]]; then
+	echo "activate-node-release: live Executor gateway environment is missing or unreadable" >&2
+	exit 2
+fi
+if [[ -r $gateway_env ]]; then
+	gateway_line=$(grep -v '^[[:space:]]*#' "$gateway_env" | grep -v '^[[:space:]]*$' || true)
+	if [[ -n $gateway_line ]]; then
+		if [[ $gateway_line != EXECUTOR_GATEWAY_ARGS=* || $gateway_line == *$'\n'* ]]; then
+			echo "activate-node-release: live Executor gateway environment is invalid" >&2
+			exit 2
+		fi
+		[[ -n ${gateway_line#EXECUTOR_GATEWAY_ARGS=} ]] && topology_enabled=true
+	fi
+fi
+
+admission_mode=unconfigured
+if [[ -r /etc/steward/executor.env ]]; then
+	set_count=$(awk -F= '
+		BEGIN {
+			required["EXECUTOR_ADMISSION_POLICY_FILE"] = 1
+			required["EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE"] = 1
+			required["EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID"] = 1
+			required["EXECUTOR_ADMISSION_NODE_ID"] = 1
+			required["EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE"] = 1
+		}
+		$1 in required && length(substr($0, index($0, "=") + 1)) > 0 { set++ }
+		END { print set + 0 }
+	' /etc/steward/executor.env)
+	case "$set_count" in
+		0) admission_mode=unconfigured ;;
+		5) admission_mode=configured ;;
+		*) echo "activate-node-release: signed-admission configuration is incomplete" >&2; exit 2 ;;
+	esac
+fi
+
+services_stopped=false
+selectors_switched=false
+target_services_started=false
+failure_handled=false
+
+start_previous_services() {
+	local failed=false
+	[[ $was_gateway == false ]] || systemctl start steward-gateway.service || failed=true
+	[[ $was_steward == false ]] || systemctl start steward.service || failed=true
+	[[ $was_executor == false ]] || systemctl start steward-executor.service || failed=true
+	[[ $failed == false ]]
+}
+
+stop_active_services() {
+	local failed=false
+	systemctl is-active --quiet steward-gateway.service && systemctl stop steward-gateway.service || true
+	systemctl is-active --quiet steward.service && systemctl stop steward.service || true
+	systemctl is-active --quiet steward-executor.service && systemctl stop steward-executor.service || true
+	[[ $failed == false ]]
+}
+
+restore_selectors() {
+	local current_tmp failed=false
+	if [[ $gateway_env_present == true ]]; then
+		rm -f "$gateway_env" || failed=true
+		cp -a -- "$gateway_env_backup/executor-gateway.env" "$gateway_env" || failed=true
+	else
+		rm -f "$gateway_env" || failed=true
+	fi
+	current_tmp="/opt/steward/.current.rollback.$$"
+	rm -f "$current_tmp" || failed=true
+	if [[ -n $previous_current ]]; then
+		ln -s "$previous_current" "$current_tmp" || failed=true
+		mv -Tf "$current_tmp" /opt/steward/current || failed=true
+	else
+		rm -f /opt/steward/current || failed=true
+	fi
+	systemctl daemon-reload || failed=true
+	[[ $failed == false ]]
+}
+
+activation_exit() {
+	local status=$?
+	trap - EXIT ERR HUP INT TERM
+	if (( status != 0 )) && [[ $failure_handled == false && ( $services_stopped == true || $selectors_switched == true ) ]]; then
+		failure_handled=true
+		set +e
+		if [[ $selectors_switched == true ]]; then
+			stop_active_services
+			safe_restore=true
+			if [[ $target_services_started == true ]]; then
+				safe_restore=false
+				if [[ -n $previous_current && -f $previous_current/release.json ]]; then
+					if "$release_dir/integration/scripts/node-removal-guard.sh" >/dev/null && \
+						"$release_dir/stewardctl" upgrade inspect-formats \
+						-signed-admission "$admission_mode" \
+						-gateway-config /etc/steward/gateway.json \
+						-release-manifest "$previous_current/release.json" >/dev/null; then
+						safe_restore=true
+					fi
+				fi
+			fi
+			if [[ $safe_restore == true ]]; then
+				restore_ok=false
+				if restore_selectors; then restore_ok=true; fi
+				if [[ $restore_ok == true ]] && start_previous_services; then
+					echo "activate-node-release: activation failed; restored the prior release and relay binding" >&2
+				elif [[ $restore_ok == false ]]; then
+					echo "activate-node-release: activation failed and prior selectors could not be restored completely" >&2
+					echo "  Steward services remain stopped. Repair /opt/steward/current and $gateway_env before starting them." >&2
+				else
+					echo "activate-node-release: activation failed; restored prior selectors, but one or more prior services did not restart" >&2
+				fi
+			else
+				echo "activate-node-release: activation failed after target services started; durable formats are not proven readable by the prior release" >&2
+				echo "  Target selectors remain selected and Steward services are stopped. Repair the target or follow an approved state migration; do not force a binary rollback." >&2
+			fi
+		else
+			if start_previous_services; then
+				echo "activate-node-release: target validation failed; restored the prior service state" >&2
+			else
+				echo "activate-node-release: target validation failed and a prior service did not restart" >&2
+			fi
+		fi
+		set -e
+	fi
+	rm -rf -- "$gateway_env_backup"
+	exit "$status"
+}
+trap activation_exit EXIT
+trap 'exit 130' HUP INT TERM
+
+if [[ $restart == true && ( $was_gateway == true || $was_steward == true || $was_executor == true ) ]]; then
+	services_stopped=true
+	# Stop writers and capability entry points in a fixed order before checking
+	# drain state or durable-format compatibility.
+	[[ $was_gateway == false ]] || systemctl stop steward-gateway.service
+	[[ $was_steward == false ]] || systemctl stop steward.service
+	[[ $was_executor == false ]] || systemctl stop steward-executor.service
+fi
+
+if [[ $transition == true ]]; then
+	# Docker objects are checked by label and include stopped containers. The CLI
+	# additionally rejects live signed-admission fences, pending journal entries,
+	# and retained Gateway grants, then validates observed formats against the
+	# target manifest without changing any state.
+	"$release_dir/integration/scripts/node-removal-guard.sh"
+	"$release_dir/stewardctl" upgrade check-drained \
+		-signed-admission "$admission_mode" \
+		-gateway-config /etc/steward/gateway.json \
+		-release-manifest "$manifest"
+fi
+
+target_gateway_env=$gateway_env
+if [[ $topology_enabled == true ]]; then
+	if [[ $transition == false ]]; then
+		# A same-release repair can still change the relay image binding. Apply the
+		# same drain proof as a version transition before building or selecting it.
+		"$release_dir/integration/scripts/node-removal-guard.sh"
+		"$release_dir/stewardctl" upgrade check-drained \
+			-signed-admission "$admission_mode" \
+			-gateway-config /etc/steward/gateway.json \
+			-release-manifest "$manifest"
+	fi
+	# Preparation writes only the target's per-release binding. The live selector
+	# remains unchanged until target preflight has accepted the binding.
+	"$release_dir/integration/scripts/build-relay-image.sh" --release-dir "$release_dir" --replace-missing
+	target_gateway_env="/var/lib/steward-node/relay-images/$version.env"
+fi
+
 STEWARD_BIN="$release_dir/steward" \
+	STEWARD_CTL_BIN="$release_dir/stewardctl" \
+	STEWARD_MCP_BIN="$release_dir/steward-mcp" \
 	STEWARD_EXECUTOR_BIN="$release_dir/steward-executor" \
 	STEWARD_GATEWAY_BIN="$release_dir/steward-gateway" \
-	/usr/local/libexec/steward/node-preflight
+	STEWARD_RELAY_BIN="$release_dir/steward-relay" \
+	STEWARD_EXECUTOR_GATEWAY_ENV_FILE="$target_gateway_env" \
+	STEWARD_UNIT_DIR="$release_dir/integration/deploy/systemd" \
+	"$release_dir/integration/scripts/node-preflight.sh"
 
-install -d -o root -g root -m 0755 /opt/steward /usr/local/bin
-current_tmp="/opt/steward/.current.new.$$"
-rm -f "$current_tmp"
-ln -s "$release_dir" "$current_tmp"
-mv -Tf "$current_tmp" /opt/steward/current
+check_managed_symlink() {
+	local path=$1 target
+	if [[ ! -e $path && ! -L $path ]]; then return 0; fi
+	if [[ -L $path ]]; then
+		target=$(readlink "$path")
+		case "$target" in /opt/steward/current/* | /opt/steward/releases/*) return 0 ;; esac
+	fi
+	echo "activate-node-release: refusing unmanaged $path" >&2
+	return 2
+}
 
-# These stable entry points are installed once (or repair an old direct-release
-# symlink). Every later activation changes only /opt/steward/current, so both
-# process names cross the version boundary in one atomic rename.
+check_legacy_regular() {
+	local path=$1 mode owner
+	[[ -f $path && ! -L $path ]] || return 1
+	owner=$(stat -c '%u' "$path")
+	mode=$(stat -c '%a' "$path")
+	[[ $owner == 0 ]] || return 1
+	(( (8#$mode & 0022) == 0 ))
+}
+
+for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+	check_managed_symlink "/usr/local/bin/$binary"
+done
+for mapping in \
+	activate-node-release:/opt/steward/current/integration/scripts/activate-node-release.sh \
+	node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
+	configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
+	configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
+	uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
+	node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
+	build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh; do
+	name=${mapping%%:*}
+	path="/usr/local/libexec/steward/$name"
+	if [[ -e $path || -L $path ]]; then
+		if [[ -L $path ]]; then check_managed_symlink "$path"
+		elif ! check_legacy_regular "$path"; then
+			echo "activate-node-release: refusing unmanaged $path" >&2
+			exit 2
+		fi
+	fi
+done
+for unit in steward.service steward-executor.service steward-gateway.service; do
+	path="/usr/local/lib/systemd/system/$unit"
+	if [[ -e $path || -L $path ]]; then
+		if [[ -L $path ]]; then check_managed_symlink "$path"
+		elif ! check_legacy_regular "$path"; then
+			echo "activate-node-release: refusing unmanaged $path" >&2
+			exit 2
+		fi
+	fi
+	legacy="/etc/systemd/system/$unit"
+	if [[ -e $legacy || -L $legacy ]]; then
+		legacy_owned=false
+		if [[ -f $legacy && ! -L $legacy ]]; then
+			if [[ -n $previous_current && -f $previous_current/integration/deploy/systemd/$unit ]] &&
+				cmp -s "$legacy" "$previous_current/integration/deploy/systemd/$unit"; then
+				legacy_owned=true
+			elif [[ -f $path && ! -L $path ]] && cmp -s "$legacy" "$path"; then
+				legacy_owned=true
+			elif cmp -s "$legacy" "$release_dir/integration/deploy/systemd/$unit"; then
+				legacy_owned=true
+			fi
+		fi
+		if [[ $legacy_owned != true ]]; then
+			echo "activate-node-release: refusing modified $legacy because it shadows the packaged vendor unit" >&2
+			echo "  Preserve local settings in /etc/systemd/system/$unit.d/*.conf, then remove the full-unit override and re-run." >&2
+			exit 2
+		fi
+	fi
+done
+
+install -d -o root -g root -m 0755 /opt/steward /usr/local/bin \
+	/usr/local/libexec/steward /usr/local/lib/systemd/system
 for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 	tmp="/usr/local/bin/.${binary}.new.$$"
 	rm -f "$tmp"
 	ln -s "/opt/steward/current/$binary" "$tmp"
 	mv -Tf "$tmp" "/usr/local/bin/$binary"
 done
+for mapping in \
+	activate-node-release:/opt/steward/current/integration/scripts/activate-node-release.sh \
+	node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
+	configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
+	configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
+	uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
+	node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
+	build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh; do
+	name=${mapping%%:*}
+	target=${mapping#*:}
+	tmp="/usr/local/libexec/steward/.${name}.new.$$"
+	rm -f "$tmp"
+	ln -s "$target" "$tmp"
+	mv -Tf "$tmp" "/usr/local/libexec/steward/$name"
+done
+for unit in steward.service steward-executor.service steward-gateway.service; do
+	legacy="/etc/systemd/system/$unit"
+	if [[ -e $legacy || -L $legacy ]]; then
+		rm -f "$legacy"
+		echo "activate-node-release: migrated legacy installer-owned $legacy"
+	fi
+	tmp="/usr/local/lib/systemd/system/.${unit}.new.$$"
+	rm -f "$tmp"
+	ln -s "/opt/steward/current/integration/deploy/systemd/$unit" "$tmp"
+	mv -Tf "$tmp" "/usr/local/lib/systemd/system/$unit"
+done
 
-if [[ ${2:-} == --restart ]]; then
-	systemctl try-restart steward-gateway.service steward-executor.service steward.service
+if [[ $topology_enabled == true ]]; then
+	selector_tmp="/etc/steward/.executor-gateway.env.new.$$"
+	rm -f "$selector_tmp"
+	ln -s "$target_gateway_env" "$selector_tmp"
+	mv -Tf "$selector_tmp" "$gateway_env"
 fi
+current_tmp="/opt/steward/.current.new.$$"
+rm -f "$current_tmp"
+ln -s "$release_dir" "$current_tmp"
+mv -Tf "$current_tmp" /opt/steward/current
+selectors_switched=true
+systemctl daemon-reload
+
+if [[ $restart == true ]]; then
+	target_services_started=true
+	[[ $was_gateway == false ]] || systemctl start steward-gateway.service
+	[[ $was_steward == false ]] || systemctl start steward.service
+	[[ $was_executor == false ]] || systemctl start steward-executor.service
+	[[ $was_gateway == false ]] || systemctl is-active --quiet steward-gateway.service
+	[[ $was_steward == false ]] || systemctl is-active --quiet steward.service
+	[[ $was_executor == false ]] || systemctl is-active --quiet steward-executor.service
+fi
+
+rm -rf -- "$gateway_env_backup"
+trap - EXIT
 echo "activate-node-release: active version is $version"

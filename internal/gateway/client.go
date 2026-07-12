@@ -33,8 +33,9 @@ func NewControlClient(socket string) (*ControlClient, error) {
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "unix", socket)
 		},
-		ResponseHeaderTimeout: 5 * time.Second,
-		IdleConnTimeout:       30 * time.Second,
+		ResponseHeaderTimeout:  5 * time.Second,
+		MaxResponseHeaderBytes: maxHTTPHeaderBytes,
+		IdleConnTimeout:        30 * time.Second,
 	}
 	return &ControlClient{client: &http.Client{Transport: transport, Timeout: 10 * time.Second}}, nil
 }
@@ -44,14 +45,21 @@ func (c *ControlClient) Register(ctx context.Context, grant Grant) error {
 }
 
 func (c *ControlClient) Inspect(ctx context.Context, grantID string) (Grant, error) {
+	inspection, err := c.InspectWithPolicy(ctx, grantID)
+	return inspection.Grant, err
+}
+
+// InspectWithPolicy returns the retained grant together with the deterministic,
+// non-secret digest of its effective inference and egress route policy.
+func (c *ControlClient) InspectWithPolicy(ctx context.Context, grantID string) (GrantInspection, error) {
 	if !validGrantID(grantID) {
-		return Grant{}, errors.New("invalid gateway grant ID")
+		return GrantInspection{}, errors.New("invalid gateway grant ID")
 	}
-	var grant Grant
-	if err := c.callInto(ctx, http.MethodGet, "/v1/grants/"+url.PathEscape(grantID), nil, http.StatusOK, &grant); err != nil {
-		return Grant{}, err
+	var inspection GrantInspection
+	if err := c.callInto(ctx, http.MethodGet, "/v1/grants/"+url.PathEscape(grantID), nil, http.StatusOK, &inspection); err != nil {
+		return GrantInspection{}, err
 	}
-	return grant, nil
+	return inspection, nil
 }
 
 func (c *ControlClient) EgressStats(ctx context.Context, grantID string) (EgressStats, error) {

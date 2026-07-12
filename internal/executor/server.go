@@ -43,26 +43,33 @@ type Server struct {
 	// counts restart-safe; this lock prevents concurrent HTTP calls from racing
 	// past the same ceiling.
 	provisionMu sync.Mutex
+
+	reconcileMu        sync.RWMutex
+	reconcileAttempted bool
+	reconcileAt        time.Time
+	reconcileReport    ReconcileReport
 }
 
 type secureAdmission struct {
-	policyEnvelope []byte
-	siteRoots      map[string]ed25519.PublicKey
-	nodeID         string
-	fences         *admission.FenceStore
-	journal        *journal.Journal
-	evidence       *evidence.Log
-	allowHostAdmin bool
-	topology       TopologyDocker
-	gateway        GatewayControl
-	relayImage     string
-	grantRoot      string
-	relayGID       int
+	policyEnvelope      []byte
+	siteRoots           map[string]ed25519.PublicKey
+	nodeID              string
+	fences              *admission.FenceStore
+	journal             *journal.Journal
+	evidence            *evidence.Log
+	allowHostAdmin      bool
+	allowUnquotaedState bool
+	topology            TopologyDocker
+	gateway             GatewayControl
+	relayImage          string
+	grantRoot           string
+	relayGID            int
 }
 
 type GatewayControl interface {
 	Register(context.Context, gateway.Grant) error
 	Inspect(context.Context, string) (gateway.Grant, error)
+	InspectWithPolicy(context.Context, string) (gateway.GrantInspection, error)
 	Activate(context.Context, string) error
 	Deactivate(context.Context, string) error
 	Unregister(context.Context, string) error
@@ -82,9 +89,13 @@ type SecureAdmissionConfig struct {
 	// select a tenant. Leave false when tenant identity must come from an
 	// authenticated uplink principal.
 	AllowHostAdminIntent bool
+	// AllowUnquotaedStateOnDedicatedHost enables Docker local-volume state even
+	// though it has no portable hard byte or inode quota. It must remain false on
+	// shared multi-tenant hosts.
+	AllowUnquotaedStateOnDedicatedHost bool
 	// Positive-capability topology is optional as a complete unit. When absent,
-	// signed state-only workloads remain available and inference/service fail
-	// closed with capability_unavailable.
+	// inference, service, and egress fail closed. State also fails closed unless
+	// the dedicated-host-only unquotaed compatibility flag is explicit.
 	Topology   TopologyDocker
 	Gateway    GatewayControl
 	RelayImage string
@@ -114,16 +125,15 @@ func NewServer(docker Docker, token string, logger *slog.Logger) (*Server, error
 }
 
 // EnableSecureAdmission installs the signed local authority chain before the
-// server begins serving. Pending journal operations require explicit recovery;
-// accepting fresh mutations while host state is ambiguous would be unsafe.
+// server begins serving. A recovered pending journal operation is accepted so
+// the process can expose liveness, readiness, inspection, and authenticated
+// fail-closed containment. Expansive or irreversible mutations remain blocked
+// until an operator resolves the ambiguous operation and reconciliation passes.
 func (s *Server) EnableSecureAdmission(config SecureAdmissionConfig) error {
 	if len(config.PolicyEnvelope) == 0 || len(config.SiteRoots) == 0 ||
 		strings.TrimSpace(config.NodeID) == "" || config.Fences == nil ||
 		config.Journal == nil || config.Evidence == nil {
 		return errors.New("complete secure admission configuration is required")
-	}
-	if len(config.Journal.Pending()) != 0 {
-		return errors.New("operation journal has pending work; reconcile it before startup")
 	}
 	if config.Fences.Count() > 0 && config.Evidence.NextSequence() == 1 {
 		return errors.New("evidence chain is empty but admission fences exist; restore the prior chain")
@@ -146,17 +156,26 @@ func (s *Server) EnableSecureAdmission(config SecureAdmissionConfig) error {
 	if err := policy.Validate(); err != nil {
 		return fmt.Errorf("validate site policy: %w", err)
 	}
+	if config.AllowUnquotaedStateOnDedicatedHost && len(policy.Tenants) != 1 {
+		return errors.New("unquotaed persistent state requires a signed site policy with exactly one tenant")
+	}
 	s.secure = &secureAdmission{
-		policyEnvelope: append([]byte(nil), config.PolicyEnvelope...),
-		siteRoots:      clonePublicKeys(config.SiteRoots),
-		nodeID:         config.NodeID,
-		fences:         config.Fences,
-		journal:        config.Journal,
-		evidence:       config.Evidence,
-		allowHostAdmin: config.AllowHostAdminIntent,
-		topology:       config.Topology, gateway: config.Gateway, relayImage: config.RelayImage,
+		policyEnvelope:      append([]byte(nil), config.PolicyEnvelope...),
+		siteRoots:           clonePublicKeys(config.SiteRoots),
+		nodeID:              config.NodeID,
+		fences:              config.Fences,
+		journal:             config.Journal,
+		evidence:            config.Evidence,
+		allowHostAdmin:      config.AllowHostAdminIntent,
+		allowUnquotaedState: config.AllowUnquotaedStateOnDedicatedHost,
+		topology:            config.Topology, gateway: config.Gateway, relayImage: config.RelayImage,
 		grantRoot: config.GrantRoot, relayGID: config.RelayGID,
 	}
+	s.reconcileMu.Lock()
+	s.reconcileAttempted = false
+	s.reconcileAt = time.Time{}
+	s.reconcileReport = ReconcileReport{}
+	s.reconcileMu.Unlock()
 	return nil
 }
 
@@ -195,10 +214,36 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/workloads/{id}", s.status)
 	mux.HandleFunc("GET /v1/workloads/{id}/logs", s.logs)
 	mux.HandleFunc("GET /v1/workloads/{id}/egress", s.egressStats)
+	mux.HandleFunc("GET /v1/readiness", s.readiness)
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	return recoverMiddleware(jsonErrors(s.auth(mux), s.logger), s.logger)
+}
+
+func (s *Server) readiness(w http.ResponseWriter, _ *http.Request) {
+	if s.secure == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "ready", "secure_admission": false,
+		})
+		return
+	}
+	s.reconcileMu.RLock()
+	attempted, at, report := s.reconcileAttempted, s.reconcileAt, s.reconcileReport
+	s.reconcileMu.RUnlock()
+	status, code := "reconciling", http.StatusServiceUnavailable
+	if attempted && report.Ready {
+		status, code = "ready", http.StatusOK
+	} else if attempted {
+		status = "degraded"
+	}
+	response := map[string]any{
+		"status": status, "secure_admission": true, "reconciliation": report,
+	}
+	if !at.IsZero() {
+		response["last_attempt"] = at.UTC().Format(time.RFC3339Nano)
+	}
+	writeJSON(w, code, response)
 }
 
 type secureProvisionRequest struct {
@@ -207,16 +252,17 @@ type secureProvisionRequest struct {
 }
 
 type secureProvisionResponse struct {
-	RuntimeRef     string   `json:"runtime_ref"`
-	Status         string   `json:"status"`
-	CapsuleDigest  string   `json:"capsule_digest"`
-	PolicyDigest   string   `json:"policy_digest"`
-	Generation     uint64   `json:"generation"`
-	EvidenceKeyID  string   `json:"evidence_key_id"`
-	GrantID        string   `json:"grant_id,omitempty"`
-	ServicePath    string   `json:"service_path,omitempty"`
-	EgressProxy    string   `json:"egress_proxy,omitempty"`
-	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
+	RuntimeRef        string   `json:"runtime_ref"`
+	Status            string   `json:"status"`
+	CapsuleDigest     string   `json:"capsule_digest"`
+	PolicyDigest      string   `json:"policy_digest"`
+	Generation        uint64   `json:"generation"`
+	EvidenceKeyID     string   `json:"evidence_key_id"`
+	GrantID           string   `json:"grant_id,omitempty"`
+	ServicePath       string   `json:"service_path,omitempty"`
+	EgressProxy       string   `json:"egress_proxy,omitempty"`
+	EgressRouteIDs    []string `json:"egress_route_ids,omitempty"`
+	RoutePolicyDigest string   `json:"route_policy_digest,omitempty"`
 }
 
 type purgeStateRequest struct {
@@ -286,6 +332,33 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 		},
 		Egress: Egress{},
 	}
+	imageDocker, ok := s.docker.(ImageDocker)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "capability_unavailable", "signed image inspection is unavailable with this Docker backend")
+		return
+	}
+	observedImage, err := imageDocker.InspectImage(r.Context(), effective.Capsule.Image.ConfigDigest)
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusConflict, "image_unavailable", "the exact signed image config is not loaded on this node")
+		return
+	}
+	if err != nil {
+		writeDockerError(w, err)
+		return
+	}
+	if err := ValidateImage(observedImage, ImageRequirement{
+		ConfigDigest: effective.Capsule.Image.ConfigDigest,
+		OS:           effective.Capsule.Image.Platform.OS,
+		Architecture: effective.Capsule.Image.Platform.Architecture,
+		Variant:      effective.Capsule.Image.Platform.Variant,
+	}); err != nil {
+		writeError(w, http.StatusConflict, "image_rejected", err.Error())
+		return
+	}
+	// Docker create uses this exact verified local content ID. The signed
+	// repository@manifest value remains attached as provenance, but is not used
+	// as an offline lookup alias because docker load may not preserve it.
+	workload.ImageConfigDigest = effective.Capsule.Image.ConfigDigest
 	// Every mount, network and grant identifier is Executor-derived. The signed
 	// request selects only finite capabilities already authorized by capsule and
 	// site policy; it never supplies a host path or Docker topology primitive.
@@ -302,13 +375,15 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 			RouteID:        effective.Intent.InferenceRouteID,
 			EgressRouteIDs: admission.CanonicalRouteIDs(effective.Intent.EgressRouteIDs),
 		}
-		addresses := NetworkSpecFor(effective.Intent.TenantID, effective.Intent.InstanceID, effective.Intent.Generation)
-		workload.Runtime.RelayIP, workload.Runtime.AgentIP = addresses.RelayIP, addresses.AgentIP
 		if effective.Intent.Capabilities.Service {
 			workload.Runtime.ServicePort = effective.Capsule.Service.Port
 		}
 	}
 	if effective.Intent.Capabilities.State {
+		if !s.secure.allowUnquotaedState {
+			writeError(w, http.StatusNotImplemented, "capability_unavailable", "persistent state is disabled because the configured Docker volume has no hard byte or inode quota")
+			return
+		}
 		if _, ok := s.docker.(StateDocker); !ok {
 			writeError(w, http.StatusNotImplemented, "capability_unavailable", "persistent state is unavailable with this Docker backend")
 			return
@@ -368,6 +443,12 @@ func (s *Server) purgeState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "admission_denied", "state purge does not match the authenticated command")
 		return
 	}
+	s.provisionMu.Lock()
+	defer s.provisionMu.Unlock()
+	if s.secureMutationBlockedLocked() {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; state purge is blocked until reconciliation succeeds")
+		return
+	}
 	var lineage admission.FenceRecord
 	for _, record := range s.secure.fences.Records() {
 		if record.TenantID != request.TenantID || record.LineageID != request.LineageID {
@@ -385,13 +466,11 @@ func (s *Server) purgeState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "state_not_found", "state lineage is not known to this node")
 		return
 	}
-	if lineage.Generation != request.Generation || !s.authorizeRecord(r.Context(), lineage) {
+	if lineage.Generation != request.Generation || !s.principalAuthorizesRecord(r.Context(), lineage) {
 		writeError(w, http.StatusForbidden, "signed_lifecycle_required", "state purge is not authorized for the signed lineage generation")
 		return
 	}
 	name := StateVolumeName(request.TenantID, request.LineageID)
-	s.provisionMu.Lock()
-	defer s.provisionMu.Unlock()
 	if len(s.secure.journal.Pending()) != 0 {
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "a prior host mutation requires reconciliation")
 		return
@@ -463,22 +542,34 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 	name := RuntimeRef(workload.TenantID, workload.InstanceID)
 	s.provisionMu.Lock()
 	defer s.provisionMu.Unlock()
-	if len(s.secure.journal.Pending()) != 0 {
-		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "a prior host mutation requires reconciliation")
+	if s.secureMutationBlockedLocked() {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; admission is blocked until reconciliation succeeds")
 		return
 	}
 	observed, err := s.docker.Inspect(r.Context(), name)
 	if err == nil {
+		if workload.Runtime != nil && observed.Workload.Runtime != nil &&
+			workload.Runtime.NetworkName == observed.Workload.Runtime.NetworkName &&
+			workload.Runtime.GrantID == observed.Workload.Runtime.GrantID &&
+			workload.Runtime.Generation == observed.Workload.Runtime.Generation {
+			workload.Runtime.Subnet = observed.Workload.Runtime.Subnet
+			workload.Runtime.Gateway = observed.Workload.Runtime.Gateway
+			workload.Runtime.RelayIP = observed.Workload.Runtime.RelayIP
+			workload.Runtime.AgentIP = observed.Workload.Runtime.AgentIP
+		}
+		committedRecord, hasCommittedRecord := s.secure.fences.Record(workload.TenantID, workload.InstanceID)
+		expectedRecord := admission.FenceRecord{
+			TenantID: workload.TenantID, InstanceID: workload.InstanceID,
+			Generation: effective.Intent.Generation, CapsuleDigest: effective.CapsuleDigest,
+			PolicyDigest: effective.PolicyDigest, LineageID: effective.Intent.LineageID,
+			WorkloadDigest:    "sha256:" + workloadFingerprint(workload),
+			ImageConfigDigest: effective.Capsule.Image.ConfigDigest,
+			RoutePolicyDigest: committedRecord.RoutePolicyDigest, Present: true,
+		}
 		if !observed.Managed || !observed.Hardened ||
 			observed.Fingerprint != workloadFingerprint(workload) ||
 			observed.ImageID != effective.Capsule.Image.ConfigDigest ||
-			!s.secure.fences.Matches(admission.FenceRecord{
-				TenantID: workload.TenantID, InstanceID: workload.InstanceID,
-				Generation: effective.Intent.Generation, CapsuleDigest: effective.CapsuleDigest,
-				PolicyDigest: effective.PolicyDigest, LineageID: effective.Intent.LineageID,
-				WorkloadDigest:    "sha256:" + workloadFingerprint(workload),
-				ImageConfigDigest: effective.Capsule.Image.ConfigDigest, Present: true,
-			}, effective.SitePolicy.PolicyEpoch) {
+			!hasCommittedRecord || !s.secure.fences.Matches(expectedRecord, effective.SitePolicy.PolicyEpoch) {
 			writeError(w, http.StatusConflict, "workload_conflict", "runtime_ref already belongs to a different workload definition")
 			return
 		}
@@ -486,11 +577,17 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusConflict, "state_drift", "persistent state volume does not match the signed tenant lineage")
 			return
 		}
-		if workload.Runtime != nil && !s.runtimeTopologyMatches(r.Context(), workload, observed.Status == "running") {
+		observedRunning, lifecycleKnown := desiredStatus(observed.Status)
+		if !lifecycleKnown {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "existing workload has an ambiguous Docker lifecycle state")
+			return
+		}
+		if workload.Runtime != nil && (!s.runtimeTopologyMatches(r.Context(), workload, observedRunning) ||
+			!s.gatewayRoutePolicyMatches(r.Context(), workload, committedRecord.RoutePolicyDigest)) {
 			writeError(w, http.StatusConflict, "runtime_drift", "isolated runtime topology does not match the signed capability grant")
 			return
 		}
-		s.writeSecureResponse(w, http.StatusOK, name, observed.Status, effective)
+		s.writeSecureResponse(r.Context(), w, http.StatusOK, name, observed.Status, effective, committedRecord.RoutePolicyDigest)
 		return
 	}
 	if !errors.Is(err, ErrNotFound) {
@@ -500,6 +597,15 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 	if persisted := s.secure.fences.Fences(workload.TenantID, workload.InstanceID); persisted.Generation >= effective.Intent.Generation {
 		writeError(w, http.StatusConflict, "generation_consumed", "the committed generation is absent; submit a higher generation rather than replaying it")
 		return
+	}
+	if workload.State != nil {
+		for _, record := range s.secure.fences.Records() {
+			if record.Present && record.TenantID == workload.TenantID &&
+				record.LineageID == effective.Intent.LineageID && record.InstanceID != workload.InstanceID {
+				writeError(w, http.StatusConflict, "state_in_use", "persistent state lineage is already leased by another live instance")
+				return
+			}
+		}
 	}
 	stateDocker, stateExists, stateErr := s.prepareStateAdmission(r.Context(), workload, effective)
 	if stateErr != nil {
@@ -511,17 +617,13 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 		}
 		return
 	}
-	total, tenant, err := s.docker.WorkloadCounts(r.Context(), workload.TenantID)
+	capacityMessage, err := s.capacityMessage(r.Context(), workload)
 	if err != nil {
 		writeDockerError(w, err)
 		return
 	}
-	if total >= s.policy.MaxWorkloads {
-		writeCapacityError(w, "host workload capacity is exhausted")
-		return
-	}
-	if tenant >= s.policy.MaxWorkloadsPerTenant {
-		writeCapacityError(w, "tenant workload capacity is exhausted")
+	if capacityMessage != "" {
+		writeCapacityError(w, capacityMessage)
 		return
 	}
 	opID, err := newOperationID(name, effective.Intent.Generation)
@@ -574,6 +676,15 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusServiceUnavailable, "topology_unavailable", err.Error())
 		return
 	}
+	if err := workload.Validate(); err != nil {
+		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "allocated runtime topology was invalid and rollback is ambiguous; operation remains prepared")
+			return
+		}
+		s.recordCompensation(opID, prepared, "topology_validate")
+		writeError(w, http.StatusInternalServerError, "enforcement_failed", "Docker allocated an invalid runtime topology")
+		return
+	}
 	if err := s.docker.Create(r.Context(), name, workload); err != nil {
 		if _, inspectErr := s.docker.Inspect(r.Context(), name); errors.Is(inspectErr, ErrNotFound) {
 			if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
@@ -581,7 +692,7 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 				return
 			}
 			s.recordCompensation(opID, prepared, "docker_create")
-			writeDockerError(w, err)
+			writeCreateError(w, err)
 		} else {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "Docker create returned an ambiguous result; operation remains prepared")
 		}
@@ -608,9 +719,20 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusInternalServerError, "enforcement_failed", "created workload did not match admitted hardened state")
 		return
 	}
+	routePolicyDigest, err := s.gatewayRoutePolicyDigest(r.Context(), workload)
+	if err != nil {
+		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "gateway policy inspection failed and workload rollback is ambiguous; operation remains prepared")
+			return
+		}
+		s.recordCompensation(opID, prepared, "gateway_policy")
+		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "effective gateway route policy could not be verified")
+		return
+	}
 	committed := prepared
 	committed.Type = evidence.JournalCommit
 	committed.Outcome = evidence.Committed
+	committed.MetadataHash = routePolicyDigest
 	if _, err := s.secure.evidence.Append(committed); err != nil {
 		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "commit receipt failed and workload rollback is ambiguous; operation remains prepared")
@@ -625,7 +747,8 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 		Generation: effective.Intent.Generation, CapsuleDigest: effective.CapsuleDigest,
 		PolicyDigest: effective.PolicyDigest, LineageID: effective.Intent.LineageID,
 		WorkloadDigest:    "sha256:" + workloadFingerprint(workload),
-		ImageConfigDigest: effective.Capsule.Image.ConfigDigest, Present: true,
+		ImageConfigDigest: effective.Capsule.Image.ConfigDigest,
+		RoutePolicyDigest: routePolicyDigest, Present: true,
 	}, effective.SitePolicy.PolicyEpoch); err != nil {
 		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "fence commit failed and workload rollback is ambiguous; operation remains prepared")
@@ -641,7 +764,7 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", err.Error())
 		return
 	}
-	s.writeSecureResponse(w, http.StatusCreated, name, observed.Status, effective)
+	s.writeSecureResponse(r.Context(), w, http.StatusCreated, name, observed.Status, effective, routePolicyDigest)
 }
 
 func (s *Server) recordCompensation(opID string, prepared evidence.Event, code string) {
@@ -743,7 +866,7 @@ func removeAndConfirmStateAbsent(ctx context.Context, docker StateDocker, name s
 	return errors.Is(inspectErr, ErrNotFound)
 }
 
-func (s *Server) writeSecureResponse(w http.ResponseWriter, status int, runtimeRef, runtimeStatus string, effective admission.EffectiveAdmission) {
+func (s *Server) writeSecureResponse(ctx context.Context, w http.ResponseWriter, status int, runtimeRef, runtimeStatus string, effective admission.EffectiveAdmission, expectedRoutePolicyDigest string) {
 	response := secureProvisionResponse{
 		RuntimeRef: runtimeRef, Status: runtimeStatus, CapsuleDigest: effective.CapsuleDigest,
 		PolicyDigest: effective.PolicyDigest, Generation: effective.Intent.Generation,
@@ -758,6 +881,17 @@ func (s *Server) writeSecureResponse(w http.ResponseWriter, status int, runtimeR
 	if effective.Intent.Capabilities.Egress {
 		response.EgressProxy = "http://steward-relay:8082"
 		response.EgressRouteIDs = admission.CanonicalRouteIDs(effective.Intent.EgressRouteIDs)
+	}
+	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Egress {
+		inspection, err := s.secure.gateway.InspectWithPolicy(ctx, response.GrantID)
+		if err != nil || !imageConfigDigest.MatchString(expectedRoutePolicyDigest) || inspection.RoutePolicyDigest != expectedRoutePolicyDigest {
+			writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "effective gateway route policy could not be verified")
+			return
+		}
+		response.RoutePolicyDigest = expectedRoutePolicyDigest
+	} else if expectedRoutePolicyDigest != "" {
+		writeError(w, http.StatusServiceUnavailable, "fence_unavailable", "committed route policy binding is inconsistent with the admitted capabilities")
+		return
 	}
 	writeJSON(w, status, response)
 }
@@ -885,21 +1019,17 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		writeDockerError(w, err)
 		return
 	}
-	total, tenant, err := s.docker.WorkloadCounts(r.Context(), workload.TenantID)
+	capacityMessage, err := s.capacityMessage(r.Context(), workload)
 	if err != nil {
 		writeDockerError(w, err)
 		return
 	}
-	if total >= s.policy.MaxWorkloads {
-		writeCapacityError(w, "host workload capacity is exhausted")
-		return
-	}
-	if tenant >= s.policy.MaxWorkloadsPerTenant {
-		writeCapacityError(w, "tenant workload capacity is exhausted")
+	if capacityMessage != "" {
+		writeCapacityError(w, capacityMessage)
 		return
 	}
 	if err := s.docker.Create(r.Context(), name, workload); err != nil {
-		writeDockerError(w, err)
+		writeCreateError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"runtime_ref": name, "status": "created"})
@@ -907,6 +1037,77 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 
 func writeCapacityError(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusServiceUnavailable, "capacity_exceeded", message)
+}
+
+func (s *Server) capacityMessage(ctx context.Context, workload Workload) (string, error) {
+	var usage CapacityUsage
+	if docker, ok := s.docker.(CapacityDocker); ok {
+		observed, err := docker.CapacityUsage(ctx, workload.TenantID)
+		if err != nil {
+			return "", err
+		}
+		usage = observed
+	} else {
+		total, tenant, err := s.docker.WorkloadCounts(ctx, workload.TenantID)
+		if err != nil {
+			return "", err
+		}
+		usage.Host.Workloads, usage.Tenant.Workloads = total, tenant
+	}
+	if usage.Host.Workloads >= s.policy.MaxWorkloads {
+		return "host workload capacity is exhausted", nil
+	}
+	if usage.Tenant.Workloads >= s.policy.MaxWorkloadsPerTenant {
+		return "tenant workload capacity is exhausted", nil
+	}
+	prospective, err := workloadReservation(workload)
+	if err != nil {
+		return "", err
+	}
+	if exceedsCapacity(usage.Host.MemoryBytes, prospective.MemoryBytes, s.policy.MaxTotalMemoryBytes) {
+		return "host memory capacity is exhausted", nil
+	}
+	if exceedsCapacity(usage.Host.CPUMillis, prospective.CPUMillis, s.policy.MaxTotalCPUMillis) {
+		return "host CPU capacity is exhausted", nil
+	}
+	if exceedsCapacity(usage.Host.PIDs, prospective.PIDs, s.policy.MaxTotalPIDs) {
+		return "host process capacity is exhausted", nil
+	}
+	if exceedsCapacity(usage.Tenant.MemoryBytes, prospective.MemoryBytes, s.policy.MaxTenantMemoryBytes) {
+		return "tenant memory capacity is exhausted", nil
+	}
+	if exceedsCapacity(usage.Tenant.CPUMillis, prospective.CPUMillis, s.policy.MaxTenantCPUMillis) {
+		return "tenant CPU capacity is exhausted", nil
+	}
+	if exceedsCapacity(usage.Tenant.PIDs, prospective.PIDs, s.policy.MaxTenantPIDs) {
+		return "tenant process capacity is exhausted", nil
+	}
+	return "", nil
+}
+
+func workloadReservation(workload Workload) (CapacityReservation, error) {
+	reservation := CapacityReservation{
+		Workloads: 1, MemoryBytes: workload.Resources.MemoryBytes,
+		CPUMillis: workload.Resources.CPUMillis, PIDs: workload.Resources.PIDs,
+	}
+	if workload.Runtime == nil {
+		return reservation, nil
+	}
+	var err error
+	if reservation.MemoryBytes, err = checkedCapacityAdd(reservation.MemoryBytes, defaultRelayMemory); err != nil {
+		return CapacityReservation{}, err
+	}
+	if reservation.CPUMillis, err = checkedCapacityAdd(reservation.CPUMillis, defaultRelayCPU); err != nil {
+		return CapacityReservation{}, err
+	}
+	if reservation.PIDs, err = checkedCapacityAdd(reservation.PIDs, defaultRelayPIDs); err != nil {
+		return CapacityReservation{}, err
+	}
+	return reservation, nil
+}
+
+func exceedsCapacity(used, add, maximum int64) bool {
+	return used < 0 || add < 0 || add > maximum || used > maximum-add
 }
 
 func (s *Server) start(w http.ResponseWriter, r *http.Request) { s.transition(w, r, "start") }
@@ -926,26 +1127,42 @@ func (s *Server) transition(w http.ResponseWriter, r *http.Request, action strin
 		writeDockerError(w, err)
 		return
 	}
-	status := observed.Status
-	if (action == "start" && status == "running") || (action == "stop" && status != "running") {
-		writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": status})
+	state := classifyDockerLifecycle(observed.Status)
+	if action == "start" && state == dockerLifecycleRunning || action == "stop" && state == dockerLifecycleStopped {
+		writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": observed.Status})
+		return
+	}
+	if state == dockerLifecycleAmbiguous {
+		if err := s.stopWorkloadAndConfirm(r.Context(), name, observed.Workload); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "ambiguous Docker lifecycle state could not be confirmed stopped")
+			return
+		}
+		if action == "start" {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "ambiguous Docker lifecycle state was contained; retry start from the confirmed stopped state")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": "exited"})
 		return
 	}
 	if action == "start" {
 		err = s.docker.Start(r.Context(), name)
 	} else {
-		err = s.docker.Stop(r.Context(), name)
+		err = s.stopWorkloadAndConfirm(r.Context(), name, observed.Workload)
 	}
-	if err != nil {
+	final, inspectErr := s.managed(r.Context(), name)
+	if inspectErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "Docker lifecycle result could not be reinspected")
+		return
+	}
+	if lifecycleMatches(final.Status, action == "start") {
+		writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": final.Status})
+		return
+	}
+	if err != nil && classifyDockerLifecycle(final.Status) != dockerLifecycleAmbiguous {
 		writeDockerError(w, err)
 		return
 	}
-	observed, err = s.managed(r.Context(), name)
-	if err != nil {
-		writeDockerError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": observed.Status})
+	writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "Docker lifecycle operation did not reach the requested exact state")
 }
 
 func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action string) {
@@ -956,8 +1173,12 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 	}
 	s.provisionMu.Lock()
 	defer s.provisionMu.Unlock()
-	if len(s.secure.journal.Pending()) != 0 {
-		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "a prior host mutation requires reconciliation")
+	if s.secureMutationBlockedLocked() {
+		if action == "stop" {
+			s.containSecureWorkload(w, r, name)
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; start is blocked until reconciliation succeeds")
 		return
 	}
 	observed, err := s.managed(r.Context(), name)
@@ -965,22 +1186,63 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 		writeDockerError(w, err)
 		return
 	}
-	record, ok := s.authorizeSecureLifecycle(r.Context(), observed)
-	if !ok {
+	record, ok := s.secureLifecycleRecord(observed)
+	if !ok || !s.principalAuthorizesRecord(r.Context(), record) ||
+		(action == "start" && !s.currentPolicyAuthorizesRecord(record)) {
 		writeError(w, http.StatusForbidden, "signed_lifecycle_required", "workload is not bound to the authenticated signed admission")
 		return
 	}
-	if ((action == "start" && observed.Status == "running") || (action == "stop" && observed.Status != "running")) &&
-		s.runtimeLifecycleMatches(r.Context(), observed.Workload, action == "start") {
+	priorRunning, priorKnown := desiredStatus(observed.Status)
+	containAmbiguousStart := action == "start" && !priorKnown
+	if action == "start" && priorKnown && observed.Workload.Runtime != nil && s.secure.topology != nil {
+		relay, relayErr := s.secure.topology.InspectRelay(r.Context(), RelayName(
+			observed.Workload.TenantID, observed.Workload.InstanceID, observed.Workload.Runtime.Generation))
+		if relayErr == nil && relayEqual(relay, s.desiredRelay(observed.Workload)) &&
+			classifyDockerLifecycle(relay.Status) == dockerLifecycleAmbiguous {
+			containAmbiguousStart = true
+			priorKnown = false
+		}
+	}
+	effectiveAction := action
+	if containAmbiguousStart {
+		effectiveAction = "stop"
+	}
+	if action == "start" && !containAmbiguousStart {
+		proofErr := s.proveRuntimeTopologyState(r.Context(), observed.Workload, priorRunning, record.RoutePolicyDigest)
+		if proofErr != nil {
+			if priorRunning {
+				s.markRuntimeTopologyDegradedLocked(name, proofErr)
+				_, complete := s.containObservedSecureWorkload(r, name, record, observed)
+				if complete {
+					writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "an unsafe running topology was contained; reconciliation must prove the repaired runtime before it can start")
+				} else {
+					writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "unsafe running topology containment was attempted, but every authority boundary could not be verified inactive and stopped")
+				}
+				return
+			}
+			writeRuntimeTopologyFailure(w, proofErr)
+			return
+		}
+		if priorRunning {
+			writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": observed.Status})
+			return
+		}
+	}
+	if lifecycleMatches(observed.Status, effectiveAction == "start") &&
+		s.runtimeLifecycleMatches(r.Context(), observed.Workload, effectiveAction == "start") {
 		writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": observed.Status})
 		return
 	}
-	opID, err := newOperationID(action+"-"+name, record.Generation)
+	journalAction := effectiveAction
+	if containAmbiguousStart {
+		journalAction = "lifecycle_containment"
+	}
+	opID, err := newOperationID(journalAction+"-"+name, record.Generation)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "create operation identity")
 		return
 	}
-	if _, err := s.secure.journal.Prepare(opID, action+":"+name, record.Generation); err != nil {
+	if _, err := s.secure.journal.Prepare(opID, journalAction+":"+name, record.Generation); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "journal_unavailable", err.Error())
 		return
 	}
@@ -988,30 +1250,98 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 		Type: evidence.JournalPrepare, TenantID: record.TenantID, RuntimeRef: name,
 		CapsuleDigest: record.CapsuleDigest, PolicyDigest: record.PolicyDigest,
 		Generation: record.Generation, GrantID: "workload", Outcome: evidence.Allowed,
-		ErrorCode: action,
+		ErrorCode: journalAction,
 	}
 	if _, err := s.secure.evidence.Append(prepared); err != nil {
 		_ = s.secure.journal.Compensate(opID)
 		writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
 		return
 	}
-	err = s.applyRuntimeTransition(r.Context(), name, observed.Workload, action == "start")
+	err = s.applyRuntimeTransition(r.Context(), name, observed.Workload, effectiveAction == "start", record.RoutePolicyDigest)
 	final, inspectErr := s.managed(r.Context(), name)
-	expected := (action == "start" && final.Status == "running" || action == "stop" && final.Status != "running") &&
-		s.runtimeLifecycleMatches(r.Context(), final.Workload, action == "start")
-	unchanged := inspectErr == nil && final.Status == observed.Status &&
-		s.runtimeLifecycleMatches(r.Context(), observed.Workload, observed.Status == "running")
+	expected := inspectErr == nil && lifecycleMatches(final.Status, effectiveAction == "start")
+	if expected && effectiveAction == "start" {
+		expected = s.proveRuntimeTopologyState(r.Context(), final.Workload, true, record.RoutePolicyDigest) == nil
+	} else if expected {
+		expected = s.runtimeLifecycleMatches(r.Context(), final.Workload, false)
+	}
+	var startProofFailure *runtimeStartProofFailure
+	if err != nil && errors.As(err, &startProofFailure) {
+		// The primitive guarantees that its precondition runs before its first
+		// mutation. Compensate the journal without invoking a rollback path that
+		// could widen authority on the topology it just rejected.
+		s.recordCompensation(opID, prepared, "start_precondition")
+		writeRuntimeTransitionFailure(w, err)
+		return
+	}
+	var failedStart *runtimeFailedStart
+	if err != nil && errors.As(err, &failedStart) {
+		if failedStart.topologyReconciliation {
+			s.markRuntimeTopologyDegradedLocked(name, failedStart.err)
+		}
+		if !failedStart.contained {
+			s.markRuntimeDegradedLocked(name, "containment_incomplete", failedStart.err)
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "failed start containment could not be proven; the operation remains pending")
+			return
+		}
+		s.recordCompensation(opID, prepared, "failed_start_contained")
+		if failedStart.topologyReconciliation {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "the failed start was contained; reconciliation must prove the repaired topology")
+		} else {
+			writeRuntimeTransitionFailure(w, failedStart.err)
+		}
+		return
+	}
+	if err != nil && effectiveAction == "start" {
+		// Defensive catch-all: every known post-precondition failure is wrapped
+		// above, but a future start stage must still be monotonic by default.
+		failure := s.failedRuntimeStart(r.Context(), name, observed.Workload, record.RoutePolicyDigest, err, false)
+		if !failure.contained {
+			s.markRuntimeDegradedLocked(name, "containment_incomplete", failure.err)
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "failed start containment could not be proven; the operation remains pending")
+			return
+		}
+		s.recordCompensation(opID, prepared, "failed_start_contained")
+		writeRuntimeTransitionFailure(w, failure.err)
+		return
+	}
+	unchanged := inspectErr == nil && priorKnown && final.Status == observed.Status &&
+		lifecycleMatches(final.Status, priorRunning) && s.runtimeLifecycleMatches(r.Context(), observed.Workload, priorRunning)
 	if err != nil && unchanged {
-		s.recordCompensation(opID, prepared, "docker_"+action)
-		writeDockerError(w, err)
+		s.recordCompensation(opID, prepared, "docker_"+effectiveAction)
+		writeRuntimeTransitionFailure(w, err)
 		return
 	}
 	if inspectErr != nil {
+		if effectiveAction == "start" {
+			failure := s.failedRuntimeStart(r.Context(), name, observed.Workload, record.RoutePolicyDigest,
+				fmt.Errorf("inspect started workload: %w", inspectErr), false)
+			if !failure.contained {
+				s.markRuntimeDegradedLocked(name, "containment_incomplete", failure.err)
+				writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "Docker start result and containment are ambiguous; the operation remains pending")
+				return
+			}
+			s.recordCompensation(opID, prepared, "ambiguous_start_contained")
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "Docker start result was ambiguous and the failed start was contained")
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "Docker lifecycle result is ambiguous; operation remains prepared")
 		return
 	}
 	if !expected {
-		if !s.restoreRuntimeLifecycle(r.Context(), name, observed.Workload, observed.Status == "running") {
+		if effectiveAction == "start" {
+			failure := s.failedRuntimeStart(r.Context(), name, observed.Workload, record.RoutePolicyDigest,
+				errors.New("started runtime did not reach the exact requested state"), false)
+			if !failure.contained {
+				s.markRuntimeDegradedLocked(name, "containment_incomplete", failure.err)
+				writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "unexpected start result could not be contained; the operation remains pending")
+				return
+			}
+			s.recordCompensation(opID, prepared, "unexpected_start_contained")
+			writeError(w, http.StatusInternalServerError, "enforcement_failed", "lifecycle result did not match the requested state; the failed start was contained")
+			return
+		}
+		if !priorKnown || !s.restoreRuntimeLifecycle(r.Context(), name, observed.Workload, priorRunning, record.RoutePolicyDigest) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "unexpected lifecycle result could not be rolled back; operation remains prepared")
 			return
 		}
@@ -1022,13 +1352,26 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 	committed := prepared
 	committed.ErrorCode = ""
 	committed.Outcome = evidence.Committed
-	if action == "start" {
+	committed.MetadataHash = record.RoutePolicyDigest
+	if effectiveAction == "start" {
 		committed.Type = evidence.LifecycleStart
 	} else {
 		committed.Type = evidence.LifecycleStop
 	}
 	if _, err := s.secure.evidence.Append(committed); err != nil {
-		if !s.restoreRuntimeLifecycle(r.Context(), name, observed.Workload, observed.Status == "running") {
+		if effectiveAction == "start" {
+			failure := s.failedRuntimeStart(r.Context(), name, observed.Workload, record.RoutePolicyDigest,
+				fmt.Errorf("persist lifecycle receipt: %w", err), false)
+			if !failure.contained {
+				s.markRuntimeDegradedLocked(name, "containment_incomplete", failure.err)
+				writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "lifecycle receipt failed and the started runtime could not be contained; the operation remains pending")
+				return
+			}
+			_ = s.secure.journal.Compensate(opID)
+			writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", "lifecycle receipt could not be persisted; the failed start was contained")
+			return
+		}
+		if !priorKnown || !s.restoreRuntimeLifecycle(r.Context(), name, observed.Workload, priorRunning, record.RoutePolicyDigest) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "lifecycle receipt failed and prior state could not be restored; operation remains prepared")
 			return
 		}
@@ -1040,7 +1383,67 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", err.Error())
 		return
 	}
+	if containAmbiguousStart {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "ambiguous Docker lifecycle state was contained; retry start from the confirmed stopped state")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": final.Status})
+}
+
+// markRuntimeTopologyDegradedLocked publishes drift discovered between periodic
+// scans before releasing provisionMu. A waiting mutation must therefore observe
+// the degraded gate, even when monotonic containment completed successfully.
+func (s *Server) markRuntimeTopologyDegradedLocked(runtimeRef string, err error) {
+	code := "runtime_drift"
+	var failure *runtimeTopologyFailure
+	if errors.As(err, &failure) && failure.unavailable {
+		code = "topology_unavailable"
+	}
+	s.markRuntimeDegradedLocked(runtimeRef, code, err)
+}
+
+func (s *Server) markRuntimeDegradedLocked(runtimeRef, code string, err error) {
+	s.reconcileMu.Lock()
+	report := cloneReconcileReport(s.reconcileReport)
+	report.Ready = false
+	report.addFailure(runtimeRef, code, err.Error())
+	s.reconcileAttempted = true
+	// reconcileAt remains the last actual scan time; this request discovered
+	// drift but did not claim to complete a host-wide reconciliation.
+	s.reconcileReport = report
+	s.reconcileMu.Unlock()
+}
+
+func writeRuntimeTopologyFailure(w http.ResponseWriter, err error) {
+	var failure *runtimeTopologyFailure
+	if !errors.As(err, &failure) {
+		writeDockerError(w, err)
+		return
+	}
+	if !failure.unavailable {
+		writeError(w, http.StatusConflict, "runtime_drift", failure.message)
+		return
+	}
+	switch failure.component {
+	case runtimeTopologyNetwork, runtimeTopologyRelay:
+		if failure.cause != nil {
+			writeDockerError(w, failure.cause)
+			return
+		}
+	case runtimeTopologyGateway:
+		writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "Gateway topology inspection is unavailable")
+		return
+	}
+	writeError(w, http.StatusServiceUnavailable, "topology_unavailable", "runtime topology inspection is unavailable")
+}
+
+func writeRuntimeTransitionFailure(w http.ResponseWriter, err error) {
+	var failure *runtimeTopologyFailure
+	if errors.As(err, &failure) {
+		writeRuntimeTopologyFailure(w, err)
+		return
+	}
+	writeDockerError(w, err)
 }
 
 func (s *Server) destroy(w http.ResponseWriter, r *http.Request) {
@@ -1075,14 +1478,14 @@ func (s *Server) secureDestroy(w http.ResponseWriter, r *http.Request) {
 	}
 	s.provisionMu.Lock()
 	defer s.provisionMu.Unlock()
-	if len(s.secure.journal.Pending()) != 0 {
-		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "a prior host mutation requires reconciliation")
+	if s.secureMutationBlockedLocked() {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; destroy is blocked until reconciliation succeeds")
 		return
 	}
 	observed, err := s.docker.Inspect(r.Context(), name)
 	if errors.Is(err, ErrNotFound) {
 		for _, record := range s.secure.fences.Records() {
-			if RuntimeRef(record.TenantID, record.InstanceID) == name && !record.Present && s.authorizeRecord(r.Context(), record) {
+			if RuntimeRef(record.TenantID, record.InstanceID) == name && !record.Present && s.principalAuthorizesRecord(r.Context(), record) {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -1098,8 +1501,8 @@ func (s *Server) secureDestroy(w http.ResponseWriter, r *http.Request) {
 		writeDockerError(w, ErrWorkloadDrift)
 		return
 	}
-	record, ok := s.authorizeSecureLifecycle(r.Context(), observed)
-	if !ok {
+	record, ok := s.secureLifecycleRecord(observed)
+	if !ok || !s.principalAuthorizesRecord(r.Context(), record) {
 		writeError(w, http.StatusForbidden, "signed_lifecycle_required", "workload is not bound to the authenticated signed admission")
 		return
 	}
@@ -1163,7 +1566,7 @@ func (s *Server) secureDestroy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) authorizeSecureLifecycle(ctx context.Context, observed ObservedWorkload) (admission.FenceRecord, bool) {
+func (s *Server) secureLifecycleRecord(observed ObservedWorkload) (admission.FenceRecord, bool) {
 	record, ok := s.secure.fences.Record(observed.Workload.TenantID, observed.Workload.InstanceID)
 	if !ok || !record.Present ||
 		observed.Fingerprint != strings.TrimPrefix(record.WorkloadDigest, "sha256:") ||
@@ -1171,13 +1574,17 @@ func (s *Server) authorizeSecureLifecycle(ctx context.Context, observed Observed
 		RuntimeRef(record.TenantID, record.InstanceID) != RuntimeRef(observed.Workload.TenantID, observed.Workload.InstanceID) {
 		return admission.FenceRecord{}, false
 	}
-	return record, s.authorizeRecord(ctx, record)
+	return record, true
 }
 
-func (s *Server) authorizeRecord(ctx context.Context, record admission.FenceRecord) bool {
-	if record.PolicyDigest != dsse.Digest(s.secure.policyEnvelope) {
-		return false
-	}
+func (s *Server) currentPolicyAuthorizesRecord(record admission.FenceRecord) bool {
+	return record.PolicyDigest == dsse.Digest(s.secure.policyEnvelope)
+}
+
+// principalAuthorizesRecord authenticates cleanup authority independently from
+// the current policy digest. A policy rotation may revoke permission to start a
+// workload, but it must never make stop, destroy, or state cleanup impossible.
+func (s *Server) principalAuthorizesRecord(ctx context.Context, record admission.FenceRecord) bool {
 	principal, authenticated := ctx.Value(admissionPrincipalKey{}).(admissionPrincipal)
 	if !authenticated {
 		return s.secure.allowHostAdmin
@@ -1219,7 +1626,18 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
 		writeDockerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "logs": logs})
+	encoded, err := json.Marshal(map[string]string{"runtime_ref": name, "logs": logs})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "encode workload logs")
+		return
+	}
+	if len(encoded)+1 > maxLogBytes {
+		writeError(w, http.StatusBadGateway, "docker_error", "encoded Docker log response exceeds 1 MiB limit")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(append(encoded, '\n'))
 }
 
 func (s *Server) egressStats(w http.ResponseWriter, r *http.Request) {
@@ -1289,6 +1707,13 @@ func writeDockerError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusBadGateway, "docker_error", fmt.Sprintf("Docker operation failed: %v", err))
+}
+func writeCreateError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusConflict, "workload_dependency_unavailable", "the requested image or prepared network is unavailable")
+		return
+	}
+	writeDockerError(w, err)
 }
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]string{"error": code, "message": message})

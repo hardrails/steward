@@ -4,169 +4,169 @@ description: Maintainer runbook for validating, tagging, building, checksumming,
 section: Maintainer guide
 ---
 
-# Releasing Steward
+# Release Steward
 
-This document is the maintainer runbook for cutting a Steward release. Pushing a
-version tag (`vX.Y.Z`) builds cross-platform binaries, Linux packages, the guided
-installer, and SHA-256 checksums and attaches them to a GitHub Release — no manual
-uploads. It also records *why* the release uses native package tools rather than a
-packaging framework, and how the
-version a binary reports is derived, because both were decided from empirical
-tests, not assumption.
+Pushing a `vX.Y.Z` tag builds cross-platform binaries, Linux packages, the guided
+installer, and SHA-256 checksums, then attaches them to a GitHub Release. No manual
+upload is required. This runbook also records the release-identity and packaging
+decisions that protect artifact consistency and publishing authority.
 
-## TL;DR — cut a release
+## Cut a release
 
 ```console
 # 1. Make sure main is green and you are on the exact commit you want to ship.
 git checkout main
 git pull origin main
 
-# 2. (Optional) bump the compiled-in fallback constant if it is stale. This is
-#    ONLY the version reported under `go run`/`go test`; a real tagged build does
-#    not use it (see "How the version is derived" below). Skip if it already
-#    matches the release you are cutting.
-#    -> internal/buildinfo/version.go: const Version = "1.2.0"
+# 2. Choose the semver tag once and reuse it throughout the runbook.
+RELEASE_TAG="<release-tag>"
 
 # 3. Tag the release commit and push the tag. The tag push is what triggers the
 #    Release workflow.
-git tag v1.4.0
-git push origin v1.4.0
+git tag "$RELEASE_TAG"
+git push origin "$RELEASE_TAG"
 
 # 4. Watch the run; it publishes the GitHub Release when green.
 gh run watch "$(gh run list --workflow=release.yml --limit=1 --json databaseId --jq '.[0].databaseId')"
-gh release view v1.4.0 --web
+gh release view "$RELEASE_TAG" --web
 ```
 
-That is the whole flow. Everything below is the detail behind it.
+## What the workflow does
 
-## What the automation does
+`.github/workflows/release.yml` starts on any `v*` tag. GitHub tag-filter globs
+cannot reliably express the complete semantic-version rule, so
+`scripts/release.sh` is authoritative: before building, it requires `vX.Y.Z` with
+an optional valid prerelease suffix and rejects malformed tags, leading zeros,
+and build-metadata suffixes. This fail-fast check prevents tags such as `vnext` or
+`v2` from reaching publication.
 
-`.github/workflows/release.yml` triggers on `push` of any `v*` tag. (The trigger
-is a broad glob on purpose: GitHub's tag-filter syntax cannot reliably express
-"semver only", and a filter that silently failed to match the release tag would be
-worse than a broad one — so `scripts/release.sh` enforces the `vX.Y.Z` shape
-itself, failing a stray tag like `vnext` or `v2` fast and loudly before anything is
-built or published.) It uses four job executions, split deliberately for native
-packaging and least privilege:
+The workflow uses four job executions:
 
-1. **`build / amd64` and `build / arm64`** — each with a **read-only** token and
-   a matching native host — check out the release source with full history, then
-   run `scripts/release.sh`, which rejects a
-   non-semver tag up front, cross-compiles that architecture's Linux and Darwin
-   targets, packages each build
-   as a `.tar.gz` (`steward` and `stewardctl` everywhere, plus `steward-executor` and the offline
-   node-appliance assets on Linux, with `LICENSE` + `README.md`), writes a `checksums.txt` of
-   SHA-256 sums, builds DEB and RPM node packages for both Linux architectures,
-   includes `install-steward.sh`, asserts all three binaries self-report the tag, and
-   uploads that architecture's artifacts. Native hosts are load-bearing here:
-   RPM validates build architecture and will not safely produce an `aarch64`
-   package on an `x86_64` host merely because its payload was cross-compiled.
-2. **`combine`** — still read-only and with **no checkout** — downloads both
-   architecture sets, verifies the complete advertised matrix is present, and
-   writes one SHA-256 manifest over exactly those release files.
-3. **`publish`** — the only job with a `contents: write` token — runs **only on a
-   tag push**, checks out **no repository code**, downloads the artifacts the
-   combine job produced, and creates a GitHub Release named after the tag (auto-generated
-   notes, archives, and `checksums.txt` attached).
+1. **`build / amd64` and `build / arm64`:** each runs on a matching native host
+   with a read-only token. For a tag build, each job first proves that the commit
+   referenced by the tag is reachable from `origin/main`; a tag created from an
+   unmerged branch cannot publish. `scripts/release.sh` cross-compiles Linux and Darwin,
+   creates `.tar.gz` archives with `LICENSE` and `README.md`, builds DEB and RPM
+   packages, includes `install-steward.sh`, and checks that all six host-native
+   binaries report the tag. Each Linux artifact contains a deterministic
+   `release.json` that binds the tag, target, six binaries, units, templates, and
+   helper scripts by SHA-256 and declares durable-state reader/writer ranges. Native
+   package hosts are required because RPM validates build architecture;
+   cross-compiled payloads alone do not safely
+   produce an `aarch64` package on `x86_64`.
+2. **`combine`:** with a read-only token and no source checkout, downloads both
+   architecture sets, requires the complete matrix, and writes one SHA-256
+   manifest over exactly those files.
+3. **`publish`:** only on a tag push, with the workflow's only `contents: write`
+   token and no source checkout, runs `gh release create` against the combined
+   artifacts. It adds generated notes, archives, packages, the installer, and
+   `checksums.txt`.
 
-The split is the point: the jobs that run the tagged commit's own code
-(`scripts/release.sh`) never holds a token that can publish, and the job that can
-publish runs nothing but `gh release create` against already-built artifacts. So
-an accidentally-tagged bad commit cannot execute with publish permissions.
+Code from the tagged commit runs only in read-only jobs. The job allowed to
+publish executes no repository code. A bad tagged commit can therefore fail or
+produce bad artifacts, but it cannot run its own code with release-write
+authority.
 
 ### Target matrix
 
-| GOOS   | GOARCH | Archive                              | Processes |
-| ------ | ------ | ------------------------------------ | --------- |
-| linux  | amd64  | `steward_vX.Y.Z_linux_amd64.tar.gz`  | `steward`, `steward-executor`, `stewardctl` |
-| linux  | arm64  | `steward_vX.Y.Z_linux_arm64.tar.gz`  | `steward`, `steward-executor`, `stewardctl` |
-| darwin | amd64  | `steward_vX.Y.Z_darwin_amd64.tar.gz` | `steward`, `stewardctl` |
-| darwin | arm64  | `steward_vX.Y.Z_darwin_arm64.tar.gz` | `steward`, `stewardctl` |
+| GOOS | GOARCH | Archive | Binaries |
+| --- | --- | --- | --- |
+| linux | amd64 | `steward_vX.Y.Z_linux_amd64.tar.gz` | All six Steward binaries |
+| linux | arm64 | `steward_vX.Y.Z_linux_arm64.tar.gz` | All six Steward binaries |
+| darwin | amd64 | `steward_vX.Y.Z_darwin_amd64.tar.gz` | `steward`, `stewardctl`, `steward-mcp` |
+| darwin | arm64 | `steward_vX.Y.Z_darwin_arm64.tar.gz` | `steward`, `stewardctl`, `steward-mcp` |
 
-Each Linux row additionally produces
-`steward-node_vX.Y.Z_<arch>.deb` and
-`steward-node_vX.Y.Z_<arch>.rpm`. `install-steward.sh` is architecture-independent
-and selects among those packages and the archive at runtime.
+Each Linux target also produces `steward-node_vX.Y.Z_<arch>.deb` and
+`steward-node_vX.Y.Z_<arch>.rpm`. The architecture-independent
+`install-steward.sh` selects a native package or archive at install time.
 
-All Steward binaries are pure–standard-library Go. Executor and the
-systemd/config/install/preflight/activation node-appliance assets are shipped in each
-Linux archive—the supported node-server platform—and versioned as an integral Steward
-component. Darwin archives contain the usable `steward` client/supervisor and
-offline `stewardctl`; they do not advertise an Executor or Linux service installer that cannot obtain Docker `runsc`
-on macOS. Adding a target requires deciding explicitly whether it can satisfy Executor's
-host contract.
+Steward uses only the Go standard library. Linux archives include Executor,
+Gateway, Relay, systemd units, configuration, and installation, preflight, and
+activation assets. The node installer requires the expected version and rejects a
+manifest whose version, operating system, architecture, file set, or digest differs.
+Darwin archives contain `steward`, `stewardctl`, and
+`steward-mcp`; they do not claim support for Executor or the Linux service
+installer because macOS cannot satisfy the Docker `runsc` host contract. Add a
+target only after deciding whether it can meet that contract.
 
-## How release identity is stamped
+## Release identity
 
-`internal/buildinfo.Resolve()` has four explicit precedence levels:
+`internal/buildinfo.Resolve()` chooses a version in this order:
 
-1. **Stamped release version** — `scripts/release.sh` sets the otherwise-empty
-   private string `releaseVersion` through Go's standard `-ldflags -X` support.
-2. **`debug.ReadBuildInfo().Main.Version`** — used by a versioned `go install`.
-3. **VCS revision** — the commit SHA (`-dirty` when the tree had uncommitted
-   changes), stamped by any `go build` of a committed tree.
-4. **`const Version`** (`"1.2.0"`) — the development fallback when there is no build
-   metadata at all (`go run`, `go test`, or a build with VCS stamping disabled).
+1. **Stamped release version:** `scripts/release.sh` sets private
+   `releaseVersion` through Go's `-ldflags -X`.
+2. **`debug.ReadBuildInfo().Main.Version`:** used for versioned `go install`.
+3. **VCS revision:** the commit SHA, with `-dirty` for uncommitted changes.
+4. **`const Version`:** fallback for metadata-free `go run`, `go test`, or builds
+   with VCS stamping disabled.
 
-The explicit first level is load-bearing. A local-module checkout normally has
-`Main.Version="(devel)"`; VCS metadata identifies a commit, not the human release
-tag; and reproducible `-trimpath` builds may omit that metadata. The artifact
-filename, `/opt/steward/releases/<version>` directory, and activation argument must
-still agree exactly, so the release tag is passed directly to every cross-build:
+The explicit stamp is required. A checkout normally reports
+`Main.Version="(devel)"`; VCS metadata identifies a commit rather than its release
+tag; and `-trimpath` builds may omit that metadata. Artifact names,
+`/opt/steward/releases/<version>`, and activation arguments must still match.
+Every cross-build therefore receives the tag directly:
 
 ```console
+RELEASE_TAG="<release-tag>"
 go build -trimpath \
-  -ldflags "-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=v1.4.0" \
+  -ldflags "-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=$RELEASE_TAG" \
   ./cmd/steward
 ```
 
-The release script then builds host-native copies through the same path, executes
-both `steward -version` and `steward-executor -version`, and fails before publishing
-unless both equal `GITHUB_REF_NAME`. This guards the linker symbol, import path, and
-all three entry points rather than assuming a successful `go build` implies the version
-arrived.
+The script also builds host-native copies through this path, runs all six with
+`-version`, and fails unless each result equals the `VERSION` stamped into the
+artifacts. On a tag build, that value is `GITHUB_REF_NAME`. This checks the linker
+symbol, import path, and every entry point.
 
-A canonical `go install github.com/hardrails/steward/cmd/steward@v1.4.0` still
-reports `v1.4.0` through `Main.Version` without release flags. The shared fallback
-constant matters only for metadata-free developer invocations; keep it roughly in
-step for tidiness, but it does not identify published artifacts.
+`go install "github.com/hardrails/steward/cmd/steward@$RELEASE_TAG"` still reports
+the selected tag through `Main.Version` without linker flags. Keep the shared
+fallback constant reasonably current for developer builds, but it does not
+identify published artifacts.
 
-## Why native package tools, not a packaging framework
+## Why the release uses native package tools
 
-The release deliberately uses `dpkg-deb` and `rpmbuild`, invoked by short audited
-scripts, instead of goreleaser, nfpm, fpm, or a self-extracting installer:
+The release invokes `dpkg-deb` and `rpmbuild` from short audited scripts instead
+of using goreleaser, nfpm, fpm, or a self-extracting installer.
 
-- **Use the host's ownership model.** DEB and RPM provide atomic file ownership,
-  upgrade ordering, dependency checks, and removal semantics. A self-extracting
-  shell archive would have to recreate those poorly.
-- **No application dependency.** The package builders are distribution-native
-  release tools, not Go module or runtime dependencies. `go list -m all` remains
-  exactly the Steward module.
-- **Small audit surface.** The templates only carry the already-built release stage
-  and invoke the same `install-node.sh` lifecycle on the target. There is no second
-  implementation of identity, configuration, unit, or activation behavior.
-- **The one linker stamp needs no framework.** The native release script applies a
-  single standard `-X` value and executes both outputs to verify it. A packaging
-  framework would not make that contract smaller or safer.
-- **Locally and fully verifiable.** `scripts/release.sh` is the exact build CI
-  runs; a maintainer can dry-run the whole thing on their laptop. The build was
-  validated end-to-end (all four targets cross-compiled, each self-reporting
-  `v1.4.0` from a tagged checkout) before this workflow was committed.
-- **Smaller trusted-action surface.** The workflow pins only `actions/checkout`,
-  `actions/setup-go`, and `actions/{upload,download}-artifact` to full commit SHAs
-  — the same supply-chain discipline the rest of CI already uses — and publishes
-  with the built-in `GITHUB_TOKEN` via `gh`, adding no third-party release action.
+- DEB and RPM already provide file ownership, upgrade ordering, dependency
+  checks, and removal semantics.
+- These distribution tools add no Go module or runtime dependency.
+  `go list -m all` remains only the Steward module.
+- Package templates carry the built release stage and call the same
+  `install-node.sh` lifecycle, avoiding a second implementation of identity,
+  configuration, units, or activation.
+- One standard `-X` linker value is enough, and executing each host-native binary
+  verifies the result.
+- `scripts/release.sh` is the script CI runs, so maintainers can reproduce the
+  build locally. End-to-end validation has cross-compiled all four targets and
+  confirmed each host-native binary reports the selected tag.
+- `actions/checkout`, `actions/setup-go`, and
+  `actions/{upload,download}-artifact` are pinned to full commit SHAs.
+  Publication uses the built-in `GITHUB_TOKEN` and `gh`, with no third-party
+  release action.
 
-Revisit a packaging framework only when Steward commits to another native format
-(for example, a non-systemd platform) or package metadata becomes complex enough
-that maintaining the two templates is riskier than adopting the tool. Do not adopt
-one merely to shorten these build scripts.
+Reconsider a packaging framework if Steward adds another native package format or
+the DEB/RPM metadata becomes harder to maintain safely than the dependency. Script
+length alone is not a reason to add one.
 
-## Dry-running the release without publishing
+## Why each Linux release has an embedded manifest
 
-You never have to publish to test the automation. Two ways:
+Steward uses the host's SHA-256 tools and the existing package and archive formats.
+This keeps the node install path offline and adds no parser, package framework, or
+runtime dependency. `release.json` has one canonical layout, so the installer
+reconstructs it from the expected tag, host target, and actual files and requires an
+exact byte match.
 
-### Locally (no GitHub involved)
+The embedded manifest prevents version-label and mixed-file mistakes inside a
+verified artifact. It does not authenticate the artifact by itself: an attacker who
+can replace both the payload and manifest can recompute every digest. Operators must
+still verify the outer artifact through `checksums.txt` obtained over a trusted
+channel or an independently pinned mirror hash. Revisit signed release metadata if
+Steward adopts a public signing and key-rotation policy.
+
+## Dry-run without publishing
+
+### Local dry-run
 
 ```console
 # Builds every target and any native packages whose platform tools are installed,
@@ -176,24 +176,24 @@ ls dist/
 (cd dist && sha256sum -c checksums.txt)   # use `shasum -a 256 -c` on macOS
 ```
 
-On Ubuntu CI, `dpkg-deb` and `rpmbuild` are both installed and every advertised
-package is mandatory; x86 and ARM RPMs are built on matching native runners. A
-maintainer's macOS dry run builds archives and skips native packages whose Linux
-tools are absent; use the CI dry run for the complete matrix.
+Ubuntu CI installs `dpkg-deb` and `rpmbuild`; matching x86 and ARM runners make
+every advertised package mandatory. A macOS dry-run builds archives and skips
+Linux-native packages. Use a CI dry-run to verify the complete matrix.
 
-Run against a tag locally to also exercise the version assertion:
+To exercise tag validation and version assertions locally:
 
 ```console
-GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v1.4.0 bash scripts/release.sh
+RELEASE_TAG="<release-tag>"
+GITHUB_REF_TYPE=tag GITHUB_REF_NAME="$RELEASE_TAG" bash scripts/release.sh
 ```
 
-### On GitHub (`workflow_dispatch`)
+### GitHub dry-run
 
-The workflow also accepts a manual trigger. A `workflow_dispatch` run performs the
-**identical** build, checksum, and assertion steps and uploads `dist/` to the
-workflow run — but the "Create GitHub Release" step is gated to `push` of a `v*`
-tag, so a dispatch run **cannot create or mutate a release**. Fire one from the
-Actions tab, or:
+A `workflow_dispatch` run performs the same builds, checksums, and six-binary
+version assertion, then uploads `dist/` to the workflow run. It checks the
+immutable development `VERSION` used for those artifacts because a dispatch has
+no release tag. Its publish job is gated to a `v*` tag push, so manual dispatch
+cannot create or change a release.
 
 ```console
 gh workflow run release.yml --ref main
@@ -202,47 +202,59 @@ gh run watch "$(gh run list --workflow=release.yml --limit=1 --json databaseId -
 gh run download "$(gh run list --workflow=release.yml --limit=1 --json databaseId --jq '.[0].databaseId')" -n steward-dist -D /tmp/steward-dist
 ```
 
-(On a dispatch run the archives and binaries use an immutable
-`v0.0.0-dev.<commit>` prerelease identity, since there is no tag. The shape is
-accepted by the offline installer, so a maintainer can exercise the downloaded
-set as well as inspect it. That identity is never published as a GitHub Release.)
+Without a tag, archives and binaries receive the immutable prerelease identity
+`v0.0.0-dev.<commit>`. The offline installer accepts this form, but the workflow
+never publishes it as a GitHub Release.
 
-## Verifying a published download (for consumers)
+## Verify a published download
 
 ```console
 # Download the archive and the checksums for the release, then verify.
-gh release download v1.4.0 --repo hardrails/steward
+RELEASE_TAG="<release-tag>"
+gh release download "$RELEASE_TAG" --repo hardrails/steward
 sha256sum -c checksums.txt      # macOS: shasum -a 256 -c checksums.txt
-tar -xzf steward_v1.4.0_linux_amd64.tar.gz
-./steward -version              # -> steward v1.4.0
-# On Linux, steward-executor is in the same verified archive.
+tar -xzf "steward_${RELEASE_TAG}_linux_amd64.tar.gz"
+./steward -version              # must report "$RELEASE_TAG"
+# On Linux, the other five binaries are in the same verified archive.
 ```
 
-## Pre-flight checklist
+## Preflight checklist
 
-- [ ] `main` is green (all required checks pass) at the commit you will tag.
-- [ ] `scripts/signed-admission-acceptance.sh` passes on a Linux Docker host with
-      `runsc`, using the exact release binaries and an already-local pinned image.
-- [ ] `scripts/v14-egress-acceptance.sh` passes with a preloaded digest-pinned
-      image containing `/bin/sleep` and `curl`; it proves HTTP, HTTPS CONNECT, denial,
-      DNS isolation, audit, statistics, lifecycle, and receipts through real gVisor.
-- [ ] The tag is a valid semver `vX.Y.Z` (a pre-release such as `v1.4.0-rc.1`
-      is auto-marked as a GitHub pre-release; a hyphen in the tag is the signal).
-- [ ] You are tagging the intended commit (`git log -1`).
-- [ ] (Optional) `const Version` in `internal/buildinfo/version.go` is not
-      embarrassingly stale.
+Run Docker acceptance only on a disposable host that contains no real Steward
+workloads. Each script refuses to start unless
+`STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES` is set. It assigns a random run ID and
+removes only relays and networks carrying that run's exact tenant and instance
+labels. The scripts still bind fixed host ports, exercise the local Docker daemon,
+and intentionally create and destroy workloads, so a shared or production node is
+not a supported test target.
 
-## Rollback / re-cut
+- [ ] `main` is green at the exact commit to tag.
+- [ ] `scripts/signed-admission-acceptance.sh` passes on Linux with Docker and
+      `runsc`, using the release binaries and a local digest-pinned image.
+- [ ] `scripts/positive-capabilities-acceptance.sh` passes on Docker Engine 28+
+      with `runsc`. It tests persistent state, model brokering, service ingress,
+      MCP lifecycle, purge, and receipts through the production topology.
+- [ ] `scripts/egress-acceptance.sh` passes with a preloaded digest-pinned image
+      containing `/bin/sleep` and `curl`. It tests HTTP, HTTPS CONNECT, denial,
+      DNS isolation, audit, statistics, lifecycle, and receipts through gVisor.
+- [ ] The tag is `vX.Y.Z`, optionally with a prerelease suffix. A hyphen marks a
+      GitHub prerelease.
+- [ ] `git log -1` shows the intended commit.
+- [ ] Optional: `const Version` in `internal/buildinfo/version.go` is reasonably
+      current.
 
-A release is a tag plus a GitHub Release. If something is wrong:
+## Withdraw and replace a release
+
+A release consists of a tag and a GitHub Release. To withdraw both:
 
 ```console
 # Remove the GitHub Release and delete the tag locally and on the remote.
-gh release delete v1.4.0 --repo hardrails/steward --yes
-git push origin :refs/tags/v1.4.0
-git tag -d v1.4.0
+RELEASE_TAG="<release-tag>"
+gh release delete "$RELEASE_TAG" --repo hardrails/steward --yes
+git push origin ":refs/tags/$RELEASE_TAG"
+git tag -d "$RELEASE_TAG"
 ```
 
-Then fix forward and tag again. Prefer a new patch tag (`v1.2.1`) over re-pointing
-an already-published tag: consumers and the Go module proxy may have cached the
-old tag, and a moved tag is a supply-chain surprise.
+Commit the fix and publish a new patch tag. Do not move a published tag: consumers
+and the Go module proxy may have cached the original, so moving it can make the same
+tag resolve to different source for different consumers.

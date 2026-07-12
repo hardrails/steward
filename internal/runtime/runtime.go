@@ -305,23 +305,6 @@ func newTracker(maxInstances int, stateFile string, opts ...Option) *Tracker {
 // a brand-new instance simply starts unfenced (today's REST-handler behavior;
 // see docs/instance-generation-fencing.md).
 func (t *Tracker) Provision(instanceID string, generation int64, spec json.RawMessage) (inst *Instance, created bool, err error) {
-	// Process-exec opt-in gate. A spec carrying a "command" field expresses intent to
-	// run a real process. If process execution is disabled, that intent is REJECTED
-	// loudly (never silently stored and later ignored). If it is enabled, the process
-	// spec is validated now so a malformed command fails at provision, not only at
-	// the first start. A spec with no command field is the historical opaque blob and
-	// is unaffected either way, so an existing caller provisioning arbitrary config is
-	// exactly as before. This runs before the idempotency lookup on purpose: a
-	// command-bearing spec must be rejected under a disabled Steward regardless of
-	// whether the instance_id happens to already exist.
-	_, hasCommand, specErr := parseProcessSpec(spec)
-	if hasCommand && !t.execEnabled {
-		return nil, false, ErrProcessExecDisabled
-	}
-	if hasCommand && specErr != nil {
-		return nil, false, fmt.Errorf("%w: %v", ErrInvalidProcessSpec, specErr)
-	}
-
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -342,6 +325,20 @@ func (t *Tracker) Provision(instanceID string, generation int64, spec json.RawMe
 			return existing.clone(), false, nil
 		}
 		delete(t.byID, instanceID)
+	}
+
+	// Process-exec is a creation gate, not a replay gate. Idempotency above must
+	// return a still-live instance unchanged even after a restart with process
+	// execution disabled, or when a retry carries a different spec. For a new
+	// instance, a "command" field expresses intent to run a real process and is
+	// rejected unless process execution is enabled. When enabled, validate it now
+	// so malformed commands fail during provision rather than at first start.
+	_, hasCommand, specErr := parseProcessSpec(spec)
+	if hasCommand && !t.execEnabled {
+		return nil, false, ErrProcessExecDisabled
+	}
+	if hasCommand && specErr != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrInvalidProcessSpec, specErr)
 	}
 
 	if len(t.byRef) >= t.maxInstances {

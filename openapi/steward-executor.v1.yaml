@@ -1,12 +1,13 @@
 openapi: 3.0.3
 info:
   title: Steward Executor API
-  version: "1.4.0"
+  version: "1.5.0"
   description: |
     Public host-local contract for Steward's separate Docker/gVisor executor
     process. The control plane supplies a fully resolved generic OCI workload;
     Executor independently enforces immutable images, resource ceilings, and
-    non-escapable sandbox settings. Any compatible control plane can consume it.
+    fixed sandbox settings that callers cannot override. Any compatible control
+    plane can consume it within the documented host trust boundary.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -46,6 +47,38 @@ paths:
           $ref: "#/components/responses/MethodNotAllowed"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/readiness:
+    get:
+      tags: [health]
+      operationId: executorReadiness
+      summary: Report signed-runtime reconciliation readiness
+      description: |
+        Returns 200 only after the latest bounded reconciliation proved every
+        present signed runtime or safely repaired its lifecycle/control state.
+        Structural drift, missing objects, or an ambiguous journaled mutation
+        returns 503 with a bounded failure report. Executor stays live in that
+        degraded state so operators can inspect it and issue authenticated stop
+        requests that only deactivate and stop exactly identified local objects.
+        Unlike liveness, this endpoint requires the host-control credential.
+      responses:
+        "200":
+          description: Executor is ready for lifecycle mutations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Reconciliation has not run or its latest bounded scan is degraded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
   /v1/workloads:
     post:
       tags: [workloads]
@@ -89,7 +122,7 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          description: The deterministic runtime reference already has a different or drifted definition.
+          description: The deterministic runtime reference conflicts or drifted, or the requested image or prepared network disappeared before creation.
           content:
             application/json:
               schema:
@@ -97,7 +130,7 @@ paths:
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
-          description: Host or per-tenant workload capacity is exhausted.
+          description: A host or per-tenant workload-count, memory, CPU, or PID reservation is exhausted.
           content:
             application/json:
               schema:
@@ -113,10 +146,17 @@ paths:
         Verifies the exact publisher-signed capsule against the configured
         site-root-signed policy, binds it to the host-authenticated instance
         intent, applies policy and generation rollback fences, journals the
-        Docker mutation, and appends signed node-local receipts. V1.4 can grant
+        Docker mutation, and appends signed node-local receipts. Steward can grant
         persistent state, brokered inference, one declared private service, and
         named deny-by-default HTTP(S) egress routes only when the corresponding
-        local enforcement topology is configured.
+        local enforcement topology is configured. Persistent state also requires
+        the dedicated-host-only unquotaed-volume compatibility flag because the
+        portable Docker local-volume driver has no hard byte or inode quota.
+        Before any mutation, Executor
+        resolves the signed config digest locally, verifies the exact platform,
+        rejects image-declared volumes, and executes by that immutable config ID.
+        Admission is blocked while the latest reconciliation is degraded or a
+        prior journaled mutation remains ambiguous.
       requestBody:
         required: true
         content:
@@ -146,12 +186,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          $ref: "#/components/responses/WorkloadDrift"
+          description: Existing workload drift, unavailable exact image or prepared network, or unsafe local image metadata prevented admission.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
         "501":
-          description: A signed positive capability is valid but its required local enforcement topology is not configured.
+          description: A signed positive capability is valid but its required local enforcement topology is not configured, or persistent state is disabled because no hard byte or inode quota is available.
           content:
             application/json:
               schema:
@@ -251,11 +297,16 @@ paths:
     delete:
       tags: [workloads]
       operationId: destroyWorkload
-      summary: Idempotently destroy a workload
-      description: Removes only an Executor-managed workload; an absent or unmanaged name is already absent from this boundary.
+      summary: Destroy a workload
+      description: >-
+        Removes only an Executor-managed workload. Without signed admission, an
+        absent name is an idempotent success. With signed admission, an absent
+        name returns 204 only when an authorized destroyed tombstone is retained;
+        an unknown signed runtime reference returns 404. Destroy is blocked while
+        signed-runtime reconciliation is degraded because removal is irreversible.
       responses:
         "204":
-          description: Workload is absent; repeated destroys also return 204.
+          description: Workload is absent; authorized retries for a retained signed tombstone also return 204.
         "400":
           $ref: "#/components/responses/InvalidRuntimeRef"
         "401":
@@ -266,6 +317,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
@@ -287,7 +340,7 @@ paths:
       tags: [workloads]
       operationId: startWorkload
       summary: Idempotently start a workload
-      description: Starts only an Executor-managed, still-hardened workload; an already-running workload is a no-op.
+      description: Starts only an Executor-managed, still-hardened workload; an already-running workload is a no-op. Start is blocked while signed-runtime reconciliation is degraded because it would widen runtime authority.
       responses:
         "200":
           description: Workload is running.
@@ -328,7 +381,17 @@ paths:
       tags: [workloads]
       operationId: stopWorkload
       summary: Idempotently stop a workload
-      description: Stops only an Executor-managed, still-hardened workload; an already-stopped workload is a no-op.
+      description: |
+        In ready state, stops only an Executor-managed, still-hardened workload
+        and journals and receipts the transition; an already-stopped workload is
+        a no-op. In degraded state, this same endpoint becomes a narrow
+        containment operation. It requires the authenticated signed tenant and
+        generation, derives the Gateway grant and relay names from the retained
+        fence, deactivates that grant, stops only an agent and relay whose exact
+        retained identity can be proven, and reinspects their stopped state. It
+        does not settle a pending journal operation, update a fence, recreate,
+        adopt, or remove an object. A partially verified containment returns 503
+        while preserving every safety-only stop that was confirmed.
       responses:
         "200":
           description: Workload is not running.
@@ -355,7 +418,7 @@ paths:
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
-          description: Journal, receipt, or reconciliation state prevents a safe mutation.
+          description: At least one degraded containment boundary could not be verified inactive or exactly stopped; confirmed safety-only stops are not rolled back.
           content:
             application/json:
               schema:
@@ -369,10 +432,10 @@ paths:
       tags: [workloads]
       operationId: getWorkloadLogs
       summary: Read a bounded workload log tail
-      description: Returns at most the most recent 1 MiB from an Executor-managed workload.
+      description: Requests Docker's most recent 1000 lines and returns them only when the bounded encoded response is at most 1 MiB.
       responses:
         "200":
-          description: Combined stdout/stderr tail, bounded to 1 MiB.
+          description: Combined stdout/stderr from Docker's 1000-line tail, returned only when its bounded encoded response is at most 1 MiB.
           content:
             application/json:
               schema:
@@ -411,7 +474,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
-          description: Workload or signed egress grant is absent.
+          description: The workload is absent or has no signed egress capability. A grant expected by retained workload state but missing from Gateway is a fail-closed 503.
           content:
             application/json:
               schema:
@@ -554,7 +617,6 @@ components:
     Capabilities:
       type: object
       additionalProperties: false
-      required: [state, inference, service, egress]
       properties:
         state:
           type: boolean
@@ -564,7 +626,7 @@ components:
           type: boolean
         egress:
           type: boolean
-      description: Positive capabilities require their configured enforcement topology; otherwise admission fails closed with 501.
+      description: Omitted capability fields are false. Positive capabilities require their configured enforcement topology; otherwise admission fails closed with 501. Persistent state also requires an explicit dedicated-host compatibility setting and signed policy with exactly one tenant because local Docker volumes have no portable hard byte or inode quota.
     StatePurgeRequest:
       type: object
       additionalProperties: false
@@ -626,6 +688,10 @@ components:
           items:
             type: string
             pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        route_policy_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+          description: Deterministic non-secret digest of the effective inference and egress route policy retained by Gateway.
     Resources:
       type: object
       additionalProperties: false
@@ -721,6 +787,61 @@ components:
         status:
           type: string
           enum: [ok]
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [status, secure_admission]
+      properties:
+        status:
+          type: string
+          enum: [ready, reconciling, degraded]
+        secure_admission:
+          type: boolean
+        last_attempt:
+          type: string
+          format: date-time
+        reconciliation:
+          $ref: "#/components/schemas/ReconcileReport"
+    ReconcileReport:
+      type: object
+      additionalProperties: false
+      required: [ready, checked, changed, revoked]
+      properties:
+        ready:
+          type: boolean
+        checked:
+          type: integer
+          minimum: 0
+          maximum: 4096
+        changed:
+          type: integer
+          minimum: 0
+          maximum: 4096
+        revoked:
+          type: integer
+          minimum: 0
+          maximum: 4096
+        failures:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/ReconcileFailure"
+        dropped_failures:
+          type: integer
+          minimum: 0
+    ReconcileFailure:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        runtime_ref:
+          type: string
+          pattern: "^executor-[a-f0-9]{64}$"
+        code:
+          type: string
+        message:
+          type: string
+          maxLength: 256
     Error:
       type: object
       additionalProperties: false

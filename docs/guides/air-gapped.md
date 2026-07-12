@@ -1,14 +1,15 @@
 ---
-title: Install Steward in an air-gapped environment
-description: Import, verify, install, enroll, and activate Steward and gVisor without network access from the target Linux server.
+title: Install Steward without public network access
+description: Import, verify, install, and enroll Steward and gVisor without contacting a public release service from the target Linux server.
 section: How-to guide
 ---
 
-# Install Steward in an air-gapped environment
+# Install Steward without public network access
 
-Steward's offline path performs no Steward network request from the target host.
-Prepare and authenticate the release outside the facility, transfer it through your
-approved media process, and install from a local directory.
+The offline installer makes no public request from the target host. An activated
+node may still poll its configured on-premises control plane. Authenticate the
+release outside the facility, transfer it through approved media, and install from a
+local directory.
 
 ## Build the import set
 
@@ -20,6 +21,8 @@ Download these files for the release and target architecture:
   `steward-node_<version>_<arch>.rpm`, or
   `steward_<version>_linux_<arch>.tar.gz`
 - your two node credential JSON files and control-plane CA certificate
+- for a multi-tenant Executor: the site-root-signed policy containing the tenant
+  command keys and at least one cleanup key, plus the site-root public key
 
 If gVisor is not already installed, also download the official `runsc` and
 `containerd-shim-runsc-v1` binaries for the host architecture plus each matching
@@ -27,9 +30,9 @@ If gVisor is not already installed, also download the official `runsc` and
 
 ## Authenticate before transfer
 
-`checksums.txt` detects an altered release file only after you have independently
-authenticated the manifest. Put the complete set inside your organization's signed
-outer bundle, software repository, or controlled-media manifest. Record:
+`checksums.txt` detects altered files only after independent manifest
+authentication. Put the set in an organizational signed bundle, software
+repository, or controlled-media manifest. Record:
 
 - Steward release tag and Git commit;
 - artifact SHA-256 values;
@@ -40,22 +43,32 @@ outer bundle, software repository, or controlled-media manifest. Record:
 ## Verify inside the facility
 
 ```console
-cd /media/steward-v1.4.0
-sha256sum -c checksums.txt
+RELEASE_TAG="<release-tag>"
+cd "/media/steward-$RELEASE_TAG"
+ARTIFACT="steward-node_${RELEASE_TAG}_amd64.deb" # select the transferred file
+awk -v a="$ARTIFACT" '$2 == a || $2 == "./" a || $2 == "install-steward.sh" || $2 == "./install-steward.sh"' \
+  checksums.txt > selected-checksums.txt
+test "$(wc -l < selected-checksums.txt)" -eq 2
+sha256sum -c selected-checksums.txt
 ```
 
-On macOS staging systems use `shasum -a 256 -c checksums.txt`; the target Linux
-installer selects an available SHA-256 utility itself.
+On macOS staging systems use `shasum -a 256 -c selected-checksums.txt`; the target
+Linux installer selects an available SHA-256 utility itself.
 
 ## Install without network access
 
 ```console
-sudo bash /media/steward-v1.4.0/install-steward.sh \
-  --offline-dir /media/steward-v1.4.0 \
+RELEASE_TAG="<release-tag>"
+sudo bash "/media/steward-$RELEASE_TAG/install-steward.sh" \
+  --offline-dir "/media/steward-$RELEASE_TAG" \
   --control-plane-url https://control.customer.example \
   --steward-credential /media/enrollment/steward.json \
-  --executor-credential /media/enrollment/executor.json \
-  --ca-file /media/enrollment/control-plane-ca.pem
+  --executor-credential /media/enrollment/executor-node.json \
+  --ca-file /media/enrollment/control-plane-ca.pem \
+  --admission-policy /media/enrollment/site-policy.dsse.json \
+  --site-root-public-key /media/enrollment/site-root.public \
+  --site-root-key-id site-root-1 \
+  --node-id node-a
 ```
 
 For offline gVisor installation add:
@@ -64,35 +77,67 @@ For offline gVisor installation add:
   --install-gvisor --gvisor-dir /media/gvisor
 ```
 
-For automation, add `--non-interactive`. The installer fails rather than falling
-back to the internet when `--offline-dir` is present.
+For automation, add `--non-interactive`. When `--offline-dir` is present, the
+installer fails instead of using the public network.
+
+A node-scoped Executor credential authenticates the connection, not a tenant. The
+command verifies policy and node ID, initializes both anti-replay stores, configures
+the trusted relay, then activates the uplink. Executor creates an isolated network
+later for each admitted workload that receives a network capability. Omit
+signed-admission flags only for an intentional legacy single-tenant deployment.
 
 ## Import agent images separately
 
-Executor never pulls an image. Use the facility's approved registry mirror or
-transfer an OCI archive, verify its recorded digest, then load it before provisioning:
+Executor never pulls images. Use an approved mirror, or transfer a single-image
+Docker/OCI archive with its signed capsule, policy, and site-root public key. OCI is
+the standard container image format. Inspect the archive before transfer and copy
+its manifest digest, config digest, and platform into the capsule:
 
 ```console
-docker load --input /media/images/agent-approved.tar
-docker image inspect registry.internal/agent@sha256:<digest>
+chmod go-w agent-approved.tar
+stewardctl image inspect -archive agent-approved.tar
 ```
 
-Use exactly that repository digest in the Executor workload. Tags and bare image IDs
-are rejected.
+Inside the facility, import only after Steward has authenticated the artifacts and
+verified that they agree:
 
-## Prove the node stayed offline
+```console
+sudo stewardctl image import \
+  -archive /media/images/agent-approved.tar \
+  -capsule /media/trust/capsule.dsse.json \
+  -policy /media/trust/site-policy.dsse.json \
+  -site-root-public-key /media/trust/site-root.public \
+  -site-root-key-id site-root-1
+```
 
-Run preflight and inspect service configuration:
+The importer verifies every blob and descriptor. It accepts one platform image with
+no declared writable `VOLUME` and matches its manifest, config, and platform to the
+capsule. Docker receives a sanitized archive with only selected image content, not
+tags, unreferenced blobs, or the legacy `repositories` file. Steward then inspects
+the local config digest and rejects mismatches. An existing valid image returns
+`"imported":false`. Import authorizes storage; each workload still needs a
+tenant-bound intent.
+
+Do not substitute raw `docker load`: it authenticates neither capsule nor policy and
+may lose the addressable repository digest. See
+[image and evidence tools]({{ '/reference/offline-tools/' | relative_url }}) for the
+accepted archive boundary.
+
+## Verify local inputs and the configured network policy
+
+Run preflight and inspect service configuration. These checks validate Steward's
+inputs; use facility firewall, proxy, DNS, or flow records to prove the host's
+actual network behavior:
 
 ```console
 sudo /usr/local/libexec/steward/node-preflight
-sudo systemctl cat steward steward-executor
+sudo systemctl cat steward steward-executor steward-gateway
 docker info --format '{% raw %}{{json .Runtimes}}{% endraw %}'
 ```
 
-Steward's uplinks may target an on-premises control plane. In a fully disconnected
-staging phase, install with `--stage-only` and leave services disabled until the
-internal control plane and PKI are ready.
+Steward uplinks may target an on-premises control plane. During fully disconnected
+staging, install with `--stage-only` and leave services disabled until the internal
+control plane and PKI are ready.
 
 See [release artifacts]({{ '/reference/release-artifacts/' | relative_url }}) for
 the exact file matrix and [security model]({{ '/concepts/security-model/' | relative_url }})

@@ -47,17 +47,10 @@ func openAuditLog(path string, required bool) (*auditLog, error) {
 	if !required {
 		return &auditLog{disabled: true}, nil
 	}
-	if !absoluteClean(path) {
-		return nil, errors.New("egress audit file must be an absolute clean path")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := validateAuditLog(path, true); err != nil {
 		return nil, err
 	}
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > maxAuditBytes {
-			return nil, errors.New("egress audit file must be a bounded owner-only regular file")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -69,6 +62,41 @@ func openAuditLog(path string, required bool) (*auditLog, error) {
 		return nil, err
 	}
 	return &auditLog{path: path, file: file}, nil
+}
+
+// validateAuditLog inspects an existing audit file without creating its parent
+// directory or opening the file for append. A clean prospective path is valid:
+// normal startup creates it before the first egress decision is recorded.
+func validateAuditLog(path string, required bool) error {
+	if !required {
+		return nil
+	}
+	if !absoluteClean(path) {
+		return errors.New("egress audit file must be an absolute clean path")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > maxAuditBytes {
+		return errors.New("egress audit file must be a bounded owner-only regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0o077 != 0 || openedInfo.Size() > maxAuditBytes {
+		return errors.New("egress audit file changed while it was opened for validation")
+	}
+	return nil
 }
 
 func (a *auditLog) Append(event egressAuditEvent) error {

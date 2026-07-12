@@ -1,27 +1,27 @@
 ---
 title: Configure signed HTTP(S) egress
-description: Create named deny-by-default routes, bind them through signed admission, test HTTPS CONNECT, and inspect safe egress audit statistics.
+description: Create named deny-by-default routes, bind them through signed admission, test HTTPS CONNECT, and inspect bounded egress audit statistics.
 section: How-to
 ---
 
 # Configure signed HTTP(S) egress
 
-Steward v1.4 gives proxy-aware agents useful outbound HTTP, HTTPS, SSE, and
-WebSockets-over-HTTPS without giving the container a raw Internet route. Four
-authorities must agree:
+Steward gives proxy-aware agents bounded HTTP, HTTPS, server-sent events (SSE), and
+secure WebSocket (WSS) egress without a raw Internet route. Four permissions must
+agree:
 
 1. the publisher capsule permits the `egress` capability;
 2. site policy permits named route IDs for the tenant;
 3. the instance intent requests a subset of those IDs; and
 4. the node operator maps each ID to destinations and hard limits.
 
-Anything missing is denied. The unsigned compatibility endpoint cannot request
-egress.
+Steward denies the request if any permission is missing. The unsigned compatibility
+endpoint cannot request egress.
 
 ## 1. Define a node route
 
-The safe configurator preserves file ownership, renders to a temporary file,
-validates the complete Gateway configuration, fsyncs it, and then renames it:
+The configurator preserves ownership, validates a temporary complete configuration,
+flushes it with `fsync`, then renames it atomically:
 
 ```console
 sudo stewardctl gateway route set \
@@ -36,13 +36,16 @@ sudo stewardctl gateway route set \
 sudo systemctl reload steward-gateway
 ```
 
-An exact hostname does not match subdomains. `*.example.com` matches one or more
-subdomain labels but not `example.com`; list both when both are required. There is
-no open or default-allow rule.
+An exact hostname excludes subdomains. `*.example.com` matches one or more subdomain
+labels but not `example.com`; list both if needed. No route is open or default-allow.
 
-Public IPs are accepted only after the Gateway resolves the hostname and pins the
-exact checked address for the dial. Private, loopback, and link-local addresses
-require an explicit CIDR pin:
+Gateway resolves the hostname, checks each address against the default address
+rules and any route-wide Classless Inter-Domain Routing (CIDR) ranges, then dials
+the exact accepted address. Without an explicit CIDR, Gateway rejects every range
+in the IANA special-purpose registries. This includes private, loopback, link-local,
+documentation, benchmarking, and `100.64.0.0/10` shared address space used by
+carrier-grade NAT and Tailscale. It also rejects unallocated IPv6 unicast space.
+Permit a required internal range explicitly:
 
 ```console
 sudo stewardctl gateway route set \
@@ -52,18 +55,21 @@ sudo stewardctl gateway route set \
 sudo systemctl reload steward-gateway
 ```
 
-The CIDR applies to every destination supplied in that command. Use separate route
-IDs when destinations need different address pins. Metadata endpoints such as
-`169.254.169.254` stay unreachable unless the host operator explicitly adds their
-CIDR; do not do that for agent workloads.
+Each allowed CIDR applies to every destination in that route. Use separate route
+IDs when destinations need different private ranges. An explicit CIDR can permit
+special-purpose unicast, but it cannot permit an unspecified, multicast, or limited
+broadcast address. Metadata endpoints such as `169.254.169.254` remain unreachable
+unless explicitly allowed. Do not allow them for agent workloads.
 
-`systemctl reload` is atomic. It can add or change route definitions and rotate the
-Gateway service token without dropping active connections. A reload that removes a
-route referenced by any persisted grant is rejected, leaving the running policy
-unchanged. Changing `max_concurrent` while that route has in-flight requests is
-also rejected instead of resetting the live limit; retry when the route is idle.
-`systemctl reload` only delivers the signal, so confirm `configuration reloaded`
-in the Gateway journal when automating a policy rollout.
+Reload is atomic. It can add routes, alter unreferenced routes, and rotate the
+service token without dropping connections. A retained inference grant pins the
+base URL, credential-file path and presence, loaded credential contents, and
+concurrency. A retained egress grant pins destinations, concurrency, byte limits,
+allowed CIDRs, and lifetime. Changing a pinned field rejects the whole reload.
+Remove the workload and grant before changing that authority. Changing concurrency
+on an unreferenced route also fails while its old limit is in use. Automation must
+confirm `configuration reloaded` in the journal; `systemctl reload` only sends the
+signal.
 
 ## 2. Bind the route in signed authority
 
@@ -85,30 +91,38 @@ Add the route ID to the tenant rule in `site-policy.json`:
 Set the capsule ceiling:
 
 ```json
+{
 "capabilities": {
-  "state": true,
+  "state": false,
   "inference": true,
   "service": false,
   "egress": true
+}
 }
 ```
 
 Then request the route in the instance intent:
 
 ```json
+{
 "capabilities": {
-  "state": true,
+  "state": false,
   "inference": true,
   "service": false,
   "egress": true
 },
 "egress_route_ids": ["public-web"]
+}
 ```
 
-Sign the policy and capsule as described in [Signed admission]({{ '/guides/signed-admission/' | relative_url }}).
-On a node, the transactional setup command validates the site signature, generates
-the receipt key locally, initializes the durable fence once, derives and pins the
-trusted relay image, runs preflight, and restarts an already-active Executor:
+Sign the policy and capsule as described in
+[Signed admission]({{ '/guides/signed-admission/' | relative_url }}).
+On an already configured node, this command updates signed admission atomically. It
+validates the site signature, generates a missing receipt key, initializes missing
+fence, journal, and evidence stores with their service ownership, ensures that the
+active release has a verified relay-image binding, runs preflight, and restarts
+Executor if active. A failed transaction removes only stores and keys that it
+created:
 
 ```console
 sudo /usr/local/libexec/steward/configure-admission \
@@ -118,9 +132,9 @@ sudo /usr/local/libexec/steward/configure-admission \
   --node-id node-a
 ```
 
-For a local evaluation only, add `--allow-host-admin-intent`. That opt-in lets the
-host-wide loopback token select tenant intent; production remote admission should
-use the authenticated outbound command identity instead.
+For local evaluation only, `--allow-host-admin-intent` lets the host-wide loopback
+token select a tenant. Production remote admission should use authenticated outbound
+command identity.
 
 ## 3. What the agent receives
 
@@ -133,24 +147,41 @@ NO_PROXY=steward-relay,agent,localhost,127.0.0.1
 STEWARD_EGRESS_PROXY=http://steward-relay:8082
 ```
 
-Lower-case variants are supplied too. Agent DNS is set to a non-forwarding local
-address, so proxy-aware clients send the hostname to Steward and raw DNS cannot be
-used as an exfiltration path. Software that ignores proxy variables will fail;
-Steward does not silently add transparent interception.
+Lowercase variants are also supplied. Agent DNS is non-forwarding, so proxy-aware
+clients send hostnames to Steward and raw DNS cannot carry data out. Software that
+ignores proxy variables fails; Steward does not intercept traffic transparently.
 
-HTTPS uses standard `CONNECT`. Gateway checks route, hostname, port, resolved IP,
-concurrency, byte ceilings, and lifetime, then requires the bounded TLS ClientHello
-server name to equal the CONNECT hostname before dialing upstream. An explicitly
-approved IP requires an empty server name. Gateway does not decrypt TLS, so it
-cannot inspect paths or methods inside that tunnel. Deactivating the grant cancels
-established HTTP requests and CONNECT streams. End-to-end
-Authorization and Cookie headers belong to the agent and destination; Steward does
-not log them or inject generic credentials.
+HTTPS uses `CONNECT`. Gateway checks route, hostname, port, resolved IP, concurrency,
+byte limits, tunnel lifetime, and the first TLS ClientHello. The ClientHello message
+is limited to 64 KiB and at most eight TLS records. The client must send it within
+five seconds, or sooner when the route lifetime is shorter.
+A hostname CONNECT target requires a matching TLS Server Name Indication (SNI)
+value. An IP-literal target requires the ClientHello to omit SNI. Gateway cannot
+inspect methods or paths because it does not decrypt TLS. Grant deactivation cancels
+active requests and tunnels. Either side ending a tunnel closes the other side and
+releases its concurrency slot. Steward neither logs end-to-end Authorization or
+Cookie headers nor injects generic credentials.
+
+For HTTP responses with a known length above the route limit, Gateway returns
+`502 response_too_large` before forwarding body bytes. For an unknown-length
+response, Gateway preserves streaming and advertises the
+`X-Steward-Stream-Status` trailer. A complete response ends with `completed`. If
+the upstream read fails or another byte exists after the configured limit, Gateway
+aborts the HTTP stream. The client receives a framing or body-read error instead of
+a valid-looking truncated success. Gateway classifies the outcome as
+`terminal:stream_failed` or `terminal:response_too_large` and attempts to write that
+terminal audit record. The probe byte is never forwarded.
+
+Gateway must persist an allow decision before it opens an upstream route. If that
+write fails, a plain HTTP request returns `audit_unavailable`; an HTTPS `CONNECT`
+closes before Gateway dials the upstream. Audit writes for denials and
+terminal outcomes are best-effort so an audit-storage failure cannot turn a denial
+into access or keep a completed connection open.
 
 ## 4. Inspect and troubleshoot
 
 The admission response and status output show the effective proxy and sorted route
-IDs. Read bounded counters through either local interface:
+IDs. Read bounded counters through the local CLI:
 
 ```console
 sudo stewardctl node egress \
@@ -158,10 +189,11 @@ sudo stewardctl node egress \
   -runtime-ref executor-REPLACE
 ```
 
-The equivalent MCP tool is `steward_egress`. The result contains allow/deny counts,
-byte totals, and the last destination/decision. Durable JSONL decisions are written
-to `/var/lib/steward-gateway/egress-audit.jsonl` and rotate at 64 MiB. Records omit
-paths, queries, headers, bodies, and credentials.
+The MCP equivalent is `steward_egress`. Results contain allow/deny counts, bytes,
+and the last destination and decision. JSON Lines records in
+`/var/lib/steward-gateway/egress-audit.jsonl` rotate at 64 MiB and omit paths,
+queries, headers, bodies, and credentials. Denial and terminal counters can advance
+even when their best-effort audit write fails.
 
 Common failures:
 
@@ -174,6 +206,6 @@ Common failures:
 | `grant_inactive` | The workload is stopped, being destroyed, or not fully activated. |
 | `audit_unavailable` | An allow decision could not be durably recorded, so Steward refused it. |
 
-Stopping the agent deactivates the proxy grant before the container stops.
+Stopping the agent deactivates its proxy grant before stopping the container.
 Destroying it removes the Unix socket, relay, internal network, statistics, and
-grant. A stopped agent cannot retain an ambient route.
+grant. A stopped agent has no usable route.

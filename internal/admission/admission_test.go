@@ -67,6 +67,21 @@ func TestVerifyAndAdmitRejectsOutOfEnvelopeResourceAndDuplicatePayload(t *testin
 	}
 }
 
+func TestInferenceModelAliasRequiresExplicitSiteAuthorization(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule, policy := testCapsule(), testPolicy(public)
+	intent := testIntent(testDigest('d'))
+	intent.ModelAlias = "privileged-expensive-model"
+	_, err = Intersect(capsule, testDigest('d'), policy, testDigest('e'), "publisher-1", "site-root", intent,
+		AuthenticatedIdentity{TenantID: "tenant-a", NodeID: "node-a"}, PersistedFences{}, DefaultProfiles())
+	if err == nil || !strings.Contains(err.Error(), "model alias") {
+		t.Fatalf("unlisted inference model alias err=%v", err)
+	}
+}
+
 func testCapsule() ProfileCapsule {
 	return ProfileCapsule{
 		SchemaVersion: SchemaV1, CapsuleID: "capsule-a", PublisherKeyID: "publisher-1",
@@ -81,7 +96,8 @@ func testCapsule() ProfileCapsule {
 func testPolicy(publisher ed25519.PublicKey) SitePolicy {
 	return SitePolicy{SchemaVersion: SchemaV1, PolicyID: "site-a", PolicyEpoch: 1,
 		Publishers: []PublisherRule{{KeyID: "publisher-1", PublicKey: base64.StdEncoding.EncodeToString(publisher), AllowedProfiles: []ProfileRef{{ID: "generic-v1", Version: "v1"}}, AllowedRepositories: []string{"registry.example/agent"}, ResourceCeiling: ResourceLimits{MemoryBytes: 512 << 20, CPUMillis: 1000, PIDs: 128}}},
-		Tenants:    []TenantRule{{TenantID: "tenant-a", PublisherKeyIDs: []string{"publisher-1"}, ResourceCeiling: ResourceLimits{MemoryBytes: 256 << 20, CPUMillis: 500, PIDs: 64}, InferenceRouteIDs: []string{"local-model"}, ServiceIDs: []string{"api"}}},
+		Tenants: []TenantRule{{TenantID: "tenant-a", PublisherKeyIDs: []string{"publisher-1"}, ResourceCeiling: ResourceLimits{MemoryBytes: 256 << 20, CPUMillis: 500, PIDs: 64},
+			InferenceRouteIDs: []string{"local-model"}, InferenceModelAliases: []string{"model-a"}, ServiceIDs: []string{"api"}}},
 	}
 }
 

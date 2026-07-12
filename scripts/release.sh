@@ -12,7 +12,7 @@
 # injection. Checkout builds otherwise have Main.Version="(devel)" and VCS metadata
 # identifies a commit rather than the release tag; -trimpath may omit that metadata
 # entirely. The explicit stamp makes every cross-compiled archive and package agree
-# with its filename. The host-native assertion below independently executes both
+# with its filename. The host-native assertion below independently executes all six
 # binaries and fails a release if the stamp ever stops working.
 #
 # Usage: scripts/release.sh
@@ -52,10 +52,31 @@ for target in "${targets[@]}"; do
 	esac
 done
 
-# VERSION labels artifacts and is stamped into all three binaries. On a tag push
+# VERSION labels artifacts and is stamped into all six binaries. On a tag push
 # GITHUB_REF_NAME is authoritative; a local dry run falls back to `git describe`,
 # then to "dev" outside any checkout.
 VERSION="${STEWARD_RELEASE_VERSION:-${GITHUB_REF_NAME:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}}"
+
+valid_release_version() {
+	local candidate=$1 core prerelease identifier
+	[[ $candidate =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]] || return 1
+	core=${candidate#v}
+	if [[ $core == *-* ]]; then
+		prerelease=${core#*-}
+		IFS=. read -r -a identifiers <<<"$prerelease"
+		for identifier in "${identifiers[@]}"; do
+			if [[ $identifier =~ ^[0-9]+$ && $identifier == 0[0-9]* ]]; then
+				return 1
+			fi
+		done
+	fi
+	return 0
+}
+
+if [[ ${GITHUB_REF_TYPE:-} != tag ]] && ! valid_release_version "$VERSION"; then
+	dev_identity=${VERSION//[^0-9A-Za-z-]/-}
+	VERSION="v0.0.0-dev.source-${dev_identity:-local}"
+fi
 release_ldflags="-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=${VERSION}"
 
 # Fail-fast release-tag gate. The workflow's push trigger is the broad `v*`
@@ -74,7 +95,7 @@ release_ldflags="-s -w -X github.com/hardrails/steward/internal/buildinfo.releas
 # and no build-metadata `+...` — i.e. exactly the tags that resolve as Go module
 # versions for `go install pkg@vX.Y.Z`.
 if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-	if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+	if ! valid_release_version "${GITHUB_REF_NAME}"; then
 		echo "release: FATAL — tag '${GITHUB_REF_NAME}' is not an installable semver release tag." >&2
 		echo "  Expected vX.Y.Z with an optional -prerelease suffix, e.g. v0.1.0 or v0.1.0-rc.1" >&2
 		echo "  (no leading-zero parts, no malformed prerelease, no build-metadata '+...' suffix —" >&2
@@ -112,12 +133,16 @@ for target in "${targets[@]}"; do
 		cp -R deploy/config deploy/systemd "${stage}/deploy/"
 		cp scripts/install-node.sh scripts/activate-node-release.sh \
 			scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh \
-			scripts/uninstall-node.sh scripts/build-relay-image.sh \
+			scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
 			"${stage}/scripts/"
 		chmod 0755 "${stage}"/scripts/*.sh
-		files=(steward stewardctl steward-mcp steward-executor steward-gateway steward-relay LICENSE README.md deploy scripts)
+		# Bind the exact node payload before wrapping it in an archive or native
+		# package. The canonical manifest records the target and SHA-256 of all six
+		# binaries plus every integration file installed with that release.
+		bash scripts/write-release-manifest.sh "$stage" "$VERSION" "$goos" "$goarch"
+		files=(steward stewardctl steward-mcp steward-executor steward-gateway steward-relay release.json LICENSE README.md deploy scripts)
 	fi
-	# Ship the license and readme alongside all three binaries so the download is
+	# Ship the license and readme alongside all six binaries so the download is
 	# self-contained and license-compliant.
 	cp LICENSE README.md "${stage}/"
 	# Never carry workstation xattrs (notably macOS provenance) into the sovereign
@@ -169,9 +194,9 @@ install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
 	fi
 )
 
-# Version-assertion gate. Build the host-native binary and read the version it
-# reports. On a tag build this MUST equal the tag; otherwise the linker stamp is
-# broken and the package lifecycle would address a different release directory.
+# Version-assertion gate. Build every host-native binary and require each one to
+# report the exact VERSION stamped into the artifacts. This runs for tag builds,
+# manual workflow dispatches, and local dry runs.
 native_dir="$(mktemp -d)"
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward" ./cmd/steward
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-executor" ./cmd/steward-executor
@@ -191,16 +216,14 @@ echo "release: host-native stewardctl self-reports version '${ctl_reported}'"
 echo "release: host-native steward-mcp self-reports version '${mcp_reported}'"
 echo "release: host-native steward-gateway self-reports version '${gateway_reported}'"
 echo "release: host-native steward-relay self-reports version '${relay_reported}'"
-if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-	if [ "${reported}" != "${GITHUB_REF_NAME}" ] || [ "${executor_reported}" != "${GITHUB_REF_NAME}" ] || [ "${ctl_reported}" != "${GITHUB_REF_NAME}" ] || [ "${mcp_reported}" != "${GITHUB_REF_NAME}" ] || [ "${gateway_reported}" != "${GITHUB_REF_NAME}" ] || [ "${relay_reported}" != "${GITHUB_REF_NAME}" ]; then
-		echo "release: FATAL — one or more release binaries do not report tag '${GITHUB_REF_NAME}'." >&2
-		echo "  The explicit release-version linker stamp did not reach all three binaries," >&2
-		echo "  so the artifacts would misreport their version. Ensure scripts/release.sh" >&2
-		echo "  supplies release_ldflags to all three entry points. See docs/releasing.md." >&2
-		exit 1
-	fi
-	echo "release: version assertion OK — all six binaries self-report the tag ${GITHUB_REF_NAME}"
+if [ "${reported}" != "${VERSION}" ] || [ "${executor_reported}" != "${VERSION}" ] || [ "${ctl_reported}" != "${VERSION}" ] || [ "${mcp_reported}" != "${VERSION}" ] || [ "${gateway_reported}" != "${VERSION}" ] || [ "${relay_reported}" != "${VERSION}" ]; then
+	echo "release: FATAL — one or more release binaries do not report version '${VERSION}'." >&2
+	echo "  The explicit release-version linker stamp did not reach all six binaries," >&2
+	echo "  so the artifacts would misreport their version. Ensure scripts/release.sh" >&2
+	echo "  supplies release_ldflags to all six entry points. See docs/releasing.md." >&2
+	exit 1
 fi
+echo "release: version assertion OK — all six binaries self-report ${VERSION}"
 rm -rf "$native_dir"
 
 echo "release: artifacts in ${dist}/:"

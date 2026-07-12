@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +16,15 @@ import (
 // rejected (fail-closed) rather than silently mis-parsed.
 const stateVersion = 1
 
+const maxStateHeaderBytes = 4096
+
+// StateFormatSummary reports the canonical version header physically observed
+// in an existing supervisor state snapshot.
+type StateFormatSummary struct {
+	Present       bool
+	FormatVersion int
+}
+
 // snapshot is the on-disk representation of a Tracker's state: the format
 // version plus every currently tracked instance. The byID index is not stored;
 // it is rebuilt from the instances on load, so the file cannot carry an index
@@ -22,6 +32,51 @@ const stateVersion = 1
 type snapshot struct {
 	Version   int        `json:"version"`
 	Instances []Instance `json:"instances"`
+}
+
+// InspectStateFormat reads only the bounded canonical header written by
+// saveSnapshot. It deliberately does not load instances or reconcile process
+// state, so upgrade inspection cannot mutate runtime state or act on PIDs.
+func InspectStateFormat(path string) (StateFormatSummary, error) {
+	if path == "" {
+		return StateFormatSummary{}, errors.New("supervisor state path is required")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return StateFormatSummary{}, fmt.Errorf("supervisor state %q is missing", path)
+	}
+	if err != nil {
+		return StateFormatSummary{}, fmt.Errorf("stat supervisor state %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() == 0 {
+		return StateFormatSummary{}, fmt.Errorf("supervisor state %q must be a non-empty owner-only regular file", path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return StateFormatSummary{}, fmt.Errorf("open supervisor state %q for format inspection: %w", path, err)
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return StateFormatSummary{}, fmt.Errorf("stat opened supervisor state %q: %w", path, err)
+	}
+	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0o077 != 0 || openedInfo.Size() == 0 {
+		return StateFormatSummary{}, fmt.Errorf("supervisor state %q changed while it was opened for format inspection", path)
+	}
+	decoder := json.NewDecoder(io.LimitReader(file, maxStateHeaderBytes))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
+		return StateFormatSummary{}, fmt.Errorf("supervisor state %q has an invalid format header", path)
+	}
+	key, err := decoder.Token()
+	if err != nil || key != "version" {
+		return StateFormatSummary{}, fmt.Errorf("supervisor state %q does not begin with its canonical version header", path)
+	}
+	var version int
+	if err := decoder.Decode(&version); err != nil || version <= 0 {
+		return StateFormatSummary{}, fmt.Errorf("supervisor state %q has an invalid format version", path)
+	}
+	return StateFormatSummary{Present: true, FormatVersion: version}, nil
 }
 
 // LoadTracker returns a tracker bound to stateFile for durable state.

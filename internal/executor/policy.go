@@ -17,6 +17,7 @@ type PolicyError struct{ Message string }
 func (e *PolicyError) Error() string { return e.Message }
 
 var imageDigest = regexp.MustCompile(`^.+@sha256:[a-f0-9]{64}$`)
+var imageConfigDigest = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 var relayImageDigest = regexp.MustCompile(`^(?:.+@)?sha256:[a-f0-9]{64}$`)
 
 // Workload is the complete, intentionally small request accepted by the privileged
@@ -38,6 +39,48 @@ type Workload struct {
 	// Runtime is the trusted, derived positive-capability topology. Like State,
 	// it cannot be supplied through the public workload JSON contract.
 	Runtime *RuntimeGrant `json:"-"`
+	// ImageConfigDigest is the exact local image ID selected after signed image
+	// admission. Legacy requests leave it empty and retain their historical
+	// repository@manifest create behavior; signed admission sets it only after
+	// ImageDocker has verified the local image config and platform.
+	ImageConfigDigest string `json:"-"`
+}
+
+// ImageRequirement is the signed identity that a local Docker image must match
+// before Executor mutates host state. Config-ID lookup and execution are kept
+// separate from repository provenance so offline docker load need not preserve
+// a tag or repository-digest alias.
+type ImageRequirement struct {
+	ConfigDigest string
+	OS           string
+	Architecture string
+	Variant      string
+}
+
+// ValidateImage proves that Docker resolved the signed repository manifest to
+// the exact admitted config and platform. Image-declared volumes are rejected:
+// Docker would otherwise materialize anonymous writable storage outside the
+// executor-managed lineage contract.
+func ValidateImage(observed ObservedImage, expected ImageRequirement) error {
+	if !imageConfigDigest.MatchString(expected.ConfigDigest) || expected.OS != "linux" ||
+		!boundedText(expected.Architecture, 32) || len(expected.Variant) > 32 || strings.ContainsRune(expected.Variant, '\x00') {
+		return &PolicyError{"signed image requirement is unsupported"}
+	}
+	if !observed.ConfigPresent || !imageConfigDigest.MatchString(observed.ID) ||
+		!boundedText(observed.OS, 32) || !boundedText(observed.Architecture, 32) ||
+		len(observed.Variant) > 32 || strings.ContainsRune(observed.Variant, '\x00') {
+		return &PolicyError{"local image metadata is unsupported"}
+	}
+	if len(observed.DeclaredVolumes) != 0 {
+		return &PolicyError{"image config must not declare writable volumes"}
+	}
+	if observed.ID != expected.ConfigDigest {
+		return &PolicyError{"local image config digest does not match signed admission"}
+	}
+	if observed.OS != expected.OS || observed.Architecture != expected.Architecture || observed.Variant != expected.Variant {
+		return &PolicyError{"local image platform does not match signed admission"}
+	}
+	return nil
 }
 
 type StateMount struct {
@@ -47,6 +90,8 @@ type StateMount struct {
 
 type RuntimeGrant struct {
 	NetworkName    string   `json:"network_name"`
+	Subnet         string   `json:"subnet"`
+	Gateway        string   `json:"gateway"`
 	GrantID        string   `json:"grant_id"`
 	Generation     uint64   `json:"generation"`
 	Inference      bool     `json:"inference"`
@@ -76,6 +121,12 @@ type HostPolicy struct {
 	MaxPIDs               int64
 	MaxWorkloads          int
 	MaxWorkloadsPerTenant int
+	MaxTotalMemoryBytes   int64
+	MaxTotalCPUMillis     int64
+	MaxTotalPIDs          int64
+	MaxTenantMemoryBytes  int64
+	MaxTenantCPUMillis    int64
+	MaxTenantPIDs         int64
 }
 
 // DefaultHostPolicy is conservative enough for a shared host. Operators with
@@ -87,19 +138,32 @@ func DefaultHostPolicy() HostPolicy {
 		MaxPIDs:               128,
 		MaxWorkloads:          32,
 		MaxWorkloadsPerTenant: 4,
+		MaxTotalMemoryBytes:   8 << 30,
+		MaxTotalCPUMillis:     8000,
+		MaxTotalPIDs:          2048,
+		MaxTenantMemoryBytes:  2 << 30,
+		MaxTenantCPUMillis:    2000,
+		MaxTenantPIDs:         512,
 	}
 }
 
 func (p HostPolicy) Validate() error {
 	if p.MaxMemoryBytes <= 0 || p.MaxCPUMillis <= 0 || p.MaxPIDs <= 0 ||
-		p.MaxWorkloads <= 0 || p.MaxWorkloadsPerTenant <= 0 {
+		p.MaxWorkloads <= 0 || p.MaxWorkloadsPerTenant <= 0 ||
+		p.MaxTotalMemoryBytes <= 0 || p.MaxTotalCPUMillis <= 0 || p.MaxTotalPIDs <= 0 ||
+		p.MaxTenantMemoryBytes <= 0 || p.MaxTenantCPUMillis <= 0 || p.MaxTenantPIDs <= 0 {
 		return errors.New("all host policy limits must be positive")
 	}
-	if p.MaxCPUMillis > math.MaxInt64/1_000_000 {
+	if p.MaxCPUMillis > math.MaxInt64/1_000_000 || p.MaxTotalCPUMillis > math.MaxInt64/1_000_000 ||
+		p.MaxTenantCPUMillis > math.MaxInt64/1_000_000 {
 		return errors.New("max CPU millicores is too large for Docker NanoCPUs")
 	}
 	if p.MaxWorkloadsPerTenant > p.MaxWorkloads {
 		return errors.New("max workloads per tenant must not exceed max workloads")
+	}
+	if p.MaxTenantMemoryBytes > p.MaxTotalMemoryBytes || p.MaxTenantCPUMillis > p.MaxTotalCPUMillis ||
+		p.MaxTenantPIDs > p.MaxTotalPIDs {
+		return errors.New("tenant aggregate limits must not exceed host aggregate limits")
 	}
 	return nil
 }
@@ -139,6 +203,9 @@ func (w Workload) Validate() error {
 	}
 	if len(w.Image) > 1024 || !imageDigest.MatchString(w.Image) {
 		return &PolicyError{"image must be an immutable @sha256 digest reference"}
+	}
+	if w.ImageConfigDigest != "" && !imageConfigDigest.MatchString(w.ImageConfigDigest) {
+		return &PolicyError{"internal image config digest is invalid"}
 	}
 	if len(w.Command) > 64 {
 		return &PolicyError{"command may contain at most 64 arguments"}
@@ -180,8 +247,10 @@ func (w Workload) Validate() error {
 				return &PolicyError{"internal egress routes are invalid"}
 			}
 		}
-		addresses := NetworkSpecFor(w.TenantID, w.InstanceID, w.Runtime.Generation)
-		if w.Runtime.NetworkName != addresses.Name || w.Runtime.RelayIP != addresses.RelayIP || w.Runtime.AgentIP != addresses.AgentIP {
+		identity := NetworkSpecFor(w.TenantID, w.InstanceID, w.Runtime.Generation)
+		allocationReady := runtimeAllocationMatches(identity, w.Runtime.Subnet, w.Runtime.Gateway, w.Runtime.RelayIP, w.Runtime.AgentIP)
+		allocationPending := w.Runtime.Subnet == "" && w.Runtime.Gateway == "" && w.Runtime.RelayIP == "" && w.Runtime.AgentIP == ""
+		if w.Runtime.NetworkName != identity.Name || !allocationReady && !allocationPending {
 			return &PolicyError{"internal runtime addresses are invalid"}
 		}
 	}

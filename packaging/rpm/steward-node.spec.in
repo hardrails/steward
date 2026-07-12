@@ -33,12 +33,19 @@ install -m 0644 %{_sourcedir}/README.md %{buildroot}/usr/share/doc/steward-node/
 
 %post
 if [ "$1" -ge 1 ]; then
-    /usr/lib/steward-node/release/scripts/install-node.sh
+    /usr/lib/steward-node/release/scripts/install-node.sh --expected-version '@RELEASE_VERSION@'
 fi
 
 %preun
 if [ "$1" -eq 0 ]; then
-    systemctl disable --now steward.service steward-executor.service steward-gateway.service >/dev/null 2>&1 || true
+    guard=/usr/lib/steward-node/release/scripts/node-removal-guard.sh
+    [ -x "$guard" ] || guard=/opt/steward/current/integration/scripts/node-removal-guard.sh
+    [ -x "$guard" ] || guard=/usr/local/libexec/steward/node-removal-guard
+    "$guard"
+    systemctl stop steward-gateway.service >/dev/null 2>&1 || true
+    systemctl stop steward.service >/dev/null 2>&1 || true
+    systemctl stop steward-executor.service >/dev/null 2>&1 || true
+    systemctl disable steward-gateway.service steward.service steward-executor.service >/dev/null 2>&1 || true
 fi
 
 %postun

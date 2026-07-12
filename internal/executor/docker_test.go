@@ -5,13 +5,51 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
+	"maps"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestLoadImageUsesNativeDockerImportAndRejectsDaemonErrors(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		response string
+		wantErr  bool
+	}{
+		{name: "success", response: "{\"stream\":\"Loaded image\"}\n"},
+		{name: "daemon error", response: "{\"errorDetail\":{\"message\":\"invalid layer\"},\"error\":\"invalid layer\"}\n", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1.41/images/load" || r.URL.Query().Get("quiet") != "1" {
+					t.Fatalf("unexpected image import target %s %s", r.Method, r.URL.String())
+				}
+				if r.Header.Get("Content-Type") != "application/x-tar" {
+					t.Fatalf("content type=%q", r.Header.Get("Content-Type"))
+				}
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(body) != "verified archive" {
+					t.Fatalf("body=%q", body)
+				}
+				_, _ = w.Write([]byte(test.response))
+			})
+			err := docker.LoadImage(context.Background(), strings.NewReader("verified archive"))
+			if (err != nil) != test.wantErr {
+				t.Fatalf("LoadImage error=%v wantErr=%v", err, test.wantErr)
+			}
+		})
+	}
+}
 
 func dockerTestClient(t *testing.T, handler http.HandlerFunc) *DockerHTTP {
 	t.Helper()
@@ -37,6 +75,37 @@ func dockerTestClient(t *testing.T, handler http.HandlerFunc) *DockerHTTP {
 	return NewDockerHTTP(socket)
 }
 
+func assertClosedDockerCreatePolicy(t *testing.T, host map[string]any) {
+	t.Helper()
+	for key, want := range map[string]any{
+		"PidMode": "", "IpcMode": "private", "UTSMode": "", "CgroupnsMode": "private",
+		"UsernsMode": "", "Cgroup": "", "AutoRemove": false, "OomKillDisable": false,
+		"OomScoreAdj": float64(0), "ContainerIDFile": "", "CgroupParent": "", "VolumeDriver": "",
+		"ShmSize": float64(privateShmBytes),
+	} {
+		got, ok := host[key]
+		if !ok || got != want {
+			t.Fatalf("closed Docker policy %s=%#v want %#v (present=%v): %#v", key, got, want, ok, host)
+		}
+	}
+	restart, ok := host["RestartPolicy"].(map[string]any)
+	if !ok || restart["Name"] != "no" || restart["MaximumRetryCount"] != float64(0) {
+		t.Fatalf("restart policy is not explicitly disabled: %#v", host["RestartPolicy"])
+	}
+	for _, key := range []string{"VolumesFrom", "Links", "GroupAdd", "DeviceCgroupRules", "DnsOptions", "DnsSearch"} {
+		values, ok := host[key].([]any)
+		if !ok || len(values) != 0 {
+			t.Fatalf("closed Docker policy %s=%#v", key, host[key])
+		}
+	}
+	for _, key := range []string{"StorageOpt", "Sysctls"} {
+		values, ok := host[key].(map[string]any)
+		if !ok || len(values) != 0 {
+			t.Fatalf("closed Docker policy %s=%#v", key, host[key])
+		}
+	}
+}
+
 func TestCreateSendsNonEscapableDockerPolicy(t *testing.T) {
 	var payload map[string]any
 	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +126,7 @@ func TestCreateSendsNonEscapableDockerPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := payload["HostConfig"].(map[string]any)
+	assertClosedDockerCreatePolicy(t, host)
 	if payload["User"] != "65532:65532" {
 		t.Fatalf("workload was not forced to an unprivileged user: %#v", payload)
 	}
@@ -68,6 +138,15 @@ func TestCreateSendsNonEscapableDockerPolicy(t *testing.T) {
 	}
 	if host["Memory"] != float64(1<<20) || host["NanoCPUs"] != float64(250_000_000) || host["PidsLimit"] != float64(32) {
 		t.Fatalf("resource limits missing: %#v", host)
+	}
+	if host["MemorySwap"] != float64(1<<20) {
+		t.Fatalf("swap exceeded memory ceiling: %#v", host)
+	}
+	logConfig := host["LogConfig"].(map[string]any)
+	logOptions := logConfig["Config"].(map[string]any)
+	if logConfig["Type"] != dockerLogDriver || logOptions["max-size"] != dockerLogMaxSize ||
+		logOptions["max-file"] != dockerLogMaxFiles || logOptions["compress"] != dockerLogCompress {
+		t.Fatalf("bounded local logging missing: %#v", logConfig)
 	}
 	if got := host["CapDrop"].([]any); len(got) != 1 || got[0] != "ALL" {
 		t.Fatalf("capabilities not dropped: %#v", host)
@@ -85,6 +164,34 @@ func TestCreateSendsNonEscapableDockerPolicy(t *testing.T) {
 	}
 	if labels[workloadMemoryLabel] != "1048576" || labels[workloadCPULabel] != "250" || labels[workloadPIDsLabel] != "32" {
 		t.Fatalf("resource drift labels missing: %#v", labels)
+	}
+}
+
+func TestCreateRunsSecureWorkloadByExactConfigDigest(t *testing.T) {
+	var payload map[string]any
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	workload := Workload{
+		InstanceID: "agent", TenantID: "tenant-a", ProfileID: "generic-v1@v1",
+		Image: "registry.local/agent@sha256:" + strings.Repeat("a", 64), ImageConfigDigest: "sha256:" + strings.Repeat("b", 64),
+		Command: []string{"agent"}, Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 16},
+	}
+	if err := workload.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := docker.Create(context.Background(), "executor-image-id", workload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["Image"] != workload.ImageConfigDigest {
+		t.Fatalf("Docker create image=%v want exact config %s", payload["Image"], workload.ImageConfigDigest)
+	}
+	labels := payload["Labels"].(map[string]any)
+	if labels[workloadImageReferenceLabel] != workload.Image || labels[workloadImageConfigLabel] != workload.ImageConfigDigest {
+		t.Fatalf("signed image identity labels=%#v", labels)
 	}
 }
 
@@ -109,6 +216,7 @@ func TestCreateWithStateUsesOnlyExecutorDerivedVolume(t *testing.T) {
 		t.Fatalf("payload=%#v", payload)
 	}
 	host := payload["HostConfig"].(map[string]any)
+	assertClosedDockerCreatePolicy(t, host)
 	tmpfs := host["Tmpfs"].(map[string]any)
 	if _, exists := tmpfs["/workspace"]; exists {
 		t.Fatal("state workload retained ephemeral workspace")
@@ -132,11 +240,12 @@ func TestCreateWithSignedEgressInjectsOnlyFixedProxyAndDisablesDNS(t *testing.T)
 		}
 		w.WriteHeader(http.StatusCreated)
 	})
-	addresses := NetworkSpecFor("tenant-a", "agent-a", 4)
+	addresses := testNetworkSpec("tenant-a", "agent-a", 4)
 	workload := Workload{InstanceID: "agent-a", TenantID: "tenant-a", ProfileID: "generic-v1@v1",
 		Image: "registry.local/agent@sha256:" + strings.Repeat("a", 64), Command: []string{"agent"},
 		Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 16}, Runtime: &RuntimeGrant{
 			NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), Generation: 4,
+			Subnet: addresses.Subnet, Gateway: addresses.Gateway,
 			RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP, EgressRouteIDs: []string{"package-mirrors", "public-web"},
 		}}
 	if err := workload.Validate(); err != nil {
@@ -167,6 +276,37 @@ func TestCreateWithSignedEgressInjectsOnlyFixedProxyAndDisablesDNS(t *testing.T)
 	labels := payload["Labels"].(map[string]any)
 	if labels[runtimeEgressRoutesLabel] != "package-mirrors,public-web" {
 		t.Fatalf("labels=%#v", labels)
+	}
+}
+
+func TestCreateDisablesDNSForEveryPositiveCapabilityRuntime(t *testing.T) {
+	for _, runtime := range []*RuntimeGrant{
+		{Inference: true, RouteID: "local", ModelAlias: "model"},
+		{ServicePort: 8080},
+	} {
+		t.Run(fmt.Sprintf("inference=%t-service=%d", runtime.Inference, runtime.ServicePort), func(t *testing.T) {
+			var payload map[string]any
+			docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				w.WriteHeader(http.StatusCreated)
+			})
+			addresses := testNetworkSpec("tenant-a", "agent-a", 5)
+			runtime.NetworkName, runtime.GrantID, runtime.Generation = addresses.Name, "grant-"+strings.Repeat("b", 64), 5
+			runtime.Subnet, runtime.Gateway = addresses.Subnet, addresses.Gateway
+			runtime.RelayIP, runtime.AgentIP = addresses.RelayIP, addresses.AgentIP
+			workload := Workload{InstanceID: "agent-a", TenantID: "tenant-a", ProfileID: "generic-v1@v1",
+				Image: "registry.local/agent@sha256:" + strings.Repeat("a", 64), Command: []string{"agent"},
+				Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 16}, Runtime: runtime}
+			if err := docker.Create(context.Background(), "executor-runtime", workload); err != nil {
+				t.Fatal(err)
+			}
+			dns := payload["HostConfig"].(map[string]any)["Dns"].([]any)
+			if len(dns) != 1 || dns[0] != "127.0.0.1" {
+				t.Fatalf("DNS=%#v", dns)
+			}
+		})
 	}
 }
 
@@ -259,14 +399,18 @@ func TestCreateRelayUsesOnlyFixedHardenedTopology(t *testing.T) {
 		MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
 	}
 	spec.Name = RelayName(spec.TenantID, spec.InstanceID, spec.Generation)
-	addresses := NetworkSpecFor(spec.TenantID, spec.InstanceID, spec.Generation)
+	addresses := testNetworkSpec(spec.TenantID, spec.InstanceID, spec.Generation)
 	spec.NetworkName, spec.RelayIP, spec.AgentIP = addresses.Name, addresses.RelayIP, addresses.AgentIP
 	if err := docker.CreateRelay(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}
 	host := payload["HostConfig"].(map[string]any)
+	assertClosedDockerCreatePolicy(t, host)
 	if host["Runtime"] != "runc" || host["NetworkMode"] != spec.NetworkName || host["ReadonlyRootfs"] != true {
 		t.Fatalf("host=%#v", host)
+	}
+	if host["MemorySwap"] != float64(spec.MemoryBytes) || host["Dns"].([]any)[0] != "127.0.0.1" {
+		t.Fatalf("relay resource/DNS fence missing: %#v", host)
 	}
 	if _, published := host["PortBindings"]; published {
 		t.Fatalf("relay published a raw Docker port: %#v", host)
@@ -294,19 +438,96 @@ func TestCreateRelayUsesOnlyFixedHardenedTopology(t *testing.T) {
 	}
 }
 
-func TestNetworkSpecUsesDeterministicPrivatePerInstanceSubnet(t *testing.T) {
-	a := NetworkSpecFor("tenant-a", "agent-a", 1)
-	b := NetworkSpecFor("tenant-a", "agent-a", 2)
-	if a == b || !strings.HasSuffix(a.Subnet, "/29") || !strings.HasPrefix(a.AgentIP, "10.") || a.AgentIP == a.RelayIP {
-		t.Fatalf("a=%#v b=%#v", a, b)
+func TestCreateServiceOnlyRelayMountsItsGrantSocket(t *testing.T) {
+	var payload map[string]any
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	spec := RelaySpec{
+		TenantID: "tenant-a", InstanceID: "service-only", Generation: 1,
+		GrantID: "grant-" + strings.Repeat("a", 64), GrantDir: "/run/steward-gateway/grants/" + strings.Repeat("a", 32),
+		Image: "sha256:" + strings.Repeat("b", 64), RelayGID: 1234, ServicePort: 8080,
+		MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
 	}
-	if a.Name != NetworkName("tenant-a", "agent-a", 1) {
-		t.Fatalf("name=%s", a.Name)
+	spec.Name = RelayName(spec.TenantID, spec.InstanceID, spec.Generation)
+	addresses := testNetworkSpec(spec.TenantID, spec.InstanceID, spec.Generation)
+	spec.NetworkName, spec.RelayIP, spec.AgentIP = addresses.Name, addresses.RelayIP, addresses.AgentIP
+	if err := docker.CreateRelay(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	command := payload["Cmd"].([]any)
+	wantCommand := []string{"-service-socket=/run/steward-grant/s.sock", "-service-target=http://agent:8080"}
+	if len(command) != len(wantCommand) {
+		t.Fatalf("command=%#v", command)
+	}
+	for index := range wantCommand {
+		if command[index] != wantCommand[index] {
+			t.Fatalf("command=%#v", command)
+		}
+	}
+	mounts := payload["HostConfig"].(map[string]any)["Mounts"].([]any)
+	if len(mounts) != 1 || mounts[0].(map[string]any)["Source"] != spec.GrantDir {
+		t.Fatalf("mounts=%#v", mounts)
+	}
+}
+
+func TestNetworkSpecBindsDockerAllocatedPrivateAddresses(t *testing.T) {
+	identity := NetworkSpecFor("tenant-a", "agent-a", 1)
+	if identity.Name != NetworkName("tenant-a", "agent-a", 1) || identity.Subnet != "" || identity.RelayIP != "" || identity.AgentIP != "" {
+		t.Fatalf("identity=%#v", identity)
+	}
+	allocated, err := networkSpecFromIPAM(identity, "172.30.8.0/29", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allocated.Subnet != "172.30.8.0/29" || allocated.Gateway != "" ||
+		allocated.RelayIP != "172.30.8.1" || allocated.AgentIP != "172.30.8.2" {
+		t.Fatalf("allocated=%#v", allocated)
+	}
+	observed := ObservedNetwork{NetworkSpec: allocated, Managed: true, Internal: true}
+	if !networkEqual(observed, identity) {
+		t.Fatal("gateway-less isolated Docker allocation did not match its identity")
+	}
+	observed.AgentIP = "172.30.8.3"
+	if networkEqual(observed, identity) {
+		t.Fatal("network equality accepted an endpoint that was not derived from Docker IPAM")
+	}
+	if !runtimeAllocationMatches(identity, allocated.Subnet, allocated.Gateway, allocated.RelayIP, allocated.AgentIP) {
+		t.Fatal("canonical gateway-less allocation did not match")
+	}
+	if runtimeAllocationMatches(identity, "172.30.8.1/29", allocated.Gateway, allocated.RelayIP, allocated.AgentIP) {
+		t.Fatal("non-canonical subnet matched the recorded runtime allocation")
+	}
+	withGateway, err := networkSpecFromIPAM(identity, "172.30.8.0/29", "172.30.8.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withGateway.Gateway != "172.30.8.1" || withGateway.RelayIP != "172.30.8.2" || withGateway.AgentIP != "172.30.8.3" {
+		t.Fatalf("allocation with gateway=%#v", withGateway)
+	}
+	for _, test := range []struct {
+		name, subnet, gateway string
+	}{
+		{"too small", "172.30.8.0/30", ""},
+		{"public gateway", "192.0.2.0/29", "192.0.2.1"},
+		{"outside gateway", "172.30.8.0/29", "172.30.9.1"},
+		{"invalid gateway", "172.30.8.0/29", "not-an-address"},
+		{"network address gateway", "172.30.8.0/29", "172.30.8.0"},
+		{"broadcast gateway", "172.30.8.0/29", "172.30.8.7"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := networkSpecFromIPAM(identity, test.subnet, test.gateway); err == nil {
+				t.Fatal("invalid Docker allocation accepted")
+			}
+		})
 	}
 }
 
 func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) {
-	network := NetworkSpecFor("tenant-a", "agent-a", 7)
+	network := testNetworkSpec("tenant-a", "agent-a", 7)
 	relay := RelaySpec{
 		Name: RelayName("tenant-a", "agent-a", 7), Image: "sha256:" + strings.Repeat("a", 64),
 		NetworkName: network.Name, GrantID: "grant-" + strings.Repeat("b", 64),
@@ -317,12 +538,21 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1.41/networks/create":
+			var create map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&create); err != nil {
+				t.Fatal(err)
+			}
+			if create["Driver"] != "bridge" || create["Internal"] != true ||
+				create["Options"].(map[string]any)[isolatedGatewayOption] != isolatedGatewayMode {
+				t.Fatalf("network create=%#v", create)
+			}
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1.41/networks/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"Name": network.Name, "Internal": true, "Attachable": false,
-				"Labels": map[string]string{managedNetworkLabel: "true", "io.hardrails.tenant": network.TenantID, "io.hardrails.instance": network.InstanceID, networkGenerationLabel: "7"},
-				"IPAM":   map[string]any{"Config": []map[string]string{{"Subnet": network.Subnet, "Gateway": network.Gateway}}},
+				"Name": network.Name, "Driver": "bridge", "Internal": true, "Attachable": false,
+				"Options": map[string]string{isolatedGatewayOption: isolatedGatewayMode},
+				"Labels":  map[string]string{managedNetworkLabel: "true", "io.hardrails.tenant": network.TenantID, "io.hardrails.instance": network.InstanceID, networkGenerationLabel: "7"},
+				"IPAM":    map[string]any{"Config": []map[string]string{{"Subnet": network.Subnet, "Gateway": network.Gateway}}},
 			})
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1.41/networks/"):
 			w.WriteHeader(http.StatusNoContent)
@@ -330,33 +560,181 @@ func TestNetworkLifecycleAndRelayInspectionVerifyObservedTopology(t *testing.T) 
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"Image": relay.Image,
 				"Config": map[string]any{"Image": relay.Image, "User": "65532:1234", "WorkingDir": "/",
-					"Cmd":    []string{"-inference-socket=/run/steward-grant/i.sock", "-service-target=http://agent:8080"},
+					"Cmd":    []string{"-inference-socket=/run/steward-grant/i.sock", "-service-socket=/run/steward-grant/s.sock", "-service-target=http://agent:8080"},
 					"Labels": map[string]string{managedRelayLabel: "true", relayFingerprintLabel: relayFingerprint(relay), "io.hardrails.tenant": relay.TenantID, "io.hardrails.instance": relay.InstanceID, networkGenerationLabel: "7", runtimeNetworkLabel: relay.NetworkName, runtimeGrantLabel: relay.GrantID}},
-				"HostConfig": map[string]any{"Memory": relay.MemoryBytes, "NanoCpus": relay.CPUMillis * 1_000_000, "PidsLimit": relay.PIDs,
+				"HostConfig": enforceClosedDockerHostPolicy(map[string]any{"Memory": relay.MemoryBytes, "MemorySwap": relay.MemoryBytes, "NanoCpus": relay.CPUMillis * 1_000_000, "PidsLimit": relay.PIDs,
 					"Runtime": "runc", "NetworkMode": relay.NetworkName, "ReadonlyRootfs": true, "CapDrop": []string{"ALL"},
-					"SecurityOpt": []string{"no-new-privileges:true"}, "Tmpfs": map[string]string{"/tmp": tempTmpfs}, "ExtraHosts": []string{"agent:" + relay.AgentIP}},
-				"Mounts":          []map[string]any{{"Type": "bind", "Source": relay.GrantDir, "Destination": "/run/steward-grant", "RW": true}},
-				"NetworkSettings": map[string]any{"Networks": map[string]any{relay.NetworkName: map[string]string{"IPAddress": relay.RelayIP}}},
-				"State":           map[string]string{"Status": "running"},
+					"SecurityOpt": []string{"no-new-privileges:true"}, "Tmpfs": map[string]string{"/tmp": tempTmpfs}, "ExtraHosts": []string{"agent:" + relay.AgentIP},
+					"Dns": []string{"127.0.0.1"}, "LogConfig": map[string]any{"Type": dockerLogDriver, "Config": map[string]string{
+						"max-size": dockerLogMaxSize, "max-file": dockerLogMaxFiles, "compress": dockerLogCompress}}}),
+				"Mounts": []map[string]any{{"Type": "bind", "Source": relay.GrantDir, "Destination": "/run/steward-grant", "RW": true}},
+				"NetworkSettings": map[string]any{"Networks": map[string]any{relay.NetworkName: map[string]any{
+					"IPAddress": relay.RelayIP, "IPAMConfig": map[string]string{"IPv4Address": relay.RelayIP},
+				}}},
+				"State": map[string]string{"Status": "running"},
 			})
 		default:
 			t.Fatalf("unexpected Docker request %s %s", r.Method, r.URL.Path)
 		}
 	})
 	ctx := context.Background()
-	if err := docker.CreateNetwork(ctx, network); err != nil {
+	if err := docker.CreateNetwork(ctx, NetworkSpecFor(network.TenantID, network.InstanceID, network.Generation)); err != nil {
 		t.Fatal(err)
 	}
 	observedNetwork, err := docker.InspectNetwork(ctx, network.Name)
-	if err != nil || !networkEqual(observedNetwork, network) {
+	if err != nil || !observedNetwork.Managed || !observedNetwork.Internal || observedNetwork.NetworkSpec != network {
 		t.Fatalf("network=%#v err=%v", observedNetwork, err)
 	}
 	observedRelay, err := docker.InspectRelay(ctx, relay.Name)
-	if err != nil || !relayEqual(observedRelay, relay) || observedRelay.IPAddress != relay.RelayIP {
+	if err != nil || !observedRelay.Managed || !observedRelay.Hardened || observedRelay.Spec != relay ||
+		observedRelay.Fingerprint != relayFingerprint(relay) || observedRelay.IPAddress != relay.RelayIP {
 		t.Fatalf("relay=%#v err=%v", observedRelay, err)
 	}
 	if err := docker.RemoveNetwork(ctx, network.Name); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInspectRelayRejectsClosedEnvelopeDrift(t *testing.T) {
+	network := testNetworkSpec("tenant-a", "agent-a", 9)
+	relay := RelaySpec{
+		Name: RelayName("tenant-a", "agent-a", 9), Image: "sha256:" + strings.Repeat("a", 64),
+		NetworkName: network.Name, GrantID: "grant-" + strings.Repeat("b", 64),
+		GrantDir: "/run/steward-gateway/grants/" + strings.Repeat("b", 32), TenantID: "tenant-a", InstanceID: "agent-a", Generation: 9,
+		RelayGID: 1234, Inference: true, ServicePort: 8080, RelayIP: network.RelayIP, AgentIP: network.AgentIP,
+		MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
+	}
+	tests := []struct {
+		name   string
+		field  string
+		mutate func(map[string]any)
+	}{
+		{"extra mount", "mounts", func(p map[string]any) {
+			p["Mounts"] = append(p["Mounts"].([]map[string]any), map[string]any{"Type": "bind", "Source": "/host", "Destination": "/host", "RW": true})
+		}},
+		{"extra network", "networks", func(p map[string]any) {
+			p["NetworkSettings"].(map[string]any)["Networks"].(map[string]any)["hostile"] = map[string]string{"IPAddress": "10.0.0.2"}
+		}},
+		{"privileged", "privileged", func(p map[string]any) { p["HostConfig"].(map[string]any)["Privileged"] = true }},
+		{"device", "devices", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["Devices"] = []map[string]string{{"PathOnHost": "/dev/kvm"}}
+		}},
+		{"port binding", "published_ports", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["PortBindings"] = map[string]any{"8080/tcp": []map[string]string{{"HostPort": "8080"}}}
+		}},
+		{"unsafe logs", "log_config", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["LogConfig"] = map[string]any{"Type": "json-file", "Config": map[string]string{}}
+		}},
+		{"host PID namespace", "namespace_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["PidMode"] = "host" }},
+		{"shared IPC namespace", "namespace_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["IpcMode"] = "shareable" }},
+		{"host UTS namespace", "namespace_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["UTSMode"] = "host" }},
+		{"host cgroup namespace", "namespace_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["CgroupnsMode"] = "host" }},
+		{"host user namespace", "namespace_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["UsernsMode"] = "host" }},
+		{"shared container cgroup", "namespace_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["Cgroup"] = "container:peer" }},
+		{"restart policy", "lifecycle_policy", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["RestartPolicy"] = map[string]any{"Name": "always", "MaximumRetryCount": 0}
+		}},
+		{"automatic removal", "lifecycle_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["AutoRemove"] = true }},
+		{"OOM killer disabled", "lifecycle_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["OomKillDisable"] = true }},
+		{"protected from host OOM", "lifecycle_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["OomScoreAdj"] = -1000 }},
+		{"custom cgroup parent", "host_attachment_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["CgroupParent"] = "/system.slice" }},
+		{"device cgroup rule", "host_attachment_policy", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["DeviceCgroupRules"] = []string{"c 1:3 rwm"}
+		}},
+		{"volumes from peer", "host_attachment_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["VolumesFrom"] = []string{"peer"} }},
+		{"supplemental host group", "host_attachment_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["GroupAdd"] = []string{"docker"} }},
+		{"legacy container link", "host_attachment_policy", func(p map[string]any) { p["HostConfig"].(map[string]any)["Links"] = []string{"/peer:/agent/peer"} }},
+		{"namespaced sysctl", "host_attachment_policy", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["Sysctls"] = map[string]string{"net.ipv4.ip_unprivileged_port_start": "0"}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := hardenedRelayInspectPayload(relay)
+			test.mutate(payload)
+			docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(payload)
+			})
+			observed, err := docker.InspectRelay(context.Background(), relay.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observed.Hardened || !strings.Contains(observed.Drift, test.field) {
+				t.Fatalf("drift accepted or not explained: %#v", observed)
+			}
+		})
+	}
+}
+
+func hardenedRelayInspectPayload(relay RelaySpec) map[string]any {
+	return map[string]any{
+		"Image": relay.Image,
+		"Config": map[string]any{
+			"Image": relay.Image, "User": "65532:1234", "WorkingDir": "/",
+			"Cmd": []string{"-inference-socket=/run/steward-grant/i.sock", "-service-socket=/run/steward-grant/s.sock", "-service-target=http://agent:8080"},
+			"Labels": map[string]string{
+				managedRelayLabel: "true", relayFingerprintLabel: relayFingerprint(relay),
+				"io.hardrails.tenant": relay.TenantID, "io.hardrails.instance": relay.InstanceID,
+				networkGenerationLabel: "9", runtimeNetworkLabel: relay.NetworkName, runtimeGrantLabel: relay.GrantID,
+			},
+		},
+		"HostConfig": enforceClosedDockerHostPolicy(map[string]any{
+			"Memory": relay.MemoryBytes, "MemorySwap": relay.MemoryBytes, "NanoCpus": relay.CPUMillis * 1_000_000, "PidsLimit": relay.PIDs,
+			"Runtime": "runc", "NetworkMode": relay.NetworkName, "ReadonlyRootfs": true,
+			"CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges:true"}, "Tmpfs": map[string]string{"/tmp": tempTmpfs},
+			"ExtraHosts": []string{"agent:" + relay.AgentIP}, "Dns": []string{"127.0.0.1"},
+			"LogConfig": map[string]any{"Type": dockerLogDriver, "Config": map[string]string{
+				"max-size": dockerLogMaxSize, "max-file": dockerLogMaxFiles, "compress": dockerLogCompress}},
+		}),
+		"Mounts": []map[string]any{{"Type": "bind", "Source": relay.GrantDir, "Destination": "/run/steward-grant", "RW": true}},
+		"NetworkSettings": map[string]any{"Networks": map[string]any{
+			relay.NetworkName: map[string]any{
+				"IPAddress": relay.RelayIP, "IPAMConfig": map[string]string{"IPv4Address": relay.RelayIP},
+			},
+		}},
+		"State": map[string]string{"Status": "running"},
+	}
+}
+
+func TestInspectRelayUsesConfiguredStaticIPBeforeFirstStart(t *testing.T) {
+	network := testNetworkSpec("tenant-a", "agent-a", 9)
+	relay := RelaySpec{
+		Name: RelayName("tenant-a", "agent-a", 9), Image: "sha256:" + strings.Repeat("a", 64),
+		NetworkName: network.Name, GrantID: "grant-" + strings.Repeat("b", 64),
+		GrantDir: "/run/steward-gateway/grants/" + strings.Repeat("b", 32), TenantID: "tenant-a", InstanceID: "agent-a", Generation: 9,
+		RelayGID: 1234, Inference: true, ServicePort: 8080, RelayIP: network.RelayIP, AgentIP: network.AgentIP,
+		MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
+	}
+	payload := hardenedRelayInspectPayload(relay)
+	endpoint := payload["NetworkSettings"].(map[string]any)["Networks"].(map[string]any)[relay.NetworkName].(map[string]any)
+	endpoint["IPAddress"] = ""
+	payload["State"] = map[string]string{"Status": "created"}
+	docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(payload)
+	})
+	observed, err := docker.InspectRelay(context.Background(), relay.Name)
+	if err != nil || !observed.Hardened || observed.Spec != relay || observed.IPAddress != "" {
+		t.Fatalf("created relay=%#v err=%v", observed, err)
+	}
+}
+
+func TestInspectNetworkRejectsInternalBridgeWithoutIsolatedGatewayMode(t *testing.T) {
+	network := testNetworkSpec("tenant-a", "agent-a", 7)
+	docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Name": network.Name, "Driver": "bridge", "Internal": true, "Attachable": false,
+			"Options": map[string]string{isolatedGatewayOption: "nat"},
+			"Labels": map[string]string{managedNetworkLabel: "true", "io.hardrails.tenant": network.TenantID,
+				"io.hardrails.instance": network.InstanceID, networkGenerationLabel: "7"},
+			"IPAM": map[string]any{"Config": []map[string]string{{"Subnet": network.Subnet, "Gateway": network.Gateway}}},
+		})
+	})
+	observed, err := docker.InspectNetwork(context.Background(), network.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Internal {
+		t.Fatalf("host-reachable internal bridge accepted: %#v", observed)
 	}
 }
 
@@ -370,6 +748,145 @@ func TestRuntimeAvailableReadsDockerRegistry(t *testing.T) {
 	available, err := docker.RuntimeAvailable(context.Background(), "runsc")
 	if err != nil || !available {
 		t.Fatalf("RuntimeAvailable = %v, %v", available, err)
+	}
+}
+
+func TestInspectImageProjectsExactConfigPlatformAndVolumes(t *testing.T) {
+	configDigest := "sha256:" + strings.Repeat("b", 64)
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1.41/images/") {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Id": "sha256:" + strings.Repeat("b", 64), "Os": "linux", "Architecture": "arm64", "Variant": "v8",
+			"Config": map[string]any{"Volumes": map[string]any{"/z": map[string]any{}, "/a": map[string]any{}}},
+		})
+	})
+	observed, err := docker.InspectImage(context.Background(), configDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.ID != "sha256:"+strings.Repeat("b", 64) || observed.OS != "linux" || observed.Architecture != "arm64" ||
+		observed.Variant != "v8" || !observed.ConfigPresent || !reflect.DeepEqual(observed.DeclaredVolumes, []string{"/a", "/z"}) {
+		t.Fatalf("observed=%#v", observed)
+	}
+}
+
+func TestInspectRejectsClosedEnvelopeDrift(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"anonymous volume", func(p map[string]any) {
+			p["Mounts"] = []map[string]any{{"Type": "volume", "Name": "anonymous", "Destination": "/data", "RW": true}}
+		}},
+		{"extra network", func(p map[string]any) {
+			p["NetworkSettings"].(map[string]any)["Networks"].(map[string]any)["hostile"] = map[string]string{"IPAddress": "10.0.0.2"}
+		}},
+		{"privileged", func(p map[string]any) { p["HostConfig"].(map[string]any)["Privileged"] = true }},
+		{"device", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["Devices"] = []map[string]string{{"PathOnHost": "/dev/kvm"}}
+		}},
+		{"port binding", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["PortBindings"] = map[string]any{"8080/tcp": []map[string]string{{"HostPort": "8080"}}}
+		}},
+		{"unsafe logs", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["LogConfig"] = map[string]any{"Type": "json-file", "Config": map[string]string{}}
+		}},
+		{"swap growth", func(p map[string]any) { p["HostConfig"].(map[string]any)["MemorySwap"] = 2 << 20 }},
+		{"host PID namespace", func(p map[string]any) { p["HostConfig"].(map[string]any)["PidMode"] = "host" }},
+		{"shared IPC namespace", func(p map[string]any) { p["HostConfig"].(map[string]any)["IpcMode"] = "container:peer" }},
+		{"host UTS namespace", func(p map[string]any) { p["HostConfig"].(map[string]any)["UTSMode"] = "host" }},
+		{"host cgroup namespace", func(p map[string]any) { p["HostConfig"].(map[string]any)["CgroupnsMode"] = "host" }},
+		{"host user namespace", func(p map[string]any) { p["HostConfig"].(map[string]any)["UsernsMode"] = "host" }},
+		{"shared container cgroup", func(p map[string]any) { p["HostConfig"].(map[string]any)["Cgroup"] = "container:peer" }},
+		{"restart policy", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["RestartPolicy"] = map[string]any{"Name": "unless-stopped", "MaximumRetryCount": 0}
+		}},
+		{"automatic removal", func(p map[string]any) { p["HostConfig"].(map[string]any)["AutoRemove"] = true }},
+		{"OOM killer disabled", func(p map[string]any) { p["HostConfig"].(map[string]any)["OomKillDisable"] = true }},
+		{"protected from host OOM", func(p map[string]any) { p["HostConfig"].(map[string]any)["OomScoreAdj"] = -1000 }},
+		{"custom cgroup parent", func(p map[string]any) { p["HostConfig"].(map[string]any)["CgroupParent"] = "/system.slice" }},
+		{"device cgroup rule", func(p map[string]any) { p["HostConfig"].(map[string]any)["DeviceCgroupRules"] = []string{"c 1:3 rwm"} }},
+		{"volumes from peer", func(p map[string]any) { p["HostConfig"].(map[string]any)["VolumesFrom"] = []string{"peer"} }},
+		{"supplemental host group", func(p map[string]any) { p["HostConfig"].(map[string]any)["GroupAdd"] = []string{"docker"} }},
+		{"legacy container link", func(p map[string]any) { p["HostConfig"].(map[string]any)["Links"] = []string{"/peer:/agent/peer"} }},
+		{"namespaced sysctl", func(p map[string]any) {
+			p["HostConfig"].(map[string]any)["Sysctls"] = map[string]string{"net.ipv4.ip_unprivileged_port_start": "0"}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := hardenedWorkloadInspectPayload()
+			test.mutate(payload)
+			docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(payload)
+			})
+			observed, err := docker.Inspect(context.Background(), "executor-agent")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observed.Hardened {
+				t.Fatalf("%s drift was accepted", test.name)
+			}
+		})
+	}
+}
+
+func hardenedWorkloadInspectPayload() map[string]any {
+	return map[string]any{
+		"Image": "sha256:" + strings.Repeat("b", 64),
+		"Config": map[string]any{
+			"Image": "registry.local/agent@sha256:" + strings.Repeat("a", 64), "Cmd": []string{"agent"},
+			"User": "65532:65532", "Env": []string{"HOME=/workspace", "TMPDIR=/tmp"}, "WorkingDir": "/workspace",
+			"Labels": map[string]string{
+				managedWorkloadLabel: "true", workloadFingerprintLabel: strings.Repeat("c", 64),
+				"io.hardrails.tenant": "tenant-a", "io.hardrails.instance": "agent", "io.hardrails.profile": "generic-v1@v1",
+				workloadMemoryLabel: "1048576", workloadCPULabel: "100", workloadPIDsLabel: "16",
+			},
+		},
+		"HostConfig": enforceClosedDockerHostPolicy(map[string]any{
+			"Memory": 1048576, "MemorySwap": 1048576, "NanoCpus": 100000000, "PidsLimit": 16,
+			"Runtime": "runsc", "NetworkMode": "none", "ReadonlyRootfs": true,
+			"CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges:true"},
+			"Tmpfs": map[string]string{"/tmp": tempTmpfs, "/workspace": workspaceTmpfs},
+			"LogConfig": map[string]any{"Type": dockerLogDriver, "Config": map[string]string{
+				"max-size": dockerLogMaxSize, "max-file": dockerLogMaxFiles, "compress": dockerLogCompress}},
+		}),
+		"Mounts":          []map[string]any{},
+		"NetworkSettings": map[string]any{"Networks": map[string]any{"none": map[string]string{"IPAddress": ""}}},
+		"State":           map[string]string{"Status": "created"},
+	}
+}
+
+func TestInspectReconstructsSignedImageIdentityAndRequiresExactConfigID(t *testing.T) {
+	reference := "registry.local/agent@sha256:" + strings.Repeat("a", 64)
+	configID := "sha256:" + strings.Repeat("b", 64)
+	payload := hardenedWorkloadInspectPayload()
+	payload["Image"] = configID
+	config := payload["Config"].(map[string]any)
+	config["Image"] = configID
+	labels := config["Labels"].(map[string]string)
+	labels[workloadImageReferenceLabel] = reference
+	labels[workloadImageConfigLabel] = configID
+	docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(payload)
+	})
+	observed, err := docker.Inspect(context.Background(), "executor-image")
+	if err != nil || !observed.Hardened {
+		t.Fatalf("observed=%#v err=%v", observed, err)
+	}
+	if observed.Workload.Image != reference || observed.Workload.ImageConfigDigest != configID || observed.ImageID != configID {
+		t.Fatalf("image identity=%#v imageID=%s", observed.Workload, observed.ImageID)
+	}
+
+	payload["Image"] = "sha256:" + strings.Repeat("c", 64)
+	observed, err = docker.Inspect(context.Background(), "executor-image")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Hardened {
+		t.Fatal("container running a different config ID was accepted")
 	}
 }
 
@@ -387,13 +904,16 @@ func TestInspectProjectsOnlyExecutorOwnedWorkloadState(t *testing.T) {
 					workloadMemoryLabel:      "1048576", workloadCPULabel: "250", workloadPIDsLabel: "32",
 				},
 			},
-			"HostConfig": map[string]any{
-				"Memory": 1048576, "NanoCpus": 250000000, "PidsLimit": 32,
+			"HostConfig": enforceClosedDockerHostPolicy(map[string]any{
+				"Memory": 1048576, "MemorySwap": 1048576, "NanoCpus": 250000000, "PidsLimit": 32,
 				"Runtime": "runsc", "NetworkMode": "none", "ReadonlyRootfs": true,
 				"CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges:true"},
 				"Tmpfs": map[string]string{"/tmp": tempTmpfs, "/workspace": workspaceTmpfs},
-			},
-			"State": map[string]any{"Status": "running"},
+				"LogConfig": map[string]any{"Type": dockerLogDriver, "Config": map[string]string{
+					"max-size": dockerLogMaxSize, "max-file": dockerLogMaxFiles, "compress": dockerLogCompress}},
+			}),
+			"NetworkSettings": map[string]any{"Networks": map[string]any{"none": map[string]string{"IPAddress": ""}}},
+			"State":           map[string]any{"Status": "running"},
 		})
 	})
 	observed, err := docker.Inspect(context.Background(), "executor-x")
@@ -407,11 +927,12 @@ func TestInspectProjectsOnlyExecutorOwnedWorkloadState(t *testing.T) {
 }
 
 func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
-	addresses := NetworkSpecFor("tenant-a", "agent-1", 3)
+	addresses := testNetworkSpec("tenant-a", "agent-1", 3)
 	state := &StateMount{VolumeName: StateVolumeName("tenant-a", "lineage-a"), Path: "/home/node/.openclaw"}
 	runtime := &RuntimeGrant{
 		NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), Generation: 3,
 		Inference: true, RouteID: "local", ModelAlias: "private-model", ServicePort: 8080,
+		Subnet: addresses.Subnet, Gateway: addresses.Gateway,
 		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
 	}
 	workload := Workload{
@@ -437,18 +958,23 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 					stateVolumeLabel: state.VolumeName, statePathLabel: state.Path,
 					runtimeNetworkLabel: addresses.Name, runtimeGrantLabel: runtime.GrantID, runtimeGenerationLabel: "3",
 					runtimeInferenceLabel: "true", runtimeModelLabel: "private-model", runtimeRouteLabel: "local",
+					runtimeSubnetLabel: addresses.Subnet, runtimeGatewayLabel: addresses.Gateway,
 					runtimeServicePortLabel: "8080", runtimeRelayIPLabel: addresses.RelayIP, runtimeAgentIPLabel: addresses.AgentIP,
 				},
 			},
-			"HostConfig": map[string]any{
-				"Memory": 1048576, "NanoCpus": 250000000, "PidsLimit": 32,
+			"HostConfig": enforceClosedDockerHostPolicy(map[string]any{
+				"Memory": 1048576, "MemorySwap": 1048576, "NanoCpus": 250000000, "PidsLimit": 32,
 				"Runtime": "runsc", "NetworkMode": addresses.Name, "ReadonlyRootfs": true,
 				"CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges:true"},
-				"Tmpfs": map[string]string{"/tmp": tempTmpfs}, "ExtraHosts": []string{"steward-relay:" + addresses.RelayIP},
-			},
-			"Mounts":          []map[string]any{{"Type": "volume", "Name": state.VolumeName, "Destination": state.Path, "RW": true}},
-			"NetworkSettings": map[string]any{"Networks": map[string]any{addresses.Name: map[string]string{"IPAddress": addresses.AgentIP}}},
-			"State":           map[string]string{"Status": "running"},
+				"Tmpfs": map[string]string{"/tmp": tempTmpfs}, "ExtraHosts": []string{"steward-relay:" + addresses.RelayIP}, "Dns": []string{"127.0.0.1"},
+				"LogConfig": map[string]any{"Type": dockerLogDriver, "Config": map[string]string{
+					"max-size": dockerLogMaxSize, "max-file": dockerLogMaxFiles, "compress": dockerLogCompress}},
+			}),
+			"Mounts": []map[string]any{{"Type": "volume", "Name": state.VolumeName, "Destination": state.Path, "RW": true}},
+			"NetworkSettings": map[string]any{"Networks": map[string]any{addresses.Name: map[string]any{
+				"IPAddress": addresses.AgentIP, "IPAMConfig": map[string]string{"IPv4Address": addresses.AgentIP},
+			}}},
+			"State": map[string]string{"Status": "running"},
 		})
 	})
 	observed, err := docker.Inspect(context.Background(), "executor-state-runtime")
@@ -486,6 +1012,12 @@ func TestDockerInspectAndVolumeErrorResponses(t *testing.T) {
 	if hasExactStateMount([]dockerMount{{Type: "bind", Name: "x", Destination: "/state", RW: true}}, StateMount{VolumeName: "x", Path: "/state"}) {
 		t.Fatal("bind mount accepted as state volume")
 	}
+	if hasExactStateMount([]dockerMount{
+		{Type: "volume", Name: "x", Destination: "/state", RW: true},
+		{Type: "volume", Name: "extra", Destination: "/extra", RW: true},
+	}, StateMount{VolumeName: "x", Path: "/state"}) {
+		t.Fatal("state mount helper accepted an extra mount")
+	}
 }
 
 func TestWorkloadCountsUseManagedDockerLabels(t *testing.T) {
@@ -512,6 +1044,73 @@ func TestWorkloadCountsUseManagedDockerLabels(t *testing.T) {
 	}
 	if total != 3 || tenant != 2 {
 		t.Fatalf("counts = %d, %d", total, tenant)
+	}
+}
+
+func TestCapacityUsageIncludesStoppedWorkloadsAndRelayReservations(t *testing.T) {
+	managedNetwork := "steward-net-" + strings.Repeat("a", 64)
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("all") != "true" || !strings.Contains(r.URL.Query().Get("filters"), managedWorkloadLabel) {
+			t.Fatalf("query=%s", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"State": "exited", "Labels": map[string]string{
+				managedWorkloadLabel: "true", "io.hardrails.tenant": "tenant-a",
+				workloadMemoryLabel: "1048576", workloadCPULabel: "100", workloadPIDsLabel: "16",
+				runtimeNetworkLabel: managedNetwork,
+			}},
+			{"State": "running", "Labels": map[string]string{
+				managedWorkloadLabel: "true", "io.hardrails.tenant": "tenant-b",
+				workloadMemoryLabel: "2097152", workloadCPULabel: "200", workloadPIDsLabel: "32",
+			}},
+		})
+	})
+	usage, err := docker.CapacityUsage(context.Background(), "tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTenant := CapacityReservation{
+		Workloads: 1, MemoryBytes: (1 << 20) + defaultRelayMemory,
+		CPUMillis: 100 + defaultRelayCPU, PIDs: 16 + defaultRelayPIDs,
+	}
+	wantHost := wantTenant
+	wantHost.Workloads++
+	wantHost.MemoryBytes += 2 << 20
+	wantHost.CPUMillis += 200
+	wantHost.PIDs += 32
+	if usage.Host != wantHost || usage.Tenant != wantTenant {
+		t.Fatalf("usage=%#v want host=%#v tenant=%#v", usage, wantHost, wantTenant)
+	}
+}
+
+func TestCapacityUsageRejectsMalformedAndOverflowingLabels(t *testing.T) {
+	valid := map[string]string{
+		managedWorkloadLabel: "true", "io.hardrails.tenant": "tenant-a",
+		workloadMemoryLabel: "1", workloadCPULabel: "1", workloadPIDsLabel: "1",
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]string)
+	}{
+		{"missing tenant", func(labels map[string]string) { delete(labels, "io.hardrails.tenant") }},
+		{"missing resource", func(labels map[string]string) { delete(labels, workloadMemoryLabel) }},
+		{"negative resource", func(labels map[string]string) { labels[workloadPIDsLabel] = "-1" }},
+		{"partial runtime", func(labels map[string]string) { labels[runtimeGrantLabel] = "grant" }},
+		{"overflow relay", func(labels map[string]string) {
+			labels[workloadMemoryLabel] = strconv.FormatInt(math.MaxInt64, 10)
+			labels[runtimeNetworkLabel] = "steward-net-" + strings.Repeat("a", 64)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			labels := maps.Clone(valid)
+			test.mutate(labels)
+			docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode([]map[string]any{{"Labels": labels}})
+			})
+			if _, err := docker.CapacityUsage(context.Background(), "tenant-a"); err == nil {
+				t.Fatal("invalid capacity labels accepted")
+			}
+		})
 	}
 }
 
@@ -576,6 +1175,9 @@ func TestDockerLifecycleAndLogsUseOnlyBoundedManagedPaths(t *testing.T) {
 	}
 	if len(calls) != 4 {
 		t.Fatalf("calls=%#v", calls)
+	}
+	if !strings.Contains(calls[2], "force=true") || !strings.Contains(calls[2], "v=true") {
+		t.Fatalf("remove did not clean anonymous volumes: %q", calls[2])
 	}
 }
 

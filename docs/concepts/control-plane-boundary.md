@@ -6,32 +6,31 @@ section: Explanation
 
 # Steward and the control-plane boundary
 
-Steward is independently installable open-source node software. A control plane is a
-separately hosted product or operator implementation that coordinates many Steward
-nodes. It is a consumer—not a dependency—of Steward.
+Steward is independently installable, open-source node software. A separately
+hosted control plane coordinates the fleet through Steward's public contracts;
+Steward does not depend on it.
 
 | Steward owns on each node | A control plane owns across the fleet |
 | --- | --- |
-| Host capability validation | Users, organizations, and tenant hierarchy |
-| Generic lifecycle state | Authentication, authorization, and approvals |
-| OCI workload admission | Agent profiles and desired-state resolution |
-| Fixed sandbox enforcement | Scheduling and placement decisions |
-| Command ordering and replay fences | Rollouts, retries, and reconciliation |
-| Node-local health and evidence | Fleet inventory, audit views, and policy |
-| Public APIs and uplink protocol | Product workflows and operator experience |
+| Docker, gVisor, service-account, and configuration preflight | Users, organizations, and tenant hierarchy |
+| Node-local workload lifecycle state | User authentication, approvals, and business authorization |
+| Open Container Initiative (OCI) artifact and workload admission | Agent-profile catalog and desired-state resolution |
+| Fixed sandbox and capability enforcement | Host selection, scheduling, and placement |
+| Command ordering and durable anti-replay state | Fleet rollouts, retries, and desired-state reconciliation |
+| Node-local health checks and signed evidence | Fleet inventory, evidence collection, dashboards, and policy distribution |
+| Public APIs and uplink protocols | Enrollment workflows, fleet user interface, and incident-response tools |
 
 ## Why the split matters
 
-Sovereign operators can audit, rebuild, and operate the privileged node component
-without access to private services. Control-plane vendors can innovate above a stable
-contract without adding their SDK or credentials to the host boundary. A compromised
-control-plane payload still cannot ask Executor for privileged mode, raw networking,
-host mounts, devices, or the Docker socket.
+Operators can audit, rebuild, and run the privileged node component without private
+services. Control planes add fleet features through public contracts without
+placing an SDK or credentials inside the privileged host boundary. Even a
+compromised control plane cannot request privileged mode, raw networking, host
+mounts, devices, or the Docker socket.
 
-The control plane remains security-critical: it decides which tenant and image
-should run and sends lifecycle intent. Steward limits the consequences of malformed
-or malicious intent but cannot determine whether a valid, policy-conforming business
-request was authorized correctly.
+The control plane remains security-critical: it chooses tenants and images and
+sends lifecycle commands. Steward limits malformed or malicious commands, but
+cannot verify the business approval behind a valid, policy-compliant command.
 
 ## Integration surfaces
 
@@ -39,8 +38,12 @@ request was authorized correctly.
   covers generic lifecycle tracking and node capabilities.
 - The [Executor API](https://github.com/hardrails/steward/blob/main/openapi/steward-executor.v1.yaml)
   covers hardened OCI workload lifecycle.
-- Outbound uplink protocols reuse those node handlers and add authenticated node
-  identity, delivery, reporting, generation fencing, and causal sequencing.
+- Executor uplink invokes the Executor HTTP handlers and adds authenticated node
+  identity, tenant-signed commands, reporting, and durable anti-replay positions.
+- The generic supervisor uplink calls the same tracker methods as its HTTP API. It
+  preserves command order within one poll response. A later poll is not guaranteed
+  to wait for or observe every effect from an earlier poll, so the control plane must
+  use instance state and idempotent retries rather than assuming cross-poll order.
 
-No contract requires a private package, private schema registry, private SDK, or
-Hardrails-hosted endpoint.
+These contracts require no private package, private schema registry, private SDK,
+or Hardrails-hosted endpoint.

@@ -127,7 +127,7 @@ func TestDispatcherAppliesLifecycleCommandsAndRejectsHibernate(t *testing.T) {
 	}
 	for index, kind := range []string{"start", "stop", "destroy"} {
 		cmd := base
-		cmd.CommandID, cmd.Kind, cmd.CommandSequence = kind, kind, int64(index+1)
+		cmd.CommandID, cmd.Kind, cmd.CommandSequence = kind, kind, uint64(index+1)
 		if rep := d.execute(context.Background(), cmd); rep.Status != "done" {
 			t.Fatalf("%s report=%#v", kind, rep)
 		} else if kind == "destroy" && rep.Result["absent"] != true {
@@ -167,5 +167,99 @@ func TestLocalDockerStatesMapToControlPlaneLifecycleStates(t *testing.T) {
 				t.Fatalf("reported=%q err=%v, want %q", got, err, reported)
 			}
 		})
+	}
+}
+
+func TestNodeScopedDispatcherSupportsReadAndReceiptedPurge(t *testing.T) {
+	var paths []string
+	var purge map[string]any
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if r.URL.Path == "/v1/state/purge" {
+			if err := json.NewDecoder(r.Body).Decode(&purge); err != nil {
+				t.Fatal(err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"runtime_ref": "executor-x", "status": "running"})
+	})
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
+	if err := store.advance("tenant-a", "agent-1", position{
+		ClaimGeneration: 1, Generation: 4, Sequence: 1, ReportedStatus: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := dispatcher{handler: handler, token: "token", nodeID: "node-1", nodeScoped: true, state: store}
+	ref, err := RuntimeRefV2("tenant-a", "node-1", "agent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := command{
+		TenantID: "tenant-a", NodeID: "node-1", InstanceID: "agent-1", RuntimeRef: ref,
+		ClaimGeneration: 1, InstanceGeneration: 4, signed: true,
+	}
+	poison := base
+	poison.CommandID, poison.Kind, poison.CommandSequence, poison.Payload = "read-future", "read", 9999, json.RawMessage(`{}`)
+	poison.ClaimGeneration, poison.InstanceGeneration = 99, 99
+	if rep := d.execute(context.Background(), poison); rep.Status != "failed" || len(paths) != 0 {
+		t.Fatalf("future-generation read report=%#v paths=%#v", rep, paths)
+	}
+	read := base
+	read.CommandID, read.Kind, read.CommandSequence, read.Payload = "read", "read", 1000, json.RawMessage(`{}`)
+	if rep := d.execute(context.Background(), read); rep.Status != "done" || rep.ReportedStatus != "running" {
+		t.Fatalf("read report = %#v", rep)
+	}
+	purgeCommand := base
+	purgeCommand.CommandID, purgeCommand.Kind, purgeCommand.CommandSequence = "purge", "purge", 2
+	purgeCommand.Payload = json.RawMessage(`{"lineage_id":"lineage-1"}`)
+	if rep := d.execute(context.Background(), purgeCommand); rep.Status != "done" {
+		t.Fatalf("purge report = %#v", rep)
+	}
+	if current, ok := store.position("tenant-a", "agent-1"); !ok || current.Sequence != 2 {
+		t.Fatalf("read-only command advanced lifecycle fence: %#v %t", current, ok)
+	}
+	if len(paths) != 2 || !strings.HasPrefix(paths[0], "GET /v1/workloads/") || paths[1] != "POST /v1/state/purge" {
+		t.Fatalf("paths = %#v", paths)
+	}
+	if purge["tenant_id"] != "tenant-a" || purge["node_id"] != "node-1" || purge["lineage_id"] != "lineage-1" || purge["generation"] != float64(4) {
+		t.Fatalf("purge body = %#v", purge)
+	}
+}
+
+func TestRuntimeRefV2UsesTenantAwareUTF8ByteLengths(t *testing.T) {
+	ref, err := RuntimeRefV2("té", "节点", "agent:one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := parseRuntimeRef(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Version != 2 || identity.TenantID != "té" || identity.NodeID != "节点" || identity.InstanceID != "agent:one" {
+		t.Fatalf("identity = %#v, ref=%q", identity, ref)
+	}
+	// "té" is three UTF-8 bytes. A rune-count prefix of two must not parse.
+	tampered := strings.Replace(ref, "uplink:v2:3:", "uplink:v2:2:", 1)
+	if _, err := parseRuntimeRef(tampered); err == nil {
+		t.Fatal("rune-count-prefixed v2 runtime reference was accepted")
+	}
+}
+
+func TestNodeScopedDispatcherRejectsTenantRuntimeRefMismatch(t *testing.T) {
+	mutations := 0
+	d := dispatcher{
+		handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { mutations++ }),
+		token:   "token", nodeID: "node-1", nodeScoped: true,
+		state: newStateStore(t, filepath.Join(t.TempDir(), "state.json")),
+	}
+	ref, _ := RuntimeRefV2("tenant-a", "node-1", "agent-1")
+	cmd := command{
+		CommandID: "cross-tenant", TenantID: "tenant-b", NodeID: "node-1", InstanceID: "agent-1",
+		RuntimeRef: ref, Kind: "read", Payload: json.RawMessage(`{}`), signed: true,
+		ClaimGeneration: 1, InstanceGeneration: 1, CommandSequence: 1,
+	}
+	if rep := d.execute(context.Background(), cmd); rep.Status != "failed" || mutations != 0 {
+		t.Fatalf("report=%#v mutations=%d", rep, mutations)
 	}
 }

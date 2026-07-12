@@ -6,28 +6,35 @@ section: How-to guide
 
 # Operate an Executor workload
 
-Use this procedure to test a preloaded OCI image against Steward's fixed
-sandbox. It targets the host-local Executor API at `127.0.0.1:8090`. Packaged
-nodes bind it to loopback only; never expose that listener on a routable address.
+Use this procedure to test a preloaded Open Container Initiative (OCI) image in
+Steward's fixed sandbox. It calls the host-local Executor API at
+`127.0.0.1:8090`. Packaged nodes bind this API to loopback. Never expose it on a
+routable address.
+
+This guide uses the unsigned compatibility endpoint. It is available only when
+signed admission is disabled. Production workflows should use
+[signed admission]({{ '/guides/signed-admission/' | relative_url }}) and the
+[policy-bound image importer]({{ '/reference/offline-tools/' | relative_url }}).
+The commands require `curl`, `jq`, and Docker's command-line client.
 
 ## 1. Prepare a host-local token
 
-Executor requires an owner-only, non-empty token file:
+The packaged installer creates an owner-only, non-empty token before Executor
+starts. Read that existing token; do not replace it on a running or enrolled node:
 
 ```console
-sudo install -o steward-executor -g steward-executor -m 0600 /dev/null /etc/steward/executor-token
-openssl rand -hex 32 | sudo tee /etc/steward/executor-token >/dev/null
-sudo chown steward-executor:steward-executor /etc/steward/executor-token
+sudo test -s /etc/steward/executor-token
 TOKEN=$(sudo cat /etc/steward/executor-token)
 ```
 
-Do not expose this listener beyond loopback. The token authorizes workload mutation
-on the node; it is not a tenant end-user credential.
+The token authorizes workload changes across the node; it is not a tenant end-user
+credential. Executor reads it at startup, so changing the file does not rotate a
+running process. Keep the listener on loopback.
 
 ## 2. Preload and pin the image
 
-Executor never pulls an image. Import it through your approved registry or offline
-image-transfer workflow, then obtain its immutable repository digest:
+Executor never pulls images. Import one through an approved registry or offline
+transfer process, then obtain its immutable repository digest:
 
 ```console
 docker pull registry.example/agent:approved-version
@@ -63,8 +70,9 @@ curl --fail-with-body -sS \
 RUNTIME_REF=$(jq -r .runtime_ref workload.json)
 ```
 
-Provision is idempotent for the exact same admitted workload. A conflicting
-definition or any observed sandbox drift returns HTTP 409 rather than adopting it.
+Repeating provision for the exact same admitted workload returns the existing
+result. A conflicting definition or observed sandbox drift returns HTTP 409;
+Executor will not adopt it.
 
 ## 4. Start and inspect
 
@@ -78,8 +86,8 @@ curl --fail-with-body -sS \
   "http://127.0.0.1:8090/v1/workloads/$RUNTIME_REF"
 ```
 
-The container may exit immediately for a compatibility command such as `--help`.
-That is expected; inspect its bounded combined output:
+The container may exit immediately after a compatibility command such as `--help`.
+This is expected. Inspect its bounded combined output:
 
 ```console
 curl --fail-with-body -sS \
@@ -87,7 +95,10 @@ curl --fail-with-body -sS \
   "http://127.0.0.1:8090/v1/workloads/$RUNTIME_REF/logs" | jq -r .logs
 ```
 
-Executor returns at most the most recent 1 MiB of logs.
+Executor requests the most recent 1000 lines from Docker and returns them only if
+the encoded response is at most 1 MiB. A larger response returns HTTP 502 with
+`docker_error` instead of consuming unbounded host memory. Reduce agent log volume
+or inspect operator-managed Docker log files through a separate privileged process.
 
 ## 5. Stop and destroy
 
@@ -101,11 +112,15 @@ curl --fail-with-body -sS -X DELETE \
   "http://127.0.0.1:8090/v1/workloads/$RUNTIME_REF"
 ```
 
-Destroy is idempotent and returns HTTP 204 when the managed workload is absent.
+Without signed admission, destroy is idempotent and returns HTTP 204 when the
+managed workload is already absent. With signed admission, an authorized retry
+returns 204 only when Executor retains the workload's destroyed tombstone. An
+unknown signed runtime reference returns 404; an existing workload outside the
+caller's signed authority returns 403.
 
 ## Fixed sandbox
 
-The request cannot ask for network, environment variables, mounts, devices,
-privileged mode, a different runtime, or a different container user. Those fields
-are absent from the contract. The exact API and response schemas are in the
+The request cannot select a network, environment variables, mounts, devices,
+privileged mode, runtime, or container user. The contract has no such fields. See
+the exact API and response schemas in the
 [Executor OpenAPI reference]({{ '/reference/api/' | relative_url }}).

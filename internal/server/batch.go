@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/hardrails/steward/internal/runtime"
@@ -14,8 +15,10 @@ import (
 // lifecycle operations to execute one after another, against the live tracker,
 // in exactly the order given.
 type batchRequest struct {
-	Operations []batchOperation `json:"operations"`
+	Operations *[]batchOperation `json:"operations"`
 }
+
+const maxBatchOperations = 256
 
 // batchOperation is one entry in a batchRequest. Op selects which lifecycle
 // verb to run and which of the remaining fields apply, mirroring the field
@@ -85,7 +88,8 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 
 	var req batchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			writeError(w, http.StatusRequestEntityTooLarge, codeRequestTooLarge,
@@ -95,9 +99,28 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, "request body must be a JSON object")
 		return
 	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, codeRequestTooLarge,
+				"request body exceeds the 1MiB limit")
+			return
+		}
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "request body must contain one JSON object")
+		return
+	}
+	if req.Operations == nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "operations must be a JSON array")
+		return
+	}
+	if len(*req.Operations) > maxBatchOperations {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "operations must contain at most 256 entries")
+		return
+	}
 
-	results := make([]batchOperationResult, len(req.Operations))
-	for i, op := range req.Operations {
+	results := make([]batchOperationResult, len(*req.Operations))
+	for i, op := range *req.Operations {
 		results[i] = s.executeBatchOperation(op)
 	}
 	writeJSON(w, http.StatusOK, batchResponse{Results: results})
@@ -118,7 +141,7 @@ func (s *Server) executeBatchOperation(op batchOperation) batchOperationResult {
 		return s.batchTransition(op, s.tracker.Destroy)
 	default:
 		return batchOperationResult{
-			Op:     op.Op,
+			Op: op.Op, InstanceID: op.InstanceID, RuntimeRef: op.RuntimeRef,
 			Status: http.StatusBadRequest,
 			Error: &errorResponse{
 				Error:   codeInvalidRequest,
@@ -157,6 +180,19 @@ func (s *Server) batchProvision(op batchOperation) batchOperationResult {
 
 	inst, created, err := s.tracker.Provision(op.InstanceID, 0, spec)
 	if err != nil {
+		if errors.Is(err, runtime.ErrProcessExecDisabled) {
+			return batchOperationResult{
+				Op: op.Op, InstanceID: op.InstanceID, Status: http.StatusBadRequest,
+				Error: &errorResponse{Error: codeProcessExecDisabled,
+					Message: "spec has a \"command\" field but process execution is disabled; start Steward with -enable-process-exec to run processes, or remove the command from the spec"},
+			}
+		}
+		if errors.Is(err, runtime.ErrInvalidProcessSpec) {
+			return batchOperationResult{
+				Op: op.Op, InstanceID: op.InstanceID, Status: http.StatusBadRequest,
+				Error: &errorResponse{Error: codeInvalidSpec, Message: err.Error()},
+			}
+		}
 		if errors.Is(err, runtime.ErrCapacityExceeded) {
 			return batchOperationResult{
 				Op:         op.Op,
@@ -216,6 +252,16 @@ func (s *Server) batchTransition(op batchOperation, transition func(string) (*ru
 				RuntimeRef: op.RuntimeRef,
 				Status:     http.StatusConflict,
 				Error:      &errorResponse{Error: codeInvalidStateTransition, Message: err.Error()},
+			}
+		}
+		if errors.Is(err, runtime.ErrProcessStart) || errors.Is(err, runtime.ErrInvalidProcessSpec) {
+			code := codeProcessStartFailed
+			if errors.Is(err, runtime.ErrInvalidProcessSpec) {
+				code = codeInvalidSpec
+			}
+			return batchOperationResult{
+				Op: op.Op, RuntimeRef: op.RuntimeRef, Status: http.StatusBadRequest,
+				Error: &errorResponse{Error: code, Message: err.Error()},
 			}
 		}
 		s.logger.Error("batch operation failed", "op", op.Op, "err", err)

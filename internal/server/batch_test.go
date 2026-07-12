@@ -221,7 +221,8 @@ func TestBatchUnknownOpReturns400PerOperation(t *testing.T) {
 		t.Fatalf("batch: status=%d want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
 	got := decodeBatch(t, rec)
-	if got.Results[0].Status != http.StatusBadRequest || got.Results[0].Error == nil {
+	if got.Results[0].Status != http.StatusBadRequest || got.Results[0].Error == nil ||
+		got.Results[0].RuntimeRef != "rt_whatever" {
 		t.Fatalf("result 0 (unknown op): %+v, want 400 with an error", got.Results[0])
 	}
 	if got.Results[1].Status != http.StatusCreated {
@@ -375,12 +376,59 @@ func TestBatchMalformedBodyReturns400(t *testing.T) {
 	}{
 		{"malformed json", `{"operations":`},
 		{"not an object", `[1,2,3]`},
+		{"missing operations", `{}`},
+		{"null operations", `{"operations":null}`},
+		{"trailing value", `{"operations":[]} {}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			assertJSONError(t, do(h, http.MethodPost, "/v1/instances/batch", c.body), http.StatusBadRequest)
 		})
 	}
+}
+
+func TestBatchRejectsTooManyOperations(t *testing.T) {
+	h := newTestHandler(0)
+	operations := make([]string, maxBatchOperations+1)
+	for i := range operations {
+		operations[i] = `{"op":"provision","instance_id":"a"}`
+	}
+	body := `{"operations":[` + strings.Join(operations, ",") + `]}`
+	assertJSONError(t, do(h, http.MethodPost, "/v1/instances/batch", body), http.StatusBadRequest)
+}
+
+func TestBatchProvisionMirrorsSingleEndpointProcessErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		h    http.Handler
+		spec string
+		code string
+	}{
+		{name: "execution disabled", h: newTestHandler(0), spec: `{"command":"/bin/echo"}`, code: codeProcessExecDisabled},
+		{name: "invalid process spec", h: execHandler(t), spec: `{"command":""}`, code: codeInvalidSpec},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"operations":[{"op":"provision","instance_id":"a","spec":` + test.spec + `}]}`
+			result := decodeBatch(t, do(test.h, http.MethodPost, "/v1/instances/batch", body)).Results[0]
+			if result.Status != http.StatusBadRequest || result.Error == nil || result.Error.Error != test.code {
+				t.Fatalf("result=%+v", result)
+			}
+		})
+	}
+	t.Run("process start failure", func(t *testing.T) {
+		h := execHandler(t)
+		provisioned := do(h, http.MethodPost, "/v1/instances", `{"instance_id":"start-fails","spec":{"command":"/nonexistent/steward-no-such-binary"}}`)
+		if provisioned.Code != http.StatusCreated {
+			t.Fatalf("provision status=%d body=%s", provisioned.Code, provisioned.Body.String())
+		}
+		ref := decodeInstance(t, provisioned).RuntimeRef
+		body := `{"operations":[{"op":"start","runtime_ref":"` + ref + `"}]}`
+		result := decodeBatch(t, do(h, http.MethodPost, "/v1/instances/batch", body)).Results[0]
+		if result.Status != http.StatusBadRequest || result.Error == nil || result.Error.Error != codeProcessStartFailed {
+			t.Fatalf("result=%+v", result)
+		}
+	})
 }
 
 // TestBatchOversizedBodyReturns413 mirrors TestOversizedBodyRejected for the

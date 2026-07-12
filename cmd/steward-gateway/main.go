@@ -38,14 +38,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "steward-gateway: load configuration:", err)
 		return 2
 	}
+	if *checkConfig {
+		if _, err := gateway.Validate(config, routes, egressRoutes, token); err != nil {
+			fmt.Fprintln(stderr, "steward-gateway: validate:", err)
+			return 2
+		}
+		fmt.Fprintln(stdout, "gateway configuration valid")
+		return 0
+	}
 	server, err := gateway.Open(config, routes, egressRoutes, token)
 	if err != nil {
 		fmt.Fprintln(stderr, "steward-gateway: open:", err)
 		return 2
-	}
-	if *checkConfig {
-		fmt.Fprintln(stdout, "gateway configuration valid")
-		return 0
 	}
 	reloads := make(chan os.Signal, 1)
 	signal.Notify(reloads, syscall.SIGHUP)

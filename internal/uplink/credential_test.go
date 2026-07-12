@@ -30,6 +30,53 @@ func TestLoadCredentialValidFile(t *testing.T) {
 	}
 }
 
+func TestLoadCredentialNodeScopeRequiresExplicitSecurityGuard(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cred.json")
+	const content = `{"version":2,"scope":"node","node_id":"node-7","credential":"opaque-bearer-token"}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, security := range []CredentialSecurity{
+		{},
+		{SecureExecutor: true},
+		{ProtectedTransport: true},
+	} {
+		if credential, err := LoadCredentialWithSecurity(path, security); err == nil || credential != nil {
+			t.Fatalf("node credential loaded with incomplete guard %#v", security)
+		}
+	}
+	credential, err := LoadCredentialWithSecurity(path, CredentialSecurity{
+		SecureExecutor: true, ProtectedTransport: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !credential.NodeScoped() || credential.TenantID != "" || credential.NodeID != "node-7" {
+		t.Fatalf("credential = %#v", credential)
+	}
+	if credential, err := LoadCredential(path); err == nil || credential != nil {
+		t.Fatal("unguarded compatibility loader accepted node scope")
+	}
+}
+
+func TestLoadCredentialRejectsAmbiguousCredentialVersions(t *testing.T) {
+	for name, content := range map[string]string{
+		"v1 with scope": `{"version":1,"scope":"node","tenant_id":"tenant-a","node_id":"node-7","credential":"token"}`,
+		"v2 tenant":     `{"version":2,"scope":"node","tenant_id":"tenant-a","node_id":"node-7","credential":"token"}`,
+		"v2 no scope":   `{"version":2,"node_id":"node-7","credential":"token"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cred.json")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadCredentialWithSecurity(path, CredentialSecurity{SecureExecutor: true, ProtectedTransport: true}); err == nil {
+				t.Fatal("ambiguous credential was accepted")
+			}
+		})
+	}
+}
+
 func TestLoadCredentialFailsClosed(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -46,6 +93,7 @@ func TestLoadCredentialFailsClosed(t *testing.T) {
 		{"empty credential", `{"version":1,"tenant_id":"acme","node_id":"node-7","credential":""}`},
 		{"missing credential", `{"version":1,"tenant_id":"acme","node_id":"node-7"}`},
 		{"unknown field", `{"version":1,"tenant_id":"acme","node_id":"node-7","credential":"tok","private_api":"x"}`},
+		{"duplicate field", `{"version":1,"tenant_id":"acme","tenant_id":"other","node_id":"node-7","credential":"tok"}`},
 		{"multiple objects", `{"version":1,"tenant_id":"acme","node_id":"node-7","credential":"tok"} {}`},
 	}
 	for _, c := range cases {

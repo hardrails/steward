@@ -89,6 +89,10 @@ for target in "${targets[@]}"; do
 done
 fence=/var/lib/steward-executor/admission-fences.bin
 fence_created=false
+journal=/var/lib/steward-executor/operation-journal.bin
+journal_created=false
+evidence=/var/lib/steward-executor/evidence.bin
+evidence_created=false
 was_active=false
 systemctl is-active --quiet steward-executor.service && was_active=true
 committed=false
@@ -105,6 +109,8 @@ rollback() {
 			[[ -e $backup/$name || -L $backup/$name ]] && cp -a -- "$backup/$name" "$target"
 		done
 		[[ $fence_created == false ]] || rm -f -- "$fence"
+		[[ $journal_created == false ]] || rm -f -- "$journal"
+		[[ $evidence_created == false ]] || rm -f -- "$evidence"
 		if [[ $was_active == true ]]; then systemctl restart steward-executor.service >/dev/null 2>&1 || true; fi
 		echo "configure-admission: failed; restored previous trust configuration" >&2
 	fi
@@ -152,12 +158,27 @@ mv -f "$tmp_env" /etc/steward/executor.env
 tmp_env=
 
 gateway_line=$(grep -v '^[[:space:]]*#' /etc/steward/executor-gateway.env 2>/dev/null | grep -v '^[[:space:]]*$' || true)
-if [[ -z $gateway_line || $gateway_line == EXECUTOR_GATEWAY_ARGS= ]]; then
-	/usr/local/libexec/steward/build-relay-image --configure
-fi
-if [[ ! -e $fence ]]; then
+if [[ ! -e $fence && ! -L $fence ]]; then
 	fence_created=true
 	runuser -u steward-executor -- /usr/local/bin/steward-executor -initialize-admission-fence -admission-fence-file "$fence"
+fi
+# Configuration validation is strictly read-only. Initialize the two empty
+# append-only stores explicitly, with the service identity that will own later
+# writes. The transaction removes them again if a later validation step fails.
+if [[ ! -e $journal && ! -L $journal ]]; then
+	journal_created=true
+	install -o steward-executor -g steward-executor -m 0600 /dev/null "$journal"
+fi
+if [[ ! -e $evidence && ! -L $evidence ]]; then
+	evidence_created=true
+	install -o steward-executor -g steward-executor -m 0600 /dev/null "$evidence"
+fi
+# Validate trust, node identity, the uplink credential, and every non-topology
+# prerequisite before doing an image build. This catches a mismatched v2 node
+# credential without leaving even an unreferenced relay image behind.
+if [[ -z $gateway_line || $gateway_line == EXECUTOR_GATEWAY_ARGS= ]]; then
+	/usr/local/libexec/steward/node-preflight
+	/usr/local/libexec/steward/build-relay-image --configure
 fi
 /usr/local/libexec/steward/node-preflight
 if [[ $restart == true && $was_active == true ]]; then systemctl restart steward-executor.service; fi

@@ -4,8 +4,10 @@
 package evidence
 
 import (
+	"bufio"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -16,12 +18,17 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/hardrails/steward/internal/dsse"
 )
 
 const (
 	PayloadType      = "application/vnd.steward.receipt.v1+binary"
+	ExportFormat     = "application/vnd.steward.evidence-export.v1+ndjson"
 	MaxEnvelopeBytes = 64 << 10
 	maxLogBytes      = 64 << 20
+	maxExportBytes   = 256 << 20
+	maxExportLine    = 128 << 10
 	receiptVersion   = 1
 	envelopeVersion  = 1
 )
@@ -89,6 +96,37 @@ type Receipt struct {
 	Event
 }
 
+// VerifiedReceipt pairs one authenticated receipt with the chain hash after
+// that receipt. Frame is an independent copy of the exact length-prefixed,
+// signed envelope consumed by verification; it can be moved without
+// reserializing the signed payload. Retaining the final pair outside the node
+// lets a later verifier detect removal of a complete signed suffix.
+type VerifiedReceipt struct {
+	Receipt   Receipt
+	ChainHash [sha256.Size]byte
+	Frame     []byte
+}
+
+// Head is the compact, non-secret result of verifying a complete chain.
+type Head struct {
+	NodeID    string
+	Epoch     uint64
+	Sequence  uint64
+	ChainHash [sha256.Size]byte
+	KeyID     string
+}
+
+// FormatSummary reports the receipt version physically observed in an
+// existing evidence log. Empty logs contain no receipt header, so
+// FormatVersion is zero. This is a structural, read-only compatibility check;
+// callers that need authenticity must also verify the chain with its public
+// key through OpenForValidation or VerifyRecords.
+type FormatSummary struct {
+	Present       bool
+	FormatVersion int
+	Records       uint64
+}
+
 // Envelope is a DSSE-like envelope carrying exact binary statement bytes. The
 // signature is over PreAuthEncoding(PayloadType, Payload), not a reserialized
 // Receipt struct.
@@ -107,6 +145,8 @@ type Log struct {
 	path     string
 	file     *os.File
 	private  ed25519.PrivateKey
+	public   ed25519.PublicKey
+	readOnly bool
 	nodeID   string
 	epoch    uint64
 	keyID    string
@@ -157,8 +197,105 @@ func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) 
 		_ = f.Close()
 		return nil, fmt.Errorf("verify evidence %q: %w", path, err)
 	}
-	return &Log{path: path, file: f, private: private, nodeID: nodeID, epoch: epoch,
+	return &Log{path: path, file: f, private: private, public: append(ed25519.PublicKey(nil), public...), nodeID: nodeID, epoch: epoch,
 		keyID: KeyID(public), next: next, lastHash: last}, nil
+}
+
+// OpenForValidation verifies an existing evidence chain through a read-only
+// descriptor. It never creates a missing log, changes its mode, or opens it for
+// append. The returned Log supports inspection methods used by secure-admission
+// startup validation; Append fails explicitly.
+func OpenForValidation(path string, public ed25519.PublicKey, nodeID string, epoch uint64) (*Log, error) {
+	if path == "" || len(public) != ed25519.PublicKeySize || !validText(nodeID, 256) || epoch == 0 {
+		return nil, errors.New("evidence validation requires path, public key, bounded node id, and positive epoch")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("evidence %q is missing; initialize durable admission state before validation", path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("stat evidence %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("evidence %q must be a regular file with mode 0600 or stricter", path)
+	}
+	if info.Size() > maxLogBytes {
+		return nil, fmt.Errorf("evidence %q exceeds %d bytes", path, maxLogBytes)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open evidence %q for validation: %w", path, err)
+	}
+	openedInfo, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("stat opened evidence %q: %w", path, err)
+	}
+	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0o077 != 0 || openedInfo.Size() > maxLogBytes {
+		_ = f.Close()
+		return nil, fmt.Errorf("evidence %q changed while it was opened for validation", path)
+	}
+	next, last, err := verifyFile(f, public, nodeID, epoch)
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("verify evidence %q: %w", path, err)
+	}
+	return &Log{path: path, file: f, public: append(ed25519.PublicKey(nil), public...), readOnly: true,
+		nodeID: nodeID, epoch: epoch, keyID: KeyID(public), next: next, lastHash: last}, nil
+}
+
+// InspectFormat validates every frame and receipt structurally through a
+// read-only descriptor and reports the observed receipt version. It never
+// creates a missing log or changes file metadata.
+func InspectFormat(path string) (FormatSummary, error) {
+	if path == "" {
+		return FormatSummary{}, errors.New("evidence path is required")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return FormatSummary{}, fmt.Errorf("evidence %q is missing", path)
+	}
+	if err != nil {
+		return FormatSummary{}, fmt.Errorf("stat evidence %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > maxLogBytes {
+		return FormatSummary{}, fmt.Errorf("evidence %q must be a bounded regular file with mode 0600 or stricter", path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return FormatSummary{}, fmt.Errorf("open evidence %q for format inspection: %w", path, err)
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return FormatSummary{}, fmt.Errorf("stat opened evidence %q: %w", path, err)
+	}
+	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0o077 != 0 || openedInfo.Size() > maxLogBytes {
+		return FormatSummary{}, fmt.Errorf("evidence %q changed while it was opened for format inspection", path)
+	}
+	summary := FormatSummary{Present: true}
+	for {
+		raw, err := readFrame(file)
+		if errors.Is(err, io.EOF) {
+			return summary, nil
+		}
+		if err != nil {
+			return FormatSummary{}, fmt.Errorf("inspect evidence %q: %w", path, err)
+		}
+		envelope, err := unmarshalEnvelope(raw)
+		if err != nil {
+			return FormatSummary{}, fmt.Errorf("inspect evidence %q: %w", path, err)
+		}
+		receipt, err := unmarshalReceipt(envelope.Payload)
+		if err != nil {
+			return FormatSummary{}, fmt.Errorf("inspect evidence %q: %w", path, err)
+		}
+		if summary.FormatVersion != 0 && summary.FormatVersion != int(receipt.Version) {
+			return FormatSummary{}, fmt.Errorf("evidence %q contains mixed receipt format versions", path)
+		}
+		summary.FormatVersion = int(receipt.Version)
+		summary.Records++
+	}
 }
 
 // Verify checks a receipt file without its private key and returns the final
@@ -172,8 +309,133 @@ func Verify(path string, public ed25519.PublicKey, nodeID string, epoch uint64) 
 		return nil, err
 	}
 	defer f.Close()
+	if err := validateInputFile(f, maxLogBytes, "evidence log"); err != nil {
+		return nil, err
+	}
 	_, _, last, err := verifyFileWithLast(f, public, nodeID, epoch)
 	return last, err
+}
+
+// VerifyRecords authenticates the complete chain before returning its head and
+// invokes visit for each verified record in sequence. Callers that publish
+// partial output should run this once with a nil visitor first, then a second
+// time with their visitor, so a corrupt suffix cannot make partial output look
+// like a complete export.
+func VerifyRecords(path string, public ed25519.PublicKey, nodeID string, epoch uint64, visit func(VerifiedReceipt) error) (Head, error) {
+	if len(public) != ed25519.PublicKeySize || !validText(nodeID, 256) || epoch == 0 {
+		return Head{}, errors.New("evidence verification arguments are invalid")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return Head{}, err
+	}
+	defer f.Close()
+	if err := validateInputFile(f, maxLogBytes, "evidence log"); err != nil {
+		return Head{}, err
+	}
+	next, hash, _, err := verifyFileWithVisitor(f, public, nodeID, epoch, visit)
+	if err != nil {
+		return Head{}, err
+	}
+	return Head{NodeID: nodeID, Epoch: epoch, Sequence: next - 1, ChainHash: hash, KeyID: KeyID(public)}, nil
+}
+
+// VerifyAnyRecords auto-detects and verifies either the native length-framed
+// evidence log or Steward's portable NDJSON export. Portable receipt fields are
+// checked projections of the embedded signed frames; the frames, not the JSON
+// projections, remain the cryptographic source of truth.
+func VerifyAnyRecords(path string, public ed25519.PublicKey, nodeID string, epoch uint64, visit func(VerifiedReceipt) error) (Head, error) {
+	if len(public) != ed25519.PublicKeySize || !validText(nodeID, 256) || epoch == 0 {
+		return Head{}, errors.New("evidence verification arguments are invalid")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return Head{}, err
+	}
+	defer f.Close()
+	if err := validateInputFile(f, maxExportBytes, "evidence input"); err != nil {
+		return Head{}, err
+	}
+	portable, err := isPortableExport(f)
+	if err != nil {
+		return Head{}, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return Head{}, err
+	}
+	if !portable {
+		info, err := f.Stat()
+		if err != nil {
+			return Head{}, err
+		}
+		if info.Size() > maxLogBytes {
+			return Head{}, fmt.Errorf("evidence log exceeds %d bytes", maxLogBytes)
+		}
+		next, hash, _, err := verifyFileWithVisitor(f, public, nodeID, epoch, visit)
+		if err != nil {
+			return Head{}, err
+		}
+		return Head{NodeID: nodeID, Epoch: epoch, Sequence: next - 1, ChainHash: hash, KeyID: KeyID(public)}, nil
+	}
+	return verifyExportWithVisitor(f, public, nodeID, epoch, visit)
+}
+
+// EventName and OutcomeName expose the closed receipt vocabulary without
+// turning unknown numeric values into apparently valid audit labels.
+func EventName(value EventType) string {
+	switch value {
+	case AdmissionAllow:
+		return "admission_allow"
+	case AdmissionDeny:
+		return "admission_deny"
+	case JournalPrepare:
+		return "journal_prepare"
+	case JournalCommit:
+		return "journal_commit"
+	case JournalCompensate:
+		return "journal_compensate"
+	case GatewayRegistration:
+		return "gateway_registration"
+	case InferenceAuthorize:
+		return "inference_authorize"
+	case InferenceTerminal:
+		return "inference_terminal"
+	case ServiceMapping:
+		return "service_mapping"
+	case LifecycleStart:
+		return "lifecycle_start"
+	case LifecycleStop:
+		return "lifecycle_stop"
+	case LifecycleDestroy:
+		return "lifecycle_destroy"
+	case StatePurge:
+		return "state_purge"
+	case PolicyReload:
+		return "policy_reload"
+	case Drift:
+		return "drift"
+	case Revocation:
+		return "revocation"
+	default:
+		return ""
+	}
+}
+
+func OutcomeName(value Outcome) string {
+	switch value {
+	case Allowed:
+		return "allowed"
+	case Denied:
+		return "denied"
+	case Committed:
+		return "committed"
+	case Failed:
+		return "failed"
+	case Compensated:
+		return "compensated"
+	default:
+		return ""
+	}
 }
 
 // Append serializes and signs one receipt, writes its length-framed envelope,
@@ -186,6 +448,9 @@ func (l *Log) Append(event Event) (Receipt, error) {
 	defer l.mu.Unlock()
 	if l.file == nil {
 		return Receipt{}, errors.New("evidence log is closed")
+	}
+	if l.readOnly {
+		return Receipt{}, errors.New("evidence log is open for validation only")
 	}
 	receipt := Receipt{Version: receiptVersion, NodeID: l.nodeID, Epoch: l.epoch,
 		Sequence: l.next, PreviousHash: l.lastHash, Event: event}
@@ -239,8 +504,7 @@ func (l *Log) Close() error {
 
 // PublicKey returns a copy suitable for offline verification.
 func (l *Log) PublicKey() ed25519.PublicKey {
-	key := l.private.Public().(ed25519.PublicKey)
-	return append(ed25519.PublicKey(nil), key...)
+	return append(ed25519.PublicKey(nil), l.public...)
 }
 
 // NextSequence exposes only the non-secret durable chain position so startup
@@ -269,12 +533,17 @@ func verifyFile(f *os.File, public ed25519.PublicKey, nodeID string, epoch uint6
 }
 
 func verifyFileWithLast(f *os.File, public ed25519.PublicKey, nodeID string, epoch uint64) (uint64, [sha256.Size]byte, *Receipt, error) {
+	return verifyFileWithVisitor(f, public, nodeID, epoch, nil)
+}
+
+func verifyFileWithVisitor(f *os.File, public ed25519.PublicKey, nodeID string, epoch uint64, visit func(VerifiedReceipt) error) (uint64, [sha256.Size]byte, *Receipt, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return 0, [sha256.Size]byte{}, nil, err
 	}
 	var previous [sha256.Size]byte
 	var expected uint64 = 1
 	var last *Receipt
+	var total int64
 	for {
 		raw, err := readFrame(f)
 		if errors.Is(err, io.EOF) {
@@ -283,22 +552,20 @@ func verifyFileWithLast(f *os.File, public ed25519.PublicKey, nodeID string, epo
 		if err != nil {
 			return 0, [sha256.Size]byte{}, nil, err
 		}
-		envelope, err := unmarshalEnvelope(raw)
+		total += int64(4 + len(raw))
+		if total > maxLogBytes {
+			return 0, [sha256.Size]byte{}, nil, fmt.Errorf("evidence log exceeds %d bytes", maxLogBytes)
+		}
+		receipt, current, err := verifyEnvelope(raw, public, nodeID, epoch, expected, previous)
 		if err != nil {
 			return 0, [sha256.Size]byte{}, nil, err
 		}
-		if envelope.Version != envelopeVersion || envelope.PayloadType != PayloadType || envelope.KeyID != KeyID(public) ||
-			len(envelope.Signature) != ed25519.SignatureSize || !ed25519.Verify(public, PreAuthEncoding(envelope.PayloadType, envelope.Payload), envelope.Signature) {
-			return 0, [sha256.Size]byte{}, nil, errors.New("invalid evidence envelope signature or identity")
+		previous = current
+		if visit != nil {
+			if err := visit(VerifiedReceipt{Receipt: receipt, ChainHash: previous, Frame: frameBytes(raw)}); err != nil {
+				return 0, [sha256.Size]byte{}, nil, err
+			}
 		}
-		receipt, err := unmarshalReceipt(envelope.Payload)
-		if err != nil {
-			return 0, [sha256.Size]byte{}, nil, err
-		}
-		if receipt.NodeID != nodeID || receipt.Epoch != epoch || receipt.Sequence != expected || receipt.PreviousHash != previous {
-			return 0, [sha256.Size]byte{}, nil, errors.New("evidence chain coordinate mismatch")
-		}
-		previous = chainHash(receipt.PreviousHash, PreAuthEncoding(envelope.PayloadType, envelope.Payload))
 		copyReceipt := receipt
 		last = &copyReceipt
 		expected++
@@ -307,6 +574,247 @@ func verifyFileWithLast(f *os.File, public ed25519.PublicKey, nodeID string, epo
 		return 0, [sha256.Size]byte{}, nil, err
 	}
 	return expected, previous, last, nil
+}
+
+func verifyEnvelope(raw []byte, public ed25519.PublicKey, nodeID string, epoch, expected uint64, previous [sha256.Size]byte) (Receipt, [sha256.Size]byte, error) {
+	envelope, err := unmarshalEnvelope(raw)
+	if err != nil {
+		return Receipt{}, [sha256.Size]byte{}, err
+	}
+	pae := PreAuthEncoding(envelope.PayloadType, envelope.Payload)
+	if envelope.Version != envelopeVersion || envelope.PayloadType != PayloadType || envelope.KeyID != KeyID(public) ||
+		len(envelope.Signature) != ed25519.SignatureSize || !ed25519.Verify(public, pae, envelope.Signature) {
+		return Receipt{}, [sha256.Size]byte{}, errors.New("invalid evidence envelope signature or identity")
+	}
+	receipt, err := unmarshalReceipt(envelope.Payload)
+	if err != nil {
+		return Receipt{}, [sha256.Size]byte{}, err
+	}
+	if receipt.NodeID != nodeID || receipt.Epoch != epoch || receipt.Sequence != expected || receipt.PreviousHash != previous {
+		return Receipt{}, [sha256.Size]byte{}, errors.New("evidence chain coordinate mismatch")
+	}
+	return receipt, chainHash(receipt.PreviousHash, pae), nil
+}
+
+func frameBytes(envelope []byte) []byte {
+	frame := make([]byte, 4+len(envelope))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(envelope)))
+	copy(frame[4:], envelope)
+	return frame
+}
+
+func verifyFrame(frame []byte, public ed25519.PublicKey, nodeID string, epoch, expected uint64, previous [sha256.Size]byte) (Receipt, [sha256.Size]byte, error) {
+	if len(frame) < 5 {
+		return Receipt{}, [sha256.Size]byte{}, errors.New("portable evidence contains a short signed frame")
+	}
+	size := binary.BigEndian.Uint32(frame[:4])
+	if size == 0 || size > MaxEnvelopeBytes || uint64(size) != uint64(len(frame)-4) {
+		return Receipt{}, [sha256.Size]byte{}, errors.New("portable evidence contains an invalid signed frame")
+	}
+	return verifyEnvelope(frame[4:], public, nodeID, epoch, expected, previous)
+}
+
+type portableLine struct {
+	Kind          *string       `json:"kind"`
+	Format        *string       `json:"format"`
+	SignedFrame   *string       `json:"signed_frame"`
+	NodeID        *string       `json:"node_id"`
+	Epoch         *uint64       `json:"epoch"`
+	Sequence      *uint64       `json:"sequence"`
+	PreviousHash  *string       `json:"previous_hash"`
+	ChainHash     *string       `json:"chain_hash"`
+	Event         *string       `json:"event"`
+	TenantID      *string       `json:"tenant_id"`
+	RuntimeRef    *string       `json:"runtime_ref"`
+	CapsuleDigest *string       `json:"capsule_digest"`
+	PolicyDigest  *string       `json:"policy_digest"`
+	Generation    *uint64       `json:"generation"`
+	GrantID       *string       `json:"grant_id"`
+	Outcome       *string       `json:"outcome"`
+	ErrorCode     *string       `json:"error_code"`
+	MetadataHash  *string       `json:"metadata_hash"`
+	Head          *portableHead `json:"head"`
+}
+
+type portableHead struct {
+	NodeID    *string `json:"node_id"`
+	Epoch     *uint64 `json:"epoch"`
+	Sequence  *uint64 `json:"sequence"`
+	ChainHash *string `json:"chain_hash"`
+	KeyID     *string `json:"key_id"`
+}
+
+func verifyExportWithVisitor(f *os.File, public ed25519.PublicKey, nodeID string, epoch uint64, visit func(VerifiedReceipt) error) (Head, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return Head{}, err
+	}
+	reader := bufio.NewReaderSize(f, maxExportLine+1)
+	var previous [sha256.Size]byte
+	var expected uint64 = 1
+	var total int64
+	lineNumber := 0
+	seenHead := false
+	for {
+		raw, err := reader.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			return Head{}, fmt.Errorf("portable evidence line %d exceeds %d bytes", lineNumber+1, maxExportLine)
+		}
+		if errors.Is(err, io.EOF) {
+			if len(raw) != 0 {
+				return Head{}, errors.New("portable evidence is truncated or lacks its final newline")
+			}
+			break
+		}
+		if err != nil {
+			return Head{}, fmt.Errorf("read portable evidence: %w", err)
+		}
+		lineNumber++
+		total += int64(len(raw))
+		if total > maxExportBytes {
+			return Head{}, fmt.Errorf("portable evidence exceeds %d bytes", maxExportBytes)
+		}
+		if len(raw) <= 1 || len(raw) > maxExportLine {
+			return Head{}, fmt.Errorf("portable evidence line %d is empty or exceeds its limit", lineNumber)
+		}
+		if seenHead {
+			return Head{}, errors.New("portable evidence contains content after its final head")
+		}
+		var line portableLine
+		if err := dsse.DecodeStrictInto(raw[:len(raw)-1], maxExportLine, &line); err != nil {
+			return Head{}, fmt.Errorf("decode portable evidence line %d: %w", lineNumber, err)
+		}
+		if line.Kind == nil || line.Format == nil || *line.Format != ExportFormat {
+			return Head{}, fmt.Errorf("portable evidence line %d has an invalid kind or format", lineNumber)
+		}
+		switch *line.Kind {
+		case "receipt":
+			if err := validatePortableReceiptShape(line); err != nil {
+				return Head{}, fmt.Errorf("portable evidence line %d: %w", lineNumber, err)
+			}
+			frame, err := base64.StdEncoding.DecodeString(*line.SignedFrame)
+			if err != nil || base64.StdEncoding.EncodeToString(frame) != *line.SignedFrame {
+				return Head{}, fmt.Errorf("portable evidence line %d has a non-canonical signed frame", lineNumber)
+			}
+			receipt, current, err := verifyFrame(frame, public, nodeID, epoch, expected, previous)
+			if err != nil {
+				return Head{}, fmt.Errorf("verify portable evidence line %d: %w", lineNumber, err)
+			}
+			if !portableReceiptMatches(line, receipt, current) {
+				return Head{}, fmt.Errorf("portable evidence line %d does not match its signed frame", lineNumber)
+			}
+			if visit != nil {
+				if err := visit(VerifiedReceipt{Receipt: receipt, ChainHash: current, Frame: append([]byte(nil), frame...)}); err != nil {
+					return Head{}, err
+				}
+			}
+			previous = current
+			expected++
+		case "head":
+			if err := validatePortableHeadShape(line); err != nil {
+				return Head{}, fmt.Errorf("portable evidence line %d: %w", lineNumber, err)
+			}
+			derived := Head{NodeID: nodeID, Epoch: epoch, Sequence: expected - 1, ChainHash: previous, KeyID: KeyID(public)}
+			if !portableHeadMatches(*line.Head, derived) {
+				return Head{}, errors.New("portable evidence final head does not match its signed receipt chain")
+			}
+			seenHead = true
+		default:
+			return Head{}, fmt.Errorf("portable evidence line %d has unknown kind %q", lineNumber, *line.Kind)
+		}
+	}
+	if !seenHead {
+		return Head{}, errors.New("portable evidence is missing its final head")
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return Head{}, err
+	}
+	return Head{NodeID: nodeID, Epoch: epoch, Sequence: expected - 1, ChainHash: previous, KeyID: KeyID(public)}, nil
+}
+
+func validatePortableReceiptShape(line portableLine) error {
+	if line.Head != nil || line.SignedFrame == nil || line.NodeID == nil || line.Epoch == nil || line.Sequence == nil ||
+		line.PreviousHash == nil || line.ChainHash == nil || line.Event == nil || line.TenantID == nil ||
+		line.RuntimeRef == nil || line.CapsuleDigest == nil || line.PolicyDigest == nil || line.Generation == nil ||
+		line.GrantID == nil || line.Outcome == nil {
+		return errors.New("receipt does not have the required portable evidence fields")
+	}
+	return nil
+}
+
+func validatePortableHeadShape(line portableLine) error {
+	if line.Head == nil || line.SignedFrame != nil || line.NodeID != nil || line.Epoch != nil || line.Sequence != nil ||
+		line.PreviousHash != nil || line.ChainHash != nil || line.Event != nil || line.TenantID != nil ||
+		line.RuntimeRef != nil || line.CapsuleDigest != nil || line.PolicyDigest != nil || line.Generation != nil ||
+		line.GrantID != nil || line.Outcome != nil || line.ErrorCode != nil || line.MetadataHash != nil {
+		return errors.New("head contains missing or receipt-only fields")
+	}
+	if line.Head.NodeID == nil || line.Head.Epoch == nil || line.Head.Sequence == nil || line.Head.ChainHash == nil || line.Head.KeyID == nil {
+		return errors.New("head does not have all required fields")
+	}
+	return nil
+}
+
+func portableReceiptMatches(line portableLine, receipt Receipt, current [sha256.Size]byte) bool {
+	return *line.NodeID == receipt.NodeID && *line.Epoch == receipt.Epoch && *line.Sequence == receipt.Sequence &&
+		*line.PreviousHash == formattedHash(receipt.PreviousHash) && *line.ChainHash == formattedHash(current) &&
+		*line.Event == EventName(receipt.Type) && *line.TenantID == receipt.TenantID && *line.RuntimeRef == receipt.RuntimeRef &&
+		*line.CapsuleDigest == receipt.CapsuleDigest && *line.PolicyDigest == receipt.PolicyDigest &&
+		*line.Generation == receipt.Generation && *line.GrantID == receipt.GrantID && *line.Outcome == OutcomeName(receipt.Outcome) &&
+		optionalProjectionMatches(line.ErrorCode, receipt.ErrorCode) && optionalProjectionMatches(line.MetadataHash, receipt.MetadataHash)
+}
+
+func optionalProjectionMatches(got *string, want string) bool {
+	if want == "" {
+		return got == nil
+	}
+	return got != nil && *got == want
+}
+
+func portableHeadMatches(got portableHead, want Head) bool {
+	return *got.NodeID == want.NodeID && *got.Epoch == want.Epoch && *got.Sequence == want.Sequence &&
+		*got.ChainHash == formattedHash(want.ChainHash) && *got.KeyID == want.KeyID
+}
+
+func formattedHash(hash [sha256.Size]byte) string {
+	return "sha256:" + hex.EncodeToString(hash[:])
+}
+
+func validateInputFile(f *os.File, maxBytes int64, label string) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s must be a regular file", label)
+	}
+	if info.Size() > maxBytes {
+		return fmt.Errorf("%s exceeds %d bytes", label, maxBytes)
+	}
+	return nil
+}
+
+func isPortableExport(f *os.File) (bool, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	var buffer [4096]byte
+	for {
+		n, err := f.Read(buffer[:])
+		for _, value := range buffer[:n] {
+			switch value {
+			case ' ', '\t', '\r', '\n':
+				continue
+			default:
+				return value == '{', nil
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
 }
 
 func readFrame(reader io.Reader) ([]byte, error) {

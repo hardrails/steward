@@ -190,14 +190,15 @@ func (d *dispatcher) execute(cmd command) (rep report, retry, fenced bool) {
 		return d.fail(rep, "runtime_ref is unparseable"), false, false
 	}
 	instanceID = parsedInstanceID
-	// The client-side analog of the server adapter's _verify_issued check: the
-	// server should only ever queue commands for this node, so a foreign node_id is
-	// a version-skew/bug tripwire, not an expected path. Reject without touching the
-	// tracker.
-	if nodeID != d.nodeID {
+	// The explicit node_id and the node encoded in runtime_ref must both name
+	// this node and each other. The server should only queue commands for this
+	// node, so any mismatch is a version-skew, corruption, or routing tripwire.
+	// Reject it before a tracker lookup or mutation.
+	if cmd.NodeID != d.nodeID || nodeID != d.nodeID || cmd.NodeID != nodeID {
 		d.logger.Error("uplink command addressed to a foreign node_id; rejecting",
-			"command_id", cmd.CommandID, "command_node_id", nodeID, "this_node_id", d.nodeID)
-		return d.fail(rep, "runtime_ref is addressed to a different node"), false, false
+			"command_id", cmd.CommandID, "command_node_id", cmd.NodeID,
+			"runtime_ref_node_id", nodeID, "this_node_id", d.nodeID)
+		return d.fail(rep, "command node_id and runtime_ref must address this node"), false, false
 	}
 
 	// A negative instance_generation is out-of-contract for a trusted control

@@ -373,6 +373,14 @@ func main() {
 	// smaller that window.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	runtimeFailure := make(chan struct{}, 1)
+	reportRuntimeFailure := func() {
+		select {
+		case runtimeFailure <- struct{}{}:
+		default:
+		}
+		stop()
+	}
 
 	// SIGHUP triggers a live re-read of the -config file to hot-reload the
 	// max_instances cap (only). It is wired here, at the same "as early as
@@ -470,7 +478,7 @@ func main() {
 			// graceful shutdown, rather than hanging silently.
 			if srv == nil && ctx.Err() == nil {
 				logger.Error("uplink poll loop exited and no inbound listener is configured; shutting down")
-				stop()
+				reportRuntimeFailure()
 			}
 		}()
 		uplinkDone = done
@@ -481,7 +489,7 @@ func main() {
 			logger.Info("steward listening", "addr", cfg.addr, "version", server.Version)
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				logger.Error("server error", "err", err)
-				stop()
+				reportRuntimeFailure()
 			}
 		}()
 	} else {
@@ -509,6 +517,15 @@ func main() {
 		case <-shutdownCtx.Done():
 			logger.Warn("uplink poll loop did not stop within the shutdown deadline")
 		}
+	}
+	select {
+	case <-runtimeFailure:
+		// os.Exit bypasses deferred cleanup. Close the optional audit file after
+		// every worker has stopped so systemd receives a failure status without
+		// leaking buffered host state.
+		_ = auditLogger.Close()
+		os.Exit(1)
+	default:
 	}
 }
 
@@ -561,32 +578,34 @@ func listenerIsLoopback(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// validateProcessExecStateFile rejects an existing durable-state file that is
-// accessible to group or other users. Command-bearing specs and supervised PIDs
-// are operationally sensitive; newly-created snapshots are already 0600, but an
-// operator-supplied pre-existing file must meet the same standard before it is
-// trusted. A missing file is valid first-run state and will be created securely by
-// the runtime persister.
-func validateProcessExecStateFile(path string) error {
+// validateDurableStateFile rejects an existing state path that is not a regular,
+// owner-only file. Snapshots include complete workload definitions and may include
+// command environment values. Newly created snapshots are 0600; an operator-
+// supplied file must meet the same rule even when process execution is disabled.
+// A missing path is valid first-run state and will be created securely.
+func validateDurableStateFile(path string) error {
 	if path == "" {
 		return nil
 	}
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("inspect state file %q permissions: %w", path, err)
 	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("state file %q must be a regular file, not a symlink or special file", path)
+	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("state file %q permissions are %04o; process execution requires 0600 or stricter (run chmod 600 %q)", path, info.Mode().Perm(), path)
+		return fmt.Errorf("state file %q permissions are %04o; durable state requires 0600 or stricter (run chmod 600 %q)", path, info.Mode().Perm(), path)
 	}
 	hasACL, err := inspectExtendedACL(path)
 	if err != nil {
 		return fmt.Errorf("inspect state file %q extended ACL: %w", path, err)
 	}
 	if hasACL {
-		return fmt.Errorf("state file %q has an extended access ACL; process execution requires owner-only access (remove the ACL and run chmod 600 %q)", path, path)
+		return fmt.Errorf("state file %q has an extended access ACL; durable state requires owner-only access (remove the ACL and run chmod 600 %q)", path, path)
 	}
 	return nil
 }
@@ -734,11 +753,9 @@ func prepareRuntime(cfg resolvedConfig, logger *slog.Logger, checkOnly bool) (*s
 			"acknowledgement", "allow-root-process-exec")
 	}
 
-	if cfg.enableProcessExec {
-		if err := validateProcessExecStateFile(cfg.stateFile); err != nil {
-			logger.Error("unsafe process-execution state file", "err", err)
-			return logger, nil, nil, nil, err
-		}
+	if err := validateDurableStateFile(cfg.stateFile); err != nil {
+		logger.Error("unsafe durable state file", "err", err)
+		return logger, nil, nil, nil, err
 	}
 
 	// LoadTracker restores any existing state (validating the file) before the server
@@ -971,8 +988,9 @@ func parseLogLevel(s string) (slog.Level, error) {
 	}
 }
 
-// fileConfig is the -config JSON file's shape: the same settings the flags and env
-// vars carry, supplied as the lowest-precedence layer (flag > env > file). Every
+// fileConfig is the -config JSON file's shape: durable node settings supplied as
+// the lowest-precedence layer (flag > env > file). Operational rate limiting,
+// metrics enablement, and audit-log output remain flag/environment-only. Every
 // field is a pointer so an absent key is distinguishable from a present zero value —
 // an absent key leaves the env/flag/default value untouched, while a present key
 // (even one set to "" or false) overrides the built-in default. Keys are snake_case,

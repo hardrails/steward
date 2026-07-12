@@ -10,7 +10,7 @@ your own discipline plus CI, not a pre-write hook.
 
 **Zero dependency, at build time or runtime, on any private package, API, or
 tool.** This is the entire reason Steward is a separate, public repository —
-see [README.md](README.md#zero-private-dependencies). Before any commit:
+see [README.md](README.md#platforms-and-independence). Before any commit:
 
 ```console
 $ go list -m all

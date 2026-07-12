@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -21,7 +22,9 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/executoruplink"
+	"github.com/hardrails/steward/internal/journal"
 )
 
 func TestReadTokenTrimsFileWhitespace(t *testing.T) {
@@ -275,6 +278,14 @@ func TestExecutorMainFailsClosedOnMissingRunscAndPartialUplink(t *testing.T) {
 	if output, err := partial.CombinedOutput(); err == nil || !strings.Contains(string(output), "uplink-credential-file") {
 		t.Fatalf("partial uplink did not fail closed: err=%v output=%s", err, output)
 	}
+	unquotaedWithoutAdmission := exec.Command(bin,
+		"-docker-socket", fakeDockerSocket(t, true), "-token-file", token,
+		"-allow-unquotaed-state-on-dedicated-host",
+	)
+	unquotaedWithoutAdmission.Env = executorEnv()
+	if output, err := unquotaedWithoutAdmission.CombinedOutput(); err == nil || !strings.Contains(string(output), "signed admission requires") {
+		t.Fatalf("unquotaed state without signed admission did not fail closed: err=%v output=%s", err, output)
+	}
 }
 
 func TestExecutorMainVersionNeedsNoDockerOrCredential(t *testing.T) {
@@ -408,6 +419,29 @@ func TestExecutorMainInitializesFenceOnceWithoutDocker(t *testing.T) {
 	if output, err := command.CombinedOutput(); err == nil {
 		t.Fatalf("second initialization overwrote fence: %s", output)
 	}
+
+	legacyPath := filepath.Join(t.TempDir(), "legacy-state.json")
+	legacy := []byte(`{"version":1,"positions":{"agent-1":{"generation":2,"sequence":7,"reported_status":"running"}}}`)
+	if err := os.WriteFile(legacyPath, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.Command(bin, "-migrate-uplink-state-v1-tenant", "tenant-a", "-uplink-state-file", legacyPath)
+	command.Env = executorEnv()
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("migrate: %v output=%s", err, output)
+	}
+	if _, err := executoruplink.LoadStateStore(legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := os.ReadFile(legacyPath + ".v1.bak")
+	if err != nil || string(backup) != string(legacy) {
+		t.Fatalf("migration backup=%q err=%v", backup, err)
+	}
+	command = exec.Command(bin, "-migrate-uplink-state-v1-tenant", "tenant-a", "-uplink-state-file", legacyPath)
+	command.Env = executorEnv()
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("second migration or downgrade was accepted: %s", output)
+	}
 }
 
 func buildExecutor(t *testing.T) string {
@@ -469,20 +503,132 @@ func TestExecutorMainCheckConfigValidatesSecureAdmission(t *testing.T) {
 	if err := admission.InitializeFenceStore(fencePath); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(bin,
+	journalPath := filepath.Join(dir, "journal.bin")
+	operationJournal, err := journal.Open(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := operationJournal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	evidencePath := filepath.Join(dir, "evidence.bin")
+	receiptLog, err := evidence.Open(evidencePath, receiptPrivate, "node-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := receiptLog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{
 		"-check-config", "-docker-socket", fakeDockerSocket(t, true), "-token-file", executorTokenFile(t),
 		"-admission-policy-file", policyPath,
 		"-admission-site-root-public-key-file", rootPath,
 		"-admission-site-root-key-id", "site-root", "-admission-node-id", "node-a",
 		"-admission-fence-file", fencePath,
-		"-admission-journal-file", filepath.Join(dir, "journal.bin"),
-		"-admission-evidence-file", filepath.Join(dir, "evidence.bin"),
+		"-admission-journal-file", journalPath,
+		"-admission-evidence-file", evidencePath,
 		"-admission-evidence-key-file", receiptPath,
-	)
+	}
+	before := snapshotExecutorTree(t, dir)
+	command := exec.Command(bin, args...)
 	command.Env = executorEnv()
 	output, err := command.CombinedOutput()
 	if err != nil || string(output) != "executor configuration valid\n" {
 		t.Fatalf("secure check config: err=%v output=%s", err, output)
+	}
+	after := snapshotExecutorTree(t, dir)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("secure check-config changed durable files\nbefore=%#v\nafter=%#v", before, after)
+	}
+	pendingJournalPath := filepath.Join(dir, "pending-journal.bin")
+	pendingJournal, err := journal.Open(pendingJournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pendingJournal.Prepare("pending", "target", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := pendingJournal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pendingArgs := append([]string(nil), args...)
+	for index := range pendingArgs {
+		if pendingArgs[index] == "-admission-journal-file" {
+			pendingArgs[index+1] = pendingJournalPath
+			break
+		}
+	}
+	pendingCheck := exec.Command(bin, pendingArgs...)
+	pendingCheck.Env = executorEnv()
+	if output, err := pendingCheck.CombinedOutput(); err == nil || !strings.Contains(string(output), "operation journal has pending work") {
+		t.Fatalf("pending journal check did not fail: err=%v output=%s", err, output)
+	}
+	addr := freeAddress(t)
+	degradedArgs := append([]string(nil), pendingArgs[1:]...)
+	degradedArgs = append(degradedArgs, "-addr", addr)
+	degraded := exec.Command(bin, degradedArgs...)
+	degraded.Env = executorEnv()
+	var degradedOutput strings.Builder
+	degraded.Stdout, degraded.Stderr = &degradedOutput, &degradedOutput
+	if err := degraded.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if degraded.ProcessState == nil {
+			_ = degraded.Process.Kill()
+			_, _ = degraded.Process.Wait()
+		}
+	})
+	readinessURL := "http://" + addr + "/v1/readiness"
+	deadline := time.Now().Add(5 * time.Second)
+	var readinessStatus int
+	for time.Now().Before(deadline) {
+		request, _ := http.NewRequest(http.MethodGet, readinessURL, nil)
+		request.Header.Set("Authorization", "Bearer local-secret")
+		if response, err := http.DefaultClient.Do(request); err == nil {
+			readinessStatus = response.StatusCode
+			response.Body.Close()
+			if readinessStatus == http.StatusServiceUnavailable {
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if readinessStatus != http.StatusServiceUnavailable {
+		t.Fatalf("degraded startup readiness=%d output=%s", readinessStatus, degradedOutput.String())
+	}
+	if err := degraded.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitCommand(degraded, 5*time.Second); err != nil {
+		t.Fatalf("degraded executor shutdown: %v output=%s", err, degradedOutput.String())
+	}
+	if !strings.Contains(degradedOutput.String(), "starting in degraded containment mode") {
+		t.Fatalf("degraded startup was not logged: %s", degradedOutput.String())
+	}
+	for _, missing := range []struct {
+		flag string
+		path string
+		want string
+	}{
+		{flag: "-admission-journal-file", path: filepath.Join(dir, "missing-journal.bin"), want: "journal"},
+		{flag: "-admission-evidence-file", path: filepath.Join(dir, "missing-evidence.bin"), want: "evidence"},
+	} {
+		missingArgs := append([]string(nil), args...)
+		for index := range missingArgs {
+			if missingArgs[index] == missing.flag {
+				missingArgs[index+1] = missing.path
+				break
+			}
+		}
+		check := exec.Command(bin, missingArgs...)
+		check.Env = executorEnv()
+		if output, err := check.CombinedOutput(); err == nil || !strings.Contains(string(output), missing.want) || !strings.Contains(string(output), "missing") {
+			t.Fatalf("missing %s: err=%v output=%s", missing.want, err, output)
+		}
+		if _, err := os.Lstat(missing.path); !os.IsNotExist(err) {
+			t.Fatalf("check-config created %s: %v", missing.path, err)
+		}
 	}
 	partial := exec.Command(bin,
 		"-check-config", "-docker-socket", fakeDockerSocket(t, true), "-token-file", executorTokenFile(t),
@@ -492,6 +638,40 @@ func TestExecutorMainCheckConfigValidatesSecureAdmission(t *testing.T) {
 	if output, err := partial.CombinedOutput(); err == nil || !strings.Contains(string(output), "signed admission requires") {
 		t.Fatalf("partial admission did not fail: err=%v output=%s", err, output)
 	}
+}
+
+type executorTreeEntry struct {
+	Mode    os.FileMode
+	ModTime time.Time
+	Bytes   string
+}
+
+func snapshotExecutorTree(t *testing.T, root string) map[string]executorTreeEntry {
+	t.Helper()
+	result := make(map[string]executorTreeEntry)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		entry := executorTreeEntry{Mode: info.Mode(), ModTime: info.ModTime()}
+		if info.Mode().IsRegular() {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			entry.Bytes = string(raw)
+		}
+		result[relative] = entry
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func executorEnv() []string {
