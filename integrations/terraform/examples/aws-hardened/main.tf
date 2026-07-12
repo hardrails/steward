@@ -37,4 +37,3 @@ resource "aws_instance" "steward" {
 
   tags = { Name = "steward-node" }
 }
-

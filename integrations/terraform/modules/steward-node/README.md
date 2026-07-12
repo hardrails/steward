@@ -17,4 +17,3 @@ node-local tokens on the host and exposes only loopback services.
 This module provisions software, not agent instances. Agent lifecycle remains in
 Steward because it uses signed generation fences, receipts, and runtime
 reconciliation that do not map safely to Terraform's refresh model yet.
-

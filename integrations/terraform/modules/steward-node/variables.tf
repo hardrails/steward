@@ -6,7 +6,6 @@ variable "release_version" {
     error_message = "release_version must be an exact vMAJOR.MINOR.PATCH tag."
   }
 }
-
 variable "installer_url" {
   description = "HTTPS or private HTTP URL of install-steward.sh."
   type        = string
@@ -50,4 +49,3 @@ variable "gvisor_version" {
     error_message = "gvisor_version must be empty or a pinned YYYYMMDD[.N] release."
   }
 }
-
