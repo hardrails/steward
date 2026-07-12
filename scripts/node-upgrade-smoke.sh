@@ -79,13 +79,17 @@ if [[ $relay_test == true ]]; then
 	"${as_root[@]}" env "${common_env[@]}" "$root/scripts/build-relay-image.sh" \
 		--release-dir "$work/releases/v0.0.0-test" >/dev/null
 	binding="$work/relay-images/v0.0.0-test.env"
-	[[ -f $binding && ! -L $binding ]]
-	[[ $(stat -c '%u:%g:%a' "$binding") == 0:0:600 ]]
-	grep -Fxq '# steward.relay-binding.v1' "$binding"
-	grep -Fxq '# release_version=v0.0.0-test' "$binding"
-	grep -Fxq "# relay_binary_sha256=$binary_sha" "$binding"
-	grep -Fxq "# relay_image_id=$image_id" "$binding"
-	grep -Fq -- "-relay-image=$image_id" "$binding"
+	# The production binding directory is root-only and the binding itself is
+	# mode 0600. Inspect it through the same privilege boundary used to create it
+	# so this smoke also works for passwordless-sudo CI runners.
+	"${as_root[@]}" test -f "$binding"
+	"${as_root[@]}" test ! -L "$binding"
+	[[ $("${as_root[@]}" stat -c '%u:%g:%a' "$binding") == 0:0:600 ]]
+	"${as_root[@]}" grep -Fxq '# steward.relay-binding.v1' "$binding"
+	"${as_root[@]}" grep -Fxq '# release_version=v0.0.0-test' "$binding"
+	"${as_root[@]}" grep -Fxq "# relay_binary_sha256=$binary_sha" "$binding"
+	"${as_root[@]}" grep -Fxq "# relay_image_id=$image_id" "$binding"
+	"${as_root[@]}" grep -Fq -- "-relay-image=$image_id" "$binding"
 	[[ ! -e $work/etc/executor-gateway.env && ! -L $work/etc/executor-gateway.env ]]
 	grep -Fq 'build --network=none --pull=false --provenance=false' "$work/docker.log"
 
@@ -102,7 +106,7 @@ if [[ $relay_test == true ]]; then
 		"FAKE_BUILD_MARKER=$work/build.marker" "$root/scripts/build-relay-image.sh" \
 		--release-dir "$work/releases/v0.0.0-test" --replace-missing >/dev/null
 	[[ $(grep -c '^build ' "$work/docker.log") -eq 2 ]]
-	grep -Fxq "# relay_image_id=$image_id" "$binding"
+	"${as_root[@]}" grep -Fxq "# relay_image_id=$image_id" "$binding"
 else
 	echo "node-upgrade-smoke: relay binding checks skipped (passwordless root unavailable)"
 fi
