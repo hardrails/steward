@@ -111,7 +111,7 @@ for target in "${targets[@]}"; do
 		mkdir -p "${stage}/deploy" "${stage}/scripts"
 		cp -R deploy/config deploy/systemd "${stage}/deploy/"
 		cp scripts/install-node.sh scripts/activate-node-release.sh \
-			scripts/node-preflight.sh scripts/configure-node.sh \
+			scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh \
 			scripts/uninstall-node.sh scripts/build-relay-image.sh \
 			"${stage}/scripts/"
 		chmod 0755 "${stage}"/scripts/*.sh

@@ -1,12 +1,12 @@
 ---
 title: Configure state, inference, and service grants
-description: Enable Steward v1.3 persistent state, credential-hidden OpenAI-compatible inference, and authenticated private service ingress.
+description: Enable Steward v1.4 persistent state, credential-hidden OpenAI-compatible inference, and authenticated private service ingress.
 section: How-to
 ---
 
 # Configure state, inference, and service grants
 
-Steward v1.3 turns three agent necessities into narrow grants instead of ambient
+Steward v1.4 turns agent necessities into narrow grants instead of ambient
 container privilege:
 
 - state is one Executor-derived Docker volume, fixed at `/state`, keyed by tenant
@@ -16,8 +16,9 @@ container privilege:
 - service is one capsule-declared port reached through an authenticated loopback
   gateway path, not a raw agent container port.
 
-There is still no general Internet egress, arbitrary TCP proxy, `CONNECT`, host
-bind mount, caller-selected environment, or Docker socket access.
+Signed HTTP(S) egress is a separate named-route capability. There is still no raw
+TCP/UDP, open/default-allow network, host bind mount, caller-selected environment,
+or Docker socket access. See [Configure signed egress]({{ '/guides/egress/' | relative_url }}).
 
 ## 1. Configure the local model route
 
@@ -36,7 +37,8 @@ Route IDs, URLs, and credentials are operator configuration, never tenant input.
 
 ## 2. Build the trusted relay without a registry
 
-The release includes the relay binary. Build a scratch image locally and write
+The installer/configurator does this automatically on a fresh node. To rebuild or
+replace it deliberately, use the shipped relay binary to build a scratch image and write
 its immutable Docker image ID into Executor's root-owned optional configuration:
 
 ```bash

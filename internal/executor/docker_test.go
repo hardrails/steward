@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -118,6 +120,52 @@ func TestCreateWithStateUsesOnlyExecutorDerivedVolume(t *testing.T) {
 	}
 	labels := payload["Labels"].(map[string]any)
 	if labels[stateVolumeLabel] != state.VolumeName || labels[statePathLabel] != "/state" {
+		t.Fatalf("labels=%#v", labels)
+	}
+}
+
+func TestCreateWithSignedEgressInjectsOnlyFixedProxyAndDisablesDNS(t *testing.T) {
+	var payload map[string]any
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	addresses := NetworkSpecFor("tenant-a", "agent-a", 4)
+	workload := Workload{InstanceID: "agent-a", TenantID: "tenant-a", ProfileID: "generic-v1@v1",
+		Image: "registry.local/agent@sha256:" + strings.Repeat("a", 64), Command: []string{"agent"},
+		Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 16}, Runtime: &RuntimeGrant{
+			NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), Generation: 4,
+			RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP, EgressRouteIDs: []string{"package-mirrors", "public-web"},
+		}}
+	if err := workload.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := docker.Create(context.Background(), "executor-egress", workload); err != nil {
+		t.Fatal(err)
+	}
+	host := payload["HostConfig"].(map[string]any)
+	dns := host["Dns"].([]any)
+	if len(dns) != 1 || dns[0] != "127.0.0.1" {
+		t.Fatalf("DNS=%#v", dns)
+	}
+	environment := payload["Env"].([]any)
+	for _, expected := range []string{"STEWARD_EGRESS_PROXY=http://steward-relay:8082", "HTTP_PROXY=http://steward-relay:8082",
+		"HTTPS_PROXY=http://steward-relay:8082", "NO_PROXY=steward-relay,agent,localhost,127.0.0.1",
+		"http_proxy=http://steward-relay:8082", "https_proxy=http://steward-relay:8082"} {
+		found := false
+		for _, value := range environment {
+			if value == expected {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing %q in %#v", expected, environment)
+		}
+	}
+	labels := payload["Labels"].(map[string]any)
+	if labels[runtimeEgressRoutesLabel] != "package-mirrors,public-web" {
 		t.Fatalf("labels=%#v", labels)
 	}
 }
@@ -407,7 +455,7 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 	if err != nil || !observed.Hardened || observed.Workload.State == nil || observed.Workload.Runtime == nil {
 		t.Fatalf("observed=%#v err=%v", observed, err)
 	}
-	if *observed.Workload.State != *state || *observed.Workload.Runtime != *runtime || observed.Fingerprint != fingerprint {
+	if *observed.Workload.State != *state || !reflect.DeepEqual(*observed.Workload.Runtime, *runtime) || observed.Fingerprint != fingerprint {
 		t.Fatalf("projected workload=%#v", observed.Workload)
 	}
 }
@@ -474,6 +522,21 @@ func TestUnframeDockerLogs(t *testing.T) {
 	raw := append(frame, []byte("stdout\n")...)
 	if got := string(unframeDockerLogs(raw)); got != "stdout\n" {
 		t.Fatalf("unframeDockerLogs = %q", got)
+	}
+}
+
+func TestEgressRouteLabelValidationRejectsNoncanonicalSets(t *testing.T) {
+	tooMany := make([]string, 33)
+	for index := range tooMany {
+		tooMany[index] = fmt.Sprintf("route-%02d", index)
+	}
+	if validEgressRouteIDs(tooMany) {
+		t.Fatal("more than 32 egress routes accepted")
+	}
+	for _, routes := range [][]string{{"bad route"}, {"route-b", "route-a"}, {"route-a", "route-a"}} {
+		if validEgressRouteIDs(routes) {
+			t.Fatalf("noncanonical route set accepted: %#v", routes)
+		}
 	}
 }
 

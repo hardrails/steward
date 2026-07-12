@@ -7,7 +7,7 @@ section: Operator reference
 # Installing the Steward node appliance
 
 Every Linux release is available as DEB, RPM, and a universal systemd archive. All
-three contain the same two static binaries, hardened systemd units, fail-closed
+three contain the same six static binaries, hardened systemd units, fail-closed
 configuration templates, and small Bash utilities for install, enrollment,
 preflight, version activation, and removal. They contain no control-plane code.
 
@@ -66,7 +66,9 @@ invalid credentials, modes, CA material, configuration, gVisor, or systemd units
 restore the previous `/etc/steward` files. A newly created empty Executor fence is
 removed if that same enrollment transaction fails before service start; any
 pre-existing fence is never reset or removed. A valid target version is then
-activated atomically and both services are enabled and started.
+activated atomically and the three services are enabled and started. Fresh
+configuration also builds the trusted relay from the shipped static binary with
+`--network=none`, pins its Docker image digest, and validates the derived topology.
 
 ## Unattended install
 
@@ -76,7 +78,7 @@ secrets on the command line:
 ```console
 sudo bash install-steward.sh \
   --non-interactive \
-  --version v1.3.0 \
+  --version v1.4.0 \
   --install-gvisor \
   --control-plane-url https://control.customer.example \
   --steward-credential /secure/enrollment/steward.json \
@@ -102,7 +104,7 @@ and its pinned trust key before importing these files into the facility.
 
 ```console
 sudo bash install-steward.sh \
-  --offline-dir /media/steward-v1.3.0 \
+  --offline-dir /media/steward-v1.4.0 \
   --control-plane-url https://control.customer.example \
   --steward-credential /media/enrollment/steward.json \
   --executor-credential /media/enrollment/executor.json \
@@ -119,22 +121,22 @@ directly (`dpkg -i ...deb` or `rpm -Uvh ...rpm`). The universal equivalent remai
 
 ```console
 sha256sum -c checksums.txt
-tar -xzf steward_v1.3.0_linux_amd64.tar.gz
+tar -xzf steward_v1.4.0_linux_amd64.tar.gz
 sudo bash scripts/install-node.sh
 ```
 
 The installer:
 
 1. requires Linux and an existing Docker group;
-2. verifies that `steward` and `steward-executor` report the same safe version;
+2. verifies that all six Steward binaries report the same safe version;
 3. creates distinct unprivileged `steward` and `steward-executor` service users,
    adding only the Executor identity to the root-equivalent Docker group;
 4. copies immutable binaries under `/opt/steward/releases/<version>` and atomically
-   selects both through one `/opt/steward/current` symlink;
+   selects all binaries through one `/opt/steward/current` symlink;
 5. installs vendor systemd units under `/usr/local/lib/systemd/system` and
    configuration templates without overwriting an operator's existing configuration
    or `/etc/systemd/system` overrides; and
-6. leaves both services disabled and stopped. Only the top-level guided installer
+6. leaves services disabled and stopped. Only the top-level guided installer
    proceeds through enrollment, preflight, activation, and explicit enablement.
 
 An exact legacy unit written to `/etc/systemd/system` by the prototype installer is
@@ -199,8 +201,8 @@ configured; a later install only stages the new version and does not change or r
 the active release. Activate or roll back atomically:
 
 ```console
-sudo /usr/local/libexec/steward/activate-node-release v1.3.0 --restart
-sudo /usr/local/libexec/steward/activate-node-release v1.3.0 --restart
+sudo /usr/local/libexec/steward/activate-node-release v1.4.0 --restart
+sudo /usr/local/libexec/steward/activate-node-release v1.4.0 --restart
 ```
 
 Every activation runs the target binaries through full node preflight before the
@@ -217,7 +219,7 @@ requires a separate operator-approved recovery procedure.
 The guided upgrade equivalent is:
 
 ```console
-sudo bash install-steward.sh --version v1.3.0 --reuse-configuration
+sudo bash install-steward.sh --version v1.4.0 --reuse-configuration
 ```
 
 ## Removal

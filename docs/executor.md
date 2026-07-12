@@ -17,8 +17,8 @@ The separation is a privilege boundary, not a product boundary:
 - A control plane owns tenants, users, approvals, desired state, rollout policy,
   and profile resolution. Executor contains none of those systems and has no
   dependency on a particular control plane.
-- `steward-gateway` and a per-instance `steward-relay` broker one approved
-  OpenAI-compatible inference route and one declared service without general egress.
+- `steward-gateway` and a per-instance `steward-relay` broker approved inference,
+  one declared service, and named signed HTTP(S) routes without raw agent networking.
 
 `steward-executor -check-config` runs the same token, Docker socket, `runsc`, host
 policy, TLS, credential, durable-fence, and uplink validation as normal startup, then
@@ -29,7 +29,7 @@ starting a poll. The disconnected-node preflight uses this action under the actu
 ## Threat model and fixed policy
 
 Images and every workload field are untrusted. Executor independently rejects
-mutable image tags, zero or over-ceiling resource limits, general networking, environment
+mutable image tags, zero or over-ceiling resource limits, ambient networking, environment
 injection, and unknown JSON fields. The API has no representation for privileged
 mode, host mounts, devices, Docker socket access, host networking, added
 capabilities, or writable-root requests.
@@ -38,7 +38,7 @@ Every admitted container is created with:
 
 - Docker runtime `runsc` (gVisor), verified available before Executor starts;
 - network mode `none`, or an Executor-derived internal per-instance network when
-  a signed inference/service grant requires the trusted relay;
+  a signed inference/service/egress grant requires the trusted relay;
 - read-only root filesystem;
 - UID/GID `65532:65532`;
 - all Linux capabilities dropped;
@@ -100,9 +100,10 @@ destroy persists a generation tombstone. Direct tenant selection is disabled unl
 the operator explicitly enables `-admission-allow-host-admin-intent` as a
 host-administrator break-glass path.
 
-State grants use an Executor-derived lineage volume. Inference and service grants
-use the configured gateway and hardened relay; partial configuration fails closed.
+State grants use an Executor-derived lineage volume. Inference, service, and egress
+grants use the configured gateway and hardened relay; partial configuration fails closed.
 See [positive-capability setup]({{ '/guides/positive-capabilities/' | relative_url }}),
+[signed egress]({{ '/guides/egress/' | relative_url }}),
 [the signed-admission guide]({{ '/guides/signed-admission/' | relative_url }}), and
 [release boundaries]({{ '/limitations/' | relative_url }}).
 

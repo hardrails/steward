@@ -5,7 +5,7 @@
 > instance intent, Docker/gVisor enforcement, rollback fences, and offline-verifiable
 > node receipts without depending on a particular control plane.
 
-Version documented: v1.3.0
+Version documented: v1.4.0
 License: Apache-2.0
 Source: https://github.com/hardrails/steward
 Documentation: https://hardrails.github.io/steward/
@@ -16,7 +16,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Install](https://hardrails.github.io/steward/getting-started/): Interactive and unattended Linux installation
 - [Why Steward exists](https://hardrails.github.io/steward/product/positioning/): Product thesis and proof boundary
 - [Market analysis](https://hardrails.github.io/steward/product/market-analysis/): Dated competitive matrix and research signals
-- [Limitations](https://hardrails.github.io/steward/limitations/): Exact v1.3 capability boundary
+- [Limitations](https://hardrails.github.io/steward/limitations/): Exact v1.4 capability boundary
 - [FAQ](https://hardrails.github.io/steward/faq/): Common product and operational questions
 
 ## How-to guides
@@ -24,6 +24,8 @@ Documentation: https://hardrails.github.io/steward/
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
 - [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
 - [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure state, inference, and service grants
+- [Signed egress](https://hardrails.github.io/steward/guides/egress/): Configure HTTP(S) routes, private CIDRs, audit, and diagnostics
+- [Terraform](https://hardrails.github.io/steward/guides/terraform/): Secret-free cloud bootstrap and AWS hardening
 - [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate a local node with MCP 2025-11-25 stdio tools
 - [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Run a constrained Hermes Agent image
 - [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): Run a constrained OpenClaw image
@@ -43,10 +45,10 @@ Documentation: https://hardrails.github.io/steward/
 - [APIs](https://hardrails.github.io/steward/reference/api/): Authoritative OpenAPI contracts
 - [Release artifacts](https://hardrails.github.io/steward/reference/release-artifacts/): Filenames and checksum verification
 
-## Important v1.3 fact
+## Important v1.4 fact
 
-Steward v1.3 can grant lineage-scoped persistent state, one credential-hidden
-OpenAI-compatible inference route, and one declared private service. It still
-denies arbitrary egress, raw secrets, host mounts, Docker access, privileged mode,
-and undeclared ports. HTTP, `stewardctl node`, and `steward-mcp` all reach the same
-Executor enforcement path.
+Steward v1.4 can grant lineage-scoped persistent state, credential-hidden
+OpenAI-compatible inference, one declared private service, and signed named HTTP(S)
+routes through a standard per-instance proxy. Raw TCP/UDP, transparent proxying,
+raw secrets, host mounts, Docker access, privileged mode, and undeclared ports stay
+denied. HTTP, `stewardctl node`, and `steward-mcp` reach the same enforcement path.

@@ -98,6 +98,7 @@ backup_dir=$(mktemp -d /etc/steward/.configure-backup.XXXXXX)
 targets=(
 	/etc/steward/steward.json
 	/etc/steward/executor.env
+	/etc/steward/executor-gateway.env
 	/etc/steward/uplink-credential.json
 	/etc/steward/executor-uplink.json
 	/etc/steward/executor-token
@@ -235,6 +236,18 @@ elif [[ ! -e /etc/steward/executor-token ]]; then
 	token_tmp=
 fi
 
+# A fresh package ships an empty positive-capability topology. Derive the relay
+# image from the already checksum-verified Steward binary, build it with no build
+# network, pin the resulting image digest, and configure the four narrow Executor
+# arguments. Preserve an existing non-empty operator-managed topology.
+gateway_line=$(grep -v '^[[:space:]]*#' /etc/steward/executor-gateway.env 2>/dev/null | grep -v '^[[:space:]]*$' || true)
+if [[ -z $gateway_line || $gateway_line == EXECUTOR_GATEWAY_ARGS= ]]; then
+	/usr/local/libexec/steward/build-relay-image --configure
+	derived_relay=true
+else
+	derived_relay=false
+fi
+
 if [[ $local_only == false && ! -e $fence ]]; then
 	fence_created=true
 	runuser -u steward-executor -- /usr/local/bin/steward-executor \
@@ -250,4 +263,7 @@ if [[ $start_services == true ]]; then
 	echo "configure-node: Steward is configured, validated, enabled, and running"
 else
 	echo "configure-node: Steward is configured and validated; service state was not changed"
+fi
+if [[ $derived_relay == true ]]; then
+	echo "configure-node: trusted relay topology was built offline and pinned automatically"
 fi

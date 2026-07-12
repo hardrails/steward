@@ -19,7 +19,7 @@ state within the authority allowed by the configured Executor. Do not expose it
 to an untrusted agent or a shared desktop account. MCP tool annotations and
 confirmation text are usability signals, not authorization controls.
 
-Executor listens only on `127.0.0.1:8090` in the packaged v1.3 unit. The MCP
+Executor listens only on `127.0.0.1:8090` in the packaged v1.4 unit. The MCP
 server accepts only a syntactic loopback origin and an owner-only token file.
 
 ## Configure a client
@@ -59,6 +59,7 @@ stdout and diagnostics only to stderr.
 | `steward_admit` | Submit a base64 DSSE capsule and strict instance-intent JSON. |
 | `steward_status` | Read current hardened workload state. |
 | `steward_logs` | Read bounded container logs. |
+| `steward_egress` | Read safe egress counters and last destination/decision. |
 | `steward_start` / `steward_stop` | Transition the agent, relay, and gateway grant as one journaled operation. |
 | `steward_destroy` | Destroy runtime topology while retaining state. |
 | `steward_purge_state` | Permanently remove an inactive lineage after signed authorization. |

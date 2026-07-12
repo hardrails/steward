@@ -8,7 +8,8 @@ section: How-to guide
 
 This guide enables the opt-in signed authority chain. Run the authoring steps on an
 operator workstation with `stewardctl`; carry only the required public artifacts
-and the node receipt key into the site through your approved transfer process.
+into the site through your approved transfer process. The node creates its own
+receipt key locally.
 
 ## 1. Create independent keys
 
@@ -18,13 +19,11 @@ stewardctl keygen -key-id site-root-1 \
   -private-out site-root.private.pem -public-out site-root.public
 stewardctl keygen -key-id publisher-1 \
   -private-out publisher.private.pem -public-out publisher.public
-stewardctl keygen -key-id node-receipts-1 \
-  -private-out node-receipts.private.pem -public-out node-receipts.public
 ```
 
 `keygen` refuses to overwrite a file. Keep the site-root and publisher private
-keys off the execution node. The node receipt private key must reach Executor and
-remain mode `0600`; its public half is what auditors need.
+keys off the execution node. Do not place a receipt private key in Terraform,
+cloud-init, tags, or an enrollment archive; the node configurator generates it.
 
 ## 2. Sign the local site policy
 
@@ -93,7 +92,7 @@ approved OCI import/inspection workflow; do not substitute a mutable tag.
     "cpu_millis": 1000,
     "pids": 128
   },
-  "capabilities": {"state":false,"inference":false,"service":false},
+  "capabilities": {"state":false,"inference":false,"service":false,"egress":false},
   "state": {"schema_version":"v1","path":"/state"},
   "service": {}
 }
@@ -109,37 +108,25 @@ printf '%s\n' "$CAPSULE_DIGEST"
 
 The digest identifies the exact serialized DSSE envelope, including its signature.
 
-## 4. Install node trust material
+## 4. Configure node trust material atomically
 
-On the Linux node:
-
-```console
-sudo install -o root -g steward-executor -m 0640 \
-  site-policy.dsse.json /etc/steward/site-policy.dsse.json
-sudo install -o root -g root -m 0644 \
-  site-root.public /etc/steward/site-root.public
-sudo install -o steward-executor -g steward-executor -m 0600 \
-  node-receipts.private.pem /etc/steward/node-receipts.private.pem
-```
-
-Append these no-whitespace values to `/etc/steward/executor.env`:
-
-```text
-EXECUTOR_ADMISSION_POLICY_FILE=/etc/steward/site-policy.dsse.json
-EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE=/etc/steward/site-root.public
-EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID=site-root-1
-EXECUTOR_ADMISSION_NODE_ID=node-a
-EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE=/etc/steward/node-receipts.private.pem
-```
-
-Then validate and restart:
+On the Linux node, one command verifies the policy signature and schema, installs
+public trust, generates the receipt key locally, initializes the admission fence
+exactly once, builds and digest-pins the relay image, runs the real node preflight,
+and restarts an already-active Executor only after validation succeeds:
 
 ```console
-sudo -u steward-executor steward-executor -initialize-admission-fence \
-  -admission-fence-file /var/lib/steward-executor/admission-fences.bin
-sudo /usr/local/libexec/steward/node-preflight
-sudo systemctl restart steward-executor
+sudo /usr/local/libexec/steward/configure-admission \
+  --policy site-policy.dsse.json \
+  --site-root-public-key site-root.public \
+  --site-root-key-id site-root-1 \
+  --node-id node-a
 ```
+
+The node writes its receipt public key to
+`/etc/steward/node-receipts.public`. Retain that public key and the expected chain
+head outside the node. The private key is generated on the node and never accepted
+as a Terraform/cloud-init input.
 
 Initialization is explicit and exclusive. Normal startup refuses a missing fence
 instead of silently forgetting previously consumed generations.
@@ -169,7 +156,7 @@ and generation must match the intent exactly:
       "cpu_millis": 1000,
       "pids": 128
     },
-    "capabilities": {"state":false,"inference":false,"service":false},
+    "capabilities": {"state":false,"inference":false,"service":false,"egress":false},
     "state_disposition": "none"
   }
 }

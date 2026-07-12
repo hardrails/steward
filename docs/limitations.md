@@ -1,15 +1,16 @@
 ---
-title: Steward v1.3 boundaries
-description: Exact Steward v1.3 guarantees, positive capability controls, residual risks, and deliberately unavailable authority.
+title: Steward v1.4 boundaries
+description: Exact Steward v1.4 guarantees, signed HTTP(S) egress controls, residual risks, and deliberately unavailable authority.
 section: Release boundary
 ---
 
-# Steward v1.3 boundaries
+# Steward v1.4 boundaries
 
-v1.3 combines the sovereign authorization core—strict DSSE/Ed25519 profile capsules,
+v1.4 combines the sovereign authorization core—strict DSSE/Ed25519 profile capsules,
 site-root-signed policy, tenant/node/instance intent, policy and generation fences,
 a fsynced host-mutation journal, signed hash-linked receipts, and offline
-verification—with useful state, inference, service, direct CLI, and MCP operations.
+verification—with useful state, inference, service, deny-by-default HTTP(S) egress,
+direct CLI, Terraform bootstrap, and MCP operations.
 
 ## What a receipt means
 
@@ -26,7 +27,7 @@ that matters. Without a TPM/TEE or external anchor, a hostile host root can repl
 the key, log, and software together. Receipts are tamper-evident inside the
 documented node trust boundary, not globally non-repudiable.
 
-In v1.3 the receipt key is loaded by the Docker-authorized Executor process; there
+In v1.4 the receipt key is loaded by the Docker-authorized Executor process; there
 is no separate signer service or Unix identity. Compromise of Executor can therefore
 forge node-local receipts. Separating Docker authority from receipt-signing authority
 is future hardening, not a property claimed by this release.
@@ -47,10 +48,29 @@ the `admit` command through the authenticated Executor uplink, or an operator ca
 enable the loopback API plus the explicit host-admin-intent flag. The local bearer
 token is a host-administrator credential, not tenant end-user authentication.
 
-## Not available in v1.3
+## Egress boundary
 
-- Outbound network or hostname allowlists
-- Arbitrary outbound network or arbitrary inference destinations
+Signed workloads can request 1–32 named route IDs. A publisher capsule must permit
+the egress capability, tenant site policy must permit every route ID, and the local
+Gateway configuration maps each route to host patterns, ports, concurrency, byte,
+and time ceilings. The agent receives a standard HTTP/HTTPS proxy, not raw Docker
+networking. Gateway resolves the hostname and dials the exact checked IP, blocking
+private, loopback, link-local, multicast, and unspecified addresses unless the host
+operator pins an explicit CIDR. Agent DNS is disabled for egress-bearing workloads.
+
+HTTPS uses standard `CONNECT`. Steward binds the visible TLS ClientHello server
+name to the approved CONNECT hostname and enforces port, address, bytes, time, and
+concurrency, but it does not intercept TLS and therefore cannot enforce HTTP paths
+or methods inside an HTTPS tunnel. The JSONL audit deliberately omits URL
+paths, queries, headers, bodies, and credentials. Generic credentials remain owned
+by the agent's approved state; only the inference broker hides an upstream token.
+
+## Not available in v1.4
+
+- Raw outbound TCP, UDP, ICMP, SOCKS, or arbitrary inference destinations
+- Transparent interception for software that ignores `HTTP_PROXY`/`HTTPS_PROXY`
+- TLS interception or L7 path/method policy inside HTTPS tunnels
+- Interactive dynamic approval of previously unlisted destinations
 - Arbitrary state paths, host bind mounts, or automatic state deletion
 - Raw published agent ports, public ingress, or tenant end-user authentication
 - Secret, arbitrary environment-variable, or file injection
@@ -63,8 +83,8 @@ token is a host-administrator credential, not tenant end-user authentication.
 - Automatic recovery of an ambiguous prepared journal operation
 - Container checkpoint/restore, Kubernetes, or multi-host placement
 
-The signed capsule format contains `state`, `inference`, and `service` ceilings.
-v1.3 enforces them only when the complete Docker volume or gateway/relay topology
+The signed capsule format contains `state`, `inference`, `service`, and `egress` ceilings.
+v1.4 enforces them only when the complete Docker volume or gateway/relay topology
 is configured. Otherwise it returns HTTP 501; a signed boolean is never treated
 as an implemented isolation control.
 
@@ -80,8 +100,8 @@ The next capability work must preserve deny-by-default operation:
 
 Each capability ships only with crash recovery, drift inspection, cross-tenant
 tests, and real Docker+gVisor acceptance. Host mounts, Docker socket exposure,
-`CONNECT`, wildcard destinations, and caller-selected container privileges are not
-acceptable shortcuts.
+open/default-allow routes, implicit private-address access, and caller-selected
+container privileges are not acceptable shortcuts.
 
 ## Trusted substrate
 

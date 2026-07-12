@@ -376,7 +376,7 @@ func TestSecureAdmissionCreatesOnlyFromSignedIntersection(t *testing.T) {
 func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing.T) {
 	docker := &secureDocker{}
 	server, _ := NewServer(docker, "secret", nil)
-	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true, Service: true})
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true, Service: true, Egress: true})
 	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
 	config.Topology, config.Gateway = docker, grants
 	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
@@ -392,15 +392,79 @@ func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing
 	if response.Code != http.StatusCreated || docker.network == nil || docker.relay == nil || len(grants.grants) != 1 {
 		t.Fatalf("admit status=%d network=%#v relay=%#v grants=%#v body=%s", response.Code, docker.network, docker.relay, grants.grants, response.Body.String())
 	}
+	var admitted secureProvisionResponse
+	if err := json.NewDecoder(response.Body).Decode(&admitted); err != nil || admitted.EgressProxy != "http://steward-relay:8082" ||
+		len(admitted.EgressRouteIDs) != 1 || admitted.EgressRouteIDs[0] != "public-web" || !docker.relay.Spec.Egress ||
+		len(docker.observed.Workload.Runtime.EgressRouteIDs) != 1 {
+		t.Fatalf("egress admission=%#v relay=%#v workload=%#v err=%v", admitted, docker.relay, docker.observed.Workload, err)
+	}
 	ref := RuntimeRef(intent.TenantID, intent.InstanceID)
 	assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+ref+"/start", context.Background(), http.StatusOK)
 	if !grants.grants[docker.observed.Workload.Runtime.GrantID].Active || docker.observed.Status != "running" || docker.relay.Status != "running" {
 		t.Fatalf("runtime not activated: agent=%#v relay=%#v grants=%#v", docker.observed, docker.relay, grants.grants)
 	}
+	request = httptest.NewRequest(http.MethodGet, "/v1/workloads/"+ref+"/egress", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"allowed":1`) {
+		t.Fatalf("egress stats status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet, "/v1/workloads/"+ref, nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"egress_proxy":"http://steward-relay:8082"`) || !strings.Contains(response.Body.String(), `"public-web"`) {
+		t.Fatalf("egress status=%d body=%s", response.Code, response.Body.String())
+	}
+	grants.inspectErr = errors.New("gateway offline")
+	request = httptest.NewRequest(http.MethodGet, "/v1/workloads/"+ref+"/egress", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "gateway_unavailable") {
+		t.Fatalf("offline stats status=%d body=%s", response.Code, response.Body.String())
+	}
+	grants.inspectErr = nil
 	assertLifecycleStatus(t, server, http.MethodPost, "/v1/workloads/"+ref+"/stop", context.Background(), http.StatusOK)
 	assertLifecycleStatus(t, server, http.MethodDelete, "/v1/workloads/"+ref, context.Background(), http.StatusNoContent)
 	if docker.network != nil || docker.relay != nil || len(grants.grants) != 0 {
 		t.Fatalf("runtime topology retained: network=%#v relay=%#v grants=%#v", docker.network, docker.relay, grants.grants)
+	}
+}
+
+func TestEgressStatsRejectsInvalidUnmanagedAndUngrantableWorkloads(t *testing.T) {
+	request := func(t *testing.T, docker Docker, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		server, err := NewServer(docker, "secret", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, req)
+		return response
+	}
+
+	response := request(t, &fakeDocker{}, "/v1/workloads/not-a-runtime-ref/egress")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_runtime_ref") {
+		t.Fatalf("invalid ref status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	path := "/v1/workloads/" + RuntimeRef("tenant-a", "agent-1") + "/egress"
+	response = request(t, &fakeDocker{err: ErrNotFound}, path)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing workload status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	response = request(t, &fakeDocker{observed: &ObservedWorkload{
+		Workload: Workload{InstanceID: "tenant-a/agent-1", TenantID: "tenant-a"},
+		Managed:  true,
+		Hardened: true,
+	}}, path)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unsigned workload status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -1300,7 +1364,7 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 		Tenants: []admission.TenantRule{{
 			TenantID: "tenant-a", PublisherKeyIDs: []string{"publisher-a"},
 			ResourceCeiling:   admission.ResourceLimits{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 32},
-			InferenceRouteIDs: []string{"local"}, ServiceIDs: []string{"agent-api"},
+			InferenceRouteIDs: []string{"local"}, ServiceIDs: []string{"agent-api"}, EgressRouteIDs: []string{"public-web"},
 		}},
 	}
 	policyPayload, _ := json.Marshal(policy)
@@ -1339,6 +1403,9 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 	}
 	if capabilities.Service {
 		intent.ServiceID = "agent-api"
+	}
+	if capabilities.Egress {
+		intent.EgressRouteIDs = []string{"public-web"}
 	}
 	dir := t.TempDir()
 	if err := admission.InitializeFenceStore(filepath.Join(dir, "fences.bin")); err != nil {

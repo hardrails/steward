@@ -6,7 +6,7 @@ section: Agent compatibility
 
 # Hermes Agent on Steward
 
-Steward v1.3 has a built-in `hermes-v1@v1` layout: persistent state is mounted at
+Steward v1.4 has a built-in `hermes-v1@v1` layout: persistent state is mounted at
 `/opt/data`, `HOME` is `/opt/data/home`, and OpenAI-compatible requests are routed
 to the per-instance relay. This matches Hermes' documented state and custom-model
 interfaces without exposing the real model credential to Hermes.
@@ -46,7 +46,7 @@ typically requests:
 
 ```json
 {
-  "capabilities": {"state": true, "inference": true, "service": false},
+  "capabilities": {"state": true, "inference": true, "service": false, "egress": false},
   "state_disposition": "new",
   "inference_route_id": "local-openai",
   "model_alias": "approved-model"
@@ -63,8 +63,8 @@ Admit and start with `stewardctl node` or the MCP tools. Destroy retains
 
 ## Deliberate limits
 
-Hermes skills that download packages, call arbitrary web APIs, launch a browser,
-mount host projects, use Docker, or connect directly to Telegram/Discord/Slack do
-not work through the inference-only grant. Add those only when Steward has an
-explicit enforcement contract for them; do not enable general container networking
-as a workaround.
+Hermes skills can use standard HTTP(S) through explicitly named routes. Set capsule
+and intent `egress` to true and select only the routes the skill needs; Steward
+injects standard proxy variables automatically. See [signed egress]({{ '/guides/egress/' | relative_url }}).
+Raw TCP/UDP, browser sandboxes, host projects, Docker, and unlisted messaging or API
+destinations remain denied; do not enable general container networking as a workaround.

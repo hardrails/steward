@@ -43,7 +43,8 @@ download, verify, and register official gVisor after asking for approval.
 
 Yes, within the [documented shared-host threat model]({{ '/concepts/security-model/' | relative_url }}).
 Each workload receives a separate gVisor sandbox, fixed least privilege, no host
-mount or network, and tenant-scoped capacity accounting. Dedicated hardware may
+mount or raw network, and tenant-scoped capacity accounting. Signed HTTP(S) egress
+is mediated by a per-instance relay and host Gateway. Dedicated hardware may
 still be required for threats such as microarchitectural side channels or stronger
 failure-domain separation.
 
@@ -64,10 +65,18 @@ also outside the node-local receipt trust boundary.
 ## Can Steward run Hermes Agent or OpenClaw?
 
 Yes. Steward can run approved Hermes Agent and OpenClaw images as connected,
-persistent services through v1.3's finite inference, service, and state
-capabilities. Arbitrary egress, arbitrary secret injection, host mounts, and raw
-published Docker ports remain outside the contract. See the [Hermes]({{ '/guides/hermes-agent/' | relative_url }})
+persistent services through v1.4's finite inference, service, state, and named
+HTTP(S) egress capabilities. Raw TCP/UDP, arbitrary secret injection, host mounts,
+and raw published Docker ports remain outside the contract. See the [Hermes]({{ '/guides/hermes-agent/' | relative_url }})
 and [OpenClaw]({{ '/guides/openclaw/' | relative_url }}) guides.
+
+## Can Terraform manage Steward?
+
+Terraform can safely provision servers, disks, security groups, and secret-free
+Steward cloud-init through the shipped module. Agent instances remain under
+Steward's generation-fenced lifecycle. A future provider requires a remote mTLS or
+attestation-bound operator API; Steward will not expose its loopback host token just
+to make a Terraform resource possible. See [Terraform bootstrap]({{ '/guides/terraform/' | relative_url }}).
 
 ## Where do models run?
 

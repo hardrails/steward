@@ -42,7 +42,7 @@ fi
 declare -A executor=()
 required=' EXECUTOR_TOKEN_FILE EXECUTOR_DOCKER_SOCKET EXECUTOR_MAX_MEMORY_BYTES EXECUTOR_MAX_CPU_MILLIS EXECUTOR_MAX_PIDS EXECUTOR_MAX_WORKLOADS EXECUTOR_MAX_WORKLOADS_PER_TENANT '
 uplink=' EXECUTOR_UPLINK_URL EXECUTOR_UPLINK_CREDENTIAL_FILE EXECUTOR_UPLINK_STATE_FILE EXECUTOR_UPLINK_TLS_CA_FILE '
-optional=' EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE '
+optional=' EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG '
 allowed="$required$uplink$optional"
 while IFS= read -r line || [[ -n $line ]]; do
 	[[ -z $line || $line == \#* ]] && continue
@@ -97,6 +97,15 @@ if (( admission_set == ${#admission_keys[@]} )); then
 		-admission-node-id "${executor[EXECUTOR_ADMISSION_NODE_ID]}"
 		-admission-evidence-key-file "${executor[EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE]}"
 	)
+	admin_arg=${executor[EXECUTOR_ADMISSION_HOST_ADMIN_ARG]:-}
+	if [[ -n $admin_arg && $admin_arg != -admission-allow-host-admin-intent ]]; then
+		echo "node-preflight: invalid host-admin admission argument" >&2
+		exit 2
+	fi
+	[[ -z $admin_arg ]] || admission_args+=("$admin_arg")
+elif [[ -n ${executor[EXECUTOR_ADMISSION_HOST_ADMIN_ARG]:-} ]]; then
+	echo "node-preflight: host-admin intent requires complete signed admission" >&2
+	exit 2
 fi
 
 if [[ -r $executor_gateway_env ]]; then

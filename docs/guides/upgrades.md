@@ -32,7 +32,7 @@ a new active version.
 ## Activate atomically
 
 ```console
-sudo /usr/local/libexec/steward/activate-node-release v1.3.0 --restart
+sudo /usr/local/libexec/steward/activate-node-release v1.4.0 --restart
 ```
 
 Activation checks both target binaries and runs full node preflight before switching

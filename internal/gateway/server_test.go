@@ -33,7 +33,7 @@ func testGateway(t *testing.T, upstream string) (*Server, Config) {
 		Routes: []Route{{ID: "local", BaseURL: upstream, MaxConcurrent: 2}},
 	}
 	routes := map[string]loadedRoute{"local": {Route: config.Routes[0], base: parsed, credential: "upstream-secret"}}
-	server, err := Open(config, routes, "service-secret")
+	server, err := Open(config, routes, nil, "service-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestGrantFencingAuthenticationAndRestartState(t *testing.T) {
 		t.Fatalf("unauthorized status=%d", response.Code)
 	}
 	server.closeGrantListeners()
-	reopened, err := Open(config, server.routes, "service-secret")
+	reopened, err := Open(config, server.routes, nil, "service-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +246,37 @@ func TestGrantDeactivateUnregisterAndServiceDenials(t *testing.T) {
 	}
 }
 
+func TestUnregisterRestoresGrantWhenStateCannotPersist(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer upstream.Close()
+	server, config := testGateway(t, upstream.URL)
+	grant := Grant{GrantID: GrantID("tenant", "agent", 9), TenantID: "tenant", InstanceID: "agent", Generation: 9, RouteID: "local", ModelAlias: "model"}
+	raw, _ := json.Marshal(grant)
+	response := httptest.NewRecorder()
+	server.ControlHandler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/grants", bytes.NewReader(raw)))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("register status=%d body=%s", response.Code, response.Body.String())
+	}
+	blocker := filepath.Join(filepath.Dir(config.StateFile), "state-blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server.config.StateFile = filepath.Join(blocker, "state.json")
+	response = httptest.NewRecorder()
+	server.ControlHandler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/grants/"+grant.GrantID+"/activate", nil))
+	if response.Code != http.StatusServiceUnavailable || server.grants[grant.GrantID].Active {
+		t.Fatalf("failed activation was not rolled back: status=%d grant=%#v", response.Code, server.grants[grant.GrantID])
+	}
+	response = httptest.NewRecorder()
+	server.ControlHandler().ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/v1/grants/"+grant.GrantID, nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unregister status=%d body=%s", response.Code, response.Body.String())
+	}
+	if restored, ok := server.grants[grant.GrantID]; !ok || !grantsEqual(restored, grant) || server.listeners[grant.GrantID] == nil {
+		t.Fatalf("grant was not restored after persistence failure: %#v", restored)
+	}
+}
+
 func TestGrantAndProxyValidationErrors(t *testing.T) {
 	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Location", "/elsewhere")
@@ -339,10 +370,7 @@ func TestGatewayStartServesUnixControlAndShutsDown(t *testing.T) {
 func TestOpenRejectsUntrustedPersistedState(t *testing.T) {
 	parsed, _ := url.Parse("http://127.0.0.1:1")
 	routes := map[string]loadedRoute{"local": {Route: Route{ID: "local", BaseURL: parsed.String(), MaxConcurrent: 1}, base: parsed}}
-	if _, err := Open(Config{}, nil, "token"); err == nil {
-		t.Fatal("empty routes accepted")
-	}
-	if _, err := Open(Config{}, routes, ""); err == nil {
+	if _, err := Open(Config{}, routes, nil, ""); err == nil {
 		t.Fatal("empty service token accepted")
 	}
 	valid := Grant{GrantID: GrantID("tenant", "agent", 1), TenantID: "tenant", InstanceID: "agent", Generation: 1, RouteID: "local", ModelAlias: "model"}
@@ -376,7 +404,7 @@ func TestOpenRejectsUntrustedPersistedState(t *testing.T) {
 				t.Fatal(err)
 			}
 			config := Config{StateFile: state, GrantRoot: filepath.Join(directory, "grants"), ControlSocket: filepath.Join(directory, "control.sock"), ExecutorGID: os.Getgid(), RelayGID: os.Getgid()}
-			if _, err := Open(config, routes, "token"); err == nil {
+			if _, err := Open(config, routes, nil, "token"); err == nil {
 				t.Fatal("untrusted state accepted")
 			}
 		})

@@ -53,6 +53,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return verifyEvidence(arguments[1:], stdout)
 	case "node":
 		return nodeCommand(arguments[1:], stdout)
+	case "gateway":
+		return gatewayCommand(arguments[1:], stdout)
 	default:
 		return usage(stderr)
 	}
@@ -63,13 +65,14 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl capsule sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify -in FILE -public-key FILE -node-id ID [-epoch N]")
-	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|start|stop|destroy|purge-state ...")
+	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state ...")
+	fmt.Fprintln(writer, "       stewardctl gateway validate|route ...")
 	return errors.New("invalid command")
 }
 
 func nodeCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("node command requires admit, status, logs, start, stop, destroy, or purge-state")
+		return errors.New("node command requires admit, status, logs, egress, start, stop, destroy, or purge-state")
 	}
 	action := arguments[0]
 	flags := flag.NewFlagSet("node "+action, flag.ContinueOnError)
@@ -117,7 +120,7 @@ func nodeCommand(arguments []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-	case "status", "logs", "start", "stop", "destroy":
+	case "status", "logs", "egress", "start", "stop", "destroy":
 		if *runtimeRef == "" || *capsulePath != "" || *intentPath != "" {
 			return fmt.Errorf("node %s requires -runtime-ref", action)
 		}
@@ -126,6 +129,8 @@ func nodeCommand(arguments []string, stdout io.Writer) error {
 			result, err = client.Status(ctx, *runtimeRef)
 		case "logs":
 			result, err = client.Logs(ctx, *runtimeRef)
+		case "egress":
+			result, err = client.EgressStats(ctx, *runtimeRef)
 		case "start":
 			result, err = client.Start(ctx, *runtimeRef)
 		case "stop":

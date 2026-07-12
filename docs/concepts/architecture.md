@@ -27,6 +27,10 @@ Linux node
                                     v
                            tenant agent container
                            Docker runtime: runsc
+                              | internal network only
+                              v
+                         hardened relay --Unix grant--> host gateway
+                                                   inference / service / HTTP(S)
 
 Offline stewardctl: keys, signed capsule/policy, receipt verification
 Inference gateway: a separate operator-controlled system
@@ -58,7 +62,7 @@ cannot resurrect a destroyed workload after restart.
 
 ## Signed local admission
 
-The opt-in v1.3 path separates three authorities: a publisher signs a reusable
+The opt-in v1.4 path separates three authorities: a publisher signs a reusable
 profile capsule, the site root signs local policy, and an authenticated caller
 submits a tenant/node/instance intent. Executor admits only their intersection.
 It persists policy-epoch and instance-generation high-water marks, journals the
@@ -78,12 +82,18 @@ receiving the proprietary control-plane source. It also keeps enterprise functio
 such as SSO, approvals, organization hierarchy, and fleet policy out of the node's
 privileged process.
 
-## Inference separation
+## Inference and egress separation
 
 Steward does not host, schedule, or select models. A local or remote inference system
-can be exposed through an OpenAI-compatible gateway under separate policy. Future
-Executor egress grants should reference approved destinations; they should not
-embed model governance inside the node runtime.
+can be exposed through an OpenAI-compatible gateway under separate policy.
+
+For ordinary outbound HTTP(S), the agent receives standard proxy variables pointing
+at its per-instance relay. The relay has no Internet route; it bridges bytes to one
+grant-owned Unix socket. The host Gateway intersects that grant with operator route
+configuration, resolves and pins a permitted IP, and performs the dial. Stopping or
+destroying the instance deactivates or removes the same grant. This keeps DNS,
+private-address protection, audit, and lifecycle at the trusted boundary without
+placing a generic proxy SDK in the agent image.
 
 For implementation-level decisions, read the repository's
 [`ARCHITECTURE.md`](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md).

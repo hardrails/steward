@@ -22,7 +22,7 @@ for path in steward stewardctl steward-mcp steward-executor steward-gateway stew
 	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
 	deploy/config/gateway.json.in scripts/install-node.sh \
 	scripts/activate-node-release.sh scripts/node-preflight.sh \
-	scripts/configure-node.sh scripts/uninstall-node.sh scripts/build-relay-image.sh LICENSE README.md; do
+	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh scripts/build-relay-image.sh LICENSE README.md; do
 	if [[ ! -f "$stage/$path" ]]; then
 		echo "build-deb: stage is missing $path" >&2
 		exit 2

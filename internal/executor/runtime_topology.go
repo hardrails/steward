@@ -20,7 +20,8 @@ func (s *Server) desiredGatewayGrant(workload Workload, serviceURL string) gatew
 		GrantID: workload.Runtime.GrantID, TenantID: workload.TenantID, InstanceID: workload.InstanceID,
 		Generation: workload.Runtime.Generation, Service: workload.Runtime.ServicePort > 0, ServiceURL: serviceURL,
 	}
-	if workload.Runtime.Inference {
+	grant.EgressRouteIDs = append([]string(nil), workload.Runtime.EgressRouteIDs...)
+	if workload.Runtime.Inference || len(workload.Runtime.EgressRouteIDs) > 0 {
 		grant.RouteID = workload.Runtime.RouteID
 		grant.ModelAlias = workload.Runtime.ModelAlias
 	}
@@ -29,7 +30,7 @@ func (s *Server) desiredGatewayGrant(workload Workload, serviceURL string) gatew
 
 func (s *Server) desiredRelay(workload Workload) RelaySpec {
 	grantDir := ""
-	if workload.Runtime.Inference {
+	if workload.Runtime.Inference || len(workload.Runtime.EgressRouteIDs) > 0 {
 		grantDir = gateway.GrantDirectory(s.secure.grantRoot, workload.Runtime.GrantID)
 	}
 	return RelaySpec{
@@ -37,7 +38,7 @@ func (s *Server) desiredRelay(workload Workload) RelaySpec {
 		Image: s.secure.relayImage, NetworkName: workload.Runtime.NetworkName, GrantID: workload.Runtime.GrantID,
 		GrantDir: grantDir, TenantID: workload.TenantID, InstanceID: workload.InstanceID,
 		Generation: workload.Runtime.Generation, RelayGID: s.secure.relayGID,
-		Inference: workload.Runtime.Inference, ServicePort: workload.Runtime.ServicePort,
+		Inference: workload.Runtime.Inference, Egress: len(workload.Runtime.EgressRouteIDs) > 0, ServicePort: workload.Runtime.ServicePort,
 		RelayIP: workload.Runtime.RelayIP, AgentIP: workload.Runtime.AgentIP,
 		MemoryBytes: defaultRelayMemory, CPUMillis: defaultRelayCPU, PIDs: defaultRelayPIDs,
 	}
@@ -112,7 +113,7 @@ func (s *Server) runtimeTopologyMatches(ctx context.Context, workload Workload, 
 	}
 	wantGrant := s.desiredGatewayGrant(workload, serviceURL)
 	wantGrant.Active = wantActive
-	return observedGrant == wantGrant
+	return gateway.GrantsEqual(observedGrant, wantGrant)
 }
 
 func networkEqual(observed ObservedNetwork, want NetworkSpec) bool {

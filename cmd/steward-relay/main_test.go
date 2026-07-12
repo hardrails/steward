@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunVersionValidationAndShutdown(t *testing.T) {
@@ -35,6 +37,53 @@ func TestRunVersionValidationAndShutdown(t *testing.T) {
 	}
 	if code := run(context.Background(), []string{"-bad-flag"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("invalid flag code=%d", code)
+	}
+}
+
+func TestEgressBridgeForwardsOnlyToConfiguredUnixSocket(t *testing.T) {
+	directory, _ := os.MkdirTemp("/tmp", "sre-")
+	defer os.RemoveAll(directory)
+	socket := filepath.Join(directory, "e.sock")
+	gateway, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	go func() {
+		connection, err := gateway.Accept()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		_, _ = io.Copy(connection, connection)
+	}()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveEgressBridge(ctx, listener, socket) }()
+	agent, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Write([]byte("proxy-bytes")); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, len("proxy-bytes"))
+	if _, err := io.ReadFull(agent, buffer); err != nil || string(buffer) != "proxy-bytes" {
+		t.Fatalf("bridge bytes=%q err=%v", buffer, err)
+	}
+	_ = agent.Close()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("egress bridge did not stop")
 	}
 }
 

@@ -40,7 +40,7 @@ outer bundle, software repository, or controlled-media manifest. Record:
 ## Verify inside the facility
 
 ```console
-cd /media/steward-v1.3.0
+cd /media/steward-v1.4.0
 sha256sum -c checksums.txt
 ```
 
@@ -50,8 +50,8 @@ installer selects an available SHA-256 utility itself.
 ## Install without network access
 
 ```console
-sudo bash /media/steward-v1.3.0/install-steward.sh \
-  --offline-dir /media/steward-v1.3.0 \
+sudo bash /media/steward-v1.4.0/install-steward.sh \
+  --offline-dir /media/steward-v1.4.0 \
   --control-plane-url https://control.customer.example \
   --steward-credential /media/enrollment/steward.json \
   --executor-credential /media/enrollment/executor.json \

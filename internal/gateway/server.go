@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,21 +27,23 @@ const maxProxyBody = 4 << 20
 const maxProxyResponse = 32 << 20
 
 type Grant struct {
-	GrantID    string `json:"grant_id"`
-	TenantID   string `json:"tenant_id"`
-	InstanceID string `json:"instance_id"`
-	Generation uint64 `json:"generation"`
-	RouteID    string `json:"route_id,omitempty"`
-	ModelAlias string `json:"model_alias,omitempty"`
-	Service    bool   `json:"service"`
-	ServiceURL string `json:"service_url,omitempty"`
-	Active     bool   `json:"active"`
+	GrantID        string   `json:"grant_id"`
+	TenantID       string   `json:"tenant_id"`
+	InstanceID     string   `json:"instance_id"`
+	Generation     uint64   `json:"generation"`
+	RouteID        string   `json:"route_id,omitempty"`
+	ModelAlias     string   `json:"model_alias,omitempty"`
+	Service        bool     `json:"service"`
+	ServiceURL     string   `json:"service_url,omitempty"`
+	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
+	Active         bool     `json:"active"`
 }
 
 type grantResponse struct {
 	GrantID         string `json:"grant_id"`
 	InferenceSocket string `json:"inference_socket,omitempty"`
 	ServicePath     string `json:"service_path,omitempty"`
+	EgressSocket    string `json:"egress_socket,omitempty"`
 	Active          bool   `json:"active"`
 }
 
@@ -49,20 +52,35 @@ type snapshot struct {
 	Grants  []Grant `json:"grants"`
 }
 
-type Server struct {
-	mu         sync.Mutex
-	config     Config
-	routes     map[string]loadedRoute
-	semaphores map[string]chan struct{}
-	grants     map[string]Grant
-	listeners  map[string]net.Listener
-	tokenHash  [sha256.Size]byte
-	client     *http.Client
+type egressLease struct {
+	context context.Context
+	cancel  context.CancelFunc
 }
 
-func Open(config Config, routes map[string]loadedRoute, serviceToken string) (*Server, error) {
-	if len(routes) == 0 || serviceToken == "" {
-		return nil, errors.New("gateway routes and service token are required")
+type Server struct {
+	mu               sync.Mutex
+	config           Config
+	routes           map[string]loadedRoute
+	egressRoutes     map[string]loadedEgressRoute
+	semaphores       map[string]chan struct{}
+	egressSemaphores map[string]chan struct{}
+	grants           map[string]Grant
+	listeners        map[string]net.Listener
+	egressListeners  map[string]net.Listener
+	egressStats      map[string]EgressStats
+	egressLeases     map[string]egressLease
+	audit            *auditLog
+	tokenHash        [sha256.Size]byte
+	client           *http.Client
+}
+
+func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, serviceToken string) (*Server, error) {
+	if serviceToken == "" {
+		return nil, errors.New("gateway service token is required")
+	}
+	audit, err := openAuditLog(config.EgressAuditFile, config.EgressAuditFile != "")
+	if err != nil {
+		return nil, err
 	}
 	transport := &http.Transport{
 		Proxy:                 nil,
@@ -71,8 +89,10 @@ func Open(config Config, routes map[string]loadedRoute, serviceToken string) (*S
 		IdleConnTimeout:       60 * time.Second,
 	}
 	server := &Server{
-		config: config, routes: routes, semaphores: make(map[string]chan struct{}, len(routes)),
-		grants: make(map[string]Grant), listeners: make(map[string]net.Listener),
+		config: config, routes: routes, egressRoutes: egressRoutes, semaphores: make(map[string]chan struct{}, len(routes)),
+		egressSemaphores: make(map[string]chan struct{}, len(egressRoutes)),
+		grants:           make(map[string]Grant), listeners: make(map[string]net.Listener), egressListeners: make(map[string]net.Listener),
+		egressStats: make(map[string]EgressStats), egressLeases: make(map[string]egressLease), audit: audit,
 		tokenHash: sha256.Sum256([]byte("Bearer " + serviceToken)),
 		client: &http.Client{Transport: transport, Timeout: 2 * time.Minute,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
@@ -80,19 +100,93 @@ func Open(config Config, routes map[string]loadedRoute, serviceToken string) (*S
 	for id, route := range routes {
 		server.semaphores[id] = make(chan struct{}, route.MaxConcurrent)
 	}
+	for id, route := range egressRoutes {
+		server.egressSemaphores[id] = make(chan struct{}, route.MaxConcurrent)
+	}
 	if err := server.load(); err != nil {
+		_ = audit.Close()
 		return nil, err
 	}
 	return server, nil
 }
 
+// Reload atomically replaces operator-owned route policy and the service token.
+// Socket, identity, state, and audit paths are immutable for the process lifetime.
+// Existing grants fence route removal so a successful reload cannot orphan an
+// admitted workload. Narrowing or widening destinations within an existing route
+// ID is an explicit host-operator policy change and takes effect on the next request.
+func (s *Server) Reload(config Config, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, serviceToken string) error {
+	if serviceToken == "" || !sameRuntimeConfig(s.config, config) {
+		return errors.New("gateway reload may change only routes and service token")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, grant := range s.grants {
+		if grant.RouteID != "" {
+			if _, ok := routes[grant.RouteID]; !ok {
+				return fmt.Errorf("reload removes inference route %q used by grant %s", grant.RouteID, grant.GrantID)
+			}
+		}
+		for _, id := range grant.EgressRouteIDs {
+			if _, ok := egressRoutes[id]; !ok {
+				return fmt.Errorf("reload removes egress route %q used by grant %s", id, grant.GrantID)
+			}
+		}
+	}
+	semaphores := make(map[string]chan struct{}, len(routes))
+	for id, route := range routes {
+		current := s.semaphores[id]
+		if current != nil && cap(current) == route.MaxConcurrent {
+			semaphores[id] = current
+			continue
+		}
+		if len(current) > 0 {
+			return fmt.Errorf("reload changes concurrency for busy inference route %q", id)
+		}
+		semaphores[id] = make(chan struct{}, route.MaxConcurrent)
+	}
+	egressSemaphores := make(map[string]chan struct{}, len(egressRoutes))
+	for id, route := range egressRoutes {
+		current := s.egressSemaphores[id]
+		if current != nil && cap(current) == route.MaxConcurrent {
+			egressSemaphores[id] = current
+			continue
+		}
+		if len(current) > 0 {
+			return fmt.Errorf("reload changes concurrency for busy egress route %q", id)
+		}
+		egressSemaphores[id] = make(chan struct{}, route.MaxConcurrent)
+	}
+	s.config.Routes, s.config.EgressRoutes = config.Routes, config.EgressRoutes
+	s.routes, s.egressRoutes = routes, egressRoutes
+	s.semaphores, s.egressSemaphores = semaphores, egressSemaphores
+	s.tokenHash = sha256.Sum256([]byte("Bearer " + serviceToken))
+	return nil
+}
+
+func sameRuntimeConfig(left, right Config) bool {
+	return left.Version == right.Version && left.ControlSocket == right.ControlSocket &&
+		left.ServiceAddress == right.ServiceAddress && left.ServiceTokenFile == right.ServiceTokenFile &&
+		left.StateFile == right.StateFile && left.GrantRoot == right.GrantRoot &&
+		left.ExecutorGID == right.ExecutorGID && left.RelayGID == right.RelayGID &&
+		left.EgressAuditFile == right.EgressAuditFile
+}
+
 func (s *Server) Start(ctx context.Context) error {
+	defer s.audit.Close()
+	defer s.closeGrantListeners()
 	s.mu.Lock()
 	for id, grant := range s.grants {
 		if grant.RouteID != "" {
 			if err := s.listenGrantLocked(id); err != nil {
 				s.mu.Unlock()
 				return fmt.Errorf("restore inference grant %q: %w", id, err)
+			}
+		}
+		if len(grant.EgressRouteIDs) > 0 {
+			if err := s.listenEgressGrantLocked(id); err != nil {
+				s.mu.Unlock()
+				return fmt.Errorf("restore egress grant %q: %w", id, err)
 			}
 		}
 	}
@@ -118,21 +212,20 @@ func (s *Server) Start(ctx context.Context) error {
 	errorsCh := make(chan error, 2)
 	go func() { errorsCh <- control.Serve(controlListener) }()
 	go func() { errorsCh <- service.ListenAndServe() }()
+	var runErr error
 	select {
 	case <-ctx.Done():
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = control.Shutdown(shutdown)
-		_ = service.Shutdown(shutdown)
-		s.closeGrantListeners()
-		_ = os.Remove(s.config.ControlSocket)
-		return nil
 	case err := <-errorsCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		if !errors.Is(err, http.ErrServerClosed) {
+			runErr = err
 		}
-		return err
 	}
+	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = control.Shutdown(shutdown)
+	_ = service.Shutdown(shutdown)
+	_ = os.Remove(s.config.ControlSocket)
+	return runErr
 }
 
 func (s *Server) ControlHandler() http.Handler {
@@ -141,6 +234,7 @@ func (s *Server) ControlHandler() http.Handler {
 	mux.HandleFunc("POST /v1/grants/{id}/activate", s.activate)
 	mux.HandleFunc("POST /v1/grants/{id}/deactivate", s.deactivate)
 	mux.HandleFunc("GET /v1/grants/{id}", s.getGrant)
+	mux.HandleFunc("GET /v1/grants/{id}/egress", s.getEgressStats)
 	mux.HandleFunc("DELETE /v1/grants/{id}", s.unregister)
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -162,7 +256,10 @@ func (s *Server) getGrant(w http.ResponseWriter, r *http.Request) {
 func (s *Server) ServiceHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		presented := sha256.Sum256([]byte(r.Header.Get("Authorization")))
-		if subtle.ConstantTimeCompare(presented[:], s.tokenHash[:]) != 1 {
+		s.mu.Lock()
+		tokenHash := s.tokenHash
+		s.mu.Unlock()
+		if subtle.ConstantTimeCompare(presented[:], tokenHash[:]) != 1 {
 			writeGatewayError(w, http.StatusUnauthorized, "unauthorized", "valid gateway bearer credential required")
 			return
 		}
@@ -197,43 +294,69 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var grant Grant
-	if err := dsse.DecodeStrictInto(raw, maxConfigBytes, &grant); err != nil || !s.validGrant(grant) || grant.Active {
+	if err := dsse.DecodeStrictInto(raw, maxConfigBytes, &grant); err != nil || grant.Active {
 		writeGatewayError(w, http.StatusBadRequest, "invalid_request", "grant request is invalid")
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.validGrant(grant) {
+		writeGatewayError(w, http.StatusBadRequest, "invalid_request", "grant request is invalid")
+		return
+	}
 	current, hadCurrent := s.grants[grant.GrantID]
 	if hadCurrent {
+		if current.Active {
+			writeGatewayError(w, http.StatusConflict, "grant_active", "active gateway grant must be deactivated before replacement")
+			return
+		}
 		if grant.Generation < current.Generation {
 			writeGatewayError(w, http.StatusConflict, "generation_rollback", "gateway grant generation rollback")
 			return
 		}
 		grant.Active = false
-		if grant.Generation == current.Generation && grant != current && !validServiceEnrichment(current, grant) {
+		if grant.Generation == current.Generation && !grantsEqual(grant, current) && !validServiceEnrichment(current, grant) {
 			writeGatewayError(w, http.StatusConflict, "grant_conflict", "equal generation identifies a different gateway grant")
 			return
 		}
 	}
 	grant.Active = false
-	s.grants[grant.GrantID] = grant
-	if err := s.persistLocked(); err != nil {
+	hadInferenceListener := s.listeners[grant.GrantID] != nil
+	hadEgressListener := s.egressListeners[grant.GrantID] != nil
+	rollback := func() {
 		if hadCurrent {
 			s.grants[grant.GrantID] = current
 		} else {
 			delete(s.grants, grant.GrantID)
 		}
+		if !hadInferenceListener && s.listeners[grant.GrantID] != nil {
+			_ = s.listeners[grant.GrantID].Close()
+			delete(s.listeners, grant.GrantID)
+			_ = os.Remove(inferenceSocketPath(s.config.GrantRoot, grant.GrantID))
+		}
+		if !hadEgressListener && s.egressListeners[grant.GrantID] != nil {
+			_ = s.egressListeners[grant.GrantID].Close()
+			delete(s.egressListeners, grant.GrantID)
+			_ = os.Remove(egressSocketPath(s.config.GrantRoot, grant.GrantID))
+		}
+		_ = s.persistLocked()
+	}
+	s.grants[grant.GrantID] = grant
+	if err := s.persistLocked(); err != nil {
+		rollback()
 		writeGatewayError(w, http.StatusServiceUnavailable, "state_unavailable", err.Error())
 		return
 	}
 	if grant.RouteID != "" {
 		if err := s.listenGrantLocked(grant.GrantID); err != nil {
-			if hadCurrent {
-				s.grants[grant.GrantID] = current
-			} else {
-				delete(s.grants, grant.GrantID)
-			}
-			_ = s.persistLocked()
+			rollback()
+			writeGatewayError(w, http.StatusServiceUnavailable, "socket_unavailable", err.Error())
+			return
+		}
+	}
+	if len(grant.EgressRouteIDs) > 0 {
+		if err := s.listenEgressGrantLocked(grant.GrantID); err != nil {
+			rollback()
 			writeGatewayError(w, http.StatusServiceUnavailable, "socket_unavailable", err.Error())
 			return
 		}
@@ -249,8 +372,19 @@ func validServiceEnrichment(current, next Grant) bool {
 	return !current.Active && !next.Active && current.ServiceURL == "" && next.ServiceURL != "" &&
 		current.GrantID == next.GrantID && current.TenantID == next.TenantID &&
 		current.InstanceID == next.InstanceID && current.Generation == next.Generation &&
-		current.RouteID == next.RouteID && current.ModelAlias == next.ModelAlias && current.Service == next.Service
+		current.RouteID == next.RouteID && current.ModelAlias == next.ModelAlias && current.Service == next.Service &&
+		slices.Equal(current.EgressRouteIDs, next.EgressRouteIDs)
 }
+
+func grantsEqual(left, right Grant) bool {
+	return left.GrantID == right.GrantID && left.TenantID == right.TenantID &&
+		left.InstanceID == right.InstanceID && left.Generation == right.Generation &&
+		left.RouteID == right.RouteID && left.ModelAlias == right.ModelAlias &&
+		left.Service == right.Service && left.ServiceURL == right.ServiceURL &&
+		left.Active == right.Active && slices.Equal(left.EgressRouteIDs, right.EgressRouteIDs)
+}
+
+func GrantsEqual(left, right Grant) bool { return grantsEqual(left, right) }
 
 func (s *Server) activate(w http.ResponseWriter, r *http.Request) {
 	s.setActive(w, r.PathValue("id"), true)
@@ -267,13 +401,18 @@ func (s *Server) setActive(w http.ResponseWriter, id string, active bool) {
 		writeGatewayError(w, http.StatusNotFound, "grant_not_found", "gateway grant not found")
 		return
 	}
+	current := grant
 	grant.Active = active
 	s.grants[id] = grant
 	if err := s.persistLocked(); err != nil {
-		grant.Active = !active
-		s.grants[id] = grant
+		s.grants[id] = current
 		writeGatewayError(w, http.StatusServiceUnavailable, "state_unavailable", err.Error())
 		return
+	}
+	if active && len(grant.EgressRouteIDs) > 0 {
+		s.egressLeaseLocked(id)
+	} else {
+		s.revokeEgressLocked(id)
 	}
 	writeJSON(w, http.StatusOK, s.response(grant))
 }
@@ -282,30 +421,52 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.grants[id]; !ok {
+	grant, ok := s.grants[id]
+	if !ok {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	delete(s.grants, id)
 	if err := s.persistLocked(); err != nil {
+		s.grants[id] = grant
 		writeGatewayError(w, http.StatusServiceUnavailable, "state_unavailable", err.Error())
 		return
 	}
+	s.revokeEgressLocked(id)
 	if listener := s.listeners[id]; listener != nil {
 		_ = listener.Close()
 		delete(s.listeners, id)
 	}
+	if listener := s.egressListeners[id]; listener != nil {
+		_ = listener.Close()
+		delete(s.egressListeners, id)
+	}
+	delete(s.egressStats, id)
 	_ = os.RemoveAll(GrantDirectory(s.config.GrantRoot, id))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) validGrant(grant Grant) bool {
 	if !validGrantID(grant.GrantID) || !bounded(grant.TenantID, 128) || !bounded(grant.InstanceID, 256) || grant.Generation == 0 ||
-		(grant.RouteID == "" && !grant.Service) || len(grant.ModelAlias) > 256 || (grant.ServiceURL != "" && !grant.Service) {
+		(grant.RouteID == "" && !grant.Service && len(grant.EgressRouteIDs) == 0) || len(grant.ModelAlias) > 256 || (grant.ServiceURL != "" && !grant.Service) {
 		return false
 	}
 	if grant.RouteID != "" {
 		if _, ok := s.routes[grant.RouteID]; !ok || !bounded(grant.ModelAlias, 256) {
+			return false
+		}
+	}
+	if len(grant.EgressRouteIDs) > 32 {
+		return false
+	}
+	for index, id := range grant.EgressRouteIDs {
+		if !routeID(id) {
+			return false
+		}
+		if _, ok := s.egressRoutes[id]; !ok {
+			return false
+		}
+		if index > 0 && grant.EgressRouteIDs[index-1] >= id {
 			return false
 		}
 	}
@@ -344,6 +505,9 @@ func (s *Server) response(grant Grant) grantResponse {
 	if grant.Service {
 		result.ServicePath = "/v1/services/" + grant.GrantID + "/"
 	}
+	if len(grant.EgressRouteIDs) > 0 {
+		result.EgressSocket = egressSocketPath(s.config.GrantRoot, grant.GrantID)
+	}
 	return result
 }
 
@@ -352,24 +516,9 @@ func (s *Server) listenGrantLocked(id string) error {
 		return nil
 	}
 	directory := GrantDirectory(s.config.GrantRoot, id)
-	if err := os.MkdirAll(directory, 0o710); err != nil {
-		return err
-	}
-	if err := os.Chown(directory, -1, s.config.RelayGID); err != nil {
-		return err
-	}
 	path := inferenceSocketPath(s.config.GrantRoot, id)
-	_ = os.Remove(path)
-	listener, err := net.Listen("unix", path)
+	listener, err := openGrantListener(directory, path, s.config.RelayGID)
 	if err != nil {
-		return err
-	}
-	if err := os.Chmod(path, 0o660); err != nil {
-		_ = listener.Close()
-		return err
-	}
-	if err := os.Chown(path, -1, s.config.RelayGID); err != nil {
-		_ = listener.Close()
 		return err
 	}
 	s.listeners[id] = listener
@@ -384,15 +533,17 @@ func (s *Server) inferenceHandler(id string) http.Handler {
 		grant, ok := s.grants[id]
 		route := s.routes[grant.RouteID]
 		semaphore := s.semaphores[grant.RouteID]
-		s.mu.Unlock()
 		if !ok || !grant.Active || grant.RouteID == "" {
+			s.mu.Unlock()
 			writeGatewayError(w, http.StatusServiceUnavailable, "grant_inactive", "inference grant is not active")
 			return
 		}
 		select {
 		case semaphore <- struct{}{}:
+			s.mu.Unlock()
 			defer func() { <-semaphore }()
 		default:
+			s.mu.Unlock()
 			writeGatewayError(w, http.StatusTooManyRequests, "route_busy", "inference route concurrency limit reached")
 			return
 		}
@@ -487,8 +638,19 @@ func (s *Server) proxy(w http.ResponseWriter, incoming *http.Request, base *url.
 }
 
 func copyHeaders(destination, source http.Header) {
+	connectionHeaders := make(map[string]struct{})
+	for _, value := range source.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if token = http.CanonicalHeaderKey(strings.TrimSpace(token)); token != "" {
+				connectionHeaders[token] = struct{}{}
+			}
+		}
+	}
 	for key, values := range source {
 		if hopHeader(key) {
+			continue
+		}
+		if _, connected := connectionHeaders[http.CanonicalHeaderKey(key)]; connected {
 			continue
 		}
 		for _, value := range values {
@@ -596,9 +758,35 @@ func (s *Server) persistLocked() error {
 func (s *Server) closeGrantListeners() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for id := range s.egressLeases {
+		s.revokeEgressLocked(id)
+	}
 	for id, listener := range s.listeners {
 		_ = listener.Close()
 		delete(s.listeners, id)
+	}
+	for id, listener := range s.egressListeners {
+		_ = listener.Close()
+		delete(s.egressListeners, id)
+	}
+}
+
+func (s *Server) egressLeaseLocked(id string) context.Context {
+	if lease, ok := s.egressLeases[id]; ok {
+		return lease.context
+	}
+	if s.egressLeases == nil {
+		s.egressLeases = make(map[string]egressLease)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.egressLeases[id] = egressLease{context: ctx, cancel: cancel}
+	return ctx
+}
+
+func (s *Server) revokeEgressLocked(id string) {
+	if lease, ok := s.egressLeases[id]; ok {
+		lease.cancel()
+		delete(s.egressLeases, id)
 	}
 }
 
@@ -620,6 +808,33 @@ func GrantDirectory(root, grantID string) string {
 
 func inferenceSocketPath(root, grantID string) string {
 	return filepath.Join(GrantDirectory(root, grantID), "i.sock")
+}
+
+func egressSocketPath(root, grantID string) string {
+	return filepath.Join(GrantDirectory(root, grantID), "e.sock")
+}
+
+func openGrantListener(directory, path string, relayGID int) (net.Listener, error) {
+	if err := os.MkdirAll(directory, 0o710); err != nil {
+		return nil, err
+	}
+	if err := os.Chown(directory, -1, relayGID); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(path)
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o660); err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	if err := os.Chown(path, -1, relayGID); err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	return listener, nil
 }
 
 func writeGatewayError(w http.ResponseWriter, status int, code, message string) {

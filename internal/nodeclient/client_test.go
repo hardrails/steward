@@ -33,6 +33,8 @@ func TestClientDrivesBoundedExecutorContract(t *testing.T) {
 			_, _ = w.Write([]byte(`{"runtime_ref":"` + runtimeRef + `","status":"created","capsule_digest":"sha256:a","policy_digest":"sha256:b","generation":1,"evidence_key_id":"key"}`))
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/logs"):
 			_, _ = w.Write([]byte(`{"runtime_ref":"` + runtimeRef + `","status":"running","logs":"hello"}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/egress"):
+			_, _ = w.Write([]byte(`{"allowed":2,"denied":1,"bytes_from_agent":10,"bytes_to_agent":20,"last_destination":"example.com:443"}`))
 		case r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -54,10 +56,14 @@ func TestClientDrivesBoundedExecutorContract(t *testing.T) {
 			t.Fatalf("state=%#v err=%v", state, err)
 		}
 	}
+	stats, err := client.EgressStats(context.Background(), runtimeRef)
+	if err != nil || stats.Allowed != 2 || stats.Denied != 1 || stats.BytesToAgent != 20 {
+		t.Fatalf("stats=%#v err=%v", stats, err)
+	}
 	if err := client.Destroy(context.Background(), runtimeRef); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 6 {
+	if requests != 7 {
 		t.Fatalf("requests=%d", requests)
 	}
 }
