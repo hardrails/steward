@@ -1,36 +1,37 @@
 # Steward
 
-> Steward is an open-source, control-plane-neutral sovereign admission and Linux
-> execution runtime for AI agents. It combines signed local policy, tenant-bound
-> instance intent, Docker/gVisor enforcement, rollback fences, and offline-verifiable
-> node receipts without depending on a particular control plane.
+> Steward is an open-source Linux runtime for admitting and executing AI agents.
+> Operators control policy, keys, artifacts, infrastructure, and evidence. Signed
+> local policy, tenant-bound commands, Docker/gVisor enforcement, durable
+> anti-replay records, and offline-verifiable receipts do not depend on a specific
+> control plane.
 
-Version documented: v1.4.0
+Documentation scope: current supported capabilities
 License: Apache-2.0
 Source: https://github.com/hardrails/steward
 Documentation: https://hardrails.github.io/steward/
 
 ## Start here
 
-- [Overview](https://hardrails.github.io/steward/): Product purpose, boundary, and documentation map
+- [Overview](https://hardrails.github.io/steward/): Purpose, enforced boundary, and documentation map
 - [Install](https://hardrails.github.io/steward/getting-started/): Interactive and unattended Linux installation
-- [Why Steward exists](https://hardrails.github.io/steward/product/positioning/): Product thesis and proof boundary
+- [Why Steward exists](https://hardrails.github.io/steward/product/positioning/): Operator problem, authorization path, and receipt limits
 - [Market analysis](https://hardrails.github.io/steward/product/market-analysis/): Dated competitive matrix and research signals
-- [Limitations](https://hardrails.github.io/steward/limitations/): Exact v1.4 capability boundary
+- [Limitations](https://hardrails.github.io/steward/limitations/): Current capabilities, exclusions, and trusted components
 - [FAQ](https://hardrails.github.io/steward/faq/): Common product and operational questions
 
 ## How-to guides
 
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
 - [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
-- [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure state, inference, and service grants
+- [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure optional state, inference, and service grants
 - [Signed egress](https://hardrails.github.io/steward/guides/egress/): Configure HTTP(S) routes, private CIDRs, audit, and diagnostics
-- [Terraform](https://hardrails.github.io/steward/guides/terraform/): Secret-free cloud bootstrap and AWS hardening
-- [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate a local node with MCP 2025-11-25 stdio tools
-- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Run a constrained Hermes Agent image
-- [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): Run a constrained OpenClaw image
+- [Terraform](https://hardrails.github.io/steward/guides/terraform/): Non-secret cloud bootstrap and AWS hardening
+- [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate a local node with Model Context Protocol 2025-11-25 stdio tools
+- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Review the layout contract, upstream incompatibilities, and adapter acceptance gate
+- [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): Review the layout contract, bounded WebSocket path, and adapter acceptance gate
 - [Air-gapped installation](https://hardrails.github.io/steward/guides/air-gapped/): Offline import and verification
-- [Upgrade and rollback](https://hardrails.github.io/steward/guides/upgrades/): Atomic release activation
+- [Upgrade and rollback](https://hardrails.github.io/steward/guides/upgrades/): Manifest-bound activation, drained-node requirements, durable-format checks, and rollback limits
 
 ## Explanation
 
@@ -43,12 +44,16 @@ Documentation: https://hardrails.github.io/steward/
 - [Platform support](https://hardrails.github.io/steward/reference/platform-support/): Supported hosts and artifacts
 - [Configuration](https://hardrails.github.io/steward/reference/configuration/): Flags, defaults, paths, and validation
 - [APIs](https://hardrails.github.io/steward/reference/api/): Authoritative OpenAPI contracts
+- [Image and evidence tools](https://hardrails.github.io/steward/reference/offline-tools/): Verify and import signed Open Container Initiative (OCI) archives; verify and export receipt chains
 - [Release artifacts](https://hardrails.github.io/steward/reference/release-artifacts/): Filenames and checksum verification
 
-## Important v1.4 fact
+## Important capability boundary
 
-Steward v1.4 can grant lineage-scoped persistent state, credential-hidden
-OpenAI-compatible inference, one declared private service, and signed named HTTP(S)
-routes through a standard per-instance proxy. Raw TCP/UDP, transparent proxying,
-raw secrets, host mounts, Docker access, privileged mode, and undeclared ports stay
-denied. HTTP, `stewardctl node`, and `steward-mcp` reach the same enforcement path.
+On a dedicated single-tenant host, Steward can grant persistent state across
+approved workload replacements; the Docker volume has no enforced byte or inode
+quota and is disabled on a shared host. Steward can also grant OpenAI-compatible
+inference without exposing the upstream credential, one private service, and named
+HTTP(S) routes through a per-instance proxy. It denies raw TCP/UDP, transparent
+proxying, raw secrets, host mounts, Docker access, privileged mode, and undeclared
+ports. The Executor HTTP API, `stewardctl node`, and `steward-mcp` call the same
+Executor handlers.

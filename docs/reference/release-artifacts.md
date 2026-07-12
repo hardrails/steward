@@ -6,8 +6,8 @@ section: Reference
 
 # Release artifacts and verification
 
-Every GitHub release contains static archives, native Linux node packages, the
-guided installer, and one SHA-256 manifest.
+Each GitHub release contains static archives, native Linux node packages, the guided
+installer, and a SHA-256 manifest.
 
 ## File matrix
 
@@ -22,27 +22,33 @@ guided installer, and one SHA-256 manifest.
 | `steward_<version>_darwin_amd64.tar.gz` | macOS development supervisor, CLI, and MCP adapter |
 | `steward_<version>_darwin_arm64.tar.gz` | macOS development supervisor, CLI, and MCP adapter |
 | `install-steward.sh` | Interactive and unattended top-level installer |
-| `checksums.txt` | SHA-256 values for all release assets |
+| `checksums.txt` | SHA-256 values for every other release asset |
 
-Linux archives and packages include the hardened systemd units, configuration
-templates, enrollment/preflight helpers, and atomic activation/removal tools. macOS
-archives contain `steward`, `stewardctl`, `steward-mcp`, the license, and README.
+Linux archives and packages include hardened systemd units, configuration templates,
+enrollment and preflight helpers, and whole-release activation and removal tools.
+macOS archives contain `steward`, `stewardctl`, `steward-mcp`, the license, and
+README.
 
 ## Verify a downloaded release
 
 ```console
-gh release download v1.4.0 --repo hardrails/steward --dir steward-v1.4.0
-cd steward-v1.4.0
+RELEASE_TAG="<release-tag>"
+gh release download "$RELEASE_TAG" --repo hardrails/steward --dir "steward-$RELEASE_TAG"
+cd "steward-$RELEASE_TAG"
 sha256sum -c checksums.txt
 ```
 
-A checksum proves consistency with the downloaded manifest; authenticate the
-manifest or outer software bundle independently for high-assurance imports.
+On stock macOS, use `shasum -a 256 -c checksums.txt` instead of `sha256sum`.
+
+A checksum proves only that files match the downloaded manifest. For high-assurance
+imports, authenticate the manifest with a trusted signature or verify it as part of
+an independently authenticated release bundle.
 
 ## Version identity
 
-Published binaries are linker-stamped and the release build executes all six
-host-native binaries to assert they self-report the exact tag. Verify after installation:
+Published binaries are linker-stamped. For each Linux target, the release build
+executes all six host-native binaries and requires each to report the exact tag.
+Verify after installation:
 
 ```console
 steward -version
@@ -53,9 +59,16 @@ steward-relay -version
 steward-mcp -version
 ```
 
-All six must match the active `/opt/steward/releases/<version>` directory. Release tags
-use `vX.Y.Z` semantic versioning with optional prerelease suffixes and no build
+All six must match the active `/opt/steward/releases/<version>` directory. Release
+tags use `vX.Y.Z` semantic versioning, with optional prerelease suffixes and no build
 metadata.
+
+Linux releases also contain `release.json`. Its canonical file map binds every
+binary and host-integration asset by SHA-256. Its `state_formats` map declares the
+minimum and maximum durable format each release reads and the format it writes for
+Gateway state, admission fences, the operation journal, evidence, uplink replay
+state, and supervisor state. Activation uses these ranges to reject an unsafe
+upgrade or rollback before changing the active-release symlink or relay binding.
 
 See [platform support]({{ '/reference/platform-support/' | relative_url }}) and
 [air-gapped installation]({{ '/guides/air-gapped/' | relative_url }}).

@@ -6,10 +6,9 @@ section: How-to guide
 
 # Configure signed admission and offline receipts
 
-This guide enables the opt-in signed authority chain. Run the authoring steps on an
-operator workstation with `stewardctl`; carry only the required public artifacts
-into the site through your approved transfer process. The node creates its own
-receipt key locally.
+This guide configures signed authority. Author artifacts with `stewardctl` on an
+operator workstation, transfer only required public material through an approved
+process, and let the node generate its receipt key.
 
 ## 1. Create independent keys
 
@@ -19,21 +18,33 @@ stewardctl keygen -key-id site-root-1 \
   -private-out site-root.private.pem -public-out site-root.public
 stewardctl keygen -key-id publisher-1 \
   -private-out publisher.private.pem -public-out publisher.public
+stewardctl keygen -key-id tenant-a-commands \
+  -private-out tenant-a-commands.private.pem -public-out tenant-a-commands.public
+stewardctl keygen -key-id site-cleanup \
+  -private-out site-cleanup.private.pem -public-out site-cleanup.public
 ```
 
-`keygen` refuses to overwrite a file. Keep the site-root and publisher private
-keys off the execution node. Do not place a receipt private key in Terraform,
-cloud-init, tags, or an enrollment archive; the node configurator generates it.
+`keygen` will not overwrite files. Keep site-root and publisher private keys off the
+node, tenant command keys in the tenant's control-plane signer, and the independent
+cleanup key in a site incident-response system. Site policy gives the node only
+public keys. Never put receipt or command private keys in Terraform, cloud-init,
+tags, or enrollment archives. The node generates its receipt key.
 
 ## 2. Sign the local site policy
 
-Insert the exact base64 publisher public key into `site-policy.json`:
+Insert the exact base64 values from `publisher.public`,
+`tenant-a-commands.public`, and `site-cleanup.public` into `site-policy.json`:
 
 ```json
 {
   "schema_version": "steward.admission.v1",
   "policy_id": "site-a",
   "policy_epoch": 1,
+  "site_cleanup_command_keys": [{
+    "key_id": "site-cleanup",
+    "public_key": "PASTE site-cleanup.public HERE",
+    "operations": ["stop", "destroy", "purge"]
+  }],
   "publishers": [{
     "key_id": "publisher-1",
     "public_key": "PASTE publisher.public HERE",
@@ -54,7 +65,12 @@ Insert the exact base64 publisher public key into `site-policy.json`:
       "memory_bytes": 536870912,
       "cpu_millis": 1000,
       "pids": 128
-    }
+    },
+    "command_keys": [{
+      "key_id": "tenant-a-commands",
+      "public_key": "PASTE tenant-a-commands.public HERE",
+      "operations": ["admit", "start", "stop", "destroy", "read", "purge"]
+    }]
   }]
 }
 ```
@@ -66,18 +82,42 @@ stewardctl policy verify -in site-policy.dsse.json \
   -public-key site-root.public -key-id site-root-1
 ```
 
-Increase `policy_epoch` for every replacement. Executor persists the highest
-accepted epoch and rejects an older signed policy after activation.
+Increase `policy_epoch` for each replacement. Executor stores the highest accepted
+value and rejects older policy.
+
+Node-scoped multi-tenant uplink requires at least one
+`site_cleanup_command_keys` entry. These entries may authorize only `stop`,
+`destroy`, or `purge`; their IDs cannot match tenant command keys. This site authority survives
+tenant-key compromise or rule removal but cannot admit, start, or read. Each command
+binds tenant, node, instance, generations, sequence, validity window, and runtime
+reference to Executor's durable record. An emergency cleanup policy may set
+`"tenants": []` to block admission while retaining containment and removal.
+
+Each `command_keys` entry belongs to one tenant and authorizes its listed operations.
+A tenant needs one for node-scoped remote control, but not for local administration
+or a tenant-scoped compatibility credential.
 
 ## 3. Sign a reusable profile capsule
 
-The manifest and config digests have different meanings. Obtain both through your
-approved OCI import/inspection workflow; do not substitute a mutable tag.
+The manifest digest identifies an Open Container Initiative (OCI) manifest; the
+config digest identifies image configuration. Obtain both by inspection, never from
+a mutable tag.
+
+```console
+chmod go-w agent-approved.tar
+stewardctl image inspect -archive agent-approved.tar
+```
+
+Copy `manifest_digest`, `config_digest`, and `platform` exactly into the capsule.
+Inspection hashes the bounded archive without contacting Docker or authorizing its
+publisher. Select `repository` from the approved build or promotion record; archive
+inspection does not establish repository provenance, and an OCI archive may contain
+no repository name.
 
 ```json
 {
   "schema_version": "steward.admission.v1",
-  "capsule_id": "approved-agent-2026-07",
+  "capsule_id": "approved-agent",
   "publisher_key_id": "publisher-1",
   "profile": {"id":"generic-v1","version":"v1"},
   "image": {
@@ -106,14 +146,48 @@ stewardctl capsule verify -in capsule.dsse.json \
 printf '%s\n' "$CAPSULE_DIGEST"
 ```
 
-The digest identifies the exact serialized DSSE envelope, including its signature.
+The digest identifies the exact serialized DSSE (Dead Simple Signing Envelope),
+including its signatures. DSSE binds a typed payload to those signatures.
 
-## 4. Configure node trust material atomically
+## 4. Import the image under signed authority
 
-On the Linux node, one command verifies the policy signature and schema, installs
-public trust, generates the receipt key locally, initializes the admission fence
-exactly once, builds and digest-pins the relay image, runs the real node preflight,
-and restarts an already-active Executor only after validation succeeds:
+Transfer the archive, capsule, policy, and site-root public key through approved
+media. Authenticate them on the node before Docker receives image content:
+
+```console
+sudo stewardctl image import \
+  -archive agent-approved.tar \
+  -capsule capsule.dsse.json \
+  -policy site-policy.dsse.json \
+  -site-root-public-key site-root.public \
+  -site-root-key-id site-root-1
+```
+
+Before calling Docker, import verifies signatures, publisher revocation,
+repository/manifest allowlists, the built-in profile, every blob, and the signed
+manifest/config/platform tuple. Docker receives a sanitized archive with only the
+selected manifest, config, and layers. Steward then
+inspects the local config and rejects declared volumes or platform drift. Import
+does not authorize an instance; Executor later requires capsule, policy, and tenant
+intent to agree.
+
+## 5. Configure node trust material atomically
+
+For initial multi-tenant enrollment, pass these trust files with both uplink
+credentials to `configure-node`; see
+[Enroll and activate a Steward node]({{ '/getting-started/enroll/' | relative_url }}).
+Do not activate a node-scoped credential separately.
+
+Use `configure-admission` only after `configure-node` or the full installer has
+created the node's base local or remote enrollment. A package staged with
+`--stage-only` does not yet have the token and base configuration that preflight
+requires. On a configured node, `configure-admission` adds signed trust without
+changing its control-plane credential, or replaces policy on an enrolled node.
+The command verifies policy, installs public trust, generates the receipt key,
+initializes missing fence, journal, and evidence stores with their service ownership,
+ensures that the active release has a verified relay-image binding, runs preflight,
+and restarts an active Executor. A failed transaction removes only stores and keys
+that it created. Changes activate only after all checks pass:
 
 ```console
 sudo /usr/local/libexec/steward/configure-admission \
@@ -123,23 +197,26 @@ sudo /usr/local/libexec/steward/configure-admission \
   --node-id node-a
 ```
 
-The node writes its receipt public key to
-`/etc/steward/node-receipts.public`. Retain that public key and the expected chain
-head outside the node. The private key is generated on the node and never accepted
-as a Terraform/cloud-init input.
+Retain `/etc/steward/node-receipts.public` and the expected chain head outside the
+node. The head is the last sequence and hash needed to detect suffix removal. The
+node-generated private key is never accepted through Terraform or cloud-init.
 
-Initialization is explicit and exclusive. Normal startup refuses a missing fence
-instead of silently forgetting previously consumed generations.
+Startup rejects a missing fence instead of forgetting consumed generations.
 
-Partial configuration, an invalid signature, a policy rollback, a changed receipt
-key, a corrupt receipt chain, or a pending operation journal prevents signed
-admission from starting.
+Partial configuration, invalid signatures, policy rollback, receipt-key change, or
+corrupt evidence stops startup. A valid pending journal allows degraded startup but
+blocks admission and other normal mutations until an operator resolves it.
 
-## 5. Submit a fenced instance intent
+Signed control stores have finite lifetime limits: 64 MiB for evidence, 16 MiB for
+the operation journal, 4 MiB and 65,535 records for admission fences, and 1 MiB for
+encoded Executor uplink state. There is no supported rollover or compaction command.
+Monitor these files and plan node retirement before a limit blocks further signed
+mutations. See [durable control-store limits]({{ '/limitations/' | relative_url }}#durable-control-stores-have-fixed-lifetime-limits).
 
-The normal packaged path is the authenticated outbound Executor uplink. Send an
-`admit` command whose payload has this shape; its command tenant, node, instance,
-and generation must match the intent exactly:
+## 6. Submit a fenced instance intent
+
+Normally, send `admit` through Executor's authenticated outbound uplink. Command and
+intent must name the same tenant, node, instance, and generation:
 
 ```json
 {
@@ -162,20 +239,18 @@ and generation must match the intent exactly:
 }
 ```
 
-For a deliberately enabled loopback Executor listener, the operator must also set
-`-admission-allow-host-admin-intent` before POSTing the same object to
-`/v1/admissions`. This is a privileged break-glass mode: the token authorizes every
-tenant on the node. Without that flag, tenant identity must arrive through the
-non-forgeable in-process principal established by the authenticated uplink.
+For a deliberately enabled loopback listener, set
+`-admission-allow-host-admin-intent` before posting to `/v1/admissions`. This
+recovery option lets the token authorize every tenant. Otherwise tenant identity
+must come from the authenticated uplink.
 
-Executor verifies both signatures, applies the capsule/policy/intent intersection,
-journals the operation, writes a pre-effect receipt, creates and inspects the
-gVisor container, writes the commit receipt, then advances the durable fences.
-Start, stop, and destroy of a securely admitted workload use the same authenticated
-generation, journal, and receipt chain. Destroy persists a tombstone; replaying the
-consumed generation cannot recreate the absent container.
+Executor verifies signatures and requires capsule, policy, and intent to agree. It
+journals the operation, writes a pre-effect receipt, creates and inspects the gVisor
+container, writes a commit receipt, then advances fences. Lifecycle operations use
+the same identity, journal, and chain. A destroy tombstone prevents generation
+replay.
 
-## 6. Verify receipts without the node
+## 7. Verify and export receipts without the node
 
 Copy `/var/lib/steward-executor/evidence.bin` and the previously retained
 `node-receipts.public` to an offline audit workstation:
@@ -185,9 +260,44 @@ stewardctl evidence verify -in evidence.bin \
   -public-key node-receipts.public -node-id node-a -epoch 1
 ```
 
-Verification fails on a wrong key, changed frame, partial-frame truncation,
-reorder, internal sequence gap, node mismatch, or epoch mismatch. Retain the last
-verified sequence independently if you must detect removal of a complete signed
-suffix. The receipt proves Steward's recorded
-enforcement boundary—not prompt contents, model behavior, or resistance to a
-host-root compromise.
+Wrong keys, changed frames, a partial trailing frame, reordering, sequence gaps, and
+node or epoch mismatches fail verification. Removing one or more complete records
+from the end can form a valid shorter chain; detecting that requires the exact
+off-node head described below. For automation, emit JSON:
+
+```console
+stewardctl evidence verify -in evidence.bin \
+  -public-key node-receipts.public -node-id node-a -epoch 1 \
+  -json > verified-head.json
+```
+
+Retain `head.sequence` and `head.chain_hash` off-node. Supply both when verifying the
+same checkpoint to detect removal or replacement of a signed suffix:
+
+```console
+EXPECTED_SEQUENCE="<retained-sequence>"
+EXPECTED_CHAIN_HASH="sha256:<retained-chain-hash>"
+stewardctl evidence verify -in evidence.bin \
+  -public-key node-receipts.public -node-id node-a -epoch 1 \
+  -expected-sequence "$EXPECTED_SEQUENCE" \
+  -expected-chain-hash "$EXPECTED_CHAIN_HASH"
+```
+
+Export verified newline-delimited JSON with the same rollback expectations:
+
+```console
+stewardctl evidence export -in evidence.bin \
+  -public-key node-receipts.public -node-id node-a -epoch 1 \
+  -expected-sequence "$EXPECTED_SEQUENCE" \
+  -expected-chain-hash "$EXPECTED_CHAIN_HASH" > receipts.ndjson
+```
+
+Each record line has `"kind":"receipt"`; the final line has `"kind":"head"`.
+The export is independently verifiable with the trusted node public key, node ID,
+and key epoch. Each receipt contains its original signed frame, which is the source
+of truth. The readable fields are a human-readable copy that verification checks
+against the signed frame. Export emits output only after verifying that the
+evidence file remained unchanged during the operation. Expected values assert the
+exact head, not a minimum; after legitimate records are appended, retain and use
+the new head. Receipts prove Steward's recorded enforcement, not prompt contents,
+model behavior, or resistance to host-root compromise.

@@ -30,7 +30,6 @@
         "codeRepository": "https://github.com/hardrails/steward",
         "programmingLanguage": "Go",
         "runtimePlatform": "Linux",
-        "softwareVersion": "{{ site.version }}",
         "license": "https://www.apache.org/licenses/LICENSE-2.0"
       }
     }
@@ -42,7 +41,7 @@
       <div class="header-inner">
         <a class="brand" href="{{ '/' | relative_url }}" aria-label="Steward documentation home">
           <span class="brand-mark" aria-hidden="true">S</span>
-          <span><strong>Steward</strong><small>node field manual</small></span>
+          <span><strong>Steward</strong><small>agent node documentation</small></span>
         </a>
         <nav class="top-nav" aria-label="Primary navigation">
           <a href="{{ '/getting-started/' | relative_url }}">Start</a>
@@ -60,7 +59,7 @@
         <a href="{{ '/getting-started/' | relative_url }}">Install Steward</a>
         <a href="{{ '/getting-started/enroll/' | relative_url }}">Enroll a node</a>
         <a href="{{ '/product/positioning/' | relative_url }}">Why Steward exists</a>
-        <a href="{{ '/limitations/' | relative_url }}">v1.3 boundaries</a>
+        <a href="{{ '/limitations/' | relative_url }}">Capability boundaries</a>
 
         <p class="nav-label">How-to guides</p>
         <a href="{{ '/guides/workload-lifecycle/' | relative_url }}">Workload lifecycle</a>
@@ -84,13 +83,14 @@
         <a href="{{ '/reference/platform-support/' | relative_url }}">Platform support</a>
         <a href="{{ '/reference/configuration/' | relative_url }}">Configuration</a>
         <a href="{{ '/reference/api/' | relative_url }}">APIs and schemas</a>
+        <a href="{{ '/reference/offline-tools/' | relative_url }}">Image and evidence tools</a>
         <a href="{{ '/reference/release-artifacts/' | relative_url }}">Release artifacts</a>
         <a href="{{ '/faq/' | relative_url }}">FAQ</a>
       </aside>
 
       <main id="main-content" class="content" tabindex="-1">
         {% unless page.home %}
-          <div class="page-kicker">Steward {{ site.version }} · {{ page.section | default: "Documentation" }}</div>
+          <div class="page-kicker">Steward · {{ page.section | default: "Documentation" }}</div>
         {% endunless %}
         {{ content }}
         {% unless page.home %}

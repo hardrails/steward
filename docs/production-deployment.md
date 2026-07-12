@@ -6,35 +6,44 @@ section: Operator guide
 
 # Production deployment
 
-This is the operator-facing companion to the [configuration reference]({{ '/reference/configuration/' | relative_url }})
-and [ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md). It ties together
-the operational surface a production rollout actually touches — config, pre-flight
-validation, credential rotation, rate limiting, networking, and shutdown — into one
-walkthrough. It assumes you have already built Steward (see the repository
-[build instructions](https://github.com/hardrails/steward#build-and-contribute)) and does not repeat the full flag
-table or API reference; it links to them where relevant.
+This guide covers the production settings and procedures for the generic `steward`
+supervisor: configuration validation, networking, credentials, rate limits,
+observability, live capacity changes, shutdown, and health checks. See the
+[configuration reference]({{ '/reference/configuration/' | relative_url }}) for
+every setting and [ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md)
+for design constraints. Install a pinned package by following the
+[installation guide]({{ '/getting-started/' | relative_url }}).
 
-Two deployment topologies are coherent, and this document covers both, weighted
-toward the second:
+<div class="callout warning">
+  <strong>Supervisor uplink scope</strong>
+  This page documents the generic <code>steward</code> supervisor and its
+  tenant-scoped credential. Do not reuse its unsigned command contract for a
+  multi-tenant Executor. Executor requires a node-scoped transport credential,
+  verified HTTPS, complete signed admission, tenant-signed normal commands, and a
+  site-owned cleanup key restricted to stop/destroy/purge. See the <a href="{{ '/executor/' | relative_url }}#outbound-executor-uplink">Executor uplink contract</a>.
+</div>
 
-- **Directly reachable.** A control plane dials the node's inbound REST API. `-addr` must
-  be bound to a network-reachable address.
-- **NAT'd / firewalled (the uplink pattern).** The node sits behind NAT or a
-  firewall that blocks inbound connections. Steward instead polls the control plane
-  outbound. This is the deployment the uplink client, rate limiting, and
-  credential hot-reload were built for, so it gets the most detail below.
+Steward supports two network topologies:
 
-## Configuring a production node
+- **Direct REST:** a control plane connects to the inbound API. The API has no
+  built-in authentication or TLS. Keep it on loopback or place it behind a
+  mutually authenticated TLS proxy and restrictive firewall; never expose it
+  directly to an untrusted network.
+- **Outbound uplink:** a node behind network address translation (NAT) or a
+  firewall polls the control plane. The node needs no inbound port. This guide
+  gives this topology more detail because it uses credential reload and uplink
+  backpressure controls.
 
-Any setting can go in a JSON file pointed at by `-config` (or `STEWARD_CONFIG`);
-see the [configuration reference]({{ '/reference/configuration/' | relative_url }}) for the full key list and the
-precedence rule (flag > env var > config file > built-in default). In production,
-prefer a config file over a long flag list — it is what your fleet-management
-tooling checks in and validates (see [Pre-flight validation](#pre-flight-validation-with--check-config)
-below), one file per node or per node class, with the per-node credential kept in
-its own file rather than inlined.
+## Configure a production node
 
-A production config for a NAT'd, uplink-only node looks like:
+Put supported file-backed settings in JSON and pass the file with `-config` or
+`STEWARD_CONFIG`. Rate limiting, metrics, and the audit-log path remain
+flag/environment-only settings. The [configuration reference]({{ '/reference/configuration/' | relative_url }})
+defines exact sources and precedence.
+
+Prefer a checked-in, validated config file per node or node class. Keep each
+node's credential in a separate file rather than embedding it in configuration.
+For an uplink-only node:
 
 ```json
 {
@@ -47,131 +56,98 @@ A production config for a NAT'd, uplink-only node looks like:
 }
 ```
 
-Nothing is unconditionally required — every flag has a default — but two settings
-become required together, and are validated as such at startup:
+Every flag has a default, but these combinations are validated at startup:
 
-- `-uplink-url` and `-uplink-credential-file` are a pair: setting one without the
-  other is a fail-closed startup error.
-- `-disable-inbound-listener` requires `-uplink-url` already be set: a node with
-  neither door open is unreachable and refuses to start (see
-  [Networking](#networking-does-steward-need-an-open-inbound-port) below).
+- Setting `-uplink-url` also requires `-uplink-credential-file`. A credential path
+  without a URL is accepted but unused because the uplink remains disabled.
+- `-disable-inbound-listener` requires `-uplink-url`; otherwise the node would
+  have no management path.
 
-Everything else — `-max-instances`, `-max-requests-per-second`, `-log-level`,
-`-uplink-poll-interval`, `-uplink-command-queue-depth` — has a default sane enough
-to run unmodified; tune them per the guidance in the sections below as your fleet's
-actual traffic tells you to, not preemptively.
+Defaults for `-max-instances`, `-max-requests-per-second`, `-log-level`,
+`-uplink-poll-interval`, and `-uplink-command-queue-depth` are usable without
+tuning. Change them from observed workload data, not expected traffic alone.
 
-## Pre-flight validation with `-check-config`
+## Validate configuration with `-check-config`
 
-`-check-config` runs the exact same fail-closed validation sequence a real startup
-runs — including a `-config` file, if one is given — then exits `0` (valid) or
-non-zero, without binding a port, loading state for real use, or starting the
-uplink loop:
+`-check-config` runs the same fail-closed validation used at startup, including a
+`-config` file, then exits without binding a port, loading state for service, or
+starting the uplink:
 
 ```console
 $ steward -check-config -config /etc/steward/config.json
 configuration valid
 ```
 
-Run it as the last step of your config-rendering pipeline, before a candidate
-config file is distributed to a node or a fleet: it catches a typo'd JSON key (an
-unknown key is rejected, not silently dropped), a malformed
-`uplink_poll_interval` duration, a non-positive `max_instances` or
-`uplink_command_queue_depth`, or a `disable_inbound_listener: true` with no
-`uplink_url` — the same problems a real boot would refuse, surfaced before a
-rollout instead of after one.
+Run it before distributing configuration. It rejects unknown JSON keys, malformed
+durations, non-positive `max_instances` or `uplink_command_queue_depth`, and
+`disable_inbound_listener: true` without `uplink_url`.
 
-One operational detail: Steward logs everything, including this error, as JSON to
-**stdout** (there is no separate stderr stream for failures). Automation wrapping
-`-check-config` should check the **exit code**, not which stream a message landed
-on.
+Steward writes all structured logs to **stdout**, including validation errors.
+Automation must use the exit code, not the output stream, to determine success.
 
-## Schema-validating a candidate config with `-schema`
+## Validate configuration structure with `-schema`
 
-`-check-config` validates the config *this binary* would boot with, on the node,
-at rollout time. Earlier in the pipeline — when your fleet-management tooling
-renders or edits a candidate config file, before it is ever shipped to a node —
-`-schema` gives that tooling a real JSON Schema (draft 2020-12) to validate the
-file against:
+Use `-schema` earlier in the delivery pipeline to emit JSON Schema draft 2020-12:
 
 ```console
 $ steward -schema > steward.config.schema.json
 ```
 
-The emitted schema describes the config file's shape and the same constraints a
-real boot enforces: `additionalProperties: false` (an unknown key is rejected, the
-schema mirror of the loader's fail-closed unknown-key check), a positive
-`max_instances` and a positive `uplink_command_queue_depth`, the one-directional
-`uplink_url` ⇒ `uplink_credential_file` pairing, and
-`disable_inbound_listener: true` ⇒ `uplink_url`. It is generated by
-reflecting over Steward's own config struct, so a new setting appears in the schema
-automatically and the schema cannot silently drift from what a boot accepts. Check
-a rendered config against it with any standard JSON-Schema validator in your
-CI/CD, then run `-check-config` on the node as the final on-box gate — the two are
-complementary: the schema catches a malformed candidate early and offline,
-`-check-config` catches everything the schema deliberately does not (a credential
-file that is missing on *this* node, a `-state-file` path or permissions that are
-unsafe here, an `-addr` that will not bind, root process execution, or a resolved
-non-loopback process-execution listener).
+The schema sets `additionalProperties: false`, requires positive
+`max_instances` and `uplink_command_queue_depth`, and expresses
+`uplink_url` => `uplink_credential_file` and
+`disable_inbound_listener: true` => `uplink_url`. Steward derives it from its
+config struct, so new file-backed settings appear automatically.
 
-Two disclosed simplifications in the schema, both erring toward the documented
-canonical form rather than a stricter rule than the validator enforces:
+Validate rendered files against this schema in CI/CD, then run `-check-config`
+on the node. The schema catches structure errors offline. `-check-config` also
+checks node-specific conditions such as credential-file presence; whether an
+existing state file is owner-only and has no extended access-control list (ACL);
+`-addr`; root process execution; and a resolved non-loopback process-execution
+listener. It validates address syntax and policy but does not bind a socket, so it
+cannot prove that an address is available.
 
-- `log_level` is an `enum` of the lowercase `debug`/`info`/`warn`/`error`. The real
-  parser additionally accepts other letter casing and surrounding whitespace (e.g.
-  `"INFO"`); JSON Schema has no portable case-insensitive-enum construct, so the
-  schema documents the canonical lowercase form and says so in that field's
-  `description`. A config using non-lowercase casing that `-check-config` accepts
-  could be flagged by a strict schema validator — render your configs in lowercase
-  and this never bites.
-- `uplink_poll_interval` is typed `string` (it is a Go duration string such as
-  `"30s"`, not a JSON-native type); the schema does not encode a duration-syntax
-  regex — `-check-config` remains the authority on whether the value parses.
+The schema has two documented simplifications:
 
-## Networking: does Steward need an open inbound port?
+- `log_level` lists lowercase `debug`, `info`, `warn`, and `error`. The parser
+  also accepts other casing and surrounding whitespace, such as `"INFO"`.
+  JSON Schema has no portable case-insensitive enum, so render lowercase values
+  to avoid a schema-only rejection.
+- `uplink_poll_interval` is a string because Go durations such as `"30s"` have
+  no native JSON type. The schema does not encode duration syntax;
+  `-check-config` remains authoritative.
 
-**No — not for the uplink pattern.** This is worth stating plainly because it is
-the entire point of a NAT'd/firewalled deployment: `internal/uplink.Poller` is
-handed the tracker directly and dials **out** to `-uplink-url` on its own
-`http.Client` (`p.pollURL` / `p.reportURL`, both derived from that flag). Nothing
-in `internal/uplink` opens a listener or accepts a connection. The inbound HTTP
-listener (`-addr`) and the outbound uplink are two independent front doors onto
-one tracker — see
-[ARCHITECTURE.md's "second caller, not a second lifecycle engine"](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md#outbound-uplink-is-opt-in) —
-and removing one does not touch the other.
+## Network exposure
 
-What the inbound listener is *for*, then, on a NAT'd node:
+An outbound-uplink node needs no inbound port. The supervisor polls
+`-uplink-url`. Enabling the uplink does not open an additional listener, but the
+default loopback listener remains active until `-disable-inbound-listener` is set.
+The inbound API and outbound uplink are independent callers of the same lifecycle
+tracker; see
+[outbound uplink design](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md#outbound-uplink).
 
-- The **direct-REST topology**, where the control plane dials in.
-- **Local health/admin** on the uplink topology: `GET /v1/healthz`,
-  `GET /v1/capabilities`, and — if `-enable-metrics` is also set —
-  `GET /metrics`, all reachable only on-box since the default `-addr` is
-  `127.0.0.1:8080` (loopback, not exposed to the network unless explicitly
-  rebound). See [Metrics and the command audit log](#metrics-and-the-command-audit-log)
-  below.
+Keep the inbound listener for either of these uses:
 
-If your process supervisor watches the process and its stdout logs directly
-(systemd, a container runtime, a Kubernetes exec probe) rather than polling an
-HTTP endpoint, you have no use for even the loopback listener. Set
-`-disable-inbound-listener` (env `STEWARD_DISABLE_INBOUND_LISTENER`) and the node
-binds **nothing** inbound — no `http.Server` is built at all — while every fleet
-operation still flows through the uplink poll loop. A node with the flag set and
-no `-uplink-url` is refused at startup (a dark, unreachable process is a
-configuration error, not a valid deployment); see
-[ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md#the-inbound-listener-is-opt-out-uplink-only-nodes-bind-nothing-inbound)
-and the full design in [`disable-inbound-listener.md`]({{ '/disable-inbound-listener/' | relative_url }}).
+- direct REST management; or
+- local health and administration on an uplink node: `GET /v1/healthz`,
+  `GET /v1/readiness`, `GET /v1/capabilities`, and, with `-enable-metrics`,
+  `GET /metrics`.
 
-Practical read: for a NAT'd node, the only network egress you need to open at the
-firewall is ordinary outbound HTTPS to `-uplink-url` — the same egress a browser
-on that box would already need. There is nothing to open for inbound.
+The default `-addr` is loopback-only at `127.0.0.1:8080`. If systemd, a container
+runtime, or another supervisor can monitor the process and stdout directly, set
+`-disable-inbound-listener` or `STEWARD_DISABLE_INBOUND_LISTENER`. Steward then
+constructs no `http.Server` and binds nothing. It rejects this setting without
+an uplink. See [Disable the inbound listener]({{ '/disable-inbound-listener/' | relative_url }}).
 
-## Credential provisioning and rotation
+For an uplink-only node, allow outbound HTTPS to `-uplink-url`; do not open an
+inbound firewall port for Steward.
+
+## Provision and rotate the supervisor credential
 
 ### Initial provisioning
 
-The uplink authenticates the node *to* the control plane, outbound only — it adds
-no inbound authentication. The credential is minted by the control-plane operator
-at enrollment and delivered to the node as a small versioned JSON file:
+The uplink credential authenticates the node to the control plane. It does not add
+authentication to the inbound API. Enrollment provides a versioned JSON file:
 
 ```json
 {
@@ -182,131 +158,82 @@ at enrollment and delivered to the node as a small versioned JSON file:
 }
 ```
 
-Write it to the path named by `-uplink-credential-file`. Steward treats the
-`credential` field as an opaque string sent verbatim in the `Authorization`
-header — it never parses it — so provisioning is just: get the file from
-enrollment onto the node, at that path. `internal/uplink.LoadCredential` reads it
-fail-closed at startup: a missing file (when the uplink is enabled), invalid JSON,
-wrong `version`, or an empty `tenant_id`/`node_id`/`credential` is a startup error
-naming the path and the fix — re-enroll the node and rewrite the file — never a
-silently-disabled uplink. As general secret-handling practice, write it with
-restrictive permissions (`0600`, owned by the service user) — Steward does not
-set the file's mode for you.
+Write it to the path named by `-uplink-credential-file`. Steward sends
+`credential` unchanged in the `Authorization` header. At startup,
+Steward requires an owner-only regular credential file of at most
+64 KiB. It rejects a missing file, symlink, group/other permissions, a file that
+changes while being opened, invalid JSON, the wrong `version`, or empty
+`tenant_id`, `node_id`, or `credential`. It does not silently disable the uplink.
+Store the file as `0600`, owned by the service user; Steward does not set its
+permissions.
 
-Apply the same restrictive permissions to the `-state-file` when durable state is
-enabled: once process execution is used (`-enable-process-exec`), an instance's
-`spec` — including any `spec.env` values a caller passes to the child process, which
-may be secrets — is persisted verbatim, in cleartext, in that file. Steward creates
-new state snapshots as owner-only files and, with process execution enabled, fails
-startup if an existing file is accessible by group or other users or carries an
-extended access ACL. Keep it `0600`, ACL-free, and owned by the dedicated Steward
-service account.
+Protect `-state-file` the same way when durable state is enabled. Steward creates
+new snapshots as owner-only files and rejects any existing state file that is
+accessible by group or other users or has an extended access-control list (ACL).
+Keep it `0600`, ACL-free, and owned by the dedicated Steward account. With
+`-enable-process-exec`, the file also contains each instance `spec`, including
+`spec.env`, in cleartext.
 
-Process execution also fails closed when Steward is root or its inbound listener
-is reachable beyond loopback. Run Steward as an unprivileged service account and,
-for remotely managed nodes, prefer `-disable-inbound-listener` with the authenticated
-outbound uplink. `-allow-root-process-exec` and
+Process execution also rejects root and a listener reachable beyond loopback.
+Run as an unprivileged account and prefer an authenticated outbound uplink with
+`-disable-inbound-listener`. `-allow-root-process-exec` and
 `-allow-nonloopback-process-exec` are dangerous acknowledgements for exceptional
-deployments, not normal production settings; enabling either posture emits a loud
-warning.
+deployments; each produces a warning.
 
-### Rotating a credential without downtime
+### Rotation without downtime
 
-A fatal `401`/`403` used to stop the poll loop outright, requiring a full process
-restart to pick up a corrected credential. That's closed: `Poller.Run` now pauses
-on a fatal rejection and watches `-uplink-credential-file` — the same path the
-credential was loaded from — until it changes to a new, valid credential for this
-node, then resumes with no restart. The full design is in
-[`uplink-client.md`'s node-side credential hot-reload section]({{ '/uplink-client/' | relative_url }}#node-side-credential-hot-reload);
-the operational shape that matters for a rollout:
+After the control plane returns `401` or `403`, `Poller.Run` pauses and rereads
+`-uplink-credential-file` until it finds a valid replacement for the same node.
+It then resumes without a restart. The watch is reactive: changing the file alone
+does not replace the in-memory credential before a rejection.
 
-- **It is reactive, not a live file-watcher.** The watch loop only starts once a
-  poll is actually rejected with `401`/`403`. Pre-staging a new credential file
-  *before* the control plane revokes the old one does nothing by itself — Steward
-  keeps polling with its in-memory credential until a poll fails. The safe
-  sequence for a planned rotation is: **(1)** mint the new credential and write it
-  to the node's credential-file path first, so it's ready, **(2)** revoke the old
-  credential on the control-plane side. The next poll attempt then gets rejected,
-  Steward pauses and starts watching, and — because the new file is already
-  staged — picks it up on its very next check.
-- **The watch interval is fixed at 5 seconds** (`uplink.DefaultCredentialWatchInterval`)
-  for the real binary; `cmd/steward` does not expose it as a flag. So the total
-  exposure window for a planned rotation is roughly one poll attempt (governed by
-  `-uplink-poll-interval`) plus at most 5 seconds — no restart, no re-enrollment,
-  no operator action beyond writing the file and revoking the old secret.
-- **Write the new file atomically** (temp file + rename in the same directory),
-  the same discipline Steward's own state and credential files use internally.
-  The watch loop tolerates a torn read from a non-atomic rotation tool (a
-  transiently absent, truncated, or invalid-JSON file is logged at `DEBUG` and
-  retried on the next tick, not treated as fatal) — but atomic replacement avoids
-  relying on that tolerance at all.
-- **`node_id` must not change across a rotation.** A reloaded file naming a
-  different `node_id` than the process was started with is refused (logged at
-  `ERROR`, watch continues) — rotating a node's own secret and re-enrolling it as
-  a different node identity are different operations, and only the former
-  hot-reloads. Re-enrolling as a new identity still requires a restart with the
-  new credential file in place.
-- **A bad replacement just keeps waiting.** If the newly-dropped credential is
-  *also* rejected, `Run` pauses and watches again — the same cycle, indefinitely.
-  There is no crash and no restart needed; fix the file and it resumes on the next
-  tick.
+For planned rotation:
 
-For a **compromised** credential, the actual security control is the revocation on
-the control-plane side — that's what turns the next poll into the `401`/`403`
-that pauses the loop. Delivering the replacement file is the recovery step, and
-because it's hot-reloaded, no process restart is needed for either half.
+1. Mint the replacement and atomically write it to the credential path using a
+   temporary file and rename in the same directory.
+2. Revoke the old credential at the control plane.
+
+The next poll is rejected, then the watcher reads the staged file. Steward checks
+every five seconds; no flag changes this interval. The rotation window is therefore
+about one poll attempt plus at most five seconds.
+
+A transiently absent, truncated, or invalid replacement is logged at `DEBUG` and
+retried. A different `node_id` is rejected and logged at `ERROR`; changing node
+identity is re-enrollment and requires a restart. If the replacement is also
+rejected, Steward returns to the same wait cycle indefinitely. For a compromised
+credential, control-plane revocation is the security action; installing the new
+file is recovery. See [Node credential]({{ '/uplink-client/' | relative_url }}#node-credential).
 
 ## Inbound rate limiting
 
-The inbound HTTP listener is unauthenticated by design, so it defends itself from
-a request flood the same structural way it bounds request bodies and instance
-count: a per-source (client IP) token-bucket limiter. The default —
-`20` requests/second per source with a burst of `40` — sheds excess requests with
-`429 Too Many Requests` and a `Retry-After` header before any handler work runs, so
-a 429 is always safe to retry. See the
-[Configuration reference]({{ '/reference/configuration/' | relative_url }}) for the full budget
-rationale.
+The unauthenticated inbound listener uses a token bucket per client IP. The
+default allows `20` requests per second per source with a burst of `40`. Excess
+requests receive `429 Too Many Requests` and `Retry-After` before handler work,
+so retrying them is safe.
 
-**This only matters when the inbound listener is bound.** On a
-`-disable-inbound-listener` node there is no listener to protect, and this whole
-section is moot. Even with the listener on, the default `-addr` is loopback-only,
-so the limiter is defense-in-depth there rather than load-bearing against
-off-box traffic — it becomes operationally significant on the direct-REST
-topology, or any deployment that rebinds `-addr` to a network-reachable address.
+This control applies only when the listener exists. It is an additional safeguard,
+not the primary protection, on the default loopback address and becomes important
+when `-addr` is network-reachable.
 
-Tuning for fleet scale:
+- Bulk provisioning from one control-plane replica can exceed the burst. Raise
+  `-max-requests-per-second` or `STEWARD_MAX_REQUESTS_PER_SECOND` from measured
+  demand. Setting it to `0` disables the limiter and is appropriate only when a
+  trusted fronting gateway already enforces a limit.
+- The key is the real TCP peer, never `X-Forwarded-For`. A client could forge that
+  header on an unauthenticated listener. Replicas or proxies sharing one egress IP
+  therefore share a bucket; raise the node limit or rate-limit at the proxy.
+- The source map is capacity-bounded and idle entries are swept, preventing
+  unbounded memory growth during a many-IP flood. Exact internal bounds are in
+  `internal/server/ratelimit.go`; operators do not tune them.
 
-- The default is sized for a control plane driving lifecycle operations at
-  reconciler-and-human pace. A **bulk operation** — cold-provisioning hundreds of
-  instances back to back from one control-plane replica — can exceed the 40-token
-  burst and see some requests shed with 429. Raise `-max-requests-per-second` (or
-  `STEWARD_MAX_REQUESTS_PER_SECOND`) for that traffic class, or set it to `0` to
-  disable the limiter outright — appropriate only when Steward already sits
-  behind a gateway that rate-limits for it, since the listener is still otherwise
-  unauthenticated.
-- The limiter keys on the **real TCP peer**, never a client-supplied header like
-  `X-Forwarded-For` (a forgeable value on an unauthenticated listener would let an
-  attacker dodge the limit by rotating it). One consequence: if multiple control-plane
-  replicas — or any fronting proxy — reach a node through one shared egress
-  address, they all share a single bucket. That's a signal to raise the limit for
-  that node, or move rate limiting to the fronting layer instead of tightening
-  Steward's per-source key.
-- The per-source bucket map is capped (bounded memory against a distributed
-  many-IP flood) and idle buckets are swept periodically; this is not a tuning
-  knob an operator sets, just a reassurance that raising the rate limit for
-  legitimate traffic doesn't also open an unbounded-memory path. See
-  `internal/server/ratelimit.go` if you need the exact numbers.
+## Metrics and command audit log
 
-## Metrics and the command audit log
+Both features are opt-in. The
+[configuration reference]({{ '/reference/configuration/' | relative_url }}) lists
+their flags. This section defines the metric names and JSON Lines record shape.
 
-Both are opt-in and off by default; see the
-[Configuration reference]({{ '/reference/configuration/' | relative_url }}) for the metrics and command-audit flags and
-the exact metric names / JSON-line shape.
-
-**Wiring `-enable-metrics` into a Prometheus scrape config.** `GET /metrics`
-lives on the same listener and `-addr` as everything else — there is no
-separate metrics port to open at the firewall or expose in a Service/Ingress
-beyond what you already do for the inbound API. A minimal scrape job:
+With `-enable-metrics`, `GET /metrics` uses the same listener and `-addr` as the
+API. There is no separate metrics port:
 
 ```yaml
 scrape_configs:
@@ -316,59 +243,39 @@ scrape_configs:
     metrics_path: /metrics
 ```
 
-Two consequences follow directly from "same listener, no second door":
+An uplink-only node with `-disable-inbound-listener` has no scrape endpoint, and
+`-enable-metrics` has no effect. Monitor it from the control-plane side or through
+an external host monitor. The endpoint also shares the per-source rate limiter.
+A 15–60 second scrape interval fits comfortably within the default budget, but a
+scraper and lifecycle traffic from the same IP share one bucket.
 
-- **`-disable-inbound-listener` nodes have nothing to scrape.** If your fleet
-  runs the NAT'd/uplink-only topology (the default recommendation above), there
-  is no local listener at all, so `-enable-metrics` has no effect and no target
-  to add to Prometheus. Pull operational state for that topology from the
-  control-plane side instead, or run a **separate** direct-REST node
-  in your fleet dashboard's monitoring path if you need node-local scraping —
-  do not reach for a second listener inside Steward itself; that is exactly the
-  shape ARCHITECTURE.md's zero-dependency, single-listener posture rules out.
-- **It inherits the per-source rate limiter.** A scraper hitting `/metrics`
-  counts against the same token bucket as every other inbound request from that
-  source. The default budget (20 req/s, burst 40) comfortably covers any
-  reasonable scrape interval (15s–60s is typical); only tighten
-  `-max-requests-per-second` awareness if you also run a very aggressive scrape
-  interval from the same source as heavy lifecycle traffic.
+Uplink metrics expose queue pressure:
 
-**Watching uplink command backpressure.** When the uplink is enabled, `/metrics`
-also exposes the command queue's health:
-`steward_uplink_command_queue_depth` (current queued-plus-in-flight commands)
-against `steward_uplink_command_queue_max_depth` (the `-uplink-command-queue-depth`
-cap), plus `steward_uplink_commands_rejected_total` — a counter that only grows
-when a poll cycle's commands exceeded the cap and were rejected for redelivery. A
-depth that rides at the cap, or a rejected-total that climbs steadily, means the
-control plane is queuing lifecycle work faster than this node executes it (with
-`-state-file` set, per-command disk writes are the usual bottleneck); the node also
-drops out of `GET /v1/readiness` while a backlog persists, so a load balancer stops
-routing it new work until it drains. Raise `-uplink-command-queue-depth` only if the
-backlog is a legitimate burst the node can absorb — the default `256` is a hard
-ceiling on in-flight work, not a throughput target, and a rejected command is never
-lost (the control plane redelivers it), so a small rejected-total under a spike is
-healthy backpressure, not an error.
+- `steward_uplink_command_queue_depth` measures queued plus in-flight commands.
+- `steward_uplink_command_queue_max_depth` reports the
+  `-uplink-command-queue-depth` cap.
+- `steward_uplink_commands_rejected_total` grows when a poll exceeds that cap.
 
-**Wiring `-audit-log-file` for log shipping.** The file is plain JSON-lines
-(one record per line, no wrapping array), so it drops directly into a
-`filelog`/`journald`/Fluent Bit-style tail-and-ship pipeline without a custom
-parser — treat it the same way you would any other application JSON-lines log,
-rotated by your log-shipping agent (Steward itself does not rotate or truncate
-it; it only ever appends). It records **uplink-dispatched** commands only (see
-README for why the direct REST path has no `command_id` to attach a record to)
-— on a direct-REST-only node (no `-uplink-url`), setting this flag creates the
-file but nothing is ever written to it, and startup logs a `WARN` saying so;
-that combination is a config smell worth cleaning up, not a startup failure.
+A depth held at the cap or a steadily growing rejection counter means work is
+arriving faster than the node executes it. Durable per-command state writes are a
+common bottleneck when `-state-file` is set. Sustained backlog makes
+`GET /v1/readiness` fail until the queue drains. Raise the default cap of `256`
+only for a legitimate burst the node can absorb. A rejected command is not
+reported. Its control-plane claim lease must expire before the control plane can
+redeliver it, so a small count during a spike is healthy backpressure, not data
+loss.
 
-## Hot-reloading `max_instances` with `SIGHUP`
+`-audit-log-file` appends one JSON object per line. Steward does not rotate or
+truncate the file; configure journald, Fluent Bit, OpenTelemetry `filelog`, or
+another shipping agent to do so. It records only uplink-dispatched commands,
+because direct REST requests have no `command_id`. On a direct-REST-only node,
+the flag creates the file but writes no records and logs a `WARN`.
 
-Steward treats its signals as two distinct verbs: `SIGHUP` **reloads**, while
-`SIGINT`/`SIGTERM` **shut down** (next section). They never overlap — a `SIGHUP`
-never terminates the process, and a shutdown signal never reloads — so an operator
-can retune capacity on a live node with no risk of accidentally stopping it.
+## Reload `max_instances` with `SIGHUP`
 
-`SIGHUP` re-reads the `-config` file and hot-reloads **`max_instances` only**, in
-place, with no restart. The operator loop is:
+`SIGHUP` reloads configuration; `SIGINT` and `SIGTERM` shut down. A reload never
+terminates the process. Only `max_instances` reloads, and only from the startup
+`-config` file.
 
 ```console
 # 1. Edit the node's config file, changing only max_instances.
@@ -380,70 +287,44 @@ journalctl -u steward | grep 'sighup reload'
 # -> sighup reload: max_instances updated old_max_instances=512 new_max_instances=1024
 ```
 
-Under **systemd**, wire it to `systemctl reload steward` by adding an
-`ExecReload` directive to the unit in [Graceful shutdown](#graceful-shutdown)
-below:
+Add this systemd directive to support `systemctl reload steward`:
 
 ```ini
 ExecReload=/bin/kill -HUP $MAINPID
 ```
 
-Then `systemctl reload steward` (after editing the config file) performs the
-`SIGHUP` for you.
+Reload behavior is explicit and non-destructive:
 
-What the reload guarantees, all logged and never silent:
+- Listen address, uplink settings, credentials, and state-file path require a
+  restart.
+- Lowering the cap below the current instance count evicts nothing. New
+  provisions return `503 capacity_exceeded` until normal `Destroy` operations
+  lower the count.
+- Startup precedence remains `flag > env > file`. If a flag or
+  `STEWARD_MAX_INSTANCES` set the value at startup, a file reload cannot replace
+  it and Steward logs the rejection.
+- Without a startup `-config`, `SIGHUP` is a logged no-op. An unreadable or
+  invalid file leaves the current cap unchanged and logs the reason; reload never
+  applies a partial change or crashes the process.
 
-- **Only `max_instances` reloads.** The listen address, uplink URL and credential,
-  and state file are a much larger live-reconfiguration surface and are out of
-  scope — change them with a restart. `max_instances` is a single in-memory integer
-  (not even part of the persisted state snapshot), so reloading it touches no
-  listener, socket, or file.
-- **Lowering the cap below the live instance count evicts nothing.** No tracked
-  instance is stopped or destroyed; the lower cap only blocks *new* provisions
-  (`503 capacity_exceeded`) until ordinary `Destroy` attrition drains the count back
-  under the ceiling. This is the same "circuit breaker on growth, not on reload"
-  posture Steward applies when it loads a state file holding more instances than its
-  cap — a capacity re-tune must never become an outage. See
-  [ARCHITECTURE.md](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md#max_instances-hot-reloads-on-sighup-and-lowering-it-never-evicts)
-  for the design provenance.
-- **The startup precedence model still holds.** If `max_instances` was pinned by
-  the `-max-instances` flag or `STEWARD_MAX_INSTANCES` env var at startup, the file
-  does not override it on the live path either (flag > env > file) — the reload logs
-  the rejection rather than silently applying or ignoring the file's value.
-- **It fails closed.** No `-config` file at startup makes `SIGHUP` a documented
-  no-op (it logs one). An unreadable or invalid file (malformed JSON, an unknown
-  key, a non-positive `max_instances`) leaves the live cap exactly as it was and
-  logs the reason — a bad file can never crash the process or apply a partial
-  change.
-
-`GET /v1/capabilities` reads `max_instances` live, so after a reload it reports the
-new value — a convenient way to confirm the change took beyond grepping the logs.
+`GET /v1/capabilities` reports the live value after a successful reload. See the
+[capacity reload design](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md#capacity-reload).
 
 ## Graceful shutdown
 
-`cmd/steward/main.go` registers a `SIGINT`/`SIGTERM` handler
-(`signal.NotifyContext`) immediately after startup validation succeeds. On
-receipt of either signal:
+After startup validation, Steward handles `SIGINT` and `SIGTERM`. On either signal:
 
-1. It logs `"shutting down"` and opens a **10-second** shutdown deadline
-   (`shutdownCtx`).
-2. If the inbound listener is bound, `srv.Shutdown(shutdownCtx)` stops accepting
-   new connections and drains in-flight ones. A failure here is the one case that
-   exits non-zero.
-3. It waits for the uplink poll loop to finish — its context is already
-   cancelled, so `Run` returns promptly — bounded by the *same* 10-second
-   deadline. A poll loop that doesn't drain in time logs a `WARN` but does **not**
-   fail the shutdown; the process still exits `0`.
+1. Steward logs `"shutting down"` and opens one 10-second deadline.
+2. If the inbound listener exists, Steward stops accepting requests and drains
+   active connections. A failure here exits non-zero.
+3. The cancelled uplink loop drains under the same deadline. A timeout logs a
+   `WARN`, but shutdown still exits `0`.
 
-The practical rule for a supervisor: **send `SIGTERM`, not `SIGKILL`, and allow at
-least the 10-second internal bound plus margin before force-killing** — a
-supervisor timeout shorter than that will `SIGKILL` mid-drain and defeat the
-graceful path entirely. `scripts/smoke.sh` is the proof this contract holds on the
-real release binary: CI builds it, sends `SIGTERM`, and asserts a clean, panic-free
-exit `0` within a timeout on every push (see
-[How a release build is proven solid](#how-a-release-build-is-proven-solid)).
+Send `SIGTERM`, not `SIGKILL`, and give the process more than ten seconds before
+force-killing it. CI's `scripts/smoke.sh` exercises this path on the compiled
+binary.
 
-**Under systemd**, set an explicit stop timeout above the internal bound:
+A minimal systemd unit is:
 
 ```ini
 [Unit]
@@ -466,43 +347,35 @@ StateDirectory=steward
 WantedBy=multi-user.target
 ```
 
-`TimeoutStopSec=15` leaves margin above Steward's own 10-second bound so systemd
-never `SIGKILL`s before the graceful path finishes on its own.
+`TimeoutStopSec=15` leaves margin above Steward's internal deadline. In a
+container, use an exec-form entrypoint or an init such as `tini` so `SIGTERM`
+reaches Steward. Give `terminationGracePeriodSeconds`, or its equivalent, the
+same margin.
 
-**Under a container runtime**, make sure `SIGTERM` actually reaches the Steward
-process: use the exec form of your entrypoint (or an init such as `tini`) rather
-than a shell wrapper that swallows the signal, and give Kubernetes'
-`terminationGracePeriodSeconds` (or the equivalent in your orchestrator) the same
-margin above 10 seconds that the systemd unit above uses.
+## Health and readiness
 
-## Health and readiness signals
+When the listener exists:
 
-**With the inbound listener bound** (the default, or explicit `disable_inbound_listener: false`):
+- `GET /v1/healthz` returns `200 {"status":"ok"}` as a **liveness** check.
+  It intentionally performs no durable-state I/O. Startup validates the existing
+  state file. Ordinary reversible mutations persist a new complete snapshot before
+  success, but they do not reread the current file first; use separate file-integrity
+  monitoring when out-of-process modification is in scope. A process exit cannot
+  be rolled back and may leave the in-memory status ahead of disk if persistence
+  fails. Use liveness only for restart decisions.
+- `GET /v1/readiness` returns `200 {"status":"ready"}` or
+  `503 {"status":"not_ready","check":"...","detail":"..."}`. It checks
+  tracker initialization, persistent uplink failure or rejection, sustained
+  queue backpressure, and durable-state writability. Use it to remove a node from
+  traffic without restarting it.
+- `GET /v1/capabilities` reports `version`, `instance_count`, `max_instances`,
+  and `durable_state`. It is rollout introspection, not a readiness gate.
 
-- `GET /v1/healthz` → `200 {"status":"ok"}` is a **liveness** probe only. It
-  deliberately does not touch the durable-state file — that would waste I/O on a
-  hot path and risks racing the state file's own atomic-rename writes — because a
-  broken state file already fails closed elsewhere (at startup, or on the write
-  inside the mutation that touches it), never silently behind a healthy probe.
-  Point your orchestrator's liveness/restart probe here.
-- `GET /v1/readiness` → `200 {"status":"ready"}` when the instance should receive
-  traffic, or `503 {"status":"not_ready","check":"...","detail":"..."}` naming the
-  first failing gate when it should be drained. It is the **readiness** probe for
-  rolling deployments: it passes only when the tracker is initialized, the uplink
-  (if enabled) has polled successfully at least once or is not persistently
-  failing, and durable state (if enabled) is writable. Point your load balancer /
-  orchestrator readiness probe here so a not-yet-warm or degraded instance is kept
-  out of rotation — and set the readiness `503` to remove the instance from the
-  pool without restarting it (that is what liveness is for).
-- `GET /v1/capabilities` reports `version`, `instance_count`, `max_instances`, and
-  a `durable_state` boolean. It's useful for confirming a rollout landed the
-  binary and config you expect, but it's introspection, not a readiness gate — use
-  `/v1/readiness` for that.
-
-**With the inbound listener disabled** (`disable_inbound_listener: true`), neither
-endpoint exists locally — there is no listener to serve them. Liveness for a
-uplink-only node is **process-alive plus advancing structured JSON logs on
-stdout**. Representative lines to key alerting on:
+With `disable_inbound_listener: true`, these endpoints do not exist. The service
+manager can observe process liveness. Logs expose startup, failure, credential
+recovery, and command events, but a quiet successful poll is not logged on every
+cycle. The control plane must provide the positive signal that polls continue.
+Alert on lines such as:
 
 ```json
 {"level":"INFO","msg":"uplink enabled","url":"https://control-plane.example","node_id":"node-7","tenant_id":"acme","poll_interval":"30s"}
@@ -511,73 +384,50 @@ stdout**. Representative lines to key alerting on:
 {"level":"INFO","msg":"uplink credential file changed; resuming the poll loop","node_id":"node-7"}
 ```
 
-A fatal credential rejection **pauses** the loop rather than exiting the process
-(see [Rotating a credential](#rotating-a-credential-without-downtime) above), so
-"process still running" stays a valid liveness signal even through a rejected
-credential — the `ERROR` log line, not process exit, is what should page someone.
-The one condition that *does* trigger a shutdown on a listener-disabled node
-without an operator signal is the poll loop returning unexpectedly with no
-shutdown already in progress (a defensive fallback for a misconfigured library
-caller, not reachable through `cmd/steward`'s own flags today): it logs an
-`ERROR` and triggers the same graceful shutdown a real `SIGTERM` would, ending in
-process exit. If that ever fires, `Restart=on-failure` (or your orchestrator's
-equivalent) is the correct response.
+A rejected credential pauses the loop but leaves the process alive, so alert on
+the `ERROR` line rather than waiting for exit. If a listener-disabled poll loop
+returns unexpectedly without an active shutdown, Steward logs `ERROR`, starts
+the normal graceful shutdown, and exits nonzero. `Restart=on-failure` therefore
+restarts the service. See
+[Disable the inbound listener]({{ '/disable-inbound-listener/' | relative_url }}).
 
-See [`disable-inbound-listener.md`]({{ '/disable-inbound-listener/' | relative_url }}) for the full
-design provenance behind this model.
+## Minimal rollout
 
-## A minimal production rollout walkthrough
+For an outbound-uplink node:
 
-For a NAT'd node using the uplink pattern end to end:
-
-1. **Build the binary.** `go build -o steward ./cmd/steward` (see README's
-   [build instructions](https://github.com/hardrails/steward#build-and-contribute)), or use a pinned release build —
-   either way, confirm what you're running with `steward -version`.
-2. **Enroll the node** on the control-plane side to obtain its `tenant_id`,
-   `node_id`, and bearer `credential`.
-3. **Write the credential file** to the node, e.g.
-   `/etc/steward/uplink-credential.json`, with `0600` permissions owned by the
-   service user (see [Initial provisioning](#initial-provisioning) above).
-4. **Write the config file**, e.g. `/etc/steward/config.json`, with `uplink_url`,
-   `uplink_credential_file`, `state_file`, `disable_inbound_listener`, and
-   `log_level` set as your topology needs (see the example under
-   [Configuring a production node](#configuring-a-production-node)).
-5. **Validate before rolling out**: `steward -check-config -config /etc/steward/config.json`.
-6. **Install and start** the systemd unit from
-   [Graceful shutdown](#graceful-shutdown) (or your orchestrator's equivalent),
-   pointing `ExecStart` at the binary and config file, then
+1. Install a pinned release artifact and confirm it with `steward -version`.
+2. Enroll the node and obtain its `tenant_id`, `node_id`, and bearer
+   `credential`.
+3. Write `/etc/steward/uplink-credential.json` as `0600`, owned by the service
+   user.
+4. Write `/etc/steward/config.json` with the required uplink, state, listener,
+   and logging settings.
+5. Run `steward -check-config -config /etc/steward/config.json`.
+6. Install the systemd unit above, then run
    `systemctl daemon-reload && systemctl enable --now steward`.
-7. **Verify locally**: `journalctl -u steward -f` should show `"uplink enabled"`
-   naming the right `node_id`/`tenant_id`/`url`; if the inbound listener is on,
-   `curl localhost:8080/v1/healthz` should return `200 {"status":"ok"}`.
-8. **Verify from the control plane** that the node is polling and its lifecycle
-   commands are being claimed—that side of the contract belongs to the control
-   plane and is out of scope here.
+7. Check `journalctl -u steward -f` for `"uplink enabled"` with the expected
+   `node_id`, `tenant_id`, and URL. If the listener exists,
+   `curl localhost:8080/v1/healthz` must return `200 {"status":"ok"}`.
+8. Confirm at the control plane that the node polls and claims lifecycle
+   commands. Control-plane implementation is outside Steward's scope.
 
-## How a release build is proven solid
+## Release-build evidence
 
-CI (`.github/workflows/ci.yml`) gates every push to `main` and every pull request
-with five jobs, all required:
+CI (`.github/workflows/ci.yml`) requires six jobs for every pull request and push
+to `main`:
 
-- **build / vet / test** — `go build`, `go vet`, and `go test -race ./...`
-  (the race detector catches exactly the concurrency class the tracker's
-  single-mutex design depends on).
+- **build / vet / test:** `go build`, `go vet`, and `go test -race ./...`.
 - **golangci-lint**.
-- **openapi lint** — spectral against `openapi/steward.v1.yaml`, the same public
-  contract this document assumes.
-- **coverage** — an 85% floor over the honest aggregate: unit test coverage
-  unioned with `main()`'s own coverage recovered from a `-cover`-instrumented
-  subprocess run (`scripts/coverage.sh`), so the CLI/startup glue this document
-  walks through is actually covered, not exempted.
-- **mutation** — a 70% kill-efficacy floor (`gremlins`, `.gremlins.yaml`) over the
-  same code.
-- **smoke** — builds the real release binary, asserts `GET /v1/healthz` comes up
-  within a timeout, then sends `SIGTERM` and asserts a clean, panic-free exit `0`
-  (`scripts/smoke.sh`). This is the one job that exercises this document's
-  [graceful shutdown](#graceful-shutdown) contract end to end, not just described
-  in prose.
+- **openapi lint:** Spectral checks `openapi/*.yaml`, covering the supervisor and
+  Executor contracts.
+- **coverage:** `scripts/coverage.sh` requires 85% aggregate unit and
+  instrumented-`main()` coverage.
+- **mutation:** Gremlins and `.gremlins.yaml` require tests to reject at least 70%
+  of generated code mutations.
+- **smoke:** `scripts/smoke.sh` starts the compiled binary, checks
+  `GET /v1/healthz`, sends `SIGTERM`, and requires a clean, panic-free exit `0`.
 
-An operator asking "is this build solid" can point at green CI on the commit or
-tag being deployed — the smoke test in particular is proof, not just a claim, that
-the shutdown behavior this document relies on actually holds on the compiled
-binary.
+Green CI on the deployed commit or tag is the evidence for these checks. The
+smoke job exercises one startup, health-check, and graceful-shutdown path; it does
+not prove every target operating system or deployment environment satisfies the
+contract.

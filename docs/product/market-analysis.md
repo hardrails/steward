@@ -1,6 +1,6 @@
 ---
 title: Agent execution market analysis
-description: A dated V1.4 comparison of agent sandboxes and runtimes, current egress/security signals, and Steward's sovereign authorization-to-enforcement focus.
+description: A dated comparison of agent sandboxes and runtimes with Steward's operator-controlled admission, anti-replay state, and offline-verifiable receipts.
 section: Product
 ---
 
@@ -10,33 +10,30 @@ section: Product
 > A vendor's documented feature is not a security certification, and an omitted
 > feature is not proof that the vendor can never provide it.
 
-Agent execution is rapidly becoming a capable market: microVMs and hardened
-containers, egress restrictions, lifecycle APIs, organization controls,
-observability, and audit logs are available from several projects. That is good
-news for operators. It also means those features alone are not a durable product
-claim.
+Several products offer hardened containers or microVMs—small virtual machines with
+their own kernel—plus egress policy, lifecycle APIs, organization controls,
+observability, and audit logs. These controls no longer distinguish a runtime by
+themselves.
 
-Steward V1.4 is aimed at a narrower, complementary problem: a customer-owned
-node should be able to verify a locally authorized deployment envelope,
-grant only locally enforced state/inference/service/HTTP(S) paths, and export an
-offline-verifiable receipt of the enforcement decisions it recorded.
+Steward focuses on customer-owned nodes that verify local authorization, grant only
+approved state, inference, service, and HTTP(S) paths, and export receipts for
+offline verification.
 
 ## Comparison
 
-| System | Documented focus as of the snapshot | Where Steward's V1.4 focus differs |
+| System | Documented focus as of the snapshot | Where Steward's focus differs |
 | --- | --- | --- |
-| [NVIDIA NemoClaw](https://docs.nvidia.com/nemoclaw/latest/about/overview.html) / [OpenShell](https://github.com/NVIDIA/OpenShell) | NemoClaw documents a reference stack for always-on agents using OpenShell sandboxing, routed inference, and declarative egress. OpenShell currently labels itself alpha and “single-player mode”; the [Hermes platform notes](https://docs.nvidia.com/nemoclaw/latest/user-guide/hermes/reference/platform-support) currently list air-gapped/offline installs as unsupported. | Steward is not a competing policy language or agent distribution. Its shipped wedge is tenant-bound signed intent, site-root policy, immutable artifact admission, generation fences, and offline-verifiable node receipts with no vendor service in the trust path. Current maturity/offline differences are dated observations, not permanent claims. |
-| [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/governance/) / [AI Governance](https://www.docker.com/products/ai-governance/) | Docker documents microVM sandboxes plus centrally managed filesystem/network policy, MCP controls, organization sign-in enforcement, structured decision logs, credential injection, and DNS policy enforcement. Its architecture also documents direct workspace passthrough as a supported mode. | Docker's controls are valuable endpoint governance. Steward v1.4 targets remote, tenant-labelled agent instances whose immutable Docker input and route authority are constrained by a signed local deployment envelope. Steward does not claim isolation, egress policy, DNS gating, or JSON audit as unique. |
-| [OpenSandbox](https://github.com/alibaba/OpenSandbox) | OpenSandbox documents a unified sandbox API, Docker and Kubernetes backends, lifecycle control, and [secure runtime choices](https://open-sandbox.ai/guides/secure-container) including gVisor, Kata, and Firecracker. | This is close to a reusable execution substrate. Steward's value sits above that substrate: a site-owned admission decision, tenant/instance fencing, and an operator-verifiable receipt. The projects could be complementary; v1.4 does not depend on OpenSandbox. |
-| [Kubernetes Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) | The Kubernetes SIG project documents `Sandbox` and related CRDs for isolated, stateful singleton workloads, templates, claims, warm pools, and optional gVisor or Kata isolation. | It is a Kubernetes execution API and controller, not a general sovereign control plane. Steward V1.4 deliberately stays on Docker and gVisor rather than adding a Kubernetes backend; a future backend could preserve the same admission and receipt contract. |
-| [E2B](https://www.e2b.dev/) | E2B documents Firecracker microVM sandboxing for untrusted workflows and advertises managed, BYOC, on-premises, and self-hosted options. Its [open-source project](https://github.com/e2b-dev/e2b) documents Terraform self-hosting for AWS and GCP. | E2B validates demand for secure code-execution environments. Steward does not attempt to recreate a microVM platform; it focuses on an offline, site-policy-controlled deployment and evidence boundary for long-lived agent instances on an operator's required Docker/gVisor host. |
-| [Daytona](https://www.daytona.io/docs/en/) | Daytona documents isolated sandboxes with a dedicated kernel, filesystem, network stack, snapshots, organizations, resource limits, audit logs, OpenTelemetry, and egress controls. Its [source repository](https://github.com/daytonaio/daytona/blob/main/apps/docs/src/content/docs/en/oss-deployment.mdx) documents an OSS Docker Compose deployment. | Daytona is a broad, capable agent/code-workspace platform. Steward's defensible claim is not “we have sandboxes, RBAC, egress, or logs.” It is the specific local authorization-to-enforcement receipt chain for tenant-bound, locally preloaded agent deployment. |
-| [Amazon Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) | AgentCore documents a managed runtime alongside identity, memory, MCP gateway, code interpreter, browser, and OpenTelemetry-compatible observability. Its [VPC documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html) describes AWS-managed network interfaces and IAM service roles for private-resource access. | AgentCore is a managed cloud option with deep AWS integration. Steward addresses operators who require local policy keys, locally imported artifacts, local infrastructure, and an operating path that does not require a vendor control plane or Internet access. V1.4 does not claim an equivalent managed service portfolio. |
+| [NVIDIA NemoClaw](https://docs.nvidia.com/nemoclaw/latest/about/overview.html) / [OpenShell](https://github.com/NVIDIA/OpenShell) | NemoClaw documents OpenShell sandboxing, routed inference, and declarative egress for always-on agents. OpenShell labels itself alpha and “single-player mode.” The current [Hermes notes](https://docs.nvidia.com/nemoclaw/latest/user-guide/hermes/reference/platform-support) list offline installation as unsupported. | Steward combines tenant-bound signed intent, site-root policy, immutable artifact admission, anti-replay fences, and offline-verifiable receipts without a vendor service in the trust path. The maturity and offline differences are dated, not permanent claims. |
+| [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/governance/) / [AI Governance](https://www.docker.com/products/ai-governance/) | Docker documents microVMs, central filesystem/network and Model Context Protocol (MCP) policy, organization sign-in, decision logs, credential injection, DNS policy, and direct workspace passthrough. | Steward constrains remote, tenant-labelled instances through signed local authorization. It does not claim isolation, egress policy, DNS gating, or JSON audit as unique. |
+| [OpenSandbox](https://github.com/alibaba/OpenSandbox) | OpenSandbox documents a sandbox API, Docker and Kubernetes backends, lifecycle control, and [gVisor, Kata, and Firecracker runtimes](https://open-sandbox.ai/guides/secure-container). | Steward adds site-owned admission, tenant/instance replay protection, and operator-verifiable receipts. The projects could complement each other; Steward does not depend on OpenSandbox. |
+| [Kubernetes Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) | The Kubernetes SIG project documents `Sandbox` Custom Resource Definitions (CRDs) for isolated, stateful single workloads, plus templates, claims, warm pools, and optional gVisor or Kata isolation. | It provides a Kubernetes execution API and controller. Steward uses Docker/gVisor, but a future backend could preserve the same admission and receipt contract. |
+| [E2B](https://www.e2b.dev/) | E2B documents Firecracker microVMs for untrusted workflows and managed, bring-your-own-cloud (BYOC), on-premises, and self-hosted options. Its [open-source project](https://github.com/e2b-dev/e2b) documents Terraform self-hosting for Amazon Web Services (AWS) and Google Cloud Platform (GCP). | Steward does not recreate a microVM platform. It provides an offline, site-policy-controlled deployment and evidence boundary for long-lived agents on Docker/gVisor. |
+| [Daytona](https://www.daytona.io/docs/en/) | Daytona documents dedicated-kernel sandboxes with separate filesystems and networks, snapshots, organizations, resource limits, audit logs, OpenTelemetry, and egress controls. Its [source at the reviewed revision](https://github.com/daytonaio/daytona/blob/ec4c21b2d597091ac09ecc278f3bcc172575a987/apps/docs/src/content/docs/en/oss-deployment.mdx) documents open-source Docker Compose deployment. | Steward does not claim sandboxes, role-based access control, egress, or logs as unique. It focuses on local authorization-to-enforcement receipts for tenant-bound, preloaded agents. |
+| [Amazon Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) | AgentCore documents managed runtime, identity, memory, MCP gateway, code interpreter, browser, and OpenTelemetry observability. Its [Virtual Private Cloud (VPC) guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html) describes AWS-managed network interfaces and Identity and Access Management (IAM) service roles. | Steward serves operators who require local keys, artifacts, infrastructure, and operation without a vendor control plane or public Internet. It does not claim an equivalent managed-service portfolio. |
 
-## What is now table stakes
+## Common platform capabilities
 
-The comparison shows why V1.4 should not build product identity around any one
-of these capabilities:
+These capabilities remain useful but do not distinguish Steward:
 
 - isolated execution with a container, gVisor, Kata, Firecracker, or microVM;
 - sandbox creation, pause/resume, snapshots, templates, or pools;
@@ -45,94 +42,93 @@ of these capabilities:
 - organization roles, quotas, OpenTelemetry, dashboards, or JSON audit logs;
 - a generic code-execution, browser, or agent SDK.
 
-Those remain useful controls. In Steward, Docker plus gVisor is a required host
-substrate, not the product's moat.
+These controls remain useful. Docker and gVisor are Steward's required host
+foundation, not its primary differentiator.
 
-## The V1.4 wedge
+## Steward's specific focus
 
-The V1.4 differentiator is a single **authorization-to-enforcement
-receipt chain**:
+An **authorization-to-enforcement receipt chain** links the signed decision to run
+an agent with the controls the node records:
 
-1. a publisher-signed, immutable profile capsule defines a bounded workload
-   ceiling;
+1. a publisher-signed, immutable profile capsule defines the workload's maximum
+   capabilities;
 2. a site-root-signed policy scopes publishers, tenant authority, profiles,
    repositories or exact image manifests, resource ceilings, inference route
    IDs, service IDs, egress route IDs, and revocation;
-3. an authenticated instance intent binds an actual tenant, node, instance,
-   lineage, and generation;
+3. an authenticated instance intent binds a tenant, node, instance, state lineage,
+   and generation;
 4. the local executor admits only the intersection, creates the constrained
    gVisor workload, and rejects replay, policy rollback, and observed drift; and
 5. the node emits signed, hash-linked receipts that an operator can verify
    offline.
 
-The narrow gateway now brokers inference, authenticated service ingress, and named
-HTTP(S) routes without handing a workload raw networking. Persistent state
-is tenant-lineage scoped and explicitly purged. These capabilities extend the
-receipt chain; they do not replace it as the differentiator.
+Gateway brokers inference, authenticated service ingress, and named HTTP(S) routes
+without raw network access. Persistent state is scoped to one tenant and workload
+history and requires explicit purge, but its local Docker volume has no enforced byte
+or inode quota and is limited to the dedicated-host compatibility mode. Signed
+receipts record admission and lifecycle events; inference and egress admissions
+include the effective route-policy digest. They do not embed the complete
+state/service grant or individual Gateway traffic decisions.
 
-The important word is *receipt*, not *transcript*. A receipt documents the
-runtime inputs and enforcement decisions Steward observed. It does not claim to
+A receipt records runtime inputs and observed enforcement decisions. It does not
 reconstruct prompt meaning, prove agent intent, or certify upstream behavior.
 
 ## Standards and research signals
 
-Several current sources point to the same design pressure: agent interoperability
-and capability are expanding, while identity, authorization, and prompt/data
-boundaries need explicit treatment.
+The following current standards and publications focus on identity,
+authorization, and separating trusted instructions from untrusted data.
 
 - The [Model Context Protocol authorization specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)
-  defines transport authorization around OAuth 2.1, while its
+  defines transport authorization using OAuth 2.1, while its
   [security guidance](https://modelcontextprotocol.io/specification/2025-03-26/index)
-  says implementers must build consent and authorization around powerful data
-  access and code-execution paths. A tool protocol does not replace local
-  workload admission.
-- The [A2A Protocol](https://a2a-protocol.org/dev/specification/) is an open
-  interoperability protocol for independent agent systems. It makes
-  framework-neutral execution boundaries more useful; it does not itself decide
-  which tenant may run a workload on a host.
+  requires consent and authorization around powerful data and code-execution
+  paths. A tool protocol does not replace local workload admission.
+- The [Agent2Agent (A2A) Protocol](https://a2a-protocol.org/dev/specification/) is
+  an open interoperability protocol for independent agents. It does not decide which
+  tenant may run a workload on a host.
 - [NIST's agent-hijacking discussion](https://www.nist.gov/news-events/news/2025/01/technical-blog-strengthening-ai-agent-hijacking-evaluations)
   describes the risk created when trusted instructions and untrusted external
   data are not clearly separated. NIST's 2026
   [agent identity and authorization concept paper](https://www.nist.gov/news-events/news/2026/02/new-concept-paper-identity-and-authority-software-agents)
-  further signals the need to apply identity practices to software agents.
+  signals the need to apply identity practices to software agents.
 - The [OWASP Top 10 for Agentic Applications 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/)
   includes goal hijack, tool misuse, identity and privilege abuse, supply-chain
   vulnerabilities, unexpected code execution, and memory/context poisoning.
   Steward's narrow grants and artifact/policy binding address only part of that
   risk set; they do not make prompts or agents intrinsically safe.
 - A 2026 [sandbox-assurance research framework](https://arxiv.org/abs/2606.18532)
-  argues that sandbox claims depend on multiple dimensions including
-  controllability, observability, containment, reproducibility, and governance
-  artifacts. This is research, not a certification of Steward or any product.
+  argues that sandbox assurance depends on controllability, observability,
+  containment, reproducibility, and governance artifacts. This research does not
+  certify Steward or any other product.
 - Current [Docker network governance](https://docs.docker.com/ai/sandboxes/governance/local/)
   routes HTTP(S) through a host proxy, and its release notes explicitly call out
-  DNS-policy gating and structured JSONL decisions. Current
+  DNS-policy gating and structured newline-delimited JSON (JSONL) decisions. Current
   [NemoClaw policy guidance](https://docs.nvidia.com/nemoclaw/latest/user-guide/openclaw/network-policy/customize-network-policy)
-  adds protocol/path matchers and restricts user-authored IP widening for SSRF
-  protection. The signal is clear: “hostname allowlist” alone is not a complete
-  feature. V1.4 therefore pins checked DNS answers, requires explicit private CIDRs,
-  gates DNS in the agent, bounds streams, and records decisions—but does not claim
-  TLS path inspection it cannot perform without MITM.
+  adds protocol and path matchers and restricts user-authored IP widening to reduce
+  server-side request forgery (SSRF). A hostname allowlist alone is therefore
+  insufficient. Steward pins verified DNS answers, requires explicit private
+  Classless Inter-Domain Routing (CIDR) ranges, disables agent DNS, bounds streams,
+  requires a persisted audit record before allowing a route, and attempts
+  best-effort denial and terminal records. It cannot
+  inspect paths inside TLS without intercepting TLS, which it does not do.
 
 ## Claim limits
 
-Product documentation should make the following limits explicit:
-
-- **Not physical isolation.** Docker and gVisor reduce the workload's authority;
-  they do not make shared hardware or host root untrusted.
+- **Not physical isolation.** Docker and gVisor reduce the workload's authority,
+  but shared hardware and host root remain trusted.
 - **Not a proof against host compromise.** Without hardware-backed keys or an
   external evidence anchor, node-local receipts are tamper-evident within the
-  stated trust boundary, not globally non-repudiable.
-- **Not universal air-gap certification.** V1.4 supports disconnected installation
-  and operation after the Docker/gVisor host, approved local image, signed policy,
-  and keys are prepared. It does not bootstrap a bare operating system, operate a
-  model service, or confer a formal accreditation.
+  stated trust boundary. They do not prove to an independent party that the host
+  was uncompromised.
+- **Not universal air-gap certification.** Steward supports disconnected
+  installation and operation after the Docker/gVisor host, approved local image,
+  signed policy, and keys are prepared. It does not bootstrap a bare operating
+  system, operate a model service, or provide formal accreditation.
 - **Not semantic observability.** The receipt does not include or validate
   prompts, model output, agent explanations, or semantic tool actions.
-- **Not a public access layer.** V1.4 service ingress is authenticated and
+- **Not a public access layer.** Steward service ingress is authenticated and
   loopback-only. It does not replace tenant end-user authentication,
   reverse-proxy design, or operator decisions about public exposure.
 
-That precision is part of the value proposition. A sovereign operator should be
-able to see exactly what Steward can enforce, what its receipt means, and where
-additional controls are still required.
+Operators should be able to identify exactly what Steward enforces, what a receipt
+proves, and where they still need additional controls.
