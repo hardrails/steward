@@ -104,12 +104,13 @@ func (f *topologyFixture) InspectRelay(context.Context, string) (ObservedRelay, 
 }
 
 type gatewayFixture struct {
-	grants        map[string]gateway.Grant
-	registerErr   error
-	inspectErr    error
-	activateErr   error
-	deactivateErr error
-	unregisterErr error
+	grants          map[string]gateway.Grant
+	registerErr     error
+	inspectErr      error
+	activateErr     error
+	activateApplies bool
+	deactivateErr   error
+	unregisterErr   error
 }
 
 func (f *gatewayFixture) Register(_ context.Context, grant gateway.Grant) error {
@@ -134,6 +135,11 @@ func (f *gatewayFixture) Inspect(_ context.Context, id string) (gateway.Grant, e
 }
 func (f *gatewayFixture) Activate(_ context.Context, id string) error {
 	if f.activateErr != nil {
+		if f.activateApplies {
+			grant := f.grants[id]
+			grant.Active = true
+			f.grants[id] = grant
+		}
 		return f.activateErr
 	}
 	grant := f.grants[id]
@@ -269,11 +275,14 @@ func TestRuntimeTransitionAndCleanupFailures(t *testing.T) {
 		{name: "service bind", start: true, mutate: func(_ *topologyFixture, g *gatewayFixture) { g.registerErr = errors.New("bind") }},
 		{name: "grant activate", start: true, mutate: func(_ *topologyFixture, g *gatewayFixture) { g.activateErr = errors.New("activate") }},
 		{name: "agent start", start: true, mutate: func(d *topologyFixture, _ *gatewayFixture) { d.startErrAt = 2 }},
-		{name: "agent start rollback deactivation", start: true, mutate: func(d *topologyFixture, g *gatewayFixture) {
-			d.startErrAt, g.deactivateErr = 2, errors.New("deactivate")
+		{name: "activation rollback deactivation", start: true, mutate: func(_ *topologyFixture, g *gatewayFixture) {
+			g.activateErr, g.deactivateErr = errors.New("activate"), errors.New("deactivate")
 		}},
-		{name: "agent start rollback relay stop", start: true, mutate: func(d *topologyFixture, _ *gatewayFixture) {
-			d.startErrAt, d.stopErrAt = 2, 1
+		{name: "activation rollback agent stop", start: true, mutate: func(d *topologyFixture, g *gatewayFixture) {
+			g.activateErr, d.stopErrAt = errors.New("activate"), 1
+		}},
+		{name: "activation rollback relay stop", start: true, mutate: func(d *topologyFixture, g *gatewayFixture) {
+			g.activateErr, d.stopErrAt = errors.New("activate"), 2
 		}},
 		{name: "grant deactivate", start: false, mutate: func(_ *topologyFixture, g *gatewayFixture) { g.deactivateErr = errors.New("deactivate") }},
 		{name: "agent stop", start: false, mutate: func(d *topologyFixture, _ *gatewayFixture) { d.stopErrAt = 1 }},
@@ -293,6 +302,17 @@ func TestRuntimeTransitionAndCleanupFailures(t *testing.T) {
 			}
 		})
 	}
+	t.Run("ambiguous activation never points at stopped backends", func(t *testing.T) {
+		docker, grants, server := makeReady()
+		grants.activateErr, grants.activateApplies, grants.deactivateErr = errors.New("response lost"), true, errors.New("gateway unavailable")
+		if err := server.applyRuntimeTransition(context.Background(), "executor-agent", workload, true); err == nil {
+			t.Fatal("ambiguous activation accepted")
+		}
+		grant := grants.grants[workload.Runtime.GrantID]
+		if !grant.Active || docker.agent.Status != "running" || docker.relay.Status != "running" {
+			t.Fatalf("active grant points at stopped backend: grant=%#v agent=%s relay=%s", grant, docker.agent.Status, docker.relay.Status)
+		}
+	})
 	t.Run("cleanup failures", func(t *testing.T) {
 		docker, grants, server := makeReady()
 		docker.removeRelayNoop = true

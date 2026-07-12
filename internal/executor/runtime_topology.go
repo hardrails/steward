@@ -185,21 +185,26 @@ func (s *Server) applyRuntimeTransition(ctx context.Context, runtimeRef string, 
 			_ = s.docker.Stop(ctx, relay)
 			return fmt.Errorf("bind gateway service grant: %w", err)
 		}
-		if err := s.secure.gateway.Activate(ctx, workload.Runtime.GrantID); err != nil {
-			_ = s.docker.Stop(ctx, relay)
-			return fmt.Errorf("activate gateway grant: %w", err)
-		}
 		if err := s.docker.Start(ctx, runtimeRef); err != nil {
-			if deactivateErr := s.secure.gateway.Deactivate(ctx, workload.Runtime.GrantID); deactivateErr != nil {
-				// Keep the relay running while the grant is still active. The caller
-				// observes a failed transition and leaves its journal prepared; later
-				// mutations remain fenced until reconciliation can deactivate it.
-				return fmt.Errorf("start agent: %v; rollback gateway deactivation: %w", err, deactivateErr)
-			}
 			if stopErr := s.docker.Stop(ctx, relay); stopErr != nil {
 				return fmt.Errorf("start agent: %v; rollback trusted relay stop: %w", err, stopErr)
 			}
 			return err
+		}
+		if err := s.secure.gateway.Activate(ctx, workload.Runtime.GrantID); err != nil {
+			if deactivateErr := s.secure.gateway.Deactivate(ctx, workload.Runtime.GrantID); deactivateErr != nil {
+				// Activation may have committed even if its response was lost. Keep
+				// both backends running until reconciliation can prove the grant
+				// inactive; never leave an active grant pointing at a stopped agent.
+				return fmt.Errorf("activate gateway grant: %v; rollback gateway deactivation: %w", err, deactivateErr)
+			}
+			if stopErr := s.docker.Stop(ctx, runtimeRef); stopErr != nil {
+				return fmt.Errorf("activate gateway grant: %v; rollback agent stop: %w", err, stopErr)
+			}
+			if stopErr := s.docker.Stop(ctx, relay); stopErr != nil {
+				return fmt.Errorf("activate gateway grant: %v; rollback trusted relay stop: %w", err, stopErr)
+			}
+			return fmt.Errorf("activate gateway grant: %w", err)
 		}
 		return nil
 	}
