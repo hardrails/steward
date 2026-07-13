@@ -14,8 +14,10 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	stewarduplink "github.com/hardrails/steward/internal/uplink"
 )
@@ -62,6 +64,14 @@ type Config struct {
 	ProtectedTransport bool
 	CommandPolicy      *admission.SitePolicy
 	Now                func() time.Time
+	// ProtocolVersion zero preserves tenant v1 and selects node v3 only when a
+	// DeliveryState store is present. Explicit 2 keeps the signed-command v2
+	// compatibility protocol; explicit 3 requires DeliveryState.
+	ProtocolVersion int
+	DeliveryState   *DeliveryStore
+	// ValidateOnly checks delivery state without converting pre-crash executing
+	// records into outcome_unknown. Normal startup leaves this false.
+	ValidateOnly bool
 }
 
 type Poller struct {
@@ -75,6 +85,8 @@ type Poller struct {
 	security           stewarduplink.CredentialSecurity
 	commandPolicy      *admission.SitePolicy
 	now                func() time.Time
+	protocolVersion    int
+	deliveryState      *DeliveryStore
 }
 
 func NewPoller(cfg Config) (*Poller, error) {
@@ -112,6 +124,41 @@ func NewPoller(cfg Config) (*Poller, error) {
 			return nil, errors.New("node-scoped uplink site policy has no site cleanup command key")
 		}
 	}
+	protocolVersion := cfg.ProtocolVersion
+	if credential.NodeScoped() {
+		if protocolVersion == 0 {
+			protocolVersion = 2
+			if cfg.DeliveryState != nil {
+				protocolVersion = controlprotocol.ExecutorProtocolV3
+			}
+		}
+		if protocolVersion != 2 && protocolVersion != controlprotocol.ExecutorProtocolV3 {
+			return nil, fmt.Errorf("node-scoped uplink protocol version must be 2 or %d", controlprotocol.ExecutorProtocolV3)
+		}
+		if protocolVersion == controlprotocol.ExecutorProtocolV3 {
+			if cfg.DeliveryState == nil {
+				return nil, errors.New("executor uplink protocol 3 requires durable delivery state")
+			}
+			if cfg.DeliveryState.NodeID() != credential.NodeID {
+				return nil, errors.New("executor delivery state node ID does not match the uplink credential")
+			}
+			if !cfg.ValidateOnly {
+				if err := cfg.DeliveryState.RecoverExecuting(); err != nil {
+					return nil, fmt.Errorf("recover executor delivery state: %w", err)
+				}
+			}
+		} else if cfg.DeliveryState != nil {
+			return nil, errors.New("executor delivery state is only valid with uplink protocol 3")
+		}
+	} else {
+		if protocolVersion != 0 && protocolVersion != 1 {
+			return nil, errors.New("tenant-scoped uplink only supports protocol version 1")
+		}
+		if cfg.DeliveryState != nil {
+			return nil, errors.New("tenant-scoped uplink cannot use node delivery state")
+		}
+		protocolVersion = 1
+	}
 	pollURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "poll")
 	reportURL, _ := url.JoinPath(cfg.BaseURL, "executor-uplink", "report")
 	client := cfg.HTTPClient
@@ -130,6 +177,7 @@ func NewPoller(cfg Config) (*Poller, error) {
 		pollURL: pollURL, reportURL: reportURL, credentialPath: cfg.CredentialPath,
 		expected: credential, interval: cfg.PollInterval, client: client, logger: logger,
 		security: security, commandPolicy: cfg.CommandPolicy, now: now,
+		protocolVersion: protocolVersion, deliveryState: cfg.DeliveryState,
 		dispatcher: dispatcher{
 			handler: cfg.Handler, token: cfg.LocalToken, tenantID: credential.TenantID,
 			nodeID: credential.NodeID, nodeScoped: credential.NodeScoped(), state: cfg.State,
@@ -185,10 +233,18 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 	}
 	requestBody := []byte(`{}`)
 	if credential.NodeScoped() {
-		requestBody, err = json.Marshal(pollRequest{
-			ProtocolVersion: 2, NodeID: credential.NodeID, CredentialScope: "node",
-			Capabilities: []string{"signed-commands-v2", "multi-tenant", "read", "state-purge"},
-		})
+		if p.protocolVersion == controlprotocol.ExecutorProtocolV3 {
+			requestBody, err = json.Marshal(controlprotocol.ExecutorPollRequestV3{
+				ProtocolVersion: controlprotocol.ExecutorProtocolV3,
+				NodeID:          credential.NodeID, CredentialScope: "node",
+				Capabilities: []string{"signed-commands-v2", "delivery-leases-v3", "multi-tenant", "read", "state-purge"},
+			})
+		} else {
+			requestBody, err = json.Marshal(pollRequest{
+				ProtocolVersion: 2, NodeID: credential.NodeID, CredentialScope: "node",
+				Capabilities: []string{"signed-commands-v2", "multi-tenant", "read", "state-purge"},
+			})
+		}
 		if err != nil {
 			return err
 		}
@@ -207,11 +263,14 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return wireError("poll", resp)
 	}
-	var payload pollResponse
 	raw, err := readBounded(resp.Body, maxWireBytes)
 	if err != nil {
 		return fmt.Errorf("read poll response: %w", err)
 	}
+	if p.protocolVersion == controlprotocol.ExecutorProtocolV3 {
+		return p.processPollV3(ctx, credential, raw)
+	}
+	var payload pollResponse
 	if err := dsse.DecodeStrictInto(raw, maxWireBytes, &payload); err != nil {
 		return fmt.Errorf("decode poll response: %w", err)
 	}
@@ -238,6 +297,132 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (p *Poller) processPollV3(ctx context.Context, credential *stewarduplink.Credential, raw []byte) error {
+	payload, err := controlprotocol.DecodeExecutorPollResponseV3(raw, maxWireBytes)
+	if err != nil {
+		return fmt.Errorf("decode executor poll v3 response: %w", err)
+	}
+	var failures []error
+	for index, rawDelivery := range payload.Deliveries {
+		if err := p.processDeliveryV3(ctx, credential, rawDelivery); err != nil {
+			failures = append(failures, fmt.Errorf("delivery %d: %w", index, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (p *Poller) processDeliveryV3(ctx context.Context, credential *stewarduplink.Credential, raw []byte) error {
+	delivery, err := controlprotocol.DecodeExecutorDeliveryV3(raw)
+	if err != nil {
+		return fmt.Errorf("decode wrapper: %w", err)
+	}
+	commandRaw, err := base64.StdEncoding.DecodeString(delivery.CommandDSSEBase64)
+	if err != nil || base64.StdEncoding.EncodeToString(commandRaw) != delivery.CommandDSSEBase64 {
+		return p.rejectDeliveryV3(ctx, credential.Credential, delivery, "invalid_command_encoding", "signed command encoding is invalid", err)
+	}
+	if dsse.Digest(commandRaw) != delivery.CommandDigest {
+		return p.rejectDeliveryV3(ctx, credential.Credential, delivery, "command_digest_mismatch", "signed command digest does not match its delivery", nil)
+	}
+	cmd, err := p.decodeCommand(commandRaw, credential)
+	if err != nil {
+		return p.rejectDeliveryV3(ctx, credential.Credential, delivery, "invalid_signed_command", "signed command was rejected", err)
+	}
+	if cmd.CommandID != delivery.CommandID {
+		return p.rejectDeliveryV3(ctx, credential.Credential, delivery, "command_identity_mismatch", "delivery command ID does not match the signed command", nil)
+	}
+	decision, terminal, err := p.deliveryState.Accept(delivery)
+	if err != nil {
+		return fmt.Errorf("persist accepted delivery: %w", err)
+	}
+	switch decision {
+	case deliveryStale:
+		return nil
+	case deliveryReport:
+		if terminal == nil {
+			return errors.New("terminal delivery has no retained report")
+		}
+		return p.sendReportV3(ctx, credential.Credential, *terminal)
+	case deliveryExecute:
+		if err := p.deliveryState.MarkExecuting(delivery.DeliveryID); err != nil {
+			return fmt.Errorf("persist executing delivery: %w", err)
+		}
+		legacyReport := p.dispatcher.execute(ctx, cmd)
+		report := makeReportV3(delivery, legacyReport)
+		if err := p.deliveryState.MarkTerminal(report); err != nil {
+			return fmt.Errorf("persist terminal delivery: %w", err)
+		}
+		return p.sendReportV3(ctx, credential.Credential, report)
+	default:
+		return errors.New("delivery store returned an invalid decision")
+	}
+}
+
+func (p *Poller) rejectDeliveryV3(
+	ctx context.Context,
+	credential string,
+	delivery controlprotocol.ExecutorDeliveryV3,
+	errorCode, detail string,
+	cause error,
+) error {
+	if cause != nil {
+		p.logger.Warn("executor uplink rejected signed delivery", "delivery_id", delivery.DeliveryID,
+			"error_code", errorCode, "error", cause)
+	}
+	rejected := controlprotocol.ExecutorReportV3{
+		ProtocolVersion: controlprotocol.ExecutorProtocolV3,
+		DeliveryID:      delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
+		CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
+		Status: controlprotocol.ExecutorStatusRejected, ReportedStatus: "failed", ErrorCode: errorCode,
+		Result: controlprotocol.ExecutorReportResultV3{Error: detail},
+	}
+	terminal, err := p.deliveryState.Reject(delivery, rejected)
+	if err != nil {
+		return fmt.Errorf("persist rejected delivery: %w", err)
+	}
+	if terminal == nil {
+		return nil
+	}
+	return p.sendReportV3(ctx, credential, *terminal)
+}
+
+func makeReportV3(delivery controlprotocol.ExecutorDeliveryV3, legacy report) controlprotocol.ExecutorReportV3 {
+	result := controlprotocol.ExecutorReportResultV3{}
+	if value, ok := legacy.Result["runtime_ref"].(string); ok {
+		result.RuntimeRef = truncateUTF8(value, 1024)
+	}
+	if value, ok := legacy.Result["error"].(string); ok {
+		result.Error = truncateUTF8(value, 4096)
+	}
+	if value, ok := legacy.Result["replayed"].(bool); ok {
+		result.Replayed = value
+	}
+	if value, ok := legacy.Result["absent"].(bool); ok {
+		result.Absent = value
+	}
+	report := controlprotocol.ExecutorReportV3{
+		ProtocolVersion: controlprotocol.ExecutorProtocolV3,
+		DeliveryID:      delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
+		CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
+		Status: legacy.Status, ReportedStatus: legacy.ReportedStatus,
+		ClaimGeneration: legacy.ClaimGeneration, Result: result,
+	}
+	if legacy.Status == controlprotocol.ExecutorStatusFailed {
+		report.ErrorCode = "executor_command_failed"
+	}
+	return report
+}
+
+func truncateUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func (p *Poller) decodeCommand(raw []byte, credential *stewarduplink.Credential) (command, error) {
@@ -327,6 +512,50 @@ func (p *Poller) sendReport(ctx context.Context, credential string, report repor
 	}
 	if !response.Applied {
 		return errors.New("uplink report was not acknowledged as applied")
+	}
+	return nil
+}
+
+func (p *Poller) sendReportV3(ctx context.Context, credential string, report controlprotocol.ExecutorReportV3) error {
+	if err := report.Validate(); err != nil {
+		return fmt.Errorf("validate executor report v3: %w", err)
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	if len(raw) > maxWireBytes {
+		return errors.New("executor uplink report v3 exceeds wire limit")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.reportURL, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+credential)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return wireError("report", resp)
+	}
+	responseBody, err := readBounded(resp.Body, maxWireBytes)
+	if err != nil {
+		return fmt.Errorf("read executor report v3 response: %w", err)
+	}
+	var response controlprotocol.ExecutorReportResponseV3
+	if err := dsse.DecodeStrictInto(responseBody, maxWireBytes, &response); err != nil {
+		return fmt.Errorf("decode executor report v3 response: %w", err)
+	}
+	if response.ProtocolVersion != controlprotocol.ExecutorProtocolV3 {
+		return fmt.Errorf("executor report acknowledgement protocol_version is %d, want %d", response.ProtocolVersion, controlprotocol.ExecutorProtocolV3)
+	}
+	// Both true and false are acknowledgements. False is the control plane's
+	// stale-or-duplicate no-op and must never cause command reexecution.
+	if err := p.deliveryState.Settle(report.DeliveryID, report.DeliveryGeneration); err != nil {
+		return fmt.Errorf("persist executor report acknowledgement: %w", err)
 	}
 	return nil
 }
