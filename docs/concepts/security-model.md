@@ -14,6 +14,11 @@ infrastructure (PKI), and node enrollment process.
 This is a shared-host isolation model, not a claim that software isolation equals
 separate physical hardware.
 
+A sandbox reduces the ways untrusted code can attack the host. It does not prove
+that a tenant authorized a particular task or stop a manipulated agent from changing
+request content inside a reusable service grant. Tenant-signed service tasks address
+that separate authorization problem; they do not strengthen the gVisor boundary.
+
 ## Isolation controls
 
 Every admitted agent container receives one fixed policy:
@@ -28,7 +33,8 @@ Every admitted agent container receives one fixed policy:
 | Filesystem | The root filesystem is read-only. Executor adds fixed bounded temporary filesystems. Persistent state uses one fixed-path Steward-owned Docker volume, but Docker's portable local volume driver has no hard byte or inode quota. State is therefore disabled by default and must remain disabled on a shared host. The exact mount set is inspected; host mounts, extra volumes, devices, and caller-selected files are unavailable. |
 | Network | The default is `network=none`. A workload with inference, service, connector, or egress authority receives one internal per-instance Docker network containing only the agent and its trusted relay. Docker allocates the subnet from its daemon-wide address pools, and its bridge host gateway is disabled. Gateway performs approved connections; the container receives no raw host or Internet route. |
 | Inference | Site policy selects one route and model alias. Gateway injects the upstream credential, rejects any other model, and synthesizes `/v1/models` from the allowed alias. |
-| Agent service | Gateway exposes a bearer-protected loopback endpoint. It reaches only the declared port through the grant's Unix socket and fixed relay; Docker publishes no container port. |
+| Agent service | Gateway exposes a bearer-protected loopback endpoint. It reaches only the declared port through the grant's Unix socket and fixed relay; Docker publishes no container port. The bearer is host-administrator transport authority, not a tenant approval. |
+| Tenant-signed service task | Signed site policy scopes each tenant Ed25519 public key to exact service IDs. The private key stays off-node. Gateway accepts only configured exact JSON `POST` operations, verifies one short-lived permit against the active tenant, instance, generation, artifact, policies, task, operation, and request bytes, fsyncs authorization before dispatch, and never automatically retries an ambiguous outcome. |
 | Authenticated connector | The signed capsule, tenant policy, and intent select connector IDs. Node configuration maps each connector operation to one exact method, path, origin, address policy, and owner-only credential. Gateway strips agent credentials, spends a durable task claim and call budget, pins the resolved address, injects only the configured Bearer or API-key value, denies redirects, and bounds concurrency, bodies, response, and time. An opt-in tenant-scoped action authority can additionally require one short-lived signed permit that matches the live grant, exact origin, method, path, credential injection mode and epoch, task, and request bytes. |
 | HTTP(S) egress | Executor intersects the publisher profile, tenant route IDs, and instance request. Gateway enforces host and port, a pinned resolved IP, explicit private Classless Inter-Domain Routing (CIDR) ranges, concurrency, byte and time limits, lifecycle, and bounded audit output. Synchronous denial work is limited to 30 per grant, 120 per tenant, and 480 per host per minute; exhaustion suppresses further denial writes while allowed traffic continues. |
 | Resources | Per-workload memory, swap, CPU, PID, and shared-memory limits are mandatory. Docker's bounded `local` log rotation is fixed and the out-of-memory (OOM) killer remains enabled. Executor reconstructs host and tenant aggregate memory, CPU, PID, and workload reservations from Docker, including stopped containers and fixed relay overhead. Disk, inode, and I/O quotas remain outside this portable contract. |
@@ -36,7 +42,7 @@ Every admitted agent container receives one fixed policy:
 | Integrity and recovery | A SHA-256 fingerprint covers the admitted definition. Reconciliation—comparison of durable signed state with actual runtime objects—runs before normal mutations are accepted and every 30 seconds. It may repair limited lifecycle drift, but never recreates or adopts missing or structurally changed objects. A degraded scan can only narrow authority. |
 | Route integrity | Gateway persists a non-secret digest of each retained route policy and a private credential-content binding. Executor stores the route-policy digest in the admission fence and receipt. Reload, restart, start, and reconciliation refuse a mismatch while the grant remains retained. |
 | Interface | Request bodies and log output are bounded, and every error has the same JSON shape. Executor mutation and both uplinks require authentication. Signed envelopes and payloads reject duplicate and unknown JSON members. The generic supervisor REST API has no built-in authentication and must stay on loopback or behind operator authentication. |
-| Receipts (opt-in) | Executor writes length-framed, Ed25519-signed lifecycle records. Gateway writes a separate signed newline-delimited JSON chain for connector authorizations and terminal outcomes. Permit-backed records include the authority key ID, exact permit-envelope digest, and exact request digest. Both chains are hash-linked and flushed with `fsync`; an auditor can verify a copied chain and an independently retained exact head without network access. |
+| Receipts (opt-in) | Executor writes length-framed, Ed25519-signed lifecycle records. Gateway writes a separate signed newline-delimited JSON chain for connector and service-task authorizations and terminal outcomes. Permit-backed records include the authority key ID, exact permit-envelope digest, and exact request digest. Service-task records add the service, operation-policy digest, bounded status, and observed run ID but never the raw prompt. Both chains are hash-linked and flushed with `fsync`; an auditor can verify a copied chain and an independently retained exact head without network access. |
 
 The trusted per-instance relay uses `runc`, not gVisor, because it mounts one
 host-owned, per-grant socket directory. It connects to Gateway's inference,
@@ -59,6 +65,8 @@ Within this trust model, Steward's shared-host tenant isolation means:
   namespace inside an agent;
 - one gVisor sandbox per untrusted workload;
 - tenant-bound signed authority and anti-replay state keyed by tenant and instance;
+- service-scoped public task authority with node-local spend-before-dispatch replay
+  control;
 - per-workload resource ceilings and host-wide and per-tenant aggregate memory,
   CPU, PID, and workload-count ceilings;
 - layered grant, tenant, and host limits on egress denial-audit work;
@@ -105,8 +113,15 @@ enrollment and preflight succeed.
 With signed admission, incomplete trust inputs, a bad policy signature, policy
 rollback, receipt-key replacement, or receipt corruption stop startup. An
 unresolved prepared journal operation allows degraded startup but blocks normal
-mutations. A requested state, inference, service, connector, or egress capability is rejected
-when any part of its enforcement path is missing or cannot be inspected.
+mutations. A requested state, inference, service, connector, or egress capability is
+rejected when any part of its enforcement path is missing or cannot be inspected.
+
+A task-authorized service grant also fails closed when Gateway lacks a configured
+exact operation, signed receipt identity, explicit tenant receipt budget, retained
+public task authority, or compatible state. A request with a missing, duplicate,
+expired, malformed, or mismatched task permit is rejected before dispatch. Receipt
+quota exhaustion is also pre-dispatch. If authorization is durable but the service
+result is ambiguous, Gateway writes `outcome_unknown` and refuses automatic retry.
 
 Policy rotation revokes the ability to start an instance admitted under stale
 policy while preserving cleanup authorization. While Executor is serving, the bound
@@ -135,6 +150,20 @@ most two minutes per request or stream, allows 4 MiB from client to service, and
 32 MiB from service to client. Application-level authentication inside the agent
 service remains the adapter's responsibility.
 
+Task-enabled service mutations use a narrower path. Node configuration allows only
+exact `POST` operations with `application/json`, at most 64 KiB of request data,
+1 MiB of response data, a 120-second dispatch, and a 15-minute permit. The request
+has no query, alternate encoded path, transfer coding, WebSocket upgrade, or
+caller-selected upstream headers. Gateway accepts only HTTP 200, 201, or 202 with a
+bounded run ID as success and returns its own canonical response.
+
+Replay prevention is scoped to one node and one retained Gateway receipt-ledger
+epoch. The spend key omits generation, so replacing the same logical instance does
+not make a task ID spendable again. A second node, a replaced ledger, or a new epoch
+is a different replay domain. Steward therefore claims node-local at-most-once
+dispatch, never exactly-once execution. The run ID comes from the untrusted agent
+service and can be fabricated.
+
 Egress supports proxy-aware HTTP with Server-Sent Events (SSE) and HTTPS with
 secure WebSockets (WSS). It does not support raw TCP,
 UDP, ICMP, SOCKS, proxy-unaware programs, or arbitrary DNS. Gateway binds HTTPS
@@ -155,14 +184,20 @@ memory, disk latency, or the host-wide audit file.
 ## Evidence boundary
 
 Executor receipts record admission and lifecycle decisions and effects that
-Executor can observe. Gateway's separate connector chain records authorization and
-terminal outcomes that Gateway can observe. For permit-backed calls, offline audit
+Executor can observe. Gateway's separate mixed-format chain records connector and
+service-task authorization and terminal outcomes that Gateway can observe. For permit-backed calls, offline audit
 can correlate the signed permit with the authority key, exact request, stable task
 call digest, authorization time, and terminal record. Offline verification checks each
 format's signatures and framing, plus sequence, hash links, node ID, key epoch, and
 an optional exact externally retained head. An expected sequence and chain hash
 identify one exact final head; they are not lower bounds. This detects a truncated
 or advanced copy relative to that checkpoint.
+
+For service tasks, a receipt can prove that the configured node key signed an
+authorization before dispatch and later recorded a status and run ID. It cannot
+prove that the agent performed useful work, that its output was true, or that an
+upstream effect occurred exactly once. A missing terminal remains an unknown
+outcome. Raw request bytes and prompts are deliberately excluded.
 
 Node-local receipts are not hostile-host attestation. Host root can replace the
 binary, keys, and logs together. The chain does not include prompts, model output,
@@ -184,11 +219,14 @@ matters.
 ## Operator responsibilities
 
 Patch the host, Docker, gVisor, and Steward. Authenticate imported artifacts,
-protect enrollment, receipt, and off-node action-authority keys, keep management
+protect enrollment, receipt, off-node action-authority, and tenant task keys, keep management
 listeners on loopback or disabled, monitor capacity and audit output, and preserve
 anti-replay state during backup and rollback. An exported action-trust inventory is
 unsigned and non-secret: authenticate it as operator input. It is a signing
 preflight, not authority; Gateway's live configuration makes the final decision.
+The same rule applies to an exported service-trust inventory. Keep Gateway on
+loopback and use SSH or another authenticated private management channel for remote
+operation. Do not expose its host bearer as tenant authentication.
 
 On Amazon Web Services (AWS), use private subnets, no public management listener,
 encrypted disks, Instance Metadata Service v2 (IMDSv2), and non-secret user data;

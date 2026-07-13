@@ -11,10 +11,16 @@ node authority among three long-running services with separate Unix identities.
 A fixed relay runs for each instance that receives a network capability; the relay
 has no host authority.
 
+Docker and gVisor answer where untrusted code executes. They do not identify the
+tenant that authorized a workload or constrain a manipulated agent to one approved
+external effect. Steward keeps those decisions outside the agent and connects them
+to durable node state and offline-verifiable evidence.
+
 ```text
 Independent control plane or host operator
   owns users, desired state, approvals, rollout; submits tenant-bound intent
   optional off-node action authority signs one exact connector request
+  optional off-node tenant task authority signs one exact service request
        |
        | outbound HTTPS command channels
        v
@@ -29,10 +35,11 @@ Linux node
 
 Outbound data: agent -> relay -> Gateway -> approved inference or HTTP(S)
 Service ingress: authenticated host caller -> Gateway -> relay -> agent
+Signed task: owner-only bundle -> loopback Gateway -> exact service POST
 
 Host-local steward-mcp: bounded stdio adapter
-Mostly offline stewardctl: keys, signed capsule/policy, receipt verification;
-                         image import is a root-run, bounded Docker client
+Mostly offline stewardctl: keys, signed capsule/policy, task permits, receipts;
+                         image import uses Docker; hermes run uses loopback Gateway
 Inference system: separately selected and operated
 ```
 
@@ -46,7 +53,8 @@ one-shot `stewardctl image import` command is a separate bounded Docker client: 
 verifies and sanitizes one archive before loading it.
 
 `steward-gateway` holds upstream route credentials and enforces bounded,
-per-instance inference, service, connector, and egress grants, but it cannot open the Docker
+per-instance inference, service, exact tenant-signed task, connector, and egress
+grants, but it cannot open the Docker
 socket. Executor creates, activates, deactivates, and removes grants over Gateway's
 local control socket without receiving upstream credentials. The per-instance relay
 runs in the workload network and receives only its matching per-grant Unix-socket
@@ -106,12 +114,35 @@ uplink available with readiness at 503, but only an authenticated safety-only st
 may mutate the host. Reconciliation may repair limited lifecycle drift, but it
 never recreates or adopts a missing or structurally changed workload.
 
-For inference, connector, and egress policy, Gateway durably pins a non-secret digest of the effective
-route policy and a private binding to the loaded credential. Executor stores the
+For inference, task-authorized service, connector, and egress policy, Gateway
+durably pins a non-secret digest of the effective route policy and a private binding
+to each loaded credential. Executor stores the
 public policy digest in its admission fence and evidence. A restart, reload, start,
 or reconciliation refuses mismatched route semantics. Inference requests must use
 the exact authorized model alias; a route credential that can reach other models
 does not grant access to them.
+
+For a task-authorized service, site policy assigns a tenant's Ed25519 public key to
+exact service IDs. Executor projects only the matching public authority into the
+runtime grant; the private key stays off-node. The tenant authority signs a
+short-lived DSSE statement for one exact JSON request. Gateway compares the
+signature with the active tenant, instance, runtime, generation, admitted artifact,
+site and route policy, service operation, task ID, request digest and length, and
+validity window.
+
+Gateway reserves the task identity in memory, fsyncs signed authorization to its
+receipt ledger, rechecks time and lifecycle, and only then sends the configured
+`POST` to the agent service. It forwards no caller-selected headers. A successful
+service response must have HTTP 200, 201, or 202 and one bounded run ID. Gateway
+records the terminal result and returns its own canonical run-ID response rather
+than relaying untrusted headers or body. A successful replay returns that stored ID;
+an ambiguous result is never dispatched automatically again.
+
+The replay identity spans workload generations for one tenant and logical instance,
+but exists only on one node and one retained ledger epoch. This is node-local
+at-most-once dispatch, not fleet-wide or upstream exactly-once execution. The
+service supplies the run ID, so the receipt records an observation rather than
+proving completed or correct agent work.
 
 A connector may also require a tenant-scoped action permit. The off-node authority
 signs a canonical, short-lived DSSE statement for one exact connector request.
@@ -124,10 +155,12 @@ permit and stable task-based call digest together in the signed connector ledger
 before DNS. The signer never needs the upstream credential, and its private key
 does not belong on the node.
 
-`stewardctl` is a CLI, not a daemon. Its key, capsule, policy, archive-inspection,
-and evidence commands run offline without contacting a node, control plane,
-publisher, or transparency service. Only `image import` connects to the local
-Docker daemon, after offline policy and archive verification.
+`stewardctl` is a CLI, not a daemon. Its key, capsule, policy, task-issuance,
+archive-inspection, and evidence commands run offline without contacting a node,
+control plane, publisher, or transparency service. `image import` connects to the
+local Docker daemon after offline verification. `hermes run` is a separate,
+explicitly online operation that accepts only a literal-loopback Gateway origin;
+remote operators use an authenticated SSH path rather than exposing Gateway.
 
 ## Control-plane neutrality
 
@@ -143,6 +176,12 @@ fleet scheduling, and rollout policy out of the process that holds Docker author
 Steward does not host, schedule, or select models. Gateway can expose an
 operator-selected local or remote OpenAI-compatible inference system through a
 finite, per-instance grant.
+
+For agent-service task submission, the host operator first configures one exact
+service method and path. A separately controlled tenant key then narrows the active
+service grant to one request. The host Gateway token authenticates transport and
+does not replace the tenant signature. Ordinary service health and status reads
+remain host operations; the task permit authorizes only its exact configured POST.
 
 For an authenticated connector, the agent sends a logical connector and operation
 ID to its Relay. Gateway selects one exact operator-configured origin, method, and

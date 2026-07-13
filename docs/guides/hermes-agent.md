@@ -1,6 +1,6 @@
 ---
 title: Build and run the qualified Hermes Agent adapter
-description: Build Steward's exact pinned Hermes Agent adapter, understand its proven gVisor runtime and signed workspace and connector skills, and rerun the qualification proof.
+description: Build Steward's exact pinned Hermes Agent adapter, run a custom skill with one tenant-signed task, and verify the node's dispatch receipts offline.
 section: Agent compatibility
 ---
 
@@ -13,8 +13,9 @@ runs every process as UID/GID `65532:65532`. It does not use or modify the offic
 upstream image.
 
 Qualification means this pinned source and Steward adapter passed the documented
-runtime proof under gVisor on `linux/amd64`, including a signed workspace audit and
-an authenticated connector effect through a signed custom skill. The state proof
+runtime proof under gVisor on `linux/amd64`, including a signed workspace audit, an
+authenticated connector effect through a signed custom skill, and the
+tenant-authorized service path used to submit an exact run request. The state proof
 also runs useful work before and after a container restart. Other platforms require
 their own qualification run. The retained proof does not approve another Hermes
 commit, a changed adapter, or arbitrary Hermes plugins, channels, skills, or Model
@@ -122,11 +123,12 @@ configured credential in response headers and the decoded body stream, but the
 upstream remains trusted not to transform that value, disclose private origin
 details, or return other application secrets.
 
-This retained qualification predates the optional exact-request action-permit
-path. It used the connector grant, task fence, call budget, and receipt schema 1; it
-did not configure an action authority, issue `X-Steward-Action-Permit`, or exercise
-permit-to-receipt audit. Qualify those steps separately before claiming that a
-Hermes deployment uses action permits.
+The connector portion of the retained qualification uses the connector grant, task
+fence, and call budget. It does not configure a connector action authority or issue
+`X-Steward-Action-Permit`. The tenant-signed service-task path is a separate control:
+it authorizes the exact `POST /v1/runs` bytes with `X-Steward-Task-Permit` and writes
+receipt format 3. Do not describe the connector result as proof of connector action
+permits.
 
 A separate Steward integration gate inspected and imported the archive through a
 publisher-signed capsule and site policy, started Hermes through Executor, and sent
@@ -146,6 +148,12 @@ for the qualified inputs. CI recomputes the adapter file-set, builder, Dockerfil
 source-input, and acceptance-harness digests and fails if they no longer match the
 evidence. The files contain no prompt, response, workspace content, credential, or
 log. They are release-bound records, not independently signed attestations.
+
+In that metadata, `task_private_key_agent_absence_verified` means the harness
+verified absence from the agent image, container metadata, writable state, and other
+scanned agent-visible material. It is not a claim that the private key never existed
+anywhere else on the disposable host. Operationally, keep the private key on the
+separate signing workstation.
 
 ## Build the adapter
 
@@ -275,6 +283,210 @@ repeat the runtime qualification or approve a different command, model alias,
 service grant, or egress route. See
 [image and evidence tools]({{ '/reference/offline-tools/' | relative_url }}) and
 [signed admission]({{ '/guides/signed-admission/' | relative_url }}).
+
+## Authorize and run one exact Hermes task
+
+A normal service bearer token authorizes the host operator to reach an admitted
+service. It does not prove that a tenant approved a particular prompt. The following
+workflow adds that approval without putting the tenant's private signing key in
+Hermes, Executor, or Gateway.
+
+### 1. Create a tenant task key
+
+Generate the key on an operator-controlled signing workstation. Keep the private
+file off the Steward node:
+
+```console
+stewardctl keygen \
+  -key-id hermes-task-approver \
+  -private-out hermes-task-approver.private.pem \
+  -public-out hermes-task-approver.public
+```
+
+Add the canonical base64 public key to the tenant rule in site policy. The key is
+valid only for the listed service IDs; the private half is never part of policy:
+
+```json
+{
+  "tenant_id": "tenant-a",
+  "publisher_key_ids": ["publisher"],
+  "resource_ceiling": {
+    "memory_bytes": 536870912,
+    "cpu_millis": 1000,
+    "pids": 128
+  },
+  "service_ids": ["hermes-api"],
+  "task_keys": [
+    {
+      "key_id": "hermes-task-approver",
+      "public_key": "<contents-of-hermes-task-approver.public>",
+      "service_ids": ["hermes-api"]
+    }
+  ]
+}
+```
+
+Sign and install the complete policy through the normal
+[signed-admission workflow]({{ '/guides/signed-admission/' | relative_url }}).
+Admit Hermes with service ID `hermes-api` and save both the exact instance intent
+and `stewardctl node admit` response. The response must contain `service_id`, the
+public `task_authorities`, `grant_id`, `service_path`, and `route_policy_digest`.
+
+### 2. Configure the exact Gateway operation
+
+Configure only Hermes run submission. Gateway accepts service-task operations only
+as `POST` with `application/json`; the path cannot contain a query, wildcard, or
+alternate percent-encoded spelling. The hard ceilings are 64 KiB per request,
+1 MiB per response, 120 seconds per dispatch, and 15 minutes per permit. This
+example uses a five-minute permit ceiling:
+
+```console
+sudo stewardctl gateway service set \
+  -config /etc/steward/gateway.json \
+  -service-id hermes-api \
+  -operation hermes.run=POST:/v1/runs \
+  -max-request-bytes 65536 \
+  -max-response-bytes 1048576 \
+  -max-seconds 120 \
+  -max-permit-seconds 300 \
+  -tenant-budget tenant-a=4194304
+```
+
+Run the exact activation command printed by `gateway service set`. It prints
+`systemctl restart steward-gateway.service` when it adds or changes a receipt
+identity or tenant budget and `systemctl reload steward-gateway.service` otherwise.
+An older configuration with no Gateway receipt identity also needs
+`-receipt-file`, `-receipt-key-file`, `-receipt-node-id`, and a positive
+`-receipt-epoch` on this first change. `gateway service list` prints the installed
+operations.
+
+Export the exact non-secret operation inventory for this node and tenant. It is
+unsigned, so authenticate the file when moving it to the signing workstation:
+
+```console
+sudo stewardctl gateway service trust \
+  -config /etc/steward/gateway.json \
+  -node-id node-a \
+  -tenant-id tenant-a > hermes-service-trust.json
+chmod go-w hermes-service-trust.json
+```
+
+The `steward.service-trust.v1` file includes the operation-policy digest and all
+byte, time, and permit limits. It contains no private key, token, prompt, or Gateway
+credential. `task issue` uses it as mismatch preflight; the active Gateway grant and
+configuration remain authoritative.
+
+### 3. Sign one exact custom-skill request
+
+Create the exact Hermes run body. This request asks the pinned adapter to load and
+run the immutable `steward.workspace-audit` custom skill:
+
+```console
+printf '%s\n' \
+  '{"input":"STEWARD_WORKSPACE_AUDIT","session_id":"tenant-a-workspace-audit-01"}' \
+  > hermes-workspace-audit.request.json
+```
+
+Issue an owner-only bundle. Omit `-task-id` to generate a random 128-bit task ID;
+do not reuse a task ID for a different intended effect:
+
+```console
+stewardctl task issue \
+  -admission admission.json \
+  -intent instance-intent.json \
+  -trust hermes-service-trust.json \
+  -request hermes-workspace-audit.request.json \
+  -operation-id hermes.run \
+  -valid-for 5m \
+  -clock-skew 5s \
+  -key hermes-task-approver.private.pem \
+  -key-id hermes-task-approver \
+  -out hermes-workspace-audit.task.json
+```
+
+The bundle contains the exact request bytes, public authority, service path,
+operation limits, and signed permit. It is mode `0600` because the exact task may be
+sensitive even though the private key is absent. Verify it against an external
+public key before transfer:
+
+```console
+stewardctl task verify \
+  -in hermes-workspace-audit.task.json \
+  -public-key hermes-task-approver.public \
+  -key-id hermes-task-approver \
+  -request hermes-workspace-audit.request.json
+```
+
+### 4. Dispatch through loopback Gateway
+
+On the node, submit the bundle and wait for Hermes to reach a terminal run state:
+
+```console
+sudo stewardctl hermes run \
+  -bundle hermes-workspace-audit.task.json \
+  -gateway-url http://127.0.0.1:8091 \
+  -token-file /etc/steward/gateway-service-token \
+  -wait \
+  -wait-timeout 3m
+```
+
+`hermes run` accepts only an HTTP origin with a literal loopback address and an
+explicit port. For a remote node, copy the owner-only bundle through an approved
+channel and run this command over SSH so the Gateway token remains on the node:
+
+```console
+scp hermes-workspace-audit.task.json root@node-a:/root/
+ssh root@node-a 'stewardctl hermes run \
+  -bundle /root/hermes-workspace-audit.task.json \
+  -gateway-url http://127.0.0.1:8091 \
+  -token-file /etc/steward/gateway-service-token \
+  -wait'
+```
+
+If policy requires an SSH tunnel instead, forward a local port to
+`127.0.0.1:8091` and use `http://127.0.0.1:<local-port>`; the CLI still requires a
+separately protected local copy of the Gateway token. The SSH connection and token
+authenticate the host operator transport. The tenant signature authorizes the exact
+task. The optional status polling after dispatch uses the host token because the
+permit authorizes only `POST /v1/runs`.
+
+Gateway records authorization before contacting Hermes. The exact same successful
+request and permit can return the recorded run ID with
+`X-Steward-Task-Receipt: replayed` while the bundle remains locally valid, without
+another dispatch. Any changed byte, operation, grant, policy, or authority fails.
+An interrupted or malformed upstream response is recorded as an unknown outcome and
+is not retried automatically.
+
+This is node-local at-most-once dispatch within one retained Gateway ledger epoch.
+It is not exactly-once execution across nodes, ledger replacement, epoch rotation,
+or an upstream service. The run ID is supplied by the untrusted Hermes service; a
+receipt proves only that Gateway observed and retained it. The custom-skill result
+and qualification checks provide separate evidence that this pinned Hermes build did
+actual workspace work.
+
+### 5. Audit the signed dispatch offline
+
+Copy the Gateway receipt ledger and public key to an audit workstation, along with
+an independently retained chain head:
+
+```console
+stewardctl task audit \
+  -in hermes-workspace-audit.task.json \
+  -public-key hermes-task-approver.public \
+  -key-id hermes-task-approver \
+  -request hermes-workspace-audit.request.json \
+  -receipts connector-receipts.ndjson \
+  -receipt-public-key connector-receipts.public \
+  -receipt-node-id node-a/gateway \
+  -receipt-epoch 1 \
+  -expected-sequence '<retained-sequence>' \
+  -expected-chain-hash 'sha256:<retained-chain-hash>'
+```
+
+The output correlates the authority key, permit, exact request digest, admitted
+artifact and policies, service operation, authorization, optional terminal record,
+and final chain head. Receipts do not contain the request body, raw prompt, model
+output, workspace files, or signing private key.
 
 ## Inference and service behavior
 

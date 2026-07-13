@@ -58,7 +58,9 @@ not isolate shared CPU, memory, disk latency, or the host-wide audit filesystem.
 
 ## What does signed admission add beyond a sandbox?
 
-It records why a workload was allowed. A profile capsule is a publisher-signed
+Docker and gVisor limit where code runs; they do not identify the tenant that
+authorized it or define one approved external effect. Signed admission records why
+a workload was allowed. A profile capsule is a publisher-signed
 description of an immutable image and its maximum capabilities. Executor verifies
 that capsule, a policy signed by the operator's site root key, and an authenticated
 intent bound to a tenant, node, instance, and generation. Executor journals host
@@ -67,9 +69,12 @@ changes and emits receipts that `stewardctl` can verify offline. This path is op
 
 ## Do receipts prove everything an agent did?
 
-No. Receipts bind Steward's admission and host-mutation records. They exclude
-prompts, model responses, agent logs, and tool meaning. Compromised host root is
-outside the node-local receipt trust boundary.
+No. Executor receipts bind Steward's admission and host-mutation records. Gateway
+receipts can bind an exact tenant task permit, request digest, dispatch result, and
+the run ID observed from an agent service. They exclude raw prompts, request bodies,
+model responses, agent logs, workspace content, and tool meaning. The service
+supplies its run ID, so the ID is not independent proof that useful work completed.
+Compromised host root is outside the node-local receipt trust boundary.
 
 ## Can Steward run Hermes Agent or OpenClaw?
 
@@ -80,7 +85,7 @@ admissible because it starts as root and declares a volume. Steward includes an
 interactive and non-interactive builder; it does not redistribute a prebuilt image
 because dependency and base-image notices are incomplete.
 
-The Hermes qualification ran a signed, network-free workspace-audit skill as a real
+The Hermes qualification runs a signed, network-free workspace-audit skill as a real
 task under gVisor, changed persisted workspace state, and required a fresh changed
 result after restart. It also required Hermes to discover and load the exact signed
 connector skill before proving one authenticated upstream effect, replay and
@@ -90,8 +95,10 @@ but not run event streams. Inference is fixed through
 `http://steward-relay:8080/v1`. Persistent state requires the explicit dedicated
 single-tenant host mode and is not a shared-host claim.
 
-The retained Hermes qualification used ordinary connector grant and task authority;
-it did not exercise the optional action-permit path.
+The tenant-signed service-task path scopes an off-node key to `hermes-api`, signs the
+exact workspace-audit run request, dispatches it with `stewardctl hermes run`, and
+audits receipt format 3. The connector portion still uses ordinary connector grant
+and task authority; it does not exercise the optional connector action-permit path.
 
 OpenClaw has not completed this qualification and remains a layout contract. See the
 [Hermes]({{ '/guides/hermes-agent/' | relative_url }}) and
@@ -135,6 +142,26 @@ exact configured credential. A malicious or misconfigured upstream can still
 encode or transform that value, disclose the private origin, or return another
 application secret. Use a narrow trusted operation. See
 [authenticated API operations]({{ '/guides/connectors/' | relative_url }}).
+
+## How can a tenant authorize one exact agent task?
+
+Add an Ed25519 public key to that tenant's signed-policy `task_keys` and scope it to
+the exact service ID. Keep the private key off-node. Configure one exact Gateway
+service operation with `stewardctl gateway service set`, export its unsigned
+tenant-specific inventory with `gateway service trust`, and issue an owner-only
+bundle with `stewardctl task issue`. Gateway requires both the active workload grant
+and that short-lived permit before dispatch.
+
+For Hermes, `stewardctl hermes run` submits the bundle through a literal-loopback
+Gateway origin and can poll the bounded status endpoint. Run it locally or over SSH;
+do not expose Gateway publicly. `stewardctl task verify` checks the bundle offline,
+and `task audit` correlates it with a copied format-3 Gateway receipt chain.
+
+The replay guarantee is node-local at-most-once dispatch within one retained ledger
+epoch. It is not fleet-wide or upstream exactly-once execution. Reusing the task ID
+on another node, replacing the ledger, or advancing its epoch creates another replay
+domain. An ambiguous outcome stays spent and is not retried automatically. See the
+[Hermes task workflow]({{ '/guides/hermes-agent/' | relative_url }}#authorize-and-run-one-exact-hermes-task).
 
 ## Is the exported action-trust inventory an authorization document?
 
