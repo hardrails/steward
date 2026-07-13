@@ -28,6 +28,7 @@ var upgradeStateNames = []string{
 	"gateway_state",
 	"operation_journal",
 	"supervisor_state",
+	"uplink_delivery_state",
 	"uplink_state",
 }
 
@@ -37,6 +38,7 @@ type upgradeOptions struct {
 	journalFile         string
 	evidenceFile        string
 	uplinkStateFile     string
+	uplinkDeliveryState string
 	supervisorStateFile string
 	gatewayConfig       string
 	releaseManifest     string
@@ -49,6 +51,7 @@ type observedStateFormats struct {
 	GatewayState        *int `json:"gateway_state"`
 	OperationJournal    *int `json:"operation_journal"`
 	SupervisorState     *int `json:"supervisor_state"`
+	UplinkDeliveryState *int `json:"uplink_delivery_state"`
 	UplinkState         *int `json:"uplink_state"`
 }
 
@@ -94,6 +97,7 @@ type releaseStateFormats struct {
 	GatewayState        releaseFormatRange `json:"gateway_state"`
 	OperationJournal    releaseFormatRange `json:"operation_journal"`
 	SupervisorState     releaseFormatRange `json:"supervisor_state"`
+	UplinkDeliveryState releaseFormatRange `json:"uplink_delivery_state"`
 	UplinkState         releaseFormatRange `json:"uplink_state"`
 }
 
@@ -140,6 +144,7 @@ func parseUpgradeOptions(action string, arguments []string) (upgradeOptions, err
 	journalFile := flags.String("journal-file", "/var/lib/steward-executor/operation-journal.bin", "operation journal")
 	evidenceFile := flags.String("evidence-file", "/var/lib/steward-executor/evidence.bin", "evidence log")
 	uplinkStateFile := flags.String("uplink-state-file", "/var/lib/steward-executor/uplink-state.json", "Executor uplink state")
+	uplinkDeliveryState := flags.String("uplink-delivery-state-file", "/var/lib/steward-executor/uplink-delivery-state.json", "Executor uplink delivery state")
 	supervisorStateFile := flags.String("supervisor-state-file", "/var/lib/steward/state.json", "supervisor state")
 	gatewayConfig := flags.String("gateway-config", "/etc/steward/gateway.json", "Gateway configuration")
 	releaseManifest := flags.String("release-manifest", "", "target release.json compatibility manifest")
@@ -154,8 +159,9 @@ func parseUpgradeOptions(action string, arguments []string) (upgradeOptions, err
 	}
 	for name, value := range map[string]string{
 		"fence-file": *fenceFile, "journal-file": *journalFile, "evidence-file": *evidenceFile,
-		"uplink-state-file": *uplinkStateFile, "supervisor-state-file": *supervisorStateFile,
-		"gateway-config": *gatewayConfig,
+		"uplink-state-file": *uplinkStateFile, "uplink-delivery-state-file": *uplinkDeliveryState,
+		"supervisor-state-file": *supervisorStateFile,
+		"gateway-config":        *gatewayConfig,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return upgradeOptions{}, fmt.Errorf("-%s must not be empty", name)
@@ -164,6 +170,7 @@ func parseUpgradeOptions(action string, arguments []string) (upgradeOptions, err
 	return upgradeOptions{
 		signedAdmission: *signedAdmission, fenceFile: *fenceFile, journalFile: *journalFile,
 		evidenceFile: *evidenceFile, uplinkStateFile: *uplinkStateFile,
+		uplinkDeliveryState: *uplinkDeliveryState,
 		supervisorStateFile: *supervisorStateFile, gatewayConfig: *gatewayConfig,
 		releaseManifest: *releaseManifest,
 	}, nil
@@ -252,6 +259,16 @@ func inspectUpgradeState(options upgradeOptions) (upgradeInspection, error) {
 		result.Formats.UplinkState = integerPointer(summary.FormatVersion)
 	}
 
+	if present, err = pathPresent(options.uplinkDeliveryState); err != nil {
+		return upgradeInspection{}, fmt.Errorf("inspect Executor uplink delivery state path: %w", err)
+	} else if present {
+		summary, err := executoruplink.InspectDeliveryStateFormat(options.uplinkDeliveryState)
+		if err != nil {
+			return upgradeInspection{}, err
+		}
+		result.Formats.UplinkDeliveryState = integerPointer(summary.FormatVersion)
+	}
+
 	if present, err = pathPresent(options.supervisorStateFile); err != nil {
 		return upgradeInspection{}, fmt.Errorf("inspect supervisor state path: %w", err)
 	} else if present {
@@ -322,6 +339,7 @@ func checkTargetCompatibility(path string, observed observedStateFormats) (*bool
 		"gateway_state":         observed.GatewayState,
 		"operation_journal":     observed.OperationJournal,
 		"supervisor_state":      observed.SupervisorState,
+		"uplink_delivery_state": observed.UplinkDeliveryState,
 		"uplink_state":          observed.UplinkState,
 	}
 	incompatible := make([]string, 0)
@@ -357,6 +375,8 @@ func (formats releaseStateFormats) forName(name string) releaseFormatRange {
 		return formats.OperationJournal
 	case "supervisor_state":
 		return formats.SupervisorState
+	case "uplink_delivery_state":
+		return formats.UplinkDeliveryState
 	case "uplink_state":
 		return formats.UplinkState
 	default:

@@ -95,6 +95,18 @@ func TestDeliveryStoreIsOwnerOnlyNodeBoundAndStrict(t *testing.T) {
 	if store.NodeID() != "node-1" {
 		t.Fatalf("node=%q", store.NodeID())
 	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := InspectDeliveryStateFormat(path)
+	if err != nil || !summary.Present || summary.FormatVersion != deliveryStateVersion {
+		t.Fatalf("format summary=%#v err=%v", summary, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("format inspection changed state: err=%v", err)
+	}
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode=%v err=%v", info.Mode().Perm(), err)

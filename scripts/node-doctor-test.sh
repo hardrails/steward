@@ -129,6 +129,7 @@ case "$format" in
 	*operation-journal.bin) printf '1677721\n' ;;
 	*evidence.bin) printf '6710886\n' ;;
 	*uplink-state.json) printf '104857\n' ;;
+	*uplink-delivery-state.json) printf '838860\n' ;;
 	*) printf '%s\n' "${FAKE_CONNECTOR_SIZE:-6710886}" ;;
 	esac
 	;;
@@ -185,17 +186,19 @@ fence=$work/state/admission-fences.bin
 journal=$work/state/operation-journal.bin
 evidence=$work/state/evidence.bin
 uplink=$work/state/uplink-state.json
+uplink_delivery=$work/state/uplink-delivery-state.json
 connector=$work/state/connector\"receipts.ndjson
 : >"$fence"
 : >"$journal"
 : >"$evidence"
 : >"$uplink"
+: >"$uplink_delivery"
 : >"$connector"
-chmod 0600 "$fence" "$journal" "$evidence" "$uplink" "$connector"
+chmod 0600 "$fence" "$journal" "$evidence" "$uplink" "$uplink_delivery" "$connector"
 executor_env=$work/state/executor.env
 docker_socket=$work/state/docker.sock
-printf 'EXECUTOR_DOCKER_SOCKET=%s\nEXECUTOR_TOKEN_FILE=%s\nEXECUTOR_UPLINK_STATE_FILE=%s\n' \
-	"$docker_socket" "$token" "$uplink" >"$executor_env"
+printf 'EXECUTOR_DOCKER_SOCKET=%s\nEXECUTOR_TOKEN_FILE=%s\nEXECUTOR_UPLINK_STATE_FILE=%s\nEXECUTOR_UPLINK_DELIVERY_STATE_FILE=%s\n' \
+	"$docker_socket" "$token" "$uplink" "$uplink_delivery" >"$executor_env"
 chmod 0600 "$executor_env"
 : >"$work/curl.log"
 : >"$work/stewardctl.log"
@@ -217,6 +220,7 @@ common_env=(
 	"STEWARD_DOCTOR_OPERATION_JOURNAL_FILE=$journal"
 	"STEWARD_DOCTOR_EVIDENCE_FILE=$evidence"
 	"STEWARD_DOCTOR_UPLINK_STATE_FILE=$uplink"
+	"STEWARD_DOCTOR_UPLINK_DELIVERY_STATE_FILE=$uplink_delivery"
 	"STEWARD_DOCTOR_CONNECTOR_RECEIPT_FILE=$connector"
 	"FAKE_CURL_LOG=$work/curl.log"
 	"FAKE_STEWARDCTL_LOG=$work/stewardctl.log"

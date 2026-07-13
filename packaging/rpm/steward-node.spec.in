@@ -50,7 +50,7 @@ fi
 
 %postun
 if [ "$1" -eq 0 ]; then
-    for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+    for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
         path="/usr/local/bin/$binary"
         target=$(readlink "$path" 2>/dev/null || true)
         case "$target" in

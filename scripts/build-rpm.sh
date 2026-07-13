@@ -17,7 +17,7 @@ command -v rpmbuild >/dev/null || {
 	echo "build-rpm: rpmbuild is required" >&2
 	exit 2
 }
-for path in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/config/steward.json deploy/config/steward-local.json \
+for path in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/config/steward.json deploy/config/steward-local.json \
 	deploy/config/executor.env deploy/config/executor-gateway.env deploy/systemd/steward.service \
 	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
 	deploy/config/gateway.json.in scripts/install-node.sh \

@@ -91,6 +91,7 @@ jobs:
             /tmp/steward-node-test.deb.contents /tmp/steward-node-test.rpm.contents' EXIT
           mkdir -p "$stage/adapters" "$stage/deploy" "$stage/scripts"
           go build -o "$stage/steward" ./cmd/steward
+          go build -o "$stage/steward-control" ./cmd/steward-control
           go build -o "$stage/steward-executor" ./cmd/steward-executor
           go build -o "$stage/stewardctl" ./cmd/stewardctl
           go build -o "$stage/steward-mcp" ./cmd/steward-mcp
@@ -115,6 +116,14 @@ jobs:
           test "$("$smoke/layout/hermes-steward-acceptance" --check-layout)" = \
             "$smoke/layout/release"
           bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)"
+          grep -Fq '    "steward-control": "' "$stage/release.json"
+          grep -Fxq '    "uplink_delivery_state": {"read_min": 1, "read_max": 1, "write": 1},' "$stage/release.json"
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 49
+          grep -Fxq 'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' "$stage/deploy/config/executor.env"
+          grep -Fq -- '-uplink-delivery-state-file=${EXECUTOR_UPLINK_DELIVERY_STATE_FILE}' \
+            "$stage/deploy/systemd/steward-executor.service"
+          grep -Fq -- '-uplink-delivery-state-file "${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-}"' \
+            "$stage/scripts/node-preflight.sh"
           cp "$stage/release.json" "$stage/release.first.json"
           bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)"
           cmp "$stage/release.first.json" "$stage/release.json"
@@ -159,6 +168,11 @@ jobs:
             /tmp/steward-node-test.rpm
           dpkg-deb --info /tmp/steward-node-test.deb
           dpkg-deb --contents /tmp/steward-node-test.deb > /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/steward-control' /tmp/steward-node-test.deb.contents
+          if grep -q 'steward-control.service' /tmp/steward-node-test.deb.contents; then
+            echo 'node DEB unexpectedly installs a control-plane service' >&2
+            exit 1
+          fi
           grep -q './usr/lib/steward-node/release/steward-executor' /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/stewardctl' /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/steward-mcp' /tmp/steward-node-test.deb.contents
@@ -180,6 +194,11 @@ jobs:
             tar -xOf - ./postinst | grep -q -- "--expected-version 'v0.0.0-test'"
           rpm -qpi /tmp/steward-node-test.rpm
           rpm -qpl /tmp/steward-node-test.rpm > /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/steward-control' /tmp/steward-node-test.rpm.contents
+          if grep -q 'steward-control.service' /tmp/steward-node-test.rpm.contents; then
+            echo 'node RPM unexpectedly installs a control-plane service' >&2
+            exit 1
+          fi
           grep -q '/usr/lib/steward-node/release/steward-executor' /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/stewardctl' /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/steward-mcp' /tmp/steward-node-test.rpm.contents

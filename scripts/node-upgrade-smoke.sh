@@ -123,6 +123,193 @@ EOF
 	fi
 }
 
+exercise_configuration_lock() {
+	local helper lock ready release error_file
+	if ! command -v flock >/dev/null 2>&1; then
+		echo "node-upgrade-smoke: configuration lock check skipped (flock unavailable)"
+		return 0
+	fi
+	helper="$work/exercise-configuration-lock.sh"
+	{
+		printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n'
+		awk '
+			/^acquire_node_lock\(\) \{$/ { copying=1 }
+			copying { print }
+			copying && /^}$/ { exit }
+		' "$root/scripts/configure-node.sh"
+		cat <<'EOF'
+lock=$SMOKE_LOCK
+ready=$SMOKE_READY
+release=$SMOKE_RELEASE
+error_file=$SMOKE_ERROR
+(
+	exec 8>"$lock"
+	flock 8
+	: >"$ready"
+	while [[ ! -e $release ]]; do sleep 0.01; done
+) &
+holder=$!
+for ((index = 0; index < 1000; index++)); do
+	[[ ! -e $ready ]] || break
+	sleep 0.01
+done
+[[ -e $ready ]]
+if acquire_node_lock "$lock" 0 2>"$error_file"; then
+	echo "node-upgrade-smoke: configure-node acquired a held activation lock" >&2
+	exit 1
+fi
+grep -Fxq 'configure-node: another node configuration or activation did not finish within 0 seconds' "$error_file"
+: >"$release"
+wait "$holder"
+acquire_node_lock "$lock" 1
+exec 9>&-
+EOF
+	} >"$helper"
+	chmod 0755 "$helper"
+	grep -Fq 'acquire_node_lock() {' "$helper" || {
+		echo "node-upgrade-smoke: could not extract configure-node lock acquisition" >&2
+		return 1
+	}
+	lock="$work/configure.lock"
+	ready="$work/configure.lock.ready"
+	release="$work/configure.lock.release"
+	error_file="$work/configure.lock.error"
+	SMOKE_LOCK="$lock" SMOKE_READY="$ready" SMOKE_RELEASE="$release" \
+		SMOKE_ERROR="$error_file" bash "$helper"
+}
+
+exercise_delivery_activation() {
+	local helper function_name
+	mkdir -p "$work/delivery/bin" "$work/delivery/release" "$work/delivery/etc" \
+		"$work/delivery/backup" "$work/delivery/state"
+	cat >"$work/delivery/bin/runuser" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ ${1:-} == -u && -n ${2:-} && ${3:-} == -- ]] || exit 2
+shift 3
+exec "$@"
+EOF
+	cat >"$work/delivery/bin/chown" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# -eq 2 && $1 == root:root && -f $2 ]]
+EOF
+	cat >"$work/delivery/release/steward-executor" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+	-inspect-uplink-credential)
+		printf '%s\n%s\n' "${FAKE_SCOPE:?}" "${FAKE_NODE_ID:?}"
+		;;
+	-initialize-uplink-delivery-state)
+		state= node=
+		while (( $# > 0 )); do
+			case "$1" in
+				-initialize-uplink-delivery-state) shift ;;
+				-uplink-delivery-state-file) state=${2:-}; shift 2 ;;
+				-admission-node-id) node=${2:-}; shift 2 ;;
+				*) exit 2 ;;
+			esac
+		done
+		[[ -n $state && $node == node-a ]]
+		( set -o noclobber; : >"$state" ) 2>/dev/null || exit 2
+		chmod 0600 "$state"
+		;;
+	*) exit 2 ;;
+esac
+EOF
+	chmod 0755 "$work/delivery/bin/runuser" "$work/delivery/bin/chown" \
+		"$work/delivery/release/steward-executor"
+
+	helper="$work/delivery/exercise.sh"
+	{
+		printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n'
+		for function_name in restore_executor_setup activation_error read_executor_setting prepare_uplink_delivery_state; do
+			awk -v signature="$function_name() {" '
+				$0 == signature { copying=1 }
+				copying { print }
+				copying && $0 == "}" { exit }
+			' "$root/scripts/activate-node-release.sh"
+		done
+		cat <<'EOF'
+executor_env=$SMOKE_EXECUTOR_ENV
+gateway_env_backup=$SMOKE_BACKUP
+executor_env_present=true
+release_dir=$SMOKE_RELEASE
+uplink_delivery_state=$SMOKE_DELIVERY_STATE
+admission_mode=configured
+executor_env_tmp=
+
+write_env() {
+	printf '%s\n' \
+		'EXECUTOR_UPLINK_CREDENTIAL_FILE=/credential.json' \
+		'EXECUTOR_ADMISSION_NODE_ID=node-a' \
+		'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' >"$executor_env"
+	cp -a -- "$executor_env" "$gateway_env_backup/executor.env"
+	executor_setup_changed=false
+	uplink_delivery_state_created=false
+}
+
+write_env
+export FAKE_SCOPE=node FAKE_NODE_ID=node-a
+prepare_uplink_delivery_state
+grep -Fxq "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=$uplink_delivery_state" "$executor_env"
+[[ -f $uplink_delivery_state && $executor_setup_changed == true && $uplink_delivery_state_created == true ]]
+restore_executor_setup
+cmp "$executor_env" "$gateway_env_backup/executor.env"
+[[ ! -e $uplink_delivery_state ]]
+
+write_env
+export FAKE_SCOPE=tenant FAKE_NODE_ID=node-a
+prepare_uplink_delivery_state
+cmp "$executor_env" "$gateway_env_backup/executor.env"
+[[ ! -e $uplink_delivery_state && $executor_setup_changed == false ]]
+
+write_env
+: >"$uplink_delivery_state"
+chmod 0600 "$uplink_delivery_state"
+export FAKE_SCOPE=node FAKE_NODE_ID=node-a
+prepare_uplink_delivery_state
+[[ $executor_setup_changed == true && $uplink_delivery_state_created == false ]]
+restore_executor_setup
+[[ -f $uplink_delivery_state ]]
+rm -f "$uplink_delivery_state"
+
+write_env
+export FAKE_SCOPE=node FAKE_NODE_ID=node-other
+set +e
+( set -e; prepare_uplink_delivery_state ) >/dev/null 2>&1
+status=$?
+set -e
+[[ $status -ne 0 ]]
+cmp "$executor_env" "$gateway_env_backup/executor.env"
+[[ ! -e $uplink_delivery_state ]]
+EOF
+	} >"$helper"
+	chmod 0755 "$helper"
+	for function_name in restore_executor_setup activation_error read_executor_setting prepare_uplink_delivery_state; do
+		grep -Fq "$function_name() {" "$helper" || {
+			echo "node-upgrade-smoke: could not extract $function_name" >&2
+			return 1
+		}
+	done
+
+	delivery_env=(
+		"PATH=$work/delivery/bin:$PATH"
+		"SMOKE_EXECUTOR_ENV=$work/delivery/etc/executor.env"
+		"SMOKE_BACKUP=$work/delivery/backup"
+		"SMOKE_RELEASE=$work/delivery/release"
+		"SMOKE_DELIVERY_STATE=$work/delivery/state/uplink-delivery-state.json"
+	)
+	if (( ${#as_root[@]} > 0 )); then
+		"${as_root[@]}" env "${delivery_env[@]}" bash "$helper"
+	else
+		env "${delivery_env[@]}" bash "$helper"
+	fi
+}
+
+exercise_configuration_lock
+exercise_delivery_activation
 if [[ $relay_test == true ]]; then
 	exercise_connector_keygen_boundary
 else
@@ -243,4 +430,4 @@ if "$root/scripts/uninstall-node.sh" --purge-data 2>/dev/null; then
 	exit 1
 fi
 
-echo "node-upgrade-smoke: key-generation boundary, relay binding, and drain guards passed"
+echo "node-upgrade-smoke: configuration lock, delivery activation, key-generation boundary, relay binding, and drain guards passed"

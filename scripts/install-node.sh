@@ -163,6 +163,7 @@ esac
 
 release_files=(
 	steward
+	steward-control
 	steward-executor
 	steward-gateway
 	steward-mcp
@@ -247,6 +248,7 @@ write_canonical_manifest() {
 		printf '    "gateway_state": {"read_min": 1, "read_max": 4, "write": 4},\n'
 		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
+		printf '    "uplink_delivery_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "uplink_state": {"read_min": 2, "read_max": 2, "write": 2}\n'
 		printf '  },\n'
 		printf '  "files": {\n'
@@ -363,7 +365,7 @@ install -d -o root -g root -m 0755 /opt/steward
 incoming=$(mktemp -d /opt/steward/.incoming.XXXXXX)
 trap 'rm -rf "$incoming"' EXIT
 chmod 0755 "$incoming"
-for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 	install -o root -g root -m 0755 "$root/$binary" "$incoming/$binary"
 done
 install -d -o root -g root -m 0755 "$incoming/integration" \
@@ -402,12 +404,13 @@ install -o root -g root -m 0644 "$root/release.json" "$incoming/release.json"
 verify_release "$incoming" installed
 
 steward_version=$(runuser -u steward -- "$incoming/steward" -version | awk '{print $2}')
+control_version=$(runuser -u steward -- "$incoming/steward-control" -version | awk '{print $2}')
 ctl_version=$(runuser -u steward -- "$incoming/stewardctl" -version | awk '{print $2}')
 executor_version=$(runuser -u steward -- "$incoming/steward-executor" -version | awk '{print $2}')
 gateway_version=$(runuser -u steward -- "$incoming/steward-gateway" -version | awk '{print $2}')
 relay_version=$(runuser -u steward -- "$incoming/steward-relay" -version | awk '{print $2}')
 mcp_version=$(runuser -u steward -- "$incoming/steward-mcp" -version | awk '{print $2}')
-if [[ -z $steward_version || $steward_version != "$executor_version" || $steward_version != "$ctl_version" || \
+if [[ -z $steward_version || $steward_version != "$control_version" || $steward_version != "$executor_version" || $steward_version != "$ctl_version" || \
 	$steward_version != "$gateway_version" || $steward_version != "$relay_version" || $steward_version != "$mcp_version" ]]; then
 	echo "install-node: Steward process versions do not match" >&2
 	exit 2
@@ -509,7 +512,7 @@ else
 	# A first install may repair only an already-correct managed symlink. Any
 	# unrelated file at a stable entry point belongs to the operator and is not
 	# replaced implicitly.
-	for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+	for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 		path="/usr/local/bin/$binary"
 		if [[ -e $path || -L $path ]]; then
 			[[ -L $path && $(readlink "$path") == "/opt/steward/current/$binary" ]] || {
@@ -566,7 +569,7 @@ else
 	mv -Tf "$current_tmp" /opt/steward/current
 	selection="selected for first-time configuration"
 
-	for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+	for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 		tmp="/usr/local/bin/.${binary}.new.$$"
 		rm -f "$tmp"
 		ln -s "/opt/steward/current/$binary" "$tmp"

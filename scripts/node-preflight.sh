@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Validate the installed node, trust material, six binaries, and three services.
+# Validate the installed node, trust material, seven binaries, and three services.
 set -euo pipefail
 
 steward_config=${STEWARD_CONFIG_FILE:-/etc/steward/steward.json}
 executor_env=${STEWARD_EXECUTOR_ENV_FILE:-/etc/steward/executor.env}
 executor_gateway_env=${STEWARD_EXECUTOR_GATEWAY_ENV_FILE:-/etc/steward/executor-gateway.env}
 steward_bin=${STEWARD_BIN:-/usr/local/bin/steward}
+control_bin=${STEWARD_CONTROL_BIN:-/usr/local/bin/steward-control}
 ctl_bin=${STEWARD_CTL_BIN:-/usr/local/bin/stewardctl}
 mcp_bin=${STEWARD_MCP_BIN:-/usr/local/bin/steward-mcp}
 executor_bin=${STEWARD_EXECUTOR_BIN:-/usr/local/bin/steward-executor}
@@ -45,8 +46,8 @@ if ! docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
 	echo "node-preflight: Docker runtime runsc is required" >&2
 	exit 2
 fi
-binary_names=(steward stewardctl steward-mcp steward-executor steward-gateway steward-relay)
-binary_paths=("$steward_bin" "$ctl_bin" "$mcp_bin" "$executor_bin" "$gateway_bin" "$relay_bin")
+binary_names=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay)
+binary_paths=("$steward_bin" "$control_bin" "$ctl_bin" "$mcp_bin" "$executor_bin" "$gateway_bin" "$relay_bin")
 for binary in "${binary_paths[@]}"; do
 	if [[ ! -x $binary ]]; then
 		echo "node-preflight: missing executable $binary" >&2
@@ -133,7 +134,7 @@ fi
 declare -A executor=()
 required=' EXECUTOR_TOKEN_FILE EXECUTOR_DOCKER_SOCKET EXECUTOR_MAX_MEMORY_BYTES EXECUTOR_MAX_CPU_MILLIS EXECUTOR_MAX_PIDS EXECUTOR_MAX_WORKLOADS EXECUTOR_MAX_WORKLOADS_PER_TENANT '
 uplink=' EXECUTOR_UPLINK_URL EXECUTOR_UPLINK_CREDENTIAL_FILE EXECUTOR_UPLINK_STATE_FILE EXECUTOR_UPLINK_TLS_CA_FILE '
-optional=' EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG EXECUTOR_STATE_ARG EXECUTOR_MAX_TOTAL_MEMORY_BYTES EXECUTOR_MAX_TOTAL_CPU_MILLIS EXECUTOR_MAX_TOTAL_PIDS EXECUTOR_MAX_TENANT_MEMORY_BYTES EXECUTOR_MAX_TENANT_CPU_MILLIS EXECUTOR_MAX_TENANT_PIDS '
+optional=' EXECUTOR_UPLINK_DELIVERY_STATE_FILE EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG EXECUTOR_STATE_ARG EXECUTOR_MAX_TOTAL_MEMORY_BYTES EXECUTOR_MAX_TOTAL_CPU_MILLIS EXECUTOR_MAX_TOTAL_PIDS EXECUTOR_MAX_TENANT_MEMORY_BYTES EXECUTOR_MAX_TENANT_CPU_MILLIS EXECUTOR_MAX_TENANT_PIDS '
 allowed="$required$uplink$optional"
 while IFS= read -r line || [[ -n $line ]]; do
 	[[ -z $line || $line == \#* ]] && continue
@@ -167,6 +168,10 @@ if (( uplink_set != 0 && uplink_set != 4 )); then
 	echo "node-preflight: Executor uplink settings must be all set or all empty" >&2
 	exit 2
 fi
+if [[ -n ${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-} && $uplink_set -ne 4 ]]; then
+	echo "node-preflight: Executor delivery state requires the complete uplink configuration" >&2
+	exit 2
+fi
 
 admission_args=()
 gateway_args=()
@@ -178,6 +183,10 @@ for key in "${admission_keys[@]}"; do
 done
 if (( admission_set != 0 && admission_set != ${#admission_keys[@]} )); then
 	echo "node-preflight: signed admission settings must be all set or all absent" >&2
+	exit 2
+fi
+if [[ -n ${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-} && $admission_set -ne ${#admission_keys[@]} ]]; then
+	echo "node-preflight: Executor delivery state requires complete signed admission" >&2
 	exit 2
 fi
 if (( admission_set == ${#admission_keys[@]} )); then
@@ -282,6 +291,7 @@ runuser -u steward-executor -- "$executor_bin" -check-config \
 	-uplink-url "${executor[EXECUTOR_UPLINK_URL]}" \
 	-uplink-credential-file "${executor[EXECUTOR_UPLINK_CREDENTIAL_FILE]}" \
 	-uplink-state-file "${executor[EXECUTOR_UPLINK_STATE_FILE]}" \
+	-uplink-delivery-state-file "${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-}" \
 	-uplink-tls-ca-file "${executor[EXECUTOR_UPLINK_TLS_CA_FILE]}" \
 	-max-memory-bytes "${executor[EXECUTOR_MAX_MEMORY_BYTES]}" \
 	-max-cpu-millis "${executor[EXECUTOR_MAX_CPU_MILLIS]}" \

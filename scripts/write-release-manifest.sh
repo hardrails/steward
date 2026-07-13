@@ -51,6 +51,7 @@ esac
 # deploy/ and scripts/ layout, so logical_source removes only this fixed prefix.
 release_files=(
 	steward
+	steward-control
 	steward-executor
 	steward-gateway
 	steward-mcp
@@ -173,6 +174,7 @@ trap cleanup EXIT HUP INT TERM
 	printf '    "gateway_state": {"read_min": 1, "read_max": 4, "write": 4},\n'
 	printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 	printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
+	printf '    "uplink_delivery_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
 	printf '    "uplink_state": {"read_min": 2, "read_max": 2, "write": 2}\n'
 	printf '  },\n'
 	printf '  "files": {\n'

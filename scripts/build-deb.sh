@@ -17,7 +17,7 @@ command -v dpkg-deb >/dev/null || {
 	echo "build-deb: dpkg-deb is required" >&2
 	exit 2
 }
-for path in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/config/steward.json deploy/config/steward-local.json \
+for path in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/config/steward.json deploy/config/steward-local.json \
 	deploy/config/executor.env deploy/config/executor-gateway.env deploy/systemd/steward.service \
 	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
 	deploy/config/gateway.json.in scripts/install-node.sh \
@@ -78,7 +78,7 @@ trap cleanup EXIT HUP INT TERM
 install -d -m 0755 "$package_root/DEBIAN" \
 	"$package_root/usr/lib/steward-node/release" \
 	"$package_root/usr/share/doc/steward-node"
-cp -R "$stage/steward" "$stage/stewardctl" "$stage/steward-mcp" "$stage/steward-executor" \
+cp -R "$stage/steward" "$stage/steward-control" "$stage/stewardctl" "$stage/steward-mcp" "$stage/steward-executor" \
 	"$stage/steward-gateway" "$stage/steward-relay" "$stage/adapters" "$stage/deploy" "$stage/scripts" \
 	"$stage/release.json" \
 	"$package_root/usr/lib/steward-node/release/"

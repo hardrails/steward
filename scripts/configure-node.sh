@@ -27,7 +27,7 @@ Optional:
 
 The operation is transactional through preflight: invalid input restores the
 previous files under /etc/steward and removes state files created by this run.
-Existing Executor fence, journal, and evidence state is never reset.
+Existing Executor fence, delivery, journal, and evidence state is never reset.
 EOF
 }
 
@@ -143,6 +143,23 @@ if (( admission_required == 3 )) && [[ ! -x /usr/local/libexec/steward/configure
 	exit 2
 fi
 
+acquire_node_lock() {
+	local lock_file=${1:-/run/lock/steward-node-activation.lock}
+	local wait_seconds=${2:-60}
+	if ! command -v flock >/dev/null 2>&1; then
+		echo "configure-node: flock is required to serialize node configuration" >&2
+		return 2
+	fi
+	exec 9>"$lock_file"
+	if ! flock -w "$wait_seconds" 9; then
+		echo "configure-node: another node configuration or activation did not finish within $wait_seconds seconds" >&2
+		return 1
+	fi
+}
+
+install -d -o root -g root -m 0755 /run/lock
+acquire_node_lock
+
 install -d -o root -g root -m 0755 /etc/steward
 backup_dir=$(mktemp -d /etc/steward/.configure-backup.XXXXXX)
 targets=(
@@ -173,10 +190,12 @@ executor_tmp=
 token_tmp=
 atomic_tmp=
 uplink_fence=/var/lib/steward-executor/uplink-state.json
+uplink_delivery_state=/var/lib/steward-executor/uplink-delivery-state.json
 admission_fence=/var/lib/steward-executor/admission-fences.bin
 operation_journal=/var/lib/steward-executor/operation-journal.bin
 evidence_log=/var/lib/steward-executor/evidence.bin
 uplink_fence_created=false
+uplink_delivery_state_created=false
 admission_fence_created=false
 operation_journal_created=false
 evidence_log_created=false
@@ -194,6 +213,7 @@ rollback() {
 			fi
 		done
 		[[ $uplink_fence_created == false ]] || rm -f -- "$uplink_fence"
+		[[ $uplink_delivery_state_created == false ]] || rm -f -- "$uplink_delivery_state"
 		[[ $admission_fence_created == false ]] || rm -f -- "$admission_fence"
 		[[ $operation_journal_created == false ]] || rm -f -- "$operation_journal"
 		[[ $evidence_log_created == false ]] || rm -f -- "$evidence_log"
@@ -204,6 +224,11 @@ rollback() {
 	exit "$status"
 }
 trap rollback ERR INT TERM
+
+transaction_error() {
+	echo "configure-node: $1" >&2
+	return 2
+}
 
 steward_tmp=$(mktemp /etc/steward/.steward.json.XXXXXX)
 if [[ $local_only == true ]]; then
@@ -257,13 +282,22 @@ awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" -v loc
 		found_state = 1
 		next
 	}
+	/^EXECUTOR_UPLINK_DELIVERY_STATE_FILE=/ {
+		if (found_delivery) exit 3
+		print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE="
+		found_delivery = 1
+		next
+	}
 	/^EXECUTOR_UPLINK_TLS_CA_FILE=/ {
 		print "EXECUTOR_UPLINK_TLS_CA_FILE=" (local_only == "true" ? "" : ca)
 		found_ca = 1
 		next
 	}
 	{ print }
-	END { if (!found_url || !found_credential || !found_state || !found_ca) exit 3 }
+	END {
+		if (!found_delivery) print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE="
+		if (!found_url || !found_credential || !found_state || !found_ca) exit 3
+	}
 ' /etc/steward/executor.env >"$executor_tmp"
 chown root:root "$executor_tmp"
 chmod 0600 "$executor_tmp"
@@ -283,6 +317,21 @@ if [[ $local_only == false ]]; then
 	install_atomic "$executor_credential" /etc/steward/executor-uplink.json \
 		steward-executor steward-executor 0600
 	install_atomic "$ca_file" /etc/steward/control-plane-ca.pem root root 0644
+fi
+executor_credential_scope=
+executor_credential_node_id=
+if [[ $local_only == false ]]; then
+	credential_metadata=$(runuser -u steward-executor -- /usr/local/bin/steward-executor \
+		-inspect-uplink-credential -uplink-credential-file /etc/steward/executor-uplink.json)
+	if [[ $credential_metadata != *$'\n'* ]]; then
+		transaction_error "Executor credential inspection returned invalid metadata"
+	fi
+	executor_credential_scope=${credential_metadata%%$'\n'*}
+	executor_credential_node_id=${credential_metadata#*$'\n'}
+	if [[ $executor_credential_node_id == *$'\n'* ]] || \
+		[[ $executor_credential_scope != tenant && $executor_credential_scope != node ]]; then
+		transaction_error "Executor credential inspection returned invalid metadata"
+	fi
 fi
 if [[ -n $executor_token ]]; then
 	install_atomic "$executor_token" /etc/steward/executor-token \
@@ -341,6 +390,46 @@ admission_env_complete() {
 		}
 	' /etc/steward/executor.env
 }
+
+# Node-scoped credentials select protocol 3 and therefore require the durable
+# delivery ledger. Tenant-scoped credentials retain protocol 1 with an empty
+# delivery-state setting. Initialization is create-only: an existing ledger is
+# never reset, and final preflight verifies its owner, format, and node binding.
+if [[ $executor_credential_scope == node ]]; then
+	if ! admission_env_complete; then
+		transaction_error "a node-scoped Executor credential requires complete signed admission"
+	fi
+	configured_node_id=$(awk -F= '
+		$1 == "EXECUTOR_ADMISSION_NODE_ID" {
+			if (seen++) exit 2
+			print substr($0, index($0, "=") + 1)
+		}
+	' /etc/steward/executor.env)
+	if [[ -z $configured_node_id || $configured_node_id != "$executor_credential_node_id" ]]; then
+		transaction_error "node-scoped Executor credential node ID does not match signed admission"
+	fi
+	if [[ ! -e $uplink_delivery_state && ! -L $uplink_delivery_state ]]; then
+		runuser -u steward-executor -- /usr/local/bin/steward-executor \
+			-initialize-uplink-delivery-state \
+			-uplink-delivery-state-file "$uplink_delivery_state" \
+			-admission-node-id "$configured_node_id"
+		uplink_delivery_state_created=true
+	fi
+	executor_tmp=$(mktemp /etc/steward/.executor.env.XXXXXX)
+	awk -v path="$uplink_delivery_state" '
+		/^EXECUTOR_UPLINK_DELIVERY_STATE_FILE=/ {
+			if (found++) exit 3
+			print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=" path
+			next
+		}
+		{ print }
+		END { if (!found) print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=" path }
+	' /etc/steward/executor.env >"$executor_tmp"
+	chown root:root "$executor_tmp"
+	chmod 0600 "$executor_tmp"
+	mv -f "$executor_tmp" /etc/steward/executor.env
+	executor_tmp=
+fi
 
 # A fresh package ships an empty positive-capability topology. Derive it only
 # after all signed-admission inputs exist. Gateway arguments themselves request

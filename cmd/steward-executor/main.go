@@ -41,6 +41,7 @@ func main() {
 	disableInbound := flag.Bool("disable-inbound-listener", false, "run outbound-only without binding the host-local HTTP API")
 	uplinkURL := flag.String("uplink-url", "", "optional control-plane base URL for outbound executor commands")
 	uplinkCredentialFile := flag.String("uplink-credential-file", "", "path to versioned executor uplink credential")
+	inspectUplinkCredential := flag.Bool("inspect-uplink-credential", false, "validate an uplink credential and print its scope and node ID, then exit")
 	uplinkStateFile := flag.String("uplink-state-file", "", "path to durable executor command-fencing state")
 	initializeUplinkState := flag.Bool("initialize-uplink-state", false, "initialize a new empty executor uplink fence and exit")
 	migrateUplinkStateTenant := flag.String("migrate-uplink-state-v1-tenant", "", "explicitly bind a version-1 uplink fence to this tenant and migrate it to version 2")
@@ -88,15 +89,33 @@ func main() {
 	}
 	oneShotActions := 0
 	for _, selected := range []bool{
-		*initializeUplinkState, *migrateUplinkStateTenant != "", *initializeUplinkDeliveryState, *initializeAdmissionFence,
+		*inspectUplinkCredential, *initializeUplinkState, *migrateUplinkStateTenant != "",
+		*initializeUplinkDeliveryState, *initializeAdmissionFence,
 	} {
 		if selected {
 			oneShotActions++
 		}
 	}
 	if oneShotActions > 1 {
-		slog.Error("state initialization and migration actions are mutually exclusive")
+		slog.Error("credential inspection, state initialization, and migration actions are mutually exclusive")
 		os.Exit(2)
+	}
+	if *inspectUplinkCredential {
+		if *uplinkCredentialFile == "" {
+			slog.Error("credential inspection requires -uplink-credential-file")
+			os.Exit(2)
+		}
+		metadata, err := stewarduplink.InspectCredential(*uplinkCredentialFile)
+		if err != nil {
+			slog.Error("inspect executor uplink credential", "err", err)
+			os.Exit(2)
+		}
+		scope := "tenant"
+		if metadata.NodeScoped() {
+			scope = "node"
+		}
+		fmt.Printf("%s\n%s\n", scope, metadata.NodeID)
+		return
 	}
 	if *initializeUplinkState {
 		if err := executoruplink.InitializeStateStore(*uplinkStateFile); err != nil {

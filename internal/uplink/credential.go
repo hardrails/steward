@@ -51,8 +51,37 @@ type CredentialSecurity struct {
 	ProtectedTransport bool
 }
 
+// CredentialMetadata is the non-secret identity bound to a validated uplink
+// credential. InspectCredential returns only these fields so installation code
+// can select a compatible protocol without exposing the bearer credential.
+type CredentialMetadata struct {
+	Version  int
+	Scope    string
+	TenantID string
+	NodeID   string
+}
+
 func (c Credential) NodeScoped() bool {
 	return c.Version == credentialVersionNode && c.Scope == "node"
+}
+
+func (m CredentialMetadata) NodeScoped() bool {
+	return m.Version == credentialVersionNode && m.Scope == "node"
+}
+
+// InspectCredential validates the credential file with the same bounded,
+// owner-only, strict-JSON checks as LoadCredentialWithSecurity, but returns
+// only non-secret metadata. It deliberately does not authorize use of a
+// node-scoped credential; callers still must load that credential with both
+// security guards before it can enter an uplink poller.
+func InspectCredential(path string) (CredentialMetadata, error) {
+	c, err := readCredential(path, nil)
+	if err != nil {
+		return CredentialMetadata{}, err
+	}
+	return CredentialMetadata{
+		Version: c.Version, Scope: c.Scope, TenantID: c.TenantID, NodeID: c.NodeID,
+	}, nil
 }
 
 // LoadCredential reads and validates the credential file at path, fail-closed. It
@@ -76,6 +105,14 @@ func LoadCredential(path string) (*Credential, error) {
 // so it is refused unless the caller explicitly attests both secure signed-command
 // mode and protected transport. This guard must also be supplied on hot reload.
 func LoadCredentialWithSecurity(path string, security CredentialSecurity) (*Credential, error) {
+	return readCredential(path, &security)
+}
+
+// readCredential centralizes every file and schema check used by both the
+// runtime loader and the non-secret metadata inspector. A nil security guard
+// means inspection only; returning the bearer is kept private to this package
+// so inspection callers cannot accidentally use it for authentication.
+func readCredential(path string, security *CredentialSecurity) (*Credential, error) {
 	// A bearer credential is a secret; its file must not be readable or writable
 	// by group or others (0600 or stricter). Check the permission bits before
 	// reading the contents so an over-exposed secret is a loud, actionable
@@ -118,7 +155,7 @@ func LoadCredentialWithSecurity(path string, security CredentialSecurity) (*Cred
 		if c.Scope != "node" || c.TenantID != "" {
 			return nil, fmt.Errorf("uplink credential file %q version 2 must have scope %q and no tenant_id (re-enroll this node and rewrite the credential file)", path, "node")
 		}
-		if !security.SecureExecutor || !security.ProtectedTransport {
+		if security != nil && (!security.SecureExecutor || !security.ProtectedTransport) {
 			return nil, fmt.Errorf("uplink credential file %q is node-scoped and requires caller-confirmed secure Executor mode and protected transport", path)
 		}
 	default:

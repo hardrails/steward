@@ -28,6 +28,7 @@ type upgradeFixture struct {
 	journal          string
 	evidence         string
 	uplink           string
+	uplinkDelivery   string
 	supervisor       string
 	gatewayConfig    string
 	gatewayState     string
@@ -47,7 +48,8 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 	fixture := upgradeFixture{
 		directory: directory, fence: filepath.Join(directory, "fences.bin"), journal: filepath.Join(directory, "journal.bin"),
 		evidence: filepath.Join(directory, "evidence.bin"), uplink: filepath.Join(directory, "uplink.json"),
-		supervisor: filepath.Join(directory, "supervisor.json"), gatewayConfig: filepath.Join(directory, "gateway.json"),
+		uplinkDelivery: filepath.Join(directory, "uplink-delivery.json"),
+		supervisor:     filepath.Join(directory, "supervisor.json"), gatewayConfig: filepath.Join(directory, "gateway.json"),
 		gatewayState: filepath.Join(directory, "gateway-state.json"), gatewayGrantRoot: filepath.Join(directory, "grants"),
 		receiptLog: filepath.Join(directory, "connector-receipts.ndjson"), receiptKey: filepath.Join(directory, "connector-receipts.pem"),
 		manifest: filepath.Join(directory, "release.json"),
@@ -66,6 +68,9 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 		t.Fatal(err)
 	}
 	if err := executoruplink.InitializeStateStore(fixture.uplink); err != nil {
+		t.Fatal(err)
+	}
+	if err := executoruplink.InitializeDeliveryStore(fixture.uplinkDelivery, "node-a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(fixture.supervisor, []byte("{\"version\":1,\"instances\":[]}\n"), 0o600); err != nil {
@@ -131,6 +136,7 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
 		"operation_journal":     {ReadMin: 1, ReadMax: 1, Write: 1},
 		"supervisor_state":      {ReadMin: 1, ReadMax: 1, Write: 1},
+		"uplink_delivery_state": {ReadMin: 1, ReadMax: 1, Write: 1},
 		"uplink_state":          {ReadMin: 1, ReadMax: 2, Write: 2},
 	})
 	return fixture
@@ -140,20 +146,25 @@ func (fixture upgradeFixture) arguments(action, mode string) []string {
 	return []string{
 		"upgrade", action, "-signed-admission", mode,
 		"-fence-file", fixture.fence, "-journal-file", fixture.journal, "-evidence-file", fixture.evidence,
-		"-uplink-state-file", fixture.uplink, "-supervisor-state-file", fixture.supervisor,
+		"-uplink-state-file", fixture.uplink, "-uplink-delivery-state-file", fixture.uplinkDelivery,
+		"-supervisor-state-file", fixture.supervisor,
 		"-gateway-config", fixture.gatewayConfig, "-release-manifest", fixture.manifest,
 	}
 }
 
 func writeUpgradeManifest(t *testing.T, path string, formats map[string]releaseFormatRange) {
 	t.Helper()
+	uplinkDelivery := formats["uplink_delivery_state"]
+	if uplinkDelivery == (releaseFormatRange{}) {
+		uplinkDelivery = releaseFormatRange{ReadMin: 1, ReadMax: 1, Write: 1}
+	}
 	raw, err := json.Marshal(releaseManifest{
 		Schema: "steward.release.v2", Version: "v9.9.9", OS: "linux", Architecture: "amd64",
 		StateFormats: releaseStateFormats{
 			AdmissionFence: formats["admission_fence"], ConnectorReceiptLog: formats["connector_receipt_log"],
 			EvidenceLog: formats["evidence_log"], GatewayState: formats["gateway_state"],
 			OperationJournal: formats["operation_journal"], SupervisorState: formats["supervisor_state"],
-			UplinkState: formats["uplink_state"],
+			UplinkDeliveryState: uplinkDelivery, UplinkState: formats["uplink_state"],
 		},
 		Files: json.RawMessage(`{}`),
 	})
@@ -168,7 +179,7 @@ func writeUpgradeManifest(t *testing.T, path string, formats map[string]releaseF
 func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 	fixture := newUpgradeFixture(t)
 	paths := []string{
-		fixture.fence, fixture.journal, fixture.evidence, fixture.uplink, fixture.supervisor,
+		fixture.fence, fixture.journal, fixture.evidence, fixture.uplink, fixture.uplinkDelivery, fixture.supervisor,
 		fixture.gatewayConfig, fixture.receiptLog, fixture.receiptKey, fixture.manifest,
 	}
 	before := make(map[string][]byte, len(paths))
@@ -179,7 +190,7 @@ func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 	if err := run(fixture.arguments("check-drained", "configured"), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"signed_admission\":\"configured\",\"active_fences\":0,\"pending_operations\":0,\"retained_gateway_grants\":0,\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_state\":2},\"target_compatible\":true,\"drained\":true}\n"
+	want := "{\"signed_admission\":\"configured\",\"active_fences\":0,\"pending_operations\":0,\"retained_gateway_grants\":0,\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_delivery_state\":1,\"uplink_state\":2},\"target_compatible\":true,\"drained\":true}\n"
 	if output.String() != want {
 		t.Fatalf("check-drained snapshot\n got: %s want: %s", output.String(), want)
 	}
@@ -200,7 +211,7 @@ func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 	if err := run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want = "{\"signed_admission\":\"configured\",\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_state\":2},\"target_compatible\":true}\n"
+	want = "{\"signed_admission\":\"configured\",\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_delivery_state\":1,\"uplink_state\":2},\"target_compatible\":true}\n"
 	if output.String() != want {
 		t.Fatalf("inspect-formats snapshot\n got: %s want: %s", output.String(), want)
 	}
@@ -257,7 +268,7 @@ func TestUpgradeCheckDrainedReportsAllLegacyFormats(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		`"admission_fence":1`, `"connector_receipt_log":1`, `"evidence_log":1`, `"gateway_state":1`,
-		`"operation_journal":1`, `"supervisor_state":1`, `"uplink_state":1`,
+		`"operation_journal":1`, `"supervisor_state":1`, `"uplink_delivery_state":1`, `"uplink_state":1`,
 	} {
 		if !strings.Contains(output.String(), fragment) {
 			t.Fatalf("legacy format snapshot missing %s: %s", fragment, output.String())
@@ -427,6 +438,51 @@ func TestUpgradeManifestCompatibilityBlocksUnreadableObservedVersion(t *testing.
 	output.Reset()
 	if err := run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "decode target release manifest") {
 		t.Fatalf("ambiguous manifest error = %v", err)
+	}
+}
+
+func TestUpgradeManifestRequiresAndChecksUplinkDeliveryStateFormat(t *testing.T) {
+	fixture := newUpgradeFixture(t)
+	raw, err := os.ReadFile(fixture.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	formats, ok := document["state_formats"].(map[string]any)
+	if !ok {
+		t.Fatal("test manifest state_formats is not an object")
+	}
+	delete(formats, "uplink_delivery_state")
+	raw, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.manifest, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "invalid uplink_delivery_state reader/writer range") {
+		t.Fatalf("missing uplink delivery format error = %v", err)
+	}
+
+	formats["uplink_delivery_state"] = map[string]any{"read_min": 2, "read_max": 2, "write": 2}
+	raw, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.manifest, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	err = run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "uplink_delivery_state version 1 is outside reader range 2-2") ||
+		!strings.Contains(output.String(), `"uplink_delivery_state":1`) ||
+		!strings.Contains(output.String(), `"target_compatible":false`) {
+		t.Fatalf("delivery-state compatibility output=%s error=%v", output.String(), err)
 	}
 }
 

@@ -407,6 +407,43 @@ func TestExecutorMainInitializesFenceOnceWithoutDocker(t *testing.T) {
 		t.Skip("builds the real executor binary")
 	}
 	bin := buildExecutor(t)
+	for _, test := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "tenant",
+			content: `{"version":1,"tenant_id":"tenant-a","node_id":"node-tenant","credential":"do-not-print-tenant-secret"}`,
+			want:    "tenant\nnode-tenant\n",
+		},
+		{
+			name:    "node",
+			content: `{"version":2,"scope":"node","node_id":"node-scoped","credential":"do-not-print-node-secret"}`,
+			want:    "node\nnode-scoped\n",
+		},
+	} {
+		t.Run("inspect credential "+test.name, func(t *testing.T) {
+			credentialPath := filepath.Join(t.TempDir(), "credential.json")
+			if err := os.WriteFile(credentialPath, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command(bin, "-inspect-uplink-credential", "-uplink-credential-file", credentialPath)
+			command.Env = executorEnv()
+			output, err := command.CombinedOutput()
+			if err != nil || string(output) != test.want {
+				t.Fatalf("inspect credential: err=%v output=%q want=%q", err, output, test.want)
+			}
+			if strings.Contains(string(output), "secret") {
+				t.Fatalf("credential inspection exposed the bearer: %q", output)
+			}
+		})
+	}
+	missingCredential := exec.Command(bin, "-inspect-uplink-credential")
+	missingCredential.Env = executorEnv()
+	if output, err := missingCredential.CombinedOutput(); err == nil || !strings.Contains(string(output), "requires -uplink-credential-file") {
+		t.Fatalf("credential inspection accepted a missing path: err=%v output=%s", err, output)
+	}
 	path := filepath.Join(t.TempDir(), "state.json")
 	command := exec.Command(bin, "-initialize-uplink-state", "-uplink-state-file", path)
 	command.Env = executorEnv()

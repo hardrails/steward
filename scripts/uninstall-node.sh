@@ -44,7 +44,7 @@ systemctl stop steward-gateway.service >/dev/null 2>&1 || true
 systemctl stop steward.service >/dev/null 2>&1 || true
 systemctl stop steward-executor.service >/dev/null 2>&1 || true
 systemctl disable steward-gateway.service steward.service steward-executor.service >/dev/null 2>&1 || true
-for binary in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
 	path="/usr/local/bin/$binary"
 	target=$(readlink "$path" 2>/dev/null || true)
 	case "$target" in

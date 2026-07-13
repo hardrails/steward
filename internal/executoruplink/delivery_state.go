@@ -58,6 +58,13 @@ type DeliveryStore struct {
 	records map[string]deliveryRecord
 }
 
+// DeliveryStateFormatSummary reports the validated durable delivery-state
+// format without changing recovery phases or requiring the enrolling node ID.
+type DeliveryStateFormatSummary struct {
+	Present       bool
+	FormatVersion int
+}
+
 type deliveryDecision uint8
 
 const (
@@ -84,37 +91,59 @@ func LoadDeliveryStore(path, nodeID string) (*DeliveryStore, error) {
 	if path == "" || !boundedDeliveryText(nodeID, 128) {
 		return nil, errors.New("delivery state path and bounded node ID are required")
 	}
-	raw, err := readDeliveryState(path)
+	state, records, err := decodeDeliveryState(path)
 	if err != nil {
 		return nil, err
-	}
-	var state deliveryStateFile
-	if err := dsse.DecodeStrictInto(raw, maxDeliveryStateBytes, &state); err != nil {
-		return nil, fmt.Errorf("decode executor delivery state %q: %w", path, err)
-	}
-	if state.Version != deliveryStateVersion {
-		return nil, fmt.Errorf("executor delivery state %q has unsupported format version %d", path, state.Version)
 	}
 	if state.NodeID != nodeID {
 		return nil, fmt.Errorf("executor delivery state %q belongs to node %q, not %q", path, state.NodeID, nodeID)
 	}
+	return &DeliveryStore{path: path, nodeID: nodeID, records: records}, nil
+}
+
+// InspectDeliveryStateFormat validates the complete owner-only state file but
+// never performs executing-record recovery. Upgrade checks use it before any
+// release selector changes.
+func InspectDeliveryStateFormat(path string) (DeliveryStateFormatSummary, error) {
+	state, _, err := decodeDeliveryState(path)
+	if err != nil {
+		return DeliveryStateFormatSummary{}, err
+	}
+	return DeliveryStateFormatSummary{Present: true, FormatVersion: state.Version}, nil
+}
+
+func decodeDeliveryState(path string) (deliveryStateFile, map[string]deliveryRecord, error) {
+	raw, err := readDeliveryState(path)
+	if err != nil {
+		return deliveryStateFile{}, nil, err
+	}
+	var state deliveryStateFile
+	if err := dsse.DecodeStrictInto(raw, maxDeliveryStateBytes, &state); err != nil {
+		return deliveryStateFile{}, nil, fmt.Errorf("decode executor delivery state %q: %w", path, err)
+	}
+	if state.Version != deliveryStateVersion {
+		return deliveryStateFile{}, nil, fmt.Errorf("executor delivery state %q has unsupported format version %d", path, state.Version)
+	}
+	if !boundedDeliveryText(state.NodeID, 128) {
+		return deliveryStateFile{}, nil, fmt.Errorf("executor delivery state %q has an invalid node ID", path)
+	}
 	if state.Records == nil {
-		return nil, fmt.Errorf("executor delivery state %q is missing its records array", path)
+		return deliveryStateFile{}, nil, fmt.Errorf("executor delivery state %q is missing its records array", path)
 	}
 	if len(state.Records) > maxDeliveryRecords {
-		return nil, fmt.Errorf("executor delivery state %q has %d records, limit is %d", path, len(state.Records), maxDeliveryRecords)
+		return deliveryStateFile{}, nil, fmt.Errorf("executor delivery state %q has %d records, limit is %d", path, len(state.Records), maxDeliveryRecords)
 	}
 	records := make(map[string]deliveryRecord, len(state.Records))
 	for _, record := range state.Records {
 		if err := validateDeliveryRecord(record); err != nil {
-			return nil, fmt.Errorf("executor delivery state %q contains an invalid record: %w", path, err)
+			return deliveryStateFile{}, nil, fmt.Errorf("executor delivery state %q contains an invalid record: %w", path, err)
 		}
 		if _, exists := records[record.DeliveryID]; exists {
-			return nil, fmt.Errorf("executor delivery state %q contains duplicate delivery ID %q", path, record.DeliveryID)
+			return deliveryStateFile{}, nil, fmt.Errorf("executor delivery state %q contains duplicate delivery ID %q", path, record.DeliveryID)
 		}
 		records[record.DeliveryID] = cloneDeliveryRecord(record)
 	}
-	return &DeliveryStore{path: path, nodeID: nodeID, records: records}, nil
+	return state, records, nil
 }
 
 func (s *DeliveryStore) NodeID() string {

@@ -12,7 +12,7 @@
 # injection. Checkout builds otherwise have Main.Version="(devel)" and VCS metadata
 # identifies a commit rather than the release tag; -trimpath may omit that metadata
 # entirely. The explicit stamp makes every cross-compiled archive and package agree
-# with its filename. The host-native assertion below independently executes all six
+# with its filename. The host-native assertion below independently executes all seven
 # binaries and fails a release if the stamp ever stops working.
 #
 # Usage: scripts/release.sh
@@ -52,7 +52,7 @@ for target in "${targets[@]}"; do
 	esac
 done
 
-# VERSION labels artifacts and is stamped into all six binaries. On a tag push
+# VERSION labels artifacts and is stamped into all seven binaries. On a tag push
 # GITHUB_REF_NAME is authoritative; a local dry run falls back to `git describe`,
 # then to "dev" outside any checkout.
 VERSION="${STEWARD_RELEASE_VERSION:-${GITHUB_REF_NAME:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}}"
@@ -121,7 +121,9 @@ for target in "${targets[@]}"; do
 		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/stewardctl" ./cmd/stewardctl
 	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-mcp" ./cmd/steward-mcp
-	files=(steward stewardctl steward-mcp LICENSE README.md)
+	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-control" ./cmd/steward-control
+	files=(steward steward-control stewardctl steward-mcp LICENSE README.md)
 	if [ "$goos" = "linux" ]; then
 		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-executor" ./cmd/steward-executor
@@ -140,12 +142,12 @@ for target in "${targets[@]}"; do
 			"${stage}/scripts/"
 		chmod 0755 "${stage}"/scripts/*.sh
 		# Bind the exact node payload before wrapping it in an archive or native
-		# package. The canonical manifest records the target and SHA-256 of all six
+		# package. The canonical manifest records the target and SHA-256 of all seven
 		# binaries plus every integration file installed with that release.
 		bash scripts/write-release-manifest.sh "$stage" "$VERSION" "$goos" "$goarch"
-		files=(steward stewardctl steward-mcp steward-executor steward-gateway steward-relay release.json LICENSE README.md adapters deploy scripts)
+		files=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay release.json LICENSE README.md adapters deploy scripts)
 	fi
-	# Ship the license and readme alongside all six binaries so the download is
+	# Ship the license and readme alongside all seven binaries so the download is
 	# self-contained and license-compliant.
 	cp LICENSE README.md "${stage}/"
 	# Never carry workstation xattrs (notably macOS provenance) into the sovereign
@@ -202,31 +204,34 @@ install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
 # manual workflow dispatches, and local dry runs.
 native_dir="$(mktemp -d)"
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward" ./cmd/steward
+go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-control" ./cmd/steward-control
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-executor" ./cmd/steward-executor
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/stewardctl" ./cmd/stewardctl
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-mcp" ./cmd/steward-mcp
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-gateway" ./cmd/steward-gateway
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-relay" ./cmd/steward-relay
 reported="$("$native_dir/steward" -version | awk '{print $2}')"
+control_reported="$("$native_dir/steward-control" -version | awk '{print $2}')"
 executor_reported="$("$native_dir/steward-executor" -version | awk '{print $2}')"
 ctl_reported="$("$native_dir/stewardctl" -version | awk '{print $2}')"
 mcp_reported="$("$native_dir/steward-mcp" -version | awk '{print $2}')"
 gateway_reported="$("$native_dir/steward-gateway" -version | awk '{print $2}')"
 relay_reported="$("$native_dir/steward-relay" -version | awk '{print $2}')"
 echo "release: host-native steward self-reports version '${reported}'"
+echo "release: host-native steward-control self-reports version '${control_reported}'"
 echo "release: host-native steward-executor self-reports version '${executor_reported}'"
 echo "release: host-native stewardctl self-reports version '${ctl_reported}'"
 echo "release: host-native steward-mcp self-reports version '${mcp_reported}'"
 echo "release: host-native steward-gateway self-reports version '${gateway_reported}'"
 echo "release: host-native steward-relay self-reports version '${relay_reported}'"
-if [ "${reported}" != "${VERSION}" ] || [ "${executor_reported}" != "${VERSION}" ] || [ "${ctl_reported}" != "${VERSION}" ] || [ "${mcp_reported}" != "${VERSION}" ] || [ "${gateway_reported}" != "${VERSION}" ] || [ "${relay_reported}" != "${VERSION}" ]; then
+if [ "${reported}" != "${VERSION}" ] || [ "${control_reported}" != "${VERSION}" ] || [ "${executor_reported}" != "${VERSION}" ] || [ "${ctl_reported}" != "${VERSION}" ] || [ "${mcp_reported}" != "${VERSION}" ] || [ "${gateway_reported}" != "${VERSION}" ] || [ "${relay_reported}" != "${VERSION}" ]; then
 	echo "release: FATAL — one or more release binaries do not report version '${VERSION}'." >&2
-	echo "  The explicit release-version linker stamp did not reach all six binaries," >&2
+	echo "  The explicit release-version linker stamp did not reach all seven binaries," >&2
 	echo "  so the artifacts would misreport their version. Ensure scripts/release.sh" >&2
-	echo "  supplies release_ldflags to all six entry points. See docs/releasing.md." >&2
+	echo "  supplies release_ldflags to all seven entry points. See docs/releasing.md." >&2
 	exit 1
 fi
-echo "release: version assertion OK — all six binaries self-report ${VERSION}"
+echo "release: version assertion OK — all seven binaries self-report ${VERSION}"
 rm -rf "$native_dir"
 
 echo "release: artifacts in ${dist}/:"
