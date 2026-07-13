@@ -462,7 +462,7 @@ docker create --name "$sandbox_name" \
 	--tmpfs "/output:rw,noexec,nosuid,nodev,size=$sandbox_output_bytes" \
 	--user 65532:65532 --workdir /tmp/build \
 	--env HOME=/tmp/home --env UV_CACHE_DIR=/tmp/uv-cache --env UV_LINK_MODE=copy \
-	--log-driver local --log-opt max-size=1m --log-opt max-file=1 \
+	--log-driver local --log-opt max-size=1m --log-opt max-file=1 --log-opt compress=false \
 	--mount "type=bind,source=$work/context/upstream,target=/input/upstream,readonly" \
 	--mount "type=bind,source=$work/context/adapter,target=/input/adapter,readonly" \
 	--entrypoint /bin/sh "$base_image_reference" -ceu "$sandbox_command" >/dev/null
