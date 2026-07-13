@@ -45,11 +45,11 @@ one-shot `stewardctl image import` command is a separate bounded Docker client: 
 verifies and sanitizes one archive before loading it.
 
 `steward-gateway` holds upstream route credentials and enforces bounded,
-per-instance inference, service, and egress grants, but it cannot open the Docker
+per-instance inference, service, connector, and egress grants, but it cannot open the Docker
 socket. Executor creates, activates, deactivates, and removes grants over Gateway's
 local control socket without receiving upstream credentials. The per-instance relay
 runs in the workload network and receives only its matching per-grant Unix-socket
-directory. Fixed socket names carry inference, service, and egress traffic; Docker
+directory. Fixed socket names carry inference, service, connector, and egress traffic; Docker
 publishes no agent or relay port to the host.
 
 Systemd hardening reduces each service's host access, but it cannot make Docker
@@ -105,7 +105,7 @@ uplink available with readiness at 503, but only an authenticated safety-only st
 may mutate the host. Reconciliation may repair limited lifecycle drift, but it
 never recreates or adopts a missing or structurally changed workload.
 
-For inference and egress, Gateway durably pins a non-secret digest of the effective
+For inference, connector, and egress policy, Gateway durably pins a non-secret digest of the effective
 route policy and a private binding to the loaded credential. Executor stores the
 public policy digest in its admission fence and evidence. A restart, reload, start,
 or reconciliation refuses mismatched route semantics. Inference requests must use
@@ -126,11 +126,18 @@ This boundary lets an operator audit and build the node software without access 
 a control plane's source. It also keeps SSO, approvals, organization hierarchy,
 fleet scheduling, and rollout policy out of the process that holds Docker authority.
 
-## Inference and egress separation
+## Inference, connector, and egress separation
 
 Steward does not host, schedule, or select models. Gateway can expose an
 operator-selected local or remote OpenAI-compatible inference system through a
 finite, per-instance grant.
+
+For an authenticated connector, the agent sends a logical connector and operation
+ID to its Relay. Gateway selects one exact operator-configured origin, method, and
+path, pins an allowed resolved address, strips agent-supplied credentials, and adds
+the owner-provided credential at the last hop. Spend-before-effect task claims and
+per-grant call budgets survive restart. The connector is not an arbitrary proxy or
+secret-delivery mechanism.
 
 For HTTP(S) egress, the agent receives standard proxy variables that point to its
 relay. The relay has no Internet route; it forwards bytes to one grant-owned Unix

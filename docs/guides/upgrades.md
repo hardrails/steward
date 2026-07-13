@@ -14,8 +14,9 @@ system, architecture, and SHA-256 digest of every executable and integration fil
 Configuration, durable state, audit logs, relay images, and anti-replay state remain
 outside release directories. Each manifest also declares the durable formats the
 release can read and the format it writes. Activation compares those declarations
-with existing Gateway state, admission fences, operation journal, evidence log,
-Executor uplink state, and supervisor state before a binary switch.
+with existing Gateway state, connector receipt log, admission fences, operation
+journal, Executor evidence log, uplink state, and supervisor state before a binary
+switch.
 
 Staging verifies the manifest and writes only a new immutable release directory.
 It does not change active helpers or units and does not run `systemctl daemon-reload`.
@@ -113,11 +114,12 @@ intentionally disabled service.
 `--no-restart` is accepted only when all three services are already inactive. This
 prevents the active-release symlink from changing underneath a running process.
 
-Target preflight is read-only: it validates existing state, audit, journal,
-evidence, and fence files without creating or appending to them. It also reports a
-missing prospective Gateway state or audit path as valid. If activation fails before
-the target services start, it attempts to restore the prior active-release symlink,
-relay binding, and service state. After target services have started, it restores the
+Target preflight is read-only: it validates existing state, audit, connector
+receipt, journal, evidence, and fence files without creating or appending to them.
+It also reports a missing prospective Gateway state, audit, or connector receipt
+path as valid. If activation fails before the target services start, it attempts to
+restore the prior active-release symlink, relay binding, and service state. After
+target services have started, it restores the
 prior release only when that release's manifest proves it can read every observed
 format. Otherwise activation leaves the target selected and all Steward services
 stopped. Repair the target or follow an approved migration procedure; do not force

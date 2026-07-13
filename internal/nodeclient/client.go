@@ -14,11 +14,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/securefile"
 )
 
 const maxWireBytes = 1 << 20
@@ -237,14 +237,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any) 
 }
 
 func ReadToken(path string) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() <= 0 || info.Size() > 4096 {
-		return "", errors.New("node token must be a bounded owner-only regular file")
-	}
-	raw, err := os.ReadFile(path)
+	raw, err := securefile.Read(path, 4096, securefile.OwnerOnly)
 	if err != nil {
 		return "", err
 	}
@@ -252,18 +245,16 @@ func ReadToken(path string) (string, error) {
 	if token == "" {
 		return "", errors.New("node token must not be empty")
 	}
+	for index := 0; index < len(token); index++ {
+		if token[index] < 0x21 || token[index] > 0x7e {
+			return "", errors.New("node token must contain only visible ASCII without internal whitespace")
+		}
+	}
 	return token, nil
 }
 
 func ReadBounded(path string, limit int64) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > limit {
-		return nil, errors.New("input must be a non-empty bounded regular file")
-	}
-	return os.ReadFile(path)
+	return securefile.Read(path, limit, securefile.Regular)
 }
 
 func validRuntimePath(path string) bool {

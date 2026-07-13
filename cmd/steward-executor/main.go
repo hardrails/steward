@@ -27,6 +27,8 @@ import (
 	"github.com/hardrails/steward/internal/executoruplink"
 	"github.com/hardrails/steward/internal/gateway"
 	"github.com/hardrails/steward/internal/journal"
+	"github.com/hardrails/steward/internal/nodeclient"
+	"github.com/hardrails/steward/internal/securefile"
 	stewarduplink "github.com/hardrails/steward/internal/uplink"
 )
 
@@ -114,7 +116,7 @@ func main() {
 		slog.Error("-token-file is required")
 		os.Exit(2)
 	}
-	token, err := readToken(*tokenFile)
+	token, err := nodeclient.ReadToken(*tokenFile)
 	if err != nil {
 		slog.Error("read executor token", "err", err)
 		os.Exit(2)
@@ -362,24 +364,11 @@ func main() {
 }
 
 func readSecureArtifact(path string, secret bool, limit int64) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errors.New("artifact must be a regular file")
-	}
+	permissions := securefile.TrustFile
 	if secret {
-		if info.Mode().Perm()&0o077 != 0 {
-			return nil, errors.New("secret file must have mode 0600 or stricter")
-		}
-	} else if info.Mode().Perm()&0o022 != 0 {
-		return nil, errors.New("trust file must not be group/world writable")
+		permissions = securefile.OwnerOnly
 	}
-	if info.Size() <= 0 || info.Size() > limit {
-		return nil, errors.New("artifact is empty or exceeds its size limit")
-	}
-	return os.ReadFile(path)
+	return securefile.Read(path, limit, permissions)
 }
 
 func readEd25519PublicKey(path string) (ed25519.PublicKey, error) {
@@ -412,29 +401,4 @@ func readEd25519PrivateKey(path string) (ed25519.PrivateKey, error) {
 		return nil, errors.New("private key is not Ed25519")
 	}
 	return private, nil
-}
-
-func readToken(path string) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-	if !info.Mode().IsRegular() {
-		return "", errors.New("executor token must be a regular file")
-	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return "", errors.New("executor token must have mode 0600 or stricter")
-	}
-	if info.Size() > 4096 {
-		return "", errors.New("executor token must not exceed 4096 bytes")
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	token := strings.TrimSpace(string(raw))
-	if token == "" {
-		return "", errors.New("executor token must not be empty")
-	}
-	return token, nil
 }

@@ -8,6 +8,10 @@
   "executor_gid": @EXECUTOR_GID@,
   "relay_gid": @RELAY_GID@,
   "egress_audit_file": "/var/lib/steward-gateway/egress-audit.jsonl",
+  "connector_receipt_file": "/var/lib/steward-gateway/connector-receipts.ndjson",
+  "connector_receipt_key_file": "/etc/steward/connector-receipts.private.pem",
+  "connector_receipt_node_id": "@CONNECTOR_RECEIPT_NODE_ID@",
+  "connector_receipt_epoch": 1,
   "routes": [
     {
       "id": "local-openai",
@@ -15,5 +19,6 @@
       "max_concurrent": 8
     }
   ],
-  "egress_routes": []
+  "egress_routes": [],
+  "connectors": []
 }

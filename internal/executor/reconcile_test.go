@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -49,6 +50,13 @@ func (d *reconcileDocker) RuntimeAvailable(context.Context, string) (bool, error
 	return true, nil
 }
 
+func (d *reconcileDocker) InspectSignedImage(_ context.Context, _ string, configDigest string) (ObservedImage, error) {
+	return ObservedImage{
+		ID: configDigest, ConfigDigest: configDigest, Identity: imageIdentityConfig,
+		OS: "linux", Architecture: "amd64", ConfigPresent: true,
+	}, nil
+}
+
 func (d *reconcileDocker) WorkloadCounts(context.Context, string) (int, int, error) {
 	return 1, 1, nil
 }
@@ -69,12 +77,17 @@ func (d *reconcileDocker) Create(context.Context, string, Workload) error {
 func (d *reconcileDocker) Start(_ context.Context, name string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if name != d.relay.Spec.Name {
-		return errors.New("reconciler must not start the observed agent")
+	switch name {
+	case d.relay.Spec.Name:
+		d.recorder.add("start_relay")
+		d.relay.Status = "running"
+		d.relay.IPAddress = d.relay.Spec.RelayIP
+	case RuntimeRef(d.agent.Workload.TenantID, d.agent.Workload.InstanceID):
+		d.recorder.add("start_agent")
+		d.agent.Status = "running"
+	default:
+		return errors.New("unexpected start target")
 	}
-	d.recorder.add("start_relay")
-	d.relay.Status = "running"
-	d.relay.IPAddress = d.relay.Spec.RelayIP
 	return nil
 }
 
@@ -298,15 +311,25 @@ type reconcileRig struct {
 	recorder *reconcileRecorder
 	config   SecureAdmissionConfig
 	record   admission.FenceRecord
+	capsule  []byte
+	intent   admission.InstanceIntent
 }
 
 func newReconcileRig(t *testing.T, policyCurrent bool) *reconcileRig {
 	return newReconcileRigWithRoutePolicy(t, policyCurrent, "sha256:"+strings.Repeat("e", 64))
 }
 
-func newReconcileRigWithRoutePolicy(t *testing.T, policyCurrent bool, routePolicyDigest string) *reconcileRig {
+func newReconcileRigWithRoutePolicy(t *testing.T, policyCurrent bool, routePolicyDigest string, namedConnector ...bool) *reconcileRig {
 	t.Helper()
-	_, intent, config := secureAdmissionFixture(t)
+	connectorRuntime := len(namedConnector) != 0 && namedConnector[0]
+	var capsule []byte
+	var intent admission.InstanceIntent
+	var config SecureAdmissionConfig
+	if connectorRuntime {
+		capsule, intent, config = secureAdmissionFixtureFor(t, admission.Capabilities{Connector: true})
+	} else {
+		capsule, intent, config = secureAdmissionFixture(t)
+	}
 	recorder := &reconcileRecorder{}
 	docker := &reconcileDocker{recorder: recorder}
 	control := &reconcileGateway{
@@ -328,9 +351,22 @@ func newReconcileRigWithRoutePolicy(t *testing.T, policyCurrent bool, routePolic
 	network := testNetworkSpec(intent.TenantID, intent.InstanceID, intent.Generation)
 	runtime := &RuntimeGrant{
 		NetworkName: network.Name, GrantID: gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation),
-		Generation: intent.Generation, Inference: true, RouteID: "local", ModelAlias: "private-model",
-		Subnet: network.Subnet, Gateway: network.Gateway,
+		Generation: intent.Generation,
+		Subnet:     network.Subnet, Gateway: network.Gateway,
 		RelayIP: network.RelayIP, AgentIP: network.AgentIP,
+	}
+	if connectorRuntime {
+		runtime.ConnectorIDs = admission.CanonicalConnectorIDs(intent.ConnectorIDs)
+		runtime.CapsuleDigest = intent.CapsuleDigest
+	} else {
+		runtime.Inference, runtime.RouteID, runtime.ModelAlias = true, "local", "private-model"
+	}
+	policyDigest := dsse.Digest(config.PolicyEnvelope)
+	if !policyCurrent {
+		policyDigest = "sha256:" + strings.Repeat("c", 64)
+	}
+	if connectorRuntime {
+		runtime.PolicyDigest = policyDigest
 	}
 	workload := Workload{
 		InstanceID: intent.InstanceID, TenantID: intent.TenantID, ProfileID: "generic-v1@v1",
@@ -355,10 +391,6 @@ func newReconcileRigWithRoutePolicy(t *testing.T, policyCurrent bool, routePolic
 	wantGrant := server.desiredGatewayGrant(workload, "")
 	wantGrant.Active = true
 	control.grants[wantGrant.GrantID] = wantGrant
-	policyDigest := dsse.Digest(config.PolicyEnvelope)
-	if !policyCurrent {
-		policyDigest = "sha256:" + strings.Repeat("c", 64)
-	}
 	record := admission.FenceRecord{
 		TenantID: intent.TenantID, InstanceID: intent.InstanceID, Generation: intent.Generation,
 		CapsuleDigest: intent.CapsuleDigest, PolicyDigest: policyDigest, LineageID: intent.LineageID,
@@ -368,7 +400,74 @@ func newReconcileRigWithRoutePolicy(t *testing.T, policyCurrent bool, routePolic
 	if err := config.Fences.Commit(record, 1); err != nil {
 		t.Fatal(err)
 	}
-	return &reconcileRig{server: server, docker: docker, gateway: control, recorder: recorder, config: config, record: record}
+	return &reconcileRig{
+		server: server, docker: docker, gateway: control, recorder: recorder,
+		config: config, record: record, capsule: capsule, intent: intent,
+	}
+}
+
+func newLegacyUpgradeRig(t *testing.T) *reconcileRig {
+	t.Helper()
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true})
+	recorder := &reconcileRecorder{}
+	docker := &reconcileDocker{recorder: recorder}
+	control := &reconcileGateway{
+		grants: make(map[string]gateway.Grant), policyDigest: "sha256:" + strings.Repeat("e", 64), recorder: recorder,
+	}
+	config.Topology = docker
+	config.Gateway = control
+	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+	config.GrantRoot = "/run/steward-gateway/grants"
+	config.RelayGID = 65531
+	server, err := NewServer(docker, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+
+	network := testNetworkSpec(intent.TenantID, intent.InstanceID, intent.Generation)
+	runtime := &RuntimeGrant{
+		NetworkName: network.Name, GrantID: gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation),
+		Generation: intent.Generation, Inference: true, RouteID: "local", ModelAlias: "private-model",
+		Subnet: network.Subnet, Gateway: network.Gateway, RelayIP: network.RelayIP, AgentIP: network.AgentIP,
+		// A pre-binding workload has no admission digests in Docker labels.
+		CapsuleDigest: "", PolicyDigest: "",
+	}
+	workload := Workload{
+		InstanceID: intent.InstanceID, TenantID: intent.TenantID, ProfileID: "generic-v1@v1",
+		Image:             "registry.local/agent@sha256:" + strings.Repeat("a", 64),
+		ImageConfigDigest: "sha256:" + strings.Repeat("b", 64), Command: []string{"agent"},
+		Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 32}, Egress: Egress{}, Runtime: runtime,
+	}
+	docker.agent = ObservedWorkload{
+		Workload: workload, ImageID: workload.ImageConfigDigest, Fingerprint: workloadFingerprint(workload),
+		Managed: true, Hardened: true, Status: "running",
+	}
+	docker.network = ObservedNetwork{NetworkSpec: network, Managed: true, Internal: true}
+	relay := server.desiredRelay(workload)
+	docker.relay = ObservedRelay{
+		Spec: relay, Fingerprint: relayFingerprint(relay), Managed: true, Hardened: true,
+		Status: "running", IPAddress: relay.RelayIP,
+	}
+	grant := server.desiredGatewayGrant(workload, "")
+	grant.Active = true
+	control.grants[grant.GrantID] = grant
+	policyDigest := dsse.Digest(config.PolicyEnvelope)
+	record := admission.FenceRecord{
+		TenantID: intent.TenantID, InstanceID: intent.InstanceID, Generation: intent.Generation,
+		CapsuleDigest: intent.CapsuleDigest, PolicyDigest: policyDigest, LineageID: intent.LineageID,
+		WorkloadDigest: "sha256:" + workloadFingerprint(workload), ImageConfigDigest: workload.ImageConfigDigest,
+		RoutePolicyDigest: control.policyDigest, Present: true,
+	}
+	if err := config.Fences.Commit(record, 1); err != nil {
+		t.Fatal(err)
+	}
+	return &reconcileRig{
+		server: server, docker: docker, gateway: control, recorder: recorder,
+		config: config, record: record, capsule: capsule, intent: intent,
+	}
 }
 
 func TestReconcileCleanRuntimeIsReceiptFreeNoop(t *testing.T) {
@@ -389,6 +488,76 @@ func TestReconcileCleanRuntimeIsReceiptFreeNoop(t *testing.T) {
 	}
 	if events := rig.recorder.snapshot(); len(events) != 0 {
 		t.Fatalf("mutations = %#v", events)
+	}
+}
+
+func TestLegacyGatewayGrantSurvivesUpgradeAdmissionAndLifecycle(t *testing.T) {
+	rig := newLegacyUpgradeRig(t)
+	grant, ok := rig.gateway.grant(rig.recordGrantID())
+	if !ok || grant.RuntimeRef != "" || grant.CapsuleDigest != "" || grant.PolicyDigest != "" {
+		t.Fatalf("pre-upgrade retained grant=%#v present=%t", grant, ok)
+	}
+	before := rig.config.Evidence.NextSequence()
+	report, err := rig.server.Reconcile(context.Background())
+	if err != nil || !report.Ready || report.Changed != 0 || len(report.Failures) != 0 {
+		t.Fatalf("upgrade reconcile report=%#v err=%v", report, err)
+	}
+	if got := rig.config.Evidence.NextSequence(); got != before || len(rig.recorder.snapshot()) != 0 {
+		t.Fatalf("upgrade reconcile mutated evidence=%d want=%d events=%#v", got, before, rig.recorder.snapshot())
+	}
+
+	body, err := json.Marshal(secureProvisionRequest{
+		CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(rig.capsule), Intent: rig.intent,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", strings.NewReader(string(body)))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	rig.server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || len(rig.recorder.snapshot()) != 0 {
+		t.Fatalf("idempotent legacy admission status=%d events=%#v body=%s", response.Code, rig.recorder.snapshot(), response.Body.String())
+	}
+
+	ref := RuntimeRef(rig.record.TenantID, rig.record.InstanceID)
+	assertLifecycleStatus(t, rig.server, http.MethodPost, "/v1/workloads/"+ref+"/stop", context.Background(), http.StatusOK)
+	assertLifecycleStatus(t, rig.server, http.MethodPost, "/v1/workloads/"+ref+"/start", context.Background(), http.StatusOK)
+	agent, relay := rig.docker.states()
+	if agent != "running" || relay != "running" {
+		t.Fatalf("legacy lifecycle agent=%q relay=%q", agent, relay)
+	}
+}
+
+func TestReconcileCleanConnectorRuntimeProvesSignedGatewayGrant(t *testing.T) {
+	rig := newReconcileRigWithRoutePolicy(t, true, "sha256:"+strings.Repeat("e", 64), true)
+	report, err := rig.server.Reconcile(context.Background())
+	if err != nil || !report.Ready || report.Changed != 0 {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	grant, ok := rig.gateway.grant(rig.recordGrantID())
+	if !ok || grant.RuntimeRef != RuntimeRef(rig.record.TenantID, rig.record.InstanceID) ||
+		grant.CapsuleDigest != rig.record.CapsuleDigest || grant.PolicyDigest != rig.record.PolicyDigest ||
+		len(grant.ConnectorIDs) != 2 || !rig.docker.relay.Spec.Connector {
+		t.Fatalf("grant=%#v relay=%#v", grant, rig.docker.relay)
+	}
+}
+
+func TestReconcileContainsConnectorGrantBindingDrift(t *testing.T) {
+	rig := newReconcileRigWithRoutePolicy(t, true, "sha256:"+strings.Repeat("e", 64), true)
+	grant, _ := rig.gateway.grant(rig.recordGrantID())
+	grant.PolicyDigest = "sha256:" + strings.Repeat("f", 64)
+	rig.gateway.mu.Lock()
+	rig.gateway.grants[grant.GrantID] = grant
+	rig.gateway.mu.Unlock()
+
+	report, err := rig.server.Reconcile(context.Background())
+	if !errors.Is(err, ErrReconciliationIncomplete) || report.Ready || report.Changed != 1 ||
+		len(report.Failures) != 1 || report.Failures[0].Code != "gateway_drift" {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	if events := strings.Join(rig.recorder.snapshot(), ","); events != "deactivate_grant,stop_agent,stop_relay" {
+		t.Fatalf("containment mutations=%q", events)
 	}
 }
 
@@ -558,6 +727,15 @@ func TestReconcileContainsLegacyFenceWithoutRoutePolicyBinding(t *testing.T) {
 	}
 	if events := strings.Join(rig.recorder.snapshot(), ","); events != "deactivate_grant,stop_agent,stop_relay" {
 		t.Fatalf("legacy containment mutations=%q", events)
+	}
+}
+
+func TestReconcileContainsConnectorFenceWithoutRoutePolicyBinding(t *testing.T) {
+	rig := newReconcileRigWithRoutePolicy(t, true, "", true)
+	report, err := rig.server.Reconcile(context.Background())
+	if !errors.Is(err, ErrReconciliationIncomplete) || report.Ready || report.Changed != 1 ||
+		len(report.Failures) != 1 || report.Failures[0].Code != "gateway_drift" {
+		t.Fatalf("report=%#v err=%v", report, err)
 	}
 }
 

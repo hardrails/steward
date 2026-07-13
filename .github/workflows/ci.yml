@@ -98,8 +98,19 @@ jobs:
           cp scripts/install-node.sh scripts/activate-node-release.sh \
             scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh \
             scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
-            scripts/build-hermes-adapter.sh scripts/hermes-feasibility.sh "$stage/scripts/"
+            scripts/build-hermes-adapter.sh scripts/hermes-feasibility.sh \
+            scripts/hermes-steward-acceptance.sh "$stage/scripts/"
           cp LICENSE README.md "$stage/"
+          test "$("$stage/scripts/hermes-steward-acceptance.sh" --check-layout)" = "$stage"
+          mkdir -p "$smoke/layout/release/integration/scripts"
+          cp "$stage/steward-executor" "$stage/steward-gateway" "$stage/steward-relay" \
+            "$stage/stewardctl" "$smoke/layout/release/"
+          cp "$stage/scripts/hermes-steward-acceptance.sh" \
+            "$smoke/layout/release/integration/scripts/"
+          ln -s "$smoke/layout/release/integration/scripts/hermes-steward-acceptance.sh" \
+            "$smoke/layout/hermes-steward-acceptance"
+          test "$("$smoke/layout/hermes-steward-acceptance" --check-layout)" = \
+            "$smoke/layout/release"
           bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)"
           cp "$stage/release.json" "$stage/release.first.json"
           bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)"
@@ -152,9 +163,13 @@ jobs:
           grep -q './usr/lib/steward-node/release/release.json' /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/adapters/hermes-agent/adapter.json' \
             /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' \
+            /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' \
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/scripts/hermes-feasibility.sh' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' \
             /tmp/steward-node-test.deb.contents
           dpkg-deb --ctrl-tarfile /tmp/steward-node-test.deb | \
             tar -xOf - ./postinst | grep -q -- "--expected-version 'v0.0.0-test'"
@@ -166,9 +181,13 @@ jobs:
           grep -q '/usr/lib/steward-node/release/release.json' /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/adapter.json' \
             /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' \
+            /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/scripts/hermes-feasibility.sh' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' \
             /tmp/steward-node-test.rpm.contents
           rpm -qp --scripts /tmp/steward-node-test.rpm | \
             grep -q -- "--expected-version 'v0.0.0-test'"

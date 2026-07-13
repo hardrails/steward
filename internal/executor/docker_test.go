@@ -311,6 +311,39 @@ func TestCreateWithSignedEgressInjectsOnlyFixedProxyAndDisablesDNS(t *testing.T)
 	}
 }
 
+func TestCreateWithSignedConnectorInjectsOnlyFixedRelayURLAndAdmissionBindings(t *testing.T) {
+	var payload map[string]any
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	addresses := testNetworkSpec("tenant-a", "agent-a", 4)
+	workload := Workload{InstanceID: "agent-a", TenantID: "tenant-a", ProfileID: "generic-v1@v1",
+		Image: "registry.local/agent@sha256:" + strings.Repeat("a", 64), Command: []string{"agent"},
+		Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 16}, Runtime: &RuntimeGrant{
+			NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), Generation: 4,
+			Subnet: addresses.Subnet, Gateway: addresses.Gateway, RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
+			ConnectorIDs:  []string{"git.read", "issues.create"},
+			CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
+		}}
+	if err := docker.Create(context.Background(), "executor-connector", workload); err != nil {
+		t.Fatal(err)
+	}
+	environment := payload["Env"].([]any)
+	wantEnvironment := []any{"HOME=/workspace", "TMPDIR=/tmp", "STEWARD_CONNECTOR_URL=http://steward-relay:8081"}
+	if !reflect.DeepEqual(environment, wantEnvironment) {
+		t.Fatalf("environment=%#v want=%#v", environment, wantEnvironment)
+	}
+	labels := payload["Labels"].(map[string]any)
+	if labels[runtimeConnectorsLabel] != "git.read,issues.create" ||
+		labels[runtimeCapsuleDigestLabel] != workload.Runtime.CapsuleDigest ||
+		labels[runtimePolicyDigestLabel] != workload.Runtime.PolicyDigest {
+		t.Fatalf("labels=%#v", labels)
+	}
+}
+
 func TestCreateDisablesDNSForEveryPositiveCapabilityRuntime(t *testing.T) {
 	for _, runtime := range []*RuntimeGrant{
 		{Inference: true, RouteID: "local", ModelAlias: "model"},
@@ -427,7 +460,7 @@ func TestCreateRelayUsesOnlyFixedHardenedTopology(t *testing.T) {
 	spec := RelaySpec{
 		TenantID: "tenant-a", InstanceID: "agent-a", Generation: 3,
 		GrantID: "grant-" + strings.Repeat("a", 64), GrantDir: "/run/steward-gateway/grants/grant-" + strings.Repeat("a", 64),
-		Image: "sha256:" + strings.Repeat("b", 64), RelayGID: 1234, Inference: true, ServicePort: 8080,
+		Image: "sha256:" + strings.Repeat("b", 64), RelayGID: 1234, Inference: true, Connector: true, ServicePort: 8080,
 		MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
 	}
 	spec.Name = RelayName(spec.TenantID, spec.InstanceID, spec.Generation)
@@ -462,6 +495,21 @@ func TestCreateRelayUsesOnlyFixedHardenedTopology(t *testing.T) {
 	labels := payload["Labels"].(map[string]any)
 	if labels["io.hardrails.tenant"] != spec.TenantID || labels[runtimeGrantLabel] != spec.GrantID {
 		t.Fatalf("labels=%#v", labels)
+	}
+	command := payload["Cmd"].([]any)
+	wantCommand := []string{
+		"-inference-socket=/run/steward-grant/i.sock",
+		"-connector-socket=/run/steward-grant/c.sock",
+		"-service-socket=/run/steward-grant/s.sock",
+		"-service-target=http://agent:8080",
+	}
+	if len(command) != len(wantCommand) {
+		t.Fatalf("command=%#v", command)
+	}
+	for index := range wantCommand {
+		if command[index] != wantCommand[index] {
+			t.Fatalf("command=%#v", command)
+		}
 	}
 	bad := spec
 	bad.Image = "steward-relay:latest"
@@ -703,7 +751,7 @@ func hardenedRelayInspectPayload(relay RelaySpec) map[string]any {
 		"Image": relay.Image,
 		"Config": map[string]any{
 			"Image": relay.Image, "User": "65532:1234", "WorkingDir": "/",
-			"Cmd": []string{"-inference-socket=/run/steward-grant/i.sock", "-service-socket=/run/steward-grant/s.sock", "-service-target=http://agent:8080"},
+			"Cmd": relayCommand(relay),
 			"Labels": map[string]string{
 				managedRelayLabel: "true", relayFingerprintLabel: relayFingerprint(relay),
 				"io.hardrails.tenant": relay.TenantID, "io.hardrails.instance": relay.InstanceID,
@@ -734,7 +782,7 @@ func TestInspectRelayUsesConfiguredStaticIPBeforeFirstStart(t *testing.T) {
 		Name: RelayName("tenant-a", "agent-a", 9), Image: "sha256:" + strings.Repeat("a", 64),
 		NetworkName: network.Name, GrantID: "grant-" + strings.Repeat("b", 64),
 		GrantDir: "/run/steward-gateway/grants/" + strings.Repeat("b", 32), TenantID: "tenant-a", InstanceID: "agent-a", Generation: 9,
-		RelayGID: 1234, Inference: true, ServicePort: 8080, RelayIP: network.RelayIP, AgentIP: network.AgentIP,
+		RelayGID: 1234, Inference: true, Connector: true, ServicePort: 8080, RelayIP: network.RelayIP, AgentIP: network.AgentIP,
 		MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
 	}
 	payload := hardenedRelayInspectPayload(relay)
@@ -1187,7 +1235,8 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 		NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), Generation: 3,
 		Inference: true, RouteID: "local", ModelAlias: "private-model", ServicePort: 8080,
 		Subnet: addresses.Subnet, Gateway: addresses.Gateway,
-		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
+		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP, ConnectorIDs: []string{"git.read", "issues.create"},
+		CapsuleDigest: "sha256:" + strings.Repeat("d", 64), PolicyDigest: "sha256:" + strings.Repeat("e", 64),
 	}
 	workload := Workload{
 		InstanceID: "agent-1", TenantID: "tenant-a", ProfileID: "openclaw-v1@v1",
@@ -1203,6 +1252,7 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 				"Env": []string{
 					"HOME=/home/node", "TMPDIR=/tmp", "OPENAI_BASE_URL=http://steward-relay:8080/v1",
 					"OPENAI_API_BASE=http://steward-relay:8080/v1", "OPENAI_API_KEY=steward-local", "OPENAI_MODEL=private-model",
+					"STEWARD_CONNECTOR_URL=http://steward-relay:8081",
 				},
 				"WorkingDir": "/home/node/.openclaw/workspace",
 				"Labels": map[string]string{
@@ -1214,6 +1264,8 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 					runtimeInferenceLabel: "true", runtimeModelLabel: "private-model", runtimeRouteLabel: "local",
 					runtimeSubnetLabel: addresses.Subnet, runtimeGatewayLabel: addresses.Gateway,
 					runtimeServicePortLabel: "8080", runtimeRelayIPLabel: addresses.RelayIP, runtimeAgentIPLabel: addresses.AgentIP,
+					runtimeConnectorsLabel: "git.read,issues.create", runtimeCapsuleDigestLabel: runtime.CapsuleDigest,
+					runtimePolicyDigestLabel: runtime.PolicyDigest,
 				},
 			},
 			"HostConfig": enforceClosedDockerHostPolicy(map[string]any{

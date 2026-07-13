@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -95,5 +96,61 @@ func TestWorkloadValidatesOptionalExactConfigDigest(t *testing.T) {
 	workload.ImageRuntimeDigest = "sha256:" + strings.Repeat("c", 64)
 	if err := workload.Validate(); err == nil {
 		t.Fatal("runtime digest unrelated to the signed manifest/config pair accepted")
+	}
+}
+
+func TestWorkloadValidatesBoundedConnectorRuntimeGrant(t *testing.T) {
+	connectorIDs := make([]string, 32)
+	for index := range connectorIDs {
+		connectorIDs[index] = fmt.Sprintf("connector.%02d", index)
+	}
+	network := NetworkSpecFor("tenant", "agent", 1)
+	runtime := RuntimeGrant{
+		NetworkName: network.Name, GrantID: "grant-" + strings.Repeat("b", 64), Generation: 1,
+		ConnectorIDs: connectorIDs, CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
+	}
+	workload := Workload{
+		InstanceID: "agent", TenantID: "tenant", ProfileID: "generic-v1@v1",
+		Image: "registry.local/agent@sha256:" + strings.Repeat("e", 64), Command: []string{"agent"},
+		Resources: Resources{MemoryBytes: 1, CPUMillis: 1, PIDs: 1}, Runtime: &runtime,
+	}
+	if err := workload.Validate(); err != nil {
+		t.Fatalf("valid 32-connector runtime rejected: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*RuntimeGrant)
+	}{
+		{name: "too many", mutate: func(runtime *RuntimeGrant) { runtime.ConnectorIDs = append(runtime.ConnectorIDs, "connector.32") }},
+		{name: "not sorted", mutate: func(runtime *RuntimeGrant) {
+			runtime.ConnectorIDs[0], runtime.ConnectorIDs[1] = runtime.ConnectorIDs[1], runtime.ConnectorIDs[0]
+		}},
+		{name: "duplicate", mutate: func(runtime *RuntimeGrant) { runtime.ConnectorIDs[1] = runtime.ConnectorIDs[0] }},
+		{name: "invalid ID", mutate: func(runtime *RuntimeGrant) { runtime.ConnectorIDs[0] = "bad connector" }},
+		{name: "missing bindings", mutate: func(runtime *RuntimeGrant) { runtime.CapsuleDigest, runtime.PolicyDigest = "", "" }},
+		{name: "partial binding", mutate: func(runtime *RuntimeGrant) { runtime.PolicyDigest = "" }},
+		{name: "invalid binding", mutate: func(runtime *RuntimeGrant) { runtime.PolicyDigest = "sha256:not-a-digest" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := workload
+			clonedRuntime := runtime
+			clonedRuntime.ConnectorIDs = append([]string(nil), runtime.ConnectorIDs...)
+			candidate.Runtime = &clonedRuntime
+			test.mutate(candidate.Runtime)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("invalid connector runtime accepted")
+			}
+		})
+	}
+
+	legacy := workload
+	legacyRuntime := runtime
+	legacyRuntime.ConnectorIDs = nil
+	legacyRuntime.CapsuleDigest, legacyRuntime.PolicyDigest = "", ""
+	legacyRuntime.Inference, legacyRuntime.RouteID, legacyRuntime.ModelAlias = true, "local", "model"
+	legacy.Runtime = &legacyRuntime
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy connector-free runtime rejected: %v", err)
 	}
 }

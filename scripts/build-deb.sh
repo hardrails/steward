@@ -24,9 +24,17 @@ for path in steward stewardctl steward-mcp steward-executor steward-gateway stew
 	scripts/activate-node-release.sh scripts/node-preflight.sh \
 	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh \
 	scripts/node-removal-guard.sh scripts/build-hermes-adapter.sh scripts/build-relay-image.sh \
-	scripts/hermes-feasibility.sh adapters/hermes-agent/Dockerfile adapters/hermes-agent/README.md \
+	scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh \
+	adapters/hermes-agent/Dockerfile adapters/hermes-agent/README.md \
 	adapters/hermes-agent/adapter.json adapters/hermes-agent/entrypoint.py \
-	adapters/hermes-agent/fixture_mcp.py adapters/hermes-agent/fixture_model.py \
+	adapters/hermes-agent/fixture_connector.py adapters/hermes-agent/fixture_mcp.py \
+	adapters/hermes-agent/fixture_model.py adapters/hermes-agent/fixture_secret_scan.py \
+	adapters/hermes-agent/fixtures/connector-skill/SKILL.md \
+	adapters/hermes-agent/fixtures/connector-skill/connector-fixture-contract.json \
+	adapters/hermes-agent/fixtures/connector-skill/connector_work.py \
+	adapters/hermes-agent/fixtures/connector-skill/manifest.json \
+	adapters/hermes-agent/fixtures/connector-skill/manifest.sig \
+	adapters/hermes-agent/fixtures/connector-skill/public.pem \
 	adapters/hermes-agent/fixtures/skill/SKILL.md \
 	adapters/hermes-agent/fixtures/skill/manifest.json \
 	adapters/hermes-agent/fixtures/skill/manifest.sig \

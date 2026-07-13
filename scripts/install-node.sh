@@ -28,6 +28,119 @@ valid_release_version() {
 	return 0
 }
 
+# Generate connector receipt trust material without giving staged release code
+# root privileges. The root-controlled configuration directory contains a
+# random service-owned child only while generation runs. The node transaction
+# smoke test exercises this same boundary.
+generate_connector_receipt_keypair() (
+	set -euo pipefail
+	if [[ $# -ne 4 ]]; then
+		echo "install-node: internal connector key generation arguments are invalid" >&2
+		exit 2
+	fi
+	local release_dir=$1 gateway_user=$2 gateway_group=$3 config_root=$4
+	local gateway_uid gateway_gid key_work staged_private staged_public
+	local temporary_private='' temporary_public='' destinations_started=0 committed=0
+	local private_destination="$config_root/connector-receipts.private.pem"
+	local public_destination="$config_root/connector-receipts.public"
+
+	# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
+	cleanup_connector_receipt_keypair() {
+		[[ -z ${key_work:-} ]] || rm -rf -- "$key_work"
+		[[ -z ${temporary_private:-} ]] || rm -f -- "$temporary_private"
+		[[ -z ${temporary_public:-} ]] || rm -f -- "$temporary_public"
+		if (( destinations_started == 1 && committed == 0 )); then
+			rm -f -- "$private_destination" "$public_destination"
+		fi
+	}
+	trap cleanup_connector_receipt_keypair EXIT
+	trap 'exit 2' HUP INT TERM
+
+	if [[ ! -d $config_root || -L $config_root ]]; then
+		echo "install-node: connector key configuration path must be an existing regular directory" >&2
+		exit 2
+	fi
+	gateway_uid=$(id -u "$gateway_user")
+	gateway_gid=$(id -g "$gateway_user")
+	if [[ $(id -gn "$gateway_user") != "$gateway_group" ]]; then
+		echo "install-node: connector key identity must use its primary group" >&2
+		exit 2
+	fi
+	if [[ $(stat -c '%u:%g:%a' "$config_root") != "0:0:755" ]]; then
+		echo "install-node: connector key configuration directory must be root-owned with mode 0755" >&2
+		exit 2
+	fi
+
+	key_work=$(mktemp -d "$config_root/.connector-keygen.XXXXXX")
+	chown "$gateway_user:$gateway_group" "$key_work"
+	chmod 0700 "$key_work"
+	staged_private="$key_work/private.pem"
+	staged_public="$key_work/public"
+	if ! runuser -u "$gateway_user" -- /bin/sh -c 'umask 022; exec "$@"' steward-keygen \
+		"$release_dir/stewardctl" keygen -private-out "$staged_private" \
+		-public-out "$staged_public" >/dev/null; then
+		echo "install-node: unprivileged connector receipt key generation failed" >&2
+		exit 2
+	fi
+	if [[ ! -f $staged_private || -L $staged_private || ! -f $staged_public || -L $staged_public ]]; then
+		echo "install-node: connector key generator did not create regular files" >&2
+		exit 2
+	fi
+	if [[ $(stat -c '%u:%g:%a:%h' "$staged_private") != "$gateway_uid:$gateway_gid:600:1" ||
+		$(stat -c '%u:%g:%a:%h' "$staged_public") != "$gateway_uid:$gateway_gid:644:1" ]]; then
+		echo "install-node: connector key generator created unsafe ownership, modes, or links" >&2
+		exit 2
+	fi
+	if ! runuser -u "$gateway_user" -- "$release_dir/stewardctl" key match \
+		-private-key "$staged_private" -public-key "$staged_public" >/dev/null; then
+		echo "install-node: generated connector receipt key pair does not match" >&2
+		exit 2
+	fi
+	# The parent is root-owned and not writable by the service identity, so taking
+	# ownership of this directory closes the staged-output namespace before root
+	# copies from it.
+	chown root:root "$key_work"
+	chmod 0700 "$key_work"
+	if [[ $(stat -c '%u:%g:%a' "$key_work") != "0:0:700" ||
+		$(stat -c '%u:%g:%a:%h' "$staged_private") != "$gateway_uid:$gateway_gid:600:1" ||
+		$(stat -c '%u:%g:%a:%h' "$staged_public") != "$gateway_uid:$gateway_gid:644:1" ]]; then
+		echo "install-node: connector key output namespace could not be sealed" >&2
+		exit 2
+	fi
+
+	temporary_private=$(mktemp "$config_root/.connector-receipts.private.XXXXXX")
+	temporary_public=$(mktemp "$config_root/.connector-receipts.public.XXXXXX")
+	rm -f -- "$temporary_private" "$temporary_public"
+	install -o "$gateway_user" -g "$gateway_group" -m 0600 "$staged_private" "$temporary_private"
+	install -o root -g root -m 0644 "$staged_public" "$temporary_public"
+	if [[ ! -f $temporary_private || -L $temporary_private ||
+		$(stat -c '%u:%g:%a:%h' "$temporary_private") != "$gateway_uid:$gateway_gid:600:1" ]]; then
+		echo "install-node: installed connector receipt private key is unsafe" >&2
+		exit 2
+	fi
+	if [[ ! -f $temporary_public || -L $temporary_public ||
+		$(stat -c '%u:%g:%a:%h' "$temporary_public") != "0:0:644:1" ]]; then
+		echo "install-node: installed connector receipt public key is unsafe" >&2
+		exit 2
+	fi
+	if ! runuser -u "$gateway_user" -- "$release_dir/stewardctl" key match \
+		-private-key "$temporary_private" -public-key "$temporary_public" >/dev/null; then
+		echo "install-node: installed connector receipt key pair does not match" >&2
+		exit 2
+	fi
+	if [[ -e $private_destination || -L $private_destination ||
+		-e $public_destination || -L $public_destination ]]; then
+		echo "install-node: refusing to replace connector receipt trust material" >&2
+		exit 2
+	fi
+	destinations_started=1
+	mv "$temporary_private" "$private_destination"
+	temporary_private=
+	mv "$temporary_public" "$public_destination"
+	temporary_public=
+	committed=1
+)
+
 if ! valid_release_version "$expected_version"; then
 	echo "install-node: --expected-version must be an installable vX.Y.Z release tag" >&2
 	exit 2
@@ -59,8 +172,16 @@ release_files=(
 	integration/adapters/hermes-agent/README.md
 	integration/adapters/hermes-agent/adapter.json
 	integration/adapters/hermes-agent/entrypoint.py
+	integration/adapters/hermes-agent/fixture_connector.py
 	integration/adapters/hermes-agent/fixture_mcp.py
 	integration/adapters/hermes-agent/fixture_model.py
+	integration/adapters/hermes-agent/fixture_secret_scan.py
+	integration/adapters/hermes-agent/fixtures/connector-skill/SKILL.md
+	integration/adapters/hermes-agent/fixtures/connector-skill/connector-fixture-contract.json
+	integration/adapters/hermes-agent/fixtures/connector-skill/connector_work.py
+	integration/adapters/hermes-agent/fixtures/connector-skill/manifest.json
+	integration/adapters/hermes-agent/fixtures/connector-skill/manifest.sig
+	integration/adapters/hermes-agent/fixtures/connector-skill/public.pem
 	integration/adapters/hermes-agent/fixtures/skill/SKILL.md
 	integration/adapters/hermes-agent/fixtures/skill/manifest.json
 	integration/adapters/hermes-agent/fixtures/skill/manifest.sig
@@ -84,6 +205,7 @@ release_files=(
 	integration/scripts/configure-node.sh
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
+	integration/scripts/hermes-steward-acceptance.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
 	integration/scripts/uninstall-node.sh
@@ -119,8 +241,9 @@ write_canonical_manifest() {
 		printf '  "arch": "%s",\n' "$goarch"
 		printf '  "state_formats": {\n'
 		printf '    "admission_fence": {"read_min": 1, "read_max": 2, "write": 2},\n'
+		printf '    "connector_receipt_log": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "evidence_log": {"read_min": 1, "read_max": 1, "write": 1},\n'
-		printf '    "gateway_state": {"read_min": 1, "read_max": 2, "write": 2},\n'
+		printf '    "gateway_state": {"read_min": 1, "read_max": 3, "write": 3},\n'
 		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "uplink_state": {"read_min": 2, "read_max": 2, "write": 2}\n'
@@ -245,13 +368,18 @@ done
 install -d -o root -g root -m 0755 "$incoming/integration" \
 	"$incoming/integration/adapters" "$incoming/integration/adapters/hermes-agent" \
 	"$incoming/integration/adapters/hermes-agent/fixtures" \
+	"$incoming/integration/adapters/hermes-agent/fixtures/connector-skill" \
 	"$incoming/integration/adapters/hermes-agent/fixtures/skill" \
 	"$incoming/integration/deploy" "$incoming/integration/deploy/config" \
 	"$incoming/integration/deploy/systemd" "$incoming/integration/scripts"
-for file in Dockerfile README.md adapter.json entrypoint.py fixture_mcp.py fixture_model.py \
-	license-inventory.json source-inputs.sha256; do
+for file in Dockerfile README.md adapter.json entrypoint.py fixture_connector.py fixture_mcp.py \
+	fixture_model.py fixture_secret_scan.py license-inventory.json source-inputs.sha256; do
 	install -o root -g root -m 0644 "$root/adapters/hermes-agent/$file" \
 		"$incoming/integration/adapters/hermes-agent/$file"
+done
+for file in SKILL.md connector-fixture-contract.json connector_work.py manifest.json manifest.sig public.pem; do
+	install -o root -g root -m 0644 "$root/adapters/hermes-agent/fixtures/connector-skill/$file" \
+		"$incoming/integration/adapters/hermes-agent/fixtures/connector-skill/$file"
 done
 for file in SKILL.md manifest.json manifest.sig public.pem workspace-fixture-contract.json \
 	workspace_audit.py; do
@@ -265,7 +393,7 @@ for file in deploy/config/executor-gateway.env deploy/config/executor.env \
 	install -o root -g root -m 0644 "$root/$file" "$incoming/integration/$file"
 done
 for script in activate-node-release.sh build-hermes-adapter.sh build-relay-image.sh configure-admission.sh \
-	configure-node.sh hermes-feasibility.sh install-node.sh node-preflight.sh node-removal-guard.sh \
+	configure-node.sh hermes-feasibility.sh hermes-steward-acceptance.sh install-node.sh node-preflight.sh node-removal-guard.sh \
 	uninstall-node.sh; do
 	install -o root -g root -m 0755 "$root/scripts/$script" "$incoming/integration/scripts/$script"
 done
@@ -333,9 +461,29 @@ if [[ ! -e /etc/steward/gateway-service-token ]]; then
 	chown steward-gateway:steward-gateway /etc/steward/gateway-service-token
 	chmod 0600 /etc/steward/gateway-service-token
 fi
+connector_private_present=0
+connector_public_present=0
+if [[ -e /etc/steward/connector-receipts.private.pem || -L /etc/steward/connector-receipts.private.pem ]]; then
+	connector_private_present=1
+fi
+if [[ -e /etc/steward/connector-receipts.public || -L /etc/steward/connector-receipts.public ]]; then
+	connector_public_present=1
+fi
+if (( connector_private_present != connector_public_present )); then
+	echo "install-node: connector receipt private and public keys must exist together" >&2
+	exit 2
+fi
+if (( connector_private_present == 0 )); then
+	generate_connector_receipt_keypair "$release_dir" steward-gateway steward-gateway \
+		/etc/steward
+fi
 if [[ ! -e /etc/steward/gateway.json ]]; then
+	[[ -r /etc/machine-id ]] || { echo "install-node: /etc/machine-id is required to create the Gateway receipt identity" >&2; exit 2; }
+	machine_id=$(tr -d '\n' </etc/machine-id)
+	[[ $machine_id =~ ^[a-f0-9]{32}$ ]] || { echo "install-node: /etc/machine-id is invalid" >&2; exit 2; }
 	sed -e "s/@EXECUTOR_GID@/$(id -g steward-executor)/g" \
 		-e "s/@RELAY_GID@/$(getent group steward-relay | cut -d: -f3)/g" \
+		-e "s|@CONNECTOR_RECEIPT_NODE_ID@|steward-$machine_id/gateway|g" \
 		"$release_config/gateway.json.in" >/etc/steward/gateway.json
 	chown root:steward-gateway /etc/steward/gateway.json
 	chmod 0640 /etc/steward/gateway.json
@@ -377,7 +525,8 @@ else
 		uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 		node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 		build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
-		build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh; do
+		build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh \
+		hermes-steward-acceptance:/opt/steward/current/integration/scripts/hermes-steward-acceptance.sh; do
 		name=${mapping%%:*}
 		target=${mapping#*:}
 		path="/usr/local/libexec/steward/$name"
@@ -429,7 +578,8 @@ else
 		uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 		node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 		build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
-		build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh; do
+		build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh \
+		hermes-steward-acceptance:/opt/steward/current/integration/scripts/hermes-steward-acceptance.sh; do
 		name=${mapping%%:*}
 		target=${mapping#*:}
 		tmp="/usr/local/libexec/steward/.${name}.new.$$"

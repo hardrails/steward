@@ -94,9 +94,9 @@ Steward separates those capabilities:
 | Deployment authority | A publisher-signed workload profile, site policy, and tenant/node-bound instance request must all permit the workload. |
 | Stale commands | Durable policy and generation records reject policy rollback and commands for replaced instances. Read-only commands do not change lifecycle ordering. |
 | Multiple tenants on one host | Each workload has its own gVisor sandbox, per-workload resource limits, host and tenant aggregate memory/CPU/PID reservations, workload-count caps, command authority, and, when needed, private Docker network. Durable admission, command-fence, journal, and receipt records bind the tenant ID. Persistent Docker volumes are disabled on shared hosts because the local volume driver does not provide portable hard byte or inode quotas. |
-| Model and API access | Site policy grants named inference routes, model aliases, service IDs, and HTTP(S) egress routes. The agent gets no general network route. |
+| Model and API access | Site policy grants named inference routes, model aliases, service IDs, credential-brokered connector IDs, and HTTP(S) egress routes. A connector maps a logical operation to one operator-owned origin, method, path, credential, and call budget. Gateway gives the configured credential only to that upstream operation, not directly to the workload. Explicit non-borrowing receipt budgets prevent one tenant from consuming another tenant's evidence allocation. The agent gets no general network route. |
 | Remote nodes | Authenticated outbound polling works behind network address translation (NAT) and inbound firewalls. Tenant-signed commands include a short validity window, instance generation, and sequence number so Executor can reject replay. |
-| Audit evidence | Executor writes signed, hash-linked receipts. `stewardctl` verifies native logs or portable newline-delimited JSON (NDJSON) exports offline. |
+| Audit evidence | Executor writes signed, hash-linked lifecycle receipts. Gateway writes a separate signed chain for connector authorizations and outcomes. `stewardctl` verifies both offline. |
 | Disconnected operation | Static binaries, local public-key infrastructure (PKI), offline image import, and local model gateways do not require a public network service after transfer. |
 | Vendor independence | Public OpenAPI and uplink contracts have no private runtime dependency. |
 
@@ -116,12 +116,12 @@ responsibility behind an OpenAI-compatible endpoint.
                          v
   +------------------- Steward node -------------------+
   | steward | steward-executor | steward-gateway       |
-  | state   | admission+Docker | inference+egress      |
+  | state   | admission+Docker | inference+connectors  |
   +-----------------------|-----------------------------+
                           v
               gVisor agent <-> trusted relay
                                   |
-                 approved inference + HTTP(S) routes
+           approved inference + connectors + HTTP(S) routes
 ```
 
 A Linux release contains six static binaries:
@@ -130,7 +130,7 @@ A Linux release contains six static binaries:
 - `steward-executor` verifies admission and is the only long-running Steward
   service with Docker-group membership.
 - `steward-gateway` holds upstream credentials and enforces inference, service,
-  and HTTP(S) egress grants.
+  exact connector-operation, and HTTP(S) egress grants.
 - `steward-relay` is a fixed-destination companion inside one workload network.
 - `stewardctl` manages keys, policy, OCI import, evidence, and local node actions.
 - `steward-mcp` exposes bounded node operations over MCP stdio.
@@ -160,8 +160,10 @@ agent has:
 - bounded local logs, request bodies, and response bodies;
 - no host mount, device, published port, Docker socket, or caller-defined
   environment;
-- `network=none`, unless a signed capability needs the per-instance relay;
-- an isolated bridge with no host gateway for inference, service, or egress;
+- `network=none`, unless a signed inference, service, connector, or egress
+  capability needs the per-instance relay;
+- an isolated bridge with no host gateway for inference, service, connector, or
+  egress;
 - persistent state only through a Steward-owned volume for one tenant and logical
   workload, and only after the operator enables the documented dedicated-host
   compatibility mode; and
@@ -179,11 +181,21 @@ hardware side channels.
 
 ## What is different
 
-Sandboxes, lifecycle APIs, and egress allowlists are necessary but widely
-available. Steward adds a portable authorization-to-enforcement record: local keys
-and policy identify the artifact and tenant request; durable anti-replay records
-reject stale authority; and the node binds effective route policy into signed
-receipts.
+Sandboxes, lifecycle APIs, egress allowlists, and credential injection are necessary
+but widely available. Steward connects them into a portable
+authorization-to-enforcement record: local keys and policy identify the artifact,
+tenant request, and exact connector operation; Gateway sends the configured
+credential only to that upstream operation, the node durably spends bounded
+connector calls before external effects, rejects stale authority, and binds
+effective route policy into signed receipts.
+
+Connector credential isolation has a precise boundary: Gateway does not hand the
+configured credential to the workload and aborts an upstream response if any header
+or decoded body chunk contains that exact value. It does not detect encoded or
+transformed credentials, private-origin disclosure, or application-specific secret
+fields. Operators must still use a narrow trusted upstream. Tenant receipt budgets
+isolate ledger bytes; they do not isolate the shared disk, synchronous writes, or a
+hostile host root.
 
 This claim is intentionally limited. Receipts show what Steward accepted and which
 host mutations it recorded. They do not prove prompt meaning, model honesty,
@@ -201,20 +213,23 @@ Steward includes a qualified, source-built adapter definition for
 only negotiation, health, run submission, and run-status operations on service port
 `8766`. Run event streams are not exposed.
 
-The qualification ran a signed `steward.workspace-audit` skill as real Hermes work
-under gVisor, verified its bounded inventory of `/opt/data/workspace`, restarted the
-container, and ran the skill again. A separate integration gate imported the image
-through signed admission, called it through Gateway, resumed its state, purged that
-state, and verified Executor's signed receipt chain. The proof applies only to the
-pinned source, adapter, and documented inference, service, state, and skill behavior.
-The official upstream image remains inadmissible because it starts as root and
-declares a volume.
+Qualification ran two signed skills as real Hermes work under gVisor. It verified
+the bounded `steward.workspace-audit` inventory, changed persisted workspace state,
+restarted the container, opened a fresh session, and required the changed result.
+For `steward.connector-work`, Hermes had to discover the native skill index entry,
+load the exact signed `SKILL.md` with `skill_view`, and follow its terminal command.
+The integration gate proved one authenticated upstream effect, replay and
+undeclared-operation denial, fixed-material secret scans, state purge, and separate
+Executor and Gateway connector receipt chains. The proof applies only to the pinned
+source, adapter, and documented inference, service, state, connector, and skill
+behavior. The official upstream image remains inadmissible because it starts as
+root and declares a volume.
 
-Linux releases include `scripts/build-hermes-adapter.sh` for interactive or
-non-interactive local builds. The builder can fetch the exact pinned commit or use a
-transferred source checkout. Steward does not redistribute a prebuilt Hermes OCI
-archive because dependency and base-image notices are incomplete. Operators inspect
-and sign the exact archive they build.
+Linux releases include the interactive or non-interactive builder and the
+`hermes-steward-acceptance` disposable-host harness. The builder can fetch the exact
+pinned commit or use a transferred source checkout. Steward does not redistribute a
+prebuilt Hermes OCI archive because dependency and base-image notices are incomplete.
+Operators build, qualify, inspect, and sign their exact archive.
 
 Persistent state still requires the explicit dedicated single-tenant host mode for
 volumes without enforced byte or inode quotas. Raw TCP/UDP, host mounts, arbitrary
@@ -260,6 +275,7 @@ without access to private source or infrastructure.
 - [Operate a workload](https://hardrails.github.io/steward/guides/workload-lifecycle/)
 - [Install without public network access](https://hardrails.github.io/steward/guides/air-gapped/)
 - [Configure signed admission](https://hardrails.github.io/steward/guides/signed-admission/)
+- [Broker authenticated API operations](https://hardrails.github.io/steward/guides/connectors/)
 - [Upgrade and roll back](https://hardrails.github.io/steward/guides/upgrades/)
 - [Configuration reference](https://hardrails.github.io/steward/reference/configuration/)
 - [FAQ](https://hardrails.github.io/steward/faq/)

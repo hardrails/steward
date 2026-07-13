@@ -61,8 +61,16 @@ release_files=(
 	integration/adapters/hermes-agent/README.md
 	integration/adapters/hermes-agent/adapter.json
 	integration/adapters/hermes-agent/entrypoint.py
+	integration/adapters/hermes-agent/fixture_connector.py
 	integration/adapters/hermes-agent/fixture_mcp.py
 	integration/adapters/hermes-agent/fixture_model.py
+	integration/adapters/hermes-agent/fixture_secret_scan.py
+	integration/adapters/hermes-agent/fixtures/connector-skill/SKILL.md
+	integration/adapters/hermes-agent/fixtures/connector-skill/connector-fixture-contract.json
+	integration/adapters/hermes-agent/fixtures/connector-skill/connector_work.py
+	integration/adapters/hermes-agent/fixtures/connector-skill/manifest.json
+	integration/adapters/hermes-agent/fixtures/connector-skill/manifest.sig
+	integration/adapters/hermes-agent/fixtures/connector-skill/public.pem
 	integration/adapters/hermes-agent/fixtures/skill/SKILL.md
 	integration/adapters/hermes-agent/fixtures/skill/manifest.json
 	integration/adapters/hermes-agent/fixtures/skill/manifest.sig
@@ -86,6 +94,7 @@ release_files=(
 	integration/scripts/configure-node.sh
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
+	integration/scripts/hermes-steward-acceptance.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
 	integration/scripts/uninstall-node.sh
@@ -112,8 +121,9 @@ write_canonical_manifest() {
 		printf '  "arch": "%s",\n' "$goarch"
 		printf '  "state_formats": {\n'
 		printf '    "admission_fence": {"read_min": 1, "read_max": 2, "write": 2},\n'
+		printf '    "connector_receipt_log": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "evidence_log": {"read_min": 1, "read_max": 1, "write": 1},\n'
-		printf '    "gateway_state": {"read_min": 1, "read_max": 2, "write": 2},\n'
+		printf '    "gateway_state": {"read_min": 1, "read_max": 3, "write": 3},\n'
 		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "uplink_state": {"read_min": 2, "read_max": 2, "write": 2}\n'
@@ -426,7 +436,8 @@ for mapping in \
 	uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 	node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 	build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
-	build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh; do
+	build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh \
+	hermes-steward-acceptance:/opt/steward/current/integration/scripts/hermes-steward-acceptance.sh; do
 	name=${mapping%%:*}
 	path="/usr/local/libexec/steward/$name"
 	if [[ -e $path || -L $path ]]; then
@@ -483,7 +494,8 @@ for mapping in \
 	uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 	node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
 	build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
-	build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh; do
+	build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh \
+	hermes-steward-acceptance:/opt/steward/current/integration/scripts/hermes-steward-acceptance.sh; do
 	name=${mapping%%:*}
 	target=${mapping#*:}
 	tmp="/usr/local/libexec/steward/.${name}.new.$$"

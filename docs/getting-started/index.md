@@ -19,10 +19,10 @@ To stage the software, you need:
 - public Internet access to GitHub Releases, unless you use the [air-gapped path]({{ '/guides/air-gapped/' | relative_url }}).
 
 Staging does not require a running Docker daemon. Activation requires Docker to be
-running and gVisor registered as runtime `runsc`. Inference, service, and egress
-networks require Docker Engine 28 or newer. Steward uses Docker's isolated bridge
-gateway mode so containers cannot reach host services through the bridge gateway.
-A `network=none` workload does not need this Docker feature.
+running and gVisor registered as runtime `runsc`. Inference, service, connector,
+and egress networks require Docker Engine 28 or newer. Steward uses Docker's
+isolated bridge gateway mode so containers cannot reach host services through the
+bridge gateway. A `network=none` workload does not need this Docker feature.
 
 Remote activation needs the control plane's HTTPS URL, two credential files, and
 certificate authority (CA) certificate. Choose **stage only** to install without

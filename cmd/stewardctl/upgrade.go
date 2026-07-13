@@ -23,6 +23,7 @@ const maxReleaseManifestBytes = 1 << 20
 
 var upgradeStateNames = []string{
 	"admission_fence",
+	"connector_receipt_log",
 	"evidence_log",
 	"gateway_state",
 	"operation_journal",
@@ -42,12 +43,13 @@ type upgradeOptions struct {
 }
 
 type observedStateFormats struct {
-	AdmissionFence   *int `json:"admission_fence"`
-	EvidenceLog      *int `json:"evidence_log"`
-	GatewayState     *int `json:"gateway_state"`
-	OperationJournal *int `json:"operation_journal"`
-	SupervisorState  *int `json:"supervisor_state"`
-	UplinkState      *int `json:"uplink_state"`
+	AdmissionFence      *int `json:"admission_fence"`
+	ConnectorReceiptLog *int `json:"connector_receipt_log"`
+	EvidenceLog         *int `json:"evidence_log"`
+	GatewayState        *int `json:"gateway_state"`
+	OperationJournal    *int `json:"operation_journal"`
+	SupervisorState     *int `json:"supervisor_state"`
+	UplinkState         *int `json:"uplink_state"`
 }
 
 type upgradeInspection struct {
@@ -86,12 +88,13 @@ type releaseManifest struct {
 }
 
 type releaseStateFormats struct {
-	AdmissionFence   releaseFormatRange `json:"admission_fence"`
-	EvidenceLog      releaseFormatRange `json:"evidence_log"`
-	GatewayState     releaseFormatRange `json:"gateway_state"`
-	OperationJournal releaseFormatRange `json:"operation_journal"`
-	SupervisorState  releaseFormatRange `json:"supervisor_state"`
-	UplinkState      releaseFormatRange `json:"uplink_state"`
+	AdmissionFence      releaseFormatRange `json:"admission_fence"`
+	ConnectorReceiptLog releaseFormatRange `json:"connector_receipt_log"`
+	EvidenceLog         releaseFormatRange `json:"evidence_log"`
+	GatewayState        releaseFormatRange `json:"gateway_state"`
+	OperationJournal    releaseFormatRange `json:"operation_journal"`
+	SupervisorState     releaseFormatRange `json:"supervisor_state"`
+	UplinkState         releaseFormatRange `json:"uplink_state"`
 }
 
 func upgradeCommand(arguments []string, stdout io.Writer) error {
@@ -231,6 +234,13 @@ func inspectUpgradeState(options upgradeOptions) (upgradeInspection, error) {
 	if gatewaySummary.Present {
 		result.Formats.GatewayState = integerPointer(gatewaySummary.FormatVersion)
 	}
+	receiptSummary, err := gateway.InspectConnectorReceiptFormat(config)
+	if err != nil {
+		return upgradeInspection{}, fmt.Errorf("inspect connector receipt log: %w", err)
+	}
+	if receiptSummary.Present {
+		result.Formats.ConnectorReceiptLog = integerPointer(receiptSummary.FormatVersion)
+	}
 
 	if present, err = pathPresent(options.uplinkStateFile); err != nil {
 		return upgradeInspection{}, fmt.Errorf("inspect Executor uplink state path: %w", err)
@@ -306,12 +316,13 @@ func checkTargetCompatibility(path string, observed observedStateFormats) (*bool
 		}
 	}
 	versions := map[string]*int{
-		"admission_fence":   observed.AdmissionFence,
-		"evidence_log":      observed.EvidenceLog,
-		"gateway_state":     observed.GatewayState,
-		"operation_journal": observed.OperationJournal,
-		"supervisor_state":  observed.SupervisorState,
-		"uplink_state":      observed.UplinkState,
+		"admission_fence":       observed.AdmissionFence,
+		"connector_receipt_log": observed.ConnectorReceiptLog,
+		"evidence_log":          observed.EvidenceLog,
+		"gateway_state":         observed.GatewayState,
+		"operation_journal":     observed.OperationJournal,
+		"supervisor_state":      observed.SupervisorState,
+		"uplink_state":          observed.UplinkState,
 	}
 	incompatible := make([]string, 0)
 	for _, name := range upgradeStateNames {
@@ -336,6 +347,8 @@ func (formats releaseStateFormats) forName(name string) releaseFormatRange {
 	switch name {
 	case "admission_fence":
 		return formats.AdmissionFence
+	case "connector_receipt_log":
+		return formats.ConnectorReceiptLog
 	case "evidence_log":
 		return formats.EvidenceLog
 	case "gateway_state":

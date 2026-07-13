@@ -105,7 +105,7 @@ outbound-only deployment.
 | `-admission-evidence-file` | `/var/lib/steward-executor/evidence.bin` | Append-only signed receipt chain; capped at 64 MiB |
 | `-admission-evidence-key-file` | empty | Owner-only PKCS#8 Ed25519 receipt private key |
 | `-admission-evidence-epoch` | `1` | Receipt-key epoch expected by offline verification |
-| `-gateway-control-socket` | empty | Gateway Unix socket; enables inference, service, and egress grants with a complete Gateway/relay setup |
+| `-gateway-control-socket` | empty | Gateway Unix socket; enables inference, service, connector, and egress grants with a complete Gateway/relay setup |
 | `-gateway-grant-root` | `/run/steward-gateway/grants` | Host directory containing per-grant capability sockets |
 | `-relay-image` | empty | Trusted relay image pinned by repository digest or local Docker image ID |
 | `-relay-gid` | `0` | Nonzero host GID used for per-grant relay socket access |
@@ -187,6 +187,66 @@ with `systemctl reload steward-gateway`. Reload can alter unreferenced routes an
 rotate the service token, not socket, state, identity, grant, or audit paths. A grant
 retained for a stopped workload pins security-relevant route fields; changing one
 rejects the reload.
+
+`connectors` contains at most 128 credential-brokered API policies. Each connector
+defines one exact HTTPS origin, one owner-only credential file containing one line
+of 12 to 16,384 visible ASCII bytes, `bearer` or
+`x-api-key` injection, optional canonical address CIDRs, concurrency, request,
+response, duration, and per-grant call limits, plus at most 64 operations. Each
+operation is one ID, uppercase HTTP method, and canonical exact path without a
+query, fragment, wildcard, or percent-encoded spelling. Connector grants also pin
+the loaded credential digest. See
+[authenticated API operations]({{ '/guides/connectors/' | relative_url }}) for the
+complete boundary.
+
+`connector_receipt_file`, `connector_receipt_key_file`,
+`connector_receipt_node_id`, and `connector_receipt_epoch` form one required group
+when any connector exists. The key is an owner-only PKCS#8 Ed25519 private key and
+the ledger is an owner-only, signed newline-delimited JSON chain capped at 64 MiB.
+Receipt paths must be separate from credentials, Gateway state, audit, token,
+control socket, and the grant directory. The packaged installer creates an
+independent Gateway key and writes its public half to
+`/etc/steward/connector-receipts.public`. Plain HTTP connector origins additionally
+require `allow_insecure_http: true`; the default is HTTPS only.
+
+`connector_receipt_tenant_budgets` partitions that ledger into exact,
+non-borrowing tenant allocations:
+
+```json
+"connector_receipt_tenant_budgets": [
+  {"tenant_id": "tenant-a", "bytes": 4194304},
+  {"tenant_id": "tenant=west", "bytes": 2097152}
+]
+```
+
+Every connector-bearing grant must match one listed `tenant_id`; Gateway rejects
+an unbudgeted grant before creating its connector socket. Each allocation must be
+at least 262146 bytes, the table may contain at most 128 entries, and the sum may
+not exceed 67108864 bytes (64 MiB). Usage is the exact signed JSON line plus its
+newline. An authorized call also holds a worst-case terminal-record reservation
+until that terminal record is written. Unused capacity is not shared with another
+tenant. Exhaustion returns HTTP 503 with
+`connector_evidence_quota_exhausted`; it does not consume another tenant's slice.
+
+`stewardctl gateway connector set -tenant-budget TENANT=BYTES` may be repeated.
+It adds or updates exact tenant entries and does not remove existing entries. The
+parser splits at the final `=`, so `tenant=west=2097152` updates tenant
+`tenant=west`. Connector changes may use `systemctl reload steward-gateway`, but
+any receipt identity or tenant-budget change requires
+`systemctl restart steward-gateway`.
+
+A budget can be reduced in place only after all retained connector grants that
+bind the old route policy have been drained. The new allocation must still cover
+the tenant's verified historical signed lines and any reconstructed terminal
+reservation. Gateway checks those conditions at restart and fails closed when the
+allocation is too small. The smaller value changes the route-policy digest for new
+grants; it does not reclaim historical ledger bytes.
+
+Removing a tenant that already has ledger history requires a new receipt file and
+incremented `connector_receipt_epoch`. Make the retention and external-checkpoint
+decision for the old chain, drain retained grants, preserve the old ledger and
+verification material, configure the new file and table, and restart Gateway.
+There is no CLI operation that removes a budget or compacts an existing ledger.
 
 `steward-mcp` accepts `-node-url`, a loopback HTTP origin, and `-token-file`, an
 owner-only Executor bearer token. It does not listen on the network.

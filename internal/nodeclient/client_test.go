@@ -108,6 +108,28 @@ func TestTokenAndBoundedFilePermissions(t *testing.T) {
 	if _, err := ReadToken(path); err == nil {
 		t.Fatal("permissive token accepted")
 	}
+	if err := os.WriteFile(path, []byte("two words\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadToken(path); err == nil {
+		t.Fatal("token with internal whitespace accepted")
+	}
+}
+
+func TestBoundedReadersRejectSymlink(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "input")
+	if err := os.WriteFile(path, []byte("stable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(directory, "symlink")
+	if err := os.Symlink(path, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadBounded(symlink, 64); err == nil {
+		t.Fatal("symlink accepted")
+	}
+
 }
 
 func TestClientPurgeAndStrictResponseFailures(t *testing.T) {

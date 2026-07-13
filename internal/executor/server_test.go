@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -416,7 +417,7 @@ func TestSecureAdmissionCreatesOnlyFromSignedIntersection(t *testing.T) {
 func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing.T) {
 	docker := &secureDocker{}
 	server, _ := NewServer(docker, "secret", nil)
-	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true, Service: true, Egress: true})
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true, Service: true, Egress: true, Connector: true})
 	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
 	config.Topology, config.Gateway = docker, grants
 	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
@@ -435,8 +436,18 @@ func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing
 	var admitted secureProvisionResponse
 	if err := json.NewDecoder(response.Body).Decode(&admitted); err != nil || admitted.EgressProxy != "http://steward-relay:8082" ||
 		len(admitted.EgressRouteIDs) != 1 || admitted.EgressRouteIDs[0] != "public-web" || !docker.relay.Spec.Egress ||
-		admitted.RoutePolicyDigest != "sha256:"+strings.Repeat("e", 64) || len(docker.observed.Workload.Runtime.EgressRouteIDs) != 1 {
+		admitted.ConnectorURL != "http://steward-relay:8081" || !slices.Equal(admitted.ConnectorIDs, []string{"git.read", "issues.create"}) ||
+		!docker.relay.Spec.Connector || admitted.RoutePolicyDigest != "sha256:"+strings.Repeat("e", 64) ||
+		len(docker.observed.Workload.Runtime.EgressRouteIDs) != 1 ||
+		!slices.Equal(docker.observed.Workload.Runtime.ConnectorIDs, admitted.ConnectorIDs) ||
+		docker.observed.Workload.Runtime.CapsuleDigest != admitted.CapsuleDigest ||
+		docker.observed.Workload.Runtime.PolicyDigest != admitted.PolicyDigest {
 		t.Fatalf("egress admission=%#v relay=%#v workload=%#v err=%v", admitted, docker.relay, docker.observed.Workload, err)
+	}
+	grant := grants.grants[admitted.GrantID]
+	if grant.RuntimeRef != admitted.RuntimeRef || grant.CapsuleDigest != admitted.CapsuleDigest ||
+		grant.PolicyDigest != admitted.PolicyDigest || !slices.Equal(grant.ConnectorIDs, admitted.ConnectorIDs) {
+		t.Fatalf("connector grant=%#v admission=%#v", grant, admitted)
 	}
 	committedFence, ok := config.Fences.Record(intent.TenantID, intent.InstanceID)
 	if !ok || committedFence.RoutePolicyDigest != admitted.RoutePolicyDigest {
@@ -464,7 +475,9 @@ func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing
 	request.Header.Set("Authorization", "Bearer secret")
 	response = httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"egress_proxy":"http://steward-relay:8082"`) || !strings.Contains(response.Body.String(), `"public-web"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"egress_proxy":"http://steward-relay:8082"`) ||
+		!strings.Contains(response.Body.String(), `"connector_url":"http://steward-relay:8081"`) ||
+		!strings.Contains(response.Body.String(), `"git.read"`) || !strings.Contains(response.Body.String(), `"public-web"`) {
 		t.Fatalf("egress status=%d body=%s", response.Code, response.Body.String())
 	}
 	grants.inspectErr = errors.New("gateway offline")
@@ -480,6 +493,50 @@ func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing
 	assertLifecycleStatus(t, server, http.MethodDelete, "/v1/workloads/"+ref, context.Background(), http.StatusNoContent)
 	if docker.network != nil || docker.relay != nil || len(grants.grants) != 0 {
 		t.Fatalf("runtime topology retained: network=%#v relay=%#v grants=%#v", docker.network, docker.relay, grants.grants)
+	}
+}
+
+func TestLegacyRuntimeReplayAcceptsOnlyConnectorFreeBlankBindings(t *testing.T) {
+	runtime := &RuntimeGrant{
+		NetworkName: "steward-net-" + strings.Repeat("a", 64), Subnet: "10.1.0.0/29", Gateway: "10.1.0.1",
+		GrantID: "grant-" + strings.Repeat("b", 64), Generation: 2, Inference: true, RouteID: "local",
+		RelayIP: "10.1.0.2", AgentIP: "10.1.0.3", ModelAlias: "model", EgressRouteIDs: []string{"public-web"},
+		CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
+	}
+	desired := Workload{Runtime: runtime}
+	legacyRuntime := *runtime
+	legacyRuntime.EgressRouteIDs = append([]string(nil), runtime.EgressRouteIDs...)
+	legacyRuntime.CapsuleDigest, legacyRuntime.PolicyDigest = "", ""
+	legacy, ok := legacyRuntimeReplay(desired, Workload{Runtime: &legacyRuntime})
+	if !ok || legacy.Runtime.CapsuleDigest != "" || legacy.Runtime.PolicyDigest != "" ||
+		desired.Runtime.CapsuleDigest == "" || desired.Runtime.PolicyDigest == "" {
+		t.Fatalf("legacy=%#v ok=%t desired=%#v", legacy.Runtime, ok, desired.Runtime)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*RuntimeGrant, *RuntimeGrant)
+	}{
+		{name: "connector request", mutate: func(desired, observed *RuntimeGrant) {
+			desired.ConnectorIDs, observed.ConnectorIDs = []string{"git.read"}, []string{"git.read"}
+		}},
+		{name: "partial retained binding", mutate: func(_ *RuntimeGrant, observed *RuntimeGrant) {
+			observed.CapsuleDigest = "sha256:" + strings.Repeat("e", 64)
+		}},
+		{name: "mismatched retained binding", mutate: func(_ *RuntimeGrant, observed *RuntimeGrant) {
+			observed.CapsuleDigest = "sha256:" + strings.Repeat("e", 64)
+			observed.PolicyDigest = "sha256:" + strings.Repeat("f", 64)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			desiredRuntime, observedRuntime := *runtime, legacyRuntime
+			desiredRuntime.EgressRouteIDs = append([]string(nil), runtime.EgressRouteIDs...)
+			observedRuntime.EgressRouteIDs = append([]string(nil), runtime.EgressRouteIDs...)
+			test.mutate(&desiredRuntime, &observedRuntime)
+			if _, ok := legacyRuntimeReplay(Workload{Runtime: &desiredRuntime}, Workload{Runtime: &observedRuntime}); ok {
+				t.Fatal("unsafe retained runtime used the legacy replay projection")
+			}
+		})
 	}
 }
 
@@ -1120,9 +1177,9 @@ func TestSecureAdmissionBoundaryAndCapabilityFailures(t *testing.T) {
 			}
 		})
 	}
-	t.Run("runtime topology unavailable", func(t *testing.T) {
+	t.Run("connector topology unavailable", func(t *testing.T) {
 		server, _ := NewServer(&secureDocker{}, "secret", nil)
-		capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true, Service: true})
+		capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Connector: true})
 		if err := server.EnableSecureAdmission(config); err != nil {
 			t.Fatal(err)
 		}
@@ -1642,6 +1699,7 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 			ResourceCeiling:   admission.ResourceLimits{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 32},
 			InferenceRouteIDs: []string{"local"}, InferenceModelAliases: []string{"private-model"},
 			ServiceIDs: []string{"agent-api"}, EgressRouteIDs: []string{"public-web"},
+			ConnectorIDs: []string{"git.read", "issues.create"},
 		}},
 	}
 	policyPayload, _ := json.Marshal(policy)
@@ -1683,6 +1741,9 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 	}
 	if capabilities.Egress {
 		intent.EgressRouteIDs = []string{"public-web"}
+	}
+	if capabilities.Connector {
+		intent.ConnectorIDs = []string{"issues.create", "git.read"}
 	}
 	dir := t.TempDir()
 	if err := admission.InitializeFenceStore(filepath.Join(dir, "fences.bin")); err != nil {

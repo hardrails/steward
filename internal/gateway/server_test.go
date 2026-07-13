@@ -308,7 +308,7 @@ func TestGrantFencingAuthenticationAndRestartState(t *testing.T) {
 	}
 	rollback := grant
 	rollback.Generation = 1
-	if got := register(rollback); got != http.StatusConflict {
+	if got := register(rollback); got != http.StatusBadRequest {
 		t.Fatalf("rollback=%d", got)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/v1/services/"+grant.GrantID+"/", nil)

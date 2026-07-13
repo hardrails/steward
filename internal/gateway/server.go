@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -30,17 +31,25 @@ const maxHTTPHeaderBytes = 64 << 10
 const maxServiceConcurrent = 16
 const maxServiceLifetime = 2 * time.Minute
 const streamStatusTrailer = "X-Steward-Stream-Status"
+const maxConnectorGlobalConcurrent = 32
+const maxConnectorGrantConcurrent = 4
+const connectorReceiptStatusTrailer = "X-Steward-Connector-Receipt"
+const maxConnectorAttemptsPerMinute = 60
 
 type Grant struct {
 	GrantID        string   `json:"grant_id"`
 	TenantID       string   `json:"tenant_id"`
 	InstanceID     string   `json:"instance_id"`
 	Generation     uint64   `json:"generation"`
+	RuntimeRef     string   `json:"runtime_ref,omitempty"`
+	CapsuleDigest  string   `json:"capsule_digest,omitempty"`
+	PolicyDigest   string   `json:"policy_digest,omitempty"`
 	RouteID        string   `json:"route_id,omitempty"`
 	ModelAlias     string   `json:"model_alias,omitempty"`
 	Service        bool     `json:"service"`
 	ServiceURL     string   `json:"service_url,omitempty"`
 	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
+	ConnectorIDs   []string `json:"connector_ids,omitempty"`
 	Active         bool     `json:"active"`
 }
 
@@ -49,6 +58,7 @@ type grantResponse struct {
 	InferenceSocket   string `json:"inference_socket,omitempty"`
 	ServicePath       string `json:"service_path,omitempty"`
 	EgressSocket      string `json:"egress_socket,omitempty"`
+	ConnectorSocket   string `json:"connector_socket,omitempty"`
 	RoutePolicyDigest string `json:"route_policy_digest,omitempty"`
 	Active            bool   `json:"active"`
 }
@@ -62,34 +72,64 @@ type GrantInspection struct {
 }
 
 type retainedGrant struct {
-	GrantID                 string   `json:"grant_id"`
-	TenantID                string   `json:"tenant_id"`
-	InstanceID              string   `json:"instance_id"`
-	Generation              uint64   `json:"generation"`
-	RouteID                 string   `json:"route_id,omitempty"`
-	ModelAlias              string   `json:"model_alias,omitempty"`
-	Service                 bool     `json:"service"`
-	ServiceURL              string   `json:"service_url,omitempty"`
-	EgressRouteIDs          []string `json:"egress_route_ids,omitempty"`
-	Active                  bool     `json:"active"`
-	RoutePolicyDigest       string   `json:"route_policy_digest,omitempty"`
-	CredentialBindingDigest string   `json:"credential_binding_digest,omitempty"`
+	GrantID                 string                  `json:"grant_id"`
+	TenantID                string                  `json:"tenant_id"`
+	InstanceID              string                  `json:"instance_id"`
+	Generation              uint64                  `json:"generation"`
+	RuntimeRef              string                  `json:"runtime_ref,omitempty"`
+	CapsuleDigest           string                  `json:"capsule_digest,omitempty"`
+	PolicyDigest            string                  `json:"policy_digest,omitempty"`
+	RouteID                 string                  `json:"route_id,omitempty"`
+	ModelAlias              string                  `json:"model_alias,omitempty"`
+	Service                 bool                    `json:"service"`
+	ServiceURL              string                  `json:"service_url,omitempty"`
+	EgressRouteIDs          []string                `json:"egress_route_ids,omitempty"`
+	ConnectorIDs            []string                `json:"connector_ids,omitempty"`
+	Active                  bool                    `json:"active"`
+	RoutePolicyDigest       string                  `json:"route_policy_digest,omitempty"`
+	CredentialBindingDigest string                  `json:"credential_binding_digest,omitempty"`
+	ConnectorCalls          []retainedConnectorCall `json:"connector_calls,omitempty"`
 }
 
-func retainGrant(grant Grant, policyDigest, credentialDigest string) retainedGrant {
-	return retainedGrant{
+type retainedConnectorCall struct {
+	ConnectorID string `json:"connector_id"`
+	Sequence    int    `json:"sequence"`
+	Digest      string `json:"digest"`
+}
+
+func retainGrant(grant Grant, policyDigest, credentialDigest string, callMaps ...map[string][]string) retainedGrant {
+	retained := retainedGrant{
 		GrantID: grant.GrantID, TenantID: grant.TenantID, InstanceID: grant.InstanceID, Generation: grant.Generation,
+		RuntimeRef: grant.RuntimeRef, CapsuleDigest: grant.CapsuleDigest, PolicyDigest: grant.PolicyDigest,
 		RouteID: grant.RouteID, ModelAlias: grant.ModelAlias, Service: grant.Service, ServiceURL: grant.ServiceURL,
 		EgressRouteIDs: append([]string(nil), grant.EgressRouteIDs...), Active: grant.Active,
+		ConnectorIDs:      append([]string(nil), grant.ConnectorIDs...),
 		RoutePolicyDigest: policyDigest, CredentialBindingDigest: credentialDigest,
 	}
+	if len(callMaps) > 0 {
+		connectorIDs := make([]string, 0, len(callMaps[0]))
+		for connectorID := range callMaps[0] {
+			connectorIDs = append(connectorIDs, connectorID)
+		}
+		sort.Strings(connectorIDs)
+		for _, connectorID := range connectorIDs {
+			for index, digest := range callMaps[0][connectorID] {
+				retained.ConnectorCalls = append(retained.ConnectorCalls, retainedConnectorCall{
+					ConnectorID: connectorID, Sequence: index + 1, Digest: digest,
+				})
+			}
+		}
+	}
+	return retained
 }
 
 func (retained retainedGrant) grant() Grant {
 	return Grant{
 		GrantID: retained.GrantID, TenantID: retained.TenantID, InstanceID: retained.InstanceID, Generation: retained.Generation,
+		RuntimeRef: retained.RuntimeRef, CapsuleDigest: retained.CapsuleDigest, PolicyDigest: retained.PolicyDigest,
 		RouteID: retained.RouteID, ModelAlias: retained.ModelAlias, Service: retained.Service, ServiceURL: retained.ServiceURL,
-		EgressRouteIDs: append([]string(nil), retained.EgressRouteIDs...), Active: retained.Active,
+		EgressRouteIDs: append([]string(nil), retained.EgressRouteIDs...),
+		ConnectorIDs:   append([]string(nil), retained.ConnectorIDs...), Active: retained.Active,
 	}
 }
 
@@ -103,33 +143,70 @@ type grantLease struct {
 	cancel  context.CancelFunc
 }
 
+type connectorAttemptWindow struct {
+	started time.Time
+	count   int
+}
+
+type connectorReceiptLog interface {
+	Begin(connectorledger.Event) (connectorledger.Head, error)
+	Finish(connectorledger.Event) (connectorledger.Head, error)
+	Failed() bool
+	Close() error
+}
+
 type Server struct {
-	mu                sync.Mutex
-	config            Config
-	routes            map[string]loadedRoute
-	egressRoutes      map[string]loadedEgressRoute
-	semaphores        map[string]chan struct{}
-	egressSemaphores  map[string]chan struct{}
-	serviceSemaphores map[string]chan struct{}
-	grants            map[string]Grant
-	policyDigests     map[string]string
-	credentialDigests map[string]string
-	listeners         map[string]net.Listener
-	egressListeners   map[string]net.Listener
-	egressStats       map[string]EgressStats
-	grantLeases       map[string]grantLease
-	egressLeases      map[string]grantLease
-	audit             *auditLog
-	tokenHash         [sha256.Size]byte
-	client            *http.Client
+	mu                       sync.Mutex
+	config                   Config
+	routes                   map[string]loadedRoute
+	egressRoutes             map[string]loadedEgressRoute
+	connectors               map[string]loadedConnector
+	semaphores               map[string]chan struct{}
+	egressSemaphores         map[string]chan struct{}
+	connectorSemaphores      map[string]chan struct{}
+	connectorGlobalSemaphore chan struct{}
+	connectorGrantSemaphores map[string]chan struct{}
+	serviceSemaphores        map[string]chan struct{}
+	grants                   map[string]Grant
+	policyDigests            map[string]string
+	credentialDigests        map[string]string
+	listeners                map[string]net.Listener
+	egressListeners          map[string]net.Listener
+	connectorListeners       map[string]net.Listener
+	egressStats              map[string]EgressStats
+	connectorCalls           map[string]map[string][]string
+	connectorSpends          map[string]connectorSpendOwner
+	connectorCallCounts      map[string]map[string]int
+	connectorAttempts        map[string]connectorAttemptWindow
+	grantLeases              map[string]grantLease
+	egressLeases             map[string]grantLease
+	audit                    *auditLog
+	connectorLedger          connectorReceiptLog
+	tokenHash                [sha256.Size]byte
+	client                   *http.Client
 }
 
 func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, serviceToken string) (*Server, error) {
 	if serviceToken == "" {
 		return nil, errors.New("gateway service token is required")
 	}
+	connectors, err := config.connectorMap()
+	if err != nil {
+		return nil, err
+	}
+	config.loadedConnectors = connectors
+	receiptKey, err := config.connectorReceiptPrivateKey()
+	if err != nil {
+		return nil, err
+	}
+	config.connectorReceiptKey = receiptKey
 	audit, err := openAuditLog(config.EgressAuditFile, config.EgressAuditFile != "")
 	if err != nil {
+		return nil, err
+	}
+	receiptLog, receiptIndex, err := openConnectorReceiptLedger(config, receiptKey)
+	if err != nil {
+		_ = audit.Close()
 		return nil, err
 	}
 	transport := &http.Transport{
@@ -139,14 +216,26 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		MaxResponseHeaderBytes: maxHTTPHeaderBytes,
 		IdleConnTimeout:        60 * time.Second,
 	}
+	var receiptWriter connectorReceiptLog
+	if receiptLog != nil {
+		receiptWriter = receiptLog
+	}
 	server := &Server{
-		config: config, routes: routes, egressRoutes: egressRoutes, semaphores: make(map[string]chan struct{}, len(routes)),
-		egressSemaphores: make(map[string]chan struct{}, len(egressRoutes)),
-		grants:           make(map[string]Grant), policyDigests: make(map[string]string), credentialDigests: make(map[string]string),
-		listeners: make(map[string]net.Listener), egressListeners: make(map[string]net.Listener),
+		config: config, routes: routes, egressRoutes: egressRoutes, connectors: connectors,
+		semaphores:               make(map[string]chan struct{}, len(routes)),
+		egressSemaphores:         make(map[string]chan struct{}, len(egressRoutes)),
+		connectorSemaphores:      make(map[string]chan struct{}, len(connectors)),
+		connectorGlobalSemaphore: make(chan struct{}, maxConnectorGlobalConcurrent),
+		connectorGrantSemaphores: make(map[string]chan struct{}),
+		grants:                   make(map[string]Grant), policyDigests: make(map[string]string), credentialDigests: make(map[string]string),
+		listeners: make(map[string]net.Listener), egressListeners: make(map[string]net.Listener), connectorListeners: make(map[string]net.Listener),
 		serviceSemaphores: make(map[string]chan struct{}), egressStats: make(map[string]EgressStats),
-		grantLeases: make(map[string]grantLease), egressLeases: make(map[string]grantLease), audit: audit,
-		tokenHash: sha256.Sum256([]byte("Bearer " + serviceToken)),
+		connectorCalls:  make(map[string]map[string][]string),
+		connectorSpends: receiptIndex.spends, connectorCallCounts: receiptIndex.counts,
+		connectorAttempts: make(map[string]connectorAttemptWindow),
+		grantLeases:       make(map[string]grantLease), egressLeases: make(map[string]grantLease), audit: audit,
+		connectorLedger: receiptWriter,
+		tokenHash:       sha256.Sum256([]byte("Bearer " + serviceToken)),
 		client: &http.Client{Transport: transport, Timeout: 2 * time.Minute,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
@@ -156,8 +245,21 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 	for id, route := range egressRoutes {
 		server.egressSemaphores[id] = make(chan struct{}, route.MaxConcurrent)
 	}
+	for id, connector := range connectors {
+		server.connectorSemaphores[id] = make(chan struct{}, connector.MaxConcurrent)
+	}
 	if err := server.load(); err != nil {
 		_ = audit.Close()
+		if receiptLog != nil {
+			_ = receiptLog.Close()
+		}
+		return nil, err
+	}
+	if err := server.mergeRetainedConnectorSpends(); err != nil {
+		_ = audit.Close()
+		if receiptLog != nil {
+			_ = receiptLog.Close()
+		}
 		return nil, err
 	}
 	return server, nil
@@ -179,8 +281,27 @@ func Validate(config Config, routes map[string]loadedRoute, egressRoutes map[str
 	if serviceToken == "" {
 		return StateSummary{}, errors.New("gateway service token is required")
 	}
+	connectors, err := config.connectorMap()
+	if err != nil {
+		return StateSummary{}, err
+	}
+	config.loadedConnectors = connectors
+	receiptKey, err := config.connectorReceiptPrivateKey()
+	if err != nil {
+		return StateSummary{}, err
+	}
+	config.connectorReceiptKey = receiptKey
 	if err := validateAuditLog(config.EgressAuditFile, config.EgressAuditFile != ""); err != nil {
 		return StateSummary{}, err
+	}
+	if receiptKey != nil {
+		limits, err := config.connectorReceiptLimits()
+		if err != nil {
+			return StateSummary{}, err
+		}
+		if _, err := connectorledger.ValidateWithLimits(config.ConnectorReceiptFile, receiptKey, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch, limits); err != nil {
+			return StateSummary{}, err
+		}
 	}
 	return InspectState(config, routes, egressRoutes)
 }
@@ -190,22 +311,32 @@ func Validate(config Config, routes map[string]loadedRoute, egressRoutes map[str
 // file. Activation tooling can use the summary to require an explicit drain or
 // migration before changing formats.
 func InspectState(config Config, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute) (StateSummary, error) {
+	connectors, err := config.connectorMap()
+	if err != nil {
+		return StateSummary{}, err
+	}
 	validator := &Server{
-		config: config, routes: routes, egressRoutes: egressRoutes,
+		config: config, routes: routes, egressRoutes: egressRoutes, connectors: connectors,
 		grants: make(map[string]Grant), policyDigests: make(map[string]string), credentialDigests: make(map[string]string),
+		connectorCalls: make(map[string]map[string][]string),
 	}
 	return validator.loadExisting()
 }
 
-// Reload atomically replaces operator-owned route policy and the service token.
+// Reload atomically replaces operator-owned route and connector policy and the service token.
 // Socket, identity, state, and audit paths are immutable for the process lifetime.
 // Existing retained grants pin the complete effective route, including concurrency
 // and loaded credentials. A route may be added or changed only while no retained
 // grant refers to its ID, preventing a reload from silently changing signed authority.
 func (s *Server) Reload(config Config, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, serviceToken string) error {
 	if serviceToken == "" || !sameRuntimeConfig(s.config, config) {
-		return errors.New("gateway reload may change only routes and service token")
+		return errors.New("gateway reload may change only routes, connectors, and service token")
 	}
+	connectors, err := config.connectorMap()
+	if err != nil {
+		return err
+	}
+	config.loadedConnectors = connectors
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, grant := range s.grants {
@@ -227,8 +358,18 @@ func (s *Server) Reload(config Config, routes map[string]loadedRoute, egressRout
 				return fmt.Errorf("reload changes egress route %q used by retained grant %s", id, grant.GrantID)
 			}
 		}
-		if routePolicyDigest(grant, routes, egressRoutes) != s.policyDigests[id] ||
-			routeCredentialBindingDigest(grant, routes) != s.credentialDigests[id] {
+		for _, connectorID := range grant.ConnectorIDs {
+			next, ok := connectors[connectorID]
+			if !ok {
+				return fmt.Errorf("reload removes connector %q used by grant %s", connectorID, grant.GrantID)
+			}
+			if !sameLoadedConnector(s.connectors[connectorID], next) {
+				return fmt.Errorf("reload changes connector %q used by retained grant %s", connectorID, grant.GrantID)
+			}
+		}
+		budget, _ := config.connectorReceiptBudget(grant.TenantID)
+		if routePolicyDigest(grant, routes, egressRoutes, connectors, budget) != s.policyDigests[id] ||
+			routeCredentialBindingDigest(grant, routes, connectors) != s.credentialDigests[id] {
 			return fmt.Errorf("reload changes route policy used by retained grant %s", grant.GrantID)
 		}
 	}
@@ -256,9 +397,22 @@ func (s *Server) Reload(config Config, routes map[string]loadedRoute, egressRout
 		}
 		egressSemaphores[id] = make(chan struct{}, route.MaxConcurrent)
 	}
-	s.config.Routes, s.config.EgressRoutes = config.Routes, config.EgressRoutes
-	s.routes, s.egressRoutes = routes, egressRoutes
-	s.semaphores, s.egressSemaphores = semaphores, egressSemaphores
+	connectorSemaphores := make(map[string]chan struct{}, len(connectors))
+	for id, connector := range connectors {
+		current := s.connectorSemaphores[id]
+		if current != nil && cap(current) == connector.MaxConcurrent {
+			connectorSemaphores[id] = current
+			continue
+		}
+		if len(current) > 0 {
+			return fmt.Errorf("reload changes concurrency for busy connector %q", id)
+		}
+		connectorSemaphores[id] = make(chan struct{}, connector.MaxConcurrent)
+	}
+	s.config.Routes, s.config.EgressRoutes, s.config.Connectors = config.Routes, config.EgressRoutes, config.Connectors
+	s.config.loadedConnectors = connectors
+	s.routes, s.egressRoutes, s.connectors = routes, egressRoutes, connectors
+	s.semaphores, s.egressSemaphores, s.connectorSemaphores = semaphores, egressSemaphores, connectorSemaphores
 	s.tokenHash = sha256.Sum256([]byte("Bearer " + serviceToken))
 	return nil
 }
@@ -268,11 +422,36 @@ func sameRuntimeConfig(left, right Config) bool {
 		left.ServiceAddress == right.ServiceAddress && left.ServiceTokenFile == right.ServiceTokenFile &&
 		left.StateFile == right.StateFile && left.GrantRoot == right.GrantRoot &&
 		left.ExecutorGID == right.ExecutorGID && left.RelayGID == right.RelayGID &&
-		left.EgressAuditFile == right.EgressAuditFile
+		left.EgressAuditFile == right.EgressAuditFile &&
+		left.ConnectorReceiptFile == right.ConnectorReceiptFile &&
+		left.ConnectorReceiptKeyFile == right.ConnectorReceiptKeyFile &&
+		left.ConnectorReceiptNodeID == right.ConnectorReceiptNodeID &&
+		left.ConnectorReceiptEpoch == right.ConnectorReceiptEpoch &&
+		sameConnectorReceiptTenantBudgets(left.ConnectorReceiptTenantBudgets, right.ConnectorReceiptTenantBudgets) &&
+		connectorReceiptKeyID(left) == connectorReceiptKeyID(right)
+}
+
+func sameConnectorReceiptTenantBudgets(left, right []ConnectorReceiptTenantBudget) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	rightByTenant := make(map[string]int64, len(right))
+	for _, budget := range right {
+		rightByTenant[budget.TenantID] = budget.Bytes
+	}
+	for _, budget := range left {
+		if bytes, ok := rightByTenant[budget.TenantID]; !ok || bytes != budget.Bytes {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) Start(ctx context.Context) error {
 	defer s.audit.Close()
+	if s.connectorLedger != nil {
+		defer s.connectorLedger.Close()
+	}
 	defer s.closeGrantListeners()
 	s.mu.Lock()
 	for id, grant := range s.grants {
@@ -292,6 +471,12 @@ func (s *Server) Start(ctx context.Context) error {
 			if err := s.listenEgressGrantLocked(id); err != nil {
 				s.mu.Unlock()
 				return fmt.Errorf("restore egress grant %q: %w", id, err)
+			}
+		}
+		if len(grant.ConnectorIDs) > 0 {
+			if err := s.listenConnectorGrantLocked(id); err != nil {
+				s.mu.Unlock()
+				return fmt.Errorf("restore connector grant %q: %w", id, err)
 			}
 		}
 	}
@@ -431,7 +616,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	currentPolicyDigest, hadPolicyDigest := s.policyDigests[grant.GrantID]
 	currentCredentialDigest, hadCredentialDigest := s.credentialDigests[grant.GrantID]
 	policyDigest := s.routePolicyDigestLocked(grant)
-	credentialDigest := routeCredentialBindingDigest(grant, s.routes)
+	credentialDigest := routeCredentialBindingDigest(grant, s.routes, s.connectors)
 	if hadCurrent {
 		if current.Active {
 			writeGatewayError(w, http.StatusConflict, "grant_active", "active gateway grant must be deactivated before replacement")
@@ -454,6 +639,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	grant.Active = false
 	hadInferenceListener := s.listeners[grant.GrantID] != nil
 	hadEgressListener := s.egressListeners[grant.GrantID] != nil
+	hadConnectorListener := s.connectorListeners[grant.GrantID] != nil
 	grantDirectory := GrantDirectory(s.config.GrantRoot, grant.GrantID)
 	_, directoryErr := os.Stat(grantDirectory)
 	hadGrantDirectory := directoryErr == nil
@@ -480,6 +666,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 			_ = s.egressListeners[grant.GrantID].Close()
 			delete(s.egressListeners, grant.GrantID)
 			_ = os.Remove(egressSocketPath(s.config.GrantRoot, grant.GrantID))
+		}
+		if !hadConnectorListener && s.connectorListeners[grant.GrantID] != nil {
+			_ = s.connectorListeners[grant.GrantID].Close()
+			delete(s.connectorListeners, grant.GrantID)
+			_ = os.Remove(connectorSocketPath(s.config.GrantRoot, grant.GrantID))
 		}
 		if !hadGrantDirectory {
 			_ = os.RemoveAll(grantDirectory)
@@ -515,6 +706,13 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if len(grant.ConnectorIDs) > 0 {
+		if err := s.listenConnectorGrantLocked(grant.GrantID); err != nil {
+			rollback()
+			writeGatewayError(w, http.StatusServiceUnavailable, "socket_unavailable", err.Error())
+			return
+		}
+	}
 	writeJSON(w, http.StatusCreated, s.response(grant))
 }
 
@@ -525,16 +723,18 @@ func validServiceEnrichment(current, next Grant) bool {
 	return !current.Active && !next.Active && current.ServiceURL == "" && next.ServiceURL != "" &&
 		current.GrantID == next.GrantID && current.TenantID == next.TenantID &&
 		current.InstanceID == next.InstanceID && current.Generation == next.Generation &&
+		current.RuntimeRef == next.RuntimeRef && current.CapsuleDigest == next.CapsuleDigest && current.PolicyDigest == next.PolicyDigest &&
 		current.RouteID == next.RouteID && current.ModelAlias == next.ModelAlias && current.Service == next.Service &&
-		slices.Equal(current.EgressRouteIDs, next.EgressRouteIDs)
+		slices.Equal(current.EgressRouteIDs, next.EgressRouteIDs) && slices.Equal(current.ConnectorIDs, next.ConnectorIDs)
 }
 
 func grantsEqual(left, right Grant) bool {
 	return left.GrantID == right.GrantID && left.TenantID == right.TenantID &&
 		left.InstanceID == right.InstanceID && left.Generation == right.Generation &&
+		left.RuntimeRef == right.RuntimeRef && left.CapsuleDigest == right.CapsuleDigest && left.PolicyDigest == right.PolicyDigest &&
 		left.RouteID == right.RouteID && left.ModelAlias == right.ModelAlias &&
 		left.Service == right.Service && left.ServiceURL == right.ServiceURL &&
-		left.Active == right.Active && slices.Equal(left.EgressRouteIDs, right.EgressRouteIDs)
+		left.Active == right.Active && slices.Equal(left.EgressRouteIDs, right.EgressRouteIDs) && slices.Equal(left.ConnectorIDs, right.ConnectorIDs)
 }
 
 func GrantsEqual(left, right Grant) bool { return grantsEqual(left, right) }
@@ -585,12 +785,17 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(s.grants, id)
+	connectorCalls, hadConnectorCalls := s.connectorCalls[id]
+	delete(s.connectorCalls, id)
 	policyDigest, hadPolicyDigest := s.policyDigests[id]
 	credentialDigest, hadCredentialDigest := s.credentialDigests[id]
 	delete(s.policyDigests, id)
 	delete(s.credentialDigests, id)
 	if err := s.persistLocked(); err != nil {
 		s.grants[id] = grant
+		if hadConnectorCalls {
+			s.connectorCalls[id] = connectorCalls
+		}
 		if hadPolicyDigest {
 			s.policyDigests[id] = policyDigest
 		}
@@ -610,15 +815,23 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 		_ = listener.Close()
 		delete(s.egressListeners, id)
 	}
+	if listener := s.connectorListeners[id]; listener != nil {
+		_ = listener.Close()
+		delete(s.connectorListeners, id)
+	}
 	delete(s.egressStats, id)
 	delete(s.serviceSemaphores, id)
+	delete(s.connectorGrantSemaphores, id)
+	delete(s.connectorAttempts, id)
 	_ = os.RemoveAll(GrantDirectory(s.config.GrantRoot, id))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) validGrant(grant Grant) bool {
 	if !validGrantID(grant.GrantID) || !bounded(grant.TenantID, 128) || !bounded(grant.InstanceID, 256) || grant.Generation == 0 ||
-		(grant.RouteID == "" && !grant.Service && len(grant.EgressRouteIDs) == 0) || len(grant.ModelAlias) > 256 || (grant.ServiceURL != "" && !grant.Service) {
+		grant.GrantID != GrantID(grant.TenantID, grant.InstanceID, grant.Generation) ||
+		(grant.RouteID == "" && !grant.Service && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0) ||
+		len(grant.ModelAlias) > 256 || (grant.ServiceURL != "" && !grant.Service) || !validGrantEvidenceContext(grant) {
 		return false
 	}
 	if grant.RouteID != "" {
@@ -640,8 +853,58 @@ func (s *Server) validGrant(grant Grant) bool {
 			return false
 		}
 	}
+	if len(grant.ConnectorIDs) > 32 {
+		return false
+	}
+	for index, id := range grant.ConnectorIDs {
+		if !routeID(id) {
+			return false
+		}
+		if _, ok := s.connectors[id]; !ok {
+			return false
+		}
+		if index > 0 && grant.ConnectorIDs[index-1] >= id {
+			return false
+		}
+	}
+	if len(grant.ConnectorIDs) > 0 && grant.RuntimeRef == "" {
+		return false
+	}
+	if len(grant.ConnectorIDs) > 0 {
+		if _, budgeted := s.config.connectorReceiptBudget(grant.TenantID); !budgeted {
+			return false
+		}
+	}
 	if grant.ServiceURL != "" && !validServiceURL(grant.ServiceURL, s.config.GrantRoot, grant.GrantID) {
 		return false
+	}
+	return true
+}
+
+func validGrantEvidenceContext(grant Grant) bool {
+	present := grant.RuntimeRef != "" || grant.CapsuleDigest != "" || grant.PolicyDigest != ""
+	if !present {
+		return true
+	}
+	return validExecutorRuntimeRef(grant.RuntimeRef) && validSHA256Digest(grant.CapsuleDigest) && validSHA256Digest(grant.PolicyDigest)
+}
+
+func validExecutorRuntimeRef(value string) bool {
+	return strings.HasPrefix(value, "executor-") && len(value) == len("executor-")+64 && lowerHex(value[len("executor-"):])
+}
+
+func validSHA256Digest(value string) bool {
+	return strings.HasPrefix(value, "sha256:") && len(value) == len("sha256:")+64 && lowerHex(value[len("sha256:"):])
+}
+
+func lowerHex(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+			return false
+		}
 	}
 	return true
 }
@@ -683,6 +946,9 @@ func (s *Server) response(grant Grant) grantResponse {
 	}
 	if len(grant.EgressRouteIDs) > 0 {
 		result.EgressSocket = egressSocketPath(s.config.GrantRoot, grant.GrantID)
+	}
+	if len(grant.ConnectorIDs) > 0 {
+		result.ConnectorSocket = connectorSocketPath(s.config.GrantRoot, grant.GrantID)
 	}
 	return result
 }
@@ -1029,7 +1295,8 @@ func (s *Server) loadExisting() (StateSummary, error) {
 		return StateSummary{}, errors.New("gateway state must be a bounded owner-only regular file")
 	}
 	var state snapshot
-	if err := dsse.DecodeStrictInto(raw, maxConfigBytes, &state); err != nil || (state.Version != 1 && state.Version != 2) || len(state.Grants) > 4096 {
+	if err := dsse.DecodeStrictInto(raw, maxConfigBytes, &state); err != nil ||
+		(state.Version != 1 && state.Version != 2 && state.Version != 3) || len(state.Grants) > 4096 {
 		return StateSummary{}, errors.New("gateway state is invalid")
 	}
 	for _, retained := range state.Grants {
@@ -1042,17 +1309,27 @@ func (s *Server) loadExisting() (StateSummary, error) {
 			return StateSummary{}, errors.New("gateway state contains a duplicate grant")
 		}
 		effectivePolicyDigest := s.routePolicyDigestLocked(grant)
-		effectiveCredentialDigest := routeCredentialBindingDigest(grant, s.routes)
+		effectiveCredentialDigest := routeCredentialBindingDigest(grant, s.routes, s.connectors)
 		policyBearing := effectivePolicyDigest != ""
-		if policyBearing && (state.Version != 2 || retained.RoutePolicyDigest == "" || retained.CredentialBindingDigest == "") {
+		if policyBearing && (state.Version < 2 || retained.RoutePolicyDigest == "" || retained.CredentialBindingDigest == "") {
 			return StateSummary{}, errors.New("gateway state contains a retained grant without a durable route policy binding")
+		}
+		if len(grant.ConnectorIDs) > 0 && state.Version != 3 {
+			return StateSummary{}, errors.New("gateway state contains a connector grant without durable call accounting")
 		}
 		if retained.RoutePolicyDigest != effectivePolicyDigest || retained.CredentialBindingDigest != effectiveCredentialDigest {
 			return StateSummary{}, errors.New("gateway state route policy does not match current configuration")
 		}
+		calls, err := s.validateRetainedConnectorCalls(grant, retained.ConnectorCalls)
+		if err != nil {
+			return StateSummary{}, fmt.Errorf("gateway state connector calls are invalid: %w", err)
+		}
 		s.grants[grant.GrantID] = grant
 		s.policyDigests[grant.GrantID] = retained.RoutePolicyDigest
 		s.credentialDigests[grant.GrantID] = retained.CredentialBindingDigest
+		if len(calls) > 0 {
+			s.connectorCalls[grant.GrantID] = calls
+		}
 	}
 	return StateSummary{Present: true, FormatVersion: state.Version, RetainedGrants: len(state.Grants)}, nil
 }
@@ -1060,12 +1337,17 @@ func (s *Server) loadExisting() (StateSummary, error) {
 func (s *Server) persistLocked() error {
 	grants := make([]retainedGrant, 0, len(s.grants))
 	for _, grant := range s.grants {
-		grants = append(grants, retainGrant(grant, s.policyDigests[grant.GrantID], s.credentialDigests[grant.GrantID]))
+		grants = append(grants, retainGrant(
+			grant, s.policyDigests[grant.GrantID], s.credentialDigests[grant.GrantID], s.connectorCalls[grant.GrantID],
+		))
 	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i].GrantID < grants[j].GrantID })
-	raw, err := json.Marshal(snapshot{Version: 2, Grants: grants})
+	raw, err := json.Marshal(snapshot{Version: 3, Grants: grants})
 	if err != nil {
 		return err
+	}
+	if len(raw) > maxConfigBytes {
+		return errors.New("gateway state capacity exceeded")
 	}
 	directory := filepath.Dir(s.config.StateFile)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -1107,6 +1389,34 @@ func (s *Server) persistLocked() error {
 	return closeErr
 }
 
+func (s *Server) validateRetainedConnectorCalls(grant Grant, retained []retainedConnectorCall) (map[string][]string, error) {
+	if len(retained) == 0 {
+		return nil, nil
+	}
+	calls := make(map[string][]string)
+	seenDigests := make(map[string]struct{}, len(retained))
+	previousConnector := ""
+	for _, call := range retained {
+		if !slices.Contains(grant.ConnectorIDs, call.ConnectorID) || !validSHA256Digest(call.Digest) {
+			return nil, errors.New("call does not belong to the retained connector grant")
+		}
+		if previousConnector > call.ConnectorID {
+			return nil, errors.New("calls are not in canonical connector order")
+		}
+		previousConnector = call.ConnectorID
+		current := calls[call.ConnectorID]
+		if call.Sequence != len(current)+1 || len(current) >= s.connectors[call.ConnectorID].MaxCallsPerGrant {
+			return nil, errors.New("call sequence or budget is invalid")
+		}
+		if _, duplicate := seenDigests[call.Digest]; duplicate {
+			return nil, errors.New("duplicate call digest")
+		}
+		seenDigests[call.Digest] = struct{}{}
+		calls[call.ConnectorID] = append(current, call.Digest)
+	}
+	return calls, nil
+}
+
 func (s *Server) closeGrantListeners() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1123,6 +1433,10 @@ func (s *Server) closeGrantListeners() {
 	for id, listener := range s.egressListeners {
 		_ = listener.Close()
 		delete(s.egressListeners, id)
+	}
+	for id, listener := range s.connectorListeners {
+		_ = listener.Close()
+		delete(s.connectorListeners, id)
 	}
 }
 
@@ -1198,6 +1512,10 @@ func inferenceSocketPath(root, grantID string) string {
 
 func egressSocketPath(root, grantID string) string {
 	return filepath.Join(GrantDirectory(root, grantID), "e.sock")
+}
+
+func connectorSocketPath(root, grantID string) string {
+	return filepath.Join(GrantDirectory(root, grantID), "c.sock")
 }
 
 func serviceSocketPath(root, grantID string) string {

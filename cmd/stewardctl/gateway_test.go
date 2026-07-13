@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,8 +73,11 @@ func TestGatewayCommandRejectsAmbiguousInputs(t *testing.T) {
 	var output bytes.Buffer
 	for _, arguments := range [][]string{
 		{"gateway"}, {"gateway", "unknown"}, {"gateway", "route"}, {"gateway", "route", "remove"},
+		{"gateway", "connector"}, {"gateway", "connector", "remove"},
 		{"gateway", "route", "set", "-id", "web"}, {"gateway", "route", "set", "-id", "web", "-destination", "missing-port"},
+		{"gateway", "connector", "set", "-id", "issues"},
 		{"gateway", "validate", "extra"}, {"gateway", "route", "list", "-id", "unexpected"},
+		{"gateway", "route", "list", "-max-concurrent", "7"},
 	} {
 		if err := run(arguments, &output, &output); err == nil {
 			t.Fatalf("ambiguous command accepted: %v", arguments)
@@ -94,5 +99,252 @@ func TestGatewayCommandRejectsAmbiguousInputs(t *testing.T) {
 	}
 	if err := writeGatewayConfig(unsafe, gateway.Config{}); err == nil {
 		t.Fatal("unsafe config file accepted")
+	}
+}
+
+func TestGatewayConnectorSetIsValidatedSecretFreeAndAtomic(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "sgcc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	token := filepath.Join(directory, "service.token")
+	credential := filepath.Join(directory, "connector.token")
+	if err := os.WriteFile(token, []byte("service-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(credential, []byte("upstream-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	privateKey := filepath.Join(directory, "connector-receipts.private.pem")
+	publicKey := filepath.Join(directory, "connector-receipts.public")
+	if err := run([]string{"keygen", "-private-out", privateKey, "-public-out", publicKey}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	config := gateway.Config{
+		Version: 1, ControlSocket: filepath.Join(directory, "control.sock"), ServiceAddress: "127.0.0.1:8091",
+		ServiceTokenFile: token, StateFile: filepath.Join(directory, "state.json"), GrantRoot: filepath.Join(directory, "grants"),
+		ExecutorGID: os.Getgid(), RelayGID: os.Getgid(), ConnectorReceiptFile: filepath.Join(directory, "connector-receipts.ndjson"),
+		ConnectorReceiptKeyFile: privateKey, ConnectorReceiptNodeID: "node-a/gateway", ConnectorReceiptEpoch: 1,
+	}
+	if config.ExecutorGID == 0 {
+		config.ExecutorGID, config.RelayGID = 1, 1
+	}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "gateway.json")
+	if err := os.WriteFile(path, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	connectorArguments := []string{
+		"gateway", "connector", "set", "-config", path, "-id", "issues", "-base-url", "https://api.example.test",
+		"-credential-file", credential, "-allow-cidr", "203.0.113.0/24",
+		"-operation", "create=POST:/v1/issues", "-operation", "read=GET:/v1/issues/current",
+	}
+	beforeInitialization, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run(connectorArguments, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "tenant-budget") {
+		t.Fatalf("first connector without a tenant budget err=%v", err)
+	}
+	afterInitialization, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeInitialization, afterInitialization) {
+		t.Fatal("missing tenant budget changed gateway config")
+	}
+	arguments := append(append([]string(nil), connectorArguments...), "-tenant-budget", "tenant-a=1048576")
+	if err := run(arguments, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, _, err := gateway.LoadConfig(path)
+	if err != nil || len(loaded.Connectors) != 1 || loaded.Connectors[0].Operations[0].Method != http.MethodPost ||
+		len(loaded.ConnectorReceiptTenantBudgets) != 1 || loaded.ConnectorReceiptTenantBudgets[0].TenantID != "tenant-a" ||
+		loaded.ConnectorReceiptTenantBudgets[0].Bytes != 1048576 ||
+		strings.Contains(output.String(), "upstream-secret") || !strings.Contains(output.String(), "systemctl restart") {
+		t.Fatalf("loaded=%#v budgets=%#v output=%q err=%v", loaded.Connectors, loaded.ConnectorReceiptTenantBudgets, output.String(), err)
+	}
+	var preserveOutput bytes.Buffer
+	if err := run(connectorArguments, &preserveOutput, &bytes.Buffer{}); err != nil {
+		t.Fatalf("replace connector while preserving tenant budgets: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || len(loaded.ConnectorReceiptTenantBudgets) != 1 || loaded.ConnectorReceiptTenantBudgets[0].Bytes != 1048576 ||
+		!strings.Contains(preserveOutput.String(), "systemctl reload") {
+		t.Fatalf("preserved budgets=%#v err=%v", loaded.ConnectorReceiptTenantBudgets, err)
+	}
+	upsert := append(append([]string(nil), connectorArguments...), "-tenant-budget", "tenant=west=1048576")
+	var upsertOutput bytes.Buffer
+	if err := run(upsert, &upsertOutput, &bytes.Buffer{}); err != nil {
+		t.Fatalf("upsert exact tenant budget: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || len(loaded.ConnectorReceiptTenantBudgets) != 2 || loaded.ConnectorReceiptTenantBudgets[0].TenantID != "tenant-a" ||
+		loaded.ConnectorReceiptTenantBudgets[1].TenantID != "tenant=west" || !strings.Contains(upsertOutput.String(), "systemctl restart") {
+		t.Fatalf("upserted budgets=%#v output=%q err=%v", loaded.ConnectorReceiptTenantBudgets, upsertOutput.String(), err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := append([]string(nil), arguments...)
+	for index := range bad {
+		if bad[index] == "https://api.example.test" {
+			bad[index] = "http://api.example.test"
+		}
+	}
+	if err := run(bad, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("plaintext connector origin was accepted without acknowledgement")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("invalid connector update changed gateway config")
+	}
+	for _, invalidBudgets := range [][]string{
+		{"-tenant-budget", "tenant-a=1048576", "-tenant-budget", "tenant-a=2097152"},
+		{"-tenant-budget", "tenant-a=0"},
+		{"-tenant-budget", "tenant-a=not-bytes"},
+	} {
+		invalid := append(append([]string(nil), connectorArguments...), invalidBudgets...)
+		if err := run(invalid, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("invalid tenant budgets accepted: %v", invalidBudgets)
+		}
+		unchanged, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(after, unchanged) {
+			t.Fatalf("invalid tenant budgets changed gateway config: %v", invalidBudgets)
+		}
+	}
+	output.Reset()
+	if err := run([]string{"gateway", "connector", "list", "-config", path}, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"id": "issues"`) {
+		t.Fatalf("list output=%q err=%v", output.String(), err)
+	}
+	if _, err := parseConnectorOperation("missing-separators"); err == nil {
+		t.Fatal("ambiguous connector operation accepted")
+	}
+	if err := run([]string{"gateway", "connector", "list", "-config", path, "-max-calls-per-grant", "9"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("connector list silently ignored a mutation flag")
+	}
+	withReceiptOverride := append([]string(nil), arguments...)
+	withReceiptOverride = append(withReceiptOverride, "-receipt-epoch", "2")
+	if err := run(withReceiptOverride, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("connector set accepted a receipt identity override for an initialized config")
+	}
+
+	legacyConfig := config
+	legacyConfig.ConnectorReceiptFile = ""
+	legacyConfig.ConnectorReceiptKeyFile = ""
+	legacyConfig.ConnectorReceiptNodeID = ""
+	legacyConfig.ConnectorReceiptEpoch = 0
+	legacyRaw, err := json.Marshal(legacyConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(directory, "legacy-gateway.json")
+	if err := os.WriteFile(legacyPath, legacyRaw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	legacyArguments := append([]string(nil), arguments...)
+	for index := range legacyArguments {
+		if legacyArguments[index] == path {
+			legacyArguments[index] = legacyPath
+		}
+	}
+	legacyArguments = append(legacyArguments,
+		"-receipt-file", filepath.Join(directory, "legacy-connector-receipts.ndjson"),
+		"-receipt-key-file", privateKey, "-receipt-node-id", "node-a/legacy-gateway", "-receipt-epoch", "2")
+	if err := run(legacyArguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("add first connector to older config: %v", err)
+	}
+	upgraded, _, _, _, err := gateway.LoadConfig(legacyPath)
+	if err != nil || upgraded.ConnectorReceiptEpoch != 2 || upgraded.ConnectorReceiptNodeID != "node-a/legacy-gateway" {
+		t.Fatalf("upgraded receipt identity=%q/%d err=%v", upgraded.ConnectorReceiptNodeID, upgraded.ConnectorReceiptEpoch, err)
+	}
+}
+
+func TestGatewayRouteSetRejectsRetainedGrantPolicyDrift(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "sgc-retained-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	token := filepath.Join(directory, "token")
+	if err := os.WriteFile(token, []byte("service-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := gateway.Config{
+		Version: 1, ControlSocket: filepath.Join(directory, "control.sock"), ServiceAddress: "127.0.0.1:8091",
+		ServiceTokenFile: token, StateFile: filepath.Join(directory, "state.json"), GrantRoot: filepath.Join(directory, "grants"),
+		ExecutorGID: os.Getgid(), RelayGID: os.Getgid(), EgressAuditFile: filepath.Join(directory, "audit.jsonl"),
+		EgressRoutes: []gateway.EgressRoute{{
+			ID: "public-web", MaxConcurrent: 1, MaxRequestBytes: 1024, MaxResponseBytes: 1024, MaxTunnelSeconds: 30,
+			Destinations: []gateway.EgressDestination{{Host: "api.example.com", Ports: []int{443}}},
+		}},
+	}
+	if config.ExecutorGID == 0 {
+		config.ExecutorGID, config.RelayGID = 1, 1
+	}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "gateway.json")
+	if err := os.WriteFile(path, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	loaded, routes, egressRoutes, serviceToken, err := gateway.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := gateway.Open(loaded, routes, egressRoutes, serviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := gateway.Grant{
+		GrantID: gateway.GrantID("tenant-a", "instance-a", 1), TenantID: "tenant-a", InstanceID: "instance-a", Generation: 1,
+		EgressRouteIDs: []string{"public-web"},
+	}
+	grantRaw, err := json.Marshal(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/grants", bytes.NewReader(grantRaw))
+	recorder := httptest.NewRecorder()
+	server.ControlHandler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("register status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	t.Cleanup(func() {
+		recorder := httptest.NewRecorder()
+		server.ControlHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/v1/grants/"+grant.GrantID, nil))
+	})
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = run([]string{"gateway", "route", "set", "-config", path, "-id", "public-web",
+		"-destination", "replacement.example.com:443"}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "retained state") {
+		t.Fatalf("policy drift err=%v output=%q", err, output.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected retained-policy update changed gateway config")
 	}
 }

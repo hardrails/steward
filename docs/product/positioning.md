@@ -1,6 +1,6 @@
 ---
 title: Why Steward exists
-description: "Steward's product direction: operator-controlled local admission, named HTTP(S) routes, tenant-bound commands, and offline-verifiable receipts."
+description: "Steward's product direction: operator-controlled local admission, credential-brokered operations, tenant-bound commands, and offline-verifiable receipts."
 section: Product
 ---
 
@@ -29,7 +29,7 @@ operator can:
    workload-count caps;
 3. run the agent in a tenant-labelled, gVisor-sandboxed Docker workload with
    no default network access, while granting only approved state, inference,
-   service, or named HTTP(S) routes; and
+   service, exact connector operations, or named HTTP(S) routes; and
 4. export a node-local, tamper-evident receipt of the accepted inputs and recorded
    enforcement decisions. Tamper-evident means changes within the supplied chain
    can be detected; detecting removal of a complete suffix requires an independently
@@ -66,7 +66,7 @@ Each input has a separate purpose:
   privilege.
 - A **site policy** is signed by the operator's site root key. It limits publishers,
   tenants, profiles, repositories or exact image digests, resources, inference
-  routes, services, egress routes, and publisher revocation state.
+  routes, services, connector IDs, egress routes, and publisher revocation state.
 - An **instance intent** is a separately authenticated command to run a profile for
   a tenant, node, and instance. A generation fence—an increasing counter keyed by
   `(tenant_id, instance_id)`—prevents an older command from replacing newer state.
@@ -77,18 +77,19 @@ identity.
 
 ## A receipt is not an agent transcript
 
-The receipt records evidence from controls Executor can enforce. It binds the
+The lifecycle receipt records evidence from controls Executor can enforce. It binds the
 tenant, runtime reference, capsule and policy digests, instance generation,
-lifecycle event, and outcome from a fixed vocabulary. For inference or egress, the
-admission commit also stores the effective route-policy digest. The receipt does
-not embed the full instance intent, state or service selection, actual Gateway
-grant ID, or individual Gateway traffic decisions; Gateway records those traffic
-decisions in a separate unsigned newline-delimited JSON (JSONL) audit log. Receipts
-also exclude prompts, model responses, agent logs, the meaning of agent actions,
-and secrets.
+lifecycle event, and outcome from a fixed vocabulary. When Gateway authority is
+present, the admission commit also stores the effective route-policy digest. The
+lifecycle chain does not embed the full instance intent, state or service
+selection, actual Gateway grant ID, or individual Gateway traffic decisions.
+HTTP(S) egress decisions use a separate unsigned newline-delimited JSON (JSONL)
+audit log. Connector authorizations and terminal outcomes use a separate
+Gateway-signed, hash-linked chain. Both receipt chains exclude prompts, model
+responses, agent logs, the meaning of agent actions, credentials, and bodies.
 
 This gives an auditor a bounded question they can answer locally: *what did
-this node accept and enforce?* It does **not** prove that a model was honest,
+this node accept and record?* It does **not** prove that a model was honest,
 that an agent's explanation was true, that an upstream service behaved as
 claimed, or that every semantic action inside a container was safe.
 
@@ -98,11 +99,13 @@ protection, and operator configuration remain trusted. Steward does not claim
 hardware attestation (proof tied to hardware state), protection from a hostile host
 administrator, cross-node anchoring, detection when all trailing records are
 removed without an external checkpoint, or formal certification. Executor holds
-the receipt key; a separate signing service does not isolate it.
+the lifecycle receipt key. Gateway holds a different connector receipt key and
+also performs the network effect that key records. Neither key is isolated in a
+separate signing service.
 
 ## Capabilities require explicit grants
 
-Steward enforces four optional, explicitly granted capabilities. A signed request
+Steward enforces five optional, explicitly granted capabilities. A signed request
 does not enable a capability by itself. If the required local components are
 missing, admission fails closed:
 
@@ -114,15 +117,28 @@ missing, admission fails closed:
   is disabled by default and may be enabled only in dedicated-host compatibility
   mode.
 - **Inference**: one logical route resolved by a local gateway. The gateway
-  adds the upstream credential at the last hop. The workload receives neither the
-  credential nor a general-purpose proxy.
+  adds the upstream credential at the last hop. Steward does not directly
+  configure, mount, or inject that credential into the workload, and exposes no
+  general-purpose inference proxy.
 - **Service**: one declared agent port reached through the paired relay and an
   authenticated local gateway. The endpoint does not provide tenant end-user
   authentication or public exposure.
+- **Connector**: named HTTP operations whose exact upstream origin, method, path,
+  credential mode, address policy, concurrency, call count, byte limits, and
+  duration are fixed by the node operator. Steward directly gives the workload a
+  logical operation endpoint, not the configured upstream credential, private
+  origin, or a general authenticated proxy. A durable task claim and call budget
+  are spent before Gateway opens the upstream request.
 - **Egress**: named HTTP(S) routes allowed by the publisher capsule, tenant policy,
   and instance intent, then mapped by the host operator to hostnames, ports,
   verified IP addresses, concurrency limits, byte limits, and time limits. The
   agent receives a standard proxy, not a raw network interface.
+
+Gateway rejects the exact connector credential in upstream response headers and the
+decoded body stream. Inference and connector upstreams remain trusted not to encode
+or transform authentication material, disclose private origin details, or return
+other application secrets. These grants isolate how Steward supplies authority;
+they are not general response data-loss-prevention filters.
 
 These contracts include lifecycle ordering, drift inspection, journaling, and
 explicit state purge with a receipt. When the observed outcome of a failed mutation

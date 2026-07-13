@@ -165,6 +165,9 @@ const runtimeGatewayLabel = "io.hardrails.runtime.gateway"
 const runtimeRelayIPLabel = "io.hardrails.runtime.relay-ip"
 const runtimeAgentIPLabel = "io.hardrails.runtime.agent-ip"
 const runtimeEgressRoutesLabel = "io.hardrails.runtime.egress-routes"
+const runtimeConnectorsLabel = "io.hardrails.runtime.connectors"
+const runtimeCapsuleDigestLabel = "io.hardrails.runtime.capsule-digest"
+const runtimePolicyDigestLabel = "io.hardrails.runtime.policy-digest"
 
 type dockerRestartPolicy struct {
 	Name              string `json:"Name"`
@@ -429,7 +432,8 @@ func reservationFromLabels(labels map[string]string) (CapacityReservation, strin
 	reservation := CapacityReservation{Workloads: 1, MemoryBytes: memory, CPUMillis: cpu, PIDs: pids}
 	runtimeLabels := []string{runtimeGrantLabel, runtimeInferenceLabel, runtimeModelLabel, runtimeRouteLabel,
 		runtimeServicePortLabel, runtimeGenerationLabel, runtimeSubnetLabel, runtimeGatewayLabel,
-		runtimeRelayIPLabel, runtimeAgentIPLabel, runtimeEgressRoutesLabel}
+		runtimeRelayIPLabel, runtimeAgentIPLabel, runtimeEgressRoutesLabel, runtimeConnectorsLabel,
+		runtimeCapsuleDigestLabel, runtimePolicyDigestLabel}
 	hasRuntimeMetadata := labels[runtimeNetworkLabel] != ""
 	for _, key := range runtimeLabels {
 		hasRuntimeMetadata = hasRuntimeMetadata || labels[key] != ""
@@ -634,6 +638,9 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		labels[runtimeRelayIPLabel] = w.Runtime.RelayIP
 		labels[runtimeAgentIPLabel] = w.Runtime.AgentIP
 		labels[runtimeEgressRoutesLabel] = strings.Join(w.Runtime.EgressRouteIDs, ",")
+		labels[runtimeConnectorsLabel] = strings.Join(w.Runtime.ConnectorIDs, ",")
+		labels[runtimeCapsuleDigestLabel] = w.Runtime.CapsuleDigest
+		labels[runtimePolicyDigestLabel] = w.Runtime.PolicyDigest
 	}
 	environment := []string{"HOME=" + home, "TMPDIR=/tmp"}
 	if w.Runtime != nil && w.Runtime.Inference {
@@ -647,6 +654,9 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		environment = append(environment, "STEWARD_EGRESS_PROXY="+proxy,
 			"HTTP_PROXY="+proxy, "HTTPS_PROXY="+proxy, "NO_PROXY="+noProxy,
 			"http_proxy="+proxy, "https_proxy="+proxy, "no_proxy="+noProxy)
+	}
+	if w.Runtime != nil && len(w.Runtime.ConnectorIDs) > 0 {
+		environment = append(environment, "STEWARD_CONNECTOR_URL=http://steward-relay:8081")
 	}
 	dns := []string(nil)
 	if w.Runtime != nil {
@@ -787,6 +797,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 	}
 	var runtimeGrant *RuntimeGrant
 	runtimeHardened := payload.HostConfig.NetworkMode == "none" && labels[runtimeNetworkLabel] == "" && labels[runtimeGrantLabel] == "" &&
+		labels[runtimeConnectorsLabel] == "" && labels[runtimeCapsuleDigestLabel] == "" && labels[runtimePolicyDigestLabel] == "" &&
 		hasExactNetwork(payload.NetworkSettings.Networks, "none", "", false) && len(payload.HostConfig.ExtraHosts) == 0 && len(payload.HostConfig.DNS) == 0
 	if labels[runtimeNetworkLabel] != "" || labels[runtimeGrantLabel] != "" {
 		servicePort, serviceErr := strconv.Atoi(labels[runtimeServicePortLabel])
@@ -798,9 +809,12 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			Subnet: labels[runtimeSubnetLabel], Gateway: labels[runtimeGatewayLabel],
 			RelayIP: labels[runtimeRelayIPLabel], AgentIP: labels[runtimeAgentIPLabel],
 			EgressRouteIDs: splitRouteIDs(labels[runtimeEgressRoutesLabel]),
+			ConnectorIDs:   splitRouteIDs(labels[runtimeConnectorsLabel]),
+			CapsuleDigest:  labels[runtimeCapsuleDigestLabel], PolicyDigest: labels[runtimePolicyDigestLabel],
 		}
 		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil && generation > 0 &&
-			validEgressRouteIDs(runtimeGrant.EgressRouteIDs) &&
+			validEgressRouteIDs(runtimeGrant.EgressRouteIDs) && validConnectorIDs(runtimeGrant.ConnectorIDs) &&
+			validRuntimeAdmissionBindings(runtimeGrant) &&
 			runtimeAllocationMatches(NetworkSpecFor(labels["io.hardrails.tenant"], labels["io.hardrails.instance"], generation),
 				runtimeGrant.Subnet, runtimeGrant.Gateway, runtimeGrant.RelayIP, runtimeGrant.AgentIP) &&
 			payload.HostConfig.NetworkMode == runtimeGrant.NetworkName &&
@@ -821,6 +835,9 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 				contains(payload.Config.Env, "HTTP_PROXY="+proxy) && contains(payload.Config.Env, "HTTPS_PROXY="+proxy) &&
 				contains(payload.Config.Env, "NO_PROXY="+noProxy) && contains(payload.Config.Env, "http_proxy="+proxy) &&
 				contains(payload.Config.Env, "https_proxy="+proxy) && contains(payload.Config.Env, "no_proxy="+noProxy)
+		}
+		if len(runtimeGrant.ConnectorIDs) > 0 {
+			runtimeHardened = runtimeHardened && contains(payload.Config.Env, "STEWARD_CONNECTOR_URL=http://steward-relay:8081")
 		}
 	}
 	return ObservedWorkload{
@@ -884,6 +901,27 @@ func validEgressRouteIDs(routes []string) bool {
 		}
 	}
 	return true
+}
+
+func validConnectorIDs(connectors []string) bool {
+	if len(connectors) > 32 {
+		return false
+	}
+	for index, connector := range connectors {
+		if !egressRouteID.MatchString(connector) || index > 0 && connectors[index-1] >= connector {
+			return false
+		}
+	}
+	return true
+}
+
+func validRuntimeAdmissionBindings(runtime *RuntimeGrant) bool {
+	if runtime == nil {
+		return true
+	}
+	absent := runtime.CapsuleDigest == "" && runtime.PolicyDigest == ""
+	valid := imageConfigDigest.MatchString(runtime.CapsuleDigest) && imageConfigDigest.MatchString(runtime.PolicyDigest)
+	return valid || absent && len(runtime.ConnectorIDs) == 0
 }
 
 func validFingerprint(value string) bool {

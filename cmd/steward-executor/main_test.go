@@ -25,6 +25,7 @@ import (
 	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/executoruplink"
 	"github.com/hardrails/steward/internal/journal"
+	"github.com/hardrails/steward/internal/nodeclient"
 )
 
 func TestReadTokenTrimsFileWhitespace(t *testing.T) {
@@ -32,7 +33,7 @@ func TestReadTokenTrimsFileWhitespace(t *testing.T) {
 	if err := os.WriteFile(path, []byte("development-only-executor-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	token, err := readToken(path)
+	token, err := nodeclient.ReadToken(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +47,7 @@ func TestReadTokenRejectsOverPermissiveFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readToken(path); err == nil {
+	if _, err := nodeclient.ReadToken(path); err == nil {
 		t.Fatal("world-readable executor token was accepted")
 	}
 }
@@ -140,17 +141,17 @@ func TestReadTokenRejectsEmptyOversizedAndDirectory(t *testing.T) {
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readToken(empty); err == nil {
+	if _, err := nodeclient.ReadToken(empty); err == nil {
 		t.Fatal("readToken accepted empty token")
 	}
 	large := filepath.Join(dir, "large-token")
 	if err := os.WriteFile(large, []byte(strings.Repeat("x", 4097)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readToken(large); err == nil {
+	if _, err := nodeclient.ReadToken(large); err == nil {
 		t.Fatal("readToken accepted oversized token")
 	}
-	if _, err := readToken(dir); err == nil {
+	if _, err := nodeclient.ReadToken(dir); err == nil {
 		t.Fatal("readToken accepted directory")
 	}
 }

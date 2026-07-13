@@ -28,6 +28,12 @@ COPY --chown=0:0 --chmod=0444 adapter/fixtures/skill/workspace-fixture-contract.
 COPY --chown=0:0 --chmod=0444 adapter/fixtures/skill/manifest.json /opt/steward/skills/steward.workspace-audit/manifest.json
 COPY --chown=0:0 --chmod=0444 adapter/fixtures/skill/manifest.sig /opt/steward/skills/steward.workspace-audit/manifest.sig
 COPY --chown=0:0 --chmod=0444 adapter/fixtures/skill/public.pem /opt/steward/skills/steward.workspace-audit/public.pem
+COPY --chown=0:0 --chmod=0555 adapter/fixtures/connector-skill/connector_work.py /opt/steward/skills/steward.connector-work/connector_work.py
+COPY --chown=0:0 --chmod=0444 adapter/fixtures/connector-skill/SKILL.md /opt/steward/skills/steward.connector-work/SKILL.md
+COPY --chown=0:0 --chmod=0444 adapter/fixtures/connector-skill/connector-fixture-contract.json /opt/steward/skills/steward.connector-work/connector-fixture-contract.json
+COPY --chown=0:0 --chmod=0444 adapter/fixtures/connector-skill/manifest.json /opt/steward/skills/steward.connector-work/manifest.json
+COPY --chown=0:0 --chmod=0444 adapter/fixtures/connector-skill/manifest.sig /opt/steward/skills/steward.connector-work/manifest.sig
+COPY --chown=0:0 --chmod=0444 adapter/fixtures/connector-skill/public.pem /opt/steward/skills/steward.connector-work/public.pem
 
 USER 65532:65532
 WORKDIR /opt/data

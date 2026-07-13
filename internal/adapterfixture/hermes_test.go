@@ -22,7 +22,11 @@ import (
 	"testing"
 )
 
-const hermesSkillKeySHA256 = "183e8cd011fa5e5f044700be4a61f3bc22e2eb61ad34469e62433d42f5af2452"
+const (
+	hermesSkillKeySHA256          = "183e8cd011fa5e5f044700be4a61f3bc22e2eb61ad34469e62433d42f5af2452"
+	hermesConnectorKeySHA256      = "6eceb945f87b1979b2d5fde2235ddb493c38ae2fa2694c2c6d7dbd0a61a5e564"
+	hermesConnectorLogicalBaseURL = "http://steward-relay:8081"
+)
 
 type skillManifest struct {
 	Entrypoint    string         `json:"entrypoint"`
@@ -39,6 +43,17 @@ type skillFile struct {
 	Mode   string `json:"mode"`
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
+}
+
+type connectorSkillManifest struct {
+	Connector     map[string]string `json:"connector"`
+	Entrypoint    string            `json:"entrypoint"`
+	Files         []skillFile       `json:"files"`
+	Limits        map[string]int    `json:"limits"`
+	Name          string            `json:"name"`
+	Network       bool              `json:"network"`
+	SchemaVersion string            `json:"schema_version"`
+	Version       string            `json:"version"`
 }
 
 func TestHermesWorkspaceSkillSignatureAndInventory(t *testing.T) {
@@ -118,6 +133,75 @@ func TestHermesWorkspaceSkillSignatureAndInventory(t *testing.T) {
 	}
 }
 
+func TestHermesConnectorSkillSignatureAndInventory(t *testing.T) {
+	root := filepath.Join(hermesAdapterRoot(t), "fixtures", "connector-skill")
+	manifestBytes := readBounded(t, filepath.Join(root, "manifest.json"), 16<<10)
+	signatureText := readBounded(t, filepath.Join(root, "manifest.sig"), 256)
+	publicPEM := readBounded(t, filepath.Join(root, "public.pem"), 1<<10)
+	if digest := sha256.Sum256(publicPEM); hex.EncodeToString(digest[:]) != hermesConnectorKeySHA256 {
+		t.Fatalf("connector public-key digest = %x", digest)
+	}
+	block, rest := pem.Decode(publicPEM)
+	if block == nil || len(rest) != 0 || block.Type != "PUBLIC KEY" {
+		t.Fatal("connector public key is not one canonical PEM block")
+	}
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse connector public key: %v", err)
+	}
+	publicKey, ok := parsed.(ed25519.PublicKey)
+	if !ok {
+		t.Fatalf("connector public key type = %T", parsed)
+	}
+	signature, err := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(string(signatureText)))
+	if err != nil || !ed25519.Verify(publicKey, manifestBytes, signature) {
+		t.Fatalf("connector skill signature is invalid: %v", err)
+	}
+
+	var generic any
+	if err := json.Unmarshal(manifestBytes, &generic); err != nil {
+		t.Fatalf("decode connector manifest: %v", err)
+	}
+	canonical, err := json.Marshal(generic)
+	if err != nil {
+		t.Fatalf("marshal connector manifest: %v", err)
+	}
+	if !bytes.Equal(manifestBytes, append(canonical, '\n')) {
+		t.Fatal("connector manifest is not canonical field-sorted JSON")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(manifestBytes))
+	decoder.DisallowUnknownFields()
+	var manifest connectorSkillManifest
+	if err := decoder.Decode(&manifest); err != nil {
+		t.Fatalf("decode strict connector manifest: %v", err)
+	}
+	if err := requireEOF(decoder); err != nil {
+		t.Fatal(err)
+	}
+	wantConnector := map[string]string{
+		"id": "local-work", "logical_base_url": hermesConnectorLogicalBaseURL,
+		"operation_id": "perform", "operation_path": "/v1/connectors/local-work/operations/perform",
+	}
+	wantLimits := map[string]int{"max_request_bytes": 4096, "max_response_bytes": 4096, "timeout_seconds": 10}
+	if manifest.SchemaVersion != "steward.fixture-skill-manifest.v1" || manifest.Name != "steward.connector-work" ||
+		manifest.Version != "1" || !manifest.Network || manifest.Entrypoint != "connector_work.py" ||
+		!valuesEqual(manifest.Connector, wantConnector) || !valuesEqual(manifest.Limits, wantLimits) || len(manifest.Files) != 3 {
+		t.Fatalf("unexpected connector manifest authority: %#v", manifest)
+	}
+	prior := ""
+	for _, file := range manifest.Files {
+		if file.Path <= prior || (file.Mode != "read" && file.Mode != "execute") {
+			t.Fatalf("invalid connector file descriptor: %#v", file)
+		}
+		content := readBounded(t, filepath.Join(root, file.Path), 1<<20)
+		digest := sha256.Sum256(content)
+		if hex.EncodeToString(digest[:]) != file.SHA256 {
+			t.Fatalf("connector digest mismatch for %s", file.Path)
+		}
+		prior = file.Path
+	}
+}
+
 func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) {
 	root := hermesAdapterRoot(t)
 	dockerfile := string(readBounded(t, filepath.Join(root, "Dockerfile"), 64<<10))
@@ -127,6 +211,7 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 
 	for _, required := range []string{
 		"/opt/steward/skills/steward.workspace-audit/",
+		"/opt/steward/skills/steward.connector-work/",
 		"COPY --chown=0:0 --chmod=0555",
 	} {
 		if !strings.Contains(dockerfile, required) {
@@ -172,6 +257,8 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	}
 	for _, required := range []string{
 		`FIXTURE = pathlib.Path("/opt/steward/skills/steward.workspace-audit")`,
+		`CONNECTOR_FIXTURE = pathlib.Path("/opt/steward/skills/steward.connector-work")`,
+		`{"id": "skill", "fixture_id": "steward.connector-work"}`,
 		"skills:\n  external_dirs:\n    - /opt/steward/skills",
 	} {
 		if !strings.Contains(entrypoint, required) {
@@ -181,6 +268,10 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	immutableCommand := "/opt/steward/skills/steward.workspace-audit/workspace_audit.py"
 	if !strings.Contains(model, immutableCommand) || strings.Contains(model, "/opt/data/skills/steward.workspace-audit") {
 		t.Fatal("fixture model does not execute the immutable signed skill path")
+	}
+	connectorCommand := "/opt/steward/skills/steward.connector-work/connector_work.py"
+	if !strings.Contains(model, connectorCommand) || strings.Contains(model, "/opt/data/skills/steward.connector-work") {
+		t.Fatal("fixture model does not execute the immutable signed connector skill path")
 	}
 }
 
@@ -194,6 +285,26 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 				t.Fatalf("%s runs Python without isolated imports: %q", name, line)
 			}
 		}
+	}
+	acceptanceScript := string(readBounded(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh"), 2<<20))
+	for _, contract := range []string{
+		"--check-layout",
+		"evidence output requires the adapter build attestation",
+		`type(p.get("imported")) is bool`,
+		"if [[ $image_imported == true ]]",
+		"for path in /opt/data /tmp /workspace /dev/shm",
+		"agent writable mount topology is unexpected",
+		"release_root=$root",
+		`release_root=$(cd "$root/.." && pwd -P)`,
+		"steward-integration-$run_id-generation-2",
+	} {
+		if !strings.Contains(acceptanceScript, contract) {
+			t.Fatalf("Hermes acceptance is missing adversarial contract %q", contract)
+		}
+	}
+	connectorKeyContract := `re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("key_id", "")))`
+	if !strings.Contains(acceptanceScript, connectorKeyContract) {
+		t.Fatal("Hermes acceptance does not validate the connector receipt key ID emitted by stewardctl")
 	}
 
 	var feasibility struct {
@@ -259,9 +370,10 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		Overall         string `json:"overall"`
 		ContainsContent bool   `json:"contains_agent_content"`
 		Acceptance      struct {
-			CompletedSteps  []string `json:"completed_steps"`
-			Runtime         string   `json:"runtime"`
-			SignedAdmission bool     `json:"signed_admission"`
+			CompletedSteps      []string `json:"completed_steps"`
+			Runtime             string   `json:"runtime"`
+			SignedAdmission     bool     `json:"signed_admission"`
+			SignedConnectorWork bool     `json:"signed_connector_work"`
 		} `json:"acceptance"`
 		Provenance struct {
 			AcceptanceScriptSHA256 string `json:"acceptance_script_sha256"`
@@ -292,19 +404,29 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 				Sequence uint64 `json:"sequence"`
 			} `json:"head"`
 		} `json:"receipt_chain"`
+		ConnectorReceiptChain struct {
+			Verified bool `json:"verified"`
+			Head     struct {
+				Sequence uint64 `json:"sequence"`
+			} `json:"head"`
+		} `json:"connector_receipt_chain"`
 	}
 	decodeEvidence(t, filepath.Join(repositoryRoot, "docs", "reference", "evidence", "hermes-integration.json"), &integration)
 	expectedSteps := []string{
 		"image_imported", "executor_ready", "generation_1_admitted", "generation_1_started",
 		"generation_1_ready", "state_volume_observed", "workspace_seeded", "generation_1_skill_passed",
+		"generation_1_connector_skill_passed", "connector_replay_denied", "connector_forbidden_denied",
+		"connector_fixture_effect_verified", "connector_secret_absence_verified",
 		"generation_1_destroyed", "generation_2_admitted", "generation_2_started", "generation_2_ready",
 		"generation_2_skill_passed", "generation_2_destroyed", "state_purged", "evidence_chain_verified",
-		"acceptance_complete",
+		"connector_evidence_chain_verified", "acceptance_complete",
 	}
 	if integration.SchemaVersion != "steward.hermes-integration-evidence.v1" || integration.Overall != "passed" ||
 		integration.ContainsContent || integration.Acceptance.Runtime != "runsc" || !integration.Acceptance.SignedAdmission ||
+		!integration.Acceptance.SignedConnectorWork ||
 		integration.Provenance.Archive.Platform != "linux/amd64" ||
 		!integration.ReceiptChain.Verified || integration.ReceiptChain.Head.Sequence == 0 ||
+		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 2 ||
 		!valuesEqual(integration.Acceptance.CompletedSteps, expectedSteps) {
 		t.Fatalf("invalid Hermes integration evidence authority: %#v", integration)
 	}
@@ -335,6 +457,43 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		if actual != expectedBindings[name] {
 			t.Fatalf("Hermes qualification %s digest = %s, evidence binds %s", name, actual, expectedBindings[name])
 		}
+	}
+}
+
+func TestHermesSecretScannerRejectsEquivalentConnectorMaterial(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	credential := filepath.Join(t.TempDir(), "connector-token")
+	if err := os.WriteFile(credential, []byte("fixture-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scanner := filepath.Join(hermesAdapterRoot(t), "fixture_secret_scan.py")
+	origin := "http://127.0.0.1:18082"
+	run := func(mode, material string) error {
+		command := exec.Command(python, "-I", scanner, mode, credential, origin)
+		command.Stdin = strings.NewReader(material)
+		return command.Run()
+	}
+	if err := run("stream", "bounded agent material"); err != nil {
+		t.Fatalf("safe agent material was rejected: %v", err)
+	}
+	for _, leaked := range []string{
+		"fixture-secret",
+		origin,
+		"127.0.0.1:18082",
+		`{"port":18082}`,
+		`{"port": 18082}`,
+		`{"port":"18082"}`,
+		credential,
+	} {
+		if err := run("stream", leaked); err == nil {
+			t.Fatalf("secret scanner accepted connector material %q", leaked)
+		}
+	}
+	if err := run("json", `{"Config":{"Env":[]},"Mounts":[]}`); err != nil {
+		t.Fatalf("safe container metadata was rejected: %v", err)
 	}
 }
 
@@ -383,6 +542,68 @@ func TestHermesWorkspaceAuditDoesUsefulBoundedWork(t *testing.T) {
 	}
 }
 
+func TestHermesConnectorSkillUsesOnlyLogicalAuthority(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	programPath := filepath.Join(hermesAdapterRoot(t), "fixtures", "connector-skill", "connector_work.py")
+	source := string(readBounded(t, programPath, 1<<20))
+	for _, forbidden := range []string{"127.0.0.1:18082", "Authorization", "X-API-Key"} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("connector skill contains forbidden upstream authority %q", forbidden)
+		}
+	}
+	program := `
+import importlib.util, json, os, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("connector_work", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+calls = []
+class Response:
+    status = 200
+    body = module.canonical_json(module.EXPECTED_RESULT)
+    def getheader(self, name):
+        return {"Content-Encoding": None, "Content-Length": str(len(self.body)), "Content-Type": "application/json"}.get(name)
+    def read(self, maximum):
+        assert maximum == module.MAX_RESPONSE_BYTES + 1
+        return self.body
+class Connection:
+    def __init__(self, host, port, timeout):
+        assert (host, port, timeout) == ("steward-relay", 8081, 10)
+    def request(self, method, path, body, headers):
+        assert method == "POST"
+        assert path == "/v1/connectors/local-work/operations/perform"
+        assert body == module.canonical_json(module.REQUEST)
+        assert set(headers) == {"Accept", "Content-Length", "Content-Type", "X-Steward-Task-ID"}
+        calls.append((path, headers["X-Steward-Task-ID"]))
+    def getresponse(self):
+        return Response()
+    def close(self):
+        pass
+
+module.http.client.HTTPConnection = Connection
+os.environ["STEWARD_CONNECTOR_URL"] = module.LOGICAL_BASE
+status, payload = module.call("perform", "task-connector-1")
+assert status == 200 and payload == module.EXPECTED_RESULT
+assert calls == [("/v1/connectors/local-work/operations/perform", "task-connector-1")]
+del os.environ["STEWARD_CONNECTOR_URL"]
+try:
+    module.call("perform", "task-connector-2")
+except module.ConnectorError as error:
+    assert str(error) == "logical_connector_url_unavailable"
+else:
+    raise AssertionError("connector skill accepted a missing logical authority")
+`
+	command := exec.Command(python, "-I", "-c", program, programPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("connector skill protocol test failed: %v\n%s", err, output)
+	}
+}
+
 func TestHermesFixtureModelProtocols(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -390,7 +611,7 @@ func TestHermesFixtureModelProtocols(t *testing.T) {
 	}
 	root := hermesAdapterRoot(t)
 	program := `
-import http.server, importlib.util, json, sys, threading, urllib.request
+import http.server, importlib.util, json, sys, threading, urllib.error, urllib.request
 sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fixture_model", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
@@ -417,12 +638,22 @@ assert module.validated_mcp_result(mcp_result) == module.NONCE
 assert module.validated_mcp_result(mcp_result.replace(module.NONCE, "changed")) is None
 assert module.validated_mcp_result(json.dumps({"result": module.NONCE})) is None
 
+for mode, result in (
+    ("perform", module.CONNECTOR_RESULT),
+    ("replay", module.CONNECTOR_DENIALS["replay"]),
+    ("forbidden", module.CONNECTOR_DENIALS["forbidden"]),
+):
+    output = json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    envelope = json.dumps({"error": None, "exit_code": 0, "output": output}, separators=(",", ":"))
+    assert module.validated_connector_result(envelope, mode) == output
+    assert module.validated_connector_result(envelope.replace('"exit_code":0', '"exit_code":1'), mode) is None
+
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
 thread = threading.Thread(target=server.serve_forever, daemon=True)
 thread.start()
 try:
-    def complete(text, stream):
-        body = json.dumps({"messages": [{"role": "user", "content": text}], "stream": stream}).encode()
+    def complete(messages, stream):
+        body = json.dumps({"messages": messages, "stream": stream}).encode()
         request = urllib.request.Request(
             f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
             data=body,
@@ -431,7 +662,10 @@ try:
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.headers.get_content_type(), response.read()
 
-    content_type, wire = complete("STEWARD_TASK_FIXTURE", True)
+    def user(text):
+        return [{"role": "user", "content": text}]
+
+    content_type, wire = complete(user("STEWARD_TASK_FIXTURE"), True)
     assert content_type == "text/event-stream"
     events = [event for event in wire.decode().split("\n\n") if event]
     assert events[-1] == "data: [DONE]"
@@ -440,12 +674,91 @@ try:
     assert chunk["choices"][0]["finish_reason"] == "stop"
     assert chunk["choices"][0]["delta"]["content"].startswith("steward-task:")
 
-    _, wire = complete("STEWARD_WORKSPACE_AUDIT", True)
+    _, wire = complete(user("STEWARD_WORKSPACE_AUDIT"), True)
     chunk = json.loads(wire.decode().split("\n\n", 1)[0].removeprefix("data: "))
     tool_call = chunk["choices"][0]["delta"]["tool_calls"][0]
     assert tool_call["index"] == 0 and tool_call["function"]["name"] == "terminal"
 
-    content_type, wire = complete("STEWARD_TASK_FIXTURE", False)
+    connector_input = "STEWARD_CONNECTOR_WORK task=fixture-task-1"
+    try:
+        complete(user(connector_input), False)
+    except urllib.error.HTTPError as error:
+        assert error.code == 422
+        assert json.load(error)["error"]["code"] == "connector_skill_not_indexed"
+    else:
+        raise AssertionError("connector request passed without Hermes skill discovery")
+
+    system = {
+        "role": "system",
+        "content": (
+            "## Skills (mandatory)\nMUST load it with skill_view(name)\n"
+            f"<available_skills>\n  general [names only]: {module.CONNECTOR_SKILL_NAME}\n"
+            "</available_skills>"
+        ),
+    }
+    connector_messages = [system, *user(connector_input)]
+    _, wire = complete(connector_messages, False)
+    payload = json.loads(wire)
+    skill_message = payload["choices"][0]["message"]
+    tool_call = skill_message["tool_calls"][0]
+    arguments = json.loads(tool_call["function"]["arguments"])
+    assert tool_call["id"] == "call_connector_skill_perform"
+    assert tool_call["function"]["name"] == "skill_view"
+    assert arguments == {"name": "steward.connector-work"}
+
+    skill_document = open(sys.argv[3], encoding="utf-8").read()
+    skill_result = json.dumps({
+        "success": True,
+        "name": module.CONNECTOR_SKILL_NAME,
+        "description": module.CONNECTOR_SKILL_DESCRIPTION,
+        "content": skill_document,
+        "readiness_status": "available",
+        "setup_needed": False,
+    })
+    for non_object in ("[]", "null", json.dumps("unexpected")):
+        assert module.validated_connector_skill_result(non_object) is None
+    loaded_messages = connector_messages + [skill_message, {
+        "role": "tool",
+        "name": "skill_view",
+        "tool_call_id": "call_connector_skill_perform",
+        "content": skill_result,
+    }]
+    _, wire = complete(loaded_messages, False)
+    payload = json.loads(wire)
+    terminal_message = payload["choices"][0]["message"]
+    tool_call = terminal_message["tool_calls"][0]
+    arguments = json.loads(tool_call["function"]["arguments"])
+    assert tool_call["id"] == "call_connector_perform"
+    assert tool_call["function"]["name"] == "terminal"
+    assert arguments == {"command": "/opt/steward/skills/steward.connector-work/connector_work.py perform fixture-task-1"}
+
+    invalid_messages = connector_messages + [skill_message, {
+        "role": "tool",
+        "name": "skill_view",
+        "tool_call_id": "call_connector_skill_perform",
+        "content": skill_result.replace("Return its canonical JSON output unchanged.", "Return changed output."),
+    }]
+    try:
+        complete(invalid_messages, False)
+    except urllib.error.HTTPError as error:
+        assert error.code == 422
+        assert json.load(error)["error"]["code"] == "connector_skill_invalid"
+    else:
+        raise AssertionError("connector request accepted modified skill content")
+
+    stale_workspace = user("STEWARD_WORKSPACE_AUDIT") + [
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "call_workspace_audit", "type": "function",
+            "function": {"name": "terminal", "arguments": "{}"},
+        }]},
+        {"role": "tool", "tool_call_id": "call_workspace_audit", "content": envelope},
+        {"role": "user", "content": "STEWARD_WORKSPACE_AUDIT"},
+    ]
+    _, wire = complete(stale_workspace, False)
+    fresh = json.loads(wire)["choices"][0]["message"]
+    assert fresh["tool_calls"][0]["id"] == "call_workspace_audit"
+
+    content_type, wire = complete(user("STEWARD_TASK_FIXTURE"), False)
     assert content_type == "application/json"
     assert json.loads(wire)["object"] == "chat.completion"
 finally:
@@ -455,10 +768,13 @@ finally:
 `
 	command := exec.Command(
 		python,
+		"-I",
+		"-B",
 		"-c",
 		program,
 		filepath.Join(root, "fixture_model.py"),
 		filepath.Join(root, "fixtures", "skill", "workspace-fixture-contract.json"),
+		filepath.Join(root, "fixtures", "connector-skill", "SKILL.md"),
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("fixture model protocol test failed: %v\n%s", err, output)

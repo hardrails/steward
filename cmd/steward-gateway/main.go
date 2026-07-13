@@ -46,6 +46,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "gateway configuration valid")
 		return 0
 	}
+	lifetimeLock, err := acquireGatewayLifetimeLock(config)
+	if err != nil {
+		fmt.Fprintln(stderr, "steward-gateway: lock:", err)
+		return 2
+	}
+	defer lifetimeLock.Close()
 	server, err := gateway.Open(config, routes, egressRoutes, token)
 	if err != nil {
 		fmt.Fprintln(stderr, "steward-gateway: open:", err)

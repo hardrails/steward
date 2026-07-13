@@ -14,14 +14,25 @@ replace unrestricted container privileges.
   local volume driver has no hard byte or inode quota, so state is disabled by
   default and is not supported on shared multi-tenant hosts;
 - inference is one site-policy-approved route and model alias through
-  `steward-gateway`; the upstream bearer credential never enters the agent
-  container; and
+  `steward-gateway`; Gateway does not configure, mount, or inject the upstream
+  bearer credential into the agent container; and
 - service is one capsule-declared port reached through an authenticated loopback
   gateway path, not a raw agent container port.
 
 Signed HTTP(S) egress uses separate named routes. Steward provides no raw TCP/UDP,
 default-allow network, host bind mount, caller-selected environment, or Docker socket.
 See [Configure signed egress]({{ '/guides/egress/' | relative_url }}).
+
+Authenticated API work uses named connectors. Gateway maps each logical operation
+to an exact method, path, origin, credential, and call budget without placing the
+origin or credential in the workload. See
+[Broker authenticated API operations]({{ '/guides/connectors/' | relative_url }}).
+
+Gateway rejects the exact configured connector credential in upstream response
+headers and the decoded body stream. It does not detect transformed credentials,
+private-origin disclosure, or other application secrets, and it does not apply an
+upstream-specific response schema. Treat each inference and connector upstream as a
+trusted service and use narrow, tenant-specific credentials.
 
 To use persistent state on a dedicated single-tenant host, set
 `EXECUTOR_STATE_ARG=-allow-unquotaed-state-on-dedicated-host` in

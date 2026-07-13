@@ -107,32 +107,41 @@ jobs:
           archive="dist/steward_${STEWARD_RELEASE_VERSION}_linux_${{ matrix.goarch }}.tar.gz"
           manifest=$(tar -xOf "$archive" release.json)
           grep -Fxq '  "schema": "steward.release.v2",' <<<"$manifest"
-          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 2, "write": 2},' <<<"$manifest"
           grep -Fxq '    "admission_fence": {"read_min": 1, "read_max": 2, "write": 2},' <<<"$manifest"
+          grep -Fxq '    "connector_receipt_log": {"read_min": 1, "read_max": 1, "write": 1},' <<<"$manifest"
+          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 3, "write": 3},' <<<"$manifest"
           grep -Fxq "  \"version\": \"${STEWARD_RELEASE_VERSION}\"," <<<"$manifest"
           grep -Fxq '  "os": "linux",' <<<"$manifest"
           grep -Fxq "  \"arch\": \"${{ matrix.goarch }}\"," <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/adapter.json": "' <<<"$manifest"
+          grep -Fq '    "integration/adapters/hermes-agent/fixtures/connector-skill/SKILL.md": "' <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/fixtures/skill/SKILL.md": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/build-hermes-adapter.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/hermes-feasibility.sh": "' <<<"$manifest"
+          grep -Fq '    "integration/scripts/hermes-steward-acceptance.sh": "' <<<"$manifest"
           tar -tzf "$archive" adapters/hermes-agent/adapter.json >/dev/null
+          tar -tzf "$archive" adapters/hermes-agent/fixtures/connector-skill/SKILL.md >/dev/null
           tar -tzf "$archive" adapters/hermes-agent/fixtures/skill/SKILL.md >/dev/null
           tar -tzf "$archive" scripts/build-hermes-adapter.sh >/dev/null
           tar -tzf "$archive" scripts/hermes-feasibility.sh >/dev/null
+          tar -tzf "$archive" scripts/hermes-steward-acceptance.sh >/dev/null
           deb_contents=$(mktemp)
           rpm_contents=$(mktemp)
           trap 'rm -f "$deb_contents" "$rpm_contents"' EXIT
           dpkg-deb --contents "dist/steward-node_${STEWARD_RELEASE_VERSION}_${{ matrix.goarch }}.deb" >"$deb_contents"
           grep -q './usr/lib/steward-node/release/release.json' "$deb_contents"
           grep -q './usr/lib/steward-node/release/adapters/hermes-agent/adapter.json' "$deb_contents"
+          grep -q './usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/hermes-feasibility.sh' "$deb_contents"
+          grep -q './usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' "$deb_contents"
           rpm -qpl "dist/steward-node_${STEWARD_RELEASE_VERSION}_${{ matrix.goarch }}.rpm" >"$rpm_contents"
           grep -q '/usr/lib/steward-node/release/release.json' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/adapter.json' "$rpm_contents"
+          grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/hermes-feasibility.sh' "$rpm_contents"
+          grep -q '/usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' "$rpm_contents"
 
       - name: Keep one installer copy
         if: matrix.goarch == 'arm64'

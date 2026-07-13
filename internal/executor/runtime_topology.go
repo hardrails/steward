@@ -84,7 +84,13 @@ func (s *Server) desiredGatewayGrant(workload Workload, serviceURL string) gatew
 		GrantID: workload.Runtime.GrantID, TenantID: workload.TenantID, InstanceID: workload.InstanceID,
 		Generation: workload.Runtime.Generation, Service: workload.Runtime.ServicePort > 0, ServiceURL: serviceURL,
 	}
+	if imageConfigDigest.MatchString(workload.Runtime.CapsuleDigest) && imageConfigDigest.MatchString(workload.Runtime.PolicyDigest) {
+		grant.RuntimeRef = RuntimeRef(workload.TenantID, workload.InstanceID)
+		grant.CapsuleDigest = workload.Runtime.CapsuleDigest
+		grant.PolicyDigest = workload.Runtime.PolicyDigest
+	}
 	grant.EgressRouteIDs = append([]string(nil), workload.Runtime.EgressRouteIDs...)
+	grant.ConnectorIDs = append([]string(nil), workload.Runtime.ConnectorIDs...)
 	if workload.Runtime.Inference || len(workload.Runtime.EgressRouteIDs) > 0 {
 		grant.RouteID = workload.Runtime.RouteID
 		grant.ModelAlias = workload.Runtime.ModelAlias
@@ -94,7 +100,7 @@ func (s *Server) desiredGatewayGrant(workload Workload, serviceURL string) gatew
 
 func (s *Server) desiredRelay(workload Workload) RelaySpec {
 	grantDir := ""
-	if workload.Runtime.Inference || len(workload.Runtime.EgressRouteIDs) > 0 || workload.Runtime.ServicePort > 0 {
+	if workload.Runtime.Inference || len(workload.Runtime.EgressRouteIDs) > 0 || len(workload.Runtime.ConnectorIDs) > 0 || workload.Runtime.ServicePort > 0 {
 		grantDir = gateway.GrantDirectory(s.secure.grantRoot, workload.Runtime.GrantID)
 	}
 	return RelaySpec{
@@ -102,7 +108,8 @@ func (s *Server) desiredRelay(workload Workload) RelaySpec {
 		Image: s.secure.relayImage, NetworkName: workload.Runtime.NetworkName, GrantID: workload.Runtime.GrantID,
 		GrantDir: grantDir, TenantID: workload.TenantID, InstanceID: workload.InstanceID,
 		Generation: workload.Runtime.Generation, RelayGID: s.secure.relayGID,
-		Inference: workload.Runtime.Inference, Egress: len(workload.Runtime.EgressRouteIDs) > 0, ServicePort: workload.Runtime.ServicePort,
+		Inference: workload.Runtime.Inference, Connector: len(workload.Runtime.ConnectorIDs) > 0,
+		Egress: len(workload.Runtime.EgressRouteIDs) > 0, ServicePort: workload.Runtime.ServicePort,
 		RelayIP: workload.Runtime.RelayIP, AgentIP: workload.Runtime.AgentIP,
 		MemoryBytes: defaultRelayMemory, CPUMillis: defaultRelayCPU, PIDs: defaultRelayPIDs,
 	}
@@ -374,7 +381,7 @@ func (s *Server) stopRelayAndConfirm(ctx context.Context, relayName string, want
 }
 
 func (s *Server) gatewayRoutePolicyDigest(ctx context.Context, workload Workload) (string, error) {
-	if workload.Runtime == nil || !workload.Runtime.Inference && len(workload.Runtime.EgressRouteIDs) == 0 {
+	if workload.Runtime == nil || !workload.Runtime.Inference && len(workload.Runtime.EgressRouteIDs) == 0 && len(workload.Runtime.ConnectorIDs) == 0 {
 		return "", nil
 	}
 	inspection, err := s.secure.gateway.InspectWithPolicy(ctx, workload.Runtime.GrantID)
@@ -392,10 +399,10 @@ func (s *Server) gatewayRoutePolicyMatches(ctx context.Context, workload Workloa
 }
 
 func (s *Server) inspectGatewayRoutePolicy(ctx context.Context, workload Workload, expected string) error {
-	policyBearing := workload.Runtime != nil && (workload.Runtime.Inference || len(workload.Runtime.EgressRouteIDs) != 0)
+	policyBearing := workload.Runtime != nil && (workload.Runtime.Inference || len(workload.Runtime.EgressRouteIDs) != 0 || len(workload.Runtime.ConnectorIDs) != 0)
 	if !policyBearing {
 		if expected != "" {
-			return topologyDrift(runtimeTopologyGateway, "workload without an inference or egress route has an unexpected route-policy binding")
+			return topologyDrift(runtimeTopologyGateway, "workload without an inference, egress, or connector route has an unexpected route-policy binding")
 		}
 		return nil
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -68,7 +69,7 @@ func TestEgressProxyHTTPConnectDenialAuditAndLifecycle(t *testing.T) {
 	replacement.Generation = 2
 	replacement.EgressRouteIDs = nil
 	replacement.Service = true
-	controlRequest(t, server, http.MethodPost, "/v1/grants", replacement, http.StatusConflict)
+	controlRequest(t, server, http.MethodPost, "/v1/grants", replacement, http.StatusBadRequest)
 	current := server.grants[grant.GrantID]
 	if !current.Active || !GrantsEqual(current, Grant{GrantID: grant.GrantID, TenantID: grant.TenantID, InstanceID: grant.InstanceID,
 		Generation: grant.Generation, EgressRouteIDs: grant.EgressRouteIDs, Active: true}) {
@@ -466,8 +467,9 @@ func TestResolveAllowedIPAndProxyDestinationValidation(t *testing.T) {
 	if err != nil || address.String() != "127.0.0.1" {
 		t.Fatalf("address=%v err=%v", address, err)
 	}
-	if _, err := resolveAllowedIP(context.Background(), "127.0.0.1", loadedEgressDestination{}); err == nil {
-		t.Fatal("private literal accepted without CIDR")
+	if _, err := resolveAllowedIP(context.Background(), "127.0.0.1", loadedEgressDestination{}); err == nil ||
+		!errors.Is(err, errAddressDenied) {
+		t.Fatalf("private literal policy error=%v", err)
 	}
 	localhost := loadedEgressDestination{prefixes: []netip.Prefix{
 		netip.MustParsePrefix("127.0.0.0/8"),
@@ -477,8 +479,9 @@ func TestResolveAllowedIPAndProxyDestinationValidation(t *testing.T) {
 	if err != nil || !address.IsLoopback() {
 		t.Fatalf("localhost address=%v err=%v", address, err)
 	}
-	if _, err := resolveAllowedIP(context.Background(), "not a dns name", localhost); err == nil {
-		t.Fatal("invalid DNS name resolved")
+	if _, err := resolveAllowedIP(context.Background(), "not a dns name", localhost); err == nil ||
+		!errors.Is(err, errAddressResolutionFailed) {
+		t.Fatalf("invalid DNS resolution error=%v", err)
 	}
 	for _, target := range []string{"ftp://example.com/file", "http://user@example.com/file"} {
 		request := httptest.NewRequest(http.MethodGet, target, nil)
@@ -495,6 +498,20 @@ func TestResolveAllowedIPAndProxyDestinationValidation(t *testing.T) {
 	request.Host = "missing-port"
 	if _, _, err := proxyDestination(request); err == nil {
 		t.Fatal("CONNECT without port accepted")
+	}
+}
+
+func TestClassifyAddressFailureSeparatesPolicyResolutionAndRevocation(t *testing.T) {
+	if status, code := classifyAddressFailure(errAddressDenied, context.Background()); status != http.StatusForbidden || code != "address_denied" {
+		t.Fatalf("policy status=%d code=%q", status, code)
+	}
+	if status, code := classifyAddressFailure(errAddressResolutionFailed, context.Background()); status != http.StatusBadGateway || code != "resolution_failed" {
+		t.Fatalf("resolution status=%d code=%q", status, code)
+	}
+	lease, revoke := context.WithCancel(context.Background())
+	revoke()
+	if status, code := classifyAddressFailure(errAddressResolutionFailed, lease); status != http.StatusServiceUnavailable || code != "grant_revoked" {
+		t.Fatalf("revocation status=%d code=%q", status, code)
 	}
 }
 

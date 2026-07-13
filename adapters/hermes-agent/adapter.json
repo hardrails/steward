@@ -58,6 +58,13 @@
     "network": false,
     "result_schema": "steward.workspace-audit.result.v1"
   },
+  "qualified_connector_skill_fixture": {
+    "name": "steward.connector-work",
+    "connector_id": "local-work",
+    "operation_id": "perform",
+    "network": true,
+    "result_schema": "steward.connector-work.result.v1"
+  },
   "known_upstream_incompatibilities": [
     "upstream image starts as root for s6 initialization",
     "upstream image declares VOLUME /opt/data",

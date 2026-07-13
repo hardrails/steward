@@ -28,8 +28,8 @@ Staging requires:
 Activation also requires the Docker daemon and the gVisor sandbox runtime
 registered as `runsc`, plus operator-provided enrollment inputs.
 The guided installer can install official gVisor, register `runsc`, and generate
-the host-local Executor token. Inference, service, or egress topology requires
-Docker Engine 28 or newer.
+the host-local Executor token. Inference, service, connector, or egress topology
+requires Docker Engine 28 or newer.
 
 Persistent Docker state is disabled by default. The portable local volume driver
 has no hard byte or inode quota, so the compatibility flag that enables state is
@@ -292,13 +292,13 @@ sudo systemctl enable --now steward-gateway steward steward-executor
 ```
 
 Preflight checks the actual service identities, Docker `runsc`, all six binaries,
-required Executor settings, credential/state/CA readability and permissions, and
-all three systemd units. Binary configuration checks do not bind a listener or
-start an uplink poll. They inspect existing durable files through read-only file
-descriptors and leave prospective Gateway state and audit paths absent. Executor
-requires its admission fence, journal, and evidence chain to be initialized before
-preflight because silently replacing any of them would weaken rollback protection
-or audit continuity.
+required Executor settings, credential/state/CA readability and permissions,
+Gateway receipt-key ownership, and all three systemd units. Binary configuration
+checks do not bind a listener or start an uplink poll. They inspect existing durable
+files through read-only file descriptors and leave prospective Gateway state,
+audit, and connector receipt paths absent. Executor requires its admission fence,
+journal, and evidence chain to be initialized before preflight because silently
+replacing any of them would weaken rollback protection or audit continuity.
 
 The appliance sets `enable_process_exec: false`, so `steward` remains a status
 tracker. Untrusted workloads run only through Executor and gVisor.

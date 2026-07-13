@@ -20,7 +20,7 @@ home: true
 
 <div class="grid">
   <article class="card"><span class="number">01 / AUTHORIZE</span><h3>Why may this run?</h3><p>Signed admission requires the publisher's workload limits, the operator's site policy, and the tenant's instance request to allow the same deployment. A stored instance generation rejects delayed commands for a replaced instance; a separate policy epoch rejects policy rollback.</p><a href="{{ '/guides/signed-admission/' | relative_url }}">Signed admission →</a></article>
-  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor accepts only immutable, resource-bounded images. Signed policy can grant approved model, private-service, and HTTP(S) routes. Persistent Docker state is available only through an explicit dedicated-host compatibility mode because it has no portable hard quota.</p><a href="{{ '/concepts/security-model/' | relative_url }}">Security model →</a></article>
+  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor accepts only immutable, resource-bounded images. Signed policy can grant approved model, private-service, exact credential-brokered connector, and HTTP(S) routes. Persistent Docker state is available only through an explicit dedicated-host compatibility mode because it has no portable hard quota.</p><a href="{{ '/concepts/security-model/' | relative_url }}">Security model →</a></article>
   <article class="card"><span class="number">03 / VERIFY</span><h3>What did the node enforce?</h3><p>Hash-linked, signed receipts record the accepted artifact, policy, instance generation, and host-mutation result for offline verification.</p><a href="{{ '/reference/offline-tools/' | relative_url }}">Verify and export evidence →</a></article>
 </div>
 
@@ -50,8 +50,14 @@ home: true
 </div>
 
 Model serving is managed separately. Steward's local gateway connects the agent to
-an operator-selected, OpenAI-compatible route without putting the upstream
-credential in the agent container.
+an operator-selected, OpenAI-compatible route without configuring, mounting, or
+injecting the upstream credential into the agent container. Named connectors apply
+the same separation to exact authenticated API operations: Steward directly gives
+the agent a logical operation and finite call budget, not the configured upstream
+origin or secret. Gateway rejects the exact connector credential in response
+headers and the decoded body stream. Configured upstreams remain trusted not to
+transform that value, disclose private origin details, or return other application
+secrets.
 
 ## Agent adapters
 
@@ -60,8 +66,11 @@ commit `095b9eed3801c251796df93f48a8f2a527ff6e70`. The retained proof applies to
 `linux/amd64`; other platforms are not yet qualified. The source-built image runs as
 `65532:65532`, uses the fixed Steward inference relay, and exposes only bounded
 negotiation, health, run submission, and run-status operations on port `8766`.
-Qualification ran the signed `steward.workspace-audit` skill under gVisor, restarted
-the container, and successfully ran the skill again.
+Qualification ran the signed `steward.workspace-audit` skill under gVisor, changed
+persisted workspace state, restarted the container, and required a fresh changed
+result. It also required Hermes to discover and load the exact signed
+`steward.connector-work` skill before proving one authenticated effect, replay and
+undeclared-operation denial, and a separate signed connector receipt chain.
 
 The official Hermes image remains inadmissible. Steward ships the pinned builder,
 not a prebuilt Hermes OCI archive, because dependency and base-image notices are
@@ -83,6 +92,7 @@ secrets, host mounts, privileged mode, or undeclared ports.
 [Build and run the Hermes Agent adapter]({{ '/guides/hermes-agent/' | relative_url }}) ·
 [Review the OpenClaw adapter contract]({{ '/guides/openclaw/' | relative_url }}) ·
 [Configure positive capabilities]({{ '/guides/positive-capabilities/' | relative_url }}) ·
+[Broker authenticated API operations]({{ '/guides/connectors/' | relative_url }}) ·
 [Configure egress]({{ '/guides/egress/' | relative_url }}) ·
 [Bootstrap with Terraform]({{ '/guides/terraform/' | relative_url }}) ·
 [Connect an MCP client]({{ '/guides/mcp/' | relative_url }}) ·

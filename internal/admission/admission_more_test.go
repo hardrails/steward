@@ -183,6 +183,9 @@ func TestPolicyValidationRejectsEveryBoundedShape(t *testing.T) {
 		{"service", func(p *SitePolicy) { p.Tenants[0].ServiceIDs = []string{""} }},
 		{"egress route", func(p *SitePolicy) { p.Tenants[0].EgressRouteIDs = []string{"bad route"} }},
 		{"duplicate egress route", func(p *SitePolicy) { p.Tenants[0].EgressRouteIDs = []string{"web", "web"} }},
+		{"connector ID", func(p *SitePolicy) { p.Tenants[0].ConnectorIDs = []string{"bad connector"} }},
+		{"duplicate connector ID", func(p *SitePolicy) { p.Tenants[0].ConnectorIDs = []string{"git.read", "git.read"} }},
+		{"too many connector IDs", func(p *SitePolicy) { p.Tenants[0].ConnectorIDs = make([]string, 33) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			policy := testPolicy(public)
@@ -225,6 +228,51 @@ func TestEgressCapabilityIntersectionAndCanonicalRoutes(t *testing.T) {
 			AuthenticatedIdentity{TenantID: "tenant-a", NodeID: "node-a"}, PersistedFences{}, DefaultProfiles()); err == nil {
 			t.Fatal("invalid egress authority accepted")
 		}
+	}
+}
+
+func TestConnectorCapabilityIntersectionAndCanonicalIDs(t *testing.T) {
+	public, _, _ := ed25519.GenerateKey(rand.Reader)
+	capsule, policy := testCapsule(), testPolicy(public)
+	capsule.Capabilities.Connector = true
+	policy.Tenants[0].ConnectorIDs = []string{"issues.create", "git.read"}
+	intent := testIntent(testDigest('d'))
+	intent.Capabilities.Connector = true
+	intent.ConnectorIDs = []string{"issues.create", "git.read"}
+	effective, err := Intersect(capsule, testDigest('d'), policy, testDigest('e'), "publisher-1", "site-root", intent,
+		AuthenticatedIdentity{TenantID: "tenant-a", NodeID: "node-a"}, PersistedFences{}, DefaultProfiles())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := effective.Intent.ConnectorIDs; len(got) != 2 || got[0] != "git.read" || got[1] != "issues.create" {
+		t.Fatalf("effective connector IDs=%v", got)
+	}
+	canonical := CanonicalConnectorIDs([]string{"issues.create", "git.read", "issues.create"})
+	if len(canonical) != 2 || canonical[0] != "git.read" || canonical[1] != "issues.create" {
+		t.Fatalf("canonical connector IDs=%v", canonical)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*InstanceIntent, *ProfileCapsule)
+	}{
+		{name: "unknown", mutate: func(intent *InstanceIntent, _ *ProfileCapsule) { intent.ConnectorIDs = []string{"admin.delete"} }},
+		{name: "duplicate", mutate: func(intent *InstanceIntent, _ *ProfileCapsule) {
+			intent.ConnectorIDs = []string{"git.read", "git.read"}
+		}},
+		{name: "too many", mutate: func(intent *InstanceIntent, _ *ProfileCapsule) { intent.ConnectorIDs = make([]string, 33) }},
+		{name: "empty", mutate: func(intent *InstanceIntent, _ *ProfileCapsule) { intent.ConnectorIDs = nil }},
+		{name: "without capability", mutate: func(intent *InstanceIntent, _ *ProfileCapsule) { intent.Capabilities.Connector = false }},
+		{name: "outside capsule ceiling", mutate: func(_ *InstanceIntent, capsule *ProfileCapsule) { capsule.Capabilities.Connector = false }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changedIntent, changedCapsule := intent, capsule
+			test.mutate(&changedIntent, &changedCapsule)
+			if _, err := Intersect(changedCapsule, testDigest('d'), policy, testDigest('e'), "publisher-1", "site-root", changedIntent,
+				AuthenticatedIdentity{TenantID: "tenant-a", NodeID: "node-a"}, PersistedFences{}, DefaultProfiles()); err == nil {
+				t.Fatal("invalid connector authority accepted")
+			}
+		})
 	}
 }
 

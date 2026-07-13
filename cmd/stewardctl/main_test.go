@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/evidence"
 )
 
@@ -143,6 +144,69 @@ func TestEvidenceVerify(t *testing.T) {
 	}
 	if !portableVerified.Valid || portableVerified.Head != verified.Head {
 		t.Fatalf("portable verification=%#v want head %#v", portableVerified, verified.Head)
+	}
+}
+
+func TestConnectorEvidenceVerify(t *testing.T) {
+	directory := t.TempDir()
+	privatePath := filepath.Join(directory, "private.pem")
+	publicPath := filepath.Join(directory, "public.pem")
+	if err := run([]string{"keygen", "-private-out", privatePath, "-public-out", publicPath}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	privateKey, err := readPrivateKey(privatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(directory, "connector-receipts.ndjson")
+	log, err := connectorledger.Open(logPath, privateKey, "node-a/gateway", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskDigest, _ := connectorledger.TaskDigest("task-0123456789abcdef")
+	head, err := log.Begin(connectorledger.Event{
+		Phase: connectorledger.Authorize, Outcome: connectorledger.Allowed, TenantID: "tenant-a",
+		RuntimeRef: "executor-" + strings.Repeat("a", 64), CapsuleDigest: digest('b'), PolicyDigest: digest('c'),
+		RoutePolicyDigest: digest('e'), Generation: 3, GrantID: "grant-" + strings.Repeat("d", 64), ConnectorID: "ticketing",
+		OperationID: "create-ticket", TaskDigest: taskDigest, RequestBytes: 19,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	arguments := []string{"evidence", "verify", "-kind", "connector", "-in", logPath, "-public-key", publicPath,
+		"-node-id", "node-a/gateway", "-epoch", "2", "-expected-sequence", "1", "-expected-chain-hash", head.ChainHash}
+	if err := run(arguments, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "valid connector evidence chain: node=node-a/gateway epoch=2 sequence=1\n" {
+		t.Fatalf("output=%q", got)
+	}
+	output.Reset()
+	arguments = append(arguments, "-json")
+	if err := run(arguments, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var verified struct {
+		Valid bool               `json:"valid"`
+		Kind  string             `json:"kind"`
+		Head  evidenceHeadOutput `json:"head"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &verified); err != nil {
+		t.Fatal(err)
+	}
+	if !verified.Valid || verified.Kind != "connector" || verified.Head.ChainHash != head.ChainHash || verified.Head.KeyID != head.KeyID {
+		t.Fatalf("verified=%#v", verified)
+	}
+	if err := run([]string{"evidence", "export", "-kind", "connector", "-in", logPath, "-public-key", publicPath, "-node-id", "node-a/gateway"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("connector evidence export was accepted")
+	}
+	if err := run([]string{"evidence", "verify", "-kind", "unknown", "-in", logPath, "-public-key", publicPath, "-node-id", "node-a/gateway"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("unknown evidence kind was accepted")
 	}
 }
 

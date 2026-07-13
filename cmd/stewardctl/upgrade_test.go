@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/executoruplink"
 	"github.com/hardrails/steward/internal/gateway"
@@ -28,6 +31,8 @@ type upgradeFixture struct {
 	gatewayConfig    string
 	gatewayState     string
 	gatewayGrantRoot string
+	receiptLog       string
+	receiptKey       string
 	manifest         string
 }
 
@@ -43,6 +48,7 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 		evidence: filepath.Join(directory, "evidence.bin"), uplink: filepath.Join(directory, "uplink.json"),
 		supervisor: filepath.Join(directory, "supervisor.json"), gatewayConfig: filepath.Join(directory, "gateway.json"),
 		gatewayState: filepath.Join(directory, "gateway-state.json"), gatewayGrantRoot: filepath.Join(directory, "grants"),
+		receiptLog: filepath.Join(directory, "connector-receipts.ndjson"), receiptKey: filepath.Join(directory, "connector-receipts.pem"),
 		manifest: filepath.Join(directory, "release.json"),
 	}
 	if err := admission.InitializeFenceStore(fixture.fence); err != nil {
@@ -68,6 +74,36 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 	if err := os.WriteFile(token, []byte("upgrade-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	_, receiptPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptDER, err := x509.MarshalPKCS8PrivateKey(receiptPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.receiptKey, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: receiptDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receipts, err := connectorledger.Open(fixture.receiptLog, receiptPrivate, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskDigest, err := connectorledger.TaskDigest("upgrade-format-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := receipts.Append(connectorledger.Event{
+		Phase: connectorledger.Deny, Outcome: connectorledger.Denied, TenantID: "tenant-a",
+		RuntimeRef: "executor-" + strings.Repeat("a", 64), CapsuleDigest: digest('b'), PolicyDigest: digest('c'),
+		RoutePolicyDigest: digest('d'), Generation: 1, GrantID: "grant-" + strings.Repeat("e", 64),
+		ConnectorID: "ticketing", OperationID: "create-ticket", TaskDigest: taskDigest, ErrorCode: "policy_denied",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := receipts.Close(); err != nil {
+		t.Fatal(err)
+	}
 	executorGID := os.Getgid()
 	if executorGID == 0 {
 		executorGID = 1
@@ -76,6 +112,9 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 		Version: 1, ControlSocket: filepath.Join(directory, "gateway.sock"), ServiceAddress: "127.0.0.1:8091",
 		ServiceTokenFile: token, StateFile: fixture.gatewayState, GrantRoot: fixture.gatewayGrantRoot,
 		ExecutorGID: executorGID, RelayGID: executorGID,
+		ConnectorReceiptFile: fixture.receiptLog, ConnectorReceiptKeyFile: fixture.receiptKey,
+		ConnectorReceiptNodeID: "node-a/gateway", ConnectorReceiptEpoch: 1,
+		ConnectorReceiptTenantBudgets: []gateway.ConnectorReceiptTenantBudget{{TenantID: "tenant-a", Bytes: 4 << 20}},
 	}
 	raw, err := json.Marshal(config)
 	if err != nil {
@@ -85,12 +124,13 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 		t.Fatal(err)
 	}
 	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
-		"admission_fence":   {ReadMin: 1, ReadMax: 2, Write: 2},
-		"evidence_log":      {ReadMin: 1, ReadMax: 1, Write: 1},
-		"gateway_state":     {ReadMin: 1, ReadMax: 2, Write: 2},
-		"operation_journal": {ReadMin: 1, ReadMax: 1, Write: 1},
-		"supervisor_state":  {ReadMin: 1, ReadMax: 1, Write: 1},
-		"uplink_state":      {ReadMin: 1, ReadMax: 2, Write: 2},
+		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 2},
+		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
+		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
+		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
+		"operation_journal":     {ReadMin: 1, ReadMax: 1, Write: 1},
+		"supervisor_state":      {ReadMin: 1, ReadMax: 1, Write: 1},
+		"uplink_state":          {ReadMin: 1, ReadMax: 2, Write: 2},
 	})
 	return fixture
 }
@@ -109,9 +149,10 @@ func writeUpgradeManifest(t *testing.T, path string, formats map[string]releaseF
 	raw, err := json.Marshal(releaseManifest{
 		Schema: "steward.release.v2", Version: "v9.9.9", OS: "linux", Architecture: "amd64",
 		StateFormats: releaseStateFormats{
-			AdmissionFence: formats["admission_fence"], EvidenceLog: formats["evidence_log"],
-			GatewayState: formats["gateway_state"], OperationJournal: formats["operation_journal"],
-			SupervisorState: formats["supervisor_state"], UplinkState: formats["uplink_state"],
+			AdmissionFence: formats["admission_fence"], ConnectorReceiptLog: formats["connector_receipt_log"],
+			EvidenceLog: formats["evidence_log"], GatewayState: formats["gateway_state"],
+			OperationJournal: formats["operation_journal"], SupervisorState: formats["supervisor_state"],
+			UplinkState: formats["uplink_state"],
 		},
 		Files: json.RawMessage(`{}`),
 	})
@@ -125,7 +166,10 @@ func writeUpgradeManifest(t *testing.T, path string, formats map[string]releaseF
 
 func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 	fixture := newUpgradeFixture(t)
-	paths := []string{fixture.fence, fixture.journal, fixture.evidence, fixture.uplink, fixture.supervisor, fixture.gatewayConfig, fixture.manifest}
+	paths := []string{
+		fixture.fence, fixture.journal, fixture.evidence, fixture.uplink, fixture.supervisor,
+		fixture.gatewayConfig, fixture.receiptLog, fixture.receiptKey, fixture.manifest,
+	}
 	before := make(map[string][]byte, len(paths))
 	for _, path := range paths {
 		before[path], _ = os.ReadFile(path)
@@ -134,7 +178,7 @@ func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 	if err := run(fixture.arguments("check-drained", "configured"), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"signed_admission\":\"configured\",\"active_fences\":0,\"pending_operations\":0,\"retained_gateway_grants\":0,\"formats\":{\"admission_fence\":2,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_state\":2},\"target_compatible\":true,\"drained\":true}\n"
+	want := "{\"signed_admission\":\"configured\",\"active_fences\":0,\"pending_operations\":0,\"retained_gateway_grants\":0,\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_state\":2},\"target_compatible\":true,\"drained\":true}\n"
 	if output.String() != want {
 		t.Fatalf("check-drained snapshot\n got: %s want: %s", output.String(), want)
 	}
@@ -155,7 +199,7 @@ func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 	if err := run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want = "{\"signed_admission\":\"configured\",\"formats\":{\"admission_fence\":2,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_state\":2},\"target_compatible\":true}\n"
+	want = "{\"signed_admission\":\"configured\",\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_state\":2},\"target_compatible\":true}\n"
 	if output.String() != want {
 		t.Fatalf("inspect-formats snapshot\n got: %s want: %s", output.String(), want)
 	}
@@ -211,7 +255,7 @@ func TestUpgradeCheckDrainedReportsAllLegacyFormats(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, fragment := range []string{
-		`"admission_fence":1`, `"evidence_log":1`, `"gateway_state":1`,
+		`"admission_fence":1`, `"connector_receipt_log":1`, `"evidence_log":1`, `"gateway_state":1`,
 		`"operation_journal":1`, `"supervisor_state":1`, `"uplink_state":1`,
 	} {
 		if !strings.Contains(output.String(), fragment) {
@@ -341,12 +385,13 @@ func TestUpgradeCheckDrainedMissingAndAmbiguousStateFailsClosed(t *testing.T) {
 func TestUpgradeManifestCompatibilityBlocksUnreadableObservedVersion(t *testing.T) {
 	fixture := newUpgradeFixture(t)
 	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
-		"admission_fence":   {ReadMin: 1, ReadMax: 1, Write: 1},
-		"evidence_log":      {ReadMin: 1, ReadMax: 1, Write: 1},
-		"gateway_state":     {ReadMin: 1, ReadMax: 2, Write: 2},
-		"operation_journal": {ReadMin: 1, ReadMax: 1, Write: 1},
-		"supervisor_state":  {ReadMin: 1, ReadMax: 1, Write: 1},
-		"uplink_state":      {ReadMin: 1, ReadMax: 2, Write: 2},
+		"admission_fence":       {ReadMin: 1, ReadMax: 1, Write: 1},
+		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
+		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
+		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
+		"operation_journal":     {ReadMin: 1, ReadMax: 1, Write: 1},
+		"supervisor_state":      {ReadMin: 1, ReadMax: 1, Write: 1},
+		"uplink_state":          {ReadMin: 1, ReadMax: 2, Write: 2},
 	})
 	var output bytes.Buffer
 	err := run(fixture.arguments("check-drained", "configured"), &output, &bytes.Buffer{})
@@ -358,12 +403,13 @@ func TestUpgradeManifestCompatibilityBlocksUnreadableObservedVersion(t *testing.
 	}
 
 	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
-		"admission_fence":   {ReadMin: 1, ReadMax: 2, Write: 1},
-		"evidence_log":      {ReadMin: 1, ReadMax: 1, Write: 1},
-		"gateway_state":     {ReadMin: 1, ReadMax: 2, Write: 2},
-		"operation_journal": {ReadMin: 1, ReadMax: 1, Write: 1},
-		"supervisor_state":  {ReadMin: 1, ReadMax: 1, Write: 1},
-		"uplink_state":      {ReadMin: 1, ReadMax: 2, Write: 2},
+		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 1},
+		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
+		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
+		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
+		"operation_journal":     {ReadMin: 1, ReadMax: 1, Write: 1},
+		"supervisor_state":      {ReadMin: 1, ReadMax: 1, Write: 1},
+		"uplink_state":          {ReadMin: 1, ReadMax: 2, Write: 2},
 	})
 	output.Reset()
 	err = run(fixture.arguments("check-drained", "configured"), &output, &bytes.Buffer{})
@@ -380,5 +426,72 @@ func TestUpgradeManifestCompatibilityBlocksUnreadableObservedVersion(t *testing.
 	output.Reset()
 	if err := run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "decode target release manifest") {
 		t.Fatalf("ambiguous manifest error = %v", err)
+	}
+}
+
+func TestUpgradeManifestRequiresReceiptFormatAndPreservesGatewayV3(t *testing.T) {
+	fixture := newUpgradeFixture(t)
+	raw, err := os.ReadFile(fixture.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	formats, ok := document["state_formats"].(map[string]any)
+	if !ok {
+		t.Fatal("test manifest state_formats is not an object")
+	}
+	delete(formats, "connector_receipt_log")
+	raw, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.manifest, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "invalid connector_receipt_log reader/writer range") {
+		t.Fatalf("missing connector receipt format error = %v", err)
+	}
+
+	if err := os.WriteFile(fixture.gatewayState, []byte(`{"version":3,"grants":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
+		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 2},
+		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
+		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
+		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
+		"operation_journal":     {ReadMin: 1, ReadMax: 1, Write: 1},
+		"supervisor_state":      {ReadMin: 1, ReadMax: 1, Write: 1},
+		"uplink_state":          {ReadMin: 1, ReadMax: 2, Write: 2},
+	})
+	output.Reset()
+	if err := run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{}); err != nil {
+		t.Fatalf("v3-compatible target rejected: %v", err)
+	}
+	if !strings.Contains(output.String(), `"gateway_state":3`) || !strings.Contains(output.String(), `"target_compatible":true`) {
+		t.Fatalf("v3-compatible report = %s", output.String())
+	}
+
+	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
+		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 2},
+		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
+		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
+		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 2},
+		"operation_journal":     {ReadMin: 1, ReadMax: 1, Write: 1},
+		"supervisor_state":      {ReadMin: 1, ReadMax: 1, Write: 1},
+		"uplink_state":          {ReadMin: 1, ReadMax: 2, Write: 2},
+	})
+	output.Reset()
+	err = run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "gateway_state version 3 would be rewritten by lower writer version 2") {
+		t.Fatalf("v3 writer downgrade error = %v", err)
+	}
+	if !strings.Contains(output.String(), `"target_compatible":false`) {
+		t.Fatalf("v3 writer downgrade report = %s", output.String())
 	}
 }
