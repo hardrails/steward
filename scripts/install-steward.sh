@@ -22,7 +22,9 @@ Artifact source:
 
 Node enrollment:
   --control-plane-url URL       HTTPS control-plane base URL
-  --steward-credential FILE     Steward uplink credential JSON
+  --steward-credential FILE     Optional supervisor uplink credential JSON.
+                                Omit with bundled steward-control; the
+                                supervisor remains loopback-only.
   --executor-credential FILE    Executor uplink credential JSON
   --ca-file FILE                PEM CA bundle for the control plane
   --executor-token FILE         Host-local token (securely generated if omitted)
@@ -58,6 +60,8 @@ STEWARD_LOCAL_ONLY, STEWARD_INSTALL_GVISOR, STEWARD_GVISOR_DIR, and STEWARD_GVIS
 Supported node targets: Debian/Ubuntu (DEB), RHEL/Rocky/Alma/Fedora/Amazon Linux/
 SUSE (RPM), and other systemd Linux distributions (tar), on amd64 or arm64.
 Docker is a prerequisite. macOS and Windows are not Steward node targets.
+Bundled steward-control enrollment requires a node-scoped Executor credential
+and the three signed-admission trust inputs. It does not use a supervisor credential.
 EOF
 }
 
@@ -226,8 +230,8 @@ if [[ $non_interactive == false ]]; then
 	version=$(prompt "Release version [latest]: " "$version")
 	if [[ $stage_only == false ]]; then
 		if [[ $remote_inputs_supplied == false && $local_only == false && \
-			-f /etc/steward/uplink-credential.json && \
-			-f /etc/steward/executor-uplink.json ]]; then
+			-f /etc/steward/executor-uplink.json && \
+			-f /etc/steward/control-plane-ca.pem ]]; then
 			if confirm "Reuse the existing Steward enrollment?" yes; then
 				reuse_configuration=true
 			fi
@@ -243,21 +247,34 @@ if [[ $non_interactive == false ]]; then
 				stage_only=true
 			else
 				control_plane_url=$(prompt "Control-plane HTTPS URL: " "$control_plane_url")
-				steward_credential=$(prompt "Steward credential JSON path: " "$steward_credential")
+				if confirm "Use bundled steward-control (signed Executor control; local supervisor)?" yes; then
+					steward_credential=
+					echo "The supervisor will listen only on loopback, keep durable local state, and reject process execution."
+				else
+					steward_credential=$(prompt "Generic supervisor uplink credential JSON path: " "$steward_credential")
+				fi
 				executor_credential=$(prompt "Executor credential JSON path: " "$executor_credential")
 				ca_file=$(prompt "Control-plane CA PEM path: " "$ca_file")
 				executor_token=$(prompt "Existing Executor token path [generate one]: " "$executor_token")
 			fi
 			if [[ $local_only == false && $stage_only == false && -z $admission_policy && -z $site_root && -z $site_root_key_id ]]; then
-				admission_answer=$(prompt "Configure signed multi-tenant admission now? [y/N] " "no")
-				case "$admission_answer" in
-				y | Y | yes | YES | Yes)
+				if [[ -z $steward_credential ]]; then
+					echo "Bundled steward-control requires signed admission and a node-scoped Executor credential."
 					admission_policy=$(prompt "Signed site-policy DSSE path: " "$admission_policy")
 					site_root=$(prompt "Site-root public key path: " "$site_root")
 					site_root_key_id=$(prompt "Site-root key ID: " "$site_root_key_id")
 					node_id=$(prompt "Stable node ID [derive from machine-id]: " "$node_id")
-					;;
-				esac
+				else
+					admission_answer=$(prompt "Configure signed multi-tenant admission now? [y/N] " "no")
+					case "$admission_answer" in
+					y | Y | yes | YES | Yes)
+						admission_policy=$(prompt "Signed site-policy DSSE path: " "$admission_policy")
+						site_root=$(prompt "Site-root public key path: " "$site_root")
+						site_root_key_id=$(prompt "Site-root key ID: " "$site_root_key_id")
+						node_id=$(prompt "Stable node ID [derive from machine-id]: " "$node_id")
+						;;
+					esac
+				fi
 			fi
 		fi
 	fi
@@ -283,6 +300,11 @@ fi
 if [[ $local_only == true && $reuse_configuration == true ]]; then
 	echo "install-steward: --local-only and --reuse-configuration are mutually exclusive" >&2
 	exit 2
+fi
+executor_only_remote=false
+if [[ $stage_only == false && $reuse_configuration == false && \
+	$local_only == false && -z $steward_credential ]]; then
+	executor_only_remote=true
 fi
 admission_required=0
 for value in "$admission_policy" "$site_root" "$site_root_key_id"; do
@@ -323,12 +345,17 @@ if [[ $stage_only == true && $install_gvisor == true ]]; then
 	exit 2
 fi
 if [[ $stage_only == false && $reuse_configuration == false && $local_only == false ]]; then
-	for value in "$control_plane_url" "$steward_credential" "$executor_credential" "$ca_file"; do
+	for value in "$control_plane_url" "$executor_credential" "$ca_file"; do
 		if [[ -z $value ]]; then
-			echo "install-steward: full installation requires enrollment inputs (or --reuse-configuration)" >&2
+			echo "install-steward: remote installation requires --control-plane-url, --executor-credential, and --ca-file (or --reuse-configuration)" >&2
 			exit 2
 		fi
 	done
+fi
+if [[ $executor_only_remote == true && $admission_required -ne 3 ]]; then
+	echo "install-steward: bundled steward-control enrollment requires complete signed-admission inputs" >&2
+	echo "  Pass --admission-policy, --site-root-public-key, and --site-root-key-id." >&2
+	exit 2
 fi
 
 if [[ $version != latest ]] && ! valid_release_version "$version"; then
@@ -351,8 +378,10 @@ if [[ $dry_run == true ]]; then
 		enrollment_plan=reuse-existing
 	elif [[ $local_only == true ]]; then
 		enrollment_plan=local-only
+	elif [[ $executor_only_remote == true ]]; then
+		enrollment_plan=bundled-control-executor-only
 	else
-		enrollment_plan=provision-new
+		enrollment_plan=generic-supervisor-and-executor
 	fi
 	echo "Install plan:"
 	echo "  target:       $os_id/$goarch"
@@ -386,12 +415,16 @@ done
 # and operators can inspect plans with placeholder paths.
 if [[ $stage_only == false && $reuse_configuration == false ]]; then
 	if [[ $local_only == false ]]; then
-		for input in "$steward_credential" "$executor_credential" "$ca_file"; do
+		for input in "$executor_credential" "$ca_file"; do
 			if [[ ! -f $input || ! -r $input ]]; then
-				echo "install-steward: enrollment input is not a readable regular file: $input" >&2
+				echo "install-steward: Executor enrollment input is not a readable regular file: $input" >&2
 				exit 2
 			fi
 		done
+		if [[ -n $steward_credential && ( ! -f $steward_credential || ! -r $steward_credential ) ]]; then
+			echo "install-steward: supervisor credential is not a readable regular file: $steward_credential" >&2
+			exit 2
+		fi
 	fi
 	if [[ -n $executor_token && ( ! -f $executor_token || ! -r $executor_token ) ]]; then
 		echo "install-steward: Executor token is not a readable regular file: $executor_token" >&2
@@ -650,11 +683,13 @@ else
 	else
 		configure_args=(
 			--control-plane-url "$control_plane_url"
-			--steward-credential "$steward_credential"
 			--executor-credential "$executor_credential"
 			--ca-file "$ca_file"
 			--no-start
 		)
+		if [[ -n $steward_credential ]]; then
+			configure_args+=(--steward-credential "$steward_credential")
+		fi
 	fi
 	if [[ -n $executor_token ]]; then
 		configure_args+=(--executor-token "$executor_token")

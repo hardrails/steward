@@ -8,7 +8,9 @@ Usage: configure-node.sh OPTIONS
 
 Remote enrollment (omit with --local-only):
   --control-plane-url URL       HTTPS control-plane base URL
-  --steward-credential FILE     Steward uplink credential JSON
+  --steward-credential FILE     Optional supervisor uplink credential JSON.
+                                Omit with steward-control; the supervisor then
+                                stays loopback-only with durable local state.
   --executor-credential FILE    Executor uplink credential JSON
   --ca-file FILE                PEM CA bundle for the control plane
 
@@ -28,6 +30,8 @@ Optional:
 The operation is transactional through preflight: invalid input restores the
 previous files under /etc/steward and removes state files created by this run.
 Existing Executor fence, delivery, journal, and evidence state is never reset.
+When --steward-credential is omitted, the Executor credential must be
+node-scoped and signed admission must already exist or be supplied in this run.
 EOF
 }
 
@@ -86,12 +90,20 @@ if [[ $local_only == true ]]; then
 		exit 2
 	fi
 else
-	for input in "$steward_credential" "$executor_credential" "$ca_file"; do
+	for input in "$executor_credential" "$ca_file"; do
 		if [[ -z $input || ! -f $input || ! -r $input ]]; then
-			echo "configure-node: required input is not a readable regular file: ${input:-<unset>}" >&2
+			echo "configure-node: required Executor enrollment input is not a readable regular file: ${input:-<unset>}" >&2
 			exit 2
 		fi
 	done
+	if [[ -n $steward_credential && ( ! -f $steward_credential || ! -r $steward_credential ) ]]; then
+		echo "configure-node: supervisor credential is not a readable regular file: $steward_credential" >&2
+		exit 2
+	fi
+fi
+executor_only=false
+if [[ $local_only == false && -z $steward_credential ]]; then
+	executor_only=true
 fi
 if [[ -n $executor_token && ( ! -f $executor_token || ! -r $executor_token ) ]]; then
 	echo "configure-node: Executor token is not a readable regular file: $executor_token" >&2
@@ -230,16 +242,22 @@ transaction_error() {
 	return 2
 }
 
+write_loopback_supervisor_config() {
+	cat <<'EOF'
+{
+  "addr": "127.0.0.1:8080",
+  "disable_inbound_listener": false,
+  "enable_process_exec": false,
+  "log_level": "info",
+  "max_instances": 1024,
+  "state_file": "/var/lib/steward/state.json"
+}
+EOF
+}
+
 steward_tmp=$(mktemp /etc/steward/.steward.json.XXXXXX)
-if [[ $local_only == true ]]; then
-	printf '%s\n' '{' \
-		'  "addr": "127.0.0.1:8080",' \
-		'  "disable_inbound_listener": false,' \
-		'  "enable_process_exec": false,' \
-		'  "log_level": "info",' \
-		'  "max_instances": 1024,' \
-		'  "state_file": "/var/lib/steward/state.json"' \
-		'}' >"$steward_tmp"
+if [[ $local_only == true || $executor_only == true ]]; then
+	write_loopback_supervisor_config >"$steward_tmp"
 	chown root:steward "$steward_tmp"
 	chmod 0640 "$steward_tmp"
 else
@@ -312,8 +330,15 @@ install_atomic() {
 	atomic_tmp=
 }
 if [[ $local_only == false ]]; then
-	install_atomic "$steward_credential" /etc/steward/uplink-credential.json \
-		steward steward 0600
+	if [[ $executor_only == true ]]; then
+		# steward-control speaks the signed Executor protocol, not the generic
+		# supervisor protocol. Remove any old generic credential so a later edit
+		# cannot accidentally reconnect the supervisor to a stale authority.
+		rm -f -- /etc/steward/uplink-credential.json
+	else
+		install_atomic "$steward_credential" /etc/steward/uplink-credential.json \
+			steward steward 0600
+	fi
 	install_atomic "$executor_credential" /etc/steward/executor-uplink.json \
 		steward-executor steward-executor 0600
 	install_atomic "$ca_file" /etc/steward/control-plane-ca.pem root root 0644
@@ -331,6 +356,9 @@ if [[ $local_only == false ]]; then
 	if [[ $executor_credential_node_id == *$'\n'* ]] || \
 		[[ $executor_credential_scope != tenant && $executor_credential_scope != node ]]; then
 		transaction_error "Executor credential inspection returned invalid metadata"
+	fi
+	if [[ $executor_only == true && $executor_credential_scope != node ]]; then
+		transaction_error "steward-control requires a node-scoped Executor credential"
 	fi
 fi
 if [[ -n $executor_token ]]; then
@@ -409,11 +437,11 @@ if [[ $executor_credential_scope == node ]]; then
 		transaction_error "node-scoped Executor credential node ID does not match signed admission"
 	fi
 	if [[ ! -e $uplink_delivery_state && ! -L $uplink_delivery_state ]]; then
+		uplink_delivery_state_created=true
 		runuser -u steward-executor -- /usr/local/bin/steward-executor \
 			-initialize-uplink-delivery-state \
 			-uplink-delivery-state-file "$uplink_delivery_state" \
 			-admission-node-id "$configured_node_id"
-		uplink_delivery_state_created=true
 	fi
 	executor_tmp=$(mktemp /etc/steward/.executor.env.XXXXXX)
 	awk -v path="$uplink_delivery_state" '
@@ -459,6 +487,9 @@ if [[ $start_services == true ]]; then
 	echo "configure-node: Steward is configured, validated, enabled, and running"
 else
 	echo "configure-node: Steward is configured and validated; service state was not changed"
+fi
+if [[ $executor_only == true ]]; then
+	echo "configure-node: Executor uses steward-control; the supervisor remains loopback-only with process execution disabled"
 fi
 if [[ $derived_relay == true ]]; then
 	echo "configure-node: trusted relay topology was built offline and pinned automatically"
