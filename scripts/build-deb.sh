@@ -23,7 +23,18 @@ for path in steward stewardctl steward-mcp steward-executor steward-gateway stew
 	deploy/config/gateway.json.in scripts/install-node.sh \
 	scripts/activate-node-release.sh scripts/node-preflight.sh \
 	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh \
-	scripts/node-removal-guard.sh scripts/build-relay-image.sh release.json LICENSE README.md; do
+	scripts/node-removal-guard.sh scripts/build-hermes-adapter.sh scripts/build-relay-image.sh \
+	scripts/hermes-feasibility.sh adapters/hermes-agent/Dockerfile adapters/hermes-agent/README.md \
+	adapters/hermes-agent/adapter.json adapters/hermes-agent/entrypoint.py \
+	adapters/hermes-agent/fixture_mcp.py adapters/hermes-agent/fixture_model.py \
+	adapters/hermes-agent/fixtures/skill/SKILL.md \
+	adapters/hermes-agent/fixtures/skill/manifest.json \
+	adapters/hermes-agent/fixtures/skill/manifest.sig \
+	adapters/hermes-agent/fixtures/skill/public.pem \
+	adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json \
+	adapters/hermes-agent/fixtures/skill/workspace_audit.py \
+	adapters/hermes-agent/license-inventory.json adapters/hermes-agent/source-inputs.sha256 \
+	release.json LICENSE README.md; do
 	if [[ ! -f "$stage/$path" ]]; then
 		echo "build-deb: stage is missing $path" >&2
 		exit 2
@@ -60,7 +71,7 @@ install -d -m 0755 "$package_root/DEBIAN" \
 	"$package_root/usr/lib/steward-node/release" \
 	"$package_root/usr/share/doc/steward-node"
 cp -R "$stage/steward" "$stage/stewardctl" "$stage/steward-mcp" "$stage/steward-executor" \
-	"$stage/steward-gateway" "$stage/steward-relay" "$stage/deploy" "$stage/scripts" \
+	"$stage/steward-gateway" "$stage/steward-relay" "$stage/adapters" "$stage/deploy" "$stage/scripts" \
 	"$stage/release.json" \
 	"$package_root/usr/lib/steward-node/release/"
 install -m 0644 "$stage/LICENSE" "$package_root/usr/share/doc/steward-node/copyright"

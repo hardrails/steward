@@ -129,18 +129,20 @@ for target in "${targets[@]}"; do
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-gateway" ./cmd/steward-gateway
 		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-relay" ./cmd/steward-relay
-		mkdir -p "${stage}/deploy" "${stage}/scripts"
+		mkdir -p "${stage}/adapters" "${stage}/deploy" "${stage}/scripts"
+		cp -R adapters/hermes-agent "${stage}/adapters/"
 		cp -R deploy/config deploy/systemd "${stage}/deploy/"
 		cp scripts/install-node.sh scripts/activate-node-release.sh \
 			scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh \
 			scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
+			scripts/build-hermes-adapter.sh scripts/hermes-feasibility.sh \
 			"${stage}/scripts/"
 		chmod 0755 "${stage}"/scripts/*.sh
 		# Bind the exact node payload before wrapping it in an archive or native
 		# package. The canonical manifest records the target and SHA-256 of all six
 		# binaries plus every integration file installed with that release.
 		bash scripts/write-release-manifest.sh "$stage" "$VERSION" "$goos" "$goarch"
-		files=(steward stewardctl steward-mcp steward-executor steward-gateway steward-relay release.json LICENSE README.md deploy scripts)
+		files=(steward stewardctl steward-mcp steward-executor steward-gateway steward-relay release.json LICENSE README.md adapters deploy scripts)
 	fi
 	# Ship the license and readme alongside all six binaries so the download is
 	# self-contained and license-compliant.
