@@ -32,10 +32,10 @@ func TestActionTrustInventoryIsFilteredToOneTenant(t *testing.T) {
 			{KeyID: "approver-b", TenantID: "tenant-b", PublicKey: base64.StdEncoding.EncodeToString(publicB)},
 		},
 		Connectors: []gateway.Connector{
-			{ID: "shared", BaseURL: "https://shared.example.test", CredentialEpoch: 1,
+			{ID: "shared", BaseURL: "https://shared.example.test", CredentialMode: gateway.CredentialModeBearer, CredentialEpoch: 1,
 				ActionAuthorityIDs: []string{"approver-a", "approver-b"}, MaxActionPermitSeconds: 300,
 				Operations: []gateway.ConnectorOperation{{ID: "create", Method: http.MethodPost, Path: "/v1/items"}}},
-			{ID: "tenant-b-only", BaseURL: "https://private.example.test", CredentialEpoch: 1,
+			{ID: "tenant-b-only", BaseURL: "https://private.example.test", CredentialMode: gateway.CredentialModeXAPIKey, CredentialEpoch: 1,
 				ActionAuthorityIDs: []string{"approver-b"}, MaxActionPermitSeconds: 300,
 				Operations: []gateway.ConnectorOperation{{ID: "read", Method: http.MethodGet, Path: "/v1/private"}}},
 		},
@@ -52,6 +52,7 @@ func TestActionTrustInventoryIsFilteredToOneTenant(t *testing.T) {
 		inventory.Authorities[0].KeyID != "approver-a" || len(inventory.Connectors) != 1 ||
 		inventory.Connectors[0].ConnectorID != "shared" || len(inventory.Connectors[0].AuthorityKeyIDs) != 1 ||
 		inventory.Connectors[0].AuthorityKeyIDs[0] != "approver-a" ||
+		inventory.Connectors[0].CredentialMode != gateway.CredentialModeBearer ||
 		strings.Contains(output.String(), "tenant-b") || strings.Contains(output.String(), "approver-b") ||
 		strings.Contains(output.String(), "private.example.test") {
 		t.Fatalf("tenant-filtered inventory=%s", output.String())
@@ -272,6 +273,7 @@ func TestGatewayConnectorSetIsValidatedSecretFreeAndAtomic(t *testing.T) {
 		!strings.Contains(trustOutput.String(), `"node_id": "node-a"`) ||
 		!strings.Contains(trustOutput.String(), `"tenant_id": "tenant-a"`) ||
 		!strings.Contains(trustOutput.String(), `"public_key_digest": "sha256:`) ||
+		!strings.Contains(trustOutput.String(), `"credential_mode": "bearer"`) ||
 		!strings.Contains(trustOutput.String(), `"credential_epoch": 1`) ||
 		!strings.Contains(trustOutput.String(), `"max_permit_seconds": 120`) ||
 		!strings.Contains(trustOutput.String(), `"base_url": "https://api.example.test"`) ||

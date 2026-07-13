@@ -213,7 +213,8 @@ func TestPermitIssueRejectsAuthorityMismatchAndUnsafeValidity(t *testing.T) {
 			KeyID: "approver-a", TenantID: intent.TenantID, PublicKeyDigest: dsse.Digest(public), ConnectorIDs: []string{"ticketing"},
 		}},
 		Connectors: []actionTrustConnector{{
-			ConnectorID: "ticketing", BaseURL: "https://tickets.example.test", CredentialEpoch: 1, MaxPermitSeconds: 3600,
+			ConnectorID: "ticketing", BaseURL: "https://tickets.example.test", CredentialMode: gateway.CredentialModeBearer,
+			CredentialEpoch: 1, MaxPermitSeconds: 3600,
 			AuthorityKeyIDs: []string{"approver-a"}, Operations: []actionTrustOperation{{
 				ID: "create", Method: "POST", Path: "/v1/tickets",
 				PolicyDigest: mustOperationPolicyDigest(t, "https://tickets.example.test", 1, "ticketing", "create", "POST", "/v1/tickets"),
@@ -238,7 +239,8 @@ func TestPermitIssueRejectsAuthorityMismatchAndUnsafeValidity(t *testing.T) {
 			KeyID: "approver-a", TenantID: intent.TenantID, PublicKeyDigest: dsse.Digest(public), ConnectorIDs: []string{"ticketing"},
 		}},
 		Connectors: []actionTrustConnector{{
-			ConnectorID: "ticketing", BaseURL: "https://tickets.example.test", CredentialEpoch: 1, MaxPermitSeconds: 3600,
+			ConnectorID: "ticketing", BaseURL: "https://tickets.example.test", CredentialMode: gateway.CredentialModeBearer,
+			CredentialEpoch: 1, MaxPermitSeconds: 3600,
 			AuthorityKeyIDs: []string{"approver-a"}, Operations: []actionTrustOperation{{
 				ID: "create", Method: "PUT", Path: "/v1/tickets",
 				PolicyDigest: mustOperationPolicyDigest(t, "https://tickets.example.test", 1, "ticketing", "create", "POST", "/v1/tickets"),
@@ -254,6 +256,33 @@ func TestPermitIssueRejectsAuthorityMismatchAndUnsafeValidity(t *testing.T) {
 	}
 	if err := run(tamperedTrust, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "inconsistent connector operation policy") {
 		t.Fatalf("tampered operation trust inventory error=%v", err)
+	}
+	tamperedModeTrustPath := writePermitJSON(t, directory, "tampered-mode-action-trust.json", actionTrustInventory{
+		SchemaVersion: actionTrustSchemaV1,
+		NodeID:        intent.NodeID,
+		TenantID:      intent.TenantID,
+		Authorities: []actionTrustAuthority{{
+			KeyID: "approver-a", TenantID: intent.TenantID, PublicKeyDigest: dsse.Digest(public), ConnectorIDs: []string{"ticketing"},
+		}},
+		Connectors: []actionTrustConnector{{
+			ConnectorID: "ticketing", BaseURL: "https://tickets.example.test", CredentialMode: gateway.CredentialModeXAPIKey,
+			CredentialEpoch: 1, MaxPermitSeconds: 3600, AuthorityKeyIDs: []string{"approver-a"},
+			Operations: []actionTrustOperation{{
+				ID: "create", Method: "POST", Path: "/v1/tickets",
+				PolicyDigest: mustOperationPolicyDigest(t, "https://tickets.example.test", 1, "ticketing", "create", "POST", "/v1/tickets"),
+			}},
+		}},
+	})
+	tamperedModeTrust := append([]string(nil), base...)
+	for index := range tamperedModeTrust {
+		if tamperedModeTrust[index] == trustPath {
+			tamperedModeTrust[index] = tamperedModeTrustPath
+			break
+		}
+	}
+	if err := run(tamperedModeTrust, &bytes.Buffer{}, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "inconsistent connector operation policy") {
+		t.Fatalf("tampered credential mode trust inventory error=%v", err)
 	}
 
 	requestPath := filepath.Join(directory, "invalid-request.json")
@@ -523,7 +552,8 @@ func writeActionTrustFixtureForOperation(
 			KeyID: keyID, TenantID: tenantID, PublicKeyDigest: dsse.Digest(public), ConnectorIDs: []string{connectorID},
 		}},
 		Connectors: []actionTrustConnector{{
-			ConnectorID: connectorID, BaseURL: "https://tickets.example.test", CredentialEpoch: 1, MaxPermitSeconds: maxPermitSeconds,
+			ConnectorID: connectorID, BaseURL: "https://tickets.example.test", CredentialMode: gateway.CredentialModeBearer,
+			CredentialEpoch: 1, MaxPermitSeconds: maxPermitSeconds,
 			AuthorityKeyIDs: []string{keyID}, Operations: []actionTrustOperation{{
 				ID: operationID, Method: method, Path: path,
 				PolicyDigest: mustOperationPolicyDigest(t, "https://tickets.example.test", 1, connectorID, operationID, method, path),
@@ -534,7 +564,7 @@ func writeActionTrustFixtureForOperation(
 
 func mustOperationPolicyDigest(t *testing.T, baseURL string, epoch uint64, connectorID, operationID, method, path string) string {
 	t.Helper()
-	digest, err := gateway.ConnectorOperationPolicyDigest(baseURL, epoch, connectorID, gateway.ConnectorOperation{
+	digest, err := gateway.ConnectorOperationPolicyDigest(baseURL, gateway.CredentialModeBearer, epoch, connectorID, gateway.ConnectorOperation{
 		ID: operationID, Method: method, Path: path,
 	})
 	if err != nil {

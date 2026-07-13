@@ -249,7 +249,7 @@ func verifyConnectorActionPermit(
 		return connectorActionPermit{}, errors.New("permit operation is not configured")
 	}
 	operationDigest, err := ConnectorOperationPolicyDigest(
-		connector.BaseURL, connector.CredentialEpoch, connectorID, operation,
+		connector.BaseURL, connector.CredentialMode, connector.CredentialEpoch, connectorID, operation,
 	)
 	if err != nil {
 		return connectorActionPermit{}, errors.New("connector operation policy is invalid")
@@ -387,22 +387,25 @@ func ConnectorCallDigest(tenantID, instanceID, taskID, connectorID, operationID 
 
 // ConnectorOperationPolicyDigest identifies the exact non-secret effect route
 // that one logical operation selects. It deliberately excludes credential bytes
-// while including the operator-managed credential epoch.
+// while including their injection mode and the operator-managed credential epoch.
 func ConnectorOperationPolicyDigest(
 	baseURL string,
+	credentialMode CredentialMode,
 	credentialEpoch uint64,
 	connectorID string,
 	operation ConnectorOperation,
 ) (string, error) {
 	base, err := exactConnectorOrigin(baseURL)
-	if err != nil || credentialEpoch == 0 || !routeID(connectorID) || !routeID(operation.ID) ||
+	if err != nil || (credentialMode != CredentialModeBearer && credentialMode != CredentialModeXAPIKey) ||
+		credentialEpoch == 0 || !routeID(connectorID) || !routeID(operation.ID) ||
 		!connectorMethod(operation.Method) || !canonicalConnectorPath(operation.Path) {
 		return "", errors.New("connector operation policy is invalid")
 	}
 	digest := sha256.New()
 	_, _ = digest.Write([]byte("steward-connector-operation-policy-v1\x00"))
 	for _, value := range []string{
-		connectorID, base.String(), strconv.FormatUint(credentialEpoch, 10), operation.ID, operation.Method, operation.Path,
+		connectorID, base.String(), string(credentialMode), strconv.FormatUint(credentialEpoch, 10),
+		operation.ID, operation.Method, operation.Path,
 	} {
 		_, _ = digest.Write([]byte(value))
 		_, _ = digest.Write([]byte{0})

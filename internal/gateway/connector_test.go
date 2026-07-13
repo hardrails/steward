@@ -230,7 +230,9 @@ func actionPermitFor(
 	if !ok {
 		t.Fatalf("test connector has no operation %q", operationID)
 	}
-	operationDigest, err := ConnectorOperationPolicyDigest(connector.BaseURL, connector.CredentialEpoch, connector.ID, operation)
+	operationDigest, err := ConnectorOperationPolicyDigest(
+		connector.BaseURL, connector.CredentialMode, connector.CredentialEpoch, connector.ID, operation,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,25 +383,27 @@ func TestConnectorAcceptsBodylessPermitWithExactOutboundMetadata(t *testing.T) {
 
 func TestConnectorOperationPolicyDigestBindsEveryEffectRouteField(t *testing.T) {
 	base := ConnectorOperation{ID: "create", Method: http.MethodPost, Path: "/v1/issues"}
-	want, err := ConnectorOperationPolicyDigest("https://api.example.test", 1, "issues", base)
+	want, err := ConnectorOperationPolicyDigest("https://api.example.test", CredentialModeBearer, 1, "issues", base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	variants := []struct {
 		origin      string
+		mode        CredentialMode
 		epoch       uint64
 		connectorID string
 		operation   ConnectorOperation
 	}{
-		{origin: "https://other.example.test", epoch: 1, connectorID: "issues", operation: base},
-		{origin: "https://api.example.test", epoch: 2, connectorID: "issues", operation: base},
-		{origin: "https://api.example.test", epoch: 1, connectorID: "other", operation: base},
-		{origin: "https://api.example.test", epoch: 1, connectorID: "issues", operation: ConnectorOperation{ID: "update", Method: http.MethodPost, Path: "/v1/issues"}},
-		{origin: "https://api.example.test", epoch: 1, connectorID: "issues", operation: ConnectorOperation{ID: "create", Method: http.MethodPut, Path: "/v1/issues"}},
-		{origin: "https://api.example.test", epoch: 1, connectorID: "issues", operation: ConnectorOperation{ID: "create", Method: http.MethodPost, Path: "/v2/issues"}},
+		{origin: "https://other.example.test", mode: CredentialModeBearer, epoch: 1, connectorID: "issues", operation: base},
+		{origin: "https://api.example.test", mode: CredentialModeXAPIKey, epoch: 1, connectorID: "issues", operation: base},
+		{origin: "https://api.example.test", mode: CredentialModeBearer, epoch: 2, connectorID: "issues", operation: base},
+		{origin: "https://api.example.test", mode: CredentialModeBearer, epoch: 1, connectorID: "other", operation: base},
+		{origin: "https://api.example.test", mode: CredentialModeBearer, epoch: 1, connectorID: "issues", operation: ConnectorOperation{ID: "update", Method: http.MethodPost, Path: "/v1/issues"}},
+		{origin: "https://api.example.test", mode: CredentialModeBearer, epoch: 1, connectorID: "issues", operation: ConnectorOperation{ID: "create", Method: http.MethodPut, Path: "/v1/issues"}},
+		{origin: "https://api.example.test", mode: CredentialModeBearer, epoch: 1, connectorID: "issues", operation: ConnectorOperation{ID: "create", Method: http.MethodPost, Path: "/v2/issues"}},
 	}
 	for _, variant := range variants {
-		got, err := ConnectorOperationPolicyDigest(variant.origin, variant.epoch, variant.connectorID, variant.operation)
+		got, err := ConnectorOperationPolicyDigest(variant.origin, variant.mode, variant.epoch, variant.connectorID, variant.operation)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -407,8 +411,11 @@ func TestConnectorOperationPolicyDigestBindsEveryEffectRouteField(t *testing.T) 
 			t.Fatalf("operation policy digest ignored changed route: %#v", variant)
 		}
 	}
-	if _, err := ConnectorOperationPolicyDigest("https://api.example.test/path", 1, "issues", base); err == nil {
+	if _, err := ConnectorOperationPolicyDigest("https://api.example.test/path", CredentialModeBearer, 1, "issues", base); err == nil {
 		t.Fatal("operation policy digest accepted a non-origin base URL")
+	}
+	if _, err := ConnectorOperationPolicyDigest("https://api.example.test", "cookie", 1, "issues", base); err == nil {
+		t.Fatal("operation policy digest accepted an unsupported credential mode")
 	}
 }
 

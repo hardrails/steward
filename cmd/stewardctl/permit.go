@@ -456,7 +456,7 @@ func validateActionTrust(
 		return validatedActionTrust{}, errors.New("action trust inventory does not contain the requested connector operation")
 	}
 	policyDigest, err := gateway.ConnectorOperationPolicyDigest(
-		connector.BaseURL, connector.CredentialEpoch, connector.ConnectorID,
+		connector.BaseURL, connector.CredentialMode, connector.CredentialEpoch, connector.ConnectorID,
 		gateway.ConnectorOperation{ID: operation.ID, Method: operation.Method, Path: operation.Path},
 	)
 	if err != nil || policyDigest != operation.PolicyDigest {

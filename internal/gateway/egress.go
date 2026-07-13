@@ -421,8 +421,13 @@ func copyBounded(destination io.Writer, source io.Reader, maximum int64) (int64,
 func (s *Server) rejectEgress(w http.ResponseWriter, grant Grant, reason, method, host string, port, status int, message string) {
 	switch s.denyEgress(grant, reason, method, host, port) {
 	case egressDenialRateLimited:
-		writeGatewayError(w, http.StatusTooManyRequests, "egress_rate_limited", "egress denied-attempt rate limit reached")
-		return
+		// Revocation is an authority transition, not a traffic-policy result.
+		// Attempt its audit record through the same bounded limiter, but never
+		// conceal the transition behind a rate-limit response.
+		if reason != "grant_inactive" && reason != "grant_revoked" {
+			writeGatewayError(w, http.StatusTooManyRequests, "egress_rate_limited", "egress denied-attempt rate limit reached")
+			return
+		}
 	case egressDenialGrantMissing:
 		// Preserve the underlying revocation or routing result. A grant deleted
 		// during an in-flight request is not a denial-rate-limit event.

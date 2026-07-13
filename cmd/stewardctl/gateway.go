@@ -45,6 +45,7 @@ type actionTrustAuthority struct {
 type actionTrustConnector struct {
 	ConnectorID      string                 `json:"connector_id"`
 	BaseURL          string                 `json:"base_url"`
+	CredentialMode   gateway.CredentialMode `json:"credential_mode"`
 	CredentialEpoch  uint64                 `json:"credential_epoch"`
 	MaxPermitSeconds int                    `json:"max_permit_seconds"`
 	AuthorityKeyIDs  []string               `json:"authority_key_ids"`
@@ -403,7 +404,7 @@ func writeActionTrustInventory(stdout io.Writer, config gateway.Config, tenantID
 			operations := make([]actionTrustOperation, 0, len(connector.Operations))
 			for _, operation := range connector.Operations {
 				digest, err := gateway.ConnectorOperationPolicyDigest(
-					connector.BaseURL, connector.CredentialEpoch, connector.ID, operation,
+					connector.BaseURL, connector.CredentialMode, connector.CredentialEpoch, connector.ID, operation,
 				)
 				if err != nil {
 					return err
@@ -414,7 +415,8 @@ func writeActionTrustInventory(stdout io.Writer, config gateway.Config, tenantID
 			}
 			sort.Slice(operations, func(i, j int) bool { return operations[i].ID < operations[j].ID })
 			output.Connectors = append(output.Connectors, actionTrustConnector{
-				ConnectorID: connector.ID, BaseURL: connector.BaseURL, CredentialEpoch: connector.CredentialEpoch,
+				ConnectorID: connector.ID, BaseURL: connector.BaseURL, CredentialMode: connector.CredentialMode,
+				CredentialEpoch:  connector.CredentialEpoch,
 				MaxPermitSeconds: connector.MaxActionPermitSeconds,
 				AuthorityKeyIDs:  authorityKeyIDs, Operations: operations,
 			})

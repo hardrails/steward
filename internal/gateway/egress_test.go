@@ -334,6 +334,39 @@ func TestEgressLateDenialPreservesGrantRevocationResponse(t *testing.T) {
 	}
 }
 
+func TestEgressRevocationResponsesSurviveDenialSaturation(t *testing.T) {
+	grant := Grant{
+		GrantID: GrantID("tenant-a", "agent-a", 1), TenantID: "tenant-a", InstanceID: "agent-a",
+		Generation: 1, EgressRouteIDs: []string{"web"}, Active: false,
+	}
+	started := time.Now()
+	server := &Server{
+		grants: map[string]Grant{grant.GrantID: grant},
+		egressDeniedAttempts: map[string]egressDeniedAttemptWindow{
+			grant.GrantID: {started: started, count: maxEgressDeniedAttemptsPerGrantMinute},
+		},
+		egressTenantDenials: map[string]egressDeniedAttemptWindow{
+			grant.TenantID: {started: started, count: maxEgressDeniedAttemptsPerTenantMinute},
+		},
+		egressHostDenials: egressDeniedAttemptWindow{started: started, count: maxEgressDeniedAttemptsHostMinute},
+	}
+
+	inactive := httptest.NewRecorder()
+	server.egressHandler(grant.GrantID).ServeHTTP(inactive, httptest.NewRequest(http.MethodGet, "http://api.example.test/", nil))
+	if inactive.Code != http.StatusServiceUnavailable || !strings.Contains(inactive.Body.String(), `"error":"grant_inactive"`) ||
+		strings.Contains(inactive.Body.String(), "egress_rate_limited") {
+		t.Fatalf("saturated inactive response status=%d body=%s", inactive.Code, inactive.Body.String())
+	}
+
+	revoked := httptest.NewRecorder()
+	server.rejectEgress(revoked, grant, "grant_revoked", http.MethodConnect, "api.example.test", 443,
+		http.StatusServiceUnavailable, "egress grant was revoked during address resolution")
+	if revoked.Code != http.StatusServiceUnavailable || !strings.Contains(revoked.Body.String(), `"error":"grant_revoked"`) ||
+		strings.Contains(revoked.Body.String(), "egress_rate_limited") {
+		t.Fatalf("saturated revoked response status=%d body=%s", revoked.Code, revoked.Body.String())
+	}
+}
+
 func TestEgressDeniedAttemptFixedWindowsPreserveTenantCapacity(t *testing.T) {
 	if maxEgressDeniedAttemptsPerTenantMinute >= maxEgressDeniedAttemptsHostMinute {
 		t.Fatal("one tenant must not be able to exhaust the host denial budget")
