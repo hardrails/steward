@@ -118,6 +118,12 @@ Authorization: Bearer <credential>
 Content-Type: application/json
 ```
 
+The client does not inherit `HTTP_PROXY`, `HTTPS_PROXY`, or `NO_PROXY`, and it does
+not follow redirects. This prevents an ambient host setting or control-plane
+redirect from forwarding the node bearer to a destination that was not explicitly
+configured. Sites that require an outbound proxy must terminate that policy in an
+explicit local network path rather than injecting an unreviewed process-wide proxy.
+
 Poll responses, reports, and report responses are each limited to 1 MiB. Steward
 rejects an oversized poll response as a whole rather than parsing a truncated batch.
 It refuses an oversized report before transmission. In both cases, the control

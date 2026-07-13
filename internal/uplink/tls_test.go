@@ -66,6 +66,44 @@ func TestNewHTTPClientVerifiesServerCert(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
+func TestNewHTTPClientDoesNotInheritProxyOrFollowRedirects(t *testing.T) {
+	client, err := NewHTTPClient(TLSConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport is %T, want *http.Transport", client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("uplink client inherited ambient proxy discovery")
+	}
+	destinationCalled := false
+	destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		destinationCalled = true
+	}))
+	defer destination.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		http.Redirect(w, request, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+	request, err := http.NewRequest(http.MethodGet, redirect.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer node-secret")
+	response, err := client.Do(request)
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "redirects are disabled") {
+		t.Fatalf("redirect error=%v", err)
+	}
+	if destinationCalled {
+		t.Fatal("uplink bearer reached redirect destination")
+	}
+}
+
 // TestNewHTTPClientFailsClosed pins the fail-closed TLS misconfiguration paths:
 // each is a startup error naming the fix, never a silent fall back to defaults.
 func TestNewHTTPClientFailsClosed(t *testing.T) {
