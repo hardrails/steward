@@ -281,6 +281,14 @@ Pending, conflicting, rejected, malformed, or ambiguous outcomes do not dispatch
 again automatically. If Gateway restarts after authorization but before a terminal
 record, it closes that task as `outcome_unknown`.
 
+An ambiguous authorization write happens before service dispatch. Gateway returns
+`evidence_unavailable` and retains that task's process-local replay fence. Once the
+ledger reports the failure, Gateway rejects new task authorizations without adding
+new fences. Restart Gateway to verify the ledger: a complete authorization is closed
+as `outcome_unknown`, while an absent authorization leaves the task available. This
+fail-closed recovery can consume a permit without dispatch when the authorization
+was durable but its sync result was ambiguous.
+
 This guarantee is node-local at-most-once dispatch within one retained receipt file
 and epoch. It is not exactly-once execution across a fleet, after ledger deletion or
 replacement, after an epoch change, or inside the agent or an external system. A

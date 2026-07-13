@@ -241,6 +241,12 @@ func (s *Server) existingServiceTaskByPermit(
 }
 
 func (s *Server) beginServiceTask(taskDigest string, event connectorledger.Event) (serviceTaskReceipt, bool, error) {
+	// The ledger already serializes durable appends. Serialize this surrounding
+	// failure check and process-local reservation too, so one ambiguous append
+	// cannot leave an attacker-selected number of concurrent task fences.
+	s.serviceTaskBeginMu.Lock()
+	defer s.serviceTaskBeginMu.Unlock()
+
 	s.mu.Lock()
 	if s.serviceTasks == nil {
 		s.serviceTasks = make(map[string]serviceTaskReceipt)
@@ -256,10 +262,25 @@ func (s *Server) beginServiceTask(taskDigest string, event connectorledger.Event
 		s.mu.Unlock()
 		return serviceTaskReceipt{}, false, errors.New("task permit is already bound to a different task identity")
 	}
-	ledger := s.connectorLedger
+	ledger := s.connectorLedger // Fixed for this Server's lifetime; Reload does not replace it.
+	s.mu.Unlock()
 	if ledger == nil {
-		s.mu.Unlock()
 		return serviceTaskReceipt{}, false, errors.New("task receipt ledger is unavailable")
+	}
+	// Failed takes the ledger lock and can wait for an in-flight fsync. Keep
+	// that wait outside the Server mutex, then repeat the replay checks before
+	// reserving so concurrent callers cannot cross this gap.
+	if ledger.Failed() {
+		return serviceTaskReceipt{}, false, errors.New("task receipt ledger requires reopen after an ambiguous write")
+	}
+	s.mu.Lock()
+	if state, exists := s.serviceTasks[taskDigest]; exists {
+		s.mu.Unlock()
+		return state, true, nil
+	}
+	if existingTask, exists := s.serviceTaskPermits[event.PermitDigest]; exists && existingTask != taskDigest {
+		s.mu.Unlock()
+		return serviceTaskReceipt{}, false, errors.New("task permit is already bound to a different task identity")
 	}
 	reserved := serviceTaskReceipt{Authorization: event}
 	s.serviceTasks[taskDigest] = reserved
@@ -270,16 +291,24 @@ func (s *Server) beginServiceTask(taskDigest string, event connectorledger.Event
 	// slow fsync from blocking unrelated grants while still preventing two
 	// concurrent copies of one signed task from reaching the service.
 	if _, err := ledger.Begin(event); err != nil {
-		if !ledger.Failed() {
-			s.mu.Lock()
-			if current, exists := s.serviceTasks[taskDigest]; exists && current.Authorization.PermitDigest == event.PermitDigest && current.Terminal.Phase == "" {
+		ambiguous := ledger.Failed()
+		s.mu.Lock()
+		if current, exists := s.serviceTasks[taskDigest]; exists && current.Authorization.PermitDigest == event.PermitDigest && current.Terminal.Phase == "" {
+			if ambiguous {
+				// The service was not contacted, but the authorization may be
+				// durable. Retain its replay identity until reopen verifies the
+				// ledger; the failed-ledger check above prevents later distinct
+				// tasks from accumulating process-local reservations meanwhile.
+				current.authorizationAmbiguous = true
+				s.serviceTasks[taskDigest] = current
+			} else {
 				delete(s.serviceTasks, taskDigest)
 				if s.serviceTaskPermits[event.PermitDigest] == taskDigest {
 					delete(s.serviceTaskPermits, event.PermitDigest)
 				}
 			}
-			s.mu.Unlock()
 		}
+		s.mu.Unlock()
 		return serviceTaskReceipt{}, false, err
 	}
 	return reserved, false, nil
@@ -295,6 +324,10 @@ func (s *Server) serviceTaskGrantStillActive(grant Grant) bool {
 func (s *Server) writeExistingServiceTask(w http.ResponseWriter, state serviceTaskReceipt, permitDigest string) {
 	if state.Authorization.PermitDigest != permitDigest {
 		writeGatewayError(w, http.StatusConflict, "task_id_conflict", "task ID is already bound to different signed authority")
+		return
+	}
+	if state.authorizationAmbiguous {
+		writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task authorization evidence is ambiguous; restart Gateway to reconcile it")
 		return
 	}
 	if state.Terminal.Phase == "" {

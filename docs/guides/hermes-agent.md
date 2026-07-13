@@ -461,6 +461,12 @@ another dispatch. Any changed byte, operation, grant, policy, or authority fails
 An interrupted or malformed upstream response is recorded as an unknown outcome and
 is not retried automatically.
 
+If Gateway returns `evidence_unavailable` because the authorization write had an
+ambiguous sync result, it has not contacted Hermes. Do not loop on the request:
+restart Gateway so it can verify the receipt ledger. A retained authorization is
+closed as `outcome_unknown`; if no authorization was retained, the same bundle can
+be submitted later.
+
 This is node-local at-most-once dispatch within one retained Gateway ledger epoch.
 It is not exactly-once execution across nodes, ledger replacement, epoch rotation,
 or an upstream service. The run ID is supplied by the untrusted Hermes service; a

@@ -24,8 +24,9 @@ type connectorReceiptIndex struct {
 }
 
 type serviceTaskReceipt struct {
-	Authorization connectorledger.Event
-	Terminal      connectorledger.Event
+	Authorization          connectorledger.Event
+	Terminal               connectorledger.Event
+	authorizationAmbiguous bool
 }
 
 // ConnectorReceiptFormatSummary identifies the connector receipt compatibility

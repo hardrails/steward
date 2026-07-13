@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,43 @@ type serviceTaskRig struct {
 	privateKey ed25519.PrivateKey
 	now        time.Time
 }
+
+type ambiguousServiceTaskReceiptLog struct {
+	connectorReceiptLog
+	failed atomic.Bool
+}
+
+func (log *ambiguousServiceTaskReceiptLog) Begin(event connectorledger.Event) (connectorledger.Head, error) {
+	if _, err := log.connectorReceiptLog.Begin(event); err != nil {
+		return connectorledger.Head{}, err
+	}
+	log.failed.Store(true)
+	return connectorledger.Head{}, errors.New("fixture authorization sync outcome is ambiguous")
+}
+
+func (log *ambiguousServiceTaskReceiptLog) Failed() bool { return log.failed.Load() }
+
+type blockingServiceTaskFailureCheckLog struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (*blockingServiceTaskFailureCheckLog) Begin(connectorledger.Event) (connectorledger.Head, error) {
+	return connectorledger.Head{}, errors.New("fixture append refused before write")
+}
+
+func (*blockingServiceTaskFailureCheckLog) Finish(connectorledger.Event) (connectorledger.Head, error) {
+	return connectorledger.Head{}, errors.New("unexpected fixture finish")
+}
+
+func (log *blockingServiceTaskFailureCheckLog) Failed() bool {
+	log.once.Do(func() { close(log.entered) })
+	<-log.release
+	return false
+}
+
+func (*blockingServiceTaskFailureCheckLog) Close() error { return nil }
 
 func newServiceTaskRig(t *testing.T, upstream string) *serviceTaskRig {
 	t.Helper()
@@ -276,6 +314,130 @@ func TestSignedServiceTaskQuotaFailureDoesNotSpendOrDispatch(t *testing.T) {
 	retried := invokeServiceTask(rig, body, permit)
 	if retried.Code != http.StatusOK || calls.Load() != 1 {
 		t.Fatalf("retry status=%d body=%s calls=%d", retried.Code, retried.Body.String(), calls.Load())
+	}
+}
+
+func TestSignedServiceTaskAmbiguousAuthorizationFailureDoesNotRemainInProgress(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"run_id":"run_0123456789abcdef0123456789abcdef"}`))
+	}))
+	defer upstream.Close()
+	rig := newServiceTaskRig(t, upstream.URL)
+	body := []byte(`{"input":"work","session_id":"ambiguous-authorization"}`)
+	permit := taskPermitFor(t, rig, "task-ambiguous-authorization", body, nil)
+	rig.server.connectorLedger = &ambiguousServiceTaskReceiptLog{connectorReceiptLog: rig.server.connectorLedger}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		response := invokeServiceTask(rig, body, permit)
+		if response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(response.Body.String(), `"error":"evidence_unavailable"`) || calls.Load() != 0 {
+			t.Fatalf("attempt %d status=%d body=%s calls=%d", attempt, response.Code, response.Body.String(), calls.Load())
+		}
+	}
+	taskDigest := taskpermit.TaskDigest(rig.grant.TenantID, rig.grant.InstanceID, "task-ambiguous-authorization")
+	rawPermit, err := taskpermit.DecodeHeader(permit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.server.mu.Lock()
+	state, taskReserved := rig.server.serviceTasks[taskDigest]
+	_, permitReserved := rig.server.serviceTaskPermits[dsse.Digest(rawPermit)]
+	reservedTasks := len(rig.server.serviceTasks)
+	rig.server.mu.Unlock()
+	if !taskReserved || !permitReserved || !state.authorizationAmbiguous || reservedTasks != 1 {
+		t.Fatalf("ambiguous authorization task=%t permit=%t marked=%t count=%d", taskReserved, permitReserved, state.authorizationAmbiguous, reservedTasks)
+	}
+
+	otherBody := []byte(`{"input":"other","session_id":"ambiguous-authorization"}`)
+	otherPermit := taskPermitFor(t, rig, "task-after-ambiguous-authorization", otherBody, nil)
+	other := invokeServiceTask(rig, otherBody, otherPermit)
+	if other.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(other.Body.String(), `"error":"evidence_unavailable"`) || calls.Load() != 0 {
+		t.Fatalf("other task status=%d body=%s calls=%d", other.Code, other.Body.String(), calls.Load())
+	}
+	rig.server.mu.Lock()
+	reservedTasks = len(rig.server.serviceTasks)
+	rig.server.mu.Unlock()
+	if reservedTasks != 1 {
+		t.Fatalf("failed ledger retained %d task reservations", reservedTasks)
+	}
+
+	rig.server.closeGrantListeners()
+	_ = rig.server.audit.Close()
+	_ = rig.server.connectorLedger.Close()
+	reopened, err := Open(rig.config, nil, nil, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		reopened.closeGrantListeners()
+		_ = reopened.audit.Close()
+		_ = reopened.connectorLedger.Close()
+	})
+	reopened.now = func() time.Time { return rig.now }
+	activateConnectorGrant(t, reopened, rig.grant.GrantID)
+	rig.server = reopened
+	replay := invokeServiceTask(rig, body, permit)
+	if replay.Code != http.StatusConflict || !strings.Contains(replay.Body.String(), `"error":"outcome_unknown"`) || calls.Load() != 0 {
+		t.Fatalf("reconciled replay status=%d body=%s calls=%d", replay.Code, replay.Body.String(), calls.Load())
+	}
+}
+
+func TestSignedServiceTaskLedgerFailureCheckDoesNotBlockGrantControl(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer upstream.Close()
+	rig := newServiceTaskRig(t, upstream.URL)
+	if err := rig.server.connectorLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	blocked := &blockingServiceTaskFailureCheckLog{entered: make(chan struct{}), release: make(chan struct{})}
+	defer func() {
+		select {
+		case <-blocked.release:
+		default:
+			close(blocked.release)
+		}
+	}()
+	rig.server.connectorLedger = blocked
+	body := []byte(`{"input":"work","session_id":"slow-authorization"}`)
+	permit := taskPermitFor(t, rig, "task-slow-authorization", body, nil)
+	dispatchDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { dispatchDone <- invokeServiceTask(rig, body, permit) }()
+	select {
+	case <-blocked.entered:
+	case <-time.After(time.Second):
+		t.Fatal("task ledger failure check did not block")
+	}
+
+	controlDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		rig.server.ControlHandler().ServeHTTP(
+			response, httptest.NewRequest(http.MethodPost, "/v1/grants/"+rig.grant.GrantID+"/deactivate", nil),
+		)
+		controlDone <- response
+	}()
+	select {
+	case response := <-controlDone:
+		if response.Code != http.StatusOK {
+			t.Fatalf("grant deactivation status=%d body=%s", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		close(blocked.release)
+		t.Fatal("blocked task ledger failure check stalled grant control")
+	}
+
+	close(blocked.release)
+	response := <-dispatchDone
+	if response.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(response.Body.String(), `"error":"evidence_unavailable"`) || calls.Load() != 0 {
+		t.Fatalf("task status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
 	}
 }
 

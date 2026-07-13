@@ -183,6 +183,7 @@ type connectorReceiptLog interface {
 
 type Server struct {
 	mu                       sync.Mutex
+	serviceTaskBeginMu       sync.Mutex
 	config                   Config
 	routes                   map[string]loadedRoute
 	egressRoutes             map[string]loadedEgressRoute

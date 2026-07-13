@@ -151,6 +151,12 @@ ledger or advancing to a new epoch creates a new replay boundary. The service
 supplies the run ID, so the signed receipt proves what Gateway observed, not that the
 agent completed useful work.
 
+If the authorization write or filesystem sync has an ambiguous result, Gateway does
+not contact the service. The request and its exact replay return
+`evidence_unavailable` until Gateway restarts and verifies the ledger. A complete
+authorization is then closed as `outcome_unknown`; if no authorization was retained,
+the task remains available for a later submission.
+
 For the qualified Hermes adapter, `stewardctl hermes run` sends the signed
 `POST /v1/runs` and can poll `GET /v1/runs/{run_id}` to a terminal state. Status
 polling uses the host Gateway bearer token; the task permit authorizes only the
