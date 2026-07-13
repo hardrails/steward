@@ -69,7 +69,7 @@ safe_git() {
 	shift
 	env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
 		GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 \
-		git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$repository" "$@"
+		git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c tar.umask=0022 -C "$repository" "$@"
 }
 
 safe_git_timeout() {
@@ -77,7 +77,7 @@ safe_git_timeout() {
 	shift 2
 	timeout "$duration" env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
 		GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 \
-		git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$repository" "$@"
+		git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c tar.umask=0022 -C "$repository" "$@"
 }
 
 validate_integer_range() {
