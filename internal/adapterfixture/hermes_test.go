@@ -297,6 +297,16 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		"release_root=$root",
 		`release_root=$(cd "$root/.." && pwd -P)`,
 		"steward-integration-$run_id-generation-2",
+		"gateway service set",
+		"gateway service trust",
+		"task issue -admission",
+		"hermes run -bundle",
+		"task audit -in",
+		"application/vnd.steward.connector-receipt.v3+json",
+		"tenant_task_private_key_agent_absence_verified",
+		`base64.b64encode(seed).rstrip(b"=")`,
+		"escaped_trimmed_key",
+		`admissions[admission["grant_id"]] = (generation, admission)`,
 	} {
 		if !strings.Contains(acceptanceScript, contract) {
 			t.Fatalf("Hermes acceptance is missing adversarial contract %q", contract)
@@ -370,10 +380,12 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		Overall         string `json:"overall"`
 		ContainsContent bool   `json:"contains_agent_content"`
 		Acceptance      struct {
-			CompletedSteps      []string `json:"completed_steps"`
-			Runtime             string   `json:"runtime"`
-			SignedAdmission     bool     `json:"signed_admission"`
-			SignedConnectorWork bool     `json:"signed_connector_work"`
+			CompletedSteps                     []string `json:"completed_steps"`
+			Runtime                            string   `json:"runtime"`
+			SignedAdmission                    bool     `json:"signed_admission"`
+			SignedConnectorWork                bool     `json:"signed_connector_work"`
+			SignedServiceTasks                 bool     `json:"signed_service_tasks"`
+			TaskPrivateKeyAgentAbsenceVerified bool     `json:"task_private_key_agent_absence_verified"`
 		} `json:"acceptance"`
 		Provenance struct {
 			AcceptanceScriptSHA256 string `json:"acceptance_script_sha256"`
@@ -415,18 +427,21 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	expectedSteps := []string{
 		"image_imported", "executor_ready", "generation_1_admitted", "generation_1_started",
 		"generation_1_ready", "state_volume_observed", "workspace_seeded", "generation_1_skill_passed",
+		"service_task_replay_verified",
 		"generation_1_connector_skill_passed", "connector_replay_denied", "connector_forbidden_denied",
 		"connector_fixture_effect_verified", "connector_secret_absence_verified",
+		"tenant_task_private_key_agent_absence_verified",
 		"generation_1_destroyed", "generation_2_admitted", "generation_2_started", "generation_2_ready",
 		"generation_2_skill_passed", "generation_2_destroyed", "state_purged", "evidence_chain_verified",
-		"connector_evidence_chain_verified", "acceptance_complete",
+		"connector_evidence_chain_verified", "service_task_audit_verified", "acceptance_complete",
 	}
 	if integration.SchemaVersion != "steward.hermes-integration-evidence.v1" || integration.Overall != "passed" ||
 		integration.ContainsContent || integration.Acceptance.Runtime != "runsc" || !integration.Acceptance.SignedAdmission ||
-		!integration.Acceptance.SignedConnectorWork ||
+		!integration.Acceptance.SignedConnectorWork || !integration.Acceptance.SignedServiceTasks ||
+		!integration.Acceptance.TaskPrivateKeyAgentAbsenceVerified ||
 		integration.Provenance.Archive.Platform != "linux/amd64" ||
 		!integration.ReceiptChain.Verified || integration.ReceiptChain.Head.Sequence == 0 ||
-		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 2 ||
+		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 12 ||
 		!valuesEqual(integration.Acceptance.CompletedSteps, expectedSteps) {
 		t.Fatalf("invalid Hermes integration evidence authority: %#v", integration)
 	}
