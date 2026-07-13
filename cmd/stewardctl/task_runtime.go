@@ -177,7 +177,7 @@ func waitTask(arguments []string, stdout io.Writer) (returnErr error) {
 		}
 	}()
 	pollInterval := time.Duration(runtime.bundle.Bundle.Operation.PollIntervalSeconds) * time.Second
-	observeTerminal := *resultPath != "" && taskHasRecoverableTerminalResult(status)
+	observeTerminal := (*resultPath != "" || *discardResult) && taskHasRecoverableTerminalResult(status)
 	for status.Phase != gatewayclient.PhaseTerminal || observeTerminal {
 		if status.Phase == gatewayclient.PhaseAuthorize {
 			if err := waitTaskPoll(ctx, pollInterval); err != nil {

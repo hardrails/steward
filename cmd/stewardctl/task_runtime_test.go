@@ -269,13 +269,15 @@ func TestTaskWaitRefetchesResultWhenInitialStatusIsAlreadyTerminal(t *testing.T)
 	}
 }
 
-func TestTaskWaitDiscardStopsAtAlreadyTerminalMetadata(t *testing.T) {
+func TestTaskWaitDiscardRefetchesAlreadyTerminalResult(t *testing.T) {
 	fixture := newTaskRuntimeFixture(t)
 	raw := []byte(`{"run_id":"run_0123456789abcdef0123456789abcdef","status":"completed"}`)
 	var observations atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPost {
 			observations.Add(1)
+			writeTaskRuntimeResponse(t, w, taskRuntimeStatusJSON(fixture, terminalTaskRuntimeFields(raw, "completed", true)))
+			return
 		}
 		writeTaskRuntimeResponse(t, w, taskRuntimeStatusJSON(fixture, terminalTaskRuntimeFields(raw, "completed", false)))
 	}))
@@ -284,8 +286,8 @@ func TestTaskWaitDiscardStopsAtAlreadyTerminalMetadata(t *testing.T) {
 	if err := run(fixture.arguments("wait", server.URL, "-discard-result"), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	if observations.Load() != 0 {
-		t.Fatalf("discard-result made %d unnecessary observations", observations.Load())
+	if observations.Load() != 1 {
+		t.Fatalf("discard-result made %d observations, want 1", observations.Load())
 	}
 	if status := decodeTaskRuntimeOutput(t, output.Bytes()); status.Phase != gatewayclient.PhaseTerminal {
 		t.Fatalf("status=%#v", status)
