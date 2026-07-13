@@ -64,9 +64,6 @@ func (index *connectorReceiptIndex) visit(record connectorledger.VerifiedReceipt
 	event := record.Receipt.Event
 	switch event.Phase {
 	case connectorledger.Authorize:
-		if _, duplicate := index.spends[event.TaskDigest]; duplicate {
-			return errors.New("connector receipt ledger contains a duplicate spent call")
-		}
 		index.spends[event.TaskDigest] = connectorSpendOwner{GrantID: event.GrantID, ConnectorID: event.ConnectorID}
 		if index.counts[event.GrantID] == nil {
 			index.counts[event.GrantID] = make(map[string]int)
@@ -74,22 +71,9 @@ func (index *connectorReceiptIndex) visit(record connectorledger.VerifiedReceipt
 		index.counts[event.GrantID][event.ConnectorID]++
 		index.pending[event.TaskDigest] = event
 	case connectorledger.Terminal:
-		authorized, ok := index.pending[event.TaskDigest]
-		if !ok || !sameConnectorReceiptCall(authorized, event) {
-			return errors.New("connector receipt ledger has an unmatched terminal record")
-		}
 		delete(index.pending, event.TaskDigest)
 	}
 	return nil
-}
-
-func sameConnectorReceiptCall(left, right connectorledger.Event) bool {
-	return left.TenantID == right.TenantID && left.RuntimeRef == right.RuntimeRef &&
-		left.CapsuleDigest == right.CapsuleDigest && left.PolicyDigest == right.PolicyDigest &&
-		left.RoutePolicyDigest == right.RoutePolicyDigest && left.Generation == right.Generation &&
-		left.GrantID == right.GrantID && left.ConnectorID == right.ConnectorID &&
-		left.OperationID == right.OperationID && left.TaskDigest == right.TaskDigest &&
-		left.RequestBytes == right.RequestBytes
 }
 
 func openConnectorReceiptLedger(config Config, key ed25519.PrivateKey) (*connectorledger.Log, *connectorReceiptIndex, error) {

@@ -116,6 +116,7 @@ type Log struct {
 	failed   bool
 	reserved int64
 	pending  map[string]Event
+	spent    map[string]struct{}
 }
 
 func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) (*Log, error) {
@@ -165,8 +166,9 @@ func OpenWithVisit(path string, private ed25519.PrivateKey, nodeID string, epoch
 	}
 	public := private.Public().(ed25519.PublicKey)
 	pending := make(map[string]Event)
+	spent := make(map[string]struct{})
 	head, err := verifyFile(file, public, nodeID, epoch, func(record VerifiedReceipt) error {
-		if err := updatePending(pending, record.Receipt.Event); err != nil {
+		if err := updateHistory(pending, spent, record.Receipt.Event); err != nil {
 			return err
 		}
 		if visit != nil {
@@ -187,7 +189,7 @@ func OpenWithVisit(path string, private ed25519.PrivateKey, nodeID string, epoch
 		path: path, file: file, private: append(ed25519.PrivateKey(nil), private...),
 		public: append(ed25519.PublicKey(nil), public...), nodeID: nodeID, epoch: epoch,
 		keyID: KeyID(public), next: head.Sequence + 1, last: head.ChainHash,
-		reserved: reserved, pending: pending,
+		reserved: reserved, pending: pending, spent: spent,
 	}, nil
 }
 
@@ -218,14 +220,15 @@ func (l *Log) Begin(event Event) (Head, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := event.TaskDigest
-	if _, exists := l.pending[key]; exists {
-		return Head{}, errors.New("connector authorization is already pending")
+	if _, exists := l.spent[key]; exists {
+		return Head{}, errors.New("connector authorization task is already spent")
 	}
 	head, err := l.appendLocked(event, terminalReserveBytes)
 	if err != nil {
 		return Head{}, err
 	}
 	l.pending[key] = event
+	l.spent[key] = struct{}{}
 	return head, nil
 }
 
@@ -358,8 +361,9 @@ func VerifyRecords(path string, public ed25519.PublicKey, nodeID string, epoch u
 		return Head{}, errors.New("connector ledger changed while opening")
 	}
 	pending := make(map[string]Event)
+	spent := make(map[string]struct{})
 	return verifyFile(file, public, nodeID, epoch, func(record VerifiedReceipt) error {
-		if err := updatePending(pending, record.Receipt.Event); err != nil {
+		if err := updateHistory(pending, spent, record.Receipt.Event); err != nil {
 			return err
 		}
 		if visit != nil {
@@ -455,12 +459,13 @@ func validateReceipt(receipt Receipt, nodeID string, epoch, sequence uint64, pre
 	return validateEvent(receipt.Event)
 }
 
-func updatePending(pending map[string]Event, event Event) error {
+func updateHistory(pending map[string]Event, spent map[string]struct{}, event Event) error {
 	switch event.Phase {
 	case Authorize:
-		if _, exists := pending[event.TaskDigest]; exists {
-			return errors.New("connector ledger contains a duplicate pending authorization")
+		if _, exists := spent[event.TaskDigest]; exists {
+			return errors.New("connector ledger contains a duplicate spent authorization")
 		}
+		spent[event.TaskDigest] = struct{}{}
 		pending[event.TaskDigest] = event
 	case Terminal:
 		authorized, exists := pending[event.TaskDigest]

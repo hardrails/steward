@@ -147,6 +147,46 @@ func TestVerifyRecordsRejectsSignedOrphanTerminal(t *testing.T) {
 	}
 }
 
+func TestConnectorLedgerRejectsSpentAuthorizationReplay(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "spent-replay.ndjson")
+	log, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized := validEvent(Authorize, Allowed)
+	if _, err := log.Begin(authorized); err != nil {
+		t.Fatal(err)
+	}
+	terminal := validEvent(Terminal, Committed)
+	terminal.HTTPStatus = 200
+	if _, err := log.Finish(terminal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Begin(authorized); err == nil || !strings.Contains(err.Error(), "already spent") {
+		t.Fatalf("live spent authorization replay err=%v", err)
+	}
+
+	// Simulate a correctly signed but semantically invalid history. All readers,
+	// including offline evidence verification, must reject the permanent replay.
+	log.mu.Lock()
+	_, err = log.appendLocked(authorized, terminalReserveBytes)
+	log.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyRecords(path, public, "node-a/gateway", 1, nil); err == nil ||
+		!strings.Contains(err.Error(), "duplicate spent authorization") {
+		t.Fatalf("signed spent authorization replay verification err=%v", err)
+	}
+}
+
 func TestConnectorLedgerConcurrentAppendHasOneChainOrder(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
