@@ -390,6 +390,11 @@ func TestGrantDeactivateUnregisterAndServiceDenials(t *testing.T) {
 	if got := authorized(http.MethodGet, "/unknown"); got.Code != http.StatusNotFound {
 		t.Fatalf("unknown path status=%d", got.Code)
 	}
+	windowStarted := time.Now()
+	server.connectorAttempts[grant.GrantID] = connectorAttemptWindow{started: windowStarted, count: maxConnectorAttemptsPerMinute}
+	server.egressDeniedAttempts[grant.GrantID] = egressDeniedAttemptWindow{started: windowStarted, count: maxEgressDeniedAttemptsPerGrantMinute}
+	server.egressTenantDenials[grant.TenantID] = egressDeniedAttemptWindow{started: windowStarted, count: maxEgressDeniedAttemptsPerTenantMinute}
+	server.egressHostDenials = egressDeniedAttemptWindow{started: windowStarted, count: 1}
 	response = httptest.NewRecorder()
 	server.ControlHandler().ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/v1/grants/"+grant.GrantID, nil))
 	if response.Code != http.StatusNoContent {
@@ -397,6 +402,18 @@ func TestGrantDeactivateUnregisterAndServiceDenials(t *testing.T) {
 	}
 	if _, err := os.Stat(GrantDirectory(config.GrantRoot, grant.GrantID)); !os.IsNotExist(err) {
 		t.Fatalf("grant directory still exists: %v", err)
+	}
+	if _, ok := server.egressDeniedAttempts[grant.GrantID]; ok {
+		t.Fatal("unregistered grant retained its egress denial window")
+	}
+	if got := server.egressTenantDenials[grant.TenantID].count; got != maxEgressDeniedAttemptsPerTenantMinute {
+		t.Fatal("unregister reset the tenant denial window and allowed grant churn to borrow shared capacity")
+	}
+	if _, ok := server.connectorAttempts[grant.GrantID]; ok {
+		t.Fatal("unregistered grant retained its connector attempt window")
+	}
+	if server.egressHostDenials.count != 1 {
+		t.Fatal("unregister reset the host denial window and reopened shared audit capacity")
 	}
 	response = httptest.NewRecorder()
 	server.ControlHandler().ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/v1/grants/"+grant.GrantID, nil))

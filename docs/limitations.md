@@ -114,10 +114,15 @@ Route concurrency limits apply to allowed traffic. Gateway fails closed if it ca
 persist an allow decision before opening the route. It attempts synchronous audit
 writes for denied requests and terminal outcomes, but those writes are best-effort:
 a denial still returns and an existing stream still ends if the write fails. Denied
-requests currently have no separate per-grant request-rate limit. A tenant can
-therefore create shared Gateway disk-I/O pressure by repeatedly requesting denied
-destinations. Host monitoring and external resource controls remain necessary until
-denial accounting is rate-bounded.
+requests are admitted to that synchronous path through fixed one-minute limits: 30
+per grant, 120 per tenant, and 480 across the host. After a layer is exhausted, a
+request that fails egress policy returns HTTP 429 `egress_rate_limited` without
+another denial write until the window resets. Requests that satisfy policy continue.
+Inactive and revoked grants retain `grant_inactive` or `grant_revoked` even when
+the limiter suppresses their denial record. This bounds audit amplification, but
+all tenants still share Gateway CPU, memory,
+the audit filesystem, and a host-wide limit. Host monitoring and external resource
+controls remain necessary.
 
 Docker selects each capability network from its daemon-wide default address pools.
 Steward currently does not request a fixed prefix size. Docker commonly allocates
@@ -150,6 +155,17 @@ connector calls at 32 per host and four per grant and rate-limits total attempts
 grant. These fixed caps protect Gateway resources; they are not a scheduler or a
 fair-share guarantee across tenants.
 
+A connector may opt into an additional action permit. One tenant-scoped Ed25519
+key then signs a short-lived canonical DSSE envelope for the exact request. Gateway
+checks node, tenant, instance, generation, artifact and policy digests, connector,
+operation-policy digest, task, exact body digest and length, method-derived content
+type, and time window against live state. The operation-policy digest commits to
+the canonical origin, credential injection mode, credential epoch, connector and
+operation IDs, method, and exact path. The permit cannot expand the outer workload
+grant. Gateway
+records the authority key ID, exact permit digest, and exact request digest beside
+the stable task-based call digest in receipt format 2 before the network effect.
+
 The connector ledger also has an explicit, non-borrowing byte budget for every
 tenant that may receive a connector grant. Gateway rejects an unbudgeted grant
 before creating its socket. A tenant's usage includes each durable signed line and
@@ -159,15 +175,19 @@ the total is at most 64 MiB. Exhaustion fails the call with HTTP 503 and
 `connector_evidence_quota_exhausted`; unused capacity assigned to another tenant is
 not available.
 
-The workload can mint task IDs until it exhausts its admitted connector and
-node-configured call budget. A task ID is a replay and correlation fence, not proof
-that a human or separate service approved the action. Connector receipts omit
-credentials, headers, origins, paths, queries, and bodies. The signed effective
-route-policy digest commits to those operator-controlled details without disclosing
-them. The records do not prove that the upstream service applied a request exactly
-once. A lost response remains an ambiguous external effect; replaying the same task
-fails closed. If Gateway stops between authorization and a terminal record, restart
-records `outcome_unknown`; the operator must treat the upstream result as ambiguous.
+Without an action authority, the workload can mint task IDs until it exhausts its
+admitted connector and node-configured call budget. A task ID is a replay and
+correlation fence, not proof that a human or separate service approved the action.
+With an action authority, an accepted permit proves only that the configured key
+signed those exact bytes and metadata within the validity window; it does not prove
+the natural-language task's meaning or the signer's decision process. Connector
+receipts omit credentials, headers, origins, paths, queries, and bodies. The signed
+effective route-policy digest commits to those operator-controlled details without
+disclosing them. The records do not prove that the upstream service applied a
+request exactly once. A lost response remains an ambiguous external effect;
+replaying the same task fails closed. If Gateway stops between authorization and a
+terminal record, restart records `outcome_unknown`; the operator must treat the
+upstream result as ambiguous.
 
 Steward itself does not directly configure or give the connector credential or
 private upstream origin to the workload. Gateway rejects an upstream response when
@@ -195,6 +215,12 @@ filesystem. All tenants also share one ledger descriptor, mutex, and synchronous
 `fsync` path, so disk latency and lock contention can affect other tenants even
 when their byte allocations remain available.
 
+The action-trust inventory exported for an off-node signer is non-secret but
+unsigned. It can prevent accidental issuance for a mismatched node, tenant, key,
+connector, operation, credential epoch, or lifetime only when the operator
+authenticates its transfer. It is not a delegated grant and cannot prove Gateway's
+current state; Gateway's live configuration is the final enforcement point.
+
 Gateway configuration requires an explicit loopback service address with a numeric
 port from 1 through 65535. Missing, zero, out-of-range, and named service ports fail
 both `-check-config` and startup.
@@ -213,6 +239,11 @@ proof also required Hermes to discover and load the exact signed
 task replay and an undeclared operation, scanned the fixed qualification material
 for secret and origin leakage, and verified a separate signed Gateway connector
 receipt chain.
+
+That historical qualification used the connector grant-and-task path. It did not
+configure an action authority, issue an exact-request permit, or exercise receipt
+format 2. Do not cite the retained Hermes evidence as proof of the optional action
+permit path.
 
 This does not qualify the official upstream image, another Hermes commit, arbitrary
 plugins, channels, skills, MCP servers, or run event streams. The service bridge

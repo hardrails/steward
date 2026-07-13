@@ -73,4 +73,10 @@ func TestInspectConnectorReceiptFormatIsReadOnlyForProspectiveAndActualLedger(t 
 	if !bytes.Equal(before, after) {
 		t.Fatal("receipt-format inspection rewrote the ledger")
 	}
+
+	config.ActionAuthorities = []ActionAuthority{{KeyID: "approver-a", TenantID: "tenant-a", PublicKey: "configured-by-validated-loader"}}
+	summary, err = InspectConnectorReceiptFormat(config)
+	if err != nil || !summary.Present || summary.FormatVersion != 2 {
+		t.Fatalf("permit-capable summary = %#v, error = %v", summary, err)
+	}
 }

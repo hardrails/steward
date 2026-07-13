@@ -18,6 +18,15 @@ with existing Gateway state, connector receipt log, admission fences, operation
 journal, Executor evidence log, uplink state, and supervisor state before a binary
 switch.
 
+Connector receipt format 1 records ordinary connector events. Format 2 records the
+action-authority key ID, permit digest, and exact request digest for permit-backed
+events. A single ledger may contain both schemas in one signed hash chain. Current
+release manifests declare `connector_receipt_log` readers 1 through 2 and writer 2.
+The inspector reports format 2 after any format-2 record exists. It also reports
+format 2 when action authorities are configured but the ledger is absent or still
+contains only format-1 records, because the running configuration can write a
+permit-backed record immediately.
+
 Staging verifies the manifest and writes only a new immutable release directory.
 It does not change active helpers or units and does not run `systemctl daemon-reload`.
 
@@ -124,6 +133,13 @@ prior release only when that release's manifest proves it can read every observe
 format. Otherwise activation leaves the target selected and all Steward services
 stopped. Repair the target or follow an approved migration procedure; do not force
 an older binary over newer durable state.
+
+An older target whose connector-receipt reader stops at format 1 is therefore not a
+safe rollback target while action-authority configuration requires format 2 or
+after the ledger contains any format-2 record. Removing action authority can lower
+the configuration requirement only before a format-2 event has been written; it
+does not rewrite or downgrade existing evidence. Do not split, edit, or reserialize
+a mixed ledger to regain rollback eligibility.
 
 ## Roll back the release
 

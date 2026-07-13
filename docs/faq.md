@@ -49,6 +49,13 @@ shared hosts because it has no portable hard byte or inode quota. Use dedicated
 hardware when processor side channels, storage exhaustion, or separate hardware
 failure domains are in scope.
 
+Egress denials are limited to 30 per grant, 120 per tenant, and 480 per host per
+minute to bound synchronous audit pressure. After a layer is exhausted, requests
+that fail policy return `egress_rate_limited` without another denial write; allowed
+traffic continues. Inactive and revoked grants retain their specific lifecycle
+response even if the limiter suppresses the corresponding denial record. This does
+not isolate shared CPU, memory, disk latency, or the host-wide audit filesystem.
+
 ## What does signed admission add beyond a sandbox?
 
 It records why a workload was allowed. A profile capsule is a publisher-signed
@@ -83,6 +90,9 @@ but not run event streams. Inference is fixed through
 `http://steward-relay:8080/v1`. Persistent state requires the explicit dedicated
 single-tenant host mode and is not a shared-host claim.
 
+The retained Hermes qualification used ordinary connector grant and task authority;
+it did not exercise the optional action-permit path.
+
 OpenClaw has not completed this qualification and remains a layout contract. See the
 [Hermes]({{ '/guides/hermes-agent/' | relative_url }}) and
 [OpenClaw]({{ '/guides/openclaw/' | relative_url }}) guides before signing an exact
@@ -114,12 +124,27 @@ subset. The node operator maps each ID to exact HTTP operations, an address poli
 an owner-only credential file, and finite concurrency, call, byte, and time limits.
 Gateway spends a task claim before opening the upstream request, strips
 agent-supplied credentials, and adds the configured credential at the last hop.
+For operations that need independent approval, configure a tenant-scoped action
+authority. Its private key stays off-node and signs a short-lived permit for the
+exact admitted instance, operation, task, and request bytes. Gateway requires both
+the workload grant and that permit, spends the call durably, and records the permit
+and request digests in its signed connector chain.
 It is not a general secret injector or an HTTPS interception proxy. Gateway relays
 bounded responses but rejects any header or decoded body stream containing the
 exact configured credential. A malicious or misconfigured upstream can still
 encode or transform that value, disclose the private origin, or return another
 application secret. Use a narrow trusted operation. See
 [authenticated API operations]({{ '/guides/connectors/' | relative_url }}).
+
+## Is the exported action-trust inventory an authorization document?
+
+No. It is unsigned, non-secret operator input that summarizes one Gateway
+configuration for one explicitly selected tenant's signing station. The required
+tenant filter omits other tenants' action-authority and connector metadata.
+Authenticate its transfer from the intended node. `stewardctl permit issue` uses it
+to catch node, tenant, key, connector origin, exact operation, credential-epoch,
+and lifetime mismatches before signing. Gateway's live validated configuration
+remains the final enforcement authority.
 
 ## Does Steward work without public Internet access?
 

@@ -7,8 +7,8 @@ home: true
 <section class="hero">
   <p class="eyebrow">Open-source, operator-controlled agent infrastructure</p>
   <h1>Keep agent execution under local authority.</h1>
-  <p class="hero-lede">With signed admission enabled, Steward verifies which agent artifact local policy permits, which tenant and instance it serves, and which capabilities it may receive. Steward then creates a hardened Docker + gVisor workload and records a receipt that can be verified offline.</p>
-  <div class="status-line"><span>Signed local authorization</span><span>Offline-verifiable receipts</span><span>Docker + gVisor</span><span>Apache-2.0</span></div>
+  <p class="hero-lede">With signed admission enabled, Steward verifies which agent artifact local policy permits, which tenant and instance it serves, and which capabilities it may receive. Selected connector effects can additionally require an off-node tenant authority to sign one exact request. Steward creates a hardened Docker + gVisor workload and records receipts that can be verified offline.</p>
+  <div class="status-line"><span>Signed local authorization</span><span>Exact-request action permits</span><span>Offline-verifiable receipts</span><span>Docker + gVisor</span><span>Apache-2.0</span></div>
   <div class="install-box">
     <header><span>Interactive Linux install</span><button class="copy-button" type="button">Copy</button></header>
     <pre><code>curl -fsSL https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | sudo bash</code></pre>
@@ -20,8 +20,8 @@ home: true
 
 <div class="grid">
   <article class="card"><span class="number">01 / AUTHORIZE</span><h3>Why may this run?</h3><p>Signed admission requires the publisher's workload limits, the operator's site policy, and the tenant's instance request to allow the same deployment. A stored instance generation rejects delayed commands for a replaced instance; a separate policy epoch rejects policy rollback.</p><a href="{{ '/guides/signed-admission/' | relative_url }}">Signed admission →</a></article>
-  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor accepts only immutable, resource-bounded images. Signed policy can grant approved model, private-service, exact credential-brokered connector, and HTTP(S) routes. Persistent Docker state is available only through an explicit dedicated-host compatibility mode because it has no portable hard quota.</p><a href="{{ '/concepts/security-model/' | relative_url }}">Security model →</a></article>
-  <article class="card"><span class="number">03 / VERIFY</span><h3>What did the node enforce?</h3><p>Hash-linked, signed receipts record the accepted artifact, policy, instance generation, and host-mutation result for offline verification.</p><a href="{{ '/reference/offline-tools/' | relative_url }}">Verify and export evidence →</a></article>
+  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor accepts only immutable, resource-bounded images. Signed policy can grant approved model, private-service, exact credential-brokered connector, and HTTP(S) routes. A connector can require a tenant key to sign the exact request bytes. Persistent Docker state is available only through an explicit dedicated-host compatibility mode because it has no portable hard quota.</p><a href="{{ '/concepts/security-model/' | relative_url }}">Security model →</a></article>
+  <article class="card"><span class="number">03 / VERIFY</span><h3>What did the node enforce?</h3><p>Hash-linked, signed receipts record the accepted artifact, policy, instance generation, host-mutation result, and permit-backed connector linkage for offline verification.</p><a href="{{ '/reference/offline-tools/' | relative_url }}">Verify and export evidence →</a></article>
 </div>
 
 ## Choose your path
@@ -57,7 +57,8 @@ the agent a logical operation and finite call budget, not the configured upstrea
 origin or secret. Gateway rejects the exact connector credential in response
 headers and the decoded body stream. Configured upstreams remain trusted not to
 transform that value, disclose private origin details, or return other application
-secrets.
+secrets. For selected operations, a separate off-node tenant key can authorize one
+exact request; Gateway records and spends that permit before the effect.
 
 ## Agent adapters
 
@@ -71,6 +72,7 @@ persisted workspace state, restarted the container, and required a fresh changed
 result. It also required Hermes to discover and load the exact signed
 `steward.connector-work` skill before proving one authenticated effect, replay and
 undeclared-operation denial, and a separate signed connector receipt chain.
+That retained connector proof did not exercise the optional action-permit path.
 
 The official Hermes image remains inadmissible. Steward ships the pinned builder,
 not a prebuilt Hermes OCI archive, because dependency and base-image notices are
@@ -104,7 +106,7 @@ secrets, host mounts, privileged mode, or undeclared ports.
 Many products now provide sandbox lifecycle, small virtual-machine isolation,
 egress policy, credential injection, and JSON audit logs. Steward focuses on
 operator-owned authorization tied to the node's recorded enforcement decision,
-including at disconnected sites. Read the
+including exact-request permits and offline correlation at disconnected sites. Read the
 [dated comparison]({{ '/product/market-analysis/' | relative_url }}) and its claim
 limits.
 

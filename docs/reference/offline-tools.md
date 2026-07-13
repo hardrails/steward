@@ -6,11 +6,11 @@ section: Reference
 
 # Local operator tools
 
-`stewardctl image` inspects and imports image media, and `stewardctl evidence`
-verifies receipts without a registry, transparency service, or vendor control plane.
-Within those two command groups, only `image import` contacts Docker; the other
-operations use local files. Commands under `stewardctl node` contact the local
-Executor API.
+`stewardctl image` inspects and imports image media, `stewardctl permit` signs and
+audits exact connector authority, and `stewardctl evidence` verifies receipts
+without a registry, transparency service, or vendor control plane. Within those
+command groups, only `image import` contacts Docker; the other operations use local
+files. Commands under `stewardctl node` contact the local Executor API.
 
 ## Upgrade inspection
 
@@ -38,10 +38,121 @@ header yet. Tombstone fences preserve replay history but do not count as active.
 The command exits nonzero when workload or grant state remains, a file is malformed
 or missing when required, or the target reader/writer range is unsafe.
 
+Connector receipt format 1 contains ordinary connector records. Permit-backed
+records use format 2, and one verified chain may contain both. The observed format
+is 2 after any format-2 record exists. It is also 2 whenever Gateway configures an
+action authority, even before the receipt file exists or a permit is used, because
+that live configuration can write format 2. A target whose manifest can read only
+format 1 is then incompatible.
+
 `upgrade inspect-formats` returns the same seven format observations without requiring
 a drained node. Activation uses it after a failed target start to decide whether the
 prior release can safely read the state before restoring the old active-release
 symlink and relay binding.
+
+## Exact-request action permits
+
+`stewardctl permit` signs and verifies short-lived permission for one exact
+connector request. It does not contact Gateway, a control plane, or a hosted signer.
+Keep the action private key on an operator-controlled signing station, not on the
+Steward node.
+
+Before issuance, export Gateway's non-secret view:
+
+```console
+sudo stewardctl gateway connector trust \
+  -config /etc/steward/gateway.json \
+  -tenant-id tenant-a > action-trust.json
+```
+
+The required tenant filter excludes other tenants' action-authority and connector
+metadata. The `steward.action-trust.v1` inventory contains the selected tenant,
+node ID, tenant-scoped key digests, connector origins, credential modes, exact
+operation methods, paths and policy digests, credential epochs, and lifetime
+limits. It is unsigned. Authenticate the transfer from the intended node. `permit
+issue` uses it to catch mismatches before signing; Gateway's current validated
+configuration is still the final authority.
+
+Issue a canonical single-signature DSSE permit:
+
+```console
+stewardctl permit issue \
+  -admission admission.json \
+  -intent instance-intent.json \
+  -trust action-trust.json \
+  -request exact-request.json \
+  -connector-id ticketing \
+  -operation-id create-ticket \
+  -task-id task-4bd6ce188f8b4e09a92af56d59a5df0e \
+  -valid-for 5m \
+  -clock-skew 5s \
+  -key approver-a.private.pem \
+  -key-id approver-a \
+  -out action-permit.dsse.json \
+  -header-out action-permit.header
+```
+
+Required inputs bind the admitted node, tenant, instance, generation, capsule,
+policy, route policy, connector, operation, operation-policy digest, task, request
+digest and byte length, outbound content type, and validity interval. The
+operation-policy digest commits to the exported canonical origin, credential
+injection mode, credential epoch, connector and operation IDs, method, and exact
+path without credential bytes. The non-secret mode identifies whether Gateway uses
+the `Authorization` or `X-API-Key` header. For POST, PUT, and PATCH, `-request` must
+contain one strict JSON value and binds
+`application/json`. For GET, HEAD, and DELETE, omit it; the permit binds an empty
+request and empty content type. Exact bytes are hashed without reserialization. The
+envelope is limited to 16 KiB and the request to 4 MiB, while the connector may set
+a smaller body ceiling. Validity is whole seconds from one second through 24 hours
+and may not exceed the connector's exported maximum.
+
+`-clock-skew` defaults to five seconds, is limited to five minutes, and must be
+shorter than `-valid-for`. It shifts the start earlier but does not lengthen the
+signed interval. The private key must be an owner-only PKCS#8 Ed25519 PEM file.
+Outputs are owner-only and must be different new paths. If multi-output publication
+fails, the command attempts to remove previously written outputs and reports any
+rollback failure; an operator may then need to remove a leftover file. Standard
+output is the exact permit-envelope SHA-256 digest. `-header-out` contains the
+canonical unpadded base64url value for `X-Steward-Action-Permit`.
+
+Verify the signature, statement, current time, and optional request bytes:
+
+```console
+stewardctl permit verify \
+  -in action-permit.dsse.json \
+  -public-key approver-a.public \
+  -key-id approver-a \
+  -request exact-request.json
+```
+
+The JSON output contains `valid`, `evaluated_at`, `key_id`, `envelope_digest`, and
+the complete `statement`. `-at` accepts canonical UTC RFC 3339 whole seconds for a
+historical evaluation. `-max-validity` applies a stricter local ceiling.
+
+Audit the permit against a copied Gateway connector chain:
+
+```console
+stewardctl permit audit \
+  -in action-permit.dsse.json \
+  -public-key approver-a.public \
+  -key-id approver-a \
+  -request exact-request.json \
+  -receipts connector-receipts.ndjson \
+  -receipt-public-key connector-receipts.public \
+  -receipt-node-id steward-0123456789abcdef0123456789abcdef/gateway \
+  -receipt-epoch 1 \
+  -expected-sequence '<retained-sequence>' \
+  -expected-chain-hash 'sha256:<retained-chain-hash>'
+```
+
+The command verifies the whole signed chain, correlates the exact authority key,
+permit, request, grant, policy, connector operation, and stable task-based call
+digest, and re-evaluates the permit at the authorization receipt's signed
+observation time. Output contains `valid`, `permit_digest`, `request_digest`,
+`permit_key_id`, the signed `statement`, matching `authorization`, optional
+`terminal`, and final `head`. Supply both expected-head fields to compare with an
+independently retained checkpoint. An absent terminal means the outcome is still
+unknown; it is not evidence that no upstream effect occurred.
 
 ## Image archives
 

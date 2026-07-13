@@ -61,6 +61,49 @@ func TestAppendVerifyAndVisitConnectorLedger(t *testing.T) {
 	_ = reopened.Close()
 }
 
+func TestConnectorLedgerReadsMixedLegacyAndPermitReceiptFormats(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "mixed.ndjson")
+	log, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denial := validEvent(Deny, Denied)
+	denial.ErrorCode = "policy_denied"
+	if _, err := log.Append(denial); err != nil {
+		t.Fatal(err)
+	}
+	permitted := validEvent(Authorize, Allowed)
+	permitted.TaskDigest = "sha256:" + strings.Repeat("9", 64)
+	permitted.AuthorityKeyID = "approver-a"
+	permitted.PermitDigest = "sha256:" + strings.Repeat("8", 64)
+	permitted.RequestDigest = "sha256:" + strings.Repeat("7", 64)
+	if _, err := log.Begin(permitted); err != nil {
+		t.Fatal(err)
+	}
+	terminal := permitted
+	terminal.Phase, terminal.Outcome, terminal.HTTPStatus = Terminal, Responded, 200
+	if _, err := log.Finish(terminal); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var schemas []string
+	if _, err := VerifyRecords(path, public, "node-a/gateway", 1, func(record VerifiedReceipt) error {
+		schemas = append(schemas, record.Receipt.SchemaVersion)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(schemas) != 3 || schemas[0] != SchemaV1 || schemas[1] != SchemaV2 || schemas[2] != SchemaV2 {
+		t.Fatalf("mixed receipt schemas=%v", schemas)
+	}
+}
+
 func TestConnectorLedgerRejectsConcurrentWriterThroughHardLink(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -632,6 +675,29 @@ func TestConnectorLedgerValidatesEventsFilesAndTaskIDs(t *testing.T) {
 	invalid = validEvent(Deny, Denied)
 	if _, err := log.Append(invalid); err == nil {
 		t.Fatal("denial without reason was accepted")
+	}
+	invalid = validEvent(Authorize, Allowed)
+	invalid.PermitDigest = "sha256:" + strings.Repeat("f", 64)
+	if _, err := log.Begin(invalid); err == nil {
+		t.Fatal("permit digest without request digest was accepted")
+	}
+	permitted := validEvent(Authorize, Allowed)
+	permitted.AuthorityKeyID = "approver-a"
+	permitted.PermitDigest = "sha256:" + strings.Repeat("f", 64)
+	permitted.RequestDigest = "sha256:" + strings.Repeat("0", 64)
+	if _, err := log.Begin(permitted); err != nil {
+		t.Fatalf("valid permitted authorization rejected: %v", err)
+	}
+	mismatched := permitted
+	mismatched.Phase, mismatched.Outcome, mismatched.HTTPStatus = Terminal, Responded, 200
+	mismatched.PermitDigest = "sha256:" + strings.Repeat("1", 64)
+	if _, err := log.Finish(mismatched); err == nil {
+		t.Fatal("terminal with a different permit digest was accepted")
+	}
+	terminal := permitted
+	terminal.Phase, terminal.Outcome, terminal.HTTPStatus = Terminal, Responded, 200
+	if _, err := log.Finish(terminal); err != nil {
+		t.Fatalf("matching permitted terminal rejected: %v", err)
 	}
 	if _, err := TaskDigest("../weak"); err == nil {
 		t.Fatal("unsafe task id accepted")

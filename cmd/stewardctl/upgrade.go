@@ -238,7 +238,7 @@ func inspectUpgradeState(options upgradeOptions) (upgradeInspection, error) {
 	if err != nil {
 		return upgradeInspection{}, fmt.Errorf("inspect connector receipt log: %w", err)
 	}
-	if receiptSummary.Present {
+	if receiptSummary.FormatVersion != 0 {
 		result.Formats.ConnectorReceiptLog = integerPointer(receiptSummary.FormatVersion)
 	}
 

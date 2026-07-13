@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +15,52 @@ import (
 
 	"github.com/hardrails/steward/internal/gateway"
 )
+
+func TestActionTrustInventoryIsFilteredToOneTenant(t *testing.T) {
+	publicA, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := gateway.Config{
+		ActionPermitNodeID: "node-a",
+		ActionAuthorities: []gateway.ActionAuthority{
+			{KeyID: "approver-a", TenantID: "tenant-a", PublicKey: base64.StdEncoding.EncodeToString(publicA)},
+			{KeyID: "approver-b", TenantID: "tenant-b", PublicKey: base64.StdEncoding.EncodeToString(publicB)},
+		},
+		Connectors: []gateway.Connector{
+			{ID: "shared", BaseURL: "https://shared.example.test", CredentialMode: gateway.CredentialModeBearer, CredentialEpoch: 1,
+				ActionAuthorityIDs: []string{"approver-a", "approver-b"}, MaxActionPermitSeconds: 300,
+				Operations: []gateway.ConnectorOperation{{ID: "create", Method: http.MethodPost, Path: "/v1/items"}}},
+			{ID: "tenant-b-only", BaseURL: "https://private.example.test", CredentialMode: gateway.CredentialModeXAPIKey, CredentialEpoch: 1,
+				ActionAuthorityIDs: []string{"approver-b"}, MaxActionPermitSeconds: 300,
+				Operations: []gateway.ConnectorOperation{{ID: "read", Method: http.MethodGet, Path: "/v1/private"}}},
+		},
+	}
+	var output bytes.Buffer
+	if err := writeActionTrustInventory(&output, config, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	var inventory actionTrustInventory
+	if err := json.Unmarshal(output.Bytes(), &inventory); err != nil {
+		t.Fatal(err)
+	}
+	if inventory.TenantID != "tenant-a" || len(inventory.Authorities) != 1 ||
+		inventory.Authorities[0].KeyID != "approver-a" || len(inventory.Connectors) != 1 ||
+		inventory.Connectors[0].ConnectorID != "shared" || len(inventory.Connectors[0].AuthorityKeyIDs) != 1 ||
+		inventory.Connectors[0].AuthorityKeyIDs[0] != "approver-a" ||
+		inventory.Connectors[0].CredentialMode != gateway.CredentialModeBearer ||
+		strings.Contains(output.String(), "tenant-b") || strings.Contains(output.String(), "approver-b") ||
+		strings.Contains(output.String(), "private.example.test") {
+		t.Fatalf("tenant-filtered inventory=%s", output.String())
+	}
+	if err := writeActionTrustInventory(&bytes.Buffer{}, config, "tenant-c"); err == nil {
+		t.Fatal("action trust export accepted a tenant without an authority")
+	}
+}
 
 func TestGatewayRouteSetIsValidatedAndAtomic(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "sgc-")
@@ -164,10 +213,18 @@ func TestGatewayConnectorSetIsValidatedSecretFreeAndAtomic(t *testing.T) {
 	}
 	loaded, _, _, _, err := gateway.LoadConfig(path)
 	if err != nil || len(loaded.Connectors) != 1 || loaded.Connectors[0].Operations[0].Method != http.MethodPost ||
+		loaded.Connectors[0].CredentialEpoch != 0 ||
 		len(loaded.ConnectorReceiptTenantBudgets) != 1 || loaded.ConnectorReceiptTenantBudgets[0].TenantID != "tenant-a" ||
 		loaded.ConnectorReceiptTenantBudgets[0].Bytes != 1048576 ||
 		strings.Contains(output.String(), "upstream-secret") || !strings.Contains(output.String(), "systemctl restart") {
 		t.Fatalf("loaded=%#v budgets=%#v output=%q err=%v", loaded.Connectors, loaded.ConnectorReceiptTenantBudgets, output.String(), err)
+	}
+	legacyCompatible, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(legacyCompatible, []byte(`"credential_epoch"`)) || bytes.Contains(legacyCompatible, []byte(`"action_authorities"`)) {
+		t.Fatalf("non-permit connector serialized permit-only fields: %s", legacyCompatible)
 	}
 	var preserveOutput bytes.Buffer
 	if err := run(connectorArguments, &preserveOutput, &bytes.Buffer{}); err != nil {
@@ -177,6 +234,71 @@ func TestGatewayConnectorSetIsValidatedSecretFreeAndAtomic(t *testing.T) {
 	if err != nil || len(loaded.ConnectorReceiptTenantBudgets) != 1 || loaded.ConnectorReceiptTenantBudgets[0].Bytes != 1048576 ||
 		!strings.Contains(preserveOutput.String(), "systemctl reload") {
 		t.Fatalf("preserved budgets=%#v err=%v", loaded.ConnectorReceiptTenantBudgets, err)
+	}
+	permitArguments := append(append([]string(nil), connectorArguments...),
+		"-action-authority", "approver-a="+publicKey, "-action-authority-tenant", "approver-a=tenant-a",
+		"-action-node-id", "node-a", "-max-action-permit-seconds", "300")
+	if err := run(permitArguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("configure action permit: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || loaded.ActionPermitNodeID != "node-a" || len(loaded.ActionAuthorities) != 1 ||
+		len(loaded.Connectors[0].ActionAuthorityIDs) != 1 || loaded.Connectors[0].ActionAuthorityIDs[0] != "approver-a" ||
+		loaded.ActionAuthorities[0].TenantID != "tenant-a" || loaded.Connectors[0].CredentialEpoch != 1 ||
+		loaded.Connectors[0].MaxActionPermitSeconds != 300 {
+		t.Fatalf("action permit config=%#v connectors=%#v err=%v", loaded.ActionAuthorities, loaded.Connectors, err)
+	}
+	if err := run(connectorArguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("replace connector while preserving action permit: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || len(loaded.Connectors[0].ActionAuthorityIDs) != 1 {
+		t.Fatalf("preserved action permit connector=%#v err=%v", loaded.Connectors[0], err)
+	}
+	changePermitLifetime := append(append([]string(nil), connectorArguments...), "-max-action-permit-seconds", "120")
+	if err := run(changePermitLifetime, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("change preserved action permit lifetime: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || loaded.Connectors[0].MaxActionPermitSeconds != 120 {
+		t.Fatalf("changed action permit lifetime connector=%#v err=%v", loaded.Connectors[0], err)
+	}
+	var trustOutput bytes.Buffer
+	if err := run([]string{"gateway", "connector", "trust", "-config", path}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "requires -tenant-id") {
+		t.Fatalf("tenant-unscoped action trust export error=%v", err)
+	}
+	if err := run([]string{"gateway", "connector", "trust", "-config", path, "-tenant-id", "tenant-a"}, &trustOutput, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(trustOutput.String(), `"schema_version": "steward.action-trust.v1"`) ||
+		!strings.Contains(trustOutput.String(), `"node_id": "node-a"`) ||
+		!strings.Contains(trustOutput.String(), `"tenant_id": "tenant-a"`) ||
+		!strings.Contains(trustOutput.String(), `"public_key_digest": "sha256:`) ||
+		!strings.Contains(trustOutput.String(), `"credential_mode": "bearer"`) ||
+		!strings.Contains(trustOutput.String(), `"credential_epoch": 1`) ||
+		!strings.Contains(trustOutput.String(), `"max_permit_seconds": 120`) ||
+		!strings.Contains(trustOutput.String(), `"base_url": "https://api.example.test"`) ||
+		!strings.Contains(trustOutput.String(), `"method": "POST"`) ||
+		!strings.Contains(trustOutput.String(), `"path": "/v1/issues"`) ||
+		!strings.Contains(trustOutput.String(), `"policy_digest": "sha256:`) {
+		t.Fatalf("action trust output=%q err=%v", trustOutput.String(), err)
+	}
+	clearPermit := append(append([]string(nil), connectorArguments...), "-clear-action-permit")
+	if err := run(clearPermit, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("clear action permit: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || loaded.ActionPermitNodeID != "" || len(loaded.ActionAuthorities) != 0 ||
+		len(loaded.Connectors[0].ActionAuthorityIDs) != 0 || loaded.Connectors[0].CredentialEpoch != 0 {
+		t.Fatalf("cleared action permit config=%#v connector=%#v err=%v", loaded.ActionAuthorities, loaded.Connectors[0], err)
+	}
+	clearedRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"credential_epoch", "action_authorities", "action_permit_node_id", "action_authority_ids", "max_action_permit_seconds"} {
+		if bytes.Contains(clearedRaw, []byte(`"`+field+`"`)) {
+			t.Fatalf("cleared permit config retained legacy-incompatible field %q: %s", field, clearedRaw)
+		}
 	}
 	upsert := append(append([]string(nil), connectorArguments...), "-tenant-budget", "tenant=west=1048576")
 	var upsertOutput bytes.Buffer

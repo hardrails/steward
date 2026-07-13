@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hardrails/steward/internal/actionpermit"
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 )
@@ -28,6 +30,7 @@ var (
 )
 
 const connectorCredentialScanBlockBytes = 32 << 10
+const actionPermitHeader = "X-Steward-Action-Permit"
 
 func (s *Server) listenConnectorGrantLocked(id string) error {
 	if listener := s.connectorListeners[id]; listener != nil {
@@ -139,8 +142,20 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 			return
 		}
 
-		callDigest := connectorCallDigest(grant.TenantID, grant.InstanceID, taskID, connectorID, operationID)
-		receipt := connectorReceiptEvent(grant, routePolicyDigest, connectorID, operationID, callDigest, int64(len(body)))
+		permit, permitErr := verifyConnectorActionPermit(
+			request.Header, connector, grant, routePolicyDigest, connectorID, operationID, taskID, body, s.now().UTC(),
+		)
+		if permitErr != nil {
+			slog.Warn("connector action permit denied", "grant_id", grantID, "connector_id", connectorID,
+				"operation_id", operationID, "reason", permitErr.Error())
+			writeGatewayError(w, http.StatusForbidden, "action_permit_denied", "a valid action permit for the exact connector request is required")
+			return
+		}
+		callDigest := ConnectorCallDigest(grant.TenantID, grant.InstanceID, taskID, connectorID, operationID)
+		receipt := connectorReceiptEvent(
+			grant, routePolicyDigest, connectorID, operationID, callDigest, permit.authorityKeyID,
+			permit.permitDigest, permit.requestDigest, int64(len(body)),
+		)
 		if err := s.spendConnectorCall(grantID, connectorID, callDigest, receipt); err != nil {
 			switch {
 			case errors.Is(err, errConnectorReplay):
@@ -156,6 +171,14 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 			default:
 				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector authorization could not be recorded")
 			}
+			return
+		}
+		if !permit.expiresAt.IsZero() && !s.now().UTC().Before(permit.expiresAt) {
+			if err := s.finishConnectorReceipt(receipt, 0, 0, "action_permit_expired"); err != nil {
+				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
+				return
+			}
+			writeGatewayError(w, http.StatusForbidden, "action_permit_denied", "the action permit expired before the connector effect could begin")
 			return
 		}
 		// Spending is durable before DNS because DNS itself is externally visible.
@@ -184,9 +207,88 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 	})
 }
 
+type connectorActionPermit struct {
+	authorityKeyID string
+	permitDigest   string
+	requestDigest  string
+	expiresAt      time.Time
+}
+
+func verifyConnectorActionPermit(
+	header http.Header,
+	connector loadedConnector,
+	grant Grant,
+	routePolicyDigest, connectorID, operationID, taskID string,
+	body []byte,
+	now time.Time,
+) (connectorActionPermit, error) {
+	values := header.Values(actionPermitHeader)
+	if len(connector.authorities) == 0 {
+		if len(values) != 0 {
+			return connectorActionPermit{}, errors.New("connector does not accept action permits")
+		}
+		return connectorActionPermit{}, nil
+	}
+	if len(values) != 1 {
+		return connectorActionPermit{}, errors.New("exactly one action permit header is required")
+	}
+	raw, err := actionpermit.DecodeHeader(values[0])
+	if err != nil {
+		return connectorActionPermit{}, fmt.Errorf("decode permit header: %w", err)
+	}
+	verified, err := actionpermit.Verify(
+		raw, connector.authorities, now, time.Duration(connector.MaxActionPermitSeconds)*time.Second,
+	)
+	if err != nil {
+		return connectorActionPermit{}, err
+	}
+	statement := verified.Statement
+	requestDigest := actionpermit.RequestDigest(body)
+	operation, operationExists := connector.operations[operationID]
+	if !operationExists {
+		return connectorActionPermit{}, errors.New("permit operation is not configured")
+	}
+	operationDigest, err := ConnectorOperationPolicyDigest(
+		connector.BaseURL, connector.CredentialMode, connector.CredentialEpoch, connectorID, operation,
+	)
+	if err != nil {
+		return connectorActionPermit{}, errors.New("connector operation policy is invalid")
+	}
+	contentType, err := ConnectorOperationContentType(operation.Method)
+	if err != nil {
+		return connectorActionPermit{}, errors.New("connector operation content type is invalid")
+	}
+	if connector.authorityTenants[verified.KeyID] != grant.TenantID ||
+		statement.NodeID != connector.permitNodeID || statement.TenantID != grant.TenantID ||
+		statement.InstanceID != grant.InstanceID || statement.Generation != grant.Generation ||
+		statement.CapsuleDigest != grant.CapsuleDigest || statement.PolicyDigest != grant.PolicyDigest ||
+		statement.RoutePolicyDigest != routePolicyDigest || statement.ConnectorID != connectorID ||
+		statement.OperationID != operationID || statement.OperationDigest != operationDigest || statement.TaskID != taskID ||
+		statement.RequestDigest != requestDigest || statement.RequestBytes != int64(len(body)) ||
+		statement.ContentType != contentType {
+		return connectorActionPermit{}, errors.New("permit does not match the active tenant, grant, operation, task, and request")
+	}
+	expiresAt, err := time.Parse(time.RFC3339, statement.ExpiresAt)
+	if err != nil {
+		return connectorActionPermit{}, errors.New("permit expiry is invalid")
+	}
+	return connectorActionPermit{
+		authorityKeyID: verified.KeyID, permitDigest: verified.EnvelopeDigest,
+		requestDigest: requestDigest, expiresAt: expiresAt,
+	}, nil
+}
+
 func (s *Server) allowConnectorAttempt(grantID string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A request already accepted by the Unix listener can outlive unregister.
+	// Do not let that late request recreate limiter state for a deleted grant.
+	if _, ok := s.grants[grantID]; !ok {
+		return false
+	}
+	if s.connectorAttempts == nil {
+		s.connectorAttempts = make(map[string]connectorAttemptWindow)
+	}
 	window := s.connectorAttempts[grantID]
 	if now.Before(window.started) {
 		return false
@@ -271,7 +373,9 @@ func connectorPort(scheme, portText string) int {
 	return 80
 }
 
-func connectorCallDigest(tenantID, instanceID, taskID, connectorID, operationID string) string {
+// ConnectorCallDigest returns the durable, non-secret replay identity for one
+// logical connector effect. It is exported for offline permit-to-receipt audit.
+func ConnectorCallDigest(tenantID, instanceID, taskID, connectorID, operationID string) string {
 	digest := sha256.New()
 	_, _ = digest.Write([]byte("steward-gateway-connector-call-v1\x00"))
 	for _, value := range []string{tenantID, instanceID, taskID, connectorID, operationID} {
@@ -279,6 +383,46 @@ func connectorCallDigest(tenantID, instanceID, taskID, connectorID, operationID 
 		_, _ = digest.Write([]byte{0})
 	}
 	return "sha256:" + fmt.Sprintf("%x", digest.Sum(nil))
+}
+
+// ConnectorOperationPolicyDigest identifies the exact non-secret effect route
+// that one logical operation selects. It deliberately excludes credential bytes
+// while including their injection mode and the operator-managed credential epoch.
+func ConnectorOperationPolicyDigest(
+	baseURL string,
+	credentialMode CredentialMode,
+	credentialEpoch uint64,
+	connectorID string,
+	operation ConnectorOperation,
+) (string, error) {
+	base, err := exactConnectorOrigin(baseURL)
+	if err != nil || (credentialMode != CredentialModeBearer && credentialMode != CredentialModeXAPIKey) ||
+		credentialEpoch == 0 || !routeID(connectorID) || !routeID(operation.ID) ||
+		!connectorMethod(operation.Method) || !canonicalConnectorPath(operation.Path) {
+		return "", errors.New("connector operation policy is invalid")
+	}
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("steward-connector-operation-policy-v1\x00"))
+	for _, value := range []string{
+		connectorID, base.String(), string(credentialMode), strconv.FormatUint(credentialEpoch, 10),
+		operation.ID, operation.Method, operation.Path,
+	} {
+		_, _ = digest.Write([]byte(value))
+		_, _ = digest.Write([]byte{0})
+	}
+	return "sha256:" + fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+// ConnectorOperationContentType returns the outbound Content-Type fixed by
+// Gateway for a validated connector method.
+func ConnectorOperationContentType(method string) (string, error) {
+	if !connectorMethod(method) {
+		return "", errors.New("unsupported connector method")
+	}
+	if connectorMethodHasBody(method) {
+		return "application/json", nil
+	}
+	return "", nil
 }
 
 func (s *Server) spendConnectorCall(grantID, connectorID, digest string, receipt connectorledger.Event) error {

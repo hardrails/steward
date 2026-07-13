@@ -188,6 +188,14 @@ rotate the service token, not socket, state, identity, grant, or audit paths. A 
 retained for a stopped workload pins security-relevant route fields; changing one
 rejects the reload.
 
+Gateway limits synchronous egress denial handling to 30 attempts per grant, 120
+per tenant, and 480 across the host in each one-minute fixed window. Exhausting any
+layer makes subsequent requests that are actually denied return
+`egress_rate_limited` until reset, without another denial-audit write. Requests that
+satisfy egress policy continue normally. An inactive or revoked grant keeps its
+`grant_inactive` or `grant_revoked` response even when the corresponding denial
+record is suppressed. These limits are fixed and have no configuration fields.
+
 `connectors` contains at most 128 credential-brokered API policies. Each connector
 defines one exact HTTPS origin, one owner-only credential file containing one line
 of 12 to 16,384 visible ASCII bytes, `bearer` or
@@ -195,9 +203,63 @@ of 12 to 16,384 visible ASCII bytes, `bearer` or
 response, duration, and per-grant call limits, plus at most 64 operations. Each
 operation is one ID, uppercase HTTP method, and canonical exact path without a
 query, fragment, wildcard, or percent-encoded spelling. Connector grants also pin
-the loaded credential digest. See
+the loaded credential digest. `credential_epoch` is an operator-managed counter
+used only by a permit-enabled connector. It must be positive there and should be
+incremented for every credential-authority rotation. It is included in the
+effective route-policy digest and omitted when action permits are disabled. See
 [authenticated API operations]({{ '/guides/connectors/' | relative_url }}) for the
 complete boundary.
+
+Action permits are opt-in per connector. `action_authorities` accepts at most 64
+non-secret Ed25519 public keys. Each entry contains a bounded `key_id`, one exact
+`tenant_id`, and canonical base64 `public_key`. The configurator treats key IDs as
+immutable: changing a key or tenant requires a new ID. Reusing the same public key
+bytes under another ID in one configuration is rejected, and every configured
+authority must be referenced. Private action keys never belong in Gateway
+configuration or on the node.
+
+When any authority exists, `action_permit_node_id` is required and must be a
+bounded stable node identity; without authorities it must be absent. A connector's
+sorted `action_authority_ids` contains one through eight configured keys, and
+`max_action_permit_seconds` is one through 86,400. Gateway then requires exactly
+one canonical `X-Steward-Action-Permit` header for that connector and verifies the
+key's tenant scope, node, instance, generation, admission digests, connector,
+operation, `operation_policy_digest`, task, exact request digest and length, content
+type, and validity window against live state. The operation-policy digest commits
+to the canonical base URL, credential injection mode, credential epoch, connector
+and operation IDs, HTTP method, and exact path without including credential bytes.
+The non-secret mode is `bearer` or `x-api-key` and identifies the header Gateway
+uses; the credential value remains excluded. Content type is
+`application/json` for POST, PUT, and PATCH and empty for bodyless GET, HEAD, and
+DELETE. A connector with no action key rejects an unsolicited permit header rather
+than silently ignoring it.
+
+Use repeatable `-action-authority KEY_ID=PUBLIC_KEY_FILE` flags with
+`stewardctl gateway connector set`. For each new key, also pass
+`-action-authority-tenant KEY_ID=TENANT_ID`. The first permit-enabled connector
+requires `-action-node-id`; every permit-enabled connector requires a positive
+`-max-action-permit-seconds`. `-clear-action-permit` removes the requirement and
+credential epoch, and cannot be combined with action flags. Replacing a connector
+without action flags preserves its existing action keys and lifetime. Explicitly
+listing keys replaces that connector's list, and unreferenced global keys are
+pruned.
+
+A retained grant pins credential epoch, action-key digests and tenant scopes,
+permit node identity, lifetime, operations, and all other effective connector
+authority. Drain the retained grant before changing those fields; reload rejects
+semantic drift. Rotate an action key with a new ID. Rotate a connector credential
+only after draining, and increment its credential epoch before admitting replacement
+workloads.
+
+Run `stewardctl gateway connector trust` with
+`-config /etc/steward/gateway.json` and `-tenant-id TENANT_ID` to export strict,
+tenant-filtered `steward.action-trust.v1` JSON. The required root `tenant_id`
+excludes other tenants' action-authority and connector metadata. The output
+contains node, tenant/key, public-key-digest, connector origin, credential mode,
+exact operation method, path and policy digest, credential epoch, and lifetime
+metadata. The inventory is non-secret and unsigned. Authenticate it before using
+it on a signing station. It is only an issuance preflight; Gateway's live
+configuration remains authoritative.
 
 `connector_receipt_file`, `connector_receipt_key_file`,
 `connector_receipt_node_id`, and `connector_receipt_epoch` form one required group

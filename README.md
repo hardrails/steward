@@ -94,9 +94,9 @@ Steward separates those capabilities:
 | Deployment authority | A publisher-signed workload profile, site policy, and tenant/node-bound instance request must all permit the workload. |
 | Stale commands | Durable policy and generation records reject policy rollback and commands for replaced instances. Read-only commands do not change lifecycle ordering. |
 | Multiple tenants on one host | Each workload has its own gVisor sandbox, per-workload resource limits, host and tenant aggregate memory/CPU/PID reservations, workload-count caps, command authority, and, when needed, private Docker network. Durable admission, command-fence, journal, and receipt records bind the tenant ID. Persistent Docker volumes are disabled on shared hosts because the local volume driver does not provide portable hard byte or inode quotas. |
-| Model and API access | Site policy grants named inference routes, model aliases, service IDs, credential-brokered connector IDs, and HTTP(S) egress routes. A connector maps a logical operation to one operator-owned origin, method, path, credential, and call budget. Gateway gives the configured credential only to that upstream operation, not directly to the workload. Explicit non-borrowing receipt budgets prevent one tenant from consuming another tenant's evidence allocation. The agent gets no general network route. |
+| Model and API access | Site policy grants named inference routes, model aliases, service IDs, credential-brokered connector IDs, and HTTP(S) egress routes. A connector maps a logical operation to one operator-owned origin, method, path, credential, and call budget. Gateway gives the configured credential only to that upstream operation, not directly to the workload. An opt-in tenant-scoped action authority can additionally sign one short-lived permit for the exact connector request bytes. Explicit non-borrowing receipt budgets prevent one tenant from consuming another tenant's evidence allocation, while layered denial limits bound egress audit pressure. The agent gets no general network route. |
 | Remote nodes | Authenticated outbound polling works behind network address translation (NAT) and inbound firewalls. Tenant-signed commands include a short validity window, instance generation, and sequence number so Executor can reject replay. |
-| Audit evidence | Executor writes signed, hash-linked lifecycle receipts. Gateway writes a separate signed chain for connector authorizations and outcomes. `stewardctl` verifies both offline. |
+| Audit evidence | Executor writes signed, hash-linked lifecycle receipts. Gateway writes a separate signed chain for connector authorizations and outcomes; permit-backed records bind the authority key, permit, and exact request digest. `stewardctl` verifies both chains and correlates permits offline. |
 | Disconnected operation | Static binaries, local public-key infrastructure (PKI), offline image import, and local model gateways do not require a public network service after transfer. |
 | Vendor independence | Public OpenAPI and uplink contracts have no private runtime dependency. |
 
@@ -132,7 +132,8 @@ A Linux release contains six static binaries:
 - `steward-gateway` holds upstream credentials and enforces inference, service,
   exact connector-operation, and HTTP(S) egress grants.
 - `steward-relay` is a fixed-destination companion inside one workload network.
-- `stewardctl` manages keys, policy, OCI import, evidence, and local node actions.
+- `stewardctl` manages keys, policy, exact-request action permits, OCI import,
+  evidence, and local node actions.
 - `steward-mcp` exposes bounded node operations over MCP stdio.
 
 `steward`, `steward-executor`, and `steward-gateway` run as separate systemd
@@ -184,10 +185,11 @@ hardware side channels.
 Sandboxes, lifecycle APIs, egress allowlists, and credential injection are necessary
 but widely available. Steward connects them into a portable
 authorization-to-enforcement record: local keys and policy identify the artifact,
-tenant request, and exact connector operation; Gateway sends the configured
-credential only to that upstream operation, the node durably spends bounded
-connector calls before external effects, rejects stale authority, and binds
-effective route policy into signed receipts.
+tenant request, and exact connector operation; an optional off-node action key
+authorizes one exact connector request; Gateway sends the configured credential
+only to that upstream operation; and the node durably spends authority before an
+external effect. Signed receipts retain the stable task call, permit, request,
+policy, and outcome linkage for offline audit.
 
 Connector credential isolation has a precise boundary: Gateway does not hand the
 configured credential to the workload and aborts an upstream response if any header
@@ -222,8 +224,9 @@ The integration gate proved one authenticated upstream effect, replay and
 undeclared-operation denial, fixed-material secret scans, state purge, and separate
 Executor and Gateway connector receipt chains. The proof applies only to the pinned
 source, adapter, and documented inference, service, state, connector, and skill
-behavior. The official upstream image remains inadmissible because it starts as
-root and declares a volume.
+behavior. It used the connector grant-and-task path and did not exercise the
+optional action-permit path. The official upstream image remains inadmissible
+because it starts as root and declares a volume.
 
 Linux releases include the interactive or non-interactive builder and the
 `hermes-steward-acceptance` disposable-host harness. The builder can fetch the exact

@@ -25,8 +25,13 @@ import (
 )
 
 const (
-	PayloadType              = "application/vnd.steward.connector-receipt.v1+json"
-	SchemaV1                 = "steward.connector-receipt.v1"
+	PayloadTypeV1 = "application/vnd.steward.connector-receipt.v1+json"
+	PayloadTypeV2 = "application/vnd.steward.connector-receipt.v2+json"
+	SchemaV1      = "steward.connector-receipt.v1"
+	SchemaV2      = "steward.connector-receipt.v2"
+	// PayloadType remains the original format identifier for source compatibility
+	// with callers that construct legacy, non-permit receipt fixtures.
+	PayloadType              = PayloadTypeV1
 	MaxLineBytes             = 128 << 10
 	MaxLogBytes              = 64 << 20
 	MaxTenantBudgets         = 128
@@ -161,6 +166,9 @@ type Event struct {
 	ConnectorID       string  `json:"connector_id"`
 	OperationID       string  `json:"operation_id"`
 	TaskDigest        string  `json:"task_digest"`
+	AuthorityKeyID    string  `json:"authority_key_id,omitempty"`
+	PermitDigest      string  `json:"permit_digest,omitempty"`
+	RequestDigest     string  `json:"request_digest,omitempty"`
 	HTTPStatus        int     `json:"http_status,omitempty"`
 	RequestBytes      int64   `json:"request_bytes"`
 	ResponseBytes     int64   `json:"response_bytes"`
@@ -401,15 +409,19 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 	if l.failed {
 		return Head{}, errors.New("connector ledger requires reopen after an ambiguous write")
 	}
+	payloadType, schemaVersion := PayloadTypeV1, SchemaV1
+	if event.PermitDigest != "" {
+		payloadType, schemaVersion = PayloadTypeV2, SchemaV2
+	}
 	receipt := Receipt{
-		SchemaVersion: SchemaV1, NodeID: l.nodeID, Epoch: l.epoch, Sequence: l.next,
+		SchemaVersion: schemaVersion, NodeID: l.nodeID, Epoch: l.epoch, Sequence: l.next,
 		PreviousHash: l.last, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Event: event,
 	}
 	payload, err := json.Marshal(receipt)
 	if err != nil {
 		return Head{}, err
 	}
-	envelope, err := dsse.Sign(PayloadType, payload, l.keyID, l.private)
+	envelope, err := dsse.Sign(payloadType, payload, l.keyID, l.private)
 	if err != nil {
 		return Head{}, err
 	}
@@ -609,7 +621,11 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 		if len(raw) == 0 || len(raw) > MaxLineBytes {
 			return Head{}, fmt.Errorf("connector ledger line %d is empty or oversized", lineNumber)
 		}
-		payload, keyID, err := dsse.Verify(raw, PayloadType, trusted)
+		envelope, err := dsse.Parse(raw)
+		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 {
+			return Head{}, fmt.Errorf("verify connector ledger line %d: unsupported receipt envelope", lineNumber)
+		}
+		payload, keyID, err := dsse.Verify(raw, envelope.PayloadType, trusted)
 		if err != nil || keyID != head.KeyID {
 			return Head{}, fmt.Errorf("verify connector ledger line %d: %w", lineNumber, err)
 		}
@@ -617,7 +633,7 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 		if err := dsse.DecodeStrictInto(payload, MaxLineBytes, &receipt); err != nil {
 			return Head{}, fmt.Errorf("decode connector ledger line %d: %w", lineNumber, err)
 		}
-		if err := validateReceipt(receipt, nodeID, epoch, uint64(lineNumber), previous); err != nil {
+		if err := validateReceipt(receipt, envelope.PayloadType, nodeID, epoch, uint64(lineNumber), previous); err != nil {
 			return Head{}, fmt.Errorf("validate connector ledger line %d: %w", lineNumber, err)
 		}
 		current := hashLine(raw)
@@ -637,14 +653,22 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 	return head, nil
 }
 
-func validateReceipt(receipt Receipt, nodeID string, epoch, sequence uint64, previous string) error {
-	if receipt.SchemaVersion != SchemaV1 || receipt.NodeID != nodeID || receipt.Epoch != epoch ||
+func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequence uint64, previous string) error {
+	expectedSchema := SchemaV1
+	if payloadType == PayloadTypeV2 {
+		expectedSchema = SchemaV2
+	}
+	if receipt.SchemaVersion != expectedSchema || receipt.NodeID != nodeID || receipt.Epoch != epoch ||
 		receipt.Sequence != sequence || receipt.PreviousHash != previous {
 		return errors.New("connector receipt chain coordinates do not match")
 	}
 	observed, err := time.Parse(time.RFC3339Nano, receipt.ObservedAt)
 	if err != nil || observed.IsZero() || receipt.ObservedAt != observed.UTC().Format(time.RFC3339Nano) {
 		return errors.New("connector receipt has an invalid observation time")
+	}
+	if payloadType == PayloadTypeV1 && receipt.Event.PermitDigest != "" ||
+		payloadType == PayloadTypeV2 && receipt.Event.PermitDigest == "" {
+		return errors.New("connector receipt schema does not match its permit fields")
 	}
 	return validateEvent(receipt.Event)
 }
@@ -673,6 +697,8 @@ func sameCall(left, right Event) bool {
 		left.RoutePolicyDigest == right.RoutePolicyDigest && left.Generation == right.Generation &&
 		left.GrantID == right.GrantID && left.ConnectorID == right.ConnectorID &&
 		left.OperationID == right.OperationID && left.TaskDigest == right.TaskDigest &&
+		left.AuthorityKeyID == right.AuthorityKeyID &&
+		left.PermitDigest == right.PermitDigest && left.RequestDigest == right.RequestDigest &&
 		left.RequestBytes == right.RequestBytes
 }
 
@@ -684,6 +710,14 @@ func validateEvent(event Event) error {
 		event.ResponseBytes < 0 || event.ResponseBytes > 1<<30 || event.HTTPStatus < 0 || event.HTTPStatus > 599 ||
 		(event.ErrorCode != "" && !identifier(event.ErrorCode)) {
 		return errors.New("invalid bounded connector event")
+	}
+	if (event.PermitDigest == "") != (event.RequestDigest == "") ||
+		(event.PermitDigest == "") != (event.AuthorityKeyID == "") ||
+		event.PermitDigest != "" && (!digest(event.PermitDigest) || !digest(event.RequestDigest)) {
+		return errors.New("connector permit and request digests must be valid and present together")
+	}
+	if event.AuthorityKeyID != "" && !identifier(event.AuthorityKeyID) {
+		return errors.New("connector action authority key ID is invalid")
 	}
 	switch event.Phase {
 	case Authorize:

@@ -29,14 +29,14 @@ Every admitted agent container receives one fixed policy:
 | Network | The default is `network=none`. A workload with inference, service, connector, or egress authority receives one internal per-instance Docker network containing only the agent and its trusted relay. Docker allocates the subnet from its daemon-wide address pools, and its bridge host gateway is disabled. Gateway performs approved connections; the container receives no raw host or Internet route. |
 | Inference | Site policy selects one route and model alias. Gateway injects the upstream credential, rejects any other model, and synthesizes `/v1/models` from the allowed alias. |
 | Agent service | Gateway exposes a bearer-protected loopback endpoint. It reaches only the declared port through the grant's Unix socket and fixed relay; Docker publishes no container port. |
-| Authenticated connector | The signed capsule, tenant policy, and intent select connector IDs. Node configuration maps each connector operation to one exact method, path, origin, address policy, and owner-only credential. Gateway strips agent credentials, spends a durable task claim and call budget, pins the resolved address, injects only the configured Bearer or API-key value, denies redirects, and bounds concurrency, bodies, response, and time. |
-| HTTP(S) egress | Executor intersects the publisher profile, tenant route IDs, and instance request. Gateway enforces host and port, a pinned resolved IP, explicit private Classless Inter-Domain Routing (CIDR) ranges, concurrency, byte and time limits, lifecycle, and bounded audit output. |
+| Authenticated connector | The signed capsule, tenant policy, and intent select connector IDs. Node configuration maps each connector operation to one exact method, path, origin, address policy, and owner-only credential. Gateway strips agent credentials, spends a durable task claim and call budget, pins the resolved address, injects only the configured Bearer or API-key value, denies redirects, and bounds concurrency, bodies, response, and time. An opt-in tenant-scoped action authority can additionally require one short-lived signed permit that matches the live grant, exact origin, method, path, credential injection mode and epoch, task, and request bytes. |
+| HTTP(S) egress | Executor intersects the publisher profile, tenant route IDs, and instance request. Gateway enforces host and port, a pinned resolved IP, explicit private Classless Inter-Domain Routing (CIDR) ranges, concurrency, byte and time limits, lifecycle, and bounded audit output. Synchronous denial work is limited to 30 per grant, 120 per tenant, and 480 per host per minute; exhaustion suppresses further denial writes while allowed traffic continues. |
 | Resources | Per-workload memory, swap, CPU, PID, and shared-memory limits are mandatory. Docker's bounded `local` log rotation is fixed and the out-of-memory (OOM) killer remains enabled. Executor reconstructs host and tenant aggregate memory, CPU, PID, and workload reservations from Docker, including stopped containers and fixed relay overhead. Disk, inode, and I/O quotas remain outside this portable contract. |
 | Lifecycle | Docker restart and automatic-removal policies are disabled. Executor, not Docker, owns lifecycle. It inspects restart, log, port, device, mount, network, namespace, and image settings after creation. |
 | Integrity and recovery | A SHA-256 fingerprint covers the admitted definition. Reconciliation—comparison of durable signed state with actual runtime objects—runs before normal mutations are accepted and every 30 seconds. It may repair limited lifecycle drift, but never recreates or adopts missing or structurally changed objects. A degraded scan can only narrow authority. |
 | Route integrity | Gateway persists a non-secret digest of each retained route policy and a private credential-content binding. Executor stores the route-policy digest in the admission fence and receipt. Reload, restart, start, and reconciliation refuse a mismatch while the grant remains retained. |
 | Interface | Request bodies and log output are bounded, and every error has the same JSON shape. Executor mutation and both uplinks require authentication. Signed envelopes and payloads reject duplicate and unknown JSON members. The generic supervisor REST API has no built-in authentication and must stay on loopback or behind operator authentication. |
-| Receipts (opt-in) | Executor writes length-framed, Ed25519-signed lifecycle records. Gateway writes a separate signed newline-delimited JSON chain for connector authorizations and terminal outcomes. Both chains are hash-linked and flushed with `fsync`; an auditor can verify a copied chain and an independently retained exact head without network access. |
+| Receipts (opt-in) | Executor writes length-framed, Ed25519-signed lifecycle records. Gateway writes a separate signed newline-delimited JSON chain for connector authorizations and terminal outcomes. Permit-backed records include the authority key ID, exact permit-envelope digest, and exact request digest. Both chains are hash-linked and flushed with `fsync`; an auditor can verify a copied chain and an independently retained exact head without network access. |
 
 The trusted per-instance relay uses `runc`, not gVisor, because it mounts one
 host-owned, per-grant socket directory. It connects to Gateway's inference,
@@ -61,6 +61,7 @@ Within this trust model, Steward's shared-host tenant isolation means:
 - tenant-bound signed authority and anti-replay state keyed by tenant and instance;
 - per-workload resource ceilings and host-wide and per-tenant aggregate memory,
   CPU, PID, and workload-count ceilings;
+- layered grant, tenant, and host limits on egress denial-audit work;
 - one private network and finite Gateway grant per positive-capability instance;
   and
 - site-owned cleanup keys that, while Executor is serving, can stop, destroy, or
@@ -142,11 +143,22 @@ path and method policy apply only to HTTP that Gateway can inspect. Deactivating
 removing a grant closes active HTTP requests, CONNECT tunnels, and WebSocket
 streams immediately.
 
+The egress denial limiter bounds synchronous audit pressure, not all Gateway work.
+After 30 denials for one grant, 120 for one tenant, or 480 across the host in a
+one-minute fixed window, the next request that fails egress policy returns
+`egress_rate_limited` without another denial-audit write. Requests that satisfy
+policy remain allowed. Lifecycle transitions keep the more specific
+`grant_inactive` or `grant_revoked` response even when their denial record is
+suppressed. The limiter does not provide tenant scheduling or isolate shared CPU,
+memory, disk latency, or the host-wide audit file.
+
 ## Evidence boundary
 
 Executor receipts record admission and lifecycle decisions and effects that
 Executor can observe. Gateway's separate connector chain records authorization and
-terminal outcomes that Gateway can observe. Offline verification checks each
+terminal outcomes that Gateway can observe. For permit-backed calls, offline audit
+can correlate the signed permit with the authority key, exact request, stable task
+call digest, authorization time, and terminal record. Offline verification checks each
 format's signatures and framing, plus sequence, hash links, node ID, key epoch, and
 an optional exact externally retained head. An expected sequence and chain hash
 identify one exact final head; they are not lower bounds. This detects a truncated
@@ -172,9 +184,11 @@ matters.
 ## Operator responsibilities
 
 Patch the host, Docker, gVisor, and Steward. Authenticate imported artifacts,
-protect enrollment and receipt keys, keep management listeners on loopback or
-disabled, monitor capacity and audit output, and preserve anti-replay state during
-backup and rollback.
+protect enrollment, receipt, and off-node action-authority keys, keep management
+listeners on loopback or disabled, monitor capacity and audit output, and preserve
+anti-replay state during backup and rollback. An exported action-trust inventory is
+unsigned and non-secret: authenticate it as operator input. It is a signing
+preflight, not authority; Gateway's live configuration makes the final decision.
 
 On Amazon Web Services (AWS), use private subnets, no public management listener,
 encrypted disks, Instance Metadata Service v2 (IMDSv2), and non-secret user data;

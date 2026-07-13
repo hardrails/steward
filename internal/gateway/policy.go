@@ -41,19 +41,29 @@ type egressDestinationPolicy struct {
 }
 
 type connectorRoutePolicy struct {
-	ID                   string                     `json:"id"`
-	BaseURL              string                     `json:"base_url"`
-	CredentialFile       string                     `json:"credential_file"`
-	CredentialMode       CredentialMode             `json:"credential_mode"`
-	CredentialConfigured bool                       `json:"credential_configured"`
-	AllowInsecureHTTP    bool                       `json:"allow_insecure_http"`
-	AllowedCIDRs         []string                   `json:"allowed_cidrs,omitempty"`
-	MaxConcurrent        int                        `json:"max_concurrent"`
-	MaxRequestBytes      int64                      `json:"max_request_bytes"`
-	MaxResponseBytes     int64                      `json:"max_response_bytes"`
-	MaxSeconds           int                        `json:"max_seconds"`
-	MaxCallsPerGrant     int                        `json:"max_calls_per_grant"`
-	Operations           []connectorOperationPolicy `json:"operations"`
+	ID                     string                     `json:"id"`
+	BaseURL                string                     `json:"base_url"`
+	CredentialFile         string                     `json:"credential_file"`
+	CredentialMode         CredentialMode             `json:"credential_mode"`
+	CredentialConfigured   bool                       `json:"credential_configured"`
+	CredentialEpoch        uint64                     `json:"credential_epoch,omitempty"`
+	AllowInsecureHTTP      bool                       `json:"allow_insecure_http"`
+	AllowedCIDRs           []string                   `json:"allowed_cidrs,omitempty"`
+	MaxConcurrent          int                        `json:"max_concurrent"`
+	MaxRequestBytes        int64                      `json:"max_request_bytes"`
+	MaxResponseBytes       int64                      `json:"max_response_bytes"`
+	MaxSeconds             int                        `json:"max_seconds"`
+	MaxCallsPerGrant       int                        `json:"max_calls_per_grant"`
+	ActionAuthorities      []actionAuthorityPolicy    `json:"action_authorities,omitempty"`
+	ActionPermitNodeID     string                     `json:"action_permit_node_id,omitempty"`
+	MaxActionPermitSeconds int                        `json:"max_action_permit_seconds,omitempty"`
+	Operations             []connectorOperationPolicy `json:"operations"`
+}
+
+type actionAuthorityPolicy struct {
+	KeyID           string `json:"key_id"`
+	TenantID        string `json:"tenant_id"`
+	PublicKeyDigest string `json:"public_key_digest"`
 }
 
 type connectorOperationPolicy struct {
@@ -87,10 +97,20 @@ func sameLoadedConnector(left, right loadedConnector) bool {
 		left.CredentialFile != right.CredentialFile || left.CredentialMode != right.CredentialMode ||
 		left.AllowInsecureHTTP != right.AllowInsecureHTTP ||
 		left.credential != right.credential || left.MaxConcurrent != right.MaxConcurrent ||
+		left.CredentialEpoch != right.CredentialEpoch ||
 		left.MaxRequestBytes != right.MaxRequestBytes || left.MaxResponseBytes != right.MaxResponseBytes ||
 		left.MaxSeconds != right.MaxSeconds || left.MaxCallsPerGrant != right.MaxCallsPerGrant ||
-		!slices.Equal(left.prefixes, right.prefixes) || len(left.operations) != len(right.operations) {
+		left.MaxActionPermitSeconds != right.MaxActionPermitSeconds ||
+		left.permitNodeID != right.permitNodeID ||
+		!slices.Equal(left.ActionAuthorityIDs, right.ActionAuthorityIDs) ||
+		!slices.Equal(left.prefixes, right.prefixes) || len(left.operations) != len(right.operations) ||
+		len(left.authorities) != len(right.authorities) {
 		return false
+	}
+	for id, key := range left.authorities {
+		if string(key) != string(right.authorities[id]) || left.authorityTenants[id] != right.authorityTenants[id] {
+			return false
+		}
 	}
 	for id, operation := range left.operations {
 		if operation != right.operations[id] {
@@ -145,10 +165,22 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		policy := connectorRoutePolicy{
 			ID: connector.ID, BaseURL: routeBaseURL(connector.base), CredentialFile: connector.CredentialFile,
 			CredentialMode: connector.CredentialMode, CredentialConfigured: connector.credential != "",
+			CredentialEpoch:   connector.CredentialEpoch,
 			AllowInsecureHTTP: connector.AllowInsecureHTTP,
 			MaxConcurrent:     connector.MaxConcurrent, MaxRequestBytes: connector.MaxRequestBytes,
 			MaxResponseBytes: connector.MaxResponseBytes, MaxSeconds: connector.MaxSeconds,
-			MaxCallsPerGrant: connector.MaxCallsPerGrant,
+			MaxCallsPerGrant: connector.MaxCallsPerGrant, ActionPermitNodeID: connector.permitNodeID,
+			MaxActionPermitSeconds: connector.MaxActionPermitSeconds,
+		}
+		if len(connector.ActionAuthorityIDs) > 0 {
+			document.Version = 4
+		}
+		for _, keyID := range connector.ActionAuthorityIDs {
+			sum := sha256.Sum256(connector.authorities[keyID])
+			policy.ActionAuthorities = append(policy.ActionAuthorities, actionAuthorityPolicy{
+				KeyID: keyID, TenantID: connector.authorityTenants[keyID],
+				PublicKeyDigest: "sha256:" + fmt.Sprintf("%x", sum[:]),
+			})
 		}
 		for _, prefix := range connector.prefixes {
 			policy.AllowedCIDRs = append(policy.AllowedCIDRs, prefix.String())
