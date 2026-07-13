@@ -135,7 +135,8 @@ both `-check-config` and startup.
 
 Steward's Hermes qualification applies only to upstream commit
 `095b9eed3801c251796df93f48a8f2a527ff6e70`, the checked-in adapter definition, and
-the documented runtime contract. The proof ran a source-built, non-root image under
+the documented runtime contract on `linux/amd64`. Other platforms are not yet
+qualified. The proof ran a source-built, non-root image under
 gVisor, submitted useful work through Hermes's run API, verified the signed
 `steward.workspace-audit` result, restarted the container with its retained state,
 and ran the skill again.

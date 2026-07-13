@@ -1,6 +1,7 @@
 {
   "schema_version": "steward.adapter-source.v1",
   "adapter_contract": "steward.hermes-agent.v1",
+  "qualified_platforms": ["linux/amd64"],
   "upstream": {
     "repository": "https://github.com/NousResearch/hermes-agent.git",
     "revision": "095b9eed3801c251796df93f48a8f2a527ff6e70",

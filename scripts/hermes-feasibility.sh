@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Real Docker/gVisor feasibility gate for the exact pinned Hermes adapter.
 set -euo pipefail
+unset CDPATH PYTHONHOME PYTHONPATH
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 revision=095b9eed3801c251796df93f48a8f2a527ff6e70
@@ -28,6 +31,7 @@ debug_keep=${HERMES_DEBUG_KEEP_FAILED_WORK:-NO}
 }
 command -v docker >/dev/null || { echo 'hermes-feasibility: docker is required' >&2; exit 2; }
 command -v python3 >/dev/null || { echo 'hermes-feasibility: python3 is required' >&2; exit 2; }
+command -v sha256sum >/dev/null || { echo 'hermes-feasibility: sha256sum is required' >&2; exit 2; }
 command -v timeout >/dev/null || { echo 'hermes-feasibility: GNU timeout is required' >&2; exit 2; }
 docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || {
 	echo 'hermes-feasibility: Docker runtime runsc is required' >&2
@@ -52,10 +56,12 @@ adapter_archive_digest=unavailable
 image_manifest_digest=unavailable
 image_config_digest=unavailable
 runtime_image_id=unavailable
+image_platform=unavailable
 runtime_observed=unknown
 overall=failed
 failure_code=unhandled_failure
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+harness_sha256=$(sha256sum "$root/scripts/hermes-feasibility.sh" | awk '{print $1}')
 required_checks=(
 	source.inputs image.build image.contract network.internal fixture.services
 	fixture.network
@@ -76,7 +82,10 @@ record() {
 safe_git() {
 	local repository=$1
 	shift
-	env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+	env -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_CEILING_DIRECTORIES \
+		-u GIT_COMMON_DIR -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_DIR \
+		-u GIT_EXEC_PATH -u GIT_INDEX_FILE -u GIT_NAMESPACE -u GIT_OBJECT_DIRECTORY \
+		-u GIT_SHALLOW_FILE -u GIT_TEMPLATE_DIR -u GIT_WORK_TREE \
 		GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 \
 		git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c tar.umask=0022 -C "$repository" "$@"
 }
@@ -116,10 +125,11 @@ write_evidence() {
 	fi
 	mkdir -p "$(dirname "$evidence_out")"
 	local evidence_write_status=0
-		python3 - "$checks" "$evidence_out" "$overall" "$failure_code" "$started_at" \
+		python3 -I - "$checks" "$evidence_out" "$overall" "$failure_code" "$started_at" \
 			"$revision" "$source_tree_digest" "$source_archive_digest" "$adapter_commit" \
 			"$adapter_tree_digest" "$adapter_archive_digest" "$image_manifest_digest" \
-			"$image_config_digest" "$runtime_image_id" "$runtime_observed" <<'PY' || evidence_write_status=$?
+			"$image_config_digest" "$runtime_image_id" "$image_platform" "$runtime_observed" \
+			"$harness_sha256" <<'PY' || evidence_write_status=$?
 import json
 import os
 import pathlib
@@ -128,7 +138,8 @@ import sys
 (
     checks_path, output, overall, failure, started, revision, source_tree,
     source_archive, adapter_commit, adapter_tree, adapter_archive,
-    image_manifest, image_config, runtime_image_id, runtime,
+    image_manifest, image_config, runtime_image_id, image_platform, runtime,
+    harness_sha256,
 ) = sys.argv[1:]
 checks = []
 path = pathlib.Path(checks_path)
@@ -152,7 +163,9 @@ payload = {
     "image_manifest_digest": None if image_manifest == "unavailable" else image_manifest,
     "image_config_digest": None if image_config == "unavailable" else image_config,
     "runtime_image_id": None if runtime_image_id == "unavailable" else runtime_image_id,
+    "platform": None if image_platform == "unavailable" else image_platform,
     "runtime": None if runtime == "unknown" else runtime,
+    "harness_sha256": harness_sha256,
     "contains_agent_content": False,
     "checks": checks,
 }
@@ -234,7 +247,7 @@ builder_archive=$work/hermes-adapter.tar
 	>"$work/build.log" 2>&1 || stop_gate image.build pinned_source_build_failed
 builder_attestation=$builder_archive.attestation.json
 [[ -f $builder_archive && -f $builder_attestation ]] || stop_gate image.build builder_output_missing
-image_identity_values=$(python3 - "$builder_attestation" "$revision" "$source_tree_digest" \
+image_identity_values=$(python3 -I - "$builder_attestation" "$revision" "$source_tree_digest" \
 	"$source_archive_digest" "$adapter_commit" "$adapter_tree_digest" <<'PY'
 import json
 import pathlib
@@ -257,6 +270,7 @@ if (
     or adapter.get("steward_commit") != sys.argv[5]
     or adapter.get("git_tree") != sys.argv[6]
     or payload.get("build_recipe", {}).get("build_isolation") != "gvisor-runsc"
+    or payload.get("build_recipe", {}).get("network_scope") != "verified-host-wheel-fetch;gvisor-hooks-network-none"
     or payload.get("build_recipe", {}).get("upstream_build_hooks_in_final_assembly") is not False
 ):
     raise SystemExit(1)
@@ -264,21 +278,24 @@ image = payload.get("image", {})
 manifest = image.get("manifest_digest")
 config = image.get("config_digest")
 runtime = image.get("runtime_image_id")
+platform = image.get("platform")
 digest = re.compile(r"sha256:[a-f0-9]{64}")
 if any(not isinstance(value, str) or digest.fullmatch(value) is None for value in (manifest, config, runtime)):
     raise SystemExit(1)
-if runtime not in {manifest, config}:
+if runtime not in {manifest, config} or platform != "linux/amd64":
     raise SystemExit(1)
 print(manifest)
 print(config)
 print(runtime)
+print(platform)
 PY
 ) || stop_gate image.identity invalid_image_identity
 mapfile -t image_identities <<<"$image_identity_values"
-(( ${#image_identities[@]} == 3 )) || stop_gate image.identity incomplete_image_identity
+(( ${#image_identities[@]} == 4 )) || stop_gate image.identity incomplete_image_identity
 image_manifest_digest=${image_identities[0]}
 image_config_digest=${image_identities[1]}
 runtime_image_id=${image_identities[2]}
+image_platform=${image_identities[3]}
 timeout "$build_timeout" docker load --input "$builder_archive" >"$work/load.log" 2>&1 || stop_gate image.load image_load_failed
 image=$runtime_image_id
 docker image inspect "$image" >/dev/null 2>&1 || stop_gate image.present image_not_present
@@ -310,7 +327,7 @@ docker run -d --name "$mcp" "${closed_run[@]}" \
 	--entrypoint python3 "$image" /opt/steward/fixture_mcp.py >/dev/null || stop_gate fixture.mcp mcp_start_failed
 model_ip=$(docker inspect --format "{{(index .NetworkSettings.Networks \"$network\").IPAddress}}" "$model")
 mcp_ip=$(docker inspect --format "{{(index .NetworkSettings.Networks \"$network\").IPAddress}}" "$mcp")
-python3 - "$model_ip" "$mcp_ip" <<'PY' || stop_gate fixture.network invalid_fixture_addresses
+python3 -I - "$model_ip" "$mcp_ip" <<'PY' || stop_gate fixture.network invalid_fixture_addresses
 import ipaddress
 import sys
 
@@ -320,8 +337,8 @@ assert model.version == 4 and mcp.version == 4 and model != mcp
 PY
 fixture_ready=false
 for _ in $(seq 1 30); do
-	if docker exec -u 65532:65532 "$model" python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/v1/models",timeout=2).read(65536)' >/dev/null 2>&1 && \
-		docker exec -u 65532:65532 "$mcp" python3 -c 'import urllib.request; r=urllib.request.Request("http://127.0.0.1:8767/mcp",method="HEAD"); urllib.request.urlopen(r,timeout=2).read(1)' >/dev/null 2>&1; then
+	if docker exec -u 65532:65532 "$model" python3 -I -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/v1/models",timeout=2).read(65536)' >/dev/null 2>&1 && \
+		docker exec -u 65532:65532 "$mcp" python3 -I -c 'import urllib.request; r=urllib.request.Request("http://127.0.0.1:8767/mcp",method="HEAD"); urllib.request.urlopen(r,timeout=2).read(1)' >/dev/null 2>&1; then
 		fixture_ready=true
 		break
 	fi
@@ -354,7 +371,7 @@ record runtime.policy passed runsc_closed_policy
 
 agent_get() {
 	local path=$1
-	timeout 15 docker exec -i -u 65532:65532 "$agent" python3 - "$path" <<'PY'
+	timeout 15 docker exec -i -u 65532:65532 "$agent" python3 -I - "$path" <<'PY'
 import sys
 import urllib.request
 
@@ -371,7 +388,7 @@ PY
 agent_post() {
 	local path=$1 body=$2
 	[[ ${#body} -le 65536 ]] || return 1
-	timeout 15 docker exec -i -u 65532:65532 "$agent" python3 - "$path" "$body" <<'PY'
+	timeout 15 docker exec -i -u 65532:65532 "$agent" python3 -I - "$path" "$body" <<'PY'
 import sys
 import urllib.request
 
@@ -397,7 +414,7 @@ for _ in $(seq 1 90); do
 	sleep 1
 done
 [[ -n $health ]] || stop_gate agent.readiness hermes_api_not_ready
-python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("status")=="ok" and p.get("platform")=="hermes-agent"' \
+python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert p.get("status")=="ok" and p.get("platform")=="hermes-agent"' \
 	<<<"$health" || stop_gate agent.readiness invalid_health_contract
 record agent.readiness passed "health_sha256:$(printf %s "$health" | sha256sum | awk '{print $1}')"
 
@@ -406,10 +423,10 @@ authority_before=$(find "$state_root" -type f \( -path '*/config.yaml' -o -path 
 negotiation_two=$(agent_get /steward/v1/negotiation) || stop_gate adapter.negotiation negotiation_replay_failed
 authority_after=$(find "$state_root" -type f \( -path '*/config.yaml' -o -path '*/skills/steward.workspace-audit/*' \) -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
 [[ $negotiation_one == "$negotiation_two" && $authority_before == "$authority_after" ]] || stop_gate adapter.negotiation negotiation_mutated_authority_state
-python3 -c 'import json,sys; p=json.load(sys.stdin); assert set(p)=={"adapter","adapter_contract","capabilities","native_protocols","schema_version","task_protocol","upstream_revision"}; assert p["schema_version"]=="steward.adapter-negotiation.v1" and p["adapter"]=="hermes-agent" and p["adapter_contract"]=="steward.hermes-agent.v1" and p["upstream_revision"]==sys.argv[1]; assert p["task_protocol"]=="hermes.runs.v1" and p["native_protocols"]==["http"]; assert p["capabilities"]==[{"fixture_id":"steward.workspace-audit","id":"skill"},{"fixture_id":"fixed-response","id":"task"}]' "$revision" <<<"$negotiation_one" || stop_gate adapter.negotiation invalid_negotiation_contract
+python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert set(p)=={"adapter","adapter_contract","capabilities","native_protocols","schema_version","task_protocol","upstream_revision"}; assert p["schema_version"]=="steward.adapter-negotiation.v1" and p["adapter"]=="hermes-agent" and p["adapter_contract"]=="steward.hermes-agent.v1" and p["upstream_revision"]==sys.argv[1]; assert p["task_protocol"]=="hermes.runs.v1" and p["native_protocols"]==["http"]; assert p["capabilities"]==[{"fixture_id":"steward.workspace-audit","id":"skill"},{"fixture_id":"fixed-response","id":"task"}]' "$revision" <<<"$negotiation_one" || stop_gate adapter.negotiation invalid_negotiation_contract
 record adapter.negotiation passed side_effect_free_exact_contract
 
-timeout 15 docker exec -i -u 65532:65532 "$agent" python3 - <<'PY' || stop_gate service.boundary service_boundary_contract_failed
+timeout 15 docker exec -i -u 65532:65532 "$agent" python3 -I - <<'PY' || stop_gate service.boundary service_boundary_contract_failed
 import http.client
 import urllib.error
 import urllib.request
@@ -437,7 +454,7 @@ for headers, expected in (({}, 411), ({"Content-Length": "65537"}, 413)):
 PY
 record service.boundary passed allowlist_and_body_limits_enforced
 
-docker exec -i -u 65532:65532 "$agent" python3 - <<'PY' || stop_gate runtime.identity process_identity_drift
+docker exec -i -u 65532:65532 "$agent" python3 -I - <<'PY' || stop_gate runtime.identity process_identity_drift
 import pathlib
 for status in pathlib.Path("/proc").glob("[0-9]*/status"):
     text = status.read_text(errors="replace")
@@ -455,7 +472,7 @@ docker exec -u 65532:65532 "$agent" sh -c 'printf ok > /opt/data/steward/state-w
 [[ $(cat "$state_root/steward/state-write-probe") == ok ]] || stop_gate runtime.state state_write_not_observed
 record runtime.filesystem passed fixed_state_only
 
-if docker exec -i -u 65532:65532 "$agent" python3 - <<'PY' >/dev/null 2>&1
+if docker exec -i -u 65532:65532 "$agent" python3 -I - <<'PY' >/dev/null 2>&1
 import urllib.request
 urllib.request.urlopen("https://pypi.org/simple/", timeout=3)
 PY
@@ -465,26 +482,26 @@ fi
 record runtime.network passed runtime_download_route_absent
 
 expected_digest=$(printf %s steward-hermes-phase1 | sha256sum | awk '{print $1}')
-	workspace_manifest_digest=$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1],encoding="utf-8")); assert p["fixture_id"]=="steward.workspace-audit.small.v1"; print(p["manifest_digest"])' \
+	workspace_manifest_digest=$(python3 -I -c 'import json,sys; p=json.load(open(sys.argv[1],encoding="utf-8")); assert p["fixture_id"]=="steward.workspace-audit.small.v1"; print(p["manifest_digest"])' \
 		"$work/context/adapter/fixtures/skill/workspace-fixture-contract.json") || stop_gate fixture.workspace invalid_workspace_contract
 record fixture.workspace passed actual_workspace_work_contract
 
 run_native_task() {
 	local task_name=$1 input=$2 expected=$3
 	local request response run_ref terminal
-	request=$(python3 - "$input" "$task_name" <<'PY'
+	request=$(python3 -I - "$input" "$task_name" <<'PY'
 import json
 import sys
 print(json.dumps({"input": sys.argv[1], "session_id": "steward-" + sys.argv[2]}, separators=(",", ":")))
 PY
 )
 	response=$(agent_post /v1/runs "$request") || stop_gate "task.$task_name" task_submit_failed
-	run_ref=$(python3 -c 'import json,sys; p=json.load(sys.stdin); print(p.get("run_id", ""))' <<<"$response")
+	run_ref=$(python3 -I -c 'import json,sys; p=json.load(sys.stdin); print(p.get("run_id", ""))' <<<"$response")
 	[[ $run_ref =~ ^run_[a-f0-9]{32}$ ]] || stop_gate "task.$task_name" invalid_upstream_run_id
 	terminal=
 	for _ in $(seq 1 "$run_timeout"); do
 		terminal=$(agent_get "/v1/runs/$run_ref") || stop_gate "task.$task_name" task_status_failed
-		status=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))' <<<"$terminal")
+		status=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("status", ""))' <<<"$terminal")
 		case $status in
 		completed) break ;;
 		failed|cancelled) stop_gate "task.$task_name" "task_$status" ;;
@@ -492,7 +509,7 @@ PY
 		sleep 1
 	done
 	[[ $status == completed ]] || stop_gate "task.$task_name" task_timeout
-	python3 -c 'import json,sys; p=json.load(sys.stdin); out=p.get("output"); raise SystemExit(0 if isinstance(out,str) and sys.argv[1] in out else 1)' \
+	python3 -I -c 'import json,sys; p=json.load(sys.stdin); out=p.get("output"); raise SystemExit(0 if isinstance(out,str) and sys.argv[1] in out else 1)' \
 		"$expected" <<<"$terminal" || stop_gate "task.$task_name" expected_result_missing
 	record "task.$task_name" passed "result_sha256:$(printf %s "$terminal" | sha256sum | awk '{print $1}')"
 }

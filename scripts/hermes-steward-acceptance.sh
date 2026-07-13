@@ -4,6 +4,9 @@
 # HERMES_BUILD_ATTESTATION selects builder metadata; the archive's sibling attestation is the default.
 set -euo pipefail
 umask 077
+unset CDPATH PYTHONHOME PYTHONPATH
+PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 
 : "${HERMES_ARCHIVE:?set HERMES_ARCHIVE to a builder-produced Hermes adapter .tar}"
 evidence_out=${HERMES_INTEGRATION_EVIDENCE_OUT:-}
@@ -60,7 +63,7 @@ prepare_evidence_provenance() {
 	if [[ -z $attestation && ( -e $HERMES_ARCHIVE.attestation.json || -L $HERMES_ARCHIVE.attestation.json ) ]]; then
 		attestation=$HERMES_ARCHIVE.attestation.json
 	fi
-	python3 - "$work/provenance.json" "$HERMES_ARCHIVE" "$manifest_digest" "$config_digest" \
+	python3 -I - "$work/provenance.json" "$HERMES_ARCHIVE" "$manifest_digest" "$config_digest" \
 		"$image_os" "$image_arch" "$image_variant" "$attestation" "$root" \
 		"$root/scripts/hermes-steward-acceptance.sh" \
 		executor "$executor_bin" gateway "$gateway_bin" relay "$relay_bin" ctl "$ctl_bin" <<'PY'
@@ -161,8 +164,13 @@ source = None
 source_path = pathlib.Path(source_root)
 if (source_path / ".git").exists():
     environment = dict(os.environ)
-    environment.pop("GIT_CONFIG_COUNT", None)
-    environment.pop("GIT_CONFIG_PARAMETERS", None)
+    for name in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_COMMON_DIR",
+        "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_EXEC_PATH",
+        "GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_OBJECT_DIRECTORY", "GIT_SHALLOW_FILE",
+        "GIT_TEMPLATE_DIR", "GIT_WORK_TREE",
+    ):
+        environment.pop(name, None)
     environment["GIT_CONFIG_NOSYSTEM"] = "1"
     environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
@@ -210,6 +218,7 @@ if attestation_path:
         or not isinstance(document.get("image"), dict)
         or document["image"].get("manifest_digest") != manifest_digest
         or document["image"].get("config_digest") != config_digest
+        or document["image"].get("runtime_image_id") not in {manifest_digest, config_digest}
         or document["image"].get("platform") != expected_platform
         or not isinstance(document.get("adapter"), dict)
         or document["adapter"].get("contract") != "steward.hermes-agent.v1"
@@ -232,7 +241,10 @@ if attestation_path:
         "attestation_sha256": hashlib.sha256(encoded).hexdigest(),
         "build_recipe": selected(
             document["build_recipe"],
-            ("base_image", "builder_sha256", "dockerfile_sha256", "id", "source_inputs_sha256"),
+            (
+                "base_image", "build_isolation", "builder_sha256", "dockerfile_sha256", "id",
+                "network_scope", "source_inputs_sha256", "upstream_build_hooks_in_final_assembly",
+            ),
         ),
         "schema_version": document["schema_version"],
         "source": selected(document["source"], ("archive_sha256", "git_tree", "repository", "revision")),
@@ -258,7 +270,7 @@ PY
 
 write_success_evidence() {
 	[[ -n $evidence_out ]] || return 0
-	python3 - "$evidence_out" "$work/provenance.json" "$work/evidence-head.json" \
+	python3 -I - "$evidence_out" "$work/provenance.json" "$work/evidence-head.json" \
 		"$work/steps" "$work/receipts.public" <<'PY' || return
 import datetime
 import hashlib
@@ -417,7 +429,7 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ -n $evidence_out ]]; then
-	python3 - "$evidence_out" "$work" <<'PY'
+	python3 -I - "$evidence_out" "$work" <<'PY'
 import os
 import pathlib
 import sys
@@ -446,7 +458,7 @@ for entry in executor:steward-executor gateway:steward-gateway relay:steward-rel
 done
 
 image_json=$($ctl_bin image inspect -archive "$HERMES_ARCHIVE")
-mapfile -t image_values < <(python3 -c '
+mapfile -t image_values < <(python3 -I -c '
 import json,sys
 p=json.load(sys.stdin)
 print(p["manifest_digest"])
@@ -473,7 +485,7 @@ relay_tag=steward-hermes-relay-acceptance:$run_id
 docker build --network=none --pull=false --provenance=false -q -f "$work/Relayfile" -t "$relay_tag" "$work" >/dev/null
 relay_image=$(docker image inspect --format '{{.Id}}' "$relay_tag")
 
-python3 - "$root/adapters/hermes-agent/fixture_model.py" <<'PY' >"$work/model.log" 2>&1 &
+python3 -I - "$root/adapters/hermes-agent/fixture_model.py" <<'PY' >"$work/model.log" 2>&1 &
 import http.server
 import importlib.util
 import sys
@@ -542,7 +554,7 @@ capsule_base64=$(base64 <"$work/capsule.dsse.json" | tr -d '\n')
 
 import_result=$("$ctl_bin" image import -archive "$HERMES_ARCHIVE" -capsule "$work/capsule.dsse.json" \
 	-policy "$work/policy.dsse.json" -site-root-public-key "$work/site.public" -site-root-key-id site-root)
-python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["image"]["manifest_digest"]==sys.argv[1] and p["image"]["config_digest"]==sys.argv[2]' \
+python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert p["image"]["manifest_digest"]==sys.argv[1] and p["image"]["config_digest"]==sys.argv[2]' \
 	"$manifest_digest" "$config_digest" <<<"$import_result"
 imported_image_digests=("$manifest_digest")
 [[ $config_digest == "$manifest_digest" ]] || imported_image_digests+=("$config_digest")
@@ -574,33 +586,33 @@ admit() {
 }
 
 extract_admission() {
-	python3 -c 'import json,sys; p=json.load(sys.stdin); print(p["runtime_ref"]); print(p["grant_id"])'
+	python3 -I -c 'import json,sys; p=json.load(sys.stdin); print(p["runtime_ref"]); print(p["grant_id"])'
 }
 
 require_admission() {
-	python3 -c 'import json,sys; p=json.load(sys.stdin); ok=isinstance(p.get("runtime_ref"),str) and isinstance(p.get("grant_id"),str); print(json.dumps(p,separators=(",",":")),file=sys.stderr) if not ok else None; raise SystemExit(0 if ok else 1)'
+	python3 -I -c 'import json,sys; p=json.load(sys.stdin); ok=isinstance(p.get("runtime_ref"),str) and isinstance(p.get("grant_id"),str); print(json.dumps(p,separators=(",",":")),file=sys.stderr) if not ok else None; raise SystemExit(0 if ok else 1)'
 }
 
 run_workspace_audit() {
 	local grant=$1 response run_ref terminal status expected
-	expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["manifest_digest"])' \
+	expected=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["manifest_digest"])' \
 		"$root/adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json")
 	response=$(curl -fsS -X POST "http://127.0.0.1:18091/v1/services/$grant/v1/runs" \
 		-H 'Authorization: Bearer service-secret' -H 'Content-Type: application/json' \
 		--data-binary '{"input":"STEWARD_WORKSPACE_AUDIT","session_id":"steward-integration"}')
-	run_ref=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' <<<"$response")
+	run_ref=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' <<<"$response")
 	[[ $run_ref =~ ^run_[a-f0-9]{32}$ ]] || return 1
 	status=
 	for _ in $(seq 1 180); do
 		terminal=$(curl -fsS -H 'Authorization: Bearer service-secret' \
 			"http://127.0.0.1:18091/v1/services/$grant/v1/runs/$run_ref")
-		status=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' <<<"$terminal")
+		status=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' <<<"$terminal")
 		[[ $status == completed ]] && break
 		[[ $status == failed || $status == cancelled ]] && return 1
 		sleep 1
 	done
 	[[ $status == completed ]] || return 1
-	python3 -c 'import json,sys; p=json.load(sys.stdin); assert isinstance(p.get("output"),str) and sys.argv[1] in p["output"]' \
+	python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert isinstance(p.get("output"),str) and sys.argv[1] in p["output"]' \
 		"$expected" <<<"$terminal"
 }
 
@@ -635,7 +647,7 @@ mark state_volume_observed
 docker exec -u 65532:65532 "$runtime_ref" sh -c 'mkdir -p /opt/data/workspace/nested && printf "alpha\n" > /opt/data/workspace/alpha.txt && printf "beta\n" > /opt/data/workspace/nested/beta.txt'
 mark workspace_seeded
 curl -fsS -H 'Authorization: Bearer service-secret' "http://127.0.0.1:18091/v1/services/$grant_id/health" | \
-	python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("status")=="ok" and p.get("platform")=="hermes-agent"'
+	python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert p.get("status")=="ok" and p.get("platform")=="hermes-agent"'
 run_workspace_audit "$grant_id"
 mark generation_1_skill_passed
 curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
@@ -664,7 +676,7 @@ state_volume=
 mark state_purged
 "$ctl_bin" evidence verify -in "$work/evidence.bin" -public-key "$work/receipts.public" \
 	-node-id "$node_id" -epoch 1 -json >"$work/evidence-head.json"
-python3 - "$work/evidence-head.json" "$node_id" <<'PY'
+python3 -I - "$work/evidence-head.json" "$node_id" <<'PY'
 import json
 import pathlib
 import re

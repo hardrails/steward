@@ -67,7 +67,8 @@ commits.
 ## Current qualified application
 
 The Hermes Agent adapter applies this decision to upstream commit
-`095b9eed3801c251796df93f48a8f2a527ff6e70`. Steward builds it from source rather
+`095b9eed3801c251796df93f48a8f2a527ff6e70` on the qualified `linux/amd64` platform.
+Other platforms require a separate qualification run. Steward builds it from source rather
 than deriving from the official image, which starts as root and declares a volume.
 The packaged builder accepts the exact online pin or an exact checkout supplied with
 `--source-dir`, then emits an OCI archive and metadata attestation for the local

@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b
 FROM ${UV_IMAGE}
 

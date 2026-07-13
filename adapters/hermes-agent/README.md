@@ -7,11 +7,12 @@ Hermes releases, plugins, channels, skills, or configuration.
 The build consumes an already-present checkout of the exact upstream revision
 recorded in `adapter.json`. `scripts/hermes-feasibility.sh` exports that checkout
 with replace refs and repository-local Git commands disabled. The builder runs
+the networkless planner and host fetcher described in the operator guide, then runs
 upstream dependency and packaging hooks inside a bounded gVisor container with
-read-only source, no Docker socket, dropped capabilities, `no-new-privileges`,
-fixed resource limits, and bounded artifact output. The final Dockerfile only
-assembles that validated output and runs with build networking disabled. The
-feasibility gate then runs the hostile-runtime checks.
+`--network=none`, read-only inputs, no Docker socket, dropped capabilities,
+`no-new-privileges`, fixed resource limits, and bounded artifact output. The final
+Dockerfile only assembles that validated output and runs with build networking
+disabled. The feasibility gate then runs the hostile-runtime checks.
 The build never uses the upstream image: that image starts as root, declares a
 volume, and its Dockerfile at the selected revision names two lockfiles that are
 not present in the tree.
@@ -47,13 +48,15 @@ this revision, the latter is the smallest locked extra that supplies `aiohttp`,
 which the native API-server adapter requires. No Home Assistant integration is
 configured or granted at runtime.
 
-Qualification passed two independent paths. The closed-runtime gate built the exact
-source, ran the basic task, signed workspace-audit skill, qualification-only MCP
-fixture, and restart under gVisor. The Steward integration gate then imported the
-archive through signed admission, brokered inference and the service API through
-Gateway, ran the workspace skill, destroyed and resumed the workload, ran the skill
-again, purged its state, and verified the signed receipt chain. These proofs remain
-limited to the exact pinned inputs and documented capability surface.
+On `linux/amd64`, qualification passed two independent paths. The closed-runtime gate
+built the exact source, ran the basic task, signed workspace-audit skill,
+qualification-only MCP fixture, and restart under gVisor. The Steward integration
+gate then imported the archive through signed admission, brokered inference and the
+service API through Gateway, ran the workspace skill, destroyed and resumed the
+workload, ran the skill again, purged its state, and verified the signed receipt
+chain. These proofs remain
+limited to the exact pinned inputs and documented capability surface. Other platforms
+require their own qualification run.
 
 Maintainers can retain a non-sensitive integration summary by setting
 `HERMES_INTEGRATION_EVIDENCE_OUT` when running

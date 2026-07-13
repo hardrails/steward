@@ -13,9 +13,10 @@ runs every process as UID/GID `65532:65532`. It does not use or modify the offic
 upstream image.
 
 Qualification means this pinned source and Steward adapter passed the documented
-runtime proof under gVisor, including useful work before and after a container
-restart. It does not approve another Hermes commit, a changed adapter, or arbitrary
-Hermes plugins, channels, skills, or Model Context Protocol (MCP) servers.
+runtime proof under gVisor on `linux/amd64`, including useful work before and after a
+container restart. Other platforms require their own qualification run. The retained
+proof does not approve another Hermes commit, a changed adapter, or arbitrary Hermes
+plugins, channels, skills, or Model Context Protocol (MCP) servers.
 
 Steward distributes the adapter definition and builder, not a prebuilt Hermes image.
 The dependency and base-image notice inventory is incomplete, so Steward does not
@@ -57,8 +58,8 @@ state therefore requires
 containing exactly one tenant. This is a dedicated-host compatibility mode, not a
 shared-host storage-isolation claim.
 
-The qualification suite ran the adapter with Docker's gVisor `runsc` runtime, a
-read-only root filesystem, all Linux capabilities dropped,
+On `linux/amd64`, the qualification suite ran the adapter with Docker's gVisor
+`runsc` runtime, a read-only root filesystem, all Linux capabilities dropped,
 `no-new-privileges`, fixed temporary storage, and no public network route. It
 verified the complete process tree remained at UID/GID `65532:65532`, state writes
 stayed under `/opt/data`, the immutable root rejected writes, and restart preserved
@@ -107,14 +108,18 @@ log. They are release-bound records, not independently signed attestations.
 
 ## Build the adapter
 
-Docker with the `runsc` runtime, Git, Python 3, and the command-line tools checked by
-the builder must be available on the build host. Upstream build hooks execute in a
-bounded gVisor container with read-only source and no Docker socket. The final image
-is assembled separately with build networking disabled. The sandbox can use the
-network only while resolving locked build dependencies. Do not place secrets or
-production data on the build host; use a disposable build machine because gVisor
-reduces build risk but does not make untrusted code harmless. From a Steward source
-checkout, run the interactive builder:
+Use a `linux/amd64` build host. Docker with the `runsc` runtime, Git, Python 3, and
+the command-line tools checked by the builder must be available. Upstream build
+hooks execute in a bounded gVisor container with read-only inputs, no Docker socket,
+and `--network=none`. First, a networkless gVisor planner reads the verified
+`uv.lock`. A non-executing host fetcher then downloads only the planned CPython 3.13
+`linux/amd64` wheels from `files.pythonhosted.org`. It refuses redirects and proxies
+and verifies each wheel's locked SHA-256 digest and byte size. The final image is also assembled with build
+networking disabled. Source checkout and a missing digest-pinned base image can still
+require host-side network access. Do not place secrets or production data on the
+build host; use a disposable build machine because gVisor reduces build risk but does
+not make untrusted code harmless. From a Steward source checkout, run the interactive
+builder:
 
 ```console
 scripts/build-hermes-adapter.sh --output hermes-agent-adapter.tar
@@ -156,9 +161,12 @@ a task.
 
 The builder reads committed Git objects rather than mutable working-tree files. It
 refuses a source revision other than the exact pin, a missing committed adapter,
-an unregistered `runsc`, an existing output file, insufficient free space, an unsafe
-gVisor build artifact, or an oversized archive. From an installed release, it also
-verifies every adapter file against `release.json`. It creates two new files:
+an unregistered `runsc`, insufficient free space, an unsafe gVisor build artifact,
+or an oversized archive. It never overwrites output. If both output files already
+form an exact pair bound to the current builder and current Steward commit or release,
+it reports the completed publication; otherwise it refuses them. From an installed
+release, it also verifies every adapter file against `release.json`. It creates two
+new files:
 
 - `hermes-agent-adapter.tar`, a Docker/OCI image archive; and
 - `hermes-agent-adapter.tar.attestation.json`, canonical metadata that binds the

@@ -67,7 +67,8 @@ outside the node-local receipt trust boundary.
 ## Can Steward run Hermes Agent or OpenClaw?
 
 Steward can run its qualified, source-built Hermes adapter for exact upstream commit
-`095b9eed3801c251796df93f48a8f2a527ff6e70`. The official Hermes image is still not
+`095b9eed3801c251796df93f48a8f2a527ff6e70` on the qualified `linux/amd64` platform.
+Other platforms require their own qualification run. The official Hermes image is still not
 admissible because it starts as root and declares a volume. Steward includes an
 interactive and non-interactive builder; it does not redistribute a prebuilt image
 because dependency and base-image notices are incomplete.

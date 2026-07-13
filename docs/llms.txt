@@ -59,7 +59,8 @@ ports. The Executor HTTP API, `stewardctl node`, and `steward-mcp` call the same
 Executor handlers.
 
 Steward includes a qualified Hermes Agent adapter definition for upstream commit
-`095b9eed3801c251796df93f48a8f2a527ff6e70`. The source-built image runs non-root
+`095b9eed3801c251796df93f48a8f2a527ff6e70` on `linux/amd64`; other platforms are
+not yet qualified. The source-built image runs non-root
 under gVisor, fixes inference through `http://steward-relay:8080/v1`, and exposes
 bounded negotiation, health, run submission, and run-status operations on port
 `8766`; run event streams are excluded. Qualification ran the signed,

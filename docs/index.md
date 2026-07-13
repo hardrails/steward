@@ -56,7 +56,8 @@ credential in the agent container.
 ## Agent adapters
 
 Steward provides a qualified Hermes Agent adapter definition for exact upstream
-commit `095b9eed3801c251796df93f48a8f2a527ff6e70`. The source-built image runs as
+commit `095b9eed3801c251796df93f48a8f2a527ff6e70`. The retained proof applies to
+`linux/amd64`; other platforms are not yet qualified. The source-built image runs as
 `65532:65532`, uses the fixed Steward inference relay, and exposes only bounded
 negotiation, health, run submission, and run-status operations on port `8766`.
 Qualification ran the signed `steward.workspace-audit` skill under gVisor, restarted

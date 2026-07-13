@@ -195,7 +195,8 @@ semantic tool behavior, or an uncompromised host. Read
 
 Steward includes a qualified, source-built adapter definition for
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) at exact upstream commit
-`095b9eed3801c251796df93f48a8f2a527ff6e70`. The hardened image runs as
+`095b9eed3801c251796df93f48a8f2a527ff6e70`. The retained qualification applies to
+`linux/amd64`; other platforms require a separate qualification run. The hardened image runs as
 `65532:65532`, fixes inference through `http://steward-relay:8080/v1`, and exposes
 only negotiation, health, run submission, and run-status operations on service port
 `8766`. Run event streams are not exposed.
