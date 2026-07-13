@@ -136,6 +136,7 @@ for target in "${targets[@]}"; do
 			scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh \
 			scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
 			scripts/build-hermes-adapter.sh scripts/hermes-feasibility.sh \
+			scripts/hermes-steward-acceptance.sh \
 			"${stage}/scripts/"
 		chmod 0755 "${stage}"/scripts/*.sh
 		# Bind the exact node payload before wrapping it in an archive or native

@@ -90,6 +90,11 @@ if [[ ! -f $connector_receipt_public || -L $connector_receipt_public ||
 	echo "node-preflight: connector receipt public key must be a root-owned regular file with mode 0644" >&2
 	exit 2
 fi
+if ! runuser -u steward-gateway -- "$ctl_bin" key match \
+	-private-key "$connector_receipt_private" -public-key "$connector_receipt_public" >/dev/null; then
+	echo "node-preflight: connector receipt private and public keys do not match" >&2
+	exit 2
+fi
 
 expected_version=
 for index in "${!binary_paths[@]}"; do

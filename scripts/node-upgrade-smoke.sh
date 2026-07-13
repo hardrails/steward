@@ -4,22 +4,130 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 work=$(mktemp -d)
-as_root=(sudo)
-[[ ${EUID} -ne 0 ]] || as_root=()
+as_root=()
 relay_test=true
-if [[ ${EUID} -ne 0 ]] && ! sudo -n true 2>/dev/null; then
-	if [[ ${STEWARD_REQUIRE_ROOT_SMOKE:-0} == 1 ]]; then
-		echo "node-upgrade-smoke: passwordless root is required for relay binding checks" >&2
-		exit 1
+if [[ ${EUID} -ne 0 ]]; then
+	if ! sudo -n true 2>/dev/null; then
+		if [[ ${STEWARD_REQUIRE_ROOT_SMOKE:-0} == 1 ]]; then
+			echo "node-upgrade-smoke: passwordless root is required for privilege-boundary and relay binding checks" >&2
+			exit 1
+		fi
+		relay_test=false
+	else
+		as_root=(sudo -n)
 	fi
-	relay_test=false
-	as_root=()
 fi
 cleanup() {
 	if (( ${#as_root[@]} > 0 )); then "${as_root[@]}" rm -rf -- "$work"; else rm -rf -- "$work"; fi
 }
 trap cleanup EXIT HUP INT TERM
 mkdir -p "$work/bin" "$work/releases/v0.0.0-test" "$work/etc"
+
+exercise_connector_keygen_boundary() {
+	local target_user target_group target_uid helper
+	if [[ ${EUID} -eq 0 ]]; then
+		target_user=nobody
+	else
+		target_user=$(id -un)
+	fi
+	target_group=$(id -gn "$target_user")
+	target_uid=$(id -u "$target_user")
+	if (( target_uid == 0 )); then
+		echo "node-upgrade-smoke: connector key generation test identity is root" >&2
+		return 1
+	fi
+
+	mkdir -p "$work/key-release"
+	cat >"$work/key-release/stewardctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+	keygen)
+		shift
+		private= public=
+		while (( $# > 0 )); do
+			case "$1" in
+				-private-out) private=${2:-}; shift 2 ;;
+				-public-out) public=${2:-}; shift 2 ;;
+				*) exit 2 ;;
+			esac
+		done
+		uid=$(id -u)
+		if (( uid == 0 )); then
+			echo "fake stewardctl: keygen executed as root" >&2
+			exit 90
+		fi
+		[[ -n $private && -n $public ]]
+		printf 'private:%s\n' "$uid" >"$private"
+		printf 'public:%s\n' "$uid" >"$public"
+		chmod 0600 "$private"
+		chmod 0644 "$public"
+		;;
+	key)
+		[[ ${2:-} == match ]] || exit 2
+		shift 2
+		private= public=
+		while (( $# > 0 )); do
+			case "$1" in
+				-private-key) private=${2:-}; shift 2 ;;
+				-public-key) public=${2:-}; shift 2 ;;
+				*) exit 2 ;;
+			esac
+		done
+		[[ -n $private && -n $public ]]
+		private_uid=$(sed -n 's/^private://p' "$private")
+		public_uid=$(sed -n 's/^public://p' "$public")
+		[[ -n $private_uid && $private_uid == "$public_uid" && $(id -u) == "$private_uid" ]]
+		;;
+	*) exit 2 ;;
+esac
+EOF
+	chmod 0755 "$work/key-release/stewardctl"
+
+	helper="$work/exercise-connector-keygen.sh"
+	{
+		printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+		awk '
+			/^generate_connector_receipt_keypair\(\) \($/ { copying=1 }
+			copying { print }
+			copying && /^\)$/ { exit }
+		' "$root/scripts/install-node.sh"
+		cat <<'EOF'
+generate_connector_receipt_keypair "$SMOKE_RELEASE_DIR" "$SMOKE_GATEWAY_USER" \
+	"$SMOKE_GATEWAY_GROUP" "$SMOKE_CONFIG_ROOT"
+EOF
+	} >"$helper"
+	chmod 0755 "$helper"
+	if ! grep -q '^generate_connector_receipt_keypair() ($' "$helper"; then
+		echo "node-upgrade-smoke: could not extract connector key generation boundary" >&2
+		return 1
+	fi
+
+	"${as_root[@]}" chmod 0755 "$work"
+	"${as_root[@]}" chown -R root:root "$work/key-release" "$helper"
+	"${as_root[@]}" install -d -o root -g root -m 0755 "$work/key-config"
+	"${as_root[@]}" env \
+		"SMOKE_RELEASE_DIR=$work/key-release" \
+		"SMOKE_GATEWAY_USER=$target_user" \
+		"SMOKE_GATEWAY_GROUP=$target_group" \
+		"SMOKE_CONFIG_ROOT=$work/key-config" \
+		bash "$helper"
+
+	[[ $(cat "$work/key-config/connector-receipts.public") == "public:$target_uid" ]]
+	[[ $("${as_root[@]}" stat -c '%u:%g:%a' "$work/key-config/connector-receipts.private.pem") == "$target_uid:$(id -g "$target_user"):600" ]]
+	[[ $("${as_root[@]}" stat -c '%u:%g:%a' "$work/key-config/connector-receipts.public") == "0:0:644" ]]
+	if (( $("${as_root[@]}" find "$work/key-config" -maxdepth 1 -name '.connector-keygen.*' -print -quit | wc -l) != 0 )); then
+		echo "node-upgrade-smoke: connector key generation left its work directory behind" >&2
+		return 1
+	fi
+}
+
+if [[ $relay_test == true ]]; then
+	exercise_connector_keygen_boundary
+else
+	echo "node-upgrade-smoke: connector key generation boundary check skipped (passwordless root unavailable)"
+fi
 
 cat >"$work/releases/v0.0.0-test/steward-relay" <<'EOF'
 #!/usr/bin/env bash
@@ -75,7 +183,6 @@ common_env=(
 	"STEWARD_RELAY_CURRENT_ENV=$work/etc/executor-gateway.env"
 )
 if [[ $relay_test == true ]]; then
-	[[ ${EUID} -eq 0 ]] || as_root=(sudo -n)
 	"${as_root[@]}" env "${common_env[@]}" "$root/scripts/build-relay-image.sh" \
 		--release-dir "$work/releases/v0.0.0-test" >/dev/null
 	binding="$work/relay-images/v0.0.0-test.env"
@@ -136,4 +243,4 @@ if "$root/scripts/uninstall-node.sh" --purge-data 2>/dev/null; then
 	exit 1
 fi
 
-echo "node-upgrade-smoke: relay binding and drain guards passed"
+echo "node-upgrade-smoke: key-generation boundary, relay binding, and drain guards passed"

@@ -60,8 +60,16 @@ release_files=(
 	integration/adapters/hermes-agent/README.md
 	integration/adapters/hermes-agent/adapter.json
 	integration/adapters/hermes-agent/entrypoint.py
+	integration/adapters/hermes-agent/fixture_connector.py
 	integration/adapters/hermes-agent/fixture_mcp.py
 	integration/adapters/hermes-agent/fixture_model.py
+	integration/adapters/hermes-agent/fixture_secret_scan.py
+	integration/adapters/hermes-agent/fixtures/connector-skill/SKILL.md
+	integration/adapters/hermes-agent/fixtures/connector-skill/connector-fixture-contract.json
+	integration/adapters/hermes-agent/fixtures/connector-skill/connector_work.py
+	integration/adapters/hermes-agent/fixtures/connector-skill/manifest.json
+	integration/adapters/hermes-agent/fixtures/connector-skill/manifest.sig
+	integration/adapters/hermes-agent/fixtures/connector-skill/public.pem
 	integration/adapters/hermes-agent/fixtures/skill/SKILL.md
 	integration/adapters/hermes-agent/fixtures/skill/manifest.json
 	integration/adapters/hermes-agent/fixtures/skill/manifest.sig
@@ -85,6 +93,7 @@ release_files=(
 	integration/scripts/configure-node.sh
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
+	integration/scripts/hermes-steward-acceptance.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
 	integration/scripts/uninstall-node.sh
@@ -123,7 +132,7 @@ done
 # file, empty directory, symlink, or special file must not ride alongside the
 # signed skill without a digest in release.json.
 adapter_root=$stage/adapters/hermes-agent
-for directory in "$adapter_root" "$adapter_root/fixtures" "$adapter_root/fixtures/skill"; do
+for directory in "$adapter_root" "$adapter_root/fixtures" "$adapter_root/fixtures/connector-skill" "$adapter_root/fixtures/skill"; do
 	if [[ ! -d $directory || -L $directory ]]; then
 		echo "write-release-manifest: adapter directory is missing or invalid: $directory" >&2
 		exit 2
@@ -142,7 +151,7 @@ for logical in "${release_files[@]}"; do
 done
 adapter_file_count=$(find "$adapter_root" -type f | wc -l)
 adapter_directory_count=$(find "$adapter_root" -type d | wc -l)
-if [[ $adapter_file_count -ne $expected_adapter_file_count || $adapter_directory_count -ne 3 ]]; then
+if [[ $adapter_file_count -ne $expected_adapter_file_count || $adapter_directory_count -ne 4 ]]; then
 	echo "write-release-manifest: adapter contains an unexpected file or directory" >&2
 	exit 2
 fi
