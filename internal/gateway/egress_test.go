@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -238,6 +240,197 @@ func TestEgressDeactivationCancelsInflightHTTPRequest(t *testing.T) {
 	case <-result:
 	case <-time.After(2 * time.Second):
 		t.Fatal("in-flight HTTP request survived deactivation")
+	}
+}
+
+func TestEgressDeniedAttemptLimitIsGrantIsolatedAndSkipsAudit(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	audit, err := openAuditLog(auditPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer audit.Close()
+
+	grantA := Grant{GrantID: GrantID("tenant-a", "agent-a", 1), TenantID: "tenant-a", InstanceID: "agent-a", Generation: 1,
+		EgressRouteIDs: []string{"web"}, Active: true}
+	grantSameTenant := Grant{GrantID: GrantID("tenant-a", "agent-b", 1), TenantID: "tenant-a", InstanceID: "agent-b", Generation: 1,
+		EgressRouteIDs: []string{"web"}, Active: true}
+	grantOtherTenant := Grant{GrantID: GrantID("tenant-b", "agent-a", 1), TenantID: "tenant-b", InstanceID: "agent-a", Generation: 1,
+		EgressRouteIDs: []string{"web"}, Active: true}
+	server := &Server{
+		grants: map[string]Grant{
+			grantA.GrantID: grantA, grantSameTenant.GrantID: grantSameTenant, grantOtherTenant.GrantID: grantOtherTenant,
+		},
+		egressDeniedAttempts: map[string]egressDeniedAttemptWindow{
+			grantA.GrantID: {started: time.Now(), count: maxEgressDeniedAttemptsPerGrantMinute},
+		},
+		egressStats: map[string]EgressStats{}, audit: audit,
+	}
+
+	before, err := os.Stat(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/relative", nil)
+	response := httptest.NewRecorder()
+	server.egressHandler(grantA.GrantID).ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), `"error":"egress_rate_limited"`) {
+		t.Fatalf("exhausted grant status=%d body=%s", response.Code, response.Body.String())
+	}
+	after, err := os.Stat(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() || server.egressStats[grantA.GrantID].Denied != 0 {
+		t.Fatalf("rate-limited denial wrote audit/stats: before=%d after=%d stats=%#v", before.Size(), after.Size(), server.egressStats[grantA.GrantID])
+	}
+
+	for _, grant := range []Grant{grantSameTenant, grantOtherTenant} {
+		request = httptest.NewRequest(http.MethodGet, "/relative", nil)
+		response = httptest.NewRecorder()
+		server.egressHandler(grant.GrantID).ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest || server.egressStats[grant.GrantID].Denied != 1 {
+			t.Fatalf("independent grant %s status=%d stats=%#v body=%s", grant.GrantID, response.Code, server.egressStats[grant.GrantID], response.Body.String())
+		}
+	}
+}
+
+func TestEgressDeniedAttemptFixedWindowsPreserveTenantCapacity(t *testing.T) {
+	if maxEgressDeniedAttemptsPerTenantMinute >= maxEgressDeniedAttemptsHostMinute {
+		t.Fatal("one tenant must not be able to exhaust the host denial budget")
+	}
+	started := time.Unix(1_700_000_000, 0)
+	grants := make(map[string]Grant)
+	tenantAGrants := make([]string, 5)
+	for index := range tenantAGrants {
+		tenantAGrants[index] = fmt.Sprintf("tenant-a-grant-%d", index)
+		grants[tenantAGrants[index]] = Grant{GrantID: tenantAGrants[index], TenantID: "tenant-a"}
+	}
+	grants["tenant-b-grant"] = Grant{GrantID: "tenant-b-grant", TenantID: "tenant-b"}
+	server := &Server{
+		grants:               grants,
+		egressDeniedAttempts: make(map[string]egressDeniedAttemptWindow),
+		egressTenantDenials:  make(map[string]egressDeniedAttemptWindow),
+	}
+	for _, grantID := range tenantAGrants[:4] {
+		for attempt := 0; attempt < maxEgressDeniedAttemptsPerGrantMinute; attempt++ {
+			if !server.allowEgressDeniedAttempt(grantID, started.Add(time.Duration(attempt)*time.Millisecond)) {
+				t.Fatalf("grant %s attempt %d denied before layered fixed-window limit", grantID, attempt)
+			}
+		}
+	}
+	if got := server.egressTenantDenials["tenant-a"].count; got != maxEgressDeniedAttemptsPerTenantMinute {
+		t.Fatalf("tenant-a denial count=%d want=%d", got, maxEgressDeniedAttemptsPerTenantMinute)
+	}
+	if server.allowEgressDeniedAttempt(tenantAGrants[4], started.Add(30*time.Second)) {
+		t.Fatal("tenant-a borrowed capacity after exhausting its fixed tenant window")
+	}
+	if _, ok := server.egressDeniedAttempts[tenantAGrants[4]]; ok {
+		t.Fatal("tenant denial consumed or created an unused grant window")
+	}
+	if !server.allowEgressDeniedAttempt("tenant-b-grant", started.Add(30*time.Second)) {
+		t.Fatal("one tenant exhausted another tenant's reserved denial capacity")
+	}
+	if got := server.egressHostDenials.count; got != maxEgressDeniedAttemptsPerTenantMinute+1 {
+		t.Fatalf("host denial count=%d want=%d", got, maxEgressDeniedAttemptsPerTenantMinute+1)
+	}
+}
+
+func TestEgressDeniedAttemptClockRollbackAndFixedWindowReset(t *testing.T) {
+	started := time.Unix(1_700_000_000, 0)
+	server := &Server{
+		grants: map[string]Grant{"grant-a": {GrantID: "grant-a", TenantID: "tenant-a"}},
+		egressDeniedAttempts: map[string]egressDeniedAttemptWindow{
+			"grant-a": {started: started, count: maxEgressDeniedAttemptsPerGrantMinute},
+		},
+		egressTenantDenials: map[string]egressDeniedAttemptWindow{
+			"tenant-a": {started: started, count: maxEgressDeniedAttemptsPerTenantMinute},
+		},
+		egressHostDenials: egressDeniedAttemptWindow{started: started, count: maxEgressDeniedAttemptsHostMinute},
+	}
+	if server.allowEgressDeniedAttempt("grant-a", started.Add(-time.Second)) {
+		t.Fatal("clock rollback reopened denial authority")
+	}
+	if server.allowEgressDeniedAttempt("grant-a", started.Add(30*time.Second)) {
+		t.Fatal("exhausted fixed windows accepted an attempt before reset")
+	}
+	resetAt := started.Add(time.Minute)
+	if !server.allowEgressDeniedAttempt("grant-a", resetAt) {
+		t.Fatal("elapsed fixed windows did not reset together")
+	}
+	for name, window := range map[string]egressDeniedAttemptWindow{
+		"grant":  server.egressDeniedAttempts["grant-a"],
+		"tenant": server.egressTenantDenials["tenant-a"],
+		"host":   server.egressHostDenials,
+	} {
+		if !window.started.Equal(resetAt) || window.count != 1 {
+			t.Fatalf("%s window after reset=%#v want started=%s count=1", name, window, resetAt)
+		}
+	}
+}
+
+func TestEgressDeniedAttemptConcurrentHostBound(t *testing.T) {
+	started := time.Unix(1_700_000_000, 0)
+	server := &Server{grants: make(map[string]Grant)}
+	grantIDs := make([]string, 32)
+	for index := range grantIDs {
+		grantIDs[index] = fmt.Sprintf("grant-%d", index)
+		server.grants[grantIDs[index]] = Grant{GrantID: grantIDs[index], TenantID: fmt.Sprintf("tenant-%d", index)}
+	}
+	server.grants["spare"] = Grant{GrantID: "spare", TenantID: "spare-tenant"}
+	var accepted atomic.Int64
+	var wait sync.WaitGroup
+	const attempts = 2048
+	wait.Add(attempts)
+	for attempt := 0; attempt < attempts; attempt++ {
+		grantID := grantIDs[attempt%len(grantIDs)]
+		go func() {
+			defer wait.Done()
+			if server.allowEgressDeniedAttempt(grantID, started) {
+				accepted.Add(1)
+			}
+		}()
+	}
+	wait.Wait()
+	if got := accepted.Load(); got != int64(maxEgressDeniedAttemptsHostMinute) {
+		t.Fatalf("concurrent accepted denials=%d want host bound=%d", got, maxEgressDeniedAttemptsHostMinute)
+	}
+	if server.allowEgressDeniedAttempt("spare", started) {
+		t.Fatal("concurrent attempts exceeded the host denial bound")
+	}
+}
+
+func TestEgressDeniedAttemptConcurrentUnregisterDoesNotResurrectState(t *testing.T) {
+	started := time.Unix(1_700_000_000, 0)
+	server := &Server{grants: map[string]Grant{"grant-a": {GrantID: "grant-a", TenantID: "tenant-a"}}}
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	for attempt := 0; attempt < 256; attempt++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			server.allowEgressDeniedAttempt("grant-a", started)
+		}()
+	}
+	wait.Add(1)
+	go func() {
+		defer wait.Done()
+		<-start
+		server.mu.Lock()
+		delete(server.grants, "grant-a")
+		delete(server.egressDeniedAttempts, "grant-a")
+		delete(server.egressTenantDenials, "tenant-a")
+		server.mu.Unlock()
+	}()
+	close(start)
+	wait.Wait()
+	server.mu.Lock()
+	_, grantWindowExists := server.egressDeniedAttempts["grant-a"]
+	_, tenantWindowExists := server.egressTenantDenials["tenant-a"]
+	server.mu.Unlock()
+	if grantWindowExists || tenantWindowExists {
+		t.Fatalf("late denials recreated state: grant=%t tenant=%t", grantWindowExists, tenantWindowExists)
 	}
 }
 

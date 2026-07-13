@@ -35,6 +35,9 @@ const maxConnectorGlobalConcurrent = 32
 const maxConnectorGrantConcurrent = 4
 const connectorReceiptStatusTrailer = "X-Steward-Connector-Receipt"
 const maxConnectorAttemptsPerMinute = 60
+const maxEgressDeniedAttemptsPerGrantMinute = 30
+const maxEgressDeniedAttemptsPerTenantMinute = 120
+const maxEgressDeniedAttemptsHostMinute = 480
 
 type Grant struct {
 	GrantID        string   `json:"grant_id"`
@@ -148,6 +151,11 @@ type connectorAttemptWindow struct {
 	count   int
 }
 
+type egressDeniedAttemptWindow struct {
+	started time.Time
+	count   int
+}
+
 type connectorReceiptLog interface {
 	Begin(connectorledger.Event) (connectorledger.Head, error)
 	Finish(connectorledger.Event) (connectorledger.Head, error)
@@ -178,10 +186,14 @@ type Server struct {
 	connectorSpends          map[string]connectorSpendOwner
 	connectorCallCounts      map[string]map[string]int
 	connectorAttempts        map[string]connectorAttemptWindow
+	egressDeniedAttempts     map[string]egressDeniedAttemptWindow
+	egressTenantDenials      map[string]egressDeniedAttemptWindow
+	egressHostDenials        egressDeniedAttemptWindow
 	grantLeases              map[string]grantLease
 	egressLeases             map[string]grantLease
 	audit                    *auditLog
 	connectorLedger          connectorReceiptLog
+	now                      func() time.Time
 	tokenHash                [sha256.Size]byte
 	client                   *http.Client
 }
@@ -232,10 +244,12 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		serviceSemaphores: make(map[string]chan struct{}), egressStats: make(map[string]EgressStats),
 		connectorCalls:  make(map[string]map[string][]string),
 		connectorSpends: receiptIndex.spends, connectorCallCounts: receiptIndex.counts,
-		connectorAttempts: make(map[string]connectorAttemptWindow),
-		grantLeases:       make(map[string]grantLease), egressLeases: make(map[string]grantLease), audit: audit,
-		connectorLedger: receiptWriter,
-		tokenHash:       sha256.Sum256([]byte("Bearer " + serviceToken)),
+		connectorAttempts:    make(map[string]connectorAttemptWindow),
+		egressDeniedAttempts: make(map[string]egressDeniedAttemptWindow),
+		egressTenantDenials:  make(map[string]egressDeniedAttemptWindow),
+		grantLeases:          make(map[string]grantLease), egressLeases: make(map[string]grantLease), audit: audit,
+		connectorLedger: receiptWriter, now: time.Now,
+		tokenHash: sha256.Sum256([]byte("Bearer " + serviceToken)),
 		client: &http.Client{Transport: transport, Timeout: 2 * time.Minute,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
@@ -823,6 +837,7 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 	delete(s.serviceSemaphores, id)
 	delete(s.connectorGrantSemaphores, id)
 	delete(s.connectorAttempts, id)
+	delete(s.egressDeniedAttempts, id)
 	_ = os.RemoveAll(GrantDirectory(s.config.GrantRoot, id))
 	w.WriteHeader(http.StatusNoContent)
 }
