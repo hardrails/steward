@@ -171,6 +171,8 @@ func TestConnectorBrokersExactOperationAndStripsCallerAuthority(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Set-Cookie", "upstream=secret")
 		w.Header().Set("Location", "/hidden")
+		w.Header().Set("Authorization", "Bearer reflected-secret")
+		w.Header().Set("X-API-Key", "reflected-api-key")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"id":7}`))
 	}))
@@ -185,7 +187,8 @@ func TestConnectorBrokersExactOperationAndStripsCallerAuthority(t *testing.T) {
 	request.Header.Set("X-Smuggled", "must-not-pass")
 	response := invokeConnector(rig.server, rig.grant.GrantID, request)
 	if response.Code != http.StatusCreated || response.Body.String() != `{"id":7}` || calls.Load() != 1 ||
-		response.Header().Get("Set-Cookie") != "" || response.Header().Get("Location") != "" {
+		response.Header().Get("Set-Cookie") != "" || response.Header().Get("Location") != "" ||
+		response.Header().Get("Authorization") != "" || response.Header().Get("X-API-Key") != "" {
 		t.Fatalf("response status=%d headers=%v body=%q calls=%d", response.Code, response.Header(), response.Body.String(), calls.Load())
 	}
 	state, err := os.ReadFile(rig.config.StateFile)

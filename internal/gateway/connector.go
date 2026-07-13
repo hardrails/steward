@@ -393,9 +393,11 @@ func (s *Server) proxyConnector(
 		return
 	}
 	copyHeaders(w.Header(), response.Header)
-	w.Header().Del("Set-Cookie")
-	w.Header().Del("Location")
-	w.Header().Del(connectorReceiptStatusTrailer)
+	for _, name := range []string{
+		"Authorization", "Proxy-Authorization", "X-API-Key", "Set-Cookie", "Location", connectorReceiptStatusTrailer,
+	} {
+		w.Header().Del(name)
+	}
 	if connectorResponseHasNoBody(incoming.Method, response.StatusCode) {
 		if err := s.finishConnectorReceipt(receipt, response.StatusCode, 0, ""); err != nil {
 			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
