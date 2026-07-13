@@ -484,6 +484,18 @@ until uv sync --frozen --no-install-project --extra mcp --extra homeassistant >&
     sleep 2
 done
 uv pip install --no-cache-dir --no-deps . >&2
+for script in .venv/bin/*; do
+    if [ -f "$script" ] && IFS= read -r first_line <"$script"; then
+        case "$first_line" in
+            \#\!/tmp/build/.venv/bin/python*)
+                sed -i "1s|^#!/tmp/build/.venv/bin/python|#!/opt/hermes/.venv/bin/python|" "$script"
+                ;;
+        esac
+    fi
+done
+if grep -RIl "^#!/tmp/build/.venv/bin/python" .venv/bin >/dev/null; then
+    exit 1
+fi
 tar -cf - .venv
 '
 docker create --name "$sandbox_name" \
