@@ -456,8 +456,26 @@ func TestTaskAuditVerifiesExpiredPermitAtAuthorizationAndEveryReceiptBinding(t *
 		t.Fatalf("audited=%#v", audited)
 	}
 
+	wrongNodePath := filepath.Join(fixture.directory, "wrong-node.ndjson")
+	wrongNodeLedger, err := connectorledger.Open(wrongNodePath, receiptPrivate, "node-b/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrongNodeLedger.Begin(event); err != nil {
+		t.Fatal(err)
+	}
+	if err := wrongNodeLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"task", "audit", "-in", fixture.bundlePath, "-public-key", fixture.publicPath, "-key-id", fixture.keyID,
+		"-receipts", wrongNodePath, "-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-b/gateway",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "does not match the task permit node") {
+		t.Fatalf("wrong-node receipt error=%v", err)
+	}
+
 	mismatchPath := filepath.Join(fixture.directory, "mismatch.ndjson")
-	mismatchLedger, err := connectorledger.Open(mismatchPath, receiptPrivate, "node-a/mismatch", 1)
+	mismatchLedger, err := connectorledger.Open(mismatchPath, receiptPrivate, "node-a/gateway", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +489,7 @@ func TestTaskAuditVerifiesExpiredPermitAtAuthorizationAndEveryReceiptBinding(t *
 	}
 	if err := run([]string{
 		"task", "audit", "-in", fixture.bundlePath, "-public-key", fixture.publicPath, "-key-id", fixture.keyID,
-		"-receipts", mismatchPath, "-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/mismatch",
+		"-receipts", mismatchPath, "-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/gateway",
 	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "every task-permit binding") {
 		t.Fatalf("mismatched receipt error=%v", err)
 	}

@@ -909,7 +909,7 @@ func (s *Server) validGrant(grant Grant) bool {
 	}
 	if len(grant.TaskAuthorities) > 0 {
 		if grant.ServiceID == "" || !bounded(grant.NodeID, 128) || grant.RuntimeRef == "" || len(s.serviceOperations[grant.ServiceID]) == 0 ||
-			!validTaskAuthorities(grant.TaskAuthorities) {
+			s.config.ConnectorReceiptNodeID != ServiceTaskReceiptNodeID(grant.NodeID) || !validTaskAuthorities(grant.TaskAuthorities) {
 			return false
 		}
 		if _, budgeted := s.config.connectorReceiptBudget(grant.TenantID); !budgeted {
@@ -1631,6 +1631,11 @@ func GrantID(tenantID, instanceID string, generation uint64) string {
 	sum := sha256.Sum256([]byte(tenantID + "\x00" + instanceID + "\x00" + strconv.FormatUint(generation, 10)))
 	return "grant-" + fmt.Sprintf("%x", sum[:])
 }
+
+// ServiceTaskReceiptNodeID derives the only Gateway receipt identity accepted
+// for task authority admitted on a node. This binds the signed permit's node to
+// the outer signed receipt chain without copying node identity into every event.
+func ServiceTaskReceiptNodeID(nodeID string) string { return nodeID + "/gateway" }
 
 // GrantDirectory retains 128 bits of the already-cryptographic grant ID. This
 // keeps Linux Unix-socket paths below sockaddr_un's 108-byte ceiling while the

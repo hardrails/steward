@@ -240,6 +240,14 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	if err := run([]string{"gateway", "service", "trust", "-config", path, "-tenant-id", "tenant-a"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 		t.Fatal("service trust exported without a node identity")
 	}
+	loaded.ConnectorReceiptNodeID = "node-b/gateway"
+	writePermitJSONReplace(t, path, loaded)
+	if err := run([]string{"gateway", "service", "trust", "-config", path, "-node-id", "node-a", "-tenant-id", "tenant-a"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "receipt node ID") {
+		t.Fatalf("service trust under another node's receipt identity error=%v", err)
+	}
+	loaded.ConnectorReceiptNodeID = gateway.ServiceTaskReceiptNodeID("node-a")
+	writePermitJSONReplace(t, path, loaded)
 
 	output.Reset()
 	if err := run([]string{"gateway", "service", "list", "-config", path}, &output, &bytes.Buffer{}); err != nil ||

@@ -694,6 +694,11 @@ func TestServiceTaskGrantRequiresCanonicalSignedAuthority(t *testing.T) {
 	if !rig.server.validGrant(grant) {
 		t.Fatal("valid task-enabled service grant rejected")
 	}
+	rig.server.config.ConnectorReceiptNodeID = "node-b/gateway"
+	if rig.server.validGrant(grant) {
+		t.Fatal("task-enabled service grant accepted under another node's receipt identity")
+	}
+	rig.server.config.ConnectorReceiptNodeID = ServiceTaskReceiptNodeID(grant.NodeID)
 	public, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)

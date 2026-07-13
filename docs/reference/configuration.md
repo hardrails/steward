@@ -320,6 +320,15 @@ configuration remains authoritative.
 when any connector or service-task operation exists. The key is an owner-only
 PKCS#8 Ed25519 private key and
 the ledger is an owner-only, signed newline-delimited JSON chain capped at 64 MiB.
+
+For a task-enabled service grant, `connector_receipt_node_id` must be the admitted
+node ID followed by `/gateway`, such as `node-a/gateway`. Gateway rejects the grant
+if this derived identity does not match, and `gateway service trust` fails before
+an operator can issue a task from a mismatched inventory. A connector-only setup
+may retain another stable receipt identity. Before adding service-task operations
+to such a setup, drain all grants and start a new empty receipt chain with the
+derived identity, a new key, and a new epoch. Never relabel an existing chain.
+
 Receipt paths must be separate from credentials, Gateway state, audit, token,
 control socket, and the grant directory. The packaged installer creates an
 independent Gateway key and writes its public half to

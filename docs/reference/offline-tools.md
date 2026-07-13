@@ -280,9 +280,11 @@ stewardctl task audit \
 The command verifies formats 1, 2, and 3 in one chain, finds the exact service-task
 permit, re-evaluates it at the signed authorization time, and checks every available
 tenant, runtime, grant, policy, service, operation, task, authority, permit, and
-request binding. Output includes the authorization, optional terminal record, and
-final head. An absent terminal is an unknown outcome, not proof that no dispatch
-occurred.
+request binding. The receipt node ID must equal the permit's signed node ID followed
+by `/gateway`; this prevents a valid chain from another node from being associated
+with the task by mistake. Output includes the authorization, optional terminal
+record, and final head. An absent terminal is an unknown outcome, not proof that no
+dispatch occurred.
 
 Service-task receipts record digests, byte counts, bounded status, error, and the
 run ID observed from the service. They do not contain the raw request, prompt,

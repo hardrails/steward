@@ -358,7 +358,11 @@ identity or tenant budget and `systemctl reload steward-gateway.service` otherwi
 An older configuration with no Gateway receipt identity also needs
 `-receipt-file`, `-receipt-key-file`, `-receipt-node-id`, and a positive
 `-receipt-epoch` on this first change. `gateway service list` prints the installed
-operations.
+operations. For task-enabled services, the receipt node ID is derived from the
+admitted node as `<node-id>/gateway`; the example below therefore requires
+`node-a/gateway`. Do not relabel an existing receipt chain. If a connector-only
+configuration uses another identity, drain it and begin a new empty chain, key, and
+epoch before enabling service tasks.
 
 Export the exact non-secret operation inventory for this node and tenant. It is
 unsigned, so authenticate the file when moving it to the signing workstation:

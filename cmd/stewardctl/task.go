@@ -326,6 +326,9 @@ func auditTask(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	statement := bundle.Verified.Statement
+	if *receiptNodeID != gateway.ServiceTaskReceiptNodeID(statement.NodeID) {
+		return errors.New("receipt node ID does not match the task permit node")
+	}
 	expectedTaskDigest := taskpermit.TaskDigest(statement.TenantID, statement.InstanceID, statement.TaskID)
 	var authorization, terminal *taskAuditRecord
 	head, err := connectorledger.VerifyRecords(*receiptsPath, receiptPublic, *receiptNodeID, *receiptEpoch,

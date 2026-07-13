@@ -280,6 +280,9 @@ func writeServiceTrustInventory(stdout io.Writer, config gateway.Config, nodeID,
 	if !boundedTrustIdentity(nodeID) || !boundedTrustIdentity(tenantID) {
 		return errors.New("service trust node and tenant identities must be non-empty, at most 128 bytes, and contain no NUL")
 	}
+	if config.ConnectorReceiptNodeID != gateway.ServiceTaskReceiptNodeID(nodeID) {
+		return errors.New("Gateway receipt node ID does not match the task service node")
+	}
 	budgeted := false
 	for _, budget := range config.ConnectorReceiptTenantBudgets {
 		if budget.TenantID == tenantID {
