@@ -3,6 +3,7 @@ package connectorledger
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -241,6 +242,7 @@ func TestConnectorLedgerConcurrentAppendHasOneChainOrder(t *testing.T) {
 		go func(index int) {
 			defer wait.Done()
 			event := validEvent(Authorize, Allowed)
+			event.TenantID = fmt.Sprintf("tenant-%d", index%2)
 			event.TaskDigest, _ = TaskDigest(fmt.Sprintf("task-%d", index))
 			_, err := log.Begin(event)
 			errorsCh <- err
@@ -258,6 +260,358 @@ func TestConnectorLedgerConcurrentAppendHasOneChainOrder(t *testing.T) {
 	if err != nil || head.Sequence != count {
 		t.Fatalf("head=%#v err=%v", head, err)
 	}
+}
+
+func TestLimitsValidateBoundedTenantPartitions(t *testing.T) {
+	defaults := DefaultLimits()
+	if defaults.MaxTenants != 16 || defaults.MaxBytesPerTenant != 4<<20 {
+		t.Fatalf("defaults=%#v", defaults)
+	}
+	if err := defaults.Validate(); err != nil {
+		t.Fatalf("default limits: %v", err)
+	}
+	tests := []Limits{
+		{MaxTenants: 0, MaxBytesPerTenant: minimumTenantBytes},
+		{MaxTenants: 1, MaxBytesPerTenant: minimumTenantBytes - 1},
+		{MaxTenants: 2, MaxBytesPerTenant: MaxLogBytes},
+		{MaxTenants: int(^uint(0) >> 1), MaxBytesPerTenant: minimumTenantBytes},
+	}
+	for _, limits := range tests {
+		if err := limits.Validate(); err == nil {
+			t.Errorf("invalid limits accepted: %#v", limits)
+		}
+	}
+}
+
+func TestExplicitTenantBudgetsAreExactBoundedAndNonBorrowing(t *testing.T) {
+	valid := Limits{TenantBudgets: map[string]int64{
+		"tenant-a":   minimumTenantBytes,
+		" tenant-b ": minimumTenantBytes,
+	}}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid exact budgets: %v", err)
+	}
+	invalid := []Limits{
+		{TenantBudgets: map[string]int64{"": minimumTenantBytes}},
+		{TenantBudgets: map[string]int64{"tenant-a": minimumTenantBytes - 1}},
+		{TenantBudgets: map[string]int64{"tenant-a": MaxLogBytes, "tenant-b": minimumTenantBytes}},
+		{MaxTenants: 1, MaxBytesPerTenant: minimumTenantBytes, TenantBudgets: map[string]int64{}},
+	}
+	tooMany := make(map[string]int64, MaxTenantBudgets+1)
+	for index := 0; index <= MaxTenantBudgets; index++ {
+		tooMany[fmt.Sprintf("tenant-%d", index)] = minimumTenantBytes
+	}
+	invalid = append(invalid, Limits{TenantBudgets: tooMany})
+	for _, limits := range invalid {
+		if err := limits.Validate(); err == nil {
+			t.Errorf("invalid explicit budgets accepted: %#v", limits)
+		}
+	}
+
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "explicit.ndjson")
+	log, err := OpenWithLimits(path, private, "node-a/gateway", 1, valid, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	unbudgeted := validEvent(Deny, Denied)
+	unbudgeted.TenantID, unbudgeted.ErrorCode = "tenant-b", "policy_denied"
+	if _, err := log.Append(unbudgeted); !errors.Is(err, ErrTenantUnbudgeted) {
+		t.Fatalf("unbudgeted exact tenant err=%v", err)
+	}
+	spaced := unbudgeted
+	spaced.TenantID = " tenant-b "
+	if _, err := log.Append(spaced); err != nil {
+		t.Fatalf("exact whitespace-bearing tenant was normalized: %v", err)
+	}
+}
+
+func TestExplicitTenantBeginReservationIsAtomicAndIsolated(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{TenantBudgets: map[string]int64{
+		"tenant-a": minimumTenantBytes,
+		"tenant-b": minimumTenantBytes,
+	}}
+	path := filepath.Join(t.TempDir(), "begin-boundary.ndjson")
+	log, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := validEvent(Authorize, Allowed)
+	if _, err := log.Begin(first); err != nil {
+		t.Fatalf("first tenant-a reservation: %v", err)
+	}
+	second := first
+	second.TaskDigest, _ = TaskDigest("second-a")
+	if _, err := log.Begin(second); !errors.Is(err, ErrTenantQuotaExceeded) {
+		t.Fatalf("second tenant-a reservation err=%v", err)
+	}
+	other := first
+	other.TenantID = "tenant-b"
+	other.TaskDigest, _ = TaskDigest("first-b")
+	if _, err := log.Begin(other); err != nil {
+		t.Fatalf("tenant-a consumed tenant-b reservation: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Begin(second); !errors.Is(err, ErrTenantQuotaExceeded) {
+		t.Fatalf("tenant-a reservation did not survive restart: %v", err)
+	}
+	thirdB := other
+	thirdB.TaskDigest, _ = TaskDigest("second-b")
+	if _, err := reopened.Begin(thirdB); !errors.Is(err, ErrTenantQuotaExceeded) {
+		t.Fatalf("tenant-b reservation did not survive restart: %v", err)
+	}
+}
+
+func TestConcurrentBeginsCannotOverdrawFinalTenantReservation(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{TenantBudgets: map[string]int64{"tenant-a": minimumTenantBytes}}
+	log, err := OpenWithLimits(filepath.Join(t.TempDir(), "concurrent-budget.ndjson"), private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+
+	const contenders = 8
+	start := make(chan struct{})
+	errorsCh := make(chan error, contenders)
+	var wait sync.WaitGroup
+	for index := 0; index < contenders; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			event := validEvent(Authorize, Allowed)
+			event.TaskDigest, _ = TaskDigest(fmt.Sprintf("contender-%d", index))
+			_, beginErr := log.Begin(event)
+			errorsCh <- beginErr
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+	close(errorsCh)
+	succeeded, exhausted := 0, 0
+	for beginErr := range errorsCh {
+		switch {
+		case beginErr == nil:
+			succeeded++
+		case errors.Is(beginErr, ErrTenantQuotaExceeded):
+			exhausted++
+		default:
+			t.Fatalf("unexpected Begin error: %v", beginErr)
+		}
+	}
+	if succeeded != 1 || exhausted != contenders-1 {
+		t.Fatalf("succeeded=%d exhausted=%d", succeeded, exhausted)
+	}
+}
+
+func TestTenantReceiptQuotaCannotConsumeAnotherTenantSliceAndSurvivesRestart(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{MaxTenants: 2, MaxBytesPerTenant: minimumTenantBytes}
+	path := filepath.Join(t.TempDir(), "tenant-quota.ndjson")
+	log, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denial := validEvent(Deny, Denied)
+	denial.ErrorCode = "policy_denied"
+	successful := 0
+	for {
+		if _, err := log.Append(denial); errors.Is(err, ErrTenantQuotaExceeded) {
+			break
+		} else if err != nil {
+			t.Fatalf("fill tenant-a after %d records: %v", successful, err)
+		}
+		successful++
+	}
+	if successful == 0 {
+		t.Fatal("tenant quota rejected an empty slice")
+	}
+	usedBeforeRestart := log.tenantBytes[denial.TenantID]
+	if usedBeforeRestart <= 0 || usedBeforeRestart > limits.MaxBytesPerTenant {
+		t.Fatalf("tenant-a usage=%d", usedBeforeRestart)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if got := reopened.tenantBytes[denial.TenantID]; got != usedBeforeRestart {
+		t.Fatalf("tenant usage after restart=%d want=%d", got, usedBeforeRestart)
+	}
+	if _, err := reopened.Append(denial); !errors.Is(err, ErrTenantQuotaExceeded) {
+		t.Fatalf("exhausted tenant appended after restart: %v", err)
+	}
+	other := denial
+	other.TenantID = "tenant-b"
+	if _, err := reopened.Append(other); err != nil {
+		t.Fatalf("tenant-a consumed tenant-b slice: %v", err)
+	}
+}
+
+func TestTenantIdentitySlotsUseExactHistoricalIdentity(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{MaxTenants: 2, MaxBytesPerTenant: minimumTenantBytes}
+	path := filepath.Join(t.TempDir(), "tenant-identities.ndjson")
+	log, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denial := validEvent(Deny, Denied)
+	denial.ErrorCode = "policy_denied"
+	if _, err := log.Append(denial); err != nil {
+		t.Fatal(err)
+	}
+	spaced := denial
+	spaced.TenantID = " tenant-a "
+	if _, err := log.Append(spaced); err != nil {
+		t.Fatal(err)
+	}
+	third := denial
+	third.TenantID = "tenant-b"
+	if _, err := log.Append(third); !errors.Is(err, ErrTenantIdentityCapacity) {
+		t.Fatalf("third historical tenant identity err=%v", err)
+	}
+	if _, err := log.Append(denial); err != nil {
+		t.Fatalf("existing tenant lost its identity slot: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Append(third); !errors.Is(err, ErrTenantIdentityCapacity) {
+		t.Fatalf("tenant identity slots did not survive restart: %v", err)
+	}
+}
+
+func TestPendingTerminalReservationIsChargedToTenantAfterRestart(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{MaxTenants: 1, MaxBytesPerTenant: minimumTenantBytes}
+	path := filepath.Join(t.TempDir(), "pending-reservation.ndjson")
+	log, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized := validEvent(Authorize, Allowed)
+	if _, err := log.Begin(authorized); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUsage := info.Size() + terminalReserveBytes
+	if got := log.tenantBytes[authorized.TenantID]; got != wantUsage {
+		t.Fatalf("live tenant usage=%d want=%d", got, wantUsage)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if got := reopened.tenantBytes[authorized.TenantID]; got != wantUsage {
+		t.Fatalf("reconstructed tenant usage=%d want=%d", got, wantUsage)
+	}
+	terminal := authorized
+	terminal.Phase, terminal.Outcome, terminal.HTTPStatus = Terminal, Responded, 200
+	if _, err := reopened.Finish(terminal); err != nil {
+		t.Fatalf("reserved terminal record could not be written: %v", err)
+	}
+}
+
+func TestOpenWithLimitsRejectsHistoricalLimitViolations(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("identity capacity", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "identities.ndjson")
+		log, err := Open(path, private, "node-a/gateway", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tenantID := range []string{"tenant-a", "tenant-b"} {
+			denial := validEvent(Deny, Denied)
+			denial.TenantID, denial.ErrorCode = tenantID, "policy_denied"
+			if _, err := log.Append(denial); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := log.Close(); err != nil {
+			t.Fatal(err)
+		}
+		limits := Limits{MaxTenants: 1, MaxBytesPerTenant: MaxLogBytes}
+		if reopened, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil); !errors.Is(err, ErrTenantIdentityCapacity) {
+			if reopened != nil {
+				_ = reopened.Close()
+			}
+			t.Fatalf("historical tenant identities err=%v", err)
+		}
+	})
+
+	t.Run("tenant bytes", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "bytes.ndjson")
+		log, err := Open(path, private, "node-a/gateway", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		denial := validEvent(Deny, Denied)
+		denial.ErrorCode = "policy_denied"
+		for log.tenantBytes[denial.TenantID] <= minimumTenantBytes {
+			if _, err := log.Append(denial); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := log.Close(); err != nil {
+			t.Fatal(err)
+		}
+		limits := Limits{MaxTenants: 1, MaxBytesPerTenant: minimumTenantBytes}
+		if reopened, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil); !errors.Is(err, ErrTenantQuotaExceeded) {
+			if reopened != nil {
+				_ = reopened.Close()
+			}
+			t.Fatalf("historical tenant usage err=%v", err)
+		}
+	})
 }
 
 func TestConnectorLedgerValidatesEventsFilesAndTaskIDs(t *testing.T) {

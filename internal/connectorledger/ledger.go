@@ -25,14 +25,108 @@ import (
 )
 
 const (
-	PayloadType          = "application/vnd.steward.connector-receipt.v1+json"
-	SchemaV1             = "steward.connector-receipt.v1"
-	MaxLineBytes         = 128 << 10
-	MaxLogBytes          = 64 << 20
-	terminalReserveBytes = MaxLineBytes + 1
+	PayloadType              = "application/vnd.steward.connector-receipt.v1+json"
+	SchemaV1                 = "steward.connector-receipt.v1"
+	MaxLineBytes             = 128 << 10
+	MaxLogBytes              = 64 << 20
+	MaxTenantBudgets         = 128
+	DefaultMaxTenants        = 16
+	DefaultMaxBytesPerTenant = 4 << 20
+	terminalReserveBytes     = MaxLineBytes + 1
+	minimumTenantBytes       = 2 * terminalReserveBytes
 )
 
-var chainDomain = []byte("steward-connector-ledger-v1\x00")
+var (
+	chainDomain = []byte("steward-connector-ledger-v1\x00")
+
+	// ErrTenantQuotaExceeded means a tenant has consumed its durable receipt
+	// slice. Other admitted tenants retain their independent slices.
+	ErrTenantQuotaExceeded = errors.New("connector ledger tenant byte quota exceeded")
+	// ErrTenantUnbudgeted means an explicitly partitioned ledger has no durable
+	// receipt allocation for the exact tenant identity in an event.
+	ErrTenantUnbudgeted = errors.New("connector ledger tenant is not budgeted")
+	// ErrTenantIdentityCapacity means the ledger has no unclaimed historical
+	// tenant slot. Tenant identities are retained for the life of the ledger.
+	ErrTenantIdentityCapacity = errors.New("connector ledger tenant identity capacity exceeded")
+)
+
+// Limits partitions the bounded receipt ledger between tenant identities.
+// TenantBudgets, when non-nil, is an exact non-borrowing allocation and cannot
+// be combined with the uniform compatibility fields used by DefaultLimits.
+// Every byte allowance includes durable record bytes and space reserved for
+// terminal records of incomplete calls.
+type Limits struct {
+	MaxTenants        int
+	MaxBytesPerTenant int64
+	TenantBudgets     map[string]int64
+}
+
+// DefaultLimits returns the hardened single-host partition used by Open and
+// OpenWithVisit.
+func DefaultLimits() Limits {
+	return Limits{MaxTenants: DefaultMaxTenants, MaxBytesPerTenant: DefaultMaxBytesPerTenant}
+}
+
+// Validate rejects limits that cannot reserve a worst-case authorization and
+// its matching terminal record, or whose product can exceed the bounded log.
+func (limits Limits) Validate() error {
+	if limits.TenantBudgets != nil {
+		if limits.MaxTenants != 0 || limits.MaxBytesPerTenant != 0 {
+			return errors.New("connector ledger explicit and uniform tenant limits cannot be combined")
+		}
+		if len(limits.TenantBudgets) > MaxTenantBudgets {
+			return fmt.Errorf("connector ledger permits at most %d tenant budgets", MaxTenantBudgets)
+		}
+		var total int64
+		for tenantID, bytes := range limits.TenantBudgets {
+			if !publicIdentity(tenantID, 128) {
+				return errors.New("connector ledger tenant budget has an invalid tenant identity")
+			}
+			if bytes < minimumTenantBytes {
+				return fmt.Errorf("connector ledger tenant byte quota must be at least %d", minimumTenantBytes)
+			}
+			if total > MaxLogBytes-bytes {
+				return errors.New("connector ledger tenant quotas exceed total capacity")
+			}
+			total += bytes
+		}
+		return nil
+	}
+	if limits.MaxTenants <= 0 {
+		return errors.New("connector ledger max tenants must be positive")
+	}
+	if limits.MaxBytesPerTenant < minimumTenantBytes {
+		return fmt.Errorf("connector ledger tenant byte quota must be at least %d", minimumTenantBytes)
+	}
+	// Divide before comparing so an operator-supplied product cannot overflow.
+	if int64(limits.MaxTenants) > MaxLogBytes/limits.MaxBytesPerTenant {
+		return errors.New("connector ledger tenant quotas exceed total capacity")
+	}
+	return nil
+}
+
+func (limits Limits) clone() Limits {
+	if limits.TenantBudgets == nil {
+		return limits
+	}
+	cloned := make(map[string]int64, len(limits.TenantBudgets))
+	for tenantID, bytes := range limits.TenantBudgets {
+		cloned[tenantID] = bytes
+	}
+	limits.TenantBudgets = cloned
+	return limits
+}
+
+func (limits Limits) tenantQuota(tenantID string) (int64, error) {
+	if limits.TenantBudgets != nil {
+		quota, ok := limits.TenantBudgets[tenantID]
+		if !ok {
+			return 0, ErrTenantUnbudgeted
+		}
+		return quota, nil
+	}
+	return limits.MaxBytesPerTenant, nil
+}
 
 type Phase string
 
@@ -118,19 +212,33 @@ type Log struct {
 	reserved int64
 	pending  map[string]Event
 	spent    map[string]struct{}
+	limits   Limits
+	// tenantBytes includes durable line bytes and pending terminal reserves.
+	// Map membership is also the permanent historical tenant identity set.
+	tenantBytes map[string]int64
 }
 
 func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) (*Log, error) {
-	return OpenWithVisit(path, private, nodeID, epoch, nil)
+	return OpenWithLimits(path, private, nodeID, epoch, DefaultLimits(), nil)
 }
 
 // OpenWithVisit verifies the complete existing chain and visits each record
 // before returning an append handle. Gateway uses the verified authorization
 // records to reconstruct spent task claims after restart or state rollback.
 func OpenWithVisit(path string, private ed25519.PrivateKey, nodeID string, epoch uint64, visit func(VerifiedReceipt) error) (*Log, error) {
+	return OpenWithLimits(path, private, nodeID, epoch, DefaultLimits(), visit)
+}
+
+// OpenWithLimits verifies the complete existing chain, reconstructs tenant
+// usage, and visits each record before returning an append handle.
+func OpenWithLimits(path string, private ed25519.PrivateKey, nodeID string, epoch uint64, limits Limits, visit func(VerifiedReceipt) error) (*Log, error) {
 	if !validPath(path) || len(private) != ed25519.PrivateKeySize || !validText(nodeID, 256) || epoch == 0 {
 		return nil, errors.New("connector ledger requires a clean path, Ed25519 key, bounded node id, and positive epoch")
 	}
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
+	limits = limits.clone()
 	created := false
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -178,8 +286,12 @@ func OpenWithVisit(path string, private ed25519.PrivateKey, nodeID string, epoch
 	public := private.Public().(ed25519.PublicKey)
 	pending := make(map[string]Event)
 	spent := make(map[string]struct{})
+	tenantBytes := make(map[string]int64)
 	head, err := verifyFile(file, public, nodeID, epoch, func(record VerifiedReceipt) error {
 		if err := updateHistory(pending, spent, record.Receipt.Event); err != nil {
+			return err
+		}
+		if err := addTenantUsage(tenantBytes, record.Receipt.Event.TenantID, int64(len(record.Raw)+1), limits); err != nil {
 			return err
 		}
 		if visit != nil {
@@ -191,6 +303,11 @@ func OpenWithVisit(path string, private ed25519.PrivateKey, nodeID string, epoch
 		return closeWith(fmt.Errorf("verify connector ledger: %w", err))
 	}
 	reserved := int64(len(pending)) * terminalReserveBytes
+	for _, event := range pending {
+		if err := addTenantUsage(tenantBytes, event.TenantID, terminalReserveBytes, limits); err != nil {
+			return closeWith(fmt.Errorf("reserve connector terminal record: %w", err))
+		}
+	}
 	if info, statErr := file.Stat(); statErr != nil {
 		return closeWith(statErr)
 	} else if info.Size()+reserved > MaxLogBytes {
@@ -200,7 +317,7 @@ func OpenWithVisit(path string, private ed25519.PrivateKey, nodeID string, epoch
 		path: path, file: file, private: append(ed25519.PrivateKey(nil), private...),
 		public: append(ed25519.PublicKey(nil), public...), nodeID: nodeID, epoch: epoch,
 		keyID: KeyID(public), next: head.Sequence + 1, last: head.ChainHash,
-		reserved: reserved, pending: pending, spent: spent,
+		reserved: reserved, pending: pending, spent: spent, limits: limits, tenantBytes: tenantBytes,
 	}, nil
 }
 
@@ -311,6 +428,17 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 	if reserved < 0 || info.Size()+int64(len(raw)+1)+reserved > MaxLogBytes {
 		return Head{}, errors.New("connector ledger capacity exceeded")
 	}
+	quota, err := l.limits.tenantQuota(event.TenantID)
+	if err != nil {
+		return Head{}, err
+	}
+	tenantUsage := l.tenantBytes[event.TenantID] + int64(len(raw)+1) + reservationDelta
+	if tenantUsage < 0 || tenantUsage > quota {
+		return Head{}, ErrTenantQuotaExceeded
+	}
+	if _, exists := l.tenantBytes[event.TenantID]; !exists && l.limits.TenantBudgets == nil && len(l.tenantBytes) >= l.limits.MaxTenants {
+		return Head{}, ErrTenantIdentityCapacity
+	}
 	line := append(append([]byte(nil), raw...), '\n')
 	if _, err := l.file.Write(line); err != nil {
 		l.failed = true
@@ -323,7 +451,24 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 	l.last = hashLine(raw)
 	l.next++
 	l.reserved = reserved
+	l.tenantBytes[event.TenantID] = tenantUsage
 	return l.headLocked(), nil
+}
+
+func addTenantUsage(usage map[string]int64, tenantID string, delta int64, limits Limits) error {
+	current, exists := usage[tenantID]
+	if !exists && limits.TenantBudgets == nil && len(usage) >= limits.MaxTenants {
+		return ErrTenantIdentityCapacity
+	}
+	quota, err := limits.tenantQuota(tenantID)
+	if err != nil {
+		return err
+	}
+	if delta < 0 || current > quota-delta {
+		return ErrTenantQuotaExceeded
+	}
+	usage[tenantID] = current + delta
+	return nil
 }
 
 func (l *Log) Head() Head {
@@ -397,8 +542,17 @@ func VerifyRecords(path string, public ed25519.PublicKey, nodeID string, epoch u
 // the file exists, Validate verifies its permissions, signatures, chain, node
 // identity, and epoch using the public half of the configured private key.
 func Validate(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) (Head, error) {
+	return ValidateWithLimits(path, private, nodeID, epoch, DefaultLimits())
+}
+
+// ValidateWithLimits verifies that an existing ledger fits both its signed
+// format and the proposed tenant partitions without creating or changing it.
+func ValidateWithLimits(path string, private ed25519.PrivateKey, nodeID string, epoch uint64, limits Limits) (Head, error) {
 	if !validPath(path) || len(private) != ed25519.PrivateKeySize || !validText(nodeID, 256) || epoch == 0 {
 		return Head{}, errors.New("connector ledger requires a clean path, Ed25519 key, bounded node id, and positive epoch")
+	}
+	if err := limits.Validate(); err != nil {
+		return Head{}, err
 	}
 	public := private.Public().(ed25519.PublicKey)
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
@@ -406,7 +560,24 @@ func Validate(path string, private ed25519.PrivateKey, nodeID string, epoch uint
 	} else if err != nil {
 		return Head{}, fmt.Errorf("stat connector ledger: %w", err)
 	}
-	return VerifyRecords(path, public, nodeID, epoch, nil)
+	pending := make(map[string]Event)
+	spent := make(map[string]struct{})
+	tenantBytes := make(map[string]int64)
+	head, err := VerifyRecords(path, public, nodeID, epoch, func(record VerifiedReceipt) error {
+		if err := updateHistory(pending, spent, record.Receipt.Event); err != nil {
+			return err
+		}
+		return addTenantUsage(tenantBytes, record.Receipt.Event.TenantID, int64(len(record.Raw)+1), limits)
+	})
+	if err != nil {
+		return Head{}, err
+	}
+	for _, event := range pending {
+		if err := addTenantUsage(tenantBytes, event.TenantID, terminalReserveBytes, limits); err != nil {
+			return Head{}, fmt.Errorf("reserve connector terminal record: %w", err)
+		}
+	}
+	return head, nil
 }
 
 func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch uint64, visit func(VerifiedReceipt) error) (Head, error) {
