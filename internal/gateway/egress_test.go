@@ -107,6 +107,33 @@ func TestEgressProxyHTTPConnectDenialAuditAndLifecycle(t *testing.T) {
 	if response.StatusCode != http.StatusOK || string(body) != "http-ok" || response.Header.Get("Set-Cookie") != "upstream=works" {
 		t.Fatalf("HTTP proxy status=%d body=%q headers=%v", response.StatusCode, body, response.Header)
 	}
+	windowStarted := time.Now()
+	server.mu.Lock()
+	server.egressDeniedAttempts[grant.GrantID] = egressDeniedAttemptWindow{
+		started: windowStarted, count: maxEgressDeniedAttemptsPerGrantMinute,
+	}
+	server.egressTenantDenials[grant.TenantID] = egressDeniedAttemptWindow{
+		started: windowStarted, count: maxEgressDeniedAttemptsPerTenantMinute,
+	}
+	server.egressHostDenials = egressDeniedAttemptWindow{started: windowStarted, count: maxEgressDeniedAttemptsHostMinute}
+	server.mu.Unlock()
+	allowedAfterSaturation, _ := http.NewRequest(http.MethodGet, httpUpstream.URL+"/allowed-after-denial-saturation", nil)
+	allowedAfterSaturation.Header.Set("Authorization", "Bearer agent-owned")
+	allowedAfterSaturation.Header.Set("Cookie", "session=agent")
+	response, err = client.Do(allowedAfterSaturation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(body) != "http-ok" {
+		t.Fatalf("denial saturation blocked allowed traffic: status=%d body=%q", response.StatusCode, body)
+	}
+	server.mu.Lock()
+	server.egressDeniedAttempts = make(map[string]egressDeniedAttemptWindow)
+	server.egressTenantDenials = make(map[string]egressDeniedAttemptWindow)
+	server.egressHostDenials = egressDeniedAttemptWindow{}
+	server.mu.Unlock()
 	response, err = client.Get(tlsUpstream.URL + "/tls-path")
 	if err != nil {
 		t.Fatal(err)
@@ -292,6 +319,18 @@ func TestEgressDeniedAttemptLimitIsGrantIsolatedAndSkipsAudit(t *testing.T) {
 		if response.Code != http.StatusBadRequest || server.egressStats[grant.GrantID].Denied != 1 {
 			t.Fatalf("independent grant %s status=%d stats=%#v body=%s", grant.GrantID, response.Code, server.egressStats[grant.GrantID], response.Body.String())
 		}
+	}
+}
+
+func TestEgressLateDenialPreservesGrantRevocationResponse(t *testing.T) {
+	server := &Server{grants: make(map[string]Grant)}
+	grant := Grant{GrantID: "grant-deleted", TenantID: "tenant-a", InstanceID: "agent-a"}
+	response := httptest.NewRecorder()
+	server.rejectEgress(response, grant, "grant_revoked", http.MethodConnect, "api.example.test", 443,
+		http.StatusServiceUnavailable, "egress grant was revoked during address resolution")
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"error":"grant_revoked"`) ||
+		strings.Contains(response.Body.String(), "egress_rate_limited") {
+		t.Fatalf("late revocation status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

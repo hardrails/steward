@@ -48,11 +48,6 @@ func (s *Server) egressHandler(id string) http.Handler {
 			writeGatewayError(w, http.StatusServiceUnavailable, "grant_inactive", "egress grant is not active")
 			return
 		}
-		if s.egressDenialLimitReachedLocked(id, time.Now()) {
-			s.mu.Unlock()
-			writeGatewayError(w, http.StatusTooManyRequests, "egress_rate_limited", "egress denied-attempt rate limit reached")
-			return
-		}
 		if !grant.Active {
 			s.mu.Unlock()
 			s.rejectEgress(w, grant, "grant_inactive", r.Method, "", 0, http.StatusServiceUnavailable, "egress grant is not active")
@@ -424,37 +419,56 @@ func copyBounded(destination io.Writer, source io.Reader, maximum int64) (int64,
 }
 
 func (s *Server) rejectEgress(w http.ResponseWriter, grant Grant, reason, method, host string, port, status int, message string) {
-	if !s.denyEgress(grant, reason, method, host, port) {
+	switch s.denyEgress(grant, reason, method, host, port) {
+	case egressDenialRateLimited:
 		writeGatewayError(w, http.StatusTooManyRequests, "egress_rate_limited", "egress denied-attempt rate limit reached")
+		return
+	case egressDenialGrantMissing:
+		// Preserve the underlying revocation or routing result. A grant deleted
+		// during an in-flight request is not a denial-rate-limit event.
+		writeGatewayError(w, status, reason, message)
 		return
 	}
 	writeGatewayError(w, status, reason, message)
 }
+
+type egressDenialDecision uint8
+
+const (
+	egressDenialAllowed egressDenialDecision = iota
+	egressDenialRateLimited
+	egressDenialGrantMissing
+)
 
 // denyEgress reserves denial capacity before touching the shared,
 // synchronously-fsynced audit log. Per-grant and fixed per-tenant limits keep
 // one tenant from borrowing another tenant's capacity, while the host limit
 // bounds total disk work. Callers that can still write an HTTP response
 // translate false into a 429 JSON error.
-func (s *Server) denyEgress(grant Grant, reason, method, host string, port int) bool {
-	if !s.allowEgressDeniedAttempt(grant.GrantID, time.Now()) {
-		return false
+func (s *Server) denyEgress(grant Grant, reason, method, host string, port int) egressDenialDecision {
+	decision := s.reserveEgressDeniedAttempt(grant.GrantID, time.Now())
+	if decision != egressDenialAllowed {
+		return decision
 	}
 	event := egressAuditEvent{Decision: "deny", Reason: reason, GrantID: grant.GrantID, TenantID: grant.TenantID,
 		InstanceID: grant.InstanceID, Method: method, Host: host, Port: port}
 	_ = s.audit.Append(event)
 	s.updateEgressStats(grant.GrantID, event)
-	return true
+	return egressDenialAllowed
 }
 
 func (s *Server) allowEgressDeniedAttempt(grantID string, now time.Time) bool {
+	return s.reserveEgressDeniedAttempt(grantID, now) == egressDenialAllowed
+}
+
+func (s *Server) reserveEgressDeniedAttempt(grantID string, now time.Time) egressDenialDecision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// An in-flight request can reach a late denial while unregister is revoking
 	// the grant. Do not recreate limiter state after unregister has deleted it.
 	grant, ok := s.grants[grantID]
 	if !ok {
-		return false
+		return egressDenialGrantMissing
 	}
 	s.pruneExpiredEgressTenantDenialsLocked(now)
 	grantWindow, grantAllowed := availableEgressDenialWindow(
@@ -467,7 +481,7 @@ func (s *Server) allowEgressDeniedAttempt(grantID string, now time.Time) bool {
 		s.egressHostDenials, now, maxEgressDeniedAttemptsHostMinute,
 	)
 	if !grantAllowed || !tenantAllowed || !hostAllowed {
-		return false
+		return egressDenialRateLimited
 	}
 	grantWindow.count++
 	tenantWindow.count++
@@ -481,7 +495,7 @@ func (s *Server) allowEgressDeniedAttempt(grantID string, now time.Time) bool {
 	s.egressDeniedAttempts[grantID] = grantWindow
 	s.egressTenantDenials[grant.TenantID] = tenantWindow
 	s.egressHostDenials = hostWindow
-	return true
+	return egressDenialAllowed
 }
 
 func (s *Server) pruneExpiredEgressTenantDenialsLocked(now time.Time) {
@@ -501,27 +515,6 @@ func availableEgressDenialWindow(window egressDeniedAttemptWindow, now time.Time
 		window = egressDeniedAttemptWindow{started: now}
 	}
 	return window, window.count < limit
-}
-
-func egressDenialWindowExhausted(window egressDeniedAttemptWindow, now time.Time, limit int) bool {
-	if window.started.IsZero() || now.Sub(window.started) >= time.Minute {
-		return false
-	}
-	return now.Before(window.started) || window.count >= limit
-}
-
-// egressDenialLimitReachedLocked is the cheap layered preflight that keeps an
-// exhausted CONNECT request from being hijacked before Steward can return JSON.
-// It does not consume budget, so allowed traffic remains unrestricted until a
-// grant, its tenant, or the host has produced the bounded number of denials.
-func (s *Server) egressDenialLimitReachedLocked(grantID string, now time.Time) bool {
-	grant, ok := s.grants[grantID]
-	if !ok {
-		return true
-	}
-	return egressDenialWindowExhausted(s.egressDeniedAttempts[grantID], now, maxEgressDeniedAttemptsPerGrantMinute) ||
-		egressDenialWindowExhausted(s.egressTenantDenials[grant.TenantID], now, maxEgressDeniedAttemptsPerTenantMinute) ||
-		egressDenialWindowExhausted(s.egressHostDenials, now, maxEgressDeniedAttemptsHostMinute)
 }
 
 func (s *Server) finishEgress(grant Grant, routeID, reason, method, host string, port int, fromAgent, toAgent int64) {
