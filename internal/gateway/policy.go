@@ -160,9 +160,7 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		slices.Sort(operationIDs)
 		for _, operationID := range operationIDs {
 			operation := connector.operations[operationID]
-			policy.Operations = append(policy.Operations, connectorOperationPolicy{
-				ID: operation.ID, Method: operation.Method, Path: operation.Path,
-			})
+			policy.Operations = append(policy.Operations, connectorOperationPolicy(operation))
 		}
 		document.Connectors = append(document.Connectors, policy)
 	}

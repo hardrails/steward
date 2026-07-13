@@ -451,7 +451,7 @@ func TestConnectorProxyBoundsGatewayWaitAndRetainsErrorWriteGrace(t *testing.T) 
 	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "connector_unavailable") {
 		t.Fatalf("status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
-	if len(recorder.writes) != 4 || recorder.writes[3].deadline.Sub(time.Now()) < responseBudget/2 {
+	if len(recorder.writes) != 4 || time.Until(recorder.writes[3].deadline) < responseBudget/2 {
 		t.Fatalf("timeout error lost its write grace: %#v", recorder.writes)
 	}
 }
