@@ -15,6 +15,7 @@ readonly default_max_archive_bytes=$((8 * 1024 * 1024 * 1024))
 readonly sandbox_memory_bytes=$((4 * 1024 * 1024 * 1024))
 readonly sandbox_output_bytes=$((2 * 1024 * 1024 * 1024))
 readonly sandbox_pids=512
+readonly sandbox_cpus=1
 
 usage() {
 	cat <<'USAGE'
@@ -456,7 +457,7 @@ tar -cf /output/venv.tar .venv
 docker create --name "$sandbox_name" \
 	--runtime runsc --network "$sandbox_network" --read-only --cap-drop ALL \
 	--security-opt no-new-privileges:true --pids-limit "$sandbox_pids" \
-	--memory "$sandbox_memory_bytes" --memory-swap "$sandbox_memory_bytes" --cpus 4 \
+	--memory "$sandbox_memory_bytes" --memory-swap "$sandbox_memory_bytes" --cpus "$sandbox_cpus" \
 	--tmpfs "/tmp:rw,nosuid,nodev,size=$sandbox_memory_bytes" \
 	--tmpfs "/output:rw,noexec,nosuid,nodev,size=$sandbox_output_bytes" \
 	--user 65532:65532 --workdir /tmp/build \
