@@ -45,6 +45,7 @@ type connectorRoutePolicy struct {
 	CredentialFile       string                     `json:"credential_file"`
 	CredentialMode       CredentialMode             `json:"credential_mode"`
 	CredentialConfigured bool                       `json:"credential_configured"`
+	AllowInsecureHTTP    bool                       `json:"allow_insecure_http"`
 	AllowedCIDRs         []string                   `json:"allowed_cidrs,omitempty"`
 	MaxConcurrent        int                        `json:"max_concurrent"`
 	MaxRequestBytes      int64                      `json:"max_request_bytes"`
@@ -83,6 +84,7 @@ func sameLoadedEgressRoute(left, right loadedEgressRoute) bool {
 func sameLoadedConnector(left, right loadedConnector) bool {
 	if left.ID != right.ID || routeBaseURL(left.base) != routeBaseURL(right.base) ||
 		left.CredentialFile != right.CredentialFile || left.CredentialMode != right.CredentialMode ||
+		left.AllowInsecureHTTP != right.AllowInsecureHTTP ||
 		left.credential != right.credential || left.MaxConcurrent != right.MaxConcurrent ||
 		left.MaxRequestBytes != right.MaxRequestBytes || left.MaxResponseBytes != right.MaxResponseBytes ||
 		left.MaxSeconds != right.MaxSeconds || left.MaxCallsPerGrant != right.MaxCallsPerGrant ||
@@ -145,7 +147,8 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		policy := connectorRoutePolicy{
 			ID: connector.ID, BaseURL: routeBaseURL(connector.base), CredentialFile: connector.CredentialFile,
 			CredentialMode: connector.CredentialMode, CredentialConfigured: connector.credential != "",
-			MaxConcurrent: connector.MaxConcurrent, MaxRequestBytes: connector.MaxRequestBytes,
+			AllowInsecureHTTP: connector.AllowInsecureHTTP,
+			MaxConcurrent:     connector.MaxConcurrent, MaxRequestBytes: connector.MaxRequestBytes,
 			MaxResponseBytes: connector.MaxResponseBytes, MaxSeconds: connector.MaxSeconds,
 			MaxCallsPerGrant: connector.MaxCallsPerGrant,
 		}

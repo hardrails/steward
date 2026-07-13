@@ -123,6 +123,11 @@ func TestConfigLoadsFiniteConnectorsAndOwnerOnlyCredentials(t *testing.T) {
 		len(connector.prefixes) != 1 || connector.operations["create"].Path != "/v1/issues" {
 		t.Fatalf("loaded connector = %#v", connector)
 	}
+	insecure := connectorFixture(credential)
+	insecure.BaseURL, insecure.AllowInsecureHTTP = "http://api.example.test:8080", true
+	if _, err := (Config{Connectors: []Connector{insecure}}).validateAndLoadConnectors(); err != nil {
+		t.Fatalf("explicitly acknowledged HTTP origin rejected: %v", err)
+	}
 	if err := os.Chmod(credential, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +150,7 @@ func TestConfigRejectsAmbiguousOrUnboundedConnectors(t *testing.T) {
 		{"fragment", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test#fragment" }},
 		{"userinfo", func(c *Config) { c.Connectors[0].BaseURL = "https://user@api.example.test" }},
 		{"origin path", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test/v1" }},
+		{"http without acknowledgement", func(c *Config) { c.Connectors[0].BaseURL = "http://api.example.test" }},
 		{"trailing slash", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test/" }},
 		{"noncanonical host", func(c *Config) { c.Connectors[0].BaseURL = "https://API.example.test" }},
 		{"empty port", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test:" }},

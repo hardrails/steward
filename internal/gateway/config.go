@@ -99,17 +99,18 @@ const (
 // Connector binds a finite set of logical operations to one exact upstream
 // origin and one operator-owned credential.
 type Connector struct {
-	ID               string               `json:"id"`
-	BaseURL          string               `json:"base_url"`
-	CredentialFile   string               `json:"credential_file"`
-	CredentialMode   CredentialMode       `json:"credential_mode"`
-	AllowedCIDRs     []string             `json:"allowed_cidrs,omitempty"`
-	MaxConcurrent    int                  `json:"max_concurrent"`
-	MaxRequestBytes  int64                `json:"max_request_bytes"`
-	MaxResponseBytes int64                `json:"max_response_bytes"`
-	MaxSeconds       int                  `json:"max_seconds"`
-	MaxCallsPerGrant int                  `json:"max_calls_per_grant"`
-	Operations       []ConnectorOperation `json:"operations"`
+	ID                string               `json:"id"`
+	BaseURL           string               `json:"base_url"`
+	CredentialFile    string               `json:"credential_file"`
+	CredentialMode    CredentialMode       `json:"credential_mode"`
+	AllowInsecureHTTP bool                 `json:"allow_insecure_http,omitempty"`
+	AllowedCIDRs      []string             `json:"allowed_cidrs,omitempty"`
+	MaxConcurrent     int                  `json:"max_concurrent"`
+	MaxRequestBytes   int64                `json:"max_request_bytes"`
+	MaxResponseBytes  int64                `json:"max_response_bytes"`
+	MaxSeconds        int                  `json:"max_seconds"`
+	MaxCallsPerGrant  int                  `json:"max_calls_per_grant"`
+	Operations        []ConnectorOperation `json:"operations"`
 }
 
 // ConnectorOperation is one exact method and path. Paths have no templates,
@@ -185,6 +186,9 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 		base, err := exactConnectorOrigin(connector.BaseURL)
 		if err != nil {
 			return nil, fmt.Errorf("connector %q base_url: %w", connector.ID, err)
+		}
+		if base.Scheme == "http" && !connector.AllowInsecureHTTP {
+			return nil, fmt.Errorf("connector %q requires allow_insecure_http for an HTTP origin", connector.ID)
 		}
 		if !absoluteClean(connector.CredentialFile) {
 			return nil, fmt.Errorf("connector %q credential path must be absolute", connector.ID)

@@ -104,13 +104,6 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 			return
 		}
 
-		host := connector.base.Hostname()
-		port := connectorPort(connector.base.Scheme, connector.base.Port())
-		ip, err := resolveAllowedIP(request.Context(), host, loadedEgressDestination{prefixes: connector.prefixes})
-		if err != nil {
-			writeGatewayError(w, http.StatusForbidden, "address_denied", "connector origin did not resolve to an allowed address")
-			return
-		}
 		callDigest := connectorCallDigest(taskID, connectorID, operationID)
 		if err := s.spendConnectorCall(grantID, connectorID, callDigest); err != nil {
 			switch {
@@ -123,6 +116,16 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 			default:
 				writeGatewayError(w, http.StatusServiceUnavailable, "state_unavailable", "connector call could not be persisted")
 			}
+			return
+		}
+		// Spending is durable before DNS because DNS itself is externally visible.
+		// Address-denied and resolution-failed attempts therefore consume the same
+		// bounded grant budget and cannot be retried without a new task ID.
+		host := connector.base.Hostname()
+		port := connectorPort(connector.base.Scheme, connector.base.Port())
+		ip, err := resolveAllowedIP(request.Context(), host, loadedEgressDestination{prefixes: connector.prefixes})
+		if err != nil {
+			writeGatewayError(w, http.StatusForbidden, "address_denied", "connector origin did not resolve to an allowed address")
 			return
 		}
 		s.proxyConnector(w, request, connector, operation, body, ip, port)
