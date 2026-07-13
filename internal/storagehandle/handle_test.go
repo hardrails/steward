@@ -292,12 +292,3 @@ func createBackend(t *testing.T, root, kind, backend string) {
 		t.Fatalf("create backend: %v", err)
 	}
 }
-
-func mustMarshal(t *testing.T, reference Reference) []byte {
-	t.Helper()
-	encoded, err := MarshalReference(reference)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return encoded
-}
