@@ -473,6 +473,37 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		feasibility.UpstreamRevision != integration.Provenance.BuildAttestation.Source.Revision {
 		t.Fatal("Hermes feasibility and signed-integration evidence bind different source objects")
 	}
+	stewardSource := integration.Provenance.StewardSource
+	if stewardSource.TrackedDirty == nil || *stewardSource.TrackedDirty ||
+		!validHexObjectID(stewardSource.Commit) || !validHexObjectID(stewardSource.Tree) {
+		t.Fatalf("Hermes integration evidence does not bind a clean Steward source: %#v", stewardSource)
+	}
+	expectedBinaries := map[string]string{
+		"ctl": "stewardctl", "executor": "steward-executor", "gateway": "steward-gateway", "relay": "steward-relay",
+	}
+	if len(integration.Provenance.Binaries) != len(expectedBinaries) {
+		t.Fatalf("Hermes integration evidence binds %d Steward binaries, want %d",
+			len(integration.Provenance.Binaries), len(expectedBinaries))
+	}
+	commitPrefix := stewardSource.Commit[:12]
+	commonVersion := ""
+	for field, binary := range expectedBinaries {
+		record, ok := integration.Provenance.Binaries[field]
+		versionPrefix := binary + " "
+		if !ok || !validSHA256Hex(record.SHA256) || !strings.HasPrefix(record.Version, versionPrefix) {
+			t.Fatalf("Hermes integration evidence has invalid %s binary provenance: %#v", field, record)
+		}
+		version := strings.TrimPrefix(record.Version, versionPrefix)
+		if version == "" || strings.Contains(strings.ToLower(version), "dirty") || !strings.HasSuffix(version, commitPrefix) {
+			t.Fatalf("Hermes integration %s version %q is not a clean build of %s", field, version, stewardSource.Commit)
+		}
+		if commonVersion == "" {
+			commonVersion = version
+		} else if version != commonVersion {
+			t.Fatalf("Hermes integration binaries report different source versions: %q and %q", commonVersion, version)
+		}
+	}
+
 	bindings := map[string]string{
 		"adapter file set":    hermesAdapterFileSetSHA256(t, root),
 		"builder":             sha256File(t, filepath.Join(repositoryRoot, "scripts", "build-hermes-adapter.sh")),
