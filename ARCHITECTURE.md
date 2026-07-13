@@ -28,13 +28,16 @@ Five runtime boundaries separate authority:
 4. **Steward Gateway and the per-instance relay** enforce finite inference,
    service, exact credential-brokered connector, and named HTTP(S) egress grants.
    They do not give an agent a raw host or Internet route. Gateway has its own
-   service identity and no Docker authority.
+   service identity and no Docker authority. For selected connector operations, an
+   off-node tenant action authority can sign one exact request; Gateway verifies
+   and durably spends that permit before the effect.
 5. An operator-managed **OpenAI-compatible inference system** owns model routing
    and inference policy. It is outside Steward's lifecycle contract.
 
 Two additional binaries are operator interfaces, not long-running service
 boundaries. Most `stewardctl` operations are offline: they manage Ed25519 keys,
-signed profile capsules, site policies, OCI archives, and receipt chains.
+signed profile capsules, site policies, exact-request action permits, OCI archives,
+and receipt chains.
 `sudo stewardctl image import` is the deliberate exception; after verification and
 sanitization, that one-shot command connects directly to Docker to load the image.
 `steward-mcp` is a host-local stdio adapter over the bounded Executor API and has
@@ -120,7 +123,9 @@ only an authenticated stop may narrow existing authority.
 
 Executor lifecycle receipts use exact binary framing, Ed25519 signatures, and hash
 links; they do not depend on JSON canonicalization. Gateway connector receipts use
-a separate Gateway key and one signed DSSE JSON record per newline. Both are
+a separate Gateway key and one signed DSSE JSON record per newline. Permit-backed
+records bind the action-authority key ID, exact permit digest, and exact request
+digest beside the stable task-based call digest. Both are
 node-local enforcement evidence, not proof against a hostile host. Host root, the
 host kernel, Docker, gVisor, and node-key protection remain trusted. Receipts
 exclude prompts, model responses, agent logs, semantic tool actions, and agent

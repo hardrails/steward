@@ -29,7 +29,9 @@ operator can:
    workload-count caps;
 3. run the agent in a tenant-labelled, gVisor-sandboxed Docker workload with
    no default network access, while granting only approved state, inference,
-   service, exact connector operations, or named HTTP(S) routes; and
+   service, exact connector operations, or named HTTP(S) routes, and optionally
+   require an off-node tenant authority to sign the exact request for selected
+   connector operations; and
 4. export a node-local, tamper-evident receipt of the accepted inputs and recorded
    enforcement decisions. Tamper-evident means changes within the supplied chain
    can be detected; detecting removal of a complete suffix requires an independently
@@ -53,6 +55,9 @@ authenticated tenant instance intent
               |
               v
 gVisor workload + optional dedicated-host state + per-instance trusted relay
+              |
+              v
+optional exact-request action permit -> Gateway durable spend
               |
               v
 node-local signed, hash-linked enforcement receipt
@@ -85,7 +90,9 @@ lifecycle chain does not embed the full instance intent, state or service
 selection, actual Gateway grant ID, or individual Gateway traffic decisions.
 HTTP(S) egress decisions use a separate unsigned newline-delimited JSON (JSONL)
 audit log. Connector authorizations and terminal outcomes use a separate
-Gateway-signed, hash-linked chain. Both receipt chains exclude prompts, model
+Gateway-signed, hash-linked chain. Permit-backed records bind the action-authority
+key ID, exact signed envelope, and request digests to the stable task call and
+terminal outcome. Both receipt chains exclude prompts, model
 responses, agent logs, the meaning of agent actions, credentials, and bodies.
 
 This gives an auditor a bounded question they can answer locally: *what did
@@ -128,17 +135,24 @@ missing, admission fails closed:
   duration are fixed by the node operator. Steward directly gives the workload a
   logical operation endpoint, not the configured upstream credential, private
   origin, or a general authenticated proxy. A durable task claim and call budget
-  are spent before Gateway opens the upstream request.
+  are spent before Gateway opens the upstream request. Per connector, the operator
+  can additionally require a short-lived permit signed by a tenant-scoped off-node
+  action key for the exact admitted instance, operation, task, and request bytes.
 - **Egress**: named HTTP(S) routes allowed by the publisher capsule, tenant policy,
   and instance intent, then mapped by the host operator to hostnames, ports,
   verified IP addresses, concurrency limits, byte limits, and time limits. The
-  agent receives a standard proxy, not a raw network interface.
+  agent receives a standard proxy, not a raw network interface. Layered denial
+  limits bound synchronous audit work at grant, tenant, and host scope.
 
 Gateway rejects the exact connector credential in upstream response headers and the
 decoded body stream. Inference and connector upstreams remain trusted not to encode
 or transform authentication material, disclose private origin details, or return
 other application secrets. These grants isolate how Steward supplies authority;
 they are not general response data-loss-prevention filters.
+
+The non-secret action-trust inventory used by the signer is unsigned. Operators
+must authenticate it when moving it off-node. It prevents common issuance mistakes;
+it is not a grant and does not replace Gateway's live enforcement decision.
 
 These contracts include lifecycle ordering, drift inspection, journaling, and
 explicit state purge with a receipt. When the observed outcome of a failed mutation
@@ -159,7 +173,8 @@ semantic claims about agent behavior.
 
 Existing sandboxes and agent platforms can complement Steward. Steward addresses a
 specific question: can a customer-operated node enforce a locally authorized
-deployment and produce portable evidence of that enforcement while disconnected?
+deployment, narrow selected external effects to one independently signed request,
+and produce portable evidence of that enforcement while disconnected?
 See the [market analysis]({{ '/product/market-analysis/' | relative_url }}) for a
 dated comparison and its limits.
 

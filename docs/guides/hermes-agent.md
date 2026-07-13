@@ -122,6 +122,12 @@ configured credential in response headers and the decoded body stream, but the
 upstream remains trusted not to transform that value, disclose private origin
 details, or return other application secrets.
 
+This retained qualification predates the optional exact-request action-permit
+path. It used the connector grant, task fence, call budget, and receipt schema 1; it
+did not configure an action authority, issue `X-Steward-Action-Permit`, or exercise
+permit-to-receipt audit. Qualify those steps separately before claiming that a
+Hermes deployment uses action permits.
+
 A separate Steward integration gate inspected and imported the archive through a
 publisher-signed capsule and site policy, started Hermes through Executor, and sent
 the audit and connector requests through Gateway's authenticated service path. It

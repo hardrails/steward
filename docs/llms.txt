@@ -24,8 +24,8 @@ Documentation: https://hardrails.github.io/steward/
 
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
 - [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
-- [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure optional state, inference, and service grants
-- [Authenticated connectors](https://hardrails.github.io/steward/guides/connectors/): Broker exact API operations without directly configuring the workload with upstream credentials or origins; understand exact-response filtering limits
+- [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure optional state, inference, service, connector, and HTTP(S) egress grants
+- [Authenticated connectors](https://hardrails.github.io/steward/guides/connectors/): Broker exact API operations without directly configuring the workload with upstream credentials or origins; optionally require a tenant-scoped signature over one exact request; verify permit-to-receipt linkage offline
 - [Signed egress](https://hardrails.github.io/steward/guides/egress/): Configure HTTP(S) routes, private CIDRs, audit, and diagnostics
 - [Terraform](https://hardrails.github.io/steward/guides/terraform/): Non-secret cloud bootstrap and AWS hardening
 - [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate a local node with Model Context Protocol 2025-11-25 stdio tools
@@ -45,7 +45,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Platform support](https://hardrails.github.io/steward/reference/platform-support/): Supported hosts and artifacts
 - [Configuration](https://hardrails.github.io/steward/reference/configuration/): Flags, defaults, paths, and validation
 - [APIs](https://hardrails.github.io/steward/reference/api/): Authoritative OpenAPI contracts
-- [Image and evidence tools](https://hardrails.github.io/steward/reference/offline-tools/): Verify and import signed Open Container Initiative (OCI) archives; verify and export receipt chains
+- [Image, permit, and evidence tools](https://hardrails.github.io/steward/reference/offline-tools/): Verify and import signed Open Container Initiative (OCI) archives; issue and audit exact-request action permits; verify and export receipt chains
 - [Release artifacts](https://hardrails.github.io/steward/reference/release-artifacts/): Filenames and checksum verification
 
 ## Important capability boundary
@@ -55,8 +55,12 @@ approved workload replacements; the Docker volume has no enforced byte or inode
 quota and is disabled on a shared host. Steward can also grant OpenAI-compatible
 inference without directly configuring or injecting the upstream credential into
 the workload, one private service, and named credential-brokered API operations with
-spend-before-effect call budgets, plus named HTTP(S) routes through a per-instance
-proxy. Gateway rejects the exact connector credential in response headers and the
+spend-before-effect call budgets. A connector can additionally require a short-lived
+permit signed by a tenant-scoped off-node key for the exact admitted operation,
+task, and request bytes. Gateway records that permit and request linkage in its
+signed receipt chain. Named HTTP(S) routes use a per-instance proxy with denial
+limits of 30 per grant, 120 per tenant, and 480 per host per minute. Gateway rejects
+the exact connector credential in response headers and the
 decoded body stream, but configured upstreams remain trusted not to transform that
 credential or disclose private origin details. Steward denies raw TCP/UDP, transparent
 proxying, raw secrets, host mounts, Docker access, privileged mode, and undeclared
@@ -73,6 +77,7 @@ bounded negotiation, health, run submission, and run-status operations on port
 changed result after restart. It also required Hermes to discover and load the exact
 signed `steward.connector-work` skill before proving one authenticated effect,
 replay and undeclared-operation denial, fixed-material secret scans, and a separate
-Gateway connector receipt chain. Steward ships the builder and disposable-host
+Gateway connector receipt chain. That historical qualification did not exercise
+action permits. Steward ships the builder and disposable-host
 acceptance harness but no prebuilt Hermes OCI archive because dependency and
 base-image notices are incomplete. OpenClaw remains an unqualified layout contract.

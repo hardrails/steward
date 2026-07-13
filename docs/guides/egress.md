@@ -178,6 +178,18 @@ closes before Gateway dials the upstream. Audit writes for denials and
 terminal outcomes are best-effort so an audit-storage failure cannot turn a denial
 into access or keep a completed connection open.
 
+Denied requests have a layered fixed-window limit of 30 per grant, 120 per tenant,
+and 480 across the host per minute. Gateway reserves capacity at all three layers
+before a synchronous denial-audit write, so one tenant cannot borrow another
+tenant's allocation. When any layer is exhausted, a request that is actually denied
+returns HTTP 429 `egress_rate_limited` instead of adding another audit write or
+denial statistic. An inactive or revoked grant still returns `grant_inactive` or
+`grant_revoked`; the limiter may suppress its audit record but never conceals the
+authority transition. Gateway still evaluates and permits traffic that satisfies
+its route, address, lifecycle, and resource policy. A backward wall-clock jump keeps
+denial-audit capacity closed rather than reopening spent capacity; it does not block
+otherwise allowed traffic.
+
 ## 4. Inspect and troubleshoot
 
 The admission response and status output show the effective proxy and sorted route
@@ -202,6 +214,7 @@ Common failures:
 | `route_denied` | No route in the signed grant matches the hostname and port. |
 | `address_denied` | DNS returned no public or explicitly CIDR-pinned address. |
 | `route_busy` | The route concurrency ceiling is in use. |
+| `egress_rate_limited` | A policy or resource request was denied after its grant, tenant, or the host exhausted denied-attempt audit capacity. Further denials return HTTP 429 without another audit write until the one-minute window resets; allowed traffic continues. Lifecycle responses remain `grant_inactive` or `grant_revoked` even when their denial record is suppressed. |
 | `request_too_large` / `response_too_large` | The configured byte ceiling was reached. |
 | `grant_inactive` | The workload is stopped, being destroyed, or not fully activated. |
 | `audit_unavailable` | An allow decision could not be durably recorded, so Steward refused it. |

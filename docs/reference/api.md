@@ -71,13 +71,48 @@ tools call the loopback Executor API. It is a local adapter, not another authori
 or remote endpoint. See
 [MCP setup]({{ '/guides/mcp/' | relative_url }}).
 
+## Per-workload connector protocol
+
+The trusted relay exposes a grant-owned connector origin inside an admitted
+workload as `STEWARD_CONNECTOR_URL`. This is an internal capability protocol, not a
+host management listener or a public OpenAPI endpoint:
+
+```text
+METHOD /v1/connectors/{connector_id}/operations/{operation_id}
+X-Steward-Task-ID: <bounded one-use task ID>
+Content-Type: application/json
+X-Steward-Action-Permit: <canonical base64url DSSE envelope>
+```
+
+`METHOD`, connector ID, operation ID, and whether a body is allowed come from node
+configuration. `Content-Type` applies only to POST, PUT, and PATCH; those methods
+require one strict JSON value. GET, HEAD, and DELETE are bodyless and omit that
+header. Gateway hashes and forwards the exact validated bytes. A permit-enabled
+connector requires exactly one `X-Steward-Action-Permit`; a connector without
+action authorities omits it and rejects an unsolicited copy. The permit must match
+the live node, tenant, instance, generation, admitted artifact and policy digests,
+route policy, operation-policy
+digest, task, request digest and length, content type, and time window. The
+operation-policy digest fixes the canonical upstream origin, credential injection
+mode, credential epoch, connector and operation IDs, method, and exact path.
+Bodyless GET, HEAD, and DELETE bind an empty request and content type.
+
+The task claim and call budget are spent in the signed connector ledger before DNS.
+A clean relayed response ends with `X-Steward-Connector-Receipt: recorded`.
+Connector errors use the common JSON shape; a permit failure is HTTP 403
+`action_permit_denied`. See
+[authenticated API operations]({{ '/guides/connectors/' | relative_url }}) for the
+complete request, evidence, and failure contract.
+
 ## Offline operator tools
 
-`stewardctl image`, `stewardctl evidence`, and `stewardctl upgrade` are local CLIs,
-not HTTP endpoints.
-They provide bounded, policy-bound Open Container Initiative (OCI) inspection and
-import; offline evidence verification and export; and read-only release drain and
-durable-format inspection. See
+`stewardctl image`, `stewardctl evidence`, `stewardctl permit`, and
+`stewardctl upgrade` are local CLIs, not HTTP endpoints. They provide bounded,
+policy-bound Open Container Initiative (OCI) inspection and import; offline evidence
+verification and export; exact-request permit issuance, verification, and receipt
+correlation; and read-only release drain and durable-format inspection. Permit
+issuance consumes an authenticated but unsigned action-trust inventory as mismatch
+preflight; live Gateway configuration remains authoritative. See
 [local operator tools]({{ '/reference/offline-tools/' | relative_url }}) for flags,
 output formats, and failure boundaries.
 

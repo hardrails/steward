@@ -1,6 +1,6 @@
 ---
 title: Require signed action permits for exact connector effects
-description: Why Steward will spend one authority-signed, request-bound permit before a connector can cause an external effect.
+description: Why Steward spends one authority-signed, request-bound permit before a connector can cause an external effect.
 section: Architecture decision
 ---
 
@@ -26,26 +26,36 @@ or transparency-log service.
 
 ## Decision
 
-Add an action-authority-signed **action permit** for connector operations that
-require exact-effect authorization. Here, exact effect means the exact outbound
-request bytes and bound metadata; it does not mean exactly-once delivery by the
-upstream service. The permit uses a DSSE (Dead Simple Signing Envelope) statement
-signed with Ed25519. Its statement binds:
+Steward requires an action-authority-signed **action permit** for connector
+operations configured for exact-effect authorization. Here, exact effect means the
+exact outbound request bytes and bound metadata; it does not mean exactly-once
+delivery by the upstream service. The permit uses a DSSE (Dead Simple Signing
+Envelope) statement signed with Ed25519. Its statement binds:
 
 - `node_id`, `tenant_id`, `instance_id`, and `generation`;
 - `capsule_digest`, `policy_digest`, and `route_policy_digest`;
-- `connector_id`, `operation_id`, and `task_id`;
+- `connector_id`, `operation_id`, `operation_policy_digest`, and `task_id`;
 - the exact request `request_digest` (SHA-256), `request_bytes`, and
   `content_type`; and
 - canonical `not_before` and `expires_at` timestamps.
 
+`operation_policy_digest` commits to the connector ID, canonical upstream origin,
+credential injection mode, operator-managed credential epoch, operation ID, HTTP
+method, and exact path. The mode identifies whether Gateway uses the
+`Authorization` or `X-API-Key` header; the digest does not contain the credential
+value. `content_type` is `application/json` for the
+body-bearing methods POST, PUT, and PATCH, and empty for bodyless GET, HEAD, and
+DELETE. A bodyless statement must bind the empty request.
+
 There is no separate action identifier. `task_id` and the digest of the complete
 DSSE envelope identify the authorization. Gateway verifies every binding against
-the retained grant and the request it will send. It commits the envelope digest to
-the connector call digest and durably spends the permit in the existing connector
-ledger before opening the upstream request. A mismatched, expired, not-yet-valid,
-replayed, or unrecordable permit fails before the external effect. Signed terminal
-evidence retains the same permit and call linkage for offline verification.
+the retained grant and the request it will send. The stable connector call digest
+continues to derive from tenant, instance, task, connector, and operation. Gateway
+records the permit digest beside that call digest in the signed receipt and
+durably spends the call before opening the upstream request. A mismatched,
+expired, not-yet-valid, replayed, or unrecordable permit fails before the external
+effect. Signed terminal evidence retains the same permit, request, authority-key,
+and call linkage for offline verification.
 
 **Tradeoff:** this adds a signing step for exact-effect operations and requires the
 permit format, ledger state, Gateway enforcement, and verification tools to evolve
@@ -82,9 +92,10 @@ convenient.
 
 Broad connector grants remain an outer ceiling; a permit can narrow authority but
 cannot add a connector, operation, route, artifact, tenant, or generation absent
-from the retained grant. Sign and verify commands should make the added ceremony
-scriptable, while existing receipt verification remains the evidence check. A
-standalone authorization service or dossier product is not part of this decision.
+from the retained grant. `stewardctl permit issue` and `permit verify` make issuance
+and inspection scriptable, while `permit audit` correlates the signed permit with
+the verified connector receipt chain. A standalone authorization service or
+dossier product is not part of this decision.
 
 Revisit this decision if a stable, independently implementable permit standard can
 express every binding above, supports durable offline one-time spend before effect,

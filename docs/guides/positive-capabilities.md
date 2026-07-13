@@ -1,10 +1,10 @@
 ---
-title: Configure state, inference, and service grants
-description: Configure dedicated-host persistent state, credential-hidden OpenAI-compatible inference, and authenticated private service ingress.
+title: Configure finite workload capabilities
+description: Configure dedicated-host state, credential-hidden inference, private service ingress, exact authenticated operations, and bounded HTTP(S) egress.
 section: How-to
 ---
 
-# Configure state, inference, and service grants
+# Configure finite workload capabilities
 
 **Positive capabilities** are explicit grants for state or network access. They
 replace unrestricted container privileges.
@@ -25,7 +25,10 @@ See [Configure signed egress]({{ '/guides/egress/' | relative_url }}).
 
 Authenticated API work uses named connectors. Gateway maps each logical operation
 to an exact method, path, origin, credential, and call budget without placing the
-origin or credential in the workload. See
+origin or credential in the workload. A connector can also require a short-lived
+tenant-scoped action permit that signs the exact request bytes. The signing key
+stays off-node; Gateway spends the authorization and records the permit and request
+digests before the effect. See
 [Broker authenticated API operations]({{ '/guides/connectors/' | relative_url }}).
 
 Gateway rejects the exact configured connector credential in upstream response
@@ -105,10 +108,10 @@ The authenticated instance intent selects a subset:
   `model_alias` of at most 256 bytes with no NUL (zero) byte; and
 - a `service_id` that exactly matches the capsule's declared service.
 
-Executor returns `grant_id` and, for service, `service_path`. Inference or egress
-also returns `route_policy_digest`, a deterministic non-secret digest of retained
-route settings. Executor evidence records it, and Gateway rejects changes while a
-retained grant uses the route.
+Executor returns `grant_id` and, for service, `service_path`. Inference, connector,
+or egress also returns `route_policy_digest`, a deterministic non-secret digest of
+retained route settings. Executor evidence records it, and Gateway rejects changes
+while a retained grant uses the route.
 
 Workloads are created stopped. `start` launches the relay, binds and verifies the
 grant, starts the agent, then activates the grant. Activation comes last so an

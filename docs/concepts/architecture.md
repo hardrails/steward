@@ -14,6 +14,7 @@ has no host authority.
 ```text
 Independent control plane or host operator
   owns users, desired state, approvals, rollout; submits tenant-bound intent
+  optional off-node action authority signs one exact connector request
        |
        | outbound HTTPS command channels
        v
@@ -112,6 +113,17 @@ or reconciliation refuses mismatched route semantics. Inference requests must us
 the exact authorized model alias; a route credential that can reach other models
 does not grant access to them.
 
+A connector may also require a tenant-scoped action permit. The off-node authority
+signs a canonical, short-lived DSSE statement for one exact connector request.
+Gateway checks its node, tenant, instance, generation, admitted artifact, policies,
+connector operation-policy digest, task, body digest and length, method-derived
+content type, and validity window against live state. The operation digest fixes
+the canonical origin, credential injection mode and epoch, method, and path.
+Gateway then records the
+permit and stable task-based call digest together in the signed connector ledger
+before DNS. The signer never needs the upstream credential, and its private key
+does not belong on the node.
+
 `stewardctl` is a CLI, not a daemon. Its key, capsule, policy, archive-inspection,
 and evidence commands run offline without contacting a node, control plane,
 publisher, or transparency service. Only `image import` connects to the local
@@ -137,7 +149,9 @@ ID to its Relay. Gateway selects one exact operator-configured origin, method, a
 path, pins an allowed resolved address, strips agent-supplied credentials, and adds
 the owner-provided credential at the last hop. Spend-before-effect task claims and
 per-grant call budgets survive restart. The connector is not an arbitrary proxy or
-secret-delivery mechanism.
+secret-delivery mechanism. An optional action permit narrows that outer connector
+grant to one authority-signed request; it cannot add an operation or tenant that
+the admitted grant lacks.
 
 For HTTP(S) egress, the agent receives standard proxy variables that point to its
 relay. The relay has no Internet route; it forwards bytes to one grant-owned Unix
@@ -145,6 +159,12 @@ socket. Gateway intersects the grant with operator route configuration, resolves
 and pins an allowed IP address, and performs the network connection. Stop and
 destroy deactivate or remove the same grant. DNS checks, private-address policy,
 auditing, and lifecycle enforcement therefore stay at the trusted boundary.
+Gateway also caps synchronous denied-attempt work at 30 per grant, 120 per tenant,
+and 480 per host per minute. Exhausting any layer suppresses further denial-audit
+writes and returns `egress_rate_limited` only for requests that are denied; traffic
+that satisfies policy continues. Inactive and revoked grants retain their
+`grant_inactive` or `grant_revoked` status even when no further denial record is
+written.
 
 For implementation details and residual risks, read
 [`ARCHITECTURE.md`](https://github.com/hardrails/steward/blob/main/ARCHITECTURE.md)
