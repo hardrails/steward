@@ -3,6 +3,7 @@ package controlstore
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -35,24 +36,29 @@ var (
 )
 
 type Limits struct {
-	MaxTenants           int
-	MaxNodes             int
-	MaxCredentials       int
-	MaxEnrollments       int
-	MaxCommands          int
-	MaxCommandsPerTenant int
-	MaxCommandsPerNode   int
-	MaxCommandBytes      int
-	MaxReportBytes       int
-	MaxStateBytes        int
-	MaxRecordBytes       int
-	MaxWALBytes          int64
-	TerminalRetention    time.Duration
+	MaxTenants              int
+	MaxNodes                int
+	MaxNodesPerTenant       int
+	MaxCredentials          int
+	MaxCredentialsPerTenant int
+	MaxEnrollments          int
+	MaxEnrollmentsPerTenant int
+	MaxCommands             int
+	MaxCommandsPerTenant    int
+	MaxCommandsPerNode      int
+	MaxCommandBytes         int
+	MaxReportBytes          int
+	MaxStateBytes           int
+	MaxRecordBytes          int
+	MaxWALBytes             int64
+	TerminalRetention       time.Duration
 }
 
 func DefaultLimits() Limits {
 	return Limits{
-		MaxTenants: 256, MaxNodes: 4096, MaxCredentials: 16384, MaxEnrollments: 4096,
+		MaxTenants: 256, MaxNodes: 4096, MaxNodesPerTenant: 512,
+		MaxCredentials: 16384, MaxCredentialsPerTenant: 2048,
+		MaxEnrollments: 4096, MaxEnrollmentsPerTenant: 512,
 		MaxCommands: 16384, MaxCommandsPerTenant: 1024, MaxCommandsPerNode: 256,
 		MaxCommandBytes: 1 << 20, MaxReportBytes: 64 << 10,
 		MaxStateBytes: 64 << 20, MaxRecordBytes: 2 << 20, MaxWALBytes: 64 << 20,
@@ -61,13 +67,17 @@ func DefaultLimits() Limits {
 }
 
 func (limits Limits) Validate() error {
-	if limits.MaxTenants <= 0 || limits.MaxNodes <= 0 || limits.MaxCredentials <= 0 || limits.MaxEnrollments <= 0 ||
+	if limits.MaxTenants <= 0 || limits.MaxNodes <= 0 || limits.MaxNodesPerTenant <= 0 ||
+		limits.MaxCredentials <= 0 || limits.MaxCredentialsPerTenant <= 0 ||
+		limits.MaxEnrollments <= 0 || limits.MaxEnrollmentsPerTenant <= 0 ||
 		limits.MaxCommands <= 0 || limits.MaxCommandsPerTenant <= 0 || limits.MaxCommandsPerNode <= 0 ||
 		limits.MaxCommandBytes <= 0 || limits.MaxReportBytes <= 0 || limits.MaxStateBytes <= 0 ||
 		limits.MaxRecordBytes <= 0 || limits.MaxWALBytes <= 0 || limits.TerminalRetention <= 0 {
 		return errors.New("every control store limit must be positive")
 	}
-	if limits.MaxCommandsPerTenant > limits.MaxCommands || limits.MaxCommandsPerNode > limits.MaxCommands ||
+	if limits.MaxNodesPerTenant > limits.MaxNodes || limits.MaxCredentialsPerTenant > limits.MaxCredentials ||
+		limits.MaxEnrollmentsPerTenant > limits.MaxEnrollments ||
+		limits.MaxCommandsPerTenant > limits.MaxCommands || limits.MaxCommandsPerNode > limits.MaxCommands ||
 		limits.MaxCommandBytes > limits.MaxRecordBytes || limits.MaxReportBytes > limits.MaxRecordBytes ||
 		limits.MaxRecordBytes > limits.MaxStateBytes || int64(limits.MaxRecordBytes)+walHeaderBytes+4 > limits.MaxWALBytes {
 		return errors.New("control store limits are internally inconsistent")
@@ -120,12 +130,57 @@ type Command struct {
 }
 
 type snapshotState struct {
-	Version     int                      `json:"version"`
-	Tenants     []Tenant                 `json:"tenants"`
-	Nodes       []Node                   `json:"nodes"`
-	Credentials []controlauth.Credential `json:"credentials"`
-	Enrollments []controlauth.Enrollment `json:"enrollments"`
-	Commands    []Command                `json:"commands"`
+	Version     int                `json:"version"`
+	Tenants     []Tenant           `json:"tenants"`
+	Nodes       []Node             `json:"nodes"`
+	Credentials []storedCredential `json:"credentials"`
+	Enrollments []storedEnrollment `json:"enrollments"`
+	Commands    []storedCommand    `json:"commands"`
+}
+
+type storedCredential struct {
+	Version        int                        `json:"version"`
+	ID             string                     `json:"id"`
+	Kind           controlauth.CredentialKind `json:"kind"`
+	Role           controlauth.Role           `json:"role,omitempty"`
+	TenantID       string                     `json:"tenant_id,omitempty"`
+	TenantIDs      []string                   `json:"tenant_ids,omitempty"`
+	NodeID         string                     `json:"node_id,omitempty"`
+	Audience       string                     `json:"audience,omitempty"`
+	TokenMACBase64 string                     `json:"token_mac_base64"`
+	CreatedAt      string                     `json:"created_at"`
+	Revoked        bool                       `json:"revoked"`
+	RevokedAt      string                     `json:"revoked_at,omitempty"`
+}
+
+type storedEnrollment struct {
+	Version        int      `json:"version"`
+	ID             string   `json:"id"`
+	TenantIDs      []string `json:"tenant_ids"`
+	NodeID         string   `json:"node_id"`
+	Audience       string   `json:"audience"`
+	TokenMACBase64 string   `json:"token_mac_base64"`
+	CreatedAt      string   `json:"created_at"`
+	ExpiresAt      string   `json:"expires_at"`
+	RequestID      string   `json:"request_id,omitempty"`
+	CredentialID   string   `json:"credential_id,omitempty"`
+	ConsumedAt     string   `json:"consumed_at,omitempty"`
+	Revoked        bool     `json:"revoked"`
+	RevokedAt      string   `json:"revoked_at,omitempty"`
+}
+
+type storedCommand struct {
+	TenantID           string          `json:"tenant_id"`
+	NodeID             string          `json:"node_id"`
+	ID                 string          `json:"id"`
+	DeliveryID         string          `json:"delivery_id"`
+	Digest             string          `json:"digest"`
+	CommandDSSEBase64  string          `json:"command_dsse_base64"`
+	State              CommandState    `json:"state"`
+	DeliveryGeneration uint64          `json:"delivery_generation"`
+	LeaseUntil         string          `json:"lease_until,omitempty"`
+	CreatedAt          string          `json:"created_at"`
+	Terminal           *TerminalReport `json:"terminal,omitempty"`
 }
 
 type state struct {
@@ -142,20 +197,26 @@ type transaction struct {
 }
 
 type mutation struct {
-	Kind         string                  `json:"kind"`
-	Tenant       *Tenant                 `json:"tenant,omitempty"`
-	Node         *Node                   `json:"node,omitempty"`
-	Credential   *controlauth.Credential `json:"credential,omitempty"`
-	Enrollment   *controlauth.Enrollment `json:"enrollment,omitempty"`
-	Command      *Command                `json:"command,omitempty"`
-	EnrollmentID string                  `json:"enrollment_id,omitempty"`
-	CommandRef   *commandReference       `json:"command_ref,omitempty"`
+	Kind         string            `json:"kind"`
+	Tenant       *Tenant           `json:"tenant,omitempty"`
+	Node         *Node             `json:"node,omitempty"`
+	Credential   *storedCredential `json:"credential,omitempty"`
+	Enrollment   *storedEnrollment `json:"enrollment,omitempty"`
+	Command      *storedCommand    `json:"command,omitempty"`
+	EnrollmentID string            `json:"enrollment_id,omitempty"`
+	CommandRef   *commandReference `json:"command_ref,omitempty"`
+	NodeRevoke   *nodeRevocation   `json:"node_revoke,omitempty"`
 }
 
 type commandReference struct {
 	TenantID string `json:"tenant_id"`
 	NodeID   string `json:"node_id"`
 	ID       string `json:"id"`
+}
+
+type nodeRevocation struct {
+	NodeID    string `json:"node_id"`
+	RevokedAt string `json:"revoked_at"`
 }
 
 const (
@@ -166,6 +227,7 @@ const (
 	mutationCommand          = "command_upsert"
 	mutationEnrollmentDelete = "enrollment_delete"
 	mutationCommandDelete    = "command_delete"
+	mutationNodeRevoke       = "node_revoke"
 )
 
 func emptyState() state {
@@ -183,7 +245,7 @@ func (current state) clone() state {
 	}
 	for key, node := range current.nodes {
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
-		node.Capabilities = append([]string(nil), node.Capabilities...)
+		node.Capabilities = copyStringSlice(node.Capabilities)
 		next.nodes[key] = node
 	}
 	for key, credential := range current.credentials {
@@ -211,31 +273,115 @@ func cloneCommand(command Command) Command {
 	return command
 }
 
+func credentialToStored(credential controlauth.Credential) storedCredential {
+	return storedCredential{
+		Version: credential.Version, ID: credential.ID, Kind: credential.Kind, Role: credential.Role,
+		TenantID: credential.TenantID, TenantIDs: append([]string(nil), credential.TenantIDs...),
+		NodeID: credential.NodeID, Audience: credential.Audience,
+		TokenMACBase64: base64.StdEncoding.EncodeToString(credential.TokenMAC), CreatedAt: credential.CreatedAt,
+		Revoked: credential.Revoked, RevokedAt: credential.RevokedAt,
+	}
+}
+
+func credentialFromStored(stored storedCredential) (controlauth.Credential, error) {
+	mac, err := decodeCanonicalBase64(stored.TokenMACBase64)
+	if err != nil {
+		return controlauth.Credential{}, err
+	}
+	return controlauth.Credential{
+		Version: stored.Version, ID: stored.ID, Kind: stored.Kind, Role: stored.Role,
+		TenantID: stored.TenantID, TenantIDs: append([]string(nil), stored.TenantIDs...),
+		NodeID: stored.NodeID, Audience: stored.Audience, TokenMAC: mac, CreatedAt: stored.CreatedAt,
+		Revoked: stored.Revoked, RevokedAt: stored.RevokedAt,
+	}, nil
+}
+
+func enrollmentToStored(enrollment controlauth.Enrollment) storedEnrollment {
+	return storedEnrollment{
+		Version: enrollment.Version, ID: enrollment.ID, TenantIDs: append([]string(nil), enrollment.TenantIDs...),
+		NodeID: enrollment.NodeID, Audience: enrollment.Audience,
+		TokenMACBase64: base64.StdEncoding.EncodeToString(enrollment.TokenMAC), CreatedAt: enrollment.CreatedAt,
+		ExpiresAt: enrollment.ExpiresAt, RequestID: enrollment.RequestID, CredentialID: enrollment.CredentialID,
+		ConsumedAt: enrollment.ConsumedAt, Revoked: enrollment.Revoked, RevokedAt: enrollment.RevokedAt,
+	}
+}
+
+func enrollmentFromStored(stored storedEnrollment) (controlauth.Enrollment, error) {
+	mac, err := decodeCanonicalBase64(stored.TokenMACBase64)
+	if err != nil {
+		return controlauth.Enrollment{}, err
+	}
+	return controlauth.Enrollment{
+		Version: stored.Version, ID: stored.ID, TenantIDs: append([]string(nil), stored.TenantIDs...),
+		NodeID: stored.NodeID, Audience: stored.Audience, TokenMAC: mac, CreatedAt: stored.CreatedAt,
+		ExpiresAt: stored.ExpiresAt, RequestID: stored.RequestID, CredentialID: stored.CredentialID,
+		ConsumedAt: stored.ConsumedAt, Revoked: stored.Revoked, RevokedAt: stored.RevokedAt,
+	}, nil
+}
+
+func commandToStored(command Command) storedCommand {
+	stored := storedCommand{
+		TenantID: command.TenantID, NodeID: command.NodeID, ID: command.ID, DeliveryID: command.DeliveryID,
+		Digest: command.Digest, CommandDSSEBase64: base64.StdEncoding.EncodeToString(command.CommandDSSE),
+		State: command.State, DeliveryGeneration: command.DeliveryGeneration, LeaseUntil: command.LeaseUntil,
+		CreatedAt: command.CreatedAt,
+	}
+	if command.Terminal != nil {
+		terminal := *command.Terminal
+		stored.Terminal = &terminal
+	}
+	return stored
+}
+
+func commandFromStored(stored storedCommand) (Command, error) {
+	raw, err := decodeCanonicalBase64(stored.CommandDSSEBase64)
+	if err != nil {
+		return Command{}, err
+	}
+	command := Command{
+		TenantID: stored.TenantID, NodeID: stored.NodeID, ID: stored.ID, DeliveryID: stored.DeliveryID,
+		Digest: stored.Digest, CommandDSSE: raw, State: stored.State,
+		DeliveryGeneration: stored.DeliveryGeneration, LeaseUntil: stored.LeaseUntil, CreatedAt: stored.CreatedAt,
+	}
+	if stored.Terminal != nil {
+		terminal := *stored.Terminal
+		command.Terminal = &terminal
+	}
+	return command, nil
+}
+
+func decodeCanonicalBase64(value string) ([]byte, error) {
+	if value == "" {
+		return nil, errors.New("base64 field is empty")
+	}
+	raw, err := base64.StdEncoding.DecodeString(value)
+	if err != nil || base64.StdEncoding.EncodeToString(raw) != value {
+		return nil, errors.New("base64 field is not canonical")
+	}
+	return raw, nil
+}
+
 func encodeState(current state, limit int) ([]byte, error) {
 	snapshot := snapshotState{
-		Version: stateFormatVersion, Tenants: []Tenant{}, Nodes: []Node{}, Credentials: []controlauth.Credential{},
-		Enrollments: []controlauth.Enrollment{}, Commands: []Command{},
+		Version: stateFormatVersion, Tenants: []Tenant{}, Nodes: []Node{}, Credentials: []storedCredential{},
+		Enrollments: []storedEnrollment{}, Commands: []storedCommand{},
 	}
 	for _, tenant := range current.tenants {
 		snapshot.Tenants = append(snapshot.Tenants, tenant)
 	}
 	for _, node := range current.nodes {
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
-		node.Capabilities = append([]string(nil), node.Capabilities...)
+		node.Capabilities = copyStringSlice(node.Capabilities)
 		snapshot.Nodes = append(snapshot.Nodes, node)
 	}
 	for _, credential := range current.credentials {
-		credential.TokenMAC = append([]byte(nil), credential.TokenMAC...)
-		credential.TenantIDs = append([]string(nil), credential.TenantIDs...)
-		snapshot.Credentials = append(snapshot.Credentials, credential)
+		snapshot.Credentials = append(snapshot.Credentials, credentialToStored(credential))
 	}
 	for _, enrollment := range current.enrollments {
-		enrollment.TokenMAC = append([]byte(nil), enrollment.TokenMAC...)
-		enrollment.TenantIDs = append([]string(nil), enrollment.TenantIDs...)
-		snapshot.Enrollments = append(snapshot.Enrollments, enrollment)
+		snapshot.Enrollments = append(snapshot.Enrollments, enrollmentToStored(enrollment))
 	}
 	for _, command := range current.commands {
-		snapshot.Commands = append(snapshot.Commands, cloneCommand(command))
+		snapshot.Commands = append(snapshot.Commands, commandToStored(command))
 	}
 	sort.Slice(snapshot.Tenants, func(i, j int) bool { return snapshot.Tenants[i].ID < snapshot.Tenants[j].ID })
 	sort.Slice(snapshot.Nodes, func(i, j int) bool { return snapshot.Nodes[i].ID < snapshot.Nodes[j].ID })
@@ -282,26 +428,34 @@ func decodeState(raw []byte, limit int) (state, error) {
 			return state{}, errors.New("control snapshot contains a duplicate node")
 		}
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
-		node.Capabilities = append([]string(nil), node.Capabilities...)
+		node.Capabilities = copyStringSlice(node.Capabilities)
 		current.nodes[node.ID] = node
 	}
-	for _, credential := range snapshot.Credentials {
+	for _, stored := range snapshot.Credentials {
+		credential, err := credentialFromStored(stored)
+		if err != nil {
+			return state{}, fmt.Errorf("control snapshot credential encoding: %w", err)
+		}
 		if _, exists := current.credentials[credential.ID]; exists {
 			return state{}, errors.New("control snapshot contains a duplicate credential")
 		}
-		credential.TokenMAC = append([]byte(nil), credential.TokenMAC...)
-		credential.TenantIDs = append([]string(nil), credential.TenantIDs...)
 		current.credentials[credential.ID] = credential
 	}
-	for _, enrollment := range snapshot.Enrollments {
+	for _, stored := range snapshot.Enrollments {
+		enrollment, err := enrollmentFromStored(stored)
+		if err != nil {
+			return state{}, fmt.Errorf("control snapshot enrollment encoding: %w", err)
+		}
 		if _, exists := current.enrollments[enrollment.ID]; exists {
 			return state{}, errors.New("control snapshot contains a duplicate enrollment")
 		}
-		enrollment.TokenMAC = append([]byte(nil), enrollment.TokenMAC...)
-		enrollment.TenantIDs = append([]string(nil), enrollment.TenantIDs...)
 		current.enrollments[enrollment.ID] = enrollment
 	}
-	for _, command := range snapshot.Commands {
+	for _, stored := range snapshot.Commands {
+		command, err := commandFromStored(stored)
+		if err != nil {
+			return state{}, fmt.Errorf("control snapshot command encoding: %w", err)
+		}
 		key := commandKey(command.TenantID, command.NodeID, command.ID)
 		if _, exists := current.commands[key]; exists {
 			return state{}, errors.New("control snapshot contains a duplicate command")
@@ -354,6 +508,9 @@ func applyTransaction(current state, value transaction) (state, error) {
 		if change.CommandRef != nil {
 			present++
 		}
+		if change.NodeRevoke != nil {
+			present++
+		}
 		if present != 1 {
 			return state{}, errors.New("control mutation must carry exactly one record")
 		}
@@ -369,29 +526,34 @@ func applyTransaction(current state, value transaction) (state, error) {
 			}
 			node := *change.Node
 			node.TenantIDs = append([]string(nil), change.Node.TenantIDs...)
-			node.Capabilities = append([]string(nil), change.Node.Capabilities...)
+			node.Capabilities = copyStringSlice(change.Node.Capabilities)
 			next.nodes[node.ID] = node
 		case mutationCredential:
 			if change.Credential == nil {
 				return state{}, errors.New("credential mutation is missing credential")
 			}
-			credential := *change.Credential
-			credential.TokenMAC = append([]byte(nil), credential.TokenMAC...)
-			credential.TenantIDs = append([]string(nil), credential.TenantIDs...)
+			credential, err := credentialFromStored(*change.Credential)
+			if err != nil {
+				return state{}, fmt.Errorf("credential mutation encoding: %w", err)
+			}
 			next.credentials[credential.ID] = credential
 		case mutationEnrollment:
 			if change.Enrollment == nil {
 				return state{}, errors.New("enrollment mutation is missing enrollment")
 			}
-			enrollment := *change.Enrollment
-			enrollment.TokenMAC = append([]byte(nil), enrollment.TokenMAC...)
-			enrollment.TenantIDs = append([]string(nil), enrollment.TenantIDs...)
+			enrollment, err := enrollmentFromStored(*change.Enrollment)
+			if err != nil {
+				return state{}, fmt.Errorf("enrollment mutation encoding: %w", err)
+			}
 			next.enrollments[enrollment.ID] = enrollment
 		case mutationCommand:
 			if change.Command == nil {
 				return state{}, errors.New("command mutation is missing command")
 			}
-			command := cloneCommand(*change.Command)
+			command, err := commandFromStored(*change.Command)
+			if err != nil {
+				return state{}, fmt.Errorf("command mutation encoding: %w", err)
+			}
 			next.commands[commandKey(command.TenantID, command.NodeID, command.ID)] = command
 		case mutationEnrollmentDelete:
 			if change.EnrollmentID == "" || !validRecordID(change.EnrollmentID, 128) {
@@ -411,6 +573,32 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("command deletion references missing state")
 			}
 			delete(next.commands, key)
+		case mutationNodeRevoke:
+			if change.NodeRevoke == nil || !validRecordID(change.NodeRevoke.NodeID, 128) ||
+				!validTimestamp(change.NodeRevoke.RevokedAt) {
+				return state{}, errors.New("node revocation is invalid")
+			}
+			node, exists := next.nodes[change.NodeRevoke.NodeID]
+			if !exists {
+				return state{}, errors.New("node revocation references missing state")
+			}
+			node.Active = false
+			node.RevokedAt = change.NodeRevoke.RevokedAt
+			next.nodes[node.ID] = node
+			for id, credential := range next.credentials {
+				if credential.Kind == controlauth.KindNode && credential.NodeID == node.ID && !credential.Revoked {
+					credential.Revoked = true
+					credential.RevokedAt = change.NodeRevoke.RevokedAt
+					next.credentials[id] = credential
+				}
+			}
+			for id, enrollment := range next.enrollments {
+				if enrollment.NodeID == node.ID && !enrollment.Revoked {
+					enrollment.Revoked = true
+					enrollment.RevokedAt = change.NodeRevoke.RevokedAt
+					next.enrollments[id] = enrollment
+				}
+			}
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
 		}
@@ -429,6 +617,7 @@ func validateState(current state, limits Limits) error {
 			return errors.New("control state contains an invalid tenant")
 		}
 	}
+	nodesByTenant := make(map[string]int)
 	for key, node := range current.nodes {
 		if key != node.ID || !validRecordID(node.ID, 128) || !validTenantSet(node.TenantIDs) ||
 			!validCapabilities(node.Capabilities) || !validTimestamp(node.CreatedAt) ||
@@ -436,12 +625,30 @@ func validateState(current state, limits Limits) error {
 			node.Active == (node.RevokedAt != "") {
 			return errors.New("control state contains an invalid node")
 		}
+		created, _ := parseTimestamp(node.CreatedAt)
+		if node.LastSeenAt != "" {
+			lastSeen, _ := parseTimestamp(node.LastSeenAt)
+			if lastSeen.Before(created) {
+				return errors.New("control node observation predates creation")
+			}
+		}
+		if node.RevokedAt != "" {
+			revoked, _ := parseTimestamp(node.RevokedAt)
+			if revoked.Before(created) {
+				return errors.New("control node revocation predates creation")
+			}
+		}
 		for _, tenantID := range node.TenantIDs {
 			if _, ok := current.tenants[tenantID]; !ok {
 				return errors.New("control node references an unknown tenant")
 			}
+			nodesByTenant[tenantID]++
+			if nodesByTenant[tenantID] > limits.MaxNodesPerTenant {
+				return ErrCapacityExceeded
+			}
 		}
 	}
+	credentialsByTenant := make(map[string]int)
 	for key, credential := range current.credentials {
 		if key != credential.ID || controlauth.ValidateCredential(credential) != nil {
 			return errors.New("control state contains an invalid credential")
@@ -450,14 +657,25 @@ func validateState(current state, limits Limits) error {
 			if _, ok := current.tenants[credential.TenantID]; !ok {
 				return errors.New("control credential references an unknown tenant")
 			}
+			credentialsByTenant[credential.TenantID]++
+			if credentialsByTenant[credential.TenantID] > limits.MaxCredentialsPerTenant {
+				return ErrCapacityExceeded
+			}
 		}
 		if credential.Kind == controlauth.KindNode {
 			node, ok := current.nodes[credential.NodeID]
 			if !ok || !tenantSubset(credential.TenantIDs, node.TenantIDs) {
 				return errors.New("node credential references an unknown node")
 			}
+			for _, tenantID := range credential.TenantIDs {
+				credentialsByTenant[tenantID]++
+				if credentialsByTenant[tenantID] > limits.MaxCredentialsPerTenant {
+					return ErrCapacityExceeded
+				}
+			}
 		}
 	}
+	enrollmentsByTenant := make(map[string]int)
 	for key, enrollment := range current.enrollments {
 		if key != enrollment.ID || controlauth.ValidateEnrollment(enrollment) != nil {
 			return errors.New("control state contains an invalid enrollment")
@@ -469,6 +687,12 @@ func validateState(current state, limits Limits) error {
 		if enrollment.CredentialID != "" {
 			if _, ok := current.credentials[enrollment.CredentialID]; !ok {
 				return errors.New("consumed enrollment references an unknown credential")
+			}
+		}
+		for _, tenantID := range enrollment.TenantIDs {
+			enrollmentsByTenant[tenantID]++
+			if enrollmentsByTenant[tenantID] > limits.MaxEnrollmentsPerTenant {
+				return ErrCapacityExceeded
 			}
 		}
 	}
@@ -483,9 +707,9 @@ func validateState(current state, limits Limits) error {
 			return errors.New("control command references an unknown node")
 		}
 		tenantCommands[command.TenantID]++
-		nodeCommands[command.NodeID]++
+		nodeCommands[nodeTenantKey(command.TenantID, command.NodeID)]++
 		if tenantCommands[command.TenantID] > limits.MaxCommandsPerTenant ||
-			nodeCommands[command.NodeID] > limits.MaxCommandsPerNode {
+			nodeCommands[nodeTenantKey(command.TenantID, command.NodeID)] > limits.MaxCommandsPerNode {
 			return ErrCapacityExceeded
 		}
 	}
@@ -504,6 +728,7 @@ func validateCommand(command Command, limits Limits) error {
 		command.Digest != digestBytes(command.CommandDSSE) || !validTimestamp(command.CreatedAt) {
 		return errors.New("invalid command identity or bytes")
 	}
+	created, _ := parseTimestamp(command.CreatedAt)
 	switch command.State {
 	case CommandPending:
 		if command.DeliveryGeneration != 0 || command.LeaseUntil != "" || command.Terminal != nil {
@@ -512,6 +737,10 @@ func validateCommand(command Command, limits Limits) error {
 	case CommandLeased:
 		if command.DeliveryGeneration == 0 || !validTimestamp(command.LeaseUntil) || command.Terminal != nil {
 			return errors.New("leased command has invalid delivery state")
+		}
+		leaseUntil, _ := parseTimestamp(command.LeaseUntil)
+		if !leaseUntil.After(created) {
+			return errors.New("command lease does not follow submission")
 		}
 	case CommandTerminal:
 		if command.DeliveryGeneration == 0 || command.LeaseUntil != "" || command.Terminal == nil {
@@ -527,6 +756,10 @@ func validateCommand(command Command, limits Limits) error {
 		raw, err := json.Marshal(command.Terminal.Report)
 		if err != nil || len(raw) > limits.MaxReportBytes || command.Terminal.Digest != digestBytes(raw) {
 			return errors.New("terminal report digest or size is invalid")
+		}
+		completed, _ := parseTimestamp(command.Terminal.CompletedAt)
+		if completed.Before(created) {
+			return errors.New("terminal report predates command submission")
 		}
 	default:
 		return errors.New("command state is invalid")
@@ -548,6 +781,8 @@ func deliveryID(tenantID, nodeID, commandID string) string {
 func commandKey(tenantID, nodeID, commandID string) string {
 	return tenantID + "\x00" + nodeID + "\x00" + commandID
 }
+
+func nodeTenantKey(tenantID, nodeID string) string { return tenantID + "\x00" + nodeID }
 
 func validTenantSet(tenantIDs []string) bool {
 	canonical, err := controlauth.CanonicalTenantIDs(tenantIDs)
@@ -583,7 +818,7 @@ func canonicalCapabilities(capabilities []string) ([]string, error) {
 	if capabilities == nil || len(capabilities) > 64 {
 		return nil, errors.New("node capabilities must be a present collection with at most 64 entries")
 	}
-	canonical := append([]string(nil), capabilities...)
+	canonical := copyStringSlice(capabilities)
 	for _, capability := range canonical {
 		if !validRecordID(capability, 128) {
 			return nil, errors.New("node capability is invalid")
@@ -596,6 +831,15 @@ func canonicalCapabilities(capabilities []string) ([]string, error) {
 		}
 	}
 	return canonical, nil
+}
+
+func copyStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	result := make([]string, len(values))
+	copy(result, values)
+	return result
 }
 
 func validCapabilities(capabilities []string) bool {

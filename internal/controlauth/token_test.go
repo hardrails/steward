@@ -172,6 +172,15 @@ func TestDurableRecordValidation(t *testing.T) {
 	if ValidateCredential(credential) == nil {
 		t.Fatal("invalid role scope was accepted")
 	}
+	credential.TenantID = "tenant-a"
+	credential.Revoked = true
+	if ValidateCredential(credential) == nil {
+		t.Fatal("revocation without a timestamp was accepted")
+	}
+	credential.RevokedAt = now.Add(time.Minute).Format(time.RFC3339Nano)
+	if ValidateCredential(credential) != nil {
+		t.Fatal("complete credential revocation was rejected")
+	}
 	_, enrollment, err := manager.MintEnrollment([]string{"tenant-a"}, "node-a", now.Add(time.Hour), now)
 	if err != nil || ValidateEnrollment(enrollment) != nil {
 		t.Fatalf("enrollment validation = (%v, %v)", err, ValidateEnrollment(enrollment))
@@ -179,6 +188,11 @@ func TestDurableRecordValidation(t *testing.T) {
 	enrollment.CredentialID = "orphan"
 	if ValidateEnrollment(enrollment) == nil {
 		t.Fatal("partial consumption was accepted")
+	}
+	enrollment.CredentialID = ""
+	enrollment.Revoked = true
+	if ValidateEnrollment(enrollment) == nil {
+		t.Fatal("enrollment revocation without a timestamp was accepted")
 	}
 }
 

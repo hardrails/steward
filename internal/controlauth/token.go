@@ -67,6 +67,7 @@ type Credential struct {
 	TokenMAC  []byte         `json:"token_mac"`
 	CreatedAt string         `json:"created_at"`
 	Revoked   bool           `json:"revoked"`
+	RevokedAt string         `json:"revoked_at,omitempty"`
 }
 
 // Enrollment is a durable one-time capability. An exact retry of the first
@@ -84,6 +85,7 @@ type Enrollment struct {
 	CredentialID string   `json:"credential_id,omitempty"`
 	ConsumedAt   string   `json:"consumed_at,omitempty"`
 	Revoked      bool     `json:"revoked"`
+	RevokedAt    string   `json:"revoked_at,omitempty"`
 }
 
 type Identity struct {
@@ -333,6 +335,16 @@ func ValidateCredential(credential Credential) error {
 	if _, err := parseCanonicalTime(credential.CreatedAt); err != nil {
 		return errors.New("invalid credential creation time")
 	}
+	if credential.Revoked != (credential.RevokedAt != "") {
+		return errors.New("incomplete credential revocation")
+	}
+	if credential.Revoked {
+		revoked, err := parseCanonicalTime(credential.RevokedAt)
+		created, _ := parseCanonicalTime(credential.CreatedAt)
+		if err != nil || revoked.Before(created) {
+			return errors.New("invalid credential revocation time")
+		}
+	}
 	switch credential.Kind {
 	case KindOperator:
 		if !validRoleScope(credential.Role, credential.TenantID) || len(credential.TenantIDs) != 0 || credential.NodeID != "" || credential.Audience != "" {
@@ -371,6 +383,15 @@ func ValidateEnrollment(enrollment Enrollment) error {
 		consumed, err := parseCanonicalTime(enrollment.ConsumedAt)
 		if err != nil || consumed.Before(created) || consumed.After(expires) {
 			return errors.New("invalid enrollment consumption time")
+		}
+	}
+	if enrollment.Revoked != (enrollment.RevokedAt != "") {
+		return errors.New("incomplete enrollment revocation")
+	}
+	if enrollment.Revoked {
+		revoked, err := parseCanonicalTime(enrollment.RevokedAt)
+		if err != nil || revoked.Before(created) {
+			return errors.New("invalid enrollment revocation time")
 		}
 	}
 	return nil
