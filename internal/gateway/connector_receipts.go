@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 
 	"github.com/hardrails/steward/internal/connectorledger"
@@ -18,6 +19,38 @@ type connectorReceiptIndex struct {
 	spends  map[string]connectorSpendOwner
 	counts  map[string]map[string]int
 	pending map[string]connectorledger.Event
+}
+
+// ConnectorReceiptFormatSummary identifies the connector receipt compatibility
+// boundary without exposing receipt contents.
+type ConnectorReceiptFormatSummary struct {
+	Present       bool `json:"present"`
+	FormatVersion int  `json:"format_version"`
+}
+
+// InspectConnectorReceiptFormat verifies an existing connector receipt ledger
+// without creating or changing it. A configured but not-yet-created ledger is
+// a valid prospective path and is reported as absent.
+func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary, error) {
+	key, err := config.connectorReceiptPrivateKey()
+	if err != nil {
+		return ConnectorReceiptFormatSummary{}, err
+	}
+	if key == nil {
+		return ConnectorReceiptFormatSummary{}, nil
+	}
+	if _, err := os.Lstat(config.ConnectorReceiptFile); errors.Is(err, os.ErrNotExist) {
+		return ConnectorReceiptFormatSummary{}, nil
+	} else if err != nil {
+		return ConnectorReceiptFormatSummary{}, fmt.Errorf("stat connector receipt ledger: %w", err)
+	}
+	public := key.Public().(ed25519.PublicKey)
+	if _, err := connectorledger.VerifyRecords(
+		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch, nil,
+	); err != nil {
+		return ConnectorReceiptFormatSummary{}, fmt.Errorf("inspect connector receipt ledger: %w", err)
+	}
+	return ConnectorReceiptFormatSummary{Present: true, FormatVersion: 1}, nil
 }
 
 func newConnectorReceiptIndex() *connectorReceiptIndex {
