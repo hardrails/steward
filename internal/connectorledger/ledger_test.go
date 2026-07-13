@@ -1,0 +1,206 @@
+package connectorledger
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+)
+
+func TestAppendVerifyAndVisitConnectorLedger(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "connector-receipts.ndjson")
+	log, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := validEvent(Authorize, Allowed)
+	head, err := log.Append(first)
+	if err != nil || head.Sequence != 1 || head.ChainHash == zeroHash() || head.KeyID != KeyID(public) {
+		t.Fatalf("first head=%#v err=%v", head, err)
+	}
+	terminal := validEvent(Terminal, Committed)
+	terminal.HTTPStatus, terminal.ResponseBytes = 201, 37
+	head, err = log.Append(terminal)
+	if err != nil || head.Sequence != 2 {
+		t.Fatalf("terminal head=%#v err=%v", head, err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var records []VerifiedReceipt
+	verified, err := VerifyRecords(path, public, "node-a/gateway", 1, func(receipt VerifiedReceipt) error {
+		records = append(records, receipt)
+		return nil
+	})
+	if err != nil || verified != head || len(records) != 2 {
+		t.Fatalf("verified=%#v records=%d err=%v", verified, len(records), err)
+	}
+	if records[0].Receipt.Event != first || records[1].Receipt.Event != terminal || records[1].Hash != head.ChainHash {
+		t.Fatalf("records=%#v", records)
+	}
+
+	reopened, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denial := validEvent(Deny, Denied)
+	denial.ErrorCode = "call_budget_exhausted"
+	head, err = reopened.Append(denial)
+	if err != nil || head.Sequence != 3 {
+		t.Fatalf("reopened append head=%#v err=%v", head, err)
+	}
+	_ = reopened.Close()
+}
+
+func TestConnectorLedgerRejectsTamperReorderAndTruncation(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeLedger := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "ledger.ndjson")
+		log, err := Open(path, private, "node-a/gateway", 7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := log.Append(validEvent(Authorize, Allowed)); err != nil {
+			t.Fatal(err)
+		}
+		terminal := validEvent(Terminal, Failed)
+		terminal.ErrorCode = "upstream_unavailable"
+		if _, err := log.Append(terminal); err != nil {
+			t.Fatal(err)
+		}
+		_ = log.Close()
+		return path
+	}
+
+	t.Run("tamper", func(t *testing.T) {
+		path := makeLedger(t)
+		raw, _ := os.ReadFile(path)
+		raw[len(raw)/2] ^= 1
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyRecords(path, public, "node-a/gateway", 7, nil); err == nil {
+			t.Fatal("tampered ledger verified")
+		}
+	})
+
+	t.Run("reorder", func(t *testing.T) {
+		path := makeLedger(t)
+		raw, _ := os.ReadFile(path)
+		lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+		if err := os.WriteFile(path, []byte(lines[1]+"\n"+lines[0]+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyRecords(path, public, "node-a/gateway", 7, nil); err == nil {
+			t.Fatal("reordered ledger verified")
+		}
+	})
+
+	t.Run("truncate", func(t *testing.T) {
+		path := makeLedger(t)
+		raw, _ := os.ReadFile(path)
+		if err := os.WriteFile(path, raw[:len(raw)-1], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyRecords(path, public, "node-a/gateway", 7, nil); err == nil || !strings.Contains(err.Error(), "incomplete") {
+			t.Fatalf("truncated ledger err=%v", err)
+		}
+	})
+}
+
+func TestConnectorLedgerConcurrentAppendHasOneChainOrder(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "ledger.ndjson")
+	log, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const count = 32
+	var wait sync.WaitGroup
+	errorsCh := make(chan error, count)
+	for index := 0; index < count; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := log.Append(validEvent(Authorize, Allowed))
+			errorsCh <- err
+		}()
+	}
+	wait.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = log.Close()
+	head, err := VerifyRecords(path, public, "node-a/gateway", 1, nil)
+	if err != nil || head.Sequence != count {
+		t.Fatalf("head=%#v err=%v", head, err)
+	}
+}
+
+func TestConnectorLedgerValidatesEventsFilesAndTaskIDs(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "ledger.ndjson")
+	log, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := validEvent(Terminal, Committed)
+	invalid.HTTPStatus = 0
+	if _, err := log.Append(invalid); err == nil {
+		t.Fatal("committed terminal event without status was accepted")
+	}
+	invalid = validEvent(Deny, Denied)
+	if _, err := log.Append(invalid); err == nil {
+		t.Fatal("denial without reason was accepted")
+	}
+	if _, err := TaskDigest("../weak"); err == nil {
+		t.Fatal("unsafe task id accepted")
+	}
+	first, err := TaskDigest("task-0123456789abcdef")
+	if err != nil || !digest(first) {
+		t.Fatalf("task digest=%q err=%v", first, err)
+	}
+	second, _ := TaskDigest("task-0123456789abcdef")
+	if first != second {
+		t.Fatal("task digest is not deterministic")
+	}
+	_ = log.Close()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	public := private.Public().(ed25519.PublicKey)
+	if _, err := VerifyRecords(path, public, "node-a/gateway", 1, nil); err == nil {
+		t.Fatal("world-readable ledger accepted")
+	}
+}
+
+func validEvent(phase Phase, outcome Outcome) Event {
+	task, _ := TaskDigest("task-0123456789abcdef")
+	return Event{
+		Phase: phase, Outcome: outcome, TenantID: "tenant-a",
+		RuntimeRef: "executor-" + strings.Repeat("a", 64), CapsuleDigest: "sha256:" + strings.Repeat("b", 64),
+		PolicyDigest: "sha256:" + strings.Repeat("c", 64), Generation: 4,
+		GrantID: "grant-" + strings.Repeat("d", 64), ConnectorID: "ticketing", OperationID: "create-ticket",
+		TaskDigest: task, RequestBytes: 19,
+	}
+}
