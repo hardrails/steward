@@ -3,6 +3,7 @@ package connectorledger
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -89,18 +90,81 @@ func TestConnectorLedgerReadsMixedLegacyAndPermitReceiptFormats(t *testing.T) {
 	if _, err := log.Finish(terminal); err != nil {
 		t.Fatal(err)
 	}
+	service := validServiceTaskEvent(Authorize, Allowed)
+	if _, err := log.Begin(service); err != nil {
+		t.Fatal(err)
+	}
+	serviceTerminal := service
+	serviceTerminal.Phase, serviceTerminal.Outcome, serviceTerminal.HTTPStatus = Terminal, Responded, 201
+	serviceTerminal.ResponseBytes, serviceTerminal.RunID = 43, "run-0123456789abcdef"
+	if _, err := log.Finish(serviceTerminal); err != nil {
+		t.Fatal(err)
+	}
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}
 	var schemas []string
+	var records []VerifiedReceipt
 	if _, err := VerifyRecords(path, public, "node-a/gateway", 1, func(record VerifiedReceipt) error {
 		schemas = append(schemas, record.Receipt.SchemaVersion)
+		records = append(records, record)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(schemas) != 3 || schemas[0] != SchemaV1 || schemas[1] != SchemaV2 || schemas[2] != SchemaV2 {
+	if len(schemas) != 5 || schemas[0] != SchemaV1 || schemas[1] != SchemaV2 || schemas[2] != SchemaV2 ||
+		schemas[3] != SchemaV3 || schemas[4] != SchemaV3 {
 		t.Fatalf("mixed receipt schemas=%v", schemas)
+	}
+	if records[0].Receipt.Event.Kind != "" || records[1].Receipt.Event.Kind != "" ||
+		records[3].Receipt.Event.Kind != ServiceTask || records[4].Receipt.Event.RunID != serviceTerminal.RunID {
+		t.Fatalf("mixed receipt events=%#v", records)
+	}
+
+	reopened, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(reopened.Pending()) != 0 {
+		t.Fatalf("completed mixed chain reconstructed pending calls: %#v", reopened.Pending())
+	}
+	if _, err := reopened.Begin(service); err == nil || !strings.Contains(err.Error(), "already spent") {
+		t.Fatalf("service task replay after restart err=%v", err)
+	}
+}
+
+func TestLegacyConnectorEventJSONRemainsByteStable(t *testing.T) {
+	legacy := validEvent(Authorize, Allowed)
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf(
+		`{"phase":"authorize","outcome":"allowed","tenant_id":"tenant-a","runtime_ref":"executor-%s","capsule_digest":"sha256:%s","policy_digest":"sha256:%s","route_policy_digest":"sha256:%s","generation":4,"grant_id":"grant-%s","connector_id":"ticketing","operation_id":"create-ticket","task_digest":"%s","request_bytes":19,"response_bytes":0}`,
+		strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("e", 64),
+		strings.Repeat("d", 64), legacy.TaskDigest,
+	)
+	if string(raw) != want {
+		t.Fatalf("legacy event JSON changed\n got: %s\nwant: %s", raw, want)
+	}
+
+	legacy.AuthorityKeyID = "approver-a"
+	legacy.PermitDigest = "sha256:" + strings.Repeat("8", 64)
+	legacy.RequestDigest = "sha256:" + strings.Repeat("7", 64)
+	raw, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = strings.Replace(
+		want,
+		fmt.Sprintf(`"task_digest":"%s",`, legacy.TaskDigest),
+		fmt.Sprintf(`"task_digest":"%s","authority_key_id":"approver-a","permit_digest":"sha256:%s","request_digest":"sha256:%s",`,
+			legacy.TaskDigest, strings.Repeat("8", 64), strings.Repeat("7", 64)),
+		1,
+	)
+	if string(raw) != want {
+		t.Fatalf("legacy permit event JSON changed\n got: %s\nwant: %s", raw, want)
 	}
 }
 
@@ -140,7 +204,7 @@ func TestConnectorLedgerRejectsConcurrentWriterThroughHardLink(t *testing.T) {
 	}
 }
 
-func TestConnectorLedgerRejectsTamperReorderAndTruncation(t *testing.T) {
+func TestConnectorLedgerRejectsMixedChainTamperReorderAndTruncation(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -152,12 +216,32 @@ func TestConnectorLedgerRejectsTamperReorderAndTruncation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := log.Begin(validEvent(Authorize, Allowed)); err != nil {
+		denial := validEvent(Deny, Denied)
+		denial.ErrorCode = "policy_denied"
+		if _, err := log.Append(denial); err != nil {
 			t.Fatal(err)
 		}
-		terminal := validEvent(Terminal, Failed)
-		terminal.ErrorCode = "upstream_unavailable"
+		permitted := validEvent(Authorize, Allowed)
+		permitted.TaskDigest = "sha256:" + strings.Repeat("9", 64)
+		permitted.AuthorityKeyID = "approver-a"
+		permitted.PermitDigest = "sha256:" + strings.Repeat("8", 64)
+		permitted.RequestDigest = "sha256:" + strings.Repeat("7", 64)
+		if _, err := log.Begin(permitted); err != nil {
+			t.Fatal(err)
+		}
+		terminal := permitted
+		terminal.Phase, terminal.Outcome, terminal.ErrorCode = Terminal, Failed, "upstream_unavailable"
 		if _, err := log.Finish(terminal); err != nil {
+			t.Fatal(err)
+		}
+		service := validServiceTaskEvent(Authorize, Allowed)
+		if _, err := log.Begin(service); err != nil {
+			t.Fatal(err)
+		}
+		serviceTerminal := service
+		serviceTerminal.Phase, serviceTerminal.Outcome, serviceTerminal.HTTPStatus = Terminal, Responded, 201
+		serviceTerminal.RunID = "run-0123456789abcdef"
+		if _, err := log.Finish(serviceTerminal); err != nil {
 			t.Fatal(err)
 		}
 		_ = log.Close()
@@ -180,7 +264,8 @@ func TestConnectorLedgerRejectsTamperReorderAndTruncation(t *testing.T) {
 		path := makeLedger(t)
 		raw, _ := os.ReadFile(path)
 		lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
-		if err := os.WriteFile(path, []byte(lines[1]+"\n"+lines[0]+"\n"), 0o600); err != nil {
+		lines[0], lines[1] = lines[1], lines[0]
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := VerifyRecords(path, public, "node-a/gateway", 7, nil); err == nil {
@@ -601,6 +686,145 @@ func TestPendingTerminalReservationIsChargedToTenantAfterRestart(t *testing.T) {
 	}
 }
 
+func TestServiceTaskPendingReservationSurvivesRestartAndClosesUnknownOutcome(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{MaxTenants: 1, MaxBytesPerTenant: minimumTenantBytes}
+	path := filepath.Join(t.TempDir(), "service-task-pending.ndjson")
+	log, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized := validServiceTaskEvent(Authorize, Allowed)
+	head, err := log.Begin(authorized)
+	if err != nil || head.Sequence != 1 {
+		t.Fatalf("service task authorization head=%#v err=%v", head, err)
+	}
+	second := authorized
+	second.TaskDigest = "sha256:" + strings.Repeat("5", 64)
+	if _, err := log.Begin(second); !errors.Is(err, ErrTenantQuotaExceeded) {
+		t.Fatalf("second service task did not honor tenant terminal reserve: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenWithLimits(path, private, "node-a/gateway", 1, limits, nil)
+	if err != nil {
+		t.Fatalf("reopen durably authorized service task: %v", err)
+	}
+	pending := reopened.Pending()
+	if len(pending) != 1 || pending[0] != authorized {
+		_ = reopened.Close()
+		t.Fatalf("pending service tasks=%#v", pending)
+	}
+	terminal := authorized
+	terminal.Phase, terminal.Outcome, terminal.ErrorCode = Terminal, Failed, "outcome_unknown"
+	head, err = reopened.Finish(terminal)
+	if err != nil || head.Sequence != 2 {
+		_ = reopened.Close()
+		t.Fatalf("close unknown service task head=%#v err=%v", head, err)
+	}
+	if _, err := reopened.Begin(authorized); err == nil || !strings.Contains(err.Error(), "already spent") {
+		_ = reopened.Close()
+		t.Fatalf("closed service task became spendable: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := VerifyRecords(path, public, "node-a/gateway", 1, nil)
+	if err != nil || verified != head {
+		t.Fatalf("verified=%#v durable=%#v err=%v", verified, head, err)
+	}
+}
+
+func TestServiceTaskFinishMatchesEveryAuthorizationBinding(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "service-task-match.ndjson")
+	log, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	authorized := validServiceTaskEvent(Authorize, Allowed)
+	if _, err := log.Begin(authorized); err != nil {
+		t.Fatal(err)
+	}
+	baseTerminal := authorized
+	baseTerminal.Phase, baseTerminal.Outcome, baseTerminal.HTTPStatus = Terminal, Responded, 201
+
+	tests := []struct {
+		name   string
+		mutate func(*Event)
+	}{
+		{name: "service", mutate: func(event *Event) { event.ServiceID = "other-service" }},
+		{name: "operation policy", mutate: func(event *Event) {
+			event.OperationPolicyDigest = "sha256:" + strings.Repeat("4", 64)
+		}},
+		{name: "kind", mutate: func(event *Event) {
+			event.Kind, event.ConnectorID = ConnectorCall, "ticketing"
+			event.ServiceID, event.OperationPolicyDigest = "", ""
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			terminal := baseTerminal
+			test.mutate(&terminal)
+			if _, err := log.Finish(terminal); err == nil || !strings.Contains(err.Error(), "no matching authorization") {
+				t.Fatalf("mismatched service task terminal err=%v", err)
+			}
+		})
+	}
+	baseTerminal.RunID = "run-0123456789abcdef"
+	if _, err := log.Finish(baseTerminal); err != nil {
+		t.Fatalf("terminal result did not preserve run ID independently: %v", err)
+	}
+}
+
+func TestVerifyRecordsRejectsSignedIncoherentV3Event(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*Event)
+	}{
+		{name: "service task with connector", mutate: func(event *Event) { event.ConnectorID = "ticketing" }},
+		{name: "connector call with service", mutate: func(event *Event) {
+			event.Kind, event.ConnectorID = ConnectorCall, "ticketing"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "incoherent-v3.ndjson")
+			log, err := Open(path, private, "node-a/gateway", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := validServiceTaskEvent(Authorize, Allowed)
+			test.mutate(&event)
+			log.mu.Lock()
+			_, err = log.appendLocked(event, 0)
+			log.mu.Unlock()
+			if err != nil {
+				_ = log.Close()
+				t.Fatal(err)
+			}
+			if err := log.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyRecords(path, public, "node-a/gateway", 1, nil); err == nil || !strings.Contains(err.Error(), "incoherent fields") {
+				t.Fatalf("signed incoherent v3 event verification err=%v", err)
+			}
+		})
+	}
+}
+
 func TestOpenWithLimitsRejectsHistoricalLimitViolations(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -698,6 +922,23 @@ func TestConnectorLedgerValidatesEventsFilesAndTaskIDs(t *testing.T) {
 	terminal.Phase, terminal.Outcome, terminal.HTTPStatus = Terminal, Responded, 200
 	if _, err := log.Finish(terminal); err != nil {
 		t.Fatalf("matching permitted terminal rejected: %v", err)
+	}
+	service := validServiceTaskEvent(Authorize, Allowed)
+	service.RunID = "run-too-early"
+	if _, err := log.Begin(service); err == nil || !strings.Contains(err.Error(), "run ID") {
+		t.Fatalf("authorization accepted terminal-only run ID: %v", err)
+	}
+	service = validServiceTaskEvent(Authorize, Allowed)
+	service.AuthorityKeyID = ""
+	service.PermitDigest = ""
+	service.RequestDigest = ""
+	if _, err := log.Begin(service); err == nil || !strings.Contains(err.Error(), "requires permit") {
+		t.Fatalf("service task authorization without exact permit bindings err=%v", err)
+	}
+	service = validServiceTaskEvent(Authorize, Allowed)
+	service.ConnectorID = "ticketing"
+	if _, err := log.Begin(service); err == nil || !strings.Contains(err.Error(), "incoherent fields") {
+		t.Fatalf("service task authorization with connector identity err=%v", err)
 	}
 	if _, err := TaskDigest("../weak"); err == nil {
 		t.Fatal("unsafe task id accepted")
@@ -848,5 +1089,17 @@ func validEvent(phase Phase, outcome Outcome) Event {
 		PolicyDigest: "sha256:" + strings.Repeat("c", 64), RoutePolicyDigest: "sha256:" + strings.Repeat("e", 64), Generation: 4,
 		GrantID: "grant-" + strings.Repeat("d", 64), ConnectorID: "ticketing", OperationID: "create-ticket",
 		TaskDigest: task, RequestBytes: 19,
+	}
+}
+
+func validServiceTaskEvent(phase Phase, outcome Outcome) Event {
+	return Event{
+		Phase: phase, Outcome: outcome, Kind: ServiceTask, TenantID: "tenant-a",
+		RuntimeRef: "executor-" + strings.Repeat("a", 64), CapsuleDigest: "sha256:" + strings.Repeat("b", 64),
+		PolicyDigest: "sha256:" + strings.Repeat("c", 64), RoutePolicyDigest: "sha256:" + strings.Repeat("e", 64), Generation: 4,
+		GrantID: "grant-" + strings.Repeat("d", 64), ServiceID: "hermes", OperationID: "run",
+		OperationPolicyDigest: "sha256:" + strings.Repeat("6", 64), TaskDigest: "sha256:" + strings.Repeat("3", 64),
+		AuthorityKeyID: "task-approver-a", PermitDigest: "sha256:" + strings.Repeat("8", 64),
+		RequestDigest: "sha256:" + strings.Repeat("7", 64), RequestBytes: 41,
 	}
 }
