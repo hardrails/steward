@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
@@ -426,6 +427,67 @@ func TestUpgradeManifestCompatibilityBlocksUnreadableObservedVersion(t *testing.
 	output.Reset()
 	if err := run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "decode target release manifest") {
 		t.Fatalf("ambiguous manifest error = %v", err)
+	}
+}
+
+func TestUpgradeBlocksLegacyTargetForProspectiveActionPermitConfig(t *testing.T) {
+	fixture := newUpgradeFixture(t)
+	raw, err := os.ReadFile(fixture.gatewayConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config gateway.Config
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatal(err)
+	}
+	credential := filepath.Join(fixture.directory, "ticketing.token")
+	if err := os.WriteFile(credential, []byte("ticketing-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ActionPermitNodeID = "node-a"
+	config.ActionAuthorities = []gateway.ActionAuthority{{
+		KeyID: "approver-a", TenantID: "tenant-a", PublicKey: base64.StdEncoding.EncodeToString(public),
+	}}
+	config.Connectors = []gateway.Connector{{
+		ID: "ticketing", BaseURL: "https://tickets.example.test", CredentialFile: credential,
+		CredentialMode: gateway.CredentialModeBearer, CredentialEpoch: 1, MaxConcurrent: 1,
+		MaxRequestBytes: 4096, MaxResponseBytes: 4096, MaxSeconds: 30, MaxCallsPerGrant: 4,
+		ActionAuthorityIDs: []string{"approver-a"}, MaxActionPermitSeconds: 300,
+		Operations: []gateway.ConnectorOperation{{ID: "create", Method: "POST", Path: "/v1/tickets"}},
+	}}
+	raw, err = json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.gatewayConfig, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "connector_receipt_log version 2") ||
+		!strings.Contains(output.String(), `"connector_receipt_log":2`) {
+		t.Fatalf("prospective permit downgrade output=%s error=%v", output.String(), err)
+	}
+
+	config.ActionPermitNodeID = ""
+	config.ActionAuthorities = nil
+	config.Connectors[0].ActionAuthorityIDs = nil
+	config.Connectors[0].MaxActionPermitSeconds = 0
+	raw, err = json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.gatewayConfig, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"connector_receipt_log":1`) {
+		t.Fatalf("cleared permit compatibility output=%s error=%v", output.String(), err)
 	}
 }
 
