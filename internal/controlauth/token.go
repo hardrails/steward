@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +30,7 @@ const (
 	credentialVersion = 1
 	enrollmentVersion = 1
 	maxTokenBytes     = 512
+	maxTenantBindings = 128
 )
 
 var (
@@ -59,6 +61,7 @@ type Credential struct {
 	Kind      CredentialKind `json:"kind"`
 	Role      Role           `json:"role,omitempty"`
 	TenantID  string         `json:"tenant_id,omitempty"`
+	TenantIDs []string       `json:"tenant_ids,omitempty"`
 	NodeID    string         `json:"node_id,omitempty"`
 	Audience  string         `json:"audience,omitempty"`
 	TokenMAC  []byte         `json:"token_mac"`
@@ -69,18 +72,18 @@ type Credential struct {
 // Enrollment is a durable one-time capability. An exact retry of the first
 // request_id reproduces the same node credential without storing its secret.
 type Enrollment struct {
-	Version      int    `json:"version"`
-	ID           string `json:"id"`
-	TenantID     string `json:"tenant_id"`
-	NodeID       string `json:"node_id"`
-	Audience     string `json:"audience"`
-	TokenMAC     []byte `json:"token_mac"`
-	CreatedAt    string `json:"created_at"`
-	ExpiresAt    string `json:"expires_at"`
-	RequestID    string `json:"request_id,omitempty"`
-	CredentialID string `json:"credential_id,omitempty"`
-	ConsumedAt   string `json:"consumed_at,omitempty"`
-	Revoked      bool   `json:"revoked"`
+	Version      int      `json:"version"`
+	ID           string   `json:"id"`
+	TenantIDs    []string `json:"tenant_ids"`
+	NodeID       string   `json:"node_id"`
+	Audience     string   `json:"audience"`
+	TokenMAC     []byte   `json:"token_mac"`
+	CreatedAt    string   `json:"created_at"`
+	ExpiresAt    string   `json:"expires_at"`
+	RequestID    string   `json:"request_id,omitempty"`
+	CredentialID string   `json:"credential_id,omitempty"`
+	ConsumedAt   string   `json:"consumed_at,omitempty"`
+	Revoked      bool     `json:"revoked"`
 }
 
 type Identity struct {
@@ -91,7 +94,7 @@ type Identity struct {
 
 type NodeIdentity struct {
 	CredentialID string
-	TenantID     string
+	TenantIDs    []string
 	NodeID       string
 	Audience     string
 }
@@ -201,14 +204,17 @@ func (m *Manager) MintOperator(role Role, tenantID string, now time.Time) (strin
 	if err != nil {
 		return "", Credential{}, err
 	}
-	return raw, Credential{
+	credential := Credential{
 		Version: credentialVersion, ID: id, Kind: KindOperator, Role: role, TenantID: tenantID,
-		TokenMAC: m.mac("operator", raw), CreatedAt: canonicalTime(now),
-	}, nil
+		CreatedAt: canonicalTime(now),
+	}
+	credential.TokenMAC = m.operatorMAC(raw, credential)
+	return raw, credential, nil
 }
 
-func (m *Manager) MintEnrollment(tenantID, nodeID string, expiresAt, now time.Time) (string, Enrollment, error) {
-	if !validIdentity(tenantID, 128) || !validIdentity(nodeID, 128) || now.IsZero() ||
+func (m *Manager) MintEnrollment(tenantIDs []string, nodeID string, expiresAt, now time.Time) (string, Enrollment, error) {
+	canonical, canonicalErr := CanonicalTenantIDs(tenantIDs)
+	if canonicalErr != nil || !validIdentity(nodeID, 128) || now.IsZero() ||
 		!expiresAt.After(now) || expiresAt.Sub(now) > 24*time.Hour {
 		return "", Enrollment{}, errors.New("enrollment requires bounded identities and a future lifetime no greater than 24 hours")
 	}
@@ -216,21 +222,23 @@ func (m *Manager) MintEnrollment(tenantID, nodeID string, expiresAt, now time.Ti
 	if err != nil {
 		return "", Enrollment{}, err
 	}
-	return raw, Enrollment{
-		Version: enrollmentVersion, ID: id, TenantID: tenantID, NodeID: nodeID, Audience: "executor",
-		TokenMAC: m.mac("enrollment", raw), CreatedAt: canonicalTime(now), ExpiresAt: canonicalTime(expiresAt),
-	}, nil
+	enrollment := Enrollment{
+		Version: enrollmentVersion, ID: id, TenantIDs: canonical, NodeID: nodeID, Audience: "executor",
+		CreatedAt: canonicalTime(now), ExpiresAt: canonicalTime(expiresAt),
+	}
+	enrollment.TokenMAC = m.enrollmentMAC(raw, enrollment)
+	return raw, enrollment, nil
 }
 
 // Exchange deterministically derives one node credential. The caller must
 // persist returnedEnrollment and credential atomically before returning file.
 func (m *Manager) Exchange(raw, requestID string, now time.Time, enrollment Enrollment) (NodeCredentialFile, Credential, Enrollment, error) {
 	if !validIdentity(requestID, 128) || now.IsZero() || enrollment.Revoked || enrollment.Version != enrollmentVersion ||
-		!validIdentity(enrollment.TenantID, 128) || !validIdentity(enrollment.NodeID, 128) || enrollment.Audience != "executor" {
+		!validCanonicalTenantIDs(enrollment.TenantIDs) || !validIdentity(enrollment.NodeID, 128) || enrollment.Audience != "executor" {
 		return NodeCredentialFile{}, Credential{}, Enrollment{}, ErrUnauthorized
 	}
 	id, err := parseToken(raw, enrollmentPrefix)
-	if err != nil || id != enrollment.ID || !m.matches("enrollment", raw, enrollment.TokenMAC) {
+	if err != nil || id != enrollment.ID || !m.matches(enrollment.TokenMAC, m.enrollmentMAC(raw, enrollment)) {
 		return NodeCredentialFile{}, Credential{}, Enrollment{}, ErrUnauthorized
 	}
 	expires, err := parseCanonicalTime(enrollment.ExpiresAt)
@@ -245,8 +253,8 @@ func (m *Manager) Exchange(raw, requestID string, now time.Time, enrollment Enro
 	nodeToken := nodePrefix + "_" + credentialID + "_" + secret
 	credential := Credential{
 		Version: credentialVersion, ID: credentialID, Kind: KindNode,
-		TenantID: enrollment.TenantID, NodeID: enrollment.NodeID, Audience: enrollment.Audience,
-		TokenMAC: m.mac("node", nodeToken), CreatedAt: canonicalTime(now),
+		TenantIDs: append([]string(nil), enrollment.TenantIDs...), NodeID: enrollment.NodeID, Audience: enrollment.Audience,
+		CreatedAt: canonicalTime(now),
 	}
 	updated := enrollment
 	if updated.RequestID == "" {
@@ -256,6 +264,7 @@ func (m *Manager) Exchange(raw, requestID string, now time.Time, enrollment Enro
 	} else {
 		credential.CreatedAt = updated.ConsumedAt
 	}
+	credential.TokenMAC = m.nodeMAC(nodeToken, credential)
 	return NodeCredentialFile{Version: 2, Scope: "node", NodeID: enrollment.NodeID, Credential: nodeToken}, credential, updated, nil
 }
 
@@ -275,7 +284,7 @@ func (m *Manager) AuthenticateOperator(raw string, credential Credential) (Ident
 	id, err := parseToken(raw, operatorPrefix)
 	if err != nil || credential.Version != credentialVersion || credential.Kind != KindOperator || credential.Revoked ||
 		id != credential.ID || !validRoleScope(credential.Role, credential.TenantID) ||
-		!m.matches("operator", raw, credential.TokenMAC) {
+		!m.matches(credential.TokenMAC, m.operatorMAC(raw, credential)) {
 		return Identity{}, ErrUnauthorized
 	}
 	return Identity{CredentialID: credential.ID, Role: credential.Role, TenantID: credential.TenantID}, nil
@@ -284,12 +293,12 @@ func (m *Manager) AuthenticateOperator(raw string, credential Credential) (Ident
 func (m *Manager) AuthenticateNode(raw string, credential Credential) (NodeIdentity, error) {
 	id, err := parseToken(raw, nodePrefix)
 	if err != nil || credential.Version != credentialVersion || credential.Kind != KindNode || credential.Revoked ||
-		id != credential.ID || !validIdentity(credential.TenantID, 128) || !validIdentity(credential.NodeID, 128) ||
-		credential.Audience != "executor" || !m.matches("node", raw, credential.TokenMAC) {
+		id != credential.ID || !validCanonicalTenantIDs(credential.TenantIDs) || !validIdentity(credential.NodeID, 128) ||
+		credential.Audience != "executor" || !m.matches(credential.TokenMAC, m.nodeMAC(raw, credential)) {
 		return NodeIdentity{}, ErrUnauthorized
 	}
 	return NodeIdentity{
-		CredentialID: credential.ID, TenantID: credential.TenantID,
+		CredentialID: credential.ID, TenantIDs: append([]string(nil), credential.TenantIDs...),
 		NodeID: credential.NodeID, Audience: credential.Audience,
 	}, nil
 }
@@ -306,6 +315,16 @@ func IsSiteAdmin(identity Identity) bool {
 	return identity.Role == RoleSiteAdmin && identity.TenantID == ""
 }
 
+// NodeAuthorizedTenant reports membership in the immutable, canonical tenant
+// set carried by an authenticated node credential.
+func NodeAuthorizedTenant(identity NodeIdentity, tenantID string) bool {
+	if !validIdentity(tenantID, 128) || !validCanonicalTenantIDs(identity.TenantIDs) {
+		return false
+	}
+	index := sort.SearchStrings(identity.TenantIDs, tenantID)
+	return index < len(identity.TenantIDs) && identity.TenantIDs[index] == tenantID
+}
+
 func ValidateCredential(credential Credential) error {
 	if credential.Version != credentialVersion || !validIdentity(credential.ID, 128) || len(credential.TokenMAC) != sha256.Size ||
 		credential.CreatedAt == "" {
@@ -316,11 +335,12 @@ func ValidateCredential(credential Credential) error {
 	}
 	switch credential.Kind {
 	case KindOperator:
-		if !validRoleScope(credential.Role, credential.TenantID) || credential.NodeID != "" || credential.Audience != "" {
+		if !validRoleScope(credential.Role, credential.TenantID) || len(credential.TenantIDs) != 0 || credential.NodeID != "" || credential.Audience != "" {
 			return errors.New("invalid operator credential")
 		}
 	case KindNode:
-		if credential.Role != "" || !validIdentity(credential.TenantID, 128) || !validIdentity(credential.NodeID, 128) || credential.Audience != "executor" {
+		if credential.Role != "" || credential.TenantID != "" || !validCanonicalTenantIDs(credential.TenantIDs) ||
+			!validIdentity(credential.NodeID, 128) || credential.Audience != "executor" {
 			return errors.New("invalid node credential")
 		}
 	default:
@@ -331,7 +351,7 @@ func ValidateCredential(credential Credential) error {
 
 func ValidateEnrollment(enrollment Enrollment) error {
 	if enrollment.Version != enrollmentVersion || !validIdentity(enrollment.ID, 128) ||
-		!validIdentity(enrollment.TenantID, 128) || !validIdentity(enrollment.NodeID, 128) ||
+		!validCanonicalTenantIDs(enrollment.TenantIDs) || !validIdentity(enrollment.NodeID, 128) ||
 		enrollment.Audience != "executor" || len(enrollment.TokenMAC) != sha256.Size {
 		return errors.New("invalid durable enrollment")
 	}
@@ -354,6 +374,28 @@ func ValidateEnrollment(enrollment Enrollment) error {
 		}
 	}
 	return nil
+}
+
+// CanonicalTenantIDs validates, copies, and sorts a node's explicit tenant
+// bindings. Duplicate bindings are rejected instead of silently changing the
+// meaning of a caller-supplied capability.
+func CanonicalTenantIDs(tenantIDs []string) ([]string, error) {
+	if len(tenantIDs) == 0 || len(tenantIDs) > maxTenantBindings {
+		return nil, errors.New("tenant bindings must contain between 1 and 128 tenants")
+	}
+	canonical := append([]string(nil), tenantIDs...)
+	for _, tenantID := range canonical {
+		if !validIdentity(tenantID, 128) {
+			return nil, errors.New("tenant binding contains an invalid identity")
+		}
+	}
+	sort.Strings(canonical)
+	for index := 1; index < len(canonical); index++ {
+		if canonical[index] == canonical[index-1] {
+			return nil, errors.New("tenant bindings contain a duplicate identity")
+		}
+	}
+	return canonical, nil
 }
 
 func (m *Manager) randomToken(prefix, idPrefix string) (string, string, error) {
@@ -391,14 +433,33 @@ func parseToken(raw, prefix string) (string, error) {
 	return id, nil
 }
 
-func (m *Manager) mac(domain, raw string) []byte {
+func (m *Manager) mac(domain, raw string, fields ...string) []byte {
 	hash := hmac.New(sha256.New, m.key[:])
-	_, _ = hash.Write([]byte("steward-control-auth-v1\x00" + domain + "\x00" + raw))
+	_, _ = hash.Write([]byte("steward-control-auth-v2\x00" + domain + "\x00" + raw))
+	for _, field := range fields {
+		_, _ = hash.Write([]byte{'\x00'})
+		_, _ = hash.Write([]byte(field))
+	}
 	return hash.Sum(nil)
 }
 
-func (m *Manager) matches(domain, raw string, expected []byte) bool {
-	actual := m.mac(domain, raw)
+func (m *Manager) operatorMAC(raw string, credential Credential) []byte {
+	return m.mac("operator", raw, credential.ID, string(credential.Role), credential.TenantID, credential.CreatedAt)
+}
+
+func (m *Manager) enrollmentMAC(raw string, enrollment Enrollment) []byte {
+	fields := []string{enrollment.ID, enrollment.NodeID, enrollment.Audience, enrollment.CreatedAt, enrollment.ExpiresAt}
+	fields = append(fields, enrollment.TenantIDs...)
+	return m.mac("enrollment", raw, fields...)
+}
+
+func (m *Manager) nodeMAC(raw string, credential Credential) []byte {
+	fields := []string{credential.ID, credential.NodeID, credential.Audience, credential.CreatedAt}
+	fields = append(fields, credential.TenantIDs...)
+	return m.mac("node", raw, fields...)
+}
+
+func (m *Manager) matches(expected, actual []byte) bool {
 	return len(expected) == len(actual) && subtle.ConstantTimeCompare(actual, expected) == 1
 }
 
@@ -410,6 +471,18 @@ func (m *Manager) derive(domain, raw, requestID string) []byte {
 
 func validRoleScope(role Role, tenantID string) bool {
 	return role == RoleSiteAdmin && tenantID == "" || role == RoleTenantOperator && validIdentity(tenantID, 128)
+}
+
+func validCanonicalTenantIDs(tenantIDs []string) bool {
+	if len(tenantIDs) == 0 || len(tenantIDs) > maxTenantBindings {
+		return false
+	}
+	for index, tenantID := range tenantIDs {
+		if !validIdentity(tenantID, 128) || index > 0 && tenantIDs[index-1] >= tenantID {
+			return false
+		}
+	}
+	return true
 }
 
 func validIdentity(value string, limit int) bool {
