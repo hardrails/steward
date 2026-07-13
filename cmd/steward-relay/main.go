@@ -34,6 +34,8 @@ const (
 	connectorAddress             = "0.0.0.0:8081"
 	connectorRequestBodyLifetime = 30 * time.Second
 	connectorResponseWriteTime   = 30 * time.Second
+	connectorStreamStatusTrailer = "X-Steward-Stream-Status"
+	connectorReceiptTrailer      = "X-Steward-Connector-Receipt"
 	// Gateway accepts connector max_seconds values through one hour. Relay is
 	// deliberately a little more patient than that trusted local boundary so a
 	// Gateway timeout and its terminal receipt can reach the agent intact.
@@ -298,10 +300,12 @@ func connectorProxyWithTimeouts(socket string, gatewayRoundTripTime, responseWri
 			return
 		}
 		copyConnectorHeaders(w.Header(), response.Header)
-		const streamStatus = "X-Steward-Stream-Status"
-		_, hasStreamStatus := response.Trailer[streamStatus]
-		if hasStreamStatus {
-			w.Header().Add("Trailer", streamStatus)
+		forwardedTrailers := make([]string, 0, 2)
+		for _, name := range []string{connectorStreamStatusTrailer, connectorReceiptTrailer} {
+			if _, declared := response.Trailer[name]; declared {
+				w.Header().Add("Trailer", name)
+				forwardedTrailers = append(forwardedTrailers, name)
+			}
 		}
 		if response.ContentLength >= 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(response.ContentLength, 10))
@@ -322,8 +326,8 @@ func connectorProxyWithTimeouts(socket string, gatewayRoundTripTime, responseWri
 				panic(http.ErrAbortHandler)
 			}
 		}
-		if hasStreamStatus {
-			w.Header().Set(streamStatus, response.Trailer.Get(streamStatus))
+		for _, name := range forwardedTrailers {
+			w.Header().Set(name, response.Trailer.Get(name))
 		}
 	})
 }

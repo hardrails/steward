@@ -284,8 +284,12 @@ func TestConnectorProxyForwardsOnlyExactOperationsAndFailsClosedAfterRevocation(
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Set-Cookie", "gateway-state=secret")
 		w.Header().Set("X-Steward-Test", "connector")
+		w.Header().Add("Trailer", connectorReceiptTrailer)
+		w.Header().Add("Trailer", "X-Untrusted-Trailer")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"created":true}`))
+		w.Header().Set(connectorReceiptTrailer, "recorded")
+		w.Header().Set("X-Untrusted-Trailer", "must-not-pass")
 	})}
 	go func() { _ = upstream.Serve(listener) }()
 	defer upstream.Close()
@@ -301,6 +305,11 @@ func TestConnectorProxyForwardsOnlyExactOperationsAndFailsClosedAfterRevocation(
 	if response.Code != http.StatusCreated || response.Body.String() != `{"created":true}` ||
 		response.Header().Get("X-Steward-Test") != "connector" || response.Header().Get("Set-Cookie") != "" {
 		t.Fatalf("status=%d headers=%#v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+	result := response.Result()
+	defer result.Body.Close()
+	if result.Trailer.Get(connectorReceiptTrailer) != "recorded" || result.Trailer.Get("X-Untrusted-Trailer") != "" {
+		t.Fatalf("forwarded trailers=%#v", result.Trailer)
 	}
 
 	// A connector grant is revoked by removing c.sock. DisableKeepAlives forces
