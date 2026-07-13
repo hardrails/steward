@@ -24,7 +24,7 @@ enforcement therefore sits outside the agent process.
 
 | System | Documented focus as of the snapshot | Where Steward's focus differs |
 | --- | --- | --- |
-| [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw) / [OpenShell](https://github.com/NVIDIA/OpenShell) | NemoClaw packages supported agents around OpenShell. OpenShell documents Docker, rootless Podman, microVM, and Kubernetes drivers plus declarative process and network policy. Its README labels the project alpha and “single-player mode” while multi-tenant operation is still a stated direction. | Steward narrows the first problem to a hostile multi-tenant Linux node: tenant-bound signed intent, site-root policy, immutable artifact admission, anti-replay fences, and offline-verifiable receipts. The maturity difference is dated, not a permanent claim. |
+| [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw) / [OpenShell](https://github.com/NVIDIA/OpenShell) | NemoClaw packages supported agents around OpenShell. OpenShell documents Docker, rootless Podman, microVM, and Kubernetes drivers; exact REST method, path, and query rules; provider-owned network layers; credential placeholders and rewrites; endpoint-scoped token grants using SPIFFE JWT-SVID; and inspection for REST, GraphQL, MCP, and JSON-RPC. Its README still labels the project alpha and “single-player mode.” See the current [policy schema](https://docs.nvidia.com/openshell/reference/policy-schema) and [provider architecture](https://docs.nvidia.com/openshell/sandboxes/providers-v2). | Steward does not claim method/path policy or credential injection as unique, and OpenShell documents broader application-protocol inspection. Steward's narrower difference is a disconnected, vendor-independent node that binds site-signed tenant, instance, and artifact admission to spend-before-effect task and call budgets, non-borrowing tenant evidence quotas, and Gateway-signed terminal receipts that can be verified offline. The maturity difference is dated, not a permanent claim. |
 | [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) / [AI Governance](https://docs.docker.com/ai/sandboxes/governance/) | Docker documents microVMs, filesystem and network policy, organization sign-in, decision logs, credential injection, DNS policy, and workspace sharing. Linux installation requires Kernel-based Virtual Machine (KVM) support and Docker sign-in; organization governance is a paid capability. | Steward uses Docker and gVisor on an operator-owned node without requiring a vendor login or hosted policy service. It does not claim isolation, egress policy, DNS gating, credential injection, or JSON audit as unique. |
 | [OpenSandbox](https://github.com/alibaba/OpenSandbox) | OpenSandbox documents a sandbox API, Docker and Kubernetes backends, lifecycle control, and [gVisor, Kata, and Firecracker runtimes](https://open-sandbox.ai/guides/secure-container). | Steward adds site-owned admission, tenant/instance replay protection, and operator-verifiable receipts. The projects could complement each other; Steward does not depend on OpenSandbox. |
 | [Kubernetes Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) | The Kubernetes SIG project documents `Sandbox` Custom Resource Definitions (CRDs), templates, claims, warm pools, state, and optional gVisor or Kata isolation. Kubernetes itself [does not define a first-class tenant object](https://kubernetes.io/docs/concepts/security/multi-tenancy/); operators must assemble the isolation policy. | Steward provides one opinionated tenant and evidence contract on a Linux node without making Kubernetes a prerequisite. A future backend could preserve that contract on Kubernetes. |
@@ -48,26 +48,55 @@ These capabilities remain useful but do not distinguish Steward:
 These controls remain useful. Docker and gVisor are Steward's required host
 foundation, not its primary differentiator.
 
-## Gap selection
+## Durable differentiation
 
-The release analysis compared candidate work by operator value, differentiation,
-risk reduction, implementation cost, and whether a hostile-path acceptance test
-could prove the claim. It also started with a failure question: *how could this
-feature turn one manipulated agent into another tenant's incident?*
+Steward is open source, so its defensibility cannot depend on hiding an API or
+forcing an operator through a hosted service. It comes from an accumulated public
+assurance contract:
 
-| Candidate | Operator value | Security effect | Main release risk | Decision |
-| --- | --- | --- | --- | --- |
-| Named credential-brokered operations | Makes authenticated agent work possible without placing the credential in the workload. | Reduces standing secret exposure and converts a broad HTTPS tunnel into exact method, path, destination, and budget checks. | Accidentally building a general secret injector or proxy. | Build a narrow connector contract in the existing Gateway. |
-| Shared-host persistent state | Makes long-lived agents practical on one multi-tenant host. | Contains byte and inode exhaustion and creates a foundation for memory provenance. | A filesystem quota that disappears after reboot would create a false isolation claim. | Keep admission closed until a qualified quota backend can be reconciled and tested. |
-| Automatic journal recovery | Reduces operator intervention after partial host failures. | Can prevent duplicate effects and authority resurrection. | A convenient “force clear” path could erase the only safe ambiguity signal. | Preserve degraded containment; add recovery only when observations prove one outcome. |
-| Generic workflow or browser engine | Adds broad agent features quickly. | Expands the highest-risk code and dependency surface. | Duplicates agent frameworks and weakens the small trusted core. | Leave agent behavior out of process. |
+- the same signed artifact, site policy, tenant intent, runtime grant, and receipt
+  identities remain bound across admission, Docker, Gateway, and offline tools;
+- hostile-path tests exercise replay, state rollback, credential substitution,
+  address rebinding, partial writes, process restart, and ambiguous external
+  effects;
+- qualified adapter fixtures prove useful work by an exact agent build instead of
+  treating container startup as successful integration;
+- release manifests declare every durable state format so an upgrade cannot
+  silently install a reader or writer that corrupts existing authority; and
+- the complete node enforcement path builds and operates without a private
+  package, vendor account, or public control plane.
+
+A competing product can add any one of these features. Matching Steward's claim
+requires keeping the whole chain coherent as formats, adapters, runtime behavior,
+and upgrade paths evolve. That compounding verification work is the intended
+differentiator; it is not a claim that the implementation is immune to defects.
+
+## Adversarial and Pareto selection
+
+Work is compared on operator value, differentiation, risk reduction, delivery cost,
+and whether a hostile-path test can prove the claim. Pareto selection keeps work
+for which no alternative is better on every material dimension. The adversarial
+pass starts with a separate question: *how could a manipulated agent turn this
+feature into another tenant's incident or an unverifiable external effect?*
+
+| Candidate | Adversarial failure considered | Value and assurance evidence | Decision |
+| --- | --- | --- | --- |
+| Named, credential-brokered operations | The workload steals a standing credential, changes the destination or operation, replays a task after failure, or obtains a second effect after restart. | Enables useful authenticated work while exact origin, method, path, DNS answers, credential digest, per-grant calls, and tenant-scoped task spend remain outside the agent. Signed authorization and terminal records make crash ambiguity explicit. | Build the narrow connector contract in Gateway. This is on the Pareto frontier for immediate utility, security, and differentiation. |
+| Non-borrowing connector evidence quotas | One noisy tenant fills the shared signed ledger and prevents every other tenant from recording safe terminal outcomes. | Exact per-tenant signed-line accounting reserves worst-case terminal capacity before an effect. An unbudgeted or exhausted tenant fails before upstream work and cannot borrow another tenant's allocation. | Build explicit tenant allocations and restart validation. Keep the shared-disk and shared-`fsync` residual risk visible. |
+| A real Hermes custom-skill effect | A health check or hard-coded fixture passes even though Hermes never discovers, loads, or follows the skill; a stale result is reused after restart. | Qualification requires Hermes's native system-prompt index, `skill_view` load of the exact signed `SKILL.md`, prescribed terminal call, one authenticated upstream effect, replay and forbidden-operation denial, changed persisted state after restart, secret-absence scans, and offline receipt verification. | Build and package the end-to-end proof. Treat retained evidence as release input, not a marketing assertion. |
+| Key, file, and upgrade ergonomics | A public/private key mismatch, mutable path alias, stale grant, or undeclared durable format turns a routine setup or upgrade into an outage or authority change. | CLI key-pair verification, identity-locked file reads, preflight checks, declared format compatibility, and transactional release activation turn common mistakes into early failures. | Harden the existing CLI and package path instead of adding another control plane. |
+| Shared-host persistent state quotas | An agent exhausts bytes or inodes, or a quota disappears after reboot and silently weakens isolation. | Hard quotas would make long-lived agents safer on shared hosts, but no portable Docker volume mechanism currently satisfies reconciliation and failure tests. | Keep shared-host state admission closed until a qualified backend exists. |
+| Generic workflow, browser, or computer-use engine | New in-process execution code expands the trusted core and duplicates the agent framework. | Broad capability is useful, but it scores worse on assurance cost and separation of concerns than qualifying out-of-process agents and skills. | Keep agent behavior out of the Steward process. |
+| Automatic ambiguity clearing | Recovery marks an uncertain external effect safe without enough evidence and permits a duplicate. | Automation would reduce operator work, but a false resolution is worse than visible degraded containment. | Preserve the ambiguous state unless observations prove one outcome. |
 
 The selected connector is intentionally narrower than generic egress. A workload
 names an operation; the operator maps it to one exact upstream method and path.
 Gateway adds an operator-owned credential only after the signed workload grant,
 destination, address, concurrency, call, byte, and time checks agree. The workload
-never receives the upstream origin or credential. Generic `CONNECT` remains opaque
-and receives no injected secret.
+is not configured with the upstream origin or credential. A malicious upstream can
+still reflect either value in its response, so the operator must choose a narrow
+operation that does not echo authentication material. Generic `CONNECT` remains
+opaque and receives no injected secret.
 
 ## Steward's specific focus
 
@@ -78,7 +107,7 @@ an agent with the controls the node records:
    capabilities;
 2. a site-root-signed policy scopes publishers, tenant authority, profiles,
    repositories or exact image manifests, resource ceilings, inference route
-   IDs, service IDs, egress route IDs, and revocation;
+   IDs, service IDs, connector IDs, egress route IDs, and revocation;
 3. an authenticated instance intent binds a tenant, node, instance, state lineage,
    and generation;
 4. the local executor admits only the intersection, creates the constrained
@@ -103,12 +132,12 @@ reconstruct prompt meaning, prove agent intent, or certify upstream behavior.
 The following current standards and publications focus on identity,
 authorization, and separating trusted instructions from untrusted data.
 
-- The [Model Context Protocol authorization specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)
+- The [Model Context Protocol authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
   defines transport authorization using OAuth 2.1, while its
-  [security guidance](https://modelcontextprotocol.io/specification/2025-03-26/index)
-  requires consent and authorization around powerful data and code-execution
-  paths. A tool protocol does not replace local workload admission.
-- The [Agent2Agent (A2A) Protocol](https://a2a-protocol.org/dev/specification/) is
+  [security best practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)
+  cover confused-deputy attacks, token handling, session hijacking, and local
+  server compromise. A tool protocol does not replace local workload admission.
+- The stable [Agent2Agent (A2A) Protocol specification](https://a2a-protocol.org/latest/specification/) is
   an open interoperability protocol for independent agents. It does not decide which
   tenant may run a workload on a host.
 - [NIST's large-scale agent red-team report](https://www.nist.gov/blogs/caisi-research-blog/insights-ai-agent-security-large-scale-red-teaming-competition)
@@ -144,6 +173,18 @@ authorization, and separating trusted instructions from untrusted data.
   requests, integrity-protected tasks, resource limits, and records the agent
   cannot rewrite. Steward's connector design applies those principles at the
   node boundary; the publication does not certify Steward.
+- Microsoft's 2026 [PAuth preprint](https://www.microsoft.com/en-us/research/publication/pauth-precise-task-scoped-authorization-for-agents/)
+  proposes authorization that is both task-scoped and precise at the tool-call
+  boundary. It supports Steward's choice to spend a tenant-bound task claim before
+  an external effect, but it has not been peer reviewed and does not evaluate
+  Steward.
+- The 2026 [AIRGuard preprint](https://arxiv.org/abs/2605.28914) evaluates runtime,
+  action-time authorization for agent tool use. It is recent, non-peer-reviewed
+  research, so Steward treats it as a design signal rather than proof of efficacy.
+- An emerging [IETF individual Internet-Draft on authorization evidence chains](https://www.ietf.org/archive/id/draft-schrock-ep-authorization-evidence-chain-00.html)
+  discusses carrying verifiable authorization evidence across delegated actions.
+  It is not an IETF standard, does not imply endorsement, and is cited only as a
+  signal that portable authorization provenance is becoming an active design area.
 - The 2026 *Silent Egress* [preprint](https://arxiv.org/abs/2602.22450) reports
   high data-exfiltration success that was usually invisible to output-only checks.
   This is recent, non-peer-reviewed evidence, so the exact rate should not be

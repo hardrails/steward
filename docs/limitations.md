@@ -10,8 +10,9 @@ Steward verifies profile capsules and site policy as Ed25519-signed DSSE (Dead
 Simple Signing Envelope) documents. It binds commands to a tenant, node, and
 instance; rejects stale policy and generations; durably journals host changes; and
 creates signed, hash-linked receipts for offline verification. Optional capabilities
-include inference, a private service, deny-by-default HTTP(S) egress, command-line
-and Model Context Protocol (MCP) operations, and Terraform bootstrap. Persistent
+include inference, a private service, credential-brokered connector operations,
+deny-by-default HTTP(S) egress, command-line and Model Context Protocol (MCP)
+operations, and Terraform bootstrap. Persistent
 state is available only through the dedicated-host compatibility mode described
 below.
 
@@ -30,9 +31,10 @@ trusted execution environment (TEE), or external checkpoint, a hostile host root
 user can replace the key, log, and software together. Receipts are tamper-evident
 only within the documented node trust boundary.
 
-Executor holds both Docker authority and the receipt key. There is no separate
-signing service or Unix identity, so an Executor compromise can forge node-local
-receipts.
+Executor holds Docker authority and its lifecycle receipt key. Gateway has a
+separate Unix identity and connector receipt key but also performs the connector
+network effect it records. A compromise of either service can forge that service's
+node-local receipts; neither key is isolated in a separate signer.
 
 ## Signed admission is opt-in
 
@@ -58,6 +60,7 @@ lifetime:
 | Store | Limit | What consumes it |
 | --- | ---: | --- |
 | `evidence.bin` | 64 MiB | Signed pre-effect, commit, compensation, recovery, and lifecycle receipts |
+| `connector-receipts.ndjson` | 64 MiB | Signed connector authorizations and terminal outcomes; authorization tombstones also enforce replay and call budgets |
 | `operation-journal.bin` | 16 MiB | Prepared and terminal host-mutation records |
 | `admission-fences.bin` | 4 MiB and 65,535 records | One retained record for each tenant and instance pair, including destroyed tombstones |
 | `uplink-state.json` | 1 MiB encoded | One retained anti-replay position for each tenant and instance pair seen through Executor uplink |
@@ -92,9 +95,11 @@ HTTPS uses `CONNECT`. Steward requires the TLS ClientHello server name to match 
 approved CONNECT hostname and enforces address, port, byte, time, and concurrency
 limits. It does not intercept TLS, so it cannot enforce paths or methods inside an
 HTTPS tunnel. JSON Lines (JSONL) audit omits paths, queries, headers, bodies, and
-credentials. Steward has no generic credential-injection path. If an approved agent
-already stores a credential in its state, Steward does not hide that credential from
-the agent; only the inference broker keeps its upstream token outside the workload.
+credentials. Generic egress has no credential-injection path. A named connector can
+add one operator-owned Bearer or `X-API-Key` credential only for its exact HTTP
+operation; it cannot add a credential inside an arbitrary HTTPS tunnel. If an
+approved agent already stores a credential in its state, Steward does not hide that
+credential from the agent.
 
 For an unknown-length inference, service, or HTTP egress response, Gateway starts
 forwarding before it can know the final size. It advertises an
@@ -127,6 +132,68 @@ to prove `created` or `exited`; otherwise the operation remains degraded and
 requires reconciliation. Reconciliation applies the same classifier to the agent
 and its relay.
 
+## Connector boundary
+
+A connector exposes exact node-configured HTTP operations through the trusted
+Relay and Gateway. The workload cannot choose the upstream origin, method, path,
+credential header, address policy, redirect, or limits. Gateway supports only
+Bearer and `X-API-Key` injection, requires one bounded task ID, durably spends the
+logical instance's task claim and the generation-bound grant's call budget before
+the external request, and never returns spent authority after an upstream failure.
+Replay namespaces are isolated by tenant and logical instance. Private or
+special-purpose addresses require an explicit CIDR.
+
+Gateway signs and fsyncs authorization before DNS, retains spend tombstones after
+grant deletion, reconstructs them from the verified chain after restart, and
+reserves terminal-record capacity before allowing an effect. It caps concurrent
+connector calls at 32 per host and four per grant and rate-limits total attempts per
+grant. These fixed caps protect Gateway resources; they are not a scheduler or a
+fair-share guarantee across tenants.
+
+The connector ledger also has an explicit, non-borrowing byte budget for every
+tenant that may receive a connector grant. Gateway rejects an unbudgeted grant
+before creating its socket. A tenant's usage includes each durable signed line and
+newline plus the pending worst-case terminal-record reservation for an authorized
+call. Each budget is at least 262146 bytes, the table has at most 128 entries, and
+the total is at most 64 MiB. Exhaustion fails the call with HTTP 503 and
+`connector_evidence_quota_exhausted`; unused capacity assigned to another tenant is
+not available.
+
+The workload can mint task IDs until it exhausts its admitted connector and
+node-configured call budget. A task ID is a replay and correlation fence, not proof
+that a human or separate service approved the action. Connector receipts omit
+credentials, headers, origins, paths, queries, and bodies. The signed effective
+route-policy digest commits to those operator-controlled details without disclosing
+them. The records do not prove that the upstream service applied a request exactly
+once. A lost response remains an ambiguous external effect; replaying the same task
+fails closed. If Gateway stops between authorization and a terminal record, restart
+records `outcome_unknown`; the operator must treat the upstream result as ambiguous.
+
+Steward itself does not directly configure or give the connector credential or
+private upstream origin to the workload. However, it does not schema-filter an
+upstream response body or arbitrary non-Steward response headers. A malicious or
+misconfigured upstream can reflect authentication material or private origin
+details. Configure a narrow endpoint and tenant-specific credential that never
+echoes either value.
+
+Deleting the entire connector ledger is indistinguishable from first startup to
+the node alone. Keep its verified head outside the node and compare that checkpoint
+before accepting a replacement or empty chain. The ledger has no compaction or
+rollover command. Changing a receipt identity or budget requires a restart, not a
+reload. An in-place reduction is accepted only after retained connector grants are
+drained and when the smaller allocation still covers that tenant's verified
+historical usage and pending terminal reservations. Historical bytes are never
+reclaimed. Removing a tenant that has history, or starting with a smaller empty
+ledger, requires a new receipt file and epoch after the operator decides how to
+retain and checkpoint the old chain; preserve its verification material. When a
+tenant allocation is exhausted, new connector effects for that tenant fail closed.
+
+These allocations isolate logical ledger capacity, not the underlying host. Host
+root can replace or delete the ledger, and unrelated host data can fill its
+filesystem. All tenants also share one ledger descriptor, mutex, and synchronous
+`fsync` path, so disk latency and lock contention can affect other tenants even
+when their byte allocations remain available.
+
 Gateway configuration requires an explicit loopback service address with a numeric
 port from 1 through 65535. Missing, zero, out-of-range, and named service ports fail
 both `-check-config` and startup.
@@ -138,8 +205,13 @@ Steward's Hermes qualification applies only to upstream commit
 the documented runtime contract on `linux/amd64`. Other platforms are not yet
 qualified. The proof ran a source-built, non-root image under
 gVisor, submitted useful work through Hermes's run API, verified the signed
-`steward.workspace-audit` result, restarted the container with its retained state,
-and ran the skill again.
+`steward.workspace-audit` result, changed persisted workspace state, restarted the
+container with a fresh session, and required the changed result. The integration
+proof also required Hermes to discover and load the exact signed
+`steward.connector-work` skill, verified one authenticated upstream effect, denied
+task replay and an undeclared operation, scanned the fixed qualification material
+for secret and origin leakage, and verified a separate signed Gateway connector
+receipt chain.
 
 This does not qualify the official upstream image, another Hermes commit, arbitrary
 plugins, channels, skills, MCP servers, or run event streams. The service bridge
@@ -177,6 +249,8 @@ execution boundary beneath a retained workload.
 - Arbitrary state paths, host bind mounts, or automatic state deletion
 - Raw published agent ports, public ingress, or tenant end-user authentication
 - Secret, arbitrary environment-variable, or file injection
+- Generic credential injection, caller-selected connector origins, dynamic paths,
+  redirects, or credentials inside HTTPS `CONNECT` tunnels
 - Per-workload UID/GID selection
 - GPU or other device assignment
 - Writable image root filesystems
@@ -194,10 +268,10 @@ execution boundary beneath a retained workload.
   receipt key and evidence chain as one identity
 - Container checkpoint/restore, Kubernetes, or multi-host placement
 
-The capsule contains maximum `state`, `inference`, `service`, and `egress`
+The capsule contains maximum `state`, `inference`, `service`, `connector`, and `egress`
 capabilities. State requires a Steward-owned Docker volume and the explicit
 dedicated-host-only compatibility setting for volumes without enforced byte or inode
-quotas. Inference, service, and egress require the complete Gateway and relay
+quotas. Inference, service, connector, and egress require the complete Gateway and relay
 configuration. If a requested enforcement path is missing, Executor returns HTTP
 501; a signed boolean alone is not an isolation control.
 

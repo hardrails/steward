@@ -1,6 +1,6 @@
 ---
 title: Build and run the qualified Hermes Agent adapter
-description: Build Steward's exact pinned Hermes Agent adapter, understand its proven gVisor runtime and workspace-audit skill, and preserve its service and state limits.
+description: Build Steward's exact pinned Hermes Agent adapter, understand its proven gVisor runtime and signed workspace and connector skills, and rerun the qualification proof.
 section: Agent compatibility
 ---
 
@@ -13,10 +13,12 @@ runs every process as UID/GID `65532:65532`. It does not use or modify the offic
 upstream image.
 
 Qualification means this pinned source and Steward adapter passed the documented
-runtime proof under gVisor on `linux/amd64`, including useful work before and after a
-container restart. Other platforms require their own qualification run. The retained
-proof does not approve another Hermes commit, a changed adapter, or arbitrary Hermes
-plugins, channels, skills, or Model Context Protocol (MCP) servers.
+runtime proof under gVisor on `linux/amd64`, including a signed workspace audit and
+an authenticated connector effect through a signed custom skill. The state proof
+also runs useful work before and after a container restart. Other platforms require
+their own qualification run. The retained proof does not approve another Hermes
+commit, a changed adapter, or arbitrary Hermes plugins, channels, skills, or Model
+Context Protocol (MCP) servers.
 
 Steward distributes the adapter definition and builder, not a prebuilt Hermes image.
 The dependency and base-image notice inventory is incomplete, so Steward does not
@@ -33,7 +35,7 @@ conflict with Steward's fixed non-root identity, read-only root filesystem,
 
 The qualified adapter instead builds from reviewed source. Its small entrypoint
 performs only fixed-path initialization as UID/GID `65532:65532`, verifies the
-built-in signed skill, starts the upstream Hermes gateway, and exposes one bounded
+built-in signed skills, starts the upstream Hermes gateway, and exposes one bounded
 service bridge. It does not add a root initialization phase or change Hermes core
 source.
 
@@ -87,16 +89,48 @@ Qualification submitted the audit through Hermes's native run API, verified the
 returned workspace manifest digest, restarted the gVisor container with the same
 state, and successfully ran the audit again. This proves that useful, bounded work
 survives the tested restart path while the signed skill stays bound to the immutable
-image. It does not prove autonomous skill selection by an arbitrary production
-model, or the safety of arbitrary workspace content or other skills.
+image. The deterministic qualification model exercises Hermes's native skill index
+and tool loop; it does not predict how an arbitrary production model will choose
+among skills or prove the safety of arbitrary workspace content.
+
+## Useful work: signed connector operation
+
+The adapter also includes the signed `steward.connector-work` skill. Hermes first
+discovers it in the native external-skill index, calls
+`skill_view`, receives the exact signed `SKILL.md`, and then follows its prescribed
+terminal command. Qualification fails if the index entry is absent, the skill body
+differs by one byte, the load is skipped, or an older turn's tool result is reused.
+The bridge advertises this fixture separately in
+`GET /steward/v1/negotiation`.
+
+The skill sends one fixed JSON job to the logical
+`http://steward-relay:8081/v1/connectors/local-work/operations/perform` path. It
+is not configured with the upstream origin or its bearer credential. Gateway
+checks the tenant-bound grant, exact operation, destination and DNS policy, task
+replay fence, call budget, and tenant evidence quota; durably signs authorization
+before the effect; injects the credential only on the upstream request; and signs
+the terminal outcome. The fixture upstream returns a deterministic SHA-256 result,
+so the proof verifies actual authenticated work rather than container readiness.
+
+The same run proves that the spent task ID is denied on replay and that an
+undeclared operation is denied. It then scans container metadata, the read-only
+image layer, the state volume, `/tmp`, `/workspace` when present, and `/dev/shm`
+for the qualification credential, configured origin authority, port, and credential
+path. This is a regression test for the fixed fixture material, not a claim that
+arbitrary upstream responses cannot disclose secrets. Gateway relays bounded
+response bodies and non-Steward headers, so the configured upstream remains trusted
+not to reflect authentication material or private origin details.
 
 A separate Steward integration gate inspected and imported the archive through a
 publisher-signed capsule and site policy, started Hermes through Executor, and sent
-the audit request through Gateway's authenticated service path. It destroyed the
-first container, admitted the next generation with resumed state, ran the audit
-again, purged the lineage volume, and verified Executor's signed receipt chain. This
-also exercises Docker 29's containerd image store, where Docker addresses the image
-by its manifest digest while Steward still verifies the signed config digest.
+the audit and connector requests through Gateway's authenticated service path. It
+verified one upstream effect, replay and forbidden-operation denial, and the signed
+connector receipt chain. It changed the workspace after the first audit, destroyed
+the container, admitted the next generation with resumed state, required a different
+manifest from a fresh Hermes session, purged the lineage volume, and verified
+Executor's signed receipt chain. This also exercises Docker 29's containerd image
+store, where Docker addresses the image by its manifest digest while Steward still
+verifies the signed config digest.
 
 The repository publishes the metadata-only
 [closed-runtime evidence]({{ '/reference/evidence/hermes-feasibility.json' | relative_url }})
@@ -177,6 +211,33 @@ The metadata attestation contains no agent content or secrets. It is not a signa
 and does not independently prove source provenance; authenticate the Steward release
 or checkout and the source transfer through your own trust process.
 
+## Rerun the end-to-end proof
+
+Run qualification only on a disposable `linux/amd64` host with Docker, the `runsc`
+gVisor runtime, Python 3, `curl`, `base64`, and standard GNU userland tools. The
+harness uses fixed loopback ports, creates and removes Docker images, networks,
+containers, and volumes, and starts temporary Steward services. Do not run it on a
+production node or alongside another Steward deployment.
+
+An installed Linux release includes the exact harness and automatically selects its
+packaged binaries:
+
+```console
+sudo env \
+  STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES \
+  HERMES_ARCHIVE="$PWD/hermes-agent-adapter.tar" \
+  HERMES_INTEGRATION_EVIDENCE_OUT="$PWD/hermes-integration.json" \
+  /usr/local/libexec/steward/hermes-steward-acceptance
+```
+
+From a source checkout, use `scripts/hermes-steward-acceptance.sh`; it builds the
+four required Steward binaries when explicit `EXECUTOR_BIN`, `GATEWAY_BIN`,
+`RELAY_BIN`, and `STEWARDCTL_BIN` paths are not supplied. The evidence destination
+must not already exist. A successful run writes owner-only, metadata-only evidence
+that binds the archive, build attestation, harness, binaries, accepted image,
+completed hostile-path checks, and verified receipt-chain heads. It does not retain
+prompts, model output, workspace contents, credentials, origins, or logs.
+
 ## Inspect and import the exact output
 
 Inspect the archive without changing Docker:
@@ -211,10 +272,12 @@ service grant, or egress route. See
 ## Inference and service behavior
 
 The adapter accepts only this inference base URL:
-`http://steward-relay:8080/v1`. Gateway keeps the real upstream credential outside
-the workload and enforces the model alias granted by signed policy. The adapter uses
-the fixed non-secret `steward-local` placeholder as its local API key. It cannot
-select an arbitrary inference endpoint.
+`http://steward-relay:8080/v1`. Gateway does not configure, mount, or inject the
+real upstream credential into the workload and enforces the model alias granted by
+signed policy. The configured inference provider remains trusted not to reflect
+that credential in a response. The adapter uses the fixed non-secret
+`steward-local` placeholder as its local API key. It cannot select an arbitrary
+inference endpoint.
 
 Port `8766` is intended only for a Steward authenticated service grant. The bridge
 exposes this fixed allowlist:

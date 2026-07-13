@@ -49,7 +49,7 @@ Every admitted agent container uses:
 
 - Docker runtime `runsc`, verified before Executor starts;
 - `network=none`, or one internal per-instance Docker network when a signed
-  inference, service, or egress grant requires the trusted relay;
+  inference, service, connector, or egress grant requires the trusted relay;
 - a read-only root filesystem;
 - UID/GID `65532:65532`;
 - all Linux capabilities dropped;
@@ -73,9 +73,9 @@ Capability networks also point DNS at an unavailable loopback resolver. Gateway,
 not the container, resolves authorized egress destinations.
 
 Isolated bridge gateway mode requires Docker Engine 28 or newer. Preflight checks
-that requirement before enabling inference, service, or egress. An agent with no
-network-enabled inference, service, or egress grant remains on `network=none` and
-does not require this Docker feature.
+that requirement before enabling inference, service, connector, or egress. An agent
+with no network-enabled inference, service, connector, or egress grant remains on
+`network=none` and does not require this Docker feature.
 
 Executor adds fixed, non-configurable 64 MiB tmpfs mounts at `/workspace` and
 `/tmp`, sets `HOME=/workspace` and `TMPDIR=/tmp`, and starts in `/workspace`. This
@@ -108,8 +108,8 @@ with 32 workloads per host and 4 per tenant. Aggregate defaults reserve at most
 and 512 PIDs for one tenant. These are startup flags, not request fields. Executor
 reconstructs reservations from every managed workload container, including stopped
 containers, and adds the relay's fixed 64 MiB, 100 millicores, and 32 PIDs for each
-workload with inference, service, or egress. Restarting Executor cannot reset those
-totals.
+workload with inference, service, connector, or egress. Restarting Executor cannot
+reset those totals.
 
 These reservations do not measure disk bytes, inodes, I/O bandwidth, or CPU time
 already consumed. Size the host with room for Docker, gVisor, Gateway, the operating
@@ -142,9 +142,9 @@ terminate Executor. The listener and outbound uplink remain available for
 inspection and authenticated fail-closed containment.
 
 Readiness covers present signed runtimes, not unused optional components. When no
-present runtime needs Gateway, the scan does not probe Gateway health; a 200 response
-therefore does not promise that a later inference, service, or egress admission will
-succeed.
+present runtime needs Gateway, the scan does not probe Gateway health; a 200
+response therefore does not promise that a later inference, service, connector, or
+egress admission will succeed.
 
 ## Signed admission and receipts
 
@@ -185,11 +185,11 @@ and layers. It accepts only regular files at safe paths and rejects duplicate
 paths, links, devices, embedded or remote descriptors, unexpected entries, and
 non-zero or excessive trailing data.
 
-For an inference or egress grant, Gateway calculates a deterministic, non-secret
-digest of the effective model alias, upstream and credential-file identity,
-credential presence, routes, destinations, allowed IP ranges in Classless
-Inter-Domain Routing (CIDR) notation, concurrency, byte limits, and lifetime
-limits. Gateway persists that digest and a
+For an inference, connector, or egress grant, Gateway calculates a deterministic,
+non-secret digest of the effective model alias, upstream and credential-file
+identity, credential presence, routes, exact connector operations, destinations,
+allowed IP ranges in Classless Inter-Domain Routing (CIDR) notation, concurrency,
+call, byte, and lifetime limits. Gateway persists that digest and a
 private credential-content binding with the retained grant. Executor persists the
 public digest in its admission fence and commit receipt and returns it as
 `route_policy_digest`.
@@ -222,10 +222,11 @@ relay, and grant are all inactive.
 A state grant uses one Steward-owned volume for a persistent workload history. It
 is rejected unless the dedicated-host-only compatibility flag for a volume without
 enforced byte or inode quotas is enabled. Only one live instance can hold the
-writable lease for a `(tenant_id, lineage_id)` pair. Inference, service, and egress
-grants require the configured Gateway and hardened relay; partial configuration
-fails closed. See
+writable lease for a `(tenant_id, lineage_id)` pair. Inference, service, connector,
+and egress grants require the configured Gateway and hardened relay; partial
+configuration fails closed. See
 [positive-capability setup]({{ '/guides/positive-capabilities/' | relative_url }}),
+[authenticated connector operations]({{ '/guides/connectors/' | relative_url }}),
 [signed egress]({{ '/guides/egress/' | relative_url }}),
 [the signed-admission guide]({{ '/guides/signed-admission/' | relative_url }}), and
 [image and evidence tools]({{ '/reference/offline-tools/' | relative_url }}).

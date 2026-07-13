@@ -26,27 +26,28 @@ Every admitted agent container receives one fixed policy:
 | Identity | The container runs as fixed UID/GID `65532:65532`; the caller cannot select a user. |
 | Privilege and namespaces | Executor drops every Linux capability and sets `no-new-privileges`. Interprocess communication (IPC) and control-group (cgroup) namespaces are private; process ID (PID) and hostname/domain-name (UTS) namespaces use Docker's private modes. Host, peer-container, shareable namespace, and custom cgroup-parent settings are rejected. |
 | Filesystem | The root filesystem is read-only. Executor adds fixed bounded temporary filesystems. Persistent state uses one fixed-path Steward-owned Docker volume, but Docker's portable local volume driver has no hard byte or inode quota. State is therefore disabled by default and must remain disabled on a shared host. The exact mount set is inspected; host mounts, extra volumes, devices, and caller-selected files are unavailable. |
-| Network | The default is `network=none`. A workload with inference, service, or egress receives one internal per-instance Docker network containing only the agent and its trusted relay. Docker allocates the subnet from its daemon-wide address pools, and its bridge host gateway is disabled. Signed egress uses Gateway; it never gives the container a raw host or Internet route. |
+| Network | The default is `network=none`. A workload with inference, service, connector, or egress authority receives one internal per-instance Docker network containing only the agent and its trusted relay. Docker allocates the subnet from its daemon-wide address pools, and its bridge host gateway is disabled. Gateway performs approved connections; the container receives no raw host or Internet route. |
 | Inference | Site policy selects one route and model alias. Gateway injects the upstream credential, rejects any other model, and synthesizes `/v1/models` from the allowed alias. |
 | Agent service | Gateway exposes a bearer-protected loopback endpoint. It reaches only the declared port through the grant's Unix socket and fixed relay; Docker publishes no container port. |
+| Authenticated connector | The signed capsule, tenant policy, and intent select connector IDs. Node configuration maps each connector operation to one exact method, path, origin, address policy, and owner-only credential. Gateway strips agent credentials, spends a durable task claim and call budget, pins the resolved address, injects only the configured Bearer or API-key value, denies redirects, and bounds concurrency, bodies, response, and time. |
 | HTTP(S) egress | Executor intersects the publisher profile, tenant route IDs, and instance request. Gateway enforces host and port, a pinned resolved IP, explicit private Classless Inter-Domain Routing (CIDR) ranges, concurrency, byte and time limits, lifecycle, and bounded audit output. |
 | Resources | Per-workload memory, swap, CPU, PID, and shared-memory limits are mandatory. Docker's bounded `local` log rotation is fixed and the out-of-memory (OOM) killer remains enabled. Executor reconstructs host and tenant aggregate memory, CPU, PID, and workload reservations from Docker, including stopped containers and fixed relay overhead. Disk, inode, and I/O quotas remain outside this portable contract. |
 | Lifecycle | Docker restart and automatic-removal policies are disabled. Executor, not Docker, owns lifecycle. It inspects restart, log, port, device, mount, network, namespace, and image settings after creation. |
 | Integrity and recovery | A SHA-256 fingerprint covers the admitted definition. Reconciliation—comparison of durable signed state with actual runtime objects—runs before normal mutations are accepted and every 30 seconds. It may repair limited lifecycle drift, but never recreates or adopts missing or structurally changed objects. A degraded scan can only narrow authority. |
 | Route integrity | Gateway persists a non-secret digest of each retained route policy and a private credential-content binding. Executor stores the route-policy digest in the admission fence and receipt. Reload, restart, start, and reconciliation refuse a mismatch while the grant remains retained. |
 | Interface | Request bodies and log output are bounded, and every error has the same JSON shape. Executor mutation and both uplinks require authentication. Signed envelopes and payloads reject duplicate and unknown JSON members. The generic supervisor REST API has no built-in authentication and must stay on loopback or behind operator authentication. |
-| Receipts (opt-in) | Records are flushed to durable storage with `fsync`, length-framed, Ed25519-signed, and hash-linked. They bind admission and lifecycle decisions. An auditor can verify a copied chain and an independently retained exact head without network access. |
+| Receipts (opt-in) | Executor writes length-framed, Ed25519-signed lifecycle records. Gateway writes a separate signed newline-delimited JSON chain for connector authorizations and terminal outcomes. Both chains are hash-linked and flushed with `fsync`; an auditor can verify a copied chain and an independently retained exact head without network access. |
 
 The trusted per-instance relay uses `runc`, not gVisor, because it mounts one
-host-owned, per-grant socket directory. It connects to Gateway's inference and
-egress sockets and creates the service socket that Gateway uses to reach the
-agent's declared port. It receives the same closed namespace, lifecycle, resource,
+host-owned, per-grant socket directory. It connects to Gateway's inference,
+connector, and egress sockets and creates the service socket that Gateway uses to
+reach the agent's declared port. It receives the same closed namespace, lifecycle, resource,
 mount, port, device, and logging checks except for that fixed directory and
 runtime. It has no raw Internet route or caller-selected destination.
 
 Positive-capability networks require Docker Engine 28 or newer because Steward
 depends on Docker's isolated bridge gateway mode. Preflight rejects an older Engine
-before enabling inference, service, or egress. A `network=none` workload does not
+before enabling inference, service, connector, or egress. A `network=none` workload does not
 depend on this feature.
 
 ## Tenant isolation within the host trust model
@@ -103,7 +104,7 @@ enrollment and preflight succeed.
 With signed admission, incomplete trust inputs, a bad policy signature, policy
 rollback, receipt-key replacement, or receipt corruption stop startup. An
 unresolved prepared journal operation allows degraded startup but blocks normal
-mutations. A requested state, inference, service, or egress capability is rejected
+mutations. A requested state, inference, service, connector, or egress capability is rejected
 when any part of its enforcement path is missing or cannot be inspected.
 
 Policy rotation revokes the ability to start an instance admitted under stale
@@ -143,11 +144,13 @@ streams immediately.
 
 ## Evidence boundary
 
-Receipts record decisions and effects that Executor can observe. Offline
-verification checks signatures, framing, sequence, hash links, node ID, key epoch,
-and an optional exact externally retained head. An expected sequence and chain
-hash identify one exact final head; they are not lower bounds. This detects a
-truncated or advanced copy relative to that checkpoint.
+Executor receipts record admission and lifecycle decisions and effects that
+Executor can observe. Gateway's separate connector chain records authorization and
+terminal outcomes that Gateway can observe. Offline verification checks each
+format's signatures and framing, plus sequence, hash links, node ID, key epoch, and
+an optional exact externally retained head. An expected sequence and chain hash
+identify one exact final head; they are not lower bounds. This detects a truncated
+or advanced copy relative to that checkpoint.
 
 Node-local receipts are not hostile-host attestation. Host root can replace the
 binary, keys, and logs together. The chain does not include prompts, model output,

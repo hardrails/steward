@@ -25,10 +25,11 @@ Documentation: https://hardrails.github.io/steward/
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
 - [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
 - [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure optional state, inference, and service grants
+- [Authenticated connectors](https://hardrails.github.io/steward/guides/connectors/): Broker exact API operations without directly configuring the workload with upstream credentials or origins; understand response-reflection risk
 - [Signed egress](https://hardrails.github.io/steward/guides/egress/): Configure HTTP(S) routes, private CIDRs, audit, and diagnostics
 - [Terraform](https://hardrails.github.io/steward/guides/terraform/): Non-secret cloud bootstrap and AWS hardening
 - [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate a local node with Model Context Protocol 2025-11-25 stdio tools
-- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Build the exact-pinned qualified adapter; review its gVisor proof, workspace-audit skill, service API, and limits
+- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Build the exact-pinned qualified adapter; review its gVisor proof, signed workspace and connector skills, service API, and limits
 - [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): Review the layout contract, bounded WebSocket path, and adapter acceptance gate
 - [Air-gapped installation](https://hardrails.github.io/steward/guides/air-gapped/): Offline import and verification
 - [Upgrade and rollback](https://hardrails.github.io/steward/guides/upgrades/): Manifest-bound activation, drained-node requirements, durable-format checks, and rollback limits
@@ -52,8 +53,11 @@ Documentation: https://hardrails.github.io/steward/
 On a dedicated single-tenant host, Steward can grant persistent state across
 approved workload replacements; the Docker volume has no enforced byte or inode
 quota and is disabled on a shared host. Steward can also grant OpenAI-compatible
-inference without exposing the upstream credential, one private service, and named
-HTTP(S) routes through a per-instance proxy. It denies raw TCP/UDP, transparent
+inference without directly configuring or injecting the upstream credential into
+the workload, one private service, and named credential-brokered API operations with
+spend-before-effect call budgets, plus named HTTP(S) routes through a per-instance
+proxy. Configured upstreams remain trusted not to reflect credentials or private
+origin details in responses. Steward denies raw TCP/UDP, transparent
 proxying, raw secrets, host mounts, Docker access, privileged mode, and undeclared
 ports. The Executor HTTP API, `stewardctl node`, and `steward-mcp` call the same
 Executor handlers.
@@ -63,8 +67,11 @@ Steward includes a qualified Hermes Agent adapter definition for upstream commit
 not yet qualified. The source-built image runs non-root
 under gVisor, fixes inference through `http://steward-relay:8080/v1`, and exposes
 bounded negotiation, health, run submission, and run-status operations on port
-`8766`; run event streams are excluded. Qualification ran the signed,
-network-free `steward.workspace-audit` skill against `/opt/data/workspace` and
-ran it again after restart. Steward ships the builder but no prebuilt Hermes OCI
-archive because dependency and base-image notices are incomplete. OpenClaw remains
-an unqualified layout contract.
+`8766`; run event streams are excluded. Qualification ran the signed, network-free
+`steward.workspace-audit` skill, changed persisted state, and required a fresh
+changed result after restart. It also required Hermes to discover and load the exact
+signed `steward.connector-work` skill before proving one authenticated effect,
+replay and undeclared-operation denial, fixed-material secret scans, and a separate
+Gateway connector receipt chain. Steward ships the builder and disposable-host
+acceptance harness but no prebuilt Hermes OCI archive because dependency and
+base-image notices are incomplete. OpenClaw remains an unqualified layout contract.

@@ -31,13 +31,14 @@ Both modes validate any file that is present. Packaged paths are defaults; expli
 flags can select the fence, journal, evidence, uplink, supervisor, and Gateway files.
 
 The bounded JSON result reports active fences, pending journal operations, retained
-Gateway grants, six observed format versions, target compatibility, and `drained`.
-A `null` format means the file is absent or an append-only file has no record header
-yet. Tombstone fences preserve replay history but do not count as active. The command
-exits nonzero when workload or grant state remains, a file is malformed or missing
-when required, or the target reader/writer range is unsafe.
+Gateway grants, seven observed format versions, target compatibility, and
+`drained`. The inventory includes the Gateway connector receipt log. A `null`
+format means the file is absent or, for the Executor evidence log, has no record
+header yet. Tombstone fences preserve replay history but do not count as active.
+The command exits nonzero when workload or grant state remains, a file is malformed
+or missing when required, or the target reader/writer range is unsafe.
 
-`upgrade inspect-formats` returns the same six format observations without requiring
+`upgrade inspect-formats` returns the same seven format observations without requiring
 a drained node. Activation uses it after a failed target start to decide whether the
 prior release can safely read the state before restoring the old active-release
 symlink and relay binding.
@@ -120,6 +121,21 @@ stewardctl evidence verify -in evidence.bin \
 Sequence is an unsigned decimal; hash is `sha256:` plus 64 lowercase hexadecimal
 characters. A mismatch reports rollback. Values assert the exact head, not a lower
 bound; retain a new head after legitimate growth.
+
+Connector receipts are already portable DSSE NDJSON. Verify them with the separate
+Gateway public key and the node identity from `connector_receipt_node_id`:
+
+```console
+stewardctl evidence verify -kind connector \
+  -in /var/lib/steward-gateway/connector-receipts.ndjson \
+  -public-key /etc/steward/connector-receipts.public \
+  -node-id steward-0123456789abcdef0123456789abcdef/gateway \
+  -epoch 1
+```
+
+`-expected-sequence` and `-expected-chain-hash` provide the same external rollback
+check. Retain that head outside the node. Connector evidence does not need an
+export step; `evidence export -kind connector` is rejected.
 
 ## Evidence export
 

@@ -27,8 +27,8 @@ installer, and a SHA-256 manifest.
 Linux archives and packages include hardened systemd units, configuration templates,
 enrollment and preflight helpers, and whole-release activation and removal tools.
 They also include the exact-pinned Hermes Agent adapter definition, builder, signed
-workspace-audit skill, and qualification test harness. They do not include a built Hermes
-image.
+workspace-audit and connector-work skills, and qualification test harness. They do
+not include a built Hermes image.
 macOS archives contain `steward`, `stewardctl`, `steward-mcp`, the license, and
 README.
 
@@ -60,6 +60,24 @@ digests, platform, archive digest, and size. It contains no agent content or sec
 It is metadata, not a signature or independent proof of provenance. Authenticate the
 Steward release and source transfer, then inspect and sign the exact archive through
 the documented admission workflow.
+
+The Linux payload also exposes the packaged end-to-end harness at
+`/usr/local/libexec/steward/hermes-steward-acceptance`. It requires Docker, the
+`runsc` gVisor runtime, Python 3, `curl`, `base64`, and standard GNU userland tools.
+Run it only on a disposable `linux/amd64` host with no production Steward services:
+it uses fixed ports and creates and removes Docker resources.
+
+```console
+sudo env \
+  STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES \
+  HERMES_ARCHIVE="$PWD/hermes-agent-adapter.tar" \
+  /usr/local/libexec/steward/hermes-steward-acceptance
+```
+
+Set `HERMES_INTEGRATION_EVIDENCE_OUT` to a new path when an owner-only,
+metadata-only qualification record is required. The detailed
+[Hermes guide]({{ '/guides/hermes-agent/' | relative_url }}) explains the proof and
+its limits.
 
 ## Verify a downloaded release
 
@@ -98,9 +116,10 @@ metadata.
 Linux releases also contain `release.json`. Its canonical file map binds every
 binary and host-integration asset by SHA-256. Its `state_formats` map declares the
 minimum and maximum durable format each release reads and the format it writes for
-Gateway state, admission fences, the operation journal, evidence, uplink replay
-state, and supervisor state. Activation uses these ranges to reject an unsafe
-upgrade or rollback before changing the active-release symlink or relay binding.
+Gateway state, Gateway connector receipts, admission fences, the operation journal,
+Executor evidence, uplink replay state, and supervisor state. Activation uses these
+ranges to reject an unsafe upgrade or rollback before changing the active-release
+symlink or relay binding.
 
 See [platform support]({{ '/reference/platform-support/' | relative_url }}) and
 [air-gapped installation]({{ '/guides/air-gapped/' | relative_url }}).

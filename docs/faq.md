@@ -74,10 +74,14 @@ interactive and non-interactive builder; it does not redistribute a prebuilt ima
 because dependency and base-image notices are incomplete.
 
 The Hermes qualification ran a signed, network-free workspace-audit skill as a real
-task under gVisor and repeated it after restart. The service exposes negotiation,
-health, run submission, and run status on port `8766`, but not run event streams.
-Inference is fixed through `http://steward-relay:8080/v1`. Persistent state requires
-the explicit dedicated single-tenant host mode and is not a shared-host claim.
+task under gVisor, changed persisted workspace state, and required a fresh changed
+result after restart. It also required Hermes to discover and load the exact signed
+connector skill before proving one authenticated upstream effect, replay and
+undeclared-operation denial, and a separate signed Gateway receipt chain. The
+service exposes negotiation, health, run submission, and run status on port `8766`,
+but not run event streams. Inference is fixed through
+`http://steward-relay:8080/v1`. Persistent state requires the explicit dedicated
+single-tenant host mode and is not a shared-host claim.
 
 OpenClaw has not completed this qualification and remains a layout contract. See the
 [Hermes]({{ '/guides/hermes-agent/' | relative_url }}) and
@@ -101,6 +105,20 @@ purpose. See
 Outside Steward. An operator provides local models through a separately managed,
 OpenAI-compatible service. Steward brokers site-configured routes and credentials;
 it does not schedule or serve models.
+
+## How can an agent call an authenticated API without Steward directly giving it the secret?
+
+Use a named connector. The publisher capsule permits the connector capability,
+site policy permits connector IDs for one tenant, and instance intent selects a
+subset. The node operator maps each ID to exact HTTP operations, an address policy,
+an owner-only credential file, and finite concurrency, call, byte, and time limits.
+Gateway spends a task claim before opening the upstream request, strips
+agent-supplied credentials, and adds the configured credential at the last hop.
+It is not a general secret injector or an HTTPS interception proxy. Gateway relays
+bounded response bodies and non-Steward headers, so a malicious or misconfigured
+upstream can still reflect authentication material. Use a narrow operation that
+does not echo the credential or private origin. See
+[authenticated API operations]({{ '/guides/connectors/' | relative_url }}).
 
 ## Does Steward work without public Internet access?
 

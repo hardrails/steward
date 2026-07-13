@@ -26,8 +26,9 @@ Five runtime boundaries separate authority:
    that adds a boundary between the container and the host kernel. Executor ships
    as `steward-executor`; it is never linked into or hosted by `steward`.
 4. **Steward Gateway and the per-instance relay** enforce finite inference,
-   service, and named HTTP(S) egress grants. They do not give an agent a raw host
-   or Internet route. Gateway has its own service identity and no Docker authority.
+   service, exact credential-brokered connector, and named HTTP(S) egress grants.
+   They do not give an agent a raw host or Internet route. Gateway has its own
+   service identity and no Docker authority.
 5. An operator-managed **OpenAI-compatible inference system** owns model routing
    and inference policy. It is outside Steward's lifecycle contract.
 
@@ -117,17 +118,19 @@ receipt key, or rollback stops startup. A valid unresolved journal entry starts
 Executor in degraded mode: readiness is 503, normal mutations remain blocked, and
 only an authenticated stop may narrow existing authority.
 
-Receipts use exact binary framing, Ed25519 public-key signatures, and hash links;
-they do not depend on JSON canonicalization. They are node-local enforcement
-evidence, not proof against a hostile host. Host root, the host kernel, Docker,
-gVisor, and node-key protection remain trusted. Receipts exclude prompts, model
-responses, agent logs, semantic tool actions, and agent explanations. Executor
-holds its receipt key in-process. Moving signing to a separate service account or
-process could reduce Executor's authority in the future.
+Executor lifecycle receipts use exact binary framing, Ed25519 signatures, and hash
+links; they do not depend on JSON canonicalization. Gateway connector receipts use
+a separate Gateway key and one signed DSSE JSON record per newline. Both are
+node-local enforcement evidence, not proof against a hostile host. Host root, the
+host kernel, Docker, gVisor, and node-key protection remain trusted. Receipts
+exclude prompts, model responses, agent logs, semantic tool actions, and agent
+explanations. Executor and Gateway each hold their own receipt key in-process.
+Moving signing to separate service identities or processes could reduce that
+authority in the future.
 
-Capsules can set bounded `state`, `inference`, `service`, and `egress` ceilings.
+Capsules can set bounded `state`, `inference`, `service`, `connector`, and `egress` ceilings.
 State requires a Steward-owned volume and the explicit dedicated-host-only mode for
-volumes without enforced byte or inode quotas. Inference, service, and egress
+volumes without enforced byte or inode quotas. Inference, service, connector, and egress
 require the complete Gateway/relay path. Executor grants a capability only when its
 required enforcement path is configured and verified. A signed field alone never
 grants a capability.
