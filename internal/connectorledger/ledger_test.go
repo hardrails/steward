@@ -120,6 +120,33 @@ func TestConnectorLedgerRejectsTamperReorderAndTruncation(t *testing.T) {
 	})
 }
 
+func TestVerifyRecordsRejectsSignedOrphanTerminal(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "orphan-terminal.ndjson")
+	log, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := validEvent(Terminal, Failed)
+	terminal.ErrorCode = "orphan_terminal"
+	log.mu.Lock()
+	_, err = log.appendLocked(terminal, 0)
+	log.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyRecords(path, public, "node-a/gateway", 1, nil); err == nil ||
+		!strings.Contains(err.Error(), "no matching authorization") {
+		t.Fatalf("signed orphan terminal verification err=%v", err)
+	}
+}
+
 func TestConnectorLedgerConcurrentAppendHasOneChainOrder(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

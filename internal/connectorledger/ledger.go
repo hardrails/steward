@@ -357,7 +357,16 @@ func VerifyRecords(path string, public ed25519.PublicKey, nodeID string, epoch u
 	if err != nil || !os.SameFile(info, opened) || !validFileInfo(opened) {
 		return Head{}, errors.New("connector ledger changed while opening")
 	}
-	return verifyFile(file, public, nodeID, epoch, visit)
+	pending := make(map[string]Event)
+	return verifyFile(file, public, nodeID, epoch, func(record VerifiedReceipt) error {
+		if err := updatePending(pending, record.Receipt.Event); err != nil {
+			return err
+		}
+		if visit != nil {
+			return visit(record)
+		}
+		return nil
+	})
 }
 
 // Validate inspects an existing ledger without creating it. A missing ledger is
