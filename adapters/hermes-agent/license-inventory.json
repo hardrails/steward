@@ -8,6 +8,10 @@
     "pyproject.toml",
     "uv.lock"
   ],
+  "selected_optional_inputs": [
+    "homeassistant",
+    "mcp"
+  ],
   "excluded_optional_inputs": [
     "plugins/hermes-achievements",
     "plugins/security-guidance",

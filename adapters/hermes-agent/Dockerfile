@@ -9,7 +9,7 @@ WORKDIR /opt/hermes
 COPY upstream/ /opt/hermes/
 COPY adapter/source-inputs.sha256 /tmp/source-inputs.sha256
 RUN sha256sum -c /tmp/source-inputs.sha256 && \
-    uv sync --frozen --no-install-project --extra all && \
+    uv sync --frozen --no-install-project --extra mcp --extra homeassistant && \
     uv pip install --no-cache-dir --no-deps . && \
     rm -f /tmp/source-inputs.sha256
 
@@ -31,8 +31,9 @@ COPY --from=build --chmod=0444 /opt/hermes/LICENSE /usr/share/licenses/hermes-ag
 COPY --chmod=0555 adapter/entrypoint.py /opt/steward/entrypoint.py
 COPY --chmod=0555 adapter/fixture_model.py /opt/steward/fixture_model.py
 COPY --chmod=0555 adapter/fixture_mcp.py /opt/steward/fixture_mcp.py
-COPY --chmod=0555 adapter/fixtures/skill/fixture_sha256.py /opt/steward/fixtures/skill/fixture_sha256.py
+COPY --chmod=0555 adapter/fixtures/skill/workspace_audit.py /opt/steward/fixtures/skill/workspace_audit.py
 COPY --chmod=0444 adapter/fixtures/skill/SKILL.md /opt/steward/fixtures/skill/SKILL.md
+COPY --chmod=0444 adapter/fixtures/skill/workspace-fixture-contract.json /opt/steward/fixtures/skill/workspace-fixture-contract.json
 COPY --chmod=0444 adapter/fixtures/skill/manifest.json /opt/steward/fixtures/skill/manifest.json
 COPY --chmod=0444 adapter/fixtures/skill/manifest.sig /opt/steward/fixtures/skill/manifest.sig
 COPY --chmod=0444 adapter/fixtures/skill/public.pem /opt/steward/fixtures/skill/public.pem

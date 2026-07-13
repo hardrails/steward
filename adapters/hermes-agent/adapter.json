@@ -34,8 +34,27 @@
     "home": "/opt/data/home",
     "workdir": "/opt/data",
     "tmp_path": "/tmp",
-    "negotiation_port": 8766,
-    "agent_api_port": 8642
+    "service_port": 8766,
+    "internal_agent_api_port": 8642
+  },
+  "service_surface": {
+    "negotiation_path": "/steward/v1/negotiation",
+    "operations": [
+      "GET /health",
+      "POST /v1/runs",
+      "GET /v1/runs/{run_id}"
+    ],
+    "run_id_pattern": "^run_[a-f0-9]{32}$",
+    "events": false,
+    "max_request_body_bytes": 65536,
+    "max_response_body_bytes": 1048576,
+    "timeout_seconds": 30
+  },
+  "qualified_skill_fixture": {
+    "name": "steward.workspace-audit",
+    "workspace_root": "/opt/data/workspace",
+    "network": false,
+    "result_schema": "steward.workspace-audit.result.v1"
   },
   "known_upstream_incompatibilities": [
     "upstream image starts as root for s6 initialization",
