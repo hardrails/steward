@@ -68,7 +68,7 @@ func TestEgressProxyHTTPConnectDenialAuditAndLifecycle(t *testing.T) {
 	replacement.Generation = 2
 	replacement.EgressRouteIDs = nil
 	replacement.Service = true
-	controlRequest(t, server, http.MethodPost, "/v1/grants", replacement, http.StatusConflict)
+	controlRequest(t, server, http.MethodPost, "/v1/grants", replacement, http.StatusBadRequest)
 	current := server.grants[grant.GrantID]
 	if !current.Active || !GrantsEqual(current, Grant{GrantID: grant.GrantID, TenantID: grant.TenantID, InstanceID: grant.InstanceID,
 		Generation: grant.Generation, EgressRouteIDs: grant.EgressRouteIDs, Active: true}) {

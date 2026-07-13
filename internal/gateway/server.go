@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -30,6 +31,9 @@ const maxHTTPHeaderBytes = 64 << 10
 const maxServiceConcurrent = 16
 const maxServiceLifetime = 2 * time.Minute
 const streamStatusTrailer = "X-Steward-Stream-Status"
+const maxConnectorGlobalConcurrent = 32
+const maxConnectorGrantConcurrent = 4
+const connectorReceiptStatusTrailer = "X-Steward-Connector-Receipt"
 
 type Grant struct {
 	GrantID        string   `json:"grant_id"`
@@ -139,28 +143,33 @@ type grantLease struct {
 }
 
 type Server struct {
-	mu                  sync.Mutex
-	config              Config
-	routes              map[string]loadedRoute
-	egressRoutes        map[string]loadedEgressRoute
-	connectors          map[string]loadedConnector
-	semaphores          map[string]chan struct{}
-	egressSemaphores    map[string]chan struct{}
-	connectorSemaphores map[string]chan struct{}
-	serviceSemaphores   map[string]chan struct{}
-	grants              map[string]Grant
-	policyDigests       map[string]string
-	credentialDigests   map[string]string
-	listeners           map[string]net.Listener
-	egressListeners     map[string]net.Listener
-	connectorListeners  map[string]net.Listener
-	egressStats         map[string]EgressStats
-	connectorCalls      map[string]map[string][]string
-	grantLeases         map[string]grantLease
-	egressLeases        map[string]grantLease
-	audit               *auditLog
-	tokenHash           [sha256.Size]byte
-	client              *http.Client
+	mu                       sync.Mutex
+	config                   Config
+	routes                   map[string]loadedRoute
+	egressRoutes             map[string]loadedEgressRoute
+	connectors               map[string]loadedConnector
+	semaphores               map[string]chan struct{}
+	egressSemaphores         map[string]chan struct{}
+	connectorSemaphores      map[string]chan struct{}
+	connectorGlobalSemaphore chan struct{}
+	connectorGrantSemaphores map[string]chan struct{}
+	serviceSemaphores        map[string]chan struct{}
+	grants                   map[string]Grant
+	policyDigests            map[string]string
+	credentialDigests        map[string]string
+	listeners                map[string]net.Listener
+	egressListeners          map[string]net.Listener
+	connectorListeners       map[string]net.Listener
+	egressStats              map[string]EgressStats
+	connectorCalls           map[string]map[string][]string
+	connectorSpends          map[string]connectorSpendOwner
+	connectorCallCounts      map[string]map[string]int
+	grantLeases              map[string]grantLease
+	egressLeases             map[string]grantLease
+	audit                    *auditLog
+	connectorLedger          *connectorledger.Log
+	tokenHash                [sha256.Size]byte
+	client                   *http.Client
 }
 
 func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, serviceToken string) (*Server, error) {
@@ -172,8 +181,18 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		return nil, err
 	}
 	config.loadedConnectors = connectors
+	receiptKey, err := config.connectorReceiptPrivateKey()
+	if err != nil {
+		return nil, err
+	}
+	config.connectorReceiptKey = receiptKey
 	audit, err := openAuditLog(config.EgressAuditFile, config.EgressAuditFile != "")
 	if err != nil {
+		return nil, err
+	}
+	receiptLog, receiptIndex, err := openConnectorReceiptLedger(config, receiptKey)
+	if err != nil {
+		_ = audit.Close()
 		return nil, err
 	}
 	transport := &http.Transport{
@@ -185,15 +204,19 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 	}
 	server := &Server{
 		config: config, routes: routes, egressRoutes: egressRoutes, connectors: connectors,
-		semaphores:          make(map[string]chan struct{}, len(routes)),
-		egressSemaphores:    make(map[string]chan struct{}, len(egressRoutes)),
-		connectorSemaphores: make(map[string]chan struct{}, len(connectors)),
-		grants:              make(map[string]Grant), policyDigests: make(map[string]string), credentialDigests: make(map[string]string),
+		semaphores:               make(map[string]chan struct{}, len(routes)),
+		egressSemaphores:         make(map[string]chan struct{}, len(egressRoutes)),
+		connectorSemaphores:      make(map[string]chan struct{}, len(connectors)),
+		connectorGlobalSemaphore: make(chan struct{}, maxConnectorGlobalConcurrent),
+		connectorGrantSemaphores: make(map[string]chan struct{}),
+		grants:                   make(map[string]Grant), policyDigests: make(map[string]string), credentialDigests: make(map[string]string),
 		listeners: make(map[string]net.Listener), egressListeners: make(map[string]net.Listener), connectorListeners: make(map[string]net.Listener),
 		serviceSemaphores: make(map[string]chan struct{}), egressStats: make(map[string]EgressStats),
-		connectorCalls: make(map[string]map[string][]string),
-		grantLeases:    make(map[string]grantLease), egressLeases: make(map[string]grantLease), audit: audit,
-		tokenHash: sha256.Sum256([]byte("Bearer " + serviceToken)),
+		connectorCalls:  make(map[string]map[string][]string),
+		connectorSpends: receiptIndex.spends, connectorCallCounts: receiptIndex.counts,
+		grantLeases: make(map[string]grantLease), egressLeases: make(map[string]grantLease), audit: audit,
+		connectorLedger: receiptLog,
+		tokenHash:       sha256.Sum256([]byte("Bearer " + serviceToken)),
 		client: &http.Client{Transport: transport, Timeout: 2 * time.Minute,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
@@ -208,6 +231,16 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 	}
 	if err := server.load(); err != nil {
 		_ = audit.Close()
+		if receiptLog != nil {
+			_ = receiptLog.Close()
+		}
+		return nil, err
+	}
+	if err := server.mergeRetainedConnectorSpends(); err != nil {
+		_ = audit.Close()
+		if receiptLog != nil {
+			_ = receiptLog.Close()
+		}
 		return nil, err
 	}
 	return server, nil
@@ -234,8 +267,18 @@ func Validate(config Config, routes map[string]loadedRoute, egressRoutes map[str
 		return StateSummary{}, err
 	}
 	config.loadedConnectors = connectors
+	receiptKey, err := config.connectorReceiptPrivateKey()
+	if err != nil {
+		return StateSummary{}, err
+	}
+	config.connectorReceiptKey = receiptKey
 	if err := validateAuditLog(config.EgressAuditFile, config.EgressAuditFile != ""); err != nil {
 		return StateSummary{}, err
+	}
+	if receiptKey != nil {
+		if _, err := connectorledger.Validate(config.ConnectorReceiptFile, receiptKey, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch); err != nil {
+			return StateSummary{}, err
+		}
 	}
 	return InspectState(config, routes, egressRoutes)
 }
@@ -355,11 +398,19 @@ func sameRuntimeConfig(left, right Config) bool {
 		left.ServiceAddress == right.ServiceAddress && left.ServiceTokenFile == right.ServiceTokenFile &&
 		left.StateFile == right.StateFile && left.GrantRoot == right.GrantRoot &&
 		left.ExecutorGID == right.ExecutorGID && left.RelayGID == right.RelayGID &&
-		left.EgressAuditFile == right.EgressAuditFile
+		left.EgressAuditFile == right.EgressAuditFile &&
+		left.ConnectorReceiptFile == right.ConnectorReceiptFile &&
+		left.ConnectorReceiptKeyFile == right.ConnectorReceiptKeyFile &&
+		left.ConnectorReceiptNodeID == right.ConnectorReceiptNodeID &&
+		left.ConnectorReceiptEpoch == right.ConnectorReceiptEpoch &&
+		connectorReceiptKeyID(left) == connectorReceiptKeyID(right)
 }
 
 func (s *Server) Start(ctx context.Context) error {
 	defer s.audit.Close()
+	if s.connectorLedger != nil {
+		defer s.connectorLedger.Close()
+	}
 	defer s.closeGrantListeners()
 	s.mu.Lock()
 	for id, grant := range s.grants {
@@ -735,6 +786,7 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) validGrant(grant Grant) bool {
 	if !validGrantID(grant.GrantID) || !bounded(grant.TenantID, 128) || !bounded(grant.InstanceID, 256) || grant.Generation == 0 ||
+		grant.GrantID != GrantID(grant.TenantID, grant.InstanceID, grant.Generation) ||
 		(grant.RouteID == "" && !grant.Service && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0) ||
 		len(grant.ModelAlias) > 256 || (grant.ServiceURL != "" && !grant.Service) || !validGrantEvidenceContext(grant) {
 		return false

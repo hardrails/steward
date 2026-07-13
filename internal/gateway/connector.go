@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -59,6 +60,7 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 
 		s.mu.Lock()
 		grant, granted := s.grants[grantID]
+		routePolicyDigest := s.policyDigests[grantID]
 		connector, configured := s.connectors[connectorID]
 		operation, operationExists := connector.operations[operationID]
 		if !granted || !grant.Active {
@@ -72,12 +74,38 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 			return
 		}
 		semaphore := s.connectorSemaphores[connectorID]
+		grantSemaphore := s.connectorGrantSemaphores[grantID]
+		if grantSemaphore == nil {
+			grantSemaphore = make(chan struct{}, maxConnectorGrantConcurrent)
+			s.connectorGrantSemaphores[grantID] = grantSemaphore
+		}
 		lease := s.grantLeaseLocked(grantID)
+		select {
+		case s.connectorGlobalSemaphore <- struct{}{}:
+		default:
+			s.mu.Unlock()
+			writeGatewayError(w, http.StatusTooManyRequests, "connector_busy", "Gateway connector concurrency limit reached")
+			return
+		}
+		select {
+		case grantSemaphore <- struct{}{}:
+		default:
+			<-s.connectorGlobalSemaphore
+			s.mu.Unlock()
+			writeGatewayError(w, http.StatusTooManyRequests, "connector_busy", "connector grant concurrency limit reached")
+			return
+		}
 		select {
 		case semaphore <- struct{}{}:
 			s.mu.Unlock()
-			defer func() { <-semaphore }()
+			defer func() {
+				<-semaphore
+				<-grantSemaphore
+				<-s.connectorGlobalSemaphore
+			}()
 		default:
+			<-grantSemaphore
+			<-s.connectorGlobalSemaphore
 			s.mu.Unlock()
 			writeGatewayError(w, http.StatusTooManyRequests, "connector_busy", "connector concurrency limit reached")
 			return
@@ -105,7 +133,8 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		}
 
 		callDigest := connectorCallDigest(taskID, connectorID, operationID)
-		if err := s.spendConnectorCall(grantID, connectorID, callDigest); err != nil {
+		receipt := connectorReceiptEvent(grant, routePolicyDigest, connectorID, operationID, callDigest, int64(len(body)))
+		if err := s.spendConnectorCall(grantID, connectorID, callDigest, receipt); err != nil {
 			switch {
 			case errors.Is(err, errConnectorReplay):
 				writeGatewayError(w, http.StatusConflict, "connector_task_replayed", "connector task was already spent")
@@ -125,10 +154,14 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		port := connectorPort(connector.base.Scheme, connector.base.Port())
 		ip, err := resolveAllowedIP(request.Context(), host, loadedEgressDestination{prefixes: connector.prefixes})
 		if err != nil {
+			if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "address_denied"); receiptErr != nil {
+				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
+				return
+			}
 			writeGatewayError(w, http.StatusForbidden, "address_denied", "connector origin did not resolve to an allowed address")
 			return
 		}
-		s.proxyConnector(w, request, connector, operation, body, ip, port)
+		s.proxyConnector(w, request, connector, operation, body, ip, port, receipt)
 	})
 }
 
@@ -211,7 +244,7 @@ func connectorCallDigest(taskID, connectorID, operationID string) string {
 	return "sha256:" + fmt.Sprintf("%x", digest.Sum(nil))
 }
 
-func (s *Server) spendConnectorCall(grantID, connectorID, digest string) error {
+func (s *Server) spendConnectorCall(grantID, connectorID, digest string, receipt connectorledger.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	grant, ok := s.grants[grantID]
@@ -219,31 +252,23 @@ func (s *Server) spendConnectorCall(grantID, connectorID, digest string) error {
 	if !ok || !grant.Active || !connectorOK || !slicesContainsSorted(grant.ConnectorIDs, connectorID) {
 		return errConnectorInactive
 	}
-	if s.connectorCalls[grantID] == nil {
-		s.connectorCalls[grantID] = make(map[string][]string)
+	if _, spent := s.connectorSpends[digest]; spent {
+		return errConnectorReplay
 	}
-	for _, calls := range s.connectorCalls[grantID] {
-		for _, spent := range calls {
-			if spent == digest {
-				return errConnectorReplay
-			}
-		}
-	}
-	calls := s.connectorCalls[grantID][connectorID]
-	if len(calls) >= connector.MaxCallsPerGrant {
+	if s.connectorCallCounts[grantID][connectorID] >= connector.MaxCallsPerGrant {
 		return errConnectorCallLimit
 	}
-	s.connectorCalls[grantID][connectorID] = append(calls, digest)
-	if err := s.persistLocked(); err != nil {
-		s.connectorCalls[grantID][connectorID] = calls
-		if len(calls) == 0 {
-			delete(s.connectorCalls[grantID], connectorID)
-		}
-		if len(s.connectorCalls[grantID]) == 0 {
-			delete(s.connectorCalls, grantID)
-		}
+	if s.connectorLedger == nil {
+		return errors.New("connector receipt ledger is unavailable")
+	}
+	if _, err := s.connectorLedger.Begin(receipt); err != nil {
 		return err
 	}
+	s.connectorSpends[digest] = connectorSpendOwner{GrantID: grantID, ConnectorID: connectorID}
+	if s.connectorCallCounts[grantID] == nil {
+		s.connectorCallCounts[grantID] = make(map[string]int)
+	}
+	s.connectorCallCounts[grantID][connectorID]++
 	return nil
 }
 
@@ -268,6 +293,7 @@ func (s *Server) proxyConnector(
 	body []byte,
 	ip netip.Addr,
 	port int,
+	receipt connectorledger.Event,
 ) {
 	target := *connector.base
 	target.Path = operation.Path
@@ -277,6 +303,10 @@ func (s *Server) proxyConnector(
 	}
 	request, err := http.NewRequestWithContext(incoming.Context(), operation.Method, target.String(), bodyReader)
 	if err != nil {
+		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "invalid_request"); receiptErr != nil {
+			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
+			return
+		}
 		writeGatewayError(w, http.StatusBadRequest, "invalid_request", "cannot construct connector request")
 		return
 	}
@@ -291,6 +321,10 @@ func (s *Server) proxyConnector(
 	case CredentialModeXAPIKey:
 		request.Header.Set("X-API-Key", connector.credential)
 	default:
+		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "connector_unavailable"); receiptErr != nil {
+			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
+			return
+		}
 		writeGatewayError(w, http.StatusServiceUnavailable, "connector_unavailable", "connector credential mode is unavailable")
 		return
 	}
@@ -312,13 +346,49 @@ func (s *Server) proxyConnector(
 	}
 	response, err := client.Do(request)
 	if err != nil {
+		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "upstream_unavailable"); receiptErr != nil {
+			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
+			return
+		}
 		writeGatewayError(w, http.StatusBadGateway, "upstream_unavailable", "configured connector request failed")
 		return
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "redirect_denied"); receiptErr != nil {
+			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
+			return
+		}
 		writeGatewayError(w, http.StatusBadGateway, "redirect_denied", "configured connector returned a redirect")
 		return
 	}
-	relayHTTPResponseBounded(w, response, false, connector.MaxResponseBytes)
+	if response.ContentLength > connector.MaxResponseBytes {
+		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "response_too_large"); receiptErr != nil {
+			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
+			return
+		}
+		writeGatewayError(w, http.StatusBadGateway, "response_too_large", "configured upstream response exceeds the byte limit")
+		return
+	}
+	copyHeaders(w.Header(), response.Header)
+	w.Header().Del("Set-Cookie")
+	w.Header().Del("Location")
+	// Connector success is complete only when the signed terminal receipt is
+	// durable. Force a trailer-framed response so a failed receipt append cannot
+	// look like a clean, content-length-delimited success to the agent.
+	prepareBoundedHTTPResponse(w, -1)
+	w.Header().Add("Trailer", connectorReceiptStatusTrailer)
+	w.WriteHeader(response.StatusCode)
+	result := copyHTTPResponseBody(w, response.Body, connector.MaxResponseBytes, true)
+	errorCode := ""
+	if result.abort {
+		errorCode = result.reason
+	}
+	if err := s.finishConnectorReceipt(receipt, response.StatusCode, result.written, errorCode); err != nil {
+		panic(http.ErrAbortHandler)
+	}
+	w.Header().Set(connectorReceiptStatusTrailer, "recorded")
+	if result.abort {
+		panic(http.ErrAbortHandler)
+	}
 }

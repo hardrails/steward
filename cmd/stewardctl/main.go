@@ -22,6 +22,7 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/buildinfo"
+	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/nodeclient"
@@ -70,7 +71,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "usage: stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]")
 	fmt.Fprintln(writer, "       stewardctl capsule sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")
-	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N]")
+	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
 	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state ...")
 	fmt.Fprintln(writer, "       stewardctl gateway validate|route ...")
 	fmt.Fprintln(writer, "       stewardctl image inspect|import -archive FILE ...")
@@ -213,6 +214,7 @@ func evidenceCommand(arguments []string, stdout io.Writer) error {
 	jsonOutput := flags.Bool("json", false, "emit a machine-readable verification result")
 	expectedSequence := flags.String("expected-sequence", "", "externally retained final sequence")
 	expectedChainHash := flags.String("expected-chain-hash", "", "externally retained sha256 chain hash")
+	kind := flags.String("kind", "executor", "evidence kind: executor or connector")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
@@ -222,8 +224,37 @@ func evidenceCommand(arguments []string, stdout io.Writer) error {
 	if action == "export" && *jsonOutput {
 		return errors.New("evidence export is always newline-delimited JSON; -json is only valid with verify")
 	}
+	if *kind != "executor" && *kind != "connector" {
+		return errors.New("evidence -kind must be executor or connector")
+	}
+	if *kind == "connector" && action != "verify" {
+		return errors.New("connector evidence is already portable newline-delimited DSSE; use evidence verify -kind connector")
+	}
 	publicKey, err := readPublicKey(*publicKeyPath)
 	if err != nil {
+		return err
+	}
+	if *kind == "connector" {
+		head, err := connectorledger.VerifyRecords(*input, publicKey, *nodeID, *epoch, nil)
+		if err != nil {
+			return err
+		}
+		if err := checkExpectedConnectorHead(head, *expectedSequence, *expectedChainHash); err != nil {
+			return err
+		}
+		output := evidenceHeadOutput{NodeID: head.NodeID, Epoch: head.Epoch, Sequence: head.Sequence, ChainHash: head.ChainHash, KeyID: head.KeyID}
+		if *jsonOutput {
+			return json.NewEncoder(stdout).Encode(struct {
+				Valid bool               `json:"valid"`
+				Kind  string             `json:"kind"`
+				Head  evidenceHeadOutput `json:"head"`
+			}{Valid: true, Kind: "connector", Head: output})
+		}
+		if head.Sequence == 0 {
+			_, err = fmt.Fprintln(stdout, "valid empty connector evidence chain")
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "valid connector evidence chain: node=%s epoch=%d sequence=%d\n", head.NodeID, head.Epoch, head.Sequence)
 		return err
 	}
 	var head evidence.Head
@@ -256,6 +287,30 @@ func evidenceCommand(arguments []string, stdout io.Writer) error {
 	return err
 }
 
+func checkExpectedConnectorHead(head connectorledger.Head, expectedSequence, expectedChainHash string) error {
+	if expectedSequence != "" {
+		sequence, err := strconv.ParseUint(expectedSequence, 10, 64)
+		if err != nil {
+			return errors.New("expected evidence sequence must be an unsigned decimal integer")
+		}
+		if head.Sequence != sequence {
+			if head.Sequence < sequence {
+				return fmt.Errorf("evidence rollback detected: expected sequence %d, verified %d", sequence, head.Sequence)
+			}
+			return fmt.Errorf("evidence checkpoint mismatch: expected sequence %d, verified advanced sequence %d", sequence, head.Sequence)
+		}
+	}
+	if expectedChainHash != "" {
+		if err := validateExpectedChainHash(expectedChainHash); err != nil {
+			return err
+		}
+		if head.ChainHash != expectedChainHash {
+			return fmt.Errorf("evidence checkpoint mismatch: expected chain hash %s, verified %s", expectedChainHash, head.ChainHash)
+		}
+	}
+	return nil
+}
+
 func checkExpectedEvidenceHead(head evidence.Head, expectedSequence, expectedChainHash string) error {
 	if expectedSequence != "" {
 		sequence, err := strconv.ParseUint(expectedSequence, 10, 64)
@@ -270,18 +325,25 @@ func checkExpectedEvidenceHead(head evidence.Head, expectedSequence, expectedCha
 		}
 	}
 	if expectedChainHash != "" {
-		const prefix = "sha256:"
-		if !strings.HasPrefix(expectedChainHash, prefix) || len(expectedChainHash) != len(prefix)+64 {
-			return errors.New("expected evidence chain hash must be sha256 followed by 64 lowercase hexadecimal characters")
-		}
-		digest := strings.TrimPrefix(expectedChainHash, prefix)
-		decoded, err := hex.DecodeString(digest)
-		if err != nil || hex.EncodeToString(decoded) != digest {
-			return errors.New("expected evidence chain hash must be sha256 followed by 64 lowercase hexadecimal characters")
+		if err := validateExpectedChainHash(expectedChainHash); err != nil {
+			return err
 		}
 		if chainHash(head.ChainHash) != expectedChainHash {
 			return fmt.Errorf("evidence checkpoint mismatch: expected chain hash %s, verified %s", expectedChainHash, chainHash(head.ChainHash))
 		}
+	}
+	return nil
+}
+
+func validateExpectedChainHash(value string) error {
+	const prefix = "sha256:"
+	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
+		return errors.New("expected evidence chain hash must be sha256 followed by 64 lowercase hexadecimal characters")
+	}
+	digest := strings.TrimPrefix(value, prefix)
+	decoded, err := hex.DecodeString(digest)
+	if err != nil || hex.EncodeToString(decoded) != digest {
+		return errors.New("expected evidence chain hash must be sha256 followed by 64 lowercase hexadecimal characters")
 	}
 	return nil
 }

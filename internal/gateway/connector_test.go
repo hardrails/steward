@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/hardrails/steward/internal/connectorledger"
 )
 
 type connectorRigOptions struct {
@@ -72,8 +76,16 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 		Version: 1, ControlSocket: filepath.Join(directory, "control.sock"), ServiceAddress: "127.0.0.1:8092",
 		ServiceTokenFile: filepath.Join(directory, "service.token"), StateFile: filepath.Join(directory, "state.json"),
 		GrantRoot: filepath.Join(directory, "grants"), ExecutorGID: os.Getgid(), RelayGID: os.Getgid(),
-		Connectors: []Connector{connectorConfig},
+		Connectors:              []Connector{connectorConfig},
+		ConnectorReceiptFile:    filepath.Join(directory, "connector-receipts.ndjson"),
+		ConnectorReceiptKeyFile: filepath.Join(directory, "connector-receipts.private.pem"),
+		ConnectorReceiptNodeID:  "node-test/gateway", ConnectorReceiptEpoch: 1,
 	}
+	_, receiptKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.connectorReceiptKey = receiptKey
 	connectors, err := config.validateAndLoadConnectors()
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +98,7 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 	t.Cleanup(func() {
 		server.closeGrantListeners()
 		_ = server.audit.Close()
+		_ = server.connectorLedger.Close()
 	})
 	grant := connectorGrant("tenant-a", "agent-a", 1, "issues")
 	registerConnectorGrant(t, server, grant)
@@ -176,8 +189,22 @@ func TestConnectorBrokersExactOperationAndStripsCallerAuthority(t *testing.T) {
 	}
 	state, err := os.ReadFile(rig.config.StateFile)
 	if err != nil || bytes.Contains(state, []byte("operator-secret")) || bytes.Contains(state, []byte("task-create-1")) ||
-		!bytes.Contains(state, []byte(connectorCallDigest("task-create-1", "issues", "create"))) {
-		t.Fatalf("unsafe or incomplete state=%s err=%v", state, err)
+		bytes.Contains(state, []byte(connectorCallDigest("task-create-1", "issues", "create"))) {
+		t.Fatalf("unsafe mutable state=%s err=%v", state, err)
+	}
+	var receipts []connectorledger.Event
+	_, err = connectorledger.VerifyRecords(
+		rig.config.ConnectorReceiptFile, rig.config.connectorReceiptKey.Public().(ed25519.PublicKey),
+		rig.config.ConnectorReceiptNodeID, rig.config.ConnectorReceiptEpoch,
+		func(record connectorledger.VerifiedReceipt) error {
+			receipts = append(receipts, record.Receipt.Event)
+			return nil
+		},
+	)
+	if err != nil || len(receipts) != 2 || receipts[0].Phase != connectorledger.Authorize ||
+		receipts[1].Phase != connectorledger.Terminal || receipts[0].TaskDigest != connectorCallDigest("task-create-1", "issues", "create") ||
+		receipts[0].RoutePolicyDigest == "" || receipts[1].ResponseBytes != int64(len(`{"id":7}`)) {
+		t.Fatalf("receipts=%#v err=%v", receipts, err)
 	}
 }
 
@@ -224,11 +251,16 @@ func TestConnectorRejectsCrossGrantReplayAndRestartReplay(t *testing.T) {
 
 	rig.server.closeGrantListeners()
 	_ = rig.server.audit.Close()
+	_ = rig.server.connectorLedger.Close()
 	reopened, err := Open(rig.config, nil, nil, "service-token")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { reopened.closeGrantListeners(); _ = reopened.audit.Close() }()
+	defer func() {
+		reopened.closeGrantListeners()
+		_ = reopened.audit.Close()
+		_ = reopened.connectorLedger.Close()
+	}()
 	activateConnectorGrant(t, reopened, rig.grant.GrantID)
 	afterRestart := connectorRequest(http.MethodPost, "issues", "create", "task-durable", strings.NewReader(`{"x":3}`))
 	if response := invokeConnector(reopened, rig.grant.GrantID, afterRestart); response.Code != http.StatusConflict || calls.Load() != 1 {
@@ -239,8 +271,77 @@ func TestConnectorRejectsCrossGrantReplayAndRestartReplay(t *testing.T) {
 	registerConnectorGrant(t, reopened, secondGrant)
 	activateConnectorGrant(t, reopened, secondGrant.GrantID)
 	otherGrantTask := connectorRequest(http.MethodPost, "issues", "create", "task-durable", strings.NewReader(`{"x":4}`))
-	if response := invokeConnector(reopened, secondGrant.GrantID, otherGrantTask); response.Code != http.StatusNoContent || calls.Load() != 2 {
+	if response := invokeConnector(reopened, secondGrant.GrantID, otherGrantTask); response.Code != http.StatusConflict || calls.Load() != 1 {
 		t.Fatalf("other grant status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
+	}
+}
+
+func TestConnectorReceiptTombstoneSurvivesUnregisterAndStateDeletion(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{allowedCIDRs: []string{"127.0.0.0/8"}})
+	invoke := func(server *Server) int {
+		request := connectorRequest(http.MethodPost, "issues", "create", "task-tombstone", strings.NewReader(`{"x":1}`))
+		return invokeConnector(server, rig.grant.GrantID, request).Code
+	}
+	if status := invoke(rig.server); status != http.StatusNoContent || calls.Load() != 1 {
+		t.Fatalf("initial status=%d calls=%d", status, calls.Load())
+	}
+	controlRequest(t, rig.server, http.MethodDelete, "/v1/grants/"+rig.grant.GrantID, nil, http.StatusNoContent)
+	registerConnectorGrant(t, rig.server, rig.grant)
+	activateConnectorGrant(t, rig.server, rig.grant.GrantID)
+	if status := invoke(rig.server); status != http.StatusConflict || calls.Load() != 1 {
+		t.Fatalf("post-unregister replay status=%d calls=%d", status, calls.Load())
+	}
+
+	rig.server.closeGrantListeners()
+	_ = rig.server.audit.Close()
+	_ = rig.server.connectorLedger.Close()
+	if err := os.Remove(rig.config.StateFile); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(rig.config, nil, nil, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		reopened.closeGrantListeners()
+		_ = reopened.audit.Close()
+		_ = reopened.connectorLedger.Close()
+	}()
+	registerConnectorGrant(t, reopened, rig.grant)
+	activateConnectorGrant(t, reopened, rig.grant.GrantID)
+	if status := invoke(reopened); status != http.StatusConflict || calls.Load() != 1 {
+		t.Fatalf("post-state-deletion replay status=%d calls=%d", status, calls.Load())
+	}
+}
+
+func TestConnectorRejectsGrantIDDirectoryPrefixAlias(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{allowedCIDRs: []string{"127.0.0.0/8"}})
+	prefix := rig.grant.GrantID[:len("grant-")+32]
+	suffix := strings.Repeat("f", 32)
+	if prefix+suffix == rig.grant.GrantID {
+		suffix = strings.Repeat("e", 32)
+	}
+	alias := connectorGrant("tenant-b", "agent-b", 1, "issues")
+	alias.GrantID = prefix + suffix
+	raw, _ := json.Marshal(alias)
+	response := httptest.NewRecorder()
+	rig.server.ControlHandler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/grants", bytes.NewReader(raw)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("prefix alias status=%d body=%s", response.Code, response.Body.String())
+	}
+	request := connectorRequest(http.MethodGet, "issues", "read", "task-victim-still-bound", nil)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, request); response.Code != http.StatusNoContent {
+		t.Fatalf("victim listener changed: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -302,8 +403,8 @@ func TestConnectorDNSPrivatePolicyAndRedirectsFailClosedAfterSpend(t *testing.T)
 	denied := connectorRequest(http.MethodPost, "issues", "create", "task-private", strings.NewReader(`{"x":1}`))
 	response = invokeConnector(privateRig.server, privateRig.grant.GrantID, denied)
 	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "address_denied") ||
-		len(privateRig.server.connectorCalls[privateRig.grant.GrantID]["issues"]) != 1 {
-		t.Fatalf("private status=%d body=%s calls=%#v", response.Code, response.Body.String(), privateRig.server.connectorCalls)
+		privateRig.server.connectorCallCounts[privateRig.grant.GrantID]["issues"] != 1 {
+		t.Fatalf("private status=%d body=%s counts=%#v", response.Code, response.Body.String(), privateRig.server.connectorCallCounts)
 	}
 	replay := connectorRequest(http.MethodPost, "issues", "create", "task-private", strings.NewReader(`{"x":1}`))
 	if response = invokeConnector(privateRig.server, privateRig.grant.GrantID, replay); response.Code != http.StatusConflict {

@@ -1,7 +1,11 @@
 package gateway
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -183,6 +187,60 @@ func TestConfigRejectsAmbiguousOrUnboundedConnectors(t *testing.T) {
 				t.Fatalf("invalid connector accepted: %#v", config.Connectors)
 			}
 		})
+	}
+}
+
+func TestConfigRequiresAndValidatesConnectorReceiptIdentity(t *testing.T) {
+	directory := t.TempDir()
+	credential := filepath.Join(directory, "connector-token")
+	if err := os.WriteFile(credential, []byte("connector-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(directory, "connector-receipts.private.pem")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := Config{
+		ControlSocket: filepath.Join(directory, "control.sock"), StateFile: filepath.Join(directory, "state.json"),
+		GrantRoot: filepath.Join(directory, "grants"), ServiceTokenFile: filepath.Join(directory, "service.token"),
+		Connectors:           []Connector{connectorFixture(credential)},
+		ConnectorReceiptFile: filepath.Join(directory, "connector-receipts.ndjson"), ConnectorReceiptKeyFile: keyPath,
+		ConnectorReceiptNodeID: "node-a/gateway", ConnectorReceiptEpoch: 1,
+	}
+	loaded, err := config.validateAndLoadConnectorReceiptKey()
+	if err != nil || !loaded.Equal(private) {
+		t.Fatalf("loaded key equal=%t err=%v", loaded.Equal(private), err)
+	}
+	if _, err := os.Stat(config.ConnectorReceiptFile); !os.IsNotExist(err) {
+		t.Fatalf("read-only validation created ledger: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*Config){
+		"partial":              func(value *Config) { value.ConnectorReceiptEpoch = 0 },
+		"state collision":      func(value *Config) { value.ConnectorReceiptFile = value.StateFile },
+		"control collision":    func(value *Config) { value.ConnectorReceiptFile = value.ControlSocket },
+		"grant tree log":       func(value *Config) { value.ConnectorReceiptFile = filepath.Join(value.GrantRoot, "receipts") },
+		"credential collision": func(value *Config) { value.ConnectorReceiptKeyFile = credential },
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := config
+			mutate(&invalid)
+			if _, err := invalid.validateAndLoadConnectorReceiptKey(); err == nil {
+				t.Fatalf("invalid receipt configuration accepted: %#v", invalid)
+			}
+		})
+	}
+	missing := Config{Connectors: config.Connectors}
+	if _, err := missing.validateAndLoadConnectorReceiptKey(); err == nil {
+		t.Fatal("connector without signed receipts accepted")
 	}
 }
 

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/nodeclient"
 )
@@ -30,23 +32,28 @@ const (
 )
 
 type Config struct {
-	Version          int           `json:"version"`
-	ControlSocket    string        `json:"control_socket"`
-	ServiceAddress   string        `json:"service_address"`
-	ServiceTokenFile string        `json:"service_token_file"`
-	StateFile        string        `json:"state_file"`
-	GrantRoot        string        `json:"grant_root"`
-	ExecutorGID      int           `json:"executor_gid"`
-	RelayGID         int           `json:"relay_gid"`
-	Routes           []Route       `json:"routes"`
-	EgressAuditFile  string        `json:"egress_audit_file,omitempty"`
-	EgressRoutes     []EgressRoute `json:"egress_routes,omitempty"`
-	Connectors       []Connector   `json:"connectors,omitempty"`
+	Version                 int           `json:"version"`
+	ControlSocket           string        `json:"control_socket"`
+	ServiceAddress          string        `json:"service_address"`
+	ServiceTokenFile        string        `json:"service_token_file"`
+	StateFile               string        `json:"state_file"`
+	GrantRoot               string        `json:"grant_root"`
+	ExecutorGID             int           `json:"executor_gid"`
+	RelayGID                int           `json:"relay_gid"`
+	Routes                  []Route       `json:"routes"`
+	EgressAuditFile         string        `json:"egress_audit_file,omitempty"`
+	EgressRoutes            []EgressRoute `json:"egress_routes,omitempty"`
+	Connectors              []Connector   `json:"connectors,omitempty"`
+	ConnectorReceiptFile    string        `json:"connector_receipt_file,omitempty"`
+	ConnectorReceiptKeyFile string        `json:"connector_receipt_key_file,omitempty"`
+	ConnectorReceiptNodeID  string        `json:"connector_receipt_node_id,omitempty"`
+	ConnectorReceiptEpoch   uint64        `json:"connector_receipt_epoch,omitempty"`
 
 	// loadedConnectors contains validated origins, credentials, CIDRs, and
 	// operation indexes populated by LoadConfig. It is deliberately absent from
 	// JSON so secret contents can never be serialized with operator policy.
-	loadedConnectors map[string]loadedConnector
+	loadedConnectors    map[string]loadedConnector
+	connectorReceiptKey ed25519.PrivateKey
 }
 
 type Route struct {
@@ -151,11 +158,73 @@ func LoadConfig(path string) (Config, map[string]loadedRoute, map[string]loadedE
 		return Config{}, nil, nil, "", err
 	}
 	config.loadedConnectors = connectors
+	receiptKey, err := config.validateAndLoadConnectorReceiptKey()
+	if err != nil {
+		return Config{}, nil, nil, "", err
+	}
+	config.connectorReceiptKey = receiptKey
 	token, err := nodeclient.ReadToken(config.ServiceTokenFile)
 	if err != nil {
 		return Config{}, nil, nil, "", fmt.Errorf("read gateway service token: %w", err)
 	}
 	return config, routes, egressRoutes, token, nil
+}
+
+func (c Config) connectorReceiptPrivateKey() (ed25519.PrivateKey, error) {
+	if c.connectorReceiptKey != nil {
+		return append(ed25519.PrivateKey(nil), c.connectorReceiptKey...), nil
+	}
+	return c.validateAndLoadConnectorReceiptKey()
+}
+
+func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error) {
+	configured := 0
+	for _, present := range []bool{
+		c.ConnectorReceiptFile != "", c.ConnectorReceiptKeyFile != "",
+		c.ConnectorReceiptNodeID != "", c.ConnectorReceiptEpoch != 0,
+	} {
+		if present {
+			configured++
+		}
+	}
+	if configured == 0 {
+		if len(c.Connectors) > 0 {
+			return nil, errors.New("connectors require a signed connector receipt ledger")
+		}
+		return nil, nil
+	}
+	if configured != 4 {
+		return nil, errors.New("connector receipt file, private key, node id, and epoch must be configured together")
+	}
+	if !absoluteClean(c.ConnectorReceiptFile) || !absoluteClean(c.ConnectorReceiptKeyFile) ||
+		c.ConnectorReceiptFile == c.ConnectorReceiptKeyFile || c.ConnectorReceiptFile == c.StateFile ||
+		c.ConnectorReceiptFile == c.EgressAuditFile || c.ConnectorReceiptFile == c.ServiceTokenFile ||
+		c.ConnectorReceiptFile == c.ControlSocket || c.ConnectorReceiptKeyFile == c.ControlSocket ||
+		pathWithin(c.ConnectorReceiptFile, c.GrantRoot) || pathWithin(c.ConnectorReceiptKeyFile, c.GrantRoot) {
+		return nil, errors.New("connector receipt paths must be clean, absolute, and separate from Gateway state, audit, token, and key files")
+	}
+	for _, route := range c.Routes {
+		if route.CredentialFile != "" && (c.ConnectorReceiptFile == route.CredentialFile || c.ConnectorReceiptKeyFile == route.CredentialFile) {
+			return nil, errors.New("connector receipt files must not share an inference credential path")
+		}
+	}
+	for _, connector := range c.Connectors {
+		if c.ConnectorReceiptFile == connector.CredentialFile || c.ConnectorReceiptKeyFile == connector.CredentialFile {
+			return nil, errors.New("connector receipt files must not share a connector credential path")
+		}
+	}
+	key, err := connectorledger.ReadPrivateKey(c.ConnectorReceiptKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read connector receipt private key: %w", err)
+	}
+	if _, err := connectorledger.Validate(c.ConnectorReceiptFile, key, c.ConnectorReceiptNodeID, c.ConnectorReceiptEpoch); err != nil {
+		return nil, fmt.Errorf("validate connector receipt ledger: %w", err)
+	}
+	return key, nil
+}
+
+func pathWithin(path, root string) bool {
+	return root != "" && (path == root || strings.HasPrefix(path, root+string(filepath.Separator)))
 }
 
 func (c Config) connectorMap() (map[string]loadedConnector, error) {

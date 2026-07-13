@@ -24,10 +24,11 @@ import (
 )
 
 const (
-	PayloadType  = "application/vnd.steward.connector-receipt.v1+json"
-	SchemaV1     = "steward.connector-receipt.v1"
-	MaxLineBytes = 128 << 10
-	MaxLogBytes  = 64 << 20
+	PayloadType          = "application/vnd.steward.connector-receipt.v1+json"
+	SchemaV1             = "steward.connector-receipt.v1"
+	MaxLineBytes         = 128 << 10
+	MaxLogBytes          = 64 << 20
+	terminalReserveBytes = MaxLineBytes + 1
 )
 
 var chainDomain = []byte("steward-connector-ledger-v1\x00")
@@ -53,21 +54,22 @@ const (
 // enforcement identity and transfer metadata, never headers, credentials,
 // origins, paths, queries, or bodies.
 type Event struct {
-	Phase         Phase   `json:"phase"`
-	Outcome       Outcome `json:"outcome"`
-	TenantID      string  `json:"tenant_id"`
-	RuntimeRef    string  `json:"runtime_ref"`
-	CapsuleDigest string  `json:"capsule_digest"`
-	PolicyDigest  string  `json:"policy_digest"`
-	Generation    uint64  `json:"generation"`
-	GrantID       string  `json:"grant_id"`
-	ConnectorID   string  `json:"connector_id"`
-	OperationID   string  `json:"operation_id"`
-	TaskDigest    string  `json:"task_digest"`
-	HTTPStatus    int     `json:"http_status,omitempty"`
-	RequestBytes  int64   `json:"request_bytes"`
-	ResponseBytes int64   `json:"response_bytes"`
-	ErrorCode     string  `json:"error_code,omitempty"`
+	Phase             Phase   `json:"phase"`
+	Outcome           Outcome `json:"outcome"`
+	TenantID          string  `json:"tenant_id"`
+	RuntimeRef        string  `json:"runtime_ref"`
+	CapsuleDigest     string  `json:"capsule_digest"`
+	PolicyDigest      string  `json:"policy_digest"`
+	RoutePolicyDigest string  `json:"route_policy_digest"`
+	Generation        uint64  `json:"generation"`
+	GrantID           string  `json:"grant_id"`
+	ConnectorID       string  `json:"connector_id"`
+	OperationID       string  `json:"operation_id"`
+	TaskDigest        string  `json:"task_digest"`
+	HTTPStatus        int     `json:"http_status,omitempty"`
+	RequestBytes      int64   `json:"request_bytes"`
+	ResponseBytes     int64   `json:"response_bytes"`
+	ErrorCode         string  `json:"error_code,omitempty"`
 }
 
 // Receipt contains one signed chain coordinate and one connector event.
@@ -101,20 +103,29 @@ type VerifiedReceipt struct {
 // Log serializes append and fsync. A failed write or sync poisons the open
 // handle: callers must reopen and verify the file before attempting more work.
 type Log struct {
-	mu      sync.Mutex
-	path    string
-	file    *os.File
-	private ed25519.PrivateKey
-	public  ed25519.PublicKey
-	nodeID  string
-	epoch   uint64
-	keyID   string
-	next    uint64
-	last    string
-	failed  bool
+	mu       sync.Mutex
+	path     string
+	file     *os.File
+	private  ed25519.PrivateKey
+	public   ed25519.PublicKey
+	nodeID   string
+	epoch    uint64
+	keyID    string
+	next     uint64
+	last     string
+	failed   bool
+	reserved int64
+	pending  map[string]Event
 }
 
 func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) (*Log, error) {
+	return OpenWithVisit(path, private, nodeID, epoch, nil)
+}
+
+// OpenWithVisit verifies the complete existing chain and visits each record
+// before returning an append handle. Gateway uses the verified authorization
+// records to reconstruct spent task claims after restart or state rollback.
+func OpenWithVisit(path string, private ed25519.PrivateKey, nodeID string, epoch uint64, visit func(VerifiedReceipt) error) (*Log, error) {
 	if !validPath(path) || len(private) != ed25519.PrivateKeySize || !validText(nodeID, 256) || epoch == 0 {
 		return nil, errors.New("connector ledger requires a clean path, Ed25519 key, bounded node id, and positive epoch")
 	}
@@ -127,7 +138,11 @@ func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) 
 	} else if !validFileInfo(info) {
 		return nil, errors.New("connector ledger must be a bounded owner-only regular file")
 	}
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
+	flags := os.O_RDWR | os.O_APPEND
+	if created {
+		flags |= os.O_CREATE | os.O_EXCL
+	}
+	file, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open connector ledger: %w", err)
 	}
@@ -135,32 +150,120 @@ func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) 
 		_ = file.Close()
 		return nil, openErr
 	}
-	if err := file.Chmod(0o600); err != nil {
-		return closeWith(err)
-	}
 	if created {
+		if err := file.Chmod(0o600); err != nil {
+			return closeWith(err)
+		}
 		if err := syncDirectory(filepath.Dir(path)); err != nil {
 			return closeWith(err)
 		}
+	} else {
+		opened, err := file.Stat()
+		if err != nil || !os.SameFile(info, opened) || !validFileInfo(opened) || opened.Size() != info.Size() {
+			return closeWith(errors.New("connector ledger changed while opening"))
+		}
 	}
 	public := private.Public().(ed25519.PublicKey)
-	head, err := verifyFile(file, public, nodeID, epoch, nil)
+	pending := make(map[string]Event)
+	head, err := verifyFile(file, public, nodeID, epoch, func(record VerifiedReceipt) error {
+		if err := updatePending(pending, record.Receipt.Event); err != nil {
+			return err
+		}
+		if visit != nil {
+			return visit(record)
+		}
+		return nil
+	})
 	if err != nil {
 		return closeWith(fmt.Errorf("verify connector ledger: %w", err))
+	}
+	reserved := int64(len(pending)) * terminalReserveBytes
+	if info, statErr := file.Stat(); statErr != nil {
+		return closeWith(statErr)
+	} else if info.Size()+reserved > MaxLogBytes {
+		return closeWith(errors.New("connector ledger cannot reserve terminal records for incomplete calls"))
 	}
 	return &Log{
 		path: path, file: file, private: append(ed25519.PrivateKey(nil), private...),
 		public: append(ed25519.PublicKey(nil), public...), nodeID: nodeID, epoch: epoch,
 		keyID: KeyID(public), next: head.Sequence + 1, last: head.ChainHash,
+		reserved: reserved, pending: pending,
 	}, nil
 }
 
+// Append records a denial that has no matching external effect. Authorized
+// calls use Begin and Finish so space for the terminal receipt is reserved
+// before the upstream request can start.
 func (l *Log) Append(event Event) (Head, error) {
 	if err := validateEvent(event); err != nil {
 		return Head{}, err
 	}
+	if event.Phase != Deny {
+		return Head{}, errors.New("connector authorization and terminal events require Begin and Finish")
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.appendLocked(event, 0)
+}
+
+// Begin durably records an authorization and reserves worst-case space for its
+// terminal receipt. No external effect should start until Begin succeeds.
+func (l *Log) Begin(event Event) (Head, error) {
+	if err := validateEvent(event); err != nil {
+		return Head{}, err
+	}
+	if event.Phase != Authorize {
+		return Head{}, errors.New("connector Begin requires an authorization event")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := event.TaskDigest
+	if _, exists := l.pending[key]; exists {
+		return Head{}, errors.New("connector authorization is already pending")
+	}
+	head, err := l.appendLocked(event, terminalReserveBytes)
+	if err != nil {
+		return Head{}, err
+	}
+	l.pending[key] = event
+	return head, nil
+}
+
+// Finish durably closes one authorized call and releases its reserved space.
+func (l *Log) Finish(event Event) (Head, error) {
+	if err := validateEvent(event); err != nil {
+		return Head{}, err
+	}
+	if event.Phase != Terminal {
+		return Head{}, errors.New("connector Finish requires a terminal event")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	authorized, exists := l.pending[event.TaskDigest]
+	if !exists || !sameCall(authorized, event) {
+		return Head{}, errors.New("connector terminal event has no matching authorization")
+	}
+	head, err := l.appendLocked(event, -terminalReserveBytes)
+	if err != nil {
+		return Head{}, err
+	}
+	delete(l.pending, event.TaskDigest)
+	return head, nil
+}
+
+// Pending returns verified authorization events without a terminal record.
+// Gateway closes these as outcome_unknown after an unclean restart.
+func (l *Log) Pending() []Event {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	result := make([]Event, 0, len(l.pending))
+	for _, event := range l.pending {
+		result = append(result, event)
+	}
+	return result
+}
+
+func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 	if l.file == nil {
 		return Head{}, errors.New("connector ledger is closed")
 	}
@@ -190,7 +293,8 @@ func (l *Log) Append(event Event) (Head, error) {
 	if err != nil {
 		return Head{}, err
 	}
-	if info.Size()+int64(len(raw)+1) > MaxLogBytes {
+	reserved := l.reserved + reservationDelta
+	if reserved < 0 || info.Size()+int64(len(raw)+1)+reserved > MaxLogBytes {
 		return Head{}, errors.New("connector ledger capacity exceeded")
 	}
 	line := append(append([]byte(nil), raw...), '\n')
@@ -204,6 +308,7 @@ func (l *Log) Append(event Event) (Head, error) {
 	}
 	l.last = hashLine(raw)
 	l.next++
+	l.reserved = reserved
 	return l.headLocked(), nil
 }
 
@@ -341,9 +446,35 @@ func validateReceipt(receipt Receipt, nodeID string, epoch, sequence uint64, pre
 	return validateEvent(receipt.Event)
 }
 
+func updatePending(pending map[string]Event, event Event) error {
+	switch event.Phase {
+	case Authorize:
+		if _, exists := pending[event.TaskDigest]; exists {
+			return errors.New("connector ledger contains a duplicate pending authorization")
+		}
+		pending[event.TaskDigest] = event
+	case Terminal:
+		authorized, exists := pending[event.TaskDigest]
+		if !exists || !sameCall(authorized, event) {
+			return errors.New("connector ledger terminal has no matching authorization")
+		}
+		delete(pending, event.TaskDigest)
+	}
+	return nil
+}
+
+func sameCall(left, right Event) bool {
+	return left.TenantID == right.TenantID && left.RuntimeRef == right.RuntimeRef &&
+		left.CapsuleDigest == right.CapsuleDigest && left.PolicyDigest == right.PolicyDigest &&
+		left.RoutePolicyDigest == right.RoutePolicyDigest && left.Generation == right.Generation &&
+		left.GrantID == right.GrantID && left.ConnectorID == right.ConnectorID &&
+		left.OperationID == right.OperationID && left.TaskDigest == right.TaskDigest &&
+		left.RequestBytes == right.RequestBytes
+}
+
 func validateEvent(event Event) error {
 	if !validText(event.TenantID, 128) || !runtimeRef(event.RuntimeRef) ||
-		!digest(event.CapsuleDigest) || !digest(event.PolicyDigest) || event.Generation == 0 ||
+		!digest(event.CapsuleDigest) || !digest(event.PolicyDigest) || !digest(event.RoutePolicyDigest) || event.Generation == 0 ||
 		!grantID(event.GrantID) || !identifier(event.ConnectorID) || !identifier(event.OperationID) ||
 		!digest(event.TaskDigest) || event.RequestBytes < 0 || event.RequestBytes > 1<<30 ||
 		event.ResponseBytes < 0 || event.ResponseBytes > 1<<30 || event.HTTPStatus < 0 || event.HTTPStatus > 599 ||

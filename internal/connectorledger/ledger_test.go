@@ -3,6 +3,7 @@ package connectorledger
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,13 +22,13 @@ func TestAppendVerifyAndVisitConnectorLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := validEvent(Authorize, Allowed)
-	head, err := log.Append(first)
+	head, err := log.Begin(first)
 	if err != nil || head.Sequence != 1 || head.ChainHash == zeroHash() || head.KeyID != KeyID(public) {
 		t.Fatalf("first head=%#v err=%v", head, err)
 	}
 	terminal := validEvent(Terminal, Committed)
 	terminal.HTTPStatus, terminal.ResponseBytes = 201, 37
-	head, err = log.Append(terminal)
+	head, err = log.Finish(terminal)
 	if err != nil || head.Sequence != 2 {
 		t.Fatalf("terminal head=%#v err=%v", head, err)
 	}
@@ -71,12 +72,12 @@ func TestConnectorLedgerRejectsTamperReorderAndTruncation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := log.Append(validEvent(Authorize, Allowed)); err != nil {
+		if _, err := log.Begin(validEvent(Authorize, Allowed)); err != nil {
 			t.Fatal(err)
 		}
 		terminal := validEvent(Terminal, Failed)
 		terminal.ErrorCode = "upstream_unavailable"
-		if _, err := log.Append(terminal); err != nil {
+		if _, err := log.Finish(terminal); err != nil {
 			t.Fatal(err)
 		}
 		_ = log.Close()
@@ -134,11 +135,13 @@ func TestConnectorLedgerConcurrentAppendHasOneChainOrder(t *testing.T) {
 	errorsCh := make(chan error, count)
 	for index := 0; index < count; index++ {
 		wait.Add(1)
-		go func() {
+		go func(index int) {
 			defer wait.Done()
-			_, err := log.Append(validEvent(Authorize, Allowed))
+			event := validEvent(Authorize, Allowed)
+			event.TaskDigest, _ = TaskDigest(fmt.Sprintf("task-%d", index))
+			_, err := log.Begin(event)
 			errorsCh <- err
-		}()
+		}(index)
 	}
 	wait.Wait()
 	close(errorsCh)
@@ -166,7 +169,7 @@ func TestConnectorLedgerValidatesEventsFilesAndTaskIDs(t *testing.T) {
 	}
 	invalid := validEvent(Terminal, Committed)
 	invalid.HTTPStatus = 0
-	if _, err := log.Append(invalid); err == nil {
+	if _, err := log.Finish(invalid); err == nil {
 		t.Fatal("committed terminal event without status was accepted")
 	}
 	invalid = validEvent(Deny, Denied)
@@ -216,7 +219,7 @@ func TestValidateConnectorLedgerIsReadOnlyAndVerifiesExistingChain(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	written, err := log.Append(validEvent(Authorize, Allowed))
+	written, err := log.Begin(validEvent(Authorize, Allowed))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,12 +235,66 @@ func TestValidateConnectorLedgerIsReadOnlyAndVerifiesExistingChain(t *testing.T)
 	}
 }
 
+func TestOpenWithVisitReconstructsVerifiedRecords(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "ledger.ndjson")
+	log, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Begin(validEvent(Authorize, Allowed)); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	visited := 0
+	reopened, err := OpenWithVisit(path, private, "node-a/gateway", 1, func(record VerifiedReceipt) error {
+		visited++
+		if record.Receipt.Event.Phase != Authorize || len(record.Raw) == 0 || record.Hash == "" {
+			t.Fatalf("record=%#v", record)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visited != 1 || reopened.Head().Sequence != 1 {
+		t.Fatalf("visited=%d head=%#v", visited, reopened.Head())
+	}
+	_ = reopened.Close()
+}
+
+func TestBeginReservesTerminalCapacityBeforeAuthorization(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := Open(filepath.Join(t.TempDir(), "ledger.ndjson"), private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	if err := log.file.Truncate(MaxLogBytes - terminalReserveBytes/2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Begin(validEvent(Authorize, Allowed)); err == nil || !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("authorization without terminal capacity err=%v", err)
+	}
+	if len(log.Pending()) != 0 || log.Head().Sequence != 0 {
+		t.Fatalf("failed authorization changed ledger: pending=%d head=%#v", len(log.Pending()), log.Head())
+	}
+}
+
 func validEvent(phase Phase, outcome Outcome) Event {
 	task, _ := TaskDigest("task-0123456789abcdef")
 	return Event{
 		Phase: phase, Outcome: outcome, TenantID: "tenant-a",
 		RuntimeRef: "executor-" + strings.Repeat("a", 64), CapsuleDigest: "sha256:" + strings.Repeat("b", 64),
-		PolicyDigest: "sha256:" + strings.Repeat("c", 64), Generation: 4,
+		PolicyDigest: "sha256:" + strings.Repeat("c", 64), RoutePolicyDigest: "sha256:" + strings.Repeat("e", 64), Generation: 4,
 		GrantID: "grant-" + strings.Repeat("d", 64), ConnectorID: "ticketing", OperationID: "create-ticket",
 		TaskDigest: task, RequestBytes: 19,
 	}
