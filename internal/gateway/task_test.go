@@ -61,6 +61,10 @@ func (*blockingServiceTaskFailureCheckLog) Finish(connectorledger.Event) (connec
 	return connectorledger.Head{}, errors.New("unexpected fixture finish")
 }
 
+func (*blockingServiceTaskFailureCheckLog) Dispatch(connectorledger.Event) (connectorledger.Head, error) {
+	return connectorledger.Head{}, errors.New("unexpected fixture dispatch")
+}
+
 func (log *blockingServiceTaskFailureCheckLog) Failed() bool {
 	log.once.Do(func() { close(log.entered) })
 	<-log.release

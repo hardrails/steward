@@ -25,8 +25,10 @@ type connectorReceiptIndex struct {
 
 type serviceTaskReceipt struct {
 	Authorization          connectorledger.Event
+	Dispatch               connectorledger.Event
 	Terminal               connectorledger.Event
 	authorizationAmbiguous bool
+	dispatchAmbiguous      bool
 }
 
 // ConnectorReceiptFormatSummary identifies the connector receipt compatibility
@@ -46,6 +48,9 @@ func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary
 	}
 	if len(config.ServiceOperations) > 0 {
 		requiredFormat = 3
+	}
+	if config.hasTaskLifecycle() {
+		requiredFormat = 4
 	}
 	key, err := config.connectorReceiptPrivateKey()
 	if err != nil {
@@ -68,8 +73,12 @@ func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary
 		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch,
 		func(record connectorledger.VerifiedReceipt) error {
 			switch record.Receipt.SchemaVersion {
+			case connectorledger.SchemaV4:
+				formatVersion = 4
 			case connectorledger.SchemaV3:
-				formatVersion = 3
+				if formatVersion < 3 {
+					formatVersion = 3
+				}
 			case connectorledger.SchemaV2:
 				if formatVersion < 2 {
 					formatVersion = 2
@@ -94,14 +103,18 @@ func (index *connectorReceiptIndex) visit(record connectorledger.VerifiedReceipt
 	event := record.Receipt.Event
 	if event.Kind == connectorledger.ServiceTask {
 		state := index.tasks[event.TaskDigest]
-		if event.Phase == connectorledger.Authorize {
+		switch event.Phase {
+		case connectorledger.Authorize:
 			if taskDigest, exists := index.permits[event.PermitDigest]; exists && taskDigest != event.TaskDigest {
 				return errors.New("connector receipts bind one task permit to multiple task identities")
 			}
 			state.Authorization = event
 			index.pending[event.TaskDigest] = event
 			index.permits[event.PermitDigest] = event.TaskDigest
-		} else if event.Phase == connectorledger.Terminal {
+		case connectorledger.Dispatch:
+			state.Dispatch = event
+			index.pending[event.TaskDigest] = event
+		case connectorledger.Terminal:
 			state.Terminal = event
 			delete(index.pending, event.TaskDigest)
 		}
@@ -137,13 +150,18 @@ func openConnectorReceiptLedger(config Config, key ed25519.PrivateKey) (*connect
 	if err != nil {
 		return nil, nil, err
 	}
-	// An authorization without a terminal record means Gateway stopped while
-	// an effect was in flight. Close it conservatively; "outcome_unknown" does
-	// not claim that the upstream service did or did not commit the request.
+	// An authorization without a known run means Gateway stopped while an
+	// effect may have been in flight. Close it conservatively; "outcome_unknown"
+	// does not claim that the upstream service did or did not commit the request.
+	// A durable lifecycle dispatch is different: it identifies one accepted run
+	// and remains pending so Gateway can resume observation without redispatch.
 	pending := log.Pending()
 	sort.Slice(pending, func(i, j int) bool { return pending[i].TaskDigest < pending[j].TaskDigest })
-	for _, authorized := range pending {
-		terminal := authorized
+	for _, latest := range pending {
+		if latest.TaskProtocol == connectorledger.TaskProtocolLifecycleV1 && latest.Phase == connectorledger.Dispatch {
+			continue
+		}
+		terminal := latest
 		terminal.Phase = connectorledger.Terminal
 		terminal.Outcome = connectorledger.Failed
 		terminal.ErrorCode = "outcome_unknown"
@@ -151,11 +169,11 @@ func openConnectorReceiptLedger(config Config, key ed25519.PrivateKey) (*connect
 			_ = log.Close()
 			return nil, nil, fmt.Errorf("close incomplete connector receipt: %w", err)
 		}
-		delete(index.pending, authorized.TaskDigest)
-		if authorized.Kind == connectorledger.ServiceTask {
-			state := index.tasks[authorized.TaskDigest]
+		delete(index.pending, latest.TaskDigest)
+		if latest.Kind == connectorledger.ServiceTask {
+			state := index.tasks[latest.TaskDigest]
 			state.Terminal = terminal
-			index.tasks[authorized.TaskDigest] = state
+			index.tasks[latest.TaskDigest] = state
 		}
 	}
 	return log, index, nil

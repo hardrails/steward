@@ -176,6 +176,7 @@ type egressDeniedAttemptWindow struct {
 
 type connectorReceiptLog interface {
 	Begin(connectorledger.Event) (connectorledger.Head, error)
+	Dispatch(connectorledger.Event) (connectorledger.Head, error)
 	Finish(connectorledger.Event) (connectorledger.Head, error)
 	Failed() bool
 	Close() error
@@ -183,7 +184,7 @@ type connectorReceiptLog interface {
 
 type Server struct {
 	mu                       sync.Mutex
-	serviceTaskBeginMu       sync.Mutex
+	serviceTaskMutationMu    sync.Mutex
 	config                   Config
 	routes                   map[string]loadedRoute
 	egressRoutes             map[string]loadedEgressRoute
