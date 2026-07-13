@@ -168,6 +168,7 @@ func TestHermesFixtureModelProtocols(t *testing.T) {
 	root := hermesAdapterRoot(t)
 	program := `
 import http.server, importlib.util, json, sys, threading, urllib.request
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("fixture_model", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -245,6 +246,7 @@ func runAudit(t *testing.T, python, script, workspace string, wantSuccess bool) 
 	t.Helper()
 	program := `
 import importlib.util, json, pathlib, sys
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("workspace_audit", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
