@@ -476,15 +476,15 @@ mkdir -p /tmp/build /tmp/home
 cp -R /input/upstream/. /tmp/build/
 chmod -R u+rwX /tmp/build
 cd /tmp/build
-sha256sum -c /input/adapter/source-inputs.sha256
+sha256sum -c /input/adapter/source-inputs.sha256 >&2
 attempt=1
-until uv sync --frozen --no-install-project --extra mcp --extra homeassistant; do
+until uv sync --frozen --no-install-project --extra mcp --extra homeassistant >&2; do
     [ "$attempt" -lt 4 ] || exit 1
     attempt=$((attempt + 1))
     sleep 2
 done
-uv pip install --no-cache-dir --no-deps .
-tar -cf /output/venv.tar .venv
+uv pip install --no-cache-dir --no-deps . >&2
+tar -cf - .venv
 '
 docker create --name "$sandbox_name" \
 	--runtime runsc --network "$sandbox_network" --read-only --cap-drop ALL \
@@ -492,20 +492,38 @@ docker create --name "$sandbox_name" \
 	--security-opt no-new-privileges:true --pids-limit "$sandbox_pids" \
 	--memory "$sandbox_memory_bytes" --memory-swap "$sandbox_memory_bytes" --cpus "$sandbox_cpus" \
 	--tmpfs "/tmp:rw,nosuid,nodev,size=$sandbox_memory_bytes" \
-	--tmpfs "/output:rw,noexec,nosuid,nodev,size=$sandbox_output_bytes" \
 	--user 65532:65532 --workdir /tmp \
 	--env HOME=/tmp/home --env UV_CACHE_DIR=/tmp/uv-cache --env UV_LINK_MODE=copy \
-	--log-driver local --log-opt max-size=1m --log-opt max-file=1 --log-opt compress=false \
+	--log-driver none \
 	--mount "type=bind,source=$work/context/upstream,target=/input/upstream,readonly" \
 	--mount "type=bind,source=$work/context/adapter,target=/input/adapter,readonly" \
 	--entrypoint /bin/sh "$base_image_reference" -ceu "$sandbox_command" >/dev/null
-docker start "$sandbox_name" >/dev/null
-sandbox_status=$(timeout "$build_timeout" docker wait "$sandbox_name") || die "gVisor build sandbox timed out"
-[[ $sandbox_status == 0 ]] || {
-	docker logs --tail 200 "$sandbox_name" >&2 || true
-	die "gVisor build sandbox failed with status $sandbox_status"
-}
-docker cp "$sandbox_name:/output/venv.tar" "$work/venv.tar"
+stream_status=0
+timeout "$build_timeout" docker start -a "$sandbox_name" | python3 -c '
+import os
+import pathlib
+import sys
+
+destination = pathlib.Path(sys.argv[1])
+limit = int(sys.argv[2])
+written = 0
+with destination.open("xb") as stream:
+    while True:
+        chunk = sys.stdin.buffer.read(1024 * 1024)
+        if not chunk:
+            break
+        written += len(chunk)
+        if written > limit:
+            raise SystemExit("gVisor build artifact exceeds configured size limit")
+        stream.write(chunk)
+    stream.flush()
+    os.fsync(stream.fileno())
+if written == 0:
+    raise SystemExit("gVisor build sandbox produced an empty artifact")
+' "$work/venv.tar" "$sandbox_output_bytes" || stream_status=$?
+sandbox_status=$(docker inspect --format '{{.State.ExitCode}}' "$sandbox_name" 2>/dev/null || true)
+[[ $stream_status == 0 && $sandbox_status == 0 ]] || \
+	die "gVisor build sandbox or bounded artifact stream failed (stream=$stream_status, sandbox=${sandbox_status:-unknown})"
 venv_archive_size=$(python3 - "$work/venv.tar" <<'PY'
 import os
 import stat
