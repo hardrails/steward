@@ -247,6 +247,7 @@ agent_hosts=(--add-host "steward-relay:$model_ip" --add-host "steward-mcp:$mcp_i
 docker run -d --name "$agent" --network-alias steward-agent "${closed_run[@]}" "${agent_hosts[@]}" \
 	--mount "type=bind,src=$state_root,dst=/opt/data" \
 	-e OPENAI_BASE_URL=http://steward-relay:8080/v1 -e OPENAI_API_KEY=steward-local \
+	-e STEWARD_HERMES_QUALIFICATION_MCP=enabled \
 	-e OPENAI_MODEL=steward-fixture-model "$image" >/dev/null || stop_gate agent.start agent_start_failed
 record fixture.services passed model_and_mcp_gvisor
 docker inspect --format '{{json .HostConfig.ExtraHosts}}' "$agent" | grep -Fq "steward-relay:$model_ip" || stop_gate fixture.network model_host_binding_missing
@@ -317,7 +318,7 @@ authority_before=$(find "$state_root" -type f \( -path '*/config.yaml' -o -path 
 negotiation_two=$(agent_get /steward/v1/negotiation) || stop_gate adapter.negotiation negotiation_replay_failed
 authority_after=$(find "$state_root" -type f \( -path '*/config.yaml' -o -path '*/skills/steward.workspace-audit/*' \) -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
 [[ $negotiation_one == "$negotiation_two" && $authority_before == "$authority_after" ]] || stop_gate adapter.negotiation negotiation_mutated_authority_state
-python3 -c 'import json,sys; p=json.load(sys.stdin); assert set(p)=={"adapter","adapter_contract","capabilities","native_protocols","schema_version","task_protocol","upstream_revision"}; assert p["schema_version"]=="steward.adapter-negotiation.v1" and p["adapter"]=="hermes-agent" and p["adapter_contract"]=="steward.hermes-agent.v1" and p["upstream_revision"]==sys.argv[1]; assert p["task_protocol"]=="hermes.runs.v1" and p["native_protocols"]==["http"]; assert p["capabilities"]==[{"fixture_id":"fixture_echo","id":"mcp"},{"fixture_id":"steward.workspace-audit","id":"skill"},{"fixture_id":"fixed-response","id":"task"}]' "$revision" <<<"$negotiation_one" || stop_gate adapter.negotiation invalid_negotiation_contract
+python3 -c 'import json,sys; p=json.load(sys.stdin); assert set(p)=={"adapter","adapter_contract","capabilities","native_protocols","schema_version","task_protocol","upstream_revision"}; assert p["schema_version"]=="steward.adapter-negotiation.v1" and p["adapter"]=="hermes-agent" and p["adapter_contract"]=="steward.hermes-agent.v1" and p["upstream_revision"]==sys.argv[1]; assert p["task_protocol"]=="hermes.runs.v1" and p["native_protocols"]==["http"]; assert p["capabilities"]==[{"fixture_id":"steward.workspace-audit","id":"skill"},{"fixture_id":"fixed-response","id":"task"}]' "$revision" <<<"$negotiation_one" || stop_gate adapter.negotiation invalid_negotiation_contract
 record adapter.negotiation passed side_effect_free_exact_contract
 
 timeout 15 docker exec -i -u 65532:65532 "$agent" python3 - <<'PY' || stop_gate service.boundary service_boundary_contract_failed
@@ -417,6 +418,7 @@ docker rm -f "$agent" >/dev/null
 docker run -d --name "$agent" --network-alias steward-agent "${closed_run[@]}" "${agent_hosts[@]}" \
 	--mount "type=bind,src=$state_root,dst=/opt/data" \
 	-e OPENAI_BASE_URL=http://steward-relay:8080/v1 -e OPENAI_API_KEY=steward-local \
+	-e STEWARD_HERMES_QUALIFICATION_MCP=enabled \
 	-e OPENAI_MODEL=steward-fixture-model "$image" >/dev/null || stop_gate restart.start agent_restart_failed
 for _ in $(seq 1 90); do
 	if agent_get /health >/dev/null 2>&1; then break; fi

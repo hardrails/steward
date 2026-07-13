@@ -53,7 +53,6 @@ NEGOTIATION = {
     "task_protocol": "hermes.runs.v1",
     "native_protocols": ["http"],
     "capabilities": [
-        {"id": "mcp", "fixture_id": "fixture_echo"},
         {"id": "skill", "fixture_id": "steward.workspace-audit"},
         {"id": "task", "fixture_id": "fixed-response"},
     ],
@@ -258,7 +257,7 @@ def verify_skill() -> dict[str, bytes]:
     return verified
 
 
-def seed_state(model: str, skill_files: dict[str, bytes]) -> None:
+def seed_state(model: str, skill_files: dict[str, bytes], qualification_mcp: bool) -> None:
     if os.getuid() != 65532 or os.getgid() != 65532:
         fail("runtime identity must be exactly 65532:65532")
     for relative in ("home", "sessions", "logs", "memories", "skills", "workspace", "steward"):
@@ -281,7 +280,9 @@ security:
   allow_lazy_installs: false
 terminal:
   backend: local
-mcp_servers:
+"""
+    if qualification_mcp:
+        config += """mcp_servers:
   fixture_echo:
     url: http://steward-mcp:8767/mcp
     enabled: true
@@ -292,7 +293,8 @@ mcp_servers:
       include: [echo]
       resources: false
       prompts: false
-""".encode()
+"""
+    config = config.encode()
     state_fd = open_state_directory()
     try:
         publish_exact(state_fd, "config.yaml", config, 0o600)
@@ -432,8 +434,11 @@ def main() -> int:
         fail("OPENAI_MODEL is invalid")
     if os.environ.get("OPENAI_BASE_URL", "http://steward-relay:8080/v1") != "http://steward-relay:8080/v1":
         fail("OPENAI_BASE_URL must use Steward's fixed inference relay endpoint")
+    qualification_mcp = os.environ.get("STEWARD_HERMES_QUALIFICATION_MCP", "disabled")
+    if qualification_mcp not in {"disabled", "enabled"}:
+        fail("STEWARD_HERMES_QUALIFICATION_MCP must be disabled or enabled")
     skill_files = verify_skill()
-    seed_state(model, skill_files)
+    seed_state(model, skill_files, qualification_mcp == "enabled")
     server = BoundedHTTPServer(("0.0.0.0", 8766), ServiceBridgeHandler)
     thread = threading.Thread(target=server.serve_forever, name="service-bridge", daemon=True)
     thread.start()
