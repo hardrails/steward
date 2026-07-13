@@ -682,7 +682,7 @@ if (
     or not isinstance(head.get("sequence"), int)
     or head["sequence"] <= 0
     or re.fullmatch(r"sha256:[a-f0-9]{64}", str(head.get("chain_hash", ""))) is None
-    or head.get("key_id") != "receipts"
+    or re.fullmatch(r"[a-f0-9]{32}", str(head.get("key_id", ""))) is None
 ):
     raise SystemExit("hermes-steward-acceptance: evidence verification result is invalid")
 PY
