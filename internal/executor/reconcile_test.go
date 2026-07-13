@@ -304,9 +304,16 @@ func newReconcileRig(t *testing.T, policyCurrent bool) *reconcileRig {
 	return newReconcileRigWithRoutePolicy(t, policyCurrent, "sha256:"+strings.Repeat("e", 64))
 }
 
-func newReconcileRigWithRoutePolicy(t *testing.T, policyCurrent bool, routePolicyDigest string) *reconcileRig {
+func newReconcileRigWithRoutePolicy(t *testing.T, policyCurrent bool, routePolicyDigest string, namedConnector ...bool) *reconcileRig {
 	t.Helper()
-	_, intent, config := secureAdmissionFixture(t)
+	connectorRuntime := len(namedConnector) != 0 && namedConnector[0]
+	var intent admission.InstanceIntent
+	var config SecureAdmissionConfig
+	if connectorRuntime {
+		_, intent, config = secureAdmissionFixtureFor(t, admission.Capabilities{Connector: true})
+	} else {
+		_, intent, config = secureAdmissionFixture(t)
+	}
 	recorder := &reconcileRecorder{}
 	docker := &reconcileDocker{recorder: recorder}
 	control := &reconcileGateway{
@@ -328,9 +335,22 @@ func newReconcileRigWithRoutePolicy(t *testing.T, policyCurrent bool, routePolic
 	network := testNetworkSpec(intent.TenantID, intent.InstanceID, intent.Generation)
 	runtime := &RuntimeGrant{
 		NetworkName: network.Name, GrantID: gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation),
-		Generation: intent.Generation, Inference: true, RouteID: "local", ModelAlias: "private-model",
-		Subnet: network.Subnet, Gateway: network.Gateway,
+		Generation: intent.Generation,
+		Subnet:     network.Subnet, Gateway: network.Gateway,
 		RelayIP: network.RelayIP, AgentIP: network.AgentIP,
+	}
+	if connectorRuntime {
+		runtime.ConnectorIDs = admission.CanonicalConnectorIDs(intent.ConnectorIDs)
+		runtime.CapsuleDigest = intent.CapsuleDigest
+	} else {
+		runtime.Inference, runtime.RouteID, runtime.ModelAlias = true, "local", "private-model"
+	}
+	policyDigest := dsse.Digest(config.PolicyEnvelope)
+	if !policyCurrent {
+		policyDigest = "sha256:" + strings.Repeat("c", 64)
+	}
+	if connectorRuntime {
+		runtime.PolicyDigest = policyDigest
 	}
 	workload := Workload{
 		InstanceID: intent.InstanceID, TenantID: intent.TenantID, ProfileID: "generic-v1@v1",
@@ -355,10 +375,6 @@ func newReconcileRigWithRoutePolicy(t *testing.T, policyCurrent bool, routePolic
 	wantGrant := server.desiredGatewayGrant(workload, "")
 	wantGrant.Active = true
 	control.grants[wantGrant.GrantID] = wantGrant
-	policyDigest := dsse.Digest(config.PolicyEnvelope)
-	if !policyCurrent {
-		policyDigest = "sha256:" + strings.Repeat("c", 64)
-	}
 	record := admission.FenceRecord{
 		TenantID: intent.TenantID, InstanceID: intent.InstanceID, Generation: intent.Generation,
 		CapsuleDigest: intent.CapsuleDigest, PolicyDigest: policyDigest, LineageID: intent.LineageID,
@@ -389,6 +405,38 @@ func TestReconcileCleanRuntimeIsReceiptFreeNoop(t *testing.T) {
 	}
 	if events := rig.recorder.snapshot(); len(events) != 0 {
 		t.Fatalf("mutations = %#v", events)
+	}
+}
+
+func TestReconcileCleanConnectorRuntimeProvesSignedGatewayGrant(t *testing.T) {
+	rig := newReconcileRigWithRoutePolicy(t, true, "sha256:"+strings.Repeat("e", 64), true)
+	report, err := rig.server.Reconcile(context.Background())
+	if err != nil || !report.Ready || report.Changed != 0 {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	grant, ok := rig.gateway.grant(rig.recordGrantID())
+	if !ok || grant.RuntimeRef != RuntimeRef(rig.record.TenantID, rig.record.InstanceID) ||
+		grant.CapsuleDigest != rig.record.CapsuleDigest || grant.PolicyDigest != rig.record.PolicyDigest ||
+		len(grant.ConnectorIDs) != 2 || !rig.docker.relay.Spec.Connector {
+		t.Fatalf("grant=%#v relay=%#v", grant, rig.docker.relay)
+	}
+}
+
+func TestReconcileContainsConnectorGrantBindingDrift(t *testing.T) {
+	rig := newReconcileRigWithRoutePolicy(t, true, "sha256:"+strings.Repeat("e", 64), true)
+	grant, _ := rig.gateway.grant(rig.recordGrantID())
+	grant.PolicyDigest = "sha256:" + strings.Repeat("f", 64)
+	rig.gateway.mu.Lock()
+	rig.gateway.grants[grant.GrantID] = grant
+	rig.gateway.mu.Unlock()
+
+	report, err := rig.server.Reconcile(context.Background())
+	if !errors.Is(err, ErrReconciliationIncomplete) || report.Ready || report.Changed != 1 ||
+		len(report.Failures) != 1 || report.Failures[0].Code != "gateway_drift" {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	if events := strings.Join(rig.recorder.snapshot(), ","); events != "deactivate_grant,stop_agent,stop_relay" {
+		t.Fatalf("containment mutations=%q", events)
 	}
 }
 
@@ -558,6 +606,15 @@ func TestReconcileContainsLegacyFenceWithoutRoutePolicyBinding(t *testing.T) {
 	}
 	if events := strings.Join(rig.recorder.snapshot(), ","); events != "deactivate_grant,stop_agent,stop_relay" {
 		t.Fatalf("legacy containment mutations=%q", events)
+	}
+}
+
+func TestReconcileContainsConnectorFenceWithoutRoutePolicyBinding(t *testing.T) {
+	rig := newReconcileRigWithRoutePolicy(t, true, "", true)
+	report, err := rig.server.Reconcile(context.Background())
+	if !errors.Is(err, ErrReconciliationIncomplete) || report.Ready || report.Changed != 1 ||
+		len(report.Failures) != 1 || report.Failures[0].Code != "gateway_drift" {
+		t.Fatalf("report=%#v err=%v", report, err)
 	}
 }
 

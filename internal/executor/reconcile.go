@@ -296,6 +296,10 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 		!runtimeAllocationMatches(wantNetwork, runtime.Subnet, runtime.Gateway, runtime.RelayIP, runtime.AgentIP) {
 		return s.containReconciliation(ctx, plan, observed, "topology_identity_drift", "runtime topology is not derived from the signed tenant, instance, and generation")
 	}
+	hasAdmissionBinding := runtime.CapsuleDigest != "" || runtime.PolicyDigest != "" || len(runtime.ConnectorIDs) != 0
+	if hasAdmissionBinding && (runtime.CapsuleDigest != record.CapsuleDigest || runtime.PolicyDigest != record.PolicyDigest) {
+		return s.containReconciliation(ctx, plan, observed, "topology_identity_drift", "runtime topology is not bound to the committed signed admission")
+	}
 	network, err := s.secure.topology.InspectNetwork(ctx, wantNetwork.Name)
 	if err != nil || !networkEqual(network, wantNetwork) || network.Subnet != runtime.Subnet || network.Gateway != runtime.Gateway ||
 		network.RelayIP != runtime.RelayIP || network.AgentIP != runtime.AgentIP {
@@ -309,7 +313,7 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 
 	inspection, grantErr := s.secure.gateway.InspectWithPolicy(ctx, runtime.GrantID)
 	grant := inspection.Grant
-	policyBearingGrant := runtime.Inference || len(runtime.EgressRouteIDs) != 0
+	policyBearingGrant := runtime.Inference || len(runtime.EgressRouteIDs) != 0 || len(runtime.ConnectorIDs) != 0
 	if !plan.revoked && policyBearingGrant && !imageConfigDigest.MatchString(record.RoutePolicyDigest) {
 		return s.containReconciliation(ctx, plan, observed, "gateway_drift", "committed admission fence has no valid gateway route policy binding")
 	}
@@ -378,7 +382,7 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 // authority. Drifted networks, volumes, and relays are never adopted, recreated,
 // or removed. The deterministic gateway grant is deactivated when it is active
 // (or when its state cannot be observed), preventing a compromised relay from
-// retaining inference, service, or egress authority.
+// retaining inference, service, egress, or connector authority.
 func (s *Server) containReconciliation(ctx context.Context, plan reconcilePlan, observed ObservedWorkload, code, message string) (reconcilePlan, error) {
 	plan.containment = true
 	plan.degraded = reconciliationError(code, "%s", message)

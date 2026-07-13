@@ -119,6 +119,9 @@ type RuntimeGrant struct {
 	ModelAlias     string   `json:"model_alias,omitempty"`
 	ServicePort    int      `json:"service_port,omitempty"`
 	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
+	ConnectorIDs   []string `json:"connector_ids,omitempty"`
+	CapsuleDigest  string   `json:"capsule_digest,omitempty"`
+	PolicyDigest   string   `json:"policy_digest,omitempty"`
 }
 
 // Resources are mandatory cgroup limits. Docker has no resource limits by default,
@@ -265,14 +268,24 @@ func (w Workload) Validate() error {
 			(w.Runtime.Inference && !boundedText(w.Runtime.ModelAlias, 256)) ||
 			(w.Runtime.Inference && !boundedText(w.Runtime.RouteID, 128)) ||
 			(!w.Runtime.Inference && (w.Runtime.ModelAlias != "" || w.Runtime.RouteID != "")) ||
-			(!w.Runtime.Inference && w.Runtime.ServicePort == 0 && len(w.Runtime.EgressRouteIDs) == 0) ||
-			len(w.Runtime.EgressRouteIDs) > 32 {
+			(!w.Runtime.Inference && w.Runtime.ServicePort == 0 && len(w.Runtime.EgressRouteIDs) == 0 && len(w.Runtime.ConnectorIDs) == 0) ||
+			len(w.Runtime.EgressRouteIDs) > 32 || len(w.Runtime.ConnectorIDs) > 32 {
 			return &PolicyError{"internal runtime capability topology is invalid"}
 		}
 		for index, route := range w.Runtime.EgressRouteIDs {
 			if !egressRouteID.MatchString(route) || index > 0 && w.Runtime.EgressRouteIDs[index-1] >= route {
 				return &PolicyError{"internal egress routes are invalid"}
 			}
+		}
+		for index, connector := range w.Runtime.ConnectorIDs {
+			if !egressRouteID.MatchString(connector) || index > 0 && w.Runtime.ConnectorIDs[index-1] >= connector {
+				return &PolicyError{"internal connector IDs are invalid"}
+			}
+		}
+		bindingsAbsent := w.Runtime.CapsuleDigest == "" && w.Runtime.PolicyDigest == ""
+		bindingsValid := imageConfigDigest.MatchString(w.Runtime.CapsuleDigest) && imageConfigDigest.MatchString(w.Runtime.PolicyDigest)
+		if !bindingsValid && (!bindingsAbsent || len(w.Runtime.ConnectorIDs) > 0) {
+			return &PolicyError{"internal signed admission bindings are invalid"}
 		}
 		identity := NetworkSpecFor(w.TenantID, w.InstanceID, w.Runtime.Generation)
 		allocationReady := runtimeAllocationMatches(identity, w.Runtime.Subnet, w.Runtime.Gateway, w.Runtime.RelayIP, w.Runtime.AgentIP)

@@ -147,9 +147,11 @@ paths:
         site-root-signed policy, binds it to the host-authenticated instance
         intent, applies policy and generation rollback fences, journals the
         Docker mutation, and appends signed node-local receipts. Steward can grant
-        persistent state, brokered inference, one declared private service, and
-        named deny-by-default HTTP(S) egress routes only when the corresponding
-        local enforcement topology is configured. Persistent state also requires
+        persistent state, brokered inference, one declared private service,
+        named deny-by-default HTTP(S) egress routes, and named connectors only
+        when the corresponding local enforcement topology is configured. A
+        connector is an operator-defined remote API capability selected by ID;
+        the agent never receives its upstream credential. Persistent state also requires
         the dedicated-host-only unquotaed-volume compatibility flag because the
         portable Docker local-volume driver has no hard byte or inode quota.
         Before any mutation, Executor
@@ -614,6 +616,14 @@ components:
           items:
             type: string
             pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        connector_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
     Capabilities:
       type: object
       additionalProperties: false
@@ -625,6 +635,8 @@ components:
         service:
           type: boolean
         egress:
+          type: boolean
+        connector:
           type: boolean
       description: Omitted capability fields are false. Positive capabilities require their configured enforcement topology; otherwise admission fails closed with 501. Persistent state also requires an explicit dedicated-host compatibility setting and signed policy with exactly one tenant because local Docker volumes have no portable hard byte or inode quota.
     StatePurgeRequest:
@@ -688,10 +700,21 @@ components:
           items:
             type: string
             pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        connector_url:
+          type: string
+          enum: ["http://steward-relay:8081"]
+        connector_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
         route_policy_digest:
           type: string
           pattern: "^sha256:[a-f0-9]{64}$"
-          description: Deterministic non-secret digest of the effective inference and egress route policy retained by Gateway.
+          description: Deterministic non-secret digest of the effective inference, egress, and connector route policy retained by Gateway.
     Resources:
       type: object
       additionalProperties: false
@@ -734,6 +757,17 @@ components:
           type: string
           enum: ["http://steward-relay:8082"]
         egress_route_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        connector_url:
+          type: string
+          enum: ["http://steward-relay:8081"]
+        connector_ids:
           type: array
           minItems: 1
           maxItems: 32

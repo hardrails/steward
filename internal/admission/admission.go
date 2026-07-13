@@ -80,6 +80,7 @@ type Capabilities struct {
 	Inference bool `json:"inference"`
 	Service   bool `json:"service"`
 	Egress    bool `json:"egress"`
+	Connector bool `json:"connector"`
 }
 
 type ArtifactDigest struct {
@@ -114,6 +115,7 @@ type InstanceIntent struct {
 	ModelAlias       string         `json:"model_alias,omitempty"`
 	ServiceID        string         `json:"service_id,omitempty"`
 	EgressRouteIDs   []string       `json:"egress_route_ids,omitempty"`
+	ConnectorIDs     []string       `json:"connector_ids,omitempty"`
 }
 
 type AuthenticatedIdentity struct {
@@ -151,6 +153,7 @@ type TenantRule struct {
 	InferenceModelAliases []string       `json:"inference_model_aliases,omitempty"`
 	ServiceIDs            []string       `json:"service_ids,omitempty"`
 	EgressRouteIDs        []string       `json:"egress_route_ids,omitempty"`
+	ConnectorIDs          []string       `json:"connector_ids,omitempty"`
 	CommandKeys           []CommandKey   `json:"command_keys,omitempty"`
 }
 
@@ -366,6 +369,7 @@ func Intersect(capsule ProfileCapsule, capsuleDigest string, policy SitePolicy, 
 	if err := validateRequestedCapabilities(intent, capsule, tenant); err != nil {
 		return EffectiveAdmission{}, err
 	}
+	intent.ConnectorIDs = CanonicalConnectorIDs(intent.ConnectorIDs)
 	return EffectiveAdmission{
 		Capsule: capsule, SitePolicy: policy, Intent: intent, Profile: profile,
 		CapsuleDigest: capsuleDigest, PolicyDigest: policyDigest,
@@ -414,12 +418,30 @@ func validateRequestedCapabilities(intent InstanceIntent, capsule ProfileCapsule
 	} else if len(intent.EgressRouteIDs) != 0 {
 		return deny("egress routes require egress capability")
 	}
+	if intent.Capabilities.Connector {
+		if len(intent.ConnectorIDs) == 0 || len(intent.ConnectorIDs) > 32 {
+			return deny("connector capability requires 1 to 32 connector IDs")
+		}
+		seen := make(map[string]struct{}, len(intent.ConnectorIDs))
+		for _, connector := range intent.ConnectorIDs {
+			if !routeID(connector) || !contains(tenant.ConnectorIDs, connector) {
+				return deny("connector is not authorized")
+			}
+			if _, exists := seen[connector]; exists {
+				return deny("duplicate connector ID")
+			}
+			seen[connector] = struct{}{}
+		}
+	} else if len(intent.ConnectorIDs) != 0 {
+		return deny("connector IDs require connector capability")
+	}
 	return nil
 }
 
 func (c Capabilities) SubsetOf(maximum Capabilities) bool {
 	return (!c.State || maximum.State) && (!c.Inference || maximum.Inference) &&
-		(!c.Service || maximum.Service) && (!c.Egress || maximum.Egress)
+		(!c.Service || maximum.Service) && (!c.Egress || maximum.Egress) &&
+		(!c.Connector || maximum.Connector)
 }
 
 // CanonicalRouteIDs returns a detached, sorted route set for fingerprints and
@@ -428,6 +450,15 @@ func CanonicalRouteIDs(routes []string) []string {
 	result := append([]string(nil), routes...)
 	slices.Sort(result)
 	return result
+}
+
+// CanonicalConnectorIDs returns a detached, sorted and de-duplicated connector
+// set for runtime grants. Signed admission rejects duplicate requests, while the
+// de-duplication keeps this helper safe for callers operating on retained state.
+func CanonicalConnectorIDs(connectors []string) []string {
+	result := append([]string(nil), connectors...)
+	slices.Sort(result)
+	return slices.Compact(result)
 }
 
 func (c ProfileCapsule) Validate(now time.Time) error {
@@ -620,6 +651,19 @@ func (p SitePolicy) Validate() error {
 				return deny("duplicate tenant egress route")
 			}
 			seenRoutes[route] = struct{}{}
+		}
+		if len(tenant.ConnectorIDs) > 32 {
+			return deny("tenant has too many connector IDs")
+		}
+		seenConnectors := make(map[string]struct{}, len(tenant.ConnectorIDs))
+		for _, connector := range tenant.ConnectorIDs {
+			if !routeID(connector) {
+				return deny("invalid connector ID")
+			}
+			if _, exists := seenConnectors[connector]; exists {
+				return deny("duplicate tenant connector ID")
+			}
+			seenConnectors[connector] = struct{}{}
 		}
 		if len(tenant.CommandKeys) > 32 {
 			return deny("tenant has too many command keys")

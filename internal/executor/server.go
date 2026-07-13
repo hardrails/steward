@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -262,6 +263,8 @@ type secureProvisionResponse struct {
 	ServicePath       string   `json:"service_path,omitempty"`
 	EgressProxy       string   `json:"egress_proxy,omitempty"`
 	EgressRouteIDs    []string `json:"egress_route_ids,omitempty"`
+	ConnectorURL      string   `json:"connector_url,omitempty"`
+	ConnectorIDs      []string `json:"connector_ids,omitempty"`
 	RoutePolicyDigest string   `json:"route_policy_digest,omitempty"`
 }
 
@@ -365,9 +368,9 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 	// Every mount, network and grant identifier is Executor-derived. The signed
 	// request selects only finite capabilities already authorized by capsule and
 	// site policy; it never supplies a host path or Docker topology primitive.
-	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service || effective.Intent.Capabilities.Egress {
+	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service || effective.Intent.Capabilities.Egress || effective.Intent.Capabilities.Connector {
 		if s.secure.topology == nil || s.secure.gateway == nil {
-			writeError(w, http.StatusNotImplemented, "capability_unavailable", "inference, service, and egress capabilities require the configured gateway topology")
+			writeError(w, http.StatusNotImplemented, "capability_unavailable", "inference, service, egress, and connector capabilities require the configured gateway topology")
 			return
 		}
 		workload.Runtime = &RuntimeGrant{
@@ -377,6 +380,8 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 			Inference:   effective.Intent.Capabilities.Inference, ModelAlias: effective.Intent.ModelAlias,
 			RouteID:        effective.Intent.InferenceRouteID,
 			EgressRouteIDs: admission.CanonicalRouteIDs(effective.Intent.EgressRouteIDs),
+			ConnectorIDs:   admission.CanonicalConnectorIDs(effective.Intent.ConnectorIDs),
+			CapsuleDigest:  effective.CapsuleDigest, PolicyDigest: effective.PolicyDigest,
 		}
 		if effective.Intent.Capabilities.Service {
 			workload.Runtime.ServicePort = effective.Capsule.Service.Port
@@ -559,6 +564,9 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 			workload.Runtime.Gateway = observed.Workload.Runtime.Gateway
 			workload.Runtime.RelayIP = observed.Workload.Runtime.RelayIP
 			workload.Runtime.AgentIP = observed.Workload.Runtime.AgentIP
+		}
+		if legacy, ok := legacyRuntimeReplay(workload, observed.Workload); ok {
+			workload = legacy
 		}
 		committedRecord, hasCommittedRecord := s.secure.fences.Record(workload.TenantID, workload.InstanceID)
 		expectedRecord := admission.FenceRecord{
@@ -770,6 +778,31 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 	s.writeSecureResponse(r.Context(), w, http.StatusCreated, name, observed.Status, effective, routePolicyDigest)
 }
 
+// legacyRuntimeReplay returns the exact connector-free runtime shape retained
+// before signed admission bindings were added to Docker labels. The fence and
+// fingerprint checks that follow still have to match this projection, so a new
+// runtime whose binding labels were removed cannot use the compatibility path.
+func legacyRuntimeReplay(desired, observed Workload) (Workload, bool) {
+	if desired.Runtime == nil || observed.Runtime == nil || len(desired.Runtime.ConnectorIDs) != 0 || len(observed.Runtime.ConnectorIDs) != 0 ||
+		!imageConfigDigest.MatchString(desired.Runtime.CapsuleDigest) || !imageConfigDigest.MatchString(desired.Runtime.PolicyDigest) ||
+		observed.Runtime.CapsuleDigest != "" || observed.Runtime.PolicyDigest != "" ||
+		!runtimeGrantEqualExceptAdmissionBindings(desired.Runtime, observed.Runtime) {
+		return desired, false
+	}
+	legacy := *desired.Runtime
+	legacy.CapsuleDigest, legacy.PolicyDigest = "", ""
+	desired.Runtime = &legacy
+	return desired, true
+}
+
+func runtimeGrantEqualExceptAdmissionBindings(left, right *RuntimeGrant) bool {
+	return left.NetworkName == right.NetworkName && left.Subnet == right.Subnet && left.Gateway == right.Gateway &&
+		left.GrantID == right.GrantID && left.Generation == right.Generation && left.Inference == right.Inference &&
+		left.RouteID == right.RouteID && left.RelayIP == right.RelayIP && left.AgentIP == right.AgentIP &&
+		left.ModelAlias == right.ModelAlias && left.ServicePort == right.ServicePort &&
+		slices.Equal(left.EgressRouteIDs, right.EgressRouteIDs) && slices.Equal(left.ConnectorIDs, right.ConnectorIDs)
+}
+
 func (s *Server) recordCompensation(opID string, prepared evidence.Event, code string) {
 	compensated := prepared
 	compensated.Type = evidence.JournalCompensate
@@ -875,7 +908,7 @@ func (s *Server) writeSecureResponse(ctx context.Context, w http.ResponseWriter,
 		PolicyDigest: effective.PolicyDigest, Generation: effective.Intent.Generation,
 		EvidenceKeyID: evidence.KeyID(s.secure.evidence.PublicKey()),
 	}
-	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service || effective.Intent.Capabilities.Egress {
+	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service || effective.Intent.Capabilities.Egress || effective.Intent.Capabilities.Connector {
 		response.GrantID = gateway.GrantID(effective.Intent.TenantID, effective.Intent.InstanceID, effective.Intent.Generation)
 	}
 	if effective.Intent.Capabilities.Service {
@@ -885,7 +918,11 @@ func (s *Server) writeSecureResponse(ctx context.Context, w http.ResponseWriter,
 		response.EgressProxy = "http://steward-relay:8082"
 		response.EgressRouteIDs = admission.CanonicalRouteIDs(effective.Intent.EgressRouteIDs)
 	}
-	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Egress {
+	if effective.Intent.Capabilities.Connector {
+		response.ConnectorURL = "http://steward-relay:8081"
+		response.ConnectorIDs = admission.CanonicalConnectorIDs(effective.Intent.ConnectorIDs)
+	}
+	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Egress || effective.Intent.Capabilities.Connector {
 		inspection, err := s.secure.gateway.InspectWithPolicy(ctx, response.GrantID)
 		if err != nil || !imageConfigDigest.MatchString(expectedRoutePolicyDigest) || inspection.RoutePolicyDigest != expectedRoutePolicyDigest {
 			writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "effective gateway route policy could not be verified")
@@ -1610,6 +1647,10 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if observed.Workload.Runtime != nil && len(observed.Workload.Runtime.EgressRouteIDs) > 0 {
 		response["egress_proxy"] = "http://steward-relay:8082"
 		response["egress_route_ids"] = observed.Workload.Runtime.EgressRouteIDs
+	}
+	if observed.Workload.Runtime != nil && len(observed.Workload.Runtime.ConnectorIDs) > 0 {
+		response["connector_url"] = "http://steward-relay:8081"
+		response["connector_ids"] = observed.Workload.Runtime.ConnectorIDs
 	}
 	writeJSON(w, http.StatusOK, response)
 }

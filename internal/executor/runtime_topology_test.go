@@ -158,7 +158,7 @@ func (f *gatewayFixture) InspectWithPolicy(ctx context.Context, id string) (gate
 		return gateway.GrantInspection{}, err
 	}
 	digest := ""
-	if grant.RouteID != "" || len(grant.EgressRouteIDs) != 0 {
+	if grant.RouteID != "" || len(grant.EgressRouteIDs) != 0 || len(grant.ConnectorIDs) != 0 {
 		digest = f.policyDigest
 		if digest == "" {
 			digest = testGatewayRoutePolicyDigest
@@ -248,6 +248,25 @@ func TestDesiredRelayMountsGrantDirectoryForServiceOnly(t *testing.T) {
 	}
 	if err := validateRelaySpec(want); err != nil {
 		t.Fatalf("service-only relay rejected: %v", err)
+	}
+}
+
+func TestDesiredGatewayGrantBindsConnectorAdmission(t *testing.T) {
+	workload := Workload{TenantID: "tenant-a", InstanceID: "connector-only", Runtime: &RuntimeGrant{
+		GrantID: "grant-" + strings.Repeat("a", 64), Generation: 3,
+		ConnectorIDs:  []string{"git.read", "issues.create"},
+		CapsuleDigest: "sha256:" + strings.Repeat("b", 64), PolicyDigest: "sha256:" + strings.Repeat("c", 64),
+	}}
+	server := &Server{}
+	grant := server.desiredGatewayGrant(workload, "")
+	if grant.RuntimeRef != RuntimeRef(workload.TenantID, workload.InstanceID) ||
+		grant.CapsuleDigest != workload.Runtime.CapsuleDigest || grant.PolicyDigest != workload.Runtime.PolicyDigest ||
+		len(grant.ConnectorIDs) != 2 || grant.ConnectorIDs[0] != "git.read" || grant.ConnectorIDs[1] != "issues.create" {
+		t.Fatalf("connector grant=%#v", grant)
+	}
+	workload.Runtime.ConnectorIDs[0] = "changed"
+	if grant.ConnectorIDs[0] != "git.read" {
+		t.Fatal("gateway grant aliases mutable runtime connector IDs")
 	}
 }
 
