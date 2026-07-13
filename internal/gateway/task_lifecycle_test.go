@@ -354,6 +354,9 @@ func TestLifecycleServiceTaskAmbiguousDispatchReconcilesFromDurableLedger(t *tes
 			if replay.Code != http.StatusServiceUnavailable || !strings.Contains(replay.Body.String(), `"error":"evidence_unavailable"`) || calls.Load() != 1 {
 				t.Fatalf("same-process replay status=%d body=%s calls=%d", replay.Code, replay.Body.String(), calls.Load())
 			}
+			if status := invokeLifecycleTaskEndpoint(rig, http.MethodGet, lifecycleTaskDigest(rig, "task-lifecycle-ambiguous-dispatch"), false, nil); requireGatewayErrorCode(t, status, http.StatusServiceUnavailable) != "evidence_unavailable" {
+				t.Fatalf("ambiguous dispatch inspection body=%s", status.Body.String())
+			}
 			otherBody := []byte(`{"input":"other","session_id":"lifecycle-ambiguous-dispatch"}`)
 			otherPermit := taskPermitFor(t, rig, "task-after-lifecycle-ambiguous-dispatch", otherBody, nil)
 			other := invokeServiceTask(rig, otherBody, otherPermit)
@@ -372,6 +375,40 @@ func TestLifecycleServiceTaskAmbiguousDispatchReconcilesFromDurableLedger(t *tes
 			requireLifecycleTaskChain(t, lifecycleReceiptRecords(t, rig), test.wantPhases...)
 		})
 	}
+}
+
+func TestLifecycleServiceTaskAmbiguousAuthorizationInspectionRequiresReopen(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer upstream.Close()
+	rig := newLifecycleServiceTaskRig(t, upstream.URL)
+	rig.server.connectorLedger = &ambiguousServiceTaskReceiptLog{connectorReceiptLog: rig.server.connectorLedger}
+	body := []byte(`{"input":"work","session_id":"lifecycle-ambiguous-authorization"}`)
+	taskID := "task-lifecycle-ambiguous-authorization"
+	permit := taskPermitFor(t, rig, taskID, body, nil)
+
+	response := invokeServiceTask(rig, body, permit)
+	if response.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(response.Body.String(), `"error":"evidence_unavailable"`) || calls.Load() != 0 {
+		t.Fatalf("ambiguous authorization status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+	taskDigest := lifecycleTaskDigest(rig, taskID)
+	status := invokeLifecycleTaskEndpoint(rig, http.MethodGet, taskDigest, false, nil)
+	if requireGatewayErrorCode(t, status, http.StatusServiceUnavailable) != "evidence_unavailable" {
+		t.Fatalf("ambiguous authorization inspection body=%s", status.Body.String())
+	}
+
+	reopenLifecycleServiceTaskRig(t, rig, rig.now.Add(24*time.Hour))
+	reconciled := requireLifecycleTaskStatus(
+		t, invokeLifecycleTaskEndpoint(rig, http.MethodGet, taskDigest, false, nil),
+		taskDigest, "terminal", "failed_before_dispatch", "", "",
+	)
+	if reconciled.ErrorCode != "outcome_unknown" || reconciled.ObservationBase64 != "" || calls.Load() != 0 {
+		t.Fatalf("reconciled authorization=%#v calls=%d", reconciled, calls.Load())
+	}
+	requireLifecycleTaskChain(t, lifecycleReceiptRecords(t, rig), connectorledger.Authorize, connectorledger.Terminal)
 }
 
 func TestLifecycleServiceTaskRecordsDirectFailuresWithoutFalseDispatch(t *testing.T) {
@@ -455,6 +492,9 @@ func TestLifecycleServiceTaskAmbiguousTerminalReconcilesFromDurableLedger(t *tes
 			replay := invokeServiceTask(rig, body, permit)
 			if replay.Code != http.StatusServiceUnavailable || !strings.Contains(replay.Body.String(), `"error":"evidence_unavailable"`) || calls.Load() != 1 {
 				t.Fatalf("same-process replay status=%d body=%s calls=%d", replay.Code, replay.Body.String(), calls.Load())
+			}
+			if status := invokeLifecycleTaskEndpoint(rig, http.MethodGet, lifecycleTaskDigest(rig, "task-lifecycle-ambiguous-terminal"), false, nil); requireGatewayErrorCode(t, status, http.StatusServiceUnavailable) != "evidence_unavailable" {
+				t.Fatalf("ambiguous terminal inspection body=%s", status.Body.String())
 			}
 
 			reopenLifecycleServiceTaskRig(t, rig, rig.now.Add(24*time.Hour))

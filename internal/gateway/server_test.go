@@ -473,6 +473,7 @@ func TestGrantAndProxyValidationErrors(t *testing.T) {
 	for _, body := range []string{
 		`{}`,
 		`{"grant_id":"grant-` + strings.Repeat("a", 64) + `","tenant_id":"t","instance_id":"i","generation":1,"service":true,"service_url":"http://example.com:80"}`,
+		`{"grant_id":"grant-` + strings.Repeat("a", 64) + `","tenant_id":"t","instance_id":"i","generation":1,"service":true,"service_url":"http://127.0.0.1:80?"}`,
 		`{"grant_id":"grant-` + strings.Repeat("a", 64) + `","tenant_id":"t","instance_id":"i","generation":1,"route_id":"missing","model_alias":"model","service":false}`,
 		`{"grant_id":"grant-` + strings.Repeat("a", 64) + `","tenant_id":"t","instance_id":"i","generation":1,"service":false,"service_url":"http://127.0.0.1:80"}`,
 		`{"grant_id":"grant-` + strings.Repeat("a", 64) + `","tenant_id":"t","instance_id":"i","generation":1,"service":true,"active":true}`,

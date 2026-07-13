@@ -184,6 +184,7 @@ type connectorReceiptLog interface {
 
 type Server struct {
 	mu                       sync.Mutex
+	taskObservationCommitMu  sync.RWMutex
 	serviceTaskMutationMu    sync.Mutex
 	config                   Config
 	routes                   map[string]loadedRoute
@@ -609,12 +610,21 @@ func (s *Server) getGrant(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) ServiceHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		taskRequest := strings.HasPrefix(r.URL.Path, "/v1/tasks/")
+		if taskRequest {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+		}
 		presented := sha256.Sum256([]byte(r.Header.Get("Authorization")))
 		s.mu.Lock()
 		tokenHash := s.tokenHash
 		s.mu.Unlock()
 		if subtle.ConstantTimeCompare(presented[:], tokenHash[:]) != 1 {
 			writeGatewayError(w, http.StatusUnauthorized, "unauthorized", "valid gateway bearer credential required")
+			return
+		}
+		if taskRequest {
+			s.handleTaskLifecycle(w, r)
 			return
 		}
 		const prefix = "/v1/services/"
@@ -814,6 +824,10 @@ func (s *Server) deactivate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setActive(w http.ResponseWriter, id string, active bool) {
+	if !active {
+		s.taskObservationCommitMu.Lock()
+		defer s.taskObservationCommitMu.Unlock()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	grant, ok := s.grants[id]
@@ -844,6 +858,8 @@ func (s *Server) setActive(w http.ResponseWriter, id string, active bool) {
 
 func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	s.taskObservationCommitMu.Lock()
+	defer s.taskObservationCommitMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	grant, ok := s.grants[id]
@@ -1045,7 +1061,7 @@ func validGrantID(id string) bool {
 
 func validServiceURL(value, grantRoot, grantID string) bool {
 	parsed, err := url.Parse(value)
-	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return false
 	}
 	if parsed.Scheme == "unix" {

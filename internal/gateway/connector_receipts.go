@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/hardrails/steward/internal/connectorledger"
 )
@@ -30,6 +31,8 @@ type serviceTaskReceipt struct {
 	authorizationAmbiguous bool
 	dispatchAmbiguous      bool
 	terminalUnavailable    bool
+	observing              bool
+	nextObservationAt      time.Time
 }
 
 // ConnectorReceiptFormatSummary identifies the connector receipt compatibility
