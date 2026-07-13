@@ -95,6 +95,7 @@ release_files=(
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
 	integration/scripts/hermes-steward-acceptance.sh
+	integration/scripts/node-doctor.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
 	integration/scripts/uninstall-node.sh
@@ -430,6 +431,7 @@ for binary in steward stewardctl steward-mcp steward-executor steward-gateway st
 done
 for mapping in \
 	activate-node-release:/opt/steward/current/integration/scripts/activate-node-release.sh \
+	node-doctor:/opt/steward/current/integration/scripts/node-doctor.sh \
 	node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
 	configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
 	configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
@@ -488,6 +490,7 @@ for binary in steward stewardctl steward-mcp steward-executor steward-gateway st
 done
 for mapping in \
 	activate-node-release:/opt/steward/current/integration/scripts/activate-node-release.sh \
+	node-doctor:/opt/steward/current/integration/scripts/node-doctor.sh \
 	node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
 	configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
 	configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \

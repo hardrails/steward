@@ -119,12 +119,14 @@ jobs:
           grep -Fq '    "integration/scripts/build-hermes-adapter.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/hermes-feasibility.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/hermes-steward-acceptance.sh": "' <<<"$manifest"
+          grep -Fq '    "integration/scripts/node-doctor.sh": "' <<<"$manifest"
           tar -tzf "$archive" adapters/hermes-agent/adapter.json >/dev/null
           tar -tzf "$archive" adapters/hermes-agent/fixtures/connector-skill/SKILL.md >/dev/null
           tar -tzf "$archive" adapters/hermes-agent/fixtures/skill/SKILL.md >/dev/null
           tar -tzf "$archive" scripts/build-hermes-adapter.sh >/dev/null
           tar -tzf "$archive" scripts/hermes-feasibility.sh >/dev/null
           tar -tzf "$archive" scripts/hermes-steward-acceptance.sh >/dev/null
+          tar -tzf "$archive" scripts/node-doctor.sh >/dev/null
           deb_contents=$(mktemp)
           rpm_contents=$(mktemp)
           trap 'rm -f "$deb_contents" "$rpm_contents"' EXIT
@@ -135,6 +137,7 @@ jobs:
           grep -q './usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/hermes-feasibility.sh' "$deb_contents"
           grep -q './usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' "$deb_contents"
+          grep -q './usr/lib/steward-node/release/scripts/node-doctor.sh' "$deb_contents"
           rpm -qpl "dist/steward-node_${STEWARD_RELEASE_VERSION}_${{ matrix.goarch }}.rpm" >"$rpm_contents"
           grep -q '/usr/lib/steward-node/release/release.json' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/adapter.json' "$rpm_contents"
@@ -142,6 +145,7 @@ jobs:
           grep -q '/usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/hermes-feasibility.sh' "$rpm_contents"
           grep -q '/usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' "$rpm_contents"
+          grep -q '/usr/lib/steward-node/release/scripts/node-doctor.sh' "$rpm_contents"
 
       - name: Keep one installer copy
         if: matrix.goarch == 'arm64'

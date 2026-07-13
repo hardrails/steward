@@ -21,7 +21,7 @@ for path in steward stewardctl steward-mcp steward-executor steward-gateway stew
 	deploy/config/executor.env deploy/config/executor-gateway.env deploy/systemd/steward.service \
 	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
 	deploy/config/gateway.json.in scripts/install-node.sh \
-	scripts/activate-node-release.sh scripts/node-preflight.sh \
+	scripts/activate-node-release.sh scripts/node-doctor.sh scripts/node-preflight.sh \
 	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh \
 	scripts/node-removal-guard.sh scripts/build-hermes-adapter.sh scripts/build-relay-image.sh \
 	scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh \
