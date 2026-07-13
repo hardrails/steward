@@ -495,7 +495,7 @@ func sameCall(left, right Event) bool {
 }
 
 func validateEvent(event Event) error {
-	if !validText(event.TenantID, 128) || !runtimeRef(event.RuntimeRef) ||
+	if !publicIdentity(event.TenantID, 128) || !runtimeRef(event.RuntimeRef) ||
 		!digest(event.CapsuleDigest) || !digest(event.PolicyDigest) || !digest(event.RoutePolicyDigest) || event.Generation == 0 ||
 		!grantID(event.GrantID) || !identifier(event.ConnectorID) || !identifier(event.OperationID) ||
 		!digest(event.TaskDigest) || event.RequestBytes < 0 || event.RequestBytes > 1<<30 ||
@@ -565,6 +565,14 @@ func validFileInfo(info os.FileInfo) bool {
 
 func validText(value string, limit int) bool {
 	return value != "" && len(value) <= limit && utf8.ValidString(value) && strings.TrimSpace(value) == value && !strings.ContainsRune(value, '\x00')
+}
+
+// publicIdentity matches the existing signed-admission and Gateway grant text
+// contract. Leading or trailing whitespace is unusual but already valid public
+// identity data, so a connector receipt must preserve it rather than failing
+// only when the tenant first performs work.
+func publicIdentity(value string, limit int) bool {
+	return strings.TrimSpace(value) != "" && len(value) <= limit && utf8.ValidString(value) && !strings.ContainsRune(value, '\x00')
 }
 
 func identifier(value string) bool {

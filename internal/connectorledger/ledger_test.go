@@ -264,6 +264,34 @@ func TestConnectorLedgerValidatesEventsFilesAndTaskIDs(t *testing.T) {
 	}
 }
 
+func TestConnectorLedgerPreservesPublicTenantIdentityWhitespace(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "tenant-identity.ndjson")
+	log, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized := validEvent(Authorize, Allowed)
+	authorized.TenantID = " tenant-a "
+	if _, err := log.Begin(authorized); err != nil {
+		t.Fatal(err)
+	}
+	terminal := authorized
+	terminal.Phase, terminal.Outcome, terminal.HTTPStatus = Terminal, Committed, 200
+	if _, err := log.Finish(terminal); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyRecords(path, public, "node-a/gateway", 1, nil); err != nil {
+		t.Fatalf("public tenant identity failed receipt verification: %v", err)
+	}
+}
+
 func TestValidateConnectorLedgerIsReadOnlyAndVerifiesExistingChain(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
