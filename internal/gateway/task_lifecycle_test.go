@@ -26,6 +26,26 @@ type ambiguousLifecycleDispatchLog struct {
 	failed  atomic.Bool
 }
 
+type ambiguousLifecycleTerminalLog struct {
+	connectorReceiptLog
+	durable bool
+	failed  atomic.Bool
+}
+
+func (log *ambiguousLifecycleTerminalLog) Finish(event connectorledger.Event) (connectorledger.Head, error) {
+	if log.durable {
+		if _, err := log.connectorReceiptLog.Finish(event); err != nil {
+			return connectorledger.Head{}, err
+		}
+	}
+	log.failed.Store(true)
+	return connectorledger.Head{}, errors.New("fixture terminal sync outcome is ambiguous")
+}
+
+func (log *ambiguousLifecycleTerminalLog) Failed() bool {
+	return log.failed.Load() || log.connectorReceiptLog.Failed()
+}
+
 func (log *ambiguousLifecycleDispatchLog) Dispatch(event connectorledger.Event) (connectorledger.Head, error) {
 	if log.durable {
 		if _, err := log.connectorReceiptLog.Dispatch(event); err != nil {
@@ -397,6 +417,52 @@ func TestLifecycleServiceTaskRecordsDirectFailuresWithoutFalseDispatch(t *testin
 				terminal.RunID != "" || terminal.TaskStatus != "" {
 				t.Fatalf("terminal=%#v", terminal)
 			}
+		})
+	}
+}
+
+func TestLifecycleServiceTaskAmbiguousTerminalReconcilesFromDurableLedger(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		durable    bool
+		wantError  string
+		wantPhases []connectorledger.Phase
+	}{
+		{name: "durable terminal", durable: true, wantError: "task_already_spent", wantPhases: []connectorledger.Phase{connectorledger.Authorize, connectorledger.Terminal}},
+		{name: "absent terminal", wantError: "outcome_unknown", wantPhases: []connectorledger.Phase{connectorledger.Authorize, connectorledger.Terminal}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int64
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write([]byte(`{"run_id":"run_rejected"}`))
+			}))
+			defer upstream.Close()
+			rig := newLifecycleServiceTaskRig(t, upstream.URL)
+			rig.server.connectorLedger = &ambiguousLifecycleTerminalLog{
+				connectorReceiptLog: rig.server.connectorLedger, durable: test.durable,
+			}
+			body := []byte(`{"input":"work","session_id":"lifecycle-ambiguous-terminal"}`)
+			permit := taskPermitFor(t, rig, "task-lifecycle-ambiguous-terminal", body, nil)
+
+			first := invokeServiceTask(rig, body, permit)
+			if first.Code != http.StatusServiceUnavailable || first.Header().Get(taskReceiptHeader) != "" ||
+				!strings.Contains(first.Body.String(), `"error":"evidence_unavailable"`) || calls.Load() != 1 {
+				t.Fatalf("ambiguous terminal status=%d headers=%v body=%s calls=%d", first.Code, first.Header(), first.Body.String(), calls.Load())
+			}
+			replay := invokeServiceTask(rig, body, permit)
+			if replay.Code != http.StatusServiceUnavailable || !strings.Contains(replay.Body.String(), `"error":"evidence_unavailable"`) || calls.Load() != 1 {
+				t.Fatalf("same-process replay status=%d body=%s calls=%d", replay.Code, replay.Body.String(), calls.Load())
+			}
+
+			reopenLifecycleServiceTaskRig(t, rig, rig.now.Add(24*time.Hour))
+			reconciled := invokeServiceTask(rig, body, permit)
+			if reconciled.Code != http.StatusConflict || !strings.Contains(reconciled.Body.String(), `"error":"`+test.wantError+`"`) || calls.Load() != 1 {
+				t.Fatalf("reconciled status=%d body=%s calls=%d", reconciled.Code, reconciled.Body.String(), calls.Load())
+			}
+			requireLifecycleTaskChain(t, lifecycleReceiptRecords(t, rig), test.wantPhases...)
 		})
 	}
 }

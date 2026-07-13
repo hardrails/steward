@@ -397,6 +397,10 @@ func (s *Server) writeExistingServiceTask(w http.ResponseWriter, state serviceTa
 		writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task dispatch evidence is ambiguous; restart Gateway to reconcile it")
 		return
 	}
+	if state.terminalUnavailable {
+		writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task terminal evidence is unavailable; restart Gateway to reconcile it")
+		return
+	}
 	if state.Dispatch.Phase == connectorledger.Dispatch {
 		writeServiceTaskResponse(w, state.Dispatch.HTTPStatus, state.Dispatch.RunID, "replayed")
 		return
@@ -435,6 +439,11 @@ func (s *Server) finishServiceTask(taskDigest string, terminal connectorledger.E
 		return errors.New("task receipt ledger is unavailable")
 	}
 	if _, err := s.connectorLedger.Finish(terminal); err != nil {
+		s.mu.Lock()
+		state := s.serviceTasks[taskDigest]
+		state.terminalUnavailable = true
+		s.serviceTasks[taskDigest] = state
+		s.mu.Unlock()
 		return err
 	}
 	s.mu.Lock()

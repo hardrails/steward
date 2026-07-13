@@ -29,6 +29,7 @@ type serviceTaskReceipt struct {
 	Terminal               connectorledger.Event
 	authorizationAmbiguous bool
 	dispatchAmbiguous      bool
+	terminalUnavailable    bool
 }
 
 // ConnectorReceiptFormatSummary identifies the connector receipt compatibility
