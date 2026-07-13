@@ -20,6 +20,8 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlUsageError()
 	}
 	switch arguments[0] + " " + arguments[1] {
+	case "pki create":
+		return controlPKICreate(arguments[2:], stdout)
 	case "tenant create":
 		return controlTenantCreate(arguments[2:], stdout)
 	case "tenant list":
@@ -48,7 +50,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, or command submit|status")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, or command submit|status")
 }
 
 type controlFlags struct {
