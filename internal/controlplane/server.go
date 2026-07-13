@@ -91,6 +91,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/operators/{credential_id}", server.operator)
 	server.mux.HandleFunc("/v1/enrollments", server.enrollments)
 	server.mux.HandleFunc("/v1/enroll", server.enroll)
+	server.mux.HandleFunc("/v1/node-credentials/{credential_id}", server.nodeCredential)
 	server.mux.HandleFunc("/v1/nodes/{node_id}", server.nodeAdministration)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes", server.nodes)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}", server.node)
@@ -307,6 +308,27 @@ func (server *Server) enroll(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(writer, http.StatusCreated, credential)
+}
+
+func (server *Server) nodeCredential(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodDelete) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	credentialID := request.PathValue("credential_id")
+	nodeID, revoked, err := server.store.RevokeNodeCredential(identity, credentialID, server.now())
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		CredentialID string `json:"credential_id"`
+		NodeID       string `json:"node_id"`
+		Revoked      bool   `json:"revoked"`
+	}{CredentialID: credentialID, NodeID: nodeID, Revoked: revoked})
 }
 
 func (server *Server) nodeAdministration(writer http.ResponseWriter, request *http.Request) {

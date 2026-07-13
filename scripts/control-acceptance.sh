@@ -507,9 +507,19 @@ import sys
 credential = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if credential.get("version") != 2 or credential.get("scope") != "node" or credential.get("node_id") != sys.argv[2]:
     raise SystemExit("control-acceptance: node credential is invalid")
-if pathlib.Path(sys.argv[3]).read_text() != f"{sys.argv[2]}\n" or pathlib.Path(sys.argv[4]).read_text() != f"{sys.argv[2]}\n":
-    raise SystemExit("control-acceptance: enrollment exchange disclosed more than the node ID")
+token = credential.get("credential", "")
+prefix, separator, _ = token.rpartition("_")
+credential_id = prefix.removeprefix("steward_node_v1_") if separator else ""
+if not credential_id.startswith("node-cred-"):
+    raise SystemExit("control-acceptance: node credential omits its revocation identity")
+if pathlib.Path(sys.argv[3]).read_text() != f"{credential_id}\n" or pathlib.Path(sys.argv[4]).read_text() != f"{credential_id}\n":
+    raise SystemExit("control-acceptance: enrollment exchange did not return only the credential ID")
 PY
+node_credential_id=$(tr -d '\n' <"$work/exchange.stdout")
+[[ $node_credential_id =~ ^node-cred-[A-Za-z0-9._-]+$ ]] || {
+	echo "control-acceptance: enrollment exchange returned an invalid credential ID" >&2
+	exit 1
+}
 assert_secret_absent credential "$node_credential" "$work/exchange.stdout" "$work/exchange.stderr" \
 	"$work/exchange-retry.stdout" "$work/exchange-retry.stderr"
 
@@ -727,6 +737,27 @@ import sys
 value = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if value != {"protocol_version": 3, "deliveries": []}:
     raise SystemExit("control-acceptance: terminal command was delivered again")
+PY
+
+run_bounded 30 "$work" "$work/node-credential-revoke.stdout" "$work/node-credential-revoke.stderr" \
+	"$ctl_bin" control node-credential revoke -control-url "$control_url" -token-file "$admin_token" \
+	-credential-id "$node_credential_id"
+python3 -I - "$work/node-credential-revoke.stdout" "$node_credential_id" "$node_id" <<'PY'
+import json
+import pathlib
+import sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if value != {"credential_id": sys.argv[2], "node_id": sys.argv[3], "revoked": True}:
+    raise SystemExit("control-acceptance: narrow node credential revocation response is invalid")
+PY
+http_json POST /executor-uplink/poll "$work/poll-request.json" json "$node_credential" 401 "$work/revoked-node-credential.json"
+python3 -I - "$work/revoked-node-credential.json" <<'PY'
+import json
+import pathlib
+import sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if value.get("error") != "unauthorized":
+    raise SystemExit("control-acceptance: revoked node credential remained authorized")
 PY
 
 stop_control

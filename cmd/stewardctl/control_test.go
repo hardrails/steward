@@ -23,6 +23,7 @@ func TestControlDefaultOriginMatchesLoopbackServer(t *testing.T) {
 }
 
 func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
+	const nodeCredentialToken = "steward_node_v1_node-cred-11111111111111111111111111111111_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/enroll" && request.Header.Get("Authorization") != "Bearer admin-secret" {
 			t.Fatalf("authorization=%q path=%q", request.Header.Get("Authorization"), request.URL.Path)
@@ -45,7 +46,9 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 			if request.Header.Get("Authorization") != "" {
 				t.Fatal("operator token sent to enrollment exchange")
 			}
-			_, _ = w.Write([]byte(`{"version":2,"scope":"node","node_id":"node-1","credential":"node-secret"}`))
+			_, _ = w.Write([]byte(`{"version":2,"scope":"node","node_id":"node-1","credential":"` + nodeCredentialToken + `"}`))
+		case "/v1/node-credentials/node-cred-11111111111111111111111111111111":
+			_, _ = w.Write([]byte(`{"credential_id":"node-cred-11111111111111111111111111111111","node_id":"node-1","revoked":true}`))
 		case "/v1/tenants/tenant-a/nodes/node-1/commands":
 			_, _ = w.Write([]byte(`{"command_id":"command-1","delivery_id":"delivery-1","tenant_id":"tenant-a","node_id":"node-1","command_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"pending"}`))
 		case "/v1/tenants/tenant-a/nodes/node-1/commands/command-1":
@@ -117,14 +120,24 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	if info, err := os.Stat(enrollmentPath); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("enrollment mode=%v error=%v", info, err)
 	}
+	output.Reset()
 	if err := run([]string{"control", "enrollment", "exchange", "-control-url", server.URL,
 		"-enrollment", enrollmentPath, "-request-id", "request-1", "-credential-out", credentialPath},
 		&output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
+	if strings.TrimSpace(output.String()) != "node-cred-11111111111111111111111111111111" {
+		t.Fatalf("exchange output=%q", output.String())
+	}
 	credential, err := os.ReadFile(credentialPath)
-	if err != nil || !bytes.Contains(credential, []byte(`"credential":"node-secret"`)) {
+	if err != nil || !bytes.Contains(credential, []byte(`"credential":"`+nodeCredentialToken+`"`)) {
 		t.Fatalf("credential=%s error=%v", credential, err)
+	}
+	output.Reset()
+	nodeCredentialRevokeArguments := append([]string{"control", "node-credential", "revoke"}, common...)
+	nodeCredentialRevokeArguments = append(nodeCredentialRevokeArguments, "-credential-id", "node-cred-11111111111111111111111111111111")
+	if err := run(nodeCredentialRevokeArguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"revoked":true`) {
+		t.Fatalf("node credential revoke output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
 	nodeListArguments := append([]string{"control", "node", "list"}, common...)

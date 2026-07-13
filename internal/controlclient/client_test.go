@@ -70,6 +70,8 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 			_, _ = w.Write([]byte(`{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":["signed-commands-v2"],"state":"active","created_at":"2026-07-13T12:00:00Z"}`))
 		case "/v1/nodes/node-1":
 			_, _ = w.Write([]byte(`{"node_id":"node-1","revoked_credentials":1}`))
+		case "/v1/node-credentials/node-credential-1":
+			_, _ = w.Write([]byte(`{"credential_id":"node-credential-1","node_id":"node-1","revoked":true}`))
 		default:
 			t.Fatalf("unexpected path %s", request.URL.Path)
 		}
@@ -106,6 +108,9 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 	}
 	if revoked, err := client.RevokeNode(ctx, "node-1"); err != nil || revoked.RevokedCredentials != 1 {
 		t.Fatalf("revoked=%#v error=%v", revoked, err)
+	}
+	if revoked, err := client.RevokeNodeCredential(ctx, "node-credential-1"); err != nil || !revoked.Revoked || revoked.NodeID != "node-1" {
+		t.Fatalf("node credential revocation=%#v error=%v", revoked, err)
 	}
 	if command, err := client.SubmitCommand(ctx, "tenant-a", "node-1", commandRaw); err != nil || command.State != "pending" {
 		t.Fatalf("command=%#v error=%v", command, err)

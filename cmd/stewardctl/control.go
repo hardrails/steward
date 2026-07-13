@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/nodeclient"
 	"github.com/hardrails/steward/internal/securefile"
@@ -40,6 +41,8 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlNodeStatus(arguments[2:], stdout)
 	case "node revoke":
 		return controlNodeRevoke(arguments[2:], stdout)
+	case "node-credential revoke":
+		return controlNodeCredentialRevoke(arguments[2:], stdout)
 	case "command submit":
 		return controlCommandSubmit(arguments[2:], stdout)
 	case "command status":
@@ -50,7 +53,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, or command submit|status")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, or command submit|status")
 }
 
 type controlFlags struct {
@@ -260,6 +263,10 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	credentialID, err := controlauth.ParseNodeCredentialID(credential.Credential)
+	if err != nil {
+		return errors.New("control plane returned an invalid node credential")
+	}
 	credentialRaw, err := json.Marshal(credential)
 	if err != nil {
 		return err
@@ -267,7 +274,7 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	if err := writeNewFile(*output, append(credentialRaw, '\n'), 0o600); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(stdout, credential.NodeID)
+	_, err = fmt.Fprintln(stdout, credentialID)
 	return err
 }
 
@@ -340,6 +347,30 @@ func controlNodeRevoke(arguments []string, stdout io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	revocation, err := client.RevokeNode(ctx, *nodeID)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, revocation)
+}
+
+func controlNodeCredentialRevoke(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node-credential revoke", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	credentialID := flags.String("credential-id", "", "node credential identity")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *credentialID == "" || flags.NArg() != 0 {
+		return errors.New("control node-credential revoke requires -credential-id")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	revocation, err := client.RevokeNodeCredential(ctx, *credentialID)
 	if err != nil {
 		return err
 	}

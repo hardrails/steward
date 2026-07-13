@@ -250,6 +250,43 @@ func (store *Store) RevokeOperator(actor controlauth.Identity, credentialID stri
 	return store.revokeCredential(actor, credentialID, now, true)
 }
 
+// RevokeNodeCredential disables one node transport bearer without revoking the
+// node or its sibling credentials. This is the narrow primitive needed for a
+// staged credential rotation; only a site administrator may use it.
+func (store *Store) RevokeNodeCredential(actor controlauth.Identity, credentialID string, now time.Time) (string, bool, error) {
+	if store == nil {
+		return "", false, ErrUnavailable
+	}
+	if !controlauth.IsSiteAdmin(actor) {
+		return "", false, ErrForbidden
+	}
+	if !validRecordID(credentialID, 128) || now.IsZero() {
+		return "", false, invalid("node credential identity and revocation time are required")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return "", false, err
+	}
+	credential, ok := store.current.credentials[credentialID]
+	if !ok || credential.Kind != controlauth.KindNode {
+		return "", false, ErrNotFound
+	}
+	if credential.Revoked {
+		return credential.NodeID, false, nil
+	}
+	created, _ := parseTimestamp(credential.CreatedAt)
+	if now.Before(created) {
+		return "", false, invalid("revocation time precedes credential creation")
+	}
+	credential.Revoked = true
+	credential.RevokedAt = canonicalTimestamp(now)
+	if err := store.applyMutationsLocked(credentialMutation(credential)); err != nil {
+		return "", false, err
+	}
+	return credential.NodeID, true, nil
+}
+
 func (store *Store) revokeCredential(actor controlauth.Identity, credentialID string, now time.Time, operatorOnly bool) (bool, error) {
 	if store == nil {
 		return false, ErrUnavailable

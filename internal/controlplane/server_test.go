@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -195,6 +196,29 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	}
 	if _, err := controlprotocol.DecodeExecutorPollResponseV3(response.Body.Bytes(), controlprotocol.MaxExecutorDeliveryBytes); err != nil {
 		t.Fatalf("idle poll response is not accepted by the node decoder: %v", err)
+	}
+
+	requireError(t, fixture.request(t, http.MethodDelete, "/v1/node-credentials/"+nodeCredentialID, operator.Token, ""),
+		http.StatusForbidden, "forbidden")
+	response = fixture.request(t, http.MethodDelete, "/v1/node-credentials/"+nodeCredentialID, fixture.adminToken, "")
+	requireStatus(t, response, http.StatusOK)
+	var credentialRevocation struct {
+		CredentialID string `json:"credential_id"`
+		NodeID       string `json:"node_id"`
+		Revoked      bool   `json:"revoked"`
+	}
+	decodeResponse(t, response, &credentialRevocation)
+	if credentialRevocation.CredentialID != nodeCredentialID || credentialRevocation.NodeID != "node-1" || !credentialRevocation.Revoked {
+		t.Fatalf("node credential revocation = %+v", credentialRevocation)
+	}
+	response = fixture.request(t, http.MethodDelete, "/v1/node-credentials/"+nodeCredentialID, fixture.adminToken, "")
+	requireStatus(t, response, http.StatusOK)
+	decodeResponse(t, response, &credentialRevocation)
+	if credentialRevocation.Revoked {
+		t.Fatal("exact node credential revocation retry reported a second mutation")
+	}
+	if _, err := fixture.store.AuthenticateNode(fixture.server.auth, nodeCredential.Credential); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("revoked node credential remained active: %v", err)
 	}
 
 	// Revocation takes effect before another authenticated operation.

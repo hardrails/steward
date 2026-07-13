@@ -330,8 +330,13 @@ func (m *Manager) OperatorCredentialID(raw string) (string, error) {
 }
 
 func (m *Manager) NodeCredentialID(raw string) (string, error) {
-	return parseToken(raw, nodePrefix)
+	return ParseNodeCredentialID(raw)
 }
+
+// ParseNodeCredentialID returns the non-secret identifier embedded in a node
+// bearer. It validates the complete token encoding but does not authenticate
+// the bearer; authentication still requires Manager and its retained MAC.
+func ParseNodeCredentialID(raw string) (string, error) { return parseToken(raw, nodePrefix) }
 
 func (m *Manager) EnrollmentID(raw string) (string, error) {
 	return parseToken(raw, enrollmentPrefix)

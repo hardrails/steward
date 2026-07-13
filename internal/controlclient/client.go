@@ -134,6 +134,12 @@ type NodeRevocation struct {
 	RevokedCredentials int    `json:"revoked_credentials"`
 }
 
+type NodeCredentialRevocation struct {
+	CredentialID string `json:"credential_id"`
+	NodeID       string `json:"node_id"`
+	Revoked      bool   `json:"revoked"`
+}
+
 func New(baseURL, token string, caPEM []byte) (*Client, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
@@ -270,6 +276,12 @@ func (c *Client) GetNode(ctx context.Context, tenantID, nodeID string) (Node, er
 func (c *Client) RevokeNode(ctx context.Context, nodeID string) (NodeRevocation, error) {
 	var revocation NodeRevocation
 	err := c.do(ctx, http.MethodDelete, "/v1/nodes/"+url.PathEscape(nodeID), nil, &revocation, true)
+	return revocation, err
+}
+
+func (c *Client) RevokeNodeCredential(ctx context.Context, credentialID string) (NodeCredentialRevocation, error) {
+	var revocation NodeCredentialRevocation
+	err := c.do(ctx, http.MethodDelete, "/v1/node-credentials/"+url.PathEscape(credentialID), nil, &revocation, true)
 	return revocation, err
 }
 

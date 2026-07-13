@@ -304,6 +304,33 @@ func TestEnrollmentIssuanceRetrySurvivesReopenAndBindsIssuer(t *testing.T) {
 	}
 }
 
+func TestNodeCredentialRevocationIsNarrowAndIdempotent(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	raw, identity := fixture.createNode(t, "tenant-a")
+	operator := controlauth.Identity{Role: controlauth.RoleTenantOperator, TenantID: "tenant-a"}
+	if _, _, err := fixture.store.RevokeNodeCredential(operator, identity.CredentialID, fixture.now.Add(2*time.Minute)); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant operator node-credential revocation error = %v", err)
+	}
+	if _, _, err := fixture.store.RevokeNodeCredential(fixture.admin, fixture.adminRecord.ID, fixture.now.Add(2*time.Minute)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("node endpoint accepted an operator credential: %v", err)
+	}
+	nodeID, revoked, err := fixture.store.RevokeNodeCredential(fixture.admin, identity.CredentialID, fixture.now.Add(2*time.Minute))
+	if err != nil || !revoked || nodeID != "node-1" {
+		t.Fatalf("node credential revoke = (%q, %v, %v)", nodeID, revoked, err)
+	}
+	nodeID, revoked, err = fixture.store.RevokeNodeCredential(fixture.admin, identity.CredentialID, fixture.now.Add(3*time.Minute))
+	if err != nil || revoked || nodeID != "node-1" {
+		t.Fatalf("node credential revoke retry = (%q, %v, %v)", nodeID, revoked, err)
+	}
+	if _, err := fixture.store.AuthenticateNode(fixture.auth, raw); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("revoked node credential authentication = %v", err)
+	}
+	if node, found, err := fixture.store.GetNode(fixture.admin, "tenant-a", "node-1"); err != nil || !found || !node.Active {
+		t.Fatalf("credential revocation disabled its node = (%+v, %v, %v)", node, found, err)
+	}
+}
+
 func TestMultiTenantWorkflowFencesReportsAndRevokesCredentials(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")

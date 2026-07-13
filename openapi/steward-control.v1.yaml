@@ -350,6 +350,43 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/node-credentials/{credential_id}:
+    parameters:
+      - name: credential_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Identifier128"
+    delete:
+      tags: [nodes]
+      operationId: revokeControlNodeCredential
+      summary: Revoke one node transport credential
+      description: |
+        Requires a site-administrator credential. This disables only the named
+        node bearer so a replacement can be enrolled and verified before the
+        old credential is revoked. It does not revoke the node or sibling
+        credentials. An exact retry returns `revoked: false`.
+      responses:
+        "200":
+          description: The credential is revoked or was already revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeCredentialRevocation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/nodes/{node_id}:
     parameters:
       - $ref: "#/components/parameters/NodeID"
@@ -883,6 +920,17 @@ components:
         credential:
           type: string
           writeOnly: true
+    NodeCredentialRevocation:
+      type: object
+      additionalProperties: false
+      required: [credential_id, node_id, revoked]
+      properties:
+        credential_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        revoked:
+          type: boolean
     Node:
       type: object
       additionalProperties: false
