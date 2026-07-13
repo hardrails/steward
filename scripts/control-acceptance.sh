@@ -471,10 +471,19 @@ if value.get("error") != "unauthorized" or not value.get("message"):
 PY
 
 enrollment=$work/enrollment.json
+enrollment_retry=$work/enrollment-retry.json
 run_bounded 30 "$work" "$work/enrollment.stdout" "$work/enrollment.stderr" \
 	"$ctl_bin" control enrollment create -control-url "$control_url" -token-file "$operator_token" \
-	-node-id "$node_id" -tenant-ids "$tenant_id" -valid-for 5m -out "$enrollment"
+	-request-id acceptance-node-enrollment -node-id "$node_id" -tenant-ids "$tenant_id" -valid-for 5m -out "$enrollment"
+run_bounded 30 "$work" "$work/enrollment-retry.stdout" "$work/enrollment-retry.stderr" \
+	"$ctl_bin" control enrollment create -control-url "$control_url" -token-file "$operator_token" \
+	-request-id acceptance-node-enrollment -node-id "$node_id" -tenant-ids "$tenant_id" -valid-for 5m -out "$enrollment_retry"
 assert_owner_file "$enrollment"
+assert_owner_file "$enrollment_retry"
+cmp -s "$enrollment" "$enrollment_retry" || {
+	echo "control-acceptance: exact enrollment issuance retry changed the capability" >&2
+	exit 1
+}
 assert_secret_absent enrollment_token "$enrollment" "$work/enrollment.stdout" "$work/enrollment.stderr"
 
 node_credential=$work/node-credential.json
@@ -696,15 +705,18 @@ PY
 run_bounded 30 "$work" "$work/terminal-status.stdout" "$work/terminal-status.stderr" \
 	"$ctl_bin" control command status -control-url "$control_url" -token-file "$operator_token" \
 	-tenant-id "$tenant_id" -node-id "$node_id" -command-id "$command_id"
-python3 -I - "$work/terminal-status.stdout" "$work/command-issue.stdout" "$command_id" <<'PY'
+python3 -I - "$work/terminal-status.stdout" "$work/command-issue.stdout" "$work/report.json" "$command_id" <<'PY'
 import json
 import pathlib
 import sys
 status = json.loads(pathlib.Path(sys.argv[1]).read_text())
-if status.get("command_id") != sys.argv[3] or status.get("command_digest") != pathlib.Path(sys.argv[2]).read_text().strip():
+report = json.loads(pathlib.Path(sys.argv[3]).read_text())
+if status.get("command_id") != sys.argv[4] or status.get("command_digest") != pathlib.Path(sys.argv[2]).read_text().strip():
     raise SystemExit("control-acceptance: terminal status changed command identity")
-if status.get("state") != "terminal" or status.get("reported_status") != "success":
+if status.get("state") != "terminal" or status.get("terminal_status") != report["status"] or status.get("reported_status") != "success":
     raise SystemExit("control-acceptance: terminal status was not durably retained")
+if status.get("claim_generation") != report["claim_generation"] or status.get("result") != report["result"]:
+    raise SystemExit("control-acceptance: terminal result or signed claim fence was hidden or changed")
 PY
 
 http_json POST /executor-uplink/poll "$work/poll-request.json" json "$node_credential" 200 "$work/terminal-poll.json"

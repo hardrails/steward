@@ -92,16 +92,26 @@ type NodeCredential struct {
 }
 
 type Command struct {
-	CommandID          string `json:"command_id"`
-	DeliveryID         string `json:"delivery_id,omitempty"`
-	TenantID           string `json:"tenant_id"`
-	NodeID             string `json:"node_id"`
-	CommandDigest      string `json:"command_digest"`
-	State              string `json:"state"`
-	DeliveryGeneration uint64 `json:"delivery_generation,omitempty"`
-	LeaseExpiresAt     string `json:"lease_expires_at,omitempty"`
-	ReportedStatus     string `json:"reported_status,omitempty"`
-	ErrorCode          string `json:"error_code,omitempty"`
+	CommandID          string         `json:"command_id"`
+	DeliveryID         string         `json:"delivery_id,omitempty"`
+	TenantID           string         `json:"tenant_id"`
+	NodeID             string         `json:"node_id"`
+	CommandDigest      string         `json:"command_digest"`
+	State              string         `json:"state"`
+	DeliveryGeneration uint64         `json:"delivery_generation,omitempty"`
+	LeaseExpiresAt     string         `json:"lease_expires_at,omitempty"`
+	TerminalStatus     string         `json:"terminal_status,omitempty"`
+	ReportedStatus     string         `json:"reported_status,omitempty"`
+	ErrorCode          string         `json:"error_code,omitempty"`
+	ClaimGeneration    *uint64        `json:"claim_generation,omitempty"`
+	Result             *CommandResult `json:"result,omitempty"`
+}
+
+type CommandResult struct {
+	RuntimeRef string `json:"runtime_ref,omitempty"`
+	Error      string `json:"error,omitempty"`
+	Replayed   bool   `json:"replayed,omitempty"`
+	Absent     bool   `json:"absent,omitempty"`
 }
 
 type Node struct {
@@ -141,10 +151,11 @@ func New(baseURL, token string, caPEM []byte) (*Client, error) {
 	}
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if len(caPEM) > 0 {
-		pool, err := x509.SystemCertPool()
-		if err != nil {
-			pool = x509.NewCertPool()
-		}
+		// An explicit private CA is a trust replacement, not an addition to the
+		// host's public Web PKI. This keeps a public CA (or a compromised system
+		// root set) from authenticating a controller when the operator supplied a
+		// sovereign trust root deliberately.
+		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {
 			return nil, errors.New("control CA file contains no certificates")
 		}
@@ -225,16 +236,17 @@ func (c *Client) RevokeOperator(ctx context.Context, credentialID string) error 
 	return c.do(ctx, http.MethodDelete, "/v1/operators/"+url.PathEscape(credentialID), nil, nil, true)
 }
 
-func (c *Client) CreateEnrollment(ctx context.Context, nodeID string, tenantIDs []string, ttl time.Duration) (Enrollment, error) {
+func (c *Client) CreateEnrollment(ctx context.Context, requestID, nodeID string, tenantIDs []string, ttl time.Duration) (Enrollment, error) {
 	if ttl < time.Second || ttl > 24*time.Hour || ttl%time.Second != 0 {
 		return Enrollment{}, errors.New("enrollment lifetime must be whole seconds between 1 second and 24 hours")
 	}
 	var enrollment Enrollment
 	err := c.do(ctx, http.MethodPost, "/v1/enrollments", struct {
+		RequestID  string   `json:"request_id"`
 		NodeID     string   `json:"node_id"`
 		TenantIDs  []string `json:"tenant_ids"`
 		TTLSeconds int64    `json:"ttl_seconds"`
-	}{NodeID: nodeID, TenantIDs: tenantIDs, TTLSeconds: int64(ttl / time.Second)}, &enrollment, true)
+	}{RequestID: requestID, NodeID: nodeID, TenantIDs: tenantIDs, TTLSeconds: int64(ttl / time.Second)}, &enrollment, true)
 	return enrollment, err
 }
 

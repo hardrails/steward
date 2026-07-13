@@ -193,6 +193,7 @@ func controlEnrollmentCreate(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("control enrollment create", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	common := addControlFlags(flags, true)
+	requestID := flags.String("request-id", "", "stable idempotency identity")
 	nodeID := flags.String("node-id", "", "node identity")
 	tenantList := flags.String("tenant-ids", "", "comma-separated tenant bindings")
 	validFor := flags.Duration("valid-for", 15*time.Minute, "one-time enrollment lifetime")
@@ -204,8 +205,8 @@ func controlEnrollmentCreate(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if *nodeID == "" || *output == "" || *validFor <= 0 || flags.NArg() != 0 {
-		return errors.New("control enrollment create requires node, tenants, positive validity, and output")
+	if *requestID == "" || *nodeID == "" || *output == "" || *validFor <= 0 || flags.NArg() != 0 {
+		return errors.New("control enrollment create requires request ID, node, tenants, positive validity, and output")
 	}
 	client, err := common.client(true)
 	if err != nil {
@@ -213,7 +214,7 @@ func controlEnrollmentCreate(arguments []string, stdout io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	enrollment, err := client.CreateEnrollment(ctx, *nodeID, tenantIDs, *validFor)
+	enrollment, err := client.CreateEnrollment(ctx, *requestID, *nodeID, tenantIDs, *validFor)
 	if err != nil {
 		return err
 	}

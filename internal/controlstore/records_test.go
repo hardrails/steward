@@ -245,6 +245,65 @@ func TestConcurrentIssueOperatorCreatesOneRecoverableCredential(t *testing.T) {
 	}
 }
 
+func TestEnrollmentIssuanceRetrySurvivesReopenAndBindsIssuer(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	operatorRaw, _, _, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, "tenant-a-operator", controlauth.RoleTenantOperator, "tenant-a", fixture.now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator, err := fixture.store.AuthenticateOperator(fixture.auth, operatorRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdAt := fixture.now.Add(2 * time.Minute)
+	raw, enrollment, _, created, err := fixture.store.CreateEnrollmentForRequest(
+		operator, fixture.auth, "node-a-enrollment", "node-a", []string{"tenant-a"}, createdAt.Add(15*time.Minute), createdAt,
+	)
+	if err != nil || !created || enrollment.IssueRequestID != "node-a-enrollment" || enrollment.IssuerCredentialID != operator.CredentialID {
+		t.Fatalf("first enrollment issuance = (%+v, %v, %v)", enrollment, created, err)
+	}
+	assertBearerNotPersisted(t, fixture.dir, raw)
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.store, err = Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fixture.store.Close() })
+	retryAt := createdAt.Add(time.Minute)
+	retriedRaw, retried, _, created, err := fixture.store.CreateEnrollmentForRequest(
+		operator, fixture.auth, "node-a-enrollment", "node-a", []string{"tenant-a"}, retryAt.Add(15*time.Minute), retryAt,
+	)
+	if err != nil || created || retriedRaw != raw || !enrollmentsEqual(retried, enrollment) {
+		t.Fatalf("reopened enrollment retry = (same_raw=%v, same_record=%v, created=%v, err=%v)",
+			retriedRaw == raw, enrollmentsEqual(retried, enrollment), created, err)
+	}
+	if _, _, _, _, err := fixture.store.CreateEnrollmentForRequest(
+		operator, fixture.auth, "node-a-enrollment", "node-a", []string{"tenant-a"}, retryAt.Add(10*time.Minute), retryAt,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed enrollment retry error = %v", err)
+	}
+	otherRaw, _, _, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, "tenant-a-operator-2", controlauth.RoleTenantOperator, "tenant-a", fixture.now.Add(3*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := fixture.store.AuthenticateOperator(fixture.auth, otherRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := fixture.store.CreateEnrollmentForRequest(
+		other, fixture.auth, "node-a-enrollment", "node-a", []string{"tenant-a"}, retryAt.Add(15*time.Minute), retryAt,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("different operator recovered an existing-node enrollment: %v", err)
+	}
+}
+
 func TestMultiTenantWorkflowFencesReportsAndRevokesCredentials(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")
@@ -294,6 +353,11 @@ func TestMultiTenantWorkflowFencesReportsAndRevokesCredentials(t *testing.T) {
 	storedNode, found, err := fixture.store.GetNode(fixture.admin, "tenant-a", "node-1")
 	if err != nil || !found || len(storedNode.Capabilities) != 0 {
 		t.Fatalf("node copy aliased state = (%+v, %v, %v)", storedNode, found, err)
+	}
+	if _, _, _, err := fixture.store.CreateEnrollment(
+		operator, fixture.auth, "node-1", []string{"tenant-a"}, fixture.now.Add(2*time.Hour), fixture.now.Add(3*time.Minute),
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("tenant operator re-enrolled an existing global node: %v", err)
 	}
 
 	commandRaw := signedCommand(t, "command-1", "tenant-a", "node-1", 0)

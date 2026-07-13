@@ -107,7 +107,7 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	}
 	output.Reset()
 	enrollmentArguments := append([]string{"control", "enrollment", "create"}, common...)
-	enrollmentArguments = append(enrollmentArguments, "-node-id", "node-1", "-tenant-ids", "tenant-a", "-out", enrollmentPath)
+	enrollmentArguments = append(enrollmentArguments, "-request-id", "enrollment-request-1", "-node-id", "node-1", "-tenant-ids", "tenant-a", "-out", enrollmentPath)
 	if err := run(enrollmentArguments, &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}

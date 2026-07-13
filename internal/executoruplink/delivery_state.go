@@ -150,6 +150,37 @@ func (s *DeliveryStore) NodeID() string {
 	return s.nodeID
 }
 
+// UnacknowledgedReports returns a deterministic, bounded batch of terminal
+// reports whose control-plane acknowledgement has not been persisted locally.
+// Callers must drain these reports before accepting more work: the controller
+// may have stored a report even when its HTTP response was lost, in which case
+// that terminal command will never be leased again to trigger a retry.
+func (s *DeliveryStore) UnacknowledgedReports(limit int) ([]controlprotocol.ExecutorReportV3, bool, error) {
+	if s == nil || limit <= 0 || limit > controlprotocol.MaxExecutorDeliveries {
+		return nil, false, errors.New("unacknowledged delivery report limit is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ids := make([]string, 0)
+	for id, record := range s.records {
+		if record.Phase == deliveryPhaseTerminal && record.Terminal != nil &&
+			record.SettledGeneration != record.DeliveryGeneration {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	more := len(ids) > limit
+	if more {
+		ids = ids[:limit]
+	}
+	reports := make([]controlprotocol.ExecutorReportV3, 0, len(ids))
+	for _, id := range ids {
+		reports = append(reports, *cloneExecutorReport(s.records[id].Terminal))
+	}
+	return reports, more, nil
+}
+
 // RecoverExecuting turns every pre-crash executing record into an explicit
 // ambiguous terminal result. Accepted records are safe to resume because the
 // executing transition is fsynced immediately before the local handler call.

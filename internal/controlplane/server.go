@@ -256,6 +256,7 @@ func (server *Server) enrollments(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	var input struct {
+		RequestID  string   `json:"request_id"`
 		NodeID     string   `json:"node_id"`
 		TenantIDs  []string `json:"tenant_ids"`
 		TTLSeconds int64    `json:"ttl_seconds"`
@@ -268,14 +269,19 @@ func (server *Server) enrollments(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusBadRequest, "invalid_request", "ttl_seconds must be between 1 and 86400")
 		return
 	}
-	raw, enrollment, _, err := server.store.CreateEnrollment(
-		identity, server.auth, input.NodeID, input.TenantIDs, now.Add(time.Duration(input.TTLSeconds)*time.Second), now,
+	raw, enrollment, _, created, err := server.store.CreateEnrollmentForRequest(
+		identity, server.auth, input.RequestID, input.NodeID, input.TenantIDs,
+		now.Add(time.Duration(input.TTLSeconds)*time.Second), now,
 	)
 	if err != nil {
 		server.storeError(writer, err, false)
 		return
 	}
-	writeJSON(writer, http.StatusCreated, struct {
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(writer, status, struct {
 		EnrollmentID    string   `json:"enrollment_id"`
 		EnrollmentToken string   `json:"enrollment_token"`
 		NodeID          string   `json:"node_id"`
@@ -614,16 +620,19 @@ func nodeView(node controlstore.Node) nodeResponse {
 }
 
 type commandResponse struct {
-	CommandID          string `json:"command_id"`
-	DeliveryID         string `json:"delivery_id"`
-	TenantID           string `json:"tenant_id"`
-	NodeID             string `json:"node_id"`
-	CommandDigest      string `json:"command_digest"`
-	State              string `json:"state"`
-	DeliveryGeneration uint64 `json:"delivery_generation,omitempty"`
-	LeaseExpiresAt     string `json:"lease_expires_at,omitempty"`
-	ReportedStatus     string `json:"reported_status,omitempty"`
-	ErrorCode          string `json:"error_code,omitempty"`
+	CommandID          string                                  `json:"command_id"`
+	DeliveryID         string                                  `json:"delivery_id"`
+	TenantID           string                                  `json:"tenant_id"`
+	NodeID             string                                  `json:"node_id"`
+	CommandDigest      string                                  `json:"command_digest"`
+	State              string                                  `json:"state"`
+	DeliveryGeneration uint64                                  `json:"delivery_generation,omitempty"`
+	LeaseExpiresAt     string                                  `json:"lease_expires_at,omitempty"`
+	TerminalStatus     string                                  `json:"terminal_status,omitempty"`
+	ReportedStatus     string                                  `json:"reported_status,omitempty"`
+	ErrorCode          string                                  `json:"error_code,omitempty"`
+	ClaimGeneration    *uint64                                 `json:"claim_generation,omitempty"`
+	Result             *controlprotocol.ExecutorReportResultV3 `json:"result,omitempty"`
 }
 
 func commandView(command controlstore.Command) commandResponse {
@@ -633,8 +642,13 @@ func commandView(command controlstore.Command) commandResponse {
 		DeliveryGeneration: command.DeliveryGeneration, LeaseExpiresAt: command.LeaseUntil,
 	}
 	if command.Terminal != nil {
+		claimGeneration := command.Terminal.Report.ClaimGeneration
+		result := command.Terminal.Report.Result
+		response.TerminalStatus = command.Terminal.Report.Status
 		response.ReportedStatus = command.Terminal.Report.ReportedStatus
 		response.ErrorCode = command.Terminal.Report.ErrorCode
+		response.ClaimGeneration = &claimGeneration
+		response.Result = &result
 	}
 	return response
 }

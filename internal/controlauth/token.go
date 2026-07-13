@@ -78,19 +78,21 @@ type Credential struct {
 // Enrollment is a durable one-time capability. An exact retry of the first
 // request_id reproduces the same node credential without storing its secret.
 type Enrollment struct {
-	Version      int      `json:"version"`
-	ID           string   `json:"id"`
-	TenantIDs    []string `json:"tenant_ids"`
-	NodeID       string   `json:"node_id"`
-	Audience     string   `json:"audience"`
-	TokenMAC     []byte   `json:"token_mac"`
-	CreatedAt    string   `json:"created_at"`
-	ExpiresAt    string   `json:"expires_at"`
-	RequestID    string   `json:"request_id,omitempty"`
-	CredentialID string   `json:"credential_id,omitempty"`
-	ConsumedAt   string   `json:"consumed_at,omitempty"`
-	Revoked      bool     `json:"revoked"`
-	RevokedAt    string   `json:"revoked_at,omitempty"`
+	Version            int      `json:"version"`
+	ID                 string   `json:"id"`
+	TenantIDs          []string `json:"tenant_ids"`
+	NodeID             string   `json:"node_id"`
+	Audience           string   `json:"audience"`
+	TokenMAC           []byte   `json:"token_mac"`
+	CreatedAt          string   `json:"created_at"`
+	ExpiresAt          string   `json:"expires_at"`
+	IssueRequestID     string   `json:"issue_request_id,omitempty"`
+	IssuerCredentialID string   `json:"issuer_credential_id,omitempty"`
+	RequestID          string   `json:"request_id,omitempty"`
+	CredentialID       string   `json:"credential_id,omitempty"`
+	ConsumedAt         string   `json:"consumed_at,omitempty"`
+	Revoked            bool     `json:"revoked"`
+	RevokedAt          string   `json:"revoked_at,omitempty"`
 }
 
 type Identity struct {
@@ -259,6 +261,32 @@ func (m *Manager) MintEnrollment(tenantIDs []string, nodeID string, expiresAt, n
 	return raw, enrollment, nil
 }
 
+// MintEnrollmentForRequest deterministically derives a recoverable enrollment
+// bearer for one operator credential and request identity. The durable store
+// retains only its keyed MAC and the fields needed to reproduce an exact retry.
+func (m *Manager) MintEnrollmentForRequest(requestID, issuerCredentialID string, tenantIDs []string, nodeID string, expiresAt, createdAt time.Time) (string, Enrollment, error) {
+	canonical, canonicalErr := CanonicalTenantIDs(tenantIDs)
+	if m == nil || canonicalErr != nil || !validIdentity(requestID, 128) ||
+		!validIdentity(issuerCredentialID, 128) || !validIdentity(nodeID, 128) || createdAt.IsZero() ||
+		!expiresAt.After(createdAt) || expiresAt.Sub(createdAt) > 24*time.Hour {
+		return "", Enrollment{}, errors.New("enrollment request requires bounded identities and a future lifetime no greater than 24 hours")
+	}
+	scopeFields := append([]string{issuerCredentialID, nodeID}, canonical...)
+	scopeFields = append(scopeFields, canonicalTime(createdAt), canonicalTime(expiresAt))
+	scope := strings.Join(scopeFields, "\x00")
+	idDigest := m.derive("enrollment-request-id", requestID, scope)
+	secret := m.derive("enrollment-request-secret", requestID, scope)
+	id := "enroll-" + hex.EncodeToString(idDigest[:16])
+	raw := enrollmentPrefix + "_" + id + "_" + base64.RawURLEncoding.EncodeToString(secret)
+	enrollment := Enrollment{
+		Version: enrollmentVersion, ID: id, TenantIDs: canonical, NodeID: nodeID, Audience: "executor",
+		CreatedAt: canonicalTime(createdAt), ExpiresAt: canonicalTime(expiresAt),
+		IssueRequestID: requestID, IssuerCredentialID: issuerCredentialID,
+	}
+	enrollment.TokenMAC = m.enrollmentMAC(raw, enrollment)
+	return raw, enrollment, nil
+}
+
 // Exchange deterministically derives one node credential. The caller must
 // persist returnedEnrollment and credential atomically before returning file.
 func (m *Manager) Exchange(raw, requestID string, now time.Time, enrollment Enrollment) (NodeCredentialFile, Credential, Enrollment, error) {
@@ -404,6 +432,10 @@ func ValidateEnrollment(enrollment Enrollment) error {
 	if createdErr != nil || expiresErr != nil || !expires.After(created) || expires.Sub(created) > 24*time.Hour {
 		return errors.New("invalid enrollment lifetime")
 	}
+	if (enrollment.IssueRequestID == "") != (enrollment.IssuerCredentialID == "") ||
+		enrollment.IssueRequestID != "" && (!validIdentity(enrollment.IssueRequestID, 128) || !validIdentity(enrollment.IssuerCredentialID, 128)) {
+		return errors.New("incomplete enrollment issuance identity")
+	}
 	if (enrollment.RequestID == "") != (enrollment.CredentialID == "") ||
 		(enrollment.RequestID == "") != (enrollment.ConsumedAt == "") {
 		return errors.New("incomplete enrollment consumption")
@@ -526,6 +558,12 @@ func (m *Manager) operatorMAC(raw string, credential Credential) []byte {
 func (m *Manager) enrollmentMAC(raw string, enrollment Enrollment) []byte {
 	fields := []string{enrollment.ID, enrollment.NodeID, enrollment.Audience, enrollment.CreatedAt, enrollment.ExpiresAt}
 	fields = append(fields, enrollment.TenantIDs...)
+	// Omitting issuance fields for random legacy enrollments preserves their
+	// existing MAC contract while binding every deterministic issuance retry to
+	// both its request identity and the operator credential that created it.
+	if enrollment.IssueRequestID != "" {
+		fields = append(fields, enrollment.IssueRequestID, enrollment.IssuerCredentialID)
+	}
 	return m.mac("enrollment", raw, fields...)
 }
 

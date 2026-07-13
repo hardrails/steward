@@ -20,7 +20,13 @@ import (
 	"github.com/hardrails/steward/internal/dsse"
 )
 
-func TestV3ReclaimResendsTerminalWithoutReexecutionAndAppliedFalseSettles(t *testing.T) {
+type v3RoundTripper func(*http.Request) (*http.Response, error)
+
+func (transport v3RoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+func TestV3ExplicitReportFailureRetriesBeforePollingAndAppliedFalseSettles(t *testing.T) {
 	fixture := newV3Fixture(t, 1)
 	var polls atomic.Int32
 	var localCalls atomic.Int32
@@ -29,12 +35,13 @@ func TestV3ReclaimResendsTerminalWithoutReexecutionAndAppliedFalseSettles(t *tes
 		switch r.URL.Path {
 		case "/executor-uplink/poll":
 			assertPollV3(t, r)
-			generation := uint64(polls.Add(1))
-			delivery := fixture.deliveries[0]
-			delivery.DeliveryGeneration = generation
+			deliveries := make([]json.RawMessage, 0, 1)
+			if polls.Add(1) == 1 {
+				deliveries = append(deliveries, mustJSON(t, fixture.deliveries[0]))
+			}
 			_ = json.NewEncoder(w).Encode(controlprotocol.ExecutorPollResponseV3{
 				ProtocolVersion: controlprotocol.ExecutorProtocolV3,
-				Deliveries:      []json.RawMessage{mustJSON(t, delivery)},
+				Deliveries:      deliveries,
 			})
 		case "/executor-uplink/report":
 			var report controlprotocol.ExecutorReportV3
@@ -67,12 +74,109 @@ func TestV3ReclaimResendsTerminalWithoutReexecutionAndAppliedFalseSettles(t *tes
 	if localCalls.Load() != 1 {
 		t.Fatalf("local calls=%d, command reexecuted after reclaim", localCalls.Load())
 	}
-	if len(reports) != 2 || reports[0].DeliveryGeneration != 1 || reports[1].DeliveryGeneration != 2 ||
+	if polls.Load() != 2 {
+		t.Fatalf("polls=%d, retry did not complete before the second poll", polls.Load())
+	}
+	if len(reports) != 2 || reports[0].DeliveryGeneration != 1 || reports[1].DeliveryGeneration != 1 ||
 		reports[0].Status != controlprotocol.ExecutorStatusDone || reports[1].Status != reports[0].Status {
 		t.Fatalf("reports=%#v", reports)
 	}
 	record := fixture.deliveryStore.records[fixture.deliveries[0].DeliveryID]
-	if record.SettledGeneration != 2 || record.Phase != deliveryPhaseTerminal {
+	if record.SettledGeneration != 1 || record.Phase != deliveryPhaseTerminal {
+		t.Fatalf("retained record=%#v", record)
+	}
+}
+
+func TestV3RetriesTerminalWhenControllerStoresReportButResponseIsLost(t *testing.T) {
+	fixture := newV3Fixture(t, 1)
+	var polls atomic.Int32
+	var reportCalls atomic.Int32
+	var localCalls atomic.Int32
+	var controllerTerminal atomic.Bool
+	reports := make(chan controlprotocol.ExecutorReportV3, 4)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/executor-uplink/poll":
+			polls.Add(1)
+			assertPollV3(t, r)
+			deliveries := make([]json.RawMessage, 0, 1)
+			if !controllerTerminal.Load() {
+				deliveries = append(deliveries, mustJSON(t, fixture.deliveries[0]))
+			}
+			_ = json.NewEncoder(w).Encode(controlprotocol.ExecutorPollResponseV3{
+				ProtocolVersion: controlprotocol.ExecutorProtocolV3,
+				Deliveries:      deliveries,
+			})
+		case "/executor-uplink/report":
+			var report controlprotocol.ExecutorReportV3
+			if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+				t.Error(err)
+				return
+			}
+			reports <- report
+			call := reportCalls.Add(1)
+			controllerTerminal.Store(true)
+			_ = json.NewEncoder(w).Encode(controlprotocol.ExecutorReportResponseV3{
+				ProtocolVersion: controlprotocol.ExecutorProtocolV3,
+				Applied:         call == 1,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	baseTransport := server.Client().Transport
+	var responseDropped atomic.Bool
+	client := &http.Client{Transport: v3RoundTripper(func(request *http.Request) (*http.Response, error) {
+		response, err := baseTransport.RoundTrip(request)
+		if err != nil || request.URL.Path != "/executor-uplink/report" || !responseDropped.CompareAndSwap(false, true) {
+			return response, err
+		}
+		_, readErr := io.Copy(io.Discard, response.Body)
+		closeErr := response.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		return nil, io.ErrUnexpectedEOF
+	})}
+	local := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		localCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "running"})
+	})
+	config := fixture.config(server, local)
+	config.HTTPClient = client
+	poller, err := NewPoller(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := poller.pollOnce(context.Background()); err == nil {
+		t.Fatal("lost terminal response returned nil")
+	}
+	if !controllerTerminal.Load() {
+		t.Fatal("test controller did not store the terminal report")
+	}
+	if record := fixture.deliveryStore.records[fixture.deliveries[0].DeliveryID]; record.SettledGeneration != 0 {
+		t.Fatalf("report was settled without an acknowledgement: %#v", record)
+	}
+	if err := poller.pollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if polls.Load() != 2 || reportCalls.Load() != 2 || localCalls.Load() != 1 {
+		t.Fatalf("polls=%d reports=%d local calls=%d", polls.Load(), reportCalls.Load(), localCalls.Load())
+	}
+	if len(reports) != 2 {
+		t.Fatalf("received reports=%d, want 2", len(reports))
+	}
+	first, second := <-reports, <-reports
+	if first != second || first.Status != controlprotocol.ExecutorStatusDone {
+		t.Fatalf("retried report changed: first=%#v second=%#v", first, second)
+	}
+	record := fixture.deliveryStore.records[fixture.deliveries[0].DeliveryID]
+	if record.SettledGeneration != 1 || record.Phase != deliveryPhaseTerminal {
 		t.Fatalf("retained record=%#v", record)
 	}
 }

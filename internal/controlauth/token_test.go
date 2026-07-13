@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -184,6 +185,37 @@ func TestEnrollmentRejectsDuplicateBindingsAndTampering(t *testing.T) {
 	unsortedCredential.TenantIDs = []string{"tenant-b", "tenant-a"}
 	if _, err := manager.AuthenticateNode(file.Credential, unsortedCredential); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("unordered durable binding error = %v", err)
+	}
+}
+
+func TestEnrollmentIssuanceRequestIsDeterministicAndIssuerBound(t *testing.T) {
+	manager, err := New(bytes.Repeat([]byte{0x71}, KeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	raw, enrollment, err := manager.MintEnrollmentForRequest(
+		"enrollment-request-1", "operator-a", []string{"tenant-b", "tenant-a"}, "node-a", now.Add(time.Hour), now,
+	)
+	if err != nil || ValidateEnrollment(enrollment) != nil {
+		t.Fatalf("deterministic enrollment = (%+v, %v)", enrollment, err)
+	}
+	retriedRaw, retried, err := manager.MintEnrollmentForRequest(
+		"enrollment-request-1", "operator-a", []string{"tenant-a", "tenant-b"}, "node-a", now.Add(time.Hour), now,
+	)
+	if err != nil || retriedRaw != raw || !reflect.DeepEqual(retried, enrollment) {
+		t.Fatalf("exact issuance retry changed output: same_raw=%v same_record=%v error=%v", retriedRaw == raw, reflect.DeepEqual(retried, enrollment), err)
+	}
+	otherRaw, _, err := manager.MintEnrollmentForRequest(
+		"enrollment-request-1", "operator-b", []string{"tenant-a", "tenant-b"}, "node-a", now.Add(time.Hour), now,
+	)
+	if err != nil || otherRaw == raw {
+		t.Fatalf("issuer binding did not change the capability: same=%v error=%v", otherRaw == raw, err)
+	}
+	tampered := enrollment
+	tampered.IssuerCredentialID = "operator-b"
+	if _, _, _, err := manager.Exchange(raw, "exchange-1", now.Add(time.Minute), tampered); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("tampered issuer binding error = %v", err)
 	}
 }
 

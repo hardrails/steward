@@ -90,12 +90,22 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 		`{"request_id":"operator-request-1","role":"site_admin"}`), http.StatusConflict, "conflict")
 
 	response = fixture.request(t, http.MethodPost, "/v1/enrollments", operator.Token,
-		`{"node_id":"node-1","tenant_ids":["tenant-a"],"ttl_seconds":900}`)
+		`{"request_id":"enrollment-request-1","node_id":"node-1","tenant_ids":["tenant-a"],"ttl_seconds":900}`)
 	requireStatus(t, response, http.StatusCreated)
 	var enrollment struct {
 		EnrollmentToken string `json:"enrollment_token"`
 	}
 	decodeResponse(t, response, &enrollment)
+	response = fixture.request(t, http.MethodPost, "/v1/enrollments", operator.Token,
+		`{"request_id":"enrollment-request-1","node_id":"node-1","tenant_ids":["tenant-a"],"ttl_seconds":900}`)
+	requireStatus(t, response, http.StatusOK)
+	var retriedEnrollment struct {
+		EnrollmentToken string `json:"enrollment_token"`
+	}
+	decodeResponse(t, response, &retriedEnrollment)
+	if retriedEnrollment.EnrollmentToken != enrollment.EnrollmentToken {
+		t.Fatal("exact enrollment issuance retry changed its bearer")
+	}
 	response = fixture.request(t, http.MethodPost, "/v1/enroll", "",
 		mustJSON(t, map[string]string{"enrollment_token": enrollment.EnrollmentToken, "request_id": "request-1"}))
 	requireStatus(t, response, http.StatusCreated)
@@ -169,7 +179,9 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	requireStatus(t, response, http.StatusOK)
 	var terminal commandResponse
 	decodeResponse(t, response, &terminal)
-	if terminal.State != string(controlstore.CommandTerminal) || terminal.ReportedStatus != "success" {
+	if terminal.State != string(controlstore.CommandTerminal) || terminal.TerminalStatus != controlprotocol.ExecutorStatusDone ||
+		terminal.ReportedStatus != "success" || terminal.ClaimGeneration == nil || *terminal.ClaimGeneration != 1 ||
+		terminal.Result == nil || terminal.Result.RuntimeRef != "runtime-1" {
 		t.Fatalf("terminal command status was not retained: %+v", terminal)
 	}
 

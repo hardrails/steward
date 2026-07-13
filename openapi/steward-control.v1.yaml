@@ -266,7 +266,9 @@ paths:
       description: |
         A tenant operator may bind one node to its own tenant. A site
         administrator may bind a node to multiple tenants. The capability
-        expires within 24 hours and is shown once.
+        expires within 24 hours. An exact `request_id` retry by the same
+        operator credential reproduces the bearer after an interrupted response;
+        changing the node, tenant set, or lifetime returns 409.
       requestBody:
         required: true
         content:
@@ -274,6 +276,12 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateEnrollmentRequest"
       responses:
+        "200":
+          description: An exact issuance retry returned the retained enrollment capability.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Enrollment"
         "201":
           description: A new enrollment capability was issued.
           content:
@@ -813,8 +821,10 @@ components:
     CreateEnrollmentRequest:
       type: object
       additionalProperties: false
-      required: [node_id, tenant_ids, ttl_seconds]
+      required: [request_id, node_id, tenant_ids, ttl_seconds]
       properties:
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
         node_id:
           $ref: "#/components/schemas/Identifier128"
         tenant_ids:
@@ -958,10 +968,27 @@ components:
         lease_expires_at:
           type: string
           format: date-time
+        terminal_status:
+          type: string
+          enum: [done, failed, rejected, outcome_unknown]
+          description: Node delivery outcome. Present only after the command becomes terminal.
         reported_status:
           type: string
+          maxLength: 64
+          description: Node-local workload status. Present only after the command becomes terminal.
         error_code:
           type: string
+          maxLength: 128
+          description: Stable node error classification when one was reported.
+        claim_generation:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Signed lifecycle fence observed by the node. Present only after the command becomes terminal.
+        result:
+          allOf:
+            - $ref: "#/components/schemas/ExecutorReportResult"
+          description: Bounded node result details. Present only after the command becomes terminal.
     ExecutorPollRequest:
       type: object
       additionalProperties: false

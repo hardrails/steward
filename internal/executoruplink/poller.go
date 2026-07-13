@@ -231,6 +231,15 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 		credential.TenantID != p.expected.TenantID || credential.NodeID != p.expected.NodeID {
 		return errors.New("rotated uplink credential changed version, scope, tenant_id, or node_id; refusing it")
 	}
+	if p.protocolVersion == controlprotocol.ExecutorProtocolV3 {
+		drained, err := p.retryUnacknowledgedReportsV3(ctx, credential.Credential)
+		if err != nil {
+			return err
+		}
+		if !drained {
+			return nil
+		}
+	}
 	requestBody := []byte(`{}`)
 	if credential.NodeScoped() {
 		if p.protocolVersion == controlprotocol.ExecutorProtocolV3 {
@@ -297,6 +306,23 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (p *Poller) retryUnacknowledgedReportsV3(ctx context.Context, credential string) (bool, error) {
+	reports, more, err := p.deliveryState.UnacknowledgedReports(maxCommandsPerPoll)
+	if err != nil {
+		return false, fmt.Errorf("list unacknowledged executor reports: %w", err)
+	}
+	var failures []error
+	for index, report := range reports {
+		if err := p.sendReportV3(ctx, credential, report); err != nil {
+			failures = append(failures, fmt.Errorf("retry terminal report %d: %w", index, err))
+		}
+	}
+	if err := errors.Join(failures...); err != nil {
+		return false, err
+	}
+	return !more, nil
 }
 
 func (p *Poller) processPollV3(ctx context.Context, credential *stewarduplink.Credential, raw []byte) error {

@@ -70,6 +70,53 @@ func TestDeliveryStoreReclaimResendsTerminalWithoutExecution(t *testing.T) {
 	}
 }
 
+func TestDeliveryStoreListsBoundedUnacknowledgedReportsDeterministically(t *testing.T) {
+	store := newDeliveryStore(t, filepath.Join(t.TempDir(), "deliveries.json"))
+	for _, deliveryID := range []string{"delivery-c", "delivery-a", "delivery-b", "delivery-settled"} {
+		delivery := deliveryFixture(deliveryID, 1)
+		delivery.CommandID = "command-" + deliveryID
+		if decision, _, err := store.Accept(delivery); err != nil || decision != deliveryExecute {
+			t.Fatalf("accept %s: decision=%v err=%v", deliveryID, decision, err)
+		}
+		if err := store.MarkExecuting(deliveryID); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.MarkTerminal(reportFixture(delivery, controlprotocol.ExecutorStatusDone)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Settle("delivery-settled", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	reports, more, err := store.UnacknowledgedReports(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !more || len(reports) != 2 || reports[0].DeliveryID != "delivery-a" || reports[1].DeliveryID != "delivery-b" {
+		t.Fatalf("reports=%#v more=%v", reports, more)
+	}
+	reports[0].CommandID = "mutated-copy"
+	if store.records["delivery-a"].Terminal.CommandID == "mutated-copy" {
+		t.Fatal("returned report aliases durable delivery state")
+	}
+	for _, report := range reports {
+		if err := store.Settle(report.DeliveryID, report.DeliveryGeneration); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reports, more, err = store.UnacknowledgedReports(2)
+	if err != nil || more || len(reports) != 1 || reports[0].DeliveryID != "delivery-c" {
+		t.Fatalf("remaining reports=%#v more=%v err=%v", reports, more, err)
+	}
+	if _, _, err := store.UnacknowledgedReports(0); err == nil {
+		t.Fatal("zero report limit was accepted")
+	}
+	if _, _, err := store.UnacknowledgedReports(controlprotocol.MaxExecutorDeliveries + 1); err == nil {
+		t.Fatal("report limit above the protocol bound was accepted")
+	}
+}
+
 func TestDeliveryStoreRejectsIdentityReuseAndStaleGeneration(t *testing.T) {
 	store := newDeliveryStore(t, filepath.Join(t.TempDir(), "deliveries.json"))
 	delivery := deliveryFixture("delivery-1", 2)

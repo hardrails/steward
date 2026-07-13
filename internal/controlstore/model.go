@@ -155,19 +155,21 @@ type storedCredential struct {
 }
 
 type storedEnrollment struct {
-	Version        int      `json:"version"`
-	ID             string   `json:"id"`
-	TenantIDs      []string `json:"tenant_ids"`
-	NodeID         string   `json:"node_id"`
-	Audience       string   `json:"audience"`
-	TokenMACBase64 string   `json:"token_mac_base64"`
-	CreatedAt      string   `json:"created_at"`
-	ExpiresAt      string   `json:"expires_at"`
-	RequestID      string   `json:"request_id,omitempty"`
-	CredentialID   string   `json:"credential_id,omitempty"`
-	ConsumedAt     string   `json:"consumed_at,omitempty"`
-	Revoked        bool     `json:"revoked"`
-	RevokedAt      string   `json:"revoked_at,omitempty"`
+	Version            int      `json:"version"`
+	ID                 string   `json:"id"`
+	TenantIDs          []string `json:"tenant_ids"`
+	NodeID             string   `json:"node_id"`
+	Audience           string   `json:"audience"`
+	TokenMACBase64     string   `json:"token_mac_base64"`
+	CreatedAt          string   `json:"created_at"`
+	ExpiresAt          string   `json:"expires_at"`
+	IssueRequestID     string   `json:"issue_request_id,omitempty"`
+	IssuerCredentialID string   `json:"issuer_credential_id,omitempty"`
+	RequestID          string   `json:"request_id,omitempty"`
+	CredentialID       string   `json:"credential_id,omitempty"`
+	ConsumedAt         string   `json:"consumed_at,omitempty"`
+	Revoked            bool     `json:"revoked"`
+	RevokedAt          string   `json:"revoked_at,omitempty"`
 }
 
 type storedCommand struct {
@@ -304,7 +306,8 @@ func enrollmentToStored(enrollment controlauth.Enrollment) storedEnrollment {
 		Version: enrollment.Version, ID: enrollment.ID, TenantIDs: append([]string(nil), enrollment.TenantIDs...),
 		NodeID: enrollment.NodeID, Audience: enrollment.Audience,
 		TokenMACBase64: base64.StdEncoding.EncodeToString(enrollment.TokenMAC), CreatedAt: enrollment.CreatedAt,
-		ExpiresAt: enrollment.ExpiresAt, RequestID: enrollment.RequestID, CredentialID: enrollment.CredentialID,
+		ExpiresAt: enrollment.ExpiresAt, IssueRequestID: enrollment.IssueRequestID, IssuerCredentialID: enrollment.IssuerCredentialID,
+		RequestID: enrollment.RequestID, CredentialID: enrollment.CredentialID,
 		ConsumedAt: enrollment.ConsumedAt, Revoked: enrollment.Revoked, RevokedAt: enrollment.RevokedAt,
 	}
 }
@@ -317,7 +320,8 @@ func enrollmentFromStored(stored storedEnrollment) (controlauth.Enrollment, erro
 	return controlauth.Enrollment{
 		Version: stored.Version, ID: stored.ID, TenantIDs: append([]string(nil), stored.TenantIDs...),
 		NodeID: stored.NodeID, Audience: stored.Audience, TokenMAC: mac, CreatedAt: stored.CreatedAt,
-		ExpiresAt: stored.ExpiresAt, RequestID: stored.RequestID, CredentialID: stored.CredentialID,
+		ExpiresAt: stored.ExpiresAt, IssueRequestID: stored.IssueRequestID, IssuerCredentialID: stored.IssuerCredentialID,
+		RequestID: stored.RequestID, CredentialID: stored.CredentialID,
 		ConsumedAt: stored.ConsumedAt, Revoked: stored.Revoked, RevokedAt: stored.RevokedAt,
 	}, nil
 }
@@ -686,6 +690,7 @@ func validateState(current state, limits Limits) error {
 		}
 	}
 	enrollmentsByTenant := make(map[string]int)
+	enrollmentRequests := make(map[string]string)
 	for key, enrollment := range current.enrollments {
 		if key != enrollment.ID || controlauth.ValidateEnrollment(enrollment) != nil {
 			return errors.New("control state contains an invalid enrollment")
@@ -698,6 +703,17 @@ func validateState(current state, limits Limits) error {
 			if _, ok := current.credentials[enrollment.CredentialID]; !ok {
 				return errors.New("consumed enrollment references an unknown credential")
 			}
+		}
+		if enrollment.IssueRequestID != "" {
+			issuer, ok := current.credentials[enrollment.IssuerCredentialID]
+			if !ok || issuer.Kind != controlauth.KindOperator {
+				return errors.New("enrollment issuance references an unknown operator credential")
+			}
+			requestKey := enrollment.IssuerCredentialID + "\x00" + enrollment.IssueRequestID
+			if existingID, exists := enrollmentRequests[requestKey]; exists && existingID != enrollment.ID {
+				return errors.New("control state contains a duplicate enrollment request identity")
+			}
+			enrollmentRequests[requestKey] = enrollment.ID
 		}
 		for _, tenantID := range enrollment.TenantIDs {
 			enrollmentsByTenant[tenantID]++

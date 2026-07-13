@@ -338,36 +338,87 @@ func (store *Store) RevokeNode(actor controlauth.Identity, nodeID string, now ti
 }
 
 func (store *Store) CreateEnrollment(actor controlauth.Identity, auth *controlauth.Manager, nodeID string, tenantIDs []string, expiresAt, now time.Time) (string, controlauth.Enrollment, Node, error) {
-	if store == nil {
-		return "", controlauth.Enrollment{}, Node{}, ErrUnavailable
-	}
-	if auth == nil {
-		return "", controlauth.Enrollment{}, Node{}, ErrUnavailable
+	raw, enrollment, node, _, err := store.createEnrollment(actor, auth, "", nodeID, tenantIDs, expiresAt, now)
+	return raw, enrollment, node, err
+}
+
+// CreateEnrollmentForRequest makes secret-bearing enrollment issuance
+// recoverable after an ambiguous response loss. An exact retry by the same
+// operator credential returns the same bearer and record; a changed scope or
+// lifetime conflicts instead of minting another live capability.
+func (store *Store) CreateEnrollmentForRequest(actor controlauth.Identity, auth *controlauth.Manager, requestID, nodeID string, tenantIDs []string, expiresAt, now time.Time) (string, controlauth.Enrollment, Node, bool, error) {
+	return store.createEnrollment(actor, auth, requestID, nodeID, tenantIDs, expiresAt, now)
+}
+
+func (store *Store) createEnrollment(actor controlauth.Identity, auth *controlauth.Manager, issueRequestID, nodeID string, tenantIDs []string, expiresAt, now time.Time) (string, controlauth.Enrollment, Node, bool, error) {
+	if store == nil || auth == nil {
+		return "", controlauth.Enrollment{}, Node{}, false, ErrUnavailable
 	}
 	canonical, err := controlauth.CanonicalTenantIDs(tenantIDs)
 	if err != nil || !validRecordID(nodeID, 128) || now.IsZero() || !expiresAt.After(now) || expiresAt.Sub(now) > 24*time.Hour {
-		return "", controlauth.Enrollment{}, Node{}, invalid("enrollment node, tenant set, or lifetime is invalid")
+		return "", controlauth.Enrollment{}, Node{}, false, invalid("enrollment node, tenant set, or lifetime is invalid")
+	}
+	if issueRequestID != "" && (!validRecordID(issueRequestID, 128) || !validRecordID(actor.CredentialID, 128)) {
+		return "", controlauth.Enrollment{}, Node{}, false, invalid("enrollment issuance request identity is invalid")
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
-		return "", controlauth.Enrollment{}, Node{}, err
+		return "", controlauth.Enrollment{}, Node{}, false, err
 	}
 	for _, tenantID := range canonical {
 		if !controlauth.AuthorizedTenant(actor, tenantID) {
-			return "", controlauth.Enrollment{}, Node{}, ErrNotFound
+			return "", controlauth.Enrollment{}, Node{}, false, ErrNotFound
 		}
 		tenant, ok := store.current.tenants[tenantID]
 		if !ok || !tenant.Active {
-			return "", controlauth.Enrollment{}, Node{}, ErrNotFound
+			return "", controlauth.Enrollment{}, Node{}, false, ErrNotFound
+		}
+	}
+	if issueRequestID != "" {
+		for _, existing := range store.current.enrollments {
+			if existing.IssueRequestID != issueRequestID || existing.IssuerCredentialID != actor.CredentialID {
+				continue
+			}
+			created, createdErr := parseTimestamp(existing.CreatedAt)
+			expires, expiresErr := parseTimestamp(existing.ExpiresAt)
+			if createdErr != nil || expiresErr != nil || existing.Revoked || existing.NodeID != nodeID ||
+				!equalStrings(existing.TenantIDs, canonical) || expires.Sub(created) != expiresAt.Sub(now) {
+				return "", controlauth.Enrollment{}, Node{}, false, ErrConflict
+			}
+			raw, derived, mintErr := auth.MintEnrollmentForRequest(
+				issueRequestID, actor.CredentialID, existing.TenantIDs, existing.NodeID, expires, created,
+			)
+			if mintErr != nil {
+				return "", controlauth.Enrollment{}, Node{}, false, mintErr
+			}
+			unconsumed := cloneEnrollment(existing)
+			unconsumed.RequestID, unconsumed.CredentialID, unconsumed.ConsumedAt = "", "", ""
+			if !enrollmentsEqual(unconsumed, derived) {
+				return "", controlauth.Enrollment{}, Node{}, false, ErrConflict
+			}
+			node, ok := store.current.nodes[existing.NodeID]
+			if !ok || !node.Active || !tenantSubset(existing.TenantIDs, node.TenantIDs) {
+				return "", controlauth.Enrollment{}, Node{}, false, ErrConflict
+			}
+			return raw, cloneEnrollment(existing), projectNode(node, actor, canonical[0]), false, nil
 		}
 	}
 	if err := store.reclaimExpiredEnrollmentsLocked(now, 2); err != nil {
-		return "", controlauth.Enrollment{}, Node{}, err
+		return "", controlauth.Enrollment{}, Node{}, false, err
 	}
 	node, exists := store.current.nodes[nodeID]
 	if exists && !node.Active {
-		return "", controlauth.Enrollment{}, Node{}, ErrConflict
+		return "", controlauth.Enrollment{}, Node{}, false, ErrConflict
+	}
+	// Node IDs are global fleet identities. A tenant-scoped operator may claim a
+	// new ID for its own tenant, but only a site administrator may issue another
+	// enrollment for an existing node or extend that node's tenant bindings.
+	// Without this gate, a second tenant could attach itself to an unrelated
+	// node ID and use a separately exchanged credential to overwrite the shared
+	// node's capabilities and last-seen observation.
+	if exists && !controlauth.IsSiteAdmin(actor) {
+		return "", controlauth.Enrollment{}, Node{}, false, ErrNotFound
 	}
 	if !exists {
 		node = Node{
@@ -377,15 +428,21 @@ func (store *Store) CreateEnrollment(actor controlauth.Identity, auth *controlau
 	} else {
 		node.TenantIDs = unionTenantIDs(node.TenantIDs, canonical)
 	}
-	raw, enrollment, err := auth.MintEnrollment(canonical, nodeID, expiresAt, now)
+	var raw string
+	var enrollment controlauth.Enrollment
+	if issueRequestID == "" {
+		raw, enrollment, err = auth.MintEnrollment(canonical, nodeID, expiresAt, now)
+	} else {
+		raw, enrollment, err = auth.MintEnrollmentForRequest(issueRequestID, actor.CredentialID, canonical, nodeID, expiresAt, now)
+	}
 	if err != nil {
-		return "", controlauth.Enrollment{}, Node{}, err
+		return "", controlauth.Enrollment{}, Node{}, false, err
 	}
 	mutations := []mutation{{Kind: mutationNode, Node: &node}, enrollmentMutation(enrollment)}
 	if err := store.applyMutationsLocked(mutations...); err != nil {
-		return "", controlauth.Enrollment{}, Node{}, err
+		return "", controlauth.Enrollment{}, Node{}, false, err
 	}
-	return raw, cloneEnrollment(enrollment), projectNode(node, actor, canonical[0]), nil
+	return raw, cloneEnrollment(enrollment), projectNode(node, actor, canonical[0]), true, nil
 }
 
 func (store *Store) ExchangeEnrollment(auth *controlauth.Manager, raw, requestID string, now time.Time) (controlauth.NodeCredentialFile, error) {
@@ -940,6 +997,7 @@ func credentialsEqual(left, right controlauth.Credential) bool {
 func enrollmentsEqual(left, right controlauth.Enrollment) bool {
 	return left.Version == right.Version && left.ID == right.ID && equalStrings(left.TenantIDs, right.TenantIDs) &&
 		left.NodeID == right.NodeID && left.Audience == right.Audience && bytes.Equal(left.TokenMAC, right.TokenMAC) &&
+		left.IssueRequestID == right.IssueRequestID && left.IssuerCredentialID == right.IssuerCredentialID &&
 		left.CreatedAt == right.CreatedAt && left.ExpiresAt == right.ExpiresAt && left.RequestID == right.RequestID &&
 		left.CredentialID == right.CredentialID && left.ConsumedAt == right.ConsumedAt && left.Revoked == right.Revoked &&
 		left.RevokedAt == right.RevokedAt
