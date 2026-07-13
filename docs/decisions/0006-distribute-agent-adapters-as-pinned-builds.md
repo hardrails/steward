@@ -64,6 +64,27 @@ proves only the declared contract and capabilities for that exact image. It does
 not certify arbitrary upstream plugins, skills, MCP servers, channels, or future
 commits.
 
+## Current qualified application
+
+The Hermes Agent adapter applies this decision to upstream commit
+`095b9eed3801c251796df93f48a8f2a527ff6e70`. Steward builds it from source rather
+than deriving from the official image, which starts as root and declares a volume.
+The packaged builder accepts the exact online pin or an exact checkout supplied with
+`--source-dir`, then emits an OCI archive and metadata attestation for the local
+output.
+
+The qualification proof ran the hardened non-root image under gVisor, performed a
+bounded `/opt/data/workspace` inventory through the signed
+`steward.workspace-audit` skill, restarted the container with retained state, and
+ran the skill again. Its service contract exposes only negotiation, health, run
+submission, and run status on port `8766`; run event streams are excluded.
+Inference is fixed through `http://steward-relay:8080/v1`.
+
+Steward does not redistribute the resulting Hermes image because dependency and
+base-image notices are incomplete. This legal and supply-chain gate remains separate
+from the runtime qualification. OpenClaw has not passed this qualification and
+remains a layout contract.
+
 ## Rejected alternatives
 
 - **Run official images unchanged.** Their defaults are not evidence that Steward's

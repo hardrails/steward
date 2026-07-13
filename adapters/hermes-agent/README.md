@@ -1,8 +1,8 @@
-# Hermes Agent feasibility adapter
+# Hermes Agent adapter
 
-This directory contains Steward's independently maintained feasibility adapter for
-Hermes Agent. It is not an upstream image and it is not a claim that arbitrary
-Hermes releases work under Steward.
+This directory contains Steward's independently maintained, exact-pinned adapter
+for Hermes Agent. It is not an upstream image and it does not qualify arbitrary
+Hermes releases, plugins, channels, skills, or configuration.
 
 The build consumes an already-present checkout of the exact upstream revision
 recorded in `adapter.json`. `scripts/hermes-feasibility.sh` exports that checkout
@@ -30,11 +30,21 @@ queue. Run event streams are deliberately not exposed by this first service
 surface. The bridge runs inside the isolated Hermes adapter container under
 gVisor; it is not part of the Steward host process.
 
+Production state does not enable an external MCP server. The qualification harness
+can enable the fixed `fixture_echo` MCP service with
+`STEWARD_HERMES_QUALIFICATION_MCP=enabled`; Executor never injects that variable.
+This keeps a test-only dependency from blocking normal startup or becoming an
+undeclared production capability.
+
 The pinned build selects upstream's `mcp` extra and its `homeassistant` extra. At
 this revision, the latter is the smallest locked extra that supplies `aiohttp`,
 which the native API-server adapter requires. No Home Assistant integration is
 configured or granted at runtime.
 
-Passing this feasibility gate proves only the capabilities enumerated in the
-generated evidence. Full release qualification still requires the later
-conformance, recovery, channel, quota, and Gateway-grant tests.
+Qualification passed two independent paths. The closed-runtime gate built the exact
+source, ran the basic task, signed workspace-audit skill, qualification-only MCP
+fixture, and restart under gVisor. The Steward integration gate then imported the
+archive through signed admission, brokered inference and the service API through
+Gateway, ran the workspace skill, destroyed and resumed the workload, ran the skill
+again, purged its state, and verified the signed receipt chain. These proofs remain
+limited to the exact pinned inputs and documented capability surface.

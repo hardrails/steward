@@ -15,8 +15,9 @@ runs hardened Docker/gVisor workloads through a separate Executor.
 ## Is Steward an agent framework?
 
 No. Agent runtimes are packaged as Open Container Initiative (OCI) images. Steward
-provides lifecycle, isolation, and remote control beneath them. Its Hermes Agent
-and OpenClaw layout contracts still require separately validated adapters.
+provides lifecycle, isolation, and remote control beneath them. Steward includes one
+qualified, exact-pinned Hermes Agent adapter definition. OpenClaw remains a layout
+contract that requires a separately qualified adapter.
 
 ## Does Steward require a particular control plane?
 
@@ -65,13 +66,22 @@ outside the node-local receipt trust boundary.
 
 ## Can Steward run Hermes Agent or OpenClaw?
 
-Not directly from the official images. No Steward-maintained adapter has completed
-the end-to-end acceptance process. The current Hermes image conflicts with
-Steward's fixed-user and no-declared-volume policy. OpenClaw still needs review of
-its user ID, state initialization, and application-level authentication.
-See the [Hermes]({{ '/guides/hermes-agent/' | relative_url }}) and
-[OpenClaw]({{ '/guides/openclaw/' | relative_url }}) guides before signing an
-operator-built adapter.
+Steward can run its qualified, source-built Hermes adapter for exact upstream commit
+`095b9eed3801c251796df93f48a8f2a527ff6e70`. The official Hermes image is still not
+admissible because it starts as root and declares a volume. Steward includes an
+interactive and non-interactive builder; it does not redistribute a prebuilt image
+because dependency and base-image notices are incomplete.
+
+The Hermes qualification ran a signed, network-free workspace-audit skill as a real
+task under gVisor and repeated it after restart. The service exposes negotiation,
+health, run submission, and run status on port `8766`, but not run event streams.
+Inference is fixed through `http://steward-relay:8080/v1`. Persistent state requires
+the explicit dedicated single-tenant host mode and is not a shared-host claim.
+
+OpenClaw has not completed this qualification and remains a layout contract. See the
+[Hermes]({{ '/guides/hermes-agent/' | relative_url }}) and
+[OpenClaw]({{ '/guides/openclaw/' | relative_url }}) guides before signing an exact
+adapter archive.
 
 ## Can Terraform manage Steward?
 

@@ -131,6 +131,32 @@ Gateway configuration requires an explicit loopback service address with a numer
 port from 1 through 65535. Missing, zero, out-of-range, and named service ports fail
 both `-check-config` and startup.
 
+## Hermes adapter qualification boundary
+
+Steward's Hermes qualification applies only to upstream commit
+`095b9eed3801c251796df93f48a8f2a527ff6e70`, the checked-in adapter definition, and
+the documented runtime contract. The proof ran a source-built, non-root image under
+gVisor, submitted useful work through Hermes's run API, verified the signed
+`steward.workspace-audit` result, restarted the container with its retained state,
+and ran the skill again.
+
+This does not qualify the official upstream image, another Hermes commit, arbitrary
+plugins, channels, skills, MCP servers, or run event streams. The service bridge
+allows only negotiation, health, `POST /v1/runs`, and `GET /v1/runs/{run_id}` on
+port `8766`. Inference is fixed through
+`http://steward-relay:8080/v1`.
+
+Steward distributes the pinned build definition and builder, not a prebuilt Hermes
+OCI archive. Dependency and base-image notices are incomplete, so redistribution
+remains blocked. A locally produced archive and its metadata attestation still
+require operator authentication, inspection, policy authorization, and signing.
+The attestation records build inputs and output digests; it is not a signature or a
+new runtime proof.
+
+Hermes state uses the same unquotaed Docker volume as any other persistent Steward
+workload. It requires the explicit dedicated single-tenant host mode and does not
+extend Steward's shared-host isolation claim to persistent state.
+
 ## Release transitions require a drained node
 
 Steward does not upgrade or roll back in place while workloads or grants remain.
@@ -155,7 +181,10 @@ execution boundary beneath a retained workload.
 - Writable image root filesystems
 - Interactive terminal/exec sessions
 - Image pulling or registry authentication
-- Validated, Steward-maintained Hermes Agent or OpenClaw adapters
+- A prebuilt, Steward-redistributed Hermes adapter image
+- A qualified OpenClaw adapter; OpenClaw remains a layout contract
+- Hermes run event streams or unqualified Hermes plugins, channels, skills, or MCP
+  servers
 - Multi-image archive selection, remote OCI descriptors, or mutable-tag admission
 - Automatic recovery or a decision that marks an ambiguous journal operation
   committed or compensated. Degraded stop can narrow local authority, but the

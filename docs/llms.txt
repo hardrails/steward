@@ -28,7 +28,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Signed egress](https://hardrails.github.io/steward/guides/egress/): Configure HTTP(S) routes, private CIDRs, audit, and diagnostics
 - [Terraform](https://hardrails.github.io/steward/guides/terraform/): Non-secret cloud bootstrap and AWS hardening
 - [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate a local node with Model Context Protocol 2025-11-25 stdio tools
-- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Review the layout contract, upstream incompatibilities, and adapter acceptance gate
+- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Build the exact-pinned qualified adapter; review its gVisor proof, workspace-audit skill, service API, and limits
 - [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): Review the layout contract, bounded WebSocket path, and adapter acceptance gate
 - [Air-gapped installation](https://hardrails.github.io/steward/guides/air-gapped/): Offline import and verification
 - [Upgrade and rollback](https://hardrails.github.io/steward/guides/upgrades/): Manifest-bound activation, drained-node requirements, durable-format checks, and rollback limits
@@ -57,3 +57,13 @@ HTTP(S) routes through a per-instance proxy. It denies raw TCP/UDP, transparent
 proxying, raw secrets, host mounts, Docker access, privileged mode, and undeclared
 ports. The Executor HTTP API, `stewardctl node`, and `steward-mcp` call the same
 Executor handlers.
+
+Steward includes a qualified Hermes Agent adapter definition for upstream commit
+`095b9eed3801c251796df93f48a8f2a527ff6e70`. The source-built image runs non-root
+under gVisor, fixes inference through `http://steward-relay:8080/v1`, and exposes
+bounded negotiation, health, run submission, and run-status operations on port
+`8766`; run event streams are excluded. Qualification ran the signed,
+network-free `steward.workspace-audit` skill against `/opt/data/workspace` and
+ran it again after restart. Steward ships the builder but no prebuilt Hermes OCI
+archive because dependency and base-image notices are incomplete. OpenClaw remains
+an unqualified layout contract.

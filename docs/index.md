@@ -53,20 +53,24 @@ Model serving is managed separately. Steward's local gateway connects the agent 
 an operator-selected, OpenAI-compatible route without putting the upstream
 credential in the agent container.
 
-## Agent adapter contracts
+## Agent adapters
 
-Steward defines fixed filesystem and runtime layouts for Hermes Agent and OpenClaw
-adapters. These contracts do not certify the official upstream images. Neither
-official image is currently validated for direct use with Steward. Before signing
-an operator-built adapter's exact image digest and command, validate it against the
-documented image, identity, state, authentication, and runtime requirements.
+Steward provides a qualified Hermes Agent adapter definition for exact upstream
+commit `095b9eed3801c251796df93f48a8f2a527ff6e70`. The source-built image runs as
+`65532:65532`, uses the fixed Steward inference relay, and exposes only bounded
+negotiation, health, run submission, and run-status operations on port `8766`.
+Qualification ran the signed `steward.workspace-audit` skill under gVisor, restarted
+the container, and successfully ran the skill again.
 
-An accepted adapter can receive a local OpenAI-compatible route, one declared
-private service, and HTTP(S) proxy access through named, signed routes. Persistent
-Docker state requires an explicit dedicated-host compatibility setting because
-the portable local volume driver cannot enforce hard byte or inode quotas. Steward
-rejects images that require raw TCP/UDP, transparent interception, raw secrets,
-host mounts, privileged mode, or undeclared ports.
+The official Hermes image remains inadmissible. Steward ships the pinned builder,
+not a prebuilt Hermes OCI archive, because dependency and base-image notices are
+incomplete. Operators build, inspect, and sign their exact output. OpenClaw remains
+a layout contract and has not completed qualification.
+
+Persistent Docker state requires the explicit dedicated single-tenant host setting
+because the portable local volume driver cannot enforce hard byte or inode quotas.
+Steward rejects images that require raw TCP/UDP, transparent interception, raw
+secrets, host mounts, privileged mode, or undeclared ports.
 
 <div class="callout warning">
   <strong>Do not erase the boundary</strong>
@@ -75,7 +79,7 @@ host mounts, privileged mode, or undeclared ports.
   isolation Steward is intended to enforce.
 </div>
 
-[Review the Hermes Agent adapter contract]({{ '/guides/hermes-agent/' | relative_url }}) ·
+[Build and run the Hermes Agent adapter]({{ '/guides/hermes-agent/' | relative_url }}) ·
 [Review the OpenClaw adapter contract]({{ '/guides/openclaw/' | relative_url }}) ·
 [Configure positive capabilities]({{ '/guides/positive-capabilities/' | relative_url }}) ·
 [Configure egress]({{ '/guides/egress/' | relative_url }}) ·
