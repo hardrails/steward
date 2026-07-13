@@ -760,8 +760,9 @@ func validateEvent(event Event) error {
 				return errors.New("service task authorization requires permit and request bindings")
 			}
 		}
-		if event.RunID != "" && (event.Phase != Terminal || !validText(event.RunID, 256)) {
-			return errors.New("service task run ID is invalid")
+		success := event.Phase == Terminal && event.Outcome == Responded && serviceTaskSuccessStatus(event.HTTPStatus)
+		if success != (event.RunID != "") || event.RunID != "" && !identifier(event.RunID) {
+			return errors.New("service task run ID does not match a successful terminal response")
 		}
 	default:
 		return errors.New("invalid connector receipt event kind")
@@ -789,6 +790,10 @@ func validateEvent(event Event) error {
 		return errors.New("invalid connector phase")
 	}
 	return nil
+}
+
+func serviceTaskSuccessStatus(status int) bool {
+	return status == 200 || status == 201 || status == 202
 }
 
 func KeyID(public ed25519.PublicKey) string {

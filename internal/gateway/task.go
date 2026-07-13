@@ -301,8 +301,8 @@ func (s *Server) writeExistingServiceTask(w http.ResponseWriter, state serviceTa
 		writeGatewayError(w, http.StatusConflict, "task_in_progress", "task authorization is already in progress")
 		return
 	}
-	if state.Terminal.Outcome == connectorledger.Responded && state.Terminal.HTTPStatus >= 200 &&
-		state.Terminal.HTTPStatus < 300 && state.Terminal.RunID != "" {
+	if state.Terminal.Outcome == connectorledger.Responded &&
+		successfulServiceTaskStatus(state.Terminal.HTTPStatus) && state.Terminal.RunID != "" {
 		writeServiceTaskResponse(w, state.Terminal.HTTPStatus, state.Terminal.RunID, "replayed")
 		return
 	}

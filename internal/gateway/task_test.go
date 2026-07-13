@@ -207,6 +207,78 @@ func TestSignedServiceTaskDispatchesOnceAndReplaysDurableRunID(t *testing.T) {
 	}
 }
 
+func TestSignedServiceTaskAcceptsOnlyDocumentedSuccessStatuses(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusAccepted} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var calls atomic.Int64
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"run_id":"run_0123456789abcdef0123456789abcdef"}`))
+			}))
+			defer upstream.Close()
+			rig := newServiceTaskRig(t, upstream.URL)
+			body := []byte(`{"input":"work","session_id":"allowed-status"}`)
+			permit := taskPermitFor(t, rig, fmt.Sprintf("task-status-%d", status), body, nil)
+
+			first := invokeServiceTask(rig, body, permit)
+			replay := invokeServiceTask(rig, body, permit)
+			if first.Code != status || replay.Code != status || replay.Header().Get(taskReceiptHeader) != "replayed" || calls.Load() != 1 {
+				t.Fatalf("first=%d replay=%d headers=%v calls=%d", first.Code, replay.Code, replay.Header(), calls.Load())
+			}
+		})
+	}
+
+	state := serviceTaskReceipt{
+		Authorization: connectorledger.Event{PermitDigest: "sha256:" + strings.Repeat("a", 64)},
+		Terminal: connectorledger.Event{
+			Phase: connectorledger.Terminal, Outcome: connectorledger.Responded,
+			HTTPStatus: http.StatusPartialContent, RunID: "run_should_not_cross_boundary",
+		},
+	}
+	response := httptest.NewRecorder()
+	(&Server{}).writeExistingServiceTask(response, state, state.Authorization.PermitDigest)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"error":"task_already_spent"`) {
+		t.Fatalf("undocumented replay status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSignedServiceTaskQuotaFailureDoesNotSpendOrDispatch(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"run_id":"run_0123456789abcdef0123456789abcdef"}`))
+	}))
+	defer upstream.Close()
+	rig := newServiceTaskRig(t, upstream.URL)
+	body := []byte(`{"input":"work","session_id":"quota"}`)
+	permit := taskPermitFor(t, rig, "task-quota-recovery", body, nil)
+	realLedger := rig.server.connectorLedger
+	defer func() { rig.server.connectorLedger = realLedger }()
+	rig.server.connectorLedger = refusingConnectorReceiptLog{err: connectorledger.ErrTenantQuotaExceeded}
+
+	denied := invokeServiceTask(rig, body, permit)
+	if denied.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(denied.Body.String(), `"error":"task_evidence_quota_exhausted"`) || calls.Load() != 0 {
+		t.Fatalf("quota status=%d body=%s calls=%d", denied.Code, denied.Body.String(), calls.Load())
+	}
+	taskDigest := taskpermit.TaskDigest(rig.grant.TenantID, rig.grant.InstanceID, "task-quota-recovery")
+	rig.server.mu.Lock()
+	_, reserved := rig.server.serviceTasks[taskDigest]
+	rig.server.mu.Unlock()
+	if reserved {
+		t.Fatal("pre-write quota failure retained an in-memory spent reservation")
+	}
+
+	rig.server.connectorLedger = realLedger
+	retried := invokeServiceTask(rig, body, permit)
+	if retried.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("retry status=%d body=%s calls=%d", retried.Code, retried.Body.String(), calls.Load())
+	}
+}
+
 func TestSignedServiceTaskRejectsBindingChangesBeforeDispatch(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -504,6 +576,90 @@ func TestSignedServiceTaskReplaySurvivesGatewayRestart(t *testing.T) {
 	response := invokeServiceTask(rig, body, permit)
 	if response.Code != http.StatusOK || response.Header().Get(taskReceiptHeader) != "replayed" || calls.Load() != 1 {
 		t.Fatalf("restart replay status=%d headers=%v calls=%d", response.Code, response.Header(), calls.Load())
+	}
+}
+
+func TestTaskAuthorizedGatewayStateRequiresFormatFour(t *testing.T) {
+	rig := newServiceTaskRig(t, "http://127.0.0.1:1")
+	rig.server.closeGrantListeners()
+	_ = rig.server.audit.Close()
+	_ = rig.server.connectorLedger.Close()
+
+	raw, err := os.ReadFile(rig.config.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	grants, ok := state["grants"].([]any)
+	if !ok || state["version"] != float64(4) || len(grants) != 1 {
+		t.Fatalf("task state=%s", raw)
+	}
+	retained, ok := grants[0].(map[string]any)
+	if !ok || retained["service_id"] != rig.grant.ServiceID || retained["task_authorities"] == nil {
+		t.Fatalf("retained task grant=%#v", retained)
+	}
+	state["version"] = float64(3)
+	downgraded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rig.config.StateFile, downgraded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := Open(rig.config, nil, nil, "service-token")
+	if opened != nil {
+		opened.closeGrantListeners()
+		_ = opened.audit.Close()
+		if opened.connectorLedger != nil {
+			_ = opened.connectorLedger.Close()
+		}
+	}
+	if err == nil || !strings.Contains(err.Error(), "task authority") {
+		t.Fatalf("format-3 task authority state err=%v", err)
+	}
+}
+
+func TestTaskRoutePolicyDigestBindsTaskAuthorityOperationAndBudget(t *testing.T) {
+	rig := newServiceTaskRig(t, "http://127.0.0.1:1")
+	operations := map[string]map[string]ServiceOperation{
+		rig.grant.ServiceID: {rig.operation.ID: rig.operation},
+	}
+	base := routePolicyDigest(rig.grant, nil, nil, nil, operations, 4<<20)
+	if base == "" {
+		t.Fatal("task route policy digest is empty")
+	}
+
+	changedGrant := rig.grant
+	changedGrant.TaskAuthorities = append([]TaskAuthority(nil), rig.grant.TaskAuthorities...)
+	changedGrant.TaskAuthorities[0].KeyID = "other-task-approver"
+	if got := routePolicyDigest(changedGrant, nil, nil, nil, operations, 4<<20); got == base {
+		t.Fatal("task authority key ID did not change route policy digest")
+	}
+	changedOperation := rig.operation
+	changedOperation.MaxSeconds++
+	changedOperations := map[string]map[string]ServiceOperation{
+		rig.grant.ServiceID: {changedOperation.ID: changedOperation},
+	}
+	if got := routePolicyDigest(rig.grant, nil, nil, nil, changedOperations, 4<<20); got == base {
+		t.Fatal("service operation policy did not change route policy digest")
+	}
+	if got := routePolicyDigest(rig.grant, nil, nil, nil, operations, 8<<20); got == base {
+		t.Fatal("tenant receipt budget did not change route policy digest")
+	}
+	unrelated := make(map[string]map[string]ServiceOperation, len(operations)+1)
+	for serviceID, configured := range operations {
+		unrelated[serviceID] = configured
+	}
+	unrelated["other-api"] = map[string]ServiceOperation{"other.run": {
+		ServiceID: "other-api", ID: "other.run", Method: http.MethodPost, Path: "/v1/run",
+		ContentType: "application/json", MaxRequestBytes: 1024, MaxResponseBytes: 4096,
+		MaxSeconds: 10, MaxPermitSeconds: 60,
+	}}
+	if got := routePolicyDigest(rig.grant, nil, nil, nil, unrelated, 4<<20); got != base {
+		t.Fatalf("unrelated service changed task route policy digest: before=%s after=%s", base, got)
 	}
 }
 

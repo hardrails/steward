@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -757,6 +758,7 @@ func TestServiceTaskFinishMatchesEveryAuthorizationBinding(t *testing.T) {
 	}
 	baseTerminal := authorized
 	baseTerminal.Phase, baseTerminal.Outcome, baseTerminal.HTTPStatus = Terminal, Responded, 201
+	baseTerminal.RunID = "run-0123456789abcdef"
 
 	tests := []struct {
 		name   string
@@ -768,7 +770,7 @@ func TestServiceTaskFinishMatchesEveryAuthorizationBinding(t *testing.T) {
 		}},
 		{name: "kind", mutate: func(event *Event) {
 			event.Kind, event.ConnectorID = ConnectorCall, "ticketing"
-			event.ServiceID, event.OperationPolicyDigest = "", ""
+			event.ServiceID, event.OperationPolicyDigest, event.RunID = "", "", ""
 		}},
 	}
 	for _, test := range tests {
@@ -780,7 +782,6 @@ func TestServiceTaskFinishMatchesEveryAuthorizationBinding(t *testing.T) {
 			}
 		})
 	}
-	baseTerminal.RunID = "run-0123456789abcdef"
 	if _, err := log.Finish(baseTerminal); err != nil {
 		t.Fatalf("terminal result did not preserve run ID independently: %v", err)
 	}
@@ -1101,5 +1102,49 @@ func validServiceTaskEvent(phase Phase, outcome Outcome) Event {
 		OperationPolicyDigest: "sha256:" + strings.Repeat("6", 64), TaskDigest: "sha256:" + strings.Repeat("3", 64),
 		AuthorityKeyID: "task-approver-a", PermitDigest: "sha256:" + strings.Repeat("8", 64),
 		RequestDigest: "sha256:" + strings.Repeat("7", 64), RequestBytes: 41,
+	}
+}
+
+func TestServiceTaskRunIDRequiresCanonicalSuccessfulTerminal(t *testing.T) {
+	base := validServiceTaskEvent(Terminal, Responded)
+	base.HTTPStatus = http.StatusAccepted
+	for _, runID := range []string{"run-0123456789abcdef", "R1_test.run"} {
+		candidate := base
+		candidate.RunID = runID
+		if err := validateEvent(candidate); err != nil {
+			t.Fatalf("valid run ID %q rejected: %v", runID, err)
+		}
+	}
+	for _, runID := range []string{"", "../run", "run id", strings.Repeat("r", 129)} {
+		candidate := base
+		candidate.RunID = runID
+		if err := validateEvent(candidate); err == nil {
+			t.Fatalf("invalid run ID %q accepted", runID)
+		}
+	}
+	for name, mutate := range map[string]func(*Event){
+		"failed outcome": func(event *Event) {
+			event.Outcome, event.ErrorCode = Failed, "outcome_unknown"
+		},
+		"undocumented status": func(event *Event) { event.HTTPStatus = http.StatusPartialContent },
+		"nonterminal phase": func(event *Event) {
+			event.Phase, event.Outcome, event.HTTPStatus = Authorize, Allowed, 0
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := base
+			candidate.RunID = "run-0123456789abcdef"
+			mutate(&candidate)
+			if err := validateEvent(candidate); err == nil || !strings.Contains(err.Error(), "run ID") {
+				t.Fatalf("incoherent service task accepted: %#v err=%v", candidate, err)
+			}
+		})
+	}
+	for _, status := range []int{http.StatusBadRequest, http.StatusPartialContent, http.StatusTemporaryRedirect} {
+		candidate := base
+		candidate.HTTPStatus, candidate.RunID = status, ""
+		if err := validateEvent(candidate); err != nil {
+			t.Fatalf("spent non-success status %d rejected: %v", status, err)
+		}
 	}
 }
