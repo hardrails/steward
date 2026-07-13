@@ -17,6 +17,21 @@ import (
 	"time"
 )
 
+type writeDeadlineCall struct {
+	at       time.Time
+	deadline time.Time
+}
+
+type deadlineResponseRecorder struct {
+	*httptest.ResponseRecorder
+	writes []writeDeadlineCall
+}
+
+func (r *deadlineResponseRecorder) SetWriteDeadline(deadline time.Time) error {
+	r.writes = append(r.writes, writeDeadlineCall{at: time.Now(), deadline: deadline})
+	return nil
+}
+
 func TestServiceProxyPreservesWebSocketUpgrade(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
@@ -61,6 +76,33 @@ func TestServiceProxyPreservesWebSocketUpgrade(t *testing.T) {
 	echoed := make([]byte, len(payload))
 	if _, err := io.ReadFull(reader, echoed); err != nil || !bytes.Equal(echoed, payload) {
 		t.Fatalf("echo=%q err=%v", echoed, err)
+	}
+}
+
+func TestModeSpecificHTTPServersKeepIndependentTimeoutPolicies(t *testing.T) {
+	inference := newInferenceHTTPServer("127.0.0.1:0", "/run/steward-grant/i.sock")
+	service := newServiceHTTPServer(http.NotFoundHandler())
+	connector := newConnectorHTTPServer(context.Background(), "/run/steward-grant/c.sock")
+
+	if inference.ReadHeaderTimeout != 5*time.Second || inference.ReadTimeout != 2*time.Minute ||
+		inference.WriteTimeout != 2*time.Minute || inference.IdleTimeout != 30*time.Second {
+		t.Fatalf("inference timeouts changed: %#v", inference)
+	}
+	if service.ReadHeaderTimeout != 5*time.Second || service.ReadTimeout != 0 || service.WriteTimeout != 0 ||
+		service.IdleTimeout != 30*time.Second {
+		t.Fatalf("service stream timeouts changed: %#v", service)
+	}
+	if connector.ReadHeaderTimeout != 5*time.Second || connector.ReadTimeout != connectorRequestBodyLifetime ||
+		connector.WriteTimeout != 0 || connector.IdleTimeout != 15*time.Second {
+		t.Fatalf("connector timeouts are not phase-specific: %#v", connector)
+	}
+	if connectorGatewayMaximumLifetime != time.Hour || connectorGatewayRoundTripTime <= connectorGatewayMaximumLifetime {
+		t.Fatalf("connector round-trip=%s maximum=%s", connectorGatewayRoundTripTime, connectorGatewayMaximumLifetime)
+	}
+	for name, server := range map[string]*http.Server{"inference": inference, "service": service, "connector": connector} {
+		if server.MaxHeaderBytes != maxHTTPHeaderBytes {
+			t.Fatalf("%s MaxHeaderBytes=%d", name, server.MaxHeaderBytes)
+		}
 	}
 }
 
@@ -271,6 +313,137 @@ func TestConnectorProxyForwardsOnlyExactOperationsAndFailsClosedAfterRevocation(
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/connectors/tickets/operations/create", nil))
 	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "connector_unavailable") {
 		t.Fatalf("revoked status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestConnectorProxyAllowsGatewayOperationBudgetThenNarrowsResponseWriteDeadline(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "srt-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	socket := filepath.Join(directory, "c.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(75 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})}
+	go func() { _ = upstream.Serve(listener) }()
+	defer upstream.Close()
+
+	const gatewayBudget = 2 * time.Second
+	const responseBudget = 100 * time.Millisecond
+	recorder := &deadlineResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
+	connectorProxyWithTimeouts(socket, gatewayBudget, responseBudget).ServeHTTP(
+		recorder, httptest.NewRequest(http.MethodGet, "/v1/connectors/tickets/operations/read", nil),
+	)
+	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"ok":true}` {
+		t.Fatalf("status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if len(recorder.writes) != 6 {
+		t.Fatalf("write deadlines=%#v", recorder.writes)
+	}
+	operationWindow := recorder.writes[3].deadline.Sub(recorder.writes[3].at)
+	responseWindow := recorder.writes[4].deadline.Sub(recorder.writes[4].at)
+	if operationWindow < gatewayBudget+responseBudget-20*time.Millisecond ||
+		operationWindow > gatewayBudget+responseBudget+20*time.Millisecond {
+		t.Fatalf("operation write window=%s", operationWindow)
+	}
+	if responseWindow < responseBudget-20*time.Millisecond || responseWindow > responseBudget+20*time.Millisecond {
+		t.Fatalf("response write window=%s", responseWindow)
+	}
+	if !recorder.writes[4].deadline.Before(recorder.writes[3].deadline) {
+		t.Fatalf("response deadline was not narrowed: %#v", recorder.writes)
+	}
+	if payloadWindow := recorder.writes[5].deadline.Sub(recorder.writes[5].at); payloadWindow < responseBudget-20*time.Millisecond || payloadWindow > responseBudget+20*time.Millisecond {
+		t.Fatalf("payload write window=%s", payloadWindow)
+	}
+}
+
+func TestConnectorProxyRefreshesWriteDeadlineAcrossLongGatewayStream(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "srs-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	socket := filepath.Join(directory, "c.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("first"))
+		w.(http.Flusher).Flush()
+		time.Sleep(125 * time.Millisecond)
+		_, _ = w.Write([]byte("second"))
+	})}
+	go func() { _ = upstream.Serve(listener) }()
+	defer upstream.Close()
+
+	const gatewayBudget = 2 * time.Second
+	const responseBudget = 50 * time.Millisecond
+	relayListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := &http.Server{
+		Handler:           connectorProxyWithTimeouts(socket, gatewayBudget, responseBudget),
+		ReadHeaderTimeout: time.Second, ReadTimeout: time.Second, IdleTimeout: time.Second,
+	}
+	go func() { _ = relay.Serve(relayListener) }()
+	defer relay.Close()
+
+	response, err := (&http.Client{Timeout: time.Second}).Get(
+		"http://" + relayListener.Addr().String() + "/v1/connectors/tickets/operations/read",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr != nil || response.StatusCode != http.StatusOK || string(raw) != "firstsecond" {
+		t.Fatalf("status=%d body=%q err=%v", response.StatusCode, raw, readErr)
+	}
+}
+
+func TestConnectorProxyBoundsGatewayWaitAndRetainsErrorWriteGrace(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "srg-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	socket := filepath.Join(directory, "c.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := &http.Server{Handler: http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		select {
+		case <-request.Context().Done():
+		case <-time.After(time.Second):
+		}
+	})}
+	go func() { _ = upstream.Serve(listener) }()
+	defer upstream.Close()
+
+	const gatewayBudget = 75 * time.Millisecond
+	const responseBudget = 250 * time.Millisecond
+	recorder := &deadlineResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
+	started := time.Now()
+	connectorProxyWithTimeouts(socket, gatewayBudget, responseBudget).ServeHTTP(
+		recorder, httptest.NewRequest(http.MethodGet, "/v1/connectors/tickets/operations/read", nil),
+	)
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("Gateway timeout took %s", elapsed)
+	}
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "connector_unavailable") {
+		t.Fatalf("status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if len(recorder.writes) != 4 || recorder.writes[3].deadline.Sub(time.Now()) < responseBudget/2 {
+		t.Fatalf("timeout error lost its write grace: %#v", recorder.writes)
 	}
 }
 

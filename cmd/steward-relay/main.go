@@ -27,13 +27,18 @@ import (
 )
 
 const (
-	maxHTTPHeaderBytes          = 64 << 10
-	maxConnectorRequestBytes    = 4 << 20
-	maxConnectorResponseBytes   = 32 << 20
-	maxConnectorConcurrent      = 4
-	connectorAddress            = "0.0.0.0:8081"
-	connectorRequestLifetime    = 30 * time.Second
-	connectorResponseHeaderTime = 15 * time.Second
+	maxHTTPHeaderBytes           = 64 << 10
+	maxConnectorRequestBytes     = 4 << 20
+	maxConnectorResponseBytes    = 32 << 20
+	maxConnectorConcurrent       = 4
+	connectorAddress             = "0.0.0.0:8081"
+	connectorRequestBodyLifetime = 30 * time.Second
+	connectorResponseWriteTime   = 30 * time.Second
+	// Gateway accepts connector max_seconds values through one hour. Relay is
+	// deliberately a little more patient than that trusted local boundary so a
+	// Gateway timeout and its terminal receipt can reach the agent intact.
+	connectorGatewayMaximumLifetime = time.Hour
+	connectorGatewayRoundTripTime   = connectorGatewayMaximumLifetime + 30*time.Second
 )
 
 func main() {
@@ -76,11 +81,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var serviceServer *http.Server
 	serverListeners := make(map[*http.Server]net.Listener)
 	if *inferenceSocket != "" {
-		servers = append(servers, &http.Server{
-			Addr: *inferenceAddress, Handler: inferenceProxy(*inferenceSocket),
-			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute,
-			IdleTimeout: 30 * time.Second, MaxHeaderBytes: maxHTTPHeaderBytes,
-		})
+		servers = append(servers, newInferenceHTTPServer(*inferenceAddress, *inferenceSocket))
 	}
 	if *serviceTarget != "" {
 		target, err := url.Parse(*serviceTarget)
@@ -98,14 +99,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			_ = serviceListener.Close()
 			_ = os.Remove(*serviceSocket)
 		}()
-		serviceServer = &http.Server{
-			Handler: proxy,
-			// The authenticated host Gateway owns the service stream's 2-minute
-			// lifetime and byte ceilings. ReadTimeout/WriteTimeout stay unset here
-			// because fixed HTTP deadlines truncate upgraded WebSocket sessions;
-			// header and idle limits still bound non-upgraded connections.
-			ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: maxHTTPHeaderBytes,
-		}
+		serviceServer = newServiceHTTPServer(proxy)
 		servers = append(servers, serviceServer)
 		serverListeners[serviceServer] = serviceListener
 	}
@@ -116,15 +110,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		defer connectorListener.Close()
-		connectorServer := &http.Server{
-			Addr: connectorAddress, Handler: connectorProxy(*connectorSocket),
-			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: connectorRequestLifetime,
-			WriteTimeout: connectorRequestLifetime, IdleTimeout: 15 * time.Second,
-			MaxHeaderBytes: maxHTTPHeaderBytes,
-			BaseContext: func(net.Listener) context.Context {
-				return ctx
-			},
-		}
+		connectorServer := newConnectorHTTPServer(ctx, *connectorSocket)
 		servers = append(servers, connectorServer)
 		serverListeners[connectorServer] = connectorListener
 	}
@@ -189,25 +175,74 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func newInferenceHTTPServer(address, socket string) *http.Server {
+	return &http.Server{
+		Addr: address, Handler: inferenceProxy(socket),
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute,
+		IdleTimeout: 30 * time.Second, MaxHeaderBytes: maxHTTPHeaderBytes,
+	}
+}
+
+func newServiceHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler: handler,
+		// The authenticated host Gateway owns the service stream's 2-minute
+		// lifetime and byte ceilings. ReadTimeout/WriteTimeout stay unset here
+		// because fixed HTTP deadlines truncate upgraded WebSocket sessions;
+		// header and idle limits still bound non-upgraded connections.
+		ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: maxHTTPHeaderBytes,
+	}
+}
+
+func newConnectorHTTPServer(ctx context.Context, socket string) *http.Server {
+	return &http.Server{
+		Addr: connectorAddress, Handler: connectorProxy(socket),
+		// Agent-controlled headers and request bodies retain tight absolute
+		// limits. WriteTimeout is phase-managed by connectorProxy: one long
+		// fixed server deadline would either truncate a valid one-hour Gateway
+		// operation or give a slow response reader that entire hour.
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: connectorRequestBodyLifetime,
+		IdleTimeout: 15 * time.Second, MaxHeaderBytes: maxHTTPHeaderBytes,
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
+}
+
 func connectorProxy(socket string) http.Handler {
+	return connectorProxyWithTimeouts(socket, connectorGatewayRoundTripTime, connectorResponseWriteTime)
+}
+
+type connectorDeadlineWriter struct {
+	writer     http.ResponseWriter
+	controller *http.ResponseController
+	timeout    time.Duration
+}
+
+func (w connectorDeadlineWriter) Write(payload []byte) (int, error) {
+	_ = w.controller.SetWriteDeadline(time.Now().Add(w.timeout))
+	return w.writer.Write(payload)
+}
+
+func connectorProxyWithTimeouts(socket string, gatewayRoundTripTime, responseWriteTime time.Duration) http.Handler {
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", socket)
 		},
 		DisableKeepAlives:      true,
-		ResponseHeaderTimeout:  connectorResponseHeaderTime,
+		ResponseHeaderTimeout:  gatewayRoundTripTime,
 		MaxResponseHeaderBytes: maxHTTPHeaderBytes,
 	}
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   connectorRequestLifetime,
+		Timeout:   gatewayRoundTripTime,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
 	concurrent := make(chan struct{}, maxConnectorConcurrent)
 	return http.HandlerFunc(func(w http.ResponseWriter, incoming *http.Request) {
+		controller := http.NewResponseController(w)
+		_ = controller.SetWriteDeadline(time.Now().Add(responseWriteTime))
 		if !validConnectorRequest(incoming) {
 			writeConnectorError(w, http.StatusForbidden, "connector_denied", "connector method, path, or query is not allowed")
 			return
@@ -224,7 +259,11 @@ func connectorProxy(socket string) http.Handler {
 			return
 		}
 		incoming.Body = http.MaxBytesReader(w, incoming.Body, maxConnectorRequestBytes)
+		// A body may consume its entire read budget. Keep a separate response
+		// grace so Relay can still return the bounded timeout or size error.
+		_ = controller.SetWriteDeadline(time.Now().Add(connectorRequestBodyLifetime + responseWriteTime))
 		raw, err := io.ReadAll(incoming.Body)
+		_ = controller.SetWriteDeadline(time.Now().Add(responseWriteTime))
 		if err != nil {
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) {
@@ -241,6 +280,9 @@ func connectorProxy(socket string) http.Handler {
 			return
 		}
 		copyConnectorHeaders(request.Header, incoming.Header)
+		// Gateway is the trusted operation timer. The extra response-write budget
+		// lets Relay deliver Gateway's bounded timeout/error instead of racing it.
+		_ = controller.SetWriteDeadline(time.Now().Add(gatewayRoundTripTime + responseWriteTime))
 		response, err := client.Do(request)
 		if err != nil {
 			slog.Error("connector gateway request failed", "method", incoming.Method, "path", incoming.URL.Path, "err", err)
@@ -248,6 +290,9 @@ func connectorProxy(socket string) http.Handler {
 			return
 		}
 		defer response.Body.Close()
+		// Once Gateway has answered, an agent that reads too slowly receives only
+		// the short response-write budget, never the one-hour operation budget.
+		_ = controller.SetWriteDeadline(time.Now().Add(responseWriteTime))
 		if response.ContentLength > maxConnectorResponseBytes {
 			writeConnectorError(w, http.StatusBadGateway, "response_too_large", "connector response exceeds the byte limit")
 			return
@@ -262,7 +307,11 @@ func connectorProxy(socket string) http.Handler {
 			w.Header().Set("Content-Length", strconv.FormatInt(response.ContentLength, 10))
 		}
 		w.WriteHeader(response.StatusCode)
-		written, err := io.Copy(w, io.LimitReader(response.Body, maxConnectorResponseBytes))
+		// Refresh the short write deadline for every chunk. A trusted Gateway
+		// stream may pause for its bounded operation lifetime, but an agent gets
+		// only responseWriteTime to consume each available chunk.
+		deadlineWriter := connectorDeadlineWriter{writer: w, controller: controller, timeout: responseWriteTime}
+		written, err := io.Copy(deadlineWriter, io.LimitReader(response.Body, maxConnectorResponseBytes))
 		if err != nil {
 			panic(http.ErrAbortHandler)
 		}
