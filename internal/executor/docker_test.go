@@ -427,7 +427,7 @@ func TestCreateRelayUsesOnlyFixedHardenedTopology(t *testing.T) {
 	spec := RelaySpec{
 		TenantID: "tenant-a", InstanceID: "agent-a", Generation: 3,
 		GrantID: "grant-" + strings.Repeat("a", 64), GrantDir: "/run/steward-gateway/grants/grant-" + strings.Repeat("a", 64),
-		Image: "sha256:" + strings.Repeat("b", 64), RelayGID: 1234, Inference: true, ServicePort: 8080,
+		Image: "sha256:" + strings.Repeat("b", 64), RelayGID: 1234, Inference: true, Connector: true, ServicePort: 8080,
 		MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
 	}
 	spec.Name = RelayName(spec.TenantID, spec.InstanceID, spec.Generation)
@@ -462,6 +462,21 @@ func TestCreateRelayUsesOnlyFixedHardenedTopology(t *testing.T) {
 	labels := payload["Labels"].(map[string]any)
 	if labels["io.hardrails.tenant"] != spec.TenantID || labels[runtimeGrantLabel] != spec.GrantID {
 		t.Fatalf("labels=%#v", labels)
+	}
+	command := payload["Cmd"].([]any)
+	wantCommand := []string{
+		"-inference-socket=/run/steward-grant/i.sock",
+		"-connector-socket=/run/steward-grant/c.sock",
+		"-service-socket=/run/steward-grant/s.sock",
+		"-service-target=http://agent:8080",
+	}
+	if len(command) != len(wantCommand) {
+		t.Fatalf("command=%#v", command)
+	}
+	for index := range wantCommand {
+		if command[index] != wantCommand[index] {
+			t.Fatalf("command=%#v", command)
+		}
 	}
 	bad := spec
 	bad.Image = "steward-relay:latest"
@@ -703,7 +718,7 @@ func hardenedRelayInspectPayload(relay RelaySpec) map[string]any {
 		"Image": relay.Image,
 		"Config": map[string]any{
 			"Image": relay.Image, "User": "65532:1234", "WorkingDir": "/",
-			"Cmd": []string{"-inference-socket=/run/steward-grant/i.sock", "-service-socket=/run/steward-grant/s.sock", "-service-target=http://agent:8080"},
+			"Cmd": relayCommand(relay),
 			"Labels": map[string]string{
 				managedRelayLabel: "true", relayFingerprintLabel: relayFingerprint(relay),
 				"io.hardrails.tenant": relay.TenantID, "io.hardrails.instance": relay.InstanceID,
@@ -734,7 +749,7 @@ func TestInspectRelayUsesConfiguredStaticIPBeforeFirstStart(t *testing.T) {
 		Name: RelayName("tenant-a", "agent-a", 9), Image: "sha256:" + strings.Repeat("a", 64),
 		NetworkName: network.Name, GrantID: "grant-" + strings.Repeat("b", 64),
 		GrantDir: "/run/steward-gateway/grants/" + strings.Repeat("b", 32), TenantID: "tenant-a", InstanceID: "agent-a", Generation: 9,
-		RelayGID: 1234, Inference: true, ServicePort: 8080, RelayIP: network.RelayIP, AgentIP: network.AgentIP,
+		RelayGID: 1234, Inference: true, Connector: true, ServicePort: 8080, RelayIP: network.RelayIP, AgentIP: network.AgentIP,
 		MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32,
 	}
 	payload := hardenedRelayInspectPayload(relay)
