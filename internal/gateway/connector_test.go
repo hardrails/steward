@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,7 +21,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/actionpermit"
 	"github.com/hardrails/steward/internal/connectorledger"
+	"github.com/hardrails/steward/internal/dsse"
 )
 
 type connectorRigOptions struct {
@@ -30,6 +33,8 @@ type connectorRigOptions struct {
 	maxRequestBytes  int64
 	maxResponseBytes int64
 	maxCalls         int
+	requirePermit    bool
+	actionTenant     string
 }
 
 type connectorRig struct {
@@ -37,6 +42,7 @@ type connectorRig struct {
 	config    Config
 	grant     Grant
 	connector loadedConnector
+	actionKey ed25519.PrivateKey
 }
 
 type blockingConnectorReceiptLog struct {
@@ -87,6 +93,9 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 	if options.maxCalls == 0 {
 		options.maxCalls = 8
 	}
+	if options.actionTenant == "" {
+		options.actionTenant = "tenant-a"
+	}
 	directory, err := os.MkdirTemp("/tmp", "gc-")
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +129,19 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 			{TenantID: "tenant-b", Bytes: 2 << 20},
 		},
 	}
+	var actionKey ed25519.PrivateKey
+	if options.requirePermit {
+		actionPublic, private, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		actionKey = private
+		config.ActionPermitNodeID = "node-test"
+		config.ActionAuthorities = []ActionAuthority{{KeyID: "approver-a", TenantID: options.actionTenant, PublicKey: base64.StdEncoding.EncodeToString(actionPublic)}}
+		config.Connectors[0].ActionAuthorityIDs = []string{"approver-a"}
+		config.Connectors[0].MaxActionPermitSeconds = 300
+		config.Connectors[0].CredentialEpoch = 1
+	}
 	_, receiptKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +164,7 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 	grant := connectorGrant("tenant-a", "agent-a", 1, "issues")
 	registerConnectorGrant(t, server, grant)
 	activateConnectorGrant(t, server, grant.GrantID)
-	return &connectorRig{server: server, config: config, grant: grant, connector: connectors["issues"]}
+	return &connectorRig{server: server, config: config, grant: grant, connector: connectors["issues"], actionKey: actionKey}
 }
 
 func connectorGrant(tenant, instance string, generation uint64, connectors ...string) Grant {
@@ -194,6 +216,187 @@ func invokeConnector(server *Server, grantID string, request *http.Request) *htt
 	return response
 }
 
+func actionPermitFor(
+	t *testing.T,
+	rig *connectorRig,
+	taskID, operationID string,
+	body []byte,
+	mutate func(*actionpermit.Statement),
+) (string, string) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	statement := actionpermit.Statement{
+		SchemaVersion: actionpermit.SchemaV1, NodeID: rig.config.ActionPermitNodeID,
+		TenantID: rig.grant.TenantID, InstanceID: rig.grant.InstanceID, Generation: rig.grant.Generation,
+		CapsuleDigest: rig.grant.CapsuleDigest, PolicyDigest: rig.grant.PolicyDigest,
+		RoutePolicyDigest: rig.server.policyDigests[rig.grant.GrantID], ConnectorID: "issues",
+		OperationID: operationID, TaskID: taskID, RequestDigest: actionpermit.RequestDigest(body), RequestBytes: int64(len(body)),
+		ContentType: "application/json", NotBefore: now.Add(-time.Minute).Format(time.RFC3339),
+		ExpiresAt: now.Add(4 * time.Minute).Format(time.RFC3339),
+	}
+	if mutate != nil {
+		mutate(&statement)
+	}
+	payload, err := json.Marshal(statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := dsse.Sign(actionpermit.PayloadType, payload, "approver-a", rig.actionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := dsse.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, err := actionpermit.EncodeHeader(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return header, dsse.Digest(raw)
+}
+
+func TestConnectorRequiresAndSpendsExactSignedActionPermit(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		if request.Header.Get(actionPermitHeader) != "" {
+			t.Error("action permit reached the upstream")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":true}`))
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true,
+	})
+	body := []byte(`{"title":"bounded"}`)
+	taskID := "task-permitted-1"
+
+	missing := invokeConnector(rig.server, rig.grant.GrantID,
+		connectorRequest(http.MethodPost, "issues", "create", taskID, bytes.NewReader(body)))
+	if missing.Code != http.StatusForbidden || !strings.Contains(missing.Body.String(), `"error":"action_permit_denied"`) || calls.Load() != 0 {
+		t.Fatalf("missing permit status=%d body=%s calls=%d", missing.Code, missing.Body.String(), calls.Load())
+	}
+
+	validHeader, permitDigest := actionPermitFor(t, rig, taskID, "create", body, nil)
+	changed := connectorRequest(http.MethodPost, "issues", "create", taskID, strings.NewReader(`{"title":"changed"}`))
+	changed.Header.Set(actionPermitHeader, validHeader)
+	changedResponse := invokeConnector(rig.server, rig.grant.GrantID, changed)
+	if changedResponse.Code != http.StatusForbidden || calls.Load() != 0 {
+		t.Fatalf("changed body status=%d body=%s calls=%d", changedResponse.Code, changedResponse.Body.String(), calls.Load())
+	}
+
+	wrongTenant, _ := actionPermitFor(t, rig, taskID, "create", body, func(statement *actionpermit.Statement) {
+		statement.TenantID = "tenant-b"
+	})
+	foreign := connectorRequest(http.MethodPost, "issues", "create", taskID, bytes.NewReader(body))
+	foreign.Header.Set(actionPermitHeader, wrongTenant)
+	foreignResponse := invokeConnector(rig.server, rig.grant.GrantID, foreign)
+	if foreignResponse.Code != http.StatusForbidden || calls.Load() != 0 {
+		t.Fatalf("foreign permit status=%d body=%s calls=%d", foreignResponse.Code, foreignResponse.Body.String(), calls.Load())
+	}
+
+	valid := connectorRequest(http.MethodPost, "issues", "create", taskID, bytes.NewReader(body))
+	valid.Header.Set(actionPermitHeader, validHeader)
+	response := invokeConnector(rig.server, rig.grant.GrantID, valid)
+	if response.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("valid permit status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+	replay := connectorRequest(http.MethodPost, "issues", "create", taskID, bytes.NewReader(body))
+	replay.Header.Set(actionPermitHeader, validHeader)
+	replayed := invokeConnector(rig.server, rig.grant.GrantID, replay)
+	if replayed.Code != http.StatusConflict || !strings.Contains(replayed.Body.String(), `"error":"connector_task_replayed"`) || calls.Load() != 1 {
+		t.Fatalf("replay status=%d body=%s calls=%d", replayed.Code, replayed.Body.String(), calls.Load())
+	}
+
+	var receipts []connectorledger.Event
+	_, err := connectorledger.VerifyRecords(
+		rig.config.ConnectorReceiptFile, rig.config.connectorReceiptKey.Public().(ed25519.PublicKey),
+		rig.config.ConnectorReceiptNodeID, rig.config.ConnectorReceiptEpoch,
+		func(record connectorledger.VerifiedReceipt) error {
+			receipts = append(receipts, record.Receipt.Event)
+			return nil
+		},
+	)
+	requestDigest := actionpermit.RequestDigest(body)
+	if err != nil || len(receipts) != 2 || receipts[0].PermitDigest != permitDigest ||
+		receipts[0].RequestDigest != requestDigest || receipts[1].PermitDigest != permitDigest ||
+		receipts[1].RequestDigest != requestDigest || receipts[0].AuthorityKeyID != "approver-a" ||
+		receipts[1].AuthorityKeyID != "approver-a" {
+		t.Fatalf("receipts=%#v err=%v", receipts, err)
+	}
+	summary, err := InspectConnectorReceiptFormat(rig.config)
+	if err != nil || summary.FormatVersion != 2 {
+		t.Fatalf("format summary=%#v err=%v", summary, err)
+	}
+}
+
+func TestConnectorRejectsPermitHeaderWhenPolicyDoesNotRequireIt(t *testing.T) {
+	rig := newConnectorRig(t, "https://api.example.test", connectorRigOptions{})
+	request := connectorRequest(http.MethodGet, "issues", "read", "task-unconfigured-permit", nil)
+	request.Header.Set(actionPermitHeader, "unexpected")
+	response := invokeConnector(rig.server, rig.grant.GrantID, request)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"error":"action_permit_denied"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestConnectorActionAuthorityCannotCrossTenantBoundary(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, actionTenant: "tenant-b",
+	})
+	body := []byte(`{"title":"tenant-bound"}`)
+	header, _ := actionPermitFor(t, rig, "task-tenant-scope", "create", body, nil)
+	request := connectorRequest(http.MethodPost, "issues", "create", "task-tenant-scope", bytes.NewReader(body))
+	request.Header.Set(actionPermitHeader, header)
+	response := invokeConnector(rig.server, rig.grant.GrantID, request)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"error":"action_permit_denied"`) || calls.Load() != 0 {
+		t.Fatalf("cross-tenant permit status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+}
+
+func TestConnectorRechecksPermitExpiryAfterDurableSpend(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true,
+	})
+	body := []byte(`{"title":"expires-during-spend"}`)
+	header, _ := actionPermitFor(t, rig, "task-expiry-fence", "create", body, nil)
+	validNow := time.Now().UTC()
+	var reads atomic.Int64
+	rig.server.now = func() time.Time {
+		if reads.Add(1) == 1 {
+			return validNow
+		}
+		return validNow.Add(10 * time.Minute)
+	}
+	request := connectorRequest(http.MethodPost, "issues", "create", "task-expiry-fence", bytes.NewReader(body))
+	request.Header.Set(actionPermitHeader, header)
+	response := invokeConnector(rig.server, rig.grant.GrantID, request)
+	if response.Code != http.StatusForbidden || calls.Load() != 0 {
+		t.Fatalf("expired-after-spend status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+	var events []connectorledger.Event
+	_, err := connectorledger.VerifyRecords(
+		rig.config.ConnectorReceiptFile, rig.config.connectorReceiptKey.Public().(ed25519.PublicKey),
+		rig.config.ConnectorReceiptNodeID, rig.config.ConnectorReceiptEpoch,
+		func(record connectorledger.VerifiedReceipt) error {
+			events = append(events, record.Receipt.Event)
+			return nil
+		},
+	)
+	if err != nil || len(events) != 2 || events[0].Phase != connectorledger.Authorize ||
+		events[1].Phase != connectorledger.Terminal || events[1].ErrorCode != "action_permit_expired" {
+		t.Fatalf("expiry events=%#v err=%v", events, err)
+	}
+}
+
 func TestConnectorBrokersExactOperationAndStripsCallerAuthority(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -231,7 +434,7 @@ func TestConnectorBrokersExactOperationAndStripsCallerAuthority(t *testing.T) {
 	}
 	state, err := os.ReadFile(rig.config.StateFile)
 	if err != nil || bytes.Contains(state, []byte("operator-secret")) || bytes.Contains(state, []byte("task-create-1")) ||
-		bytes.Contains(state, []byte(connectorCallDigest("tenant-a", "agent-a", "task-create-1", "issues", "create"))) {
+		bytes.Contains(state, []byte(ConnectorCallDigest("tenant-a", "agent-a", "task-create-1", "issues", "create"))) {
 		t.Fatalf("unsafe mutable state=%s err=%v", state, err)
 	}
 	var receipts []connectorledger.Event
@@ -245,7 +448,7 @@ func TestConnectorBrokersExactOperationAndStripsCallerAuthority(t *testing.T) {
 	)
 	if err != nil || len(receipts) != 2 || receipts[0].Phase != connectorledger.Authorize ||
 		receipts[1].Phase != connectorledger.Terminal ||
-		receipts[0].TaskDigest != connectorCallDigest("tenant-a", "agent-a", "task-create-1", "issues", "create") ||
+		receipts[0].TaskDigest != ConnectorCallDigest("tenant-a", "agent-a", "task-create-1", "issues", "create") ||
 		receipts[0].RoutePolicyDigest == "" || receipts[1].ResponseBytes != int64(len(`{"id":7}`)) {
 		t.Fatalf("receipts=%#v err=%v", receipts, err)
 	}
@@ -261,9 +464,9 @@ func TestBlockedConnectorReceiptDoesNotBlockOtherGrantControl(t *testing.T) {
 	}
 	blocked := &blockingConnectorReceiptLog{entered: make(chan struct{}), release: make(chan struct{})}
 	rig.server.connectorLedger = blocked
-	digest := connectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "blocked-task", "issues", "create")
+	digest := ConnectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "blocked-task", "issues", "create")
 	receipt := connectorReceiptEvent(
-		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, 2,
+		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, "", "", "", 2,
 	)
 	spendDone := make(chan error, 1)
 	go func() { spendDone <- rig.server.spendConnectorCall(rig.grant.GrantID, "issues", digest, receipt) }()
@@ -319,9 +522,9 @@ func TestAmbiguousConnectorReceiptFailureRetainsSpend(t *testing.T) {
 	rig.server.connectorLedger = &blockingConnectorReceiptLog{
 		entered: make(chan struct{}), release: release, failed: true,
 	}
-	digest := connectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "ambiguous-task", "issues", "create")
+	digest := ConnectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "ambiguous-task", "issues", "create")
 	receipt := connectorReceiptEvent(
-		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, 2,
+		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, "", "", "", 2,
 	)
 	if err := rig.server.spendConnectorCall(rig.grant.GrantID, "issues", digest, receipt); err == nil {
 		t.Fatal("ambiguous fixture append unexpectedly succeeded")
@@ -692,7 +895,13 @@ func TestConnectorFinalCallBudgetRaceHasOneUpstreamEffect(t *testing.T) {
 }
 
 func TestConnectorAttemptBudgetLimitsInvalidWorkAndRecovers(t *testing.T) {
-	server := &Server{connectorAttempts: make(map[string]connectorAttemptWindow)}
+	server := &Server{
+		grants: map[string]Grant{
+			"grant-a": {GrantID: "grant-a"},
+			"grant-b": {GrantID: "grant-b"},
+		},
+		connectorAttempts: make(map[string]connectorAttemptWindow),
+	}
 	started := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 	for attempt := 0; attempt < maxConnectorAttemptsPerMinute; attempt++ {
 		if !server.allowConnectorAttempt("grant-a", started.Add(time.Duration(attempt)*time.Millisecond)) {
@@ -710,6 +919,19 @@ func TestConnectorAttemptBudgetLimitsInvalidWorkAndRecovers(t *testing.T) {
 	}
 	if !server.allowConnectorAttempt("grant-a", started.Add(time.Minute)) {
 		t.Fatal("attempt budget did not recover after the fixed window")
+	}
+	server.mu.Lock()
+	delete(server.grants, "grant-a")
+	delete(server.connectorAttempts, "grant-a")
+	server.mu.Unlock()
+	if server.allowConnectorAttempt("grant-a", started.Add(2*time.Minute)) {
+		t.Fatal("late request for an unregistered grant was accepted")
+	}
+	server.mu.Lock()
+	_, recreated := server.connectorAttempts["grant-a"]
+	server.mu.Unlock()
+	if recreated {
+		t.Fatal("late request recreated connector limiter state for an unregistered grant")
 	}
 }
 
@@ -860,7 +1082,7 @@ func assertConnectorTerminalReceipt(t *testing.T, rig *connectorRig, taskID, ope
 			return nil
 		},
 	)
-	wantDigest := connectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, taskID, "issues", operationID)
+	wantDigest := ConnectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, taskID, "issues", operationID)
 	if err != nil || len(receipts) != 2 || receipts[0].Phase != connectorledger.Authorize ||
 		receipts[0].TaskDigest != wantDigest || receipts[1].Phase != connectorledger.Terminal ||
 		receipts[1].TaskDigest != wantDigest || receipts[1].Outcome != connectorledger.Failed ||

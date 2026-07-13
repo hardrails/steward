@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,9 @@ const (
 	maxConnectorResponseBytes   = int64(32 << 20)
 	maxConnectorSeconds         = 3600
 	maxConnectorCallsPerGrant   = 256
+	maxActionAuthorities        = 64
+	maxActionAuthoritiesPerCall = 8
+	maxActionPermitSeconds      = 86400
 	minConnectorCredentialBytes = 12
 	maxCredentialBytes          = 16 << 10
 )
@@ -48,6 +52,8 @@ type Config struct {
 	EgressAuditFile               string                         `json:"egress_audit_file,omitempty"`
 	EgressRoutes                  []EgressRoute                  `json:"egress_routes,omitempty"`
 	Connectors                    []Connector                    `json:"connectors,omitempty"`
+	ActionAuthorities             []ActionAuthority              `json:"action_authorities,omitempty"`
+	ActionPermitNodeID            string                         `json:"action_permit_node_id,omitempty"`
 	ConnectorReceiptFile          string                         `json:"connector_receipt_file,omitempty"`
 	ConnectorReceiptKeyFile       string                         `json:"connector_receipt_key_file,omitempty"`
 	ConnectorReceiptNodeID        string                         `json:"connector_receipt_node_id,omitempty"`
@@ -115,21 +121,32 @@ const (
 	CredentialModeXAPIKey CredentialMode = "x-api-key"
 )
 
+// ActionAuthority is one non-secret Ed25519 verification key trusted to issue
+// exact-effect permits. Private signing material never belongs on the node.
+type ActionAuthority struct {
+	KeyID     string `json:"key_id"`
+	TenantID  string `json:"tenant_id"`
+	PublicKey string `json:"public_key"`
+}
+
 // Connector binds a finite set of logical operations to one exact upstream
 // origin and one operator-owned credential.
 type Connector struct {
-	ID                string               `json:"id"`
-	BaseURL           string               `json:"base_url"`
-	CredentialFile    string               `json:"credential_file"`
-	CredentialMode    CredentialMode       `json:"credential_mode"`
-	AllowInsecureHTTP bool                 `json:"allow_insecure_http,omitempty"`
-	AllowedCIDRs      []string             `json:"allowed_cidrs,omitempty"`
-	MaxConcurrent     int                  `json:"max_concurrent"`
-	MaxRequestBytes   int64                `json:"max_request_bytes"`
-	MaxResponseBytes  int64                `json:"max_response_bytes"`
-	MaxSeconds        int                  `json:"max_seconds"`
-	MaxCallsPerGrant  int                  `json:"max_calls_per_grant"`
-	Operations        []ConnectorOperation `json:"operations"`
+	ID                     string               `json:"id"`
+	BaseURL                string               `json:"base_url"`
+	CredentialFile         string               `json:"credential_file"`
+	CredentialMode         CredentialMode       `json:"credential_mode"`
+	CredentialEpoch        uint64               `json:"credential_epoch,omitempty"`
+	AllowInsecureHTTP      bool                 `json:"allow_insecure_http,omitempty"`
+	AllowedCIDRs           []string             `json:"allowed_cidrs,omitempty"`
+	MaxConcurrent          int                  `json:"max_concurrent"`
+	MaxRequestBytes        int64                `json:"max_request_bytes"`
+	MaxResponseBytes       int64                `json:"max_response_bytes"`
+	MaxSeconds             int                  `json:"max_seconds"`
+	MaxCallsPerGrant       int                  `json:"max_calls_per_grant"`
+	ActionAuthorityIDs     []string             `json:"action_authority_ids,omitempty"`
+	MaxActionPermitSeconds int                  `json:"max_action_permit_seconds,omitempty"`
+	Operations             []ConnectorOperation `json:"operations"`
 }
 
 // ConnectorOperation is one exact method and path. Paths have no templates,
@@ -142,10 +159,18 @@ type ConnectorOperation struct {
 
 type loadedConnector struct {
 	Connector
-	base       *url.URL
-	credential string
-	prefixes   []netip.Prefix
-	operations map[string]ConnectorOperation
+	base             *url.URL
+	credential       string
+	prefixes         []netip.Prefix
+	operations       map[string]ConnectorOperation
+	authorities      map[string]ed25519.PublicKey
+	authorityTenants map[string]string
+	permitNodeID     string
+}
+
+type loadedActionAuthority struct {
+	publicKey ed25519.PublicKey
+	tenantID  string
 }
 
 func LoadConfig(path string) (Config, map[string]loadedRoute, map[string]loadedEgressRoute, string, error) {
@@ -286,11 +311,19 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 	if len(c.Connectors) > maxConnectors {
 		return nil, fmt.Errorf("gateway config permits at most %d connectors", maxConnectors)
 	}
+	authorities, err := c.validateActionAuthorities()
+	if err != nil {
+		return nil, err
+	}
+	if len(authorities) == 0 && c.ActionPermitNodeID != "" || len(authorities) > 0 && !bounded(c.ActionPermitNodeID, 128) {
+		return nil, errors.New("action_permit_node_id is required exactly when action authorities are configured")
+	}
 	reservedFiles, err := c.connectorReservedFileIdentities()
 	if err != nil {
 		return nil, err
 	}
 	loaded := make(map[string]loadedConnector, len(c.Connectors))
+	referencedAuthorities := make(map[string]struct{}, len(authorities))
 	connectorCredentials := make([]os.FileInfo, 0, len(c.Connectors))
 	for _, connector := range c.Connectors {
 		if !routeID(connector.ID) || connector.MaxConcurrent < 1 || connector.MaxConcurrent > 256 ||
@@ -301,6 +334,15 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 			len(connector.Operations) < 1 || len(connector.Operations) > maxConnectorOperations ||
 			len(connector.AllowedCIDRs) > maxConnectorAllowedCIDRs {
 			return nil, fmt.Errorf("connector %q has invalid limits or operations", connector.ID)
+		}
+		if len(connector.ActionAuthorityIDs) == 0 {
+			if connector.MaxActionPermitSeconds != 0 {
+				return nil, fmt.Errorf("connector %q sets a permit lifetime without an action authority", connector.ID)
+			}
+		} else if len(connector.ActionAuthorityIDs) > maxActionAuthoritiesPerCall ||
+			connector.MaxActionPermitSeconds < 1 || connector.MaxActionPermitSeconds > maxActionPermitSeconds ||
+			connector.CredentialEpoch == 0 {
+			return nil, fmt.Errorf("connector %q has invalid action permit authorities or lifetime", connector.ID)
 		}
 		if _, exists := loaded[connector.ID]; exists {
 			return nil, fmt.Errorf("duplicate connector %q", connector.ID)
@@ -341,7 +383,24 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 		connectorCredentials = append(connectorCredentials, credentialInfo)
 		entry := loadedConnector{
 			Connector: connector, base: base, credential: credential,
-			operations: make(map[string]ConnectorOperation, len(connector.Operations)),
+			operations:       make(map[string]ConnectorOperation, len(connector.Operations)),
+			authorities:      make(map[string]ed25519.PublicKey, len(connector.ActionAuthorityIDs)),
+			authorityTenants: make(map[string]string, len(connector.ActionAuthorityIDs)),
+		}
+		if len(connector.ActionAuthorityIDs) > 0 {
+			entry.permitNodeID = c.ActionPermitNodeID
+		}
+		for index, keyID := range connector.ActionAuthorityIDs {
+			if !routeID(keyID) || index > 0 && connector.ActionAuthorityIDs[index-1] >= keyID {
+				return nil, fmt.Errorf("connector %q action authority IDs must be unique and sorted", connector.ID)
+			}
+			authority, ok := authorities[keyID]
+			if !ok {
+				return nil, fmt.Errorf("connector %q references unknown action authority %q", connector.ID, keyID)
+			}
+			entry.authorities[keyID] = append(ed25519.PublicKey(nil), authority.publicKey...)
+			entry.authorityTenants[keyID] = authority.tenantID
+			referencedAuthorities[keyID] = struct{}{}
 		}
 		seenCIDRs := make(map[string]struct{}, len(connector.AllowedCIDRs))
 		for _, cidr := range connector.AllowedCIDRs {
@@ -366,7 +425,39 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 		}
 		loaded[connector.ID] = entry
 	}
+	if len(referencedAuthorities) != len(authorities) {
+		return nil, errors.New("every configured action authority must be referenced by a connector")
+	}
 	return loaded, nil
+}
+
+func (c Config) validateActionAuthorities() (map[string]loadedActionAuthority, error) {
+	if len(c.ActionAuthorities) > maxActionAuthorities {
+		return nil, fmt.Errorf("gateway config permits at most %d action authorities", maxActionAuthorities)
+	}
+	authorities := make(map[string]loadedActionAuthority, len(c.ActionAuthorities))
+	publicKeyOwners := make(map[string]string, len(c.ActionAuthorities))
+	for _, authority := range c.ActionAuthorities {
+		if !routeID(authority.KeyID) || !bounded(authority.TenantID, 128) {
+			return nil, errors.New("action authority has an invalid key ID or tenant identity")
+		}
+		if _, duplicate := authorities[authority.KeyID]; duplicate {
+			return nil, fmt.Errorf("duplicate action authority %q", authority.KeyID)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(authority.PublicKey)
+		if err != nil || len(decoded) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(decoded) != authority.PublicKey {
+			return nil, fmt.Errorf("action authority %q public key is not canonical base64 Ed25519", authority.KeyID)
+		}
+		keyIdentity := string(decoded)
+		if prior, duplicate := publicKeyOwners[keyIdentity]; duplicate {
+			return nil, fmt.Errorf("action authorities %q and %q reuse the same public key", prior, authority.KeyID)
+		}
+		publicKeyOwners[keyIdentity] = authority.KeyID
+		authorities[authority.KeyID] = loadedActionAuthority{
+			publicKey: ed25519.PublicKey(append([]byte(nil), decoded...)), tenantID: authority.TenantID,
+		}
+	}
+	return authorities, nil
 }
 
 func (c Config) reservedConnectorCredentialPath(path string) bool {

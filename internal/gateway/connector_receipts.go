@@ -32,25 +32,39 @@ type ConnectorReceiptFormatSummary struct {
 // without creating or changing it. A configured but not-yet-created ledger is
 // a valid prospective path and is reported as absent.
 func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary, error) {
+	requiredFormat := 0
+	if len(config.ActionAuthorities) > 0 {
+		requiredFormat = 2
+	}
 	key, err := config.connectorReceiptPrivateKey()
 	if err != nil {
 		return ConnectorReceiptFormatSummary{}, err
 	}
 	if key == nil {
-		return ConnectorReceiptFormatSummary{}, nil
+		return ConnectorReceiptFormatSummary{FormatVersion: requiredFormat}, nil
 	}
 	if _, err := os.Lstat(config.ConnectorReceiptFile); errors.Is(err, os.ErrNotExist) {
-		return ConnectorReceiptFormatSummary{}, nil
+		return ConnectorReceiptFormatSummary{FormatVersion: requiredFormat}, nil
 	} else if err != nil {
 		return ConnectorReceiptFormatSummary{}, fmt.Errorf("stat connector receipt ledger: %w", err)
 	}
 	public := key.Public().(ed25519.PublicKey)
+	formatVersion := 1
+	if requiredFormat > formatVersion {
+		formatVersion = requiredFormat
+	}
 	if _, err := connectorledger.VerifyRecords(
-		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch, nil,
+		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch,
+		func(record connectorledger.VerifiedReceipt) error {
+			if record.Receipt.SchemaVersion == connectorledger.SchemaV2 {
+				formatVersion = 2
+			}
+			return nil
+		},
 	); err != nil {
 		return ConnectorReceiptFormatSummary{}, fmt.Errorf("inspect connector receipt ledger: %w", err)
 	}
-	return ConnectorReceiptFormatSummary{Present: true, FormatVersion: 1}, nil
+	return ConnectorReceiptFormatSummary{Present: true, FormatVersion: formatVersion}, nil
 }
 
 func newConnectorReceiptIndex() *connectorReceiptIndex {
@@ -132,13 +146,18 @@ func (s *Server) mergeRetainedConnectorSpends() error {
 	return nil
 }
 
-func connectorReceiptEvent(grant Grant, routePolicyDigest, connectorID, operationID, callDigest string, requestBytes int64) connectorledger.Event {
+func connectorReceiptEvent(
+	grant Grant,
+	routePolicyDigest, connectorID, operationID, callDigest, authorityKeyID, permitDigest, requestDigest string,
+	requestBytes int64,
+) connectorledger.Event {
 	return connectorledger.Event{
 		Phase: connectorledger.Authorize, Outcome: connectorledger.Allowed,
 		TenantID: grant.TenantID, RuntimeRef: grant.RuntimeRef, CapsuleDigest: grant.CapsuleDigest,
 		PolicyDigest: grant.PolicyDigest, RoutePolicyDigest: routePolicyDigest, Generation: grant.Generation,
 		GrantID: grant.GrantID, ConnectorID: connectorID, OperationID: operationID,
-		TaskDigest: callDigest, RequestBytes: requestBytes,
+		TaskDigest: callDigest, AuthorityKeyID: authorityKeyID, PermitDigest: permitDigest,
+		RequestDigest: requestDigest, RequestBytes: requestBytes,
 	}
 }
 

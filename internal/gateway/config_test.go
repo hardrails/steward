@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -467,6 +468,118 @@ func TestConfigEnforcesConnectorCredentialLengthBoundary(t *testing.T) {
 	}
 	if _, err := config.validateAndLoadConnectors(); err != nil {
 		t.Fatalf("minimum-length connector credential rejected: %v", err)
+	}
+}
+
+func TestConfigValidatesActionPermitAuthorities(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := filepath.Join(t.TempDir(), "credential")
+	if err := os.WriteFile(credential, []byte("connector-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	connector := connectorFixture(credential)
+	connector.ActionAuthorityIDs = []string{"approver-a"}
+	connector.MaxActionPermitSeconds = 900
+	connector.CredentialEpoch = 1
+	valid := Config{
+		ActionPermitNodeID: "node-a",
+		ActionAuthorities:  []ActionAuthority{{KeyID: "approver-a", TenantID: "tenant-a", PublicKey: base64.StdEncoding.EncodeToString(public)}},
+		Connectors:         []Connector{connector},
+	}
+	loaded, err := valid.validateAndLoadConnectors()
+	if err != nil || !loaded[connector.ID].authorities["approver-a"].Equal(public) ||
+		loaded[connector.ID].authorityTenants["approver-a"] != "tenant-a" || loaded[connector.ID].permitNodeID != "node-a" {
+		t.Fatalf("loaded=%#v err=%v", loaded, err)
+	}
+
+	for name, mutate := range map[string]func(*Config){
+		"missing node":             func(config *Config) { config.ActionPermitNodeID = "" },
+		"missing tenant":           func(config *Config) { config.ActionAuthorities[0].TenantID = "" },
+		"invalid public":           func(config *Config) { config.ActionAuthorities[0].PublicKey = "not-base64" },
+		"unknown key":              func(config *Config) { config.Connectors[0].ActionAuthorityIDs = []string{"other"} },
+		"missing credential epoch": func(config *Config) { config.Connectors[0].CredentialEpoch = 0 },
+		"missing lifetime":         func(config *Config) { config.Connectors[0].MaxActionPermitSeconds = 0 },
+		"long lifetime":            func(config *Config) { config.Connectors[0].MaxActionPermitSeconds = maxActionPermitSeconds + 1 },
+		"unused key": func(config *Config) {
+			config.ActionAuthorities = append(config.ActionAuthorities, ActionAuthority{KeyID: "approver-b", TenantID: "tenant-a", PublicKey: base64.StdEncoding.EncodeToString(public)})
+		},
+		"duplicate key": func(config *Config) {
+			config.ActionAuthorities = append(config.ActionAuthorities, config.ActionAuthorities[0])
+		},
+		"unsorted references": func(config *Config) {
+			config.ActionAuthorities = append(config.ActionAuthorities, ActionAuthority{KeyID: "approver-0", TenantID: "tenant-a", PublicKey: base64.StdEncoding.EncodeToString(public)})
+			config.Connectors[0].ActionAuthorityIDs = []string{"approver-a", "approver-0"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			candidate.ActionAuthorities = append([]ActionAuthority(nil), valid.ActionAuthorities...)
+			candidate.Connectors = append([]Connector(nil), valid.Connectors...)
+			candidate.Connectors[0].ActionAuthorityIDs = append([]string(nil), valid.Connectors[0].ActionAuthorityIDs...)
+			mutate(&candidate)
+			if _, err := candidate.validateAndLoadConnectors(); err == nil {
+				t.Fatalf("invalid action authority configuration accepted: %#v", candidate)
+			}
+		})
+	}
+
+	withoutAuthorities := Config{ActionPermitNodeID: "node-a", Connectors: []Connector{connectorFixture(credential)}}
+	if _, err := withoutAuthorities.validateAndLoadConnectors(); err == nil {
+		t.Fatal("action permit node identity without authorities accepted")
+	}
+}
+
+func TestActionPermitConfigDoesNotDriftUnrelatedConnector(t *testing.T) {
+	directory := t.TempDir()
+	legacyCredential := filepath.Join(directory, "legacy.token")
+	permitCredential := filepath.Join(directory, "permit.token")
+	if err := os.WriteFile(legacyCredential, []byte("legacy-secret-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(permitCredential, []byte("permit-secret-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := connectorFixture(legacyCredential)
+	legacy.ID = "legacy"
+	permit := connectorFixture(permitCredential)
+	permit.ID = "approved"
+	before, err := (Config{Connectors: []Connector{legacy, permit}}).validateAndLoadConnectors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit.ActionAuthorityIDs = []string{"approver-a"}
+	permit.MaxActionPermitSeconds = 300
+	permit.CredentialEpoch = 1
+	after, err := (Config{
+		ActionPermitNodeID: "node-a",
+		ActionAuthorities: []ActionAuthority{{
+			KeyID: "approver-a", TenantID: "tenant-a", PublicKey: base64.StdEncoding.EncodeToString(public),
+		}},
+		Connectors: []Connector{legacy, permit},
+	}).validateAndLoadConnectors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameLoadedConnector(before["legacy"], after["legacy"]) || after["legacy"].permitNodeID != "" {
+		t.Fatalf("unrelated connector drifted: before=%#v after=%#v", before["legacy"], after["legacy"])
+	}
+	grant := connectorGrant("tenant-a", "agent-a", 1, "legacy")
+	if left, right := routePolicyDigest(grant, nil, nil, before, 4<<20), routePolicyDigest(grant, nil, nil, after, 4<<20); left != right {
+		t.Fatalf("unrelated route policy changed: before=%s after=%s", left, right)
+	}
+
+	changed := before["legacy"]
+	changed.CredentialEpoch = 2
+	changedMap := map[string]loadedConnector{"legacy": changed, "approved": before["approved"]}
+	if left, right := routePolicyDigest(grant, nil, nil, before, 4<<20), routePolicyDigest(grant, nil, nil, changedMap, 4<<20); left == right {
+		t.Fatal("credential epoch did not change the connector route policy digest")
 	}
 }
 
