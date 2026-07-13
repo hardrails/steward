@@ -333,9 +333,34 @@ if [[ ! -e /etc/steward/gateway-service-token ]]; then
 	chown steward-gateway:steward-gateway /etc/steward/gateway-service-token
 	chmod 0600 /etc/steward/gateway-service-token
 fi
+if [[ -e /etc/steward/connector-receipts.private.pem && ! -e /etc/steward/connector-receipts.public ]] ||
+	[[ ! -e /etc/steward/connector-receipts.private.pem && -e /etc/steward/connector-receipts.public ]]; then
+	echo "install-node: connector receipt private and public keys must exist together" >&2
+	exit 2
+fi
+if [[ ! -e /etc/steward/connector-receipts.private.pem ]]; then
+	tmp_connector_private=$(mktemp /etc/steward/.connector-receipts.private.XXXXXX)
+	tmp_connector_public=$(mktemp /etc/steward/.connector-receipts.public.XXXXXX)
+	trap 'rm -f -- "${tmp_connector_private:-}" "${tmp_connector_public:-}"' EXIT
+	rm -f "$tmp_connector_private" "$tmp_connector_public"
+	"$release_dir/stewardctl" keygen -private-out "$tmp_connector_private" -public-out "$tmp_connector_public" >/dev/null
+	chown steward-gateway:steward-gateway "$tmp_connector_private"
+	chmod 0600 "$tmp_connector_private"
+	chown root:root "$tmp_connector_public"
+	chmod 0644 "$tmp_connector_public"
+	mv "$tmp_connector_private" /etc/steward/connector-receipts.private.pem
+	tmp_connector_private=
+	mv "$tmp_connector_public" /etc/steward/connector-receipts.public
+	tmp_connector_public=
+	trap - EXIT
+fi
 if [[ ! -e /etc/steward/gateway.json ]]; then
+	[[ -r /etc/machine-id ]] || { echo "install-node: /etc/machine-id is required to create the Gateway receipt identity" >&2; exit 2; }
+	machine_id=$(tr -d '\n' </etc/machine-id)
+	[[ $machine_id =~ ^[a-f0-9]{32}$ ]] || { echo "install-node: /etc/machine-id is invalid" >&2; exit 2; }
 	sed -e "s/@EXECUTOR_GID@/$(id -g steward-executor)/g" \
 		-e "s/@RELAY_GID@/$(getent group steward-relay | cut -d: -f3)/g" \
+		-e "s|@CONNECTOR_RECEIPT_NODE_ID@|steward-$machine_id/gateway|g" \
 		"$release_config/gateway.json.in" >/etc/steward/gateway.json
 	chown root:steward-gateway /etc/steward/gateway.json
 	chmod 0640 /etc/steward/gateway.json

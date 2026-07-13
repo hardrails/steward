@@ -12,6 +12,8 @@ executor_bin=${STEWARD_EXECUTOR_BIN:-/usr/local/bin/steward-executor}
 gateway_bin=${STEWARD_GATEWAY_BIN:-/usr/local/bin/steward-gateway}
 relay_bin=${STEWARD_RELAY_BIN:-/usr/local/bin/steward-relay}
 gateway_config=${STEWARD_GATEWAY_CONFIG_FILE:-/etc/steward/gateway.json}
+connector_receipt_private=${STEWARD_CONNECTOR_RECEIPT_PRIVATE_KEY_FILE:-/etc/steward/connector-receipts.private.pem}
+connector_receipt_public=${STEWARD_CONNECTOR_RECEIPT_PUBLIC_KEY_FILE:-/etc/steward/connector-receipts.public}
 unit_dir=${STEWARD_UNIT_DIR:-}
 
 hash_file() {
@@ -76,6 +78,18 @@ for group in steward-executor steward-relay; do
 		exit 2
 	fi
 done
+gateway_uid=$(id -u steward-gateway)
+gateway_gid=$(id -g steward-gateway)
+if [[ ! -f $connector_receipt_private || -L $connector_receipt_private ||
+	$(stat -c '%u:%g:%a' "$connector_receipt_private" 2>/dev/null || true) != "$gateway_uid:$gateway_gid:600" ]]; then
+	echo "node-preflight: connector receipt private key must be a steward-gateway-owned regular file with mode 0600" >&2
+	exit 2
+fi
+if [[ ! -f $connector_receipt_public || -L $connector_receipt_public ||
+	$(stat -c '%u:%g:%a' "$connector_receipt_public" 2>/dev/null || true) != "0:0:644" ]]; then
+	echo "node-preflight: connector receipt public key must be a root-owned regular file with mode 0644" >&2
+	exit 2
+fi
 
 expected_version=
 for index in "${!binary_paths[@]}"; do
