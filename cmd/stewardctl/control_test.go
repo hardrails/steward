@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,17 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestControlDefaultOriginMatchesLoopbackServer(t *testing.T) {
+	flags := flag.NewFlagSet("control-default", flag.ContinueOnError)
+	values := addControlFlags(flags, true)
+	if err := flags.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := *values.url; got != "http://127.0.0.1:8443" {
+		t.Fatalf("default control origin = %q", got)
+	}
+}
 
 func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

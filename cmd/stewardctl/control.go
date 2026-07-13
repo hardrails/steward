@@ -61,7 +61,7 @@ type controlFlags struct {
 
 func addControlFlags(flags *flag.FlagSet, requireToken bool) controlFlags {
 	values := controlFlags{
-		url:    flags.String("control-url", "https://127.0.0.1:8443", "Steward Control HTTPS origin"),
+		url:    flags.String("control-url", "http://127.0.0.1:8443", "Steward Control origin (HTTPS except literal loopback)"),
 		caFile: flags.String("ca-file", "", "optional private CA PEM bundle"),
 	}
 	if requireToken {

@@ -663,7 +663,11 @@ func (store *Store) Poll(identity controlauth.NodeIdentity, capabilities []strin
 			return nil, err
 		}
 	}
-	return append([]controlprotocol.ExecutorDeliveryV3(nil), deliveries...), nil
+	// deliveries is initialized as a non-nil empty slice because the v3 wire
+	// contract requires `deliveries:[]` on an idle poll. Returning an append to a
+	// nil slice would collapse that distinction and encode JSON null, which the
+	// node correctly rejects as a malformed poll response.
+	return deliveries, nil
 }
 
 func (store *Store) ApplyReport(identity controlauth.NodeIdentity, report controlprotocol.ExecutorReportV3, now time.Time) (bool, error) {

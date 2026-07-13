@@ -173,6 +173,18 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 		t.Fatalf("terminal command status was not retained: %+v", terminal)
 	}
 
+	// An idle v3 poll must use an empty array, not null. The node's strict
+	// decoder rejects null so a healthy idle fleet does not silently back off as
+	// though the controller were incompatible.
+	response = fixture.request(t, http.MethodPost, "/executor-uplink/poll", nodeCredential.Credential, mustJSON(t, poll))
+	requireStatus(t, response, http.StatusOK)
+	if got := strings.TrimSpace(response.Body.String()); got != `{"protocol_version":3,"deliveries":[]}` {
+		t.Fatalf("idle poll response = %s", got)
+	}
+	if _, err := controlprotocol.DecodeExecutorPollResponseV3(response.Body.Bytes(), controlprotocol.MaxExecutorDeliveryBytes); err != nil {
+		t.Fatalf("idle poll response is not accepted by the node decoder: %v", err)
+	}
+
 	// Revocation takes effect before another authenticated operation.
 	response = fixture.request(t, http.MethodDelete, "/v1/operators/"+operator.CredentialID, fixture.adminToken, "")
 	requireStatus(t, response, http.StatusNoContent)

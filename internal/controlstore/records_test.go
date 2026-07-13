@@ -325,7 +325,7 @@ func TestMultiTenantWorkflowFencesReportsAndRevokesCredentials(t *testing.T) {
 	statusBefore, _ := fixture.store.Status()
 	empty, err := fixture.store.Poll(nodeIdentity, []string{"delivery-leases-v3", "multi-tenant"}, fixture.now.Add(6*time.Minute+30*time.Second), time.Minute, 128)
 	statusAfter, _ := fixture.store.Status()
-	if err != nil || len(empty) != 0 || statusAfter.Sequence != statusBefore.Sequence {
+	if err != nil || empty == nil || len(empty) != 0 || statusAfter.Sequence != statusBefore.Sequence {
 		t.Fatalf("throttled poll = (%+v, %v), sequence %d -> %d", empty, err, statusBefore.Sequence, statusAfter.Sequence)
 	}
 	second, err := fixture.store.Poll(nodeIdentity, []string{"delivery-leases-v3", "multi-tenant"}, fixture.now.Add(8*time.Minute), time.Minute, 128)
