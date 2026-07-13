@@ -136,7 +136,7 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 			return
 		}
 
-		callDigest := connectorCallDigest(taskID, connectorID, operationID)
+		callDigest := connectorCallDigest(grant.TenantID, grant.InstanceID, taskID, connectorID, operationID)
 		receipt := connectorReceiptEvent(grant, routePolicyDigest, connectorID, operationID, callDigest, int64(len(body)))
 		if err := s.spendConnectorCall(grantID, connectorID, callDigest, receipt); err != nil {
 			switch {
@@ -256,10 +256,10 @@ func connectorPort(scheme, portText string) int {
 	return 80
 }
 
-func connectorCallDigest(taskID, connectorID, operationID string) string {
+func connectorCallDigest(tenantID, instanceID, taskID, connectorID, operationID string) string {
 	digest := sha256.New()
 	_, _ = digest.Write([]byte("steward-gateway-connector-call-v1\x00"))
-	for _, value := range []string{taskID, connectorID, operationID} {
+	for _, value := range []string{tenantID, instanceID, taskID, connectorID, operationID} {
 		_, _ = digest.Write([]byte(value))
 		_, _ = digest.Write([]byte{0})
 	}

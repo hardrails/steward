@@ -190,7 +190,7 @@ func TestConnectorBrokersExactOperationAndStripsCallerAuthority(t *testing.T) {
 	}
 	state, err := os.ReadFile(rig.config.StateFile)
 	if err != nil || bytes.Contains(state, []byte("operator-secret")) || bytes.Contains(state, []byte("task-create-1")) ||
-		bytes.Contains(state, []byte(connectorCallDigest("task-create-1", "issues", "create"))) {
+		bytes.Contains(state, []byte(connectorCallDigest("tenant-a", "agent-a", "task-create-1", "issues", "create"))) {
 		t.Fatalf("unsafe mutable state=%s err=%v", state, err)
 	}
 	var receipts []connectorledger.Event
@@ -203,7 +203,8 @@ func TestConnectorBrokersExactOperationAndStripsCallerAuthority(t *testing.T) {
 		},
 	)
 	if err != nil || len(receipts) != 2 || receipts[0].Phase != connectorledger.Authorize ||
-		receipts[1].Phase != connectorledger.Terminal || receipts[0].TaskDigest != connectorCallDigest("task-create-1", "issues", "create") ||
+		receipts[1].Phase != connectorledger.Terminal ||
+		receipts[0].TaskDigest != connectorCallDigest("tenant-a", "agent-a", "task-create-1", "issues", "create") ||
 		receipts[0].RoutePolicyDigest == "" || receipts[1].ResponseBytes != int64(len(`{"id":7}`)) {
 		t.Fatalf("receipts=%#v err=%v", receipts, err)
 	}
@@ -228,7 +229,7 @@ func TestConnectorXAPIKeyModeInjectsOnlyFixedHeader(t *testing.T) {
 	}
 }
 
-func TestConnectorRejectsCrossGrantReplayAndRestartReplay(t *testing.T) {
+func TestConnectorReplaySurvivesRestartAndIsScopedToLogicalInstance(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
@@ -272,8 +273,18 @@ func TestConnectorRejectsCrossGrantReplayAndRestartReplay(t *testing.T) {
 	registerConnectorGrant(t, reopened, secondGrant)
 	activateConnectorGrant(t, reopened, secondGrant.GrantID)
 	otherGrantTask := connectorRequest(http.MethodPost, "issues", "create", "task-durable", strings.NewReader(`{"x":4}`))
-	if response := invokeConnector(reopened, secondGrant.GrantID, otherGrantTask); response.Code != http.StatusConflict || calls.Load() != 1 {
+	if response := invokeConnector(reopened, secondGrant.GrantID, otherGrantTask); response.Code != http.StatusNoContent || calls.Load() != 2 {
 		t.Fatalf("other grant status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
+	}
+
+	controlRequest(t, reopened, http.MethodPost, "/v1/grants/"+rig.grant.GrantID+"/deactivate", nil, http.StatusOK)
+	controlRequest(t, reopened, http.MethodDelete, "/v1/grants/"+rig.grant.GrantID, nil, http.StatusNoContent)
+	replacement := connectorGrant("tenant-a", "agent-a", 2, "issues")
+	registerConnectorGrant(t, reopened, replacement)
+	activateConnectorGrant(t, reopened, replacement.GrantID)
+	replacementTask := connectorRequest(http.MethodPost, "issues", "create", "task-durable", strings.NewReader(`{"x":5}`))
+	if response := invokeConnector(reopened, replacement.GrantID, replacementTask); response.Code != http.StatusConflict || calls.Load() != 2 {
+		t.Fatalf("replacement replay status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
 	}
 }
 
