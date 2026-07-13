@@ -76,3 +76,23 @@ func TestTenantTaskKeyValidationRejectsAmbiguousAuthority(t *testing.T) {
 		t.Fatal("too many task authorities accepted")
 	}
 }
+
+func TestTenantTaskKeyValidationRejectsCrossTenantKeyMaterial(t *testing.T) {
+	publisher, _, _ := ed25519.GenerateKey(rand.Reader)
+	public, _, _ := ed25519.GenerateKey(rand.Reader)
+	encoded := base64.StdEncoding.EncodeToString(public)
+	policy := testPolicy(publisher)
+	policy.Tenants[0].ServiceIDs = []string{"hermes-api"}
+	policy.Tenants[0].TaskKeys = []TaskKey{{
+		KeyID: "tenant-a-approver", PublicKey: encoded, ServiceIDs: []string{"hermes-api"},
+	}}
+	tenantB := policy.Tenants[0]
+	tenantB.TenantID = "tenant-b"
+	tenantB.TaskKeys = []TaskKey{{
+		KeyID: "tenant-b-approver", PublicKey: encoded, ServiceIDs: []string{"hermes-api"},
+	}}
+	policy.Tenants = append(policy.Tenants, tenantB)
+	if err := policy.Validate(); err == nil || !strings.Contains(err.Error(), "multiple tenants") {
+		t.Fatalf("cross-tenant task authority error=%v", err)
+	}
+}

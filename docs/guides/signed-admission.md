@@ -116,6 +116,11 @@ task authorities that match the admitted service. A task key cannot authorize
 admission, lifecycle, another tenant, or an unlisted service. See the
 [exact Hermes task workflow]({{ '/guides/hermes-agent/' | relative_url }}#authorize-and-run-one-exact-hermes-task).
 
+Ed25519 task-key material must also be unique across all tenant rules in one site
+policy. Steward rejects a policy that assigns the same public key to two tenants,
+even under different key IDs. This prevents possession of one tenant's private key
+from becoming cryptographic authority for another tenant through a policy mistake.
+
 ## 3. Sign a reusable profile capsule
 
 The manifest digest identifies an Open Container Initiative (OCI) manifest; the

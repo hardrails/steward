@@ -605,6 +605,7 @@ func (p SitePolicy) Validate() error {
 		return deny("invalid site policy identity")
 	}
 	seenTenants := map[string]struct{}{}
+	taskPublicKeyOwners := make(map[string]string)
 	for _, tenant := range p.Tenants {
 		if !bounded(tenant.TenantID, 128) || len(tenant.PublisherKeyIDs) == 0 || len(tenant.PublisherKeyIDs) > 64 {
 			return deny("invalid tenant policy")
@@ -733,6 +734,10 @@ func (p SitePolicy) Validate() error {
 				return deny("tenant task public key is assigned more than once")
 			}
 			seenTaskPublicKeys[string(public)] = struct{}{}
+			if owner, exists := taskPublicKeyOwners[string(public)]; exists && owner != tenant.TenantID {
+				return deny("tenant task public key is assigned to multiple tenants")
+			}
+			taskPublicKeyOwners[string(public)] = tenant.TenantID
 			seenServices := make(map[string]struct{}, len(taskKey.ServiceIDs))
 			for index, serviceID := range taskKey.ServiceIDs {
 				if !routeID(serviceID) || !contains(tenant.ServiceIDs, serviceID) ||
