@@ -79,6 +79,45 @@ for which no alternative is better on every material dimension. The adversarial
 pass starts with a separate question: *how could a manipulated agent turn this
 feature into another tenant's incident or an unverifiable external effect?*
 
+### Selected next assurance increment
+
+The accepted next design is a signed action permit: a trusted action authority
+authorizes one exact connector request for one tenant, Gateway durably spends that
+authorization before attempting the request, and subsequent evidence carries the
+same permit digest. “Exact” describes the authorized request bytes and metadata,
+not exactly-once delivery by the upstream service. This is selected work, not a
+current capability. The implementation, public contract, migration behavior, and
+hostile-path tests must land before the capability documentation can describe
+action permits as enforced.
+
+The selection assumes that an agent may be manipulated. That assumption is
+supported by [NIST's large-scale agent red-team](https://www.nist.gov/blogs/caisi-research-blog/insights-ai-agent-security-large-scale-red-teaming-competition),
+which found at least one successful hijacking attack against every tested frontier
+model, and by the [OWASP agentic-application risk list](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/),
+which includes goal hijack, tool misuse, and identity or privilege abuse. The
+[PAuth preprint](https://www.microsoft.com/en-us/research/publication/pauth-precise-task-scoped-authorization-for-agents/)
+and [Five Eyes adoption guidance](https://www.cyber.gov.au/business-government/secure-design/artificial-intelligence/careful-adoption-of-agentic-ai-services)
+are design signals for precise, runtime authorization and integrity-protected
+tasks; neither evaluates or certifies Steward.
+
+| Candidate | Adversarial failure considered | Operator value | Differentiating assurance | Delivery and residual risk | Pareto decision |
+| --- | --- | --- | --- | --- | --- |
+| Signed exact-effect action permits | A manipulated workload uses a valid broad grant for different request content, races the same authority, or retries after an ambiguous result. | High: authorizes useful external work without giving the workload reusable signing or credential authority. | High: binds node, tenant, instance generation, admitted artifact and policies, connector operation, task, exact request digest and length, content type, and validity window to durable spend and later evidence. | Medium: requires one coherent statement, signing, Gateway, ledger, restart, and verification contract. It cannot prove task meaning, upstream behavior, or exactly-once delivery. | **Selected.** It is the only candidate that directly narrows an admitted agent from a bounded operation to one authority-signed request while extending the existing offline grant-and-receipt chain. |
+| Quota-backed shared persistent state | A workload exhausts bytes or inodes, or a quota disappears after reboot and silently weakens tenant isolation. | High for long-lived shared-host workloads. | Medium: portable reconciliation evidence would be valuable, but the enforcement is substrate-specific. | High: Docker has no portable hard volume quota that satisfies Steward's restart and reconciliation contract. | Defer. Keep shared-host persistent-state admission closed until a qualified backend exists; this does not reduce the authority of an external connector call. |
+| MicroVM or Kubernetes backend | A container-runtime escape or host-orchestration failure crosses a tenant boundary. | Medium to high for some sites. | Low: [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/), [OpenSandbox](https://open-sandbox.ai/guides/secure-container), and [Kubernetes Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) already document these substrate choices. | Very high: adds packaging, lifecycle, state, network, and upgrade surfaces while host administration remains trusted. | Defer. Preserve Steward's enforcement contract and consider another backend only when a concrete operator requirement cannot use Docker and gVisor. |
+| Generic workflow engine | A manipulated plan gains another in-process execution path, or Steward duplicates agent behavior and expands its trusted core. | Medium: could simplify one product surface. | Low: Hermes, OpenClaw, and other agent frameworks already own planning, skills, and tool behavior. | Very high: broad semantics and integrations are difficult to bound or prove at the node boundary. | Reject from the Steward process. Keep qualifying external agents and enforce their authority outside them. |
+| External evidence witness | A compromised host key holder rewrites or withholds a purely node-local evidence history. | Medium: improves independent proof for connected deployments. | Medium to high, but it changes the trust model rather than preventing the manipulated agent's exact unauthorized request. | High for disconnected sites: introduces another key, service, availability dependency, synchronization protocol, and recovery path. | Defer. Keep the current host-compromise limitation explicit and revisit a witness as an optional complement, not a prerequisite for local enforcement. |
+| Broad Layer 7 (application-protocol) inspection | An allowed encrypted channel carries a semantically dangerous request or covert exfiltration. | High in selected environments. | Low to medium: OpenShell already documents broader REST, GraphQL, MCP, and JSON-RPC inspection. | Very high: TLS interception, protocol parsers, schemas, and content classification materially expand the trusted core and still cannot prove model intent. | Defer. Prefer exact named connector operations and request-bound permits; keep generic `CONNECT` opaque and credential-free. |
+
+Action permits remain on the Pareto frontier because no deferred candidate provides
+greater immediate reduction of external-effect authority at equal or lower
+assurance cost. Quota-backed state and an optional witness address different trust
+failures and remain plausible later work; substrate breadth, workflow behavior, and
+general protocol inspection are better supplied outside Steward's narrow trusted
+core.
+
+### Existing implementation choices
+
 | Candidate | Adversarial failure considered | Value and assurance evidence | Decision |
 | --- | --- | --- | --- |
 | Named, credential-brokered operations | The workload steals a standing credential, changes the destination or operation, replays a task after failure, or obtains a second effect after restart. | Enables useful authenticated work while exact origin, method, path, DNS answers, credential digest, per-grant calls, and tenant-scoped task spend remain outside the agent. Signed authorization and terminal records make crash ambiguity explicit. | Build the narrow connector contract in Gateway. This is on the Pareto frontier for immediate utility, security, and differentiation. |
@@ -145,7 +184,13 @@ authorization, and separating trusted instructions from untrusted data.
 - [NIST's large-scale agent red-team report](https://www.nist.gov/blogs/caisi-research-blog/insights-ai-agent-security-large-scale-red-teaming-competition)
   reports that every tested frontier model was hijacked at least once across more
   than 250,000 attempts. The result supports designing for a manipulated agent,
-  not claiming that a prompt can eliminate prompt injection. NIST's
+  not claiming that a prompt can eliminate prompt injection. NIST's May 2026
+  [analysis of AI-agent security RFI responses](https://www.nist.gov/publications/summary-analysis-responses-request-information-regarding-security-considerations-ai)
+  reports broad agreement among commenters that agent security creates novel
+  threats and an adoption barrier, that established cybersecurity practices need
+  adaptation, and that implementation guidance, information sharing, and standards
+  have roles to play. This is a summary of submitted views, not a Steward
+  evaluation. NIST's
   [agent identity and authorization concept paper](https://www.nccoe.nist.gov/publications/other/accelerating-adoption-software-and-ai-agent-identity-and-authorization-concept)
   calls for least privilege, dynamic authorization, authority proofs, and
   tamper-resistant records.
@@ -180,6 +225,12 @@ authorization, and separating trusted instructions from untrusted data.
   boundary. It supports Steward's choice to spend a tenant-bound task claim before
   an external effect, but it has not been peer reviewed and does not evaluate
   Steward.
+- The 2026 [Open Agent Passport preprint](https://arxiv.org/abs/2603.20953)
+  proposes deterministic authorization before a tool call and a signed audit
+  record. It is a recent, non-peer-reviewed design signal. Steward's accepted
+  permit design remains local because it must bind the existing runtime grant,
+  exact connector request, durable offline spend, and terminal receipt without
+  adding another enforcement service.
 - The 2026 [AIRGuard preprint](https://arxiv.org/abs/2605.28914) evaluates runtime,
   action-time authorization for agent tool use. It is recent, non-peer-reviewed
   research, so Steward treats it as a design signal rather than proof of efficacy.
