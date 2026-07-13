@@ -120,8 +120,11 @@ func Verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.T
 	// other signatures; accepting alternate envelope spellings would let an
 	// intermediary change the receipt's permit digest without changing authority.
 	envelope, err := dsse.Parse(rawEnvelope)
-	if err != nil || len(envelope.Signatures) != 1 {
+	if err != nil {
 		return Verified{}, invalid("parse canonical single-signature envelope: %v", err)
+	}
+	if len(envelope.Signatures) != 1 {
+		return Verified{}, invalid("permit envelope must contain exactly one signature")
 	}
 	canonical, err := dsse.Marshal(envelope)
 	if err != nil || !bytes.Equal(canonical, rawEnvelope) {

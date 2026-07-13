@@ -81,6 +81,12 @@ func TestVerifyRejectsInvalidSignedStatements(t *testing.T) {
 			}
 		})
 	}
+	boundary := validStatement()
+	boundary.RequestBytes = MaxRequestBytes
+	if _, err := Verify(signStatement(t, boundary, "authority-a", private),
+		map[string]ed25519.PublicKey{"authority-a": private.Public().(ed25519.PublicKey)}, testNow, 5*time.Minute); err != nil {
+		t.Fatalf("Verify rejected exact request-size boundary: %v", err)
+	}
 }
 
 func TestVerifyPreservesOpaquePublicIdentities(t *testing.T) {
