@@ -333,12 +333,12 @@ timeout "$build_timeout" docker build --pull=false --provenance=false \
 	--build-arg "HERMES_SOURCE_REVISION=$expected_revision" \
 	-f "$work/context/adapter/Dockerfile" -t "$image_tag" "$work/context"
 
-image_id=$(docker image inspect --format '{{.Id}}' "$image_tag")
+runtime_image_id=$(docker image inspect --format '{{.Id}}' "$image_tag")
 image_user=$(docker image inspect --format '{{.Config.User}}' "$image_tag")
 image_volumes=$(docker image inspect --format '{{json .Config.Volumes}}' "$image_tag")
 image_os=$(docker image inspect --format '{{.Os}}' "$image_tag")
 image_arch=$(docker image inspect --format '{{.Architecture}}' "$image_tag")
-[[ $image_id =~ ^sha256:[a-f0-9]{64}$ ]] || die "built image has an invalid configuration digest"
+[[ $runtime_image_id =~ ^sha256:[a-f0-9]{64}$ ]] || die "built image has an invalid runtime identity digest"
 [[ $image_user == 65532:65532 ]] || die "built image user is $image_user, not 65532:65532"
 [[ $image_volumes == null || $image_volumes == '{}' ]] || die "built image declares a volume"
 [[ -n $image_os && -n $image_arch ]] || die "built image platform is incomplete"
@@ -370,12 +370,98 @@ if written == 0:
     raise SystemExit("Docker produced an empty archive")
 ' "$archive_tmp" "$max_archive_bytes"
 
+mapfile -t archive_image_values < <(python3 - "$archive_tmp" "$image_tag" "$runtime_image_id" "$image_os" "$image_arch" <<'PY'
+import hashlib
+import json
+import re
+import sys
+import tarfile
+
+archive_path, expected_tag, runtime_id, expected_os, expected_arch = sys.argv[1:]
+digest = re.compile(r"sha256:[a-f0-9]{64}")
+blob = re.compile(r"blobs/sha256/([a-f0-9]{64})")
+
+with tarfile.open(archive_path, mode="r:") as archive:
+    members = archive.getmembers()
+    if len(members) > 512 or len({member.name for member in members}) != len(members):
+        raise SystemExit("Docker archive has an invalid member inventory")
+    if any(not (member.isfile() or member.isdir()) for member in members):
+        raise SystemExit("Docker archive contains a non-file member")
+    by_name = {member.name: member for member in members}
+
+    def read(name, maximum):
+        member = by_name.get(name)
+        if member is None or not member.isfile() or member.size < 0 or member.size > maximum:
+            raise SystemExit(f"Docker archive member is missing or oversized: {name}")
+        stream = archive.extractfile(member)
+        if stream is None:
+            raise SystemExit(f"Docker archive member cannot be read: {name}")
+        content = stream.read(maximum + 1)
+        if len(content) != member.size or len(content) > maximum:
+            raise SystemExit(f"Docker archive member changed size: {name}")
+        return content
+
+    legacy = json.loads(read("manifest.json", 1 << 20))
+    if not isinstance(legacy, list) or len(legacy) != 1 or not isinstance(legacy[0], dict):
+        raise SystemExit("Docker archive must contain exactly one image")
+    image = legacy[0]
+    if image.get("RepoTags") != [expected_tag]:
+        raise SystemExit("Docker archive tag differs from the temporary build tag")
+    config_path = image.get("Config")
+    match = blob.fullmatch(config_path) if isinstance(config_path, str) else None
+    if match is None:
+        raise SystemExit("Docker archive config path is invalid")
+    config_bytes = read(config_path, 1 << 20)
+    config_digest = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+    if config_digest != "sha256:" + match.group(1):
+        raise SystemExit("Docker archive config digest is invalid")
+    config = json.loads(config_bytes)
+    if (
+        not isinstance(config, dict)
+        or config.get("os") != expected_os
+        or config.get("architecture") != expected_arch
+        or not isinstance(config.get("config"), dict)
+        or config["config"].get("User") != "65532:65532"
+        or config["config"].get("Volumes") not in (None, {})
+    ):
+        raise SystemExit("Docker archive config contract is invalid")
+
+    index = json.loads(read("index.json", 1 << 20))
+    descriptors = index.get("manifests") if isinstance(index, dict) else None
+    if not isinstance(descriptors, list) or len(descriptors) != 1 or not isinstance(descriptors[0], dict):
+        raise SystemExit("Docker archive OCI index is invalid")
+    manifest_digest = descriptors[0].get("digest")
+    if not isinstance(manifest_digest, str) or digest.fullmatch(manifest_digest) is None:
+        raise SystemExit("Docker archive manifest digest is invalid")
+    manifest_path = "blobs/sha256/" + manifest_digest.removeprefix("sha256:")
+    manifest_bytes = read(manifest_path, 1 << 20)
+    if "sha256:" + hashlib.sha256(manifest_bytes).hexdigest() != manifest_digest:
+        raise SystemExit("Docker archive manifest content does not match its digest")
+    manifest = json.loads(manifest_bytes)
+    descriptor = manifest.get("config") if isinstance(manifest, dict) else None
+    if not isinstance(descriptor, dict) or descriptor.get("digest") != config_digest:
+        raise SystemExit("Docker archive manifest does not bind the config digest")
+    annotation = descriptors[0].get("annotations", {}).get("config.digest")
+    if annotation is not None and annotation != config_digest:
+        raise SystemExit("Docker archive index config annotation is inconsistent")
+    if runtime_id not in {manifest_digest, config_digest}:
+        raise SystemExit("Docker runtime image identity is not bound by the archive")
+
+print(manifest_digest)
+print(config_digest)
+PY
+)
+(( ${#archive_image_values[@]} == 2 )) || die "Docker archive image identity is incomplete"
+image_manifest_digest=${archive_image_values[0]}
+image_config_digest=${archive_image_values[1]}
+
 archive_sha256=$(sha256_file "$archive_tmp")
 archive_size=$(file_size "$archive_tmp")
 attestation_tmp=$publish_dir/attestation.json
 python3 - "$attestation_tmp" "$(basename -- "$output")" "$expected_repository" "$expected_revision" "$source_tree" \
 	"$source_archive_sha256" "$build_commit" "$adapter_tree" "$adapter_file_set_sha256" "$build_recipe_sha256" \
-	"$source_inputs_sha256" "$builder_sha256" "$base_image_reference" "$image_id" "$image_platform" \
+	"$source_inputs_sha256" "$builder_sha256" "$base_image_reference" "$image_manifest_digest" \
+	"$image_config_digest" "$runtime_image_id" "$image_platform" \
 	"$archive_sha256" "$archive_size" <<'PY'
 import json
 import os
@@ -385,7 +471,7 @@ import sys
 (
     destination, archive_name, repository, revision, source_tree, source_archive,
     steward_commit, adapter_tree, adapter_files, dockerfile, source_inputs, builder,
-    base_image, image_id, platform, archive_digest, archive_size,
+    base_image, manifest_digest, config_digest, runtime_image_id, platform, archive_digest, archive_size,
 ) = sys.argv[1:]
 payload = {
     "adapter": {
@@ -411,10 +497,11 @@ payload = {
     },
     "contains_agent_content": False,
     "image": {
-        "config_digest": image_id,
+        "config_digest": config_digest,
         "declared_volumes": False,
-        "id": image_id,
+        "manifest_digest": manifest_digest,
         "platform": platform,
+        "runtime_image_id": runtime_image_id,
         "user": "65532:65532",
     },
     "schema_version": "steward.hermes-adapter-build-attestation.v1",
@@ -470,5 +557,6 @@ PY
 progress "Hermes adapter archive created"
 echo "Archive:     $output"
 echo "Attestation: $attestation"
-echo "Image:       $image_id ($image_platform)"
+echo "Image:       $image_manifest_digest ($image_platform)"
+echo "Config:      $image_config_digest"
 echo "Archive SHA: $archive_sha256"
