@@ -8,7 +8,7 @@ umask 077
 	echo "hermes-steward-acceptance: set STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES only on a disposable host" >&2
 	exit 2
 }
-for command in base64 curl docker go python3; do
+for command in base64 curl docker python3; do
 	command -v "$command" >/dev/null 2>&1 || { echo "hermes-steward-acceptance: $command is required" >&2; exit 2; }
 done
 docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || {
@@ -26,6 +26,12 @@ executor_bin=${EXECUTOR_BIN:-$work/steward-executor}
 gateway_bin=${GATEWAY_BIN:-$work/steward-gateway}
 relay_bin=${RELAY_BIN:-$work/steward-relay}
 ctl_bin=${STEWARDCTL_BIN:-$work/stewardctl}
+if [[ ! -x $executor_bin || ! -x $gateway_bin || ! -x $relay_bin || ! -x $ctl_bin ]]; then
+	command -v go >/dev/null 2>&1 || {
+		echo "hermes-steward-acceptance: go is required unless all binary paths are provided" >&2
+		exit 2
+	}
+fi
 run_id=${STEWARD_ACCEPTANCE_RUN_ID:-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}
 [[ $run_id =~ ^[a-f0-9]{16}$ ]] || { echo "hermes-steward-acceptance: invalid STEWARD_ACCEPTANCE_RUN_ID" >&2; exit 2; }
 tenant_id=hermes-$run_id
@@ -41,6 +47,11 @@ debug_keep=${HERMES_DEBUG_KEEP_FAILED_WORK:-NO}
 
 cleanup() {
 	local status=$?
+	if [[ $status -ne 0 && $debug_keep == YES ]]; then
+		for container in $(docker ps -aq --filter "label=io.hardrails.tenant=$tenant_id" --filter "label=io.hardrails.instance=$instance_id"); do
+			docker logs "$container" >"$work/docker-$container.log" 2>&1 || true
+		done
+	fi
 	if [[ -n ${runtime_ref:-} && -n ${token:-} ]]; then
 		curl -sS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null 2>&1 || true
 	fi
@@ -148,9 +159,9 @@ printf '%s\n' "{
   \"publishers\":[{\"key_id\":\"publisher\",\"public_key\":\"$publisher_public\",\"revoked\":false,
     \"allowed_profiles\":[{\"id\":\"hermes-v1\",\"version\":\"v1\"}],
     \"allowed_repositories\":[\"$repository\"],\"allowed_manifest_digests\":[\"$manifest_digest\"],
-    \"resource_ceiling\":{\"memory_bytes\":1073741824,\"cpu_millis\":1000,\"pids\":128}}],
+    \"resource_ceiling\":{\"memory_bytes\":536870912,\"cpu_millis\":1000,\"pids\":128}}],
   \"tenants\":[{\"tenant_id\":\"$tenant_id\",\"publisher_key_ids\":[\"publisher\"],
-    \"resource_ceiling\":{\"memory_bytes\":1073741824,\"cpu_millis\":1000,\"pids\":128},
+    \"resource_ceiling\":{\"memory_bytes\":536870912,\"cpu_millis\":1000,\"pids\":128},
     \"inference_route_ids\":[\"local-openai\"],\"inference_model_aliases\":[\"steward-fixture-model\"],
     \"service_ids\":[\"hermes-api\"]}]
 }" >"$work/policy.json"
@@ -159,7 +170,7 @@ printf '%s\n' "{
   \"schema_version\":\"steward.admission.v1\",\"capsule_id\":\"hermes-workspace-audit\",\"publisher_key_id\":\"publisher\",
   \"profile\":{\"id\":\"hermes-v1\",\"version\":\"v1\"},
   \"image\":{\"repository\":\"$repository\",\"manifest_digest\":\"$manifest_digest\",\"config_digest\":\"$config_digest\",\"platform\":{$platform}},
-  \"command\":[\"serve\"],\"resources\":{\"memory_bytes\":1073741824,\"cpu_millis\":1000,\"pids\":128},
+  \"command\":[\"serve\"],\"resources\":{\"memory_bytes\":536870912,\"cpu_millis\":1000,\"pids\":128},
   \"capabilities\":{\"state\":true,\"inference\":true,\"service\":true,\"egress\":false},
   \"state\":{\"schema_version\":\"v1\",\"path\":\"/opt/data\"},\"service\":{\"id\":\"hermes-api\",\"port\":8766}
 }" >"$work/capsule.json"
@@ -192,12 +203,16 @@ curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:8090/v1/readiness >
 
 admit() {
 	local generation=$1 disposition=$2
-	printf '%s\n' "{\"capsule_dsse_base64\":\"$capsule_base64\",\"intent\":{\"tenant_id\":\"$tenant_id\",\"node_id\":\"$node_id\",\"instance_id\":\"$instance_id\",\"lineage_id\":\"$lineage_id\",\"generation\":$generation,\"capsule_digest\":\"$capsule_digest\",\"resources\":{\"memory_bytes\":1073741824,\"cpu_millis\":1000,\"pids\":128},\"capabilities\":{\"state\":true,\"inference\":true,\"service\":true,\"egress\":false},\"state_disposition\":\"$disposition\",\"inference_route_id\":\"local-openai\",\"model_alias\":\"steward-fixture-model\",\"service_id\":\"hermes-api\"}}" | \
-		curl -fsS -X POST http://127.0.0.1:8090/v1/admissions -H 'Content-Type: application/json' -H "Authorization: Bearer $token" --data-binary @-
+	printf '%s\n' "{\"capsule_dsse_base64\":\"$capsule_base64\",\"intent\":{\"tenant_id\":\"$tenant_id\",\"node_id\":\"$node_id\",\"instance_id\":\"$instance_id\",\"lineage_id\":\"$lineage_id\",\"generation\":$generation,\"capsule_digest\":\"$capsule_digest\",\"resources\":{\"memory_bytes\":536870912,\"cpu_millis\":1000,\"pids\":128},\"capabilities\":{\"state\":true,\"inference\":true,\"service\":true,\"egress\":false},\"state_disposition\":\"$disposition\",\"inference_route_id\":\"local-openai\",\"model_alias\":\"steward-fixture-model\",\"service_id\":\"hermes-api\"}}" | \
+		curl -sS -X POST http://127.0.0.1:8090/v1/admissions -H 'Content-Type: application/json' -H "Authorization: Bearer $token" --data-binary @-
 }
 
 extract_admission() {
 	python3 -c 'import json,sys; p=json.load(sys.stdin); print(p["runtime_ref"]); print(p["grant_id"])'
+}
+
+require_admission() {
+	python3 -c 'import json,sys; p=json.load(sys.stdin); ok=isinstance(p.get("runtime_ref"),str) and isinstance(p.get("grant_id"),str); print(json.dumps(p,separators=(",",":")),file=sys.stderr) if not ok else None; raise SystemExit(0 if ok else 1)'
 }
 
 run_workspace_audit() {
@@ -223,12 +238,28 @@ run_workspace_audit() {
 		"$expected" <<<"$terminal"
 }
 
-mapfile -t admission < <(admit 1 new | extract_admission)
+wait_for_hermes() {
+	local grant=$1 runtime=$2
+	for _ in $(seq 1 120); do
+		if curl -fsS -H 'Authorization: Bearer service-secret' \
+			"http://127.0.0.1:18091/v1/services/$grant/health" >/dev/null 2>&1; then
+			return 0
+		fi
+		[[ $(docker inspect --format '{{.State.Running}}' "$runtime" 2>/dev/null) == true ]] || return 1
+		sleep 1
+	done
+	return 1
+}
+
+admission_response=$(admit 1 new)
+require_admission <<<"$admission_response"
+mapfile -t admission < <(extract_admission <<<"$admission_response")
 runtime_ref=${admission[0]}
 grant_id=${admission[1]}
 curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
 [[ $(docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref") == runsc ]]
 [[ $(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref") == true ]]
+wait_for_hermes "$grant_id" "$runtime_ref"
 state_volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/opt/data"}}{{.Name}}{{end}}{{end}}' "$runtime_ref")
 [[ -n $state_volume ]]
 docker exec -u 65532:65532 "$runtime_ref" sh -c 'mkdir -p /opt/data/workspace/nested && printf "alpha\n" > /opt/data/workspace/alpha.txt && printf "beta\n" > /opt/data/workspace/nested/beta.txt'
@@ -237,10 +268,13 @@ run_workspace_audit "$grant_id"
 curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 runtime_ref=
 
-mapfile -t admission < <(admit 2 resume | extract_admission)
+admission_response=$(admit 2 resume)
+require_admission <<<"$admission_response"
+mapfile -t admission < <(extract_admission <<<"$admission_response")
 runtime_ref=${admission[0]}
 grant_id=${admission[1]}
 curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
+wait_for_hermes "$grant_id" "$runtime_ref"
 run_workspace_audit "$grant_id"
 curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 runtime_ref=
