@@ -165,6 +165,72 @@ func TestConfigValidatesExactServiceTaskOperations(t *testing.T) {
 	}
 }
 
+func TestConfigValidatesFixedTaskLifecyclePolicy(t *testing.T) {
+	valid := ServiceOperation{
+		ServiceID: "hermes-api", ID: "hermes.run", Method: http.MethodPost, Path: "/v1/runs",
+		ContentType: "application/json", MaxRequestBytes: 64 << 10, MaxResponseBytes: 1 << 20,
+		MaxSeconds: 30, MaxPermitSeconds: 300,
+		TaskProtocol: TaskProtocolLifecycleV1, StatusPathPrefix: "/v1/runs/",
+		StatusMaxSeconds: 15, PollIntervalSeconds: 2,
+	}
+	loaded, err := (Config{ServiceOperations: []ServiceOperation{valid}}).validateServiceOperations()
+	if err != nil || loaded[valid.ServiceID][valid.ID] != valid {
+		t.Fatalf("loaded lifecycle operation=%#v err=%v", loaded, err)
+	}
+	boundary := valid
+	boundary.StatusPathPrefix = "/" + strings.Repeat("a", 2048-maxServiceRunIDBytes-2) + "/"
+	if _, err := (Config{ServiceOperations: []ServiceOperation{boundary}}).validateServiceOperations(); err != nil {
+		t.Fatalf("maximum derived lifecycle path rejected: %v", err)
+	}
+
+	tests := map[string]func(*ServiceOperation){
+		"missing protocol":      func(value *ServiceOperation) { value.TaskProtocol = "" },
+		"unsupported protocol":  func(value *ServiceOperation) { value.TaskProtocol = "other" },
+		"missing prefix":        func(value *ServiceOperation) { value.StatusPathPrefix = "" },
+		"root prefix":           func(value *ServiceOperation) { value.StatusPathPrefix = "/" },
+		"double root":           func(value *ServiceOperation) { value.StatusPathPrefix = "//" },
+		"no trailing slash":     func(value *ServiceOperation) { value.StatusPathPrefix = "/v1/runs" },
+		"double slash":          func(value *ServiceOperation) { value.StatusPathPrefix = "/v1//runs/" },
+		"double trailing slash": func(value *ServiceOperation) { value.StatusPathPrefix = "/v1/runs//" },
+		"dot segment":           func(value *ServiceOperation) { value.StatusPathPrefix = "/v1/../runs/" },
+		"encoded path":          func(value *ServiceOperation) { value.StatusPathPrefix = "/v1/%72uns/" },
+		"query":                 func(value *ServiceOperation) { value.StatusPathPrefix = "/v1/runs/?admin=1" },
+		"fragment":              func(value *ServiceOperation) { value.StatusPathPrefix = "/v1/runs/#admin/" },
+		"backslash":             func(value *ServiceOperation) { value.StatusPathPrefix = "/v1\\runs/" },
+		"control":               func(value *ServiceOperation) { value.StatusPathPrefix = "/v1/\nruns/" },
+		"zero status timeout":   func(value *ServiceOperation) { value.StatusMaxSeconds = 0 },
+		"long status timeout":   func(value *ServiceOperation) { value.StatusMaxSeconds = maxServiceStatusSeconds + 1 },
+		"zero poll interval":    func(value *ServiceOperation) { value.PollIntervalSeconds = 0 },
+		"long poll interval":    func(value *ServiceOperation) { value.PollIntervalSeconds = maxServicePollSeconds + 1 },
+		"derived path too long": func(value *ServiceOperation) {
+			value.StatusPathPrefix = "/" + strings.Repeat("a", 2048-maxServiceRunIDBytes) + "/"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if _, err := (Config{ServiceOperations: []ServiceOperation{candidate}}).validateServiceOperations(); err == nil {
+				t.Fatalf("invalid lifecycle operation accepted: %#v", candidate)
+			}
+		})
+	}
+
+	config := Config{
+		ServiceOperations: []ServiceOperation{valid},
+		ConnectorReceiptTenantBudgets: []ConnectorReceiptTenantBudget{{
+			TenantID: "tenant-a", Bytes: connectorledger.MinimumLifecycleTenantBytes - 1,
+		}},
+	}
+	if err := config.validateLifecycleReceiptBudgets(); err == nil {
+		t.Fatal("undersized lifecycle receipt budget accepted")
+	}
+	config.ConnectorReceiptTenantBudgets[0].Bytes = connectorledger.MinimumLifecycleTenantBytes
+	if err := config.validateLifecycleReceiptBudgets(); err != nil {
+		t.Fatalf("minimum lifecycle receipt budget rejected: %v", err)
+	}
+}
+
 func TestConfigLoadsFiniteConnectorsAndOwnerOnlyCredentials(t *testing.T) {
 	directory := t.TempDir()
 	credential := filepath.Join(directory, "connector-token")

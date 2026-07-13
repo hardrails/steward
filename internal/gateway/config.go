@@ -40,9 +40,14 @@ const (
 	maxServiceTaskResponseBytes = int64(1 << 20)
 	maxServiceTaskSeconds       = 120
 	maxServiceTaskPermitSeconds = 900
+	maxServiceStatusSeconds     = 30
+	maxServicePollSeconds       = 60
+	maxServiceRunIDBytes        = 128
 	minConnectorCredentialBytes = 12
 	maxCredentialBytes          = 16 << 10
 )
+
+const TaskProtocolLifecycleV1 = connectorledger.TaskProtocolLifecycleV1
 
 type Config struct {
 	Version                       int                            `json:"version"`
@@ -78,15 +83,19 @@ type Config struct {
 // policy, not tenant input: a signed task may select only this operation ID and
 // must still bind the exact configured method, path, content type, and limits.
 type ServiceOperation struct {
-	ServiceID        string `json:"service_id"`
-	ID               string `json:"id"`
-	Method           string `json:"method"`
-	Path             string `json:"path"`
-	ContentType      string `json:"content_type"`
-	MaxRequestBytes  int64  `json:"max_request_bytes"`
-	MaxResponseBytes int64  `json:"max_response_bytes"`
-	MaxSeconds       int    `json:"max_seconds"`
-	MaxPermitSeconds int    `json:"max_permit_seconds"`
+	ServiceID           string `json:"service_id"`
+	ID                  string `json:"id"`
+	Method              string `json:"method"`
+	Path                string `json:"path"`
+	ContentType         string `json:"content_type"`
+	MaxRequestBytes     int64  `json:"max_request_bytes"`
+	MaxResponseBytes    int64  `json:"max_response_bytes"`
+	MaxSeconds          int    `json:"max_seconds"`
+	MaxPermitSeconds    int    `json:"max_permit_seconds"`
+	TaskProtocol        string `json:"task_protocol,omitempty"`
+	StatusPathPrefix    string `json:"status_path_prefix,omitempty"`
+	StatusMaxSeconds    int    `json:"status_max_seconds,omitempty"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds,omitempty"`
 }
 
 // ConnectorReceiptTenantBudget reserves non-borrowing signed receipt capacity
@@ -294,6 +303,9 @@ func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error)
 	if (len(c.Connectors) > 0 || len(c.ServiceOperations) > 0) && len(c.ConnectorReceiptTenantBudgets) == 0 {
 		return nil, errors.New("connectors and authorized service tasks require at least one explicit connector receipt tenant budget")
 	}
+	if err := c.validateLifecycleReceiptBudgets(); err != nil {
+		return nil, err
+	}
 	if !absoluteClean(c.ConnectorReceiptFile) || !absoluteClean(c.ConnectorReceiptKeyFile) ||
 		c.ConnectorReceiptFile == c.ConnectorReceiptKeyFile || c.ConnectorReceiptFile == c.StateFile ||
 		c.ConnectorReceiptFile == c.EgressAuditFile || c.ConnectorReceiptFile == c.ServiceTokenFile ||
@@ -347,13 +359,8 @@ func (c Config) validateServiceOperations() (map[string]map[string]ServiceOperat
 	}
 	loaded := make(map[string]map[string]ServiceOperation)
 	for _, operation := range c.ServiceOperations {
-		if !routeID(operation.ServiceID) || !routeID(operation.ID) || operation.Method != http.MethodPost ||
-			!canonicalConnectorPath(operation.Path) || operation.ContentType != "application/json" ||
-			operation.MaxRequestBytes < 1 || operation.MaxRequestBytes > maxServiceTaskRequestBytes ||
-			operation.MaxResponseBytes < 1 || operation.MaxResponseBytes > maxServiceTaskResponseBytes ||
-			operation.MaxSeconds < 1 || operation.MaxSeconds > maxServiceTaskSeconds ||
-			operation.MaxPermitSeconds < 1 || operation.MaxPermitSeconds > maxServiceTaskPermitSeconds {
-			return nil, fmt.Errorf("service operation %q/%q has an invalid identity, route, or limit", operation.ServiceID, operation.ID)
+		if err := ValidateServiceOperation(operation); err != nil {
+			return nil, fmt.Errorf("service operation %q/%q: %w", operation.ServiceID, operation.ID, err)
 		}
 		if loaded[operation.ServiceID] == nil {
 			loaded[operation.ServiceID] = make(map[string]ServiceOperation)
@@ -369,6 +376,74 @@ func (c Config) validateServiceOperations() (map[string]map[string]ServiceOperat
 		loaded[operation.ServiceID][operation.ID] = operation
 	}
 	return loaded, nil
+}
+
+// ValidateServiceOperation applies the complete host-policy contract for one
+// service operation. Offline bundle verification uses the same validator so
+// its accepted policy cannot drift from Gateway configuration validation.
+func ValidateServiceOperation(operation ServiceOperation) error {
+	if !routeID(operation.ServiceID) || !routeID(operation.ID) || operation.Method != http.MethodPost ||
+		!canonicalConnectorPath(operation.Path) || operation.ContentType != "application/json" ||
+		operation.MaxRequestBytes < 1 || operation.MaxRequestBytes > maxServiceTaskRequestBytes ||
+		operation.MaxResponseBytes < 1 || operation.MaxResponseBytes > maxServiceTaskResponseBytes ||
+		operation.MaxSeconds < 1 || operation.MaxSeconds > maxServiceTaskSeconds ||
+		operation.MaxPermitSeconds < 1 || operation.MaxPermitSeconds > maxServiceTaskPermitSeconds {
+		return errors.New("identity, route, or limit is invalid")
+	}
+	return validateServiceTaskLifecycle(operation)
+}
+
+func validateServiceTaskLifecycle(operation ServiceOperation) error {
+	configured := 0
+	for _, present := range []bool{
+		operation.TaskProtocol != "", operation.StatusPathPrefix != "",
+		operation.StatusMaxSeconds != 0, operation.PollIntervalSeconds != 0,
+	} {
+		if present {
+			configured++
+		}
+	}
+	if configured == 0 {
+		return nil
+	}
+	if configured != 4 || operation.TaskProtocol != TaskProtocolLifecycleV1 {
+		return errors.New("task lifecycle protocol, status prefix, timeout, and poll interval must be configured together")
+	}
+	if !canonicalServiceStatusPrefix(operation.StatusPathPrefix) ||
+		operation.StatusMaxSeconds < 1 || operation.StatusMaxSeconds > maxServiceStatusSeconds ||
+		operation.PollIntervalSeconds < 1 || operation.PollIntervalSeconds > maxServicePollSeconds {
+		return errors.New("task lifecycle status path or limits are invalid")
+	}
+	return nil
+}
+
+func canonicalServiceStatusPrefix(value string) bool {
+	if value == "/" || !strings.HasSuffix(value, "/") || strings.Contains(value, "//") ||
+		len(value)+maxServiceRunIDBytes > 2048 {
+		return false
+	}
+	return canonicalConnectorPath(strings.TrimSuffix(value, "/"))
+}
+
+func (c Config) hasTaskLifecycle() bool {
+	for _, operation := range c.ServiceOperations {
+		if operation.TaskProtocol != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (c Config) validateLifecycleReceiptBudgets() error {
+	if !c.hasTaskLifecycle() {
+		return nil
+	}
+	for _, budget := range c.ConnectorReceiptTenantBudgets {
+		if budget.Bytes < connectorledger.MinimumLifecycleTenantBytes {
+			return fmt.Errorf("task lifecycle tenant %q receipt budget must be at least %d bytes", budget.TenantID, connectorledger.MinimumLifecycleTenantBytes)
+		}
+	}
+	return nil
 }
 
 func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) {

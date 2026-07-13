@@ -291,6 +291,70 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 		!strings.Contains(output.String(), `"replaced": true`) || !strings.Contains(output.String(), "systemctl reload") {
 		t.Fatalf("replaced services=%#v output=%q err=%v", loaded.ServiceOperations, output.String(), err)
 	}
+
+	before, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range [][]string{
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "missing=/v1/runs/"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "hermes.run=//"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-poll-interval", "500ms"},
+	} {
+		if err := run(invalid, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("invalid lifecycle service config accepted: %v", invalid)
+		}
+		unchanged, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(before, unchanged) {
+			t.Fatalf("invalid lifecycle config changed Gateway config: %v", invalid)
+		}
+	}
+
+	output.Reset()
+	if err := run([]string{
+		"gateway", "service", "set", "-config", path, "-service-id", "hermes-api",
+		"-operation", "hermes.run=POST:/v1/runs", "-operation", "hermes.batch=POST:/v1/batch",
+		"-lifecycle", "hermes.run=/v1/runs/", "-status-max-seconds", "12", "-poll-interval", "3s",
+	}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || len(loaded.ServiceOperations) != 2 {
+		t.Fatalf("loaded lifecycle services=%#v err=%v", loaded.ServiceOperations, err)
+	}
+	var lifecycle gateway.ServiceOperation
+	for _, candidate := range loaded.ServiceOperations {
+		if candidate.ID == "hermes.run" {
+			lifecycle = candidate
+		}
+	}
+	if lifecycle.TaskProtocol != gateway.TaskProtocolLifecycleV1 || lifecycle.StatusPathPrefix != "/v1/runs/" ||
+		lifecycle.StatusMaxSeconds != 12 || lifecycle.PollIntervalSeconds != 3 {
+		t.Fatalf("lifecycle operation=%#v", lifecycle)
+	}
+	output.Reset()
+	if err := run([]string{"gateway", "service", "trust", "-config", path, "-node-id", "node-a", "-tenant-id", "tenant-a"}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(output.Bytes(), &trust); err != nil {
+		t.Fatal(err)
+	}
+	if trust.SchemaVersion != serviceTrustSchemaV2 {
+		t.Fatalf("lifecycle trust schema=%q output=%s", trust.SchemaVersion, output.String())
+	}
+	var trustedLifecycle serviceTrustOperation
+	for _, candidate := range trust.Services[0].Operations {
+		if candidate.ID == "hermes.run" {
+			trustedLifecycle = candidate
+		}
+	}
+	if trustedLifecycle.TaskProtocol != gateway.TaskProtocolLifecycleV1 || trustedLifecycle.StatusPathPrefix != "/v1/runs/" ||
+		trustedLifecycle.PolicyDigest != gateway.ServiceOperationDigest(lifecycle) {
+		t.Fatalf("trusted lifecycle=%#v", trustedLifecycle)
+	}
 }
 
 func TestGatewayConnectorSetIsValidatedSecretFreeAndAtomic(t *testing.T) {

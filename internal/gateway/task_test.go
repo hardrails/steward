@@ -808,6 +808,17 @@ func TestTaskRoutePolicyDigestBindsTaskAuthorityOperationAndBudget(t *testing.T)
 	if got := routePolicyDigest(rig.grant, nil, nil, nil, changedOperations, 4<<20); got == base {
 		t.Fatal("service operation policy did not change route policy digest")
 	}
+	lifecycleOperation := rig.operation
+	lifecycleOperation.TaskProtocol = TaskProtocolLifecycleV1
+	lifecycleOperation.StatusPathPrefix = "/v1/runs/"
+	lifecycleOperation.StatusMaxSeconds = 15
+	lifecycleOperation.PollIntervalSeconds = 2
+	lifecycleOperations := map[string]map[string]ServiceOperation{
+		rig.grant.ServiceID: {lifecycleOperation.ID: lifecycleOperation},
+	}
+	if got := routePolicyDigest(rig.grant, nil, nil, nil, lifecycleOperations, 4<<20); got == base {
+		t.Fatal("task lifecycle policy did not advance the route policy digest")
+	}
 	if got := routePolicyDigest(rig.grant, nil, nil, nil, operations, 8<<20); got == base {
 		t.Fatal("tenant receipt budget did not change route policy digest")
 	}
@@ -822,6 +833,15 @@ func TestTaskRoutePolicyDigestBindsTaskAuthorityOperationAndBudget(t *testing.T)
 	}}
 	if got := routePolicyDigest(rig.grant, nil, nil, nil, unrelated, 4<<20); got != base {
 		t.Fatalf("unrelated service changed task route policy digest: before=%s after=%s", base, got)
+	}
+	unrelatedLifecycle := unrelated["other-api"]["other.run"]
+	unrelatedLifecycle.TaskProtocol = TaskProtocolLifecycleV1
+	unrelatedLifecycle.StatusPathPrefix = "/v1/run/"
+	unrelatedLifecycle.StatusMaxSeconds = 15
+	unrelatedLifecycle.PollIntervalSeconds = 2
+	unrelated["other-api"]["other.run"] = unrelatedLifecycle
+	if got := routePolicyDigest(rig.grant, nil, nil, nil, unrelated, 4<<20); got != base {
+		t.Fatalf("unrelated lifecycle service changed task route policy digest: before=%s after=%s", base, got)
 	}
 }
 
@@ -898,7 +918,7 @@ func TestServiceOperationDigestBindsEveryPolicyField(t *testing.T) {
 		MaxSeconds: 30, MaxPermitSeconds: 300,
 	}
 	want := ServiceOperationDigest(base)
-	if !strings.HasPrefix(want, "sha256:") {
+	if want != "sha256:23c04739fa97d0b542098d1e92f3831eddcfb1ae877c16fd397d3567fa12ce1d" {
 		t.Fatalf("digest=%q", want)
 	}
 	mutations := []func(*ServiceOperation){
@@ -917,6 +937,28 @@ func TestServiceOperationDigestBindsEveryPolicyField(t *testing.T) {
 		mutate(&changed)
 		if got := ServiceOperationDigest(changed); got == want {
 			t.Fatalf("mutation %d did not change digest", index)
+		}
+	}
+
+	lifecycle := base
+	lifecycle.TaskProtocol = TaskProtocolLifecycleV1
+	lifecycle.StatusPathPrefix = "/v1/runs/"
+	lifecycle.StatusMaxSeconds = 15
+	lifecycle.PollIntervalSeconds = 2
+	lifecycleDigest := ServiceOperationDigest(lifecycle)
+	if lifecycleDigest == want {
+		t.Fatal("lifecycle policy retained the legacy operation digest")
+	}
+	for index, mutate := range []func(*ServiceOperation){
+		func(value *ServiceOperation) { value.TaskProtocol = "other" },
+		func(value *ServiceOperation) { value.StatusPathPrefix = "/v1/tasks/" },
+		func(value *ServiceOperation) { value.StatusMaxSeconds++ },
+		func(value *ServiceOperation) { value.PollIntervalSeconds++ },
+	} {
+		changed := lifecycle
+		mutate(&changed)
+		if got := ServiceOperationDigest(changed); got == lifecycleDigest {
+			t.Fatalf("lifecycle mutation %d did not change digest", index)
 		}
 	}
 }

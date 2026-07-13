@@ -10,10 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
-	pathpkg "path"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
@@ -26,11 +23,11 @@ import (
 
 const (
 	taskBundleSchemaV1   = "steward.task-bundle.v1"
+	taskBundleSchemaV2   = "steward.task-bundle.v2"
 	maxTaskBundleBytes   = 128 << 10
 	maxTaskServices      = 128
 	maxTaskOperations    = 128
 	maxTaskResponseBytes = int64(1 << 20)
-	maxTaskSeconds       = 120
 	maxTaskClockSkew     = 5 * time.Minute
 )
 
@@ -40,6 +37,8 @@ func (operation serviceTrustOperation) gatewayOperation() gateway.ServiceOperati
 		ContentType: operation.ContentType, MaxRequestBytes: operation.MaxRequestBytes,
 		MaxResponseBytes: operation.MaxResponseBytes, MaxSeconds: operation.MaxSeconds,
 		MaxPermitSeconds: operation.MaxPermitSeconds,
+		TaskProtocol:     operation.TaskProtocol, StatusPathPrefix: operation.StatusPathPrefix,
+		StatusMaxSeconds: operation.StatusMaxSeconds, PollIntervalSeconds: operation.PollIntervalSeconds,
 	}
 }
 
@@ -192,8 +191,12 @@ func issueTask(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	bundleSchema := taskBundleSchemaV1
+	if operation.TaskProtocol != "" {
+		bundleSchema = taskBundleSchemaV2
+	}
 	bundle := taskBundle{
-		SchemaVersion: taskBundleSchemaV1, ServicePath: admitted.ServicePath, Operation: operation,
+		SchemaVersion: bundleSchema, ServicePath: admitted.ServicePath, Operation: operation,
 		Request: base64.StdEncoding.EncodeToString(request), Permit: base64.StdEncoding.EncodeToString(permitRaw),
 		Authority: taskBundleAuthority{KeyID: *keyID, PublicKey: base64.StdEncoding.EncodeToString(public)},
 	}
@@ -425,11 +428,12 @@ func readServiceTrust(path string, intent admission.InstanceIntent, operationID 
 	if err := dsse.DecodeStrictInto(raw, maxServiceTrustBytes, &inventory); err != nil {
 		return serviceTrustOperation{}, fmt.Errorf("decode service trust inventory: %w", err)
 	}
-	if inventory.SchemaVersion != serviceTrustSchemaV1 || inventory.NodeID != intent.NodeID ||
+	if (inventory.SchemaVersion != serviceTrustSchemaV1 && inventory.SchemaVersion != serviceTrustSchemaV2) || inventory.NodeID != intent.NodeID ||
 		inventory.TenantID != intent.TenantID || len(inventory.Services) == 0 || len(inventory.Services) > maxTaskServices {
 		return serviceTrustOperation{}, errors.New("service trust inventory does not match the instance node and tenant")
 	}
 	var selected *serviceTrustOperation
+	hasLifecycle := false
 	totalOperations := 0
 	for serviceIndex, service := range inventory.Services {
 		if !taskIdentifier(service.ServiceID) || len(service.Operations) == 0 || len(service.Operations) > maxTaskOperations ||
@@ -451,11 +455,18 @@ func readServiceTrust(path string, intent admission.InstanceIntent, operationID 
 				return serviceTrustOperation{}, errors.New("service trust inventory maps one method and path to multiple operations")
 			}
 			paths[methodPath] = struct{}{}
+			if operation.TaskProtocol != "" {
+				hasLifecycle = true
+			}
 			if service.ServiceID == intent.ServiceID && operation.ID == operationID {
 				copy := operation
 				selected = &copy
 			}
 		}
+	}
+	if (inventory.SchemaVersion == serviceTrustSchemaV1 && hasLifecycle) ||
+		(inventory.SchemaVersion == serviceTrustSchemaV2 && !hasLifecycle) {
+		return serviceTrustOperation{}, errors.New("service trust schema does not match its lifecycle policy")
 	}
 	if selected == nil {
 		return serviceTrustOperation{}, errors.New("service trust inventory does not contain the admitted service operation")
@@ -464,13 +475,9 @@ func readServiceTrust(path string, intent admission.InstanceIntent, operationID 
 }
 
 func validTrustedServiceOperation(operation serviceTrustOperation) bool {
-	return taskIdentifier(operation.ServiceID) && taskIdentifier(operation.ID) && operation.Method == http.MethodPost &&
-		taskCanonicalPath(operation.Path) && operation.ContentType == "application/json" &&
-		operation.MaxRequestBytes >= 1 && operation.MaxRequestBytes <= taskpermit.MaxRequestBytes &&
-		operation.MaxResponseBytes >= 1 && operation.MaxResponseBytes <= maxTaskResponseBytes &&
-		operation.MaxSeconds >= 1 && operation.MaxSeconds <= maxTaskSeconds &&
-		operation.MaxPermitSeconds >= 1 && operation.MaxPermitSeconds <= int(taskpermit.MaxValidity/time.Second) &&
-		operation.PolicyDigest == gateway.ServiceOperationDigest(operation.gatewayOperation())
+	gatewayOperation := operation.gatewayOperation()
+	return gateway.ValidateServiceOperation(gatewayOperation) == nil &&
+		operation.PolicyDigest == gateway.ServiceOperationDigest(gatewayOperation)
 }
 
 func taskIdentifier(value string) bool {
@@ -480,21 +487,6 @@ func taskIdentifier(value string) bool {
 	for index, character := range value {
 		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' ||
 			character >= '0' && character <= '9' || index > 0 && (character == '.' || character == '_' || character == '-') {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func taskCanonicalPath(value string) bool {
-	if !strings.HasPrefix(value, "/") || len(value) > 2048 || pathpkg.Clean(value) != value || strings.Contains(value, "//") {
-		return false
-	}
-	for index := 0; index < len(value); index++ {
-		character := value[index]
-		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
-			character >= '0' && character <= '9' || strings.ContainsRune("/-._~!$&'()*+,;=:@", rune(character)) {
 			continue
 		}
 		return false
@@ -573,7 +565,9 @@ func decodeTaskBundleRaw(raw []byte, trusted map[string]ed25519.PublicKey, at ti
 }
 
 func decodeTaskBundleValue(bundle taskBundle, trusted map[string]ed25519.PublicKey, at time.Time, maxValidity time.Duration) (verifiedTaskBundle, error) {
-	if bundle.SchemaVersion != taskBundleSchemaV1 || !validTrustedServiceOperation(bundle.Operation) {
+	legacy := bundle.SchemaVersion == taskBundleSchemaV1 && bundle.Operation.TaskProtocol == ""
+	lifecycle := bundle.SchemaVersion == taskBundleSchemaV2 && bundle.Operation.TaskProtocol != ""
+	if (!legacy && !lifecycle) || !validTrustedServiceOperation(bundle.Operation) {
 		return verifiedTaskBundle{}, errors.New("task bundle has an unsupported schema or invalid service operation")
 	}
 	publicRaw, err := decodeCanonicalBase64(bundle.Authority.PublicKey, ed25519.PublicKeySize, "task authority public key")

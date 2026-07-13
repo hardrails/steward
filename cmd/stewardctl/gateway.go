@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/hardrails/steward/internal/gateway"
 )
@@ -27,6 +28,7 @@ const (
 	actionTrustSchemaV1  = "steward.action-trust.v1"
 	maxActionTrustBytes  = 4 << 20
 	serviceTrustSchemaV1 = "steward.service-trust.v1"
+	serviceTrustSchemaV2 = "steward.service-trust.v2"
 	maxServiceTrustBytes = 4 << 20
 )
 
@@ -75,16 +77,20 @@ type serviceTrustService struct {
 }
 
 type serviceTrustOperation struct {
-	ServiceID        string `json:"service_id"`
-	ID               string `json:"id"`
-	Method           string `json:"method"`
-	Path             string `json:"path"`
-	ContentType      string `json:"content_type"`
-	MaxRequestBytes  int64  `json:"max_request_bytes"`
-	MaxResponseBytes int64  `json:"max_response_bytes"`
-	MaxSeconds       int    `json:"max_seconds"`
-	MaxPermitSeconds int    `json:"max_permit_seconds"`
-	PolicyDigest     string `json:"policy_digest"`
+	ServiceID           string `json:"service_id"`
+	ID                  string `json:"id"`
+	Method              string `json:"method"`
+	Path                string `json:"path"`
+	ContentType         string `json:"content_type"`
+	MaxRequestBytes     int64  `json:"max_request_bytes"`
+	MaxResponseBytes    int64  `json:"max_response_bytes"`
+	MaxSeconds          int    `json:"max_seconds"`
+	MaxPermitSeconds    int    `json:"max_permit_seconds"`
+	PolicyDigest        string `json:"policy_digest"`
+	TaskProtocol        string `json:"task_protocol,omitempty"`
+	StatusPathPrefix    string `json:"status_path_prefix,omitempty"`
+	StatusMaxSeconds    int    `json:"status_max_seconds,omitempty"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds,omitempty"`
 }
 
 func (values *repeatedFlag) String() string { return strings.Join(*values, ",") }
@@ -146,12 +152,15 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	maxResponse := flags.Int64("max-response-bytes", 1<<20, "exact response body byte ceiling")
 	maxSeconds := flags.Int("max-seconds", 120, "upstream call lifetime ceiling")
 	maxPermitSeconds := flags.Int("max-permit-seconds", 300, "maximum tenant task-permit lifetime")
+	statusMaxSeconds := flags.Int("status-max-seconds", 15, "lifecycle status request lifetime ceiling")
+	pollInterval := flags.Duration("poll-interval", time.Second, "minimum lifecycle status poll interval")
 	receiptFile := flags.String("receipt-file", "", "signed receipt ledger path for an older config")
 	receiptKeyFile := flags.String("receipt-key-file", "", "receipt private key path for an older config")
 	receiptNodeID := flags.String("receipt-node-id", "", "stable receipt node identity for an older config")
 	receiptEpoch := flags.Uint64("receipt-epoch", 1, "receipt key epoch for an older config")
-	var operations, tenantBudgets repeatedFlag
+	var operations, lifecycles, tenantBudgets repeatedFlag
 	flags.Var(&operations, "operation", "exact ID=POST:/path operation; repeat for more")
+	flags.Var(&lifecycles, "lifecycle", "exact OPERATION_ID=/status/path/ lifecycle mapping; repeat for more")
 	flags.Var(&tenantBudgets, "tenant-budget", "exact TENANT=BYTES receipt budget; repeat for more")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
@@ -188,6 +197,16 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	if *serviceID == "" || len(operations) == 0 {
 		return errors.New("gateway service set requires -service-id and at least one -operation")
 	}
+	lifecyclePaths, err := parseServiceLifecycleMappings(lifecycles)
+	if err != nil {
+		return err
+	}
+	if len(lifecyclePaths) == 0 && (flagWasVisited(flags, "status-max-seconds") || flagWasVisited(flags, "poll-interval")) {
+		return errors.New("-status-max-seconds and -poll-interval require at least one -lifecycle mapping")
+	}
+	if len(lifecyclePaths) > 0 && (*pollInterval < time.Second || *pollInterval > 60*time.Second || *pollInterval%time.Second != 0) {
+		return errors.New("-poll-interval must be whole seconds from 1s through 1m")
+	}
 	parsed := make([]gateway.ServiceOperation, 0, len(operations))
 	seenIDs := make(map[string]struct{}, len(operations))
 	for _, value := range operations {
@@ -202,11 +221,24 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 			return fmt.Errorf("duplicate service operation %q", operation.ID)
 		}
 		seenIDs[operation.ID] = struct{}{}
-		parsed = append(parsed, gateway.ServiceOperation{
+		parsedOperation := gateway.ServiceOperation{
 			ServiceID: *serviceID, ID: operation.ID, Method: operation.Method, Path: operation.Path,
 			ContentType: "application/json", MaxRequestBytes: *maxRequest, MaxResponseBytes: *maxResponse,
 			MaxSeconds: *maxSeconds, MaxPermitSeconds: *maxPermitSeconds,
-		})
+		}
+		if statusPath, lifecycle := lifecyclePaths[operation.ID]; lifecycle {
+			parsedOperation.TaskProtocol = gateway.TaskProtocolLifecycleV1
+			parsedOperation.StatusPathPrefix = statusPath
+			parsedOperation.StatusMaxSeconds = *statusMaxSeconds
+			parsedOperation.PollIntervalSeconds = int(*pollInterval / time.Second)
+			delete(lifecyclePaths, operation.ID)
+		}
+		parsed = append(parsed, parsedOperation)
+	}
+	if len(lifecyclePaths) != 0 {
+		for operationID := range lifecyclePaths {
+			return fmt.Errorf("lifecycle mapping references undeclared operation %q", operationID)
+		}
 	}
 
 	budgetsChanged := false
@@ -276,6 +308,21 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	return encoder.Encode(result)
 }
 
+func parseServiceLifecycleMappings(values []string) (map[string]string, error) {
+	result := make(map[string]string, len(values))
+	for _, value := range values {
+		operationID, statusPath, ok := strings.Cut(value, "=")
+		if !ok || !taskIdentifier(operationID) || statusPath == "" {
+			return nil, fmt.Errorf("invalid lifecycle mapping %q; use OPERATION_ID=/status/path/", value)
+		}
+		if _, duplicate := result[operationID]; duplicate {
+			return nil, fmt.Errorf("duplicate lifecycle mapping for operation %q", operationID)
+		}
+		result[operationID] = statusPath
+	}
+	return result, nil
+}
+
 func writeServiceTrustInventory(stdout io.Writer, config gateway.Config, nodeID, tenantID string) error {
 	if !boundedTrustIdentity(nodeID) || !boundedTrustIdentity(tenantID) {
 		return errors.New("service trust node and tenant identities must be non-empty, at most 128 bytes, and contain no NUL")
@@ -294,18 +341,24 @@ func writeServiceTrustInventory(stdout io.Writer, config gateway.Config, nodeID,
 		return fmt.Errorf("tenant %q has no configured receipt budget", tenantID)
 	}
 	byService := make(map[string][]serviceTrustOperation)
+	schemaVersion := serviceTrustSchemaV1
 	for _, operation := range config.ServiceOperations {
+		if operation.TaskProtocol != "" {
+			schemaVersion = serviceTrustSchemaV2
+		}
 		byService[operation.ServiceID] = append(byService[operation.ServiceID], serviceTrustOperation{
 			ServiceID: operation.ServiceID, ID: operation.ID, Method: operation.Method, Path: operation.Path,
 			ContentType: operation.ContentType, MaxRequestBytes: operation.MaxRequestBytes,
 			MaxResponseBytes: operation.MaxResponseBytes, MaxSeconds: operation.MaxSeconds,
 			MaxPermitSeconds: operation.MaxPermitSeconds, PolicyDigest: gateway.ServiceOperationDigest(operation),
+			TaskProtocol: operation.TaskProtocol, StatusPathPrefix: operation.StatusPathPrefix,
+			StatusMaxSeconds: operation.StatusMaxSeconds, PollIntervalSeconds: operation.PollIntervalSeconds,
 		})
 	}
 	if len(byService) == 0 {
 		return errors.New("gateway has no configured authorized service operations")
 	}
-	output := serviceTrustInventory{SchemaVersion: serviceTrustSchemaV1, NodeID: nodeID, TenantID: tenantID}
+	output := serviceTrustInventory{SchemaVersion: schemaVersion, NodeID: nodeID, TenantID: tenantID}
 	for serviceID, operations := range byService {
 		sort.Slice(operations, func(i, j int) bool { return operations[i].ID < operations[j].ID })
 		output.Services = append(output.Services, serviceTrustService{ServiceID: serviceID, Operations: operations})

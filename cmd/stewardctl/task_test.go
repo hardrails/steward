@@ -92,6 +92,19 @@ func (fixture *taskCLIFixture) issueArguments() []string {
 	}
 }
 
+func (fixture *taskCLIFixture) enableLifecycle(t *testing.T) {
+	t.Helper()
+	fixture.operation.TaskProtocol = gateway.TaskProtocolLifecycleV1
+	fixture.operation.StatusPathPrefix = "/v1/runs/"
+	fixture.operation.StatusMaxSeconds = 15
+	fixture.operation.PollIntervalSeconds = 2
+	fixture.operation.PolicyDigest = gateway.ServiceOperationDigest(fixture.operation.gatewayOperation())
+	writePermitJSONReplace(t, fixture.trustPath, serviceTrustInventory{
+		SchemaVersion: serviceTrustSchemaV2, NodeID: fixture.intent.NodeID, TenantID: fixture.intent.TenantID,
+		Services: []serviceTrustService{{ServiceID: fixture.intent.ServiceID, Operations: []serviceTrustOperation{fixture.operation}}},
+	})
+}
+
 func (fixture *taskCLIFixture) issue(t *testing.T) taskpermit.Statement {
 	t.Helper()
 	priorNow := timeNow
@@ -179,6 +192,74 @@ func TestTaskIssueAndVerifyProduceOneExactOwnerOnlyBundle(t *testing.T) {
 	}
 	if after, err := os.ReadFile(fixture.bundlePath); err != nil || !bytes.Equal(after, raw) {
 		t.Fatal("failed second issue changed the existing bundle")
+	}
+}
+
+func TestTaskIssueCarriesLifecyclePolicyInVersionedBundle(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	fixture.enableLifecycle(t)
+	statement := fixture.issue(t)
+	if statement.OperationPolicyDigest != fixture.operation.PolicyDigest {
+		t.Fatalf("statement operation digest=%q want=%q", statement.OperationPolicyDigest, fixture.operation.PolicyDigest)
+	}
+	raw, err := os.ReadFile(fixture.bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle taskBundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.SchemaVersion != taskBundleSchemaV2 || bundle.Operation.TaskProtocol != gateway.TaskProtocolLifecycleV1 ||
+		bundle.Operation.StatusPathPrefix != "/v1/runs/" || bundle.Operation.StatusMaxSeconds != 15 ||
+		bundle.Operation.PollIntervalSeconds != 2 {
+		t.Fatalf("lifecycle bundle=%#v", bundle)
+	}
+
+	public, err := readPublicKey(fixture.publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.SchemaVersion = taskBundleSchemaV1
+	if _, err := decodeTaskBundleValue(bundle, map[string]ed25519.PublicKey{fixture.keyID: public}, fixture.now, taskpermit.MaxValidity); err == nil ||
+		!strings.Contains(err.Error(), "unsupported schema") {
+		t.Fatalf("v1 lifecycle bundle err=%v", err)
+	}
+	bundle.SchemaVersion = taskBundleSchemaV2
+	bundle.Operation.TaskProtocol = ""
+	if _, err := decodeTaskBundleValue(bundle, map[string]ed25519.PublicKey{fixture.keyID: public}, fixture.now, taskpermit.MaxValidity); err == nil ||
+		!strings.Contains(err.Error(), "unsupported schema") {
+		t.Fatalf("v2 legacy bundle err=%v", err)
+	}
+}
+
+func TestServiceTrustSchemaMatchesLifecycleContent(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	lifecycle := fixture.operation
+	lifecycle.TaskProtocol = gateway.TaskProtocolLifecycleV1
+	lifecycle.StatusPathPrefix = "/v1/runs/"
+	lifecycle.StatusMaxSeconds = 15
+	lifecycle.PollIntervalSeconds = 2
+	lifecycle.PolicyDigest = gateway.ServiceOperationDigest(lifecycle.gatewayOperation())
+
+	for _, test := range []struct {
+		name      string
+		schema    string
+		operation serviceTrustOperation
+	}{
+		{name: "v1 with lifecycle", schema: serviceTrustSchemaV1, operation: lifecycle},
+		{name: "v2 without lifecycle", schema: serviceTrustSchemaV2, operation: fixture.operation},
+		{name: "unknown schema", schema: "steward.service-trust.unknown", operation: lifecycle},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			writePermitJSONReplace(t, fixture.trustPath, serviceTrustInventory{
+				SchemaVersion: test.schema, NodeID: fixture.intent.NodeID, TenantID: fixture.intent.TenantID,
+				Services: []serviceTrustService{{ServiceID: fixture.intent.ServiceID, Operations: []serviceTrustOperation{test.operation}}},
+			})
+			if _, err := readServiceTrust(fixture.trustPath, fixture.intent, fixture.operation.ID); err == nil {
+				t.Fatal("mismatched service trust schema accepted")
+			}
+		})
 	}
 }
 
