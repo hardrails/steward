@@ -453,7 +453,8 @@ sandbox_network=$sandbox_name-network
 docker network create --label io.hardrails.steward.hermes-build=true "$sandbox_network" >/dev/null
 sandbox_command='set -eu
 mkdir -p /tmp/build /tmp/home
-cp -a /input/upstream/. /tmp/build/
+cp -R /input/upstream/. /tmp/build/
+chmod -R u+rwX /tmp/build
 cd /tmp/build
 sha256sum -c /input/adapter/source-inputs.sha256
 uv sync --frozen --no-install-project --extra mcp --extra homeassistant
