@@ -437,16 +437,20 @@ func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing
 	if err := json.NewDecoder(response.Body).Decode(&admitted); err != nil || admitted.EgressProxy != "http://steward-relay:8082" ||
 		len(admitted.EgressRouteIDs) != 1 || admitted.EgressRouteIDs[0] != "public-web" || !docker.relay.Spec.Egress ||
 		admitted.ConnectorURL != "http://steward-relay:8081" || !slices.Equal(admitted.ConnectorIDs, []string{"git.read", "issues.create"}) ||
+		admitted.ServiceID != "agent-api" || len(admitted.TaskAuthorities) != 1 || admitted.TaskAuthorities[0].KeyID != "task-approver" ||
 		!docker.relay.Spec.Connector || admitted.RoutePolicyDigest != "sha256:"+strings.Repeat("e", 64) ||
 		len(docker.observed.Workload.Runtime.EgressRouteIDs) != 1 ||
 		!slices.Equal(docker.observed.Workload.Runtime.ConnectorIDs, admitted.ConnectorIDs) ||
+		docker.observed.Workload.Runtime.NodeID != intent.NodeID || docker.observed.Workload.Runtime.ServiceID != admitted.ServiceID ||
+		!slices.Equal(docker.observed.Workload.Runtime.TaskAuthorities, admitted.TaskAuthorities) ||
 		docker.observed.Workload.Runtime.CapsuleDigest != admitted.CapsuleDigest ||
 		docker.observed.Workload.Runtime.PolicyDigest != admitted.PolicyDigest {
 		t.Fatalf("egress admission=%#v relay=%#v workload=%#v err=%v", admitted, docker.relay, docker.observed.Workload, err)
 	}
 	grant := grants.grants[admitted.GrantID]
 	if grant.RuntimeRef != admitted.RuntimeRef || grant.CapsuleDigest != admitted.CapsuleDigest ||
-		grant.PolicyDigest != admitted.PolicyDigest || !slices.Equal(grant.ConnectorIDs, admitted.ConnectorIDs) {
+		grant.PolicyDigest != admitted.PolicyDigest || grant.NodeID != intent.NodeID || grant.ServiceID != admitted.ServiceID ||
+		!slices.Equal(grant.TaskAuthorities, admitted.TaskAuthorities) || !slices.Equal(grant.ConnectorIDs, admitted.ConnectorIDs) {
 		t.Fatalf("connector grant=%#v admission=%#v", grant, admitted)
 	}
 	committedFence, ok := config.Fences.Record(intent.TenantID, intent.InstanceID)
@@ -519,6 +523,15 @@ func TestLegacyRuntimeReplayAcceptsOnlyConnectorFreeBlankBindings(t *testing.T) 
 	}{
 		{name: "connector request", mutate: func(desired, observed *RuntimeGrant) {
 			desired.ConnectorIDs, observed.ConnectorIDs = []string{"git.read"}, []string{"git.read"}
+		}},
+		{name: "task authority", mutate: func(desired, observed *RuntimeGrant) {
+			authorities := []gateway.TaskAuthority{{
+				KeyID: "task-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+			}}
+			desired.NodeID, observed.NodeID = "node-a", "node-a"
+			desired.ServiceID, observed.ServiceID = "hermes-api", "hermes-api"
+			desired.TaskAuthorities = append([]gateway.TaskAuthority(nil), authorities...)
+			observed.TaskAuthorities = append([]gateway.TaskAuthority(nil), authorities...)
 		}},
 		{name: "partial retained binding", mutate: func(_ *RuntimeGrant, observed *RuntimeGrant) {
 			observed.CapsuleDigest = "sha256:" + strings.Repeat("e", 64)
@@ -1685,6 +1698,7 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 	t.Helper()
 	_, sitePrivate, _ := ed25519.GenerateKey(rand.Reader)
 	publisherPublic, publisherPrivate, _ := ed25519.GenerateKey(rand.Reader)
+	taskPublic, _, _ := ed25519.GenerateKey(rand.Reader)
 	policy := admission.SitePolicy{
 		SchemaVersion: admission.SchemaV1, PolicyID: "site-a", PolicyEpoch: 1,
 		Publishers: []admission.PublisherRule{{
@@ -1701,6 +1715,11 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 			ServiceIDs: []string{"agent-api"}, EgressRouteIDs: []string{"public-web"},
 			ConnectorIDs: []string{"git.read", "issues.create"},
 		}},
+	}
+	if capabilities.Service {
+		policy.Tenants[0].TaskKeys = []admission.TaskKey{{
+			KeyID: "task-approver", PublicKey: base64.StdEncoding.EncodeToString(taskPublic), ServiceIDs: []string{"agent-api"},
+		}}
 	}
 	policyPayload, _ := json.Marshal(policy)
 	policySigned, _ := dsse.Sign(admission.PolicyPayloadType, policyPayload, "site-root", sitePrivate)

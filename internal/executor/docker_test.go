@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/hardrails/steward/internal/gateway"
 )
 
 func TestLoadImageUsesNativeDockerImportAndRejectsDaemonErrors(t *testing.T) {
@@ -1231,10 +1234,14 @@ func TestInspectProjectsOnlyExecutorOwnedWorkloadState(t *testing.T) {
 func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 	addresses := testNetworkSpec("tenant-a", "agent-1", 3)
 	state := &StateMount{VolumeName: StateVolumeName("tenant-a", "lineage-a"), Path: "/home/node/.openclaw"}
+	taskAuthorities := []gateway.TaskAuthority{{
+		KeyID: "task-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+	}}
 	runtime := &RuntimeGrant{
-		NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), Generation: 3,
-		Inference: true, RouteID: "local", ModelAlias: "private-model", ServicePort: 8080,
-		Subnet: addresses.Subnet, Gateway: addresses.Gateway,
+		NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), NodeID: "node-a", Generation: 3,
+		Inference: true, RouteID: "local", ModelAlias: "private-model", ServicePort: 8080, ServiceID: "hermes-api",
+		TaskAuthorities: taskAuthorities,
+		Subnet:          addresses.Subnet, Gateway: addresses.Gateway,
 		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP, ConnectorIDs: []string{"git.read", "issues.create"},
 		CapsuleDigest: "sha256:" + strings.Repeat("d", 64), PolicyDigest: "sha256:" + strings.Repeat("e", 64),
 	}
@@ -1244,6 +1251,10 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 		Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 250, PIDs: 32}, State: state, Runtime: runtime,
 	}
 	fingerprint := workloadFingerprint(workload)
+	authorityLabel, err := json.Marshal(dockerTaskAuthorityLabel{Authorities: taskAuthorities})
+	if err != nil {
+		t.Fatal(err)
+	}
 	docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"Image": "sha256:" + strings.Repeat("c", 64),
@@ -1261,7 +1272,9 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 					workloadMemoryLabel: "1048576", workloadCPULabel: "250", workloadPIDsLabel: "32",
 					stateVolumeLabel: state.VolumeName, statePathLabel: state.Path,
 					runtimeNetworkLabel: addresses.Name, runtimeGrantLabel: runtime.GrantID, runtimeGenerationLabel: "3",
+					runtimeNodeIDLabel:    "node-a",
 					runtimeInferenceLabel: "true", runtimeModelLabel: "private-model", runtimeRouteLabel: "local",
+					runtimeServiceIDLabel: "hermes-api", runtimeTaskAuthoritiesLabel: string(authorityLabel),
 					runtimeSubnetLabel: addresses.Subnet, runtimeGatewayLabel: addresses.Gateway,
 					runtimeServicePortLabel: "8080", runtimeRelayIPLabel: addresses.RelayIP, runtimeAgentIPLabel: addresses.AgentIP,
 					runtimeConnectorsLabel: "git.read,issues.create", runtimeCapsuleDigestLabel: runtime.CapsuleDigest,
@@ -1289,6 +1302,55 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 	}
 	if *observed.Workload.State != *state || !reflect.DeepEqual(*observed.Workload.Runtime, *runtime) || observed.Fingerprint != fingerprint {
 		t.Fatalf("projected workload=%#v", observed.Workload)
+	}
+}
+
+func TestTaskAuthorityDockerLabelRoundTripsAndRejectsAmbiguity(t *testing.T) {
+	want := []gateway.TaskAuthority{{
+		KeyID: "task-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+	}}
+	raw, err := json.Marshal(dockerTaskAuthorityLabel{Authorities: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeTaskAuthorityLabel(string(raw))
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("decoded=%#v err=%v", got, err)
+	}
+	if got, err := decodeTaskAuthorityLabel(""); err != nil || got != nil {
+		t.Fatalf("empty decoded=%#v err=%v", got, err)
+	}
+
+	secondPublic := append([]byte(nil), make([]byte, 32)...)
+	secondPublic[0] = 1
+	unsorted, err := json.Marshal(dockerTaskAuthorityLabel{Authorities: []gateway.TaskAuthority{
+		{KeyID: "z-key", PublicKey: base64.StdEncoding.EncodeToString(secondPublic)},
+		{KeyID: "a-key", PublicKey: want[0].PublicKey},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyArray, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"legacy array":        string(legacyArray),
+		"missing member":      `{}`,
+		"null authorities":    `{"authorities":null}`,
+		"empty authorities":   `{"authorities":[]}`,
+		"unknown member":      `{"authorities":[],"extra":true}`,
+		"duplicate member":    `{"authorities":[],"authorities":[]}`,
+		"duplicate key field": `{"authorities":[{"key_id":"task-approver","key_id":"other","public_key":"` + want[0].PublicKey + `"}]}`,
+		"invalid public key":  `{"authorities":[{"key_id":"task-approver","public_key":"not-base64"}]}`,
+		"unsorted keys":       string(unsorted),
+		"oversized":           strings.Repeat("x", 16<<10+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeTaskAuthorityLabel(value); err == nil {
+				t.Fatal("invalid task authority label accepted")
+			}
+		})
 	}
 }
 

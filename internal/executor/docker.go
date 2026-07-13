@@ -18,6 +18,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/gateway"
 )
 
 // Docker is the minimum Docker Engine API surface the executor needs. Keeping this
@@ -155,10 +158,13 @@ const stateVolumeLabel = "io.hardrails.state.volume"
 const statePathLabel = "io.hardrails.state.path"
 const runtimeNetworkLabel = "io.hardrails.runtime.network"
 const runtimeGrantLabel = "io.hardrails.runtime.grant"
+const runtimeNodeIDLabel = "io.hardrails.runtime.node-id"
 const runtimeInferenceLabel = "io.hardrails.runtime.inference"
 const runtimeModelLabel = "io.hardrails.runtime.model"
 const runtimeRouteLabel = "io.hardrails.runtime.route"
 const runtimeServicePortLabel = "io.hardrails.runtime.service-port"
+const runtimeServiceIDLabel = "io.hardrails.runtime.service-id"
+const runtimeTaskAuthoritiesLabel = "io.hardrails.runtime.task-authorities"
 const runtimeGenerationLabel = "io.hardrails.runtime.generation"
 const runtimeSubnetLabel = "io.hardrails.runtime.subnet"
 const runtimeGatewayLabel = "io.hardrails.runtime.gateway"
@@ -168,6 +174,10 @@ const runtimeEgressRoutesLabel = "io.hardrails.runtime.egress-routes"
 const runtimeConnectorsLabel = "io.hardrails.runtime.connectors"
 const runtimeCapsuleDigestLabel = "io.hardrails.runtime.capsule-digest"
 const runtimePolicyDigestLabel = "io.hardrails.runtime.policy-digest"
+
+type dockerTaskAuthorityLabel struct {
+	Authorities []gateway.TaskAuthority `json:"authorities"`
+}
 
 type dockerRestartPolicy struct {
 	Name              string `json:"Name"`
@@ -430,8 +440,8 @@ func reservationFromLabels(labels map[string]string) (CapacityReservation, strin
 		return CapacityReservation{}, "", errors.New("managed workload has invalid resource capacity labels")
 	}
 	reservation := CapacityReservation{Workloads: 1, MemoryBytes: memory, CPUMillis: cpu, PIDs: pids}
-	runtimeLabels := []string{runtimeGrantLabel, runtimeInferenceLabel, runtimeModelLabel, runtimeRouteLabel,
-		runtimeServicePortLabel, runtimeGenerationLabel, runtimeSubnetLabel, runtimeGatewayLabel,
+	runtimeLabels := []string{runtimeGrantLabel, runtimeNodeIDLabel, runtimeInferenceLabel, runtimeModelLabel, runtimeRouteLabel,
+		runtimeServicePortLabel, runtimeServiceIDLabel, runtimeTaskAuthoritiesLabel, runtimeGenerationLabel, runtimeSubnetLabel, runtimeGatewayLabel,
 		runtimeRelayIPLabel, runtimeAgentIPLabel, runtimeEgressRoutesLabel, runtimeConnectorsLabel,
 		runtimeCapsuleDigestLabel, runtimePolicyDigestLabel}
 	hasRuntimeMetadata := labels[runtimeNetworkLabel] != ""
@@ -628,11 +638,17 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		}}
 		labels[runtimeNetworkLabel] = w.Runtime.NetworkName
 		labels[runtimeGrantLabel] = w.Runtime.GrantID
+		labels[runtimeNodeIDLabel] = w.Runtime.NodeID
 		labels[runtimeGenerationLabel] = strconv.FormatUint(w.Runtime.Generation, 10)
 		labels[runtimeInferenceLabel] = strconv.FormatBool(w.Runtime.Inference)
 		labels[runtimeModelLabel] = w.Runtime.ModelAlias
 		labels[runtimeRouteLabel] = w.Runtime.RouteID
 		labels[runtimeServicePortLabel] = strconv.Itoa(w.Runtime.ServicePort)
+		labels[runtimeServiceIDLabel] = w.Runtime.ServiceID
+		if len(w.Runtime.TaskAuthorities) > 0 {
+			raw, _ := json.Marshal(dockerTaskAuthorityLabel{Authorities: w.Runtime.TaskAuthorities})
+			labels[runtimeTaskAuthoritiesLabel] = string(raw)
+		}
 		labels[runtimeSubnetLabel] = w.Runtime.Subnet
 		labels[runtimeGatewayLabel] = w.Runtime.Gateway
 		labels[runtimeRelayIPLabel] = w.Runtime.RelayIP
@@ -797,22 +813,28 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 	}
 	var runtimeGrant *RuntimeGrant
 	runtimeHardened := payload.HostConfig.NetworkMode == "none" && labels[runtimeNetworkLabel] == "" && labels[runtimeGrantLabel] == "" &&
-		labels[runtimeConnectorsLabel] == "" && labels[runtimeCapsuleDigestLabel] == "" && labels[runtimePolicyDigestLabel] == "" &&
+		labels[runtimeNodeIDLabel] == "" && labels[runtimeConnectorsLabel] == "" && labels[runtimeServiceIDLabel] == "" && labels[runtimeTaskAuthoritiesLabel] == "" &&
+		labels[runtimeCapsuleDigestLabel] == "" && labels[runtimePolicyDigestLabel] == "" &&
 		hasExactNetwork(payload.NetworkSettings.Networks, "none", "", false) && len(payload.HostConfig.ExtraHosts) == 0 && len(payload.HostConfig.DNS) == 0
 	if labels[runtimeNetworkLabel] != "" || labels[runtimeGrantLabel] != "" {
 		servicePort, serviceErr := strconv.Atoi(labels[runtimeServicePortLabel])
 		inference, inferenceErr := strconv.ParseBool(labels[runtimeInferenceLabel])
 		generation, generationErr := strconv.ParseUint(labels[runtimeGenerationLabel], 10, 64)
+		taskAuthorities, taskAuthorityErr := decodeTaskAuthorityLabel(labels[runtimeTaskAuthoritiesLabel])
 		runtimeGrant = &RuntimeGrant{
 			NetworkName: labels[runtimeNetworkLabel], GrantID: labels[runtimeGrantLabel],
+			NodeID:     labels[runtimeNodeIDLabel],
 			Generation: generation, Inference: inference, RouteID: labels[runtimeRouteLabel], ModelAlias: labels[runtimeModelLabel], ServicePort: servicePort,
+			ServiceID: labels[runtimeServiceIDLabel], TaskAuthorities: taskAuthorities,
 			Subnet: labels[runtimeSubnetLabel], Gateway: labels[runtimeGatewayLabel],
 			RelayIP: labels[runtimeRelayIPLabel], AgentIP: labels[runtimeAgentIPLabel],
 			EgressRouteIDs: splitRouteIDs(labels[runtimeEgressRoutesLabel]),
 			ConnectorIDs:   splitRouteIDs(labels[runtimeConnectorsLabel]),
 			CapsuleDigest:  labels[runtimeCapsuleDigestLabel], PolicyDigest: labels[runtimePolicyDigestLabel],
 		}
-		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil && generation > 0 &&
+		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil && taskAuthorityErr == nil && generation > 0 &&
+			(len(taskAuthorities) == 0 && runtimeGrant.NodeID == "" && runtimeGrant.ServiceID == "" ||
+				len(taskAuthorities) > 0 && boundedText(runtimeGrant.NodeID, 128) && egressRouteID.MatchString(runtimeGrant.ServiceID) && servicePort > 0) &&
 			validEgressRouteIDs(runtimeGrant.EgressRouteIDs) && validConnectorIDs(runtimeGrant.ConnectorIDs) &&
 			validRuntimeAdmissionBindings(runtimeGrant) &&
 			runtimeAllocationMatches(NetworkSpecFor(labels["io.hardrails.tenant"], labels["io.hardrails.instance"], generation),
@@ -891,6 +913,20 @@ func splitRouteIDs(value string) []string {
 	return strings.Split(value, ",")
 }
 
+func decodeTaskAuthorityLabel(value string) ([]gateway.TaskAuthority, error) {
+	if value == "" {
+		return nil, nil
+	}
+	var label dockerTaskAuthorityLabel
+	if err := dsse.DecodeStrictInto([]byte(value), 16<<10, &label); err != nil {
+		return nil, err
+	}
+	if !gateway.TaskAuthoritiesValid(label.Authorities) {
+		return nil, errors.New("invalid task authority label")
+	}
+	return label.Authorities, nil
+}
+
 func validEgressRouteIDs(routes []string) bool {
 	if len(routes) > 32 {
 		return false
@@ -921,7 +957,7 @@ func validRuntimeAdmissionBindings(runtime *RuntimeGrant) bool {
 	}
 	absent := runtime.CapsuleDigest == "" && runtime.PolicyDigest == ""
 	valid := imageConfigDigest.MatchString(runtime.CapsuleDigest) && imageConfigDigest.MatchString(runtime.PolicyDigest)
-	return valid || absent && len(runtime.ConnectorIDs) == 0
+	return valid || absent && len(runtime.ConnectorIDs) == 0 && len(runtime.TaskAuthorities) == 0
 }
 
 func validFingerprint(value string) bool {
