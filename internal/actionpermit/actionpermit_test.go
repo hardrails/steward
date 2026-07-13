@@ -168,6 +168,43 @@ func TestVerifyRejectsEnvelopeAndJSONAmbiguity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	parsed, err = dsse.Parse(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newlinePayloadEnvelope := parsed
+	newlinePayloadEnvelope.Payload = parsed.Payload[:4] + "\n" + parsed.Payload[4:]
+	newlinePayload, err := json.Marshal(newlinePayloadEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newlineSignatureEnvelope := parsed
+	newlineSignatureEnvelope.Signatures = append([]dsse.Signature(nil), parsed.Signatures...)
+	newlineSignatureEnvelope.Signatures[0].Sig = parsed.Signatures[0].Sig[:4] + "\n" + parsed.Signatures[0].Sig[4:]
+	newlineSignature, err := json.Marshal(newlineSignatureEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonCanonicalBitsEnvelope := parsed
+	nonCanonicalBitsEnvelope.Signatures = append([]dsse.Signature(nil), parsed.Signatures...)
+	signature := []byte(parsed.Signatures[0].Sig)
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	lastData := len(signature) - 3 // A 64-byte Ed25519 signature ends in two padding bytes.
+	index := strings.IndexByte(alphabet, signature[lastData])
+	if index < 0 || signature[len(signature)-2] != '=' || signature[len(signature)-1] != '=' {
+		t.Fatalf("unexpected signature base64 %q", signature)
+	}
+	signature[lastData] = alphabet[index^1]
+	nonCanonicalBitsEnvelope.Signatures[0].Sig = string(signature)
+	nonCanonicalBits, err := json.Marshal(nonCanonicalBitsEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalSignature, canonicalErr := base64.StdEncoding.DecodeString(parsed.Signatures[0].Sig)
+	alternateSignature, alternateErr := base64.StdEncoding.DecodeString(string(signature))
+	if canonicalErr != nil || alternateErr != nil || !bytes.Equal(canonicalSignature, alternateSignature) {
+		t.Fatal("test setup did not produce an equivalent non-canonical base64 signature")
+	}
 
 	for _, test := range []struct {
 		name    string
@@ -182,6 +219,9 @@ func TestVerifyRejectsEnvelopeAndJSONAmbiguity(t *testing.T) {
 		{"invalid signing key ID", invalidKeyID, map[string]ed25519.PublicKey{"bad key": public}},
 		{"non-canonical envelope", nonCanonicalEnvelope, trusted},
 		{"multiple signatures", multipleSignatures, trusted},
+		{"payload base64 with ignored newline", newlinePayload, trusted},
+		{"signature base64 with ignored newline", newlineSignature, trusted},
+		{"signature base64 with nonzero trailing bits", nonCanonicalBits, trusted},
 		{"unknown payload field", signPayload(t, PayloadType, unknownPayload, "authority-a", private), trusted},
 		{"duplicate payload field", signPayload(t, PayloadType, duplicatePayload, "authority-a", private), trusted},
 		{"missing zero-capable field", signPayload(t, PayloadType, missingZeroPayload, "authority-a", private), trusted},

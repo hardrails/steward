@@ -126,6 +126,15 @@ func Verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.T
 	if len(envelope.Signatures) != 1 {
 		return Verified{}, invalid("permit envelope must contain exactly one signature")
 	}
+	payloadBytes, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil || base64.StdEncoding.EncodeToString(payloadBytes) != envelope.Payload {
+		return Verified{}, invalid("permit payload is not canonical base64")
+	}
+	signatureBytes, err := base64.StdEncoding.DecodeString(envelope.Signatures[0].Sig)
+	if err != nil || len(signatureBytes) != ed25519.SignatureSize ||
+		base64.StdEncoding.EncodeToString(signatureBytes) != envelope.Signatures[0].Sig {
+		return Verified{}, invalid("permit signature is not canonical base64")
+	}
 	canonical, err := dsse.Marshal(envelope)
 	if err != nil || !bytes.Equal(canonical, rawEnvelope) {
 		return Verified{}, invalid("permit envelope is not canonical")
