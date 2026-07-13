@@ -29,9 +29,11 @@ const (
 	PayloadTypeV1 = "application/vnd.steward.connector-receipt.v1+json"
 	PayloadTypeV2 = "application/vnd.steward.connector-receipt.v2+json"
 	PayloadTypeV3 = "application/vnd.steward.connector-receipt.v3+json"
+	PayloadTypeV4 = "application/vnd.steward.connector-receipt.v4+json"
 	SchemaV1      = "steward.connector-receipt.v1"
 	SchemaV2      = "steward.connector-receipt.v2"
 	SchemaV3      = "steward.connector-receipt.v3"
+	SchemaV4      = "steward.connector-receipt.v4"
 	// PayloadType remains the original format identifier for source compatibility
 	// with callers that construct legacy, non-permit receipt fixtures.
 	PayloadType              = PayloadTypeV1
@@ -42,6 +44,10 @@ const (
 	DefaultMaxBytesPerTenant = 4 << 20
 	terminalReserveBytes     = MaxLineBytes + 1
 	minimumTenantBytes       = 2 * terminalReserveBytes
+	// MinimumLifecycleTenantBytes is the smallest tenant allocation that can
+	// reserve authorization, dispatch, and terminal lifecycle receipts.
+	MinimumLifecycleTenantBytes = 3 * terminalReserveBytes
+	TaskProtocolLifecycleV1     = "steward.task-lifecycle.v1"
 )
 
 var (
@@ -56,13 +62,16 @@ var (
 	// ErrTenantIdentityCapacity means the ledger has no unclaimed historical
 	// tenant slot. Tenant identities are retained for the life of the ledger.
 	ErrTenantIdentityCapacity = errors.New("connector ledger tenant identity capacity exceeded")
+	// ErrRunIDConflict means two tasks under one service grant claimed the same
+	// agent-supplied run identifier. The second task must not observe that run.
+	ErrRunIDConflict = errors.New("connector ledger service run ID conflict")
 )
 
 // Limits partitions the bounded receipt ledger between tenant identities.
 // TenantBudgets, when non-nil, is an exact non-borrowing allocation and cannot
 // be combined with the uniform compatibility fields used by DefaultLimits.
 // Every byte allowance includes durable record bytes and space reserved for
-// terminal records of incomplete calls.
+// the remaining records of incomplete calls.
 type Limits struct {
 	MaxTenants        int
 	MaxBytesPerTenant int64
@@ -75,8 +84,9 @@ func DefaultLimits() Limits {
 	return Limits{MaxTenants: DefaultMaxTenants, MaxBytesPerTenant: DefaultMaxBytesPerTenant}
 }
 
-// Validate rejects limits that cannot reserve a worst-case authorization and
-// its matching terminal record, or whose product can exceed the bounded log.
+// Validate rejects limits that cannot reserve a worst-case legacy
+// authorization and its terminal record, or whose product can exceed the
+// bounded log. Lifecycle admission performs its larger reservation atomically.
 func (limits Limits) Validate() error {
 	if limits.TenantBudgets != nil {
 		if limits.MaxTenants != 0 || limits.MaxBytesPerTenant != 0 {
@@ -140,6 +150,7 @@ type Phase string
 
 const (
 	Authorize Phase = "authorize"
+	Dispatch  Phase = "dispatch"
 	Deny      Phase = "deny"
 	Terminal  Phase = "terminal"
 )
@@ -162,44 +173,59 @@ const (
 	ServiceTask   EventKind = "service_task"
 )
 
+// TaskStatus is an agent-reported terminal state. It is evidence of what
+// Gateway observed, not proof that the agent's work was correct or useful.
+type TaskStatus string
+
+const (
+	TaskStatusAgentReportedCompleted TaskStatus = "agent_reported_completed"
+	TaskStatusAgentReportedFailed    TaskStatus = "agent_reported_failed"
+	TaskStatusAgentReportedCancelled TaskStatus = "agent_reported_cancelled"
+)
+
 // Event is the bounded, non-secret portion supplied by Gateway. It records
 // enforcement identity and transfer metadata, never headers, credentials,
 // origins, paths, queries, or bodies.
 type Event struct {
-	Phase                 Phase     `json:"phase"`
-	Outcome               Outcome   `json:"outcome"`
-	Kind                  EventKind `json:"kind,omitempty"`
-	TenantID              string    `json:"tenant_id"`
-	RuntimeRef            string    `json:"runtime_ref"`
-	CapsuleDigest         string    `json:"capsule_digest"`
-	PolicyDigest          string    `json:"policy_digest"`
-	RoutePolicyDigest     string    `json:"route_policy_digest"`
-	Generation            uint64    `json:"generation"`
-	GrantID               string    `json:"grant_id"`
-	ConnectorID           string    `json:"connector_id"`
-	ServiceID             string    `json:"service_id,omitempty"`
-	OperationID           string    `json:"operation_id"`
-	OperationPolicyDigest string    `json:"operation_policy_digest,omitempty"`
-	TaskDigest            string    `json:"task_digest"`
-	AuthorityKeyID        string    `json:"authority_key_id,omitempty"`
-	PermitDigest          string    `json:"permit_digest,omitempty"`
-	RequestDigest         string    `json:"request_digest,omitempty"`
-	HTTPStatus            int       `json:"http_status,omitempty"`
-	RequestBytes          int64     `json:"request_bytes"`
-	ResponseBytes         int64     `json:"response_bytes"`
-	ErrorCode             string    `json:"error_code,omitempty"`
-	RunID                 string    `json:"run_id,omitempty"`
+	Phase                 Phase      `json:"phase"`
+	Outcome               Outcome    `json:"outcome"`
+	Kind                  EventKind  `json:"kind,omitempty"`
+	TenantID              string     `json:"tenant_id"`
+	RuntimeRef            string     `json:"runtime_ref"`
+	CapsuleDigest         string     `json:"capsule_digest"`
+	PolicyDigest          string     `json:"policy_digest"`
+	RoutePolicyDigest     string     `json:"route_policy_digest"`
+	Generation            uint64     `json:"generation"`
+	GrantID               string     `json:"grant_id"`
+	ConnectorID           string     `json:"connector_id"`
+	ServiceID             string     `json:"service_id,omitempty"`
+	OperationID           string     `json:"operation_id"`
+	OperationPolicyDigest string     `json:"operation_policy_digest,omitempty"`
+	TaskDigest            string     `json:"task_digest"`
+	AuthorityKeyID        string     `json:"authority_key_id,omitempty"`
+	PermitDigest          string     `json:"permit_digest,omitempty"`
+	RequestDigest         string     `json:"request_digest,omitempty"`
+	HTTPStatus            int        `json:"http_status,omitempty"`
+	RequestBytes          int64      `json:"request_bytes"`
+	ResponseBytes         int64      `json:"response_bytes"`
+	ErrorCode             string     `json:"error_code,omitempty"`
+	RunID                 string     `json:"run_id,omitempty"`
+	TaskProtocol          string     `json:"task_protocol,omitempty"`
+	TaskStatus            TaskStatus `json:"task_status,omitempty"`
+	ResultDigest          string     `json:"result_digest,omitempty"`
 }
 
 // Receipt contains one signed chain coordinate and one mediated-effect event.
 type Receipt struct {
-	SchemaVersion string `json:"schema_version"`
-	NodeID        string `json:"node_id"`
-	Epoch         uint64 `json:"epoch"`
-	Sequence      uint64 `json:"sequence"`
-	PreviousHash  string `json:"previous_hash"`
-	ObservedAt    string `json:"observed_at"`
-	Event         Event  `json:"event"`
+	SchemaVersion    string `json:"schema_version"`
+	NodeID           string `json:"node_id"`
+	Epoch            uint64 `json:"epoch"`
+	Sequence         uint64 `json:"sequence"`
+	PreviousHash     string `json:"previous_hash"`
+	ObservedAt       string `json:"observed_at"`
+	Event            Event  `json:"event"`
+	TaskSequence     uint64 `json:"task_sequence,omitempty"`
+	PreviousTaskHash string `json:"previous_task_hash,omitempty"`
 }
 
 // Head is safe to retain outside the node to detect removal of a complete
@@ -219,25 +245,38 @@ type VerifiedReceipt struct {
 	Hash    string
 }
 
+type taskCoordinate struct {
+	sequence uint64
+	hash     string
+}
+
+type runOwnership struct {
+	grantID   string
+	serviceID string
+	runID     string
+}
+
 // Log serializes append and fsync. A failed write or sync poisons the open
 // handle: callers must reopen and verify the file before attempting more work.
 type Log struct {
-	mu       sync.Mutex
-	path     string
-	file     *os.File
-	private  ed25519.PrivateKey
-	public   ed25519.PublicKey
-	nodeID   string
-	epoch    uint64
-	keyID    string
-	next     uint64
-	last     string
-	failed   bool
-	reserved int64
-	pending  map[string]Event
-	spent    map[string]struct{}
-	limits   Limits
-	// tenantBytes includes durable line bytes and pending terminal reserves.
+	mu        sync.Mutex
+	path      string
+	file      *os.File
+	private   ed25519.PrivateKey
+	public    ed25519.PublicKey
+	nodeID    string
+	epoch     uint64
+	keyID     string
+	next      uint64
+	last      string
+	failed    bool
+	reserved  int64
+	pending   map[string]Event
+	spent     map[string]struct{}
+	taskHeads map[string]taskCoordinate
+	runOwners map[runOwnership]string
+	limits    Limits
+	// tenantBytes includes durable line bytes and pending record reserves.
 	// Map membership is also the permanent historical tenant identity set.
 	tenantBytes map[string]int64
 }
@@ -310,9 +349,11 @@ func OpenWithLimits(path string, private ed25519.PrivateKey, nodeID string, epoc
 	public := private.Public().(ed25519.PublicKey)
 	pending := make(map[string]Event)
 	spent := make(map[string]struct{})
+	taskHeads := make(map[string]taskCoordinate)
+	runOwners := make(map[runOwnership]string)
 	tenantBytes := make(map[string]int64)
 	head, err := verifyFile(file, public, nodeID, epoch, func(record VerifiedReceipt) error {
-		if err := updateHistory(pending, spent, record.Receipt.Event); err != nil {
+		if err := updateHistory(pending, spent, taskHeads, runOwners, record); err != nil {
 			return err
 		}
 		if err := addTenantUsage(tenantBytes, record.Receipt.Event.TenantID, int64(len(record.Raw)+1), limits); err != nil {
@@ -326,22 +367,25 @@ func OpenWithLimits(path string, private ed25519.PrivateKey, nodeID string, epoc
 	if err != nil {
 		return closeWith(fmt.Errorf("verify connector ledger: %w", err))
 	}
-	reserved := int64(len(pending)) * terminalReserveBytes
+	var reserved int64
 	for _, event := range pending {
-		if err := addTenantUsage(tenantBytes, event.TenantID, terminalReserveBytes, limits); err != nil {
-			return closeWith(fmt.Errorf("reserve connector terminal record: %w", err))
+		reservation := pendingReservation(event)
+		if err := addTenantUsage(tenantBytes, event.TenantID, reservation, limits); err != nil {
+			return closeWith(fmt.Errorf("reserve remaining connector records: %w", err))
 		}
+		reserved += reservation
 	}
 	if info, statErr := file.Stat(); statErr != nil {
 		return closeWith(statErr)
 	} else if info.Size()+reserved > MaxLogBytes {
-		return closeWith(errors.New("connector ledger cannot reserve terminal records for incomplete calls"))
+		return closeWith(errors.New("connector ledger cannot reserve remaining records for incomplete calls"))
 	}
 	return &Log{
 		path: path, file: file, private: append(ed25519.PrivateKey(nil), private...),
 		public: append(ed25519.PublicKey(nil), public...), nodeID: nodeID, epoch: epoch,
 		keyID: KeyID(public), next: head.Sequence + 1, last: head.ChainHash,
-		reserved: reserved, pending: pending, spent: spent, limits: limits, tenantBytes: tenantBytes,
+		reserved: reserved, pending: pending, spent: spent, taskHeads: taskHeads, runOwners: runOwners,
+		limits: limits, tenantBytes: tenantBytes,
 	}, nil
 }
 
@@ -360,8 +404,8 @@ func (l *Log) Append(event Event) (Head, error) {
 	return l.appendLocked(event, 0)
 }
 
-// Begin durably records an authorization and reserves worst-case space for its
-// terminal receipt. No external effect should start until Begin succeeds.
+// Begin durably records an authorization and reserves worst-case space for all
+// remaining receipts. No external effect should start until Begin succeeds.
 func (l *Log) Begin(event Event) (Head, error) {
 	if err := validateEvent(event); err != nil {
 		return Head{}, err
@@ -375,12 +419,41 @@ func (l *Log) Begin(event Event) (Head, error) {
 	if _, exists := l.spent[key]; exists {
 		return Head{}, errors.New("connector authorization task is already spent")
 	}
-	head, err := l.appendLocked(event, terminalReserveBytes)
+	reservation := pendingReservation(event)
+	head, err := l.appendLocked(event, reservation)
 	if err != nil {
 		return Head{}, err
 	}
 	l.pending[key] = event
 	l.spent[key] = struct{}{}
+	return head, nil
+}
+
+// Dispatch durably records that a lifecycle service accepted a task and
+// releases the reservation for that record. It does not record legacy calls.
+func (l *Log) Dispatch(event Event) (Head, error) {
+	if err := validateEvent(event); err != nil {
+		return Head{}, err
+	}
+	if event.Phase != Dispatch {
+		return Head{}, errors.New("connector Dispatch requires a dispatch event")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	authorized, exists := l.pending[event.TaskDigest]
+	if !exists || validateTransition(authorized, event) != nil {
+		return Head{}, errors.New("connector dispatch event has no matching lifecycle authorization")
+	}
+	ownership := runOwnershipFor(event)
+	if owner, exists := l.runOwners[ownership]; exists && owner != event.TaskDigest {
+		return Head{}, ErrRunIDConflict
+	}
+	head, err := l.appendLocked(event, -terminalReserveBytes)
+	if err != nil {
+		return Head{}, err
+	}
+	l.pending[event.TaskDigest] = event
+	l.runOwners[ownership] = event.TaskDigest
 	return head, nil
 }
 
@@ -394,11 +467,11 @@ func (l *Log) Finish(event Event) (Head, error) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	authorized, exists := l.pending[event.TaskDigest]
-	if !exists || !sameCall(authorized, event) {
+	previous, exists := l.pending[event.TaskDigest]
+	if !exists || validateTransition(previous, event) != nil {
 		return Head{}, errors.New("connector terminal event has no matching authorization")
 	}
-	head, err := l.appendLocked(event, -terminalReserveBytes)
+	head, err := l.appendLocked(event, -pendingReservation(previous))
 	if err != nil {
 		return Head{}, err
 	}
@@ -406,8 +479,8 @@ func (l *Log) Finish(event Event) (Head, error) {
 	return head, nil
 }
 
-// Pending returns verified authorization events without a terminal record.
-// Gateway closes these as outcome_unknown after an unclean restart.
+// Pending returns the latest verified event for calls without a terminal
+// record. A lifecycle task may therefore be pending at authorize or dispatch.
 func (l *Log) Pending() []Event {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -426,7 +499,9 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 		return Head{}, errors.New("connector ledger requires reopen after an ambiguous write")
 	}
 	payloadType, schemaVersion := PayloadTypeV1, SchemaV1
-	if event.Kind != "" {
+	if event.TaskProtocol != "" {
+		payloadType, schemaVersion = PayloadTypeV4, SchemaV4
+	} else if event.Kind != "" {
 		payloadType, schemaVersion = PayloadTypeV3, SchemaV3
 	} else if event.PermitDigest != "" {
 		payloadType, schemaVersion = PayloadTypeV2, SchemaV2
@@ -434,6 +509,17 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 	receipt := Receipt{
 		SchemaVersion: schemaVersion, NodeID: l.nodeID, Epoch: l.epoch, Sequence: l.next,
 		PreviousHash: l.last, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Event: event,
+	}
+	if event.TaskProtocol != "" {
+		coordinate := l.taskHeads[event.TaskDigest]
+		if coordinate.sequence == ^uint64(0) {
+			return Head{}, errors.New("connector task sequence exhausted")
+		}
+		receipt.TaskSequence = coordinate.sequence + 1
+		receipt.PreviousTaskHash = coordinate.hash
+		if receipt.PreviousTaskHash == "" {
+			receipt.PreviousTaskHash = zeroHash()
+		}
 	}
 	payload, err := json.Marshal(receipt)
 	if err != nil {
@@ -482,7 +568,17 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 	l.next++
 	l.reserved = reserved
 	l.tenantBytes[event.TenantID] = tenantUsage
+	if event.TaskProtocol != "" {
+		l.taskHeads[event.TaskDigest] = taskCoordinate{sequence: receipt.TaskSequence, hash: l.last}
+	}
 	return l.headLocked(), nil
+}
+
+func pendingReservation(event Event) int64 {
+	if event.TaskProtocol == TaskProtocolLifecycleV1 && event.Phase == Authorize {
+		return 2 * terminalReserveBytes
+	}
+	return terminalReserveBytes
 }
 
 func addTenantUsage(usage map[string]int64, tenantID string, delta int64, limits Limits) error {
@@ -556,8 +652,10 @@ func VerifyRecords(path string, public ed25519.PublicKey, nodeID string, epoch u
 	}
 	pending := make(map[string]Event)
 	spent := make(map[string]struct{})
+	taskHeads := make(map[string]taskCoordinate)
+	runOwners := make(map[runOwnership]string)
 	return verifyFile(file, public, nodeID, epoch, func(record VerifiedReceipt) error {
-		if err := updateHistory(pending, spent, record.Receipt.Event); err != nil {
+		if err := updateHistory(pending, spent, taskHeads, runOwners, record); err != nil {
 			return err
 		}
 		if visit != nil {
@@ -592,9 +690,11 @@ func ValidateWithLimits(path string, private ed25519.PrivateKey, nodeID string, 
 	}
 	pending := make(map[string]Event)
 	spent := make(map[string]struct{})
+	taskHeads := make(map[string]taskCoordinate)
+	runOwners := make(map[runOwnership]string)
 	tenantBytes := make(map[string]int64)
 	head, err := VerifyRecords(path, public, nodeID, epoch, func(record VerifiedReceipt) error {
-		if err := updateHistory(pending, spent, record.Receipt.Event); err != nil {
+		if err := updateHistory(pending, spent, taskHeads, runOwners, record); err != nil {
 			return err
 		}
 		return addTenantUsage(tenantBytes, record.Receipt.Event.TenantID, int64(len(record.Raw)+1), limits)
@@ -603,8 +703,8 @@ func ValidateWithLimits(path string, private ed25519.PrivateKey, nodeID string, 
 		return Head{}, err
 	}
 	for _, event := range pending {
-		if err := addTenantUsage(tenantBytes, event.TenantID, terminalReserveBytes, limits); err != nil {
-			return Head{}, fmt.Errorf("reserve connector terminal record: %w", err)
+		if err := addTenantUsage(tenantBytes, event.TenantID, pendingReservation(event), limits); err != nil {
+			return Head{}, fmt.Errorf("reserve remaining connector records: %w", err)
 		}
 	}
 	return head, nil
@@ -640,7 +740,8 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 			return Head{}, fmt.Errorf("connector ledger line %d is empty or oversized", lineNumber)
 		}
 		envelope, err := dsse.Parse(raw)
-		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 && envelope.PayloadType != PayloadTypeV3 {
+		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 &&
+			envelope.PayloadType != PayloadTypeV3 && envelope.PayloadType != PayloadTypeV4 {
 			return Head{}, fmt.Errorf("verify connector ledger line %d: unsupported receipt envelope", lineNumber)
 		}
 		payload, keyID, err := dsse.Verify(raw, envelope.PayloadType, trusted)
@@ -678,6 +779,8 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 		expectedSchema = SchemaV2
 	case PayloadTypeV3:
 		expectedSchema = SchemaV3
+	case PayloadTypeV4:
+		expectedSchema = SchemaV4
 	}
 	if receipt.SchemaVersion != expectedSchema || receipt.NodeID != nodeID || receipt.Epoch != epoch ||
 		receipt.Sequence != sequence || receipt.PreviousHash != previous {
@@ -689,26 +792,108 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 	}
 	if payloadType == PayloadTypeV1 && (receipt.Event.PermitDigest != "" || receipt.Event.Kind != "") ||
 		payloadType == PayloadTypeV2 && (receipt.Event.PermitDigest == "" || receipt.Event.Kind != "") ||
-		payloadType == PayloadTypeV3 && receipt.Event.Kind == "" {
+		payloadType == PayloadTypeV3 && (receipt.Event.Kind == "" || receipt.Event.TaskProtocol != "") ||
+		payloadType == PayloadTypeV4 && (receipt.Event.Kind != ServiceTask || receipt.Event.TaskProtocol == "") {
 		return errors.New("connector receipt schema does not match its permit fields")
+	}
+	if payloadType == PayloadTypeV4 {
+		if receipt.TaskSequence == 0 || !digest(receipt.PreviousTaskHash) {
+			return errors.New("connector lifecycle receipt has invalid task-chain coordinates")
+		}
+	} else if receipt.TaskSequence != 0 || receipt.PreviousTaskHash != "" {
+		return errors.New("legacy connector receipt contains task-chain coordinates")
 	}
 	return validateEvent(receipt.Event)
 }
 
-func updateHistory(pending map[string]Event, spent map[string]struct{}, event Event) error {
+func updateHistory(pending map[string]Event, spent map[string]struct{}, taskHeads map[string]taskCoordinate,
+	runOwners map[runOwnership]string, record VerifiedReceipt) error {
+	event := record.Receipt.Event
 	switch event.Phase {
 	case Authorize:
 		if _, exists := spent[event.TaskDigest]; exists {
 			return errors.New("connector ledger contains a duplicate spent authorization")
 		}
+		if err := validateTaskCoordinate(record, taskHeads[event.TaskDigest], true); err != nil {
+			return err
+		}
 		spent[event.TaskDigest] = struct{}{}
 		pending[event.TaskDigest] = event
-	case Terminal:
+	case Dispatch:
 		authorized, exists := pending[event.TaskDigest]
-		if !exists || !sameCall(authorized, event) {
+		if !exists || validateTransition(authorized, event) != nil {
+			return errors.New("connector ledger dispatch has no matching lifecycle authorization")
+		}
+		if err := validateTaskCoordinate(record, taskHeads[event.TaskDigest], false); err != nil {
+			return err
+		}
+		ownership := runOwnershipFor(event)
+		if owner, exists := runOwners[ownership]; exists && owner != event.TaskDigest {
+			return ErrRunIDConflict
+		}
+		pending[event.TaskDigest] = event
+		runOwners[ownership] = event.TaskDigest
+	case Terminal:
+		previous, exists := pending[event.TaskDigest]
+		if !exists || validateTransition(previous, event) != nil {
 			return errors.New("connector ledger terminal has no matching authorization")
 		}
+		if err := validateTaskCoordinate(record, taskHeads[event.TaskDigest], false); err != nil {
+			return err
+		}
 		delete(pending, event.TaskDigest)
+	}
+	if event.TaskProtocol != "" {
+		taskHeads[event.TaskDigest] = taskCoordinate{sequence: record.Receipt.TaskSequence, hash: record.Hash}
+	}
+	return nil
+}
+
+func runOwnershipFor(event Event) runOwnership {
+	return runOwnership{grantID: event.GrantID, serviceID: event.ServiceID, runID: event.RunID}
+}
+
+func validateTransition(previous, next Event) error {
+	if !sameCall(previous, next) {
+		return errors.New("connector lifecycle event does not match its authorization")
+	}
+	if previous.TaskProtocol == "" {
+		if previous.Phase != Authorize || next.Phase != Terminal {
+			return errors.New("legacy connector call has an invalid phase transition")
+		}
+		return nil
+	}
+	switch previous.Phase {
+	case Authorize:
+		if next.Phase == Dispatch {
+			return nil
+		}
+		if next.Phase == Terminal && next.Outcome == Failed && next.RunID == "" && next.TaskStatus == "" {
+			return nil
+		}
+	case Dispatch:
+		if next.Phase == Terminal && next.RunID == previous.RunID {
+			if (next.Outcome == Responded && next.TaskStatus != "") ||
+				(next.Outcome == Failed && next.TaskStatus == "") {
+				return nil
+			}
+		}
+	}
+	return errors.New("connector lifecycle event has an invalid phase transition")
+}
+
+func validateTaskCoordinate(record VerifiedReceipt, previous taskCoordinate, first bool) error {
+	if record.Receipt.Event.TaskProtocol == "" {
+		return nil
+	}
+	expectedSequence, expectedHash := previous.sequence+1, previous.hash
+	if first {
+		expectedSequence, expectedHash = 1, zeroHash()
+	} else if previous.sequence == 0 || previous.hash == "" {
+		return errors.New("connector lifecycle receipt has no previous task-chain record")
+	}
+	if record.Receipt.TaskSequence != expectedSequence || record.Receipt.PreviousTaskHash != expectedHash {
+		return errors.New("connector lifecycle task-chain coordinates do not match")
 	}
 	return nil
 }
@@ -722,7 +907,7 @@ func sameCall(left, right Event) bool {
 		left.OperationPolicyDigest == right.OperationPolicyDigest && left.TaskDigest == right.TaskDigest &&
 		left.AuthorityKeyID == right.AuthorityKeyID &&
 		left.PermitDigest == right.PermitDigest && left.RequestDigest == right.RequestDigest &&
-		left.RequestBytes == right.RequestBytes
+		left.RequestBytes == right.RequestBytes && left.TaskProtocol == right.TaskProtocol
 }
 
 func validateEvent(event Event) error {
@@ -744,25 +929,58 @@ func validateEvent(event Event) error {
 	}
 	switch event.Kind {
 	case "":
-		if !identifier(event.ConnectorID) || event.ServiceID != "" || event.OperationPolicyDigest != "" || event.RunID != "" {
+		if !identifier(event.ConnectorID) || event.ServiceID != "" || event.OperationPolicyDigest != "" || event.RunID != "" ||
+			event.TaskProtocol != "" || event.TaskStatus != "" || event.ResultDigest != "" {
 			return errors.New("legacy connector event contains service task fields")
 		}
 	case ConnectorCall:
-		if !identifier(event.ConnectorID) || event.ServiceID != "" || event.OperationPolicyDigest != "" || event.RunID != "" {
+		if !identifier(event.ConnectorID) || event.ServiceID != "" || event.OperationPolicyDigest != "" || event.RunID != "" ||
+			event.TaskProtocol != "" || event.TaskStatus != "" || event.ResultDigest != "" {
 			return errors.New("connector call event contains incoherent fields")
 		}
 	case ServiceTask:
 		if event.ConnectorID != "" || !identifier(event.ServiceID) || !digest(event.OperationPolicyDigest) {
 			return errors.New("service task event contains incoherent fields")
 		}
-		if event.Phase == Authorize || event.Phase == Terminal {
+		if event.Phase == Authorize || event.Phase == Dispatch || event.Phase == Terminal {
 			if event.AuthorityKeyID == "" || event.PermitDigest == "" || event.RequestDigest == "" || event.RequestBytes == 0 {
 				return errors.New("service task authorization requires permit and request bindings")
 			}
 		}
-		success := event.Phase == Terminal && event.Outcome == Responded && serviceTaskSuccessStatus(event.HTTPStatus)
-		if success != (event.RunID != "") || event.RunID != "" && !identifier(event.RunID) {
-			return errors.New("service task run ID does not match a successful terminal response")
+		if event.TaskProtocol == "" {
+			if event.Phase == Dispatch || event.TaskStatus != "" || event.ResultDigest != "" {
+				return errors.New("legacy service task contains lifecycle fields")
+			}
+			success := event.Phase == Terminal && event.Outcome == Responded && serviceTaskSuccessStatus(event.HTTPStatus)
+			if success != (event.RunID != "") || event.RunID != "" && !identifier(event.RunID) {
+				return errors.New("service task run ID does not match a successful terminal response")
+			}
+		} else {
+			if event.TaskProtocol != TaskProtocolLifecycleV1 {
+				return errors.New("service task uses an unsupported lifecycle protocol")
+			}
+			switch event.Phase {
+			case Authorize:
+				if event.RunID != "" || event.TaskStatus != "" || event.ResultDigest != "" {
+					return errors.New("lifecycle authorization contains service output")
+				}
+			case Dispatch:
+				if event.Outcome != Responded || !serviceTaskSuccessStatus(event.HTTPStatus) || event.ResponseBytes == 0 ||
+					!identifier(event.RunID) || event.TaskStatus != "" || event.ResultDigest != "" || event.ErrorCode != "" {
+					return errors.New("invalid lifecycle dispatch event")
+				}
+			case Terminal:
+				if event.TaskStatus == "" {
+					if event.Outcome != Failed || event.ResultDigest != "" || event.RunID != "" && !identifier(event.RunID) {
+						return errors.New("invalid lifecycle terminal failure")
+					}
+				} else if !validTaskStatus(event.TaskStatus) || event.Outcome != Responded || event.HTTPStatus != 200 ||
+					event.ResponseBytes == 0 || !identifier(event.RunID) || !digest(event.ResultDigest) || event.ErrorCode != "" {
+					return errors.New("invalid agent-reported lifecycle terminal event")
+				}
+			default:
+				return errors.New("invalid lifecycle service task phase")
+			}
 		}
 	default:
 		return errors.New("invalid connector receipt event kind")
@@ -775,6 +993,11 @@ func validateEvent(event Event) error {
 	case Deny:
 		if event.Outcome != Denied || event.HTTPStatus != 0 || event.ResponseBytes != 0 || event.ErrorCode == "" {
 			return errors.New("invalid connector denial event")
+		}
+	case Dispatch:
+		if event.Kind != ServiceTask || event.TaskProtocol != TaskProtocolLifecycleV1 || event.Outcome != Responded ||
+			event.HTTPStatus < 100 || event.HTTPStatus > 599 || event.ErrorCode != "" {
+			return errors.New("invalid connector dispatch event")
 		}
 	case Terminal:
 		if event.Outcome != Responded && event.Outcome != Failed {
@@ -794,6 +1017,11 @@ func validateEvent(event Event) error {
 
 func serviceTaskSuccessStatus(status int) bool {
 	return status == 200 || status == 201 || status == 202
+}
+
+func validTaskStatus(status TaskStatus) bool {
+	return status == TaskStatusAgentReportedCompleted || status == TaskStatusAgentReportedFailed ||
+		status == TaskStatusAgentReportedCancelled
 }
 
 func KeyID(public ed25519.PublicKey) string {
