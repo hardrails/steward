@@ -8,11 +8,11 @@ package uplink
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/securefile"
 )
 
 const (
@@ -97,24 +97,9 @@ func LoadCredentialWithSecurity(path string, security CredentialSecurity) (*Cred
 		return nil, fmt.Errorf("uplink credential file %q exceeds the %d-byte limit", path, maxCredentialBytes)
 	}
 
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("read uplink credential file %q: %w (re-enroll this node and write its credential to that path)", path, err)
-	}
-	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat opened uplink credential file %q: %w", path, err)
-	}
-	if !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0o077 != 0 || !os.SameFile(info, openedInfo) {
-		return nil, fmt.Errorf("uplink credential file %q changed while opening or is not an owner-only regular file", path)
-	}
-	raw, err := io.ReadAll(io.LimitReader(file, maxCredentialBytes+1))
+	raw, err := securefile.Read(path, maxCredentialBytes, securefile.OwnerOnly)
 	if err != nil {
 		return nil, fmt.Errorf("read uplink credential file %q: %w", path, err)
-	}
-	if len(raw) == 0 || len(raw) > maxCredentialBytes {
-		return nil, fmt.Errorf("uplink credential file %q is empty or exceeds the %d-byte limit", path, maxCredentialBytes)
 	}
 
 	var c Credential

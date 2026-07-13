@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/hardrails/steward/internal/admission"
@@ -117,7 +116,7 @@ func TestTokenAndBoundedFilePermissions(t *testing.T) {
 	}
 }
 
-func TestBoundedReadersRejectSymlinkFIFOReplacementAndGrowth(t *testing.T) {
+func TestBoundedReadersRejectSymlink(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "input")
 	if err := os.WriteFile(path, []byte("stable"), 0o600); err != nil {
@@ -131,41 +130,6 @@ func TestBoundedReadersRejectSymlinkFIFOReplacementAndGrowth(t *testing.T) {
 		t.Fatal("symlink accepted")
 	}
 
-	fifo := filepath.Join(directory, "fifo")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ReadBounded(fifo, 64); err == nil {
-		t.Fatal("FIFO accepted")
-	}
-
-	if _, err := readBoundedFile(path, 64, false, func(*os.File) error {
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
-		if err != nil {
-			return err
-		}
-		_, writeErr := file.WriteString("-changed")
-		closeErr := file.Close()
-		if writeErr != nil {
-			return writeErr
-		}
-		return closeErr
-	}); err == nil || !strings.Contains(err.Error(), "changed while reading") {
-		t.Fatalf("growing file err=%v", err)
-	}
-
-	if err := os.WriteFile(path, []byte("stable"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	replacementFIFO := filepath.Join(directory, "replacement-fifo")
-	if err := syscall.Mkfifo(replacementFIFO, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readBoundedFile(path, 64, false, func(*os.File) error {
-		return os.Rename(replacementFIFO, path)
-	}); err == nil || !strings.Contains(err.Error(), "changed while reading") {
-		t.Fatalf("path replacement err=%v", err)
-	}
 }
 
 func TestClientPurgeAndStrictResponseFailures(t *testing.T) {

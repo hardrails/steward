@@ -14,12 +14,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/securefile"
 )
 
 const maxWireBytes = 1 << 20
@@ -238,7 +237,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any) 
 }
 
 func ReadToken(path string) (string, error) {
-	raw, err := readBoundedFile(path, 4096, true, nil)
+	raw, err := securefile.Read(path, 4096, securefile.OwnerOnly)
 	if err != nil {
 		return "", err
 	}
@@ -255,72 +254,7 @@ func ReadToken(path string) (string, error) {
 }
 
 func ReadBounded(path string, limit int64) ([]byte, error) {
-	return readBoundedFile(path, limit, false, nil)
-}
-
-// readBoundedFile opens once without following a final symlink and performs a
-// bounded read from that descriptor. The hook exists only so package tests can
-// deterministically exercise path replacement and file growth after open.
-func readBoundedFile(path string, limit int64, ownerOnly bool, afterOpen func(*os.File) error) ([]byte, error) {
-	if limit <= 0 || limit == int64(^uint64(0)>>1) {
-		return nil, errors.New("input file limit must be positive and bounded")
-	}
-	invalid := func() error {
-		if ownerOnly {
-			return errors.New("node token must be a bounded owner-only regular file")
-		}
-		return errors.New("input must be a non-empty bounded regular file")
-	}
-	valid := func(info os.FileInfo) bool {
-		return info != nil && info.Mode().IsRegular() && info.Size() > 0 && info.Size() <= limit &&
-			(!ownerOnly || info.Mode().Perm()&0o077 == 0)
-	}
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !valid(before) {
-		return nil, invalid()
-	}
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !valid(opened) || !sameFileSnapshot(before, opened) {
-		return nil, errors.New("input file changed while opening")
-	}
-	if afterOpen != nil {
-		if err := afterOpen(file); err != nil {
-			return nil, err
-		}
-	}
-	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	after, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	current, err := os.Lstat(path)
-	if err != nil {
-		return nil, errors.New("input file changed while reading")
-	}
-	if int64(len(raw)) != opened.Size() || !valid(after) || !valid(current) ||
-		!sameFileSnapshot(opened, after) || !sameFileSnapshot(opened, current) {
-		return nil, errors.New("input file changed while reading")
-	}
-	return raw, nil
-}
-
-func sameFileSnapshot(left, right os.FileInfo) bool {
-	return os.SameFile(left, right) && left.Mode() == right.Mode() && left.Size() == right.Size() &&
-		left.ModTime().Equal(right.ModTime())
+	return securefile.Read(path, limit, securefile.Regular)
 }
 
 func validRuntimePath(path string) bool {
