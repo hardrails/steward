@@ -225,6 +225,11 @@ common_env=(
 
 run_doctor() {
 	local argument_count=${#doctor_arguments[@]}
+	# These files instrument one invocation. Reset them so the fake commands do
+	# not turn prior test output into a side effect that exceeds capture_bounded's
+	# process file-size limit on Linux.
+	: >"$work/curl.log"
+	: >"$work/stewardctl.log"
 	if (( argument_count == 0 )); then
 		# The child shell, not this test process, expands the positional parameters.
 		# shellcheck disable=SC2016
@@ -300,11 +305,12 @@ set -e
 
 doctor_arguments=(--json)
 set +e
-bounded=$(run_doctor FAKE_DOCKER_FLOOD=1)
+bounded=$(run_doctor FAKE_DOCKER_FLOOD=1 2>"$work/bounded.stderr")
 bounded_status=$?
 set -e
 [[ $bounded_status == 1 && $bounded == *'"id":"docker.runsc","status":"fail"'* ]]
 [[ ${#bounded} -le 65536 ]]
+[[ ! -s $work/bounded.stderr ]]
 
 executor_env_contents=$(<"$executor_env")
 for ((index = 0; index < 2000; index++)); do printf 'UNTRUSTED_%04d=%01024d\n' "$index" 0; done >"$executor_env"

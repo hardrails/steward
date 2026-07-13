@@ -470,10 +470,16 @@ capture_bounded() {
 	# being written; Bash specifies -f in 1024-byte blocks on Linux. The exact
 	# byte ceiling is enforced again below before any output enters memory.
 	file_blocks=$(((maximum + 1023) / 1024))
-	(
-		ulimit -f "$file_blocks" || exit 125
-		"$timeout_bin" --signal=TERM --kill-after=2s "${seconds}s" "$@"
-	) >"$output_file" 2>/dev/null
+	# Bash reports a child killed by RLIMIT_FSIZE from the waiting parent shell,
+	# outside the child's stderr redirection. Keep that expected diagnostic out
+	# of the machine-readable report; the non-zero status below still makes the
+	# affected check fail.
+	{
+		(
+			ulimit -f "$file_blocks" || exit 125
+			exec "$timeout_bin" --signal=TERM --kill-after=2s "${seconds}s" "$@"
+		) >"$output_file" 2>/dev/null
+	} 2>/dev/null
 	command_status=$?
 	if (( command_status != 0 )); then
 		"$rm_bin" -f -- "$output_file"
