@@ -97,6 +97,14 @@ again, purged the lineage volume, and verified Executor's signed receipt chain. 
 also exercises Docker 29's containerd image store, where Docker addresses the image
 by its manifest digest while Steward still verifies the signed config digest.
 
+The repository publishes the metadata-only
+[closed-runtime evidence]({{ '/reference/evidence/hermes-feasibility.json' | relative_url }})
+and [signed-integration evidence]({{ '/reference/evidence/hermes-integration.json' | relative_url }})
+for the qualified inputs. CI recomputes the adapter file-set, builder, Dockerfile,
+source-input, and acceptance-harness digests and fails if they no longer match the
+evidence. The files contain no prompt, response, workspace content, credential, or
+log. They are release-bound records, not independently signed attestations.
+
 ## Build the adapter
 
 Docker with the `runsc` runtime, Git, Python 3, and the command-line tools checked by

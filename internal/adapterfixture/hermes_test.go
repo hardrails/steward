@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -161,6 +162,109 @@ func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) 
 	immutableCommand := "/opt/steward/skills/steward.workspace-audit/workspace_audit.py"
 	if !strings.Contains(model, immutableCommand) || strings.Contains(model, "/opt/data/skills/steward.workspace-audit") {
 		t.Fatal("fixture model does not execute the immutable signed skill path")
+	}
+}
+
+func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
+	root := hermesAdapterRoot(t)
+	repositoryRoot := filepath.Join(root, "..", "..")
+
+	var feasibility struct {
+		SchemaVersion    string `json:"schema_version"`
+		Overall          string `json:"overall"`
+		ContainsContent  bool   `json:"contains_agent_content"`
+		Runtime          string `json:"runtime"`
+		UpstreamRevision string `json:"upstream_revision"`
+		Checks           []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"checks"`
+	}
+	decodeEvidence(t, filepath.Join(repositoryRoot, "docs", "reference", "evidence", "hermes-feasibility.json"), &feasibility)
+	if feasibility.SchemaVersion != "steward.agent-feasibility.v1" || feasibility.Overall != "passed" ||
+		feasibility.ContainsContent || feasibility.Runtime != "runsc" ||
+		feasibility.UpstreamRevision != "095b9eed3801c251796df93f48a8f2a527ff6e70" {
+		t.Fatalf("invalid Hermes feasibility evidence authority: %#v", feasibility)
+	}
+	passed := make(map[string]int, len(feasibility.Checks))
+	for _, check := range feasibility.Checks {
+		if check.Status == "passed" {
+			passed[check.ID]++
+		}
+	}
+	for _, required := range []string{
+		"source.inputs", "image.build", "runtime.policy", "runtime.identity",
+		"runtime.filesystem", "runtime.network", "task.basic", "task.skill",
+		"task.mcp", "task.restart", "restart.state", "feasibility.complete",
+		"evidence.coverage",
+	} {
+		if passed[required] != 1 {
+			t.Fatalf("Hermes feasibility check %q passed %d times", required, passed[required])
+		}
+	}
+
+	var integration struct {
+		SchemaVersion   string `json:"schema_version"`
+		Overall         string `json:"overall"`
+		ContainsContent bool   `json:"contains_agent_content"`
+		Acceptance      struct {
+			CompletedSteps  []string `json:"completed_steps"`
+			Runtime         string   `json:"runtime"`
+			SignedAdmission bool     `json:"signed_admission"`
+		} `json:"acceptance"`
+		Provenance struct {
+			AcceptanceScriptSHA256 string `json:"acceptance_script_sha256"`
+			BuildAttestation       struct {
+				Adapter struct {
+					FileSetSHA256 string `json:"file_set_sha256"`
+				} `json:"adapter"`
+				BuildRecipe struct {
+					BuilderSHA256      string `json:"builder_sha256"`
+					DockerfileSHA256   string `json:"dockerfile_sha256"`
+					SourceInputsSHA256 string `json:"source_inputs_sha256"`
+				} `json:"build_recipe"`
+			} `json:"build_attestation"`
+		} `json:"provenance"`
+		ReceiptChain struct {
+			Verified bool `json:"verified"`
+			Head     struct {
+				Sequence uint64 `json:"sequence"`
+			} `json:"head"`
+		} `json:"receipt_chain"`
+	}
+	decodeEvidence(t, filepath.Join(repositoryRoot, "docs", "reference", "evidence", "hermes-integration.json"), &integration)
+	expectedSteps := []string{
+		"image_imported", "executor_ready", "generation_1_admitted", "generation_1_started",
+		"generation_1_ready", "state_volume_observed", "workspace_seeded", "generation_1_skill_passed",
+		"generation_1_destroyed", "generation_2_admitted", "generation_2_started", "generation_2_ready",
+		"generation_2_skill_passed", "generation_2_destroyed", "state_purged", "evidence_chain_verified",
+		"acceptance_complete",
+	}
+	if integration.SchemaVersion != "steward.hermes-integration-evidence.v1" || integration.Overall != "passed" ||
+		integration.ContainsContent || integration.Acceptance.Runtime != "runsc" || !integration.Acceptance.SignedAdmission ||
+		!integration.ReceiptChain.Verified || integration.ReceiptChain.Head.Sequence == 0 ||
+		!valuesEqual(integration.Acceptance.CompletedSteps, expectedSteps) {
+		t.Fatalf("invalid Hermes integration evidence authority: %#v", integration)
+	}
+
+	bindings := map[string]string{
+		"adapter file set":   hermesAdapterFileSetSHA256(t, root),
+		"builder":            sha256File(t, filepath.Join(repositoryRoot, "scripts", "build-hermes-adapter.sh")),
+		"acceptance harness": sha256File(t, filepath.Join(repositoryRoot, "scripts", "hermes-steward-acceptance.sh")),
+		"Dockerfile":         sha256File(t, filepath.Join(root, "Dockerfile")),
+		"source inputs":      sha256File(t, filepath.Join(root, "source-inputs.sha256")),
+	}
+	expectedBindings := map[string]string{
+		"adapter file set":   integration.Provenance.BuildAttestation.Adapter.FileSetSHA256,
+		"builder":            integration.Provenance.BuildAttestation.BuildRecipe.BuilderSHA256,
+		"acceptance harness": integration.Provenance.AcceptanceScriptSHA256,
+		"Dockerfile":         integration.Provenance.BuildAttestation.BuildRecipe.DockerfileSHA256,
+		"source inputs":      integration.Provenance.BuildAttestation.BuildRecipe.SourceInputsSHA256,
+	}
+	for name, actual := range bindings {
+		if actual != expectedBindings[name] {
+			t.Fatalf("Hermes qualification %s digest = %s, evidence binds %s", name, actual, expectedBindings[name])
+		}
 	}
 }
 
@@ -465,6 +569,82 @@ func readBounded(t *testing.T, path string, maximum int64) []byte {
 		t.Fatalf("%s exceeds %d bytes", path, maximum)
 	}
 	return content
+}
+
+func decodeEvidence(t *testing.T, path string, destination any) {
+	t.Helper()
+	content := readBounded(t, path, 1<<20)
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	if err := decoder.Decode(destination); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	if err := requireEOF(decoder); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+}
+
+func sha256File(t *testing.T, path string) string {
+	t.Helper()
+	digest := sha256.Sum256(readBounded(t, path, 8<<20))
+	return hex.EncodeToString(digest[:])
+}
+
+func hermesAdapterFileSetSHA256(t *testing.T, root string) string {
+	t.Helper()
+	var paths []string
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path != root && !entry.IsDir() {
+			paths = append(paths, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk Hermes adapter: %v", err)
+	}
+	sort.Slice(paths, func(left, right int) bool {
+		leftRelative, _ := filepath.Rel(root, paths[left])
+		rightRelative, _ := filepath.Rel(root, paths[right])
+		return filepath.ToSlash(leftRelative) < filepath.ToSlash(rightRelative)
+	})
+	entries := make([]map[string]any, 0, len(paths))
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("inspect Hermes adapter entry: %v", err)
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := map[string]any{
+			"mode": int(info.Mode().Perm()),
+			"path": filepath.ToSlash(relative),
+		}
+		switch {
+		case info.Mode().IsRegular():
+			digest := sha256.Sum256(readBounded(t, path, 8<<20))
+			entry["sha256"] = hex.EncodeToString(digest[:])
+			entry["type"] = "file"
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry["target"] = target
+			entry["type"] = "symlink"
+		default:
+			t.Fatalf("unsupported Hermes adapter entry type: %s", relative)
+		}
+		entries = append(entries, entry)
+	}
+	encoded, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
 }
 
 func requireEOF(decoder *json.Decoder) error {
