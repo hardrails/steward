@@ -209,16 +209,85 @@ for command in docker git python3 sha256sum tar timeout df awk od; do
 	require_command "$command"
 done
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-adapter_path=$root/adapters/hermes-agent
-[[ -f $adapter_path/adapter.json && -f $adapter_path/Dockerfile ]] || die "checked-in Hermes adapter is incomplete"
-git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "Steward must be built from a Git checkout"
-build_commit=$(git -C "$root" rev-parse HEAD)
-git -C "$root" ls-files --error-unmatch scripts/build-hermes-adapter.sh >/dev/null 2>&1 \
-	|| die "builder must be checked in before it can produce an attestation"
-[[ -z $(git -C "$root" status --porcelain=v1 --untracked-files=all -- adapters/hermes-agent scripts/build-hermes-adapter.sh) ]] \
-	|| die "checked-in builder or Hermes adapter has tracked or untracked drift"
-adapter_tree=$(git -C "$root" rev-parse "$build_commit:adapters/hermes-agent")
+script_path=$(python3 - "${BASH_SOURCE[0]}" <<'PY'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PY
+)
+root=$(cd "$(dirname "$script_path")/.." && pwd -P)
+adapter_source=
+build_commit=
+adapter_tree=
+release_version=
+release_manifest_sha256=
+if [[ -f $root/adapters/hermes-agent/adapter.json ]]; then
+	adapter_source=git-checkout
+	adapter_path=$root/adapters/hermes-agent
+	git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "Steward source root is not a Git checkout"
+	build_commit=$(git -C "$root" rev-parse HEAD)
+	git -C "$root" ls-files --error-unmatch scripts/build-hermes-adapter.sh >/dev/null 2>&1 \
+		|| die "builder must be checked in before it can produce an attestation"
+	[[ -z $(git -C "$root" status --porcelain=v1 --untracked-files=all -- adapters/hermes-agent scripts/build-hermes-adapter.sh) ]] \
+		|| die "checked-in builder or Hermes adapter has tracked or untracked drift"
+	adapter_tree=$(git -C "$root" rev-parse "$build_commit:adapters/hermes-agent")
+elif [[ -f $root/integration/adapters/hermes-agent/adapter.json ]]; then
+	adapter_source=release-payload
+	adapter_path=$root/integration/adapters/hermes-agent
+	release_manifest=$root/release.json
+	[[ -f $release_manifest && ! -L $release_manifest ]] || die "packaged builder requires an immutable release.json"
+	release_version=$(python3 - "$root" "$adapter_path" "$script_path" "$release_manifest" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import re
+import stat
+import sys
+
+root, adapter, script, manifest_path = map(pathlib.Path, sys.argv[1:])
+if manifest_path.stat().st_size > 1 << 20:
+    raise SystemExit("packaged release manifest is oversized")
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+version = manifest.get("version") if isinstance(manifest, dict) else None
+files = manifest.get("files") if isinstance(manifest, dict) else None
+if (
+    manifest.get("schema") != "steward.release.v2"
+    or manifest.get("os") != "linux"
+    or not isinstance(version, str)
+    or re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", version) is None
+    or not isinstance(files, dict)
+):
+    raise SystemExit("packaged release manifest is invalid")
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+actual = set()
+for path in sorted(adapter.rglob("*")):
+    info = os.lstat(path)
+    if stat.S_ISDIR(info.st_mode):
+        continue
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise SystemExit(f"packaged adapter contains an unsafe entry: {path.relative_to(root)}")
+    actual.add(path.relative_to(root).as_posix())
+expected = {name for name in files if name.startswith("integration/adapters/hermes-agent/")}
+if actual != expected:
+    raise SystemExit("packaged adapter inventory differs from release.json")
+builder_name = script.relative_to(root).as_posix()
+for name in sorted(actual | {builder_name}):
+    path = root / name
+    expected_digest = files.get(name)
+    if not isinstance(expected_digest, str) or digest(path) != expected_digest:
+        raise SystemExit(f"packaged release digest mismatch: {name}")
+print(version)
+PY
+)
+	release_manifest_sha256=$(sha256_file "$release_manifest")
+else
+	die "Hermes adapter is absent from the Steward source or release payload"
+fi
+[[ -f $adapter_path/adapter.json && -f $adapter_path/Dockerfile ]] || die "Hermes adapter payload is incomplete"
 
 output=$(python3 - "$output" <<'PY'
 import os
@@ -282,7 +351,11 @@ source_tree=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$source_dir" rev-parse "$expected
 
 mkdir -p "$work/context/upstream" "$work/context/adapter"
 GIT_NO_REPLACE_OBJECTS=1 git -C "$source_dir" archive --format=tar --output="$work/source.tar" "$expected_revision"
-git -C "$root" archive --format=tar --output="$work/adapter.tar" "$build_commit:adapters/hermes-agent"
+if [[ $adapter_source == git-checkout ]]; then
+	git -C "$root" archive --format=tar --output="$work/adapter.tar" "$build_commit:adapters/hermes-agent"
+else
+	tar -cf "$work/adapter.tar" -C "$adapter_path" .
+fi
 source_archive_sha256=$(sha256_file "$work/source.tar")
 tar -xf "$work/source.tar" -C "$work/context/upstream"
 tar -xf "$work/adapter.tar" -C "$work/context/adapter"
@@ -314,7 +387,7 @@ dockerfile_base=$(awk -F= '/^ARG UV_IMAGE=/{print substr($0, index($0, "=") + 1)
 	|| die "pinned Hermes source inputs failed verification"
 build_recipe_sha256=$(sha256_file "$work/context/adapter/Dockerfile")
 source_inputs_sha256=$(sha256_file "$work/context/adapter/source-inputs.sha256")
-builder_sha256=$(sha256_file "${BASH_SOURCE[0]}")
+builder_sha256=$(sha256_file "$script_path")
 
 if ! $non_interactive; then
 	echo >&2
@@ -459,7 +532,8 @@ archive_sha256=$(sha256_file "$archive_tmp")
 archive_size=$(file_size "$archive_tmp")
 attestation_tmp=$publish_dir/attestation.json
 python3 - "$attestation_tmp" "$(basename -- "$output")" "$expected_repository" "$expected_revision" "$source_tree" \
-	"$source_archive_sha256" "$build_commit" "$adapter_tree" "$adapter_file_set_sha256" "$build_recipe_sha256" \
+	"$source_archive_sha256" "$adapter_source" "$build_commit" "$adapter_tree" "$release_version" \
+	"$release_manifest_sha256" "$adapter_file_set_sha256" "$build_recipe_sha256" \
 	"$source_inputs_sha256" "$builder_sha256" "$base_image_reference" "$image_manifest_digest" \
 	"$image_config_digest" "$runtime_image_id" "$image_platform" \
 	"$archive_sha256" "$archive_size" <<'PY'
@@ -470,16 +544,25 @@ import sys
 
 (
     destination, archive_name, repository, revision, source_tree, source_archive,
-    steward_commit, adapter_tree, adapter_files, dockerfile, source_inputs, builder,
+    adapter_source, steward_commit, adapter_tree, release_version, release_manifest,
+    adapter_files, dockerfile, source_inputs, builder,
     base_image, manifest_digest, config_digest, runtime_image_id, platform, archive_digest, archive_size,
 ) = sys.argv[1:]
+adapter = {
+    "contract": "steward.hermes-agent.v1",
+    "file_set_sha256": adapter_files,
+    "source": adapter_source,
+}
+if adapter_source == "git-checkout":
+    adapter["git_tree"] = adapter_tree
+    adapter["steward_commit"] = steward_commit
+elif adapter_source == "release-payload":
+    adapter["release_manifest_sha256"] = release_manifest
+    adapter["release_version"] = release_version
+else:
+    raise SystemExit("invalid adapter source")
 payload = {
-    "adapter": {
-        "contract": "steward.hermes-agent.v1",
-        "file_set_sha256": adapter_files,
-        "git_tree": adapter_tree,
-        "steward_commit": steward_commit,
-    },
+    "adapter": adapter,
     "archive": {
         "file": archive_name,
         "sha256": archive_digest,
