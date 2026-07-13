@@ -34,6 +34,7 @@ const streamStatusTrailer = "X-Steward-Stream-Status"
 const maxConnectorGlobalConcurrent = 32
 const maxConnectorGrantConcurrent = 4
 const connectorReceiptStatusTrailer = "X-Steward-Connector-Receipt"
+const maxConnectorAttemptsPerMinute = 60
 
 type Grant struct {
 	GrantID        string   `json:"grant_id"`
@@ -142,6 +143,11 @@ type grantLease struct {
 	cancel  context.CancelFunc
 }
 
+type connectorAttemptWindow struct {
+	started time.Time
+	count   int
+}
+
 type Server struct {
 	mu                       sync.Mutex
 	config                   Config
@@ -164,6 +170,7 @@ type Server struct {
 	connectorCalls           map[string]map[string][]string
 	connectorSpends          map[string]connectorSpendOwner
 	connectorCallCounts      map[string]map[string]int
+	connectorAttempts        map[string]connectorAttemptWindow
 	grantLeases              map[string]grantLease
 	egressLeases             map[string]grantLease
 	audit                    *auditLog
@@ -214,7 +221,8 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		serviceSemaphores: make(map[string]chan struct{}), egressStats: make(map[string]EgressStats),
 		connectorCalls:  make(map[string]map[string][]string),
 		connectorSpends: receiptIndex.spends, connectorCallCounts: receiptIndex.counts,
-		grantLeases: make(map[string]grantLease), egressLeases: make(map[string]grantLease), audit: audit,
+		connectorAttempts: make(map[string]connectorAttemptWindow),
+		grantLeases:       make(map[string]grantLease), egressLeases: make(map[string]grantLease), audit: audit,
 		connectorLedger: receiptLog,
 		tokenHash:       sha256.Sum256([]byte("Bearer " + serviceToken)),
 		client: &http.Client{Transport: transport, Timeout: 2 * time.Minute,
@@ -780,6 +788,8 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(s.egressStats, id)
 	delete(s.serviceSemaphores, id)
+	delete(s.connectorGrantSemaphores, id)
+	delete(s.connectorAttempts, id)
 	_ = os.RemoveAll(GrantDirectory(s.config.GrantRoot, id))
 	w.WriteHeader(http.StatusNoContent)
 }

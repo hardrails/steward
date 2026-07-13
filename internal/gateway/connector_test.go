@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/connectorledger"
 )
@@ -376,6 +377,48 @@ func TestConnectorFinalCallBudgetRaceHasOneUpstreamEffect(t *testing.T) {
 	}
 	if counts[http.StatusNoContent] != 1 || counts[http.StatusTooManyRequests] != 1 || calls.Load() != 1 {
 		t.Fatalf("statuses=%v upstream calls=%d", counts, calls.Load())
+	}
+}
+
+func TestConnectorAttemptBudgetLimitsInvalidWorkAndRecovers(t *testing.T) {
+	server := &Server{connectorAttempts: make(map[string]connectorAttemptWindow)}
+	started := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	for attempt := 0; attempt < maxConnectorAttemptsPerMinute; attempt++ {
+		if !server.allowConnectorAttempt("grant-a", started.Add(time.Duration(attempt)*time.Millisecond)) {
+			t.Fatalf("attempt %d denied before fixed-window limit", attempt)
+		}
+	}
+	if server.allowConnectorAttempt("grant-a", started.Add(30*time.Second)) {
+		t.Fatal("attempt beyond fixed-window limit was accepted")
+	}
+	if !server.allowConnectorAttempt("grant-b", started.Add(30*time.Second)) {
+		t.Fatal("one grant exhausted another grant's attempt budget")
+	}
+	if server.allowConnectorAttempt("grant-a", started.Add(-time.Second)) {
+		t.Fatal("clock rollback restored attempt authority")
+	}
+	if !server.allowConnectorAttempt("grant-a", started.Add(time.Minute)) {
+		t.Fatal("attempt budget did not recover after the fixed window")
+	}
+}
+
+func TestConnectorAuthorizationReceiptFailurePreventsUpstreamEffect(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{allowedCIDRs: []string{"127.0.0.0/8"}})
+	if err := rig.server.connectorLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	response := invokeConnector(rig.server, rig.grant.GrantID,
+		connectorRequest(http.MethodPost, "issues", "create", "task-no-receipt", strings.NewReader(`{"title":"blocked"}`)))
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"error":"evidence_unavailable"`) {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream received %d calls without durable authorization", calls.Load())
 	}
 }
 

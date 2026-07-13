@@ -47,6 +47,10 @@ func (s *Server) listenConnectorGrantLocked(id string) error {
 
 func (s *Server) connectorHandler(grantID string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !s.allowConnectorAttempt(grantID, time.Now()) {
+			writeGatewayError(w, http.StatusTooManyRequests, "connector_rate_limited", "connector attempt rate limit reached")
+			return
+		}
 		connectorID, operationID, ok := connectorRequestTarget(request)
 		if !ok {
 			writeGatewayError(w, http.StatusBadRequest, "invalid_connector_request", "connector request must name one exact connector operation without a query")
@@ -143,7 +147,7 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 			case errors.Is(err, errConnectorInactive):
 				writeGatewayError(w, http.StatusServiceUnavailable, "grant_inactive", "connector grant is not active")
 			default:
-				writeGatewayError(w, http.StatusServiceUnavailable, "state_unavailable", "connector call could not be persisted")
+				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector authorization could not be recorded")
 			}
 			return
 		}
@@ -163,6 +167,24 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		}
 		s.proxyConnector(w, request, connector, operation, body, ip, port, receipt)
 	})
+}
+
+func (s *Server) allowConnectorAttempt(grantID string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	window := s.connectorAttempts[grantID]
+	if now.Before(window.started) {
+		return false
+	}
+	if window.started.IsZero() || now.Sub(window.started) >= time.Minute {
+		window = connectorAttemptWindow{started: now}
+	}
+	if window.count >= maxConnectorAttemptsPerMinute {
+		return false
+	}
+	window.count++
+	s.connectorAttempts[grantID] = window
+	return true
 }
 
 func connectorRequestTarget(request *http.Request) (string, string, bool) {
