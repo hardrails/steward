@@ -2,11 +2,13 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -57,6 +59,17 @@ func (*blockingConnectorReceiptLog) Finish(connectorledger.Event) (connectorledg
 func (log *blockingConnectorReceiptLog) Failed() bool { return log.failed }
 func (*blockingConnectorReceiptLog) Close() error     { return nil }
 
+type refusingConnectorReceiptLog struct{ err error }
+
+func (log refusingConnectorReceiptLog) Begin(connectorledger.Event) (connectorledger.Head, error) {
+	return connectorledger.Head{}, log.err
+}
+func (refusingConnectorReceiptLog) Finish(connectorledger.Event) (connectorledger.Head, error) {
+	return connectorledger.Head{}, errors.New("unexpected fixture finish")
+}
+func (refusingConnectorReceiptLog) Failed() bool { return false }
+func (refusingConnectorReceiptLog) Close() error { return nil }
+
 func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) *connectorRig {
 	t.Helper()
 	if options.credentialMode == "" {
@@ -102,6 +115,10 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 		ConnectorReceiptFile:    filepath.Join(directory, "connector-receipts.ndjson"),
 		ConnectorReceiptKeyFile: filepath.Join(directory, "connector-receipts.private.pem"),
 		ConnectorReceiptNodeID:  "node-test/gateway", ConnectorReceiptEpoch: 1,
+		ConnectorReceiptTenantBudgets: []ConnectorReceiptTenantBudget{
+			{TenantID: "tenant-a", Bytes: 2 << 20},
+			{TenantID: "tenant-b", Bytes: 2 << 20},
+		},
 	}
 	_, receiptKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -596,6 +613,28 @@ func TestConnectorAuthorizationReceiptFailurePreventsUpstreamEffect(t *testing.T
 	}
 }
 
+func TestConnectorTenantReceiptQuotaFailsBeforeUpstreamEffect(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{allowedCIDRs: []string{"127.0.0.0/8"}})
+	if err := rig.server.connectorLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig.server.connectorLedger = refusingConnectorReceiptLog{err: connectorledger.ErrTenantQuotaExceeded}
+	response := invokeConnector(rig.server, rig.grant.GrantID,
+		connectorRequest(http.MethodPost, "issues", "create", "task-quota", strings.NewReader(`{"title":"blocked"}`)))
+	if response.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(response.Body.String(), `"error":"connector_evidence_quota_exhausted"`) {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream received %d calls without a tenant receipt reservation", calls.Load())
+	}
+}
+
 func TestConnectorDNSPrivatePolicyAndRedirectsFailClosedAfterSpend(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -626,6 +665,87 @@ func TestConnectorDNSPrivatePolicyAndRedirectsFailClosedAfterSpend(t *testing.T)
 	replay := connectorRequest(http.MethodPost, "issues", "create", "task-private", strings.NewReader(`{"x":1}`))
 	if response = invokeConnector(privateRig.server, privateRig.grant.GrantID, replay); response.Code != http.StatusConflict {
 		t.Fatalf("address-denied replay status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestConnectorResolutionFailuresRecordSignedTerminalReceipts(t *testing.T) {
+	originalResolver := net.DefaultResolver
+	t.Cleanup(func() { net.DefaultResolver = originalResolver })
+
+	t.Run("resolution failure", func(t *testing.T) {
+		net.DefaultResolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("fixture DNS failure")
+			},
+		}
+		rig := newConnectorRig(t, "https://resolution-failure.example", connectorRigOptions{})
+		response := invokeConnector(rig.server, rig.grant.GrantID,
+			connectorRequest(http.MethodGet, "issues", "read", "task-resolution-failure", nil))
+		if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"error":"resolution_failed"`) {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		assertConnectorTerminalReceipt(t, rig, "task-resolution-failure", "read", "resolution_failed")
+	})
+
+	t.Run("grant revoked during resolution", func(t *testing.T) {
+		entered := make(chan struct{})
+		var once sync.Once
+		net.DefaultResolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				once.Do(func() { close(entered) })
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+		rig := newConnectorRig(t, "https://resolution-revocation.example", connectorRigOptions{})
+		responseReady := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			responseReady <- invokeConnector(rig.server, rig.grant.GrantID,
+				connectorRequest(http.MethodGet, "issues", "read", "task-resolution-revocation", nil))
+		}()
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("connector did not enter address resolution")
+		}
+
+		deactivate := httptest.NewRecorder()
+		rig.server.ControlHandler().ServeHTTP(deactivate,
+			httptest.NewRequest(http.MethodPost, "/v1/grants/"+rig.grant.GrantID+"/deactivate", nil))
+		if deactivate.Code != http.StatusOK {
+			t.Fatalf("deactivate status=%d body=%s", deactivate.Code, deactivate.Body.String())
+		}
+		select {
+		case response := <-responseReady:
+			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"error":"grant_revoked"`) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		case <-time.After(time.Second):
+			t.Fatal("connector did not stop after grant revocation")
+		}
+		assertConnectorTerminalReceipt(t, rig, "task-resolution-revocation", "read", "grant_revoked")
+	})
+}
+
+func assertConnectorTerminalReceipt(t *testing.T, rig *connectorRig, taskID, operationID, errorCode string) {
+	t.Helper()
+	var receipts []connectorledger.Event
+	_, err := connectorledger.VerifyRecords(
+		rig.config.ConnectorReceiptFile, rig.config.connectorReceiptKey.Public().(ed25519.PublicKey),
+		rig.config.ConnectorReceiptNodeID, rig.config.ConnectorReceiptEpoch,
+		func(record connectorledger.VerifiedReceipt) error {
+			receipts = append(receipts, record.Receipt.Event)
+			return nil
+		},
+	)
+	wantDigest := connectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, taskID, "issues", operationID)
+	if err != nil || len(receipts) != 2 || receipts[0].Phase != connectorledger.Authorize ||
+		receipts[0].TaskDigest != wantDigest || receipts[1].Phase != connectorledger.Terminal ||
+		receipts[1].TaskDigest != wantDigest || receipts[1].Outcome != connectorledger.Failed ||
+		receipts[1].ErrorCode != errorCode {
+		t.Fatalf("receipts=%#v err=%v", receipts, err)
 	}
 }
 
@@ -687,6 +807,10 @@ func TestConnectorGrantEvidenceAndReloadBindings(t *testing.T) {
 			t.Fatalf("invalid evidence-bound grant accepted: %#v", grant)
 		}
 	}
+	unbudgeted := connectorGrant("tenant-c", "unbudgeted", 1, "issues")
+	if rig.server.validGrant(unbudgeted) {
+		t.Fatal("connector grant for an unbudgeted tenant was admitted")
+	}
 
 	changedConfig := rig.config
 	changedConnectors := make(map[string]loadedConnector, len(rig.config.loadedConnectors))
@@ -700,10 +824,23 @@ func TestConnectorGrantEvidenceAndReloadBindings(t *testing.T) {
 	if err := rig.server.Reload(changedConfig, nil, nil, "service-token"); err == nil || !strings.Contains(err.Error(), "retained grant") {
 		t.Fatalf("credential-changing reload accepted: %v", err)
 	}
+	budgetConfig := rig.config
+	budgetConfig.ConnectorReceiptTenantBudgets = append([]ConnectorReceiptTenantBudget(nil), rig.config.ConnectorReceiptTenantBudgets...)
+	budgetConfig.ConnectorReceiptTenantBudgets[0].Bytes++
+	if err := rig.server.Reload(budgetConfig, nil, nil, "service-token"); err == nil || !strings.Contains(err.Error(), "may change only") {
+		t.Fatalf("tenant-budget-changing reload accepted: %v", err)
+	}
 	// A restart cannot overlap the old writer. Closing the live ledger also
 	// proves the descriptor lock is released before the retained grant check.
 	if err := rig.server.connectorLedger.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if opened, err := Open(budgetConfig, nil, nil, "service-token"); err == nil || !strings.Contains(err.Error(), "route policy") {
+		if opened != nil {
+			opened.closeGrantListeners()
+			_ = opened.audit.Close()
+		}
+		t.Fatalf("tenant-budget-changing restart accepted: %v", err)
 	}
 	if opened, err := Open(changedConfig, nil, nil, "service-token"); err == nil || !strings.Contains(err.Error(), "route policy") {
 		if opened != nil {

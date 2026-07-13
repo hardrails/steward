@@ -35,28 +35,36 @@ const (
 )
 
 type Config struct {
-	Version                 int           `json:"version"`
-	ControlSocket           string        `json:"control_socket"`
-	ServiceAddress          string        `json:"service_address"`
-	ServiceTokenFile        string        `json:"service_token_file"`
-	StateFile               string        `json:"state_file"`
-	GrantRoot               string        `json:"grant_root"`
-	ExecutorGID             int           `json:"executor_gid"`
-	RelayGID                int           `json:"relay_gid"`
-	Routes                  []Route       `json:"routes"`
-	EgressAuditFile         string        `json:"egress_audit_file,omitempty"`
-	EgressRoutes            []EgressRoute `json:"egress_routes,omitempty"`
-	Connectors              []Connector   `json:"connectors,omitempty"`
-	ConnectorReceiptFile    string        `json:"connector_receipt_file,omitempty"`
-	ConnectorReceiptKeyFile string        `json:"connector_receipt_key_file,omitempty"`
-	ConnectorReceiptNodeID  string        `json:"connector_receipt_node_id,omitempty"`
-	ConnectorReceiptEpoch   uint64        `json:"connector_receipt_epoch,omitempty"`
+	Version                       int                            `json:"version"`
+	ControlSocket                 string                         `json:"control_socket"`
+	ServiceAddress                string                         `json:"service_address"`
+	ServiceTokenFile              string                         `json:"service_token_file"`
+	StateFile                     string                         `json:"state_file"`
+	GrantRoot                     string                         `json:"grant_root"`
+	ExecutorGID                   int                            `json:"executor_gid"`
+	RelayGID                      int                            `json:"relay_gid"`
+	Routes                        []Route                        `json:"routes"`
+	EgressAuditFile               string                         `json:"egress_audit_file,omitempty"`
+	EgressRoutes                  []EgressRoute                  `json:"egress_routes,omitempty"`
+	Connectors                    []Connector                    `json:"connectors,omitempty"`
+	ConnectorReceiptFile          string                         `json:"connector_receipt_file,omitempty"`
+	ConnectorReceiptKeyFile       string                         `json:"connector_receipt_key_file,omitempty"`
+	ConnectorReceiptNodeID        string                         `json:"connector_receipt_node_id,omitempty"`
+	ConnectorReceiptEpoch         uint64                         `json:"connector_receipt_epoch,omitempty"`
+	ConnectorReceiptTenantBudgets []ConnectorReceiptTenantBudget `json:"connector_receipt_tenant_budgets,omitempty"`
 
 	// loadedConnectors contains validated origins, credentials, CIDRs, and
 	// operation indexes populated by LoadConfig. It is deliberately absent from
 	// JSON so secret contents can never be serialized with operator policy.
 	loadedConnectors    map[string]loadedConnector
 	connectorReceiptKey ed25519.PrivateKey
+}
+
+// ConnectorReceiptTenantBudget reserves non-borrowing signed receipt capacity
+// for one exact tenant identity. Capacity is not shared with other tenants.
+type ConnectorReceiptTenantBudget struct {
+	TenantID string `json:"tenant_id"`
+	Bytes    int64  `json:"bytes"`
 }
 
 type Route struct {
@@ -180,6 +188,30 @@ func (c Config) connectorReceiptPrivateKey() (ed25519.PrivateKey, error) {
 	return c.validateAndLoadConnectorReceiptKey()
 }
 
+func (c Config) connectorReceiptLimits() (connectorledger.Limits, error) {
+	budgets := make(map[string]int64, len(c.ConnectorReceiptTenantBudgets))
+	for _, budget := range c.ConnectorReceiptTenantBudgets {
+		if _, duplicate := budgets[budget.TenantID]; duplicate {
+			return connectorledger.Limits{}, fmt.Errorf("duplicate connector receipt tenant budget %q", budget.TenantID)
+		}
+		budgets[budget.TenantID] = budget.Bytes
+	}
+	limits := connectorledger.Limits{TenantBudgets: budgets}
+	if err := limits.Validate(); err != nil {
+		return connectorledger.Limits{}, fmt.Errorf("connector receipt tenant budgets: %w", err)
+	}
+	return limits, nil
+}
+
+func (c Config) connectorReceiptBudget(tenantID string) (int64, bool) {
+	for _, budget := range c.ConnectorReceiptTenantBudgets {
+		if budget.TenantID == tenantID {
+			return budget.Bytes, true
+		}
+	}
+	return 0, false
+}
+
 func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error) {
 	configured := 0
 	for _, present := range []bool{
@@ -191,6 +223,9 @@ func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error)
 		}
 	}
 	if configured == 0 {
+		if len(c.ConnectorReceiptTenantBudgets) != 0 {
+			return nil, errors.New("connector receipt tenant budgets require a connector receipt identity")
+		}
 		if len(c.Connectors) > 0 {
 			return nil, errors.New("connectors require a signed connector receipt ledger")
 		}
@@ -198,6 +233,13 @@ func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error)
 	}
 	if configured != 4 {
 		return nil, errors.New("connector receipt file, private key, node id, and epoch must be configured together")
+	}
+	limits, err := c.connectorReceiptLimits()
+	if err != nil {
+		return nil, err
+	}
+	if len(c.Connectors) > 0 && len(c.ConnectorReceiptTenantBudgets) == 0 {
+		return nil, errors.New("connectors require at least one explicit connector receipt tenant budget")
 	}
 	if !absoluteClean(c.ConnectorReceiptFile) || !absoluteClean(c.ConnectorReceiptKeyFile) ||
 		c.ConnectorReceiptFile == c.ConnectorReceiptKeyFile || c.ConnectorReceiptFile == c.StateFile ||
@@ -220,7 +262,9 @@ func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error)
 	if err != nil {
 		return nil, fmt.Errorf("read connector receipt private key: %w", err)
 	}
-	if _, err := connectorledger.Validate(c.ConnectorReceiptFile, key, c.ConnectorReceiptNodeID, c.ConnectorReceiptEpoch); err != nil {
+	if _, err := connectorledger.ValidateWithLimits(
+		c.ConnectorReceiptFile, key, c.ConnectorReceiptNodeID, c.ConnectorReceiptEpoch, limits,
+	); err != nil {
 		return nil, fmt.Errorf("validate connector receipt ledger: %w", err)
 	}
 	return key, nil

@@ -81,8 +81,12 @@ func openConnectorReceiptLedger(config Config, key ed25519.PrivateKey) (*connect
 	if key == nil {
 		return nil, index, nil
 	}
-	log, err := connectorledger.OpenWithVisit(
-		config.ConnectorReceiptFile, key, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch, index.visit,
+	limits, err := config.connectorReceiptLimits()
+	if err != nil {
+		return nil, nil, err
+	}
+	log, err := connectorledger.OpenWithLimits(
+		config.ConnectorReceiptFile, key, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch, limits, index.visit,
 	)
 	if err != nil {
 		return nil, nil, err

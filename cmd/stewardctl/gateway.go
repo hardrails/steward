@@ -82,9 +82,10 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 	receiptKeyFile := flags.String("receipt-key-file", "", "connector receipt private key path for an older config")
 	receiptNodeID := flags.String("receipt-node-id", "", "stable connector receipt node identity for an older config")
 	receiptEpoch := flags.Uint64("receipt-epoch", 1, "connector receipt key epoch for an older config")
-	var cidrs, operations repeatedFlag
+	var cidrs, operations, tenantBudgets repeatedFlag
 	flags.Var(&cidrs, "allow-cidr", "explicit resolved-address CIDR; repeat for more")
 	flags.Var(&operations, "operation", "exact ID=METHOD:/path operation; repeat for more")
+	flags.Var(&tenantBudgets, "tenant-budget", "exact TENANT=BYTES receipt budget; repeat for more")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
@@ -117,6 +118,34 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 		}
 		parsedOperations = append(parsedOperations, operation)
 	}
+	budgetsChanged := false
+	if len(tenantBudgets) > 0 {
+		parsedBudgets, err := parseConnectorTenantBudgets(tenantBudgets)
+		if err != nil {
+			return err
+		}
+		for _, budget := range parsedBudgets {
+			found := false
+			for index := range config.ConnectorReceiptTenantBudgets {
+				if config.ConnectorReceiptTenantBudgets[index].TenantID != budget.TenantID {
+					continue
+				}
+				found = true
+				if config.ConnectorReceiptTenantBudgets[index].Bytes != budget.Bytes {
+					config.ConnectorReceiptTenantBudgets[index] = budget
+					budgetsChanged = true
+				}
+				break
+			}
+			if !found {
+				config.ConnectorReceiptTenantBudgets = append(config.ConnectorReceiptTenantBudgets, budget)
+				budgetsChanged = true
+			}
+		}
+	}
+	if len(config.Connectors) == 0 && len(config.ConnectorReceiptTenantBudgets) == 0 {
+		return errors.New("adding the first connector requires at least one -tenant-budget TENANT=BYTES")
+	}
 	connector := gateway.Connector{
 		ID: *id, BaseURL: *baseURL, CredentialFile: *credentialFile,
 		CredentialMode: gateway.CredentialMode(*credentialMode), AllowInsecureHTTP: *allowInsecureHTTP,
@@ -124,12 +153,14 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 		MaxRequestBytes: *maxRequest, MaxResponseBytes: *maxResponse, MaxSeconds: *maxSeconds,
 		MaxCallsPerGrant: *maxCalls, Operations: parsedOperations,
 	}
+	receiptIdentityChanged := false
 	if config.ConnectorReceiptFile == "" {
 		if *receiptFile == "" || *receiptKeyFile == "" || *receiptNodeID == "" || *receiptEpoch == 0 {
 			return errors.New("older gateway config requires -receipt-file, -receipt-key-file, -receipt-node-id, and a positive -receipt-epoch when adding its first connector")
 		}
 		config.ConnectorReceiptFile, config.ConnectorReceiptKeyFile = *receiptFile, *receiptKeyFile
 		config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch = *receiptNodeID, *receiptEpoch
+		receiptIdentityChanged = true
 	} else if connectorReceiptFlagVisited(flags) {
 		return errors.New("receipt flags are accepted only when upgrading a config without a connector receipt identity")
 	}
@@ -146,10 +177,37 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 	if err := writeGatewayConfig(*path, config); err != nil {
 		return err
 	}
-	result := map[string]any{"connector": connector, "replaced": replaced, "activation": "systemctl reload steward-gateway.service"}
+	activation := "systemctl reload steward-gateway.service"
+	if budgetsChanged || receiptIdentityChanged {
+		activation = "systemctl restart steward-gateway.service"
+	}
+	result := map[string]any{"connector": connector, "replaced": replaced, "activation": activation}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(result)
+}
+
+func parseConnectorTenantBudgets(values []string) ([]gateway.ConnectorReceiptTenantBudget, error) {
+	budgets := make([]gateway.ConnectorReceiptTenantBudget, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		separator := strings.LastIndexByte(value, '=')
+		ok := separator > 0 && separator < len(value)-1
+		tenantID, bytesText := "", ""
+		if ok {
+			tenantID, bytesText = value[:separator], value[separator+1:]
+		}
+		bytes, err := strconv.ParseInt(bytesText, 10, 64)
+		if !ok || tenantID == "" || err != nil || bytes <= 0 {
+			return nil, fmt.Errorf("invalid tenant budget %q; use TENANT=positive-decimal-BYTES", value)
+		}
+		if _, duplicate := seen[tenantID]; duplicate {
+			return nil, fmt.Errorf("duplicate tenant budget for %q", tenantID)
+		}
+		seen[tenantID] = struct{}{}
+		budgets = append(budgets, gateway.ConnectorReceiptTenantBudget{TenantID: tenantID, Bytes: bytes})
+	}
+	return budgets, nil
 }
 
 func parseConnectorOperation(value string) (gateway.ConnectorOperation, error) {

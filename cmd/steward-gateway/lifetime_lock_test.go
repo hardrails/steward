@@ -61,6 +61,7 @@ func TestSecondGatewayCannotReplaceSocketOrOpenMutableState(t *testing.T) {
 		ExecutorGID: os.Getgid(), RelayGID: os.Getgid(), EgressAuditFile: filepath.Join(directory, "egress.jsonl"),
 		ConnectorReceiptFile: receiptPath, ConnectorReceiptKeyFile: privatePath,
 		ConnectorReceiptNodeID: "node-test/gateway", ConnectorReceiptEpoch: 1,
+		ConnectorReceiptTenantBudgets: []gateway.ConnectorReceiptTenantBudget{{TenantID: "tenant-a", Bytes: 4 << 20}},
 	}
 	if config.ExecutorGID == 0 {
 		config.ExecutorGID, config.RelayGID = 1, 1

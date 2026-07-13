@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hardrails/steward/internal/connectorledger"
 )
 
 func TestLoadConfigValidatesRoutesAndSecretPermissions(t *testing.T) {
@@ -470,6 +472,7 @@ func TestConfigRequiresAndValidatesConnectorReceiptIdentity(t *testing.T) {
 		Connectors:           []Connector{connectorFixture(credential)},
 		ConnectorReceiptFile: filepath.Join(directory, "connector-receipts.ndjson"), ConnectorReceiptKeyFile: keyPath,
 		ConnectorReceiptNodeID: "node-a/gateway", ConnectorReceiptEpoch: 1,
+		ConnectorReceiptTenantBudgets: []ConnectorReceiptTenantBudget{{TenantID: "tenant-a", Bytes: 4 << 20}},
 	}
 	loaded, err := config.validateAndLoadConnectorReceiptKey()
 	if err != nil || !loaded.Equal(private) {
@@ -497,6 +500,26 @@ func TestConfigRequiresAndValidatesConnectorReceiptIdentity(t *testing.T) {
 	missing := Config{Connectors: config.Connectors}
 	if _, err := missing.validateAndLoadConnectorReceiptKey(); err == nil {
 		t.Fatal("connector without signed receipts accepted")
+	}
+	minimumBudget := int64(2 * (connectorledger.MaxLineBytes + 1))
+	for name, budgets := range map[string][]ConnectorReceiptTenantBudget{
+		"missing":    nil,
+		"duplicate":  {{TenantID: "tenant-a", Bytes: minimumBudget}, {TenantID: "tenant-a", Bytes: minimumBudget}},
+		"too small":  {{TenantID: "tenant-a", Bytes: minimumBudget - 1}},
+		"invalid id": {{TenantID: "", Bytes: minimumBudget}},
+		"over total": {{TenantID: "tenant-a", Bytes: connectorledger.MaxLogBytes}, {TenantID: "tenant-b", Bytes: minimumBudget}},
+	} {
+		t.Run("tenant budget "+name, func(t *testing.T) {
+			invalid := config
+			invalid.ConnectorReceiptTenantBudgets = budgets
+			if _, err := invalid.validateAndLoadConnectorReceiptKey(); err == nil {
+				t.Fatalf("invalid tenant budgets accepted: %#v", budgets)
+			}
+		})
+	}
+	withoutIdentity := Config{ConnectorReceiptTenantBudgets: []ConnectorReceiptTenantBudget{{TenantID: "tenant-a", Bytes: minimumBudget}}}
+	if _, err := withoutIdentity.validateAndLoadConnectorReceiptKey(); err == nil {
+		t.Fatal("tenant budget without receipt identity accepted")
 	}
 }
 

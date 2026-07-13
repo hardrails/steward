@@ -9,10 +9,11 @@ import (
 )
 
 type routePolicyDocument struct {
-	Version    int                    `json:"version"`
-	Inference  *inferenceRoutePolicy  `json:"inference,omitempty"`
-	Egress     []egressRoutePolicy    `json:"egress,omitempty"`
-	Connectors []connectorRoutePolicy `json:"connectors,omitempty"`
+	Version                     int                    `json:"version"`
+	Inference                   *inferenceRoutePolicy  `json:"inference,omitempty"`
+	Egress                      []egressRoutePolicy    `json:"egress,omitempty"`
+	Connectors                  []connectorRoutePolicy `json:"connectors,omitempty"`
+	ConnectorReceiptBudgetBytes int64                  `json:"connector_receipt_budget_bytes,omitempty"`
 }
 
 type inferenceRoutePolicy struct {
@@ -110,15 +111,11 @@ func routeBaseURL(value *url.URL) string {
 // Credential presence and file identity are included, but credential contents
 // are deliberately excluded so the inspection API cannot become an offline
 // oracle for weak operator-provided bearer tokens.
-func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, connectorMaps ...map[string]loadedConnector) string {
+func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, connectors map[string]loadedConnector, connectorReceiptBudget int64) string {
 	if grant.RouteID == "" && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0 {
 		return ""
 	}
 	document := routePolicyDocument{Version: 1}
-	var connectors map[string]loadedConnector
-	if len(connectorMaps) > 0 {
-		connectors = connectorMaps[0]
-	}
 	if grant.RouteID != "" {
 		route := routes[grant.RouteID]
 		document.Inference = &inferenceRoutePolicy{
@@ -140,7 +137,8 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		document.Egress = append(document.Egress, policy)
 	}
 	if len(grant.ConnectorIDs) > 0 {
-		document.Version = 2
+		document.Version = 3
+		document.ConnectorReceiptBudgetBytes = connectorReceiptBudget
 	}
 	for _, id := range grant.ConnectorIDs {
 		connector := connectors[id]
@@ -177,7 +175,8 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 }
 
 func (s *Server) routePolicyDigestLocked(grant Grant) string {
-	return routePolicyDigest(grant, s.routes, s.egressRoutes, s.connectors)
+	budget, _ := s.config.connectorReceiptBudget(grant.TenantID)
+	return routePolicyDigest(grant, s.routes, s.egressRoutes, s.connectors, budget)
 }
 
 // routeCredentialBindingDigest is retained only in the owner-readable state

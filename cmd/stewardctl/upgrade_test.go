@@ -114,6 +114,7 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 		ExecutorGID: executorGID, RelayGID: executorGID,
 		ConnectorReceiptFile: fixture.receiptLog, ConnectorReceiptKeyFile: fixture.receiptKey,
 		ConnectorReceiptNodeID: "node-a/gateway", ConnectorReceiptEpoch: 1,
+		ConnectorReceiptTenantBudgets: []gateway.ConnectorReceiptTenantBudget{{TenantID: "tenant-a", Bytes: 4 << 20}},
 	}
 	raw, err := json.Marshal(config)
 	if err != nil {

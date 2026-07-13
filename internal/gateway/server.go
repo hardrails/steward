@@ -295,7 +295,11 @@ func Validate(config Config, routes map[string]loadedRoute, egressRoutes map[str
 		return StateSummary{}, err
 	}
 	if receiptKey != nil {
-		if _, err := connectorledger.Validate(config.ConnectorReceiptFile, receiptKey, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch); err != nil {
+		limits, err := config.connectorReceiptLimits()
+		if err != nil {
+			return StateSummary{}, err
+		}
+		if _, err := connectorledger.ValidateWithLimits(config.ConnectorReceiptFile, receiptKey, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch, limits); err != nil {
 			return StateSummary{}, err
 		}
 	}
@@ -363,7 +367,8 @@ func (s *Server) Reload(config Config, routes map[string]loadedRoute, egressRout
 				return fmt.Errorf("reload changes connector %q used by retained grant %s", connectorID, grant.GrantID)
 			}
 		}
-		if routePolicyDigest(grant, routes, egressRoutes, connectors) != s.policyDigests[id] ||
+		budget, _ := config.connectorReceiptBudget(grant.TenantID)
+		if routePolicyDigest(grant, routes, egressRoutes, connectors, budget) != s.policyDigests[id] ||
 			routeCredentialBindingDigest(grant, routes, connectors) != s.credentialDigests[id] {
 			return fmt.Errorf("reload changes route policy used by retained grant %s", grant.GrantID)
 		}
@@ -422,7 +427,24 @@ func sameRuntimeConfig(left, right Config) bool {
 		left.ConnectorReceiptKeyFile == right.ConnectorReceiptKeyFile &&
 		left.ConnectorReceiptNodeID == right.ConnectorReceiptNodeID &&
 		left.ConnectorReceiptEpoch == right.ConnectorReceiptEpoch &&
+		sameConnectorReceiptTenantBudgets(left.ConnectorReceiptTenantBudgets, right.ConnectorReceiptTenantBudgets) &&
 		connectorReceiptKeyID(left) == connectorReceiptKeyID(right)
+}
+
+func sameConnectorReceiptTenantBudgets(left, right []ConnectorReceiptTenantBudget) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	rightByTenant := make(map[string]int64, len(right))
+	for _, budget := range right {
+		rightByTenant[budget.TenantID] = budget.Bytes
+	}
+	for _, budget := range left {
+		if bytes, ok := rightByTenant[budget.TenantID]; !ok || bytes != budget.Bytes {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -847,6 +869,11 @@ func (s *Server) validGrant(grant Grant) bool {
 	}
 	if len(grant.ConnectorIDs) > 0 && grant.RuntimeRef == "" {
 		return false
+	}
+	if len(grant.ConnectorIDs) > 0 {
+		if _, budgeted := s.config.connectorReceiptBudget(grant.TenantID); !budgeted {
+			return false
+		}
 	}
 	if grant.ServiceURL != "" && !validServiceURL(grant.ServiceURL, s.config.GrantRoot, grant.GrantID) {
 		return false

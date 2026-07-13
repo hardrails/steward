@@ -146,6 +146,10 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 				writeGatewayError(w, http.StatusTooManyRequests, "connector_call_limit", "connector call budget is exhausted")
 			case errors.Is(err, errConnectorInactive):
 				writeGatewayError(w, http.StatusServiceUnavailable, "grant_inactive", "connector grant is not active")
+			case errors.Is(err, connectorledger.ErrTenantQuotaExceeded),
+				errors.Is(err, connectorledger.ErrTenantUnbudgeted),
+				errors.Is(err, connectorledger.ErrTenantIdentityCapacity):
+				writeGatewayError(w, http.StatusServiceUnavailable, "connector_evidence_quota_exhausted", "tenant connector receipt capacity is exhausted")
 			default:
 				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector authorization could not be recorded")
 			}

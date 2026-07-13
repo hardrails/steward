@@ -139,18 +139,54 @@ func TestGatewayConnectorSetIsValidatedSecretFreeAndAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	arguments := []string{
+	connectorArguments := []string{
 		"gateway", "connector", "set", "-config", path, "-id", "issues", "-base-url", "https://api.example.test",
 		"-credential-file", credential, "-allow-cidr", "203.0.113.0/24",
 		"-operation", "create=POST:/v1/issues", "-operation", "read=GET:/v1/issues/current",
 	}
+	beforeInitialization, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run(connectorArguments, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "tenant-budget") {
+		t.Fatalf("first connector without a tenant budget err=%v", err)
+	}
+	afterInitialization, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeInitialization, afterInitialization) {
+		t.Fatal("missing tenant budget changed gateway config")
+	}
+	arguments := append(append([]string(nil), connectorArguments...), "-tenant-budget", "tenant-a=1048576")
 	if err := run(arguments, &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, _, _, err := gateway.LoadConfig(path)
 	if err != nil || len(loaded.Connectors) != 1 || loaded.Connectors[0].Operations[0].Method != http.MethodPost ||
-		strings.Contains(output.String(), "upstream-secret") || !strings.Contains(output.String(), "systemctl reload") {
-		t.Fatalf("loaded=%#v output=%q err=%v", loaded.Connectors, output.String(), err)
+		len(loaded.ConnectorReceiptTenantBudgets) != 1 || loaded.ConnectorReceiptTenantBudgets[0].TenantID != "tenant-a" ||
+		loaded.ConnectorReceiptTenantBudgets[0].Bytes != 1048576 ||
+		strings.Contains(output.String(), "upstream-secret") || !strings.Contains(output.String(), "systemctl restart") {
+		t.Fatalf("loaded=%#v budgets=%#v output=%q err=%v", loaded.Connectors, loaded.ConnectorReceiptTenantBudgets, output.String(), err)
+	}
+	var preserveOutput bytes.Buffer
+	if err := run(connectorArguments, &preserveOutput, &bytes.Buffer{}); err != nil {
+		t.Fatalf("replace connector while preserving tenant budgets: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || len(loaded.ConnectorReceiptTenantBudgets) != 1 || loaded.ConnectorReceiptTenantBudgets[0].Bytes != 1048576 ||
+		!strings.Contains(preserveOutput.String(), "systemctl reload") {
+		t.Fatalf("preserved budgets=%#v err=%v", loaded.ConnectorReceiptTenantBudgets, err)
+	}
+	upsert := append(append([]string(nil), connectorArguments...), "-tenant-budget", "tenant=west=1048576")
+	var upsertOutput bytes.Buffer
+	if err := run(upsert, &upsertOutput, &bytes.Buffer{}); err != nil {
+		t.Fatalf("upsert exact tenant budget: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || len(loaded.ConnectorReceiptTenantBudgets) != 2 || loaded.ConnectorReceiptTenantBudgets[0].TenantID != "tenant-a" ||
+		loaded.ConnectorReceiptTenantBudgets[1].TenantID != "tenant=west" || !strings.Contains(upsertOutput.String(), "systemctl restart") {
+		t.Fatalf("upserted budgets=%#v output=%q err=%v", loaded.ConnectorReceiptTenantBudgets, upsertOutput.String(), err)
 	}
 	before, err := os.ReadFile(path)
 	if err != nil {
@@ -171,6 +207,23 @@ func TestGatewayConnectorSetIsValidatedSecretFreeAndAtomic(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatal("invalid connector update changed gateway config")
+	}
+	for _, invalidBudgets := range [][]string{
+		{"-tenant-budget", "tenant-a=1048576", "-tenant-budget", "tenant-a=2097152"},
+		{"-tenant-budget", "tenant-a=0"},
+		{"-tenant-budget", "tenant-a=not-bytes"},
+	} {
+		invalid := append(append([]string(nil), connectorArguments...), invalidBudgets...)
+		if err := run(invalid, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("invalid tenant budgets accepted: %v", invalidBudgets)
+		}
+		unchanged, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(after, unchanged) {
+			t.Fatalf("invalid tenant budgets changed gateway config: %v", invalidBudgets)
+		}
 	}
 	output.Reset()
 	if err := run([]string{"gateway", "connector", "list", "-config", path}, &output, &bytes.Buffer{}); err != nil ||
