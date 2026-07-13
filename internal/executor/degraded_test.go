@@ -60,6 +60,28 @@ func TestDegradedStopNeverOperatesAnInsufficientRelayIdentity(t *testing.T) {
 	}
 }
 
+func TestDegradedStopNeverOperatesAnUnrelatedRuntimeImageIdentity(t *testing.T) {
+	rig := newReconcileRig(t, true)
+	if _, err := rig.config.Journal.Prepare("ambiguous-prior-operation", "prior:"+rig.record.InstanceID, rig.record.Generation); err != nil {
+		t.Fatal(err)
+	}
+	rig.docker.mu.Lock()
+	rig.docker.agent.RuntimeImageID = "sha256:" + strings.Repeat("f", 64)
+	rig.docker.mu.Unlock()
+
+	response := degradedLifecycleRequest(rig, http.MethodPost, "/v1/workloads/"+RuntimeRef(rig.record.TenantID, rig.record.InstanceID)+"/stop", rig.record.TenantID)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if events := strings.Join(rig.recorder.snapshot(), ","); events != "deactivate_grant" {
+		t.Fatalf("runtime-image drift containment events=%q", events)
+	}
+	agent, _ := rig.docker.states()
+	if stoppedStatus(agent) {
+		t.Fatalf("unrelated runtime image was operated: status=%q", agent)
+	}
+}
+
 func TestDegradedStopDeniesCrossTenantPrincipalBeforeMutation(t *testing.T) {
 	rig := newReconcileRig(t, true)
 	if _, err := rig.config.Journal.Prepare("ambiguous-prior-operation", "prior:"+rig.record.InstanceID, rig.record.Generation); err != nil {

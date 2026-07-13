@@ -55,3 +55,6 @@ because it requires a Docker Unix socket, systemd, and gVisor runtime enforcemen
 
 Building from source requires Go 1.24 or newer. Published static binaries do not
 require Go. The Go module has no third-party dependencies.
+
+The packaged Hermes adapter builder is currently qualified only on `linux/amd64`.
+This is narrower than the Executor node and release-artifact matrix above.

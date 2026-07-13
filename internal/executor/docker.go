@@ -67,19 +67,29 @@ type StateDocker interface {
 // Docker test doubles while making pre-mutation image verification mandatory
 // for the secure path.
 type ImageDocker interface {
-	InspectImage(context.Context, string) (ObservedImage, error)
+	InspectSignedImage(context.Context, string, string) (ObservedImage, error)
 }
 
 // ObservedImage is the security-relevant projection of Docker image inspect.
 // DeclaredVolumes is sorted so policy decisions and tests are deterministic.
 type ObservedImage struct {
 	ID              string
+	ConfigDigest    string
+	ManifestDigest  string
+	Identity        imageIdentity
 	OS              string
 	Architecture    string
 	Variant         string
 	DeclaredVolumes []string
 	ConfigPresent   bool
 }
+
+type imageIdentity string
+
+const (
+	imageIdentityConfig   imageIdentity = "config"
+	imageIdentityManifest imageIdentity = "manifest"
+)
 
 type StateVolumeSpec struct {
 	Name      string
@@ -112,12 +122,16 @@ type dockerEndpoint struct {
 // already belongs to the same immutable workload before treating provision as an
 // idempotent replay.
 type ObservedWorkload struct {
-	Workload    Workload
-	ImageID     string
-	Fingerprint string
-	Managed     bool
-	Hardened    bool
-	Status      string
+	Workload Workload
+	// ImageID is the signed config identity used by admission fences. RuntimeImageID
+	// is Docker's actual store-specific selection (config on classic stores,
+	// manifest on the containerd store).
+	ImageID        string
+	RuntimeImageID string
+	Fingerprint    string
+	Managed        bool
+	Hardened       bool
+	Status         string
 }
 
 // DockerHTTP is a standard-library Docker Engine client over the local Unix socket.
@@ -134,6 +148,7 @@ const workloadCPULabel = "io.hardrails.cpu-millis"
 const workloadPIDsLabel = "io.hardrails.pids"
 const workloadImageReferenceLabel = "io.hardrails.image.reference"
 const workloadImageConfigLabel = "io.hardrails.image.config"
+const workloadImageRuntimeLabel = "io.hardrails.image.runtime"
 const managedStateLabel = "io.hardrails.state.managed"
 const stateLineageLabel = "io.hardrails.state.lineage"
 const stateVolumeLabel = "io.hardrails.state.volume"
@@ -465,15 +480,52 @@ func checkedCapacityAdd(left, right int64) (int64, error) {
 	return left + right, nil
 }
 
-// InspectImage resolves one exact config digest through Docker and projects only
-// the fields needed by signed admission. Looking up by config ID is intentional:
-// offline docker load preserves content IDs but may not preserve repository
-// digests. The signed repository and manifest remain provenance identities.
+// InspectImage resolves one exact config digest through Docker. It remains the
+// narrow compatibility surface used by image-import callers that have not yet
+// supplied a signed manifest identity.
 func (d *DockerHTTP) InspectImage(ctx context.Context, configDigest string) (ObservedImage, error) {
 	if !imageConfigDigest.MatchString(configDigest) {
 		return ObservedImage{}, &PolicyError{"image inspection requires an exact sha256 config digest"}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/v1.41/images/"+pathEscape(configDigest)+"/json", nil)
+	return d.inspectImageReference(ctx, "v1.41", configDigest, imageIdentityConfig)
+}
+
+// InspectSignedImage resolves a signed manifest/config pair without assuming a
+// particular Docker image store. Classic Docker addresses the executable image
+// by its config digest. Docker's containerd image store addresses it by manifest
+// digest and reports the config digest in Descriptor.annotations["config.digest"].
+// Only a not-found config lookup permits the manifest-store fallback; daemon and
+// decoding failures are never hidden by a second lookup.
+func (d *DockerHTTP) InspectSignedImage(ctx context.Context, imageReference, configDigest string) (ObservedImage, error) {
+	if !imageDigest.MatchString(imageReference) || !imageConfigDigest.MatchString(configDigest) {
+		return ObservedImage{}, &PolicyError{"image inspection requires exact signed manifest and config digests"}
+	}
+	observed, err := d.inspectImageReference(ctx, "v1.41", configDigest, imageIdentityConfig)
+	if err == nil || !errors.Is(err, ErrNotFound) {
+		return observed, err
+	}
+	manifestDigest := imageReference[strings.LastIndexByte(imageReference, '@')+1:]
+	// API 1.48 is the first Docker 28 API and the first image-inspect response
+	// that exposes Descriptor. Classic stores return from the config lookup above,
+	// so only a containerd-store fallback requires this newer projection.
+	observed, err = d.inspectImageReference(ctx, "v1.48", manifestDigest, imageIdentityManifest)
+	if err != nil {
+		return ObservedImage{}, err
+	}
+	// Descriptor.annotations is optional. Once Docker reports both Id and the
+	// target Descriptor as the exact signed manifest, that content identity
+	// already binds its config, so infer the config digest from the signed
+	// requirement when the convenience annotation is absent. Never replace a
+	// present value: a conflict must remain visible to ValidateImage and fail
+	// closed.
+	if observed.ConfigDigest == "" && observed.ID == manifestDigest && observed.ManifestDigest == manifestDigest {
+		observed.ConfigDigest = configDigest
+	}
+	return observed, nil
+}
+
+func (d *DockerHTTP) inspectImageReference(ctx context.Context, apiVersion, reference string, identity imageIdentity) (ObservedImage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/"+apiVersion+"/images/"+pathEscape(reference)+"/json", nil)
 	if err != nil {
 		return ObservedImage{}, err
 	}
@@ -496,13 +548,24 @@ func (d *DockerHTTP) InspectImage(ctx context.Context, configDigest string) (Obs
 		Config       *struct {
 			Volumes map[string]json.RawMessage `json:"Volumes"`
 		} `json:"Config"`
+		Descriptor *struct {
+			Digest      string            `json:"digest"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"Descriptor"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
 		return ObservedImage{}, err
 	}
 	observed := ObservedImage{
-		ID: payload.ID, OS: payload.OS, Architecture: payload.Architecture,
+		ID: payload.ID, Identity: identity, OS: payload.OS, Architecture: payload.Architecture,
 		Variant: payload.Variant, ConfigPresent: payload.Config != nil,
+	}
+	if payload.Descriptor == nil {
+		observed.ConfigDigest = payload.ID
+	} else {
+		observed.Identity = imageIdentityManifest
+		observed.ManifestDigest = payload.Descriptor.Digest
+		observed.ConfigDigest = payload.Descriptor.Annotations["config.digest"]
 	}
 	if payload.Config != nil {
 		observed.DeclaredVolumes = make([]string, 0, len(payload.Config.Volumes))
@@ -531,9 +594,15 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 	}
 	image := w.Image
 	if w.ImageConfigDigest != "" {
-		image = w.ImageConfigDigest
+		image = w.ImageRuntimeDigest
+		if image == "" {
+			// Workloads admitted before the runtime identity field existed used the
+			// config digest directly. Preserve that exact classic-store behavior.
+			image = w.ImageConfigDigest
+		}
 		labels[workloadImageReferenceLabel] = w.Image
 		labels[workloadImageConfigLabel] = w.ImageConfigDigest
+		labels[workloadImageRuntimeLabel] = image
 	}
 	if w.State != nil {
 		layout := profileLayoutFor(w.ProfileID)
@@ -687,12 +756,23 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 	labels := payload.Config.Labels
 	imageReference := payload.Config.Image
 	configuredImageID := ""
+	configuredRuntimeID := ""
+	observedImageID := payload.Image
 	imageHardened := true
-	if labels[workloadImageReferenceLabel] != "" || labels[workloadImageConfigLabel] != "" {
+	if labels[workloadImageReferenceLabel] != "" || labels[workloadImageConfigLabel] != "" || labels[workloadImageRuntimeLabel] != "" {
 		imageReference = labels[workloadImageReferenceLabel]
 		configuredImageID = labels[workloadImageConfigLabel]
+		configuredRuntimeID = labels[workloadImageRuntimeLabel]
+		if configuredRuntimeID == "" {
+			// Classic-store containers created by older Executor builds did not
+			// need a distinct runtime identity.
+			configuredRuntimeID = configuredImageID
+		}
+		observedImageID = configuredImageID
 		imageHardened = imageDigest.MatchString(imageReference) && imageConfigDigest.MatchString(configuredImageID) &&
-			payload.Config.Image == configuredImageID && payload.Image == configuredImageID
+			imageConfigDigest.MatchString(configuredRuntimeID) &&
+			signedRuntimeDigestMatches(imageReference, configuredImageID, configuredRuntimeID) &&
+			payload.Config.Image == configuredRuntimeID && payload.Image == configuredRuntimeID
 	}
 	var state *StateMount
 	stateHardened := labels[stateVolumeLabel] == "" && labels[statePathLabel] == "" &&
@@ -744,14 +824,15 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 		}
 	}
 	return ObservedWorkload{
-		ImageID: payload.Image,
+		ImageID: observedImageID, RuntimeImageID: payload.Image,
 		Workload: Workload{
-			TenantID:          labels["io.hardrails.tenant"],
-			InstanceID:        labels["io.hardrails.instance"],
-			ProfileID:         labels["io.hardrails.profile"],
-			Image:             imageReference,
-			ImageConfigDigest: configuredImageID,
-			Command:           payload.Config.Cmd,
+			TenantID:           labels["io.hardrails.tenant"],
+			InstanceID:         labels["io.hardrails.instance"],
+			ProfileID:          labels["io.hardrails.profile"],
+			Image:              imageReference,
+			ImageConfigDigest:  configuredImageID,
+			ImageRuntimeDigest: configuredRuntimeID,
+			Command:            payload.Config.Cmd,
 			Resources: Resources{
 				MemoryBytes: payload.HostConfig.Memory,
 				CPUMillis:   payload.HostConfig.NanoCPUs / 1_000_000,

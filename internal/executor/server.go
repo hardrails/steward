@@ -337,9 +337,10 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "capability_unavailable", "signed image inspection is unavailable with this Docker backend")
 		return
 	}
-	observedImage, err := imageDocker.InspectImage(r.Context(), effective.Capsule.Image.ConfigDigest)
+	imageReference := effective.Capsule.Image.Repository + "@" + effective.Capsule.Image.ManifestDigest
+	observedImage, err := imageDocker.InspectSignedImage(r.Context(), imageReference, effective.Capsule.Image.ConfigDigest)
 	if errors.Is(err, ErrNotFound) {
-		writeError(w, http.StatusConflict, "image_unavailable", "the exact signed image config is not loaded on this node")
+		writeError(w, http.StatusConflict, "image_unavailable", "the exact signed image is not loaded on this node")
 		return
 	}
 	if err != nil {
@@ -347,10 +348,11 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := ValidateImage(observedImage, ImageRequirement{
-		ConfigDigest: effective.Capsule.Image.ConfigDigest,
-		OS:           effective.Capsule.Image.Platform.OS,
-		Architecture: effective.Capsule.Image.Platform.Architecture,
-		Variant:      effective.Capsule.Image.Platform.Variant,
+		ManifestDigest: effective.Capsule.Image.ManifestDigest,
+		ConfigDigest:   effective.Capsule.Image.ConfigDigest,
+		OS:             effective.Capsule.Image.Platform.OS,
+		Architecture:   effective.Capsule.Image.Platform.Architecture,
+		Variant:        effective.Capsule.Image.Platform.Variant,
 	}); err != nil {
 		writeError(w, http.StatusConflict, "image_rejected", err.Error())
 		return
@@ -359,6 +361,7 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 	// repository@manifest value remains attached as provenance, but is not used
 	// as an offline lookup alias because docker load may not preserve it.
 	workload.ImageConfigDigest = effective.Capsule.Image.ConfigDigest
+	workload.ImageRuntimeDigest = observedImage.ID
 	// Every mount, network and grant identifier is Executor-derived. The signed
 	// request selects only finite capabilities already authorized by capsule and
 	// site policy; it never supplies a host path or Docker topology primitive.

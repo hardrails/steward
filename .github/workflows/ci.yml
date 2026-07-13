@@ -33,7 +33,8 @@ jobs:
           bash -n scripts/install-node.sh scripts/activate-node-release.sh
           scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh
           scripts/install-steward.sh scripts/uninstall-node.sh scripts/node-removal-guard.sh
-          scripts/build-deb.sh scripts/build-rpm.sh
+          scripts/build-deb.sh scripts/build-rpm.sh scripts/build-hermes-adapter.sh
+          scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh
           scripts/write-release-manifest.sh
           scripts/node-upgrade-smoke.sh
           scripts/check-docs-consistency.sh
@@ -82,50 +83,93 @@ jobs:
       - name: Native package smoke
         run: |
           stage=$(mktemp -d)
-          trap 'rm -rf "$stage" /tmp/steward-node-test.deb /tmp/steward-node-test.rpm' EXIT
-          mkdir -p "$stage/deploy" "$stage/scripts"
+          smoke=$(mktemp -d)
+          trap 'rm -rf "$stage" "$smoke" /tmp/steward-node-test.deb /tmp/steward-node-test.rpm \
+            /tmp/steward-node-test.deb.contents /tmp/steward-node-test.rpm.contents' EXIT
+          mkdir -p "$stage/adapters" "$stage/deploy" "$stage/scripts"
           go build -o "$stage/steward" ./cmd/steward
           go build -o "$stage/steward-executor" ./cmd/steward-executor
           go build -o "$stage/stewardctl" ./cmd/stewardctl
           go build -o "$stage/steward-mcp" ./cmd/steward-mcp
           go build -o "$stage/steward-gateway" ./cmd/steward-gateway
           go build -o "$stage/steward-relay" ./cmd/steward-relay
+          cp -R adapters/hermes-agent "$stage/adapters/"
           cp -R deploy/config deploy/systemd "$stage/deploy/"
           cp scripts/install-node.sh scripts/activate-node-release.sh \
             scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh \
-            scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh "$stage/scripts/"
+            scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
+            scripts/build-hermes-adapter.sh scripts/hermes-feasibility.sh "$stage/scripts/"
           cp LICENSE README.md "$stage/"
           bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)"
           cp "$stage/release.json" "$stage/release.first.json"
           bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)"
           cmp "$stage/release.first.json" "$stage/release.json"
           rm "$stage/release.first.json"
+          mkdir -p "$smoke/fake-bin"
+          # shellcheck disable=SC2016 # Write literal positional-parameter checks into the fixture.
+          printf '%s\n' '#!/usr/bin/env bash' \
+            'if [[ ${1:-} == info && $# -eq 1 ]]; then exit 0; fi' \
+            'if [[ ${1:-} == info && ${2:-} == --format ]]; then echo '\''{"runc":{}}'\''; exit 0; fi' \
+            'exit 2' >"$smoke/fake-bin/docker"
+          chmod 0755 "$smoke/fake-bin/docker"
+          if PATH="$smoke/fake-bin:$PATH" "$stage/scripts/build-hermes-adapter.sh" \
+            --non-interactive --output "$smoke/archive.tar" --source-dir "$smoke/missing" \
+            2>"$smoke/archive.stderr"; then
+            echo 'archive-layout builder unexpectedly passed without runsc' >&2
+            exit 1
+          fi
+          grep -Fxq 'build-hermes-adapter: Docker runtime runsc is not registered' "$smoke/archive.stderr"
+          mkdir -p "$smoke/installed/integration/adapters" "$smoke/installed/integration/scripts" \
+            "$smoke/libexec"
+          cp -R "$stage/adapters/hermes-agent" "$smoke/installed/integration/adapters/"
+          cp "$stage/scripts/build-hermes-adapter.sh" "$smoke/installed/integration/scripts/"
+          cp "$stage/release.json" "$smoke/installed/"
+          ln -s "$smoke/installed/integration/scripts/build-hermes-adapter.sh" \
+            "$smoke/libexec/build-hermes-adapter"
+          if PATH="$smoke/fake-bin:$PATH" "$smoke/libexec/build-hermes-adapter" \
+            --non-interactive --output "$smoke/installed.tar" --source-dir "$smoke/missing" \
+            2>"$smoke/installed.stderr"; then
+            echo 'installed-layout builder unexpectedly passed without runsc' >&2
+            exit 1
+          fi
+          grep -Fxq 'build-hermes-adapter: Docker runtime runsc is not registered' "$smoke/installed.stderr"
+          touch "$stage/adapters/hermes-agent/unlisted"
+          if bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)" 2>/dev/null; then
+            echo 'release manifest accepted an unlisted adapter file' >&2
+            exit 1
+          fi
+          rm "$stage/adapters/hermes-agent/unlisted"
           bash scripts/build-deb.sh "$stage" v0.0.0-test "$(go env GOARCH)" \
             /tmp/steward-node-test.deb
           bash scripts/build-rpm.sh "$stage" v0.0.0-test "$(go env GOARCH)" \
             /tmp/steward-node-test.rpm
           dpkg-deb --info /tmp/steward-node-test.deb
-          dpkg-deb --contents /tmp/steward-node-test.deb | \
-            grep -q './usr/lib/steward-node/release/steward-executor'
-          dpkg-deb --contents /tmp/steward-node-test.deb | \
-            grep -q './usr/lib/steward-node/release/stewardctl'
-          dpkg-deb --contents /tmp/steward-node-test.deb | \
-            grep -q './usr/lib/steward-node/release/steward-mcp'
-          dpkg-deb --contents /tmp/steward-node-test.deb | \
-            grep -q './usr/lib/steward-node/release/steward-gateway'
-          dpkg-deb --contents /tmp/steward-node-test.deb | \
-            grep -q './usr/lib/steward-node/release/release.json'
+          dpkg-deb --contents /tmp/steward-node-test.deb > /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/steward-executor' /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/stewardctl' /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/steward-mcp' /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/steward-gateway' /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/release.json' /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/adapters/hermes-agent/adapter.json' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/scripts/hermes-feasibility.sh' \
+            /tmp/steward-node-test.deb.contents
           dpkg-deb --ctrl-tarfile /tmp/steward-node-test.deb | \
             tar -xOf - ./postinst | grep -q -- "--expected-version 'v0.0.0-test'"
           rpm -qpi /tmp/steward-node-test.rpm
-          rpm -qpl /tmp/steward-node-test.rpm | \
-            grep -q '/usr/lib/steward-node/release/steward-executor'
-          rpm -qpl /tmp/steward-node-test.rpm | \
-            grep -q '/usr/lib/steward-node/release/stewardctl'
-          rpm -qpl /tmp/steward-node-test.rpm | \
-            grep -q '/usr/lib/steward-node/release/steward-mcp'
-          rpm -qpl /tmp/steward-node-test.rpm | \
-            grep -q '/usr/lib/steward-node/release/release.json'
+          rpm -qpl /tmp/steward-node-test.rpm > /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/steward-executor' /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/stewardctl' /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/steward-mcp' /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/release.json' /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/adapter.json' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/scripts/hermes-feasibility.sh' \
+            /tmp/steward-node-test.rpm.contents
           rpm -qp --scripts /tmp/steward-node-test.rpm | \
             grep -q -- "--expected-version 'v0.0.0-test'"
 

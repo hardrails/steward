@@ -193,20 +193,38 @@ semantic tool behavior, or an uncompromised host. Read
 
 ## Hermes Agent and OpenClaw
 
-Steward is agent-agnostic. It includes fixed layout contracts for adapters that
-target [Hermes Agent](https://github.com/NousResearch/hermes-agent) and
-[OpenClaw](https://github.com/openclaw/openclaw). A layout contract defines paths,
-user identity, and ports; it does not certify an upstream image. Neither official
-image is currently a validated, directly runnable Steward adapter.
+Steward includes a qualified, source-built adapter definition for
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) at exact upstream commit
+`095b9eed3801c251796df93f48a8f2a527ff6e70`. The retained qualification applies to
+`linux/amd64`; other platforms require a separate qualification run. The hardened image runs as
+`65532:65532`, fixes inference through `http://steward-relay:8080/v1`, and exposes
+only negotiation, health, run submission, and run-status operations on service port
+`8766`. Run event streams are not exposed.
 
-On a dedicated single-tenant host, an adapter may use persistent state through the
-explicit compatibility mode for volumes without enforced byte or inode quotas. An
-adapter may also use one approved OpenAI-compatible model route, one declared
-private service, and signed HTTP(S) proxy routes. Raw TCP/UDP, host mounts,
-arbitrary secret injection, privileged mode, Docker access, and undeclared ports
-remain unavailable.
+The qualification ran a signed `steward.workspace-audit` skill as real Hermes work
+under gVisor, verified its bounded inventory of `/opt/data/workspace`, restarted the
+container, and ran the skill again. A separate integration gate imported the image
+through signed admission, called it through Gateway, resumed its state, purged that
+state, and verified Executor's signed receipt chain. The proof applies only to the
+pinned source, adapter, and documented inference, service, state, and skill behavior.
+The official upstream image remains inadmissible because it starts as root and
+declares a volume.
 
-- [Hermes Agent adapter contract](https://hardrails.github.io/steward/guides/hermes-agent/)
+Linux releases include `scripts/build-hermes-adapter.sh` for interactive or
+non-interactive local builds. The builder can fetch the exact pinned commit or use a
+transferred source checkout. Steward does not redistribute a prebuilt Hermes OCI
+archive because dependency and base-image notices are incomplete. Operators inspect
+and sign the exact archive they build.
+
+Persistent state still requires the explicit dedicated single-tenant host mode for
+volumes without enforced byte or inode quotas. Raw TCP/UDP, host mounts, arbitrary
+secret injection, privileged mode, Docker access, and undeclared ports remain
+unavailable.
+
+[OpenClaw](https://github.com/openclaw/openclaw) remains a layout contract only. Its
+official image is not a qualified, directly runnable Steward adapter.
+
+- [Build and run the Hermes Agent adapter](https://hardrails.github.io/steward/guides/hermes-agent/)
 - [OpenClaw adapter contract](https://hardrails.github.io/steward/guides/openclaw/)
 - [Current limitations](https://hardrails.github.io/steward/limitations/)
 

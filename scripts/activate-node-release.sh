@@ -57,6 +57,20 @@ release_files=(
 	steward-mcp
 	steward-relay
 	stewardctl
+	integration/adapters/hermes-agent/Dockerfile
+	integration/adapters/hermes-agent/README.md
+	integration/adapters/hermes-agent/adapter.json
+	integration/adapters/hermes-agent/entrypoint.py
+	integration/adapters/hermes-agent/fixture_mcp.py
+	integration/adapters/hermes-agent/fixture_model.py
+	integration/adapters/hermes-agent/fixtures/skill/SKILL.md
+	integration/adapters/hermes-agent/fixtures/skill/manifest.json
+	integration/adapters/hermes-agent/fixtures/skill/manifest.sig
+	integration/adapters/hermes-agent/fixtures/skill/public.pem
+	integration/adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json
+	integration/adapters/hermes-agent/fixtures/skill/workspace_audit.py
+	integration/adapters/hermes-agent/license-inventory.json
+	integration/adapters/hermes-agent/source-inputs.sha256
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in
@@ -66,10 +80,12 @@ release_files=(
 	integration/deploy/systemd/steward-gateway.service
 	integration/deploy/systemd/steward.service
 	integration/scripts/activate-node-release.sh
+	integration/scripts/build-hermes-adapter.sh
 	integration/scripts/build-relay-image.sh
 	integration/scripts/configure-admission.sh
 	integration/scripts/configure-node.sh
 	integration/scripts/install-node.sh
+	integration/scripts/hermes-feasibility.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
 	integration/scripts/uninstall-node.sh
@@ -409,6 +425,7 @@ for mapping in \
 	configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
 	uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 	node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
+	build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
 	build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh; do
 	name=${mapping%%:*}
 	path="/usr/local/libexec/steward/$name"
@@ -465,6 +482,7 @@ for mapping in \
 	configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
 	uninstall-node:/opt/steward/current/integration/scripts/uninstall-node.sh \
 	node-removal-guard:/opt/steward/current/integration/scripts/node-removal-guard.sh \
+	build-hermes-adapter:/opt/steward/current/integration/scripts/build-hermes-adapter.sh \
 	build-relay-image:/opt/steward/current/integration/scripts/build-relay-image.sh; do
 	name=${mapping%%:*}
 	target=${mapping#*:}

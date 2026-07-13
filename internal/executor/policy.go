@@ -39,22 +39,26 @@ type Workload struct {
 	// Runtime is the trusted, derived positive-capability topology. Like State,
 	// it cannot be supplied through the public workload JSON contract.
 	Runtime *RuntimeGrant `json:"-"`
-	// ImageConfigDigest is the exact local image ID selected after signed image
+	// ImageConfigDigest is the config identity verified during signed image
 	// admission. Legacy requests leave it empty and retain their historical
-	// repository@manifest create behavior; signed admission sets it only after
-	// ImageDocker has verified the local image config and platform.
+	// repository@manifest create behavior.
 	ImageConfigDigest string `json:"-"`
+	// ImageRuntimeDigest is the exact Docker-store identity selected by signed
+	// admission. It equals ImageConfigDigest on the classic graphdriver store and
+	// the signed manifest digest on Docker's containerd image store.
+	ImageRuntimeDigest string `json:"-"`
 }
 
 // ImageRequirement is the signed identity that a local Docker image must match
-// before Executor mutates host state. Config-ID lookup and execution are kept
-// separate from repository provenance so offline docker load need not preserve
-// a tag or repository-digest alias.
+// before Executor mutates host state. Classic Docker executes by config digest;
+// the containerd image store executes by manifest digest. Neither path depends
+// on a mutable tag or a repository alias surviving an offline import.
 type ImageRequirement struct {
-	ConfigDigest string
-	OS           string
-	Architecture string
-	Variant      string
+	ManifestDigest string
+	ConfigDigest   string
+	OS             string
+	Architecture   string
+	Variant        string
 }
 
 // ValidateImage proves that Docker resolved the signed repository manifest to
@@ -62,11 +66,13 @@ type ImageRequirement struct {
 // Docker would otherwise materialize anonymous writable storage outside the
 // executor-managed lineage contract.
 func ValidateImage(observed ObservedImage, expected ImageRequirement) error {
-	if !imageConfigDigest.MatchString(expected.ConfigDigest) || expected.OS != "linux" ||
+	if (expected.ManifestDigest != "" && !imageConfigDigest.MatchString(expected.ManifestDigest)) ||
+		!imageConfigDigest.MatchString(expected.ConfigDigest) || expected.OS != "linux" ||
 		!boundedText(expected.Architecture, 32) || len(expected.Variant) > 32 || strings.ContainsRune(expected.Variant, '\x00') {
 		return &PolicyError{"signed image requirement is unsupported"}
 	}
 	if !observed.ConfigPresent || !imageConfigDigest.MatchString(observed.ID) ||
+		!imageConfigDigest.MatchString(observed.ConfigDigest) ||
 		!boundedText(observed.OS, 32) || !boundedText(observed.Architecture, 32) ||
 		len(observed.Variant) > 32 || strings.ContainsRune(observed.Variant, '\x00') {
 		return &PolicyError{"local image metadata is unsupported"}
@@ -74,8 +80,20 @@ func ValidateImage(observed ObservedImage, expected ImageRequirement) error {
 	if len(observed.DeclaredVolumes) != 0 {
 		return &PolicyError{"image config must not declare writable volumes"}
 	}
-	if observed.ID != expected.ConfigDigest {
+	if observed.ConfigDigest != expected.ConfigDigest {
 		return &PolicyError{"local image config digest does not match signed admission"}
+	}
+	switch observed.Identity {
+	case imageIdentityConfig:
+		if observed.ID != expected.ConfigDigest || observed.ManifestDigest != "" {
+			return &PolicyError{"local classic image identity does not match signed admission"}
+		}
+	case imageIdentityManifest:
+		if expected.ManifestDigest == "" || observed.ID != expected.ManifestDigest || observed.ManifestDigest != expected.ManifestDigest {
+			return &PolicyError{"local image manifest digest does not match signed admission"}
+		}
+	default:
+		return &PolicyError{"local image identity mode is unsupported"}
 	}
 	if observed.OS != expected.OS || observed.Architecture != expected.Architecture || observed.Variant != expected.Variant {
 		return &PolicyError{"local image platform does not match signed admission"}
@@ -207,6 +225,15 @@ func (w Workload) Validate() error {
 	if w.ImageConfigDigest != "" && !imageConfigDigest.MatchString(w.ImageConfigDigest) {
 		return &PolicyError{"internal image config digest is invalid"}
 	}
+	if w.ImageRuntimeDigest != "" && !imageConfigDigest.MatchString(w.ImageRuntimeDigest) {
+		return &PolicyError{"internal image runtime digest is invalid"}
+	}
+	if w.ImageRuntimeDigest != "" && w.ImageConfigDigest == "" {
+		return &PolicyError{"internal image runtime digest requires a config digest"}
+	}
+	if w.ImageRuntimeDigest != "" && !signedRuntimeDigestMatches(w.Image, w.ImageConfigDigest, w.ImageRuntimeDigest) {
+		return &PolicyError{"internal image runtime digest must match the signed config or manifest digest"}
+	}
 	if len(w.Command) > 64 {
 		return &PolicyError{"command may contain at most 64 arguments"}
 	}
@@ -255,6 +282,11 @@ func (w Workload) Validate() error {
 		}
 	}
 	return nil
+}
+
+func signedRuntimeDigestMatches(imageReference, configDigest, runtimeDigest string) bool {
+	separator := strings.LastIndexByte(imageReference, '@')
+	return runtimeDigest == configDigest || separator >= 0 && runtimeDigest == imageReference[separator+1:]
 }
 
 type profileLayout struct {

@@ -56,6 +56,20 @@ release_files=(
 	steward-mcp
 	steward-relay
 	stewardctl
+	integration/adapters/hermes-agent/Dockerfile
+	integration/adapters/hermes-agent/README.md
+	integration/adapters/hermes-agent/adapter.json
+	integration/adapters/hermes-agent/entrypoint.py
+	integration/adapters/hermes-agent/fixture_mcp.py
+	integration/adapters/hermes-agent/fixture_model.py
+	integration/adapters/hermes-agent/fixtures/skill/SKILL.md
+	integration/adapters/hermes-agent/fixtures/skill/manifest.json
+	integration/adapters/hermes-agent/fixtures/skill/manifest.sig
+	integration/adapters/hermes-agent/fixtures/skill/public.pem
+	integration/adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json
+	integration/adapters/hermes-agent/fixtures/skill/workspace_audit.py
+	integration/adapters/hermes-agent/license-inventory.json
+	integration/adapters/hermes-agent/source-inputs.sha256
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in
@@ -65,10 +79,12 @@ release_files=(
 	integration/deploy/systemd/steward-gateway.service
 	integration/deploy/systemd/steward.service
 	integration/scripts/activate-node-release.sh
+	integration/scripts/build-hermes-adapter.sh
 	integration/scripts/build-relay-image.sh
 	integration/scripts/configure-admission.sh
 	integration/scripts/configure-node.sh
 	integration/scripts/install-node.sh
+	integration/scripts/hermes-feasibility.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
 	integration/scripts/uninstall-node.sh
@@ -101,6 +117,35 @@ for logical in "${release_files[@]}"; do
 		exit 2
 	fi
 done
+
+# The adapter directory is copied recursively into every Linux artifact. Keep
+# that recursive payload closed over the explicit manifest above: an unreviewed
+# file, empty directory, symlink, or special file must not ride alongside the
+# signed skill without a digest in release.json.
+adapter_root=$stage/adapters/hermes-agent
+for directory in "$adapter_root" "$adapter_root/fixtures" "$adapter_root/fixtures/skill"; do
+	if [[ ! -d $directory || -L $directory ]]; then
+		echo "write-release-manifest: adapter directory is missing or invalid: $directory" >&2
+		exit 2
+	fi
+done
+if find "$adapter_root" -mindepth 1 -type l -print -quit | grep -q . ||
+	find "$adapter_root" -mindepth 1 ! -type f ! -type d -print -quit | grep -q .; then
+	echo "write-release-manifest: adapter contains a symlink or special file" >&2
+	exit 2
+fi
+expected_adapter_file_count=0
+for logical in "${release_files[@]}"; do
+	case "$logical" in
+		integration/adapters/hermes-agent/*) ((expected_adapter_file_count += 1)) ;;
+	esac
+done
+adapter_file_count=$(find "$adapter_root" -type f | wc -l)
+adapter_directory_count=$(find "$adapter_root" -type d | wc -l)
+if [[ $adapter_file_count -ne $expected_adapter_file_count || $adapter_directory_count -ne 3 ]]; then
+	echo "write-release-manifest: adapter contains an unexpected file or directory" >&2
+	exit 2
+fi
 
 manifest_tmp=$(mktemp "${stage}/.release.json.XXXXXX")
 cleanup() { rm -f "$manifest_tmp"; }

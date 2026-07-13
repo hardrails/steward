@@ -1,0 +1,27 @@
+{
+  "schema_version": "steward.adapter-license-review.v1",
+  "upstream_revision": "095b9eed3801c251796df93f48a8f2a527ff6e70",
+  "source_conclusion": "MIT",
+  "source_license_sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+  "selected_inputs": [
+    "LICENSE",
+    "pyproject.toml",
+    "uv.lock"
+  ],
+  "selected_optional_inputs": [
+    "homeassistant",
+    "mcp"
+  ],
+  "excluded_optional_inputs": [
+    "plugins/hermes-achievements",
+    "plugins/security-guidance",
+    "skills/creative/humanizer",
+    "skills/productivity/powerpoint",
+    "web",
+    "ui-tui",
+    "browser assets",
+    "messaging extras"
+  ],
+  "redistribution_status": "blocked_pending_transitive_and_base_notice_generation",
+  "note": "This record verifies the pinned upstream source license. It deliberately does not treat the MIT root license as a conclusion for every locked dependency or base-image file."
+}

@@ -26,8 +26,40 @@ installer, and a SHA-256 manifest.
 
 Linux archives and packages include hardened systemd units, configuration templates,
 enrollment and preflight helpers, and whole-release activation and removal tools.
+They also include the exact-pinned Hermes Agent adapter definition, builder, signed
+workspace-audit skill, and qualification test harness. They do not include a built Hermes
+image.
 macOS archives contain `steward`, `stewardctl`, `steward-mcp`, the license, and
 README.
+
+## Hermes adapter build outputs
+
+Steward does not publish a prebuilt Hermes OCI archive. Dependency and base-image
+notices are incomplete, so redistribution remains blocked even though the pinned
+adapter has passed its runtime qualification.
+
+On an installed Linux node, the packaged interactive builder is:
+
+```console
+/usr/local/libexec/steward/build-hermes-adapter \
+  --output hermes-agent-adapter.tar
+```
+
+For unattended operation, add `--non-interactive`. Without `--source-dir`, the
+builder downloads only Hermes commit
+`095b9eed3801c251796df93f48a8f2a527ff6e70` into a temporary directory. An operator
+can instead transfer an exact clean checkout and pass
+`--source-dir /path/to/hermes-agent`; that prevents the source download. The
+digest-pinned base image and locked build dependencies must still be present locally
+or reachable during the build.
+
+The builder publishes the requested image archive and a sibling file named
+`<archive>.attestation.json`. The canonical metadata records the pinned source,
+adapter and builder identities, digest-pinned base image, output manifest and config
+digests, platform, archive digest, and size. It contains no agent content or secrets.
+It is metadata, not a signature or independent proof of provenance. Authenticate the
+Steward release and source transfer, then inspect and sign the exact archive through
+the documented admission workflow.
 
 ## Verify a downloaded release
 

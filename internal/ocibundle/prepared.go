@@ -233,7 +233,10 @@ func writeSanitizedArchive(snapshotPath string, output io.Writer, image Image, l
 			MediaType: image.ManifestMediaType,
 			Digest:    image.ManifestDigest,
 			Size:      manifestInfo.size,
-			Platform:  &platform,
+			Annotations: map[string]string{
+				"config.digest": image.ConfigDigest,
+			},
+			Platform: &platform,
 		}},
 	})
 	if err != nil {
