@@ -39,11 +39,12 @@ The command exits nonzero when workload or grant state remains, a file is malfor
 or missing when required, or the target reader/writer range is unsafe.
 
 Connector receipt format 1 contains ordinary connector records. Permit-backed
-records use format 2, and one verified chain may contain both. The observed format
-is 2 after any format-2 record exists. It is also 2 whenever Gateway configures an
-action authority, even before the receipt file exists or a permit is used, because
-that live configuration can write format 2. A target whose manifest can read only
-format 1 is then incompatible.
+records use format 2. Exact service-task records use format 3, and one verified chain
+may contain all three. The observed format is the highest schema present. It is at
+least 2 whenever Gateway configures an action authority and 3 whenever Gateway
+configures a service-task operation, even before the receipt file exists or that
+operation is used, because the live configuration can write the corresponding
+format. A target whose manifest cannot read and preserve that format is incompatible.
 
 `upgrade inspect-formats` returns the same seven format observations without requiring
 a drained node. Activation uses it after a failed target start to decide whether the

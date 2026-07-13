@@ -20,12 +20,18 @@ switch.
 
 Connector receipt format 1 records ordinary connector events. Format 2 records the
 action-authority key ID, permit digest, and exact request digest for permit-backed
-events. A single ledger may contain both schemas in one signed hash chain. Current
-release manifests declare `connector_receipt_log` readers 1 through 2 and writer 2.
-The inspector reports format 2 after any format-2 record exists. It also reports
-format 2 when action authorities are configured but the ledger is absent or still
-contains only format-1 records, because the running configuration can write a
-permit-backed record immediately.
+events. Format 3 records exact service-task authorization, dispatch, and terminal
+outcomes, including the service, operation-policy, permit, request, and run bindings.
+A single ledger may contain all three schemas in one signed hash chain. Current
+release manifests declare `connector_receipt_log` readers 1 through 3 and writer 3.
+The inspector reports the highest format present. It reports format 2 when action
+authorities are configured and format 3 when service-task operations are configured,
+even before the receipt file exists or contains that schema, because the running
+configuration can write the required format immediately.
+
+Current release manifests declare `gateway_state` readers 1 through 4 and writer 4.
+Format 4 retains the service identity and tenant task authorities of task-authorized
+grants. Activation therefore blocks a rollback that cannot preserve those bindings.
 
 Staging verifies the manifest and writes only a new immutable release directory.
 It does not change active helpers or units and does not run `systemctl daemon-reload`.
@@ -134,12 +140,12 @@ format. Otherwise activation leaves the target selected and all Steward services
 stopped. Repair the target or follow an approved migration procedure; do not force
 an older binary over newer durable state.
 
-An older target whose connector-receipt reader stops at format 1 is therefore not a
-safe rollback target while action-authority configuration requires format 2 or
-after the ledger contains any format-2 record. Removing action authority can lower
-the configuration requirement only before a format-2 event has been written; it
-does not rewrite or downgrade existing evidence. Do not split, edit, or reserialize
-a mixed ledger to regain rollback eligibility.
+An older target whose connector-receipt reader stops below the required format is
+therefore not a safe rollback target. Action-authority configuration requires format
+2; service-task configuration requires format 3. Removing either configuration can
+lower the prospective requirement only before a record of that format has been
+written; it does not rewrite or downgrade existing evidence. Do not split, edit, or
+reserialize a mixed ledger to regain rollback eligibility.
 
 ## Roll back the release
 
