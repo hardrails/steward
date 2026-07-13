@@ -26,7 +26,7 @@ func TestAppendVerifyAndVisitConnectorLedger(t *testing.T) {
 	if err != nil || head.Sequence != 1 || head.ChainHash == zeroHash() || head.KeyID != KeyID(public) {
 		t.Fatalf("first head=%#v err=%v", head, err)
 	}
-	terminal := validEvent(Terminal, Committed)
+	terminal := validEvent(Terminal, Responded)
 	terminal.HTTPStatus, terminal.ResponseBytes = 201, 37
 	head, err = log.Finish(terminal)
 	if err != nil || head.Sequence != 2 {
@@ -197,7 +197,7 @@ func TestConnectorLedgerRejectsSpentAuthorizationReplay(t *testing.T) {
 	if _, err := log.Begin(authorized); err != nil {
 		t.Fatal(err)
 	}
-	terminal := validEvent(Terminal, Committed)
+	terminal := validEvent(Terminal, Responded)
 	terminal.HTTPStatus = 200
 	if _, err := log.Finish(terminal); err != nil {
 		t.Fatal(err)
@@ -270,10 +270,10 @@ func TestConnectorLedgerValidatesEventsFilesAndTaskIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invalid := validEvent(Terminal, Committed)
+	invalid := validEvent(Terminal, Responded)
 	invalid.HTTPStatus = 0
 	if _, err := log.Finish(invalid); err == nil {
-		t.Fatal("committed terminal event without status was accepted")
+		t.Fatal("responded terminal event without status was accepted")
 	}
 	invalid = validEvent(Deny, Denied)
 	if _, err := log.Append(invalid); err == nil {
@@ -316,7 +316,7 @@ func TestConnectorLedgerPreservesPublicTenantIdentityWhitespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	terminal := authorized
-	terminal.Phase, terminal.Outcome, terminal.HTTPStatus = Terminal, Committed, 200
+	terminal.Phase, terminal.Outcome, terminal.HTTPStatus = Terminal, Responded, 200
 	if _, err := log.Finish(terminal); err != nil {
 		t.Fatal(err)
 	}

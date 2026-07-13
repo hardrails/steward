@@ -47,7 +47,7 @@ type Outcome string
 const (
 	Allowed   Outcome = "allowed"
 	Denied    Outcome = "denied"
-	Committed Outcome = "committed"
+	Responded Outcome = "responded"
 	Failed    Outcome = "failed"
 )
 
@@ -524,11 +524,11 @@ func validateEvent(event Event) error {
 			return errors.New("invalid connector denial event")
 		}
 	case Terminal:
-		if event.Outcome != Committed && event.Outcome != Failed {
+		if event.Outcome != Responded && event.Outcome != Failed {
 			return errors.New("invalid connector terminal outcome")
 		}
-		if event.Outcome == Committed && (event.HTTPStatus < 100 || event.HTTPStatus > 599 || event.ErrorCode != "") {
-			return errors.New("committed connector outcome requires an HTTP status and no error")
+		if event.Outcome == Responded && (event.HTTPStatus < 100 || event.HTTPStatus > 599 || event.ErrorCode != "") {
+			return errors.New("responded connector outcome requires an HTTP status and no transport error")
 		}
 		if event.Outcome == Failed && event.ErrorCode == "" {
 			return errors.New("failed connector outcome requires an error code")

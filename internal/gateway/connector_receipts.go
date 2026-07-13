@@ -144,7 +144,7 @@ func (s *Server) finishConnectorReceipt(event connectorledger.Event, status int,
 	event.ResponseBytes = responseBytes
 	event.ErrorCode = errorCode
 	if errorCode == "" {
-		event.Outcome = connectorledger.Committed
+		event.Outcome = connectorledger.Responded
 	} else {
 		event.Outcome = connectorledger.Failed
 	}
