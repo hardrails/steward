@@ -487,7 +487,7 @@ func (d *DockerHTTP) InspectImage(ctx context.Context, configDigest string) (Obs
 	if !imageConfigDigest.MatchString(configDigest) {
 		return ObservedImage{}, &PolicyError{"image inspection requires an exact sha256 config digest"}
 	}
-	return d.inspectImageReference(ctx, configDigest, imageIdentityConfig)
+	return d.inspectImageReference(ctx, "v1.41", configDigest, imageIdentityConfig)
 }
 
 // InspectSignedImage resolves a signed manifest/config pair without assuming a
@@ -500,16 +500,19 @@ func (d *DockerHTTP) InspectSignedImage(ctx context.Context, imageReference, con
 	if !imageDigest.MatchString(imageReference) || !imageConfigDigest.MatchString(configDigest) {
 		return ObservedImage{}, &PolicyError{"image inspection requires exact signed manifest and config digests"}
 	}
-	observed, err := d.inspectImageReference(ctx, configDigest, imageIdentityConfig)
+	observed, err := d.inspectImageReference(ctx, "v1.41", configDigest, imageIdentityConfig)
 	if err == nil || !errors.Is(err, ErrNotFound) {
 		return observed, err
 	}
 	manifestDigest := imageReference[strings.LastIndexByte(imageReference, '@')+1:]
-	return d.inspectImageReference(ctx, manifestDigest, imageIdentityManifest)
+	// API 1.48 is the first Docker 28 API and the first image-inspect response
+	// that exposes Descriptor. Classic stores return from the config lookup above,
+	// so only a containerd-store fallback requires this newer projection.
+	return d.inspectImageReference(ctx, "v1.48", manifestDigest, imageIdentityManifest)
 }
 
-func (d *DockerHTTP) inspectImageReference(ctx context.Context, reference string, identity imageIdentity) (ObservedImage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/v1.41/images/"+pathEscape(reference)+"/json", nil)
+func (d *DockerHTTP) inspectImageReference(ctx context.Context, apiVersion, reference string, identity imageIdentity) (ObservedImage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/"+apiVersion+"/images/"+pathEscape(reference)+"/json", nil)
 	if err != nil {
 		return ObservedImage{}, err
 	}

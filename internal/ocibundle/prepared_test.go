@@ -60,6 +60,14 @@ func TestPrepareSnapshotsAndSanitizesDockerLoadArchive(t *testing.T) {
 	if blobCount != 3 {
 		t.Fatalf("sanitized blob count = %d, want manifest, config, and one layer", blobCount)
 	}
+	var index imageIndex
+	if err := json.Unmarshal(entries["index.json"], &index); err != nil {
+		t.Fatal(err)
+	}
+	if len(index.Manifests) != 1 || len(index.Manifests[0].Annotations) != 1 ||
+		index.Manifests[0].Annotations["config.digest"] != identity.ConfigDigest {
+		t.Fatalf("sanitized index does not bind config identity: %#v", index)
+	}
 	var manifest []dockerManifestEntry
 	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
 		t.Fatal(err)

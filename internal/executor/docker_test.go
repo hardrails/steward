@@ -842,7 +842,7 @@ func TestInspectSignedImageFallsBackToContainerdManifestIdentity(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1.41/images/" + configDigest + "/json":
 			w.WriteHeader(http.StatusNotFound)
-		case "/v1.41/images/" + manifestDigest + "/json":
+		case "/v1.48/images/" + manifestDigest + "/json":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"Id": manifestDigest, "Os": "linux", "Architecture": "amd64", "Config": map[string]any{},
 				"Descriptor": map[string]any{
@@ -857,7 +857,7 @@ func TestInspectSignedImageFallsBackToContainerdManifestIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPaths := []string{"/v1.41/images/" + configDigest + "/json", "/v1.41/images/" + manifestDigest + "/json"}
+	wantPaths := []string{"/v1.41/images/" + configDigest + "/json", "/v1.48/images/" + manifestDigest + "/json"}
 	if !reflect.DeepEqual(paths, wantPaths) || observed.Identity != imageIdentityManifest || observed.ID != manifestDigest ||
 		observed.ManifestDigest != manifestDigest || observed.ConfigDigest != configDigest {
 		t.Fatalf("paths=%#v observed=%#v", paths, observed)
