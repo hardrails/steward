@@ -356,6 +356,7 @@ image_tag=steward-hermes-adapter-build:${expected_revision:0:12}-$(od -An -N8 -t
 image_owned=false
 sandbox_name=
 sandbox_network=
+dns_probe_name=
 
 cleanup() {
 	local status=$?
@@ -364,6 +365,7 @@ cleanup() {
 		docker image rm "$image_tag" >/dev/null 2>&1 || true
 	fi
 	[[ -z $sandbox_name ]] || docker rm -f "$sandbox_name" >/dev/null 2>&1 || true
+	[[ -z $dns_probe_name ]] || docker rm -f "$dns_probe_name" >/dev/null 2>&1 || true
 	[[ -z $sandbox_network ]] || docker network rm "$sandbox_network" >/dev/null 2>&1 || true
 	rm -rf -- "$work"
 	rm -rf -- "$publish_dir"
@@ -451,18 +453,63 @@ progress "Building Hermes dependencies inside bounded gVisor sandbox (timeout ${
 sandbox_name=steward-hermes-build-sandbox-${expected_revision:0:12}-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 sandbox_network=$sandbox_name-network
 docker network create --label io.hardrails.steward.hermes-build=true "$sandbox_network" >/dev/null
+# Docker's embedded DNS proxy is unreliable with runsc on some engines. Read
+# the operator-configured upstream resolvers through a trusted, pinned-base probe
+# on the default bridge, then give those validated addresses to the isolated
+# build network. The untrusted source is never present in this probe.
+dns_probe_name=$sandbox_name-dns
+dns_config=$(docker run --rm --name "$dns_probe_name" \
+	--runtime runsc --network bridge --read-only --cap-drop ALL \
+	--security-opt no-new-privileges:true --pids-limit 16 \
+	--memory 67108864 --memory-swap 67108864 --cpus "$sandbox_cpus" \
+	--user 65532:65532 --log-driver none --entrypoint /bin/cat \
+	"$base_image_reference" /etc/resolv.conf) || die "could not read Docker's build DNS configuration"
+dns_probe_name=
+parsed_dns=$(python3 -c '
+import ipaddress
+import sys
+
+observed = []
+for line in sys.stdin:
+    fields = line.split()
+    if len(fields) != 2 or fields[0] != "nameserver":
+        continue
+    try:
+        address = ipaddress.ip_address(fields[1])
+    except ValueError:
+        continue
+    if address.is_loopback or address.is_unspecified or address.is_multicast or address in observed:
+        continue
+    observed.append(address)
+if not observed:
+    raise SystemExit(1)
+for address in observed[:3]:
+    print(address)
+' <<<"$dns_config") || die "Docker has no usable upstream DNS server for the gVisor build sandbox"
+mapfile -t sandbox_dns <<<"$parsed_dns"
+sandbox_dns_options=()
+for dns_server in "${sandbox_dns[@]}"; do
+	sandbox_dns_options+=(--dns "$dns_server")
+done
+# shellcheck disable=SC2016 # Expanded by the sandbox shell, not this builder.
 sandbox_command='set -eu
 mkdir -p /tmp/build /tmp/home
 cp -R /input/upstream/. /tmp/build/
 chmod -R u+rwX /tmp/build
 cd /tmp/build
 sha256sum -c /input/adapter/source-inputs.sha256
-uv sync --frozen --no-install-project --extra mcp --extra homeassistant
+attempt=1
+until uv sync --frozen --no-install-project --extra mcp --extra homeassistant; do
+    [ "$attempt" -lt 4 ] || exit 1
+    attempt=$((attempt + 1))
+    sleep 2
+done
 uv pip install --no-cache-dir --no-deps .
 tar -cf /output/venv.tar .venv
 '
 docker create --name "$sandbox_name" \
 	--runtime runsc --network "$sandbox_network" --read-only --cap-drop ALL \
+	"${sandbox_dns_options[@]}" \
 	--security-opt no-new-privileges:true --pids-limit "$sandbox_pids" \
 	--memory "$sandbox_memory_bytes" --memory-swap "$sandbox_memory_bytes" --cpus "$sandbox_cpus" \
 	--tmpfs "/tmp:rw,nosuid,nodev,size=$sandbox_memory_bytes" \
