@@ -395,6 +395,16 @@ func (s *Server) proxyConnector(
 	copyHeaders(w.Header(), response.Header)
 	w.Header().Del("Set-Cookie")
 	w.Header().Del("Location")
+	w.Header().Del(connectorReceiptStatusTrailer)
+	if connectorResponseHasNoBody(incoming.Method, response.StatusCode) {
+		if err := s.finishConnectorReceipt(receipt, response.StatusCode, 0, ""); err != nil {
+			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
+			return
+		}
+		w.Header().Set(connectorReceiptStatusTrailer, "recorded")
+		w.WriteHeader(response.StatusCode)
+		return
+	}
 	// Connector success is complete only when the signed terminal receipt is
 	// durable. Force a trailer-framed response so a failed receipt append cannot
 	// look like a clean, content-length-delimited success to the agent.
@@ -413,4 +423,8 @@ func (s *Server) proxyConnector(
 	if result.abort {
 		panic(http.ErrAbortHandler)
 	}
+}
+
+func connectorResponseHasNoBody(method string, status int) bool {
+	return method == http.MethodHead || status == http.StatusNoContent || status == http.StatusNotModified
 }

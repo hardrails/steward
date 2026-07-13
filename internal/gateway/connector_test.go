@@ -229,6 +229,57 @@ func TestConnectorXAPIKeyModeInjectsOnlyFixedHeader(t *testing.T) {
 	}
 }
 
+func TestConnectorReceiptSignalSurvivesHTTPFraming(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set(connectorReceiptStatusTrailer, "forged")
+		if request.Method == http.MethodPost {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{allowedCIDRs: []string{"127.0.0.0/8"}})
+	gatewayServer := httptest.NewServer(rig.server.connectorHandler(rig.grant.GrantID))
+	defer gatewayServer.Close()
+
+	post, err := http.NewRequest(http.MethodPost, gatewayServer.URL+"/v1/connectors/issues/operations/create", strings.NewReader(`{"x":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	post.Header.Set("Content-Type", "application/json")
+	post.Header.Set("X-Steward-Task-ID", "task-no-body")
+	response, err := http.DefaultClient.Do(post)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.Copy(io.Discard, response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusNoContent ||
+		response.Header.Get(connectorReceiptStatusTrailer) != "recorded" || response.Trailer.Get(connectorReceiptStatusTrailer) != "" {
+		t.Fatalf("no-body status=%d header=%q trailers=%v read=%v close=%v", response.StatusCode,
+			response.Header.Get(connectorReceiptStatusTrailer), response.Trailer, readErr, closeErr)
+	}
+
+	get, err := http.NewRequest(http.MethodGet, gatewayServer.URL+"/v1/connectors/issues/operations/read", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	get.Header.Set("X-Steward-Task-ID", "task-streamed")
+	response, err = http.DefaultClient.Do(get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	closeErr = response.Body.Close()
+	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK || string(body) != `{"ok":true}` ||
+		response.Header.Get(connectorReceiptStatusTrailer) != "" || response.Trailer.Get(connectorReceiptStatusTrailer) != "recorded" {
+		t.Fatalf("stream status=%d header=%q trailers=%v body=%q read=%v close=%v", response.StatusCode,
+			response.Header.Get(connectorReceiptStatusTrailer), response.Trailer, body, readErr, closeErr)
+	}
+}
+
 func TestConnectorReplaySurvivesRestartAndIsScopedToLogicalInstance(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
