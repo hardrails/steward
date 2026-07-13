@@ -1,0 +1,46 @@
+{
+  "schema_version": "steward.adapter-source.v1",
+  "adapter_contract": "steward.hermes-agent.v1",
+  "upstream": {
+    "repository": "https://github.com/NousResearch/hermes-agent.git",
+    "revision": "095b9eed3801c251796df93f48a8f2a527ff6e70",
+    "license": "MIT",
+    "license_sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6"
+  },
+  "build_inputs": [
+    {
+      "path": "pyproject.toml",
+      "sha256": "d1eee316b301dbaa35d8e59ab138cf86a4937f0fe4c65f97d839d798ae6a6755"
+    },
+    {
+      "path": "uv.lock",
+      "sha256": "8d03d04a404c641e1c9642f0482e2d8752c57da02da94d612a5f30883b25fbca"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "6fad90f58253c1be7f7916516a012242793efbe0dfdaf083e183067e6c825dc7"
+    }
+  ],
+  "base_images": [
+    {
+      "reference": "ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df22866bd7857e5d304b67a564f4feab6ac22044dde719b",
+      "purpose": "build and runtime"
+    }
+  ],
+  "runtime": {
+    "uid": 65532,
+    "gid": 65532,
+    "state_path": "/opt/data",
+    "home": "/opt/data/home",
+    "workdir": "/opt/data",
+    "tmp_path": "/tmp",
+    "negotiation_port": 8766,
+    "agent_api_port": 8642
+  },
+  "known_upstream_incompatibilities": [
+    "upstream image starts as root for s6 initialization",
+    "upstream image declares VOLUME /opt/data",
+    "upstream Dockerfile references absent web/package-lock.json and ui-tui/package-lock.json"
+  ],
+  "publication_gate": "A passing feasibility report is necessary but not sufficient. Dependency and base-image notices must be completed before redistribution."
+}
