@@ -258,6 +258,7 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 		append(append([]string(nil), base...), "-operation", "duplicate=POST:/v1/runs"),
 		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=GET:/v1/runs"},
 		{"gateway", "service", "set", "-config", path, "-service-id", "bad service", "-operation", "hermes.run=POST:/v1/runs"},
+		append(append([]string(nil), base...), "-tenant-id", "tenant-a"),
 		append(append([]string(nil), base...), "-receipt-epoch", "2"),
 	} {
 		if err := run(invalid, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {

@@ -182,6 +182,9 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unsupported gateway service action %q", action)
 	}
+	if flagWasVisited(flags, "node-id") || flagWasVisited(flags, "tenant-id") {
+		return errors.New("-node-id and -tenant-id are accepted only by gateway service trust")
+	}
 	if *serviceID == "" || len(operations) == 0 {
 		return errors.New("gateway service set requires -service-id and at least one -operation")
 	}
