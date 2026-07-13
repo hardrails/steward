@@ -57,7 +57,35 @@ type lifecycleTaskStatusResponse struct {
 	ResultDigest      string `json:"result_digest,omitempty"`
 	ResponseBytes     int64  `json:"response_bytes,omitempty"`
 	ErrorCode         string `json:"error_code,omitempty"`
+	RetrySafety       string `json:"retry_safety,omitempty"`
 	ObservationBase64 string `json:"observation_base64,omitempty"`
+}
+
+func TestLifecycleStatusDerivesReplacementSafetyFromDurableEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		errorCode string
+		dispatch  connectorledger.Event
+		wantState string
+		wantRetry string
+	}{
+		{name: "permit expired before contact", errorCode: "permit_expired", wantState: TaskStateFailedWithoutDispatchEvidence, wantRetry: TaskRetryReplacementSafeAfterNewAuthority},
+		{name: "grant revoked before contact", errorCode: "grant_revoked", wantState: TaskStateFailedWithoutDispatchEvidence, wantRetry: TaskRetryReplacementSafeAfterNewAuthority},
+		{name: "ambiguous upstream outcome", errorCode: "outcome_unknown", wantState: TaskStateFailedWithoutDispatchEvidence, wantRetry: TaskRetryReplacementUnsafe},
+		{name: "failure after durable dispatch", errorCode: "outcome_unknown", dispatch: connectorledger.Event{Phase: connectorledger.Dispatch, RunID: lifecycleTestRunID}, wantState: TaskStateObservationFailed, wantRetry: TaskRetryReplacementUnsafe},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := serviceTaskReceipt{
+				Authorization: connectorledger.Event{Phase: connectorledger.Authorize, PermitDigest: "sha256:" + strings.Repeat("a", 64)},
+				Dispatch:      test.dispatch,
+				Terminal:      connectorledger.Event{Phase: connectorledger.Terminal, ErrorCode: test.errorCode, RunID: test.dispatch.RunID},
+			}
+			status := lifecycleStatus("sha256:"+strings.Repeat("b", 64), state)
+			if status.State != test.wantState || status.RetrySafety != test.wantRetry {
+				t.Fatalf("status=%#v", status)
+			}
+		})
+	}
 }
 
 func lifecycleTaskDigest(rig *serviceTaskRig, taskID string) string {
@@ -866,6 +894,9 @@ func TestLifecycleTaskObservationServiceBusyDoesNotConsumePollInterval(t *testin
 	busy := invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
 	if code := requireGatewayErrorCode(t, busy, http.StatusTooManyRequests); code != "service_busy" {
 		t.Fatalf("busy error=%q", code)
+	}
+	if busy.Header().Get("Retry-After") != strconv.Itoa(rig.operation.PollIntervalSeconds) {
+		t.Fatalf("busy retry-after=%q", busy.Header().Get("Retry-After"))
 	}
 	for range cap(semaphore) {
 		<-semaphore

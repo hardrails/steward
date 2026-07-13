@@ -211,7 +211,7 @@ components:
           enum:
             - authorization_recorded
             - dispatch_accepted
-            - failed_before_dispatch
+            - failed_without_dispatch_evidence
             - observation_failed
             - agent_reported_completed
             - agent_reported_failed
@@ -245,6 +245,19 @@ components:
           maxLength: 128
           pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
           description: Durable Gateway failure code when no terminal agent report was recorded.
+        retry_safety:
+          type: string
+          enum:
+            - replacement_safe_after_new_authority
+            - replacement_unsafe
+          description: >-
+            Duplicate-effect guidance derived by Gateway for a terminal Gateway
+            failure. `replacement_safe_after_new_authority` means Gateway did not
+            contact the agent service; a different task still requires new signed
+            authority. `replacement_unsafe` means the service may have processed
+            the request or the evidence cannot establish otherwise. This field is
+            not approval to retry and is absent for nonterminal and agent-reported
+            terminal states.
         observed_status:
           type: string
           enum: [queued, running, completed, failed, cancelled]

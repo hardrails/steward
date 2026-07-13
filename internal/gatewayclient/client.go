@@ -65,10 +65,12 @@ const (
 )
 
 const (
-	StateAuthorizationRecorded = "authorization_recorded"
-	StateDispatchAccepted      = "dispatch_accepted"
-	StateFailedBeforeDispatch  = "failed_before_dispatch"
-	StateObservationFailed     = "observation_failed"
+	StateAuthorizationRecorded            = "authorization_recorded"
+	StateDispatchAccepted                 = "dispatch_accepted"
+	StateFailedWithoutDispatchEvidence    = "failed_without_dispatch_evidence"
+	StateObservationFailed                = "observation_failed"
+	RetryReplacementSafeAfterNewAuthority = "replacement_safe_after_new_authority"
+	RetryReplacementUnsafe                = "replacement_unsafe"
 )
 
 // TaskLifecycleStatus mirrors Steward Gateway's steward.task-status.v1 wire
@@ -88,6 +90,7 @@ type TaskLifecycleStatus struct {
 	ResultDigest      string          `json:"result_digest,omitempty"`
 	ResponseBytes     int64           `json:"response_bytes,omitempty"`
 	ErrorCode         string          `json:"error_code,omitempty"`
+	RetrySafety       string          `json:"retry_safety,omitempty"`
 	ObservedStatus    ObservedStatus  `json:"observed_status,omitempty"`
 	ObservationBase64 string          `json:"observation_base64,omitempty"`
 }
@@ -313,6 +316,9 @@ func validateStatus(
 		status.ErrorCode != "" && !identifier(status.ErrorCode, 128) {
 		return errors.New("response length or error code is invalid")
 	}
+	if status.RetrySafety != "" && !validRetrySafety(status.RetrySafety) {
+		return errors.New("retry safety is unsupported")
+	}
 	if status.ObservedStatus != "" && !validObservedStatus(status.ObservedStatus) {
 		return errors.New("observed status is unsupported")
 	}
@@ -339,6 +345,7 @@ func validateStatusFieldPresence(status TaskLifecycleStatus, fields map[string]j
 		{name: "task_status", value: string(status.TaskStatus)},
 		{name: "result_digest", value: status.ResultDigest},
 		{name: "error_code", value: status.ErrorCode},
+		{name: "retry_safety", value: status.RetrySafety},
 		{name: "observed_status", value: string(status.ObservedStatus)},
 		{name: "observation_base64", value: status.ObservationBase64},
 	}
@@ -385,7 +392,7 @@ func validateStatusShape(status TaskLifecycleStatus) error {
 		}
 	case StateDispatchAccepted:
 		if status.Phase != PhaseDispatch || status.RunID == "" || status.TaskStatus != "" ||
-			status.ResultDigest != "" || status.ResponseBytes != 0 || status.ErrorCode != "" {
+			status.ResultDigest != "" || status.ResponseBytes != 0 || status.ErrorCode != "" || status.RetrySafety != "" {
 			return errors.New("dispatch status fields are inconsistent")
 		}
 		if status.ObservedStatus != "" && status.ObservedStatus != ObservedQueued && status.ObservedStatus != ObservedRunning {
@@ -393,7 +400,7 @@ func validateStatusShape(status TaskLifecycleStatus) error {
 		}
 	case string(AgentReportedCompleted), string(AgentReportedFailed), string(AgentReportedCancelled):
 		if status.Phase != PhaseTerminal || status.RunID == "" || string(status.TaskStatus) != status.State ||
-			status.ResultDigest == "" || status.ResponseBytes < 1 || status.ErrorCode != "" {
+			status.ResultDigest == "" || status.ResponseBytes < 1 || status.ErrorCode != "" || status.RetrySafety != "" {
 			return errors.New("agent-reported terminal status fields are inconsistent")
 		}
 		wantObserved := observedForAgentStatus(status.TaskStatus)
@@ -403,14 +410,16 @@ func validateStatusShape(status TaskLifecycleStatus) error {
 		if (status.ObservedStatus == "") != (status.ObservationBase64 == "") {
 			return errors.New("terminal observation bytes and status must appear together")
 		}
-	case StateFailedBeforeDispatch:
+	case StateFailedWithoutDispatchEvidence:
 		if status.Phase != PhaseTerminal || status.RunID != "" || status.TaskStatus != "" || status.ResultDigest != "" ||
-			status.ObservedStatus != "" || status.ObservationBase64 != "" || status.ErrorCode == "" {
-			return errors.New("pre-dispatch failure fields are inconsistent")
+			status.ObservedStatus != "" || status.ObservationBase64 != "" || status.ErrorCode == "" ||
+			status.RetrySafety != retrySafetyForErrorCode(status.ErrorCode) {
+			return errors.New("failure without dispatch evidence fields are inconsistent")
 		}
 	case StateObservationFailed:
 		if status.Phase != PhaseTerminal || status.RunID == "" || status.TaskStatus != "" || status.ResultDigest != "" ||
-			status.ObservedStatus != "" || status.ObservationBase64 != "" || status.ErrorCode == "" {
+			status.ObservedStatus != "" || status.ObservationBase64 != "" || status.ErrorCode == "" ||
+			status.RetrySafety != RetryReplacementUnsafe {
 			return errors.New("observation failure fields are inconsistent")
 		}
 	}
@@ -446,7 +455,7 @@ func validateObservation(status TaskLifecycleStatus) error {
 
 func hasTaskResult(status TaskLifecycleStatus) bool {
 	return status.RunID != "" || status.TaskStatus != "" || status.ResultDigest != "" || status.ResponseBytes != 0 ||
-		status.ErrorCode != "" || status.ObservedStatus != "" || status.ObservationBase64 != ""
+		status.ErrorCode != "" || status.RetrySafety != "" || status.ObservedStatus != "" || status.ObservationBase64 != ""
 }
 
 func validPhase(value Phase) bool {
@@ -455,12 +464,23 @@ func validPhase(value Phase) bool {
 
 func validState(value string) bool {
 	switch value {
-	case StateAuthorizationRecorded, StateDispatchAccepted, StateFailedBeforeDispatch, StateObservationFailed,
+	case StateAuthorizationRecorded, StateDispatchAccepted, StateFailedWithoutDispatchEvidence, StateObservationFailed,
 		string(AgentReportedCompleted), string(AgentReportedFailed), string(AgentReportedCancelled):
 		return true
 	default:
 		return false
 	}
+}
+
+func validRetrySafety(value string) bool {
+	return value == RetryReplacementSafeAfterNewAuthority || value == RetryReplacementUnsafe
+}
+
+func retrySafetyForErrorCode(errorCode string) string {
+	if errorCode == "permit_expired" || errorCode == "grant_revoked" {
+		return RetryReplacementSafeAfterNewAuthority
+	}
+	return RetryReplacementUnsafe
 }
 
 func validAgentTaskStatus(value AgentTaskStatus) bool {

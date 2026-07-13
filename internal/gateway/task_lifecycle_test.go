@@ -403,9 +403,10 @@ func TestLifecycleServiceTaskAmbiguousAuthorizationInspectionRequiresReopen(t *t
 	reopenLifecycleServiceTaskRig(t, rig, rig.now.Add(24*time.Hour))
 	reconciled := requireLifecycleTaskStatus(
 		t, invokeLifecycleTaskEndpoint(rig, http.MethodGet, taskDigest, false, nil),
-		taskDigest, "terminal", "failed_before_dispatch", "", "",
+		taskDigest, "terminal", "failed_without_dispatch_evidence", "", "",
 	)
-	if reconciled.ErrorCode != "outcome_unknown" || reconciled.ObservationBase64 != "" || calls.Load() != 0 {
+	if reconciled.ErrorCode != "outcome_unknown" || reconciled.RetrySafety != TaskRetryReplacementUnsafe ||
+		reconciled.ObservationBase64 != "" || calls.Load() != 0 {
 		t.Fatalf("reconciled authorization=%#v calls=%d", reconciled, calls.Load())
 	}
 	requireLifecycleTaskChain(t, lifecycleReceiptRecords(t, rig), connectorledger.Authorize, connectorledger.Terminal)

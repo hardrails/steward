@@ -19,11 +19,13 @@ import (
 const TaskStatusSchemaV1 = "steward.task-status.v1"
 
 const (
-	TaskStateAuthorizationRecorded  = "authorization_recorded"
-	TaskStateDispatchAccepted       = "dispatch_accepted"
-	TaskStateFailedBeforeDispatch   = "failed_before_dispatch"
-	TaskStateObservationFailed      = "observation_failed"
-	maxTaskObservationResponseBytes = int64(taskprotocol.MaxReportBytes)
+	TaskStateAuthorizationRecorded            = "authorization_recorded"
+	TaskStateDispatchAccepted                 = "dispatch_accepted"
+	TaskStateFailedWithoutDispatchEvidence    = "failed_without_dispatch_evidence"
+	TaskStateObservationFailed                = "observation_failed"
+	TaskRetryReplacementSafeAfterNewAuthority = "replacement_safe_after_new_authority"
+	TaskRetryReplacementUnsafe                = "replacement_unsafe"
+	maxTaskObservationResponseBytes           = int64(taskprotocol.MaxReportBytes)
 )
 
 var serviceTaskDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
@@ -43,6 +45,7 @@ type TaskLifecycleStatus struct {
 	ResultDigest      string                     `json:"result_digest,omitempty"`
 	ResponseBytes     int64                      `json:"response_bytes,omitempty"`
 	ErrorCode         string                     `json:"error_code,omitempty"`
+	RetrySafety       string                     `json:"retry_safety,omitempty"`
 	ObservedStatus    taskprotocol.Status        `json:"observed_status,omitempty"`
 	ObservationBase64 string                     `json:"observation_base64,omitempty"`
 }
@@ -145,11 +148,22 @@ func lifecycleStatus(taskDigest string, state serviceTaskReceipt) TaskLifecycleS
 			status.State = string(state.Terminal.TaskStatus)
 		case state.Dispatch.Phase == connectorledger.Dispatch:
 			status.State = TaskStateObservationFailed
+			status.RetrySafety = TaskRetryReplacementUnsafe
 		default:
-			status.State = TaskStateFailedBeforeDispatch
+			status.State = TaskStateFailedWithoutDispatchEvidence
+			status.RetrySafety = taskFailureRetrySafety(state.Terminal.ErrorCode)
 		}
 	}
 	return status
+}
+
+func taskFailureRetrySafety(errorCode string) string {
+	switch errorCode {
+	case "permit_expired", "grant_revoked":
+		return TaskRetryReplacementSafeAfterNewAuthority
+	default:
+		return TaskRetryReplacementUnsafe
+	}
 }
 
 func taskEvidenceUnavailable(state serviceTaskReceipt) bool {
@@ -193,6 +207,7 @@ func (s *Server) observeTaskLifecycle(w http.ResponseWriter, request *http.Reque
 	case observation.semaphore <- struct{}{}:
 		defer func() { <-observation.semaphore }()
 	default:
+		w.Header().Set("Retry-After", strconv.Itoa(observation.operation.PollIntervalSeconds))
 		writeGatewayError(w, http.StatusTooManyRequests, "service_busy", "service grant concurrency limit reached")
 		return
 	}

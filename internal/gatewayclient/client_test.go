@@ -185,8 +185,11 @@ func TestClientStrictlyBoundsAndDecodesStatusResponses(t *testing.T) {
 		{name: "unsupported state", body: strings.Replace(valid, StateAuthorizationRecorded, "mystery", 1)},
 		{name: "evidence unavailable is an error not a success state", body: strings.Replace(valid, StateAuthorizationRecorded, "evidence_unavailable", 1)},
 		{name: "inconsistent shape", body: statusJSON(testTaskDigest, `"phase":"authorize","state":"dispatch_accepted","run_id":"run_1"`)},
-		{name: "unbounded response metadata", body: statusJSON(testTaskDigest, fmt.Sprintf(`"phase":"terminal","state":"failed_before_dispatch","response_bytes":%d,"error_code":"outcome_unknown"`, maxObservationBytes+1))},
-		{name: "observation failure without dispatched run", body: statusJSON(testTaskDigest, `"phase":"terminal","state":"observation_failed","error_code":"outcome_unknown"`)},
+		{name: "unbounded response metadata", body: statusJSON(testTaskDigest, fmt.Sprintf(`"phase":"terminal","state":"failed_without_dispatch_evidence","response_bytes":%d,"error_code":"outcome_unknown","retry_safety":"replacement_unsafe"`, maxObservationBytes+1))},
+		{name: "observation failure without dispatched run", body: statusJSON(testTaskDigest, `"phase":"terminal","state":"observation_failed","error_code":"outcome_unknown","retry_safety":"replacement_unsafe"`)},
+		{name: "missing retry safety", body: statusJSON(testTaskDigest, `"phase":"terminal","state":"failed_without_dispatch_evidence","error_code":"outcome_unknown"`)},
+		{name: "unsafe failure marked safe", body: statusJSON(testTaskDigest, `"phase":"terminal","state":"failed_without_dispatch_evidence","error_code":"outcome_unknown","retry_safety":"replacement_safe_after_new_authority"`)},
+		{name: "known pre-dispatch failure marked unsafe", body: statusJSON(testTaskDigest, `"phase":"terminal","state":"failed_without_dispatch_evidence","error_code":"permit_expired","retry_safety":"replacement_unsafe"`)},
 		{name: "bad content type", body: valid, contentType: "application/json; charset=utf-8"},
 		{name: "compressed", body: valid, encoding: "gzip"},
 	}
@@ -290,7 +293,7 @@ func TestClientRejectsPassiveShapesFromObserve(t *testing.T) {
 
 func TestClientObserveAcceptsDurableObservationFailureWithoutRawResult(t *testing.T) {
 	body := statusJSON(testTaskDigest,
-		`"phase":"terminal","state":"observation_failed","run_id":"run_1","error_code":"outcome_unknown"`)
+		`"phase":"terminal","state":"observation_failed","run_id":"run_1","error_code":"outcome_unknown","retry_safety":"replacement_unsafe"`)
 	server := statusServer(t, http.StatusOK, nil, body)
 	defer server.Close()
 	client, err := New(server.URL, "secret")
@@ -319,6 +322,7 @@ func TestClientRejectsExplicitEmptyOptionalFields(t *testing.T) {
 		{name: "result digest", fields: `"phase":"authorize","state":"authorization_recorded","result_digest":""`},
 		{name: "response bytes", fields: `"phase":"authorize","state":"authorization_recorded","response_bytes":0`},
 		{name: "error code", fields: `"phase":"authorize","state":"authorization_recorded","error_code":""`},
+		{name: "retry safety", fields: `"phase":"authorize","state":"authorization_recorded","retry_safety":""`},
 		{name: "observed status", fields: terminal + `,"observed_status":""`, observe: true},
 		{name: "raw observation", fields: terminal + `,"observation_base64":""`, observe: true},
 	}

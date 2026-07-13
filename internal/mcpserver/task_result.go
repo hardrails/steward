@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	maxTaskResultFiles      = 1024
-	maxTaskResultStoreBytes = 256 << 20
-	taskResultSuffix        = ".result"
+	maxTaskResultFiles        = 1024
+	maxTaskResultStoreBytes   = 256 << 20
+	maxTaskResultStoreEntries = maxTaskResultFiles * 2
+	taskResultSuffix          = ".result"
+	taskResultTemporarySuffix = ".partial"
 )
 
 type taskResultStore struct {
@@ -29,13 +31,25 @@ type taskResultStore struct {
 }
 
 type taskResultReservation struct {
-	store    *taskResultStore
-	name     string
-	path     string
-	file     *os.File
-	identity os.FileInfo
-	bytes    int64
-	finished bool
+	store         *taskResultStore
+	name          string
+	temporaryName string
+	path          string
+	file          *os.File
+	identity      os.FileInfo
+	bytes         int64
+	published     bool
+	finished      bool
+}
+
+type storedTaskResultEntry struct {
+	name string
+	info os.FileInfo
+}
+
+type taskResultCleanup struct {
+	entry         storedTaskResultEntry
+	expectedLinks uint64
 }
 
 func newTaskResultStore(directory string) (*taskResultStore, error) {
@@ -116,6 +130,22 @@ func validStoredTaskResult(info os.FileInfo) bool {
 		info.Size() >= 0 && info.Size() <= maxTaskObservationBytes
 }
 
+func storedTaskResultLinkCount(info os.FileInfo) (uint64, bool) {
+	if info == nil {
+		return 0, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return uint64(stat.Nlink), true
+}
+
+func validStoredTaskResultLinks(info os.FileInfo, expected uint64) bool {
+	links, ok := storedTaskResultLinkCount(info)
+	return validStoredTaskResult(info) && ok && links == expected
+}
+
 func fileOwner(info os.FileInfo) (int, bool) {
 	if info == nil {
 		return 0, false
@@ -149,12 +179,29 @@ func validStoredTaskResultName(name string) bool {
 	return true
 }
 
+func taskResultTemporaryName(name string) string {
+	return name + taskResultTemporarySuffix
+}
+
+func storedTaskResultNameForEntry(name string) (string, bool, bool) {
+	if validStoredTaskResultName(name) {
+		return name, false, true
+	}
+	if strings.HasSuffix(name, taskResultTemporarySuffix) {
+		resultName := strings.TrimSuffix(name, taskResultTemporarySuffix)
+		if validStoredTaskResultName(resultName) {
+			return resultName, true, true
+		}
+	}
+	return "", false, false
+}
+
 func (store *taskResultStore) loadUsage() error {
 	directory, err := store.root.Open(".")
 	if err != nil {
 		return err
 	}
-	entries, readErr := directory.ReadDir(maxTaskResultFiles + 1)
+	entries, readErr := directory.ReadDir(maxTaskResultStoreEntries + 1)
 	closeErr := directory.Close()
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
 		return errors.Join(readErr, closeErr)
@@ -162,33 +209,99 @@ func (store *taskResultStore) loadUsage() error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if len(entries) > maxTaskResultFiles {
+	if len(entries) > maxTaskResultStoreEntries {
 		return errors.New("MCP task result store exceeds its file-count limit")
 	}
-	removed := false
+	results := make(map[string]storedTaskResultEntry, len(entries))
+	temporaries := make(map[string]storedTaskResultEntry, len(entries))
+	identities := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
-		if !validStoredTaskResultName(entry.Name()) {
+		resultName, temporary, validName := storedTaskResultNameForEntry(entry.Name())
+		if !validName {
 			return fmt.Errorf("MCP task result store contains an unexpected entry: %s", entry.Name())
 		}
 		info, err := store.root.Lstat(entry.Name())
 		if err != nil || !validStoredTaskResult(info) {
 			return errors.Join(fmt.Errorf("MCP task result store contains an unsafe entry: %s", entry.Name()), err)
 		}
-		if info.Size() == 0 {
-			if err := store.root.Remove(entry.Name()); err != nil {
-				return err
+		stored := storedTaskResultEntry{name: entry.Name(), info: info}
+		if temporary {
+			temporaries[resultName] = stored
+		} else {
+			results[resultName] = stored
+		}
+		identities[resultName] = struct{}{}
+	}
+	if len(identities) > maxTaskResultFiles {
+		return errors.New("MCP task result store exceeds its file-count limit")
+	}
+
+	cleanups := make([]taskResultCleanup, 0, len(temporaries)+1)
+	for resultName := range identities {
+		result, hasResult := results[resultName]
+		temporary, hasTemporary := temporaries[resultName]
+		switch {
+		case hasResult && result.info.Size() == 0:
+			if hasTemporary || !validStoredTaskResultLinks(result.info, 1) {
+				return fmt.Errorf("MCP task result store contains an unsafe incomplete result: %s", result.name)
 			}
-			removed = true
+			// Older Steward builds reserved the final name before writing. An
+			// empty, single-link final is therefore an uncommitted legacy
+			// reservation and is safe to remove during upgrade.
+			cleanups = append(cleanups, taskResultCleanup{entry: result, expectedLinks: 1})
+		case hasResult && hasTemporary && os.SameFile(result.info, temporary.info):
+			if !validStoredTaskResultLinks(result.info, 2) || !validStoredTaskResultLinks(temporary.info, 2) {
+				return fmt.Errorf("MCP task result store contains an unsafe published temporary: %s", temporary.name)
+			}
+			// Publication links the fsynced inode to the final name before
+			// removing the temporary name. A two-link pair is the expected
+			// crash state in that narrow window.
+			cleanups = append(cleanups, taskResultCleanup{entry: temporary, expectedLinks: 2})
+		case hasResult && hasTemporary:
+			if !validStoredTaskResultLinks(result.info, 1) || !validStoredTaskResultLinks(temporary.info, 1) {
+				return fmt.Errorf("MCP task result store contains an unsafe stale temporary: %s", temporary.name)
+			}
+			cleanups = append(cleanups, taskResultCleanup{entry: temporary, expectedLinks: 1})
+		case hasResult:
+			if !validStoredTaskResultLinks(result.info, 1) {
+				return fmt.Errorf("MCP task result store contains an aliased result: %s", result.name)
+			}
+		case hasTemporary:
+			if !validStoredTaskResultLinks(temporary.info, 1) {
+				return fmt.Errorf("MCP task result store contains an aliased temporary entry: %s", temporary.name)
+			}
+			cleanups = append(cleanups, taskResultCleanup{entry: temporary, expectedLinks: 1})
+		}
+	}
+
+	for _, cleanup := range cleanups {
+		current, err := store.root.Lstat(cleanup.entry.name)
+		if err != nil || !os.SameFile(cleanup.entry.info, current) || !validStoredTaskResultLinks(current, cleanup.expectedLinks) {
+			return errors.Join(fmt.Errorf("MCP task result cleanup entry changed: %s", cleanup.entry.name), err)
+		}
+		if err := store.root.Remove(cleanup.entry.name); err != nil {
+			return err
+		}
+	}
+	if len(cleanups) > 0 {
+		if err := store.syncDirectory(); err != nil {
+			return err
+		}
+	}
+
+	for resultName, result := range results {
+		if result.info.Size() == 0 {
 			continue
 		}
-		if store.bytes > maxTaskResultStoreBytes-info.Size() {
+		current, err := store.root.Lstat(resultName)
+		if err != nil || !os.SameFile(result.info, current) || !validStoredTaskResultLinks(current, 1) {
+			return errors.Join(fmt.Errorf("MCP task result changed during startup: %s", resultName), err)
+		}
+		if store.bytes > maxTaskResultStoreBytes-current.Size() {
 			return errors.New("MCP task result store exceeds its byte limit")
 		}
 		store.files++
-		store.bytes += info.Size()
-	}
-	if removed {
-		return store.syncDirectory()
+		store.bytes += current.Size()
 	}
 	return nil
 }
@@ -198,6 +311,7 @@ func (store *taskResultStore) reserve(taskDigest, permitDigest string) (*taskRes
 	if err != nil {
 		return nil, err
 	}
+	temporaryName := taskResultTemporaryName(name)
 	if err := store.checkDirectory(); err != nil {
 		return nil, err
 	}
@@ -210,7 +324,14 @@ func (store *taskResultStore) reserve(taskDigest, permitDigest string) (*taskRes
 		store.mu.Unlock()
 		return nil, errors.New("terminal result store reached its file-count limit")
 	}
-	file, err := store.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if _, err := store.root.Lstat(name); err == nil {
+		store.mu.Unlock()
+		return nil, errors.New("terminal result already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		store.mu.Unlock()
+		return nil, err
+	}
+	file, err := store.root.OpenFile(temporaryName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		store.mu.Unlock()
 		return nil, err
@@ -219,7 +340,8 @@ func (store *taskResultStore) reserve(taskDigest, permitDigest string) (*taskRes
 	store.mu.Unlock()
 
 	reservation := &taskResultReservation{
-		store: store, name: name, path: filepath.Join(store.directory, name), file: file,
+		store: store, name: name, temporaryName: temporaryName,
+		path: filepath.Join(store.directory, name), file: file,
 	}
 	fail := func(cause error) (*taskResultReservation, error) {
 		return nil, errors.Join(cause, reservation.discard())
@@ -232,12 +354,17 @@ func (store *taskResultStore) reserve(taskDigest, permitDigest string) (*taskRes
 		return fail(err)
 	}
 	reservation.identity = opened
-	if !validStoredTaskResult(opened) || opened.Size() != 0 {
+	if !validStoredTaskResultLinks(opened, 1) || opened.Size() != 0 {
 		return fail(errors.New("terminal result reservation is not one empty owner-only regular file"))
 	}
-	current, err := store.root.Lstat(name)
-	if err != nil || !validStoredTaskResult(current) || !os.SameFile(opened, current) {
+	current, err := store.root.Lstat(temporaryName)
+	if err != nil || !validStoredTaskResultLinks(current, 1) || !os.SameFile(opened, current) {
 		return fail(errors.Join(errors.New("terminal result reservation changed while opening"), err))
+	}
+	if _, err := store.root.Lstat(name); err == nil {
+		return fail(errors.New("terminal result appeared while reserving"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fail(err)
 	}
 	if err := store.syncDirectory(); err != nil {
 		return fail(err)
@@ -310,64 +437,107 @@ func (store *taskResultStore) close() error {
 }
 
 func (reservation *taskResultReservation) commit(raw []byte) error {
-	if reservation == nil || reservation.finished || reservation.file == nil || reservation.identity == nil || len(raw) == 0 || len(raw) > maxTaskObservationBytes {
+	if reservation == nil || reservation.finished || reservation.published || reservation.file == nil || reservation.identity == nil ||
+		len(raw) == 0 || len(raw) > maxTaskObservationBytes {
 		return errors.New("terminal result reservation cannot be committed")
 	}
-	fail := func(cause error) error {
+	failUnpublished := func(cause error) error {
 		return errors.Join(cause, reservation.erase(), reservation.discard())
 	}
-	if err := reservation.store.checkDirectory(); err != nil {
-		return fail(err)
+	failPublished := func(cause error) error {
+		reservation.finished = true
+		return cause
 	}
-	current, err := reservation.store.root.Lstat(reservation.name)
-	if err != nil || !validStoredTaskResult(current) || !os.SameFile(reservation.identity, current) {
-		return fail(errors.Join(errors.New("terminal result reservation changed before writing"), err))
+	if err := reservation.store.checkDirectory(); err != nil {
+		return failUnpublished(err)
+	}
+	current, err := reservation.store.root.Lstat(reservation.temporaryName)
+	if err != nil || !validStoredTaskResultLinks(current, 1) || !os.SameFile(reservation.identity, current) {
+		return failUnpublished(errors.Join(errors.New("terminal result reservation changed before writing"), err))
 	}
 	if err := reservation.store.reserveBytes(int64(len(raw))); err != nil {
-		return fail(err)
+		return failUnpublished(err)
 	}
 	reservation.bytes = int64(len(raw))
 	for written := 0; written < len(raw); {
 		count, err := reservation.file.Write(raw[written:])
 		if err != nil {
-			return fail(err)
+			return failUnpublished(err)
 		}
 		if count <= 0 {
-			return fail(io.ErrShortWrite)
+			return failUnpublished(io.ErrShortWrite)
 		}
 		written += count
 	}
 	if err := reservation.file.Sync(); err != nil {
-		return fail(err)
+		return failUnpublished(err)
 	}
 	opened, err := reservation.file.Stat()
 	if err != nil {
-		return fail(err)
+		return failUnpublished(err)
 	}
-	current, err = reservation.store.root.Lstat(reservation.name)
-	if err != nil || !validStoredTaskResult(opened) || !validStoredTaskResult(current) ||
+	current, err = reservation.store.root.Lstat(reservation.temporaryName)
+	if err != nil || !validStoredTaskResultLinks(opened, 1) || !validStoredTaskResultLinks(current, 1) ||
 		opened.Size() != int64(len(raw)) || current.Size() != int64(len(raw)) ||
 		!os.SameFile(reservation.identity, opened) || !os.SameFile(reservation.identity, current) {
-		return fail(errors.Join(errors.New("terminal result file changed while writing"), err))
+		return failUnpublished(errors.Join(errors.New("terminal result temporary changed while writing"), err))
 	}
 	if err := reservation.file.Close(); err != nil {
 		reservation.file = nil
-		return fail(err)
+		return failUnpublished(err)
 	}
 	reservation.file = nil
-	current, err = reservation.store.root.Lstat(reservation.name)
-	if err != nil || !validStoredTaskResult(current) || !os.SameFile(reservation.identity, current) || current.Size() != int64(len(raw)) {
-		return fail(errors.Join(errors.New("terminal result file changed while closing"), err))
+	current, err = reservation.store.root.Lstat(reservation.temporaryName)
+	if err != nil || !validStoredTaskResultLinks(current, 1) || !os.SameFile(reservation.identity, current) || current.Size() != int64(len(raw)) {
+		return failUnpublished(errors.Join(errors.New("terminal result temporary changed while closing"), err))
+	}
+	if _, err := reservation.store.root.Lstat(reservation.name); err == nil {
+		return failUnpublished(errors.New("terminal result already exists before publication"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return failUnpublished(err)
+	}
+	if err := reservation.store.checkDirectory(); err != nil {
+		return failUnpublished(err)
+	}
+	temporaryPath := filepath.Join(reservation.store.directory, reservation.temporaryName)
+	if err := os.Link(temporaryPath, reservation.path); err != nil {
+		return failUnpublished(fmt.Errorf("publish terminal result without overwrite: %w", err))
+	}
+	reservation.published = true
+	published, publishErr := reservation.store.root.Lstat(reservation.name)
+	temporary, temporaryErr := reservation.store.root.Lstat(reservation.temporaryName)
+	if publishErr != nil || temporaryErr != nil || !validStoredTaskResultLinks(published, 2) ||
+		!validStoredTaskResultLinks(temporary, 2) || published.Size() != int64(len(raw)) ||
+		!os.SameFile(reservation.identity, published) || !os.SameFile(reservation.identity, temporary) {
+		return failPublished(errors.Join(errors.New("terminal result publication changed before directory sync"), publishErr, temporaryErr))
+	}
+	// Persist the final link before removing the temporary one. A crash before
+	// the next directory sync leaves either a safe partial or a two-link pair;
+	// loadUsage recognizes and reconciles both states.
+	if err := reservation.store.syncDirectory(); err != nil {
+		return failPublished(err)
+	}
+	temporary, err = reservation.store.root.Lstat(reservation.temporaryName)
+	if err != nil || !validStoredTaskResultLinks(temporary, 2) || !os.SameFile(reservation.identity, temporary) {
+		return failPublished(errors.Join(errors.New("terminal result temporary changed before cleanup"), err))
+	}
+	if err := reservation.store.root.Remove(reservation.temporaryName); err != nil {
+		return failPublished(err)
+	}
+	published, err = reservation.store.root.Lstat(reservation.name)
+	if err != nil || !validStoredTaskResultLinks(published, 1) || !os.SameFile(reservation.identity, published) ||
+		published.Size() != int64(len(raw)) {
+		return failPublished(errors.Join(errors.New("terminal result changed after temporary cleanup"), err))
 	}
 	if err := reservation.store.syncDirectory(); err != nil {
-		return fail(err)
+		return failPublished(err)
 	}
 	reservation.finished = true
 	return nil
 }
 
 func (reservation *taskResultReservation) erase() error {
-	if reservation == nil || reservation.file == nil {
+	if reservation == nil || reservation.published || reservation.file == nil {
 		return nil
 	}
 	if err := reservation.file.Truncate(0); err != nil {
@@ -380,6 +550,12 @@ func (reservation *taskResultReservation) discard() error {
 	if reservation == nil || reservation.finished {
 		return nil
 	}
+	if reservation.published {
+		// Never erase or release quota for an inode once its final name is
+		// visible. Startup safely removes a leftover temporary link.
+		reservation.finished = true
+		return nil
+	}
 	var closeErr error
 	if reservation.file != nil {
 		closeErr = reservation.file.Close()
@@ -387,7 +563,7 @@ func (reservation *taskResultReservation) discard() error {
 	}
 	removed := false
 	var removeErr error
-	current, err := reservation.store.root.Lstat(reservation.name)
+	current, err := reservation.store.root.Lstat(reservation.temporaryName)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		removeErr = errors.New("terminal result reservation disappeared; retaining quota conservatively")
@@ -396,7 +572,7 @@ func (reservation *taskResultReservation) discard() error {
 	case reservation.identity == nil || !os.SameFile(reservation.identity, current):
 		removeErr = errors.New("terminal result reservation path was replaced; refusing to remove it")
 	default:
-		removeErr = reservation.store.root.Remove(reservation.name)
+		removeErr = reservation.store.root.Remove(reservation.temporaryName)
 		removed = removeErr == nil
 	}
 	var syncErr error

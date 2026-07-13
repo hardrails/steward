@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,7 +177,7 @@ func waitTask(arguments []string, stdout io.Writer) (returnErr error) {
 		}
 	}()
 	pollInterval := time.Duration(runtime.bundle.Bundle.Operation.PollIntervalSeconds) * time.Second
-	observeTerminal := status.Phase == gatewayclient.PhaseTerminal && *resultPath != ""
+	observeTerminal := *resultPath != "" && taskHasRecoverableTerminalResult(status)
 	for status.Phase != gatewayclient.PhaseTerminal || observeTerminal {
 		if status.Phase == gatewayclient.PhaseAuthorize {
 			if err := waitTaskPoll(ctx, pollInterval); err != nil {
@@ -197,8 +198,12 @@ func waitTask(arguments []string, stdout io.Writer) (returnErr error) {
 		status, err = runtime.client.Observe(ctx, runtime.taskDigest, runtime.permitDigest)
 		if err != nil {
 			var apiError *gatewayclient.APIError
-			if errors.As(err, &apiError) && apiError.RetryAfter > 0 {
-				if waitErr := waitTaskPoll(ctx, apiError.RetryAfter); waitErr != nil {
+			if errors.As(err, &apiError) && apiError.Status == http.StatusTooManyRequests {
+				retryAfter := apiError.RetryAfter
+				if retryAfter <= 0 {
+					retryAfter = pollInterval
+				}
+				if waitErr := waitTaskPoll(ctx, retryAfter); waitErr != nil {
 					return fmt.Errorf("wait for task lifecycle: %w", waitErr)
 				}
 				continue
@@ -223,6 +228,18 @@ func waitTask(arguments []string, stdout io.Writer) (returnErr error) {
 		return fmt.Errorf("task ended in terminal state %s", status.State)
 	}
 	return nil
+}
+
+func taskHasRecoverableTerminalResult(status gatewayclient.TaskLifecycleStatus) bool {
+	if status.Phase != gatewayclient.PhaseTerminal || status.ResultDigest == "" || status.ResponseBytes < 1 {
+		return false
+	}
+	switch status.TaskStatus {
+	case gatewayclient.AgentReportedCompleted, gatewayclient.AgentReportedFailed, gatewayclient.AgentReportedCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 func openTaskRuntime(bundlePath, gatewayURL, tokenPath string) (taskRuntime, error) {

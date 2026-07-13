@@ -59,6 +59,7 @@ type taskStatusMetadata struct {
 	TaskStatus     gatewayclient.AgentTaskStatus `json:"task_status,omitempty"`
 	ResultDigest   string                        `json:"result_digest,omitempty"`
 	ResponseBytes  int64                         `json:"response_bytes,omitempty"`
+	RetrySafety    string                        `json:"retry_safety,omitempty"`
 	ObservedStatus gatewayclient.ObservedStatus  `json:"observed_status,omitempty"`
 	ResultPath     string                        `json:"result_path,omitempty"`
 }
@@ -208,6 +209,7 @@ func taskMetadata(status gatewayclient.TaskLifecycleStatus, taskDigest, permitDi
 		status.ResultDigest != "" && !validTaskDigest(status.ResultDigest) ||
 		status.ResponseBytes < 0 || status.ResponseBytes > maxTaskObservationBytes ||
 		status.ErrorCode != "" && !validTaskIdentifier(status.ErrorCode, 128) ||
+		!validTaskRetryMetadata(status) ||
 		status.ObservedStatus != "" && !validTaskObservedStatus(status.ObservedStatus) {
 		return taskStatusMetadata{}, errors.New("Gateway returned invalid task lifecycle metadata")
 	}
@@ -215,7 +217,7 @@ func taskMetadata(status gatewayclient.TaskLifecycleStatus, taskDigest, permitDi
 		SchemaVersion: status.SchemaVersion, TaskDigest: status.TaskDigest, PermitDigest: status.PermitDigest,
 		Phase: status.Phase, State: status.State, TaskStatus: status.TaskStatus,
 		ResultDigest: status.ResultDigest, ResponseBytes: status.ResponseBytes,
-		ObservedStatus: status.ObservedStatus,
+		RetrySafety: status.RetrySafety, ObservedStatus: status.ObservedStatus,
 	}, nil
 }
 
@@ -267,12 +269,34 @@ func validTaskPhase(phase gatewayclient.Phase) bool {
 func validTaskState(state string) bool {
 	switch state {
 	case gatewayclient.StateAuthorizationRecorded, gatewayclient.StateDispatchAccepted,
-		gatewayclient.StateFailedBeforeDispatch, gatewayclient.StateObservationFailed,
+		gatewayclient.StateFailedWithoutDispatchEvidence, gatewayclient.StateObservationFailed,
 		string(gatewayclient.AgentReportedCompleted), string(gatewayclient.AgentReportedFailed),
 		string(gatewayclient.AgentReportedCancelled):
 		return true
 	default:
 		return false
+	}
+}
+
+func validTaskRetrySafety(value string) bool {
+	return value == gatewayclient.RetryReplacementSafeAfterNewAuthority || value == gatewayclient.RetryReplacementUnsafe
+}
+
+func validTaskRetryMetadata(status gatewayclient.TaskLifecycleStatus) bool {
+	if status.RetrySafety != "" && !validTaskRetrySafety(status.RetrySafety) {
+		return false
+	}
+	switch status.State {
+	case gatewayclient.StateFailedWithoutDispatchEvidence:
+		want := gatewayclient.RetryReplacementUnsafe
+		if status.ErrorCode == "permit_expired" || status.ErrorCode == "grant_revoked" {
+			want = gatewayclient.RetryReplacementSafeAfterNewAuthority
+		}
+		return status.ErrorCode != "" && status.RetrySafety == want
+	case gatewayclient.StateObservationFailed:
+		return status.ErrorCode != "" && status.RetrySafety == gatewayclient.RetryReplacementUnsafe
+	default:
+		return status.RetrySafety == ""
 	}
 }
 

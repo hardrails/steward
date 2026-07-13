@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -178,15 +179,18 @@ func TestMCPTaskStatusOmitsUntrustedRunIDsAndErrorCodes(t *testing.T) {
 
 	gateway.status = gatewayclient.TaskLifecycleStatus{
 		SchemaVersion: "steward.task-status.v1", TaskDigest: taskDigest, PermitDigest: permitDigest,
-		Phase: gatewayclient.PhaseTerminal, State: gatewayclient.StateFailedBeforeDispatch, ErrorCode: "permit_expired",
+		Phase: gatewayclient.PhaseTerminal, State: gatewayclient.StateFailedWithoutDispatchEvidence,
+		ErrorCode: "permit_expired", RetrySafety: gatewayclient.RetryReplacementSafeAfterNewAuthority,
 	}
 	result = callMCPTaskTool(t, server, "steward_task_status", arguments)
 	raw = string(mustJSON(t, result))
-	if toolResultIsError(t, result) || strings.Contains(raw, "permit_expired") || strings.Contains(raw, "error_code") {
+	if toolResultIsError(t, result) || strings.Contains(raw, "permit_expired") || strings.Contains(raw, "error_code") ||
+		!strings.Contains(raw, gatewayclient.RetryReplacementSafeAfterNewAuthority) {
 		t.Fatalf("bounded Gateway error code was projected or rejected: %s", raw)
 	}
 
 	gateway.status.ErrorCode = "sensitive_agent_output"
+	gateway.status.RetrySafety = gatewayclient.RetryReplacementUnsafe
 	failure := callMCPTaskTool(t, server, "steward_task_status", arguments)
 	failureRaw := string(mustJSON(t, failure))
 	if toolResultIsError(t, failure) || strings.Contains(failureRaw, "sensitive_agent_output") || strings.Contains(failureRaw, "error_code") {
@@ -209,13 +213,17 @@ func TestMCPTaskObserveWritesVerifiedResultWithoutReturningRawBytes(t *testing.T
 	server, directory := newTaskMCPServer(t, gateway)
 	name := mustTaskResultName(t, taskDigest, permitDigest)
 	path := filepath.Join(directory, name)
+	temporaryPath := filepath.Join(directory, taskResultTemporaryName(name))
 	gateway.observeHook = func() error {
-		info, err := os.Lstat(path)
+		info, err := os.Lstat(temporaryPath)
 		if err != nil {
 			return err
 		}
 		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() != 0 {
 			return errors.New("terminal result was not reserved before Gateway observation")
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("terminal result became visible before publication")
 		}
 		return nil
 	}
@@ -383,6 +391,155 @@ func TestMCPTaskObserveUsesOneDeterministicResultPerTaskPermit(t *testing.T) {
 	}
 }
 
+func TestMCPTaskResultPublicationIsAtomicAndNoOverwrite(t *testing.T) {
+	taskDigest, permitDigest := digestFor('a'), digestFor('b')
+	name := mustTaskResultName(t, taskDigest, permitDigest)
+
+	t.Run("concurrent deterministic reservation", func(t *testing.T) {
+		directory := newTaskResultTestDirectory(t)
+		const workers = 12
+		stores := make([]*taskResultStore, workers)
+		for index := range stores {
+			store, err := newTaskResultStore(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stores[index] = store
+			t.Cleanup(func() { _ = store.close() })
+		}
+		type outcome struct {
+			raw []byte
+			err error
+		}
+		outcomes := make([]outcome, workers)
+		start := make(chan struct{})
+		var group sync.WaitGroup
+		for index := range workers {
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				<-start
+				raw := []byte(fmt.Sprintf(`{"worker":%d}`, index))
+				reservation, err := stores[index].reserve(taskDigest, permitDigest)
+				if err == nil {
+					err = reservation.commit(raw)
+				}
+				outcomes[index] = outcome{raw: raw, err: err}
+			}()
+		}
+		close(start)
+		group.Wait()
+
+		var winner []byte
+		for _, result := range outcomes {
+			if result.err == nil {
+				if winner != nil {
+					t.Fatalf("multiple deterministic publications succeeded: %q and %q", winner, result.raw)
+				}
+				winner = result.raw
+			}
+		}
+		if winner == nil {
+			t.Fatalf("no deterministic publication succeeded: %#v", outcomes)
+		}
+		published, err := os.ReadFile(filepath.Join(directory, name))
+		if err != nil || !bytes.Equal(published, winner) {
+			t.Fatalf("published result=%q winner=%q err=%v", published, winner, err)
+		}
+		if _, err := os.Lstat(filepath.Join(directory, taskResultTemporaryName(name))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("temporary result remained after concurrent publication: %v", err)
+		}
+	})
+
+	t.Run("raced final is preserved", func(t *testing.T) {
+		directory := newTaskResultTestDirectory(t)
+		store, err := newTaskResultStore(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.close()
+		reservation, err := store.reserve(taskDigest, permitDigest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		finalPath := filepath.Join(directory, name)
+		if err := os.WriteFile(finalPath, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := reservation.commit([]byte("do-not-publish")); err == nil {
+			t.Fatal("publication overwrote a final created after reservation")
+		}
+		published, err := os.ReadFile(finalPath)
+		if err != nil || string(published) != "keep" {
+			t.Fatalf("raced final changed: %q err=%v", published, err)
+		}
+		if _, err := os.Lstat(filepath.Join(directory, taskResultTemporaryName(name))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("failed publication left a temporary result: %v", err)
+		}
+	})
+}
+
+func TestMCPTaskResultStoreRecoversCrashAtomicPublication(t *testing.T) {
+	taskDigest, permitDigest := digestFor('a'), digestFor('b')
+	name := mustTaskResultName(t, taskDigest, permitDigest)
+	temporaryName := taskResultTemporaryName(name)
+
+	t.Run("partial temporary before publication", func(t *testing.T) {
+		directory := newTaskResultTestDirectory(t)
+		writeTaskResultTestBytes(t, filepath.Join(directory, temporaryName), []byte("partial-agent-output"))
+		store, err := newTaskResultStore(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.close()
+		if _, err := os.Lstat(filepath.Join(directory, temporaryName)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("partial temporary survived startup cleanup: %v", err)
+		}
+		if store.files != 0 || store.bytes != 0 {
+			t.Fatalf("partial temporary consumed quota: files=%d bytes=%d", store.files, store.bytes)
+		}
+		reservation, err := store.reserve(taskDigest, permitDigest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		complete := []byte(`{"status":"completed"}`)
+		if err := reservation.commit(complete); err != nil {
+			t.Fatal(err)
+		}
+		if published, err := os.ReadFile(filepath.Join(directory, name)); err != nil || !bytes.Equal(published, complete) {
+			t.Fatalf("result after partial recovery=%q err=%v", published, err)
+		}
+	})
+
+	t.Run("published link before temporary cleanup", func(t *testing.T) {
+		directory := newTaskResultTestDirectory(t)
+		complete := []byte(`{"status":"completed","result":"durable"}`)
+		temporaryPath := filepath.Join(directory, temporaryName)
+		finalPath := filepath.Join(directory, name)
+		writeTaskResultTestBytes(t, temporaryPath, complete)
+		if err := os.Link(temporaryPath, finalPath); err != nil {
+			t.Fatal(err)
+		}
+		store, err := newTaskResultStore(directory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.close()
+		if _, err := os.Lstat(temporaryPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("published temporary survived startup cleanup: %v", err)
+		}
+		published, err := os.ReadFile(finalPath)
+		if err != nil || !bytes.Equal(published, complete) {
+			t.Fatalf("recovered publication=%q err=%v", published, err)
+		}
+		info, err := os.Lstat(finalPath)
+		links, linkOK := storedTaskResultLinkCount(info)
+		if err != nil || !linkOK || links != 1 || store.files != 1 || store.bytes != int64(len(complete)) {
+			t.Fatalf("recovered publication info=%#v links=%d files=%d bytes=%d err=%v", info, links, store.files, store.bytes, err)
+		}
+	})
+}
+
 func TestMCPTaskResultReservationRejectsExistingSymlinkAndReplacementRaces(t *testing.T) {
 	taskDigest, permitDigest := digestFor('a'), digestFor('b')
 	rawResult := []byte(`{"run_id":"run_done","status":"completed"}`)
@@ -431,13 +588,15 @@ func TestMCPTaskResultReservationRejectsExistingSymlinkAndReplacementRaces(t *te
 		if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		path := filepath.Join(directory, mustTaskResultName(t, taskDigest, permitDigest))
+		name := mustTaskResultName(t, taskDigest, permitDigest)
+		path := filepath.Join(directory, name)
+		temporaryPath := filepath.Join(directory, taskResultTemporaryName(name))
 		movedPath := filepath.Join(directory, "moved-reservation")
 		gateway.observeHook = func() error {
-			if err := os.Rename(path, movedPath); err != nil {
+			if err := os.Rename(temporaryPath, movedPath); err != nil {
 				return err
 			}
-			return os.Symlink(target, path)
+			return os.Symlink(target, temporaryPath)
 		}
 		result := callMCPTaskTool(t, server, "steward_task_observe", arguments)
 		if !toolResultIsError(t, result) || gateway.observeCalls != 1 {
@@ -448,6 +607,9 @@ func TestMCPTaskResultReservationRejectsExistingSymlinkAndReplacementRaces(t *te
 		}
 		if info, err := os.Lstat(movedPath); err != nil || info.Size() != 0 {
 			t.Fatalf("moved reservation contains agent bytes: info=%#v err=%v", info, err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("replacement race published a result: %v", err)
 		}
 	})
 
@@ -530,6 +692,38 @@ func TestMCPTaskResultDirectoryRejectsUnsafeConfigurationAndEntries(t *testing.T
 		}},
 		{name: "oversized result", setup: func(t *testing.T, directory string) {
 			writeTaskResultTestFile(t, directory, digestFor('a'), digestFor('b'), maxTaskObservationBytes+1)
+		}},
+		{name: "symlink temporary", setup: func(t *testing.T, directory string) {
+			name := taskResultTemporaryName(mustTaskResultName(t, digestFor('a'), digestFor('b')))
+			target := filepath.Join(t.TempDir(), "target")
+			if err := os.WriteFile(target, []byte("partial"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(directory, name)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "aliased temporary", setup: func(t *testing.T, directory string) {
+			name := taskResultTemporaryName(mustTaskResultName(t, digestFor('a'), digestFor('b')))
+			target := filepath.Join(t.TempDir(), "target")
+			if err := os.WriteFile(target, []byte("partial"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(target, filepath.Join(directory, name)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "oversized temporary", setup: func(t *testing.T, directory string) {
+			name := taskResultTemporaryName(mustTaskResultName(t, digestFor('a'), digestFor('b')))
+			file, err := os.OpenFile(filepath.Join(directory, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			truncateErr := file.Truncate(maxTaskObservationBytes + 1)
+			closeErr := file.Close()
+			if truncateErr != nil || closeErr != nil {
+				t.Fatal(errors.Join(truncateErr, closeErr))
+			}
 		}},
 	}
 	for _, test := range tests {
@@ -623,6 +817,20 @@ func writeTaskResultTestFile(t *testing.T, directory, taskDigest, permitDigest s
 	}
 }
 
+func writeTaskResultTestBytes(t *testing.T, path string, raw []byte) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := file.Write(raw)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if writeErr != nil || syncErr != nil || closeErr != nil {
+		t.Fatal(errors.Join(writeErr, syncErr, closeErr))
+	}
+}
+
 func numberedDigest(value int) string {
 	return fmt.Sprintf("sha256:%064x", value)
 }
@@ -666,8 +874,10 @@ func terminalMCPObservation(taskDigest, permitDigest string, raw []byte) gateway
 
 func requireNoMCPResultFile(t *testing.T, directory, name string) {
 	t.Helper()
-	if _, err := os.Lstat(filepath.Join(directory, name)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("result reservation %q remained: %v", name, err)
+	for _, candidate := range []string{name, taskResultTemporaryName(name)} {
+		if _, err := os.Lstat(filepath.Join(directory, candidate)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("result reservation %q remained: %v", candidate, err)
+		}
 	}
 }
 

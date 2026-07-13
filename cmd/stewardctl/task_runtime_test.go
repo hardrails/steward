@@ -292,6 +292,34 @@ func TestTaskWaitDiscardStopsAtAlreadyTerminalMetadata(t *testing.T) {
 	}
 }
 
+func TestTaskWaitDoesNotObserveTerminalGatewayFailure(t *testing.T) {
+	fixture := newTaskRuntimeFixture(t)
+	var statusCalls, observationCalls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost {
+			observationCalls.Add(1)
+		}
+		statusCalls.Add(1)
+		writeTaskRuntimeResponse(t, w, taskRuntimeStatusJSON(fixture,
+			`"phase":"terminal","state":"failed_without_dispatch_evidence","error_code":"outcome_unknown","retry_safety":"replacement_unsafe"`))
+	}))
+	defer server.Close()
+	resultPath := filepath.Join(fixture.cli.directory, "must-not-exist.json")
+	var output bytes.Buffer
+	err := run(fixture.arguments("wait", server.URL, "-result-out", resultPath), &output, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "failed_without_dispatch_evidence") ||
+		statusCalls.Load() != 1 || observationCalls.Load() != 0 {
+		t.Fatalf("error=%v status calls=%d observation calls=%d output=%s", err, statusCalls.Load(), observationCalls.Load(), output.Bytes())
+	}
+	if _, statErr := os.Stat(resultPath); !os.IsNotExist(statErr) {
+		t.Fatalf("terminal Gateway failure created result file: %v", statErr)
+	}
+	status := decodeTaskRuntimeOutput(t, output.Bytes())
+	if status.RetrySafety != gatewayclient.RetryReplacementUnsafe || status.ErrorCode != "outcome_unknown" {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestTaskObserveRemovesReservationWhenGatewayRawResultIsInvalid(t *testing.T) {
 	fixture := newTaskRuntimeFixture(t)
 	raw := []byte(`{"run_id":"run_0123456789abcdef0123456789abcdef","status":"completed"}`)
@@ -349,6 +377,38 @@ func TestTaskWaitHonorsRetryAfterThenReturnsCompletedResult(t *testing.T) {
 	}
 	if bytes.Contains(output.Bytes(), []byte("observation_base64")) {
 		t.Fatalf("wait exposed raw result: %s", output.Bytes())
+	}
+}
+
+func TestTaskWaitBoundsServiceBusyWithoutRetryAfter(t *testing.T) {
+	fixture := newTaskRuntimeFixture(t)
+	raw := []byte(`{"run_id":"run_0123456789abcdef0123456789abcdef","status":"completed"}`)
+	var observations atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			writeTaskRuntimeResponse(t, w, taskRuntimeStatusJSON(fixture,
+				`"phase":"dispatch","state":"dispatch_accepted","run_id":"run_0123456789abcdef0123456789abcdef"`))
+			return
+		}
+		if observations.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":"service_busy","message":"service grant concurrency limit reached"}`)
+			return
+		}
+		writeTaskRuntimeResponse(t, w, taskRuntimeStatusJSON(fixture, terminalTaskRuntimeFields(raw, "completed", true)))
+	}))
+	defer server.Close()
+	resultPath := filepath.Join(fixture.cli.directory, "busy-result.json")
+	var output bytes.Buffer
+	if err := run(fixture.arguments("wait", server.URL, "-result-out", resultPath, "-wait-timeout", "3s"), &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if observations.Load() != 2 {
+		t.Fatalf("observations=%d", observations.Load())
+	}
+	if saved, err := os.ReadFile(resultPath); err != nil || !bytes.Equal(saved, raw) {
+		t.Fatalf("saved=%q err=%v", saved, err)
 	}
 }
 
