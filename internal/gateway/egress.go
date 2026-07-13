@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +14,11 @@ import (
 )
 
 const tlsClientHelloTimeout = 5 * time.Second
+
+var (
+	errAddressDenied           = errors.New("resolved address is outside the allowed policy")
+	errAddressResolutionFailed = errors.New("address resolution failed")
+)
 
 func (s *Server) listenEgressGrantLocked(id string) error {
 	if listener := s.egressListeners[id]; listener != nil {
@@ -88,8 +94,16 @@ func (s *Server) egressHandler(id string) http.Handler {
 		r = r.WithContext(requestContext)
 		ip, err := resolveAllowedIP(r.Context(), host, destination)
 		if err != nil {
-			s.denyEgress(grant, "address_denied", r.Method, host, port)
-			writeGatewayError(w, http.StatusForbidden, "address_denied", "destination did not resolve to an allowed address")
+			status, code := classifyAddressFailure(err, lease)
+			s.denyEgress(grant, code, r.Method, host, port)
+			switch code {
+			case "grant_revoked":
+				writeGatewayError(w, status, code, "egress grant was revoked during address resolution")
+			case "address_denied":
+				writeGatewayError(w, status, code, "destination resolved only to addresses outside the active policy")
+			default:
+				writeGatewayError(w, status, code, "destination address resolution failed")
+			}
 			return
 		}
 		if r.Method == http.MethodConnect {
@@ -200,16 +214,29 @@ func resolveAllowedIP(ctx context.Context, host string, destination loadedEgress
 	} else {
 		resolved, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		if err != nil {
-			return netip.Addr{}, err
+			return netip.Addr{}, fmt.Errorf("%w: %v", errAddressResolutionFailed, err)
 		}
 		addresses = append(addresses, resolved...)
+	}
+	if len(addresses) == 0 {
+		return netip.Addr{}, errAddressResolutionFailed
 	}
 	for _, address := range addresses {
 		if addressAllowed(address, destination.prefixes) {
 			return address.Unmap(), nil
 		}
 	}
-	return netip.Addr{}, errors.New("no allowed address")
+	return netip.Addr{}, errAddressDenied
+}
+
+func classifyAddressFailure(err error, lease context.Context) (int, string) {
+	if lease != nil && lease.Err() != nil {
+		return http.StatusServiceUnavailable, "grant_revoked"
+	}
+	if errors.Is(err, errAddressDenied) {
+		return http.StatusForbidden, "address_denied"
+	}
+	return http.StatusBadGateway, "resolution_failed"
 }
 
 func (s *Server) proxyHTTP(w http.ResponseWriter, incoming *http.Request, grant Grant, routeID string, route loadedEgressRoute, host string, port int, ip netip.Addr) {

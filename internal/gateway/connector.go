@@ -158,11 +158,19 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		port := connectorPort(connector.base.Scheme, connector.base.Port())
 		ip, err := resolveAllowedIP(request.Context(), host, loadedEgressDestination{prefixes: connector.prefixes})
 		if err != nil {
-			if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "address_denied"); receiptErr != nil {
+			status, code := classifyAddressFailure(err, lease)
+			if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, code); receiptErr != nil {
 				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
 				return
 			}
-			writeGatewayError(w, http.StatusForbidden, "address_denied", "connector origin did not resolve to an allowed address")
+			switch code {
+			case "grant_revoked":
+				writeGatewayError(w, status, code, "connector grant was revoked during address resolution")
+			case "address_denied":
+				writeGatewayError(w, status, code, "connector origin resolved only to addresses outside the active policy")
+			default:
+				writeGatewayError(w, status, code, "connector origin address resolution failed")
+			}
 			return
 		}
 		s.proxyConnector(w, request, connector, operation, body, ip, port, receipt)
