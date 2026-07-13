@@ -176,7 +176,9 @@ trap finalize EXIT
 [[ -n $source_dir && -d $source_dir/.git ]] || stop_gate source.checkout pinned_source_checkout_required
 actual_revision=$(git -C "$source_dir" rev-parse HEAD 2>/dev/null || true)
 [[ $actual_revision == "$revision" ]] || stop_gate source.revision source_revision_mismatch
-git -C "$source_dir" diff --quiet && git -C "$source_dir" diff --cached --quiet || stop_gate source.checkout source_checkout_dirty
+if ! git -C "$source_dir" diff --quiet || ! git -C "$source_dir" diff --cached --quiet; then
+	stop_gate source.checkout source_checkout_dirty
+fi
 (
 	cd "$source_dir"
 	sha256sum -c "$adapter_root/source-inputs.sha256"
