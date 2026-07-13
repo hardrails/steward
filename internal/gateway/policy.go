@@ -9,9 +9,10 @@ import (
 )
 
 type routePolicyDocument struct {
-	Version   int                   `json:"version"`
-	Inference *inferenceRoutePolicy `json:"inference,omitempty"`
-	Egress    []egressRoutePolicy   `json:"egress,omitempty"`
+	Version    int                    `json:"version"`
+	Inference  *inferenceRoutePolicy  `json:"inference,omitempty"`
+	Egress     []egressRoutePolicy    `json:"egress,omitempty"`
+	Connectors []connectorRoutePolicy `json:"connectors,omitempty"`
 }
 
 type inferenceRoutePolicy struct {
@@ -38,6 +39,27 @@ type egressDestinationPolicy struct {
 	AllowedCIDRs []string `json:"allowed_cidrs,omitempty"`
 }
 
+type connectorRoutePolicy struct {
+	ID                   string                     `json:"id"`
+	BaseURL              string                     `json:"base_url"`
+	CredentialFile       string                     `json:"credential_file"`
+	CredentialMode       CredentialMode             `json:"credential_mode"`
+	CredentialConfigured bool                       `json:"credential_configured"`
+	AllowedCIDRs         []string                   `json:"allowed_cidrs,omitempty"`
+	MaxConcurrent        int                        `json:"max_concurrent"`
+	MaxRequestBytes      int64                      `json:"max_request_bytes"`
+	MaxResponseBytes     int64                      `json:"max_response_bytes"`
+	MaxSeconds           int                        `json:"max_seconds"`
+	MaxCallsPerGrant     int                        `json:"max_calls_per_grant"`
+	Operations           []connectorOperationPolicy `json:"operations"`
+}
+
+type connectorOperationPolicy struct {
+	ID     string `json:"id"`
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
 func sameLoadedRoute(left, right loadedRoute) bool {
 	return left.Route == right.Route && routeBaseURL(left.base) == routeBaseURL(right.base) && left.credential == right.credential
 }
@@ -58,6 +80,23 @@ func sameLoadedEgressRoute(left, right loadedEgressRoute) bool {
 	return true
 }
 
+func sameLoadedConnector(left, right loadedConnector) bool {
+	if left.ID != right.ID || routeBaseURL(left.base) != routeBaseURL(right.base) ||
+		left.CredentialFile != right.CredentialFile || left.CredentialMode != right.CredentialMode ||
+		left.credential != right.credential || left.MaxConcurrent != right.MaxConcurrent ||
+		left.MaxRequestBytes != right.MaxRequestBytes || left.MaxResponseBytes != right.MaxResponseBytes ||
+		left.MaxSeconds != right.MaxSeconds || left.MaxCallsPerGrant != right.MaxCallsPerGrant ||
+		!slices.Equal(left.prefixes, right.prefixes) || len(left.operations) != len(right.operations) {
+		return false
+	}
+	for id, operation := range left.operations {
+		if operation != right.operations[id] {
+			return false
+		}
+	}
+	return true
+}
+
 func routeBaseURL(value *url.URL) string {
 	if value == nil {
 		return ""
@@ -69,11 +108,15 @@ func routeBaseURL(value *url.URL) string {
 // Credential presence and file identity are included, but credential contents
 // are deliberately excluded so the inspection API cannot become an offline
 // oracle for weak operator-provided bearer tokens.
-func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute) string {
-	if grant.RouteID == "" && len(grant.EgressRouteIDs) == 0 {
+func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, connectorMaps ...map[string]loadedConnector) string {
+	if grant.RouteID == "" && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0 {
 		return ""
 	}
 	document := routePolicyDocument{Version: 1}
+	var connectors map[string]loadedConnector
+	if len(connectorMaps) > 0 {
+		connectors = connectorMaps[0]
+	}
 	if grant.RouteID != "" {
 		route := routes[grant.RouteID]
 		document.Inference = &inferenceRoutePolicy{
@@ -94,6 +137,34 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		}
 		document.Egress = append(document.Egress, policy)
 	}
+	if len(grant.ConnectorIDs) > 0 {
+		document.Version = 2
+	}
+	for _, id := range grant.ConnectorIDs {
+		connector := connectors[id]
+		policy := connectorRoutePolicy{
+			ID: connector.ID, BaseURL: routeBaseURL(connector.base), CredentialFile: connector.CredentialFile,
+			CredentialMode: connector.CredentialMode, CredentialConfigured: connector.credential != "",
+			MaxConcurrent: connector.MaxConcurrent, MaxRequestBytes: connector.MaxRequestBytes,
+			MaxResponseBytes: connector.MaxResponseBytes, MaxSeconds: connector.MaxSeconds,
+			MaxCallsPerGrant: connector.MaxCallsPerGrant,
+		}
+		for _, prefix := range connector.prefixes {
+			policy.AllowedCIDRs = append(policy.AllowedCIDRs, prefix.String())
+		}
+		operationIDs := make([]string, 0, len(connector.operations))
+		for operationID := range connector.operations {
+			operationIDs = append(operationIDs, operationID)
+		}
+		slices.Sort(operationIDs)
+		for _, operationID := range operationIDs {
+			operation := connector.operations[operationID]
+			policy.Operations = append(policy.Operations, connectorOperationPolicy{
+				ID: operation.ID, Method: operation.Method, Path: operation.Path,
+			})
+		}
+		document.Connectors = append(document.Connectors, policy)
+	}
 	raw, err := json.Marshal(document)
 	if err != nil {
 		return ""
@@ -103,21 +174,42 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 }
 
 func (s *Server) routePolicyDigestLocked(grant Grant) string {
-	return routePolicyDigest(grant, s.routes, s.egressRoutes)
+	return routePolicyDigest(grant, s.routes, s.egressRoutes, s.connectors)
 }
 
 // routeCredentialBindingDigest is retained only in the owner-readable state
 // file. It detects credential-content replacement across process restarts
 // without exposing a bearer-token hash through the public inspection API.
-func routeCredentialBindingDigest(grant Grant, routes map[string]loadedRoute) string {
-	if grant.RouteID == "" {
+func routeCredentialBindingDigest(grant Grant, routes map[string]loadedRoute, connectorMaps ...map[string]loadedConnector) string {
+	if grant.RouteID == "" && len(grant.ConnectorIDs) == 0 {
 		return ""
+	}
+	if len(grant.ConnectorIDs) == 0 {
+		route := routes[grant.RouteID]
+		digest := sha256.New()
+		_, _ = digest.Write([]byte("steward-gateway-route-credential-v1\x00"))
+		_, _ = digest.Write([]byte(grant.RouteID))
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write([]byte(route.credential))
+		return "sha256:" + fmt.Sprintf("%x", digest.Sum(nil))
+	}
+	var connectors map[string]loadedConnector
+	if len(connectorMaps) > 0 {
+		connectors = connectorMaps[0]
 	}
 	route := routes[grant.RouteID]
 	digest := sha256.New()
-	_, _ = digest.Write([]byte("steward-gateway-route-credential-v1\x00"))
+	_, _ = digest.Write([]byte("steward-gateway-route-credential-v2\x00"))
+	_, _ = digest.Write([]byte("inference\x00"))
 	_, _ = digest.Write([]byte(grant.RouteID))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(route.credential))
+	for _, id := range grant.ConnectorIDs {
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write([]byte("connector\x00"))
+		_, _ = digest.Write([]byte(id))
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write([]byte(connectors[id].credential))
+	}
 	return "sha256:" + fmt.Sprintf("%x", digest.Sum(nil))
 }
