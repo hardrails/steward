@@ -56,6 +56,7 @@ type Statement struct {
 	RoutePolicyDigest string `json:"route_policy_digest"`
 	ConnectorID       string `json:"connector_id"`
 	OperationID       string `json:"operation_id"`
+	OperationDigest   string `json:"operation_policy_digest"`
 	TaskID            string `json:"task_id"`
 	RequestDigest     string `json:"request_digest"`
 	RequestBytes      int64  `json:"request_bytes"`
@@ -78,6 +79,7 @@ type wireStatement struct {
 	RoutePolicyDigest *string `json:"route_policy_digest"`
 	ConnectorID       *string `json:"connector_id"`
 	OperationID       *string `json:"operation_id"`
+	OperationDigest   *string `json:"operation_policy_digest"`
 	TaskID            *string `json:"task_id"`
 	RequestDigest     *string `json:"request_digest"`
 	RequestBytes      *int64  `json:"request_bytes"`
@@ -168,7 +170,7 @@ func Verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.T
 func (wire wireStatement) statement() (Statement, bool) {
 	if wire.SchemaVersion == nil || wire.NodeID == nil || wire.TenantID == nil || wire.InstanceID == nil ||
 		wire.Generation == nil || wire.CapsuleDigest == nil || wire.PolicyDigest == nil || wire.RoutePolicyDigest == nil ||
-		wire.ConnectorID == nil || wire.OperationID == nil || wire.TaskID == nil || wire.RequestDigest == nil ||
+		wire.ConnectorID == nil || wire.OperationID == nil || wire.OperationDigest == nil || wire.TaskID == nil || wire.RequestDigest == nil ||
 		wire.RequestBytes == nil || wire.ContentType == nil || wire.NotBefore == nil || wire.ExpiresAt == nil {
 		return Statement{}, false
 	}
@@ -176,7 +178,7 @@ func (wire wireStatement) statement() (Statement, bool) {
 		SchemaVersion: *wire.SchemaVersion, NodeID: *wire.NodeID, TenantID: *wire.TenantID,
 		InstanceID: *wire.InstanceID, Generation: *wire.Generation, CapsuleDigest: *wire.CapsuleDigest,
 		PolicyDigest: *wire.PolicyDigest, RoutePolicyDigest: *wire.RoutePolicyDigest,
-		ConnectorID: *wire.ConnectorID, OperationID: *wire.OperationID, TaskID: *wire.TaskID,
+		ConnectorID: *wire.ConnectorID, OperationID: *wire.OperationID, OperationDigest: *wire.OperationDigest, TaskID: *wire.TaskID,
 		RequestDigest: *wire.RequestDigest, RequestBytes: *wire.RequestBytes, ContentType: *wire.ContentType,
 		NotBefore: *wire.NotBefore, ExpiresAt: *wire.ExpiresAt,
 	}, true
@@ -220,14 +222,20 @@ func validateStatement(statement Statement, now time.Time, maxValidity time.Dura
 		return invalid("generation must be positive")
 	}
 	if !digest(statement.CapsuleDigest) || !digest(statement.PolicyDigest) ||
-		!digest(statement.RoutePolicyDigest) || !digest(statement.RequestDigest) {
+		!digest(statement.RoutePolicyDigest) || !digest(statement.OperationDigest) || !digest(statement.RequestDigest) {
 		return invalid("statement contains an invalid SHA-256 digest")
 	}
 	if statement.RequestBytes < 0 || statement.RequestBytes > MaxRequestBytes {
 		return invalid("request size is outside the supported range")
 	}
-	if statement.ContentType != "application/json" {
-		return invalid("content type must be application/json")
+	if statement.ContentType != "" && statement.ContentType != "application/json" {
+		return invalid("content type must be empty or application/json")
+	}
+	if statement.ContentType == "" && (statement.RequestBytes != 0 || statement.RequestDigest != RequestDigest(nil)) {
+		return invalid("bodyless operation must bind the empty request")
+	}
+	if statement.ContentType == "application/json" && statement.RequestBytes == 0 {
+		return invalid("JSON operation must bind a non-empty request")
 	}
 
 	notBefore, err := canonicalTime(statement.NotBefore)

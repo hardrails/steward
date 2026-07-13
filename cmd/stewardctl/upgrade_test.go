@@ -477,6 +477,7 @@ func TestUpgradeBlocksLegacyTargetForProspectiveActionPermitConfig(t *testing.T)
 	config.ActionAuthorities = nil
 	config.Connectors[0].ActionAuthorityIDs = nil
 	config.Connectors[0].MaxActionPermitSeconds = 0
+	config.Connectors[0].CredentialEpoch = 0
 	raw, err = json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -21,11 +22,15 @@ import (
 
 type repeatedFlag []string
 
-const actionTrustSchemaV1 = "steward.action-trust.v1"
+const (
+	actionTrustSchemaV1 = "steward.action-trust.v1"
+	maxActionTrustBytes = 4 << 20
+)
 
 type actionTrustInventory struct {
 	SchemaVersion string                 `json:"schema_version"`
 	NodeID        string                 `json:"node_id"`
+	TenantID      string                 `json:"tenant_id"`
 	Authorities   []actionTrustAuthority `json:"authorities"`
 	Connectors    []actionTrustConnector `json:"connectors"`
 }
@@ -38,11 +43,19 @@ type actionTrustAuthority struct {
 }
 
 type actionTrustConnector struct {
-	ConnectorID      string   `json:"connector_id"`
-	CredentialEpoch  uint64   `json:"credential_epoch"`
-	MaxPermitSeconds int      `json:"max_permit_seconds"`
-	AuthorityKeyIDs  []string `json:"authority_key_ids"`
-	OperationIDs     []string `json:"operation_ids"`
+	ConnectorID      string                 `json:"connector_id"`
+	BaseURL          string                 `json:"base_url"`
+	CredentialEpoch  uint64                 `json:"credential_epoch"`
+	MaxPermitSeconds int                    `json:"max_permit_seconds"`
+	AuthorityKeyIDs  []string               `json:"authority_key_ids"`
+	Operations       []actionTrustOperation `json:"operations"`
+}
+
+type actionTrustOperation struct {
+	ID           string `json:"id"`
+	Method       string `json:"method"`
+	Path         string `json:"path"`
+	PolicyDigest string `json:"policy_digest"`
 }
 
 func (values *repeatedFlag) String() string { return strings.Join(*values, ",") }
@@ -100,6 +113,7 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 	credentialFile := flags.String("credential-file", "", "owner-only upstream credential file")
 	credentialMode := flags.String("credential-mode", string(gateway.CredentialModeBearer), "bearer or x-api-key")
 	credentialEpoch := flags.Uint64("credential-epoch", 0, "operator-managed credential authority epoch")
+	trustTenantID := flags.String("tenant-id", "", "exact tenant scope for an exported action-trust inventory")
 	allowInsecureHTTP := flags.Bool("allow-insecure-http", false, "explicitly permit a plaintext HTTP origin")
 	maxConcurrent := flags.Int("max-concurrent", 4, "maximum concurrent calls for this connector")
 	maxRequest := flags.Int64("max-request-bytes", 1<<20, "request body byte ceiling")
@@ -138,13 +152,16 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 		return encoder.Encode(config.Connectors)
 	}
 	if action == "trust" {
-		if !onlyConfigFlagVisited(flags) {
-			return errors.New("gateway connector trust accepts only -config")
+		if *trustTenantID == "" || !onlyNamedFlagsVisited(flags, "config", "tenant-id") {
+			return errors.New("gateway connector trust requires -tenant-id and accepts only -config and -tenant-id")
 		}
-		return writeActionTrustInventory(stdout, config)
+		return writeActionTrustInventory(stdout, config, *trustTenantID)
 	}
 	if action != "set" {
 		return fmt.Errorf("unsupported gateway connector action %q", action)
+	}
+	if flagWasVisited(flags, "tenant-id") {
+		return errors.New("-tenant-id is accepted only by gateway connector trust")
 	}
 	if *id == "" || *baseURL == "" || *credentialFile == "" || len(operations) == 0 {
 		return errors.New("gateway connector set requires -id, -base-url, -credential-file, and at least one -operation")
@@ -157,7 +174,8 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 		}
 		parsedOperations = append(parsedOperations, operation)
 	}
-	if *clearActionPermit && (len(actionAuthorities) != 0 || len(actionAuthorityTenants) != 0 || *actionNodeID != "" || *maxActionPermitSeconds != 0) {
+	if *clearActionPermit && (len(actionAuthorities) != 0 || len(actionAuthorityTenants) != 0 || *actionNodeID != "" ||
+		*maxActionPermitSeconds != 0 || flagWasVisited(flags, "credential-epoch")) {
 		return errors.New("-clear-action-permit cannot be combined with action authority flags")
 	}
 	if len(actionAuthorityTenants) > 0 && len(actionAuthorities) == 0 {
@@ -186,8 +204,6 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 	if selectedCredentialEpoch == 0 {
 		if existingConnector != nil {
 			selectedCredentialEpoch = existingConnector.CredentialEpoch
-		} else {
-			selectedCredentialEpoch = 1
 		}
 	}
 	if len(actionAuthorities) > 0 {
@@ -262,8 +278,10 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 		} else if *actionNodeID != "" && *actionNodeID != config.ActionPermitNodeID {
 			return errors.New("-action-node-id does not match the configured action permit node identity")
 		}
-	} else if *actionNodeID != "" || *maxActionPermitSeconds != 0 {
+	} else if *actionNodeID != "" || *maxActionPermitSeconds != 0 || flagWasVisited(flags, "credential-epoch") {
 		return errors.New("action permit settings require at least one -action-authority")
+	} else {
+		selectedCredentialEpoch = 0
 	}
 	budgetsChanged := false
 	if len(tenantBudgets) > 0 {
@@ -356,31 +374,56 @@ func pruneActionAuthorities(config *gateway.Config) {
 	}
 }
 
-func writeActionTrustInventory(stdout io.Writer, config gateway.Config) error {
+func writeActionTrustInventory(stdout io.Writer, config gateway.Config, tenantID string) error {
 	output := actionTrustInventory{
-		SchemaVersion: actionTrustSchemaV1, NodeID: config.ActionPermitNodeID,
+		SchemaVersion: actionTrustSchemaV1, NodeID: config.ActionPermitNodeID, TenantID: tenantID,
 		Authorities: make([]actionTrustAuthority, 0, len(config.ActionAuthorities)),
 		Connectors:  make([]actionTrustConnector, 0, len(config.Connectors)),
 	}
 	connectorsByKey := make(map[string][]string, len(config.ActionAuthorities))
-	for _, connector := range config.Connectors {
-		for _, keyID := range connector.ActionAuthorityIDs {
-			connectorsByKey[keyID] = append(connectorsByKey[keyID], connector.ID)
+	tenantKeys := make(map[string]struct{})
+	for _, authority := range config.ActionAuthorities {
+		if authority.TenantID == tenantID {
+			tenantKeys[authority.KeyID] = struct{}{}
 		}
-		if len(connector.ActionAuthorityIDs) > 0 {
-			operationIDs := make([]string, 0, len(connector.Operations))
-			for _, operation := range connector.Operations {
-				operationIDs = append(operationIDs, operation.ID)
+	}
+	if len(tenantKeys) == 0 {
+		return fmt.Errorf("tenant %q has no configured action authority", tenantID)
+	}
+	for _, connector := range config.Connectors {
+		authorityKeyIDs := make([]string, 0, len(connector.ActionAuthorityIDs))
+		for _, keyID := range connector.ActionAuthorityIDs {
+			if _, belongs := tenantKeys[keyID]; !belongs {
+				continue
 			}
-			sort.Strings(operationIDs)
+			connectorsByKey[keyID] = append(connectorsByKey[keyID], connector.ID)
+			authorityKeyIDs = append(authorityKeyIDs, keyID)
+		}
+		if len(authorityKeyIDs) > 0 {
+			operations := make([]actionTrustOperation, 0, len(connector.Operations))
+			for _, operation := range connector.Operations {
+				digest, err := gateway.ConnectorOperationPolicyDigest(
+					connector.BaseURL, connector.CredentialEpoch, connector.ID, operation,
+				)
+				if err != nil {
+					return err
+				}
+				operations = append(operations, actionTrustOperation{
+					ID: operation.ID, Method: operation.Method, Path: operation.Path, PolicyDigest: digest,
+				})
+			}
+			sort.Slice(operations, func(i, j int) bool { return operations[i].ID < operations[j].ID })
 			output.Connectors = append(output.Connectors, actionTrustConnector{
-				ConnectorID: connector.ID, CredentialEpoch: connector.CredentialEpoch,
+				ConnectorID: connector.ID, BaseURL: connector.BaseURL, CredentialEpoch: connector.CredentialEpoch,
 				MaxPermitSeconds: connector.MaxActionPermitSeconds,
-				AuthorityKeyIDs:  append([]string(nil), connector.ActionAuthorityIDs...), OperationIDs: operationIDs,
+				AuthorityKeyIDs:  authorityKeyIDs, Operations: operations,
 			})
 		}
 	}
 	for _, authority := range config.ActionAuthorities {
+		if authority.TenantID != tenantID {
+			continue
+		}
 		public, err := base64.StdEncoding.DecodeString(authority.PublicKey)
 		if err != nil {
 			return err
@@ -395,9 +438,17 @@ func writeActionTrustInventory(stdout io.Writer, config gateway.Config) error {
 	}
 	sort.Slice(output.Authorities, func(i, j int) bool { return output.Authorities[i].KeyID < output.Authorities[j].KeyID })
 	sort.Slice(output.Connectors, func(i, j int) bool { return output.Connectors[i].ConnectorID < output.Connectors[j].ConnectorID })
-	encoder := json.NewEncoder(stdout)
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(output)
+	if err := encoder.Encode(output); err != nil {
+		return err
+	}
+	if buffer.Len() > maxActionTrustBytes {
+		return fmt.Errorf("action trust inventory exceeds %d bytes", maxActionTrustBytes)
+	}
+	_, err := stdout.Write(buffer.Bytes())
+	return err
 }
 
 func parseConnectorTenantBudgets(values []string) ([]gateway.ConnectorReceiptTenantBudget, error) {
@@ -506,9 +557,17 @@ func gatewayRouteCommand(arguments []string, stdout io.Writer) error {
 }
 
 func onlyConfigFlagVisited(flags *flag.FlagSet) bool {
+	return onlyNamedFlagsVisited(flags, "config")
+}
+
+func onlyNamedFlagsVisited(flags *flag.FlagSet, names ...string) bool {
+	allowed := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		allowed[name] = struct{}{}
+	}
 	valid := true
 	flags.Visit(func(visited *flag.Flag) {
-		if visited.Name != "config" {
+		if _, ok := allowed[visited.Name]; !ok {
 			valid = false
 		}
 	})

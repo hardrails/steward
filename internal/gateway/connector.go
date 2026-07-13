@@ -244,14 +244,28 @@ func verifyConnectorActionPermit(
 	}
 	statement := verified.Statement
 	requestDigest := actionpermit.RequestDigest(body)
+	operation, operationExists := connector.operations[operationID]
+	if !operationExists {
+		return connectorActionPermit{}, errors.New("permit operation is not configured")
+	}
+	operationDigest, err := ConnectorOperationPolicyDigest(
+		connector.BaseURL, connector.CredentialEpoch, connectorID, operation,
+	)
+	if err != nil {
+		return connectorActionPermit{}, errors.New("connector operation policy is invalid")
+	}
+	contentType, err := ConnectorOperationContentType(operation.Method)
+	if err != nil {
+		return connectorActionPermit{}, errors.New("connector operation content type is invalid")
+	}
 	if connector.authorityTenants[verified.KeyID] != grant.TenantID ||
 		statement.NodeID != connector.permitNodeID || statement.TenantID != grant.TenantID ||
 		statement.InstanceID != grant.InstanceID || statement.Generation != grant.Generation ||
 		statement.CapsuleDigest != grant.CapsuleDigest || statement.PolicyDigest != grant.PolicyDigest ||
 		statement.RoutePolicyDigest != routePolicyDigest || statement.ConnectorID != connectorID ||
-		statement.OperationID != operationID || statement.TaskID != taskID ||
+		statement.OperationID != operationID || statement.OperationDigest != operationDigest || statement.TaskID != taskID ||
 		statement.RequestDigest != requestDigest || statement.RequestBytes != int64(len(body)) ||
-		statement.ContentType != "application/json" {
+		statement.ContentType != contentType {
 		return connectorActionPermit{}, errors.New("permit does not match the active tenant, grant, operation, task, and request")
 	}
 	expiresAt, err := time.Parse(time.RFC3339, statement.ExpiresAt)
@@ -369,6 +383,43 @@ func ConnectorCallDigest(tenantID, instanceID, taskID, connectorID, operationID 
 		_, _ = digest.Write([]byte{0})
 	}
 	return "sha256:" + fmt.Sprintf("%x", digest.Sum(nil))
+}
+
+// ConnectorOperationPolicyDigest identifies the exact non-secret effect route
+// that one logical operation selects. It deliberately excludes credential bytes
+// while including the operator-managed credential epoch.
+func ConnectorOperationPolicyDigest(
+	baseURL string,
+	credentialEpoch uint64,
+	connectorID string,
+	operation ConnectorOperation,
+) (string, error) {
+	base, err := exactConnectorOrigin(baseURL)
+	if err != nil || credentialEpoch == 0 || !routeID(connectorID) || !routeID(operation.ID) ||
+		!connectorMethod(operation.Method) || !canonicalConnectorPath(operation.Path) {
+		return "", errors.New("connector operation policy is invalid")
+	}
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("steward-connector-operation-policy-v1\x00"))
+	for _, value := range []string{
+		connectorID, base.String(), strconv.FormatUint(credentialEpoch, 10), operation.ID, operation.Method, operation.Path,
+	} {
+		_, _ = digest.Write([]byte(value))
+		_, _ = digest.Write([]byte{0})
+	}
+	return "sha256:" + fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+// ConnectorOperationContentType returns the outbound Content-Type fixed by
+// Gateway for a validated connector method.
+func ConnectorOperationContentType(method string) (string, error) {
+	if !connectorMethod(method) {
+		return "", errors.New("unsupported connector method")
+	}
+	if connectorMethodHasBody(method) {
+		return "application/json", nil
+	}
+	return "", nil
 }
 
 func (s *Server) spendConnectorCall(grantID, connectorID, digest string, receipt connectorledger.Event) error {

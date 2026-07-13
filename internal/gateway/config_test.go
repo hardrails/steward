@@ -530,6 +530,11 @@ func TestConfigValidatesActionPermitAuthorities(t *testing.T) {
 	if _, err := withoutAuthorities.validateAndLoadConnectors(); err == nil {
 		t.Fatal("action permit node identity without authorities accepted")
 	}
+	nonPermitEpoch := Config{Connectors: []Connector{connectorFixture(credential)}}
+	nonPermitEpoch.Connectors[0].CredentialEpoch = 1
+	if _, err := nonPermitEpoch.validateAndLoadConnectors(); err == nil {
+		t.Fatal("credential epoch without an action authority accepted")
+	}
 }
 
 func TestActionPermitConfigDoesNotDriftUnrelatedConnector(t *testing.T) {
@@ -575,10 +580,11 @@ func TestActionPermitConfigDoesNotDriftUnrelatedConnector(t *testing.T) {
 		t.Fatalf("unrelated route policy changed: before=%s after=%s", left, right)
 	}
 
-	changed := before["legacy"]
+	approvedGrant := connectorGrant("tenant-a", "agent-a", 1, "approved")
+	changed := after["approved"]
 	changed.CredentialEpoch = 2
-	changedMap := map[string]loadedConnector{"legacy": changed, "approved": before["approved"]}
-	if left, right := routePolicyDigest(grant, nil, nil, before, 4<<20), routePolicyDigest(grant, nil, nil, changedMap, 4<<20); left == right {
+	changedMap := map[string]loadedConnector{"legacy": after["legacy"], "approved": changed}
+	if left, right := routePolicyDigest(approvedGrant, nil, nil, after, 4<<20), routePolicyDigest(approvedGrant, nil, nil, changedMap, 4<<20); left == right {
 		t.Fatal("credential epoch did not change the connector route policy digest")
 	}
 }

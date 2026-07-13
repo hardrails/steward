@@ -58,10 +58,13 @@ func TestVerifyRejectsInvalidSignedStatements(t *testing.T) {
 		{"capsule digest prefix", func(s *Statement) { s.CapsuleDigest = "SHA256:" + strings.Repeat("a", 64) }},
 		{"policy digest length", func(s *Statement) { s.PolicyDigest = digest + "a" }},
 		{"route digest uppercase", func(s *Statement) { s.RoutePolicyDigest = "sha256:" + strings.Repeat("A", 64) }},
+		{"operation digest missing", func(s *Statement) { s.OperationDigest = "" }},
 		{"request digest non hex", func(s *Statement) { s.RequestDigest = "sha256:" + strings.Repeat("g", 64) }},
 		{"negative request bytes", func(s *Statement) { s.RequestBytes = -1 }},
 		{"oversize request", func(s *Statement) { s.RequestBytes = MaxRequestBytes + 1 }},
 		{"content type parameter", func(s *Statement) { s.ContentType = "application/json; charset=utf-8" }},
+		{"bodyless with bytes", func(s *Statement) { s.ContentType = "" }},
+		{"JSON without bytes", func(s *Statement) { s.RequestBytes = 0; s.RequestDigest = RequestDigest(nil) }},
 		{"fractional not before", func(s *Statement) { s.NotBefore = "2026-07-13T11:59:00.000Z" }},
 		{"offset expiry", func(s *Statement) { s.ExpiresAt = "2026-07-13T12:04:00+00:00" }},
 		{"empty interval", func(s *Statement) { s.ExpiresAt = s.NotBefore }},
@@ -86,6 +89,14 @@ func TestVerifyRejectsInvalidSignedStatements(t *testing.T) {
 	if _, err := Verify(signStatement(t, boundary, "authority-a", private),
 		map[string]ed25519.PublicKey{"authority-a": private.Public().(ed25519.PublicKey)}, testNow, 5*time.Minute); err != nil {
 		t.Fatalf("Verify rejected exact request-size boundary: %v", err)
+	}
+	bodyless := validStatement()
+	bodyless.ContentType = ""
+	bodyless.RequestDigest = RequestDigest(nil)
+	bodyless.RequestBytes = 0
+	if _, err := Verify(signStatement(t, bodyless, "authority-a", private),
+		map[string]ed25519.PublicKey{"authority-a": private.Public().(ed25519.PublicKey)}, testNow, 5*time.Minute); err != nil {
+		t.Fatalf("Verify rejected bodyless operation metadata: %v", err)
 	}
 }
 
@@ -306,7 +317,7 @@ func validStatement() Statement {
 		SchemaVersion: SchemaV1, NodeID: "node/a", TenantID: "tenant-a", InstanceID: "instance/a",
 		Generation: 7, CapsuleDigest: "sha256:" + strings.Repeat("a", 64),
 		PolicyDigest: "sha256:" + strings.Repeat("b", 64), RoutePolicyDigest: "sha256:" + strings.Repeat("c", 64),
-		ConnectorID: "tickets.create", OperationID: "issues.create", TaskID: "task.123",
+		ConnectorID: "tickets.create", OperationID: "issues.create", OperationDigest: "sha256:" + strings.Repeat("d", 64), TaskID: "task.123",
 		RequestDigest: RequestDigest([]byte(`{"title":"help"}`)), RequestBytes: int64(len([]byte(`{"title":"help"}`))),
 		ContentType: "application/json", NotBefore: "2026-07-13T11:59:00Z", ExpiresAt: "2026-07-13T12:04:00Z",
 	}

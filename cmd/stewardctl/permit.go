@@ -126,12 +126,16 @@ func issuePermit(arguments []string, stdout io.Writer) error {
 	if !ok {
 		return errors.New("action-authority private key does not contain an Ed25519 public key")
 	}
-	if err := validateActionTrust(*trustPath, intent, *connectorID, *operationID, *keyID, public, *validFor); err != nil {
+	trustedOperation, err := validateActionTrust(*trustPath, intent, *connectorID, *operationID, *keyID, public, *validFor)
+	if err != nil {
 		return err
 	}
 
 	var request []byte
 	if *requestPath != "" {
+		if trustedOperation.ContentType == "" {
+			return errors.New("the trusted connector operation does not accept a request body")
+		}
 		request, err = securefile.Read(*requestPath, maxPermitRequestBytes, securefile.Regular)
 		if err != nil {
 			return fmt.Errorf("read exact connector request: %w", err)
@@ -139,6 +143,8 @@ func issuePermit(arguments []string, stdout io.Writer) error {
 		if err := validatePermitRequest(request); err != nil {
 			return err
 		}
+	} else if trustedOperation.ContentType != "" {
+		return errors.New("the trusted connector operation requires -request with one JSON value")
 	}
 	now := timeNow().UTC().Truncate(time.Second)
 	notBefore := now.Add(-*clockSkew)
@@ -146,8 +152,8 @@ func issuePermit(arguments []string, stdout io.Writer) error {
 		SchemaVersion: actionpermit.SchemaV1, NodeID: intent.NodeID, TenantID: intent.TenantID,
 		InstanceID: intent.InstanceID, Generation: intent.Generation, CapsuleDigest: admitted.CapsuleDigest,
 		PolicyDigest: admitted.PolicyDigest, RoutePolicyDigest: admitted.RoutePolicyDigest,
-		ConnectorID: *connectorID, OperationID: *operationID, TaskID: *taskID,
-		RequestDigest: actionpermit.RequestDigest(request), RequestBytes: int64(len(request)), ContentType: "application/json",
+		ConnectorID: *connectorID, OperationID: *operationID, OperationDigest: trustedOperation.PolicyDigest, TaskID: *taskID,
+		RequestDigest: actionpermit.RequestDigest(request), RequestBytes: int64(len(request)), ContentType: trustedOperation.ContentType,
 		NotBefore: notBefore.Format(time.RFC3339), ExpiresAt: notBefore.Add(*validFor).Format(time.RFC3339),
 	}
 	payload, err := json.Marshal(statement)
@@ -382,23 +388,28 @@ func checkPermitReceiptBindings(statement actionpermit.Statement, authorityKeyID
 	return nil
 }
 
+type validatedActionTrust struct {
+	PolicyDigest string
+	ContentType  string
+}
+
 func validateActionTrust(
 	path string,
 	intent admission.InstanceIntent,
 	connectorID, operationID, keyID string,
 	public ed25519.PublicKey,
 	validFor time.Duration,
-) error {
-	raw, err := securefile.Read(path, maxArtifactBytes, securefile.TrustFile)
+) (validatedActionTrust, error) {
+	raw, err := securefile.Read(path, maxActionTrustBytes, securefile.TrustFile)
 	if err != nil {
-		return fmt.Errorf("read action trust inventory: %w", err)
+		return validatedActionTrust{}, fmt.Errorf("read action trust inventory: %w", err)
 	}
 	var inventory actionTrustInventory
-	if err := dsse.DecodeStrictInto(raw, maxArtifactBytes, &inventory); err != nil {
-		return fmt.Errorf("decode action trust inventory: %w", err)
+	if err := dsse.DecodeStrictInto(raw, maxActionTrustBytes, &inventory); err != nil {
+		return validatedActionTrust{}, fmt.Errorf("decode action trust inventory: %w", err)
 	}
-	if inventory.SchemaVersion != actionTrustSchemaV1 || inventory.NodeID != intent.NodeID {
-		return errors.New("action trust inventory does not match the instance node")
+	if inventory.SchemaVersion != actionTrustSchemaV1 || inventory.NodeID != intent.NodeID || inventory.TenantID != intent.TenantID {
+		return validatedActionTrust{}, errors.New("action trust inventory does not match the instance node and tenant")
 	}
 	var authority *actionTrustAuthority
 	for index := range inventory.Authorities {
@@ -406,13 +417,13 @@ func validateActionTrust(
 			continue
 		}
 		if authority != nil {
-			return fmt.Errorf("action trust inventory duplicates authority %q", keyID)
+			return validatedActionTrust{}, fmt.Errorf("action trust inventory duplicates authority %q", keyID)
 		}
 		authority = &inventory.Authorities[index]
 	}
 	if authority == nil || authority.TenantID != intent.TenantID || authority.PublicKeyDigest != dsse.Digest(public) ||
 		!slices.Contains(authority.ConnectorIDs, connectorID) {
-		return errors.New("action trust inventory does not bind the signing key to this tenant and connector")
+		return validatedActionTrust{}, errors.New("action trust inventory does not bind the signing key to this tenant and connector")
 	}
 	var connector *actionTrustConnector
 	for index := range inventory.Connectors {
@@ -420,19 +431,42 @@ func validateActionTrust(
 			continue
 		}
 		if connector != nil {
-			return fmt.Errorf("action trust inventory duplicates connector %q", connectorID)
+			return validatedActionTrust{}, fmt.Errorf("action trust inventory duplicates connector %q", connectorID)
 		}
 		connector = &inventory.Connectors[index]
 	}
 	if connector == nil || connector.CredentialEpoch == 0 || connector.MaxPermitSeconds < 1 ||
-		connector.MaxPermitSeconds > int(actionpermit.MaxValidity/time.Second) ||
-		!slices.Contains(connector.AuthorityKeyIDs, keyID) || !slices.Contains(connector.OperationIDs, operationID) {
-		return errors.New("action trust inventory does not bind the connector operation to the signing authority")
+		connector.MaxPermitSeconds > int(actionpermit.MaxValidity/time.Second) || !slices.Contains(connector.AuthorityKeyIDs, keyID) {
+		return validatedActionTrust{}, errors.New("action trust inventory does not bind the connector to the signing authority")
 	}
 	if validFor > time.Duration(connector.MaxPermitSeconds)*time.Second {
-		return fmt.Errorf("permit validity %s exceeds connector maximum %s", validFor, time.Duration(connector.MaxPermitSeconds)*time.Second)
+		return validatedActionTrust{}, fmt.Errorf("permit validity %s exceeds connector maximum %s", validFor, time.Duration(connector.MaxPermitSeconds)*time.Second)
 	}
-	return nil
+	var operation *actionTrustOperation
+	for index := range connector.Operations {
+		if connector.Operations[index].ID != operationID {
+			continue
+		}
+		if operation != nil {
+			return validatedActionTrust{}, fmt.Errorf("action trust inventory duplicates operation %q", operationID)
+		}
+		operation = &connector.Operations[index]
+	}
+	if operation == nil {
+		return validatedActionTrust{}, errors.New("action trust inventory does not contain the requested connector operation")
+	}
+	policyDigest, err := gateway.ConnectorOperationPolicyDigest(
+		connector.BaseURL, connector.CredentialEpoch, connector.ConnectorID,
+		gateway.ConnectorOperation{ID: operation.ID, Method: operation.Method, Path: operation.Path},
+	)
+	if err != nil || policyDigest != operation.PolicyDigest {
+		return validatedActionTrust{}, errors.New("action trust inventory contains inconsistent connector operation policy")
+	}
+	contentType, err := gateway.ConnectorOperationContentType(operation.Method)
+	if err != nil {
+		return validatedActionTrust{}, errors.New("action trust inventory contains an unsupported connector operation method")
+	}
+	return validatedActionTrust{PolicyDigest: policyDigest, ContentType: contentType}, nil
 }
 
 func permitEvaluationTime(value string) (time.Time, error) {

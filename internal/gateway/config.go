@@ -336,13 +336,13 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 			return nil, fmt.Errorf("connector %q has invalid limits or operations", connector.ID)
 		}
 		if len(connector.ActionAuthorityIDs) == 0 {
-			if connector.MaxActionPermitSeconds != 0 {
-				return nil, fmt.Errorf("connector %q sets a permit lifetime without an action authority", connector.ID)
+			if connector.MaxActionPermitSeconds != 0 || connector.CredentialEpoch != 0 {
+				return nil, fmt.Errorf("connector %q sets action-permit metadata without an action authority", connector.ID)
 			}
 		} else if len(connector.ActionAuthorityIDs) > maxActionAuthoritiesPerCall ||
 			connector.MaxActionPermitSeconds < 1 || connector.MaxActionPermitSeconds > maxActionPermitSeconds ||
 			connector.CredentialEpoch == 0 {
-			return nil, fmt.Errorf("connector %q has invalid action permit authorities or lifetime", connector.ID)
+			return nil, fmt.Errorf("connector %q has invalid action permit authorities, credential epoch, or lifetime", connector.ID)
 		}
 		if _, exists := loaded[connector.ID]; exists {
 			return nil, fmt.Errorf("duplicate connector %q", connector.ID)

@@ -122,6 +122,38 @@ func TestPermitIssueAndVerifyExactRequest(t *testing.T) {
 	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "does not bind") {
 		t.Fatalf("changed request verify error=%v", err)
 	}
+
+	readTrustPath := writeActionTrustFixtureForOperation(t, directory, intent.NodeID, intent.TenantID, "ticketing", "read-ticket",
+		"approver-a", publicPath, 3600, "GET", "/v1/tickets/current")
+	bodylessPermitPath := filepath.Join(directory, "bodyless-permit.dsse.json")
+	if err := run([]string{
+		"permit", "issue", "-admission", admissionPath, "-intent", intentPath, "-trust", readTrustPath,
+		"-connector-id", "ticketing", "-operation-id", "read-ticket", "-task-id", "task-read-123",
+		"-key", privatePath, "-key-id", "approver-a", "-out", bodylessPermitPath,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("issue bodyless permit: %v", err)
+	}
+	output.Reset()
+	if err := run([]string{
+		"permit", "verify", "-in", bodylessPermitPath, "-public-key", publicPath, "-key-id", "approver-a",
+	}, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"content_type":""`) ||
+		!strings.Contains(output.String(), `"request_bytes":0`) {
+		t.Fatalf("verify bodyless permit output=%q error=%v", output.String(), err)
+	}
+	if err := run([]string{
+		"permit", "issue", "-admission", admissionPath, "-intent", intentPath, "-trust", readTrustPath,
+		"-request", requestPath, "-connector-id", "ticketing", "-operation-id", "read-ticket", "-task-id", "task-read-body",
+		"-key", privatePath, "-key-id", "approver-a", "-out", filepath.Join(directory, "invalid-read-permit.json"),
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "does not accept a request body") {
+		t.Fatalf("body on GET trust error=%v", err)
+	}
+	if err := run([]string{
+		"permit", "issue", "-admission", admissionPath, "-intent", intentPath, "-trust", trustPath,
+		"-connector-id", "ticketing", "-operation-id", "create-ticket", "-task-id", "task-post-empty",
+		"-key", privatePath, "-key-id", "approver-a", "-out", filepath.Join(directory, "invalid-post-permit.json"),
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "requires -request") {
+		t.Fatalf("missing POST body trust error=%v", err)
+	}
 }
 
 func TestPermitIssueRejectsAuthorityMismatchAndUnsafeValidity(t *testing.T) {
@@ -176,12 +208,16 @@ func TestPermitIssueRejectsAuthorityMismatchAndUnsafeValidity(t *testing.T) {
 	wrongTrustPath := writePermitJSON(t, directory, "wrong-node-action-trust.json", actionTrustInventory{
 		SchemaVersion: actionTrustSchemaV1,
 		NodeID:        "node-b",
+		TenantID:      intent.TenantID,
 		Authorities: []actionTrustAuthority{{
 			KeyID: "approver-a", TenantID: intent.TenantID, PublicKeyDigest: dsse.Digest(public), ConnectorIDs: []string{"ticketing"},
 		}},
 		Connectors: []actionTrustConnector{{
-			ConnectorID: "ticketing", CredentialEpoch: 1, MaxPermitSeconds: 3600,
-			AuthorityKeyIDs: []string{"approver-a"}, OperationIDs: []string{"create"},
+			ConnectorID: "ticketing", BaseURL: "https://tickets.example.test", CredentialEpoch: 1, MaxPermitSeconds: 3600,
+			AuthorityKeyIDs: []string{"approver-a"}, Operations: []actionTrustOperation{{
+				ID: "create", Method: "POST", Path: "/v1/tickets",
+				PolicyDigest: mustOperationPolicyDigest(t, "https://tickets.example.test", 1, "ticketing", "create", "POST", "/v1/tickets"),
+			}},
 		}},
 	})
 	wrongTrust := append([]string(nil), base...)
@@ -193,6 +229,31 @@ func TestPermitIssueRejectsAuthorityMismatchAndUnsafeValidity(t *testing.T) {
 	}
 	if err := run(wrongTrust, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "does not match the instance node") {
 		t.Fatalf("wrong-node trust inventory error=%v", err)
+	}
+	tamperedTrustPath := writePermitJSON(t, directory, "tampered-operation-action-trust.json", actionTrustInventory{
+		SchemaVersion: actionTrustSchemaV1,
+		NodeID:        intent.NodeID,
+		TenantID:      intent.TenantID,
+		Authorities: []actionTrustAuthority{{
+			KeyID: "approver-a", TenantID: intent.TenantID, PublicKeyDigest: dsse.Digest(public), ConnectorIDs: []string{"ticketing"},
+		}},
+		Connectors: []actionTrustConnector{{
+			ConnectorID: "ticketing", BaseURL: "https://tickets.example.test", CredentialEpoch: 1, MaxPermitSeconds: 3600,
+			AuthorityKeyIDs: []string{"approver-a"}, Operations: []actionTrustOperation{{
+				ID: "create", Method: "PUT", Path: "/v1/tickets",
+				PolicyDigest: mustOperationPolicyDigest(t, "https://tickets.example.test", 1, "ticketing", "create", "POST", "/v1/tickets"),
+			}},
+		}},
+	})
+	tamperedTrust := append([]string(nil), base...)
+	for index := range tamperedTrust {
+		if tamperedTrust[index] == trustPath {
+			tamperedTrust[index] = tamperedTrustPath
+			break
+		}
+	}
+	if err := run(tamperedTrust, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "inconsistent connector operation policy") {
+		t.Fatalf("tampered operation trust inventory error=%v", err)
 	}
 
 	requestPath := filepath.Join(directory, "invalid-request.json")
@@ -220,7 +281,11 @@ func TestPermitIssueRejectsAuthorityMismatchAndUnsafeValidity(t *testing.T) {
 	if err := os.WriteFile(headerPath, []byte("keep\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	transactional := append(append([]string(nil), base...), "-header-out", headerPath)
+	validRequestPath := filepath.Join(directory, "valid-request.json")
+	if err := os.WriteFile(validRequestPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transactional := append(append([]string(nil), base...), "-request", validRequestPath, "-header-out", headerPath)
 	if err := run(transactional, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("existing header output error=%v", err)
 	}
@@ -435,20 +500,45 @@ func writeActionTrustFixture(
 	directory, nodeID, tenantID, connectorID, operationID, keyID, publicPath string,
 	maxPermitSeconds int,
 ) string {
+	return writeActionTrustFixtureForOperation(t, directory, nodeID, tenantID, connectorID, operationID,
+		keyID, publicPath, maxPermitSeconds, "POST", "/v1/tickets")
+}
+
+func writeActionTrustFixtureForOperation(
+	t *testing.T,
+	directory, nodeID, tenantID, connectorID, operationID, keyID, publicPath string,
+	maxPermitSeconds int,
+	method, path string,
+) string {
 	t.Helper()
 	public, err := readPublicKey(publicPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return writePermitJSON(t, directory, "action-trust-"+connectorID+".json", actionTrustInventory{
+	return writePermitJSON(t, directory, "action-trust-"+connectorID+"-"+operationID+".json", actionTrustInventory{
 		SchemaVersion: actionTrustSchemaV1,
 		NodeID:        nodeID,
+		TenantID:      tenantID,
 		Authorities: []actionTrustAuthority{{
 			KeyID: keyID, TenantID: tenantID, PublicKeyDigest: dsse.Digest(public), ConnectorIDs: []string{connectorID},
 		}},
 		Connectors: []actionTrustConnector{{
-			ConnectorID: connectorID, CredentialEpoch: 1, MaxPermitSeconds: maxPermitSeconds,
-			AuthorityKeyIDs: []string{keyID}, OperationIDs: []string{operationID},
+			ConnectorID: connectorID, BaseURL: "https://tickets.example.test", CredentialEpoch: 1, MaxPermitSeconds: maxPermitSeconds,
+			AuthorityKeyIDs: []string{keyID}, Operations: []actionTrustOperation{{
+				ID: operationID, Method: method, Path: path,
+				PolicyDigest: mustOperationPolicyDigest(t, "https://tickets.example.test", 1, connectorID, operationID, method, path),
+			}},
 		}},
 	})
+}
+
+func mustOperationPolicyDigest(t *testing.T, baseURL string, epoch uint64, connectorID, operationID, method, path string) string {
+	t.Helper()
+	digest, err := gateway.ConnectorOperationPolicyDigest(baseURL, epoch, connectorID, gateway.ConnectorOperation{
+		ID: operationID, Method: method, Path: path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
 }

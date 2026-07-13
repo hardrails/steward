@@ -875,8 +875,21 @@ func (s *Server) validGrant(grant Grant) bool {
 		if !routeID(id) {
 			return false
 		}
-		if _, ok := s.connectors[id]; !ok {
+		connector, ok := s.connectors[id]
+		if !ok {
 			return false
+		}
+		if len(connector.authorities) > 0 {
+			tenantAuthorized := false
+			for keyID := range connector.authorities {
+				if connector.authorityTenants[keyID] == grant.TenantID {
+					tenantAuthorized = true
+					break
+				}
+			}
+			if !tenantAuthorized {
+				return false
+			}
 		}
 		if index > 0 && grant.ConnectorIDs[index-1] >= id {
 			return false

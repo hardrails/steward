@@ -225,13 +225,27 @@ func actionPermitFor(
 ) (string, string) {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
+	connector := rig.server.connectors["issues"]
+	operation, ok := connector.operations[operationID]
+	if !ok {
+		t.Fatalf("test connector has no operation %q", operationID)
+	}
+	operationDigest, err := ConnectorOperationPolicyDigest(connector.BaseURL, connector.CredentialEpoch, connector.ID, operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentType, err := ConnectorOperationContentType(operation.Method)
+	if err != nil {
+		t.Fatal(err)
+	}
 	statement := actionpermit.Statement{
 		SchemaVersion: actionpermit.SchemaV1, NodeID: rig.config.ActionPermitNodeID,
 		TenantID: rig.grant.TenantID, InstanceID: rig.grant.InstanceID, Generation: rig.grant.Generation,
 		CapsuleDigest: rig.grant.CapsuleDigest, PolicyDigest: rig.grant.PolicyDigest,
 		RoutePolicyDigest: rig.server.policyDigests[rig.grant.GrantID], ConnectorID: "issues",
-		OperationID: operationID, TaskID: taskID, RequestDigest: actionpermit.RequestDigest(body), RequestBytes: int64(len(body)),
-		ContentType: "application/json", NotBefore: now.Add(-time.Minute).Format(time.RFC3339),
+		OperationID: operationID, OperationDigest: operationDigest, TaskID: taskID,
+		RequestDigest: actionpermit.RequestDigest(body), RequestBytes: int64(len(body)),
+		ContentType: contentType, NotBefore: now.Add(-time.Minute).Format(time.RFC3339),
 		ExpiresAt: now.Add(4 * time.Minute).Format(time.RFC3339),
 	}
 	if mutate != nil {
@@ -296,6 +310,15 @@ func TestConnectorRequiresAndSpendsExactSignedActionPermit(t *testing.T) {
 	if foreignResponse.Code != http.StatusForbidden || calls.Load() != 0 {
 		t.Fatalf("foreign permit status=%d body=%s calls=%d", foreignResponse.Code, foreignResponse.Body.String(), calls.Load())
 	}
+	wrongOperationPolicy, _ := actionPermitFor(t, rig, taskID, "create", body, func(statement *actionpermit.Statement) {
+		statement.OperationDigest = "sha256:" + strings.Repeat("f", 64)
+	})
+	wrongOperation := connectorRequest(http.MethodPost, "issues", "create", taskID, bytes.NewReader(body))
+	wrongOperation.Header.Set(actionPermitHeader, wrongOperationPolicy)
+	wrongOperationResponse := invokeConnector(rig.server, rig.grant.GrantID, wrongOperation)
+	if wrongOperationResponse.Code != http.StatusForbidden || calls.Load() != 0 {
+		t.Fatalf("wrong operation policy status=%d body=%s calls=%d", wrongOperationResponse.Code, wrongOperationResponse.Body.String(), calls.Load())
+	}
 
 	valid := connectorRequest(http.MethodPost, "issues", "create", taskID, bytes.NewReader(body))
 	valid.Header.Set(actionPermitHeader, validHeader)
@@ -332,6 +355,63 @@ func TestConnectorRequiresAndSpendsExactSignedActionPermit(t *testing.T) {
 	}
 }
 
+func TestConnectorAcceptsBodylessPermitWithExactOutboundMetadata(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		if request.Method != http.MethodGet || request.Header.Get("Content-Type") != "" || request.ContentLength != 0 {
+			t.Errorf("bodyless operation metadata: method=%s content-type=%q length=%d",
+				request.Method, request.Header.Get("Content-Type"), request.ContentLength)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":7}`))
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true,
+	})
+	header, _ := actionPermitFor(t, rig, "task-read-permitted", "read", nil, nil)
+	request := connectorRequest(http.MethodGet, "issues", "read", "task-read-permitted", nil)
+	request.Header.Set(actionPermitHeader, header)
+	response := invokeConnector(rig.server, rig.grant.GrantID, request)
+	if response.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("bodyless permit status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+}
+
+func TestConnectorOperationPolicyDigestBindsEveryEffectRouteField(t *testing.T) {
+	base := ConnectorOperation{ID: "create", Method: http.MethodPost, Path: "/v1/issues"}
+	want, err := ConnectorOperationPolicyDigest("https://api.example.test", 1, "issues", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variants := []struct {
+		origin      string
+		epoch       uint64
+		connectorID string
+		operation   ConnectorOperation
+	}{
+		{origin: "https://other.example.test", epoch: 1, connectorID: "issues", operation: base},
+		{origin: "https://api.example.test", epoch: 2, connectorID: "issues", operation: base},
+		{origin: "https://api.example.test", epoch: 1, connectorID: "other", operation: base},
+		{origin: "https://api.example.test", epoch: 1, connectorID: "issues", operation: ConnectorOperation{ID: "update", Method: http.MethodPost, Path: "/v1/issues"}},
+		{origin: "https://api.example.test", epoch: 1, connectorID: "issues", operation: ConnectorOperation{ID: "create", Method: http.MethodPut, Path: "/v1/issues"}},
+		{origin: "https://api.example.test", epoch: 1, connectorID: "issues", operation: ConnectorOperation{ID: "create", Method: http.MethodPost, Path: "/v2/issues"}},
+	}
+	for _, variant := range variants {
+		got, err := ConnectorOperationPolicyDigest(variant.origin, variant.epoch, variant.connectorID, variant.operation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got == want {
+			t.Fatalf("operation policy digest ignored changed route: %#v", variant)
+		}
+	}
+	if _, err := ConnectorOperationPolicyDigest("https://api.example.test/path", 1, "issues", base); err == nil {
+		t.Fatal("operation policy digest accepted a non-origin base URL")
+	}
+}
+
 func TestConnectorRejectsPermitHeaderWhenPolicyDoesNotRequireIt(t *testing.T) {
 	rig := newConnectorRig(t, "https://api.example.test", connectorRigOptions{})
 	request := connectorRequest(http.MethodGet, "issues", "read", "task-unconfigured-permit", nil)
@@ -347,15 +427,35 @@ func TestConnectorActionAuthorityCannotCrossTenantBoundary(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
 	defer upstream.Close()
 	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
-		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, actionTenant: "tenant-b",
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true,
 	})
 	body := []byte(`{"title":"tenant-bound"}`)
 	header, _ := actionPermitFor(t, rig, "task-tenant-scope", "create", body, nil)
+	connector := rig.server.connectors["issues"]
+	connector.authorityTenants["approver-a"] = "tenant-b"
+	rig.server.connectors["issues"] = connector
 	request := connectorRequest(http.MethodPost, "issues", "create", "task-tenant-scope", bytes.NewReader(body))
 	request.Header.Set(actionPermitHeader, header)
 	response := invokeConnector(rig.server, rig.grant.GrantID, request)
 	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"error":"action_permit_denied"`) || calls.Load() != 0 {
 		t.Fatalf("cross-tenant permit status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+}
+
+func TestPermitConnectorGrantRequiresAuthorityForEveryTenantRoute(t *testing.T) {
+	rig := newConnectorRig(t, "https://api.example.test", connectorRigOptions{requirePermit: true})
+	foreignTenant := connectorGrant("tenant-b", "agent-b", 1, "issues")
+	if rig.server.validGrant(foreignTenant) {
+		t.Fatal("permit connector grant accepted without an action authority for its tenant")
+	}
+
+	foreignConnector := rig.server.connectors["issues"]
+	foreignConnector.ID = "foreign"
+	foreignConnector.authorityTenants = map[string]string{"approver-a": "tenant-b"}
+	rig.server.connectors["foreign"] = foreignConnector
+	mixed := connectorGrant("tenant-a", "agent-mixed", 1, "foreign", "issues")
+	if rig.server.validGrant(mixed) {
+		t.Fatal("mixed connector grant accepted when one permit connector had no tenant authority")
 	}
 }
 
