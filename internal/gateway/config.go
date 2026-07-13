@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -16,7 +18,16 @@ import (
 	"github.com/hardrails/steward/internal/nodeclient"
 )
 
-const maxConfigBytes = 1 << 20
+const (
+	maxConfigBytes            = 1 << 20
+	maxConnectors             = 128
+	maxConnectorOperations    = 64
+	maxConnectorAllowedCIDRs  = 64
+	maxConnectorRequestBytes  = int64(4 << 20)
+	maxConnectorResponseBytes = int64(32 << 20)
+	maxConnectorSeconds       = 3600
+	maxConnectorCallsPerGrant = 256
+)
 
 type Config struct {
 	Version          int           `json:"version"`
@@ -30,6 +41,12 @@ type Config struct {
 	Routes           []Route       `json:"routes"`
 	EgressAuditFile  string        `json:"egress_audit_file,omitempty"`
 	EgressRoutes     []EgressRoute `json:"egress_routes,omitempty"`
+	Connectors       []Connector   `json:"connectors,omitempty"`
+
+	// loadedConnectors contains validated origins, credentials, CIDRs, and
+	// operation indexes populated by LoadConfig. It is deliberately absent from
+	// JSON so secret contents can never be serialized with operator policy.
+	loadedConnectors map[string]loadedConnector
 }
 
 type Route struct {
@@ -70,6 +87,47 @@ type loadedEgressRoute struct {
 	destinations []loadedEgressDestination
 }
 
+// CredentialMode is the complete connector credential-injection vocabulary.
+// A connector cannot select an arbitrary header name.
+type CredentialMode string
+
+const (
+	CredentialModeBearer  CredentialMode = "bearer"
+	CredentialModeXAPIKey CredentialMode = "x-api-key"
+)
+
+// Connector binds a finite set of logical operations to one exact upstream
+// origin and one operator-owned credential.
+type Connector struct {
+	ID               string               `json:"id"`
+	BaseURL          string               `json:"base_url"`
+	CredentialFile   string               `json:"credential_file"`
+	CredentialMode   CredentialMode       `json:"credential_mode"`
+	AllowedCIDRs     []string             `json:"allowed_cidrs,omitempty"`
+	MaxConcurrent    int                  `json:"max_concurrent"`
+	MaxRequestBytes  int64                `json:"max_request_bytes"`
+	MaxResponseBytes int64                `json:"max_response_bytes"`
+	MaxSeconds       int                  `json:"max_seconds"`
+	MaxCallsPerGrant int                  `json:"max_calls_per_grant"`
+	Operations       []ConnectorOperation `json:"operations"`
+}
+
+// ConnectorOperation is one exact method and path. Paths have no templates,
+// query strings, fragments, or alternate percent-encoded spelling.
+type ConnectorOperation struct {
+	ID     string `json:"id"`
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
+type loadedConnector struct {
+	Connector
+	base       *url.URL
+	credential string
+	prefixes   []netip.Prefix
+	operations map[string]ConnectorOperation
+}
+
 func LoadConfig(path string) (Config, map[string]loadedRoute, map[string]loadedEgressRoute, string, error) {
 	raw, err := nodeclient.ReadBounded(path, maxConfigBytes)
 	if err != nil {
@@ -87,11 +145,126 @@ func LoadConfig(path string) (Config, map[string]loadedRoute, map[string]loadedE
 	if err != nil {
 		return Config{}, nil, nil, "", err
 	}
+	connectors, err := config.validateAndLoadConnectors()
+	if err != nil {
+		return Config{}, nil, nil, "", err
+	}
+	config.loadedConnectors = connectors
 	token, err := nodeclient.ReadToken(config.ServiceTokenFile)
 	if err != nil {
 		return Config{}, nil, nil, "", fmt.Errorf("read gateway service token: %w", err)
 	}
 	return config, routes, egressRoutes, token, nil
+}
+
+func (c Config) connectorMap() (map[string]loadedConnector, error) {
+	if c.loadedConnectors != nil {
+		return c.loadedConnectors, nil
+	}
+	return c.validateAndLoadConnectors()
+}
+
+func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) {
+	if len(c.Connectors) > maxConnectors {
+		return nil, fmt.Errorf("gateway config permits at most %d connectors", maxConnectors)
+	}
+	loaded := make(map[string]loadedConnector, len(c.Connectors))
+	for _, connector := range c.Connectors {
+		if !routeID(connector.ID) || connector.MaxConcurrent < 1 || connector.MaxConcurrent > 256 ||
+			connector.MaxRequestBytes < 1 || connector.MaxRequestBytes > maxConnectorRequestBytes ||
+			connector.MaxResponseBytes < 1 || connector.MaxResponseBytes > maxConnectorResponseBytes ||
+			connector.MaxSeconds < 1 || connector.MaxSeconds > maxConnectorSeconds ||
+			connector.MaxCallsPerGrant < 1 || connector.MaxCallsPerGrant > maxConnectorCallsPerGrant ||
+			len(connector.Operations) < 1 || len(connector.Operations) > maxConnectorOperations ||
+			len(connector.AllowedCIDRs) > maxConnectorAllowedCIDRs {
+			return nil, fmt.Errorf("connector %q has invalid limits or operations", connector.ID)
+		}
+		if _, exists := loaded[connector.ID]; exists {
+			return nil, fmt.Errorf("duplicate connector %q", connector.ID)
+		}
+		base, err := exactConnectorOrigin(connector.BaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("connector %q base_url: %w", connector.ID, err)
+		}
+		if !absoluteClean(connector.CredentialFile) {
+			return nil, fmt.Errorf("connector %q credential path must be absolute", connector.ID)
+		}
+		if connector.CredentialMode != CredentialModeBearer && connector.CredentialMode != CredentialModeXAPIKey {
+			return nil, fmt.Errorf("connector %q has unsupported credential mode", connector.ID)
+		}
+		credential, err := readCredential(connector.CredentialFile)
+		if err != nil {
+			return nil, fmt.Errorf("connector %q credential: %w", connector.ID, err)
+		}
+		entry := loadedConnector{
+			Connector: connector, base: base, credential: credential,
+			operations: make(map[string]ConnectorOperation, len(connector.Operations)),
+		}
+		seenCIDRs := make(map[string]struct{}, len(connector.AllowedCIDRs))
+		for _, cidr := range connector.AllowedCIDRs {
+			prefix, err := netip.ParsePrefix(cidr)
+			if err != nil || prefix.String() != cidr || prefix.Masked() != prefix {
+				return nil, fmt.Errorf("connector %q has invalid canonical allowed CIDR", connector.ID)
+			}
+			if _, duplicate := seenCIDRs[cidr]; duplicate {
+				return nil, fmt.Errorf("connector %q has duplicate allowed CIDR", connector.ID)
+			}
+			seenCIDRs[cidr] = struct{}{}
+			entry.prefixes = append(entry.prefixes, prefix)
+		}
+		for _, operation := range connector.Operations {
+			if !routeID(operation.ID) || !connectorMethod(operation.Method) || !canonicalConnectorPath(operation.Path) {
+				return nil, fmt.Errorf("connector %q has invalid operation", connector.ID)
+			}
+			if _, duplicate := entry.operations[operation.ID]; duplicate {
+				return nil, fmt.Errorf("connector %q has duplicate operation %q", connector.ID, operation.ID)
+			}
+			entry.operations[operation.ID] = operation
+		}
+		loaded[connector.ID] = entry
+	}
+	return loaded, nil
+}
+
+func exactConnectorOrigin(value string) (*url.URL, error) {
+	base, err := url.Parse(value)
+	if err != nil || base.Scheme != strings.ToLower(base.Scheme) ||
+		(base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil ||
+		base.Path != "" || base.RawPath != "" || base.RawQuery != "" || base.ForceQuery || base.Fragment != "" || base.Opaque != "" ||
+		base.String() != value || base.Host != strings.ToLower(base.Host) {
+		return nil, errors.New("must be an exact canonical HTTP(S) origin")
+	}
+	host := base.Hostname()
+	if host == "" || strings.HasSuffix(host, ".") || (!egressHostPattern.MatchString(host) && net.ParseIP(host) == nil) {
+		return nil, errors.New("must contain a canonical hostname or IP address")
+	}
+	if portText := base.Port(); portText != "" {
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+			return nil, errors.New("must contain a canonical numeric port")
+		}
+	} else if strings.HasSuffix(base.Host, ":") {
+		return nil, errors.New("must not contain an empty port")
+	}
+	return base, nil
+}
+
+func connectorMethod(value string) bool {
+	switch value {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func connectorMethodHasBody(value string) bool {
+	return value == http.MethodPost || value == http.MethodPut || value == http.MethodPatch
+}
+
+func canonicalConnectorPath(value string) bool {
+	return strings.HasPrefix(value, "/") && len(value) <= 2048 && pathpkg.Clean(value) == value &&
+		!strings.Contains(value, "//") && !strings.ContainsAny(value, "%\\?#\x00")
 }
 
 func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {

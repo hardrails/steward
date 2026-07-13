@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,5 +104,91 @@ func TestConfigValidatesBoundedEgressRoutes(t *testing.T) {
 		if _, err := config.validateEgressRoutes(); err == nil {
 			t.Fatalf("invalid egress config accepted: %#v", config)
 		}
+	}
+}
+
+func TestConfigLoadsFiniteConnectorsAndOwnerOnlyCredentials(t *testing.T) {
+	directory := t.TempDir()
+	credential := filepath.Join(directory, "connector-token")
+	if err := os.WriteFile(credential, []byte("connector-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := Config{Connectors: []Connector{connectorFixture(credential)}}
+	loaded, err := config.validateAndLoadConnectors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connector := loaded["issues"]
+	if connector.credential != "connector-secret" || connector.base.String() != "https://api.example.test:8443" ||
+		len(connector.prefixes) != 1 || connector.operations["create"].Path != "/v1/issues" {
+		t.Fatalf("loaded connector = %#v", connector)
+	}
+	if err := os.Chmod(credential, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.validateAndLoadConnectors(); err == nil || !strings.Contains(err.Error(), "owner-only") {
+		t.Fatalf("permissive connector credential accepted: %v", err)
+	}
+}
+
+func TestConfigRejectsAmbiguousOrUnboundedConnectors(t *testing.T) {
+	credential := filepath.Join(t.TempDir(), "credential")
+	if err := os.WriteFile(credential, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"duplicate connector", func(c *Config) { c.Connectors = append(c.Connectors, c.Connectors[0]) }},
+		{"query", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test?scope=all" }},
+		{"fragment", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test#fragment" }},
+		{"userinfo", func(c *Config) { c.Connectors[0].BaseURL = "https://user@api.example.test" }},
+		{"origin path", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test/v1" }},
+		{"trailing slash", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test/" }},
+		{"noncanonical host", func(c *Config) { c.Connectors[0].BaseURL = "https://API.example.test" }},
+		{"empty port", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test:" }},
+		{"credential mode", func(c *Config) { c.Connectors[0].CredentialMode = "authorization" }},
+		{"relative credential", func(c *Config) { c.Connectors[0].CredentialFile = "credential" }},
+		{"bad cidr", func(c *Config) { c.Connectors[0].AllowedCIDRs = []string{"10.0.0.1/8"} }},
+		{"duplicate cidr", func(c *Config) { c.Connectors[0].AllowedCIDRs = []string{"10.0.0.0/8", "10.0.0.0/8"} }},
+		{"zero concurrency", func(c *Config) { c.Connectors[0].MaxConcurrent = 0 }},
+		{"request limit", func(c *Config) { c.Connectors[0].MaxRequestBytes = maxConnectorRequestBytes + 1 }},
+		{"response limit", func(c *Config) { c.Connectors[0].MaxResponseBytes = maxConnectorResponseBytes + 1 }},
+		{"duration", func(c *Config) { c.Connectors[0].MaxSeconds = maxConnectorSeconds + 1 }},
+		{"call limit", func(c *Config) { c.Connectors[0].MaxCallsPerGrant = maxConnectorCallsPerGrant + 1 }},
+		{"no operations", func(c *Config) { c.Connectors[0].Operations = nil }},
+		{"duplicate operation", func(c *Config) {
+			c.Connectors[0].Operations = append(c.Connectors[0].Operations, c.Connectors[0].Operations[0])
+		}},
+		{"lowercase method", func(c *Config) { c.Connectors[0].Operations[0].Method = "post" }},
+		{"connect method", func(c *Config) { c.Connectors[0].Operations[0].Method = http.MethodConnect }},
+		{"relative path", func(c *Config) { c.Connectors[0].Operations[0].Path = "v1/issues" }},
+		{"query path", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1/issues?all=true" }},
+		{"encoded path", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1/%69ssues" }},
+		{"traversal path", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1/../admin" }},
+		{"double slash", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1//issues" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := Config{Connectors: []Connector{connectorFixture(credential)}}
+			test.mutate(&config)
+			if _, err := config.validateAndLoadConnectors(); err == nil {
+				t.Fatalf("invalid connector accepted: %#v", config.Connectors)
+			}
+		})
+	}
+}
+
+func connectorFixture(credential string) Connector {
+	return Connector{
+		ID: "issues", BaseURL: "https://api.example.test:8443", CredentialFile: credential,
+		CredentialMode: CredentialModeBearer, AllowedCIDRs: []string{"203.0.113.0/24"},
+		MaxConcurrent: 2, MaxRequestBytes: 4096, MaxResponseBytes: 8192,
+		MaxSeconds: 30, MaxCallsPerGrant: 4,
+		Operations: []ConnectorOperation{
+			{ID: "create", Method: http.MethodPost, Path: "/v1/issues"},
+			{ID: "get", Method: http.MethodGet, Path: "/v1/issues/current"},
+		},
 	}
 }
