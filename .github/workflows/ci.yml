@@ -31,7 +31,8 @@ jobs:
       - name: node appliance script syntax
         run: >-
           bash -n scripts/install-node.sh scripts/activate-node-release.sh
-          scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh
+          scripts/node-preflight.sh scripts/node-doctor.sh scripts/node-doctor-test.sh
+          scripts/configure-node.sh scripts/configure-admission.sh
           scripts/install-steward.sh scripts/uninstall-node.sh scripts/node-removal-guard.sh
           scripts/build-deb.sh scripts/build-rpm.sh scripts/build-hermes-adapter.sh
           scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh
@@ -43,6 +44,8 @@ jobs:
           packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm
       - name: Node upgrade transaction smoke
         run: STEWARD_REQUIRE_ROOT_SMOKE=1 bash scripts/node-upgrade-smoke.sh
+      - name: Node doctor hermetic checks
+        run: bash scripts/node-doctor-test.sh
       - name: Documentation consistency
         run: bash scripts/check-docs-consistency.sh
       - name: Installer plan smoke
@@ -96,7 +99,7 @@ jobs:
           cp -R adapters/hermes-agent "$stage/adapters/"
           cp -R deploy/config deploy/systemd "$stage/deploy/"
           cp scripts/install-node.sh scripts/activate-node-release.sh \
-            scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh \
+            scripts/node-preflight.sh scripts/node-doctor.sh scripts/configure-node.sh scripts/configure-admission.sh \
             scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
             scripts/build-hermes-adapter.sh scripts/hermes-feasibility.sh \
             scripts/hermes-steward-acceptance.sh "$stage/scripts/"
@@ -171,6 +174,8 @@ jobs:
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' \
             /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/scripts/node-doctor.sh' \
+            /tmp/steward-node-test.deb.contents
           dpkg-deb --ctrl-tarfile /tmp/steward-node-test.deb | \
             tar -xOf - ./postinst | grep -q -- "--expected-version 'v0.0.0-test'"
           rpm -qpi /tmp/steward-node-test.rpm
@@ -188,6 +193,8 @@ jobs:
           grep -q '/usr/lib/steward-node/release/scripts/hermes-feasibility.sh' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/scripts/node-doctor.sh' \
             /tmp/steward-node-test.rpm.contents
           rpm -qp --scripts /tmp/steward-node-test.rpm | \
             grep -q -- "--expected-version 'v0.0.0-test'"

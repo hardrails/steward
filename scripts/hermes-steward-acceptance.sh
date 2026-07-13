@@ -618,6 +618,7 @@ printf '%s\n' "{
 }" >"$work/gateway.json"
 "$ctl_bin" gateway service set -config "$work/gateway.json" -service-id hermes-api \
 	-operation hermes.run=POST:/v1/runs -max-request-bytes 65536 -max-response-bytes 1048576 \
+	-lifecycle hermes.run=/v1/runs/ -status-max-seconds 15 -poll-interval 1s \
 	-max-seconds 120 -max-permit-seconds 300 >"$work/service-setup.json"
 "$ctl_bin" gateway service trust -config "$work/gateway.json" -node-id "$node_id" \
 	-tenant-id "$tenant_id" >"$work/service-trust.json"
@@ -740,11 +741,11 @@ run_signed_hermes() {
 		-request "$request_path" -operation-id hermes.run -key "$work/task.private" \
 		-key-id "$task_key_id" -out "$bundle_path" >"$issue_path"
 	if [[ $replay == yes ]]; then
-		"$ctl_bin" hermes run -bundle "$bundle_path" -gateway-url http://127.0.0.1:18091 \
+		"$ctl_bin" task submit -bundle "$bundle_path" -gateway-url http://127.0.0.1:18091 \
 			-token-file "$work/service-token" >"$work/task-$label.first.json"
-		"$ctl_bin" hermes run -bundle "$bundle_path" -gateway-url http://127.0.0.1:18091 \
+		"$ctl_bin" task submit -bundle "$bundle_path" -gateway-url http://127.0.0.1:18091 \
 			-token-file "$work/service-token" >"$work/task-$label.replay.json"
-		python3 -I - "$work/task-$label.first.json" "$work/task-$label.replay.json" <<'PY'
+		python3 -I - "$work/task-$label.first.json" "$work/task-$label.replay.json" "$issue_path" <<'PY'
 import json
 import pathlib
 import re
@@ -752,17 +753,53 @@ import sys
 
 first = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 replay = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+issue = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
 if (
-    set(first) != {"run_id"}
-    or first != replay
+    set(first) != {"task_digest", "permit_digest", "run_id", "receipt"}
+    or set(replay) != set(first)
+    or first["task_digest"] != replay["task_digest"]
+    or first["permit_digest"] != replay["permit_digest"]
+    or first["run_id"] != replay["run_id"]
+    or first["permit_digest"] != issue.get("permit_digest")
+    or re.fullmatch(r"sha256:[a-f0-9]{64}", str(first.get("task_digest", ""))) is None
     or re.fullmatch(r"run_[a-f0-9]{32}", str(first.get("run_id", ""))) is None
+    or first.get("receipt") != "recorded"
+    or replay.get("receipt") != "replayed"
 ):
-    raise SystemExit("hermes-steward-acceptance: identical task bundle did not replay the same run ID")
+    raise SystemExit("hermes-steward-acceptance: identical task bundle did not replay one durable dispatch")
 PY
 		: >"$work/service-task-replay.verified"
+	else
+		"$ctl_bin" task submit -bundle "$bundle_path" -gateway-url http://127.0.0.1:18091 \
+			-token-file "$work/service-token" >"$work/task-$label.submit.json"
 	fi
-	"$ctl_bin" hermes run -bundle "$bundle_path" -gateway-url http://127.0.0.1:18091 \
-		-token-file "$work/service-token" -wait -wait-timeout 3m -poll-interval 1s >"$terminal_path"
+	"$ctl_bin" task wait -bundle "$bundle_path" -gateway-url http://127.0.0.1:18091 \
+		-token-file "$work/service-token" -wait-timeout 3m -result-out "$terminal_path" \
+		>"$work/task-$label.wait.json"
+	python3 -I - "$work/task-$label.wait.json" "$terminal_path" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+status = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+raw = pathlib.Path(sys.argv[2]).read_bytes()
+terminal = json.loads(raw)
+if (
+    status.get("schema_version") != "steward.task-status.v1"
+    or status.get("phase") != "terminal"
+    or status.get("state") != "agent_reported_completed"
+    or status.get("task_status") != "agent_reported_completed"
+    or status.get("observed_status") != "completed"
+    or status.get("response_bytes") != len(raw)
+    or status.get("result_digest") != "sha256:" + hashlib.sha256(raw).hexdigest()
+    or status.get("run_id") != terminal.get("run_id")
+    or terminal.get("status") != "completed"
+    or re.fullmatch(r"run_[a-f0-9]{32}", str(terminal.get("run_id", ""))) is None
+):
+    raise SystemExit("hermes-steward-acceptance: terminal result is not bound to verified lifecycle evidence")
+PY
 	cat "$terminal_path"
 }
 
@@ -1287,8 +1324,17 @@ for issue_path in sorted(work.glob("task-*.issue.json")):
     stem = issue_path.name.removesuffix(".issue.json")
     request_path = work / f"{stem}.request.json"
     bundle_path = work / f"{stem}.bundle.json"
+    terminal_path = work / f"{stem}.terminal.json"
+    submit_path = work / f"{stem}.submit.json"
+    replay_path = work / f"{stem}.replay.json"
     request = read_owner_file(request_path, 65536)
     read_owner_file(bundle_path, 128 << 10)
+    terminal_raw = read_owner_file(terminal_path, 1 << 20)
+    terminal_document = json.loads(terminal_raw)
+    dispatch_paths = [path for path in (submit_path, replay_path) if path.exists()]
+    if len(dispatch_paths) != 1:
+        raise SystemExit("hermes-steward-acceptance: task has no unique durable dispatch metadata")
+    dispatch = json.loads(read_owner_file(dispatch_paths[0], 4096))
     if (
         not request
         or len(request) > 65536
@@ -1298,13 +1344,34 @@ for issue_path in sorted(work.glob("task-*.issue.json")):
         or issue.get("request_digest") != "sha256:" + hashlib.sha256(request).hexdigest()
         or re.fullmatch(r"task-[a-f0-9]{32}", str(issue.get("task_id", ""))) is None
         or issue["permit_digest"] in issue_by_permit
+        or set(dispatch) != {"task_digest", "permit_digest", "run_id", "receipt"}
+        or dispatch.get("permit_digest") != issue["permit_digest"]
+        or dispatch.get("receipt") not in {"recorded", "replayed"}
+        or dispatch.get("run_id") != terminal_document.get("run_id")
+        or terminal_document.get("status") != "completed"
     ):
         raise SystemExit("hermes-steward-acceptance: task issue binding is invalid")
     request_document = json.loads(request)
     if set(request_document) != {"input", "session_id"} or not isinstance(request_document["input"], str):
         raise SystemExit("hermes-steward-acceptance: exact task request is invalid")
-    forbidden_material.extend((request, request_document["input"].encode(), issue["task_id"].encode()))
-    issue_by_permit[issue["permit_digest"]] = (issue, len(request), service_task_digest(issue["task_id"]))
+    output = terminal_document.get("output")
+    if not isinstance(output, str):
+        raise SystemExit("hermes-steward-acceptance: completed task has no string output")
+    forbidden_material.extend((
+        request,
+        request_document["input"].encode(),
+        issue["task_id"].encode(),
+        terminal_raw,
+        output.encode(),
+    ))
+    issue_by_permit[issue["permit_digest"]] = (
+        issue,
+        len(request),
+        service_task_digest(issue["task_id"]),
+        dispatch["run_id"],
+        len(terminal_raw),
+        "sha256:" + hashlib.sha256(terminal_raw).hexdigest(),
+    )
 if len(issue_by_permit) != 5:
     raise SystemExit("hermes-steward-acceptance: expected five independently signed Hermes task bundles")
 if (
@@ -1317,7 +1384,7 @@ if (
 ):
     raise SystemExit("hermes-steward-acceptance: Gateway receipt ledger contains task bodies, task IDs, prompts, or secrets")
 lines = raw.splitlines()
-if len(lines) != 2 + 2 * len(issue_by_permit):
+if len(lines) != 2 + 3 * len(issue_by_permit):
     raise SystemExit("hermes-steward-acceptance: mixed Gateway receipt ledger has an unexpected record count")
 receipts = []
 previous = "sha256:" + "0" * 64
@@ -1328,7 +1395,7 @@ for index, line in enumerate(lines, 1):
     payload_type = envelope.get("payloadType")
     schemas = {
         "application/vnd.steward.connector-receipt.v1+json": "steward.connector-receipt.v1",
-        "application/vnd.steward.connector-receipt.v3+json": "steward.connector-receipt.v3",
+        "application/vnd.steward.connector-receipt.v4+json": "steward.connector-receipt.v4",
     }
     if set(envelope) != {"payload", "payloadType", "signatures"} or payload_type not in schemas:
         raise SystemExit("hermes-steward-acceptance: connector receipt envelope is invalid")
@@ -1336,8 +1403,11 @@ for index, line in enumerate(lines, 1):
     if base64.b64encode(payload).decode() != envelope["payload"]:
         raise SystemExit("hermes-steward-acceptance: connector receipt payload is not canonical base64")
     receipt = json.loads(payload)
+    receipt_keys = {"epoch", "event", "node_id", "observed_at", "previous_hash", "schema_version", "sequence"}
+    if payload_type.endswith(".v4+json"):
+        receipt_keys |= {"task_sequence", "previous_task_hash"}
     if (
-        set(receipt) != {"epoch", "event", "node_id", "observed_at", "previous_hash", "schema_version", "sequence"}
+        set(receipt) != receipt_keys
         or receipt.get("schema_version") != schemas[payload_type]
         or receipt.get("node_id") != node_id
         or receipt.get("epoch") != 1
@@ -1348,7 +1418,7 @@ for index, line in enumerate(lines, 1):
         raise SystemExit("hermes-steward-acceptance: Gateway receipt provenance is invalid")
     current_hash = hashlib.sha256(b"steward-connector-ledger-v1\x00" + line).hexdigest()
     previous = "sha256:" + current_hash
-    receipts.append((payload_type, receipt))
+    receipts.append((payload_type, receipt, previous))
 
 head_document = json.loads(pathlib.Path(head_path).read_text(encoding="utf-8"))
 head = head_document.get("head") if isinstance(head_document, dict) else None
@@ -1374,7 +1444,7 @@ for value in (tenant_id, instance_id, connector_task_id, contract["connector_id"
     task_hash.update(b"\x00")
 task_digest = "sha256:" + task_hash.hexdigest()
 
-connector_receipts = [receipt for payload_type, receipt in receipts if payload_type.endswith(".v1+json")]
+connector_receipts = [receipt for payload_type, receipt, _ in receipts if payload_type.endswith(".v1+json")]
 if len(connector_receipts) != 2:
     raise SystemExit("hermes-steward-acceptance: mixed ledger must contain one complete legacy connector call")
 for receipt in connector_receipts:
@@ -1411,18 +1481,18 @@ admissions = {}
 for generation in (1, 2):
     admission = json.loads((work / f"admission-g{generation}.json").read_text(encoding="utf-8"))
     admissions[admission["grant_id"]] = (generation, admission)
-service_receipts = [receipt for payload_type, receipt in receipts if payload_type.endswith(".v3+json")]
-if len(service_receipts) != 2 * len(issue_by_permit):
-    raise SystemExit("hermes-steward-acceptance: mixed ledger omits a service-task authorization or terminal")
+service_receipts = [(receipt, receipt_hash) for payload_type, receipt, receipt_hash in receipts if payload_type.endswith(".v4+json")]
+if len(service_receipts) != 3 * len(issue_by_permit):
+    raise SystemExit("hermes-steward-acceptance: mixed ledger omits a service-task lifecycle phase")
 service_by_permit = {}
-for receipt in service_receipts:
+for receipt, receipt_hash in service_receipts:
     event = receipt["event"]
     admitted = admissions.get(event.get("grant_id"))
     binding = issue_by_permit.get(event.get("permit_digest"))
     if admitted is None or binding is None:
         raise SystemExit("hermes-steward-acceptance: service-task receipt has no exact admission or task bundle")
     generation, admission = admitted
-    issue, request_bytes, expected_task_digest = binding
+    issue, request_bytes, expected_task_digest, run_id, terminal_bytes, terminal_digest = binding
     if (
         event.get("kind") != "service_task"
         or event.get("tenant_id") != tenant_id
@@ -1440,33 +1510,60 @@ for receipt in service_receipts:
         or event.get("authority_key_id") != task_key_id
         or event.get("request_digest") != issue["request_digest"]
         or event.get("request_bytes") != request_bytes
+        or event.get("task_protocol") != "steward.task-lifecycle.v1"
         or event.get("error_code", "") != ""
     ):
         raise SystemExit("hermes-steward-acceptance: service-task receipt is not bound to the signed task and admission")
-    service_by_permit.setdefault(event["permit_digest"], []).append(event)
+    service_by_permit.setdefault(event["permit_digest"], []).append((receipt, receipt_hash))
 if set(service_by_permit) != set(issue_by_permit):
     raise SystemExit("hermes-steward-acceptance: service-task receipts do not cover every issued task")
-for permit_digest, events in service_by_permit.items():
-    if len(events) != 2:
-        raise SystemExit("hermes-steward-acceptance: a task permit was dispatched or recorded more than once")
-    authorized, completed = events
+for permit_digest, records in service_by_permit.items():
+    if len(records) != 3:
+        raise SystemExit("hermes-steward-acceptance: a task permit has an incomplete lifecycle")
+    authorized_record, dispatched_record, completed_record = records
+    authorized, dispatched, completed = (
+        authorized_record[0]["event"],
+        dispatched_record[0]["event"],
+        completed_record[0]["event"],
+    )
+    issue, request_bytes, expected_task_digest, run_id, terminal_bytes, terminal_digest = issue_by_permit[permit_digest]
+    zero_hash = "sha256:" + "0" * 64
     if (
-        authorized.get("phase") != "authorize"
+        authorized_record[0].get("task_sequence") != 1
+        or authorized_record[0].get("previous_task_hash") != zero_hash
+        or dispatched_record[0].get("task_sequence") != 2
+        or dispatched_record[0].get("previous_task_hash") != authorized_record[1]
+        or completed_record[0].get("task_sequence") != 3
+        or completed_record[0].get("previous_task_hash") != dispatched_record[1]
+        or authorized.get("phase") != "authorize"
         or authorized.get("outcome") != "allowed"
         or authorized.get("response_bytes") != 0
         or "http_status" in authorized
+        or authorized.get("run_id", "") != ""
+        or authorized.get("task_status", "") != ""
+        or authorized.get("result_digest", "") != ""
+        or dispatched.get("phase") != "dispatch"
+        or dispatched.get("outcome") != "responded"
+        or dispatched.get("http_status") != 202
+        or not 0 < dispatched.get("response_bytes", 0) <= 1 << 20
+        or dispatched.get("run_id") != run_id
+        or dispatched.get("task_status", "") != ""
+        or dispatched.get("result_digest", "") != ""
         or completed.get("phase") != "terminal"
         or completed.get("outcome") != "responded"
-        or completed.get("http_status") not in {200, 201, 202}
-        or not 0 < completed.get("response_bytes", 0) <= 1 << 20
-        or re.fullmatch(r"run_[a-f0-9]{32}", str(completed.get("run_id", ""))) is None
-        or any(authorized.get(name) != completed.get(name) for name in (
+        or completed.get("http_status") != 200
+        or completed.get("response_bytes") != terminal_bytes
+        or completed.get("run_id") != run_id
+        or completed.get("task_status") != "agent_reported_completed"
+        or completed.get("result_digest") != terminal_digest
+        or re.fullmatch(r"run_[a-f0-9]{32}", str(run_id)) is None
+        or any(authorized.get(name) != event.get(name) for event in (dispatched, completed) for name in (
             "tenant_id", "runtime_ref", "capsule_digest", "policy_digest", "route_policy_digest",
             "generation", "grant_id", "service_id", "operation_id", "operation_policy_digest",
-            "task_digest", "authority_key_id", "permit_digest", "request_digest", "request_bytes",
+            "task_digest", "authority_key_id", "permit_digest", "request_digest", "request_bytes", "task_protocol",
         ))
     ):
-        raise SystemExit("hermes-steward-acceptance: service-task receipts do not prove one accepted dispatch")
+        raise SystemExit("hermes-steward-acceptance: service-task receipts do not prove one recoverable lifecycle")
 
 audit = json.loads(pathlib.Path(task_audit_path).read_text(encoding="utf-8"))
 workspace_issue = json.loads((work / "task-workspace-g1.issue.json").read_text(encoding="utf-8"))
@@ -1477,10 +1574,13 @@ if (
     or audit.get("request_digest") != workspace_issue["request_digest"]
     or audit.get("permit_key_id") != task_key_id
     or not isinstance(audit.get("authorization"), dict)
+    or not isinstance(audit.get("dispatch"), dict)
     or not isinstance(audit.get("terminal"), dict)
     or audit["authorization"].get("event", {}).get("phase") != "authorize"
+    or audit["dispatch"].get("event", {}).get("phase") != "dispatch"
     or audit["terminal"].get("event", {}).get("phase") != "terminal"
     or audit["terminal"].get("event", {}).get("run_id") != replayed_run.get("run_id")
+    or [audit[name].get("task_sequence") for name in ("authorization", "dispatch", "terminal")] != [1, 2, 3]
     or audit.get("head") != head
 ):
     raise SystemExit("hermes-steward-acceptance: offline task audit did not bind the exact request to the mixed ledger")

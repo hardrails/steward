@@ -1,0 +1,395 @@
+openapi: 3.0.3
+info:
+  title: Steward Gateway Task Lifecycle API
+  version: "1.0.0"
+  description: |
+    Host-local inspection and observation contract for lifecycle-enabled,
+    tenant-authorized agent tasks. Each reference binds both the retained task
+    digest and the digest of the exact task-permit envelope that authorized
+    it. The active grant fixes the agent-service origin, operation policy fixes
+    the status path, timeout, response limit, and minimum poll interval, and
+    Gateway fixes the method and headers. Callers cannot supply or override
+    those values.
+
+    The API reports durable Gateway evidence. `dispatch_accepted` means Gateway
+    durably recorded the agent service's accepted run identifier.
+    `agent_reported_completed`, `agent_reported_failed`, and
+    `agent_reported_cancelled` mean Gateway received that terminal status for
+    the recorded run and durably recorded its digest and byte length. None of
+    these states proves that the agent performed the requested work, that an
+    output is correct, or that an agent report is truthful.
+
+    Gateway does not persist agent response bodies. A terminal observation
+    returns the exact bounded response as `observation_base64` only after its
+    status, run identifier, byte length, and SHA-256 digest match durable task
+    evidence. A later observation, including after Gateway restart, may recover
+    the same bytes from an active exact grant and must pass the same comparison.
+    Passive inspection never contacts the agent or returns response bytes.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: Steward
+    url: https://github.com/hardrails/steward
+servers:
+  - url: http://127.0.0.1:8091
+    description: Default host-local Gateway service listener
+security:
+  - bearerAuth: []
+tags:
+  - name: tasks
+    description: Inspect durable task evidence and request one policy-bounded agent observation.
+paths:
+  /v1/tasks/{task_digest}/permits/{permit_digest}:
+    parameters:
+      - $ref: "#/components/parameters/TaskDigest"
+      - $ref: "#/components/parameters/PermitDigest"
+    get:
+      tags: [tasks]
+      operationId: inspectTaskLifecycle
+      summary: Inspect durable task lifecycle evidence
+      description: |
+        Returns the durable lifecycle record without contacting the agent
+        service. The task and permit digests must match the same retained
+        authorization. An unknown digest, a mismatched pair, a legacy task, a
+        query string, or an alternate path encoding returns the same 404
+        response.
+
+        This request has no body. A body, transfer coding, or nonzero declared
+        content length returns 400.
+      responses:
+        "200":
+          description: Durable task lifecycle evidence.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskLifecycleStatus"
+        "400":
+          $ref: "#/components/responses/BodyNotAllowed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/TaskNotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          $ref: "#/components/responses/EvidenceUnavailable"
+  /v1/tasks/{task_digest}/permits/{permit_digest}/observe:
+    parameters:
+      - $ref: "#/components/parameters/TaskDigest"
+      - $ref: "#/components/parameters/PermitDigest"
+    post:
+      tags: [tasks]
+      operationId: observeTaskLifecycle
+      summary: Request one policy-bounded agent status observation
+      description: |
+        Asks Gateway to make at most one bodyless GET to the active grant's
+        service origin and the configured status-path prefix followed by the
+        already recorded run ID. Gateway sends only its fixed JSON negotiation
+        headers; caller headers, cookies, credentials, query parameters, and
+        preferred wait behavior do not reach the agent service.
+
+        `queued` and `running` are transient observations. They appear as
+        `observed_status` in this response but do not replace the durable
+        `dispatch_accepted` state. A valid terminal report is returned only
+        after Gateway durably appends its terminal receipt. The response to that
+        successful terminal append also includes the exact bounded agent
+        response in `observation_base64`; Gateway persists only its SHA-256
+        digest and byte length. If delivery is interrupted, a later observation
+        may recover terminal bytes from the same active grant. Gateway returns
+        them only when the new report matches the durable run identifier,
+        terminal state, digest, and length. A changed report returns 502 and
+        does not change durable evidence.
+
+        Gateway serializes initial and recovery observations for one task and
+        enforces the configured minimum poll interval and service concurrency
+        limit. A durable failure that has no agent-reported terminal result
+        returns metadata without raw response bytes.
+
+        This request has no body. A body, transfer coding, or nonzero declared
+        content length returns 400.
+      responses:
+        "200":
+          description: Transient agent status or durable terminal task evidence.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            X-Content-Type-Options:
+              $ref: "#/components/headers/NoSniff"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskLifecycleStatus"
+        "400":
+          $ref: "#/components/responses/BodyNotAllowed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/TaskNotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/ObservationConflict"
+        "429":
+          $ref: "#/components/responses/ObservationLimited"
+        "502":
+          $ref: "#/components/responses/InvalidAgentStatus"
+        "503":
+          $ref: "#/components/responses/ObservationUnavailable"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Host Gateway service token from the configured owner-only token file.
+  parameters:
+    TaskDigest:
+      name: task_digest
+      in: path
+      required: true
+      description: Deterministic SHA-256 correlation digest over the tenant, logical instance, and signed task identifier.
+      schema:
+        $ref: "#/components/schemas/SHA256Digest"
+    PermitDigest:
+      name: permit_digest
+      in: path
+      required: true
+      description: Digest of the exact canonical task-permit envelope retained with this task authorization.
+      schema:
+        $ref: "#/components/schemas/SHA256Digest"
+  headers:
+    NoStore:
+      description: Prevents storage of task evidence and transient observation responses.
+      schema:
+        type: string
+        enum: [no-store]
+    NoSniff:
+      description: Prevents content-type sniffing.
+      schema:
+        type: string
+        enum: [nosniff]
+    RetryAfter:
+      description: Whole seconds until host policy permits another observation. Present for poll-interval throttling.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+  schemas:
+    SHA256Digest:
+      type: string
+      pattern: "^sha256:[a-f0-9]{64}$"
+      example: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    TaskLifecycleStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - task_digest
+        - permit_digest
+        - phase
+        - state
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.task-status.v1]
+        task_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        phase:
+          type: string
+          description: Latest durable receipt phase represented by this response.
+          enum: [authorize, dispatch, terminal]
+        state:
+          type: string
+          description: Stable projection of the latest durable receipt.
+          enum:
+            - authorization_recorded
+            - dispatch_accepted
+            - failed_without_dispatch_evidence
+            - observation_failed
+            - agent_reported_completed
+            - agent_reported_failed
+            - agent_reported_cancelled
+        run_id:
+          type: string
+          description: Agent-supplied identifier durably recorded at successful dispatch.
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        task_status:
+          type: string
+          description: Durable terminal agent report, not a verification of completed or correct work.
+          enum:
+            - agent_reported_completed
+            - agent_reported_failed
+            - agent_reported_cancelled
+        result_digest:
+          allOf:
+            - $ref: "#/components/schemas/SHA256Digest"
+          description: SHA-256 digest of the exact bounded terminal agent response.
+        response_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 1048576
+          description: Byte length of the exact terminal agent response represented by `result_digest`.
+        error_code:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          description: Durable Gateway failure code when no terminal agent report was recorded.
+        retry_safety:
+          type: string
+          enum:
+            - replacement_safe_after_new_authority
+            - replacement_unsafe
+          description: >-
+            Duplicate-effect guidance derived by Gateway for a terminal Gateway
+            failure. `replacement_safe_after_new_authority` means Gateway did not
+            contact the agent service; a different task still requires new signed
+            authority. `replacement_unsafe` means the service may have processed
+            the request or the evidence cannot establish otherwise. This field is
+            not approval to retry and is absent for nonterminal and agent-reported
+            terminal states.
+        observed_status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+          description: Status from this live observation only; Gateway does not persist this field.
+        observation_base64:
+          type: string
+          format: byte
+          maxLength: 1398104
+          description: |
+            Canonical base64 of the exact bounded terminal agent response. It is
+            present only on a live observation whose status, run identifier,
+            length, and SHA-256 digest match durable terminal evidence. Gateway
+            does not persist these bytes.
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          minLength: 1
+        message:
+          type: string
+          minLength: 1
+  responses:
+    BodyNotAllowed:
+      description: The bodyless lifecycle request supplied a body, transfer coding, or nonzero content length (`invalid_task_observation`).
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: A valid host Gateway service bearer credential is required (`unauthorized`).
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TaskNotFound:
+      description: The task is absent, is not lifecycle-enabled, or is not bound to this exact permit digest (`task_not_found`).
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    MethodNotAllowed:
+      description: Method not allowed for this exact task lifecycle path (`method_not_allowed`).
+      headers:
+        Allow:
+          description: Method accepted by this lifecycle operation.
+          schema:
+            type: string
+            enum: [GET, POST]
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    EvidenceUnavailable:
+      description: Durable task evidence has an ambiguous filesystem result and requires Gateway restart reconciliation (`evidence_unavailable`).
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ObservationConflict:
+      description: The task has no durable dispatch (`task_not_dispatched`) or another observation is active (`task_observation_in_progress`).
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ObservationLimited:
+      description: The configured poll interval has not elapsed (`task_observation_throttled`) or the service concurrency limit is full (`service_busy`).
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InvalidAgentStatus:
+      description: The agent returned no valid bounded status (`invalid_task_status`) or a terminal result that does not match durable evidence (`terminal_result_mismatch`).
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ObservationUnavailable:
+      description: |
+        Durable evidence is unavailable (`evidence_unavailable`), active
+        policy no longer authorizes observation (`task_observation_unavailable`),
+        or authority changed before or during observation
+        (`task_observation_revoked`).
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/NoSniff"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

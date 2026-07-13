@@ -206,6 +206,7 @@ release_files=(
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
 	integration/scripts/hermes-steward-acceptance.sh
+	integration/scripts/node-doctor.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
 	integration/scripts/uninstall-node.sh
@@ -241,7 +242,7 @@ write_canonical_manifest() {
 		printf '  "arch": "%s",\n' "$goarch"
 		printf '  "state_formats": {\n'
 		printf '    "admission_fence": {"read_min": 1, "read_max": 2, "write": 2},\n'
-		printf '    "connector_receipt_log": {"read_min": 1, "read_max": 3, "write": 3},\n'
+		printf '    "connector_receipt_log": {"read_min": 1, "read_max": 4, "write": 4},\n'
 		printf '    "evidence_log": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "gateway_state": {"read_min": 1, "read_max": 4, "write": 4},\n'
 		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
@@ -393,7 +394,7 @@ for file in deploy/config/executor-gateway.env deploy/config/executor.env \
 	install -o root -g root -m 0644 "$root/$file" "$incoming/integration/$file"
 done
 for script in activate-node-release.sh build-hermes-adapter.sh build-relay-image.sh configure-admission.sh \
-	configure-node.sh hermes-feasibility.sh hermes-steward-acceptance.sh install-node.sh node-preflight.sh node-removal-guard.sh \
+	configure-node.sh hermes-feasibility.sh hermes-steward-acceptance.sh install-node.sh node-doctor.sh node-preflight.sh node-removal-guard.sh \
 	uninstall-node.sh; do
 	install -o root -g root -m 0755 "$root/scripts/$script" "$incoming/integration/scripts/$script"
 done
@@ -519,6 +520,7 @@ else
 	done
 	for mapping in \
 		activate-node-release:/opt/steward/current/integration/scripts/activate-node-release.sh \
+		node-doctor:/opt/steward/current/integration/scripts/node-doctor.sh \
 		node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
 		configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
 		configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
@@ -572,6 +574,7 @@ else
 	done
 	for mapping in \
 		activate-node-release:/opt/steward/current/integration/scripts/activate-node-release.sh \
+		node-doctor:/opt/steward/current/integration/scripts/node-doctor.sh \
 		node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
 		configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
 		configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
@@ -607,6 +610,7 @@ if [[ $selection == selected* ]]; then
 	echo "install-node: install customer credentials and CA material, initialize the Executor fence, then run:"
 	echo "  /usr/local/libexec/steward/node-preflight"
 	echo "  systemctl enable --now steward-gateway steward steward-executor"
+	echo "  /usr/local/libexec/steward/node-doctor"
 else
 	echo "install-node: activate after provisioning trust material (activation runs full preflight):"
 	echo "  $release_dir/integration/scripts/activate-node-release.sh $expected_version --restart"

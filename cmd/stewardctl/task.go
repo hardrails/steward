@@ -10,8 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
-	pathpkg "path"
 	"slices"
 	"strings"
 	"time"
@@ -25,13 +23,11 @@ import (
 )
 
 const (
-	taskBundleSchemaV1   = "steward.task-bundle.v1"
-	maxTaskBundleBytes   = 128 << 10
-	maxTaskServices      = 128
-	maxTaskOperations    = 128
-	maxTaskResponseBytes = int64(1 << 20)
-	maxTaskSeconds       = 120
-	maxTaskClockSkew     = 5 * time.Minute
+	taskBundleSchemaV2 = "steward.task-bundle.v2"
+	maxTaskBundleBytes = 128 << 10
+	maxTaskServices    = 128
+	maxTaskOperations  = 128
+	maxTaskClockSkew   = 5 * time.Minute
 )
 
 func (operation serviceTrustOperation) gatewayOperation() gateway.ServiceOperation {
@@ -40,6 +36,8 @@ func (operation serviceTrustOperation) gatewayOperation() gateway.ServiceOperati
 		ContentType: operation.ContentType, MaxRequestBytes: operation.MaxRequestBytes,
 		MaxResponseBytes: operation.MaxResponseBytes, MaxSeconds: operation.MaxSeconds,
 		MaxPermitSeconds: operation.MaxPermitSeconds,
+		TaskProtocol:     operation.TaskProtocol, StatusPathPrefix: operation.StatusPathPrefix,
+		StatusMaxSeconds: operation.StatusMaxSeconds, PollIntervalSeconds: operation.PollIntervalSeconds,
 	}
 }
 
@@ -67,7 +65,7 @@ type verifiedTaskBundle struct {
 
 func taskCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("task command requires issue, verify, or audit")
+		return errors.New("task command requires issue, verify, audit, submit, status, observe, or wait")
 	}
 	switch arguments[0] {
 	case "issue":
@@ -76,8 +74,16 @@ func taskCommand(arguments []string, stdout io.Writer) error {
 		return verifyTask(arguments[1:], stdout)
 	case "audit":
 		return auditTask(arguments[1:], stdout)
+	case "submit":
+		return submitTask(arguments[1:], stdout)
+	case "status":
+		return statusTask(arguments[1:], stdout)
+	case "observe":
+		return observeTask(arguments[1:], stdout)
+	case "wait":
+		return waitTask(arguments[1:], stdout)
 	default:
-		return errors.New("task command requires issue, verify, or audit")
+		return errors.New("task command requires issue, verify, audit, submit, status, observe, or wait")
 	}
 }
 
@@ -193,7 +199,7 @@ func issueTask(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	bundle := taskBundle{
-		SchemaVersion: taskBundleSchemaV1, ServicePath: admitted.ServicePath, Operation: operation,
+		SchemaVersion: taskBundleSchemaV2, ServicePath: admitted.ServicePath, Operation: operation,
 		Request: base64.StdEncoding.EncodeToString(request), Permit: base64.StdEncoding.EncodeToString(permitRaw),
 		Authority: taskBundleAuthority{KeyID: *keyID, PublicKey: base64.StdEncoding.EncodeToString(public)},
 	}
@@ -277,10 +283,13 @@ func verifyTask(arguments []string, stdout io.Writer) error {
 }
 
 type taskAuditRecord struct {
-	Sequence   uint64                `json:"sequence"`
-	ChainHash  string                `json:"chain_hash"`
-	ObservedAt string                `json:"observed_at"`
-	Event      connectorledger.Event `json:"event"`
+	SchemaVersion    string                `json:"schema_version"`
+	Sequence         uint64                `json:"sequence"`
+	ChainHash        string                `json:"chain_hash"`
+	TaskSequence     uint64                `json:"task_sequence,omitempty"`
+	PreviousTaskHash string                `json:"previous_task_hash,omitempty"`
+	ObservedAt       string                `json:"observed_at"`
+	Event            connectorledger.Event `json:"event"`
 }
 
 func auditTask(arguments []string, stdout io.Writer) error {
@@ -330,27 +339,44 @@ func auditTask(arguments []string, stdout io.Writer) error {
 		return errors.New("receipt node ID does not match the task permit node")
 	}
 	expectedTaskDigest := taskpermit.TaskDigest(statement.TenantID, statement.InstanceID, statement.TaskID)
-	var authorization, terminal *taskAuditRecord
+	var authorization, dispatch, terminal *taskAuditRecord
+	var matchedTaskSequence uint64
+	previousTaskHash := "sha256:" + strings.Repeat("0", 64)
 	head, err := connectorledger.VerifyRecords(*receiptsPath, receiptPublic, *receiptNodeID, *receiptEpoch,
 		func(record connectorledger.VerifiedReceipt) error {
 			event := record.Receipt.Event
-			if event.PermitDigest != bundle.Verified.EnvelopeDigest && event.TaskDigest != expectedTaskDigest {
+			if event.PermitDigest != bundle.Verified.EnvelopeDigest || event.TaskDigest != expectedTaskDigest {
 				return nil
 			}
-			if err := checkTaskReceiptBindings(statement, bundle.Verified.KeyID, bundle.Verified.EnvelopeDigest, event); err != nil {
+			if err := checkTaskReceiptBindings(statement, bundle.Verified.KeyID, bundle.Verified.EnvelopeDigest,
+				bundle.Bundle.Operation.TaskProtocol, event); err != nil {
 				return fmt.Errorf("service-task receipt sequence %d: %w", record.Receipt.Sequence, err)
 			}
-			matched := &taskAuditRecord{Sequence: record.Receipt.Sequence, ChainHash: record.Hash,
-				ObservedAt: record.Receipt.ObservedAt, Event: event}
+			matchedTaskSequence++
+			if record.Receipt.SchemaVersion != connectorledger.SchemaV4 ||
+				record.Receipt.TaskSequence != matchedTaskSequence || record.Receipt.PreviousTaskHash != previousTaskHash {
+				return fmt.Errorf("service-task receipt sequence %d has an invalid task-local chain coordinate", record.Receipt.Sequence)
+			}
+			previousTaskHash = record.Hash
+			matched := &taskAuditRecord{
+				SchemaVersion: record.Receipt.SchemaVersion, Sequence: record.Receipt.Sequence, ChainHash: record.Hash,
+				TaskSequence: record.Receipt.TaskSequence, PreviousTaskHash: record.Receipt.PreviousTaskHash,
+				ObservedAt: record.Receipt.ObservedAt, Event: event,
+			}
 			switch event.Phase {
 			case connectorledger.Authorize:
-				if authorization != nil {
+				if authorization != nil || dispatch != nil || terminal != nil {
 					return errors.New("receipt chain contains multiple authorizations for the task permit")
 				}
 				authorization = matched
+			case connectorledger.Dispatch:
+				if authorization == nil || dispatch != nil || terminal != nil {
+					return errors.New("receipt chain contains an invalid dispatch for the task permit")
+				}
+				dispatch = matched
 			case connectorledger.Terminal:
-				if terminal != nil {
-					return errors.New("receipt chain contains multiple terminal records for the task permit")
+				if authorization == nil || terminal != nil {
+					return errors.New("receipt chain contains an invalid terminal record for the task permit")
 				}
 				terminal = matched
 			default:
@@ -384,14 +410,19 @@ func auditTask(arguments []string, stdout io.Writer) error {
 		PermitKeyID   string               `json:"permit_key_id"`
 		Statement     taskpermit.Statement `json:"statement"`
 		Authorization *taskAuditRecord     `json:"authorization"`
+		Dispatch      *taskAuditRecord     `json:"dispatch,omitempty"`
 		Terminal      *taskAuditRecord     `json:"terminal"`
 		Head          connectorledger.Head `json:"head"`
 	}{Valid: true, PermitDigest: bundle.Verified.EnvelopeDigest, RequestDigest: statement.RequestDigest,
 		PermitKeyID: bundle.Verified.KeyID, Statement: statement, Authorization: authorization,
-		Terminal: terminal, Head: head})
+		Dispatch: dispatch, Terminal: terminal, Head: head})
 }
 
-func checkTaskReceiptBindings(statement taskpermit.Statement, authorityKeyID, permitDigest string, event connectorledger.Event) error {
+func checkTaskReceiptBindings(
+	statement taskpermit.Statement,
+	authorityKeyID, permitDigest, taskProtocol string,
+	event connectorledger.Event,
+) error {
 	if event.Kind != connectorledger.ServiceTask || event.TenantID != statement.TenantID ||
 		event.RuntimeRef != statement.RuntimeRef || event.CapsuleDigest != statement.CapsuleDigest ||
 		event.PolicyDigest != statement.PolicyDigest || event.RoutePolicyDigest != statement.RoutePolicyDigest ||
@@ -400,7 +431,8 @@ func checkTaskReceiptBindings(statement taskpermit.Statement, authorityKeyID, pe
 		event.OperationPolicyDigest != statement.OperationPolicyDigest ||
 		event.TaskDigest != taskpermit.TaskDigest(statement.TenantID, statement.InstanceID, statement.TaskID) ||
 		event.AuthorityKeyID != authorityKeyID || event.PermitDigest != permitDigest ||
-		event.RequestDigest != statement.RequestDigest || event.RequestBytes != statement.RequestBytes {
+		event.RequestDigest != statement.RequestDigest || event.RequestBytes != statement.RequestBytes ||
+		event.TaskProtocol != taskProtocol {
 		return errors.New("service-task receipt does not match every task-permit binding")
 	}
 	return nil
@@ -425,7 +457,7 @@ func readServiceTrust(path string, intent admission.InstanceIntent, operationID 
 	if err := dsse.DecodeStrictInto(raw, maxServiceTrustBytes, &inventory); err != nil {
 		return serviceTrustOperation{}, fmt.Errorf("decode service trust inventory: %w", err)
 	}
-	if inventory.SchemaVersion != serviceTrustSchemaV1 || inventory.NodeID != intent.NodeID ||
+	if inventory.SchemaVersion != serviceTrustSchemaV2 || inventory.NodeID != intent.NodeID ||
 		inventory.TenantID != intent.TenantID || len(inventory.Services) == 0 || len(inventory.Services) > maxTaskServices {
 		return serviceTrustOperation{}, errors.New("service trust inventory does not match the instance node and tenant")
 	}
@@ -464,13 +496,9 @@ func readServiceTrust(path string, intent admission.InstanceIntent, operationID 
 }
 
 func validTrustedServiceOperation(operation serviceTrustOperation) bool {
-	return taskIdentifier(operation.ServiceID) && taskIdentifier(operation.ID) && operation.Method == http.MethodPost &&
-		taskCanonicalPath(operation.Path) && operation.ContentType == "application/json" &&
-		operation.MaxRequestBytes >= 1 && operation.MaxRequestBytes <= taskpermit.MaxRequestBytes &&
-		operation.MaxResponseBytes >= 1 && operation.MaxResponseBytes <= maxTaskResponseBytes &&
-		operation.MaxSeconds >= 1 && operation.MaxSeconds <= maxTaskSeconds &&
-		operation.MaxPermitSeconds >= 1 && operation.MaxPermitSeconds <= int(taskpermit.MaxValidity/time.Second) &&
-		operation.PolicyDigest == gateway.ServiceOperationDigest(operation.gatewayOperation())
+	gatewayOperation := operation.gatewayOperation()
+	return gateway.ValidateServiceOperation(gatewayOperation) == nil &&
+		operation.PolicyDigest == gateway.ServiceOperationDigest(gatewayOperation)
 }
 
 func taskIdentifier(value string) bool {
@@ -480,21 +508,6 @@ func taskIdentifier(value string) bool {
 	for index, character := range value {
 		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' ||
 			character >= '0' && character <= '9' || index > 0 && (character == '.' || character == '_' || character == '-') {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func taskCanonicalPath(value string) bool {
-	if !strings.HasPrefix(value, "/") || len(value) > 2048 || pathpkg.Clean(value) != value || strings.Contains(value, "//") {
-		return false
-	}
-	for index := 0; index < len(value); index++ {
-		character := value[index]
-		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
-			character >= '0' && character <= '9' || strings.ContainsRune("/-._~!$&'()*+,;=:@", rune(character)) {
 			continue
 		}
 		return false
@@ -573,7 +586,8 @@ func decodeTaskBundleRaw(raw []byte, trusted map[string]ed25519.PublicKey, at ti
 }
 
 func decodeTaskBundleValue(bundle taskBundle, trusted map[string]ed25519.PublicKey, at time.Time, maxValidity time.Duration) (verifiedTaskBundle, error) {
-	if bundle.SchemaVersion != taskBundleSchemaV1 || !validTrustedServiceOperation(bundle.Operation) {
+	if bundle.SchemaVersion != taskBundleSchemaV2 ||
+		bundle.Operation.TaskProtocol != connectorledger.TaskProtocolLifecycleV1 || !validTrustedServiceOperation(bundle.Operation) {
 		return verifiedTaskBundle{}, errors.New("task bundle has an unsupported schema or invalid service operation")
 	}
 	publicRaw, err := decodeCanonicalBase64(bundle.Authority.PublicKey, ed25519.PublicKeySize, "task authority public key")

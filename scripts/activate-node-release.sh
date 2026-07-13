@@ -95,6 +95,7 @@ release_files=(
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
 	integration/scripts/hermes-steward-acceptance.sh
+	integration/scripts/node-doctor.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
 	integration/scripts/uninstall-node.sh
@@ -121,7 +122,7 @@ write_canonical_manifest() {
 		printf '  "arch": "%s",\n' "$goarch"
 		printf '  "state_formats": {\n'
 		printf '    "admission_fence": {"read_min": 1, "read_max": 2, "write": 2},\n'
-		printf '    "connector_receipt_log": {"read_min": 1, "read_max": 3, "write": 3},\n'
+		printf '    "connector_receipt_log": {"read_min": 1, "read_max": 4, "write": 4},\n'
 		printf '    "evidence_log": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "gateway_state": {"read_min": 1, "read_max": 4, "write": 4},\n'
 		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
@@ -430,6 +431,7 @@ for binary in steward stewardctl steward-mcp steward-executor steward-gateway st
 done
 for mapping in \
 	activate-node-release:/opt/steward/current/integration/scripts/activate-node-release.sh \
+	node-doctor:/opt/steward/current/integration/scripts/node-doctor.sh \
 	node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
 	configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
 	configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \
@@ -488,6 +490,7 @@ for binary in steward stewardctl steward-mcp steward-executor steward-gateway st
 done
 for mapping in \
 	activate-node-release:/opt/steward/current/integration/scripts/activate-node-release.sh \
+	node-doctor:/opt/steward/current/integration/scripts/node-doctor.sh \
 	node-preflight:/opt/steward/current/integration/scripts/node-preflight.sh \
 	configure-node:/opt/steward/current/integration/scripts/configure-node.sh \
 	configure-admission:/opt/steward/current/integration/scripts/configure-admission.sh \

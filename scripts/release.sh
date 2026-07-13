@@ -133,7 +133,7 @@ for target in "${targets[@]}"; do
 		cp -R adapters/hermes-agent "${stage}/adapters/"
 		cp -R deploy/config deploy/systemd "${stage}/deploy/"
 		cp scripts/install-node.sh scripts/activate-node-release.sh \
-			scripts/node-preflight.sh scripts/configure-node.sh scripts/configure-admission.sh \
+			scripts/node-preflight.sh scripts/node-doctor.sh scripts/configure-node.sh scripts/configure-admission.sh \
 			scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
 			scripts/build-hermes-adapter.sh scripts/hermes-feasibility.sh \
 			scripts/hermes-steward-acceptance.sh \

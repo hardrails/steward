@@ -56,9 +56,13 @@ use the [offline installation guide](https://hardrails.github.io/steward/guides/
 After configuration and activation, verify the node before admitting a workload:
 
 ```console
-sudo /usr/local/libexec/steward/node-preflight
-systemctl is-active steward steward-executor steward-gateway
+sudo /usr/local/libexec/steward/node-doctor
 ```
+
+The doctor checks the installed release, Docker and gVisor, systemd services,
+loopback health and readiness, Gateway, fixed evidence stores, and filesystem
+capacity without changing node state. Its optional canary submits a real signed
+task and records agent-reported completion; see the [node verification procedure](https://hardrails.github.io/steward/getting-started/#verify-the-node).
 
 For a first workload, follow the
 [loopback evaluation lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/)
@@ -73,21 +77,28 @@ sudo stewardctl node status --node-url http://127.0.0.1:8090 \
   --token-file /etc/steward/executor-token --runtime-ref executor-DIGEST
 ```
 
-For a task-enabled Hermes service, an off-node tenant key can sign one exact JSON
-run request. `stewardctl hermes run` submits the resulting owner-only bundle through
+For any lifecycle-enabled service, an off-node tenant key can sign one exact JSON
+request. The generic task client submits the resulting owner-only bundle through
 Gateway without placing that signing key in the agent or on the node:
 
 ```bash
-sudo stewardctl hermes run \
-  -bundle hermes-workspace-audit.task.json \
+sudo stewardctl task submit \
+  -bundle task.json \
+  -gateway-url http://127.0.0.1:8091 \
+  -token-file /etc/steward/gateway-service-token
+
+sudo stewardctl task wait \
+  -bundle task.json \
   -gateway-url http://127.0.0.1:8091 \
   -token-file /etc/steward/gateway-service-token \
-  -wait
+  -result-out task-result.json
 ```
 
-The [Hermes guide](https://hardrails.github.io/steward/guides/hermes-agent/#authorize-and-run-one-exact-hermes-task)
-shows the required policy, Gateway operation, signing, verification, dispatch, and
-offline audit steps.
+Keep the same bundle after a timeout or transport error: inspect or wait for that
+exact task instead of creating replacement authority. The
+[task lifecycle reference](https://hardrails.github.io/steward/reference/offline-tools/#submit-and-recover-a-service-task)
+and [Hermes guide](https://hardrails.github.io/steward/guides/hermes-agent/#authorize-and-run-one-exact-hermes-task)
+show signing, verification, dispatch, recovery, result handling, and offline audit.
 
 `steward-mcp` exposes the same bounded Executor lifecycle operations to a local
 Model Context Protocol (MCP) client over standard input and output. Starting it
@@ -97,6 +108,11 @@ directly waits for an MCP client:
 sudo steward-mcp -node-url http://127.0.0.1:8090 \
   -token-file /etc/steward/executor-token
 ```
+
+Optional task tools require a loopback Gateway credential and a dedicated
+owner-only result directory. The task signing key still stays off-node; MCP can
+submit only a pre-signed exact request. Both bearer tokens are host-administrator
+credentials and must not be exposed to an untrusted agent or MCP client.
 
 MCP is a standard tool interface for AI clients. See the
 [installation guide](https://hardrails.github.io/steward/getting-started/),
@@ -118,7 +134,7 @@ Steward separates those capabilities:
 | Multiple tenants on one host | Each workload has its own gVisor sandbox, per-workload resource limits, host and tenant aggregate memory/CPU/PID reservations, workload-count caps, command authority, and, when needed, private Docker network. Durable admission, command-fence, journal, and receipt records bind the tenant ID. Persistent Docker volumes are disabled on shared hosts because the local volume driver does not provide portable hard byte or inode quotas. |
 | Model, service, and API access | Site policy grants named inference routes, model aliases, service IDs, credential-brokered connector IDs, and HTTP(S) egress routes. A tenant task key can be scoped to one service and sign a short-lived permit for one exact service request; Gateway records authorization before dispatch. The private key is not a Steward node input and is never given to the agent. Connectors separately map logical operations to operator-owned origins and credentials and can require exact-request action permits. Non-borrowing receipt budgets prevent one tenant from consuming another tenant's evidence allocation. The agent gets no general network route. |
 | Remote nodes | Authenticated outbound polling works behind network address translation (NAT) and inbound firewalls. Tenant-signed commands include a short validity window, instance generation, and sequence number so Executor can reject replay. |
-| Audit evidence | Executor writes signed, hash-linked lifecycle receipts. Gateway writes a separate signed chain for connector calls and tenant-signed service-task authorization, dispatch outcome, and observed run ID. Permit-backed records bind the authority key, permit, operation policy, and exact request digest. They never contain the raw prompt or request body. `stewardctl` verifies both chains and correlates permits offline. |
+| Audit evidence | Executor writes signed, hash-linked lifecycle receipts. Gateway writes a separate signed chain for connector calls and tenant-signed service-task authorization, dispatch, and terminal observation. Current lifecycle tasks use receipt format 4 with a task-local authorization → dispatch → terminal chain. Permit-backed records bind the authority key, permit, operation policy, and exact request digest. They never contain the raw prompt, request body, or agent result. `stewardctl` verifies both chains and correlates permits offline. |
 | Disconnected operation | Static binaries, local public-key infrastructure (PKI), offline image import, and local model gateways do not require a public network service after transfer. |
 | Vendor independence | Public OpenAPI and uplink contracts have no private runtime dependency. |
 
@@ -155,8 +171,10 @@ A Linux release contains six static binaries:
   exact connector-operation, and HTTP(S) egress grants.
 - `steward-relay` is a fixed-destination companion inside one workload network.
 - `stewardctl` manages keys, policy, exact-request connector and service-task
-  permits, Hermes task dispatch, OCI import, evidence, and local node actions.
-- `steward-mcp` exposes bounded node operations over MCP stdio.
+  permits, generic task lifecycle and recovery, OCI import, evidence, and local
+  node actions.
+- `steward-mcp` exposes bounded node operations and optional pre-signed task
+  lifecycle tools over MCP stdio.
 
 `steward`, `steward-executor`, and `steward-gateway` run as separate systemd
 services and Unix users. Only Executor joins the Docker group. Agent containers,
@@ -248,17 +266,18 @@ Steward includes a qualified, source-built adapter definition for
 only negotiation, health, run submission, and run-status operations on service port
 `8766`. Run event streams are not exposed.
 
-Qualification runs two signed skills as real Hermes work under gVisor. It verifies
+Qualification runs two signed skills as real Hermes work under gVisor. The harness checks
 the bounded `steward.workspace-audit` inventory, changed persisted workspace state,
 restarted the container, opened a fresh session, and required the changed result.
 For `steward.connector-work`, Hermes had to discover the native skill index entry,
 load the exact signed `SKILL.md` with `skill_view`, and follow its terminal command.
-The integration gate proves one authenticated upstream effect, replay and
+The integration gate demonstrated one authenticated upstream effect, replay and
 undeclared-operation denial, fixed-material secret scans, state purge, and separate
 Executor and Gateway receipt chains. The task-enabled service workflow additionally
-uses a tenant key scoped to `hermes-api`, signs the exact workspace-audit run
-request, dispatches it with `stewardctl hermes run`, and correlates the permit with
-Gateway receipt format 3. The proof applies only to the pinned source, adapter, and
+uses a tenant key scoped to `hermes-api`, signs five exact requests, dispatches them
+through the generic task lifecycle, and checks each format-4 authorization,
+dispatch, and terminal chain. The retained qualification evidence applies only to
+the pinned source, adapter, and
 documented inference, service, state, connector, task, and skill behavior. The
 official upstream image remains inadmissible
 because it starts as root and declares a volume.

@@ -25,7 +25,8 @@ installer, and a SHA-256 manifest.
 | `checksums.txt` | SHA-256 values for every other release asset |
 
 Linux archives and packages include hardened systemd units, configuration templates,
-enrollment and preflight helpers, and whole-release activation and removal tools.
+enrollment, preflight, and node-doctor helpers, and whole-release activation and
+removal tools.
 They also include the exact-pinned Hermes Agent adapter definition, builder, signed
 workspace-audit and connector-work skills, and qualification test harness. They do
 not include a built Hermes image.
@@ -76,8 +77,8 @@ sudo env \
 
 Set `HERMES_INTEGRATION_EVIDENCE_OUT` to a new path when an owner-only,
 metadata-only qualification record is required. The detailed
-[Hermes guide]({{ '/guides/hermes-agent/' | relative_url }}) explains the proof and
-its limits.
+[Hermes guide]({{ '/guides/hermes-agent/' | relative_url }}) explains the
+qualification evidence and its limits.
 
 ## Verify a downloaded release
 
@@ -121,15 +122,16 @@ Executor evidence, uplink replay state, and supervisor state. Activation uses th
 ranges to reject an unsafe upgrade or rollback before changing the active-release
 symlink or relay binding.
 
-Current manifests declare `connector_receipt_log` with `read_min: 1`, `read_max: 3`,
-and `write: 3`. Ordinary connector records retain schema 1. Action-permit records use
+Current manifests declare `connector_receipt_log` with `read_min: 1`, `read_max: 4`,
+and `write: 4`. Ordinary connector records retain schema 1. Action-permit records use
 schema 2 and add the action-authority key ID, exact permit digest, and exact request
-digest. Exact service-task records use schema 3 and add the service, operation-policy,
-and run bindings needed to recover a durable dispatch result without repeating the
-upstream effect. All three schemas may appear in one signed chain. Format inspection
-requires reader 2 whenever action authorities are configured and reader 3 whenever
-service-task operations are configured, even before the first corresponding record,
-because the active configuration can write that format immediately.
+digest. Schema 3 is the historical two-record service-task format. Current lifecycle
+tasks use schema 4, which adds task-local sequence and hash links across
+authorization, dispatch, and terminal records. All four schemas may appear in one
+signed chain. Format inspection requires reader 2 whenever action authorities are
+configured and reader 4 whenever service-task operations are configured, even before
+the first corresponding record, because active configuration can write that format
+immediately.
 
 Current manifests also declare `gateway_state` readers 1 through 4 and writer 4.
 Gateway state format 4 retains service identity and tenant task authorities for

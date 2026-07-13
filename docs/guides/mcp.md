@@ -1,35 +1,44 @@
 ---
 title: Operate Steward through MCP
-description: Configure Steward's MCP 2025-11-25 stdio server and use its bounded admission, lifecycle, log, and state tools.
+description: Configure Steward's local MCP server for bounded node operations and optional pre-signed task lifecycle tools.
 section: How-to
 ---
 
 # Operate Steward through MCP
 
-`steward-mcp` lets a Model Context Protocol (MCP) client manage one local Steward
-node. It communicates over standard input and output and calls the same loopback
-Executor API as `stewardctl node`. When signed admission is configured, generation
-fences reject older workload generations, drift checks compare Docker state with
-the signed record, the mutation journal records host changes, and receipts provide
-signed evidence. MCP cannot bypass those controls. In unsigned mode, the same
-host-administrator API controls Docker without the signed journal and receipt path.
+`steward-mcp` lets a Model Context Protocol (MCP) client operate one local Steward
+node. It communicates through standard input and output; it does not open a network
+listener. Node tools call the same loopback Executor API as `stewardctl node`.
+Optional task tools call the loopback Gateway API and accept only an exact request
+with a tenant-signed permit.
+
+MCP is an interface, not an authorization boundary. Executor and Gateway still
+apply signed policy, generation fences, durable replay controls, journals, quotas,
+and receipts. An MCP client cannot use these tools to mint task authority or bypass
+those controls.
 
 ## Security boundary
 
-The token passed to `steward-mcp` is a **host-administrator credential**. Any MCP
-client that can invoke the server can admit, start, stop, destroy, and purge state
-within Executor's configured authority. Do not expose it to an untrusted agent or
-shared desktop account. Tool annotations and confirmation text help users avoid
-mistakes; they do not enforce authorization.
+The Executor and Gateway bearer tokens are **host-administrator credentials**. A
+client that can invoke node tools can admit, start, stop, destroy, and purge state
+within Executor's configured authority. A client with task tools can spend a valid
+pre-signed permit and cause its exact external effect. Do not expose either token,
+the MCP process, or its standard-input channel to an untrusted agent or shared
+account.
 
-The packaged Executor listens only on `127.0.0.1:8090`. The MCP server accepts only
-a syntactically valid loopback origin and an owner-only token file.
+`acknowledge_external_effects=true` is a model-visible safety acknowledgment. It is
+not evidence of human approval and does not grant authority. The tenant signature,
+the exact permit scope, and Gateway's current policy are the authorization boundary.
+Tool annotations likewise help clients present risk; they do not enforce approval.
 
-## Configure a client
+The packaged Executor and Gateway listen on literal loopback addresses. The MCP
+server accepts only loopback origins and owner-only token files. Task results never
+enter MCP JSON or standard output as raw agent-controlled bytes.
 
-Set `OPERATOR` to the existing operating-system user that runs the MCP client. The
-commands resolve that account's real primary group and home directory, create the
-destination, and make an owner-only copy of the Executor token:
+## Configure node tools
+
+Set `OPERATOR` to the existing operating-system user that runs the MCP client. Copy
+the Executor token into an owner-only directory for that account:
 
 ```bash
 OPERATOR=alice
@@ -42,7 +51,7 @@ sudo install -o "$OPERATOR" -g "$OPERATOR_GROUP" -m 0600 \
 ```
 
 Use this server entry in a client that supports local stdio MCP servers. Replace
-`/home/alice` if the resolved home directory is different:
+`/home/alice` if the resolved home directory differs:
 
 ```json
 {
@@ -60,7 +69,58 @@ Use this server entry in a client that supports local stdio MCP servers. Replace
 
 Restart the MCP client, list tools, and call `steward_status` with an
 `executor-…` runtime reference. The server writes newline-delimited JSON-RPC to
-stdout and diagnostics only to stderr.
+standard output and diagnostics only to standard error.
+
+## Enable task tools
+
+Task tools are all-or-nothing. Configure `-gateway-url`, `-gateway-token-file`, and
+`-task-result-dir` together. Copy the Gateway service token to the same trusted
+operator account and create an empty result directory:
+
+```bash
+sudo install -o "$OPERATOR" -g "$OPERATOR_GROUP" -m 0600 \
+  /etc/steward/gateway-service-token \
+  "$OPERATOR_HOME/.config/steward/gateway-service-token"
+sudo install -d -o "$OPERATOR" -g "$OPERATOR_GROUP" -m 0700 \
+  "$OPERATOR_HOME/.local" \
+  "$OPERATOR_HOME/.local/state" \
+  "$OPERATOR_HOME/.local/state/steward" \
+  "$OPERATOR_HOME/.local/state/steward/task-results"
+```
+
+Add the three task arguments to the MCP server entry:
+
+```json
+{
+  "mcpServers": {
+    "steward": {
+      "command": "/usr/local/bin/steward-mcp",
+      "args": [
+        "-node-url", "http://127.0.0.1:8090",
+        "-token-file", "/home/alice/.config/steward/executor-token",
+        "-gateway-url", "http://127.0.0.1:8091",
+        "-gateway-token-file", "/home/alice/.config/steward/gateway-service-token",
+        "-task-result-dir", "/home/alice/.local/state/steward/task-results"
+      ]
+    }
+  }
+}
+```
+
+The result directory must be a clean absolute path, owned by the MCP process user,
+and mode `0700`. Every ancestor must be a non-symlink directory owned by root or
+that user and must not be replaceable by another account. Root-owned sticky
+directories such as `/tmp` are accepted as ancestors, but a dedicated operator
+state directory is easier to audit.
+
+At startup, Steward rejects unexpected or unsafe entries. It accepts at most 1,024
+result files and 256 MiB in total; each verified result is at most 1 MiB. Results
+are new mode-`0600` files named deterministically from the task and permit digests:
+`<task-sha256>.<permit-sha256>.result`. The client cannot choose a `result_name` or
+overwrite a prior result. Steward fsyncs a private temporary file, publishes the
+final name atomically without overwrite, and fsyncs the directory. On startup it
+removes incomplete temporaries and reconciles a crash between publication and
+temporary cleanup; it never accepts a partial file as a completed result.
 
 ## Tools
 
@@ -72,21 +132,46 @@ lineage is one workload's persistent state history.
 | `steward_admit` | Submit a base64 DSSE capsule and strict instance-intent JSON. |
 | `steward_status` | Read current hardened workload state. |
 | `steward_logs` | Read bounded container logs. |
-| `steward_egress` | Read bounded egress counters and last destination/decision. |
+| `steward_egress` | Read bounded egress counters and last destination or decision. |
 | `steward_start` / `steward_stop` | Transition the agent, relay, and Gateway grant; signed workloads use the mutation journal and receipts. |
 | `steward_destroy` | Destroy the containers, network, and grant while retaining state. |
 | `steward_purge_state` | Permanently remove an inactive persistent-state lineage after signed authorization; persistent state is available only in dedicated-host compatibility mode. |
+| `steward_task_submit` | Submit one exact request and signed permit. Required arguments are `service_path`, `operation_path`, `request_base64`, `permit_base64`, and `acknowledge_external_effects=true`. Returns task and permit digests plus the durable receipt marker, never raw agent output. |
+| `steward_task_status` | Read durable lifecycle metadata by task and permit digest without contacting the agent. |
+| `steward_task_observe` | Make one bounded status observation. If terminal output is available, verify its digest and length and save it under the deterministic result path. MCP receives only the path, digest, length, and status metadata. |
+
+Create the version-2 lifecycle bundle with `stewardctl task issue` on the trusted
+signing station. Its `service_path`, `operation.path`, `request_base64`, and
+`permit_base64` fields are the exact `steward_task_submit` inputs. The private key
+never belongs on the node or in the MCP client.
+
+There is no MCP wait tool. Use `steward_task_status` for passive inspection. When
+the task reaches dispatch, call `steward_task_observe`; if Gateway reports a retry
+interval, wait at least that long before observing again. Preserve the same task and
+permit digests after any timeout or transport error. Creating a replacement task
+could duplicate an effect whose result is merely ambiguous.
+
+For a terminal Gateway failure, MCP omits the internal error code and returns a
+derived `retry_safety` value. `replacement_safe_after_new_authority` means Gateway
+knows it did not contact the service; a new task still needs new signed authority.
+`replacement_unsafe` means the service may have processed the request, so automatic
+replacement could duplicate the effect. `failed_without_dispatch_evidence` by
+itself must never be read as proof that no dispatch occurred.
 
 The implementation follows MCP revision `2025-11-25` and supports initialization,
 `ping`, `tools/list`, and `tools/call`. It has no network MCP transport. Stdio keeps
-the adapter local; Steward's existing control channels handle remote authentication.
+the adapter host-local; Steward's existing control channels handle remote
+authentication.
 
 ## Diagnose
 
 Run the binary directly and send one JSON-RPC message per line. A successful
 initialize response reports server name `steward-mcp` and protocol version
-`2025-11-25`. If the process reports a token-permission error, correct the file
-ownership. Do not make the token group- or world-readable.
+`2025-11-25`. If the process reports a token or result-directory permission error,
+correct the owner and mode. Do not make credentials or results group- or
+world-readable.
 
-For non-MCP automation, use [`stewardctl node`]({{ '/guides/workload-lifecycle/' | relative_url }})
+For non-MCP automation, use
+[`stewardctl node`]({{ '/guides/workload-lifecycle/' | relative_url }}), the
+[`stewardctl task` lifecycle]({{ '/reference/offline-tools/#submit-and-recover-a-service-task' | relative_url }}),
 or the [Executor OpenAPI]({{ '/reference/api/' | relative_url }}).

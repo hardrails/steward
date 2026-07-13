@@ -4,6 +4,10 @@
 - Date: 2026-07-13
 - Rung: in-house
 
+This decision defines the original exact-request authorization boundary. Decision
+[0011](0011-portable-task-lifecycle-evidence.md) extends it with the current
+authorization, dispatch, and terminal lifecycle chain and generic task commands.
+
 ## Context
 
 A gVisor sandbox limits what an untrusted agent process can reach, but it does not
@@ -50,7 +54,7 @@ The task private key remains outside the node. Gateway and Executor retain only 
 public key, and the owner-only task bundle carries the exact request and permit for
 controlled transfer. Receipts record digests and bounded enforcement metadata, not
 the raw prompt or request body. The agent service supplies the run ID, so that value
-is untrusted application output; the receipt proves what Gateway observed, not that
+is untrusted application output; the receipt records what Gateway observed, not that
 the agent completed useful work or reported truthfully.
 
 Revisit the standard-library implementation if a stable, independently specified

@@ -62,6 +62,10 @@ func (*blockingConnectorReceiptLog) Finish(connectorledger.Event) (connectorledg
 	return connectorledger.Head{}, errors.New("unexpected fixture finish")
 }
 
+func (*blockingConnectorReceiptLog) Dispatch(connectorledger.Event) (connectorledger.Head, error) {
+	return connectorledger.Head{}, errors.New("unexpected fixture dispatch")
+}
+
 func (log *blockingConnectorReceiptLog) Failed() bool { return log.failed }
 func (*blockingConnectorReceiptLog) Close() error     { return nil }
 
@@ -72,6 +76,9 @@ func (log refusingConnectorReceiptLog) Begin(connectorledger.Event) (connectorle
 }
 func (refusingConnectorReceiptLog) Finish(connectorledger.Event) (connectorledger.Head, error) {
 	return connectorledger.Head{}, errors.New("unexpected fixture finish")
+}
+func (refusingConnectorReceiptLog) Dispatch(connectorledger.Event) (connectorledger.Head, error) {
+	return connectorledger.Head{}, errors.New("unexpected fixture dispatch")
 }
 func (refusingConnectorReceiptLog) Failed() bool { return false }
 func (refusingConnectorReceiptLog) Close() error { return nil }

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -63,7 +64,8 @@ func newTaskCLIFixture(t *testing.T) *taskCLIFixture {
 	operation := serviceTrustOperation{
 		ServiceID: intent.ServiceID, ID: "hermes.run", Method: "POST", Path: "/v1/runs",
 		ContentType: "application/json", MaxRequestBytes: 64 << 10, MaxResponseBytes: 1 << 20,
-		MaxSeconds: 30, MaxPermitSeconds: 600,
+		MaxSeconds: 30, MaxPermitSeconds: 600, TaskProtocol: gateway.TaskProtocolLifecycleV1,
+		StatusPathPrefix: "/v1/runs/", StatusMaxSeconds: 15, PollIntervalSeconds: 2,
 	}
 	operation.PolicyDigest = gateway.ServiceOperationDigest(operation.gatewayOperation())
 	request := []byte(`{"input":"STEWARD_WORKSPACE_AUDIT","session_id":"sovereign-work"}`)
@@ -76,7 +78,7 @@ func newTaskCLIFixture(t *testing.T) *taskCLIFixture {
 		intentPath:    writePermitJSON(t, directory, "intent.json", intent),
 		admissionPath: writePermitJSON(t, directory, "admission.json", admitted),
 		trustPath: writePermitJSON(t, directory, "service-trust.json", serviceTrustInventory{
-			SchemaVersion: serviceTrustSchemaV1, NodeID: intent.NodeID, TenantID: intent.TenantID,
+			SchemaVersion: serviceTrustSchemaV2, NodeID: intent.NodeID, TenantID: intent.TenantID,
 			Services: []serviceTrustService{{ServiceID: intent.ServiceID, Operations: []serviceTrustOperation{operation}}},
 		}),
 		bundlePath: filepath.Join(directory, "task.bundle.json"), intent: intent, admitted: admitted,
@@ -179,6 +181,78 @@ func TestTaskIssueAndVerifyProduceOneExactOwnerOnlyBundle(t *testing.T) {
 	}
 	if after, err := os.ReadFile(fixture.bundlePath); err != nil || !bytes.Equal(after, raw) {
 		t.Fatal("failed second issue changed the existing bundle")
+	}
+}
+
+func TestTaskIssueCarriesLifecyclePolicyInVersionedBundle(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	statement := fixture.issue(t)
+	if statement.OperationPolicyDigest != fixture.operation.PolicyDigest {
+		t.Fatalf("statement operation digest=%q want=%q", statement.OperationPolicyDigest, fixture.operation.PolicyDigest)
+	}
+	raw, err := os.ReadFile(fixture.bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle taskBundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.SchemaVersion != taskBundleSchemaV2 || bundle.Operation.TaskProtocol != gateway.TaskProtocolLifecycleV1 ||
+		bundle.Operation.StatusPathPrefix != "/v1/runs/" || bundle.Operation.StatusMaxSeconds != 15 ||
+		bundle.Operation.PollIntervalSeconds != 2 {
+		t.Fatalf("lifecycle bundle=%#v", bundle)
+	}
+
+	public, err := readPublicKey(fixture.publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.SchemaVersion = "steward.task-bundle.v1"
+	if _, err := decodeTaskBundleValue(bundle, map[string]ed25519.PublicKey{fixture.keyID: public}, fixture.now, taskpermit.MaxValidity); err == nil ||
+		!strings.Contains(err.Error(), "unsupported schema") {
+		t.Fatalf("v1 lifecycle bundle err=%v", err)
+	}
+	bundle.SchemaVersion = taskBundleSchemaV2
+	bundle.Operation.TaskProtocol = ""
+	if _, err := decodeTaskBundleValue(bundle, map[string]ed25519.PublicKey{fixture.keyID: public}, fixture.now, taskpermit.MaxValidity); err == nil ||
+		!strings.Contains(err.Error(), "unsupported schema") {
+		t.Fatalf("v2 legacy bundle err=%v", err)
+	}
+}
+
+func TestServiceTrustSchemaMatchesLifecycleContent(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	lifecycle := fixture.operation
+	lifecycle.TaskProtocol = gateway.TaskProtocolLifecycleV1
+	lifecycle.StatusPathPrefix = "/v1/runs/"
+	lifecycle.StatusMaxSeconds = 15
+	lifecycle.PollIntervalSeconds = 2
+	lifecycle.PolicyDigest = gateway.ServiceOperationDigest(lifecycle.gatewayOperation())
+	withoutLifecycle := lifecycle
+	withoutLifecycle.TaskProtocol = ""
+	withoutLifecycle.StatusPathPrefix = ""
+	withoutLifecycle.StatusMaxSeconds = 0
+	withoutLifecycle.PollIntervalSeconds = 0
+	withoutLifecycle.PolicyDigest = gateway.ServiceOperationDigest(withoutLifecycle.gatewayOperation())
+
+	for _, test := range []struct {
+		name      string
+		schema    string
+		operation serviceTrustOperation
+	}{
+		{name: "v2 without lifecycle", schema: serviceTrustSchemaV2, operation: withoutLifecycle},
+		{name: "unknown schema", schema: "steward.service-trust.unknown", operation: lifecycle},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			writePermitJSONReplace(t, fixture.trustPath, serviceTrustInventory{
+				SchemaVersion: test.schema, NodeID: fixture.intent.NodeID, TenantID: fixture.intent.TenantID,
+				Services: []serviceTrustService{{ServiceID: fixture.intent.ServiceID, Operations: []serviceTrustOperation{test.operation}}},
+			})
+			if _, err := readServiceTrust(fixture.trustPath, fixture.intent, fixture.operation.ID); err == nil {
+				t.Fatal("mismatched service trust schema accepted")
+			}
+		})
 	}
 }
 
@@ -306,14 +380,14 @@ func TestTaskIssueRejectsUntrustedAdmissionInventoryAndAmbiguousRequest(t *testi
 			writePermitJSONReplace(t, f.admissionPath, f.admitted)
 		}, "does not bind this task-authority"},
 		"wrong trust node": {func(f *taskCLIFixture) {
-			writePermitJSONReplace(t, f.trustPath, serviceTrustInventory{SchemaVersion: serviceTrustSchemaV1,
+			writePermitJSONReplace(t, f.trustPath, serviceTrustInventory{SchemaVersion: serviceTrustSchemaV2,
 				NodeID: "node-b", TenantID: f.intent.TenantID,
 				Services: []serviceTrustService{{ServiceID: f.intent.ServiceID, Operations: []serviceTrustOperation{f.operation}}}})
 		}, "does not match"},
 		"tampered trust operation": {func(f *taskCLIFixture) {
 			operation := f.operation
 			operation.Path = "/v1/other"
-			writePermitJSONReplace(t, f.trustPath, serviceTrustInventory{SchemaVersion: serviceTrustSchemaV1,
+			writePermitJSONReplace(t, f.trustPath, serviceTrustInventory{SchemaVersion: serviceTrustSchemaV2,
 				NodeID: f.intent.NodeID, TenantID: f.intent.TenantID,
 				Services: []serviceTrustService{{ServiceID: f.intent.ServiceID, Operations: []serviceTrustOperation{operation}}}})
 		}, "operations are invalid"},
@@ -349,7 +423,7 @@ func TestTaskIssueRejectsUntrustedAdmissionInventoryAndAmbiguousRequest(t *testi
 				return result
 			}
 			hermesOperations := append([]serviceTrustOperation{f.operation}, operations(f.intent.ServiceID, "hermes", 64)...)
-			writePermitJSONReplace(t, f.trustPath, serviceTrustInventory{SchemaVersion: serviceTrustSchemaV1,
+			writePermitJSONReplace(t, f.trustPath, serviceTrustInventory{SchemaVersion: serviceTrustSchemaV2,
 				NodeID: f.intent.NodeID, TenantID: f.intent.TenantID,
 				Services: []serviceTrustService{
 					{ServiceID: "aux-api", Operations: operations("aux-api", "aux", 64)},
@@ -411,13 +485,21 @@ func TestTaskAuditVerifiesExpiredPermitAtAuthorizationAndEveryReceiptBinding(t *
 		TaskDigest:            taskpermit.TaskDigest(statement.TenantID, statement.InstanceID, statement.TaskID),
 		AuthorityKeyID:        bundle.Verified.KeyID, PermitDigest: bundle.Verified.EnvelopeDigest,
 		RequestDigest: statement.RequestDigest, RequestBytes: statement.RequestBytes,
+		TaskProtocol: connectorledger.TaskProtocolLifecycleV1,
 	}
 	if _, err := ledger.Begin(event); err != nil {
 		t.Fatal(err)
 	}
-	terminal := event
-	terminal.Phase, terminal.Outcome = connectorledger.Terminal, connectorledger.Responded
-	terminal.HTTPStatus, terminal.ResponseBytes, terminal.RunID = 201, 46, "run_0123456789abcdef0123456789abcdef"
+	dispatch := event
+	dispatch.Phase, dispatch.Outcome = connectorledger.Dispatch, connectorledger.Responded
+	dispatch.HTTPStatus, dispatch.ResponseBytes, dispatch.RunID = 202, 46, "run_0123456789abcdef0123456789abcdef"
+	if _, err := ledger.Dispatch(dispatch); err != nil {
+		t.Fatal(err)
+	}
+	terminal := dispatch
+	terminal.Phase, terminal.HTTPStatus, terminal.ResponseBytes = connectorledger.Terminal, 200, 84
+	terminal.TaskStatus = connectorledger.TaskStatusAgentReportedCompleted
+	terminal.ResultDigest = "sha256:" + strings.Repeat("f", 64)
 	head, err := ledger.Finish(terminal)
 	if err != nil {
 		t.Fatal(err)
@@ -434,7 +516,7 @@ func TestTaskAuditVerifiesExpiredPermitAtAuthorizationAndEveryReceiptBinding(t *
 	auditArguments := []string{
 		"task", "audit", "-in", fixture.bundlePath, "-public-key", fixture.publicPath, "-key-id", fixture.keyID,
 		"-receipts", receiptsPath, "-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/gateway",
-		"-receipt-epoch", "3", "-request", fixture.requestPath, "-expected-sequence", "2",
+		"-receipt-epoch", "3", "-request", fixture.requestPath, "-expected-sequence", "3",
 		"-expected-chain-hash", head.ChainHash,
 	}
 	var output bytes.Buffer
@@ -445,6 +527,7 @@ func TestTaskAuditVerifiesExpiredPermitAtAuthorizationAndEveryReceiptBinding(t *
 		Valid         bool                 `json:"valid"`
 		PermitDigest  string               `json:"permit_digest"`
 		Authorization taskAuditRecord      `json:"authorization"`
+		Dispatch      *taskAuditRecord     `json:"dispatch"`
 		Terminal      *taskAuditRecord     `json:"terminal"`
 		Head          connectorledger.Head `json:"head"`
 	}
@@ -452,6 +535,7 @@ func TestTaskAuditVerifiesExpiredPermitAtAuthorizationAndEveryReceiptBinding(t *
 		t.Fatal(err)
 	}
 	if !audited.Valid || audited.PermitDigest != bundle.Verified.EnvelopeDigest || audited.Authorization.Sequence != 1 ||
+		audited.Dispatch == nil || audited.Dispatch.Event.RunID != dispatch.RunID ||
 		audited.Terminal == nil || audited.Terminal.Event.RunID != terminal.RunID || audited.Head != head {
 		t.Fatalf("audited=%#v", audited)
 	}
@@ -492,5 +576,91 @@ func TestTaskAuditVerifiesExpiredPermitAtAuthorizationAndEveryReceiptBinding(t *
 		"-receipts", mismatchPath, "-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/gateway",
 	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "every task-permit binding") {
 		t.Fatalf("mismatched receipt error=%v", err)
+	}
+}
+
+func TestTaskAuditIncludesLifecycleDispatchAndTaskLocalChain(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	statement := fixture.issue(t)
+	public, err := readPublicKey(fixture.publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := readTaskBundle(
+		fixture.bundlePath, map[string]ed25519.PublicKey{fixture.keyID: public}, fixture.now, taskpermit.MaxValidity,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptPrivatePath, receiptPublicPath := generateTestKeyPair(t, fixture.directory, "lifecycle-receipt")
+	receiptPrivate, err := readPrivateKey(receiptPrivatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptsPath := filepath.Join(fixture.directory, "lifecycle-task-receipts.ndjson")
+	ledger, err := connectorledger.Open(receiptsPath, receiptPrivate, "node-a/gateway", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := connectorledger.Event{
+		Phase: connectorledger.Authorize, Outcome: connectorledger.Allowed, Kind: connectorledger.ServiceTask,
+		TenantID: statement.TenantID, RuntimeRef: statement.RuntimeRef, CapsuleDigest: statement.CapsuleDigest,
+		PolicyDigest: statement.PolicyDigest, RoutePolicyDigest: statement.RoutePolicyDigest, Generation: statement.Generation,
+		GrantID: statement.GrantID, ServiceID: statement.ServiceID, OperationID: statement.OperationID,
+		OperationPolicyDigest: statement.OperationPolicyDigest,
+		TaskDigest:            taskpermit.TaskDigest(statement.TenantID, statement.InstanceID, statement.TaskID),
+		AuthorityKeyID:        bundle.Verified.KeyID, PermitDigest: bundle.Verified.EnvelopeDigest,
+		RequestDigest: statement.RequestDigest, RequestBytes: statement.RequestBytes,
+		TaskProtocol: connectorledger.TaskProtocolLifecycleV1,
+	}
+	authorizationHead, err := ledger.Begin(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatch := event
+	dispatch.Phase, dispatch.Outcome = connectorledger.Dispatch, connectorledger.Responded
+	dispatch.HTTPStatus, dispatch.ResponseBytes = http.StatusAccepted, 45
+	dispatch.RunID = "run_0123456789abcdef0123456789abcdef"
+	dispatchHead, err := ledger.Dispatch(dispatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := dispatch
+	terminal.Phase, terminal.HTTPStatus, terminal.ResponseBytes = connectorledger.Terminal, http.StatusOK, 84
+	terminal.TaskStatus = connectorledger.TaskStatusAgentReportedCompleted
+	terminal.ResultDigest = "sha256:" + strings.Repeat("f", 64)
+	terminalHead, err := ledger.Finish(terminal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := run([]string{
+		"task", "audit", "-in", fixture.bundlePath, "-public-key", fixture.publicPath, "-key-id", fixture.keyID,
+		"-receipts", receiptsPath, "-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/gateway",
+		"-receipt-epoch", "4", "-expected-sequence", "3", "-expected-chain-hash", terminalHead.ChainHash,
+	}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var audited struct {
+		Valid         bool             `json:"valid"`
+		Authorization *taskAuditRecord `json:"authorization"`
+		Dispatch      *taskAuditRecord `json:"dispatch"`
+		Terminal      *taskAuditRecord `json:"terminal"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &audited); err != nil {
+		t.Fatal(err)
+	}
+	zero := "sha256:" + strings.Repeat("0", 64)
+	if !audited.Valid || audited.Authorization == nil || audited.Dispatch == nil || audited.Terminal == nil ||
+		audited.Authorization.SchemaVersion != connectorledger.SchemaV4 ||
+		audited.Authorization.TaskSequence != 1 || audited.Authorization.PreviousTaskHash != zero ||
+		audited.Dispatch.TaskSequence != 2 || audited.Dispatch.PreviousTaskHash != authorizationHead.ChainHash ||
+		audited.Terminal.TaskSequence != 3 || audited.Terminal.PreviousTaskHash != dispatchHead.ChainHash ||
+		audited.Terminal.Event.TaskStatus != connectorledger.TaskStatusAgentReportedCompleted {
+		t.Fatalf("audited lifecycle=%#v", audited)
 	}
 }

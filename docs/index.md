@@ -65,17 +65,17 @@ recorded run ID without dispatching again; an ambiguous outcome fails closed.
 ## Agent adapters
 
 Steward provides a qualified Hermes Agent adapter definition for exact upstream
-commit `095b9eed3801c251796df93f48a8f2a527ff6e70`. The retained proof applies to
+commit `095b9eed3801c251796df93f48a8f2a527ff6e70`. The retained qualification applies to
 `linux/amd64`; other platforms are not yet qualified. The source-built image runs as
 `65532:65532`, uses the fixed Steward inference relay, and exposes only bounded
 negotiation, health, run submission, and run-status operations on port `8766`.
 Qualification runs the signed `steward.workspace-audit` skill under gVisor, changes
 persisted workspace state, restarted the container, and required a fresh changed
 result. It also required Hermes to discover and load the exact signed
-`steward.connector-work` skill before proving one authenticated effect, replay and
+`steward.connector-work` skill before demonstrating one authenticated effect, replay and
 undeclared-operation denial, and a separate signed Gateway receipt chain. The
 service-task path scopes a tenant key to `hermes-api`, signs the exact run request,
-dispatches it through Gateway, and audits authorization and terminal records
+dispatches it through Gateway, and audits authorization, dispatch, and terminal records
 offline. The run ID remains application output from the untrusted Hermes service.
 
 The official Hermes image remains inadmissible. Steward ships the pinned builder,

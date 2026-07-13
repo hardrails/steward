@@ -186,6 +186,7 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	base := []string{
 		"gateway", "service", "set", "-config", path, "-service-id", "hermes-api",
 		"-operation", "hermes.run=POST:/v1/runs", "-max-seconds", "90", "-max-permit-seconds", "240",
+		"-lifecycle", "hermes.run=/v1/runs/",
 	}
 	before, err := os.ReadFile(path)
 	if err != nil {
@@ -211,7 +212,8 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	loaded, _, _, _, err := gateway.LoadConfig(path)
 	if err != nil || len(loaded.ServiceOperations) != 1 || loaded.ServiceOperations[0].ID != "hermes.run" ||
 		loaded.ServiceOperations[0].ContentType != "application/json" || loaded.ServiceOperations[0].MaxSeconds != 90 ||
-		loaded.ServiceOperations[0].MaxPermitSeconds != 240 || len(loaded.ConnectorReceiptTenantBudgets) != 1 ||
+		loaded.ServiceOperations[0].MaxPermitSeconds != 240 || loaded.ServiceOperations[0].TaskProtocol != gateway.TaskProtocolLifecycleV1 ||
+		loaded.ServiceOperations[0].StatusPathPrefix != "/v1/runs/" || len(loaded.ConnectorReceiptTenantBudgets) != 1 ||
 		!strings.Contains(output.String(), "systemctl restart") {
 		t.Fatalf("loaded=%#v budgets=%#v output=%q err=%v", loaded.ServiceOperations, loaded.ConnectorReceiptTenantBudgets, output.String(), err)
 	}
@@ -228,7 +230,7 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 		t.Fatalf("service trust=%s", output.String())
 	}
 	operation := trust.Services[0].Operations[0]
-	if trust.SchemaVersion != serviceTrustSchemaV1 || trust.NodeID != "node-a" || trust.TenantID != "tenant-a" ||
+	if trust.SchemaVersion != serviceTrustSchemaV2 || trust.NodeID != "node-a" || trust.TenantID != "tenant-a" ||
 		trust.Services[0].ServiceID != "hermes-api" || operation.ServiceID != "hermes-api" ||
 		operation.ID != "hermes.run" || operation.Method != http.MethodPost || operation.Path != "/v1/runs" ||
 		operation.PolicyDigest != gateway.ServiceOperationDigest(loaded.ServiceOperations[0]) || operation.MaxPermitSeconds != 240 {
@@ -264,8 +266,9 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	}
 	for _, invalid := range [][]string{
 		append(append([]string(nil), base...), "-operation", "duplicate=POST:/v1/runs"),
-		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=GET:/v1/runs"},
-		{"gateway", "service", "set", "-config", path, "-service-id", "bad service", "-operation", "hermes.run=POST:/v1/runs"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=GET:/v1/runs", "-lifecycle", "hermes.run=/v1/runs/"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "bad service", "-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "hermes.run=/v1/runs/"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs"},
 		append(append([]string(nil), base...), "-tenant-id", "tenant-a"),
 		append(append([]string(nil), base...), "-receipt-epoch", "2"),
 	} {
@@ -283,13 +286,80 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 
 	output.Reset()
 	if err := run([]string{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api",
-		"-operation", "hermes.run=POST:/v1/runs", "-operation", "hermes.batch=POST:/v1/batch"}, &output, &bytes.Buffer{}); err != nil {
+		"-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "hermes.run=/v1/runs/",
+		"-operation", "hermes.batch=POST:/v1/batch", "-lifecycle", "hermes.batch=/v1/batch/"}, &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, _, _, err = gateway.LoadConfig(path)
 	if err != nil || len(loaded.ServiceOperations) != 2 || loaded.ServiceOperations[0].ID != "hermes.batch" ||
 		!strings.Contains(output.String(), `"replaced": true`) || !strings.Contains(output.String(), "systemctl reload") {
 		t.Fatalf("replaced services=%#v output=%q err=%v", loaded.ServiceOperations, output.String(), err)
+	}
+
+	before, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range [][]string{
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "missing=/v1/runs/"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "hermes.run=//"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-poll-interval", "500ms"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-operation", "hermes.batch=POST:/v1/batch", "-lifecycle", "hermes.run=/v1/runs/"},
+	} {
+		if err := run(invalid, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("invalid lifecycle service config accepted: %v", invalid)
+		}
+		unchanged, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(before, unchanged) {
+			t.Fatalf("invalid lifecycle config changed Gateway config: %v", invalid)
+		}
+	}
+
+	output.Reset()
+	if err := run([]string{
+		"gateway", "service", "set", "-config", path, "-service-id", "hermes-api",
+		"-operation", "hermes.run=POST:/v1/runs", "-operation", "hermes.batch=POST:/v1/batch",
+		"-lifecycle", "hermes.run=/v1/runs/", "-lifecycle", "hermes.batch=/v1/batch/",
+		"-status-max-seconds", "12", "-poll-interval", "3s",
+	}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || len(loaded.ServiceOperations) != 2 {
+		t.Fatalf("loaded lifecycle services=%#v err=%v", loaded.ServiceOperations, err)
+	}
+	var lifecycle gateway.ServiceOperation
+	for _, candidate := range loaded.ServiceOperations {
+		if candidate.ID == "hermes.run" {
+			lifecycle = candidate
+		}
+	}
+	if lifecycle.TaskProtocol != gateway.TaskProtocolLifecycleV1 || lifecycle.StatusPathPrefix != "/v1/runs/" ||
+		lifecycle.StatusMaxSeconds != 12 || lifecycle.PollIntervalSeconds != 3 {
+		t.Fatalf("lifecycle operation=%#v", lifecycle)
+	}
+	output.Reset()
+	if err := run([]string{"gateway", "service", "trust", "-config", path, "-node-id", "node-a", "-tenant-id", "tenant-a"}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(output.Bytes(), &trust); err != nil {
+		t.Fatal(err)
+	}
+	if trust.SchemaVersion != serviceTrustSchemaV2 {
+		t.Fatalf("lifecycle trust schema=%q output=%s", trust.SchemaVersion, output.String())
+	}
+	var trustedLifecycle serviceTrustOperation
+	for _, candidate := range trust.Services[0].Operations {
+		if candidate.ID == "hermes.run" {
+			trustedLifecycle = candidate
+		}
+	}
+	if trustedLifecycle.TaskProtocol != gateway.TaskProtocolLifecycleV1 || trustedLifecycle.StatusPathPrefix != "/v1/runs/" ||
+		trustedLifecycle.PolicyDigest != gateway.ServiceOperationDigest(lifecycle) {
+		t.Fatalf("trusted lifecycle=%#v", trustedLifecycle)
 	}
 }
 

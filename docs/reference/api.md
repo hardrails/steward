@@ -1,6 +1,6 @@
 ---
 title: APIs and protocol schemas
-description: Authoritative Steward supervisor and Executor OpenAPI contracts, endpoint summaries, authentication, error shapes, and outbound uplink protocol documentation.
+description: Authoritative Steward supervisor, Executor, and Gateway OpenAPI contracts, endpoint summaries, authentication, error shapes, and outbound uplink protocol documentation.
 section: Reference
 ---
 
@@ -12,8 +12,10 @@ is a defect, not an extension clients should use.
 
 - [Steward supervisor OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward.v1.yaml)
 - [Steward Executor OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-executor.v1.yaml)
+- [Steward Gateway task lifecycle OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-gateway.v1.yaml)
 - [Raw supervisor YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward.v1.yaml)
 - [Raw Executor YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-executor.v1.yaml)
+- [Raw Gateway task lifecycle YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-gateway.v1.yaml)
 
 ## Supervisor API
 
@@ -63,12 +65,58 @@ blocked. An authenticated stop can still deactivate the Gateway grant identified
 by the retained signed admission record and stop exactly identified local agent and
 relay containers. It never settles the operation journal or removes a drifted object.
 
+## Gateway task lifecycle API
+
+Default base URL: `http://127.0.0.1:8091`
+
+Both endpoints require `Authorization: Bearer <gateway-service-token>`. Gateway
+accepts only the configured loopback listener and host credential; these are not
+tenant-facing endpoints.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /v1/tasks/{task_digest}/permits/{permit_digest}` | Read durable lifecycle evidence without contacting the agent |
+| `POST /v1/tasks/{task_digest}/permits/{permit_digest}/observe` | Ask Gateway to make one policy-bounded status request to the configured agent service |
+
+The path binds two values: the deterministic SHA-256 task correlation digest and the
+digest of the exact permit envelope that authorized that task. They must identify
+the same retained authorization. A missing task, a mismatched pair, a legacy task,
+an alternate encoded path, or a query string returns 404. Both requests are
+bodyless.
+
+The observation endpoint is not a general proxy. The active grant fixes the
+agent-service origin. Node operation policy fixes the status-path prefix, timeout,
+response limit, and minimum poll interval. Gateway appends the already recorded run
+ID, sends one bodyless GET, and does not forward caller headers or credentials.
+Concurrent observation of one task returns 409. Host policy can return 429;
+poll-interval throttling includes `Retry-After`.
+
+`dispatch_accepted` means Gateway durably recorded the run ID returned by the agent
+service. A terminal `agent_reported_*` state means Gateway received that report for
+the recorded run and durably recorded its exact response digest and byte length. It
+does not prove the agent did the requested work, that an output is correct, or that
+the report is truthful.
+
+Gateway never persists the agent response body. A live terminal observation returns
+the exact bounded response as `observation_base64` only after its run ID, terminal
+state, byte length, and SHA-256 digest match durable evidence. If delivery is lost,
+a later POST—including after Gateway restarts—can recover the same report while the
+exact grant remains active. A changed agent report returns 502 and cannot replace
+the durable terminal record. GET remains passive and never returns raw bytes. A
+`queued` or `running` report is returned as the transient `observed_status`; durable
+state remains `dispatch_accepted`.
+
 ## MCP server
 
 `steward-mcp` implements Model Context Protocol (MCP) `2025-11-25` over standard
 input/output. Its admit, status, logs, egress, start, stop, destroy, and state-purge
-tools call the loopback Executor API. It is a local adapter, not another authority
-or remote endpoint. See
+tools call the loopback Executor API. When configured with a loopback Gateway
+origin, separate owner-only Gateway token, and fixed result directory, it also
+exposes pre-signed task submit, passive status, and one-shot observation tools. Raw
+agent output is written only to a deterministic owner-only file; MCP receives its
+path, digest, length, and status metadata. The task-submit acknowledgment is not
+human approval: signed permit and Gateway policy remain authoritative. It is a
+local adapter, not another authority or remote endpoint. See
 [MCP setup]({{ '/guides/mcp/' | relative_url }}).
 
 ## Per-workload connector protocol
@@ -133,11 +181,12 @@ task ID, exact request digest and length, content type, and validity window. Gat
 checks those values against the active grant and request, then writes a signed
 authorization record before contacting the service.
 
-Only HTTP 200, 201, and 202 with one bounded JSON `run_id` count as a successful
-dispatch. Gateway records the observed status, response length, and run ID, discards
-the untrusted upstream body and headers, and returns a new canonical
-`{"run_id":"..."}` response with `X-Steward-Task-Receipt: recorded`. An exact
-successful replay within the retained ledger returns the same stored ID with
+Only HTTP 200, 201, and 202 with one bounded JSON `run_id` count as an accepted
+dispatch. Gateway records the observed HTTP status, response length, and run ID,
+discards the untrusted upstream body and headers, and returns a new canonical
+`{"run_id":"..."}` response with `X-Steward-Task-Receipt: recorded`. A
+lifecycle-enabled operation writes this as a distinct durable dispatch receipt. An
+exact replay within the retained ledger returns the same stored ID with
 `X-Steward-Task-Receipt: replayed` and does not dispatch again. A pending,
 conflicting, failed, or unknown result returns a bounded JSON error and is not
 automatically retried.
@@ -145,11 +194,11 @@ automatically retried.
 The replay fence is `(tenant_id, instance_id, task_id)`, so a new workload
 generation does not make the same logical task spendable again. It is node-local
 at-most-once dispatch within one receipt-ledger epoch, not fleet or upstream
-exactly-once execution. Gateway restart reconstructs completed spends and closes a
-durable authorization with no terminal record as `outcome_unknown`. Replacing the
-ledger or advancing to a new epoch creates a new replay boundary. The service
-supplies the run ID, so the signed receipt proves what Gateway observed, not that the
-agent completed useful work.
+exactly-once execution. Gateway restart reconstructs completed spends and pending
+lifecycle dispatches. A durable authorization with neither a dispatch nor terminal
+record is closed as `outcome_unknown`. Replacing the ledger or advancing to a new
+epoch creates a new replay boundary. The service supplies the run ID, so the signed
+receipt records what Gateway observed, not whether the agent completed useful work.
 
 If the authorization write or filesystem sync has an ambiguous result, Gateway does
 not contact the service. The request and its exact replay return
@@ -157,22 +206,35 @@ not contact the service. The request and its exact replay return
 authorization is then closed as `outcome_unknown`; if no authorization was retained,
 the task remains available for a later submission.
 
-For the qualified Hermes adapter, `stewardctl hermes run` sends the signed
-`POST /v1/runs` and can poll `GET /v1/runs/{run_id}` to a terminal state. Status
-polling uses the host Gateway bearer token; the task permit authorizes only the
-exact POST. See the [Hermes guide]({{ '/guides/hermes-agent/' | relative_url }}).
+A lifecycle-enabled operation also fixes `steward.task-lifecycle.v1`, a canonical
+status-path prefix, a status timeout, and a minimum poll interval in its signed
+operation-policy digest. After durable dispatch, clients use the Gateway task
+lifecycle endpoints above. They cannot provide an upstream URL or path. Gateway
+requests the configured prefix plus the recorded run ID and accepts only one bounded
+HTTP 200 JSON object whose `run_id` matches and whose `status` is `queued`, `running`,
+`completed`, `failed`, or `cancelled`.
+
+`queued` and `running` are transient observations. A terminal report becomes a
+signed terminal receipt with `agent_reported_completed`, `agent_reported_failed`, or
+`agent_reported_cancelled`, plus the exact response digest and byte length. These
+names deliberately preserve the claim boundary: Gateway records what the agent
+reported; it does not validate the work product. See the
+[Hermes guide]({{ '/guides/hermes-agent/' | relative_url }}) for the qualified
+adapter and the
+[Gateway task lifecycle OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-gateway.v1.yaml)
+for response and failure schemas.
 
 ## Offline operator tools
 
 `stewardctl image`, `stewardctl evidence`, `stewardctl permit`, `stewardctl task`,
-`stewardctl hermes`, and `stewardctl upgrade` are CLIs, not HTTP endpoints. They provide bounded,
+and `stewardctl upgrade` are CLIs, not HTTP endpoints. They provide bounded,
 policy-bound Open Container Initiative (OCI) inspection and import; offline evidence
 verification and export; exact connector- and service-request permit issuance,
 verification, dispatch, and receipt correlation; and read-only release drain and
 durable-format inspection. Permit issuance consumes an authenticated but unsigned
 trust inventory as mismatch preflight; live Gateway configuration remains
-authoritative. `hermes run` is the exception to offline operation: it contacts only
-an explicit literal-loopback Gateway origin. See
+authoritative. `task submit`, `status`, `observe`, and `wait` are the online task
+operations and contact only an explicit literal-loopback Gateway origin. See
 [local operator tools]({{ '/reference/offline-tools/' | relative_url }}) for flags,
 output formats, and failure boundaries.
 

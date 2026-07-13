@@ -80,15 +80,15 @@ tenant-scoped credential may omit signed admission but can act only for its tena
 ## Verify the active node
 
 ```console
-sudo /usr/local/libexec/steward/node-preflight
-systemctl is-active steward steward-executor steward-gateway
+sudo /usr/local/libexec/steward/node-doctor
 journalctl -u steward -u steward-executor -u steward-gateway --since -10m --no-pager
 ```
 
-Preflight validates units, configuration, ownership, credentials, Docker socket
-access, and gVisor registration. The supervisor and Executor poll outbound by
-default. Executor keeps its bearer-protected `127.0.0.1:8090` API for `stewardctl`
-and Model Context Protocol (MCP) clients; Gateway remains host-local.
+The doctor includes preflight validation, then checks the configured Docker target,
+gVisor, active units, health and readiness, Gateway, durable-store utilization, and
+filesystem headroom. Use `--json` for automation. The supervisor and Executor poll
+outbound by default. Executor keeps its bearer-protected `127.0.0.1:8090` API for
+`stewardctl` and Model Context Protocol (MCP) clients; Gateway remains host-local.
 
 ## Anti-replay state is identity state
 

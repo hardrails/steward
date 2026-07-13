@@ -123,13 +123,10 @@ func (s *Server) proxyServiceTask(w http.ResponseWriter, incoming *http.Request,
 		return
 	}
 
-	terminal := event
-	terminal.Phase, terminal.Outcome = connectorledger.Terminal, connectorledger.Responded
-	terminal.HTTPStatus, terminal.ResponseBytes = response.StatusCode, int64(len(responseBody))
 	if successfulServiceTaskStatus(response.StatusCode) {
 		runID, ok := serviceRunID(responseBody)
 		if !ok || !serviceTaskJSONResponse(response.Header) {
-			terminal.Outcome, terminal.ErrorCode = connectorledger.Failed, "outcome_unknown"
+			terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), "outcome_unknown")
 			if err := s.finishServiceTask(taskDigest, terminal); err != nil {
 				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
 				return
@@ -138,23 +135,55 @@ func (s *Server) proxyServiceTask(w http.ResponseWriter, incoming *http.Request,
 			writeGatewayError(w, http.StatusBadGateway, "outcome_unknown", "service returned no bounded run ID; automatic retry is unsafe")
 			return
 		}
-		terminal.RunID = runID
+		dispatch := event
+		dispatch.Phase, dispatch.Outcome = connectorledger.Dispatch, connectorledger.Responded
+		dispatch.HTTPStatus, dispatch.ResponseBytes, dispatch.RunID = response.StatusCode, int64(len(responseBody)), runID
+		ambiguous, err := s.recordServiceTaskDispatch(taskDigest, dispatch)
+		if errors.Is(err, connectorledger.ErrRunIDConflict) {
+			terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), "run_id_conflict")
+			if finishErr := s.finishServiceTask(taskDigest, terminal); finishErr != nil {
+				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
+				return
+			}
+			w.Header().Set(taskReceiptHeader, "recorded")
+			writeGatewayError(w, http.StatusConflict, "run_id_conflict", "service reused a run ID already bound to another signed task")
+			return
+		}
+		if err != nil {
+			if ambiguous {
+				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task dispatch evidence is ambiguous; restart Gateway to reconcile it")
+				return
+			}
+			terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), "outcome_unknown")
+			if finishErr := s.finishServiceTask(taskDigest, terminal); finishErr != nil {
+				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
+				return
+			}
+			w.Header().Set(taskReceiptHeader, "recorded")
+			writeGatewayError(w, http.StatusBadGateway, "outcome_unknown", "service task dispatch could not be recorded; automatic retry is unsafe")
+			return
+		}
+		writeServiceTaskResponse(w, response.StatusCode, runID, "recorded")
+		return
 	}
+
+	code, message := "service_task_rejected", "service rejected the task; the signed task is spent"
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		code, message = "redirect_denied", "service task redirects are not returned across the trust boundary"
+	}
+	terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), code)
 	if err := s.finishServiceTask(taskDigest, terminal); err != nil {
 		writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
 		return
 	}
-	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		w.Header().Set(taskReceiptHeader, "recorded")
-		writeGatewayError(w, http.StatusBadGateway, "redirect_denied", "service task redirects are not returned across the trust boundary")
-		return
-	}
-	if !successfulServiceTaskStatus(response.StatusCode) {
-		w.Header().Set(taskReceiptHeader, "recorded")
-		writeGatewayError(w, http.StatusBadGateway, "service_task_rejected", "service rejected the task; the signed task is spent")
-		return
-	}
-	writeServiceTaskResponse(w, response.StatusCode, terminal.RunID, "recorded")
+	w.Header().Set(taskReceiptHeader, "recorded")
+	writeGatewayError(w, http.StatusBadGateway, code, message)
+}
+
+func serviceTaskFailureEvent(event connectorledger.Event, status int, responseBytes int64, code string) connectorledger.Event {
+	event.Phase, event.Outcome, event.ErrorCode = connectorledger.Terminal, connectorledger.Failed, code
+	event.HTTPStatus, event.ResponseBytes = status, responseBytes
+	return event
 }
 
 func validTaskJSON(raw []byte, maxBytes int) bool {
@@ -204,6 +233,7 @@ func serviceTaskReceiptEvent(grant Grant, routePolicyDigest string, operation Se
 		OperationPolicyDigest: ServiceOperationDigest(operation), TaskDigest: taskDigest,
 		AuthorityKeyID: verified.KeyID, PermitDigest: verified.EnvelopeDigest,
 		RequestDigest: taskpermit.RequestDigest(body), RequestBytes: int64(len(body)),
+		TaskProtocol: operation.TaskProtocol,
 	}
 }
 
@@ -234,6 +264,7 @@ func (s *Server) existingServiceTaskByPermit(
 		authorized.RoutePolicyDigest != routePolicyDigest || authorized.Generation != grant.Generation ||
 		authorized.ServiceID != grant.ServiceID || authorized.OperationID != operation.ID ||
 		authorized.OperationPolicyDigest != ServiceOperationDigest(operation) ||
+		authorized.TaskProtocol != operation.TaskProtocol ||
 		authorized.RequestDigest != taskpermit.RequestDigest(body) || authorized.RequestBytes != int64(len(body)) {
 		return serviceTaskReceipt{}, false
 	}
@@ -244,8 +275,8 @@ func (s *Server) beginServiceTask(taskDigest string, event connectorledger.Event
 	// The ledger already serializes durable appends. Serialize this surrounding
 	// failure check and process-local reservation too, so one ambiguous append
 	// cannot leave an attacker-selected number of concurrent task fences.
-	s.serviceTaskBeginMu.Lock()
-	defer s.serviceTaskBeginMu.Unlock()
+	s.serviceTaskMutationMu.Lock()
+	defer s.serviceTaskMutationMu.Unlock()
 
 	s.mu.Lock()
 	if s.serviceTasks == nil {
@@ -330,13 +361,20 @@ func (s *Server) writeExistingServiceTask(w http.ResponseWriter, state serviceTa
 		writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task authorization evidence is ambiguous; restart Gateway to reconcile it")
 		return
 	}
-	if state.Terminal.Phase == "" {
-		writeGatewayError(w, http.StatusConflict, "task_in_progress", "task authorization is already in progress")
+	if state.dispatchAmbiguous {
+		writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task dispatch evidence is ambiguous; restart Gateway to reconcile it")
 		return
 	}
-	if state.Terminal.Outcome == connectorledger.Responded &&
-		successfulServiceTaskStatus(state.Terminal.HTTPStatus) && state.Terminal.RunID != "" {
-		writeServiceTaskResponse(w, state.Terminal.HTTPStatus, state.Terminal.RunID, "replayed")
+	if state.terminalUnavailable {
+		writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task terminal evidence is unavailable; restart Gateway to reconcile it")
+		return
+	}
+	if state.Dispatch.Phase == connectorledger.Dispatch {
+		writeServiceTaskResponse(w, state.Dispatch.HTTPStatus, state.Dispatch.RunID, "replayed")
+		return
+	}
+	if state.Terminal.Phase == "" {
+		writeGatewayError(w, http.StatusConflict, "task_in_progress", "task authorization is already in progress")
 		return
 	}
 	code := "task_already_spent"
@@ -358,10 +396,17 @@ func (s *Server) finishServiceTaskKnownFailure(w http.ResponseWriter, taskDigest
 }
 
 func (s *Server) finishServiceTask(taskDigest string, terminal connectorledger.Event) error {
+	s.serviceTaskMutationMu.Lock()
+	defer s.serviceTaskMutationMu.Unlock()
 	if s.connectorLedger == nil {
 		return errors.New("task receipt ledger is unavailable")
 	}
 	if _, err := s.connectorLedger.Finish(terminal); err != nil {
+		s.mu.Lock()
+		state := s.serviceTasks[taskDigest]
+		state.terminalUnavailable = true
+		s.serviceTasks[taskDigest] = state
+		s.mu.Unlock()
 		return err
 	}
 	s.mu.Lock()
@@ -370,6 +415,31 @@ func (s *Server) finishServiceTask(taskDigest string, terminal connectorledger.E
 	s.serviceTasks[taskDigest] = state
 	s.mu.Unlock()
 	return nil
+}
+
+func (s *Server) recordServiceTaskDispatch(taskDigest string, dispatch connectorledger.Event) (bool, error) {
+	s.serviceTaskMutationMu.Lock()
+	defer s.serviceTaskMutationMu.Unlock()
+	if s.connectorLedger == nil {
+		return false, errors.New("task receipt ledger is unavailable")
+	}
+	if _, err := s.connectorLedger.Dispatch(dispatch); err != nil {
+		ambiguous := s.connectorLedger.Failed()
+		if ambiguous {
+			s.mu.Lock()
+			state := s.serviceTasks[taskDigest]
+			state.dispatchAmbiguous = true
+			s.serviceTasks[taskDigest] = state
+			s.mu.Unlock()
+		}
+		return ambiguous, err
+	}
+	s.mu.Lock()
+	state := s.serviceTasks[taskDigest]
+	state.Dispatch = dispatch
+	s.serviceTasks[taskDigest] = state
+	s.mu.Unlock()
+	return false, nil
 }
 
 func (s *Server) dispatchServiceTask(ctx context.Context, grant Grant, operation ServiceOperation, body []byte) (*http.Response, []byte, string) {

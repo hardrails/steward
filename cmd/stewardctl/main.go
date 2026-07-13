@@ -60,8 +60,6 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return permitCommand(arguments[1:], stdout)
 	case "task":
 		return taskCommand(arguments[1:], stdout)
-	case "hermes":
-		return hermesCommand(arguments[1:], stdout)
 	case "evidence":
 		return evidenceCommand(arguments[1:], stdout)
 	case "node":
@@ -83,8 +81,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl capsule sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl permit issue|verify|audit ...")
-	fmt.Fprintln(writer, "       stewardctl task issue|verify|audit ...")
-	fmt.Fprintln(writer, "       stewardctl hermes run -bundle FILE -gateway-url http://127.0.0.1:PORT -token-file FILE [-wait]")
+	fmt.Fprintln(writer, "       stewardctl task issue|verify|audit|submit|status|observe|wait ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
 	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state ...")
 	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector|service ...")

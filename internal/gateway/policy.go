@@ -25,15 +25,19 @@ type serviceTaskRoutePolicy struct {
 }
 
 type serviceOperationPolicy struct {
-	ServiceID        string `json:"service_id"`
-	ID               string `json:"id"`
-	Method           string `json:"method"`
-	Path             string `json:"path"`
-	ContentType      string `json:"content_type"`
-	MaxRequestBytes  int64  `json:"max_request_bytes"`
-	MaxResponseBytes int64  `json:"max_response_bytes"`
-	MaxSeconds       int    `json:"max_seconds"`
-	MaxPermitSeconds int    `json:"max_permit_seconds"`
+	ServiceID           string `json:"service_id"`
+	ID                  string `json:"id"`
+	Method              string `json:"method"`
+	Path                string `json:"path"`
+	ContentType         string `json:"content_type"`
+	MaxRequestBytes     int64  `json:"max_request_bytes"`
+	MaxResponseBytes    int64  `json:"max_response_bytes"`
+	MaxSeconds          int    `json:"max_seconds"`
+	MaxPermitSeconds    int    `json:"max_permit_seconds"`
+	TaskProtocol        string `json:"task_protocol,omitempty"`
+	StatusPathPrefix    string `json:"status_path_prefix,omitempty"`
+	StatusMaxSeconds    int    `json:"status_max_seconds,omitempty"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds,omitempty"`
 }
 
 type inferenceRoutePolicy struct {
@@ -169,7 +173,7 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 	}
 	document := routePolicyDocument{Version: 1}
 	if len(grant.TaskAuthorities) > 0 {
-		document.Version = 5
+		document.Version = 6
 		document.ConnectorReceiptBudgetBytes = connectorReceiptBudget
 		service := &serviceTaskRoutePolicy{ServiceID: grant.ServiceID}
 		for _, authority := range grant.TaskAuthorities {
@@ -186,7 +190,8 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		}
 		slices.Sort(operationIDs)
 		for _, id := range operationIDs {
-			service.Operations = append(service.Operations, serviceOperationPolicy(serviceOperations[grant.ServiceID][id]))
+			operation := serviceOperations[grant.ServiceID][id]
+			service.Operations = append(service.Operations, serviceOperationPolicy(operation))
 		}
 		document.ServiceTask = service
 	}
@@ -275,7 +280,11 @@ func ServiceOperationDigest(operation ServiceOperation) string {
 		return ""
 	}
 	hash := sha256.New()
-	_, _ = hash.Write([]byte("steward-service-operation-v1\x00"))
+	domain := "steward-service-operation-v1\x00"
+	if operation.TaskProtocol != "" {
+		domain = "steward-service-operation-v2\x00"
+	}
+	_, _ = hash.Write([]byte(domain))
 	_, _ = hash.Write(raw)
 	return "sha256:" + fmt.Sprintf("%x", hash.Sum(nil))
 }

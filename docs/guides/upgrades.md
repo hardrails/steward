@@ -20,14 +20,16 @@ switch.
 
 Connector receipt format 1 records ordinary connector events. Format 2 records the
 action-authority key ID, permit digest, and exact request digest for permit-backed
-events. Format 3 records exact service-task authorization, dispatch, and terminal
-outcomes, including the service, operation-policy, permit, request, and run bindings.
-A single ledger may contain all three schemas in one signed hash chain. Current
-release manifests declare `connector_receipt_log` readers 1 through 3 and writer 3.
-The inspector reports the highest format present. It reports format 2 when action
-authorities are configured and format 3 when service-task operations are configured,
-even before the receipt file exists or contains that schema, because the running
-configuration can write the required format immediately.
+events. Format 3 is the historical two-record service-task contract. Format 4 is
+the current lifecycle contract: it records task-local authorization, dispatch, and
+terminal outcomes, including the service, operation-policy, permit, request, run,
+task sequence, and prior-task hash bindings. A single ledger may contain all four
+schemas in one signed hash chain. Current release manifests declare
+`connector_receipt_log` readers 1 through 4 and writer 4. The inspector reports the
+highest format present. It reports format 2 when action authorities are configured
+and format 4 when service-task operations are configured, even before the receipt
+file exists or contains that schema, because the running configuration can write the
+required format immediately.
 
 Current release manifests declare `gateway_state` readers 1 through 4 and writer 4.
 Format 4 retains the service identity and tenant task authorities of task-authorized
@@ -135,14 +137,14 @@ It also reports a missing prospective Gateway state, audit, or connector receipt
 path as valid. If activation fails before the target services start, it attempts to
 restore the prior active-release symlink, relay binding, and service state. After
 target services have started, it restores the
-prior release only when that release's manifest proves it can read every observed
-format. Otherwise activation leaves the target selected and all Steward services
+prior release only when that release's manifest declares support for every observed
+format and inspection accepts the range. Otherwise activation leaves the target selected and all Steward services
 stopped. Repair the target or follow an approved migration procedure; do not force
 an older binary over newer durable state.
 
 An older target whose connector-receipt reader stops below the required format is
 therefore not a safe rollback target. Action-authority configuration requires format
-2; service-task configuration requires format 3. Removing either configuration can
+2; current service-task configuration requires format 4. Removing either configuration can
 lower the prospective requirement only before a record of that format has been
 written; it does not rewrite or downgrade existing evidence. Do not split, edit, or
 reserialize a mixed ledger to regain rollback eligibility.
@@ -185,9 +187,14 @@ steward-gateway -version
 steward-relay -version
 stewardctl -version
 steward-mcp -version
-sudo /usr/local/libexec/steward/node-preflight
-systemctl is-active steward steward-executor steward-gateway
+sudo /usr/local/libexec/steward/node-doctor
 ```
+
+Run the doctor after services restart. It checks the active release's configuration,
+runtime dependencies, service state, loopback readiness, Gateway, durable-store
+usage, and filesystem headroom. Use its opt-in signed canary when the change also
+needs an end-to-end agent-work check; retain the same canary bundle through any
+timeout or recovery.
 
 For release construction and maintainer procedures, see
 [Releasing Steward]({{ '/releasing/' | relative_url }}).

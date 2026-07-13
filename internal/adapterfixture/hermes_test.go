@@ -300,9 +300,10 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		"gateway service set",
 		"gateway service trust",
 		"task issue -admission",
-		"hermes run -bundle",
+		"task submit -bundle",
+		"task wait -bundle",
 		"task audit -in",
-		"application/vnd.steward.connector-receipt.v3+json",
+		"application/vnd.steward.connector-receipt.v4+json",
 		"tenant_task_private_key_agent_absence_verified",
 		`base64.b64encode(value).rstrip(b"=")`,
 		"base64.urlsafe_b64encode",
@@ -463,7 +464,7 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		!integration.Acceptance.TaskPrivateKeyAgentAbsenceVerified ||
 		integration.Provenance.Archive.Platform != "linux/amd64" ||
 		!integration.ReceiptChain.Verified || integration.ReceiptChain.Head.Sequence == 0 ||
-		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 12 ||
+		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 17 ||
 		!valuesEqual(integration.Acceptance.CompletedSteps, expectedSteps) {
 		t.Fatalf("invalid Hermes integration evidence authority: %#v", integration)
 	}

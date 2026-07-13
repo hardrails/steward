@@ -76,7 +76,7 @@ root-owned Executor configuration:
 
 ```bash
 sudo /usr/local/libexec/steward/build-relay-image --configure
-sudo /usr/local/libexec/steward/node-preflight
+sudo /usr/local/libexec/steward/node-doctor
 sudo systemctl restart steward-gateway steward-executor
 ```
 
@@ -184,10 +184,13 @@ sudo stewardctl gateway service set \
   -config /etc/steward/gateway.json \
   -service-id agent-api \
   -operation agent.run=POST:/v1/runs \
+  -lifecycle agent.run=/v1/runs/ \
   -max-request-bytes 65536 \
   -max-response-bytes 1048576 \
   -max-seconds 120 \
   -max-permit-seconds 300 \
+  -status-max-seconds 15 \
+  -poll-interval 1s \
   -tenant-budget tenant-a=4194304
 ```
 
@@ -195,8 +198,9 @@ Inspect current operations with `gateway service list`. Export strict signing in
 with `gateway service trust -node-id NODE -tenant-id TENANT`, then use
 `stewardctl task issue` and `task verify` on the signing workstation. The resulting
 owner-only bundle contains the exact request and signed permit, not the private key.
-Submit it through the loopback service Gateway with an adapter-specific client such
-as `stewardctl hermes run`.
+Submit it through the loopback service Gateway with `stewardctl task submit`, then
+use `task status`, `observe`, or `wait` with the same bundle. Observation either
+writes verified terminal bytes to a new owner-only file or explicitly discards them.
 
 Gateway checks the exact active grant, task authority, operation policy, and request
 bytes; fsyncs signed authorization before dispatch; and accepts only HTTP 200, 201,

@@ -61,6 +61,10 @@ func (*blockingServiceTaskFailureCheckLog) Finish(connectorledger.Event) (connec
 	return connectorledger.Head{}, errors.New("unexpected fixture finish")
 }
 
+func (*blockingServiceTaskFailureCheckLog) Dispatch(connectorledger.Event) (connectorledger.Head, error) {
+	return connectorledger.Head{}, errors.New("unexpected fixture dispatch")
+}
+
 func (log *blockingServiceTaskFailureCheckLog) Failed() bool {
 	log.once.Do(func() { close(log.entered) })
 	<-log.release
@@ -83,7 +87,8 @@ func newServiceTaskRig(t *testing.T, upstream string) *serviceTaskRig {
 	operation := ServiceOperation{
 		ServiceID: "hermes-api", ID: "hermes.run", Method: http.MethodPost, Path: "/v1/runs",
 		ContentType: "application/json", MaxRequestBytes: 64 << 10, MaxResponseBytes: 1 << 20,
-		MaxSeconds: 5, MaxPermitSeconds: 300,
+		MaxSeconds: 5, MaxPermitSeconds: 300, TaskProtocol: TaskProtocolLifecycleV1,
+		StatusPathPrefix: "/v1/runs/", StatusMaxSeconds: 5, PollIntervalSeconds: 1,
 	}
 	config := Config{
 		Version: 1, ControlSocket: filepath.Join(directory, "control.sock"), ServiceAddress: "127.0.0.1:0",
@@ -268,17 +273,19 @@ func TestSignedServiceTaskAcceptsOnlyDocumentedSuccessStatuses(t *testing.T) {
 		})
 	}
 
-	state := serviceTaskReceipt{
-		Authorization: connectorledger.Event{PermitDigest: "sha256:" + strings.Repeat("a", 64)},
-		Terminal: connectorledger.Event{
-			Phase: connectorledger.Terminal, Outcome: connectorledger.Responded,
-			HTTPStatus: http.StatusPartialContent, RunID: "run_should_not_cross_boundary",
-		},
-	}
-	response := httptest.NewRecorder()
-	(&Server{}).writeExistingServiceTask(response, state, state.Authorization.PermitDigest)
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"error":"task_already_spent"`) {
-		t.Fatalf("undocumented replay status=%d body=%s", response.Code, response.Body.String())
+	for _, status := range []int{http.StatusOK, http.StatusPartialContent} {
+		state := serviceTaskReceipt{
+			Authorization: connectorledger.Event{PermitDigest: "sha256:" + strings.Repeat("a", 64)},
+			Terminal: connectorledger.Event{
+				Phase: connectorledger.Terminal, Outcome: connectorledger.Responded,
+				HTTPStatus: status, RunID: "run_should_not_cross_boundary",
+			},
+		}
+		response := httptest.NewRecorder()
+		(&Server{}).writeExistingServiceTask(response, state, state.Authorization.PermitDigest)
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"error":"task_already_spent"`) {
+			t.Fatalf("terminal replay status=%d response=%d body=%s", status, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -808,6 +815,14 @@ func TestTaskRoutePolicyDigestBindsTaskAuthorityOperationAndBudget(t *testing.T)
 	if got := routePolicyDigest(rig.grant, nil, nil, nil, changedOperations, 4<<20); got == base {
 		t.Fatal("service operation policy did not change route policy digest")
 	}
+	changedLifecycle := rig.operation
+	changedLifecycle.StatusMaxSeconds++
+	lifecycleOperations := map[string]map[string]ServiceOperation{
+		rig.grant.ServiceID: {changedLifecycle.ID: changedLifecycle},
+	}
+	if got := routePolicyDigest(rig.grant, nil, nil, nil, lifecycleOperations, 4<<20); got == base {
+		t.Fatal("task lifecycle status policy did not change the route policy digest")
+	}
 	if got := routePolicyDigest(rig.grant, nil, nil, nil, operations, 8<<20); got == base {
 		t.Fatal("tenant receipt budget did not change route policy digest")
 	}
@@ -818,10 +833,17 @@ func TestTaskRoutePolicyDigestBindsTaskAuthorityOperationAndBudget(t *testing.T)
 	unrelated["other-api"] = map[string]ServiceOperation{"other.run": {
 		ServiceID: "other-api", ID: "other.run", Method: http.MethodPost, Path: "/v1/run",
 		ContentType: "application/json", MaxRequestBytes: 1024, MaxResponseBytes: 4096,
-		MaxSeconds: 10, MaxPermitSeconds: 60,
+		MaxSeconds: 10, MaxPermitSeconds: 60, TaskProtocol: TaskProtocolLifecycleV1,
+		StatusPathPrefix: "/v1/run/", StatusMaxSeconds: 15, PollIntervalSeconds: 2,
 	}}
 	if got := routePolicyDigest(rig.grant, nil, nil, nil, unrelated, 4<<20); got != base {
 		t.Fatalf("unrelated service changed task route policy digest: before=%s after=%s", base, got)
+	}
+	unrelatedLifecycle := unrelated["other-api"]["other.run"]
+	unrelatedLifecycle.StatusMaxSeconds++
+	unrelated["other-api"]["other.run"] = unrelatedLifecycle
+	if got := routePolicyDigest(rig.grant, nil, nil, nil, unrelated, 4<<20); got != base {
+		t.Fatalf("unrelated lifecycle service changed task route policy digest: before=%s after=%s", base, got)
 	}
 }
 
@@ -895,12 +917,10 @@ func TestServiceOperationDigestBindsEveryPolicyField(t *testing.T) {
 	base := ServiceOperation{
 		ServiceID: "hermes-api", ID: "hermes.run", Method: http.MethodPost, Path: "/v1/runs",
 		ContentType: "application/json", MaxRequestBytes: 1024, MaxResponseBytes: 4096,
-		MaxSeconds: 30, MaxPermitSeconds: 300,
+		MaxSeconds: 30, MaxPermitSeconds: 300, TaskProtocol: TaskProtocolLifecycleV1,
+		StatusPathPrefix: "/v1/runs/", StatusMaxSeconds: 15, PollIntervalSeconds: 2,
 	}
 	want := ServiceOperationDigest(base)
-	if !strings.HasPrefix(want, "sha256:") {
-		t.Fatalf("digest=%q", want)
-	}
 	mutations := []func(*ServiceOperation){
 		func(value *ServiceOperation) { value.ServiceID = "other-api" },
 		func(value *ServiceOperation) { value.ID = "hermes.other" },
@@ -911,6 +931,10 @@ func TestServiceOperationDigestBindsEveryPolicyField(t *testing.T) {
 		func(value *ServiceOperation) { value.MaxResponseBytes++ },
 		func(value *ServiceOperation) { value.MaxSeconds++ },
 		func(value *ServiceOperation) { value.MaxPermitSeconds++ },
+		func(value *ServiceOperation) { value.TaskProtocol = "other" },
+		func(value *ServiceOperation) { value.StatusPathPrefix = "/v1/tasks/" },
+		func(value *ServiceOperation) { value.StatusMaxSeconds++ },
+		func(value *ServiceOperation) { value.PollIntervalSeconds++ },
 	}
 	for index, mutate := range mutations {
 		changed := base
@@ -918,6 +942,13 @@ func TestServiceOperationDigestBindsEveryPolicyField(t *testing.T) {
 		if got := ServiceOperationDigest(changed); got == want {
 			t.Fatalf("mutation %d did not change digest", index)
 		}
+	}
+
+	historical := base
+	historical.TaskProtocol, historical.StatusPathPrefix = "", ""
+	historical.StatusMaxSeconds, historical.PollIntervalSeconds = 0, 0
+	if got := ServiceOperationDigest(historical); got != "sha256:23c04739fa97d0b542098d1e92f3831eddcfb1ae877c16fd397d3567fa12ce1d" {
+		t.Fatalf("historical digest=%q", got)
 	}
 }
 
