@@ -414,9 +414,16 @@ func (s *Server) proxyConnector(
 	}
 	copyHeaders(w.Header(), response.Header)
 	for _, name := range []string{
-		"Authorization", "Proxy-Authorization", "X-API-Key", "Set-Cookie", "Location", connectorReceiptStatusTrailer,
+		"Authorization", "Proxy-Authorization", "X-API-Key", "Set-Cookie", "Location",
 	} {
 		w.Header().Del(name)
+	}
+	// X-Steward-* is reserved for integrity and enforcement signals produced by
+	// this deployment. An upstream must not be able to forge any such header.
+	for name := range w.Header() {
+		if strings.HasPrefix(strings.ToLower(name), "x-steward-") {
+			w.Header().Del(name)
+		}
 	}
 	if connectorResponseHasNoBody(incoming.Method, response.StatusCode) {
 		if err := s.finishConnectorReceipt(receipt, response.StatusCode, 0, ""); err != nil {

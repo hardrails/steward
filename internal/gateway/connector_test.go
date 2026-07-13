@@ -340,6 +340,8 @@ func TestConnectorXAPIKeyModeInjectsOnlyFixedHeader(t *testing.T) {
 func TestConnectorReceiptSignalSurvivesHTTPFraming(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set(connectorReceiptStatusTrailer, "forged")
+		w.Header().Set(streamStatusTrailer, "forged")
+		w.Header().Set("X-Steward-Forged", "forged")
 		if request.Method == http.MethodPost {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -365,7 +367,8 @@ func TestConnectorReceiptSignalSurvivesHTTPFraming(t *testing.T) {
 	_, readErr := io.Copy(io.Discard, response.Body)
 	closeErr := response.Body.Close()
 	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusNoContent ||
-		response.Header.Get(connectorReceiptStatusTrailer) != "recorded" || response.Trailer.Get(connectorReceiptStatusTrailer) != "" {
+		response.Header.Get(connectorReceiptStatusTrailer) != "recorded" || response.Trailer.Get(connectorReceiptStatusTrailer) != "" ||
+		response.Header.Get(streamStatusTrailer) != "" || response.Header.Get("X-Steward-Forged") != "" {
 		t.Fatalf("no-body status=%d header=%q trailers=%v read=%v close=%v", response.StatusCode,
 			response.Header.Get(connectorReceiptStatusTrailer), response.Trailer, readErr, closeErr)
 	}
@@ -382,7 +385,8 @@ func TestConnectorReceiptSignalSurvivesHTTPFraming(t *testing.T) {
 	body, readErr := io.ReadAll(response.Body)
 	closeErr = response.Body.Close()
 	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK || string(body) != `{"ok":true}` ||
-		response.Header.Get(connectorReceiptStatusTrailer) != "" || response.Trailer.Get(connectorReceiptStatusTrailer) != "recorded" {
+		response.Header.Get(connectorReceiptStatusTrailer) != "" || response.Trailer.Get(connectorReceiptStatusTrailer) != "recorded" ||
+		response.Header.Get(streamStatusTrailer) != "" || response.Header.Get("X-Steward-Forged") != "" {
 		t.Fatalf("stream status=%d header=%q trailers=%v body=%q read=%v close=%v", response.StatusCode,
 			response.Header.Get(connectorReceiptStatusTrailer), response.Trailer, body, readErr, closeErr)
 	}
