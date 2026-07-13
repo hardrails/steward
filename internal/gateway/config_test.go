@@ -154,6 +154,7 @@ func TestConfigSeparatesConnectorCredentialsFromGatewayAuthority(t *testing.T) {
 		GrantRoot:               filepath.Join(directory, "grants"),
 		ConnectorReceiptFile:    filepath.Join(directory, "connector-receipts.ndjson"),
 		ConnectorReceiptKeyFile: filepath.Join(directory, "connector-receipts.private.pem"),
+		Routes:                  []Route{{ID: "inference", CredentialFile: filepath.Join(directory, "inference-token")}},
 		Connectors:              []Connector{connectorFixture(credential)},
 	}
 	reserved := map[string]string{
@@ -163,6 +164,7 @@ func TestConfigSeparatesConnectorCredentialsFromGatewayAuthority(t *testing.T) {
 		"control socket":   base.ControlSocket,
 		"receipt log":      base.ConnectorReceiptFile,
 		"receipt key":      base.ConnectorReceiptKeyFile,
+		"inference token":  base.Routes[0].CredentialFile,
 		"grant root":       base.GrantRoot,
 		"grant descendant": filepath.Join(base.GrantRoot, "grant-a", "credential"),
 	}
@@ -176,6 +178,45 @@ func TestConfigSeparatesConnectorCredentialsFromGatewayAuthority(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("hard-link aliases", func(t *testing.T) {
+		for _, fixture := range []struct {
+			name string
+			path string
+		}{
+			{name: "service token", path: base.ServiceTokenFile},
+			{name: "inference token", path: base.Routes[0].CredentialFile},
+		} {
+			t.Run(fixture.name, func(t *testing.T) {
+				if err := os.WriteFile(fixture.path, []byte("protected-secret\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				alias := filepath.Join(directory, strings.ReplaceAll(fixture.name, " ", "-")+"-alias")
+				if err := os.Link(fixture.path, alias); err != nil {
+					t.Skipf("hard links unavailable: %v", err)
+				}
+				config := base
+				config.Connectors = []Connector{connectorFixture(alias)}
+				if _, err := config.validateAndLoadConnectors(); err == nil || !strings.Contains(err.Error(), "must not alias") {
+					t.Fatalf("hard-link authority alias accepted: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("connector credential sharing", func(t *testing.T) {
+		alias := filepath.Join(directory, "shared-connector-alias")
+		if err := os.Link(credential, alias); err != nil {
+			t.Skipf("hard links unavailable: %v", err)
+		}
+		second := connectorFixture(alias)
+		second.ID = "calendar"
+		config := base
+		config.Connectors = []Connector{connectorFixture(credential), second}
+		if _, err := config.validateAndLoadConnectors(); err == nil || !strings.Contains(err.Error(), "must not be shared") {
+			t.Fatalf("shared connector credential accepted: %v", err)
+		}
+	})
 }
 
 func TestReadCredentialUsesOneBoundedVerifiedFile(t *testing.T) {

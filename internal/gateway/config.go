@@ -241,7 +241,12 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 	if len(c.Connectors) > maxConnectors {
 		return nil, fmt.Errorf("gateway config permits at most %d connectors", maxConnectors)
 	}
+	reservedFiles, err := c.connectorReservedFileIdentities()
+	if err != nil {
+		return nil, err
+	}
 	loaded := make(map[string]loadedConnector, len(c.Connectors))
+	connectorCredentials := make([]os.FileInfo, 0, len(c.Connectors))
 	for _, connector := range c.Connectors {
 		if !routeID(connector.ID) || connector.MaxConcurrent < 1 || connector.MaxConcurrent > 256 ||
 			connector.MaxRequestBytes < 1 || connector.MaxRequestBytes > maxConnectorRequestBytes ||
@@ -266,15 +271,26 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 			return nil, fmt.Errorf("connector %q credential path must be absolute", connector.ID)
 		}
 		if c.reservedConnectorCredentialPath(connector.CredentialFile) {
-			return nil, fmt.Errorf("connector %q credential path must be separate from Gateway token, state, audit, control, receipt, and grant paths", connector.ID)
+			return nil, fmt.Errorf("connector %q credential path must be separate from Gateway and inference authority paths", connector.ID)
 		}
 		if connector.CredentialMode != CredentialModeBearer && connector.CredentialMode != CredentialModeXAPIKey {
 			return nil, fmt.Errorf("connector %q has unsupported credential mode", connector.ID)
 		}
-		credential, err := readCredential(connector.CredentialFile)
+		credential, credentialInfo, err := readCredentialWithInfo(connector.CredentialFile)
 		if err != nil {
 			return nil, fmt.Errorf("connector %q credential: %w", connector.ID, err)
 		}
+		for _, reserved := range reservedFiles {
+			if os.SameFile(credentialInfo, reserved) {
+				return nil, fmt.Errorf("connector %q credential file must not alias Gateway or inference authority", connector.ID)
+			}
+		}
+		for _, prior := range connectorCredentials {
+			if os.SameFile(credentialInfo, prior) {
+				return nil, fmt.Errorf("connector %q credential file must not be shared by connectors", connector.ID)
+			}
+		}
+		connectorCredentials = append(connectorCredentials, credentialInfo)
 		entry := loadedConnector{
 			Connector: connector, base: base, credential: credential,
 			operations: make(map[string]ConnectorOperation, len(connector.Operations)),
@@ -314,7 +330,42 @@ func (c Config) reservedConnectorCredentialPath(path string) bool {
 			return true
 		}
 	}
+	for _, route := range c.Routes {
+		if route.CredentialFile != "" && path == route.CredentialFile {
+			return true
+		}
+	}
 	return pathWithin(path, c.GrantRoot)
+}
+
+func (c Config) connectorReservedFileIdentities() ([]os.FileInfo, error) {
+	paths := []string{
+		c.ServiceTokenFile, c.StateFile, c.EgressAuditFile, c.ControlSocket,
+		c.ConnectorReceiptFile, c.ConnectorReceiptKeyFile,
+	}
+	for _, route := range c.Routes {
+		paths = append(paths, route.CredentialFile)
+	}
+	identities := make([]os.FileInfo, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, duplicate := seen[path]; duplicate {
+			continue
+		}
+		seen[path] = struct{}{}
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect connector-reserved path %q: %w", path, err)
+		}
+		identities = append(identities, info)
+	}
+	return identities, nil
 }
 
 func exactConnectorOrigin(value string) (*url.URL, error) {
@@ -489,22 +540,35 @@ func routeID(value string) bool {
 }
 
 func readCredential(path string) (string, error) {
+	value, _, err := readCredentialWithInfo(path)
+	return value, err
+}
+
+func readCredentialWithInfo(path string) (string, os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !validCredentialFileInfo(info) {
-		return "", errors.New("credential must be a bounded owner-only regular file")
+		return "", nil, errors.New("credential must be a bounded owner-only regular file")
 	}
 	// O_NONBLOCK is ignored for regular files but prevents a validated path
 	// from being swapped to a FIFO that would hang Gateway between Lstat and
 	// Open. The descriptor identity and metadata are checked before any read.
 	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer file.Close()
-	return readOpenedCredential(info, file)
+	value, err := readOpenedCredential(info, file)
+	if err != nil {
+		return "", nil, err
+	}
+	final, err := file.Stat()
+	if err != nil || !os.SameFile(info, final) || !validCredentialFileInfo(final) {
+		return "", nil, errors.New("credential changed after reading")
+	}
+	return value, final, nil
 }
 
 func readOpenedCredential(expected os.FileInfo, file *os.File) (string, error) {
