@@ -31,6 +31,7 @@ INTERNAL_API_TOKEN = "steward-feasibility"
 MAX_REQUEST_BODY = 64 << 10
 MAX_RESPONSE_BODY = 1 << 20
 SERVICE_TIMEOUT_SECONDS = 30
+STARTUP_TIMEOUT_SECONDS = 120
 SKILL_PUBLIC_KEY_SHA256 = "183e8cd011fa5e5f044700be4a61f3bc22e2eb61ad34469e62433d42f5af2452"
 SKILL_LIMITS = {
     "max_depth": 16,
@@ -527,6 +528,34 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
+def wait_for_internal_api(process: subprocess.Popen[bytes]) -> None:
+    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            fail("Hermes gateway exited before its API became ready")
+        connection = http.client.HTTPConnection(
+            INTERNAL_API_HOST,
+            INTERNAL_API_PORT,
+            timeout=min(1.0, max(0.001, deadline - time.monotonic())),
+        )
+        try:
+            connection.request(
+                "GET",
+                "/health",
+                headers={"Authorization": f"Bearer {INTERNAL_API_TOKEN}"},
+            )
+            response = connection.getresponse()
+            body = response.read(MAX_RESPONSE_BODY + 1)
+            if response.status == 200 and len(body) <= MAX_RESPONSE_BODY:
+                return
+        except (ConnectionError, OSError, TimeoutError, http.client.HTTPException):
+            pass
+        finally:
+            connection.close()
+        time.sleep(0.1)
+    fail("Hermes API did not become ready before the startup deadline")
+
+
 def main() -> int:
     if sys.argv[1:] != ["serve"]:
         fail("command must be exactly: serve")
@@ -540,9 +569,6 @@ def main() -> int:
         fail("STEWARD_HERMES_QUALIFICATION_MCP must be disabled or enabled")
     verify_skill()
     seed_state(model, qualification_mcp == "enabled")
-    server = BoundedHTTPServer(("0.0.0.0", 8766), ServiceBridgeHandler)
-    thread = threading.Thread(target=server.serve_forever, name="service-bridge", daemon=True)
-    thread.start()
     environment = os.environ.copy()
     environment.update(
         {
@@ -565,10 +591,24 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    return_code = process.wait()
-    server.shutdown()
-    server.server_close()
-    return return_code
+    server: BoundedHTTPServer | None = None
+    try:
+        wait_for_internal_api(process)
+        server = BoundedHTTPServer(("0.0.0.0", 8766), ServiceBridgeHandler)
+        thread = threading.Thread(target=server.serve_forever, name="service-bridge", daemon=True)
+        thread.start()
+        return process.wait()
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
 
 
 if __name__ == "__main__":

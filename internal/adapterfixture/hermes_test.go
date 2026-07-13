@@ -465,6 +465,76 @@ finally:
 	}
 }
 
+func TestHermesEntrypointStartsBridgeAfterHermesReadiness(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	root := hermesAdapterRoot(t)
+	program := `
+import importlib.util, os, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("hermes_entrypoint", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+events = []
+class Process:
+    def __init__(self):
+        self.exited = False
+    def poll(self):
+        return 0 if self.exited else None
+    def wait(self, timeout=None):
+        events.append("wait")
+        self.exited = True
+        return 0
+    def terminate(self):
+        events.append("terminate")
+        self.exited = True
+    def kill(self):
+        events.append("kill")
+        self.exited = True
+
+process = Process()
+def popen(*args, **kwargs):
+    events.append("spawn")
+    return process
+class Server:
+    def __init__(self, *args, **kwargs):
+        events.append("bind")
+    def serve_forever(self):
+        pass
+    def shutdown(self):
+        events.append("shutdown")
+    def server_close(self):
+        events.append("close")
+class Thread:
+    def __init__(self, *args, **kwargs):
+        pass
+    def start(self):
+        events.append("thread")
+
+module.verify_skill = lambda: None
+module.seed_state = lambda model, qualification_mcp: None
+module.subprocess.Popen = popen
+module.wait_for_internal_api = lambda child: events.append("ready")
+module.BoundedHTTPServer = Server
+module.threading.Thread = Thread
+module.signal.signal = lambda *args: None
+os.environ["OPENAI_MODEL"] = "steward-fixture-model"
+os.environ["OPENAI_BASE_URL"] = "http://steward-relay:8080/v1"
+os.environ["STEWARD_HERMES_QUALIFICATION_MCP"] = "disabled"
+sys.argv = [sys.argv[1], "serve"]
+assert module.main() == 0
+assert events == ["spawn", "ready", "bind", "thread", "wait", "shutdown", "close"], events
+`
+	command := exec.Command(python, "-I", "-c", program, filepath.Join(root, "entrypoint.py"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("entrypoint readiness ordering test failed: %v\n%s", err, output)
+	}
+}
+
 func TestHermesEntrypointPublicationRecoversWithoutOverwrite(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
