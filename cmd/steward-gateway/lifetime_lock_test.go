@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -93,6 +94,28 @@ func TestSecondGatewayCannotReplaceSocketOrOpenMutableState(t *testing.T) {
 		!strings.Contains(secondErr.String(), "already running") {
 		cancel()
 		t.Fatalf("second gateway code=%d stdout=%q stderr=%q", code, secondOut.String(), secondErr.String())
+	}
+	alternate := config
+	alternate.ControlSocket = filepath.Join(directory, "alternate-control.sock")
+	alternate.ServiceAddress = unusedLoopbackAddress(t)
+	alternateRaw, err := json.Marshal(alternate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternatePath := filepath.Join(directory, "alternate-gateway.json")
+	if err := os.WriteFile(alternatePath, alternateRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secondOut.Reset()
+	secondErr.Reset()
+	if code := run(context.Background(), []string{"-config", alternatePath}, &secondOut, &secondErr); code != 2 ||
+		!strings.Contains(secondErr.String(), "already running") {
+		cancel()
+		t.Fatalf("alternate gateway code=%d stdout=%q stderr=%q", code, secondOut.String(), secondErr.String())
+	}
+	if _, err := os.Lstat(alternate.ControlSocket); !errors.Is(err, os.ErrNotExist) {
+		cancel()
+		t.Fatalf("alternate Gateway touched its control socket before shared-resource exclusion: %v", err)
 	}
 	socketAfter, err := os.Lstat(config.ControlSocket)
 	if err != nil {

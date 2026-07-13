@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -12,55 +13,92 @@ import (
 )
 
 type gatewayLifetimeLock struct {
-	file *os.File
+	files []*os.File
 }
 
-// acquireGatewayLifetimeLock excludes a second Gateway using the same control
-// socket before either process can open mutable state or remove that socket.
-// The kernel releases flock automatically if the process exits unexpectedly.
+// acquireGatewayLifetimeLock excludes a second Gateway sharing any mutable
+// resource, even when an alternate config chooses a different control socket.
+// The kernel releases every flock automatically if the process exits.
 func acquireGatewayLifetimeLock(config gateway.Config) (*gatewayLifetimeLock, error) {
-	lockPath := config.ControlSocket + ".lock"
-	if !filepath.IsAbs(lockPath) || filepath.Clean(lockPath) != lockPath {
-		return nil, errors.New("gateway process lock requires a clean absolute control socket path")
+	paths, err := gatewayMutableLockPaths(config)
+	if err != nil {
+		return nil, err
 	}
-	if lockPathCollides(config, lockPath) {
-		return nil, fmt.Errorf("gateway process lock path %q collides with configured Gateway data", lockPath)
+	lock := &gatewayLifetimeLock{}
+	for _, path := range paths {
+		file, err := acquireGatewayResourceLock(path)
+		if err != nil {
+			_ = lock.Close()
+			return nil, err
+		}
+		lock.files = append(lock.files, file)
 	}
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
-		return nil, fmt.Errorf("create gateway process lock directory: %w", err)
-	}
+	return lock, nil
+}
 
+func gatewayMutableLockPaths(config gateway.Config) ([]string, error) {
+	resources := []string{config.ControlSocket, config.StateFile, config.GrantRoot}
+	if config.EgressAuditFile != "" {
+		resources = append(resources, config.EgressAuditFile)
+	}
+	if config.ConnectorReceiptFile != "" {
+		resources = append(resources, config.ConnectorReceiptFile)
+	}
+	paths := make([]string, 0, len(resources))
+	seen := make(map[string]struct{}, len(resources))
+	for _, resource := range resources {
+		lockPath := resource + ".steward-gateway.lock"
+		if !filepath.IsAbs(lockPath) || filepath.Clean(lockPath) != lockPath {
+			return nil, errors.New("gateway process locks require clean absolute mutable resource paths")
+		}
+		if lockPathCollides(config, lockPath) {
+			return nil, fmt.Errorf("gateway process lock path %q collides with configured Gateway data", lockPath)
+		}
+		if _, duplicate := seen[lockPath]; duplicate {
+			continue
+		}
+		seen[lockPath] = struct{}{}
+		paths = append(paths, lockPath)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func acquireGatewayResourceLock(lockPath string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
+		return nil, fmt.Errorf("create Gateway process lock directory for %q: %w", lockPath, err)
+	}
 	file, created, err := openGatewayLockFile(lockPath)
 	if err != nil {
-		return nil, fmt.Errorf("open gateway process lock: %w", err)
+		return nil, fmt.Errorf("open Gateway process lock %q: %w", lockPath, err)
 	}
-	closeWith := func(lockErr error) (*gatewayLifetimeLock, error) {
+	closeWith := func(lockErr error) (*os.File, error) {
 		_ = file.Close()
 		return nil, lockErr
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return closeWith(errors.New("another Steward Gateway is already running for this control socket"))
+			return closeWith(fmt.Errorf("another Steward Gateway is already running for mutable resource lock %q", lockPath))
 		}
-		return closeWith(fmt.Errorf("lock gateway process file: %w", err))
+		return closeWith(fmt.Errorf("lock Gateway process file %q: %w", lockPath, err))
 	}
 	if created {
 		if err := file.Chmod(0o600); err != nil {
-			return closeWith(fmt.Errorf("protect gateway process lock: %w", err))
+			return closeWith(fmt.Errorf("protect Gateway process lock %q: %w", lockPath, err))
 		}
 	}
 	var stat syscall.Stat_t
 	if err := syscall.Fstat(int(file.Fd()), &stat); err != nil {
-		return closeWith(fmt.Errorf("inspect gateway process lock: %w", err))
+		return closeWith(fmt.Errorf("inspect Gateway process lock %q: %w", lockPath, err))
 	}
 	info, err := file.Stat()
 	if err != nil {
-		return closeWith(fmt.Errorf("inspect gateway process lock: %w", err))
+		return closeWith(fmt.Errorf("inspect Gateway process lock %q: %w", lockPath, err))
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || stat.Nlink != 1 || int(stat.Uid) != os.Geteuid() {
-		return closeWith(errors.New("gateway process lock must be an owner-only regular file owned by the Gateway user"))
+		return closeWith(fmt.Errorf("Gateway process lock %q must be an owner-only regular file owned by the Gateway user", lockPath))
 	}
-	return &gatewayLifetimeLock{file: file}, nil
+	return file, nil
 }
 
 func openGatewayLockFile(path string) (*os.File, bool, error) {
@@ -78,7 +116,7 @@ func openGatewayLockFile(path string) (*os.File, bool, error) {
 
 func lockPathCollides(config gateway.Config, lockPath string) bool {
 	paths := []string{
-		config.ServiceTokenFile, config.StateFile, config.GrantRoot, config.EgressAuditFile,
+		config.ControlSocket, config.ServiceTokenFile, config.StateFile, config.GrantRoot, config.EgressAuditFile,
 		config.ConnectorReceiptFile, config.ConnectorReceiptKeyFile,
 	}
 	for _, route := range config.Routes {
@@ -97,10 +135,15 @@ func lockPathCollides(config gateway.Config, lockPath string) bool {
 }
 
 func (lock *gatewayLifetimeLock) Close() error {
-	if lock == nil || lock.file == nil {
+	if lock == nil {
 		return nil
 	}
-	err := lock.file.Close()
-	lock.file = nil
-	return err
+	var failures []error
+	for index := len(lock.files) - 1; index >= 0; index-- {
+		if err := lock.files[index].Close(); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	lock.files = nil
+	return errors.Join(failures...)
 }
