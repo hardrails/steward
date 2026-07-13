@@ -110,8 +110,13 @@ state remains `dispatch_accepted`.
 
 `steward-mcp` implements Model Context Protocol (MCP) `2025-11-25` over standard
 input/output. Its admit, status, logs, egress, start, stop, destroy, and state-purge
-tools call the loopback Executor API. It is a local adapter, not another authority
-or remote endpoint. See
+tools call the loopback Executor API. When configured with a loopback Gateway
+origin, separate owner-only Gateway token, and fixed result directory, it also
+exposes pre-signed task submit, passive status, and one-shot observation tools. Raw
+agent output is written only to a deterministic owner-only file; MCP receives its
+path, digest, length, and status metadata. The task-submit acknowledgment is not
+human approval: signed permit and Gateway policy remain authoritative. It is a
+local adapter, not another authority or remote endpoint. See
 [MCP setup]({{ '/guides/mcp/' | relative_url }}).
 
 ## Per-workload connector protocol
@@ -193,7 +198,7 @@ exactly-once execution. Gateway restart reconstructs completed spends and pendin
 lifecycle dispatches. A durable authorization with neither a dispatch nor terminal
 record is closed as `outcome_unknown`. Replacing the ledger or advancing to a new
 epoch creates a new replay boundary. The service supplies the run ID, so the signed
-receipt proves what Gateway observed, not that the agent completed useful work.
+receipt records what Gateway observed, not whether the agent completed useful work.
 
 If the authorization write or filesystem sync has an ambiguous result, Gateway does
 not contact the service. The request and its exact replay return
@@ -222,14 +227,14 @@ for response and failure schemas.
 ## Offline operator tools
 
 `stewardctl image`, `stewardctl evidence`, `stewardctl permit`, `stewardctl task`,
-`stewardctl hermes`, and `stewardctl upgrade` are CLIs, not HTTP endpoints. They provide bounded,
+and `stewardctl upgrade` are CLIs, not HTTP endpoints. They provide bounded,
 policy-bound Open Container Initiative (OCI) inspection and import; offline evidence
 verification and export; exact connector- and service-request permit issuance,
 verification, dispatch, and receipt correlation; and read-only release drain and
 durable-format inspection. Permit issuance consumes an authenticated but unsigned
 trust inventory as mismatch preflight; live Gateway configuration remains
-authoritative. `hermes run` is the exception to offline operation: it contacts only
-an explicit literal-loopback Gateway origin. See
+authoritative. `task submit`, `status`, `observe`, and `wait` are the online task
+operations and contact only an explicit literal-loopback Gateway origin. See
 [local operator tools]({{ '/reference/offline-tools/' | relative_url }}) for flags,
 output formats, and failure boundaries.
 

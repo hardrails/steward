@@ -70,8 +70,9 @@ changes and emits receipts that `stewardctl` can verify offline. This path is op
 ## Do receipts prove everything an agent did?
 
 No. Executor receipts bind Steward's admission and host-mutation records. Gateway
-receipts can bind an exact tenant task permit, request digest, dispatch result, and
-the run ID observed from an agent service. They exclude raw prompts, request bodies,
+receipts can bind an exact tenant task permit, request digest, dispatch result,
+agent-reported terminal status, result digest and length, and the run ID observed
+from an agent service. They exclude raw prompts, request bodies,
 model responses, agent logs, workspace content, and tool meaning. The service
 supplies its run ID, so the ID is not independent proof that useful work completed.
 Compromised host root is outside the node-local receipt trust boundary.
@@ -88,7 +89,7 @@ because dependency and base-image notices are incomplete.
 The Hermes qualification runs a signed, network-free workspace-audit skill as a real
 task under gVisor, changed persisted workspace state, and required a fresh changed
 result after restart. It also required Hermes to discover and load the exact signed
-connector skill before proving one authenticated upstream effect, replay and
+connector skill before demonstrating one authenticated upstream effect, replay and
 undeclared-operation denial, and a separate signed Gateway receipt chain. The
 service exposes negotiation, health, run submission, and run status on port `8766`,
 but not run event streams. Inference is fixed through
@@ -96,8 +97,8 @@ but not run event streams. Inference is fixed through
 single-tenant host mode and is not a shared-host claim.
 
 The tenant-signed service-task path scopes an off-node key to `hermes-api`, signs the
-exact workspace-audit run request, dispatches it with `stewardctl hermes run`, and
-audits receipt format 3. The connector portion still uses ordinary connector grant
+exact workspace-audit run request, dispatches it through the generic task lifecycle,
+and audits receipt format 4. The connector portion still uses ordinary connector grant
 and task authority; it does not exercise the optional connector action-permit path.
 
 OpenClaw has not completed this qualification and remains a layout contract. See the
@@ -152,10 +153,12 @@ tenant-specific inventory with `gateway service trust`, and issue an owner-only
 bundle with `stewardctl task issue`. Gateway requires both the active workload grant
 and that short-lived permit before dispatch.
 
-For Hermes, `stewardctl hermes run` submits the bundle through a literal-loopback
-Gateway origin and can poll the bounded status endpoint. Run it locally or over SSH;
-do not expose Gateway publicly. `stewardctl task verify` checks the bundle offline,
-and `task audit` correlates it with a copied format-3 Gateway receipt chain.
+`stewardctl task submit` sends any current lifecycle bundle through a
+literal-loopback Gateway origin. `task status` is passive; `task observe` makes one
+bounded observation; and `task wait` polls and writes or explicitly discards the
+verified terminal result. Run them locally or over SSH and do not expose Gateway
+publicly. `task verify` checks the bundle offline, and `task audit` correlates it
+with a copied format-4 Gateway receipt chain.
 
 The replay guarantee is node-local at-most-once dispatch within one retained ledger
 epoch. It is not fleet-wide or upstream exactly-once execution. Reusing the task ID

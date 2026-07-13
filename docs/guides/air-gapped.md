@@ -125,15 +125,20 @@ accepted archive boundary.
 
 ## Verify local inputs and the configured network policy
 
-Run preflight and inspect service configuration. These checks validate Steward's
-inputs; use facility firewall, proxy, DNS, or flow records to prove the host's
-actual network behavior:
+Run the node doctor and inspect service configuration. These checks validate
+Steward's local inputs and observed node state; use facility firewall, proxy, DNS,
+or flow records to validate the host's actual network behavior:
 
 ```console
-sudo /usr/local/libexec/steward/node-preflight
+sudo /usr/local/libexec/steward/node-doctor
 sudo systemctl cat steward steward-executor steward-gateway
 docker info --format '{% raw %}{{json .Runtimes}}{% endraw %}'
 ```
+
+The doctor is fully local and read-only unless `--canary-bundle` and
+`--canary-result` are supplied. A canary needs no public network when its signed
+service operation and inference route resolve entirely inside the disconnected
+environment.
 
 Steward uplinks may target an on-premises control plane. During fully disconnected
 staging, install with `--stage-only` and leave services disabled until the internal

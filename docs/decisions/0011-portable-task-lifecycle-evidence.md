@@ -85,8 +85,8 @@ the agent service.
 Lifecycle commands are generic: submit, inspect durable status, make one bounded
 observation, wait with a bounded overall deadline and policy-enforced minimum poll
 interval, export evidence, and verify evidence. Agent-specific commands, including
-Hermes commands, are thin adapters over this contract. Restart recovery reads the
-ledger and never redispatches an accepted task.
+the Hermes guide and acceptance harness, use this generic contract. Restart recovery
+reads the ledger and never redispatches an accepted task.
 
 **Claim boundary:** Steward may say that Gateway authorized an exact request,
 recorded dispatch acceptance, and observed an agent-reported terminal state. It
@@ -110,7 +110,9 @@ and signed ledger. A workflow engine or database would introduce another durable
 state authority and recovery boundary. A general policy engine would not replace
 exact permit validation or receipt ordering. Full MCP Tasks or A2A support would
 add broad protocol surface without supplying the required evidence semantics. A
-result store would expand sensitive-data retention. Revisit these choices if a
+general Gateway result store would expand sensitive-data retention. The optional
+MCP adapter therefore uses a fixed, process-owned, quota-bounded directory and never
+places raw results on MCP standard output. Revisit these choices if a
 stable, independently implementable protocol can preserve the exact request,
 tenant, node, policy, replay, receipt, and offline-verification bindings without a
 mandatory online service or private dependency.

@@ -37,9 +37,9 @@ Outbound data: agent -> relay -> Gateway -> approved inference or HTTP(S)
 Service ingress: authenticated host caller -> Gateway -> relay -> agent
 Signed task: owner-only bundle -> loopback Gateway -> exact service POST
 
-Host-local steward-mcp: bounded stdio adapter
+Host-local steward-mcp: bounded stdio adapter for Executor and optional task tools
 Mostly offline stewardctl: keys, signed capsule/policy, task permits, receipts;
-                         image import uses Docker; hermes run uses loopback Gateway
+                         image import uses Docker; task lifecycle uses loopback Gateway
 Inference system: separately selected and operated
 ```
 
@@ -134,9 +134,12 @@ Gateway reserves the task identity in memory, fsyncs signed authorization to its
 receipt ledger, rechecks time and lifecycle, and only then sends the configured
 `POST` to the agent service. It forwards no caller-selected headers. A successful
 service response must have HTTP 200, 201, or 202 and one bounded run ID. Gateway
-records the terminal result and returns its own canonical run-ID response rather
-than relaying untrusted headers or body. A successful replay returns that stored ID;
-an ambiguous result is never dispatched automatically again.
+records a separate dispatch receipt and returns its own canonical run-ID response
+rather than relaying untrusted headers or body. Later status observations use only
+the configured path prefix and recorded run ID. A terminal report adds a third
+receipt containing its agent-reported status, exact response digest, and byte
+length. A successful replay returns the stored ID; an ambiguous result is never
+dispatched automatically again.
 
 The replay identity spans workload generations for one tenant and logical instance,
 but exists only on one node and one retained ledger epoch. This is node-local
@@ -158,9 +161,10 @@ does not belong on the node.
 `stewardctl` is a CLI, not a daemon. Its key, capsule, policy, task-issuance,
 archive-inspection, and evidence commands run offline without contacting a node,
 control plane, publisher, or transparency service. `image import` connects to the
-local Docker daemon after offline verification. `hermes run` is a separate,
-explicitly online operation that accepts only a literal-loopback Gateway origin;
-remote operators use an authenticated SSH path rather than exposing Gateway.
+local Docker daemon after offline verification. Generic `task submit`, `status`,
+`observe`, and `wait` are explicitly online operations that accept only a
+literal-loopback Gateway origin; remote operators use an authenticated SSH path
+rather than exposing Gateway.
 
 ## Control-plane neutrality
 
@@ -178,10 +182,11 @@ operator-selected local or remote OpenAI-compatible inference system through a
 finite, per-instance grant.
 
 For agent-service task submission, the host operator first configures one exact
-service method and path. A separately controlled tenant key then narrows the active
-service grant to one request. The host Gateway token authenticates transport and
-does not replace the tenant signature. Ordinary service health and status reads
-remain host operations; the task permit authorizes only its exact configured POST.
+service method and path plus its fixed status-path prefix, observation timeout, and
+poll interval. A separately controlled tenant key then narrows the active service
+grant to one request. The host Gateway token authenticates transport and does not
+replace the tenant signature. Passive lifecycle status and bounded observations are
+host operations; the task permit authorizes only its exact configured POST.
 
 For an authenticated connector, the agent sends a logical connector and operation
 ID to its Relay. Gateway selects one exact operator-configured origin, method, and

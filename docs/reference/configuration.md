@@ -221,12 +221,15 @@ complete boundary.
 `service_operations` contains at most 128 exact tenant-authorized agent-service
 operations. Each entry has `service_id`, operation `id`, method `POST`, one canonical
 path with no query or percent-encoded alternate spelling, content type
-`application/json`, and four positive limits:
+`application/json`, the fixed lifecycle task protocol, one canonical status-path
+prefix, and positive limits:
 
 - `max_request_bytes`: at most 65536;
 - `max_response_bytes`: at most 1048576;
-- `max_seconds`: at most 120; and
-- `max_permit_seconds`: at most 900.
+- `max_seconds`: at most 120;
+- `max_permit_seconds`: at most 900;
+- `status_max_seconds`: at most 120; and
+- `poll_interval_seconds`: from 1 through 60.
 
 One service cannot map the same method and path to multiple operation IDs. These
 entries do not make a service task-authorized by themselves. Signed site policy
@@ -244,10 +247,13 @@ sudo stewardctl gateway service set \
   -config /etc/steward/gateway.json \
   -service-id hermes-api \
   -operation hermes.run=POST:/v1/runs \
+  -lifecycle hermes.run=/v1/runs/ \
   -max-request-bytes 65536 \
   -max-response-bytes 1048576 \
   -max-seconds 120 \
   -max-permit-seconds 300 \
+  -status-max-seconds 15 \
+  -poll-interval 1s \
   -tenant-budget tenant-a=4194304
 sudo stewardctl gateway service list -config /etc/steward/gateway.json
 sudo stewardctl gateway service trust \
@@ -256,13 +262,17 @@ sudo stewardctl gateway service trust \
 ```
 
 `set` replaces every operation for the named service and preserves other service,
-connector, route, and action-authority configuration. Repeat `-operation` to keep
-multiple operations for that service. It prints whether Gateway needs reload or
-restart. `trust` requires an explicit node and tenant, verifies that the tenant has
-a receipt budget, and exports strict, sorted `steward.service-trust.v1` JSON with
-operation-policy digests and limits. The inventory is unsigned preflight input for
-`stewardctl task issue`; authenticate its transfer. Gateway's current configuration
-and active grant remain authoritative.
+connector, route, and action-authority configuration. Repeat `-operation` and add
+one matching `-lifecycle OPERATION_ID=/status/path/` for every operation. The status
+path is a prefix to which the service run ID is appended. `-status-max-seconds`
+bounds each observation request; `-poll-interval` is signed into issued bundles and
+sets the minimum observation interval. The command prints whether Gateway needs
+reload or restart. `trust` requires an explicit node and tenant, verifies that the
+tenant has a receipt budget, and exports strict, sorted
+`steward.service-trust.v2` JSON with lifecycle policy, operation-policy digests, and
+limits. The inventory is unsigned preflight input for `stewardctl task issue`;
+authenticate its transfer. Gateway's current configuration and active grant remain
+authoritative.
 
 Action permits are opt-in per connector. `action_authorities` accepts at most 64
 non-secret Ed25519 public keys. Each entry contains a bounded `key_id`, one exact
@@ -347,12 +357,13 @@ non-borrowing tenant allocations:
 
 Every connector-bearing or task-authorized service grant must match one listed
 `tenant_id`; Gateway rejects an unbudgeted grant before creating its capability
-socket. Each allocation must be
-at least 262146 bytes, the table may contain at most 128 entries, and the sum may
-not exceed 67108864 bytes (64 MiB). Usage is the exact signed JSON line plus its
-newline. An authorized call also holds a worst-case terminal-record reservation
-until that terminal record is written. Unused capacity is not shared with another
-tenant. Connector exhaustion returns HTTP 503
+socket. Each connector-only allocation must be at least 262146 bytes. A tenant with
+a lifecycle service operation needs at least 393219 bytes, enough to reserve its
+authorization, dispatch, and terminal records. The table may contain at most 128
+entries, and the sum may not exceed 67108864 bytes (64 MiB). Usage is the exact
+signed JSON line plus its newline. A lifecycle authorization reserves the remaining
+dispatch and terminal capacity until those records are written. Unused capacity is
+not shared with another tenant. Connector exhaustion returns HTTP 503
 `connector_evidence_quota_exhausted`; service-task exhaustion returns HTTP 503
 `task_evidence_quota_exhausted`. Neither consumes another tenant's slice.
 
@@ -376,28 +387,37 @@ decision for the old chain, drain retained grants, preserve the old ledger and
 verification material, configure the new file and table, and restart Gateway.
 There is no CLI operation that removes a budget or compacts an existing ledger.
 
-The same signed ledger may contain receipt formats 1, 2, and 3. Format 1 is an
-ordinary connector event, format 2 adds a connector action permit, and format 3
-identifies either a connector call or an exact service task. Gateway state format 4
-retains the service ID and public tenant task authorities for task-enabled grants.
-Keep the ledger, Gateway state, and declared release-format compatibility together
-during backup, upgrade, and rollback; do not downgrade either file independently.
+The same signed ledger may contain receipt formats 1 through 4. Format 1 is an
+ordinary connector event, format 2 adds a connector action permit, and format 3 is
+the historical two-record service-task contract. Current lifecycle tasks use format
+4 and add task-local sequence and hash links across authorization, dispatch, and
+terminal records. Gateway state format 4 separately retains the service ID and
+public tenant task authorities for task-enabled grants. Keep the ledger, Gateway
+state, and declared release-format compatibility together during backup, upgrade,
+and rollback; do not downgrade either file independently.
 
-`steward-mcp` accepts `-node-url`, a loopback HTTP origin, and `-token-file`, an
-owner-only Executor bearer token. It does not listen on the network.
+`steward-mcp` accepts `-node-url` (default `http://127.0.0.1:8090`) and requires
+`-token-file`, an owner-only Executor bearer token. Optional task tools require all three of
+`-gateway-url`, `-gateway-token-file`, and `-task-result-dir`. The result directory
+must already exist as a process-owned mode-`0700` directory under trusted,
+non-replaceable ancestors. It is capped at 1,024 result files and 256 MiB. The MCP
+server does not listen on the network.
 
 To validate startup inputs without binding or polling, run the service command with
-`-check-config` and the same flags it uses at startup. The packaged preflight
-assembles that command for you. These checks do not create state, audit, journal,
-evidence, socket, or grant files. A missing Gateway state or audit file is a valid
-first-start path. Signed-admission journal, evidence, and fence files are rollback
-and audit authority, so Executor requires them to exist before validation:
+`-check-config` and the same flags it uses at startup. The packaged node doctor
+assembles those checks and also inspects Docker, gVisor, systemd, loopback health and
+readiness, Gateway, fixed stores, and filesystem capacity. Its default mode is
+read-only. A missing Gateway state or audit file is a valid first-start path. Signed
+admission journal, evidence, and fence files are rollback and audit authority, so
+Executor requires them to exist before validation:
 
 ```console
-sudo /usr/local/libexec/steward/node-preflight
+sudo /usr/local/libexec/steward/node-doctor
+sudo /usr/local/libexec/steward/node-doctor --json
 ```
 
-Validation is read-only. If the journal records an operation as started but not
+The lower-level `/usr/local/libexec/steward/node-preflight` remains available for
+configuration validation alone. If the journal records an operation as started but not
 completed, `-check-config` fails because the node is not ready for normal
 mutations. Normal startup accepts that same journal and serves in degraded
 containment mode with readiness at 503.

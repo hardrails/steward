@@ -31,7 +31,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Signed egress](https://hardrails.github.io/steward/guides/egress/): Configure HTTP(S) routes, private CIDRs, audit, and diagnostics
 - [Terraform](https://hardrails.github.io/steward/guides/terraform/): Non-secret cloud bootstrap and AWS hardening
 - [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate a local node with Model Context Protocol 2025-11-25 stdio tools
-- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Build the exact-pinned qualified adapter; review its gVisor proof, signed workspace and connector skills, service API, and limits
+- [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Build the exact-pinned qualified adapter; review its gVisor qualification evidence, signed workspace and connector skills, service API, and limits
 - [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): Review the layout contract, bounded WebSocket path, and adapter acceptance gate
 - [Air-gapped installation](https://hardrails.github.io/steward/guides/air-gapped/): Offline import and verification
 - [Upgrade and rollback](https://hardrails.github.io/steward/guides/upgrades/): Manifest-bound activation, drained-node requirements, durable-format checks, and rollback limits
@@ -62,7 +62,7 @@ permit signed by a tenant-scoped off-node key for the exact admitted operation,
 task, and request bytes. Gateway records that permit and request linkage in its
 signed receipt chain. A service-scoped tenant task key can separately authorize one
 exact JSON request to a configured agent-service operation. Gateway writes receipt
-format 3 before dispatch, does not record the raw prompt, and returns a durable run
+format 4 across authorization, dispatch, and terminal observation, does not record the raw prompt, and returns a durable run
 ID on an exact successful replay without dispatching again. This is node-local
 at-most-once dispatch within one retained ledger epoch, not exactly-once execution.
 The run ID is untrusted output from the agent service. Named HTTP(S) routes use a
@@ -83,10 +83,10 @@ bounded negotiation, health, run submission, and run-status operations on port
 `8766`; run event streams are excluded. Qualification runs the signed, network-free
 `steward.workspace-audit` skill, changed persisted state, and required a fresh
 changed result after restart. It also required Hermes to discover and load the exact
-signed `steward.connector-work` skill before proving one authenticated effect,
+signed `steward.connector-work` skill before demonstrating one authenticated effect,
 replay and undeclared-operation denial, fixed-material secret scans, and a separate
 Gateway receipt chain. The tenant-signed run path exercises a service-scoped key,
-an owner-only exact-request bundle, `stewardctl hermes run`, and offline task audit.
+an owner-only exact-request bundle, generic task lifecycle commands, and offline task audit.
 Steward ships the builder and disposable-host
 acceptance harness but no prebuilt Hermes OCI archive because dependency and
 base-image notices are incomplete. OpenClaw remains an unqualified layout contract.

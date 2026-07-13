@@ -193,9 +193,9 @@ an optional exact externally retained head. An expected sequence and chain hash
 identify one exact final head; they are not lower bounds. This detects a truncated
 or advanced copy relative to that checkpoint.
 
-For service tasks, a receipt can prove that the configured node key signed an
-authorization before dispatch and later recorded a status and run ID. It cannot
-prove that the agent performed useful work, that its output was true, or that an
+For service tasks, verification can establish that the configured node key signed
+an authorization before dispatch and later signed a status and run ID. It does not
+establish that the agent performed useful work, that its output was true, or that an
 upstream effect occurred exactly once. A missing terminal remains an unknown
 outcome. Raw request bytes and prompts are deliberately excluded.
 

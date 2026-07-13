@@ -30,7 +30,9 @@ Five runtime boundaries separate authority:
    They do not give an agent a raw host or Internet route. Gateway has its own
    service identity and no Docker authority. For selected connector operations, an
    off-node tenant action authority can sign one exact request; Gateway verifies
-   and durably spends that permit before the effect.
+   and durably spends that permit before the effect. A separate service-scoped
+   tenant task authority can sign one exact agent-service request. Current service
+   tasks record task-local authorization, dispatch, and terminal lifecycle evidence.
 5. An operator-managed **OpenAI-compatible inference system** owns model routing
    and inference policy. It is outside Steward's lifecycle contract.
 
@@ -40,8 +42,10 @@ signed profile capsules, site policies, exact-request action permits, OCI archiv
 and receipt chains.
 `sudo stewardctl image import` is the deliberate exception; after verification and
 sanitization, that one-shot command connects directly to Docker to load the image.
-`steward-mcp` is a host-local stdio adapter over the bounded Executor API and has
-no Docker authority.
+`steward-mcp` is a host-local stdio adapter over the bounded Executor API and,
+when explicitly configured, the loopback Gateway task-lifecycle API. It has no
+Docker authority. Its task tools accept only pre-signed exact requests and write
+verified terminal bytes to a fixed owner-only result store rather than MCP output.
 
 The built-in `os/exec` supervisor is for trusted, operator-authored processes. Root
 and non-loopback startup acknowledgements reduce accidental exposure, but they do
@@ -125,7 +129,9 @@ Executor lifecycle receipts use exact binary framing, Ed25519 signatures, and ha
 links; they do not depend on JSON canonicalization. Gateway connector receipts use
 a separate Gateway key and one signed DSSE JSON record per newline. Permit-backed
 records bind the action-authority key ID, exact permit digest, and exact request
-digest beside the stable task-based call digest. Both are
+digest beside the stable task-based call digest. Current lifecycle service tasks use
+receipt format 4 and add a task-local sequence and hash link across authorization,
+dispatch, and terminal records. Both are
 node-local enforcement evidence, not proof against a hostile host. Host root, the
 host kernel, Docker, gVisor, and node-key protection remain trusted. Receipts
 exclude prompts, model responses, agent logs, semantic tool actions, and agent

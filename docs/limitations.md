@@ -175,7 +175,9 @@ tenant that may receive a connector grant. Gateway rejects an unbudgeted grant
 before creating its socket. A tenant's usage includes each durable signed line and
 newline plus the pending worst-case terminal-record reservation for an authorized
 call. Each budget is at least 262146 bytes, the table has at most 128 entries, and
-the total is at most 64 MiB. Exhaustion fails the call with HTTP 503 and
+the total is at most 64 MiB. A tenant with lifecycle service operations needs at
+least 393219 bytes to reserve authorization, dispatch, and terminal records.
+Exhaustion fails the call with HTTP 503 and
 `connector_evidence_quota_exhausted`; unused capacity assigned to another tenant is
 not available.
 
@@ -247,7 +249,8 @@ Gateway accepts at most 128 configured service operations. They are exact
 `application/json` POSTs with canonical paths and no query, wildcard, alternate
 percent encoding, transfer coding, WebSocket upgrade, or caller-selected upstream
 headers. Hard ceilings are 64 KiB per request, 1 MiB per response, 120 seconds per
-dispatch, and 15 minutes per permit. A smaller operation limit wins.
+dispatch or status request, a 60-second polling interval, and 15 minutes per permit.
+Every operation has one fixed status-path prefix. A smaller operation limit wins.
 
 `stewardctl task issue` consumes the exact admission response, instance intent,
 request bytes, and an authenticated but unsigned service-trust inventory. It writes
@@ -261,25 +264,28 @@ The permit binds node, tenant, logical instance, runtime, grant, generation,
 capsule, site policy, effective route policy, service, exact operation-policy
 digest, task ID, request digest and byte length, content type, and validity window.
 Gateway validates all bindings against the live request, reserves replay identity,
-and fsyncs a format-3 authorization record before contacting the service. It checks
+and fsyncs a format-4 authorization record before contacting the service. It checks
 expiry and grant activity again after the durable write and immediately before
 dispatch.
 
 Only HTTP 200, 201, and 202 with one bounded JSON run ID count as a successful
 submission. Gateway does not relay the service's response headers or arbitrary
-body. It records the observed status, byte count, and run ID, then returns a
-canonical run-ID object. The run ID is untrusted application output and can be
-fabricated by a hostile image. A receipt proves that Gateway observed it, not that
-the agent completed useful or correct work.
+body. It records the observed status, byte count, and run ID in a distinct dispatch
+record, then returns a canonical run-ID object. A later bounded observation can add
+a terminal record with the agent-reported state, exact result digest, and byte
+length. The run ID and result are untrusted application output and can be fabricated
+by a hostile image. Receipts record what Gateway observed, not whether the agent
+completed useful or correct work.
 
 Task replay identity is `(tenant_id, instance_id, task_id)`. It deliberately omits
 generation and grant ID, so replacement of one logical workload does not make the
 same task ID spendable again. A concurrent replay cannot cross the in-memory
-reservation. After restart, Gateway reconstructs spends from the signed ledger. An
-exact successful replay can return the recorded run ID without another dispatch.
-Pending, conflicting, rejected, malformed, or ambiguous outcomes do not dispatch
-again automatically. If Gateway restarts after authorization but before a terminal
-record, it closes that task as `outcome_unknown`.
+reservation. After restart, Gateway reconstructs spends and pending lifecycles from
+the signed ledger. An exact successful replay can return the recorded run ID without
+another dispatch. Pending, conflicting, rejected, malformed, or ambiguous outcomes
+do not dispatch again automatically. A retained authorization with no safely
+recoverable dispatch outcome is closed as `outcome_unknown`; a durable dispatch
+remains observable through its configured status path.
 
 An ambiguous authorization write happens before service dispatch. Gateway returns
 `evidence_unavailable` and retains that task's process-local replay fence. Once the
@@ -299,39 +305,41 @@ outside the node; host root can replace the ledger, key, and software together.
 Service tasks share the Gateway signed ledger and its explicit non-borrowing tenant
 budgets with connectors. Exhaustion fails before dispatch with
 `task_evidence_quota_exhausted`. The allocation isolates ledger bytes, not shared
-disk latency, CPU, memory, or the host filesystem. Receipt format 3 records no raw
+disk latency, CPU, memory, or the host filesystem. Receipt format 4 records no raw
 prompt, request body, model output, workspace content, private key, Gateway bearer,
 or arbitrary service response.
 
-`stewardctl hermes run` supports only the qualified `hermes-api` operation
-`hermes.run = POST:/v1/runs` and requires an owner-only bundle, owner-only Gateway
-token, and literal-loopback HTTP origin. Remote operators should execute it through
-SSH or another authenticated private management path. Optional status polling is an
-ordinary host-authenticated `GET /v1/runs/{run_id}`; the tenant permit authorizes
-only the exact POST. Model inference remains separately configured and controlled.
+Generic `stewardctl task submit`, `status`, `observe`, and `wait` require an
+owner-only version-2 lifecycle bundle, owner-only Gateway token, and
+literal-loopback HTTP origin. Remote operators should execute them through SSH or
+another authenticated private management path. Status is passive. Observation uses
+the fixed operation policy and writes verified terminal bytes only to a new
+owner-only result file or explicitly discards them; raw result bytes are removed
+from standard output. The tenant permit authorizes only the exact POST. Model
+inference remains separately configured and controlled.
 
 ## Hermes adapter qualification boundary
 
 Steward's Hermes qualification applies only to upstream commit
 `095b9eed3801c251796df93f48a8f2a527ff6e70`, the checked-in adapter definition, and
 the documented runtime contract on `linux/amd64`. Other platforms are not yet
-qualified. The proof ran a source-built, non-root image under
+qualified. The harness ran a source-built, non-root image under
 gVisor, submitted useful work through Hermes's run API, verified the signed
 `steward.workspace-audit` result, changed persisted workspace state, restarted the
 container with a fresh session, and required the changed result. The integration
-proof also required Hermes to discover and load the exact signed
+qualification also required Hermes to discover and load the exact signed
 `steward.connector-work` skill, verified one authenticated upstream effect, denied
 task replay and an undeclared operation, scanned the fixed qualification material
 for secret and origin leakage, and verified Gateway's separate signed receipt
 chain. The exact service-task path additionally scoped a tenant key to
-`hermes-api`, signed the workspace-audit run bytes, dispatched them through
-Gateway, and correlated format-3 authorization and terminal records offline.
+`hermes-api`, signed five exact run requests, dispatched them through Gateway, and
+correlated format-4 authorization, dispatch, and terminal records offline.
 
 The connector portion still uses the connector grant-and-task path. It does not
 configure a connector action authority, issue `X-Steward-Action-Permit`, or exercise
 receipt format 2. Do not cite the retained Hermes evidence as proof of the optional
-connector action-permit path. The separate service-task proof uses
-`X-Steward-Task-Permit` and receipt format 3.
+connector action-permit path. The separate service-task qualification uses
+`X-Steward-Task-Permit` and receipt format 4.
 
 This does not qualify the official upstream image, another Hermes commit, arbitrary
 plugins, channels, skills, MCP servers, or run event streams. The service bridge
@@ -344,7 +352,7 @@ OCI archive. Dependency and base-image notices are incomplete, so redistribution
 remains blocked. A locally produced archive and its metadata attestation still
 require operator authentication, inspection, policy authorization, and signing.
 The attestation records build inputs and output digests; it is not a signature or a
-new runtime proof.
+new runtime qualification.
 
 Hermes state uses the same unquotaed Docker volume as any other persistent Steward
 workload. It requires the explicit dedicated single-tenant host mode and does not

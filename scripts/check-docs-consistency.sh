@@ -56,6 +56,26 @@ report_matches \
 	'((both|two)[[:space:]]+(Steward[[:space:]]+)?services|all[[:space:]]+three[[:space:]]+(binaries|entry[[:space:]]+points))' \
 	"${docs_files[@]}"
 
+# Removed commands and superseded current-file schemas are particularly dangerous
+# in runbooks: they fail only after an operator has transferred authority or moved
+# an artifact into an offline site. Historical prose may still explain receipt
+# format 3, but live instructions must use the generic lifecycle client and the
+# version-2 trust/bundle schemas.
+report_matches \
+	'documentation references the removed Hermes-specific task command; use stewardctl task submit/status/observe/wait' \
+	'stewardctl[[:space:]]+hermes[[:space:]]+run' \
+	"${docs_files[@]}"
+
+report_matches \
+	'documentation references a superseded service-task schema; use service-trust.v2 and task-bundle.v2' \
+	'steward[.]((service-trust|task-bundle)[.]v1)' \
+	"${docs_files[@]}"
+
+report_matches \
+	'documentation references the misleading removed lifecycle state; use failed_without_dispatch_evidence plus retry_safety' \
+	'failed_before_dispatch' \
+	"${docs_files[@]}" "${contract_files[@]}"
+
 unrelated_product_pattern='rail''yard'
 report_matches \
 	'public Steward docs must not reference an unrelated product' \
@@ -83,4 +103,4 @@ if [[ $failed == true ]]; then
 	exit 1
 fi
 
-printf 'docs consistency: evergreen release prose and component counts OK\n'
+printf 'docs consistency: evergreen prose, component counts, and task contracts OK\n'
