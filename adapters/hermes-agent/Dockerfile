@@ -47,3 +47,4 @@ RUN mkdir -p /opt/data /opt/data/home /tmp && \
 USER 65532:65532
 WORKDIR /opt/data
 ENTRYPOINT ["/opt/hermes/.venv/bin/python", "/opt/steward/entrypoint.py"]
+CMD ["serve"]

@@ -425,6 +425,8 @@ class ServiceBridgeHandler(http.server.BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    if sys.argv[1:] != ["serve"]:
+        fail("command must be exactly: serve")
     model = os.environ.get("OPENAI_MODEL", "steward-fixture-model")
     if not MODEL_RE.fullmatch(model):
         fail("OPENAI_MODEL is invalid")
