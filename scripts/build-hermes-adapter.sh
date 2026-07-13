@@ -441,6 +441,12 @@ if ! $non_interactive; then
 	[[ $answer == y || $answer == Y || $answer == yes || $answer == YES ]] || die "cancelled"
 fi
 
+# The sandbox runs as the fixed non-root runtime UID. Expose only traversal to
+# the private temporary parent and read-only access to the two explicit bind
+# roots; all other build state remains owner-only.
+chmod 0711 "$work" "$work/context"
+chmod 0555 "$work/context/upstream" "$work/context/adapter"
+
 progress "Building Hermes dependencies inside bounded gVisor sandbox (timeout ${build_timeout}s)"
 sandbox_name=steward-hermes-build-sandbox-${expected_revision:0:12}-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 sandbox_network=$sandbox_name-network
