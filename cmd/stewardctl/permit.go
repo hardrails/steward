@@ -26,19 +26,21 @@ const (
 )
 
 type permitAdmission struct {
-	RuntimeRef        string   `json:"runtime_ref"`
-	Status            string   `json:"status"`
-	CapsuleDigest     string   `json:"capsule_digest"`
-	PolicyDigest      string   `json:"policy_digest"`
-	Generation        uint64   `json:"generation"`
-	EvidenceKeyID     string   `json:"evidence_key_id"`
-	GrantID           string   `json:"grant_id,omitempty"`
-	ServicePath       string   `json:"service_path,omitempty"`
-	EgressProxy       string   `json:"egress_proxy,omitempty"`
-	EgressRouteIDs    []string `json:"egress_route_ids,omitempty"`
-	ConnectorURL      string   `json:"connector_url,omitempty"`
-	ConnectorIDs      []string `json:"connector_ids,omitempty"`
-	RoutePolicyDigest string   `json:"route_policy_digest,omitempty"`
+	RuntimeRef        string                  `json:"runtime_ref"`
+	Status            string                  `json:"status"`
+	CapsuleDigest     string                  `json:"capsule_digest"`
+	PolicyDigest      string                  `json:"policy_digest"`
+	Generation        uint64                  `json:"generation"`
+	EvidenceKeyID     string                  `json:"evidence_key_id"`
+	GrantID           string                  `json:"grant_id,omitempty"`
+	ServicePath       string                  `json:"service_path,omitempty"`
+	ServiceID         string                  `json:"service_id,omitempty"`
+	TaskAuthorities   []gateway.TaskAuthority `json:"task_authorities,omitempty"`
+	EgressProxy       string                  `json:"egress_proxy,omitempty"`
+	EgressRouteIDs    []string                `json:"egress_route_ids,omitempty"`
+	ConnectorURL      string                  `json:"connector_url,omitempty"`
+	ConnectorIDs      []string                `json:"connector_ids,omitempty"`
+	RoutePolicyDigest string                  `json:"route_policy_digest,omitempty"`
 }
 
 func permitCommand(arguments []string, stdout io.Writer) error {
