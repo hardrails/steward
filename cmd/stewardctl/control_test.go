@@ -18,7 +18,15 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
 		case "/v1/tenants":
-			_, _ = w.Write([]byte(`{"tenant_id":"tenant-a","state":"active"}`))
+			if request.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"tenants":[{"tenant_id":"tenant-a","state":"active"}]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"tenant_id":"tenant-a","state":"active"}`))
+			}
+		case "/v1/operators":
+			_, _ = w.Write([]byte(`{"credential_id":"operator-1","role":"tenant_operator","tenant_id":"tenant-a","token":"tenant-secret","created_at":"2026-07-13T12:00:00Z"}`))
+		case "/v1/operators/operator-1":
+			w.WriteHeader(http.StatusNoContent)
 		case "/v1/enrollments":
 			_, _ = w.Write([]byte(`{"enrollment_id":"enr_1","enrollment_token":"enroll-secret","node_id":"node-1","tenant_ids":["tenant-a"],"expires_at":"2026-07-13T12:15:00Z"}`))
 		case "/v1/enroll":
@@ -30,6 +38,12 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 			_, _ = w.Write([]byte(`{"command_id":"command-1","delivery_id":"delivery-1","tenant_id":"tenant-a","node_id":"node-1","command_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"pending"}`))
 		case "/v1/tenants/tenant-a/nodes/node-1/commands/command-1":
 			_, _ = w.Write([]byte(`{"command_id":"command-1","tenant_id":"tenant-a","node_id":"node-1","command_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"terminal","reported_status":"running"}`))
+		case "/v1/tenants/tenant-a/nodes":
+			_, _ = w.Write([]byte(`{"nodes":[{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z"}]}`))
+		case "/v1/tenants/tenant-a/nodes/node-1":
+			_, _ = w.Write([]byte(`{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z"}`))
+		case "/v1/nodes/node-1":
+			_, _ = w.Write([]byte(`{"node_id":"node-1","revoked_credentials":1}`))
 		default:
 			t.Fatalf("unexpected path %q", request.URL.Path)
 		}
@@ -39,6 +53,7 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	tokenPath := filepath.Join(directory, "admin.token")
 	enrollmentPath := filepath.Join(directory, "enrollment.json")
 	credentialPath := filepath.Join(directory, "credential.json")
+	operatorTokenPath := filepath.Join(directory, "tenant-operator.token")
 	commandPath := filepath.Join(directory, "command.dsse.json")
 	if err := os.WriteFile(tokenPath, []byte("admin-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -53,6 +68,30 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"tenant_id":"tenant-a"`) {
 		t.Fatalf("tenant output=%q", output.String())
+	}
+	output.Reset()
+	if err := run(append([]string{"control", "tenant", "list"}, common...), &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"tenants":[`) {
+		t.Fatalf("tenant list output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	operatorArguments := append([]string{"control", "operator", "issue"}, common...)
+	operatorArguments = append(operatorArguments, "-request-id", "operator-request-1", "-role", "tenant_operator", "-tenant-id", "tenant-a", "-token-out", operatorTokenPath)
+	if err := run(operatorArguments, &output, &bytes.Buffer{}); err != nil || strings.TrimSpace(output.String()) != "operator-1" {
+		t.Fatalf("operator issue output=%q error=%v", output.String(), err)
+	}
+	operatorToken, err := os.ReadFile(operatorTokenPath)
+	if err != nil || string(operatorToken) != "tenant-secret\n" {
+		t.Fatalf("operator token=%q error=%v", operatorToken, err)
+	}
+	if info, err := os.Stat(operatorTokenPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("operator token mode=%v error=%v", info, err)
+	}
+	output.Reset()
+	revokeArguments := append([]string{"control", "operator", "revoke"}, common...)
+	revokeArguments = append(revokeArguments, "-credential-id", "operator-1")
+	if err := run(revokeArguments, &output, &bytes.Buffer{}); err != nil || strings.TrimSpace(output.String()) != "operator-1" {
+		t.Fatalf("operator revoke output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
 	enrollmentArguments := append([]string{"control", "enrollment", "create"}, common...)
@@ -74,6 +113,24 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	credential, err := os.ReadFile(credentialPath)
 	if err != nil || !bytes.Contains(credential, []byte(`"credential":"node-secret"`)) {
 		t.Fatalf("credential=%s error=%v", credential, err)
+	}
+	output.Reset()
+	nodeListArguments := append([]string{"control", "node", "list"}, common...)
+	nodeListArguments = append(nodeListArguments, "-tenant-id", "tenant-a")
+	if err := run(nodeListArguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"nodes":[`) {
+		t.Fatalf("node list output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	nodeStatusArguments := append([]string{"control", "node", "status"}, common...)
+	nodeStatusArguments = append(nodeStatusArguments, "-tenant-id", "tenant-a", "-node-id", "node-1")
+	if err := run(nodeStatusArguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"state":"active"`) {
+		t.Fatalf("node status output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	nodeRevokeArguments := append([]string{"control", "node", "revoke"}, common...)
+	nodeRevokeArguments = append(nodeRevokeArguments, "-node-id", "node-1")
+	if err := run(nodeRevokeArguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"revoked_credentials":1`) {
+		t.Fatalf("node revoke output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
 	submitArguments := append([]string{"control", "command", "submit"}, common...)

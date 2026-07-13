@@ -17,36 +17,60 @@ import (
 )
 
 const (
-	maxLeaseDuration     = 10 * time.Minute
+	// MaxDeliveryLease is the single supported upper bound shared by storage,
+	// HTTP, and command-line validation.
+	MaxDeliveryLease     = 10 * time.Minute
 	observationInterval  = time.Minute
 	maxPollResponseBytes = 1 << 20
 )
 
-// BootstrapSiteAdmin creates the first credential only while the credential
-// collection is empty. The returned bearer is never persisted by Store.
-func (store *Store) BootstrapSiteAdmin(auth *controlauth.Manager, now time.Time) (string, controlauth.Credential, error) {
+// BootstrapSiteAdmin creates or reproduces the sole reserved bootstrap
+// credential while every other retained collection is empty. The bearer is
+// derived from the auth key and is never persisted by Store.
+func (store *Store) BootstrapSiteAdmin(auth *controlauth.Manager, now time.Time) (string, controlauth.Credential, bool, error) {
 	if store == nil || auth == nil {
-		return "", controlauth.Credential{}, ErrUnavailable
+		return "", controlauth.Credential{}, false, ErrUnavailable
 	}
 	if now.IsZero() {
-		return "", controlauth.Credential{}, invalid("bootstrap time is required")
+		return "", controlauth.Credential{}, false, invalid("bootstrap time is required")
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
-		return "", controlauth.Credential{}, err
+		return "", controlauth.Credential{}, false, err
 	}
-	if len(store.current.credentials) != 0 {
-		return "", controlauth.Credential{}, ErrConflict
+	otherState := len(store.current.tenants) != 0 || len(store.current.nodes) != 0 ||
+		len(store.current.enrollments) != 0 || len(store.current.commands) != 0
+	if otherState || len(store.current.credentials) > 1 {
+		return "", controlauth.Credential{}, false, ErrConflict
 	}
-	raw, credential, err := auth.MintOperator(controlauth.RoleSiteAdmin, "", now)
+	if len(store.current.credentials) == 1 {
+		var existing controlauth.Credential
+		for _, credential := range store.current.credentials {
+			existing = cloneCredential(credential)
+		}
+		if existing.Kind != controlauth.KindOperator || existing.Role != controlauth.RoleSiteAdmin ||
+			existing.TenantID != "" || existing.RequestID != controlauth.BootstrapRequestID || existing.Revoked {
+			return "", controlauth.Credential{}, false, ErrConflict
+		}
+		createdAt, err := parseTimestamp(existing.CreatedAt)
+		if err != nil {
+			return "", controlauth.Credential{}, false, ErrConflict
+		}
+		raw, derived, err := auth.MintBootstrapOperator(createdAt)
+		if err != nil || !credentialsEqual(existing, derived) {
+			return "", controlauth.Credential{}, false, ErrConflict
+		}
+		return raw, existing, false, nil
+	}
+	raw, credential, err := auth.MintBootstrapOperator(now)
 	if err != nil {
-		return "", controlauth.Credential{}, err
+		return "", controlauth.Credential{}, false, err
 	}
 	if err := store.applyMutationsLocked(credentialMutation(credential)); err != nil {
-		return "", controlauth.Credential{}, err
+		return "", controlauth.Credential{}, false, err
 	}
-	return raw, cloneCredential(credential), nil
+	return raw, cloneCredential(credential), true, nil
 }
 
 func (store *Store) AuthenticateOperator(auth *controlauth.Manager, raw string) (controlauth.Identity, error) {
@@ -159,42 +183,74 @@ func (store *Store) ListTenants(actor controlauth.Identity) ([]Tenant, error) {
 	return result, nil
 }
 
-func (store *Store) IssueOperator(actor controlauth.Identity, auth *controlauth.Manager, role controlauth.Role, tenantID string, now time.Time) (string, controlauth.Credential, error) {
+func (store *Store) IssueOperator(actor controlauth.Identity, auth *controlauth.Manager, requestID string, role controlauth.Role, tenantID string, now time.Time) (string, controlauth.Credential, bool, error) {
 	if store == nil {
-		return "", controlauth.Credential{}, ErrUnavailable
+		return "", controlauth.Credential{}, false, ErrUnavailable
 	}
 	if !controlauth.IsSiteAdmin(actor) {
-		return "", controlauth.Credential{}, ErrForbidden
+		return "", controlauth.Credential{}, false, ErrForbidden
 	}
 	if auth == nil {
-		return "", controlauth.Credential{}, ErrUnavailable
+		return "", controlauth.Credential{}, false, ErrUnavailable
 	}
-	if now.IsZero() || role != controlauth.RoleSiteAdmin && role != controlauth.RoleTenantOperator ||
+	if !validRecordID(requestID, 128) || requestID == controlauth.BootstrapRequestID || now.IsZero() ||
+		role != controlauth.RoleSiteAdmin && role != controlauth.RoleTenantOperator ||
 		role == controlauth.RoleSiteAdmin && tenantID != "" || role == controlauth.RoleTenantOperator && !validRecordID(tenantID, 128) {
-		return "", controlauth.Credential{}, invalid("operator role, tenant scope, and creation time are invalid")
+		return "", controlauth.Credential{}, false, invalid("operator request identity, role, tenant scope, or creation time is invalid")
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
-		return "", controlauth.Credential{}, err
+		return "", controlauth.Credential{}, false, err
+	}
+	for _, existing := range store.current.credentials {
+		if existing.RequestID != requestID {
+			continue
+		}
+		if existing.Kind != controlauth.KindOperator || existing.Role != role || existing.TenantID != tenantID || existing.Revoked {
+			return "", controlauth.Credential{}, false, ErrConflict
+		}
+		createdAt, err := parseTimestamp(existing.CreatedAt)
+		if err != nil {
+			return "", controlauth.Credential{}, false, ErrConflict
+		}
+		raw, derived, err := auth.MintOperatorForRequest(requestID, role, tenantID, createdAt)
+		if err != nil || !credentialsEqual(existing, derived) {
+			return "", controlauth.Credential{}, false, ErrConflict
+		}
+		return raw, cloneCredential(existing), false, nil
 	}
 	if role == controlauth.RoleTenantOperator {
 		tenant, ok := store.current.tenants[tenantID]
 		if !ok || !tenant.Active {
-			return "", controlauth.Credential{}, ErrNotFound
+			return "", controlauth.Credential{}, false, ErrNotFound
 		}
 	}
-	raw, credential, err := auth.MintOperator(role, tenantID, now)
+	raw, credential, err := auth.MintOperatorForRequest(requestID, role, tenantID, now)
 	if err != nil {
-		return "", controlauth.Credential{}, err
+		return "", controlauth.Credential{}, false, err
+	}
+	if _, exists := store.current.credentials[credential.ID]; exists {
+		return "", controlauth.Credential{}, false, ErrConflict
 	}
 	if err := store.applyMutationsLocked(credentialMutation(credential)); err != nil {
-		return "", controlauth.Credential{}, err
+		return "", controlauth.Credential{}, false, err
 	}
-	return raw, cloneCredential(credential), nil
+	return raw, cloneCredential(credential), true, nil
 }
 
 func (store *Store) RevokeCredential(actor controlauth.Identity, credentialID string, now time.Time) (bool, error) {
+	return store.revokeCredential(actor, credentialID, now, false)
+}
+
+// RevokeOperator revokes only an operator credential. A node credential is
+// reported as absent so an operator-management endpoint cannot revoke node
+// access accidentally or reveal credential kinds through this operation.
+func (store *Store) RevokeOperator(actor controlauth.Identity, credentialID string, now time.Time) (bool, error) {
+	return store.revokeCredential(actor, credentialID, now, true)
+}
+
+func (store *Store) revokeCredential(actor controlauth.Identity, credentialID string, now time.Time, operatorOnly bool) (bool, error) {
 	if store == nil {
 		return false, ErrUnavailable
 	}
@@ -210,7 +266,7 @@ func (store *Store) RevokeCredential(actor controlauth.Identity, credentialID st
 		return false, err
 	}
 	credential, ok := store.current.credentials[credentialID]
-	if !ok {
+	if !ok || operatorOnly && credential.Kind != controlauth.KindOperator {
 		return false, ErrNotFound
 	}
 	if credential.Revoked {
@@ -518,7 +574,7 @@ func (store *Store) Poll(identity controlauth.NodeIdentity, capabilities []strin
 		return nil, ErrUnavailable
 	}
 	canonical, err := canonicalCapabilities(capabilities)
-	if err != nil || now.IsZero() || lease <= 0 || lease > maxLeaseDuration || max <= 0 || max > controlprotocol.MaxExecutorDeliveries ||
+	if err != nil || now.IsZero() || lease <= 0 || lease > MaxDeliveryLease || max <= 0 || max > controlprotocol.MaxExecutorDeliveries ||
 		identity.Audience != "executor" || !validRecordID(identity.NodeID, 128) || !validTenantSet(identity.TenantIDs) {
 		return nil, invalid("poll identity, capabilities, lease, or batch size is invalid")
 	}
@@ -873,8 +929,8 @@ func commandMutation(command Command) mutation {
 func credentialsEqual(left, right controlauth.Credential) bool {
 	return left.Version == right.Version && left.ID == right.ID && left.Kind == right.Kind && left.Role == right.Role &&
 		left.TenantID == right.TenantID && equalStrings(left.TenantIDs, right.TenantIDs) && left.NodeID == right.NodeID &&
-		left.Audience == right.Audience && bytes.Equal(left.TokenMAC, right.TokenMAC) && left.CreatedAt == right.CreatedAt &&
-		left.Revoked == right.Revoked && left.RevokedAt == right.RevokedAt
+		left.Audience == right.Audience && bytes.Equal(left.TokenMAC, right.TokenMAC) && left.RequestID == right.RequestID &&
+		left.CreatedAt == right.CreatedAt && left.Revoked == right.Revoked && left.RevokedAt == right.RevokedAt
 }
 
 func enrollmentsEqual(left, right controlauth.Enrollment) bool {

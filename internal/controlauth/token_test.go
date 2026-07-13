@@ -48,6 +48,63 @@ func TestOperatorAuthenticationAndTenantScope(t *testing.T) {
 	}
 }
 
+func TestOperatorRequestCredentialIsRecoverableAndDomainIsolated(t *testing.T) {
+	manager, err := New(bytes.Repeat([]byte{9}, KeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	firstRaw, first, err := manager.MintOperatorForRequest("operator-request-1", RoleTenantOperator, "tenant-a", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryRaw, retry, err := manager.MintOperatorForRequest("operator-request-1", RoleTenantOperator, "tenant-a", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstRaw != retryRaw || first.ID != retry.ID || first.RequestID != "operator-request-1" ||
+		first.CreatedAt != retry.CreatedAt || !bytes.Equal(first.TokenMAC, retry.TokenMAC) {
+		t.Fatalf("exact operator request retry changed bearer or record: first=%+v retry=%+v", first, retry)
+	}
+	if _, err := manager.AuthenticateOperator(firstRaw, first); err != nil {
+		t.Fatalf("authenticate recovered operator: %v", err)
+	}
+	tampered := first
+	tampered.RequestID = "operator-request-2"
+	if _, err := manager.AuthenticateOperator(firstRaw, tampered); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("request identity was not MAC-bound: %v", err)
+	}
+	if _, _, err := manager.MintOperatorForRequest(BootstrapRequestID, RoleSiteAdmin, "", now); err == nil {
+		t.Fatal("normal operator issuance accepted the reserved bootstrap request identity")
+	}
+	bootstrapRaw, bootstrap, err := manager.MintBootstrapOperator(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapRetryRaw, bootstrapRetry, err := manager.MintBootstrapOperator(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrapRaw != bootstrapRetryRaw || bootstrap.ID != bootstrapRetry.ID ||
+		bootstrap.RequestID != BootstrapRequestID || !bytes.Equal(bootstrap.TokenMAC, bootstrapRetry.TokenMAC) {
+		t.Fatal("bootstrap operator derivation was not deterministic")
+	}
+	if bootstrapRaw == firstRaw || bootstrap.ID == first.ID {
+		t.Fatal("bootstrap and normal operator derivations share an identity domain")
+	}
+	otherManager, err := New(bytes.Repeat([]byte{10}, KeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRaw, _, err := otherManager.MintOperatorForRequest("operator-request-1", RoleTenantOperator, "tenant-a", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherRaw == firstRaw {
+		t.Fatal("operator bearer did not depend on the control auth key")
+	}
+}
+
 func TestEnrollmentExchangeIsDeterministicAndOneRequestOnly(t *testing.T) {
 	manager, err := New(bytes.Repeat([]byte{11}, KeyBytes))
 	if err != nil {
@@ -181,6 +238,23 @@ func TestDurableRecordValidation(t *testing.T) {
 	if ValidateCredential(credential) != nil {
 		t.Fatal("complete credential revocation was rejected")
 	}
+	_, requested, err := manager.MintOperatorForRequest("operator-request-1", RoleTenantOperator, "tenant-a", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested.RequestID = "-invalid"
+	if ValidateCredential(requested) == nil {
+		t.Fatal("malformed operator request identity was accepted")
+	}
+	_, bootstrap, err := manager.MintBootstrapOperator(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap.Role = RoleTenantOperator
+	bootstrap.TenantID = "tenant-a"
+	if ValidateCredential(bootstrap) == nil {
+		t.Fatal("reserved bootstrap identity was accepted outside site-admin scope")
+	}
 	_, enrollment, err := manager.MintEnrollment([]string{"tenant-a"}, "node-a", now.Add(time.Hour), now)
 	if err != nil || ValidateEnrollment(enrollment) != nil {
 		t.Fatalf("enrollment validation = (%v, %v)", err, ValidateEnrollment(enrollment))
@@ -193,6 +267,18 @@ func TestDurableRecordValidation(t *testing.T) {
 	enrollment.Revoked = true
 	if ValidateEnrollment(enrollment) == nil {
 		t.Fatal("enrollment revocation without a timestamp was accepted")
+	}
+	nodeRaw, nodeEnrollment, err := manager.MintEnrollment([]string{"tenant-a"}, "node-a", now.Add(time.Hour), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, nodeCredential, _, err := manager.Exchange(nodeRaw, "request-1", now.Add(time.Minute), nodeEnrollment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeCredential.RequestID = "operator-request-1"
+	if ValidateCredential(nodeCredential) == nil {
+		t.Fatal("node credential accepted an operator request identity")
 	}
 }
 

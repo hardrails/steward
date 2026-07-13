@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -45,6 +46,19 @@ type Tenant struct {
 	TenantID string `json:"tenant_id"`
 	State    string `json:"state,omitempty"`
 	Created  string `json:"created_at,omitempty"`
+}
+
+type TenantList struct {
+	Tenants   []Tenant `json:"tenants"`
+	NextAfter string   `json:"next_after,omitempty"`
+}
+
+type Operator struct {
+	CredentialID string `json:"credential_id"`
+	Role         string `json:"role"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	Token        string `json:"token"`
+	CreatedAt    string `json:"created_at"`
 }
 
 type Enrollment struct {
@@ -90,6 +104,26 @@ type Command struct {
 	ErrorCode          string `json:"error_code,omitempty"`
 }
 
+type Node struct {
+	NodeID       string   `json:"node_id"`
+	TenantIDs    []string `json:"tenant_ids"`
+	Capabilities []string `json:"capabilities"`
+	State        string   `json:"state"`
+	CreatedAt    string   `json:"created_at"`
+	LastSeenAt   string   `json:"last_seen_at,omitempty"`
+	RevokedAt    string   `json:"revoked_at,omitempty"`
+}
+
+type NodeList struct {
+	Nodes     []Node `json:"nodes"`
+	NextAfter string `json:"next_after,omitempty"`
+}
+
+type NodeRevocation struct {
+	NodeID             string `json:"node_id"`
+	RevokedCredentials int    `json:"revoked_credentials"`
+}
+
 func New(baseURL, token string, caPEM []byte) (*Client, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
@@ -102,7 +136,7 @@ func New(baseURL, token string, caPEM []byte) (*Client, error) {
 	if parsed.Scheme == "http" && !loopbackHost(parsed.Hostname()) {
 		return nil, errors.New("remote control URL must use HTTPS")
 	}
-	if strings.ContainsAny(token, "\r\n\x00") || len(token) > 4096 {
+	if len(token) > 4096 || token != strings.TrimSpace(token) || strings.ContainsAny(token, " \t\r\n\x00") {
 		return nil, errors.New("control token is invalid or exceeds 4096 bytes")
 	}
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -167,7 +201,34 @@ func (c *Client) CreateTenant(ctx context.Context, tenantID string) (Tenant, err
 	return tenant, err
 }
 
+func (c *Client) ListTenants(ctx context.Context, after string, limit int) (TenantList, error) {
+	var tenants TenantList
+	path, err := paginatedPath("/v1/tenants", after, limit)
+	if err != nil {
+		return TenantList{}, err
+	}
+	err = c.do(ctx, http.MethodGet, path, nil, &tenants, true)
+	return tenants, err
+}
+
+func (c *Client) IssueOperator(ctx context.Context, requestID, role, tenantID string) (Operator, error) {
+	var operator Operator
+	err := c.do(ctx, http.MethodPost, "/v1/operators", struct {
+		RequestID string `json:"request_id"`
+		Role      string `json:"role"`
+		TenantID  string `json:"tenant_id,omitempty"`
+	}{RequestID: requestID, Role: role, TenantID: tenantID}, &operator, true)
+	return operator, err
+}
+
+func (c *Client) RevokeOperator(ctx context.Context, credentialID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/operators/"+url.PathEscape(credentialID), nil, nil, true)
+}
+
 func (c *Client) CreateEnrollment(ctx context.Context, nodeID string, tenantIDs []string, ttl time.Duration) (Enrollment, error) {
+	if ttl < time.Second || ttl > 24*time.Hour || ttl%time.Second != 0 {
+		return Enrollment{}, errors.New("enrollment lifetime must be whole seconds between 1 second and 24 hours")
+	}
 	var enrollment Enrollment
 	err := c.do(ctx, http.MethodPost, "/v1/enrollments", struct {
 		NodeID     string   `json:"node_id"`
@@ -175,6 +236,29 @@ func (c *Client) CreateEnrollment(ctx context.Context, nodeID string, tenantIDs 
 		TTLSeconds int64    `json:"ttl_seconds"`
 	}{NodeID: nodeID, TenantIDs: tenantIDs, TTLSeconds: int64(ttl / time.Second)}, &enrollment, true)
 	return enrollment, err
+}
+
+func (c *Client) ListNodes(ctx context.Context, tenantID, after string, limit int) (NodeList, error) {
+	path, err := paginatedPath("/v1/tenants/"+url.PathEscape(tenantID)+"/nodes", after, limit)
+	if err != nil {
+		return NodeList{}, err
+	}
+	var nodes NodeList
+	err = c.do(ctx, http.MethodGet, path, nil, &nodes, true)
+	return nodes, err
+}
+
+func (c *Client) GetNode(ctx context.Context, tenantID, nodeID string) (Node, error) {
+	var node Node
+	path := "/v1/tenants/" + url.PathEscape(tenantID) + "/nodes/" + url.PathEscape(nodeID)
+	err := c.do(ctx, http.MethodGet, path, nil, &node, true)
+	return node, err
+}
+
+func (c *Client) RevokeNode(ctx context.Context, nodeID string) (NodeRevocation, error) {
+	var revocation NodeRevocation
+	err := c.do(ctx, http.MethodDelete, "/v1/nodes/"+url.PathEscape(nodeID), nil, &revocation, true)
+	return revocation, err
 }
 
 func (c *Client) Enroll(ctx context.Context, enrollmentToken, requestID string) (NodeCredential, error) {
@@ -245,11 +329,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any, 
 		return errors.New("control response exceeds 1 MiB")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if !jsonContentType(response.Header.Get("Content-Type")) {
+			return fmt.Errorf("control HTTP %d returned a non-JSON error", response.StatusCode)
+		}
 		var api struct {
 			Error   string `json:"error"`
 			Message string `json:"message"`
 		}
-		if err := json.Unmarshal(raw, &api); err != nil || api.Error == "" || api.Message == "" {
+		if err := dsse.DecodeStrictInto(raw, maxWireBytes, &api); err != nil || api.Error == "" || api.Message == "" {
 			return fmt.Errorf("control HTTP %d returned an invalid error body", response.StatusCode)
 		}
 		return &APIError{Status: response.StatusCode, Code: api.Error, Message: api.Message}
@@ -260,15 +347,35 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any, 
 		}
 		return nil
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(output); err != nil {
-		return fmt.Errorf("decode control response: %w", err)
+	if !jsonContentType(response.Header.Get("Content-Type")) {
+		return errors.New("control success response is not application/json")
 	}
-	if err := ensureEOF(decoder); err != nil {
+	if err := dsse.DecodeStrictInto(raw, maxWireBytes, output); err != nil {
 		return fmt.Errorf("decode control response: %w", err)
 	}
 	return nil
+}
+
+func paginatedPath(path, after string, limit int) (string, error) {
+	if len(after) > 128 || strings.ContainsAny(after, "\r\n\x00") || limit < 0 || limit > 500 {
+		return "", errors.New("control pagination is outside its bounds")
+	}
+	query := url.Values{}
+	if after != "" {
+		query.Set("after", after)
+	}
+	if limit != 0 {
+		query.Set("limit", fmt.Sprint(limit))
+	}
+	if encoded := query.Encode(); encoded != "" {
+		return path + "?" + encoded, nil
+	}
+	return path, nil
+}
+
+func jsonContentType(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(value)
+	return err == nil && mediaType == "application/json"
 }
 
 func ensureEOF(decoder *json.Decoder) error {
@@ -284,9 +391,6 @@ func ensureEOF(decoder *json.Decoder) error {
 }
 
 func loopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }

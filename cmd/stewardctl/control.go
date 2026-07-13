@@ -17,22 +17,38 @@ import (
 
 func controlCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) < 2 {
-		return errors.New("control requires tenant create, enrollment create|exchange, or command submit|status")
+		return controlUsageError()
 	}
 	switch arguments[0] + " " + arguments[1] {
 	case "tenant create":
 		return controlTenantCreate(arguments[2:], stdout)
+	case "tenant list":
+		return controlTenantList(arguments[2:], stdout)
+	case "operator issue":
+		return controlOperatorIssue(arguments[2:], stdout)
+	case "operator revoke":
+		return controlOperatorRevoke(arguments[2:], stdout)
 	case "enrollment create":
 		return controlEnrollmentCreate(arguments[2:], stdout)
 	case "enrollment exchange":
 		return controlEnrollmentExchange(arguments[2:], stdout)
+	case "node list":
+		return controlNodeList(arguments[2:], stdout)
+	case "node status":
+		return controlNodeStatus(arguments[2:], stdout)
+	case "node revoke":
+		return controlNodeRevoke(arguments[2:], stdout)
 	case "command submit":
 		return controlCommandSubmit(arguments[2:], stdout)
 	case "command status":
 		return controlCommandStatus(arguments[2:], stdout)
 	default:
-		return errors.New("control requires tenant create, enrollment create|exchange, or command submit|status")
+		return controlUsageError()
 	}
+}
+
+func controlUsageError() error {
+	return errors.New("control requires tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, or command submit|status")
 }
 
 type controlFlags struct {
@@ -85,6 +101,90 @@ func controlTenantCreate(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	return writeControlJSON(stdout, tenant)
+}
+
+func controlTenantList(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control tenant list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	after := flags.String("after", "", "exclusive tenant ID cursor")
+	limit := flags.Int("limit", 100, "maximum tenants to return")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *limit <= 0 || *limit > 500 || flags.NArg() != 0 {
+		return errors.New("control tenant list requires a limit between 1 and 500 and no positional arguments")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tenants, err := client.ListTenants(ctx, *after, *limit)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, tenants)
+}
+
+func controlOperatorIssue(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control operator issue", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	requestID := flags.String("request-id", "", "stable idempotency identity")
+	role := flags.String("role", "", "site_admin or tenant_operator")
+	tenantID := flags.String("tenant-id", "", "tenant scope for a tenant operator")
+	output := flags.String("token-out", "", "new owner-only operator token file")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *requestID == "" || *output == "" || (*role != "site_admin" && *role != "tenant_operator") ||
+		(*role == "site_admin" && *tenantID != "") || (*role == "tenant_operator" && *tenantID == "") {
+		return errors.New("control operator issue requires request ID, a valid role, matching tenant scope, and token output")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	operator, err := client.IssueOperator(ctx, *requestID, *role, *tenantID)
+	if err != nil {
+		return err
+	}
+	if operator.Token == "" || operator.CredentialID == "" {
+		return errors.New("control plane returned an incomplete operator credential")
+	}
+	if err := writeNewFile(*output, []byte(operator.Token+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write operator token: %w", err)
+	}
+	_, err = fmt.Fprintln(stdout, operator.CredentialID)
+	return err
+}
+
+func controlOperatorRevoke(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control operator revoke", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	credentialID := flags.String("credential-id", "", "operator credential identity")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *credentialID == "" || flags.NArg() != 0 {
+		return errors.New("control operator revoke requires -credential-id")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := client.RevokeOperator(ctx, *credentialID); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, *credentialID)
+	return err
 }
 
 func controlEnrollmentCreate(arguments []string, stdout io.Writer) error {
@@ -166,6 +266,81 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	}
 	_, err = fmt.Fprintln(stdout, credential.NodeID)
 	return err
+}
+
+func controlNodeList(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "tenant scope")
+	after := flags.String("after", "", "exclusive node ID cursor")
+	limit := flags.Int("limit", 100, "maximum nodes to return")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *tenantID == "" || *limit <= 0 || *limit > 500 || flags.NArg() != 0 {
+		return errors.New("control node list requires tenant and a limit between 1 and 500")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	nodes, err := client.ListNodes(ctx, *tenantID, *after, *limit)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, nodes)
+}
+
+func controlNodeStatus(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node status", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "tenant scope")
+	nodeID := flags.String("node-id", "", "node identity")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *tenantID == "" || *nodeID == "" || flags.NArg() != 0 {
+		return errors.New("control node status requires tenant and node")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	node, err := client.GetNode(ctx, *tenantID, *nodeID)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, node)
+}
+
+func controlNodeRevoke(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control node revoke", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	nodeID := flags.String("node-id", "", "node identity")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *nodeID == "" || flags.NArg() != 0 {
+		return errors.New("control node revoke requires -node-id")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	revocation, err := client.RevokeNode(ctx, *nodeID)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, revocation)
 }
 
 func controlCommandSubmit(arguments []string, stdout io.Writer) error {

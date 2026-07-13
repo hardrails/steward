@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,12 +19,14 @@ import (
 )
 
 type recordsFixture struct {
-	store  *Store
-	auth   *controlauth.Manager
-	admin  controlauth.Identity
-	now    time.Time
-	dir    string
-	limits Limits
+	store       *Store
+	auth        *controlauth.Manager
+	admin       controlauth.Identity
+	adminRaw    string
+	adminRecord controlauth.Credential
+	now         time.Time
+	dir         string
+	limits      Limits
 }
 
 func newRecordsFixture(t *testing.T, limits Limits) recordsFixture {
@@ -39,15 +42,18 @@ func newRecordsFixture(t *testing.T, limits Limits) recordsFixture {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	raw, _, err := store.BootstrapSiteAdmin(auth, now)
-	if err != nil {
-		t.Fatal(err)
+	raw, credential, created, err := store.BootstrapSiteAdmin(auth, now)
+	if err != nil || !created {
+		t.Fatalf("bootstrap site administrator = (%v, %v)", created, err)
 	}
 	admin, err := store.AuthenticateOperator(auth, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return recordsFixture{store: store, auth: auth, admin: admin, now: now, dir: directory, limits: limits}
+	return recordsFixture{
+		store: store, auth: auth, admin: admin, adminRaw: raw, adminRecord: credential,
+		now: now, dir: directory, limits: limits,
+	}
 }
 
 func (fixture recordsFixture) createTenant(t *testing.T, tenantID string) {
@@ -74,10 +80,13 @@ func (fixture recordsFixture) createNode(t *testing.T, tenants ...string) (strin
 	return credential.Credential, identity
 }
 
-func TestCredentialMutationReopensAndBootstrapIsExclusive(t *testing.T) {
+func TestBootstrapSiteAdminRetrySurvivesReopenOnlyWhilePristine(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
-	if _, _, err := fixture.store.BootstrapSiteAdmin(fixture.auth, fixture.now.Add(time.Minute)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("second bootstrap error = %v", err)
+	assertBearerNotPersisted(t, fixture.dir, fixture.adminRaw)
+	retryRaw, retryRecord, created, err := fixture.store.BootstrapSiteAdmin(fixture.auth, fixture.now.Add(time.Minute))
+	if err != nil || created || retryRaw != fixture.adminRaw || !credentialsEqual(retryRecord, fixture.adminRecord) {
+		t.Fatalf("bootstrap retry = (same_raw=%v, same_record=%v, created=%v, err=%v)",
+			retryRaw == fixture.adminRaw, credentialsEqual(retryRecord, fixture.adminRecord), created, err)
 	}
 	status, err := fixture.store.Status()
 	if err != nil || status.Credentials != 1 {
@@ -90,9 +99,149 @@ func TestCredentialMutationReopensAndBootstrapIsExclusive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after credential WAL mutation: %v", err)
 	}
+	t.Cleanup(func() { _ = reopened.Close() })
 	fixture.store = reopened
 	if status, err := reopened.Status(); err != nil || status.Credentials != 1 || status.Sequence != 1 {
 		t.Fatalf("reopened status = (%+v, %v)", status, err)
+	}
+	retryRaw, retryRecord, created, err = reopened.BootstrapSiteAdmin(fixture.auth, fixture.now.Add(2*time.Minute))
+	if err != nil || created || retryRaw != fixture.adminRaw || !credentialsEqual(retryRecord, fixture.adminRecord) {
+		t.Fatalf("reopened bootstrap retry = (same_raw=%v, same_record=%v, created=%v, err=%v)",
+			retryRaw == fixture.adminRaw, credentialsEqual(retryRecord, fixture.adminRecord), created, err)
+	}
+	fixture.createTenant(t, "tenant-a")
+	if _, _, _, err := reopened.BootstrapSiteAdmin(fixture.auth, fixture.now.Add(3*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("bootstrap with retained tenant error = %v", err)
+	}
+}
+
+func TestBootstrapSiteAdminDoesNotReproduceRevokedCredential(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	if revoked, err := fixture.store.RevokeCredential(fixture.admin, fixture.adminRecord.ID, fixture.now.Add(time.Minute)); err != nil || !revoked {
+		t.Fatalf("revoke bootstrap credential = (%v, %v)", revoked, err)
+	}
+	if _, _, _, err := fixture.store.BootstrapSiteAdmin(fixture.auth, fixture.now.Add(2*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("revoked bootstrap retry error = %v", err)
+	}
+}
+
+func TestIssueOperatorRetrySurvivesReopenAndRevocationFencesIt(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createTenant(t, "tenant-b")
+	requestID := "operator-request-1"
+	issuedRaw, issued, created, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, requestID, controlauth.RoleTenantOperator, "tenant-a", fixture.now.Add(time.Minute),
+	)
+	if err != nil || !created {
+		t.Fatalf("first operator issuance = (%v, %v)", created, err)
+	}
+	assertBearerNotPersisted(t, fixture.dir, issuedRaw)
+	retryRaw, retry, created, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, requestID, controlauth.RoleTenantOperator, "tenant-a", fixture.now.Add(2*time.Minute),
+	)
+	if err != nil || created || retryRaw != issuedRaw || !credentialsEqual(retry, issued) {
+		t.Fatalf("operator retry = (same_raw=%v, same_record=%v, created=%v, err=%v)",
+			retryRaw == issuedRaw, credentialsEqual(retry, issued), created, err)
+	}
+	if _, _, _, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, requestID, controlauth.RoleTenantOperator, "tenant-b", fixture.now.Add(2*time.Minute),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed operator scope error = %v", err)
+	}
+	if _, _, _, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, requestID, controlauth.RoleSiteAdmin, "", fixture.now.Add(2*time.Minute),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed operator role error = %v", err)
+	}
+	wrongAuth, err := controlauth.New(bytes.Repeat([]byte{32}, controlauth.KeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := fixture.store.IssueOperator(
+		fixture.admin, wrongAuth, requestID, controlauth.RoleTenantOperator, "tenant-a", fixture.now.Add(2*time.Minute),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("retry with a different auth key error = %v", err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	fixture.store = reopened
+	retryRaw, retry, created, err = reopened.IssueOperator(
+		fixture.admin, fixture.auth, requestID, controlauth.RoleTenantOperator, "tenant-a", fixture.now.Add(3*time.Minute),
+	)
+	if err != nil || created || retryRaw != issuedRaw || !credentialsEqual(retry, issued) {
+		t.Fatalf("reopened operator retry = (same_raw=%v, same_record=%v, created=%v, err=%v)",
+			retryRaw == issuedRaw, credentialsEqual(retry, issued), created, err)
+	}
+	nodeRaw, nodeIdentity := fixture.createNode(t, "tenant-a")
+	if revoked, err := reopened.RevokeOperator(fixture.admin, nodeIdentity.CredentialID, fixture.now.Add(4*time.Minute)); !errors.Is(err, ErrNotFound) || revoked {
+		t.Fatalf("operator endpoint revoked node credential = (%v, %v)", revoked, err)
+	}
+	if _, err := reopened.AuthenticateNode(fixture.auth, nodeRaw); err != nil {
+		t.Fatalf("node credential changed after operator-only revoke: %v", err)
+	}
+	if revoked, err := reopened.RevokeOperator(fixture.admin, issued.ID, fixture.now.Add(4*time.Minute)); err != nil || !revoked {
+		t.Fatalf("operator revoke = (%v, %v)", revoked, err)
+	}
+	if _, _, _, err := reopened.IssueOperator(
+		fixture.admin, fixture.auth, requestID, controlauth.RoleTenantOperator, "tenant-a", fixture.now.Add(5*time.Minute),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("revoked operator retry error = %v", err)
+	}
+	if revoked, err := reopened.RevokeCredential(fixture.admin, nodeIdentity.CredentialID, fixture.now.Add(5*time.Minute)); err != nil || !revoked {
+		t.Fatalf("generic credential revoke = (%v, %v)", revoked, err)
+	}
+	if _, err := reopened.AuthenticateNode(fixture.auth, nodeRaw); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("generic revocation did not revoke node credential: %v", err)
+	}
+}
+
+func TestConcurrentIssueOperatorCreatesOneRecoverableCredential(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	type issueResult struct {
+		raw        string
+		credential controlauth.Credential
+		created    bool
+		err        error
+	}
+	const callers = 16
+	start := make(chan struct{})
+	results := make(chan issueResult, callers)
+	for range callers {
+		go func() {
+			<-start
+			raw, credential, created, err := fixture.store.IssueOperator(
+				fixture.admin, fixture.auth, "concurrent-operator-1", controlauth.RoleTenantOperator, "tenant-a", fixture.now.Add(time.Minute),
+			)
+			results <- issueResult{raw: raw, credential: credential, created: created, err: err}
+		}()
+	}
+	close(start)
+	createdCount := 0
+	var expected issueResult
+	for index := range callers {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("concurrent issue %d: %v", index, result.err)
+		}
+		if index == 0 {
+			expected = result
+		} else if result.raw != expected.raw || !credentialsEqual(result.credential, expected.credential) {
+			t.Fatalf("concurrent issue %d returned a different credential", index)
+		}
+		if result.created {
+			createdCount++
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("concurrent created count = %d, want 1", createdCount)
 	}
 }
 
@@ -100,11 +249,11 @@ func TestMultiTenantWorkflowFencesReportsAndRevokesCredentials(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")
 	fixture.createTenant(t, "tenant-b")
-	operatorRaw, operatorRecord, err := fixture.store.IssueOperator(
-		fixture.admin, fixture.auth, controlauth.RoleTenantOperator, "tenant-a", fixture.now.Add(time.Minute),
+	operatorRaw, operatorRecord, created, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, "tenant-a-operator-1", controlauth.RoleTenantOperator, "tenant-a", fixture.now.Add(time.Minute),
 	)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !created {
+		t.Fatalf("issue tenant operator = (%v, %v)", created, err)
 	}
 	operator, err := fixture.store.AuthenticateOperator(fixture.auth, operatorRaw)
 	if err != nil {
@@ -208,7 +357,7 @@ func TestMultiTenantWorkflowFencesReportsAndRevokesCredentials(t *testing.T) {
 		t.Fatalf("node observation = (%+v, %v, %v)", storedNode, found, err)
 	}
 
-	if revoked, err := fixture.store.RevokeCredential(fixture.admin, operatorRecord.ID, fixture.now.Add(10*time.Minute)); err != nil || !revoked {
+	if revoked, err := fixture.store.RevokeOperator(fixture.admin, operatorRecord.ID, fixture.now.Add(10*time.Minute)); err != nil || !revoked {
 		t.Fatalf("operator revoke = (%v, %v)", revoked, err)
 	}
 	if _, err := fixture.store.AuthenticateOperator(fixture.auth, operatorRaw); !errors.Is(err, controlauth.ErrUnauthorized) {
@@ -368,6 +517,26 @@ func mustJSON(t *testing.T, value any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func assertBearerNotPersisted(t *testing.T, directory, bearer string) {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(directory, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(raw, []byte(bearer)) {
+			t.Fatalf("bearer was persisted in control artifact %s", entry.Name())
+		}
+	}
 }
 
 func signedCommand(t *testing.T, commandID, tenantID, nodeID string, padding int) []byte {

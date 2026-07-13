@@ -20,7 +20,24 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
 		case "/v1/tenants":
-			_, _ = w.Write([]byte(`{"tenant_id":"tenant-a","state":"active"}`))
+			if request.Method == http.MethodGet {
+				if request.URL.Query().Get("after") != "tenant-0" || request.URL.Query().Get("limit") != "25" {
+					t.Fatalf("tenant pagination=%q", request.URL.RawQuery)
+				}
+				_, _ = w.Write([]byte(`{"tenants":[{"tenant_id":"tenant-a","state":"active"}]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"tenant_id":"tenant-a","state":"active"}`))
+			}
+		case "/v1/operators":
+			var input struct {
+				RequestID string `json:"request_id"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.RequestID != "operator-request-1" {
+				t.Fatalf("operator request=%+v error=%v", input, err)
+			}
+			_, _ = w.Write([]byte(`{"credential_id":"operator-1","role":"tenant_operator","tenant_id":"tenant-a","token":"new-secret","created_at":"2026-07-13T12:00:00Z"}`))
+		case "/v1/operators/operator-1":
+			w.WriteHeader(http.StatusNoContent)
 		case "/v1/enrollments":
 			_, _ = w.Write([]byte(`{"enrollment_id":"enr_1","enrollment_token":"secret","node_id":"node-1","tenant_ids":["tenant-a"],"expires_at":"2026-07-13T12:15:00Z"}`))
 		case "/v1/enroll":
@@ -41,6 +58,12 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 			_, _ = w.Write([]byte(`{"command_id":"c1","delivery_id":"d1","tenant_id":"tenant-a","node_id":"node-1","command_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"pending"}`))
 		case "/v1/tenants/tenant-a/nodes/node-1/commands/c1":
 			_, _ = w.Write([]byte(`{"command_id":"c1","tenant_id":"tenant-a","node_id":"node-1","command_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"terminal","reported_status":"running"}`))
+		case "/v1/tenants/tenant-a/nodes":
+			_, _ = w.Write([]byte(`{"nodes":[{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z"}]}`))
+		case "/v1/tenants/tenant-a/nodes/node-1":
+			_, _ = w.Write([]byte(`{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":["signed-commands-v2"],"state":"active","created_at":"2026-07-13T12:00:00Z"}`))
+		case "/v1/nodes/node-1":
+			_, _ = w.Write([]byte(`{"node_id":"node-1","revoked_credentials":1}`))
 		default:
 			t.Fatalf("unexpected path %s", request.URL.Path)
 		}
@@ -54,11 +77,29 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 	if tenant, err := client.CreateTenant(ctx, "tenant-a"); err != nil || tenant.State != "active" {
 		t.Fatalf("tenant=%#v error=%v", tenant, err)
 	}
+	if tenants, err := client.ListTenants(ctx, "tenant-0", 25); err != nil || len(tenants.Tenants) != 1 {
+		t.Fatalf("tenants=%#v error=%v", tenants, err)
+	}
+	if operator, err := client.IssueOperator(ctx, "operator-request-1", "tenant_operator", "tenant-a"); err != nil || operator.Token != "new-secret" {
+		t.Fatalf("operator=%#v error=%v", operator, err)
+	}
+	if err := client.RevokeOperator(ctx, "operator-1"); err != nil {
+		t.Fatal(err)
+	}
 	if enrollment, err := client.CreateEnrollment(ctx, "node-1", []string{"tenant-a"}, 15*time.Minute); err != nil || enrollment.EnrollmentToken != "secret" {
 		t.Fatalf("enrollment=%#v error=%v", enrollment, err)
 	}
 	if credential, err := client.Enroll(ctx, "secret", "request-1"); err != nil || credential.Version != 2 {
 		t.Fatalf("credential=%#v error=%v", credential, err)
+	}
+	if nodes, err := client.ListNodes(ctx, "tenant-a", "", 100); err != nil || len(nodes.Nodes) != 1 {
+		t.Fatalf("nodes=%#v error=%v", nodes, err)
+	}
+	if node, err := client.GetNode(ctx, "tenant-a", "node-1"); err != nil || node.State != "active" {
+		t.Fatalf("node=%#v error=%v", node, err)
+	}
+	if revoked, err := client.RevokeNode(ctx, "node-1"); err != nil || revoked.RevokedCredentials != 1 {
+		t.Fatalf("revoked=%#v error=%v", revoked, err)
 	}
 	if command, err := client.SubmitCommand(ctx, "tenant-a", "node-1", commandRaw); err != nil || command.State != "pending" {
 		t.Fatalf("command=%#v error=%v", command, err)
@@ -69,12 +110,13 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 }
 
 func TestClientRejectsUnsafeTransportAndErrors(t *testing.T) {
-	for _, endpoint := range []string{"http://control.example:8080", "https://control.example", "https://user@control.example:443", "https://control.example:443/path"} {
+	for _, endpoint := range []string{"http://control.example:8080", "http://localhost:8080", "https://control.example", "https://user@control.example:443", "https://control.example:443/path"} {
 		if client, err := New(endpoint, "token", nil); err == nil || client != nil {
 			t.Fatalf("unsafe endpoint %q accepted", endpoint)
 		}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"error":"command_conflict","message":"different signed bytes"}`))
 	}))
@@ -87,6 +129,30 @@ func TestClientRejectsUnsafeTransportAndErrors(t *testing.T) {
 	api, ok := err.(*APIError)
 	if !ok || api.Status != http.StatusConflict || !strings.Contains(api.Error(), "command_conflict") {
 		t.Fatalf("error=%T %v", err, err)
+	}
+}
+
+func TestClientRejectsAmbiguousResponsesAndPagination(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tenant_id":"tenant-a","tenant_id":"tenant-b","state":"active"}`))
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "operator", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CreateTenant(context.Background(), "tenant-a"); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("ambiguous response error=%v", err)
+	}
+	if _, err := client.ListTenants(context.Background(), strings.Repeat("x", 129), 1); err == nil {
+		t.Fatal("oversized cursor accepted")
+	}
+	if _, err := client.ListNodes(context.Background(), "tenant-a", "", 501); err == nil {
+		t.Fatal("oversized node page accepted")
+	}
+	if _, err := New(server.URL, " token ", nil); err == nil {
+		t.Fatal("whitespace-bearing token accepted")
 	}
 }
 

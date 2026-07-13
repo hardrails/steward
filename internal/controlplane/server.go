@@ -53,8 +53,8 @@ type Server struct {
 
 func New(config Config) (*Server, error) {
 	if config.Store == nil || config.Auth == nil || config.LeaseDuration <= 0 ||
-		config.LeaseDuration > 15*time.Minute || config.MaxPoll <= 0 || config.MaxPoll > controlprotocol.MaxExecutorDeliveries {
-		return nil, errors.New("control server requires store, auth, a lease no greater than 15 minutes, and a bounded poll batch")
+		config.LeaseDuration > controlstore.MaxDeliveryLease || config.MaxPoll <= 0 || config.MaxPoll > controlprotocol.MaxExecutorDeliveries {
+		return nil, errors.New("control server requires store, auth, a lease no greater than 10 minutes, and a bounded poll batch")
 	}
 	now := config.Now
 	if now == nil {
@@ -202,18 +202,23 @@ func (server *Server) operators(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	var input struct {
-		Role     controlauth.Role `json:"role"`
-		TenantID string           `json:"tenant_id,omitempty"`
+		RequestID string           `json:"request_id"`
+		Role      controlauth.Role `json:"role"`
+		TenantID  string           `json:"tenant_id,omitempty"`
 	}
 	if !server.decode(writer, request, &input) {
 		return
 	}
-	raw, credential, err := server.store.IssueOperator(identity, server.auth, input.Role, input.TenantID, server.now())
+	raw, credential, created, err := server.store.IssueOperator(identity, server.auth, input.RequestID, input.Role, input.TenantID, server.now())
 	if err != nil {
 		server.storeError(writer, err, false)
 		return
 	}
-	writeJSON(writer, http.StatusCreated, struct {
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(writer, status, struct {
 		CredentialID string           `json:"credential_id"`
 		Role         controlauth.Role `json:"role"`
 		TenantID     string           `json:"tenant_id,omitempty"`
@@ -230,7 +235,7 @@ func (server *Server) operator(writer http.ResponseWriter, request *http.Request
 	if !ok {
 		return
 	}
-	revoked, err := server.store.RevokeCredential(identity, request.PathValue("credential_id"), server.now())
+	revoked, err := server.store.RevokeOperator(identity, request.PathValue("credential_id"), server.now())
 	if err != nil {
 		server.storeError(writer, err, false)
 		return
@@ -335,15 +340,13 @@ func (server *Server) nodes(writer http.ResponseWriter, request *http.Request) {
 		server.storeError(writer, err, true)
 		return
 	}
-	selected, next := pageNodes(nodes, page)
-	views := make([]nodeResponse, 0, len(selected))
-	for _, node := range selected {
-		views = append(views, nodeView(node))
+	views, next, err := pageNodeViews(nodes, page)
+	if err != nil {
+		server.logger.Error("control node page exceeded response bound", "error", err)
+		writeError(writer, http.StatusInternalServerError, "internal_error", "the control plane could not encode a bounded node page")
+		return
 	}
-	writeJSON(writer, http.StatusOK, struct {
-		Nodes     []nodeResponse `json:"nodes"`
-		NextAfter string         `json:"next_after,omitempty"`
-	}{Nodes: views, NextAfter: next})
+	writeJSON(writer, http.StatusOK, nodeListResponse{Nodes: views, NextAfter: next})
 }
 
 func (server *Server) node(writer http.ResponseWriter, request *http.Request) {
@@ -500,11 +503,15 @@ func (server *Server) nodeIdentity(writer http.ResponseWriter, request *http.Req
 
 func bearer(writer http.ResponseWriter, request *http.Request) (string, bool) {
 	values := request.Header.Values("Authorization")
-	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {
+	if len(values) != 1 {
 		writeError(writer, http.StatusUnauthorized, "unauthorized", "one bearer credential is required")
 		return "", false
 	}
-	token := strings.TrimPrefix(values[0], "Bearer ")
+	scheme, token, found := strings.Cut(values[0], " ")
+	if !found || !strings.EqualFold(scheme, "bearer") {
+		writeError(writer, http.StatusUnauthorized, "unauthorized", "one bearer credential is required")
+		return "", false
+	}
 	if token == "" || len(token) > 4096 || strings.TrimSpace(token) != token || strings.ContainsAny(token, " \t\r\n\x00") {
 		writeError(writer, http.StatusUnauthorized, "unauthorized", "bearer credential is invalid")
 		return "", false
@@ -589,6 +596,11 @@ type nodeResponse struct {
 	RevokedAt    string   `json:"revoked_at,omitempty"`
 }
 
+type nodeListResponse struct {
+	Nodes     []nodeResponse `json:"nodes"`
+	NextAfter string         `json:"next_after,omitempty"`
+}
+
 func nodeView(node controlstore.Node) nodeResponse {
 	state := "revoked"
 	if node.Active {
@@ -664,13 +676,32 @@ func pageTenants(values []controlstore.Tenant, page pageRequest) ([]controlstore
 	return values[start:end], values[end-1].ID
 }
 
-func pageNodes(values []controlstore.Node, page pageRequest) ([]controlstore.Node, string) {
+func pageNodeViews(values []controlstore.Node, page pageRequest) ([]nodeResponse, string, error) {
 	start := sort.Search(len(values), func(index int) bool { return values[index].ID > page.after })
-	end := start + page.limit
-	if end >= len(values) {
-		return values[start:], ""
+	views := make([]nodeResponse, 0, min(page.limit, len(values)-start))
+	for index := start; index < len(values) && len(views) < page.limit; index++ {
+		candidate := append(append([]nodeResponse(nil), views...), nodeView(values[index]))
+		next := ""
+		if index+1 < len(values) {
+			next = values[index].ID
+		}
+		raw, err := json.Marshal(nodeListResponse{Nodes: candidate, NextAfter: next})
+		if err != nil {
+			return nil, "", err
+		}
+		if len(raw)+1 > maxResponseBytes {
+			if len(views) == 0 {
+				return nil, "", errors.New("one valid node cannot fit the response limit")
+			}
+			break
+		}
+		views = candidate
 	}
-	return values[start:end], values[end-1].ID
+	next := ""
+	if start+len(views) < len(values) {
+		next = views[len(views)-1].NodeID
+	}
+	return views, next, nil
 }
 
 func method(writer http.ResponseWriter, request *http.Request, expected string) bool {

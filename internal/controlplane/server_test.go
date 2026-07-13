@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -44,7 +45,7 @@ func newServerFixture(t *testing.T) *serverFixture {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.July, 13, 20, 0, 0, 0, time.UTC)
-	adminToken, _, err := store.BootstrapSiteAdmin(manager, now)
+	adminToken, _, _, err := store.BootstrapSiteAdmin(manager, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +65,8 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 
 	response := fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken, `{"tenant_id":"tenant-a"}`)
 	requireStatus(t, response, http.StatusCreated)
-	response = fixture.request(t, http.MethodPost, "/v1/operators", fixture.adminToken, `{"role":"tenant_operator","tenant_id":"tenant-a"}`)
+	operatorRequest := `{"request_id":"operator-request-1","role":"tenant_operator","tenant_id":"tenant-a"}`
+	response = fixture.request(t, http.MethodPost, "/v1/operators", fixture.adminToken, operatorRequest)
 	requireStatus(t, response, http.StatusCreated)
 	var operator struct {
 		CredentialID string `json:"credential_id"`
@@ -74,6 +76,18 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	if operator.CredentialID == "" || operator.Token == "" {
 		t.Fatalf("operator response omitted credential material: %+v", operator)
 	}
+	response = fixture.request(t, http.MethodPost, "/v1/operators", fixture.adminToken, operatorRequest)
+	requireStatus(t, response, http.StatusOK)
+	var retriedOperator struct {
+		CredentialID string `json:"credential_id"`
+		Token        string `json:"token"`
+	}
+	decodeResponse(t, response, &retriedOperator)
+	if retriedOperator.CredentialID != operator.CredentialID || retriedOperator.Token != operator.Token {
+		t.Fatalf("operator retry changed bearer: got %+v want %+v", retriedOperator, operator)
+	}
+	requireError(t, fixture.request(t, http.MethodPost, "/v1/operators", fixture.adminToken,
+		`{"request_id":"operator-request-1","role":"site_admin"}`), http.StatusConflict, "conflict")
 
 	response = fixture.request(t, http.MethodPost, "/v1/enrollments", operator.Token,
 		`{"node_id":"node-1","tenant_ids":["tenant-a"],"ttl_seconds":900}`)
@@ -90,6 +104,12 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	if nodeCredential.Scope != "node" || nodeCredential.NodeID != "node-1" || nodeCredential.Credential == "" {
 		t.Fatalf("unexpected node credential: %+v", nodeCredential)
 	}
+	nodeCredentialID, err := fixture.server.auth.NodeCredentialID(nodeCredential.Credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireError(t, fixture.request(t, http.MethodDelete, "/v1/operators/"+nodeCredentialID, fixture.adminToken, ""),
+		http.StatusNotFound, "not_found")
 
 	// An exact exchange retry is recoverable and returns the same derived node
 	// credential without retaining its bearer secret in the store.
@@ -168,7 +188,7 @@ func TestControlPlaneRejectsAmbiguousAndCrossTenantRequests(t *testing.T) {
 	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken, `{"tenant_id":"tenant-a"}`), http.StatusCreated)
 	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken, `{"tenant_id":"tenant-b"}`), http.StatusCreated)
 	response := fixture.request(t, http.MethodPost, "/v1/operators", fixture.adminToken,
-		`{"role":"tenant_operator","tenant_id":"tenant-a"}`)
+		`{"request_id":"operator-request-1","role":"tenant_operator","tenant_id":"tenant-a"}`)
 	requireStatus(t, response, http.StatusCreated)
 	var operator struct {
 		Token string `json:"token"`
@@ -193,6 +213,11 @@ func TestControlPlaneRejectsAmbiguousAndCrossTenantRequests(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	fixture.server.ServeHTTP(recorder, request)
 	requireError(t, recorder, http.StatusUnauthorized, "unauthorized")
+	request = httptest.NewRequest(http.MethodGet, "/v1/tenants", nil)
+	request.Header.Set("Authorization", "bearer "+fixture.adminToken)
+	recorder = httptest.NewRecorder()
+	fixture.server.ServeHTTP(recorder, request)
+	requireStatus(t, recorder, http.StatusOK)
 
 	for _, response := range []*httptest.ResponseRecorder{
 		fixture.request(t, http.MethodGet, "/v1/healthz", "", ""),
@@ -202,6 +227,55 @@ func TestControlPlaneRejectsAmbiguousAndCrossTenantRequests(t *testing.T) {
 		if response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Fatalf("security response headers missing: %v", response.Header())
 		}
+	}
+}
+
+func TestNodePaginationHonorsEncodedResponseBound(t *testing.T) {
+	tenantIDs := make([]string, 128)
+	for index := range tenantIDs {
+		tenantIDs[index] = "t" + leftPad(index, 3) + "-" + strings.Repeat("x", 123)
+	}
+	capabilities := make([]string, 64)
+	for index := range capabilities {
+		capabilities[index] = "c" + leftPad(index, 2) + "-" + strings.Repeat("y", 124)
+	}
+	nodes := make([]controlstore.Node, 500)
+	for index := range nodes {
+		nodes[index] = controlstore.Node{
+			ID: "node-" + leftPad(index, 4), TenantIDs: tenantIDs, Capabilities: capabilities,
+			CreatedAt: "2026-07-13T20:00:00Z", Active: true,
+		}
+	}
+	views, next, err := pageNodeViews(nodes, pageRequest{limit: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) == 0 || len(views) >= len(nodes) || next != views[len(views)-1].NodeID {
+		t.Fatalf("bounded page count=%d next=%q", len(views), next)
+	}
+	raw, err := json.Marshal(nodeListResponse{Nodes: views, NextAfter: next})
+	if err != nil || len(raw)+1 > maxResponseBytes {
+		t.Fatalf("encoded node page bytes=%d error=%v", len(raw)+1, err)
+	}
+	second, _, err := pageNodeViews(nodes, pageRequest{after: next, limit: 500})
+	if err != nil || len(second) == 0 || second[0].NodeID <= next {
+		t.Fatalf("second page starts incorrectly: first=%+v error=%v", second, err)
+	}
+}
+
+func TestControlServerLeaseLimitMatchesStore(t *testing.T) {
+	fixture := newServerFixture(t)
+	if _, err := New(Config{
+		Store: fixture.store, Auth: fixture.server.auth, LeaseDuration: controlstore.MaxDeliveryLease,
+		MaxPoll: 1,
+	}); err != nil {
+		t.Fatalf("maximum store lease rejected: %v", err)
+	}
+	if _, err := New(Config{
+		Store: fixture.store, Auth: fixture.server.auth, LeaseDuration: controlstore.MaxDeliveryLease + time.Nanosecond,
+		MaxPoll: 1,
+	}); err == nil {
+		t.Fatal("lease above the store maximum was accepted")
 	}
 }
 
@@ -291,4 +365,9 @@ func requireError(t *testing.T, response *httptest.ResponseRecorder, status int,
 	if body.Error != code || body.Message == "" {
 		t.Fatalf("error response=%+v want code %q", body, code)
 	}
+}
+
+func leftPad(value, width int) string {
+	text := fmt.Sprint(value)
+	return strings.Repeat("0", width-len(text)) + text
 }

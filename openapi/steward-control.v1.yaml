@@ -191,7 +191,9 @@ paths:
       description: |
         Requires a site-administrator credential. The returned token is shown
         once; the controller retains only a keyed digest. Store it in an
-        owner-only file before discarding the response.
+        owner-only file before discarding the response. `request_id` makes an
+        interrupted issuance recoverable: an exact retry returns the same
+        bearer, while changing the requested role or scope returns 409.
       requestBody:
         required: true
         content:
@@ -201,6 +203,12 @@ paths:
       responses:
         "201":
           description: A new operator bearer was issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuedOperator"
+        "200":
+          description: An exact request-ID retry reproduced the retained operator bearer.
           content:
             application/json:
               schema:
@@ -215,6 +223,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
@@ -298,8 +308,9 @@ paths:
       security: []
       description: |
         Returns an Executor node credential. An exact retry with the same
-        enrollment token and request ID returns the same credential. Reusing
-        the token with another request ID returns 409.
+        enrollment token and request ID returns the same credential while the
+        enrollment remains retained and unexpired. Reusing the token with
+        another request ID returns 409.
       requestBody:
         required: true
         content:
@@ -367,7 +378,7 @@ paths:
       tags: [nodes]
       operationId: listControlNodes
       summary: List nodes visible in one tenant
-      description: Returns only nodes bound to the path tenant; a tenant outside the caller's scope is hidden as not found.
+      description: Returns only nodes bound to the path tenant; a tenant outside the caller's scope is hidden as not found. A page may contain fewer records than `limit` to keep the complete encoded response within 1 MiB; `next_after` continues the scan.
       parameters:
         - $ref: "#/components/parameters/After"
         - $ref: "#/components/parameters/Limit"
@@ -589,29 +600,25 @@ components:
       in: path
       required: true
       schema:
-        type: string
-        maxLength: 128
+        $ref: "#/components/schemas/Identifier128"
     NodeID:
       name: node_id
       in: path
       required: true
       schema:
-        type: string
-        maxLength: 128
+        $ref: "#/components/schemas/Identifier128"
     CredentialID:
       name: credential_id
       in: path
       required: true
       schema:
-        type: string
-        maxLength: 128
+        $ref: "#/components/schemas/Identifier128"
     CommandID:
       name: command_id
       in: path
       required: true
       schema:
-        type: string
-        maxLength: 256
+        $ref: "#/components/schemas/Identifier256"
     After:
       name: after
       in: query
@@ -619,7 +626,9 @@ components:
       description: Return records whose ID is lexicographically greater than this cursor.
       schema:
         type: string
+        minLength: 1
         maxLength: 128
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
     Limit:
       name: limit
       in: query
@@ -733,15 +742,14 @@ components:
       required: [tenant_id]
       properties:
         tenant_id:
-          type: string
-          maxLength: 128
+          $ref: "#/components/schemas/Identifier128"
     Tenant:
       type: object
       additionalProperties: false
       required: [tenant_id, state, created_at]
       properties:
         tenant_id:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
         state:
           type: string
           enum: [active, inactive]
@@ -759,30 +767,43 @@ components:
           items:
             $ref: "#/components/schemas/Tenant"
         next_after:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
     IssueOperatorRequest:
       type: object
       additionalProperties: false
-      required: [role]
+      required: [request_id, role]
       properties:
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
         role:
           type: string
           enum: [site_admin, tenant_operator]
         tenant_id:
-          type: string
-          maxLength: 128
+          $ref: "#/components/schemas/Identifier128"
+      oneOf:
+        - properties:
+            role:
+              type: string
+              enum: [site_admin]
+          not:
+            required: [tenant_id]
+        - required: [tenant_id]
+          properties:
+            role:
+              type: string
+              enum: [tenant_operator]
     IssuedOperator:
       type: object
       additionalProperties: false
       required: [credential_id, role, token, created_at]
       properties:
         credential_id:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
         role:
           type: string
           enum: [site_admin, tenant_operator]
         tenant_id:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
         token:
           type: string
           writeOnly: true
@@ -795,16 +816,14 @@ components:
       required: [node_id, tenant_ids, ttl_seconds]
       properties:
         node_id:
-          type: string
-          maxLength: 128
+          $ref: "#/components/schemas/Identifier128"
         tenant_ids:
           type: array
           minItems: 1
           maxItems: 128
           uniqueItems: true
           items:
-            type: string
-            maxLength: 128
+            $ref: "#/components/schemas/Identifier128"
         ttl_seconds:
           type: integer
           format: int64
@@ -816,16 +835,16 @@ components:
       required: [enrollment_id, enrollment_token, node_id, tenant_ids, expires_at]
       properties:
         enrollment_id:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
         enrollment_token:
           type: string
           writeOnly: true
         node_id:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
         tenant_ids:
           type: array
           items:
-            type: string
+            $ref: "#/components/schemas/Identifier128"
         expires_at:
           type: string
           format: date-time
@@ -837,8 +856,7 @@ components:
         enrollment_token:
           type: string
         request_id:
-          type: string
-          maxLength: 128
+          $ref: "#/components/schemas/Identifier128"
     NodeCredential:
       type: object
       additionalProperties: false
@@ -851,7 +869,7 @@ components:
           type: string
           enum: [node]
         node_id:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
         credential:
           type: string
           writeOnly: true
@@ -861,17 +879,17 @@ components:
       required: [node_id, tenant_ids, capabilities, state, created_at]
       properties:
         node_id:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
         tenant_ids:
           type: array
           maxItems: 128
           items:
-            type: string
+            $ref: "#/components/schemas/Identifier128"
         capabilities:
           type: array
           maxItems: 64
           items:
-            type: string
+            $ref: "#/components/schemas/Identifier128"
         state:
           type: string
           enum: [active, revoked]
@@ -895,14 +913,14 @@ components:
           items:
             $ref: "#/components/schemas/Node"
         next_after:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
     NodeRevocation:
       type: object
       additionalProperties: false
       required: [node_id, revoked_credentials]
       properties:
         node_id:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
         revoked_credentials:
           type: integer
           minimum: 0
@@ -921,13 +939,13 @@ components:
       required: [command_id, delivery_id, tenant_id, node_id, command_digest, state]
       properties:
         command_id:
-          type: string
+          $ref: "#/components/schemas/Identifier256"
         delivery_id:
-          type: string
+          $ref: "#/components/schemas/Identifier256"
         tenant_id:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
         node_id:
-          type: string
+          $ref: "#/components/schemas/Identifier128"
         command_digest:
           $ref: "#/components/schemas/SHA256Digest"
         state:
@@ -953,8 +971,7 @@ components:
           type: integer
           enum: [3]
         node_id:
-          type: string
-          maxLength: 128
+          $ref: "#/components/schemas/Identifier128"
         credential_scope:
           type: string
           enum: [node]
@@ -963,8 +980,7 @@ components:
           maxItems: 64
           uniqueItems: true
           items:
-            type: string
-            maxLength: 128
+            $ref: "#/components/schemas/Identifier128"
     ExecutorPollResponse:
       type: object
       additionalProperties: false
@@ -984,13 +1000,13 @@ components:
       required: [delivery_id, delivery_generation, command_id, command_digest, command_dsse_base64]
       properties:
         delivery_id:
-          type: string
+          $ref: "#/components/schemas/Identifier256"
         delivery_generation:
           type: integer
           format: int64
           minimum: 1
         command_id:
-          type: string
+          $ref: "#/components/schemas/Identifier256"
         command_digest:
           $ref: "#/components/schemas/SHA256Digest"
         command_dsse_base64:
@@ -1014,13 +1030,13 @@ components:
           type: integer
           enum: [3]
         delivery_id:
-          type: string
+          $ref: "#/components/schemas/Identifier256"
         delivery_generation:
           type: integer
           format: int64
           minimum: 1
         command_id:
-          type: string
+          $ref: "#/components/schemas/Identifier256"
         command_digest:
           $ref: "#/components/schemas/SHA256Digest"
         status:
@@ -1065,3 +1081,13 @@ components:
     SHA256Digest:
       type: string
       pattern: '^sha256:[0-9a-f]{64}$'
+    Identifier128:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    Identifier256:
+      type: string
+      minLength: 1
+      maxLength: 256
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'

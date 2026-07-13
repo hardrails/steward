@@ -31,6 +31,10 @@ const (
 	enrollmentVersion = 1
 	maxTokenBytes     = 512
 	maxTenantBindings = 128
+
+	// BootstrapRequestID is reserved for the recoverable first-site-admin
+	// handoff. Normal operator issuance must reject this request identity.
+	BootstrapRequestID = "steward-bootstrap-v1"
 )
 
 var (
@@ -65,6 +69,7 @@ type Credential struct {
 	NodeID    string         `json:"node_id,omitempty"`
 	Audience  string         `json:"audience,omitempty"`
 	TokenMAC  []byte         `json:"token_mac"`
+	RequestID string         `json:"request_id,omitempty"`
 	CreatedAt string         `json:"created_at"`
 	Revoked   bool           `json:"revoked"`
 	RevokedAt string         `json:"revoked_at,omitempty"`
@@ -214,6 +219,28 @@ func (m *Manager) MintOperator(role Role, tenantID string, now time.Time) (strin
 	return raw, credential, nil
 }
 
+// MintOperatorForRequest deterministically derives a recoverable operator
+// bearer from one bounded request identity. Only the bearer MAC is persisted.
+func (m *Manager) MintOperatorForRequest(requestID string, role Role, tenantID string, createdAt time.Time) (string, Credential, error) {
+	if !validIdentity(requestID, 128) || requestID == BootstrapRequestID ||
+		!validRoleScope(role, tenantID) || createdAt.IsZero() {
+		return "", Credential{}, errors.New("operator request requires a non-reserved identity, valid scope, and creation time")
+	}
+	return m.deterministicOperator("operator-request", "cred", requestID, role, tenantID, createdAt)
+}
+
+// MintBootstrapOperator deterministically derives the reserved first
+// site-administrator bearer in a domain isolated from normal requests.
+func (m *Manager) MintBootstrapOperator(createdAt time.Time) (string, Credential, error) {
+	if createdAt.IsZero() {
+		return "", Credential{}, errors.New("bootstrap operator requires a creation time")
+	}
+	return m.deterministicOperator(
+		"bootstrap-operator", "bootstrap-cred", BootstrapRequestID,
+		RoleSiteAdmin, "", createdAt,
+	)
+}
+
 func (m *Manager) MintEnrollment(tenantIDs []string, nodeID string, expiresAt, now time.Time) (string, Enrollment, error) {
 	canonical, canonicalErr := CanonicalTenantIDs(tenantIDs)
 	if canonicalErr != nil || !validIdentity(nodeID, 128) || now.IsZero() ||
@@ -347,11 +374,16 @@ func ValidateCredential(credential Credential) error {
 	}
 	switch credential.Kind {
 	case KindOperator:
-		if !validRoleScope(credential.Role, credential.TenantID) || len(credential.TenantIDs) != 0 || credential.NodeID != "" || credential.Audience != "" {
+		if !validRoleScope(credential.Role, credential.TenantID) ||
+			(credential.RequestID != "" && !validIdentity(credential.RequestID, 128)) ||
+			(credential.RequestID == BootstrapRequestID &&
+				(credential.Role != RoleSiteAdmin || credential.TenantID != "")) ||
+			len(credential.TenantIDs) != 0 || credential.NodeID != "" || credential.Audience != "" {
 			return errors.New("invalid operator credential")
 		}
 	case KindNode:
-		if credential.Role != "" || credential.TenantID != "" || !validCanonicalTenantIDs(credential.TenantIDs) ||
+		if credential.Role != "" || credential.TenantID != "" || credential.RequestID != "" ||
+			!validCanonicalTenantIDs(credential.TenantIDs) ||
 			!validIdentity(credential.NodeID, 128) || credential.Audience != "executor" {
 			return errors.New("invalid node credential")
 		}
@@ -395,6 +427,23 @@ func ValidateEnrollment(enrollment Enrollment) error {
 		}
 	}
 	return nil
+}
+
+func (m *Manager) deterministicOperator(domain, idPrefix, requestID string, role Role, tenantID string, createdAt time.Time) (string, Credential, error) {
+	if m == nil {
+		return "", Credential{}, errors.New("control auth manager is unavailable")
+	}
+	scope := string(role) + "\x00" + tenantID
+	idDigest := m.derive(domain+"-id", requestID, scope)
+	secret := m.derive(domain+"-secret", requestID, scope)
+	id := idPrefix + "-" + hex.EncodeToString(idDigest[:16])
+	raw := operatorPrefix + "_" + id + "_" + base64.RawURLEncoding.EncodeToString(secret)
+	credential := Credential{
+		Version: credentialVersion, ID: id, Kind: KindOperator, Role: role, TenantID: tenantID,
+		RequestID: requestID, CreatedAt: canonicalTime(createdAt),
+	}
+	credential.TokenMAC = m.operatorMAC(raw, credential)
+	return raw, credential, nil
 }
 
 // CanonicalTenantIDs validates, copies, and sorts a node's explicit tenant
@@ -465,7 +514,13 @@ func (m *Manager) mac(domain, raw string, fields ...string) []byte {
 }
 
 func (m *Manager) operatorMAC(raw string, credential Credential) []byte {
-	return m.mac("operator", raw, credential.ID, string(credential.Role), credential.TenantID, credential.CreatedAt)
+	fields := []string{credential.ID, string(credential.Role), credential.TenantID, credential.CreatedAt}
+	// Omitting the new request field for legacy/random credentials preserves
+	// the pre-request-id MAC contract and keeps existing durable records valid.
+	if credential.RequestID != "" {
+		fields = append(fields, credential.RequestID)
+	}
+	return m.mac("operator", raw, fields...)
 }
 
 func (m *Manager) enrollmentMAC(raw string, enrollment Enrollment) []byte {

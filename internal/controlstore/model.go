@@ -148,6 +148,7 @@ type storedCredential struct {
 	NodeID         string                     `json:"node_id,omitempty"`
 	Audience       string                     `json:"audience,omitempty"`
 	TokenMACBase64 string                     `json:"token_mac_base64"`
+	RequestID      string                     `json:"request_id,omitempty"`
 	CreatedAt      string                     `json:"created_at"`
 	Revoked        bool                       `json:"revoked"`
 	RevokedAt      string                     `json:"revoked_at,omitempty"`
@@ -278,8 +279,9 @@ func credentialToStored(credential controlauth.Credential) storedCredential {
 		Version: credential.Version, ID: credential.ID, Kind: credential.Kind, Role: credential.Role,
 		TenantID: credential.TenantID, TenantIDs: append([]string(nil), credential.TenantIDs...),
 		NodeID: credential.NodeID, Audience: credential.Audience,
-		TokenMACBase64: base64.StdEncoding.EncodeToString(credential.TokenMAC), CreatedAt: credential.CreatedAt,
-		Revoked: credential.Revoked, RevokedAt: credential.RevokedAt,
+		TokenMACBase64: base64.StdEncoding.EncodeToString(credential.TokenMAC), RequestID: credential.RequestID,
+		CreatedAt: credential.CreatedAt,
+		Revoked:   credential.Revoked, RevokedAt: credential.RevokedAt,
 	}
 }
 
@@ -291,8 +293,9 @@ func credentialFromStored(stored storedCredential) (controlauth.Credential, erro
 	return controlauth.Credential{
 		Version: stored.Version, ID: stored.ID, Kind: stored.Kind, Role: stored.Role,
 		TenantID: stored.TenantID, TenantIDs: append([]string(nil), stored.TenantIDs...),
-		NodeID: stored.NodeID, Audience: stored.Audience, TokenMAC: mac, CreatedAt: stored.CreatedAt,
-		Revoked: stored.Revoked, RevokedAt: stored.RevokedAt,
+		NodeID: stored.NodeID, Audience: stored.Audience, TokenMAC: mac, RequestID: stored.RequestID,
+		CreatedAt: stored.CreatedAt,
+		Revoked:   stored.Revoked, RevokedAt: stored.RevokedAt,
 	}, nil
 }
 
@@ -649,9 +652,16 @@ func validateState(current state, limits Limits) error {
 		}
 	}
 	credentialsByTenant := make(map[string]int)
+	operatorRequests := make(map[string]string)
 	for key, credential := range current.credentials {
 		if key != credential.ID || controlauth.ValidateCredential(credential) != nil {
 			return errors.New("control state contains an invalid credential")
+		}
+		if credential.Kind == controlauth.KindOperator && credential.RequestID != "" {
+			if existingID, exists := operatorRequests[credential.RequestID]; exists && existingID != credential.ID {
+				return errors.New("control state contains a duplicate operator request identity")
+			}
+			operatorRequests[credential.RequestID] = credential.ID
 		}
 		if credential.Kind == controlauth.KindOperator && credential.TenantID != "" {
 			if _, ok := current.tenants[credential.TenantID]; !ok {
