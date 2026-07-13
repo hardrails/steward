@@ -5,7 +5,7 @@ description: Create a bounded, content-addressed inventory of the persistent wor
 
 # Steward workspace audit
 
-Run `/opt/data/skills/steward.workspace-audit/workspace_audit.py` without
+Run `/opt/steward/skills/steward.workspace-audit/workspace_audit.py` without
 arguments. Return its canonical JSON output unchanged.
 
 The audit reads only `/opt/data/workspace`. It rejects symbolic links, hard-linked

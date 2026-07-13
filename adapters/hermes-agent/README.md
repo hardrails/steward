@@ -6,15 +6,21 @@ Hermes releases, plugins, channels, skills, or configuration.
 
 The build consumes an already-present checkout of the exact upstream revision
 recorded in `adapter.json`. `scripts/hermes-feasibility.sh` exports that checkout
-with `git archive`, builds the adapter, and then runs the hostile-runtime checks.
+with replace refs and repository-local Git commands disabled. The builder runs
+upstream dependency and packaging hooks inside a bounded gVisor container with
+read-only source, no Docker socket, dropped capabilities, `no-new-privileges`,
+fixed resource limits, and bounded artifact output. The final Dockerfile only
+assembles that validated output and runs with build networking disabled. The
+feasibility gate then runs the hostile-runtime checks.
 The build never uses the upstream image: that image starts as root, declares a
 volume, and its Dockerfile at the selected revision names two lockfiles that are
 not present in the tree.
 
 The adapter replaces upstream's root-only s6 initialization with `entrypoint.py`.
-That shim performs only fixed-path, non-root initialization, verifies and installs
-the signed `steward.workspace-audit` skill, starts the upstream gateway, and
-provides the service endpoint on port 8766. The skill creates a bounded canonical
+That shim performs only fixed-path, non-root initialization, verifies the signed
+`steward.workspace-audit` skill from an immutable external skill directory, starts
+the upstream gateway, and provides the service endpoint on port 8766. The skill
+creates a bounded canonical
 inventory of `/opt/data/workspace`; it rejects links, special files, limit
 violations, and concurrent mutation. It does not change Hermes core source or
 seed workspace content into the image.
@@ -48,3 +54,14 @@ archive through signed admission, brokered inference and the service API through
 Gateway, ran the workspace skill, destroyed and resumed the workload, ran the skill
 again, purged its state, and verified the signed receipt chain. These proofs remain
 limited to the exact pinned inputs and documented capability surface.
+
+Maintainers can retain a non-sensitive integration summary by setting
+`HERMES_INTEGRATION_EVIDENCE_OUT` when running
+`scripts/hermes-steward-acceptance.sh`. A successful run writes a new owner-only file
+that binds the archive hash and image digests, available Git or packaged-builder
+provenance, Steward binary hashes and versions, the complete gate list, and the
+verified receipt-chain head. The harness refuses to overwrite an existing file and
+writes nothing on failure. It validates `HERMES_BUILD_ATTESTATION`, or the archive's
+default `.attestation.json` sibling when present, before including a bounded metadata
+subset. The summary contains no workspace output, credential, log, or agent content;
+it is metadata rather than a separately signed attestation.

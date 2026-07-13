@@ -22,7 +22,7 @@ from typing import Any
 
 REVISION = "095b9eed3801c251796df93f48a8f2a527ff6e70"
 STATE = pathlib.Path("/opt/data")
-FIXTURE = pathlib.Path("/opt/steward/fixtures/skill")
+FIXTURE = pathlib.Path("/opt/steward/skills/steward.workspace-audit")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 RUN_PATH_RE = re.compile(r"^/v1/runs/run_[a-f0-9]{32}$")
 INTERNAL_API_HOST = "127.0.0.1"
@@ -31,7 +31,7 @@ INTERNAL_API_TOKEN = "steward-feasibility"
 MAX_REQUEST_BODY = 64 << 10
 MAX_RESPONSE_BODY = 1 << 20
 SERVICE_TIMEOUT_SECONDS = 30
-SKILL_PUBLIC_KEY_SHA256 = "c04a414ffd37a361ea1e16a5c9fcf58b5db2fb7052aa9f981e2d6e8b9bbe750b"
+SKILL_PUBLIC_KEY_SHA256 = "183e8cd011fa5e5f044700be4a61f3bc22e2eb61ad34469e62433d42f5af2452"
 SKILL_LIMITS = {
     "max_depth": 16,
     "max_directories": 128,
@@ -41,9 +41,9 @@ SKILL_LIMITS = {
     "max_total_bytes": 1048576,
 }
 SKILL_FILES = {
-    "SKILL.md": ("read", 0o400),
-    "workspace-fixture-contract.json": ("read", 0o400),
-    "workspace_audit.py": ("execute", 0o500),
+    "SKILL.md": ("read", 0o444),
+    "workspace-fixture-contract.json": ("read", 0o444),
+    "workspace_audit.py": ("execute", 0o555),
 }
 NEGOTIATION = {
     "schema_version": "steward.adapter-negotiation.v1",
@@ -82,12 +82,20 @@ def same_identity(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def read_regular_nofollow(path: pathlib.Path, maximum: int) -> bytes:
+def read_regular_nofollow(path: pathlib.Path, maximum: int, mode: int) -> bytes:
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)
     try:
         before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_size < 0 or before.st_size > maximum:
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_uid != 0
+            or before.st_gid != 0
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_size < 0
+            or before.st_size > maximum
+        ):
             fail("signed fixture contains an unsafe file")
         data = bytearray()
         while len(data) <= maximum:
@@ -104,12 +112,22 @@ def read_regular_nofollow(path: pathlib.Path, maximum: int) -> bytes:
         os.close(fd)
 
 
-def read_regular_at(directory_fd: int, name: str, maximum: int) -> tuple[bytes, os.stat_result]:
+def read_regular_at(
+    directory_fd: int,
+    name: str,
+    maximum: int,
+    allowed_link_counts: frozenset[int] = frozenset({1}),
+) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(name, flags, dir_fd=directory_fd)
     try:
         before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size < 0 or before.st_size > maximum:
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink not in allowed_link_counts
+            or before.st_size < 0
+            or before.st_size > maximum
+        ):
             fail("persisted skill contains an unsafe file")
         data = bytearray()
         while len(data) <= maximum:
@@ -155,17 +173,87 @@ def open_state_directory(*components: str) -> int:
             os.close(current)
 
 
-def publish_exact(directory_fd: int, name: str, data: bytes, mode: int) -> None:
+def publication_temp_name(name: str) -> str:
+    return f".{name}.steward-publish"
+
+
+def exact_publication_file(data: bytes, info: os.stat_result, expected: bytes, mode: int) -> bool:
+    return (
+        data == expected
+        and info.st_uid == os.geteuid()
+        and info.st_gid == os.getegid()
+        and stat.S_IMODE(info.st_mode) == mode
+    )
+
+
+def remove_stale_publication_temp(directory_fd: int, temp: str, mode: int) -> None:
     try:
-        current, current_stat = read_regular_at(directory_fd, name, len(data))
+        info = os.stat(temp, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.geteuid()
+        or info.st_gid != os.getegid()
+        or stat.S_IMODE(info.st_mode) != mode
+    ):
+        fail("persisted skill contains an unsafe publication file")
+    # A lone reserved temporary file cannot have published its target. Its
+    # contents may be partial because the prior process could have stopped at
+    # any write. Removing only this exact owner-only regular file is safe; the
+    # target name is never removed or replaced.
+    os.unlink(temp, dir_fd=directory_fd)
+    os.fsync(directory_fd)
+
+
+def publish_exact(directory_fd: int, name: str, data: bytes, mode: int) -> None:
+    temp = publication_temp_name(name)
+    try:
+        current, current_stat = read_regular_at(
+            directory_fd,
+            name,
+            len(data),
+            frozenset({1, 2}),
+        )
     except FileNotFoundError:
         current = None
         current_stat = None
     if current is not None:
-        if current != data or stat.S_IMODE(current_stat.st_mode) != mode:
+        if not exact_publication_file(current, current_stat, data, mode):
             fail(f"persisted skill drifted: {name}")
+        try:
+            pending, pending_stat = read_regular_at(
+                directory_fd,
+                temp,
+                len(data),
+                frozenset({1, 2}),
+            )
+        except FileNotFoundError:
+            pending = None
+            pending_stat = None
+        if pending is None:
+            if current_stat.st_nlink != 1:
+                fail(f"persisted skill has an unexplained hard link: {name}")
+            return
+        if (
+            not exact_publication_file(pending, pending_stat, data, mode)
+            or current_stat.st_nlink != 2
+            or pending_stat.st_nlink != 2
+            or current_stat.st_dev != pending_stat.st_dev
+            or current_stat.st_ino != pending_stat.st_ino
+        ):
+            fail(f"persisted skill publication is ambiguous: {name}")
+        # The prior process completed the no-overwrite link but stopped before
+        # removing its temporary name. Make that completed publication canonical.
+        os.unlink(temp, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        final, final_stat = read_regular_at(directory_fd, name, len(data))
+        if not exact_publication_file(final, final_stat, data, mode):
+            fail(f"persisted skill changed during publication recovery: {name}")
         return
-    temp = f".{name}.tmp-{os.getpid()}"
+
+    remove_stale_publication_temp(directory_fd, temp, mode)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(temp, flags, mode, dir_fd=directory_fd)
     try:
@@ -179,10 +267,16 @@ def publish_exact(directory_fd: int, name: str, data: bytes, mode: int) -> None:
     try:
         os.link(temp, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd, follow_symlinks=False)
     except FileExistsError:
-        os.unlink(temp, dir_fd=directory_fd)
         fail(f"persisted skill changed during publication: {name}")
+    # Persist the target link before removing the only recovery name. A process
+    # stop before the unlink leaves two exact links; a stop after it leaves the
+    # canonical target. Both states are handled above on the next startup.
+    os.fsync(directory_fd)
     os.unlink(temp, dir_fd=directory_fd)
     os.fsync(directory_fd)
+    final, final_stat = read_regular_at(directory_fd, name, len(data))
+    if not exact_publication_file(final, final_stat, data, mode):
+        fail(f"persisted skill changed after publication: {name}")
 
 
 def require_exact_directory_entries(directory_fd: int, expected: set[str]) -> None:
@@ -198,9 +292,20 @@ def require_exact_directory_entries(directory_fd: int, expected: set[str]) -> No
 
 
 def verify_skill() -> dict[str, bytes]:
-    manifest = read_regular_nofollow(FIXTURE / "manifest.json", 16384)
-    signature_text = read_regular_nofollow(FIXTURE / "manifest.sig", 256)
-    public_key = read_regular_nofollow(FIXTURE / "public.pem", 1024)
+    fixture_fd = os.open(
+        FIXTURE,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        fixture_stat = os.fstat(fixture_fd)
+        if fixture_stat.st_uid != 0 or fixture_stat.st_gid != 0 or stat.S_IMODE(fixture_stat.st_mode) & 0o022:
+            fail("signed fixture directory ownership or mode is invalid")
+        require_exact_directory_entries(fixture_fd, set(SKILL_FILES) | {"manifest.json", "manifest.sig", "public.pem"})
+    finally:
+        os.close(fixture_fd)
+    manifest = read_regular_nofollow(FIXTURE / "manifest.json", 16384, 0o444)
+    signature_text = read_regular_nofollow(FIXTURE / "manifest.sig", 256, 0o444)
+    public_key = read_regular_nofollow(FIXTURE / "public.pem", 1024, 0o444)
     if hashlib.sha256(public_key).hexdigest() != SKILL_PUBLIC_KEY_SHA256:
         fail("signed fixture public key does not match the adapter trust root")
     signature = base64.b64decode(signature_text.strip(), validate=True)
@@ -247,7 +352,7 @@ def verify_skill() -> dict[str, bytes]:
         digest = item.get("sha256")
         if item.get("mode") != expected_mode or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
             fail("signed fixture file authority is invalid")
-        data = read_regular_nofollow(FIXTURE / name, 1 << 20)
+        data = read_regular_nofollow(FIXTURE / name, 1 << 20, SKILL_FILES[name][1])
         if hashlib.sha256(data).hexdigest() != digest:
             fail(f"signed fixture file digest mismatch: {name}")
         verified[name] = data
@@ -257,19 +362,12 @@ def verify_skill() -> dict[str, bytes]:
     return verified
 
 
-def seed_state(model: str, skill_files: dict[str, bytes], qualification_mcp: bool) -> None:
+def seed_state(model: str, qualification_mcp: bool) -> None:
     if os.getuid() != 65532 or os.getgid() != 65532:
         fail("runtime identity must be exactly 65532:65532")
     for relative in ("home", "sessions", "logs", "memories", "skills", "workspace", "steward"):
         directory_fd = open_state_directory(relative)
         os.close(directory_fd)
-    skill_fd = open_state_directory("skills", "steward.workspace-audit")
-    try:
-        for name, data in skill_files.items():
-            publish_exact(skill_fd, name, data, SKILL_FILES[name][1])
-        require_exact_directory_entries(skill_fd, set(skill_files))
-    finally:
-        os.close(skill_fd)
     config = f"""model:
   provider: custom
   name: {model}
@@ -278,6 +376,9 @@ def seed_state(model: str, skill_files: dict[str, bytes], qualification_mcp: boo
   api_mode: chat_completions
 security:
   allow_lazy_installs: false
+skills:
+  external_dirs:
+    - /opt/steward/skills
 terminal:
   backend: local
 """
@@ -437,8 +538,8 @@ def main() -> int:
     qualification_mcp = os.environ.get("STEWARD_HERMES_QUALIFICATION_MCP", "disabled")
     if qualification_mcp not in {"disabled", "enabled"}:
         fail("STEWARD_HERMES_QUALIFICATION_MCP must be disabled or enabled")
-    skill_files = verify_skill()
-    seed_state(model, skill_files, qualification_mcp == "enabled")
+    verify_skill()
+    seed_state(model, qualification_mcp == "enabled")
     server = BoundedHTTPServer(("0.0.0.0", 8766), ServiceBridgeHandler)
     thread = threading.Thread(target=server.serve_forever, name="service-bridge", daemon=True)
     thread.start()

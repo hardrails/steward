@@ -3,11 +3,9 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-adapter_root=$root/adapters/hermes-agent
 revision=095b9eed3801c251796df93f48a8f2a527ff6e70
 evidence_out=${HERMES_EVIDENCE_OUT:-$root/dist/acceptance/hermes/feasibility.json}
 source_dir=${HERMES_SOURCE_DIR:-}
-image=${HERMES_ADAPTER_IMAGE:-}
 build_timeout=${HERMES_BUILD_TIMEOUT_SECONDS:-1800}
 run_timeout=${HERMES_RUN_TIMEOUT_SECONDS:-180}
 debug_keep=${HERMES_DEBUG_KEEP_FAILED_WORK:-NO}
@@ -16,8 +14,8 @@ debug_keep=${HERMES_DEBUG_KEEP_FAILED_WORK:-NO}
 	echo 'hermes-feasibility: set STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES only on a disposable host' >&2
 	exit 2
 }
-[[ $build_timeout =~ ^[0-9]+$ && $build_timeout -ge 60 && $build_timeout -le 3600 ]] || {
-	echo 'hermes-feasibility: HERMES_BUILD_TIMEOUT_SECONDS must be 60..3600' >&2
+[[ $build_timeout =~ ^[0-9]+$ && $build_timeout -ge 300 && $build_timeout -le 3600 ]] || {
+	echo 'hermes-feasibility: HERMES_BUILD_TIMEOUT_SECONDS must be 300..3600' >&2
 	exit 2
 }
 [[ $run_timeout =~ ^[0-9]+$ && $run_timeout -ge 30 && $run_timeout -le 600 ]] || {
@@ -47,7 +45,13 @@ work=$(mktemp -d /tmp/steward-hermes-feasibility.XXXXXX)
 checks=$work/checks.tsv
 state_root=$work/state
 source_archive_digest=unavailable
+source_tree_digest=unavailable
+adapter_commit=unavailable
+adapter_tree_digest=unavailable
+adapter_archive_digest=unavailable
+image_manifest_digest=unavailable
 image_config_digest=unavailable
+runtime_image_id=unavailable
 runtime_observed=unknown
 overall=failed
 failure_code=unhandled_failure
@@ -67,6 +71,14 @@ record() {
 		exit 1
 	}
 	printf '%s\t%s\t%s\n' "$check" "$status" "$detail" >>"$checks"
+}
+
+safe_git() {
+	local repository=$1
+	shift
+	env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+		GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 \
+		git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$repository" "$@"
 }
 
 stop_gate() {
@@ -104,14 +116,20 @@ write_evidence() {
 	fi
 	mkdir -p "$(dirname "$evidence_out")"
 	local evidence_write_status=0
-	python3 - "$checks" "$evidence_out" "$overall" "$failure_code" "$started_at" \
-		"$revision" "$source_archive_digest" "$image_config_digest" "$runtime_observed" <<'PY' || evidence_write_status=$?
+		python3 - "$checks" "$evidence_out" "$overall" "$failure_code" "$started_at" \
+			"$revision" "$source_tree_digest" "$source_archive_digest" "$adapter_commit" \
+			"$adapter_tree_digest" "$adapter_archive_digest" "$image_manifest_digest" \
+			"$image_config_digest" "$runtime_image_id" "$runtime_observed" <<'PY' || evidence_write_status=$?
 import json
 import os
 import pathlib
 import sys
 
-checks_path, output, overall, failure, started, revision, source_digest, image_digest, runtime = sys.argv[1:]
+(
+    checks_path, output, overall, failure, started, revision, source_tree,
+    source_archive, adapter_commit, adapter_tree, adapter_archive,
+    image_manifest, image_config, runtime_image_id, runtime,
+) = sys.argv[1:]
 checks = []
 path = pathlib.Path(checks_path)
 if path.exists() and path.stat().st_size <= 64 * 1024:
@@ -126,8 +144,14 @@ payload = {
     "failure_code": failure,
     "started_at": started,
     "upstream_revision": revision,
-    "source_archive_sha256": source_digest,
-    "image_config_digest": image_digest,
+    "source_tree": None if source_tree == "unavailable" else source_tree,
+    "source_archive_sha256": None if source_archive == "unavailable" else source_archive,
+    "adapter_steward_commit": None if adapter_commit == "unavailable" else adapter_commit,
+    "adapter_tree": None if adapter_tree == "unavailable" else adapter_tree,
+    "adapter_archive_sha256": None if adapter_archive == "unavailable" else adapter_archive,
+    "image_manifest_digest": None if image_manifest == "unavailable" else image_manifest,
+    "image_config_digest": None if image_config == "unavailable" else image_config,
+    "runtime_image_id": None if runtime_image_id == "unavailable" else runtime_image_id,
     "runtime": None if runtime == "unknown" else runtime,
     "contains_agent_content": False,
     "checks": checks,
@@ -155,6 +179,9 @@ PY
 cleanup() {
 	docker rm -f "$agent" "$model" "$mcp" >/dev/null 2>&1 || true
 	docker network rm "$network" >/dev/null 2>&1 || true
+	for image_digest in "$runtime_image_id" "$image_manifest_digest" "$image_config_digest"; do
+		[[ $image_digest == sha256:* ]] && docker image rm "$image_digest" >/dev/null 2>&1 || true
+	done
 	if [[ $overall == passed || $debug_keep != YES ]]; then
 		rm -rf "$work"
 	else
@@ -173,31 +200,89 @@ trap finalize EXIT
 
 : >"$checks"
 
-[[ -n $source_dir && -d $source_dir/.git ]] || stop_gate source.checkout pinned_source_checkout_required
-actual_revision=$(git -C "$source_dir" rev-parse HEAD 2>/dev/null || true)
+[[ -n $source_dir && -d $source_dir ]] || stop_gate source.checkout pinned_source_checkout_required
+source_checkout_root=$(safe_git "$source_dir" rev-parse --show-toplevel 2>/dev/null || true)
+[[ -n $source_checkout_root ]] || stop_gate source.checkout pinned_source_checkout_required
+source_checkout_root=$(cd "$source_checkout_root" && pwd -P)
+source_dir=$(cd "$source_dir" && pwd -P)
+[[ $source_checkout_root == "$source_dir" ]] || stop_gate source.checkout pinned_source_root_required
+actual_revision=$(safe_git "$source_dir" rev-parse HEAD 2>/dev/null || true)
 [[ $actual_revision == "$revision" ]] || stop_gate source.revision source_revision_mismatch
-if ! git -C "$source_dir" diff --quiet || ! git -C "$source_dir" diff --cached --quiet; then
-	stop_gate source.checkout source_checkout_dirty
-fi
-(
-	cd "$source_dir"
-	sha256sum -c "$adapter_root/source-inputs.sha256"
-) >"$work/source-inputs.log" 2>&1 || stop_gate source.inputs source_input_digest_mismatch
-record source.inputs passed exact_pin_and_digests
-source_archive_digest=$(git -C "$source_dir" archive --format=tar "$revision" | sha256sum | awk '{print $1}')
+steward_checkout_root=$(safe_git "$root" rev-parse --show-toplevel 2>/dev/null || true)
+[[ -n $steward_checkout_root ]] || stop_gate adapter.source committed_adapter_checkout_required
+steward_checkout_root=$(cd "$steward_checkout_root" && pwd -P)
+[[ $steward_checkout_root == "$root" ]] || stop_gate adapter.source committed_adapter_root_required
+adapter_commit=$(safe_git "$root" rev-parse HEAD 2>/dev/null || true)
+[[ $adapter_commit =~ ^[a-f0-9]{40,64}$ ]] || stop_gate adapter.source invalid_adapter_commit
+source_tree_digest=$(safe_git "$source_dir" rev-parse "$revision^{tree}") || stop_gate source.revision source_tree_unavailable
+adapter_tree_digest=$(safe_git "$root" rev-parse "$adapter_commit:adapters/hermes-agent") || stop_gate adapter.source adapter_tree_unavailable
 mkdir -p "$work/context/upstream" "$work/context/adapter"
-git -C "$source_dir" archive --format=tar "$revision" | tar -xf - -C "$work/context/upstream"
-cp -a "$adapter_root"/. "$work/context/adapter/"
-image=${image:-steward-hermes-feasibility:$run_id}
-timeout "$build_timeout" docker build --pull=false --provenance=false \
-	--build-arg "HERMES_SOURCE_REVISION=$revision" \
-	-f "$work/context/adapter/Dockerfile" -t "$image" "$work/context" \
+safe_git "$source_dir" archive --format=tar --output="$work/source.tar" "$revision" || stop_gate source.archive source_archive_failed
+safe_git "$root" archive --format=tar --output="$work/adapter.tar" "$adapter_commit:adapters/hermes-agent" || stop_gate adapter.source adapter_archive_failed
+source_archive_digest=$(sha256sum "$work/source.tar" | awk '{print $1}')
+adapter_archive_digest=$(sha256sum "$work/adapter.tar" | awk '{print $1}')
+tar -xf "$work/source.tar" -C "$work/context/upstream" || stop_gate source.archive source_extract_failed
+tar -xf "$work/adapter.tar" -C "$work/context/adapter" || stop_gate adapter.source adapter_extract_failed
+(
+	cd "$work/context/upstream"
+	sha256sum -c "$work/context/adapter/source-inputs.sha256"
+) >"$work/source-inputs.log" 2>&1 || stop_gate source.inputs source_input_digest_mismatch
+record source.inputs passed exact_source_and_adapter_objects
+builder_archive=$work/hermes-adapter.tar
+"$root/scripts/build-hermes-adapter.sh" --non-interactive --output "$builder_archive" \
+	--source-dir "$source_dir" --build-timeout "$build_timeout" \
 	>"$work/build.log" 2>&1 || stop_gate image.build pinned_source_build_failed
-record image.build passed pinned_source_build
+builder_attestation=$builder_archive.attestation.json
+[[ -f $builder_archive && -f $builder_attestation ]] || stop_gate image.build builder_output_missing
+image_identity_values=$(python3 - "$builder_attestation" "$revision" "$source_tree_digest" \
+	"$source_archive_digest" "$adapter_commit" "$adapter_tree_digest" <<'PY'
+import json
+import pathlib
+import re
+import sys
 
+path = pathlib.Path(sys.argv[1])
+if path.stat().st_size > 1 << 20:
+    raise SystemExit(1)
+payload = json.loads(path.read_text(encoding="utf-8"))
+if not isinstance(payload, dict) or payload.get("schema_version") != "steward.hermes-adapter-build-attestation.v1":
+    raise SystemExit(1)
+source = payload.get("source", {})
+adapter = payload.get("adapter", {})
+if (
+    source.get("revision") != sys.argv[2]
+    or source.get("git_tree") != sys.argv[3]
+    or source.get("archive_sha256") != sys.argv[4]
+    or adapter.get("source") != "git-checkout"
+    or adapter.get("steward_commit") != sys.argv[5]
+    or adapter.get("git_tree") != sys.argv[6]
+    or payload.get("build_recipe", {}).get("build_isolation") != "gvisor-runsc"
+    or payload.get("build_recipe", {}).get("upstream_build_hooks_in_final_assembly") is not False
+):
+    raise SystemExit(1)
+image = payload.get("image", {})
+manifest = image.get("manifest_digest")
+config = image.get("config_digest")
+runtime = image.get("runtime_image_id")
+digest = re.compile(r"sha256:[a-f0-9]{64}")
+if any(not isinstance(value, str) or digest.fullmatch(value) is None for value in (manifest, config, runtime)):
+    raise SystemExit(1)
+if runtime not in {manifest, config}:
+    raise SystemExit(1)
+print(manifest)
+print(config)
+print(runtime)
+PY
+) || stop_gate image.identity invalid_image_identity
+mapfile -t image_identities <<<"$image_identity_values"
+(( ${#image_identities[@]} == 3 )) || stop_gate image.identity incomplete_image_identity
+image_manifest_digest=${image_identities[0]}
+image_config_digest=${image_identities[1]}
+runtime_image_id=${image_identities[2]}
+timeout "$build_timeout" docker load --input "$builder_archive" >"$work/load.log" 2>&1 || stop_gate image.load image_load_failed
+image=$runtime_image_id
 docker image inspect "$image" >/dev/null 2>&1 || stop_gate image.present image_not_present
-image_config_digest=$(docker image inspect --format '{{.Id}}' "$image")
-[[ $image_config_digest =~ ^sha256:[a-f0-9]{64}$ ]] || stop_gate image.identity invalid_image_config_digest
+record image.build passed pinned_gvisor_source_build
 image_user=$(docker image inspect --format '{{.Config.User}}' "$image")
 [[ $image_user == 65532:65532 ]] || stop_gate image.user image_user_not_65532
 volumes=$(docker image inspect --format '{{json .Config.Volumes}}' "$image")
@@ -262,6 +347,7 @@ for container in "$agent" "$model" "$mcp"; do
 	[[ $(docker inspect --format '{{.Config.User}}' "$container") == 65532:65532 ]] || stop_gate runtime.user runtime_user_not_65532
 	docker inspect --format '{{json .HostConfig.CapDrop}}' "$container" | grep -q 'ALL' || stop_gate runtime.capabilities capabilities_not_dropped
 	docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container" | grep -q 'no-new-privileges:true' || stop_gate runtime.privileges no_new_privileges_missing
+	[[ $(docker inspect --format '{{.Image}}' "$container") == "$runtime_image_id" ]] || stop_gate image.identity runtime_image_identity_drift
 done
 runtime_observed=runsc
 record runtime.policy passed runsc_closed_policy
@@ -379,8 +465,8 @@ fi
 record runtime.network passed runtime_download_route_absent
 
 expected_digest=$(printf %s steward-hermes-phase1 | sha256sum | awk '{print $1}')
-workspace_manifest_digest=$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1],encoding="utf-8")); assert p["fixture_id"]=="steward.workspace-audit.small.v1"; print(p["manifest_digest"])' \
-	"$adapter_root/fixtures/skill/workspace-fixture-contract.json") || stop_gate fixture.workspace invalid_workspace_contract
+	workspace_manifest_digest=$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1],encoding="utf-8")); assert p["fixture_id"]=="steward.workspace-audit.small.v1"; print(p["manifest_digest"])' \
+		"$work/context/adapter/fixtures/skill/workspace-fixture-contract.json") || stop_gate fixture.workspace invalid_workspace_contract
 record fixture.workspace passed actual_workspace_work_contract
 
 run_native_task() {

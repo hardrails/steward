@@ -162,7 +162,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             "name": "terminal",
                             "arguments": json.dumps(
                                 {
-                                    "command": "/opt/data/skills/steward.workspace-audit/workspace_audit.py"
+                                    "command": "/opt/steward/skills/steward.workspace-audit/workspace_audit.py"
                                 },
                                 separators=(",", ":"),
                             ),

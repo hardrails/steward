@@ -28,14 +28,21 @@ for value in "$tenant" "$lineage" "$handle_id"; do
 	[[ $value =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || { echo "invalid identifier" >&2; exit 2; }
 done
 [[ $generation =~ ^[1-9][0-9]*$ ]] || { echo "invalid generation" >&2; exit 2; }
-if (( ${#generation} > 20 )) || { (( ${#generation} == 20 )) && [[ $generation > 18446744073709551615 ]]; }; then
+generation_too_large=false
+if (( ${#generation} > 20 )); then
+	generation_too_large=true
+elif (( ${#generation} == 20 )) && [[ $generation != 18446744073709551615 ]] && \
+	printf '%s\n' 18446744073709551615 "$generation" | LC_ALL=C sort -C; then
+	generation_too_large=true
+fi
+if [[ $generation_too_large == true ]]; then
 	echo "generation exceeds uint64" >&2
 	exit 2
 fi
-[[ $max_handles =~ ^[1-9][0-9]*$ ]] && (( max_handles <= 1024 )) || {
+if [[ ! $max_handles =~ ^[1-9][0-9]*$ ]] || (( max_handles > 1024 )); then
 	echo "invalid STEWARD_FEASIBILITY_MAX_HANDLES" >&2
 	exit 2
-}
+fi
 [[ $root == /* && $root != / ]] || {
 	echo "STEWARD_FEASIBILITY_ROOT must be a clean absolute non-root path" >&2
 	exit 2
@@ -48,7 +55,7 @@ if (( EUID != 0 )) && [[ ${STEWARD_FEASIBILITY_ALLOW_UNPRIVILEGED:-0} != 1 ]]; t
 	echo "root is required; the unprivileged override is for disposable tests only" >&2
 	exit 1
 fi
-for command in flock sha256sum sync; do
+for command in flock sha256sum sort sync; do
 	command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 2; }
 done
 

@@ -62,16 +62,20 @@ read-only root filesystem, all Linux capabilities dropped,
 `no-new-privileges`, fixed temporary storage, and no public network route. It
 verified the complete process tree remained at UID/GID `65532:65532`, state writes
 stayed under `/opt/data`, the immutable root rejected writes, and restart preserved
-the generated configuration and verified skill files.
+the generated configuration while the verified skill remained on the read-only
+image filesystem.
 
 ## Useful work: signed workspace audit
 
 The adapter includes the signed `steward.workspace-audit` skill. At startup, the
-adapter verifies the skill manifest and file digests before installing it under
-`/opt/data/skills`. The skill reads only `/opt/data/workspace` and returns a
-canonical inventory containing each regular file's path, size, and SHA-256 digest.
-This gives an operator a stable record for reviewing workspace contents or detecting
-changes without sending the files elsewhere.
+adapter verifies the skill manifest and file digests in the image's read-only
+`/opt/steward/skills` directory. Hermes loads that directory through its
+`skills.external_dirs` setting, and the model invokes the same immutable script
+path. The agent's writable UID cannot unlink or replace the skill. The skill reads
+only `/opt/data/workspace` and returns a canonical inventory containing each regular
+file's path, size, and SHA-256 digest. This gives an operator a stable record for
+reviewing workspace contents or detecting changes without sending the files
+elsewhere.
 
 The scan accepts at most 128 files, 128 directories, 16 directory levels, 256 KiB
 per file, and 1 MiB in total. It rejects symbolic links, hard-linked files, special
@@ -81,8 +85,9 @@ uses the network.
 Qualification submitted the audit through Hermes's native run API, verified the
 returned workspace manifest digest, restarted the gVisor container with the same
 state, and successfully ran the audit again. This proves that useful, bounded work
-and the signed skill survive the tested restart path. It does not prove the safety
-of arbitrary workspace content or other skills.
+survives the tested restart path while the signed skill stays bound to the immutable
+image. It does not prove autonomous skill selection by an arbitrary production
+model, or the safety of arbitrary workspace content or other skills.
 
 A separate Steward integration gate inspected and imported the archive through a
 publisher-signed capsule and site policy, started Hermes through Executor, and sent
@@ -95,8 +100,13 @@ by its manifest digest while Steward still verifies the signed config digest.
 ## Build the adapter
 
 Docker with the `runsc` runtime, Git, Python 3, and the command-line tools checked by
-the builder must be available on the build host. From a Steward source checkout,
-run the interactive builder:
+the builder must be available on the build host. Upstream build hooks execute in a
+bounded gVisor container with read-only source and no Docker socket. The final image
+is assembled separately with build networking disabled. The sandbox can use the
+network only while resolving locked build dependencies. Do not place secrets or
+production data on the build host; use a disposable build machine because gVisor
+reduces build risk but does not make untrusted code harmless. From a Steward source
+checkout, run the interactive builder:
 
 ```console
 scripts/build-hermes-adapter.sh --output hermes-agent-adapter.tar
@@ -119,8 +129,8 @@ An installed Linux release provides the same builder through a stable helper pat
 ```
 
 Without `--source-dir`, the builder fetches only the pinned Hermes commit into a
-temporary directory. To use an exact, clean checkout already transferred to the
-build host, pass it explicitly:
+temporary directory. To use an exact checkout already transferred to the build host,
+pass it explicitly:
 
 ```console
 scripts/build-hermes-adapter.sh \
@@ -129,14 +139,18 @@ scripts/build-hermes-adapter.sh \
   --output hermes-agent-adapter.tar
 ```
 
-`--source-dir` prevents a source download. The digest-pinned base image and locked
-build dependencies must still be present locally or reachable during the build.
-The resulting image does not download code, skills, models, or configuration when
-it starts or handles a task.
+`--source-dir` prevents a source download. The builder exports the pinned commit; it
+does not copy mutable working-tree files or invoke repository-local Git hooks or
+file-monitor commands. The digest-pinned base image and locked build dependencies
+must still be present locally or reachable during the build. The resulting image
+does not download code, skills, models, or configuration when it starts or handles
+a task.
 
-The builder refuses a changed source tree, a source revision other than the exact
-pin, drift in the checked-in adapter, an unregistered `runsc`, an existing output
-file, insufficient free space, or an oversized archive. It creates two new files:
+The builder reads committed Git objects rather than mutable working-tree files. It
+refuses a source revision other than the exact pin, a missing committed adapter,
+an unregistered `runsc`, an existing output file, insufficient free space, an unsafe
+gVisor build artifact, or an oversized archive. From an installed release, it also
+verifies every adapter file against `release.json`. It creates two new files:
 
 - `hermes-agent-adapter.tar`, a Docker/OCI image archive; and
 - `hermes-agent-adapter.tar.attestation.json`, canonical metadata that binds the

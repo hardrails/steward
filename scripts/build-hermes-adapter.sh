@@ -12,6 +12,9 @@ readonly default_clone_timeout=600
 readonly default_save_timeout=900
 readonly default_min_free_bytes=$((4 * 1024 * 1024 * 1024))
 readonly default_max_archive_bytes=$((8 * 1024 * 1024 * 1024))
+readonly sandbox_memory_bytes=$((4 * 1024 * 1024 * 1024))
+readonly sandbox_output_bytes=$((2 * 1024 * 1024 * 1024))
+readonly sandbox_pids=512
 
 usage() {
 	cat <<'USAGE'
@@ -34,8 +37,10 @@ Options:
   -h, --help              Show this help
 
 Without --source-dir, the builder fetches only the pinned upstream commit into a
-temporary directory. Network access is build-time only; the resulting runtime is
-not started and remains suitable for offline import and execution.
+temporary directory. Upstream build hooks run only inside a bounded gVisor
+sandbox with a read-only source mount and no Docker socket. Network access is
+build-time only; the resulting runtime is not started and remains suitable for
+offline import and execution.
 USAGE
 }
 
@@ -56,6 +61,22 @@ progress() {
 
 require_command() {
 	command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+safe_git() {
+	local repository=$1
+	shift
+	env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+		GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 \
+		git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$repository" "$@"
+}
+
+safe_git_timeout() {
+	local duration=$1 repository=$2
+	shift 2
+	timeout "$duration" env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+		GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_REPLACE_OBJECTS=1 \
+		git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$repository" "$@"
 }
 
 validate_integer_range() {
@@ -216,22 +237,27 @@ print(os.path.realpath(sys.argv[1]))
 PY
 )
 payload_root=$(cd "$(dirname "$script_path")/.." && pwd -P)
+source_checkout_root=$(safe_git "$payload_root" rev-parse --show-toplevel 2>/dev/null || true)
+if [[ -n $source_checkout_root ]]; then
+	source_checkout_root=$(cd "$source_checkout_root" && pwd -P)
+fi
 adapter_source=
 build_commit=
 adapter_tree=
 release_version=
 release_manifest_sha256=
-if [[ -d $payload_root/.git && -f $payload_root/adapters/hermes-agent/adapter.json ]]; then
+if [[ $source_checkout_root == "$payload_root" && -f $payload_root/adapters/hermes-agent/adapter.json ]]; then
 	adapter_source=git-checkout
 	root=$payload_root
 	adapter_path=$root/adapters/hermes-agent
-	git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "Steward source root is not a Git checkout"
-	build_commit=$(git -C "$root" rev-parse HEAD)
-	git -C "$root" ls-files --error-unmatch scripts/build-hermes-adapter.sh >/dev/null 2>&1 \
+	safe_git "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "Steward source root is not a Git checkout"
+	build_commit=$(safe_git "$root" rev-parse HEAD)
+	safe_git "$root" ls-files --error-unmatch scripts/build-hermes-adapter.sh >/dev/null 2>&1 \
 		|| die "builder must be checked in before it can produce an attestation"
-	[[ -z $(git -C "$root" status --porcelain=v1 --untracked-files=all -- adapters/hermes-agent scripts/build-hermes-adapter.sh) ]] \
-		|| die "checked-in builder or Hermes adapter has tracked or untracked drift"
-	adapter_tree=$(git -C "$root" rev-parse "$build_commit:adapters/hermes-agent")
+	committed_builder_blob=$(safe_git "$root" rev-parse "$build_commit:scripts/build-hermes-adapter.sh")
+	current_builder_blob=$(safe_git "$root" hash-object --no-filters "$script_path")
+	[[ $current_builder_blob == "$committed_builder_blob" ]] || die "builder differs from the committed Steward source"
+	adapter_tree=$(safe_git "$root" rev-parse "$build_commit:adapters/hermes-agent")
 elif [[ -f $payload_root/release.json && -f $payload_root/adapters/hermes-agent/adapter.json ]]; then
 	adapter_source=release-payload
 	root=$payload_root
@@ -319,6 +345,7 @@ docker info --format '{{json .Runtimes}}' | python3 -c 'import json,sys; raise S
 
 tmp_base=${TMPDIR:-/tmp}
 [[ -d $tmp_base ]] || die "temporary directory root does not exist: $tmp_base"
+[[ $tmp_base != *:* && $tmp_base != *,* ]] || die "temporary directory root must not contain ':' or ','"
 check_free_space "$tmp_base" "temporary filesystem"
 check_free_space "$output_parent" "output filesystem"
 
@@ -326,6 +353,8 @@ work=$(mktemp -d "$tmp_base/steward-hermes-build.XXXXXX")
 publish_dir=$(mktemp -d "$output_parent/.steward-hermes-publish.XXXXXX")
 image_tag=steward-hermes-adapter-build:${expected_revision:0:12}-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 image_owned=false
+sandbox_name=
+sandbox_network=
 
 cleanup() {
 	local status=$?
@@ -333,6 +362,8 @@ cleanup() {
 	if $image_owned && { (( status != 0 )) || ! $keep_image; }; then
 		docker image rm "$image_tag" >/dev/null 2>&1 || true
 	fi
+	[[ -z $sandbox_name ]] || docker rm -f "$sandbox_name" >/dev/null 2>&1 || true
+	[[ -z $sandbox_network ]] || docker network rm "$sandbox_network" >/dev/null 2>&1 || true
 	rm -rf -- "$work"
 	rm -rf -- "$publish_dir"
 	exit "$status"
@@ -347,23 +378,22 @@ if [[ -z $source_dir ]]; then
 	progress "Fetching pinned Hermes source $expected_revision"
 	source_dir=$work/source
 	git init -q "$source_dir"
-	git -C "$source_dir" remote add origin "$expected_repository"
-	timeout "$clone_timeout" git -C "$source_dir" fetch --depth=1 --no-tags origin "$expected_revision"
-	git -C "$source_dir" checkout -q --detach FETCH_HEAD
+	safe_git "$source_dir" remote add origin "$expected_repository"
+	safe_git_timeout "$clone_timeout" "$source_dir" fetch --depth=1 --no-tags origin "$expected_revision"
+	safe_git "$source_dir" checkout -q --detach FETCH_HEAD
 else
 	[[ -d $source_dir ]] || die "source directory does not exist: $source_dir"
 	source_dir=$(cd "$source_dir" && pwd -P)
 fi
 
-actual_revision=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$source_dir" rev-parse HEAD 2>/dev/null || true)
+actual_revision=$(safe_git "$source_dir" rev-parse HEAD 2>/dev/null || true)
 [[ $actual_revision == "$expected_revision" ]] || die "source revision mismatch: expected $expected_revision"
-[[ -z $(git -C "$source_dir" status --porcelain=v1 --untracked-files=all) ]] || die "source checkout has tracked or untracked drift"
-source_tree=$(GIT_NO_REPLACE_OBJECTS=1 git -C "$source_dir" rev-parse "$expected_revision^{tree}")
+source_tree=$(safe_git "$source_dir" rev-parse "$expected_revision^{tree}")
 
 mkdir -p "$work/context/upstream" "$work/context/adapter"
-GIT_NO_REPLACE_OBJECTS=1 git -C "$source_dir" archive --format=tar --output="$work/source.tar" "$expected_revision"
+safe_git "$source_dir" archive --format=tar --output="$work/source.tar" "$expected_revision"
 if [[ $adapter_source == git-checkout ]]; then
-	git -C "$root" archive --format=tar --output="$work/adapter.tar" "$build_commit:adapters/hermes-agent"
+	safe_git "$root" archive --format=tar --output="$work/adapter.tar" "$build_commit:adapters/hermes-agent"
 else
 	tar -cf "$work/adapter.tar" -C "$adapter_path" .
 fi
@@ -410,22 +440,116 @@ if ! $non_interactive; then
 	[[ $answer == y || $answer == Y || $answer == yes || $answer == YES ]] || die "cancelled"
 fi
 
+progress "Building Hermes dependencies inside bounded gVisor sandbox (timeout ${build_timeout}s)"
+sandbox_name=steward-hermes-build-sandbox-${expected_revision:0:12}-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+sandbox_network=$sandbox_name-network
+docker network create --label io.hardrails.steward.hermes-build=true "$sandbox_network" >/dev/null
+sandbox_command='set -eu
+mkdir -p /tmp/build /tmp/home
+cp -a /input/upstream/. /tmp/build/
+cd /tmp/build
+sha256sum -c /input/adapter/source-inputs.sha256
+uv sync --frozen --no-install-project --extra mcp --extra homeassistant
+uv pip install --no-cache-dir --no-deps .
+tar -cf /output/venv.tar .venv
+'
+docker create --name "$sandbox_name" \
+	--runtime runsc --network "$sandbox_network" --read-only --cap-drop ALL \
+	--security-opt no-new-privileges:true --pids-limit "$sandbox_pids" \
+	--memory "$sandbox_memory_bytes" --memory-swap "$sandbox_memory_bytes" --cpus 4 \
+	--tmpfs "/tmp:rw,nosuid,nodev,size=$sandbox_memory_bytes" \
+	--tmpfs "/output:rw,noexec,nosuid,nodev,size=$sandbox_output_bytes" \
+	--user 65532:65532 --workdir /tmp/build \
+	--env HOME=/tmp/home --env UV_CACHE_DIR=/tmp/uv-cache --env UV_LINK_MODE=copy \
+	--log-driver local --log-opt max-size=1m --log-opt max-file=1 \
+	--mount "type=bind,source=$work/context/upstream,target=/input/upstream,readonly" \
+	--mount "type=bind,source=$work/context/adapter,target=/input/adapter,readonly" \
+	--entrypoint /bin/sh "$base_image_reference" -ceu "$sandbox_command" >/dev/null
+docker start "$sandbox_name" >/dev/null
+sandbox_status=$(timeout "$build_timeout" docker wait "$sandbox_name") || die "gVisor build sandbox timed out"
+[[ $sandbox_status == 0 ]] || {
+	docker logs --tail 200 "$sandbox_name" >&2 || true
+	die "gVisor build sandbox failed with status $sandbox_status"
+}
+docker cp "$sandbox_name:/output/venv.tar" "$work/venv.tar"
+venv_archive_size=$(python3 - "$work/venv.tar" <<'PY'
+import os
+import stat
+import sys
+
+info = os.lstat(sys.argv[1])
+if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+    raise SystemExit("gVisor build artifact is not a single-link regular file")
+print(info.st_size)
+PY
+)
+(( venv_archive_size > 0 && venv_archive_size <= sandbox_output_bytes )) || die "gVisor build artifact is empty or oversized"
+
+mkdir -p "$work/final-context/adapter" "$work/final-context/upstream" "$work/final-context/artifact/venv"
+cp -a "$work/context/adapter"/. "$work/final-context/adapter/"
+install -m 0444 "$work/context/upstream/LICENSE" "$work/final-context/upstream/LICENSE"
+python3 - "$work/venv.tar" "$sandbox_output_bytes" <<'PY'
+import pathlib
+import sys
+import tarfile
+
+archive_path = pathlib.Path(sys.argv[1])
+limit = int(sys.argv[2])
+with tarfile.open(archive_path, mode="r:") as archive:
+    members = archive.getmembers()
+    if not members or len(members) > 100000:
+        raise SystemExit("gVisor build artifact has an invalid member count")
+    normalized = {}
+    symlinks = set()
+    total = 0
+    for member in members:
+        raw = member.name.removeprefix("./")
+        path = pathlib.PurePosixPath(raw)
+        if not raw or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+            raise SystemExit("gVisor build artifact contains an unsafe path")
+        if path.parts[0] != ".venv" or path in normalized:
+            raise SystemExit("gVisor build artifact escaped or duplicated its root")
+        if not (member.isdir() or member.isfile() or member.issym()) or member.mode & 0o7000:
+            raise SystemExit("gVisor build artifact contains an unsafe member type or mode")
+        if member.isfile():
+            if member.size < 0 or member.size > limit:
+                raise SystemExit("gVisor build artifact member is oversized")
+            total += member.size
+            if total > limit:
+                raise SystemExit("gVisor build artifact expands beyond its limit")
+        if member.issym():
+            if not member.linkname or len(member.linkname.encode("utf-8")) > 4096 or "\x00" in member.linkname:
+                raise SystemExit("gVisor build artifact contains an unsafe symlink")
+            symlinks.add(path)
+        normalized[path] = member
+    for path in normalized:
+        if any(pathlib.PurePosixPath(*path.parts[:index]) in symlinks for index in range(1, len(path.parts))):
+            raise SystemExit("gVisor build artifact places content below a symlink")
+PY
+tar --no-same-owner -xf "$work/venv.tar" -C "$work/final-context/artifact/venv"
+mkdir -p "$work/final-context/artifact/state/home"
+chmod 0700 "$work/final-context/artifact/state" "$work/final-context/artifact/state/home"
+printf 'docker\n' >"$work/final-context/artifact/install_method"
+chmod 0444 "$work/final-context/artifact/install_method"
+
 docker image inspect "$image_tag" >/dev/null 2>&1 && die "temporary image tag already exists"
-progress "Building pinned Hermes adapter (timeout ${build_timeout}s)"
+progress "Assembling pinned Hermes adapter without upstream build hooks (timeout ${build_timeout}s)"
 image_owned=true
-timeout "$build_timeout" docker build --pull=false --provenance=false \
+timeout "$build_timeout" docker build --network=none --pull=false --provenance=false \
 	--build-arg "HERMES_SOURCE_REVISION=$expected_revision" \
-	-f "$work/context/adapter/Dockerfile" -t "$image_tag" "$work/context"
+	-f "$work/final-context/adapter/Dockerfile" -t "$image_tag" "$work/final-context"
 
 runtime_image_id=$(docker image inspect --format '{{.Id}}' "$image_tag")
 image_user=$(docker image inspect --format '{{.Config.User}}' "$image_tag")
 image_volumes=$(docker image inspect --format '{{json .Config.Volumes}}' "$image_tag")
 image_os=$(docker image inspect --format '{{.Os}}' "$image_tag")
 image_arch=$(docker image inspect --format '{{.Architecture}}' "$image_tag")
+image_source_revision=$(docker image inspect --format '{{index .Config.Labels "io.hardrails.steward.hermes.source-revision"}}' "$image_tag")
 [[ $runtime_image_id =~ ^sha256:[a-f0-9]{64}$ ]] || die "built image has an invalid runtime identity digest"
 [[ $image_user == 65532:65532 ]] || die "built image user is $image_user, not 65532:65532"
 [[ $image_volumes == null || $image_volumes == '{}' ]] || die "built image declares a volume"
 [[ -n $image_os && -n $image_arch ]] || die "built image platform is incomplete"
+[[ $image_source_revision == "$expected_revision" ]] || die "built image source revision label is invalid"
 image_platform=$image_os/$image_arch
 
 check_free_space "$output_parent" "output filesystem"
@@ -581,13 +705,15 @@ payload = {
     },
     "build_recipe": {
         "base_image": base_image,
+        "build_isolation": "gvisor-runsc",
         "builder_sha256": builder,
         "dockerfile_sha256": dockerfile,
         "id": "steward.hermes-adapter.docker-build.v1",
-        "network_scope": "build-time-only",
+        "network_scope": "gvisor-build-sandbox-only",
         "pull_newer_base": False,
         "runtime_executed": False,
         "source_inputs_sha256": source_inputs,
+        "upstream_build_hooks_in_final_assembly": False,
     },
     "contains_agent_content": False,
     "image": {

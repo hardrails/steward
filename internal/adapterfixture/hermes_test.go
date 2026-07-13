@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-const hermesSkillKeySHA256 = "c04a414ffd37a361ea1e16a5c9fcf58b5db2fb7052aa9f981e2d6e8b9bbe750b"
+const hermesSkillKeySHA256 = "183e8cd011fa5e5f044700be4a61f3bc22e2eb61ad34469e62433d42f5af2452"
 
 type skillManifest struct {
 	Entrypoint    string         `json:"entrypoint"`
@@ -112,6 +112,55 @@ func TestHermesWorkspaceSkillSignatureAndInventory(t *testing.T) {
 			t.Fatalf("digest mismatch for %s", file.Path)
 		}
 		prior = file.Path
+	}
+}
+
+func TestHermesAdapterUsesImmutableSkillAndAssembleOnlyDockerfile(t *testing.T) {
+	root := hermesAdapterRoot(t)
+	dockerfile := string(readBounded(t, filepath.Join(root, "Dockerfile"), 64<<10))
+	entrypoint := string(readBounded(t, filepath.Join(root, "entrypoint.py"), 1<<20))
+	model := string(readBounded(t, filepath.Join(root, "fixture_model.py"), 1<<20))
+	builder := string(readBounded(t, filepath.Join(root, "..", "..", "scripts", "build-hermes-adapter.sh"), 1<<20))
+
+	for _, required := range []string{
+		"/opt/steward/skills/steward.workspace-audit/",
+		"COPY --chown=0:0 --chmod=0555",
+	} {
+		if !strings.Contains(dockerfile, required) {
+			t.Fatalf("Dockerfile does not bind immutable skill property %q", required)
+		}
+	}
+	for _, forbidden := range []string{"uv sync", "uv pip install", "/opt/steward/fixtures/skill"} {
+		if strings.Contains(dockerfile, forbidden) {
+			t.Fatalf("Dockerfile executes or installs through forbidden path %q", forbidden)
+		}
+	}
+	for _, line := range strings.Split(dockerfile, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "RUN ") {
+			t.Fatalf("assemble-only Dockerfile contains build command %q", line)
+		}
+	}
+	for _, required := range []string{
+		"--runtime runsc", "--read-only", "--cap-drop ALL",
+		"--security-opt no-new-privileges:true", "--pids-limit", "--memory-swap",
+		"target=/input/upstream,readonly", "docker build --network=none",
+		`GIT_NO_REPLACE_OBJECTS=1`, `-c core.fsmonitor=false`,
+	} {
+		if !strings.Contains(builder, required) {
+			t.Fatalf("builder does not enforce isolation property %q", required)
+		}
+	}
+	for _, required := range []string{
+		`FIXTURE = pathlib.Path("/opt/steward/skills/steward.workspace-audit")`,
+		"skills:\n  external_dirs:\n    - /opt/steward/skills",
+	} {
+		if !strings.Contains(entrypoint, required) {
+			t.Fatalf("entrypoint does not bind immutable skill property %q", required)
+		}
+	}
+	immutableCommand := "/opt/steward/skills/steward.workspace-audit/workspace_audit.py"
+	if !strings.Contains(model, immutableCommand) || strings.Contains(model, "/opt/data/skills/steward.workspace-audit") {
+		t.Fatal("fixture model does not execute the immutable signed skill path")
 	}
 }
 
@@ -239,6 +288,124 @@ finally:
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("fixture model protocol test failed: %v\n%s", err, output)
+	}
+}
+
+func TestHermesEntrypointPublicationRecoversWithoutOverwrite(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is unavailable")
+	}
+	root := hermesAdapterRoot(t)
+	program := `
+import importlib.util, os, pathlib, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("hermes_entrypoint", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+root = pathlib.Path(sys.argv[2])
+name = "config.yaml"
+temporary = module.publication_temp_name(name)
+expected = b"authority\n"
+mode = 0o600
+
+def directory(label):
+    path = root / label
+    path.mkdir(mode=0o700)
+    return os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+
+def write_at(directory_fd, filename, data):
+    descriptor = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode, dir_fd=directory_fd)
+    try:
+        os.write(descriptor, data)
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+def expect_failure(action):
+    try:
+        action()
+    except SystemExit:
+        return
+    raise AssertionError("operation unexpectedly succeeded")
+
+def assert_absent(directory_fd, filename):
+    try:
+        os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise AssertionError(f"{filename} unexpectedly exists")
+
+# A stop during the write leaves a partial, single-link temporary file.
+partial = directory("partial")
+try:
+    write_at(partial, temporary, b"partial")
+    module.publish_exact(partial, name, expected, mode)
+    content, info = module.read_regular_at(partial, name, len(expected))
+    assert content == expected and info.st_nlink == 1
+    assert_absent(partial, temporary)
+    module.require_exact_directory_entries(partial, {name})
+finally:
+    os.close(partial)
+
+# A stop after link(2) leaves two names for the same exact inode.
+linked = directory("linked")
+try:
+    write_at(linked, temporary, expected)
+    os.link(temporary, name, src_dir_fd=linked, dst_dir_fd=linked, follow_symlinks=False)
+    assert os.stat(name, dir_fd=linked, follow_symlinks=False).st_nlink == 2
+    module.publish_exact(linked, name, expected, mode)
+    content, info = module.read_regular_at(linked, name, len(expected))
+    assert content == expected and info.st_nlink == 1
+    assert_absent(linked, temporary)
+    module.require_exact_directory_entries(linked, {name})
+finally:
+    os.close(linked)
+
+# Existing drift is reported and preserved rather than overwritten.
+drifted = directory("drifted")
+try:
+    write_at(drifted, name, b"hostile")
+    expect_failure(lambda: module.publish_exact(drifted, name, expected, mode))
+    content, info = module.read_regular_at(drifted, name, len(b"hostile"))
+    assert content == b"hostile" and info.st_nlink == 1
+    assert_absent(drifted, temporary)
+finally:
+    os.close(drifted)
+
+# Cleanup cannot unlink a reserved temporary name with another hard link.
+unsafe = directory("unsafe")
+try:
+    write_at(unsafe, "unrelated", expected)
+    os.link("unrelated", temporary, src_dir_fd=unsafe, dst_dir_fd=unsafe, follow_symlinks=False)
+    expect_failure(lambda: module.publish_exact(unsafe, name, expected, mode))
+    assert os.stat("unrelated", dir_fd=unsafe, follow_symlinks=False).st_nlink == 2
+    assert os.stat(temporary, dir_fd=unsafe, follow_symlinks=False).st_nlink == 2
+    assert_absent(unsafe, name)
+finally:
+    os.close(unsafe)
+
+# Strict directory validation still rejects every unbound entry.
+strict = directory("strict")
+try:
+    module.publish_exact(strict, name, expected, mode)
+    write_at(strict, "extra", b"extra")
+    expect_failure(lambda: module.require_exact_directory_entries(strict, {name}))
+finally:
+    os.close(strict)
+`
+	command := exec.Command(
+		python,
+		"-c",
+		program,
+		filepath.Join(root, "entrypoint.py"),
+		t.TempDir(),
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("entrypoint publication recovery test failed: %v\n%s", err, output)
 	}
 }
 
