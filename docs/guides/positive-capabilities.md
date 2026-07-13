@@ -17,7 +17,9 @@ replace unrestricted container privileges.
   `steward-gateway`; Gateway does not configure, mount, or inject the upstream
   bearer credential into the agent container; and
 - service is one capsule-declared port reached through an authenticated loopback
-  gateway path, not a raw agent container port.
+  gateway path, not a raw agent container port. For configured POST operations, a
+  service-scoped off-node tenant key can additionally authorize one exact JSON task
+  request.
 
 Signed HTTP(S) egress uses separate named routes. Steward provides no raw TCP/UDP,
 default-allow network, host bind mount, caller-selected environment, or Docker socket.
@@ -97,9 +99,22 @@ policy lists each tenant's allowed inference routes, model aliases, and services
   "tenant_id": "tenant-a",
   "inference_route_ids": ["local-openai"],
   "inference_model_aliases": ["private-model"],
-  "service_ids": ["agent-api"]
+  "service_ids": ["agent-api"],
+  "task_keys": [
+    {
+      "key_id": "tenant-a-tasks",
+      "public_key": "<canonical-base64-ed25519-public-key>",
+      "service_ids": ["agent-api"]
+    }
+  ]
 }
 ```
+
+`task_keys` is optional. Each private key remains off-node and can authorize only
+the listed services for that tenant. Executor returns matching public
+`task_authorities` in the admission response and binds them into the effective
+route-policy digest. A task key never expands the capsule, tenant service list, or
+instance intent.
 
 The authenticated instance intent selects a subset:
 
@@ -158,6 +173,43 @@ at most 16 concurrent requests or streams, a two-minute lifetime, 4 MiB
 client-to-service, and 32 MiB service-to-client. Stop, destroy, deactivation, or
 grant removal immediately cancels active traffic. The adapter must authenticate
 within the agent service.
+
+### Require a tenant signature for one service task
+
+The ordinary service path remains useful for health and status. For a
+side-effecting POST, configure an exact operation outside the agent:
+
+```console
+sudo stewardctl gateway service set \
+  -config /etc/steward/gateway.json \
+  -service-id agent-api \
+  -operation agent.run=POST:/v1/runs \
+  -max-request-bytes 65536 \
+  -max-response-bytes 1048576 \
+  -max-seconds 120 \
+  -max-permit-seconds 300 \
+  -tenant-budget tenant-a=4194304
+```
+
+Inspect current operations with `gateway service list`. Export strict signing input
+with `gateway service trust -node-id NODE -tenant-id TENANT`, then use
+`stewardctl task issue` and `task verify` on the signing workstation. The resulting
+owner-only bundle contains the exact request and signed permit, not the private key.
+Submit it through the loopback service Gateway with an adapter-specific client such
+as `stewardctl hermes run`.
+
+Gateway checks the exact active grant, task authority, operation policy, and request
+bytes; fsyncs signed authorization before dispatch; and accepts only HTTP 200, 201,
+or 202 with one bounded run ID as success. It records no raw prompt. A successful
+exact replay returns the stored run ID without dispatch. An ambiguous result remains
+spent and is not retried automatically.
+
+This is node-local at-most-once dispatch while one receipt ledger and epoch remain
+intact, not exactly-once execution. The run ID comes from the untrusted agent
+service. Use `stewardctl task audit` with the copied signed ledger and an external
+chain-head checkpoint to verify what Gateway recorded. See the
+[Hermes task workflow]({{ '/guides/hermes-agent/' | relative_url }}#authorize-and-run-one-exact-hermes-task)
+and [local operator tools]({{ '/reference/offline-tools/' | relative_url }}#exact-tenant-signed-service-tasks).
 
 ## State lifecycle
 

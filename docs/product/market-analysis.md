@@ -1,6 +1,6 @@
 ---
 title: Agent execution market analysis
-description: A dated comparison of agent sandboxes and runtimes with Steward's operator-controlled admission, anti-replay state, and offline-verifiable receipts.
+description: A dated comparison of agent platforms with Steward's local signed admission, exact tenant task dispatch, durable replay control, and offline-verifiable receipts.
 section: Product
 ---
 
@@ -17,14 +17,34 @@ themselves.
 
 Steward focuses on customer-owned nodes that verify local authorization, grant only
 approved state, inference, service, and network operations, and export receipts for
-offline verification. Its product boundary assumes the agent can be manipulated;
-enforcement therefore sits outside the agent process.
+offline verification. For configured agent-service operations, a tenant-owned key
+can sign one exact request while remaining off-node; Gateway records authorization
+before dispatch and retains node-local replay state. Its product boundary assumes
+the agent can be manipulated; enforcement therefore sits outside the agent process.
+
+Among the products reviewed below, none documents an equivalent combination of
+customer-operated air-gapped nodes, site-signed artifact and tenant admission,
+service-scoped off-node task keys, exact-request service dispatch, durable node-local
+at-most-once replay control, and offline-verifiable authorization-to-outcome
+receipts. “Not documented” is not proof that a product lacks an internal or future
+capability. This is not a first, only, or certification claim.
+
+## High-level capability matrix
+
+| System | Customer-operated or disconnected boundary | Exact operation policy | Separately signed exact task | Durable dispatch replay state | Offline signed authorization-to-outcome evidence |
+| --- | --- | --- | --- | --- | --- |
+| Steward | Documented for customer-owned Linux nodes and air-gapped transfer | Documented for agent-service POSTs and connector methods/paths | Documented tenant key scoped by signed policy to service IDs; exact request digest and length | Documented node-local at-most-once spend within one retained ledger epoch | Documented hash-linked Ed25519 chain with offline task/permit correlation |
+| [NVIDIA NemoClaw / OpenShell](https://github.com/NVIDIA/NemoClaw) | OpenShell documents local and cluster drivers; deployment scope varies by driver | Documented REST, GraphQL, MCP, JSON-RPC, and WebSocket policy | Endpoint-scoped identity tokens are documented; an off-node signature over one exact task request was not found in the reviewed sources | An equivalent exact-task spend ledger was not found in the reviewed sources | Logs and OCSF JSON export are documented; the reviewed sources did not document Steward's offline signed permit-to-terminal chain |
+| [Docker Sandboxes / Governance](https://docs.docker.com/ai/sandboxes/governance/) | Local microVM sandboxes are documented; organization governance depends on Docker sign-in | Network, filesystem, credential, and decision policy are documented | Not found in the reviewed sources | Not found in the reviewed sources | Decision logs are documented; the reviewed sources did not document offline permit-to-terminal signature verification |
+| [OpenSandbox](https://github.com/alibaba/OpenSandbox) | Self-hosted Docker and Kubernetes backends are documented | Sandbox lifecycle and runtime isolation are documented | Not found in the reviewed sources | Not found in the reviewed sources | Not found in the reviewed sources |
+| [Kubernetes Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) | Customer-operated Kubernetes is supported | Templates, claims, lifecycle, and isolation are documented | Not found in the reviewed sources | Not found in the reviewed sources | Not found in the reviewed sources |
+| [Amazon Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) | AWS-managed service with VPC integration | Managed identity, gateway, tools, and observability are documented | Not found in the reviewed sources | Managed runtime semantics differ; an equivalent customer-held exact-task spend ledger was not found | OpenTelemetry observability is documented; the reviewed sources did not document a customer-verifiable offline signed chain |
 
 ## Comparison
 
 | System | Documented focus as of the snapshot | Where Steward's focus differs |
 | --- | --- | --- |
-| [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw) / [OpenShell](https://github.com/NVIDIA/OpenShell) | NemoClaw packages supported agents around OpenShell. OpenShell documents Docker, rootless Podman, microVM, and Kubernetes drivers; exact REST method, path, and query rules; provider-owned network layers; credential placeholders and rewrites; endpoint-scoped token grants using SPIFFE JWT-SVID; and inspection for REST, GraphQL, MCP, and JSON-RPC. Its README still labels the project alpha and “single-player mode.” See the current [policy schema](https://docs.nvidia.com/openshell/reference/policy-schema) and [provider architecture](https://docs.nvidia.com/openshell/sandboxes/providers-v2). | Steward does not claim method/path policy or credential injection as unique, and OpenShell documents broader application-protocol inspection. Steward's narrower difference is a disconnected, vendor-independent node that binds site-signed tenant, instance, and artifact admission to an optional tenant-authority signature over one exact request, durable spend-before-effect task and call budgets, non-borrowing tenant evidence quotas, and Gateway-signed terminal receipts that can be correlated offline. The maturity difference is dated, not a permanent claim. |
+| [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw) / [OpenShell](https://github.com/NVIDIA/OpenShell) | NemoClaw packages Hermes, OpenClaw, and LangChain Deep Agents around OpenShell. OpenShell documents Docker, rootless Podman, microVM, and Kubernetes drivers; exact REST method, path, and query rules; provider-owned network layers; credential placeholders and rewrites; endpoint-scoped token grants using SPIFFE JWT-SVID; and inspection for REST, GraphQL, MCP, and JSON-RPC. NemoClaw's current README labels the project alpha. See the current [policy schema](https://docs.nvidia.com/openshell/reference/policy-schema) and [provider architecture](https://docs.nvidia.com/openshell/sandboxes/providers-v2). | Steward does not claim method/path policy, credential injection, or Hermes packaging as unique, and OpenShell documents broader application-protocol inspection. Steward's narrower difference is a disconnected, vendor-independent node that binds site-signed tenant, instance, and artifact admission to a service-scoped tenant signature over one exact request, durable node-local task spend, non-borrowing tenant evidence quotas, and Gateway-signed terminal receipts that can be correlated offline. The maturity difference is dated, not a permanent claim. |
 | [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) / [AI Governance](https://docs.docker.com/ai/sandboxes/governance/) | Docker documents microVMs, filesystem and network policy, organization sign-in, decision logs, credential injection, DNS policy, and workspace sharing. Linux installation requires Kernel-based Virtual Machine (KVM) support and Docker sign-in; organization governance is a paid capability. | Steward uses Docker and gVisor on an operator-owned node without requiring a vendor login or hosted policy service. It does not claim isolation, egress policy, DNS gating, credential injection, or JSON audit as unique. |
 | [OpenSandbox](https://github.com/alibaba/OpenSandbox) | OpenSandbox documents a sandbox API, Docker and Kubernetes backends, lifecycle control, and [gVisor, Kata, and Firecracker runtimes](https://open-sandbox.ai/guides/secure-container). | Steward adds site-owned admission, tenant/instance replay protection, and operator-verifiable receipts. The projects could complement each other; Steward does not depend on OpenSandbox. |
 | [Kubernetes Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) | The Kubernetes SIG project documents `Sandbox` Custom Resource Definitions (CRDs), templates, claims, warm pools, state, and optional gVisor or Kata isolation. Kubernetes itself [does not define a first-class tenant object](https://kubernetes.io/docs/concepts/security/multi-tenancy/); operators must assemble the isolation policy. | Steward provides one opinionated tenant and evidence contract on a Linux node without making Kubernetes a prerequisite. A future backend could preserve that contract on Kubernetes. |
@@ -56,9 +76,9 @@ assurance contract:
 
 - the same signed artifact, site policy, tenant intent, runtime grant, and receipt
   identities remain bound across admission, Docker, Gateway, and offline tools;
-- selected connector effects can require a tenant-scoped off-node signature over
-  the exact request, with the permit and request digests retained beside the stable
-  task call in Gateway's signed chain;
+- selected service and connector effects can require tenant-scoped off-node
+  signatures over exact request bytes, with permit and request digests retained
+  beside stable task identity and terminal observations in Gateway's signed chain;
 - hostile-path tests exercise replay, state rollback, credential substitution,
   address rebinding, partial writes, process restart, and ambiguous external
   effects;
@@ -81,6 +101,41 @@ and whether a hostile-path test can prove the claim. Pareto selection keeps work
 for which no alternative is better on every material dimension. The adversarial
 pass starts with a separate question: *how could a manipulated agent turn this
 feature into another tenant's incident or an unverifiable external effect?*
+
+### Exact service-task dispatch increment
+
+The selected design lets signed site policy assign an off-node tenant key to exact
+service IDs. That key authorizes one exact JSON request. Gateway verifies the permit
+against the live workload and operation, records authorization before dispatch, and
+retains the observed run ID or explicit ambiguity. The agent never receives the
+private key, and the signed receipt never contains the raw prompt.
+
+This choice responds to converging primary-source signals. NIST's February 2026
+[agent identity and authorization concept paper](https://csrc.nist.gov/pubs/other/2026/02/05/accelerating-the-adoption-of-software-and-ai-agent/ipd)
+frames identification, authorization, access delegation, logging, accountability,
+and provenance as open agent-infrastructure problems. The NSA's May 2026
+[MCP security guidance](https://www.nsa.gov/Press-Room/Press-Releases-Statements/Press-Release-View/Article/4496698/nsa-releases-security-design-considerations-for-ai-driven-automation-leveraging/)
+warns that dynamic tool invocation, implicit trust, and context sharing create risks
+that cannot be fixed at one interface in isolation. Microsoft's March 2026
+[PAuth preprint](https://www.microsoft.com/en-us/research/publication/pauth-precise-task-scoped-authorization-for-agents/)
+argues that operator-scoped authorization overprivileges agents and evaluates a
+more precise task-scoped design. These sources motivate the boundary; none evaluates
+or certifies Steward.
+
+| Candidate | Adversarial failure considered | Operator value | Assurance and ownership cost | Pareto decision |
+| --- | --- | --- | --- | --- |
+| Tenant-signed exact service task | A manipulated agent changes prompt bytes, reuses a valid broad service grant, races a duplicate, or retries after an ambiguous response. | High: a tenant can approve useful agent work without giving the agent reusable signing authority or exposing a new tenant listener. | Medium: Steward must keep statement, grant, operation, ledger, restart, and offline-audit semantics coherent. The run ID remains untrusted and replay scope remains node-local. | **Implemented as opt-in.** It directly reduces external-effect authority while extending the existing signed admission and evidence chain. |
+| Generic JWT bearer | A bearer is copied, replayed, or interpreted with different claims by another component. | Medium: familiar transport and tooling. | Medium to high: a token format does not supply Steward's exact request, runtime, route-policy, spend, unknown-outcome, or receipt semantics; a library would also break the zero-dependency contract. | Reject for this boundary. DSSE signs the existing exact statement without creating ambient bearer authority. |
+| Open Policy Agent sidecar | Policy evaluates correctly but its availability, policy language, bundle provenance, or upgrade state diverges from Steward's durable replay ledger. | Medium for organizations already using Rego. | High for disconnected nodes: another binary, policy language, state boundary, recovery path, and dependency still does not record dispatch outcome. | Reject as a required component. External systems may make approvals, but Gateway owns final exact enforcement and evidence. |
+| Generic reverse proxy | A caller selects headers, paths, redirects, response semantics, or an operation outside the intended agent adapter. | Medium: broad protocol reuse. | High risk: broad flexibility expands the trusted parser and still leaves task identity and replay behavior unspecified. | Reject. Configure only exact JSON POST operations and return one canonical run-ID response. |
+| Approval inside the agent | Prompt injection or a malicious skill approves its own request or reads the signing key. | Low operational friction. | Unacceptable trust inversion: the untrusted workload becomes its own authorizer. | Reject. Keep the task private key and decision outside the sandbox. |
+
+The exact service-task path remains on the Pareto frontier because the alternatives
+either leave reusable authority inside the agent, introduce a larger mandatory
+dependency without solving replay and evidence, or broaden the protocol surface.
+The bounded design does not dominate every future option: fleet-wide replay control,
+hardware-backed signing, and external evidence anchoring solve different threats and
+remain separate potential layers.
 
 ### Exact-effect authorization increment
 
@@ -122,6 +177,7 @@ core.
 
 | Candidate | Adversarial failure considered | Value and assurance evidence | Decision |
 | --- | --- | --- | --- |
+| Tenant-signed service task | A broad host service bearer or manipulated agent submits different task bytes, a concurrent duplicate reaches Hermes twice, or restart hides an ambiguous submission. | Site policy scopes the public key to one tenant and service; Gateway binds one exact request to live admission, records before dispatch, reconstructs spend after restart, and exposes offline correlation. The qualified Hermes workflow separately proves real custom-skill work. | Build the narrow service-operation path in Gateway and an owner-only signing bundle. Claim node-local at-most-once dispatch only; keep run-ID trust and semantic-work limits explicit. |
 | Named, credential-brokered operations | The workload steals a standing credential, changes the destination or operation, replays a task after failure, or obtains a second effect after restart. | Enables useful authenticated work while exact origin, method, path, DNS answers, credential digest, per-grant calls, and tenant-scoped task spend remain outside the agent. Signed authorization and terminal records make crash ambiguity explicit. | Build the narrow connector contract in Gateway. This is on the Pareto frontier for immediate utility, security, and differentiation. |
 | Non-borrowing connector evidence quotas | One noisy tenant fills the shared signed ledger and prevents every other tenant from recording safe terminal outcomes. | Exact per-tenant signed-line accounting reserves worst-case terminal capacity before an effect. An unbudgeted or exhausted tenant fails before upstream work and cannot borrow another tenant's allocation. | Build explicit tenant allocations and restart validation. Keep the shared-disk and shared-`fsync` residual risk visible. |
 | Layered egress-denial limiter | A workload turns deny-by-default policy into synchronous audit amplification, resets its identity to escape a local counter, or uses a wall-clock rollback to reopen spent capacity. | Fixed 30/grant, 120/tenant, and 480/host one-minute limits reserve capacity before a denial-audit write. After exhaustion, policy and resource denials return `egress_rate_limited` without another write while allowed traffic continues; inactive and revoked grants retain their specific status, tenant and host windows survive grant churn, and backward clock movement does not reopen capacity. | Build the small limiter at the existing enforcement point. Keep shared host CPU, memory, disk latency, and the global cap visible as residual risks. |
@@ -156,9 +212,11 @@ an agent with the controls the node records:
    and generation;
 4. the local executor admits only the intersection, creates the constrained
    gVisor workload, and rejects replay, policy rollback, and observed drift;
-5. selected connector effects additionally require a tenant-scoped off-node key to
-   sign the exact request, which Gateway checks and spends before DNS; and
-6. the node emits signed, hash-linked receipts that an operator can verify
+5. selected service tasks additionally require a service-scoped off-node tenant key
+   to sign exact request bytes, which Gateway records before dispatch;
+6. selected connector effects can separately require an off-node action key to sign
+   the exact request, which Gateway checks and spends before DNS; and
+7. the node emits signed, hash-linked receipts that an operator can verify
    offline.
 
 Gateway brokers inference, authenticated service ingress, named connector
@@ -173,6 +231,12 @@ dedicated-host compatibility mode. Signed receipts record admission and lifecycl
 events; network admissions include the effective route-policy digest. Individual
 traffic records have the narrower guarantees documented in the capability guide.
 
+For tenant-signed service tasks, Gateway returns a stored successful run ID on an
+exact replay and refuses to redispatch an ambiguous result. The spend is local to
+one node, receipt file, and epoch. The service supplies the run ID; neither that ID
+nor the receipt proves useful work. The Hermes qualification adds a separate
+custom-skill result check so container readiness is not mistaken for functionality.
+
 A receipt records runtime inputs and observed enforcement decisions. It does not
 reconstruct prompt meaning, prove agent intent, or certify upstream behavior.
 
@@ -186,6 +250,12 @@ authorization, and separating trusted instructions from untrusted data.
   [security best practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)
   cover confused-deputy attacks, token handling, session hijacking, and local
   server compromise. A tool protocol does not replace local workload admission.
+- The NSA's May 2026
+  [MCP security design guidance](https://www.nsa.gov/Press-Room/Press-Releases-Statements/Press-Release-View/Article/4496698/nsa-releases-security-design-considerations-for-ai-driven-automation-leveraging/)
+  identifies dynamic tool invocation, implicit trust relationships, context sharing,
+  serialization, and agent misuse as system-level concerns. Steward therefore keeps
+  MCP as a bounded local adapter and makes final workload and task authorization at
+  Executor and Gateway, not inside the protocol client.
 - The stable [Agent2Agent (A2A) Protocol specification](https://a2a-protocol.org/latest/specification/) is
   an open interoperability protocol for independent agents. It does not decide which
   tenant may run a workload on a host.
@@ -200,8 +270,9 @@ authorization, and separating trusted instructions from untrusted data.
   have roles to play. This is a summary of submitted views, not a Steward
   evaluation. NIST's
   [agent identity and authorization concept paper](https://www.nccoe.nist.gov/publications/other/accelerating-adoption-software-and-ai-agent-identity-and-authorization-concept)
-  calls for least privilege, dynamic authorization, authority proofs, and
-  tamper-resistant records.
+  identifies agent identification, authorization, user-to-agent delegation,
+  accountability, logging and transparency, and data provenance as areas for
+  standards-based work. It is an initial public draft, not a normative standard.
 - The [OWASP Top 10 for Agentic Applications 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/)
   includes goal hijack, tool misuse, identity and privilege abuse, supply-chain
   vulnerabilities, unexpected code execution, and memory/context poisoning.
@@ -228,10 +299,16 @@ authorization, and separating trusted instructions from untrusted data.
   requests, integrity-protected tasks, resource limits, and records the agent
   cannot rewrite. Steward's connector design applies those principles at the
   node boundary; the publication does not certify Steward.
+- Microsoft's May 2026
+  [analysis of privileged tool-enabled agents](https://www.microsoft.com/en-us/research/publication/security-risks-in-tool-enabled-ai-agents-a-systematic-analysis-of-privileged-execution-environments/)
+  identifies overprivileged tools, capability-intent mismatches, and ambient
+  authority leakage as recurring cloud-agent risks. Steward's service-task path
+  narrows one request and keeps the signing key outside the execution environment;
+  it does not remove host or model risk.
 - Microsoft's 2026 [PAuth preprint](https://www.microsoft.com/en-us/research/publication/pauth-precise-task-scoped-authorization-for-agents/)
   proposes authorization that is both task-scoped and precise at the tool-call
-  boundary. It supports Steward's choice to spend a tenant-bound task claim before
-  an external effect, but it has not been peer reviewed and does not evaluate
+  boundary. It supports Steward's choice to bind one tenant-approved request at the
+  enforcement point, but it has not been peer reviewed and does not evaluate
   Steward.
 - The 2026 [Open Agent Passport preprint](https://arxiv.org/abs/2603.20953)
   proposes deterministic authorization before a tool call and a signed audit
@@ -265,7 +342,11 @@ authorization, and separating trusted instructions from untrusted data.
   signed policy, and keys are prepared. It does not bootstrap a bare operating
   system, operate a model service, or provide formal accreditation.
 - **Not semantic observability.** The receipt does not include or validate
-  prompts, model output, agent explanations, or semantic tool actions.
+  prompts, request bodies, model output, agent explanations, or semantic tool
+  actions. An agent-service run ID is untrusted observed output.
+- **Not exactly once.** Exact service tasks provide node-local at-most-once
+  dispatch only within one retained Gateway ledger epoch. Another node, a replaced
+  ledger, or an external service remains a separate replay domain.
 - **Not a public access layer.** Steward service ingress is authenticated and
   loopback-only. It does not replace tenant end-user authentication,
   reverse-proxy design, or operator decisions about public exposure.

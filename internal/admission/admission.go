@@ -155,6 +155,17 @@ type TenantRule struct {
 	EgressRouteIDs        []string       `json:"egress_route_ids,omitempty"`
 	ConnectorIDs          []string       `json:"connector_ids,omitempty"`
 	CommandKeys           []CommandKey   `json:"command_keys,omitempty"`
+	TaskKeys              []TaskKey      `json:"task_keys,omitempty"`
+}
+
+// TaskKey grants one tenant-owned Ed25519 key authority to submit exact,
+// short-lived task bytes to only the named service identities. The private key
+// remains off-node; Executor passes this signed public authority to Gateway as
+// part of the workload grant.
+type TaskKey struct {
+	KeyID      string   `json:"key_id"`
+	PublicKey  string   `json:"public_key"`
+	ServiceIDs []string `json:"service_ids"`
 }
 
 // CommandKey grants one Ed25519 key authority over only the named Executor
@@ -594,6 +605,7 @@ func (p SitePolicy) Validate() error {
 		return deny("invalid site policy identity")
 	}
 	seenTenants := map[string]struct{}{}
+	taskPublicKeyOwners := make(map[string]string)
 	for _, tenant := range p.Tenants {
 		if !bounded(tenant.TenantID, 128) || len(tenant.PublisherKeyIDs) == 0 || len(tenant.PublisherKeyIDs) > 64 {
 			return deny("invalid tenant policy")
@@ -698,6 +710,44 @@ func (p SitePolicy) Validate() error {
 					return deny("tenant command key has duplicate operation")
 				}
 				seenOperations[operation] = struct{}{}
+			}
+		}
+		if len(tenant.TaskKeys) > 8 {
+			return deny("tenant has too many task keys")
+		}
+		seenTaskKeys := make(map[string]struct{}, len(tenant.TaskKeys))
+		seenTaskPublicKeys := make(map[string]struct{}, len(tenant.TaskKeys))
+		for _, taskKey := range tenant.TaskKeys {
+			if !routeID(taskKey.KeyID) || !bounded(taskKey.PublicKey, 1024) ||
+				len(taskKey.ServiceIDs) == 0 || len(taskKey.ServiceIDs) > 32 {
+				return deny("invalid tenant task key")
+			}
+			if _, exists := seenTaskKeys[taskKey.KeyID]; exists {
+				return deny("duplicate tenant task key ID")
+			}
+			seenTaskKeys[taskKey.KeyID] = struct{}{}
+			public, err := decodePublicKey(taskKey.PublicKey)
+			if err != nil || base64.StdEncoding.EncodeToString(public) != taskKey.PublicKey {
+				return deny("invalid tenant task public key")
+			}
+			if _, exists := seenTaskPublicKeys[string(public)]; exists {
+				return deny("tenant task public key is assigned more than once")
+			}
+			seenTaskPublicKeys[string(public)] = struct{}{}
+			if owner, exists := taskPublicKeyOwners[string(public)]; exists && owner != tenant.TenantID {
+				return deny("tenant task public key is assigned to multiple tenants")
+			}
+			taskPublicKeyOwners[string(public)] = tenant.TenantID
+			seenServices := make(map[string]struct{}, len(taskKey.ServiceIDs))
+			for index, serviceID := range taskKey.ServiceIDs {
+				if !routeID(serviceID) || !contains(tenant.ServiceIDs, serviceID) ||
+					index > 0 && taskKey.ServiceIDs[index-1] >= serviceID {
+					return deny("tenant task key service IDs must be authorized, unique, and sorted")
+				}
+				if _, exists := seenServices[serviceID]; exists {
+					return deny("tenant task key has duplicate service ID")
+				}
+				seenServices[serviceID] = struct{}{}
 			}
 		}
 	}
@@ -808,6 +858,31 @@ func (p SitePolicy) TrustedCommandKeys(tenantID, operation string) (map[string]e
 	}
 	if len(keys) == 0 {
 		return nil, deny("site policy has no key authorized for command tenant and operation")
+	}
+	return keys, nil
+}
+
+// TrustedTaskKeys returns only the tenant-owned keys whose signed scope names
+// the exact service. An empty result is valid and keeps task admission opt-in;
+// callers must not infer task authority from a command key or transport token.
+func (p SitePolicy) TrustedTaskKeys(tenantID, serviceID string) (map[string]ed25519.PublicKey, error) {
+	if !routeID(serviceID) {
+		return nil, deny("invalid task service ID")
+	}
+	tenant, ok := p.tenant(tenantID)
+	if !ok || !contains(tenant.ServiceIDs, serviceID) {
+		return nil, deny("unknown task tenant or service")
+	}
+	keys := make(map[string]ed25519.PublicKey)
+	for _, taskKey := range tenant.TaskKeys {
+		if !contains(taskKey.ServiceIDs, serviceID) {
+			continue
+		}
+		key, err := decodePublicKey(taskKey.PublicKey)
+		if err != nil {
+			return nil, deny("decode tenant task key: %v", err)
+		}
+		keys[taskKey.KeyID] = key
 	}
 	return keys, nil
 }

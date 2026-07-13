@@ -11,20 +11,24 @@ Simple Signing Envelope) documents. It binds commands to a tenant, node, and
 instance; rejects stale policy and generations; durably journals host changes; and
 creates signed, hash-linked receipts for offline verification. Optional capabilities
 include inference, a private service, credential-brokered connector operations,
-deny-by-default HTTP(S) egress, command-line and Model Context Protocol (MCP)
+tenant-signed exact service tasks, deny-by-default HTTP(S) egress, command-line and Model Context Protocol (MCP)
 operations, and Terraform bootstrap. Persistent
 state is available only through the dedicated-host compatibility mode described
 below.
 
 ## What a receipt means
 
-A valid chain shows that the node key signed the supplied Steward enforcement
-records. Verification detects internal gaps, reordering, changes, and an incomplete
-final record. Each record binds capsule and policy digests, tenant, runtime
-reference, generation, decision type, and outcome.
+A valid chain shows that the corresponding Executor or Gateway node key signed the
+supplied Steward enforcement records. Verification detects internal gaps,
+reordering, changes, and an incomplete final record. Executor records bind capsule
+and policy digests, tenant, runtime reference, generation, decision type, and
+outcome. Gateway service-task records bind the public task authority, exact permit
+and request digests, service policy, dispatch result, and observed run ID.
 
-It does not prove prompt meaning, model output, agent intent, tool meaning, or
-upstream behavior. The chain also cannot reveal when someone removes every record
+It does not prove prompt meaning, model output, agent intent, tool meaning, useful
+work, or upstream behavior. The service supplies its run ID, so that value is not
+independent proof of execution. Raw prompts and request bodies are absent. The
+chain also cannot reveal when someone removes every record
 after an older valid point. To detect that rollback, store the last verified
 sequence and chain hash separately. Without a Trusted Platform Module (TPM),
 trusted execution environment (TEE), or external checkpoint, a hostile host root
@@ -60,7 +64,7 @@ lifetime:
 | Store | Limit | What consumes it |
 | --- | ---: | --- |
 | `evidence.bin` | 64 MiB | Signed pre-effect, commit, compensation, recovery, and lifecycle receipts |
-| `connector-receipts.ndjson` | 64 MiB | Signed connector authorizations and terminal outcomes; authorization tombstones also enforce replay and call budgets |
+| `connector-receipts.ndjson` | 64 MiB | Signed connector and exact service-task authorizations and terminal outcomes; authorization tombstones also enforce replay and call budgets |
 | `operation-journal.bin` | 16 MiB | Prepared and terminal host-mutation records |
 | `admission-fences.bin` | 4 MiB and 65,535 records | One retained record for each tenant and instance pair, including destroyed tombstones |
 | `uplink-state.json` | 1 MiB encoded | One retained anti-replay position for each tenant and instance pair seen through Executor uplink |
@@ -225,6 +229,87 @@ Gateway configuration requires an explicit loopback service address with a numer
 port from 1 through 65535. Missing, zero, out-of-range, and named service ports fail
 both `-check-config` and startup.
 
+## Tenant-signed service-task boundary
+
+An ordinary service grant lets a host administrator reach one capsule-declared
+agent port through Gateway. Its bearer token is host transport authority, not proof
+that a tenant approved a prompt. Exact service tasks are opt-in and add a separate
+tenant signature without exposing the private signing key to the node or agent.
+
+Signed site policy may assign at most eight Ed25519 task public keys to one tenant
+and scope each key to one through 32 service IDs. Executor admits only keys whose
+scope includes the instance's exact `service_id` and projects those public keys into
+the Gateway grant and retained state. Gateway state format 4 is required to preserve
+that binding across restart. A private task key belongs on a separately controlled
+signing station.
+
+Gateway accepts at most 128 configured service operations. They are exact
+`application/json` POSTs with canonical paths and no query, wildcard, alternate
+percent encoding, transfer coding, WebSocket upgrade, or caller-selected upstream
+headers. Hard ceilings are 64 KiB per request, 1 MiB per response, 120 seconds per
+dispatch, and 15 minutes per permit. A smaller operation limit wins.
+
+`stewardctl task issue` consumes the exact admission response, instance intent,
+request bytes, and an authenticated but unsigned service-trust inventory. It writes
+an owner-only bundle that contains the request, public authority, operation policy,
+and signed permit, but no private key or Gateway token. Because the request can be a
+sensitive prompt, treat the bundle as sensitive input even though it is not a
+reusable signing credential. The inventory is mismatch preflight only; the live
+Gateway configuration and active grant remain authoritative.
+
+The permit binds node, tenant, logical instance, runtime, grant, generation,
+capsule, site policy, effective route policy, service, exact operation-policy
+digest, task ID, request digest and byte length, content type, and validity window.
+Gateway validates all bindings against the live request, reserves replay identity,
+and fsyncs a format-3 authorization record before contacting the service. It checks
+expiry and grant activity again after the durable write and immediately before
+dispatch.
+
+Only HTTP 200, 201, and 202 with one bounded JSON run ID count as a successful
+submission. Gateway does not relay the service's response headers or arbitrary
+body. It records the observed status, byte count, and run ID, then returns a
+canonical run-ID object. The run ID is untrusted application output and can be
+fabricated by a hostile image. A receipt proves that Gateway observed it, not that
+the agent completed useful or correct work.
+
+Task replay identity is `(tenant_id, instance_id, task_id)`. It deliberately omits
+generation and grant ID, so replacement of one logical workload does not make the
+same task ID spendable again. A concurrent replay cannot cross the in-memory
+reservation. After restart, Gateway reconstructs spends from the signed ledger. An
+exact successful replay can return the recorded run ID without another dispatch.
+Pending, conflicting, rejected, malformed, or ambiguous outcomes do not dispatch
+again automatically. If Gateway restarts after authorization but before a terminal
+record, it closes that task as `outcome_unknown`.
+
+An ambiguous authorization write happens before service dispatch. Gateway returns
+`evidence_unavailable` and retains that task's process-local replay fence. Once the
+ledger reports the failure, Gateway rejects new task authorizations without adding
+new fences. Restart Gateway to verify the ledger: a complete authorization is closed
+as `outcome_unknown`, while an absent authorization leaves the task available. This
+fail-closed recovery can consume a permit without dispatch when the authorization
+was durable but its sync result was ambiguous.
+
+This guarantee is node-local at-most-once dispatch within one retained receipt file
+and epoch. It is not exactly-once execution across a fleet, after ledger deletion or
+replacement, after an epoch change, or inside the agent or an external system. A
+control plane that can target multiple nodes must coordinate task identity outside
+Steward if it needs fleet-wide replay prevention. Keep the verified ledger head
+outside the node; host root can replace the ledger, key, and software together.
+
+Service tasks share the Gateway signed ledger and its explicit non-borrowing tenant
+budgets with connectors. Exhaustion fails before dispatch with
+`task_evidence_quota_exhausted`. The allocation isolates ledger bytes, not shared
+disk latency, CPU, memory, or the host filesystem. Receipt format 3 records no raw
+prompt, request body, model output, workspace content, private key, Gateway bearer,
+or arbitrary service response.
+
+`stewardctl hermes run` supports only the qualified `hermes-api` operation
+`hermes.run = POST:/v1/runs` and requires an owner-only bundle, owner-only Gateway
+token, and literal-loopback HTTP origin. Remote operators should execute it through
+SSH or another authenticated private management path. Optional status polling is an
+ordinary host-authenticated `GET /v1/runs/{run_id}`; the tenant permit authorizes
+only the exact POST. Model inference remains separately configured and controlled.
+
 ## Hermes adapter qualification boundary
 
 Steward's Hermes qualification applies only to upstream commit
@@ -237,13 +322,16 @@ container with a fresh session, and required the changed result. The integration
 proof also required Hermes to discover and load the exact signed
 `steward.connector-work` skill, verified one authenticated upstream effect, denied
 task replay and an undeclared operation, scanned the fixed qualification material
-for secret and origin leakage, and verified a separate signed Gateway connector
-receipt chain.
+for secret and origin leakage, and verified Gateway's separate signed receipt
+chain. The exact service-task path additionally scoped a tenant key to
+`hermes-api`, signed the workspace-audit run bytes, dispatched them through
+Gateway, and correlated format-3 authorization and terminal records offline.
 
-That historical qualification used the connector grant-and-task path. It did not
-configure an action authority, issue an exact-request permit, or exercise receipt
-format 2. Do not cite the retained Hermes evidence as proof of the optional action
-permit path.
+The connector portion still uses the connector grant-and-task path. It does not
+configure a connector action authority, issue `X-Steward-Action-Permit`, or exercise
+receipt format 2. Do not cite the retained Hermes evidence as proof of the optional
+connector action-permit path. The separate service-task proof uses
+`X-Steward-Task-Permit` and receipt format 3.
 
 This does not qualify the official upstream image, another Hermes commit, arbitrary
 plugins, channels, skills, MCP servers, or run event streams. The service bridge

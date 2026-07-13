@@ -157,6 +157,14 @@ key and ID, node ID, and evidence key are all required. The packaged unit accept
 optional `EXECUTOR_ADMISSION_*` values from `/etc/steward/executor.env`. See
 [signed admission and receipts]({{ '/guides/signed-admission/' | relative_url }}).
 
+A tenant policy may contain at most eight `task_keys`. Each entry has a unique
+bounded `key_id`, one canonical base64 Ed25519 `public_key`, and one through 32
+sorted, unique `service_ids` already allowed by that tenant. The same public key
+cannot appear under multiple IDs in one tenant. Executor projects only the public
+keys whose scope includes the admitted `service_id` into the runtime grant; the
+private task key stays off-node. A service with no matching task key keeps the
+ordinary host-authenticated service behavior.
+
 The packaged unit maps `EXECUTOR_STATE_ARG` to the dedicated-host state flag.
 Leave it empty on a shared host. The packaged aggregate settings reserve memory,
 CPU, and PIDs for the host and each tenant, including fixed relay overhead. They do
@@ -209,6 +217,52 @@ incremented for every credential-authority rotation. It is included in the
 effective route-policy digest and omitted when action permits are disabled. See
 [authenticated API operations]({{ '/guides/connectors/' | relative_url }}) for the
 complete boundary.
+
+`service_operations` contains at most 128 exact tenant-authorized agent-service
+operations. Each entry has `service_id`, operation `id`, method `POST`, one canonical
+path with no query or percent-encoded alternate spelling, content type
+`application/json`, and four positive limits:
+
+- `max_request_bytes`: at most 65536;
+- `max_response_bytes`: at most 1048576;
+- `max_seconds`: at most 120; and
+- `max_permit_seconds`: at most 900.
+
+One service cannot map the same method and path to multiple operation IDs. These
+entries do not make a service task-authorized by themselves. Signed site policy
+must scope a tenant task key to the admitted service, and the live grant must carry
+that public authority. Gateway then requires one canonical
+`X-Steward-Task-Permit` for the configured operation and matches the node, tenant,
+logical instance, runtime, grant, generation, admission and route-policy digests,
+operation-policy digest, task, exact request digest and length, content type, and
+validity window.
+
+Use `stewardctl gateway service` to update and inspect the policy atomically:
+
+```console
+sudo stewardctl gateway service set \
+  -config /etc/steward/gateway.json \
+  -service-id hermes-api \
+  -operation hermes.run=POST:/v1/runs \
+  -max-request-bytes 65536 \
+  -max-response-bytes 1048576 \
+  -max-seconds 120 \
+  -max-permit-seconds 300 \
+  -tenant-budget tenant-a=4194304
+sudo stewardctl gateway service list -config /etc/steward/gateway.json
+sudo stewardctl gateway service trust \
+  -config /etc/steward/gateway.json -node-id node-a -tenant-id tenant-a \
+  > hermes-service-trust.json
+```
+
+`set` replaces every operation for the named service and preserves other service,
+connector, route, and action-authority configuration. Repeat `-operation` to keep
+multiple operations for that service. It prints whether Gateway needs reload or
+restart. `trust` requires an explicit node and tenant, verifies that the tenant has
+a receipt budget, and exports strict, sorted `steward.service-trust.v1` JSON with
+operation-policy digests and limits. The inventory is unsigned preflight input for
+`stewardctl task issue`; authenticate its transfer. Gateway's current configuration
+and active grant remain authoritative.
 
 Action permits are opt-in per connector. `action_authorities` accepts at most 64
 non-secret Ed25519 public keys. Each entry contains a bounded `key_id`, one exact
@@ -263,8 +317,18 @@ configuration remains authoritative.
 
 `connector_receipt_file`, `connector_receipt_key_file`,
 `connector_receipt_node_id`, and `connector_receipt_epoch` form one required group
-when any connector exists. The key is an owner-only PKCS#8 Ed25519 private key and
+when any connector or service-task operation exists. The key is an owner-only
+PKCS#8 Ed25519 private key and
 the ledger is an owner-only, signed newline-delimited JSON chain capped at 64 MiB.
+
+For a task-enabled service grant, `connector_receipt_node_id` must be the admitted
+node ID followed by `/gateway`, such as `node-a/gateway`. Gateway rejects the grant
+if this derived identity does not match, and `gateway service trust` fails before
+an operator can issue a task from a mismatched inventory. A connector-only setup
+may retain another stable receipt identity. Before adding service-task operations
+to such a setup, drain all grants and start a new empty receipt chain with the
+derived identity, a new key, and a new epoch. Never relabel an existing chain.
+
 Receipt paths must be separate from credentials, Gateway state, audit, token,
 control socket, and the grant directory. The packaged installer creates an
 independent Gateway key and writes its public half to
@@ -281,14 +345,16 @@ non-borrowing tenant allocations:
 ]
 ```
 
-Every connector-bearing grant must match one listed `tenant_id`; Gateway rejects
-an unbudgeted grant before creating its connector socket. Each allocation must be
+Every connector-bearing or task-authorized service grant must match one listed
+`tenant_id`; Gateway rejects an unbudgeted grant before creating its capability
+socket. Each allocation must be
 at least 262146 bytes, the table may contain at most 128 entries, and the sum may
 not exceed 67108864 bytes (64 MiB). Usage is the exact signed JSON line plus its
 newline. An authorized call also holds a worst-case terminal-record reservation
 until that terminal record is written. Unused capacity is not shared with another
-tenant. Exhaustion returns HTTP 503 with
-`connector_evidence_quota_exhausted`; it does not consume another tenant's slice.
+tenant. Connector exhaustion returns HTTP 503
+`connector_evidence_quota_exhausted`; service-task exhaustion returns HTTP 503
+`task_evidence_quota_exhausted`. Neither consumes another tenant's slice.
 
 `stewardctl gateway connector set -tenant-budget TENANT=BYTES` may be repeated.
 It adds or updates exact tenant entries and does not remove existing entries. The
@@ -309,6 +375,13 @@ incremented `connector_receipt_epoch`. Make the retention and external-checkpoin
 decision for the old chain, drain retained grants, preserve the old ledger and
 verification material, configure the new file and table, and restart Gateway.
 There is no CLI operation that removes a budget or compacts an existing ledger.
+
+The same signed ledger may contain receipt formats 1, 2, and 3. Format 1 is an
+ordinary connector event, format 2 adds a connector action permit, and format 3
+identifies either a connector call or an exact service task. Gateway state format 4
+retains the service ID and public tenant task authorities for task-enabled grants.
+Keep the ledger, Gateway state, and declared release-format compatibility together
+during backup, upgrade, and rollback; do not downgrade either file independently.
 
 `steward-mcp` accepts `-node-url`, a loopback HTTP origin, and `-token-file`, an
 owner-only Executor bearer token. It does not listen on the network.

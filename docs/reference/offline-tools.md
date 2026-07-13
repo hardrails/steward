@@ -7,10 +7,12 @@ section: Reference
 # Local operator tools
 
 `stewardctl image` inspects and imports image media, `stewardctl permit` signs and
-audits exact connector authority, and `stewardctl evidence` verifies receipts
-without a registry, transparency service, or vendor control plane. Within those
-command groups, only `image import` contacts Docker; the other operations use local
-files. Commands under `stewardctl node` contact the local Executor API.
+audits exact connector authority, `stewardctl task` signs and audits exact
+agent-service requests, and `stewardctl evidence` verifies receipts without a
+registry, transparency service, or vendor control plane. Within those command
+groups, only `image import` contacts Docker; the other operations use local files.
+Commands under `stewardctl node` contact the local Executor API. `stewardctl hermes
+run` contacts an explicit literal-loopback Gateway origin.
 
 ## Upgrade inspection
 
@@ -39,11 +41,17 @@ The command exits nonzero when workload or grant state remains, a file is malfor
 or missing when required, or the target reader/writer range is unsafe.
 
 Connector receipt format 1 contains ordinary connector records. Permit-backed
-records use format 2, and one verified chain may contain both. The observed format
-is 2 after any format-2 record exists. It is also 2 whenever Gateway configures an
-action authority, even before the receipt file exists or a permit is used, because
-that live configuration can write format 2. A target whose manifest can read only
-format 1 is then incompatible.
+records use format 2. Exact service-task records use format 3, and one verified chain
+may contain all three. The observed format is the highest schema present. It is at
+least 2 whenever Gateway configures an action authority and 3 whenever Gateway
+configures a service-task operation, even before the receipt file exists or that
+operation is used, because the live configuration can write the corresponding
+format. A target whose manifest cannot read and preserve that format is incompatible.
+
+Gateway state format 4 retains the service ID and public tenant task authorities of
+task-enabled grants. A target release must read and preserve that state even if the
+receipt ledger has not yet recorded a service task. Keep state and receipt-format
+compatibility checks together; neither file can be downgraded safely in isolation.
 
 `upgrade inspect-formats` returns the same seven format observations without requiring
 a drained node. Activation uses it after a failed target start to decide whether the
@@ -153,6 +161,138 @@ observation time. Output contains `valid`, `permit_digest`, `request_digest`,
 `terminal`, and final `head`. Supply both expected-head fields to compare with an
 independently retained checkpoint. An absent terminal means the outcome is still
 unknown; it is not evidence that no upstream effect occurred.
+
+## Exact tenant-signed service tasks
+
+`stewardctl task` signs one exact JSON request to one configured agent-service
+operation. It uses only local files and never contacts Gateway or a hosted signer.
+Keep the task private key on an operator-controlled signing station. Signed site
+policy places only its public half in one tenant's `task_keys` and scopes it to
+explicit `service_ids`.
+
+Export Gateway's strict, non-secret service-operation inventory for the intended
+node and tenant:
+
+```console
+sudo stewardctl gateway service trust \
+  -config /etc/steward/gateway.json \
+  -node-id node-a \
+  -tenant-id tenant-a > service-trust.json
+```
+
+The `steward.service-trust.v1` inventory contains service and operation IDs, exact
+method and path, content type, request and response ceilings, dispatch and permit
+time limits, and the operation-policy digest. It contains no token, private key, or
+task body. The file is unsigned; authenticate its transfer from the intended node.
+It is a signing preflight, not authority. Gateway's active configuration and grant
+make the final decision.
+
+Issue a task bundle from the exact Executor admission response, the exact instance
+intent used for that admission, and the exact request bytes:
+
+```console
+stewardctl task issue \
+  -admission admission.json \
+  -intent instance-intent.json \
+  -trust service-trust.json \
+  -request exact-task.json \
+  -operation-id hermes.run \
+  -valid-for 5m \
+  -clock-skew 5s \
+  -key task-approver.private.pem \
+  -key-id task-approver \
+  -out exact-task.bundle.json
+```
+
+`task issue` verifies that the admission response, intent, task public key, service
+inventory, and operation agree before signing. The statement binds node, tenant,
+logical instance, runtime, grant, generation, capsule, site policy, effective route
+policy, service and operation-policy digest, task ID, exact request digest and byte
+length, `application/json`, and validity interval. Omit `-task-id` to generate
+`task-` plus 32 random lowercase hexadecimal characters. A supplied ID must be a
+bounded Steward identifier. Task replay identity excludes generation, so never
+reuse one ID for a different intended effect or after replacing the workload.
+
+The request must contain one strict JSON value and fit both the operation limit and
+the 64 KiB task hard ceiling. Validity uses whole seconds, defaults to five minutes,
+and cannot exceed the operation limit or the 15-minute hard ceiling. Clock skew
+defaults to five seconds, may be at most five minutes, and must be shorter than the
+validity interval.
+
+The output is a new mode-`0600` `steward.task-bundle.v1` file capped at 128 KiB. It
+contains the exact request bytes as canonical base64, the canonical DSSE permit, the
+public authority, service path, and operation limits. It contains no private key or
+Gateway bearer, but it may contain a sensitive prompt and must remain owner-only.
+Standard output reports the bundle path, task ID, permit digest, and request digest.
+
+Verify the bundle against an external key and, optionally, a separately retained
+copy of the request:
+
+```console
+stewardctl task verify \
+  -in exact-task.bundle.json \
+  -public-key task-approver.public \
+  -key-id task-approver \
+  -request exact-task.json
+```
+
+The result includes `valid`, `evaluated_at`, `key_id`, `envelope_digest`, service
+path, operation, and the complete signed statement. `-at` accepts canonical UTC RFC
+3339 whole seconds for historical verification. `-max-validity` can impose a
+stricter local ceiling.
+
+The task is agent-independent. `stewardctl hermes run` is a convenience client for
+the qualified Hermes operation `hermes.run = POST:/v1/runs`:
+
+```console
+sudo stewardctl hermes run \
+  -bundle exact-task.bundle.json \
+  -gateway-url http://127.0.0.1:8091 \
+  -token-file /etc/steward/gateway-service-token \
+  -wait \
+  -wait-timeout 3m \
+  -poll-interval 1s
+```
+
+The Gateway URL must be HTTP with a literal loopback IP address, explicit port, and
+no path, query, user information, or fragment. The token and bundle must be
+owner-only. Without `-wait`, the command returns Gateway's canonical run-ID object.
+With `-wait`, it polls the fixed Hermes status path until `completed`, `failed`, or
+`cancelled`, or until the bounded timeout. The permit authorizes only run submission;
+status reads use the host Gateway token.
+
+Audit a task against a copied mixed-format Gateway receipt ledger:
+
+```console
+stewardctl task audit \
+  -in exact-task.bundle.json \
+  -public-key task-approver.public \
+  -key-id task-approver \
+  -request exact-task.json \
+  -receipts connector-receipts.ndjson \
+  -receipt-public-key connector-receipts.public \
+  -receipt-node-id node-a/gateway \
+  -receipt-epoch 1 \
+  -expected-sequence '<retained-sequence>' \
+  -expected-chain-hash 'sha256:<retained-chain-hash>'
+```
+
+The command verifies formats 1, 2, and 3 in one chain, finds the exact service-task
+permit, re-evaluates it at the signed authorization time, and checks every available
+tenant, runtime, grant, policy, service, operation, task, authority, permit, and
+request binding. The receipt node ID must equal the permit's signed node ID followed
+by `/gateway`; this prevents a valid chain from another node from being associated
+with the task by mistake. Output includes the authorization, optional terminal
+record, and final head. An absent terminal is an unknown outcome, not proof that no
+dispatch occurred.
+
+Service-task receipts record digests, byte counts, bounded status, error, and the
+run ID observed from the service. They do not contain the raw request, prompt,
+response, workspace content, or private key. The run ID is untrusted service output.
+The chain proves Gateway's recorded authorization and observation within the host
+trust boundary; it does not prove useful work, semantic correctness, or upstream
+exactly-once behavior. Replay prevention is node-local within one retained ledger
+epoch.
 
 ## Image archives
 

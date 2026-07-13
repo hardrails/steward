@@ -30,7 +30,7 @@ func TestClientDrivesBoundedExecutorContract(t *testing.T) {
 				t.Fatal("invalid admission body")
 			}
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"runtime_ref":"` + runtimeRef + `","status":"created","capsule_digest":"sha256:a","policy_digest":"sha256:b","generation":1,"evidence_key_id":"key","route_policy_digest":"sha256:route"}`))
+			_, _ = w.Write([]byte(`{"runtime_ref":"` + runtimeRef + `","status":"created","capsule_digest":"sha256:a","policy_digest":"sha256:b","generation":1,"evidence_key_id":"key","grant_id":"grant","service_path":"/v1/services/grant","service_id":"hermes-api","task_authorities":[{"key_id":"tenant-task","public_key":"cHVibGlj"}],"connector_url":"http://steward-relay:8081","connector_ids":["tickets"],"route_policy_digest":"sha256:route"}`))
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/logs"):
 			_, _ = w.Write([]byte(`{"runtime_ref":"` + runtimeRef + `","status":"running","logs":"hello"}`))
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/egress"):
@@ -47,7 +47,9 @@ func TestClientDrivesBoundedExecutorContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, err := client.Admit(context.Background(), []byte("capsule"), admission.InstanceIntent{TenantID: "tenant"})
-	if err != nil || state.RuntimeRef != runtimeRef || state.Generation != 1 || state.RoutePolicyDigest != "sha256:route" {
+	if err != nil || state.RuntimeRef != runtimeRef || state.Generation != 1 || state.RoutePolicyDigest != "sha256:route" ||
+		state.ServiceID != "hermes-api" || len(state.TaskAuthorities) != 1 || state.TaskAuthorities[0].KeyID != "tenant-task" ||
+		state.ConnectorURL != "http://steward-relay:8081" || len(state.ConnectorIDs) != 1 || state.ConnectorIDs[0] != "tickets" {
 		t.Fatalf("state=%#v err=%v", state, err)
 	}
 	for _, operation := range []func(context.Context, string) (State, error){client.Status, client.Logs, client.Start, client.Stop} {

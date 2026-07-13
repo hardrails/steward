@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -9,11 +10,30 @@ import (
 )
 
 type routePolicyDocument struct {
-	Version                     int                    `json:"version"`
-	Inference                   *inferenceRoutePolicy  `json:"inference,omitempty"`
-	Egress                      []egressRoutePolicy    `json:"egress,omitempty"`
-	Connectors                  []connectorRoutePolicy `json:"connectors,omitempty"`
-	ConnectorReceiptBudgetBytes int64                  `json:"connector_receipt_budget_bytes,omitempty"`
+	Version                     int                     `json:"version"`
+	Inference                   *inferenceRoutePolicy   `json:"inference,omitempty"`
+	Egress                      []egressRoutePolicy     `json:"egress,omitempty"`
+	Connectors                  []connectorRoutePolicy  `json:"connectors,omitempty"`
+	ServiceTask                 *serviceTaskRoutePolicy `json:"service_task,omitempty"`
+	ConnectorReceiptBudgetBytes int64                   `json:"connector_receipt_budget_bytes,omitempty"`
+}
+
+type serviceTaskRoutePolicy struct {
+	ServiceID   string                   `json:"service_id"`
+	Authorities []actionAuthorityPolicy  `json:"authorities"`
+	Operations  []serviceOperationPolicy `json:"operations"`
+}
+
+type serviceOperationPolicy struct {
+	ServiceID        string `json:"service_id"`
+	ID               string `json:"id"`
+	Method           string `json:"method"`
+	Path             string `json:"path"`
+	ContentType      string `json:"content_type"`
+	MaxRequestBytes  int64  `json:"max_request_bytes"`
+	MaxResponseBytes int64  `json:"max_response_bytes"`
+	MaxSeconds       int    `json:"max_seconds"`
+	MaxPermitSeconds int    `json:"max_permit_seconds"`
 }
 
 type inferenceRoutePolicy struct {
@@ -120,6 +140,18 @@ func sameLoadedConnector(left, right loadedConnector) bool {
 	return true
 }
 
+func sameServiceOperations(left, right map[string]ServiceOperation) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for id, operation := range left {
+		if operation != right[id] {
+			return false
+		}
+	}
+	return true
+}
+
 func routeBaseURL(value *url.URL) string {
 	if value == nil {
 		return ""
@@ -131,11 +163,33 @@ func routeBaseURL(value *url.URL) string {
 // Credential presence and file identity are included, but credential contents
 // are deliberately excluded so the inspection API cannot become an offline
 // oracle for weak operator-provided bearer tokens.
-func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, connectors map[string]loadedConnector, connectorReceiptBudget int64) string {
-	if grant.RouteID == "" && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0 {
+func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, connectors map[string]loadedConnector, serviceOperations map[string]map[string]ServiceOperation, connectorReceiptBudget int64) string {
+	if grant.RouteID == "" && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0 && len(grant.TaskAuthorities) == 0 {
 		return ""
 	}
 	document := routePolicyDocument{Version: 1}
+	if len(grant.TaskAuthorities) > 0 {
+		document.Version = 5
+		document.ConnectorReceiptBudgetBytes = connectorReceiptBudget
+		service := &serviceTaskRoutePolicy{ServiceID: grant.ServiceID}
+		for _, authority := range grant.TaskAuthorities {
+			public, _ := base64.StdEncoding.DecodeString(authority.PublicKey)
+			sum := sha256.Sum256(public)
+			service.Authorities = append(service.Authorities, actionAuthorityPolicy{
+				KeyID: authority.KeyID, TenantID: grant.TenantID,
+				PublicKeyDigest: "sha256:" + fmt.Sprintf("%x", sum[:]),
+			})
+		}
+		operationIDs := make([]string, 0, len(serviceOperations[grant.ServiceID]))
+		for id := range serviceOperations[grant.ServiceID] {
+			operationIDs = append(operationIDs, id)
+		}
+		slices.Sort(operationIDs)
+		for _, id := range operationIDs {
+			service.Operations = append(service.Operations, serviceOperationPolicy(serviceOperations[grant.ServiceID][id]))
+		}
+		document.ServiceTask = service
+	}
 	if grant.RouteID != "" {
 		route := routes[grant.RouteID]
 		document.Inference = &inferenceRoutePolicy{
@@ -157,7 +211,9 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		document.Egress = append(document.Egress, policy)
 	}
 	if len(grant.ConnectorIDs) > 0 {
-		document.Version = 3
+		if document.Version < 3 {
+			document.Version = 3
+		}
 		document.ConnectorReceiptBudgetBytes = connectorReceiptBudget
 	}
 	for _, id := range grant.ConnectorIDs {
@@ -173,7 +229,9 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 			MaxActionPermitSeconds: connector.MaxActionPermitSeconds,
 		}
 		if len(connector.ActionAuthorityIDs) > 0 {
-			document.Version = 4
+			if document.Version < 4 {
+				document.Version = 4
+			}
 		}
 		for _, keyID := range connector.ActionAuthorityIDs {
 			sum := sha256.Sum256(connector.authorities[keyID])
@@ -206,7 +264,20 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 
 func (s *Server) routePolicyDigestLocked(grant Grant) string {
 	budget, _ := s.config.connectorReceiptBudget(grant.TenantID)
-	return routePolicyDigest(grant, s.routes, s.egressRoutes, s.connectors, budget)
+	return routePolicyDigest(grant, s.routes, s.egressRoutes, s.connectors, s.serviceOperations, budget)
+}
+
+// ServiceOperationDigest binds a task permit to the complete non-secret
+// operator policy for one exact service request.
+func ServiceOperationDigest(operation ServiceOperation) string {
+	raw, err := json.Marshal(serviceOperationPolicy(operation))
+	if err != nil {
+		return ""
+	}
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("steward-service-operation-v1\x00"))
+	_, _ = hash.Write(raw)
+	return "sha256:" + fmt.Sprintf("%x", hash.Sum(nil))
 }
 
 // routeCredentialBindingDigest is retained only in the owner-readable state

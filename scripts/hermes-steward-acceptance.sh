@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Signed-admission proof that Hermes executes bundled workspace and connector skills through Steward.
+# Signed-admission and tenant-task proof that Hermes executes bundled workspace and connector skills through Steward.
 # HERMES_INTEGRATION_EVIDENCE_OUT optionally writes owner-only, metadata-only success evidence.
 # HERMES_BUILD_ATTESTATION selects builder metadata; the archive's sibling attestation is the default.
 set -euo pipefail
@@ -65,6 +65,7 @@ connector_operation=perform
 connector_origin=http://127.0.0.1:18082
 connector_task_id=hermes-$run_id-work
 connector_forbidden_task_id=hermes-$run_id-forbidden
+task_key_id=tenant-task
 tenant_id=hermes-$run_id
 instance_id=agent-$run_id
 lineage_id=lineage-$run_id
@@ -327,11 +328,13 @@ expected_steps = [
     "state_volume_observed",
     "workspace_seeded",
     "generation_1_skill_passed",
+    "service_task_replay_verified",
     "generation_1_connector_skill_passed",
     "connector_replay_denied",
     "connector_forbidden_denied",
     "connector_fixture_effect_verified",
     "connector_secret_absence_verified",
+    "tenant_task_private_key_agent_absence_verified",
     "generation_1_destroyed",
     "generation_2_admitted",
     "generation_2_started",
@@ -341,6 +344,7 @@ expected_steps = [
     "state_purged",
     "evidence_chain_verified",
     "connector_evidence_chain_verified",
+    "service_task_audit_verified",
     "acceptance_complete",
 ]
 
@@ -384,7 +388,8 @@ if (
     or set(connector_head) != {"chain_hash", "epoch", "key_id", "node_id", "sequence"}
     or connector_head.get("node_id") != connector_node_id
     or connector_head.get("epoch") != 1
-    or connector_head.get("sequence") != 2
+    or not isinstance(connector_head.get("sequence"), int)
+    or connector_head["sequence"] < 4
     or re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("chain_hash", ""))) is None
     or re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("key_id", ""))) is None
 ):
@@ -400,6 +405,8 @@ payload = {
         "runtime": "runsc",
         "signed_admission": True,
         "signed_connector_work": True,
+        "signed_service_tasks": True,
+        "task_private_key_agent_absence_verified": True,
     },
     "completed_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     "contains_agent_content": False,
@@ -573,6 +580,8 @@ connector_secret=hermes-connector-$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 printf '%s\n' "$connector_secret" >"$work/connector-token"
 "$ctl_bin" keygen -key-id connector-receipts -private-out "$work/connectors.private" \
 	-public-out "$work/connectors.public" >/dev/null
+"$ctl_bin" keygen -key-id "$task_key_id" -private-out "$work/task.private" \
+	-public-out "$work/task.public" >/dev/null
 python3 -I "$root/adapters/hermes-agent/fixture_connector.py" "$work/connector-token" \
 	>"$work/connector-fixture.log" 2>&1 &
 connector_fixture_pid=$!
@@ -607,6 +616,12 @@ printf '%s\n' "{
     \"operations\":[{\"id\":\"$connector_operation\",\"method\":\"POST\",\"path\":\"/v1/work/execute\"}]
   }]
 }" >"$work/gateway.json"
+"$ctl_bin" gateway service set -config "$work/gateway.json" -service-id hermes-api \
+	-operation hermes.run=POST:/v1/runs -max-request-bytes 65536 -max-response-bytes 1048576 \
+	-max-seconds 120 -max-permit-seconds 300 >"$work/service-setup.json"
+"$ctl_bin" gateway service trust -config "$work/gateway.json" -node-id "$node_id" \
+	-tenant-id "$tenant_id" >"$work/service-trust.json"
+"$ctl_bin" gateway validate -config "$work/gateway.json" >/dev/null
 "$gateway_bin" -config "$work/gateway.json" >"$work/gateway.log" 2>&1 &
 gateway_pid=$!
 for _ in $(seq 1 30); do [[ -S $work/gateway/control.sock ]] && break; sleep 1; done
@@ -617,6 +632,7 @@ unset connector_secret
 "$ctl_bin" keygen -key-id publisher -private-out "$work/publisher.private" -public-out "$work/publisher.public" >/dev/null
 "$ctl_bin" keygen -key-id receipts -private-out "$work/receipts.private" -public-out "$work/receipts.public" >/dev/null
 publisher_public=$(tr -d '\n' <"$work/publisher.public")
+task_public=$(tr -d '\n' <"$work/task.public")
 platform="\"os\":\"$image_os\",\"architecture\":\"$image_arch\""
 [[ -z $image_variant ]] || platform+=",\"variant\":\"$image_variant\""
 printf '%s\n' "{
@@ -628,7 +644,8 @@ printf '%s\n' "{
   \"tenants\":[{\"tenant_id\":\"$tenant_id\",\"publisher_key_ids\":[\"publisher\"],
     \"resource_ceiling\":{\"memory_bytes\":536870912,\"cpu_millis\":1000,\"pids\":128},
     \"inference_route_ids\":[\"local-openai\"],\"inference_model_aliases\":[\"steward-fixture-model\"],
-    \"service_ids\":[\"hermes-api\"],\"connector_ids\":[\"$connector_id\"]}]
+    \"service_ids\":[\"hermes-api\"],\"connector_ids\":[\"$connector_id\"],
+    \"task_keys\":[{\"key_id\":\"$task_key_id\",\"public_key\":\"$task_public\",\"service_ids\":[\"hermes-api\"]}]}]
 }" >"$work/policy.json"
 "$ctl_bin" policy sign -in "$work/policy.json" -out "$work/policy.dsse.json" -key "$work/site.private" -key-id site-root >/dev/null
 printf '%s\n' "{
@@ -673,8 +690,21 @@ mark executor_ready
 
 admit() {
 	local generation=$1 disposition=$2
-	printf '%s\n' "{\"capsule_dsse_base64\":\"$capsule_base64\",\"intent\":{\"tenant_id\":\"$tenant_id\",\"node_id\":\"$node_id\",\"instance_id\":\"$instance_id\",\"lineage_id\":\"$lineage_id\",\"generation\":$generation,\"capsule_digest\":\"$capsule_digest\",\"resources\":{\"memory_bytes\":536870912,\"cpu_millis\":1000,\"pids\":128},\"capabilities\":{\"state\":true,\"inference\":true,\"service\":true,\"egress\":false,\"connector\":true},\"state_disposition\":\"$disposition\",\"inference_route_id\":\"local-openai\",\"model_alias\":\"steward-fixture-model\",\"service_id\":\"hermes-api\",\"connector_ids\":[\"$connector_id\"]}}" | \
-		curl -sS -X POST http://127.0.0.1:8090/v1/admissions -H 'Content-Type: application/json' -H "Authorization: Bearer $token" --data-binary @-
+	local intent_path=$work/intent-g$generation.json
+	local request_path=$work/admission-request-g$generation.json
+	local response_path=$work/admission-g$generation.json
+	printf '%s\n' "{\"tenant_id\":\"$tenant_id\",\"node_id\":\"$node_id\",\"instance_id\":\"$instance_id\",\"lineage_id\":\"$lineage_id\",\"generation\":$generation,\"capsule_digest\":\"$capsule_digest\",\"resources\":{\"memory_bytes\":536870912,\"cpu_millis\":1000,\"pids\":128},\"capabilities\":{\"state\":true,\"inference\":true,\"service\":true,\"egress\":false,\"connector\":true},\"state_disposition\":\"$disposition\",\"inference_route_id\":\"local-openai\",\"model_alias\":\"steward-fixture-model\",\"service_id\":\"hermes-api\",\"connector_ids\":[\"$connector_id\"]}" >"$intent_path"
+	python3 -I - "$intent_path" "$capsule_base64" <<'PY' >"$request_path"
+import json
+import pathlib
+import sys
+
+intent = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(json.dumps({"capsule_dsse_base64": sys.argv[2], "intent": intent}, separators=(",", ":")))
+PY
+	curl -sS -X POST http://127.0.0.1:8090/v1/admissions -H 'Content-Type: application/json' \
+		-H "Authorization: Bearer $token" --data-binary "@$request_path" >"$response_path"
+	cat "$response_path"
 }
 
 extract_admission() {
@@ -686,50 +716,59 @@ require_admission() {
 }
 
 run_workspace_audit() {
-	local grant=$1 expected=$2 session=$3 response run_ref terminal status
+	local generation=$1 expected=$2 session=$3 replay=${4:-no} terminal
 	[[ $expected =~ ^sha256:[a-f0-9]{64}$ && $session =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || return 1
-	response=$(python3 -I -c 'import json,sys; print(json.dumps({"input":"STEWARD_WORKSPACE_AUDIT","session_id":sys.argv[1]},separators=(",",":")))' \
-		"$session" | curl -fsS -X POST "http://127.0.0.1:18091/v1/services/$grant/v1/runs" \
-		-H 'Authorization: Bearer service-secret' -H 'Content-Type: application/json' --data-binary @-)
-	run_ref=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' <<<"$response")
-	[[ $run_ref =~ ^run_[a-f0-9]{32}$ ]] || return 1
-	status=
-	for _ in $(seq 1 180); do
-		terminal=$(curl -fsS -H 'Authorization: Bearer service-secret' \
-			"http://127.0.0.1:18091/v1/services/$grant/v1/runs/$run_ref")
-		status=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' <<<"$terminal")
-		[[ $status == completed ]] && break
-		[[ $status == failed || $status == cancelled ]] && return 1
-		sleep 1
-	done
-	[[ $status == completed ]] || return 1
+	terminal=$(run_signed_hermes "$generation" "workspace-g$generation" \
+		"STEWARD_WORKSPACE_AUDIT" "$session" "$replay")
 	python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert isinstance(p.get("output"),str) and sys.argv[1] in p["output"]' \
 		"$expected" <<<"$terminal"
 }
 
-run_hermes_input() {
-	local grant=$1 input=$2 session=$3 response run_ref terminal status
-	response=$(python3 -I -c 'import json,sys; print(json.dumps({"input":sys.argv[1],"session_id":sys.argv[2]},separators=(",",":")))' \
-		"$input" "$session" | curl -fsS -X POST "http://127.0.0.1:18091/v1/services/$grant/v1/runs" \
-		-H 'Authorization: Bearer service-secret' -H 'Content-Type: application/json' --data-binary @-)
-	run_ref=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' <<<"$response")
-	[[ $run_ref =~ ^run_[a-f0-9]{32}$ ]] || return 1
-	status=
-	for _ in $(seq 1 180); do
-		terminal=$(curl -fsS -H 'Authorization: Bearer service-secret' \
-			"http://127.0.0.1:18091/v1/services/$grant/v1/runs/$run_ref")
-		status=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' <<<"$terminal")
-		[[ $status == completed ]] && break
-		[[ $status == failed || $status == cancelled ]] && return 1
-		sleep 1
-	done
-	[[ $status == completed ]] || return 1
-	printf '%s\n' "$terminal"
+run_signed_hermes() {
+	local generation=$1 label=$2 input=$3 session=$4 replay=${5:-no}
+	local request_path=$work/task-$label.request.json
+	local bundle_path=$work/task-$label.bundle.json
+	local issue_path=$work/task-$label.issue.json
+	local terminal_path=$work/task-$label.terminal.json
+	[[ $generation =~ ^[12]$ && $label =~ ^[a-z0-9][a-z0-9-]{0,63}$ && \
+		$session =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || return 1
+	[[ $replay == yes || $replay == no ]] || return 1
+	python3 -I -c 'import json,sys; print(json.dumps({"input":sys.argv[1],"session_id":sys.argv[2]},separators=(",",":")))' \
+		"$input" "$session" >"$request_path"
+	"$ctl_bin" task issue -admission "$work/admission-g$generation.json" \
+		-intent "$work/intent-g$generation.json" -trust "$work/service-trust.json" \
+		-request "$request_path" -operation-id hermes.run -key "$work/task.private" \
+		-key-id "$task_key_id" -out "$bundle_path" >"$issue_path"
+	if [[ $replay == yes ]]; then
+		"$ctl_bin" hermes run -bundle "$bundle_path" -gateway-url http://127.0.0.1:18091 \
+			-token-file "$work/service-token" >"$work/task-$label.first.json"
+		"$ctl_bin" hermes run -bundle "$bundle_path" -gateway-url http://127.0.0.1:18091 \
+			-token-file "$work/service-token" >"$work/task-$label.replay.json"
+		python3 -I - "$work/task-$label.first.json" "$work/task-$label.replay.json" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+first = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+replay = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+if (
+    set(first) != {"run_id"}
+    or first != replay
+    or re.fullmatch(r"run_[a-f0-9]{32}", str(first.get("run_id", ""))) is None
+):
+    raise SystemExit("hermes-steward-acceptance: identical task bundle did not replay the same run ID")
+PY
+		: >"$work/service-task-replay.verified"
+	fi
+	"$ctl_bin" hermes run -bundle "$bundle_path" -gateway-url http://127.0.0.1:18091 \
+		-token-file "$work/service-token" -wait -wait-timeout 3m -poll-interval 1s >"$terminal_path"
+	cat "$terminal_path"
 }
 
 run_connector_assertion() {
-	local grant=$1 marker=$2 mode=$3 terminal
-	terminal=$(run_hermes_input "$grant" "$marker" "steward-connector-$run_id-$mode")
+	local generation=$1 label=$2 marker=$3 mode=$4 terminal
+	terminal=$(run_signed_hermes "$generation" "$label" "$marker" "steward-connector-$run_id-$mode")
 	python3 -I - "$mode" "$root/adapters/hermes-agent/fixtures/connector-skill/connector-fixture-contract.json" \
 		"$terminal" <<'PY'
 import json
@@ -766,11 +805,126 @@ if output != expected:
 PY
 }
 
-assert_agent_excludes_connector_material() {
-	local runtime=$1 scanner=$root/adapters/hermes-agent/fixture_secret_scan.py inspect_file path presence
+scan_agent_sensitive_material() {
+	local mode=$1
+	python3 -I -c '
+import base64, json, os, pathlib, stat, sys
+mode, key_path_text, connector_path_text, service_path_text, executor_path_text, origin = sys.argv[1:]
+if mode not in {"json", "stream"}:
+    raise SystemExit("hermes-steward-acceptance: invalid agent-material scan mode")
+
+
+def read_owner_file(path: pathlib.Path) -> bytes:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077 or not 0 < info.st_size <= 16384:
+        raise SystemExit(f"hermes-steward-acceptance: sensitive host file is unsafe: {path.name}")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        parts = []
+        observed = 0
+        while observed <= 16384:
+            chunk = os.read(descriptor, min(65536, 16385 - observed))
+            if not chunk:
+                break
+            parts.append(chunk)
+            observed += len(chunk)
+        final = os.fstat(descriptor)
+        named = path.lstat()
+    finally:
+        os.close(descriptor)
+    data = b"".join(parts)
+    identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+    if len(data) != info.st_size or identity(info) != identity(opened) or identity(opened) != identity(final) or identity(final) != identity(named):
+        raise SystemExit(f"hermes-steward-acceptance: sensitive host file changed while being read: {path.name}")
+    return data
+
+
+def common_encodings(value: bytes) -> tuple[bytes, ...]:
+    if not value:
+        return ()
+    encoded = [
+        value,
+        base64.b64encode(value),
+        base64.b64encode(value).rstrip(b"="),
+        base64.urlsafe_b64encode(value),
+        base64.urlsafe_b64encode(value).rstrip(b"="),
+        base64.b32encode(value),
+        base64.b32encode(value).rstrip(b"="),
+        value.hex().encode(),
+        value.hex().upper().encode(),
+    ]
+    try:
+        text = value.decode("ascii")
+    except UnicodeDecodeError:
+        pass
+    else:
+        encoded.append(json.dumps(text, ensure_ascii=True)[1:-1].encode())
+    return tuple(encoded)
+
+
+key_path = pathlib.Path(key_path_text)
+key = read_owner_file(key_path)
+lines = key.splitlines()
+if lines[:1] != [b"-----BEGIN PRIVATE KEY-----"] or lines[-1:] != [b"-----END PRIVATE KEY-----"] or len(lines) < 3:
+    raise SystemExit("hermes-steward-acceptance: task signing key is not one PKCS#8 PEM block")
+try:
+    der = base64.b64decode(b"".join(lines[1:-1]), validate=True)
+except ValueError as error:
+    raise SystemExit("hermes-steward-acceptance: task signing key PEM is invalid") from error
+if len(der) < 32 or b"\x04\x20" not in der or not der.endswith(b"\x04\x20" + der[-32:]):
+    raise SystemExit("hermes-steward-acceptance: task signing key is not canonical Ed25519 PKCS#8")
+seed = der[-32:]
+escaped_key = json.dumps(key.decode("ascii"), ensure_ascii=True)[1:-1].encode()
+escaped_trimmed_key = json.dumps(key.rstrip(b"\n").decode("ascii"), ensure_ascii=True)[1:-1].encode()
+patterns = []
+for value in (key, key.rstrip(b"\n"), der, seed):
+    patterns.extend(common_encodings(value))
+patterns.extend((escaped_key, escaped_trimmed_key, os.fsencode(key_path.resolve(strict=True))))
+for token_path_text in (connector_path_text, service_path_text, executor_path_text):
+    token_path = pathlib.Path(token_path_text)
+    raw_token = read_owner_file(token_path)
+    token = raw_token.strip()
+    if not token or b"\n" in token or b"\r" in token:
+        raise SystemExit(f"hermes-steward-acceptance: sensitive bearer value is invalid: {token_path.name}")
+    patterns.extend(common_encodings(raw_token))
+    patterns.extend(common_encodings(token))
+    patterns.append(os.fsencode(token_path.resolve(strict=True)))
+netloc = origin.removeprefix("http://")
+_host, separator, port = netloc.rpartition(":")
+if not separator or not port.isascii() or not port.isdigit():
+    raise SystemExit("hermes-steward-acceptance: connector origin is invalid")
+patterns.extend((
+    origin.encode(), netloc.encode(), f":{port}".encode(), f": {port}".encode(),
+    f"={port}".encode(), ("\"" + port + "\"").encode(),
+))
+patterns = tuple(dict.fromkeys(pattern for pattern in patterns if pattern))
+limit = (1 << 20) if mode == "json" else (2 << 30)
+overlap = max(map(len, patterns)) - 1
+carry = b""
+total = 0
+while True:
+    chunk = sys.stdin.buffer.read(1 << 20)
+    if not chunk:
+        break
+    total += len(chunk)
+    if total > limit:
+        raise SystemExit("hermes-steward-acceptance: agent material exceeds sensitive-material scan limit")
+    combined = carry + chunk
+    if any(pattern in combined for pattern in patterns):
+        raise SystemExit("hermes-steward-acceptance: sensitive host authority or bearer material reached the untrusted agent")
+    carry = combined[-overlap:] if overlap else b""
+if total == 0:
+    raise SystemExit("hermes-steward-acceptance: agent material stream is empty")
+' "$mode" "$work/task.private" "$work/connector-token" "$work/service-token" "$work/token" "$connector_origin"
+}
+
+assert_agent_excludes_sensitive_material() {
+	local runtime=$1 inspect_file path presence
 	inspect_file=$work/docker-$runtime.material-inspect.json
 	docker inspect "$runtime" >"$inspect_file"
-	python3 -I "$scanner" json "$work/connector-token" "$connector_origin" <"$inspect_file"
+	scan_agent_sensitive_material json <"$inspect_file"
 	python3 -I - "$inspect_file" <<'PY'
 import json
 import pathlib
@@ -795,8 +949,7 @@ if (
 ):
     raise SystemExit("hermes-steward-acceptance: agent writable mount topology is unexpected")
 PY
-	docker export "$runtime" | \
-		python3 -I "$scanner" stream "$work/connector-token" "$connector_origin"
+	docker export "$runtime" | scan_agent_sensitive_material stream
 	for path in /opt/data /tmp /workspace /dev/shm; do
 		presence=$(docker exec "$runtime" /opt/hermes/.venv/bin/python -I -c \
 			'import os,stat,sys; p=sys.argv[1]; print("absent" if not os.path.lexists(p) else "directory" if stat.S_ISDIR(os.lstat(p).st_mode) else "unsafe")' "$path")
@@ -805,8 +958,7 @@ PY
 		directory) ;;
 		*) echo "hermes-steward-acceptance: agent scan path is unsafe: $path" >&2; return 1 ;;
 		esac
-		docker cp "$runtime:$path/." - | \
-			python3 -I "$scanner" stream "$work/connector-token" "$connector_origin"
+		docker cp "$runtime:$path/." - | scan_agent_sensitive_material stream
 	done
 }
 
@@ -858,13 +1010,15 @@ curl -fsS -H 'Authorization: Bearer service-secret' "http://127.0.0.1:18091/v1/s
 	python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert p.get("status")=="ok" and p.get("platform")=="hermes-agent"'
 generation_1_workspace_digest=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["manifest_digest"])' \
 	"$root/adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json")
-run_workspace_audit "$grant_id" "$generation_1_workspace_digest" "steward-integration-$run_id-generation-1"
+run_workspace_audit 1 "$generation_1_workspace_digest" "steward-integration-$run_id-generation-1" yes
 mark generation_1_skill_passed
-run_connector_assertion "$grant_id" "STEWARD_CONNECTOR_WORK task=$connector_task_id" perform
+[[ -f $work/service-task-replay.verified ]]
+mark service_task_replay_verified
+run_connector_assertion 1 connector-perform "STEWARD_CONNECTOR_WORK task=$connector_task_id" perform
 mark generation_1_connector_skill_passed
-run_connector_assertion "$grant_id" "STEWARD_CONNECTOR_REPLAY task=$connector_task_id" replay
+run_connector_assertion 1 connector-replay "STEWARD_CONNECTOR_REPLAY task=$connector_task_id" replay
 mark connector_replay_denied
-run_connector_assertion "$grant_id" "STEWARD_CONNECTOR_FORBIDDEN task=$connector_forbidden_task_id" forbidden
+run_connector_assertion 1 connector-forbidden "STEWARD_CONNECTOR_FORBIDDEN task=$connector_forbidden_task_id" forbidden
 mark connector_forbidden_denied
 connector_fixture_status=$(curl -fsS "$connector_origin/status")
 python3 -I - "$root/adapters/hermes-agent/fixtures/connector-skill/connector-fixture-contract.json" \
@@ -885,8 +1039,9 @@ if status != {
     raise SystemExit("hermes-steward-acceptance: connector fixture observed unexpected effects")
 PY
 mark connector_fixture_effect_verified
-assert_agent_excludes_connector_material "$runtime_ref"
+assert_agent_excludes_sensitive_material "$runtime_ref"
 mark connector_secret_absence_verified
+mark tenant_task_private_key_agent_absence_verified
 docker exec -u 65532:65532 "$runtime_ref" sh -c 'printf "generation-two\n" > /opt/data/workspace/generation-two.txt'
 generation_2_workspace_digest=$(python3 -I - "$root/adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json" <<'PY'
 import hashlib
@@ -921,16 +1076,24 @@ grant_id=${admission[1]}
 mark generation_2_admitted
 curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
 mark generation_2_started
+[[ $(docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref") == runsc ]]
+[[ $(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref") == true ]]
 wait_for_hermes "$grant_id" "$runtime_ref"
 mark generation_2_ready
-run_workspace_audit "$grant_id" "$generation_2_workspace_digest" "steward-integration-$run_id-generation-2"
+run_workspace_audit 2 "$generation_2_workspace_digest" "steward-integration-$run_id-generation-2"
 mark generation_2_skill_passed
+assert_agent_excludes_sensitive_material "$runtime_ref"
 curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 runtime_ref=
 mark generation_2_destroyed
 curl -fsS -X POST http://127.0.0.1:8090/v1/state/purge -H 'Content-Type: application/json' \
 	-H "Authorization: Bearer $token" \
 	--data-binary "{\"tenant_id\":\"$tenant_id\",\"node_id\":\"$node_id\",\"lineage_id\":\"$lineage_id\",\"generation\":2}" >/dev/null
+volume_inventory=$(docker volume ls --quiet)
+if grep -Fqx -- "$state_volume" <<<"$volume_inventory"; then
+	echo "hermes-steward-acceptance: state purge left the lineage volume present" >&2
+	exit 1
+fi
 state_volume=
 mark state_purged
 "$ctl_bin" evidence verify -in "$work/evidence.bin" -public-key "$work/receipts.public" \
@@ -960,21 +1123,46 @@ PY
 mark evidence_chain_verified
 "$ctl_bin" evidence verify -kind connector -in "$work/connector-receipts.ndjson" \
 	-public-key "$work/connectors.public" -node-id "$node_id/gateway" -epoch 1 \
-	-expected-sequence 2 -json >"$work/connector-evidence-head.json"
-python3 -I - "$work/connector-receipts.ndjson" "$work/connector-token" "$connector_origin" \
+	-json >"$work/connector-evidence-head.json"
+mapfile -t gateway_receipt_head < <(python3 -I -c '
+import json, pathlib, sys
+document = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+head = document["head"]
+print(head["sequence"])
+print(head["chain_hash"])
+' "$work/connector-evidence-head.json")
+[[ ${#gateway_receipt_head[@]} -eq 2 && ${gateway_receipt_head[0]} =~ ^[1-9][0-9]*$ && \
+	${gateway_receipt_head[1]} =~ ^sha256:[a-f0-9]{64}$ ]]
+"$ctl_bin" task audit -in "$work/task-workspace-g1.bundle.json" -public-key "$work/task.public" \
+	-key-id "$task_key_id" -receipts "$work/connector-receipts.ndjson" \
+	-receipt-public-key "$work/connectors.public" -receipt-node-id "$node_id/gateway" -receipt-epoch 1 \
+	-request "$work/task-workspace-g1.request.json" -expected-sequence "${gateway_receipt_head[0]}" \
+	-expected-chain-hash "${gateway_receipt_head[1]}" >"$work/service-task-audit.json"
+python3 -I - "$work/connector-receipts.ndjson" "$work/connector-evidence-head.json" \
+	"$work/service-task-audit.json" "$work" "$work/connector-token" "$work/service-token" \
+	"$work/token" "$work/task.private" "$connector_origin" \
 	"$root/adapters/hermes-agent/fixtures/connector-skill/connector-fixture-contract.json" \
 	"$tenant_id" "$instance_id" "$connector_runtime_ref" "$capsule_digest" "$connector_policy_digest" \
-	"$connector_route_policy_digest" "$connector_grant_id" "$connector_task_id" "$node_id/gateway" <<'PY'
+	"$connector_route_policy_digest" "$connector_grant_id" "$connector_task_id" "$connector_forbidden_task_id" \
+	"$node_id/gateway" "$task_key_id" <<'PY'
 import base64
 import hashlib
 import json
+import os
 import pathlib
+import re
 import stat
 import sys
 
 (
     ledger_path,
+    head_path,
+    task_audit_path,
+    work_path,
     token_path,
+    service_token_path,
+    executor_token_path,
+    task_private_path,
     origin,
     contract_path,
     tenant_id,
@@ -984,24 +1172,88 @@ import sys
     policy_digest,
     route_policy_digest,
     grant_id,
-    task_id,
+    connector_task_id,
+    connector_forbidden_task_id,
     node_id,
+    task_key_id,
 ) = sys.argv[1:]
+work = pathlib.Path(work_path)
+
+
+def read_owner_file(path: pathlib.Path, maximum: int) -> bytes:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or not 0 < info.st_size <= maximum:
+        raise SystemExit(f"hermes-steward-acceptance: owner-only task artifact is unsafe: {path.name}")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        parts = []
+        observed = 0
+        while observed <= maximum:
+            chunk = os.read(descriptor, min(65536, maximum + 1 - observed))
+            if not chunk:
+                break
+            parts.append(chunk)
+            observed += len(chunk)
+        final = os.fstat(descriptor)
+        named = path.lstat()
+    finally:
+        os.close(descriptor)
+    data = b"".join(parts)
+    identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+    if len(data) != info.st_size or identity(info) != identity(opened) or identity(opened) != identity(final) or identity(final) != identity(named):
+        raise SystemExit(f"hermes-steward-acceptance: task artifact changed while being read: {path.name}")
+    return data
+
+
 ledger_file = pathlib.Path(ledger_path)
 ledger_stat = ledger_file.stat()
 raw = ledger_file.read_bytes()
 if (
     not stat.S_ISREG(ledger_stat.st_mode)
     or stat.S_IMODE(ledger_stat.st_mode) != 0o600
-    or not 0 < len(raw) <= 256 << 10
+    or not 0 < len(raw) <= 4 << 20
     or len(raw) != ledger_stat.st_size
 ):
     raise SystemExit("hermes-steward-acceptance: connector receipt ledger is not a bounded owner-only file")
 secret = pathlib.Path(token_path).read_bytes().strip()
+service_token = pathlib.Path(service_token_path).read_bytes().strip()
+executor_token = pathlib.Path(executor_token_path).read_bytes().strip()
+task_private = read_owner_file(pathlib.Path(task_private_path), 16384)
+task_private_lines = task_private.splitlines()
+try:
+    task_private_der = base64.b64decode(b"".join(task_private_lines[1:-1]), validate=True)
+except ValueError as error:
+    raise SystemExit("hermes-steward-acceptance: task private key PEM is invalid") from error
+if (
+    task_private_lines[:1] != [b"-----BEGIN PRIVATE KEY-----"]
+    or task_private_lines[-1:] != [b"-----END PRIVATE KEY-----"]
+    or len(task_private_der) < 32
+    or not task_private_der.endswith(b"\x04\x20" + task_private_der[-32:])
+):
+    raise SystemExit("hermes-steward-acceptance: task private key is not canonical Ed25519 PKCS#8")
+task_private_seed = task_private_der[-32:]
+task_private_escaped = json.dumps(task_private.decode("ascii"), ensure_ascii=True)[1:-1].encode()
+task_private_trimmed_escaped = json.dumps(task_private.rstrip(b"\n").decode("ascii"), ensure_ascii=True)[1:-1].encode()
 netloc = origin.removeprefix("http://")
 _host, separator, port = netloc.rpartition(":")
-forbidden_material = (
+forbidden_material = [
     secret,
+    service_token,
+    executor_token,
+    task_private,
+    task_private_der,
+    task_private_seed,
+    base64.b64encode(task_private),
+    base64.b64encode(task_private_der),
+    base64.b64encode(task_private_seed),
+    base64.b64encode(task_private_seed).rstrip(b"="),
+    task_private_der.hex().encode(),
+    task_private_seed.hex().encode(),
+    task_private_seed.hex().upper().encode(),
+    task_private_escaped,
+    task_private_trimmed_escaped,
     origin.encode(),
     netloc.encode(),
     f":{port}".encode(),
@@ -1009,46 +1261,125 @@ forbidden_material = (
     f"={port}".encode(),
     f'"{port}"'.encode(),
     str(pathlib.Path(token_path).resolve()).encode(),
-    task_id.encode(),
-)
-if not secret or not separator or any(material in raw for material in forbidden_material):
-    raise SystemExit("hermes-steward-acceptance: connector receipt ledger contains secret call material")
+    str(pathlib.Path(service_token_path).resolve()).encode(),
+    str(pathlib.Path(executor_token_path).resolve()).encode(),
+    str(pathlib.Path(task_private_path).resolve()).encode(),
+    connector_task_id.encode(),
+    connector_forbidden_task_id.encode(),
+]
+issue_by_permit = {}
+
+
+def service_task_digest(task_id: str) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"steward-task-permit-spend-v1\x00")
+    for value in (tenant_id, instance_id, task_id):
+        encoded = value.encode()
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return "sha256:" + digest.hexdigest()
+
+
+for issue_path in sorted(work.glob("task-*.issue.json")):
+    issue = json.loads(read_owner_file(issue_path, 4096))
+    if set(issue) != {"bundle_path", "permit_digest", "request_digest", "task_id"}:
+        raise SystemExit("hermes-steward-acceptance: task issue metadata is invalid")
+    stem = issue_path.name.removesuffix(".issue.json")
+    request_path = work / f"{stem}.request.json"
+    bundle_path = work / f"{stem}.bundle.json"
+    request = read_owner_file(request_path, 65536)
+    read_owner_file(bundle_path, 128 << 10)
+    if (
+        not request
+        or len(request) > 65536
+        or issue.get("bundle_path") != str(bundle_path)
+        or re.fullmatch(r"sha256:[a-f0-9]{64}", str(issue.get("permit_digest", ""))) is None
+        or re.fullmatch(r"sha256:[a-f0-9]{64}", str(issue.get("request_digest", ""))) is None
+        or issue.get("request_digest") != "sha256:" + hashlib.sha256(request).hexdigest()
+        or re.fullmatch(r"task-[a-f0-9]{32}", str(issue.get("task_id", ""))) is None
+        or issue["permit_digest"] in issue_by_permit
+    ):
+        raise SystemExit("hermes-steward-acceptance: task issue binding is invalid")
+    request_document = json.loads(request)
+    if set(request_document) != {"input", "session_id"} or not isinstance(request_document["input"], str):
+        raise SystemExit("hermes-steward-acceptance: exact task request is invalid")
+    forbidden_material.extend((request, request_document["input"].encode(), issue["task_id"].encode()))
+    issue_by_permit[issue["permit_digest"]] = (issue, len(request), service_task_digest(issue["task_id"]))
+if len(issue_by_permit) != 5:
+    raise SystemExit("hermes-steward-acceptance: expected five independently signed Hermes task bundles")
+if (
+    not secret
+    or not service_token
+    or not executor_token
+    or not task_private
+    or not separator
+    or any(material and material in raw for material in forbidden_material)
+):
+    raise SystemExit("hermes-steward-acceptance: Gateway receipt ledger contains task bodies, task IDs, prompts, or secrets")
 lines = raw.splitlines()
-if len(lines) != 2:
-    raise SystemExit("hermes-steward-acceptance: connector receipt ledger must contain one complete call")
+if len(lines) != 2 + 2 * len(issue_by_permit):
+    raise SystemExit("hermes-steward-acceptance: mixed Gateway receipt ledger has an unexpected record count")
 receipts = []
-for line in lines:
+previous = "sha256:" + "0" * 64
+for index, line in enumerate(lines, 1):
     if not 0 < len(line) <= 128 << 10:
         raise SystemExit("hermes-steward-acceptance: connector receipt line is oversized")
     envelope = json.loads(line)
-    if set(envelope) != {"payload", "payloadType", "signatures"} or envelope["payloadType"] != "application/vnd.steward.connector-receipt.v1+json":
+    payload_type = envelope.get("payloadType")
+    schemas = {
+        "application/vnd.steward.connector-receipt.v1+json": "steward.connector-receipt.v1",
+        "application/vnd.steward.connector-receipt.v3+json": "steward.connector-receipt.v3",
+    }
+    if set(envelope) != {"payload", "payloadType", "signatures"} or payload_type not in schemas:
         raise SystemExit("hermes-steward-acceptance: connector receipt envelope is invalid")
     payload = base64.b64decode(envelope["payload"], validate=True)
-    receipts.append(json.loads(payload))
+    if base64.b64encode(payload).decode() != envelope["payload"]:
+        raise SystemExit("hermes-steward-acceptance: connector receipt payload is not canonical base64")
+    receipt = json.loads(payload)
+    if (
+        set(receipt) != {"epoch", "event", "node_id", "observed_at", "previous_hash", "schema_version", "sequence"}
+        or receipt.get("schema_version") != schemas[payload_type]
+        or receipt.get("node_id") != node_id
+        or receipt.get("epoch") != 1
+        or receipt.get("sequence") != index
+        or receipt.get("previous_hash") != previous
+        or not isinstance(receipt.get("observed_at"), str)
+    ):
+        raise SystemExit("hermes-steward-acceptance: Gateway receipt provenance is invalid")
+    current_hash = hashlib.sha256(b"steward-connector-ledger-v1\x00" + line).hexdigest()
+    previous = "sha256:" + current_hash
+    receipts.append((payload_type, receipt))
+
+head_document = json.loads(pathlib.Path(head_path).read_text(encoding="utf-8"))
+head = head_document.get("head") if isinstance(head_document, dict) else None
+if (
+    set(head_document) != {"head", "kind", "valid"}
+    or head_document.get("valid") is not True
+    or head_document.get("kind") != "connector"
+    or not isinstance(head, dict)
+    or head.get("node_id") != node_id
+    or head.get("epoch") != 1
+    or head.get("sequence") != len(lines)
+    or head.get("chain_hash") != previous
+):
+    raise SystemExit("hermes-steward-acceptance: verified dynamic Gateway receipt head is invalid")
 
 contract = json.loads(pathlib.Path(contract_path).read_text(encoding="utf-8"))
 request = json.dumps(contract["request"], separators=(",", ":"), sort_keys=True).encode()
 response = json.dumps(contract["response"], separators=(",", ":"), sort_keys=True).encode()
 task_hash = hashlib.sha256()
 task_hash.update(b"steward-gateway-connector-call-v1\x00")
-for value in (tenant_id, instance_id, task_id, contract["connector_id"], contract["operation_id"]):
+for value in (tenant_id, instance_id, connector_task_id, contract["connector_id"], contract["operation_id"]):
     task_hash.update(value.encode())
     task_hash.update(b"\x00")
 task_digest = "sha256:" + task_hash.hexdigest()
 
-for index, receipt in enumerate(receipts, 1):
+connector_receipts = [receipt for payload_type, receipt in receipts if payload_type.endswith(".v1+json")]
+if len(connector_receipts) != 2:
+    raise SystemExit("hermes-steward-acceptance: mixed ledger must contain one complete legacy connector call")
+for receipt in connector_receipts:
     if (
-        set(receipt) != {"epoch", "event", "node_id", "observed_at", "previous_hash", "schema_version", "sequence"}
-        or receipt.get("schema_version") != "steward.connector-receipt.v1"
-        or receipt.get("node_id") != node_id
-        or receipt.get("epoch") != 1
-        or receipt.get("sequence") != index
-        or not isinstance(receipt.get("observed_at"), str)
-    ):
-        raise SystemExit("hermes-steward-acceptance: connector receipt provenance is invalid")
-    event = receipt["event"]
-    if (
-        event.get("tenant_id") != tenant_id
+        (event := receipt["event"]).get("tenant_id") != tenant_id
         or event.get("runtime_ref") != runtime_ref
         or event.get("capsule_digest") != capsule_digest
         or event.get("policy_digest") != policy_digest
@@ -1063,7 +1394,7 @@ for index, receipt in enumerate(receipts, 1):
     ):
         raise SystemExit("hermes-steward-acceptance: connector receipt is not bound to the admitted call")
 
-authorize, terminal = (receipt["event"] for receipt in receipts)
+authorize, terminal = (receipt["event"] for receipt in connector_receipts)
 if (
     authorize.get("phase") != "authorize"
     or authorize.get("outcome") != "allowed"
@@ -1075,8 +1406,87 @@ if (
     or terminal.get("response_bytes") != len(response)
 ):
     raise SystemExit("hermes-steward-acceptance: connector receipt phases do not prove a completed upstream response")
+
+admissions = {}
+for generation in (1, 2):
+    admission = json.loads((work / f"admission-g{generation}.json").read_text(encoding="utf-8"))
+    admissions[admission["grant_id"]] = (generation, admission)
+service_receipts = [receipt for payload_type, receipt in receipts if payload_type.endswith(".v3+json")]
+if len(service_receipts) != 2 * len(issue_by_permit):
+    raise SystemExit("hermes-steward-acceptance: mixed ledger omits a service-task authorization or terminal")
+service_by_permit = {}
+for receipt in service_receipts:
+    event = receipt["event"]
+    admitted = admissions.get(event.get("grant_id"))
+    binding = issue_by_permit.get(event.get("permit_digest"))
+    if admitted is None or binding is None:
+        raise SystemExit("hermes-steward-acceptance: service-task receipt has no exact admission or task bundle")
+    generation, admission = admitted
+    issue, request_bytes, expected_task_digest = binding
+    if (
+        event.get("kind") != "service_task"
+        or event.get("tenant_id") != tenant_id
+        or event.get("runtime_ref") != admission.get("runtime_ref")
+        or event.get("capsule_digest") != capsule_digest
+        or event.get("policy_digest") != admission.get("policy_digest")
+        or event.get("route_policy_digest") != admission.get("route_policy_digest")
+        or event.get("generation") != generation
+        or event.get("grant_id") != admission.get("grant_id")
+        or event.get("connector_id") != ""
+        or event.get("service_id") != "hermes-api"
+        or event.get("operation_id") != "hermes.run"
+        or re.fullmatch(r"sha256:[a-f0-9]{64}", str(event.get("operation_policy_digest", ""))) is None
+        or event.get("task_digest") != expected_task_digest
+        or event.get("authority_key_id") != task_key_id
+        or event.get("request_digest") != issue["request_digest"]
+        or event.get("request_bytes") != request_bytes
+        or event.get("error_code", "") != ""
+    ):
+        raise SystemExit("hermes-steward-acceptance: service-task receipt is not bound to the signed task and admission")
+    service_by_permit.setdefault(event["permit_digest"], []).append(event)
+if set(service_by_permit) != set(issue_by_permit):
+    raise SystemExit("hermes-steward-acceptance: service-task receipts do not cover every issued task")
+for permit_digest, events in service_by_permit.items():
+    if len(events) != 2:
+        raise SystemExit("hermes-steward-acceptance: a task permit was dispatched or recorded more than once")
+    authorized, completed = events
+    if (
+        authorized.get("phase") != "authorize"
+        or authorized.get("outcome") != "allowed"
+        or authorized.get("response_bytes") != 0
+        or "http_status" in authorized
+        or completed.get("phase") != "terminal"
+        or completed.get("outcome") != "responded"
+        or completed.get("http_status") not in {200, 201, 202}
+        or not 0 < completed.get("response_bytes", 0) <= 1 << 20
+        or re.fullmatch(r"run_[a-f0-9]{32}", str(completed.get("run_id", ""))) is None
+        or any(authorized.get(name) != completed.get(name) for name in (
+            "tenant_id", "runtime_ref", "capsule_digest", "policy_digest", "route_policy_digest",
+            "generation", "grant_id", "service_id", "operation_id", "operation_policy_digest",
+            "task_digest", "authority_key_id", "permit_digest", "request_digest", "request_bytes",
+        ))
+    ):
+        raise SystemExit("hermes-steward-acceptance: service-task receipts do not prove one accepted dispatch")
+
+audit = json.loads(pathlib.Path(task_audit_path).read_text(encoding="utf-8"))
+workspace_issue = json.loads((work / "task-workspace-g1.issue.json").read_text(encoding="utf-8"))
+replayed_run = json.loads((work / "task-workspace-g1.replay.json").read_text(encoding="utf-8"))
+if (
+    audit.get("valid") is not True
+    or audit.get("permit_digest") != workspace_issue["permit_digest"]
+    or audit.get("request_digest") != workspace_issue["request_digest"]
+    or audit.get("permit_key_id") != task_key_id
+    or not isinstance(audit.get("authorization"), dict)
+    or not isinstance(audit.get("terminal"), dict)
+    or audit["authorization"].get("event", {}).get("phase") != "authorize"
+    or audit["terminal"].get("event", {}).get("phase") != "terminal"
+    or audit["terminal"].get("event", {}).get("run_id") != replayed_run.get("run_id")
+    or audit.get("head") != head
+):
+    raise SystemExit("hermes-steward-acceptance: offline task audit did not bind the exact request to the mixed ledger")
 PY
 mark connector_evidence_chain_verified
+mark service_task_audit_verified
 mark acceptance_complete
 write_success_evidence
-echo "Hermes Steward acceptance passed: signed import, gVisor, Gateway inference, service and connector work, replay denial, resume, purge, and receipts verified."
+echo "Hermes Steward acceptance passed: signed import, gVisor, tenant-signed service work, connector work, exact replay, resume, purge, and mixed receipts verified."

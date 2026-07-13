@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,8 +24,10 @@ import (
 type repeatedFlag []string
 
 const (
-	actionTrustSchemaV1 = "steward.action-trust.v1"
-	maxActionTrustBytes = 4 << 20
+	actionTrustSchemaV1  = "steward.action-trust.v1"
+	maxActionTrustBytes  = 4 << 20
+	serviceTrustSchemaV1 = "steward.service-trust.v1"
+	maxServiceTrustBytes = 4 << 20
 )
 
 type actionTrustInventory struct {
@@ -59,6 +62,31 @@ type actionTrustOperation struct {
 	PolicyDigest string `json:"policy_digest"`
 }
 
+type serviceTrustInventory struct {
+	SchemaVersion string                `json:"schema_version"`
+	NodeID        string                `json:"node_id"`
+	TenantID      string                `json:"tenant_id"`
+	Services      []serviceTrustService `json:"services"`
+}
+
+type serviceTrustService struct {
+	ServiceID  string                  `json:"service_id"`
+	Operations []serviceTrustOperation `json:"operations"`
+}
+
+type serviceTrustOperation struct {
+	ServiceID        string `json:"service_id"`
+	ID               string `json:"id"`
+	Method           string `json:"method"`
+	Path             string `json:"path"`
+	ContentType      string `json:"content_type"`
+	MaxRequestBytes  int64  `json:"max_request_bytes"`
+	MaxResponseBytes int64  `json:"max_response_bytes"`
+	MaxSeconds       int    `json:"max_seconds"`
+	MaxPermitSeconds int    `json:"max_permit_seconds"`
+	PolicyDigest     string `json:"policy_digest"`
+}
+
 func (values *repeatedFlag) String() string { return strings.Join(*values, ",") }
 func (values *repeatedFlag) Set(value string) error {
 	if strings.TrimSpace(value) == "" {
@@ -70,7 +98,7 @@ func (values *repeatedFlag) Set(value string) error {
 
 func gatewayCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("gateway command requires validate, route, or connector")
+		return errors.New("gateway command requires validate, route, connector, or service")
 	}
 	switch arguments[0] {
 	case "validate":
@@ -96,9 +124,208 @@ func gatewayCommand(arguments []string, stdout io.Writer) error {
 		return gatewayRouteCommand(arguments[1:], stdout)
 	case "connector":
 		return gatewayConnectorCommand(arguments[1:], stdout)
+	case "service":
+		return gatewayServiceCommand(arguments[1:], stdout)
 	default:
 		return fmt.Errorf("unsupported gateway command %q", arguments[0])
 	}
+}
+
+func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
+	if len(arguments) == 0 {
+		return errors.New("gateway service requires list, trust, or set")
+	}
+	action := arguments[0]
+	flags := flag.NewFlagSet("gateway service "+action, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	path := flags.String("config", "/etc/steward/gateway.json", "gateway configuration")
+	serviceID := flags.String("service-id", "", "exact admitted service ID")
+	trustNodeID := flags.String("node-id", "", "exact node identity for an exported service-trust inventory")
+	trustTenantID := flags.String("tenant-id", "", "exact tenant identity for an exported service-trust inventory")
+	maxRequest := flags.Int64("max-request-bytes", 64<<10, "exact request body byte ceiling")
+	maxResponse := flags.Int64("max-response-bytes", 1<<20, "exact response body byte ceiling")
+	maxSeconds := flags.Int("max-seconds", 120, "upstream call lifetime ceiling")
+	maxPermitSeconds := flags.Int("max-permit-seconds", 300, "maximum tenant task-permit lifetime")
+	receiptFile := flags.String("receipt-file", "", "signed receipt ledger path for an older config")
+	receiptKeyFile := flags.String("receipt-key-file", "", "receipt private key path for an older config")
+	receiptNodeID := flags.String("receipt-node-id", "", "stable receipt node identity for an older config")
+	receiptEpoch := flags.Uint64("receipt-epoch", 1, "receipt key epoch for an older config")
+	var operations, tenantBudgets repeatedFlag
+	flags.Var(&operations, "operation", "exact ID=POST:/path operation; repeat for more")
+	flags.Var(&tenantBudgets, "tenant-budget", "exact TENANT=BYTES receipt budget; repeat for more")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("gateway service accepts no positional arguments")
+	}
+	config, _, _, _, err := gateway.LoadConfig(*path)
+	if err != nil {
+		return err
+	}
+	switch action {
+	case "list":
+		if !onlyConfigFlagVisited(flags) {
+			return errors.New("gateway service list accepts only -config")
+		}
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(config.ServiceOperations)
+	case "trust":
+		if *trustNodeID == "" || *trustTenantID == "" ||
+			!onlyNamedFlagsVisited(flags, "config", "node-id", "tenant-id") {
+			return errors.New("gateway service trust requires -node-id and -tenant-id and accepts only those flags plus -config")
+		}
+		return writeServiceTrustInventory(stdout, config, *trustNodeID, *trustTenantID)
+	case "set":
+		// Continue below after the read-only operations have returned.
+	default:
+		return fmt.Errorf("unsupported gateway service action %q", action)
+	}
+	if flagWasVisited(flags, "node-id") || flagWasVisited(flags, "tenant-id") {
+		return errors.New("-node-id and -tenant-id are accepted only by gateway service trust")
+	}
+	if *serviceID == "" || len(operations) == 0 {
+		return errors.New("gateway service set requires -service-id and at least one -operation")
+	}
+	parsed := make([]gateway.ServiceOperation, 0, len(operations))
+	seenIDs := make(map[string]struct{}, len(operations))
+	for _, value := range operations {
+		operation, err := parseConnectorOperation(value)
+		if err != nil {
+			return err
+		}
+		if operation.Method != http.MethodPost {
+			return fmt.Errorf("service operation %q must use POST", operation.ID)
+		}
+		if _, duplicate := seenIDs[operation.ID]; duplicate {
+			return fmt.Errorf("duplicate service operation %q", operation.ID)
+		}
+		seenIDs[operation.ID] = struct{}{}
+		parsed = append(parsed, gateway.ServiceOperation{
+			ServiceID: *serviceID, ID: operation.ID, Method: operation.Method, Path: operation.Path,
+			ContentType: "application/json", MaxRequestBytes: *maxRequest, MaxResponseBytes: *maxResponse,
+			MaxSeconds: *maxSeconds, MaxPermitSeconds: *maxPermitSeconds,
+		})
+	}
+
+	budgetsChanged := false
+	if len(tenantBudgets) > 0 {
+		parsedBudgets, err := parseConnectorTenantBudgets(tenantBudgets)
+		if err != nil {
+			return err
+		}
+		for _, budget := range parsedBudgets {
+			found := false
+			for index := range config.ConnectorReceiptTenantBudgets {
+				if config.ConnectorReceiptTenantBudgets[index].TenantID != budget.TenantID {
+					continue
+				}
+				found = true
+				if config.ConnectorReceiptTenantBudgets[index].Bytes != budget.Bytes {
+					config.ConnectorReceiptTenantBudgets[index] = budget
+					budgetsChanged = true
+				}
+				break
+			}
+			if !found {
+				config.ConnectorReceiptTenantBudgets = append(config.ConnectorReceiptTenantBudgets, budget)
+				budgetsChanged = true
+			}
+		}
+	}
+	if len(config.ConnectorReceiptTenantBudgets) == 0 {
+		return errors.New("adding an authorized service task requires at least one -tenant-budget TENANT=BYTES")
+	}
+	receiptIdentityChanged := false
+	if config.ConnectorReceiptFile == "" {
+		if *receiptFile == "" || *receiptKeyFile == "" || *receiptNodeID == "" || *receiptEpoch == 0 {
+			return errors.New("older gateway config requires -receipt-file, -receipt-key-file, -receipt-node-id, and a positive -receipt-epoch when adding its first authorized service task")
+		}
+		config.ConnectorReceiptFile, config.ConnectorReceiptKeyFile = *receiptFile, *receiptKeyFile
+		config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch = *receiptNodeID, *receiptEpoch
+		receiptIdentityChanged = true
+	} else if connectorReceiptFlagVisited(flags) {
+		return errors.New("receipt flags are accepted only when upgrading a config without a receipt identity")
+	}
+
+	kept := config.ServiceOperations[:0]
+	for _, operation := range config.ServiceOperations {
+		if operation.ServiceID != *serviceID {
+			kept = append(kept, operation)
+		}
+	}
+	replaced := len(kept) != len(config.ServiceOperations)
+	config.ServiceOperations = append(kept, parsed...)
+	sort.Slice(config.ServiceOperations, func(i, j int) bool {
+		if config.ServiceOperations[i].ServiceID != config.ServiceOperations[j].ServiceID {
+			return config.ServiceOperations[i].ServiceID < config.ServiceOperations[j].ServiceID
+		}
+		return config.ServiceOperations[i].ID < config.ServiceOperations[j].ID
+	})
+	if err := writeGatewayConfig(*path, config); err != nil {
+		return err
+	}
+	activation := "systemctl reload steward-gateway.service"
+	if budgetsChanged || receiptIdentityChanged {
+		activation = "systemctl restart steward-gateway.service"
+	}
+	result := map[string]any{"service_id": *serviceID, "operations": parsed, "replaced": replaced, "activation": activation}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(result)
+}
+
+func writeServiceTrustInventory(stdout io.Writer, config gateway.Config, nodeID, tenantID string) error {
+	if !boundedTrustIdentity(nodeID) || !boundedTrustIdentity(tenantID) {
+		return errors.New("service trust node and tenant identities must be non-empty, at most 128 bytes, and contain no NUL")
+	}
+	if config.ConnectorReceiptNodeID != gateway.ServiceTaskReceiptNodeID(nodeID) {
+		return errors.New("Gateway receipt node ID does not match the task service node")
+	}
+	budgeted := false
+	for _, budget := range config.ConnectorReceiptTenantBudgets {
+		if budget.TenantID == tenantID {
+			budgeted = true
+			break
+		}
+	}
+	if !budgeted {
+		return fmt.Errorf("tenant %q has no configured receipt budget", tenantID)
+	}
+	byService := make(map[string][]serviceTrustOperation)
+	for _, operation := range config.ServiceOperations {
+		byService[operation.ServiceID] = append(byService[operation.ServiceID], serviceTrustOperation{
+			ServiceID: operation.ServiceID, ID: operation.ID, Method: operation.Method, Path: operation.Path,
+			ContentType: operation.ContentType, MaxRequestBytes: operation.MaxRequestBytes,
+			MaxResponseBytes: operation.MaxResponseBytes, MaxSeconds: operation.MaxSeconds,
+			MaxPermitSeconds: operation.MaxPermitSeconds, PolicyDigest: gateway.ServiceOperationDigest(operation),
+		})
+	}
+	if len(byService) == 0 {
+		return errors.New("gateway has no configured authorized service operations")
+	}
+	output := serviceTrustInventory{SchemaVersion: serviceTrustSchemaV1, NodeID: nodeID, TenantID: tenantID}
+	for serviceID, operations := range byService {
+		sort.Slice(operations, func(i, j int) bool { return operations[i].ID < operations[j].ID })
+		output.Services = append(output.Services, serviceTrustService{ServiceID: serviceID, Operations: operations})
+	}
+	sort.Slice(output.Services, func(i, j int) bool { return output.Services[i].ServiceID < output.Services[j].ServiceID })
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(output); err != nil {
+		return err
+	}
+	if buffer.Len() > maxServiceTrustBytes {
+		return fmt.Errorf("service trust inventory exceeds %d bytes", maxServiceTrustBytes)
+	}
+	_, err := stdout.Write(buffer.Bytes())
+	return err
+}
+
+func boundedTrustIdentity(value string) bool {
+	return strings.TrimSpace(value) != "" && len(value) <= 128 && !strings.ContainsRune(value, '\x00')
 }
 
 func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {

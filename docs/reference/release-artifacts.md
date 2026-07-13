@@ -121,13 +121,20 @@ Executor evidence, uplink replay state, and supervisor state. Activation uses th
 ranges to reject an unsafe upgrade or rollback before changing the active-release
 symlink or relay binding.
 
-Current manifests declare `connector_receipt_log` with `read_min: 1`, `read_max: 2`,
-and `write: 2`. Ordinary connector records retain schema 1; action-permit records
-use schema 2 and add the action-authority key ID, exact permit digest, and exact
-request digest. Both may appear in one signed chain. Format inspection also requires
-reader 2 whenever action authorities are configured, even before the first schema-2
-record, because the active configuration can write one immediately. A release that
-can read only format 1 is not a safe rollback target after either condition applies.
+Current manifests declare `connector_receipt_log` with `read_min: 1`, `read_max: 3`,
+and `write: 3`. Ordinary connector records retain schema 1. Action-permit records use
+schema 2 and add the action-authority key ID, exact permit digest, and exact request
+digest. Exact service-task records use schema 3 and add the service, operation-policy,
+and run bindings needed to recover a durable dispatch result without repeating the
+upstream effect. All three schemas may appear in one signed chain. Format inspection
+requires reader 2 whenever action authorities are configured and reader 3 whenever
+service-task operations are configured, even before the first corresponding record,
+because the active configuration can write that format immediately.
+
+Current manifests also declare `gateway_state` readers 1 through 4 and writer 4.
+Gateway state format 4 retains service identity and tenant task authorities for
+task-authorized grants. A release whose reader or writer stops at an observed or
+configuration-required format is not a safe rollback target.
 
 See [platform support]({{ '/reference/platform-support/' | relative_url }}) and
 [air-gapped installation]({{ '/guides/air-gapped/' | relative_url }}).

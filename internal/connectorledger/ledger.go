@@ -1,7 +1,8 @@
 // Package connectorledger maintains the signed, hash-linked record of mediated
-// connector calls. It is deliberately separate from the Executor receipt format:
-// adding a high-volume network vocabulary must not make an existing admission
-// evidence chain unreadable by an older Steward binary.
+// connector calls and exact service-task dispatches. It is deliberately separate
+// from the Executor receipt format: adding a high-volume network vocabulary must
+// not make an existing admission evidence chain unreadable by an older Steward
+// binary.
 package connectorledger
 
 import (
@@ -27,8 +28,10 @@ import (
 const (
 	PayloadTypeV1 = "application/vnd.steward.connector-receipt.v1+json"
 	PayloadTypeV2 = "application/vnd.steward.connector-receipt.v2+json"
+	PayloadTypeV3 = "application/vnd.steward.connector-receipt.v3+json"
 	SchemaV1      = "steward.connector-receipt.v1"
 	SchemaV2      = "steward.connector-receipt.v2"
+	SchemaV3      = "steward.connector-receipt.v3"
 	// PayloadType remains the original format identifier for source compatibility
 	// with callers that construct legacy, non-permit receipt fixtures.
 	PayloadType              = PayloadTypeV1
@@ -150,32 +153,45 @@ const (
 	Failed    Outcome = "failed"
 )
 
+// EventKind identifies the trust boundary whose exact external effect is
+// recorded. An empty kind is reserved for the legacy v1/v2 connector formats.
+type EventKind string
+
+const (
+	ConnectorCall EventKind = "connector_call"
+	ServiceTask   EventKind = "service_task"
+)
+
 // Event is the bounded, non-secret portion supplied by Gateway. It records
 // enforcement identity and transfer metadata, never headers, credentials,
 // origins, paths, queries, or bodies.
 type Event struct {
-	Phase             Phase   `json:"phase"`
-	Outcome           Outcome `json:"outcome"`
-	TenantID          string  `json:"tenant_id"`
-	RuntimeRef        string  `json:"runtime_ref"`
-	CapsuleDigest     string  `json:"capsule_digest"`
-	PolicyDigest      string  `json:"policy_digest"`
-	RoutePolicyDigest string  `json:"route_policy_digest"`
-	Generation        uint64  `json:"generation"`
-	GrantID           string  `json:"grant_id"`
-	ConnectorID       string  `json:"connector_id"`
-	OperationID       string  `json:"operation_id"`
-	TaskDigest        string  `json:"task_digest"`
-	AuthorityKeyID    string  `json:"authority_key_id,omitempty"`
-	PermitDigest      string  `json:"permit_digest,omitempty"`
-	RequestDigest     string  `json:"request_digest,omitempty"`
-	HTTPStatus        int     `json:"http_status,omitempty"`
-	RequestBytes      int64   `json:"request_bytes"`
-	ResponseBytes     int64   `json:"response_bytes"`
-	ErrorCode         string  `json:"error_code,omitempty"`
+	Phase                 Phase     `json:"phase"`
+	Outcome               Outcome   `json:"outcome"`
+	Kind                  EventKind `json:"kind,omitempty"`
+	TenantID              string    `json:"tenant_id"`
+	RuntimeRef            string    `json:"runtime_ref"`
+	CapsuleDigest         string    `json:"capsule_digest"`
+	PolicyDigest          string    `json:"policy_digest"`
+	RoutePolicyDigest     string    `json:"route_policy_digest"`
+	Generation            uint64    `json:"generation"`
+	GrantID               string    `json:"grant_id"`
+	ConnectorID           string    `json:"connector_id"`
+	ServiceID             string    `json:"service_id,omitempty"`
+	OperationID           string    `json:"operation_id"`
+	OperationPolicyDigest string    `json:"operation_policy_digest,omitempty"`
+	TaskDigest            string    `json:"task_digest"`
+	AuthorityKeyID        string    `json:"authority_key_id,omitempty"`
+	PermitDigest          string    `json:"permit_digest,omitempty"`
+	RequestDigest         string    `json:"request_digest,omitempty"`
+	HTTPStatus            int       `json:"http_status,omitempty"`
+	RequestBytes          int64     `json:"request_bytes"`
+	ResponseBytes         int64     `json:"response_bytes"`
+	ErrorCode             string    `json:"error_code,omitempty"`
+	RunID                 string    `json:"run_id,omitempty"`
 }
 
-// Receipt contains one signed chain coordinate and one connector event.
+// Receipt contains one signed chain coordinate and one mediated-effect event.
 type Receipt struct {
 	SchemaVersion string `json:"schema_version"`
 	NodeID        string `json:"node_id"`
@@ -410,7 +426,9 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 		return Head{}, errors.New("connector ledger requires reopen after an ambiguous write")
 	}
 	payloadType, schemaVersion := PayloadTypeV1, SchemaV1
-	if event.PermitDigest != "" {
+	if event.Kind != "" {
+		payloadType, schemaVersion = PayloadTypeV3, SchemaV3
+	} else if event.PermitDigest != "" {
 		payloadType, schemaVersion = PayloadTypeV2, SchemaV2
 	}
 	receipt := Receipt{
@@ -622,7 +640,7 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 			return Head{}, fmt.Errorf("connector ledger line %d is empty or oversized", lineNumber)
 		}
 		envelope, err := dsse.Parse(raw)
-		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 {
+		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 && envelope.PayloadType != PayloadTypeV3 {
 			return Head{}, fmt.Errorf("verify connector ledger line %d: unsupported receipt envelope", lineNumber)
 		}
 		payload, keyID, err := dsse.Verify(raw, envelope.PayloadType, trusted)
@@ -655,8 +673,11 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 
 func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequence uint64, previous string) error {
 	expectedSchema := SchemaV1
-	if payloadType == PayloadTypeV2 {
+	switch payloadType {
+	case PayloadTypeV2:
 		expectedSchema = SchemaV2
+	case PayloadTypeV3:
+		expectedSchema = SchemaV3
 	}
 	if receipt.SchemaVersion != expectedSchema || receipt.NodeID != nodeID || receipt.Epoch != epoch ||
 		receipt.Sequence != sequence || receipt.PreviousHash != previous {
@@ -666,8 +687,9 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 	if err != nil || observed.IsZero() || receipt.ObservedAt != observed.UTC().Format(time.RFC3339Nano) {
 		return errors.New("connector receipt has an invalid observation time")
 	}
-	if payloadType == PayloadTypeV1 && receipt.Event.PermitDigest != "" ||
-		payloadType == PayloadTypeV2 && receipt.Event.PermitDigest == "" {
+	if payloadType == PayloadTypeV1 && (receipt.Event.PermitDigest != "" || receipt.Event.Kind != "") ||
+		payloadType == PayloadTypeV2 && (receipt.Event.PermitDigest == "" || receipt.Event.Kind != "") ||
+		payloadType == PayloadTypeV3 && receipt.Event.Kind == "" {
 		return errors.New("connector receipt schema does not match its permit fields")
 	}
 	return validateEvent(receipt.Event)
@@ -692,11 +714,12 @@ func updateHistory(pending map[string]Event, spent map[string]struct{}, event Ev
 }
 
 func sameCall(left, right Event) bool {
-	return left.TenantID == right.TenantID && left.RuntimeRef == right.RuntimeRef &&
+	return left.Kind == right.Kind && left.TenantID == right.TenantID && left.RuntimeRef == right.RuntimeRef &&
 		left.CapsuleDigest == right.CapsuleDigest && left.PolicyDigest == right.PolicyDigest &&
 		left.RoutePolicyDigest == right.RoutePolicyDigest && left.Generation == right.Generation &&
 		left.GrantID == right.GrantID && left.ConnectorID == right.ConnectorID &&
-		left.OperationID == right.OperationID && left.TaskDigest == right.TaskDigest &&
+		left.ServiceID == right.ServiceID && left.OperationID == right.OperationID &&
+		left.OperationPolicyDigest == right.OperationPolicyDigest && left.TaskDigest == right.TaskDigest &&
 		left.AuthorityKeyID == right.AuthorityKeyID &&
 		left.PermitDigest == right.PermitDigest && left.RequestDigest == right.RequestDigest &&
 		left.RequestBytes == right.RequestBytes
@@ -705,7 +728,7 @@ func sameCall(left, right Event) bool {
 func validateEvent(event Event) error {
 	if !publicIdentity(event.TenantID, 128) || !runtimeRef(event.RuntimeRef) ||
 		!digest(event.CapsuleDigest) || !digest(event.PolicyDigest) || !digest(event.RoutePolicyDigest) || event.Generation == 0 ||
-		!grantID(event.GrantID) || !identifier(event.ConnectorID) || !identifier(event.OperationID) ||
+		!grantID(event.GrantID) || !identifier(event.OperationID) ||
 		!digest(event.TaskDigest) || event.RequestBytes < 0 || event.RequestBytes > 1<<30 ||
 		event.ResponseBytes < 0 || event.ResponseBytes > 1<<30 || event.HTTPStatus < 0 || event.HTTPStatus > 599 ||
 		(event.ErrorCode != "" && !identifier(event.ErrorCode)) {
@@ -718,6 +741,31 @@ func validateEvent(event Event) error {
 	}
 	if event.AuthorityKeyID != "" && !identifier(event.AuthorityKeyID) {
 		return errors.New("connector action authority key ID is invalid")
+	}
+	switch event.Kind {
+	case "":
+		if !identifier(event.ConnectorID) || event.ServiceID != "" || event.OperationPolicyDigest != "" || event.RunID != "" {
+			return errors.New("legacy connector event contains service task fields")
+		}
+	case ConnectorCall:
+		if !identifier(event.ConnectorID) || event.ServiceID != "" || event.OperationPolicyDigest != "" || event.RunID != "" {
+			return errors.New("connector call event contains incoherent fields")
+		}
+	case ServiceTask:
+		if event.ConnectorID != "" || !identifier(event.ServiceID) || !digest(event.OperationPolicyDigest) {
+			return errors.New("service task event contains incoherent fields")
+		}
+		if event.Phase == Authorize || event.Phase == Terminal {
+			if event.AuthorityKeyID == "" || event.PermitDigest == "" || event.RequestDigest == "" || event.RequestBytes == 0 {
+				return errors.New("service task authorization requires permit and request bindings")
+			}
+		}
+		success := event.Phase == Terminal && event.Outcome == Responded && serviceTaskSuccessStatus(event.HTTPStatus)
+		if success != (event.RunID != "") || event.RunID != "" && !identifier(event.RunID) {
+			return errors.New("service task run ID does not match a successful terminal response")
+		}
+	default:
+		return errors.New("invalid connector receipt event kind")
 	}
 	switch event.Phase {
 	case Authorize:
@@ -742,6 +790,10 @@ func validateEvent(event Event) error {
 		return errors.New("invalid connector phase")
 	}
 	return nil
+}
+
+func serviceTaskSuccessStatus(status int) bool {
+	return status == 200 || status == 201 || status == 202
 }
 
 func KeyID(public ed25519.PublicKey) string {

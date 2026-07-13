@@ -15,8 +15,10 @@ tenant it serves, which artifact may run, which capabilities it may receive, and
 what the local runtime will enforce.
 
 A sandbox isolates a workload, but does not explain why that workload was
-authorized. Steward connects a local admission decision to a constrained workload
-and records a receipt that the operator can verify without contacting a vendor.
+authorized, which tenant approved one sensitive request, or whether that request
+was replayed. Steward connects local admission and exact task authority to a
+constrained workload and records receipts that the operator can verify without
+contacting a vendor.
 
 ## The operator outcome
 
@@ -31,7 +33,7 @@ operator can:
    no default network access, while granting only approved state, inference,
    service, exact connector operations, or named HTTP(S) routes, and optionally
    require an off-node tenant authority to sign the exact request for selected
-   connector operations; and
+   agent-service or connector operations; and
 4. export a node-local, tamper-evident receipt of the accepted inputs and recorded
    enforcement decisions. Tamper-evident means changes within the supplied chain
    can be detected; detecting removal of a complete suffix requires an independently
@@ -57,7 +59,8 @@ authenticated tenant instance intent
 gVisor workload + optional dedicated-host state + per-instance trusted relay
               |
               v
-optional exact-request action permit -> Gateway durable spend
+optional service-scoped task permit -> Gateway durable authorization -> agent
+optional connector action permit    -> Gateway durable authorization -> upstream
               |
               v
 node-local signed, hash-linked enforcement receipt
@@ -75,6 +78,10 @@ Each input has a separate purpose:
 - An **instance intent** is a separately authenticated command to run a profile for
   a tenant, node, and instance. A generation fence—an increasing counter keyed by
   `(tenant_id, instance_id)`—prevents an older command from replacing newer state.
+- A **task permit** is a tenant-key-signed, short-lived statement for one exact
+  configured service request. Signed site policy scopes that public key to explicit
+  service IDs; the private key remains off-node. The permit cannot add a capability
+  that the profile, site policy, intent, and active grant did not already allow.
 
 Steward grants only what all three inputs allow. A trusted publisher can authorize
 a profile and its maximum capabilities, but cannot choose a tenant's schedule or
@@ -89,16 +96,23 @@ present, the admission commit also stores the effective route-policy digest. The
 lifecycle chain does not embed the full instance intent, state or service
 selection, actual Gateway grant ID, or individual Gateway traffic decisions.
 HTTP(S) egress decisions use a separate unsigned newline-delimited JSON (JSONL)
-audit log. Connector authorizations and terminal outcomes use a separate
-Gateway-signed, hash-linked chain. Permit-backed records bind the action-authority
+audit log. Connector and service-task authorizations and terminal outcomes use a
+separate Gateway-signed, hash-linked chain. Permit-backed records bind the authority
 key ID, exact signed envelope, and request digests to the stable task call and
-terminal outcome. Both receipt chains exclude prompts, model
+terminal outcome. Service-task records may retain the run ID observed from the
+agent, but that value is untrusted application output. Both receipt chains exclude prompts, model
 responses, agent logs, the meaning of agent actions, credentials, and bodies.
 
 This gives an auditor a bounded question they can answer locally: *what did
 this node accept and record?* It does **not** prove that a model was honest,
 that an agent's explanation was true, that an upstream service behaved as
 claimed, or that every semantic action inside a container was safe.
+
+For exact service tasks, replay prevention is node-local and lasts only while the
+same signed Gateway ledger and epoch are retained. It is an at-most-once dispatch
+claim, not exactly-once execution across nodes or inside an upstream system. An
+unknown outcome stays spent because a duplicate effect is worse than visible
+ambiguity.
 
 The receipt is tamper-evident only within the supplied chain and documented node
 trust boundary. The host root user, host kernel, Docker, gVisor, signing-key
@@ -129,7 +143,10 @@ missing, admission fails closed:
   general-purpose inference proxy.
 - **Service**: one declared agent port reached through the paired relay and an
   authenticated local gateway. The endpoint does not provide tenant end-user
-  authentication or public exposure.
+  authentication or public exposure. For configured JSON POST operations, signed
+  site policy can scope a tenant task key to the service. Gateway then requires one
+  short-lived permit for the exact request, writes authorization before dispatch,
+  and refuses automatic retry after an ambiguous outcome.
 - **Connector**: named HTTP operations whose exact upstream origin, method, path,
   credential mode, address policy, concurrency, call count, byte limits, and
   duration are fixed by the node operator. Steward directly gives the workload a
@@ -153,6 +170,8 @@ they are not general response data-loss-prevention filters.
 The non-secret action-trust inventory used by the signer is unsigned. Operators
 must authenticate it when moving it off-node. It prevents common issuance mistakes;
 it is not a grant and does not replace Gateway's live enforcement decision.
+A service-trust inventory has the same boundary: it is tenant-specific signing
+preflight, not an authorization artifact.
 
 These contracts include lifecycle ordering, drift inspection, journaling, and
 explicit state purge with a receipt. When the observed outcome of a failed mutation
@@ -173,8 +192,17 @@ semantic claims about agent behavior.
 
 Existing sandboxes and agent platforms can complement Steward. Steward addresses a
 specific question: can a customer-operated node enforce a locally authorized
-deployment, narrow selected external effects to one independently signed request,
-and produce portable evidence of that enforcement while disconnected?
+deployment, narrow selected external effects—including an agent-service task—to one
+independently signed request, prevent a second node-local dispatch within the
+retained ledger epoch, and produce portable evidence of that enforcement while
+disconnected?
+
+Among the systems in the dated comparison, no reviewed product documents the same
+combination of customer-operated air-gapped nodes, site-signed artifact and tenant
+admission, service-scoped off-node task keys, exact-request dispatch, durable
+node-local replay control, and offline-verifiable authorization-to-outcome receipts.
+This is a limited statement about linked public documentation, not a claim that
+Steward is first, unique, certified, or immune to defects.
 See the [market analysis]({{ '/product/market-analysis/' | relative_url }}) for a
 dated comparison and its limits.
 

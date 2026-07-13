@@ -522,9 +522,14 @@ record before it authorizes an effect.
 Permit-backed records additionally contain the action-authority key ID, exact
 permit-envelope digest, and exact request digest. Legacy connector events use
 receipt schema `steward.connector-receipt.v1`; permit-backed events use
-`steward.connector-receipt.v2`. One ledger may contain both, and the verifier checks
-the chain as one sequence. Configuring any action authority requires a release that
-can read receipt format 2 even before the first permit-backed call.
+`steward.connector-receipt.v2`. Exact tenant-signed agent-service tasks use
+`steward.connector-receipt.v3` in the same ledger. One chain may contain all three,
+and the verifier checks them as one sequence. Configuring any action authority
+requires a reader for format 2; configuring any service-task operation requires a
+reader for format 3, even before the first corresponding call. Service-task records
+carry exact permit and request digests, service and operation-policy bindings,
+bounded status, and an observed run ID, but no raw prompt or request body. See the
+[tenant-signed service-task boundary]({{ '/limitations/' | relative_url }}#tenant-signed-service-task-boundary).
 
 Connector responses use an integrity trailer. A clean response ends with
 `X-Steward-Connector-Receipt: recorded`; if Gateway cannot fsync the terminal

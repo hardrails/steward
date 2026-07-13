@@ -19,6 +19,14 @@ type connectorReceiptIndex struct {
 	spends  map[string]connectorSpendOwner
 	counts  map[string]map[string]int
 	pending map[string]connectorledger.Event
+	tasks   map[string]serviceTaskReceipt
+	permits map[string]string
+}
+
+type serviceTaskReceipt struct {
+	Authorization          connectorledger.Event
+	Terminal               connectorledger.Event
+	authorizationAmbiguous bool
 }
 
 // ConnectorReceiptFormatSummary identifies the connector receipt compatibility
@@ -35,6 +43,9 @@ func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary
 	requiredFormat := 0
 	if len(config.ActionAuthorities) > 0 {
 		requiredFormat = 2
+	}
+	if len(config.ServiceOperations) > 0 {
+		requiredFormat = 3
 	}
 	key, err := config.connectorReceiptPrivateKey()
 	if err != nil {
@@ -56,8 +67,13 @@ func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary
 	if _, err := connectorledger.VerifyRecords(
 		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch,
 		func(record connectorledger.VerifiedReceipt) error {
-			if record.Receipt.SchemaVersion == connectorledger.SchemaV2 {
-				formatVersion = 2
+			switch record.Receipt.SchemaVersion {
+			case connectorledger.SchemaV3:
+				formatVersion = 3
+			case connectorledger.SchemaV2:
+				if formatVersion < 2 {
+					formatVersion = 2
+				}
 			}
 			return nil
 		},
@@ -70,12 +86,28 @@ func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary
 func newConnectorReceiptIndex() *connectorReceiptIndex {
 	return &connectorReceiptIndex{
 		spends: make(map[string]connectorSpendOwner), counts: make(map[string]map[string]int),
-		pending: make(map[string]connectorledger.Event),
+		pending: make(map[string]connectorledger.Event), tasks: make(map[string]serviceTaskReceipt), permits: make(map[string]string),
 	}
 }
 
 func (index *connectorReceiptIndex) visit(record connectorledger.VerifiedReceipt) error {
 	event := record.Receipt.Event
+	if event.Kind == connectorledger.ServiceTask {
+		state := index.tasks[event.TaskDigest]
+		if event.Phase == connectorledger.Authorize {
+			if taskDigest, exists := index.permits[event.PermitDigest]; exists && taskDigest != event.TaskDigest {
+				return errors.New("connector receipts bind one task permit to multiple task identities")
+			}
+			state.Authorization = event
+			index.pending[event.TaskDigest] = event
+			index.permits[event.PermitDigest] = event.TaskDigest
+		} else if event.Phase == connectorledger.Terminal {
+			state.Terminal = event
+			delete(index.pending, event.TaskDigest)
+		}
+		index.tasks[event.TaskDigest] = state
+		return nil
+	}
 	switch event.Phase {
 	case connectorledger.Authorize:
 		index.spends[event.TaskDigest] = connectorSpendOwner{GrantID: event.GrantID, ConnectorID: event.ConnectorID}
@@ -120,6 +152,11 @@ func openConnectorReceiptLedger(config Config, key ed25519.PrivateKey) (*connect
 			return nil, nil, fmt.Errorf("close incomplete connector receipt: %w", err)
 		}
 		delete(index.pending, authorized.TaskDigest)
+		if authorized.Kind == connectorledger.ServiceTask {
+			state := index.tasks[authorized.TaskDigest]
+			state.Terminal = terminal
+			index.tasks[authorized.TaskDigest] = state
+		}
 	}
 	return log, index, nil
 }

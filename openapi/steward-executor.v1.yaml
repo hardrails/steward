@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Executor API
-  version: "1.5.0"
+  version: "1.6.0"
   description: |
     Public host-local contract for Steward's separate Docker/gVisor executor
     process. The control plane supplies a fully resolved generic OCI workload;
@@ -689,6 +689,18 @@ components:
         service_path:
           type: string
           pattern: "^/v1/services/grant-[a-f0-9]{64}/$"
+        service_id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          description: Present when the admitted service has at least one tenant task authority.
+        task_authorities:
+          type: array
+          minItems: 1
+          maxItems: 8
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/TaskAuthority"
+          description: Canonically sorted public tenant keys authorized by signed site policy for this exact service. Private signing keys are never returned to or stored on the node.
         egress_proxy:
           type: string
           enum: ["http://steward-relay:8082"]
@@ -714,7 +726,19 @@ components:
         route_policy_digest:
           type: string
           pattern: "^sha256:[a-f0-9]{64}$"
-          description: Deterministic non-secret digest of the effective inference, egress, and connector route policy retained by Gateway.
+          description: Deterministic non-secret digest of the effective inference, task-authorized service, egress, and connector route policy retained by Gateway.
+    TaskAuthority:
+      type: object
+      additionalProperties: false
+      required: [key_id, public_key]
+      properties:
+        key_id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        public_key:
+          type: string
+          format: byte
+          description: Canonical standard-base64 Ed25519 public key.
     Resources:
       type: object
       additionalProperties: false

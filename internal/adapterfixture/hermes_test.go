@@ -297,6 +297,21 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		"release_root=$root",
 		`release_root=$(cd "$root/.." && pwd -P)`,
 		"steward-integration-$run_id-generation-2",
+		"gateway service set",
+		"gateway service trust",
+		"task issue -admission",
+		"hermes run -bundle",
+		"task audit -in",
+		"application/vnd.steward.connector-receipt.v3+json",
+		"tenant_task_private_key_agent_absence_verified",
+		`base64.b64encode(value).rstrip(b"=")`,
+		"base64.urlsafe_b64encode",
+		"base64.b32encode",
+		"escaped_trimmed_key",
+		`"$work/service-token"`,
+		`"$work/token"`,
+		`b"steward-task-permit-spend-v1\x00"`,
+		`admissions[admission["grant_id"]] = (generation, admission)`,
 	} {
 		if !strings.Contains(acceptanceScript, contract) {
 			t.Fatalf("Hermes acceptance is missing adversarial contract %q", contract)
@@ -305,6 +320,14 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	connectorKeyContract := `re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("key_id", "")))`
 	if !strings.Contains(acceptanceScript, connectorKeyContract) {
 		t.Fatal("Hermes acceptance does not validate the connector receipt key ID emitted by stewardctl")
+	}
+	for name, contract := range map[string]string{
+		"gVisor runtime": `docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref"`,
+		"read-only root": `docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref"`,
+	} {
+		if count := strings.Count(acceptanceScript, contract); count != 2 {
+			t.Fatalf("Hermes acceptance checks %s %d times, want once per generation", name, count)
+		}
 	}
 
 	var feasibility struct {
@@ -370,16 +393,22 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		Overall         string `json:"overall"`
 		ContainsContent bool   `json:"contains_agent_content"`
 		Acceptance      struct {
-			CompletedSteps      []string `json:"completed_steps"`
-			Runtime             string   `json:"runtime"`
-			SignedAdmission     bool     `json:"signed_admission"`
-			SignedConnectorWork bool     `json:"signed_connector_work"`
+			CompletedSteps                     []string `json:"completed_steps"`
+			Runtime                            string   `json:"runtime"`
+			SignedAdmission                    bool     `json:"signed_admission"`
+			SignedConnectorWork                bool     `json:"signed_connector_work"`
+			SignedServiceTasks                 bool     `json:"signed_service_tasks"`
+			TaskPrivateKeyAgentAbsenceVerified bool     `json:"task_private_key_agent_absence_verified"`
 		} `json:"acceptance"`
 		Provenance struct {
 			AcceptanceScriptSHA256 string `json:"acceptance_script_sha256"`
 			Archive                struct {
 				Platform string `json:"platform"`
 			} `json:"archive"`
+			Binaries map[string]struct {
+				SHA256  string `json:"sha256"`
+				Version string `json:"version"`
+			} `json:"binaries"`
 			BuildAttestation struct {
 				Adapter struct {
 					FileSetSHA256 string `json:"file_set_sha256"`
@@ -397,6 +426,11 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 					Revision      string `json:"revision"`
 				} `json:"source"`
 			} `json:"build_attestation"`
+			StewardSource struct {
+				Commit       string `json:"commit"`
+				TrackedDirty *bool  `json:"tracked_dirty"`
+				Tree         string `json:"tree"`
+			} `json:"steward_source"`
 		} `json:"provenance"`
 		ReceiptChain struct {
 			Verified bool `json:"verified"`
@@ -415,18 +449,21 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	expectedSteps := []string{
 		"image_imported", "executor_ready", "generation_1_admitted", "generation_1_started",
 		"generation_1_ready", "state_volume_observed", "workspace_seeded", "generation_1_skill_passed",
+		"service_task_replay_verified",
 		"generation_1_connector_skill_passed", "connector_replay_denied", "connector_forbidden_denied",
 		"connector_fixture_effect_verified", "connector_secret_absence_verified",
+		"tenant_task_private_key_agent_absence_verified",
 		"generation_1_destroyed", "generation_2_admitted", "generation_2_started", "generation_2_ready",
 		"generation_2_skill_passed", "generation_2_destroyed", "state_purged", "evidence_chain_verified",
-		"connector_evidence_chain_verified", "acceptance_complete",
+		"connector_evidence_chain_verified", "service_task_audit_verified", "acceptance_complete",
 	}
 	if integration.SchemaVersion != "steward.hermes-integration-evidence.v1" || integration.Overall != "passed" ||
 		integration.ContainsContent || integration.Acceptance.Runtime != "runsc" || !integration.Acceptance.SignedAdmission ||
-		!integration.Acceptance.SignedConnectorWork ||
+		!integration.Acceptance.SignedConnectorWork || !integration.Acceptance.SignedServiceTasks ||
+		!integration.Acceptance.TaskPrivateKeyAgentAbsenceVerified ||
 		integration.Provenance.Archive.Platform != "linux/amd64" ||
 		!integration.ReceiptChain.Verified || integration.ReceiptChain.Head.Sequence == 0 ||
-		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 2 ||
+		!integration.ConnectorReceiptChain.Verified || integration.ConnectorReceiptChain.Head.Sequence != 12 ||
 		!valuesEqual(integration.Acceptance.CompletedSteps, expectedSteps) {
 		t.Fatalf("invalid Hermes integration evidence authority: %#v", integration)
 	}
@@ -435,6 +472,36 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		feasibility.SourceArchiveSHA256 != integration.Provenance.BuildAttestation.Source.ArchiveSHA256 ||
 		feasibility.UpstreamRevision != integration.Provenance.BuildAttestation.Source.Revision {
 		t.Fatal("Hermes feasibility and signed-integration evidence bind different source objects")
+	}
+	stewardSource := integration.Provenance.StewardSource
+	if stewardSource.TrackedDirty == nil || *stewardSource.TrackedDirty ||
+		!validHexObjectID(stewardSource.Commit) || !validHexObjectID(stewardSource.Tree) {
+		t.Fatalf("Hermes integration evidence does not bind a clean Steward source: %#v", stewardSource)
+	}
+	expectedBinaries := map[string]string{
+		"ctl": "stewardctl", "executor": "steward-executor", "gateway": "steward-gateway", "relay": "steward-relay",
+	}
+	if len(integration.Provenance.Binaries) != len(expectedBinaries) {
+		t.Fatalf("Hermes integration evidence binds %d Steward binaries, want %d",
+			len(integration.Provenance.Binaries), len(expectedBinaries))
+	}
+	commitPrefix := stewardSource.Commit[:12]
+	commonVersion := ""
+	for field, binary := range expectedBinaries {
+		record, ok := integration.Provenance.Binaries[field]
+		versionPrefix := binary + " "
+		if !ok || !validSHA256Hex(record.SHA256) || !strings.HasPrefix(record.Version, versionPrefix) {
+			t.Fatalf("Hermes integration evidence has invalid %s binary provenance: %#v", field, record)
+		}
+		version := strings.TrimPrefix(record.Version, versionPrefix)
+		if version == "" || strings.Contains(strings.ToLower(version), "dirty") || !strings.HasSuffix(version, commitPrefix) {
+			t.Fatalf("Hermes integration %s version %q is not a clean build of %s", field, version, stewardSource.Commit)
+		}
+		if commonVersion == "" {
+			commonVersion = version
+		} else if version != commonVersion {
+			t.Fatalf("Hermes integration binaries report different source versions: %q and %q", commonVersion, version)
+		}
 	}
 
 	bindings := map[string]string{

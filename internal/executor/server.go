@@ -253,19 +253,21 @@ type secureProvisionRequest struct {
 }
 
 type secureProvisionResponse struct {
-	RuntimeRef        string   `json:"runtime_ref"`
-	Status            string   `json:"status"`
-	CapsuleDigest     string   `json:"capsule_digest"`
-	PolicyDigest      string   `json:"policy_digest"`
-	Generation        uint64   `json:"generation"`
-	EvidenceKeyID     string   `json:"evidence_key_id"`
-	GrantID           string   `json:"grant_id,omitempty"`
-	ServicePath       string   `json:"service_path,omitempty"`
-	EgressProxy       string   `json:"egress_proxy,omitempty"`
-	EgressRouteIDs    []string `json:"egress_route_ids,omitempty"`
-	ConnectorURL      string   `json:"connector_url,omitempty"`
-	ConnectorIDs      []string `json:"connector_ids,omitempty"`
-	RoutePolicyDigest string   `json:"route_policy_digest,omitempty"`
+	RuntimeRef        string                  `json:"runtime_ref"`
+	Status            string                  `json:"status"`
+	CapsuleDigest     string                  `json:"capsule_digest"`
+	PolicyDigest      string                  `json:"policy_digest"`
+	Generation        uint64                  `json:"generation"`
+	EvidenceKeyID     string                  `json:"evidence_key_id"`
+	GrantID           string                  `json:"grant_id,omitempty"`
+	ServicePath       string                  `json:"service_path,omitempty"`
+	ServiceID         string                  `json:"service_id,omitempty"`
+	TaskAuthorities   []gateway.TaskAuthority `json:"task_authorities,omitempty"`
+	EgressProxy       string                  `json:"egress_proxy,omitempty"`
+	EgressRouteIDs    []string                `json:"egress_route_ids,omitempty"`
+	ConnectorURL      string                  `json:"connector_url,omitempty"`
+	ConnectorIDs      []string                `json:"connector_ids,omitempty"`
+	RoutePolicyDigest string                  `json:"route_policy_digest,omitempty"`
 }
 
 type purgeStateRequest struct {
@@ -385,6 +387,16 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 		}
 		if effective.Intent.Capabilities.Service {
 			workload.Runtime.ServicePort = effective.Capsule.Service.Port
+			taskAuthorities, err := admittedTaskAuthorities(effective)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "enforcement_failed", "signed task authority could not be projected into the runtime grant")
+				return
+			}
+			if len(taskAuthorities) > 0 {
+				workload.Runtime.NodeID = effective.Intent.NodeID
+				workload.Runtime.ServiceID = effective.Intent.ServiceID
+				workload.Runtime.TaskAuthorities = taskAuthorities
+			}
 		}
 	}
 	if effective.Intent.Capabilities.State {
@@ -778,12 +790,14 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 	s.writeSecureResponse(r.Context(), w, http.StatusCreated, name, observed.Status, effective, routePolicyDigest)
 }
 
-// legacyRuntimeReplay returns the exact connector-free runtime shape retained
-// before signed admission bindings were added to Docker labels. The fence and
-// fingerprint checks that follow still have to match this projection, so a new
-// runtime whose binding labels were removed cannot use the compatibility path.
+// legacyRuntimeReplay returns the exact external-effect-authority-free runtime
+// shape retained before signed admission bindings were added to Docker labels.
+// The fence and fingerprint checks that follow still have to match this
+// projection, so a newly authorized runtime whose binding labels were removed
+// cannot use the compatibility path.
 func legacyRuntimeReplay(desired, observed Workload) (Workload, bool) {
 	if desired.Runtime == nil || observed.Runtime == nil || len(desired.Runtime.ConnectorIDs) != 0 || len(observed.Runtime.ConnectorIDs) != 0 ||
+		len(desired.Runtime.TaskAuthorities) != 0 || len(observed.Runtime.TaskAuthorities) != 0 ||
 		!imageConfigDigest.MatchString(desired.Runtime.CapsuleDigest) || !imageConfigDigest.MatchString(desired.Runtime.PolicyDigest) ||
 		observed.Runtime.CapsuleDigest != "" || observed.Runtime.PolicyDigest != "" ||
 		!runtimeGrantEqualExceptAdmissionBindings(desired.Runtime, observed.Runtime) {
@@ -797,9 +811,10 @@ func legacyRuntimeReplay(desired, observed Workload) (Workload, bool) {
 
 func runtimeGrantEqualExceptAdmissionBindings(left, right *RuntimeGrant) bool {
 	return left.NetworkName == right.NetworkName && left.Subnet == right.Subnet && left.Gateway == right.Gateway &&
-		left.GrantID == right.GrantID && left.Generation == right.Generation && left.Inference == right.Inference &&
+		left.GrantID == right.GrantID && left.NodeID == right.NodeID && left.Generation == right.Generation && left.Inference == right.Inference &&
 		left.RouteID == right.RouteID && left.RelayIP == right.RelayIP && left.AgentIP == right.AgentIP &&
-		left.ModelAlias == right.ModelAlias && left.ServicePort == right.ServicePort &&
+		left.ModelAlias == right.ModelAlias && left.ServicePort == right.ServicePort && left.ServiceID == right.ServiceID &&
+		slices.Equal(left.TaskAuthorities, right.TaskAuthorities) &&
 		slices.Equal(left.EgressRouteIDs, right.EgressRouteIDs) && slices.Equal(left.ConnectorIDs, right.ConnectorIDs)
 }
 
@@ -913,6 +928,15 @@ func (s *Server) writeSecureResponse(ctx context.Context, w http.ResponseWriter,
 	}
 	if effective.Intent.Capabilities.Service {
 		response.ServicePath = "/v1/services/" + response.GrantID + "/"
+		taskAuthorities, err := admittedTaskAuthorities(effective)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "enforcement_failed", "signed task authority could not be returned")
+			return
+		}
+		if len(taskAuthorities) > 0 {
+			response.ServiceID = effective.Intent.ServiceID
+			response.TaskAuthorities = taskAuthorities
+		}
 	}
 	if effective.Intent.Capabilities.Egress {
 		response.EgressProxy = "http://steward-relay:8082"
@@ -922,7 +946,7 @@ func (s *Server) writeSecureResponse(ctx context.Context, w http.ResponseWriter,
 		response.ConnectorURL = "http://steward-relay:8081"
 		response.ConnectorIDs = admission.CanonicalConnectorIDs(effective.Intent.ConnectorIDs)
 	}
-	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Egress || effective.Intent.Capabilities.Connector {
+	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Egress || effective.Intent.Capabilities.Connector || len(response.TaskAuthorities) > 0 {
 		inspection, err := s.secure.gateway.InspectWithPolicy(ctx, response.GrantID)
 		if err != nil || !imageConfigDigest.MatchString(expectedRoutePolicyDigest) || inspection.RoutePolicyDigest != expectedRoutePolicyDigest {
 			writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "effective gateway route policy could not be verified")
@@ -934,6 +958,28 @@ func (s *Server) writeSecureResponse(ctx context.Context, w http.ResponseWriter,
 		return
 	}
 	writeJSON(w, status, response)
+}
+
+func admittedTaskAuthorities(effective admission.EffectiveAdmission) ([]gateway.TaskAuthority, error) {
+	if !effective.Intent.Capabilities.Service {
+		return nil, nil
+	}
+	keys, err := effective.SitePolicy.TrustedTaskKeys(effective.Intent.TenantID, effective.Intent.ServiceID)
+	if err != nil {
+		return nil, err
+	}
+	keyIDs := make([]string, 0, len(keys))
+	for keyID := range keys {
+		keyIDs = append(keyIDs, keyID)
+	}
+	slices.Sort(keyIDs)
+	authorities := make([]gateway.TaskAuthority, 0, len(keyIDs))
+	for _, keyID := range keyIDs {
+		authorities = append(authorities, gateway.TaskAuthority{
+			KeyID: keyID, PublicKey: base64.StdEncoding.EncodeToString(keys[keyID]),
+		})
+	}
+	return authorities, nil
 }
 
 func newOperationID(runtimeRef string, generation uint64) (string, error) {

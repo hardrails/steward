@@ -97,6 +97,30 @@ Each `command_keys` entry belongs to one tenant and authorizes its listed operat
 A tenant needs one for node-scoped remote control, but not for local administration
 or a tenant-scoped compatibility credential.
 
+Task keys are separate from lifecycle command keys. When a tenant must authorize an
+exact agent-service request, generate another Ed25519 pair, keep its private file on
+the signing workstation, list the service in the tenant's `service_ids`, and add
+only this public policy entry:
+
+```json
+"task_keys": [{
+  "key_id": "tenant-a-tasks",
+  "public_key": "PASTE tenant-a-tasks.public HERE",
+  "service_ids": ["agent-api"]
+}]
+```
+
+Each tenant may have at most eight task keys. Service IDs within a key must be
+sorted, unique, and already allowed for that tenant. Executor returns only public
+task authorities that match the admitted service. A task key cannot authorize
+admission, lifecycle, another tenant, or an unlisted service. See the
+[exact Hermes task workflow]({{ '/guides/hermes-agent/' | relative_url }}#authorize-and-run-one-exact-hermes-task).
+
+Ed25519 task-key material must also be unique across all tenant rules in one site
+policy. Steward rejects a policy that assigns the same public key to two tenants,
+even under different key IDs. This prevents possession of one tenant's private key
+from becoming cryptographic authority for another tenant through a policy mistake.
+
 ## 3. Sign a reusable profile capsule
 
 The manifest digest identifies an Open Container Initiative (OCI) manifest; the

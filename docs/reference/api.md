@@ -104,15 +104,75 @@ Connector errors use the common JSON shape; a permit failure is HTTP 403
 [authenticated API operations]({{ '/guides/connectors/' | relative_url }}) for the
 complete request, evidence, and failure contract.
 
+## Tenant-signed service-task protocol
+
+Gateway's loopback service listener can require a tenant signature for one exact
+agent-service operation. This is an internal capability protocol, not a public
+management endpoint and not a generic tenant ingress API:
+
+```text
+POST /v1/services/{grant_id}/{configured_path}
+Authorization: Bearer <host Gateway service token>
+Content-Type: application/json
+Content-Length: <positive exact byte length>
+X-Steward-Task-Permit: <canonical base64url DSSE envelope>
+```
+
+The request may have no query, alternate encoded path, transfer coding, WebSocket
+upgrade, or caller-selected headers beyond Gateway's accepted host interface. Node
+configuration fixes the service ID, operation ID, `POST` method, canonical path,
+`application/json` content type, request and response byte ceilings, timeout, and
+maximum permit lifetime. The body must be one strict JSON value and is limited to
+64 KiB. A permit is limited to 16 KiB decoded and 15 minutes even if configuration
+would attempt a larger value.
+
+Signed site policy scopes each public tenant task key to exact service IDs.
+The permit binds the node, tenant, logical instance, runtime and grant, generation,
+capsule, site policy, effective route policy, service and operation-policy digest,
+task ID, exact request digest and length, content type, and validity window. Gateway
+checks those values against the active grant and request, then writes a signed
+authorization record before contacting the service.
+
+Only HTTP 200, 201, and 202 with one bounded JSON `run_id` count as a successful
+dispatch. Gateway records the observed status, response length, and run ID, discards
+the untrusted upstream body and headers, and returns a new canonical
+`{"run_id":"..."}` response with `X-Steward-Task-Receipt: recorded`. An exact
+successful replay within the retained ledger returns the same stored ID with
+`X-Steward-Task-Receipt: replayed` and does not dispatch again. A pending,
+conflicting, failed, or unknown result returns a bounded JSON error and is not
+automatically retried.
+
+The replay fence is `(tenant_id, instance_id, task_id)`, so a new workload
+generation does not make the same logical task spendable again. It is node-local
+at-most-once dispatch within one receipt-ledger epoch, not fleet or upstream
+exactly-once execution. Gateway restart reconstructs completed spends and closes a
+durable authorization with no terminal record as `outcome_unknown`. Replacing the
+ledger or advancing to a new epoch creates a new replay boundary. The service
+supplies the run ID, so the signed receipt proves what Gateway observed, not that the
+agent completed useful work.
+
+If the authorization write or filesystem sync has an ambiguous result, Gateway does
+not contact the service. The request and its exact replay return
+`evidence_unavailable` until Gateway restarts and verifies the ledger. A complete
+authorization is then closed as `outcome_unknown`; if no authorization was retained,
+the task remains available for a later submission.
+
+For the qualified Hermes adapter, `stewardctl hermes run` sends the signed
+`POST /v1/runs` and can poll `GET /v1/runs/{run_id}` to a terminal state. Status
+polling uses the host Gateway bearer token; the task permit authorizes only the
+exact POST. See the [Hermes guide]({{ '/guides/hermes-agent/' | relative_url }}).
+
 ## Offline operator tools
 
-`stewardctl image`, `stewardctl evidence`, `stewardctl permit`, and
-`stewardctl upgrade` are local CLIs, not HTTP endpoints. They provide bounded,
+`stewardctl image`, `stewardctl evidence`, `stewardctl permit`, `stewardctl task`,
+`stewardctl hermes`, and `stewardctl upgrade` are CLIs, not HTTP endpoints. They provide bounded,
 policy-bound Open Container Initiative (OCI) inspection and import; offline evidence
-verification and export; exact-request permit issuance, verification, and receipt
-correlation; and read-only release drain and durable-format inspection. Permit
-issuance consumes an authenticated but unsigned action-trust inventory as mismatch
-preflight; live Gateway configuration remains authoritative. See
+verification and export; exact connector- and service-request permit issuance,
+verification, dispatch, and receipt correlation; and read-only release drain and
+durable-format inspection. Permit issuance consumes an authenticated but unsigned
+trust inventory as mismatch preflight; live Gateway configuration remains
+authoritative. `hermes run` is the exception to offline operation: it contacts only
+an explicit literal-loopback Gateway origin. See
 [local operator tools]({{ '/reference/offline-tools/' | relative_url }}) for flags,
 output formats, and failure boundaries.
 
@@ -145,8 +205,9 @@ enforcement component returns HTTP 501. Signed admission disables legacy
 `POST /v1/workloads`. Uplink lifecycle operations record verified tenant, node, and
 generation in journal and evidence.
 
-Inference or egress returns `route_policy_digest`, a deterministic non-secret digest
-of retained Gateway route settings. Executor records and reconciles it; Gateway
+Inference, task-authorized service, connector, or egress admission returns
+`route_policy_digest`, a deterministic non-secret digest of retained Gateway route
+settings and public task authority. Executor records and reconciles it; Gateway
 rejects semantic route changes while a retained grant references the route.
 
 Inference grants expose only the fixed OpenAI-compatible paths listed in the

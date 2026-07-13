@@ -1,9 +1,13 @@
 package executor
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/hardrails/steward/internal/gateway"
 )
 
 func TestValidateImageRequiresExactSafeLocalImage(t *testing.T) {
@@ -152,5 +156,46 @@ func TestWorkloadValidatesBoundedConnectorRuntimeGrant(t *testing.T) {
 	legacy.Runtime = &legacyRuntime
 	if err := legacy.Validate(); err != nil {
 		t.Fatalf("legacy connector-free runtime rejected: %v", err)
+	}
+}
+
+func TestWorkloadValidatesTaskAuthorityRuntimeGrant(t *testing.T) {
+	network := NetworkSpecFor("tenant", "agent", 1)
+	runtime := RuntimeGrant{
+		NetworkName: network.Name, GrantID: "grant-" + strings.Repeat("b", 64), NodeID: "node-a", Generation: 1,
+		ServicePort: 8080, ServiceID: "hermes-api", TaskAuthorities: []gateway.TaskAuthority{{
+			KeyID: "task-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+		}},
+		CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
+	}
+	workload := Workload{
+		InstanceID: "agent", TenantID: "tenant", ProfileID: "hermes-v1@v1",
+		Image: "registry.local/agent@sha256:" + strings.Repeat("e", 64), Command: []string{"agent"},
+		Resources: Resources{MemoryBytes: 1, CPUMillis: 1, PIDs: 1}, Runtime: &runtime,
+	}
+	if err := workload.Validate(); err != nil {
+		t.Fatalf("valid task-authorized runtime rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*RuntimeGrant)
+	}{
+		{"missing node", func(value *RuntimeGrant) { value.NodeID = "" }},
+		{"invalid service", func(value *RuntimeGrant) { value.ServiceID = "bad service" }},
+		{"missing service port", func(value *RuntimeGrant) { value.ServicePort = 0 }},
+		{"missing admission bindings", func(value *RuntimeGrant) { value.CapsuleDigest, value.PolicyDigest = "", "" }},
+		{"invalid authority", func(value *RuntimeGrant) { value.TaskAuthorities[0].PublicKey = "not-base64" }},
+		{"authority removed but identity retained", func(value *RuntimeGrant) { value.TaskAuthorities = nil }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := workload
+			candidateRuntime := runtime
+			candidateRuntime.TaskAuthorities = append([]gateway.TaskAuthority(nil), runtime.TaskAuthorities...)
+			candidate.Runtime = &candidateRuntime
+			test.mutate(candidate.Runtime)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("invalid task-authorized runtime accepted")
+			}
+		})
 	}
 }
