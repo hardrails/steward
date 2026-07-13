@@ -140,6 +140,44 @@ func TestConfigLoadsFiniteConnectorsAndOwnerOnlyCredentials(t *testing.T) {
 	}
 }
 
+func TestConfigSeparatesConnectorCredentialsFromGatewayAuthority(t *testing.T) {
+	directory := t.TempDir()
+	credential := filepath.Join(directory, "connector-token")
+	if err := os.WriteFile(credential, []byte("connector-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := Config{
+		ServiceTokenFile:        filepath.Join(directory, "service-token"),
+		StateFile:               filepath.Join(directory, "state.json"),
+		EgressAuditFile:         filepath.Join(directory, "egress-audit.jsonl"),
+		ControlSocket:           filepath.Join(directory, "control.sock"),
+		GrantRoot:               filepath.Join(directory, "grants"),
+		ConnectorReceiptFile:    filepath.Join(directory, "connector-receipts.ndjson"),
+		ConnectorReceiptKeyFile: filepath.Join(directory, "connector-receipts.private.pem"),
+		Connectors:              []Connector{connectorFixture(credential)},
+	}
+	reserved := map[string]string{
+		"service token":    base.ServiceTokenFile,
+		"state":            base.StateFile,
+		"audit":            base.EgressAuditFile,
+		"control socket":   base.ControlSocket,
+		"receipt log":      base.ConnectorReceiptFile,
+		"receipt key":      base.ConnectorReceiptKeyFile,
+		"grant root":       base.GrantRoot,
+		"grant descendant": filepath.Join(base.GrantRoot, "grant-a", "credential"),
+	}
+	for name, path := range reserved {
+		t.Run(name, func(t *testing.T) {
+			config := base
+			config.Connectors = append([]Connector(nil), base.Connectors...)
+			config.Connectors[0].CredentialFile = path
+			if _, err := config.validateAndLoadConnectors(); err == nil || !strings.Contains(err.Error(), "must be separate") {
+				t.Fatalf("reserved credential path %q err=%v", path, err)
+			}
+		})
+	}
+}
+
 func TestReadCredentialUsesOneBoundedVerifiedFile(t *testing.T) {
 	directory := t.TempDir()
 	credential := filepath.Join(directory, "credential")

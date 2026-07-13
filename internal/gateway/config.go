@@ -265,6 +265,9 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 		if !absoluteClean(connector.CredentialFile) {
 			return nil, fmt.Errorf("connector %q credential path must be absolute", connector.ID)
 		}
+		if c.reservedConnectorCredentialPath(connector.CredentialFile) {
+			return nil, fmt.Errorf("connector %q credential path must be separate from Gateway token, state, audit, control, receipt, and grant paths", connector.ID)
+		}
 		if connector.CredentialMode != CredentialModeBearer && connector.CredentialMode != CredentialModeXAPIKey {
 			return nil, fmt.Errorf("connector %q has unsupported credential mode", connector.ID)
 		}
@@ -300,6 +303,18 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 		loaded[connector.ID] = entry
 	}
 	return loaded, nil
+}
+
+func (c Config) reservedConnectorCredentialPath(path string) bool {
+	for _, reserved := range []string{
+		c.ServiceTokenFile, c.StateFile, c.EgressAuditFile, c.ControlSocket,
+		c.ConnectorReceiptFile, c.ConnectorReceiptKeyFile,
+	} {
+		if reserved != "" && path == reserved {
+			return true
+		}
+	}
+	return pathWithin(path, c.GrantRoot)
 }
 
 func exactConnectorOrigin(value string) (*url.URL, error) {
