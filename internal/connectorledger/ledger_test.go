@@ -60,6 +60,42 @@ func TestAppendVerifyAndVisitConnectorLedger(t *testing.T) {
 	_ = reopened.Close()
 }
 
+func TestConnectorLedgerRejectsConcurrentWriterThroughHardLink(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	path := filepath.Join(directory, "connector-receipts.ndjson")
+	alias := filepath.Join(directory, "connector-receipts-alias.ndjson")
+	first, err := Open(path, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, alias); err != nil {
+		_ = first.Close()
+		t.Fatal(err)
+	}
+	if second, err := Open(alias, private, "node-a/gateway", 1); err == nil ||
+		!strings.Contains(err.Error(), "already open by another writer") {
+		if second != nil {
+			_ = second.Close()
+		}
+		_ = first.Close()
+		t.Fatalf("concurrent hard-link writer err=%v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(alias, private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatalf("open after owner closed: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestConnectorLedgerRejectsTamperReorderAndTruncation(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

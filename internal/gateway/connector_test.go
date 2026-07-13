@@ -696,6 +696,11 @@ func TestConnectorGrantEvidenceAndReloadBindings(t *testing.T) {
 	if err := rig.server.Reload(changedConfig, nil, nil, "service-token"); err == nil || !strings.Contains(err.Error(), "retained grant") {
 		t.Fatalf("credential-changing reload accepted: %v", err)
 	}
+	// A restart cannot overlap the old writer. Closing the live ledger also
+	// proves the descriptor lock is released before the retained grant check.
+	if err := rig.server.connectorLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if opened, err := Open(changedConfig, nil, nil, "service-token"); err == nil || !strings.Contains(err.Error(), "route policy") {
 		if opened != nil {
 			opened.closeGrantListeners()

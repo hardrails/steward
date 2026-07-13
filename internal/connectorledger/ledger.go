@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -150,6 +151,16 @@ func OpenWithVisit(path string, private ed25519.PrivateKey, nodeID string, epoch
 	closeWith := func(openErr error) (*Log, error) {
 		_ = file.Close()
 		return nil, openErr
+	}
+	// Path locks are not sufficient here: the same inode can be reached through
+	// a hard link with a different pathname. Keep an exclusive descriptor lock
+	// for the lifetime of the append handle so only one verified chain head can
+	// ever authorize writes to this ledger.
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return closeWith(errors.New("connector ledger is already open by another writer"))
+		}
+		return closeWith(fmt.Errorf("lock connector ledger: %w", err))
 	}
 	if created {
 		if err := file.Chmod(0o600); err != nil {
