@@ -1,6 +1,7 @@
 // Package mcpserver implements Steward's deliberately narrow MCP stdio tools
-// adapter. It supports the MCP 2025-11-25 lifecycle and tools capability while
-// delegating every operation to the public loopback Executor contract.
+// adapter. It supports the MCP 2025-11-25 lifecycle and tools capability,
+// delegates node operations to the public loopback Executor contract, and can
+// optionally expose Gateway's bounded task-lifecycle client.
 package mcpserver
 
 import (
@@ -34,8 +35,10 @@ type Node interface {
 }
 
 type Server struct {
-	node    Node
-	version string
+	node        Node
+	tasks       TaskGateway
+	resultStore *taskResultStore
+	version     string
 }
 
 func New(node Node, version string) (*Server, error) {
@@ -46,6 +49,27 @@ func New(node Node, version string) (*Server, error) {
 		return nil, errors.New("MCP server version is required")
 	}
 	return &Server{node: node, version: version}, nil
+}
+
+// NewWithTasks adds the optional Gateway-backed task lifecycle tools. The
+// result directory is fixed for the process lifetime and must already be an
+// owner-only directory; terminal agent bytes are written there and never
+// returned over MCP stdio.
+func NewWithTasks(node Node, tasks TaskGateway, resultDirectory, version string) (*Server, error) {
+	server, err := New(node, version)
+	if err != nil {
+		return nil, err
+	}
+	if tasks == nil {
+		return nil, errors.New("MCP Gateway task client is required")
+	}
+	store, err := newTaskResultStore(resultDirectory)
+	if err != nil {
+		return nil, err
+	}
+	server.tasks = tasks
+	server.resultStore = store
+	return server, nil
 }
 
 type request struct {
@@ -70,6 +94,9 @@ type rpcError struct {
 func (s *Server) Serve(ctx context.Context, input io.Reader, output, logWriter io.Writer) error {
 	if input == nil || output == nil || logWriter == nil {
 		return errors.New("MCP input, output, and log writer are required")
+	}
+	if s.resultStore != nil {
+		defer s.resultStore.close()
 	}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 64<<10), maxMessageBytes)
@@ -122,14 +149,22 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output, logWriter i
 				break
 			}
 			initializedResponse = true
+			instructions := "Use read tools freely. Confirm create, stop, destroy, and other lifecycle mutations with the operator before invoking them."
+			serverTitle := "Steward Node Operations"
+			serverDescription := "Manage one locally authorized Steward node through its public enforcement boundary."
+			if s.tasks != nil {
+				instructions += " Task submission starts signed real-world work. The acknowledgment argument is not proof of human approval; signed permits and Gateway policy authorize the exact work. Terminal agent output is saved only in the configured owner-only, quota-bounded result directory."
+				serverTitle = "Steward Node and Task Operations"
+				serverDescription = "Manage one locally authorized Steward node and bounded Gateway task lifecycle through their public enforcement boundaries."
+			}
 			result = map[string]any{
 				"protocolVersion": ProtocolVersion,
 				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 				"serverInfo": map[string]any{
-					"name": "steward-mcp", "title": "Steward Node Operations", "version": s.version,
-					"description": "Manage one locally authorized Steward node through its public enforcement boundary.",
+					"name": "steward-mcp", "title": serverTitle, "version": s.version,
+					"description": serverDescription,
 				},
-				"instructions": "Use read tools freely. Confirm create, stop, destroy, and other lifecycle mutations with the operator before invoking them.",
+				"instructions": instructions,
 			}
 		case "ping":
 			result = map[string]any{}
@@ -138,7 +173,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output, logWriter i
 				callErr = &rpcError{Code: -32002, Message: "MCP session is not initialized"}
 				break
 			}
-			result = map[string]any{"tools": tools()}
+			result = map[string]any{"tools": tools(s.tasks != nil)}
 		case "tools/call":
 			if !initialized {
 				callErr = &rpcError{Code: -32002, Message: "MCP session is not initialized"}
@@ -271,6 +306,21 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 			TenantID: arguments.TenantID, NodeID: arguments.NodeID, LineageID: arguments.LineageID, Generation: arguments.Generation,
 		})
 		value = map[string]any{"tenant_id": arguments.TenantID, "lineage_id": arguments.LineageID, "purged": err == nil}
+	case "steward_task_submit":
+		if s.tasks == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
+		value, err = s.submitTask(ctx, call.Arguments)
+	case "steward_task_status":
+		if s.tasks == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
+		value, err = s.taskStatus(ctx, call.Arguments)
+	case "steward_task_observe":
+		if s.tasks == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
+		value, err = s.observeTask(ctx, call.Arguments)
 	default:
 		return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
 	}
@@ -308,25 +358,25 @@ func toolFailure(message string) any {
 	}
 }
 
-func tools() []any {
+func tools(includeTasks bool) []any {
 	runtimeSchema := map[string]any{
 		"type": "object", "additionalProperties": false, "required": []string{"runtime_ref"},
 		"properties": map[string]any{"runtime_ref": map[string]any{"type": "string", "pattern": "^executor-[a-f0-9]{64}$"}},
 	}
-	return []any{
+	result := []any{
 		tool("steward_admit", "Admit signed agent", "Admit one publisher-signed capsule and tenant-bound intent on the configured Steward node.", map[string]any{
 			"type": "object", "additionalProperties": false, "required": []string{"capsule_dsse_base64", "intent_json"},
 			"properties": map[string]any{
 				"capsule_dsse_base64": map[string]any{"type": "string", "description": "Base64 of the exact signed capsule envelope."},
 				"intent_json":         map[string]any{"type": "string", "description": "Strict JSON instance intent authenticated by the configured node path."},
 			},
-		}, false, false, true),
-		tool("steward_status", "Inspect agent", "Read the current bounded runtime status.", runtimeSchema, true, false, true),
-		tool("steward_logs", "Read agent logs", "Read the bounded tail of agent stdout and stderr.", runtimeSchema, true, false, true),
-		tool("steward_egress", "Inspect agent egress", "Read bounded allow/deny counters and the last destination for the signed egress grant.", runtimeSchema, true, false, true),
-		tool("steward_start", "Start agent", "Start an admitted agent workload.", runtimeSchema, false, false, true),
-		tool("steward_stop", "Stop agent", "Stop an admitted agent workload.", runtimeSchema, false, true, true),
-		tool("steward_destroy", "Destroy agent", "Destroy the admitted workload while retaining separately managed lineage state.", runtimeSchema, false, true, true),
+		}, false, false, true, false),
+		tool("steward_status", "Inspect agent", "Read the current bounded runtime status.", runtimeSchema, true, false, true, false),
+		tool("steward_logs", "Read agent logs", "Read the bounded tail of agent stdout and stderr.", runtimeSchema, true, false, true, false),
+		tool("steward_egress", "Inspect agent egress", "Read bounded allow/deny counters and the last destination for the signed egress grant.", runtimeSchema, true, false, true, false),
+		tool("steward_start", "Start agent", "Start an admitted agent workload.", runtimeSchema, false, false, true, false),
+		tool("steward_stop", "Stop agent", "Stop an admitted agent workload.", runtimeSchema, false, true, true, false),
+		tool("steward_destroy", "Destroy agent", "Destroy the admitted workload while retaining separately managed lineage state.", runtimeSchema, false, true, true, false),
 		tool("steward_purge_state", "Purge agent state", "Permanently remove one absent, signed tenant lineage state volume.", map[string]any{
 			"type": "object", "additionalProperties": false,
 			"required": []string{"tenant_id", "node_id", "lineage_id", "generation"},
@@ -336,16 +386,20 @@ func tools() []any {
 				"lineage_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 256},
 				"generation": map[string]any{"type": "integer", "minimum": 1},
 			},
-		}, false, true, true),
+		}, false, true, true, false),
 	}
+	if includeTasks {
+		result = append(result, taskTools()...)
+	}
+	return result
 }
 
-func tool(name, title, description string, schema map[string]any, readOnly, destructive, idempotent bool) map[string]any {
+func tool(name, title, description string, schema map[string]any, readOnly, destructive, idempotent, openWorld bool) map[string]any {
 	return map[string]any{
 		"name": name, "title": title, "description": description, "inputSchema": schema,
 		"annotations": map[string]any{
 			"title": title, "readOnlyHint": readOnly, "destructiveHint": destructive,
-			"idempotentHint": idempotent, "openWorldHint": false,
+			"idempotentHint": idempotent, "openWorldHint": openWorld,
 		},
 	}
 }
