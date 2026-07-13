@@ -869,6 +869,115 @@ func TestInspectSignedImageFallsBackToContainerdManifestIdentity(t *testing.T) {
 	}
 }
 
+func TestInspectSignedImageUsesSignedConfigWhenContainerdOmitsAnnotation(t *testing.T) {
+	manifestDigest := "sha256:" + strings.Repeat("a", 64)
+	configDigest := "sha256:" + strings.Repeat("b", 64)
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1.41/images/" + configDigest + "/json":
+			w.WriteHeader(http.StatusNotFound)
+		case "/v1.48/images/" + manifestDigest + "/json":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id": manifestDigest, "Os": "linux", "Architecture": "amd64", "Config": map[string]any{},
+				"Descriptor": map[string]any{"digest": manifestDigest},
+			})
+		default:
+			t.Fatalf("unexpected containerd lookup %s", r.URL.Path)
+		}
+	})
+
+	observed, err := docker.InspectSignedImage(context.Background(), "registry.local/agent@"+manifestDigest, configDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.ConfigDigest != configDigest {
+		t.Fatalf("config digest=%q want signed %q", observed.ConfigDigest, configDigest)
+	}
+	if err := ValidateImage(observed, ImageRequirement{
+		ManifestDigest: manifestDigest, ConfigDigest: configDigest, OS: "linux", Architecture: "amd64",
+	}); err != nil {
+		t.Fatalf("containerd image without optional annotation rejected: %v", err)
+	}
+}
+
+func TestInspectSignedImageDoesNotReplaceConflictingContainerdConfigAnnotation(t *testing.T) {
+	manifestDigest := "sha256:" + strings.Repeat("a", 64)
+	configDigest := "sha256:" + strings.Repeat("b", 64)
+	conflictingDigest := "sha256:" + strings.Repeat("c", 64)
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1.41/images/" + configDigest + "/json":
+			w.WriteHeader(http.StatusNotFound)
+		case "/v1.48/images/" + manifestDigest + "/json":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id": manifestDigest, "Os": "linux", "Architecture": "amd64", "Config": map[string]any{},
+				"Descriptor": map[string]any{
+					"digest": manifestDigest, "annotations": map[string]string{"config.digest": conflictingDigest},
+				},
+			})
+		default:
+			t.Fatalf("unexpected containerd lookup %s", r.URL.Path)
+		}
+	})
+
+	observed, err := docker.InspectSignedImage(context.Background(), "registry.local/agent@"+manifestDigest, configDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.ConfigDigest != conflictingDigest {
+		t.Fatalf("config digest=%q want observed conflict %q", observed.ConfigDigest, conflictingDigest)
+	}
+	if err := ValidateImage(observed, ImageRequirement{
+		ManifestDigest: manifestDigest, ConfigDigest: configDigest, OS: "linux", Architecture: "amd64",
+	}); err == nil {
+		t.Fatal("conflicting config annotation accepted")
+	}
+}
+
+func TestInspectSignedImageDoesNotInferConfigBeforeExactManifestMatch(t *testing.T) {
+	manifestDigest := "sha256:" + strings.Repeat("a", 64)
+	configDigest := "sha256:" + strings.Repeat("b", 64)
+	otherDigest := "sha256:" + strings.Repeat("c", 64)
+	tests := []struct {
+		name             string
+		id               string
+		descriptorDigest string
+	}{
+		{name: "image id mismatch", id: otherDigest, descriptorDigest: manifestDigest},
+		{name: "descriptor mismatch", id: manifestDigest, descriptorDigest: otherDigest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1.41/images/" + configDigest + "/json":
+					w.WriteHeader(http.StatusNotFound)
+				case "/v1.48/images/" + manifestDigest + "/json":
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"Id": tt.id, "Os": "linux", "Architecture": "amd64", "Config": map[string]any{},
+						"Descriptor": map[string]any{"digest": tt.descriptorDigest},
+					})
+				default:
+					t.Fatalf("unexpected containerd lookup %s", r.URL.Path)
+				}
+			})
+
+			observed, err := docker.InspectSignedImage(context.Background(), "registry.local/agent@"+manifestDigest, configDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observed.ConfigDigest != "" {
+				t.Fatalf("config digest inferred before exact manifest match: %q", observed.ConfigDigest)
+			}
+			if err := ValidateImage(observed, ImageRequirement{
+				ManifestDigest: manifestDigest, ConfigDigest: configDigest, OS: "linux", Architecture: "amd64",
+			}); err == nil {
+				t.Fatal("mismatched manifest identity accepted")
+			}
+		})
+	}
+}
+
 func TestInspectSignedImageDoesNotHideConfigLookupFailure(t *testing.T) {
 	requests := 0
 	docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {

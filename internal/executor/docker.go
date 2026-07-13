@@ -508,7 +508,20 @@ func (d *DockerHTTP) InspectSignedImage(ctx context.Context, imageReference, con
 	// API 1.48 is the first Docker 28 API and the first image-inspect response
 	// that exposes Descriptor. Classic stores return from the config lookup above,
 	// so only a containerd-store fallback requires this newer projection.
-	return d.inspectImageReference(ctx, "v1.48", manifestDigest, imageIdentityManifest)
+	observed, err = d.inspectImageReference(ctx, "v1.48", manifestDigest, imageIdentityManifest)
+	if err != nil {
+		return ObservedImage{}, err
+	}
+	// Descriptor.annotations is optional. Once Docker reports both Id and the
+	// target Descriptor as the exact signed manifest, that content identity
+	// already binds its config, so infer the config digest from the signed
+	// requirement when the convenience annotation is absent. Never replace a
+	// present value: a conflict must remain visible to ValidateImage and fail
+	// closed.
+	if observed.ConfigDigest == "" && observed.ID == manifestDigest && observed.ManifestDigest == manifestDigest {
+		observed.ConfigDigest = configDigest
+	}
+	return observed, nil
 }
 
 func (d *DockerHTTP) inspectImageReference(ctx context.Context, apiVersion, reference string, identity imageIdentity) (ObservedImage, error) {
