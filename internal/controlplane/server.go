@@ -1,0 +1,730 @@
+// Package controlplane exposes the bounded HTTP contract for Steward's bundled
+// controller. The service transports exact tenant-signed commands but never
+// receives tenant private keys or executes agent operations itself.
+package controlplane
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"mime"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/hardrails/steward/internal/controlauth"
+	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/controlstore"
+	"github.com/hardrails/steward/internal/dsse"
+)
+
+const (
+	maxRequestBytes  = 1 << 20
+	maxResponseBytes = 1 << 20
+	defaultPageSize  = 100
+	maxPageSize      = 500
+)
+
+var errBodyTooLarge = errors.New("request body exceeds 1 MiB")
+
+type Config struct {
+	Store         *controlstore.Store
+	Auth          *controlauth.Manager
+	LeaseDuration time.Duration
+	MaxPoll       int
+	Now           func() time.Time
+	Logger        *slog.Logger
+}
+
+type Server struct {
+	store   *controlstore.Store
+	auth    *controlauth.Manager
+	lease   time.Duration
+	maxPoll int
+	now     func() time.Time
+	logger  *slog.Logger
+	mux     *http.ServeMux
+}
+
+func New(config Config) (*Server, error) {
+	if config.Store == nil || config.Auth == nil || config.LeaseDuration <= 0 ||
+		config.LeaseDuration > 15*time.Minute || config.MaxPoll <= 0 || config.MaxPoll > controlprotocol.MaxExecutorDeliveries {
+		return nil, errors.New("control server requires store, auth, a lease no greater than 15 minutes, and a bounded poll batch")
+	}
+	now := config.Now
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	logger := config.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	server := &Server{
+		store: config.Store, auth: config.Auth, lease: config.LeaseDuration,
+		maxPoll: config.MaxPoll, now: now, logger: logger, mux: http.NewServeMux(),
+	}
+	server.routes()
+	return server, nil
+}
+
+func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			server.logger.Error("control HTTP panic recovered", "panic", recovered, "method", request.Method, "path", request.URL.Path)
+			writeError(writer, http.StatusInternalServerError, "internal_error", "the control plane could not complete the request")
+		}
+	}()
+	server.mux.ServeHTTP(writer, request)
+}
+
+func (server *Server) routes() {
+	server.mux.HandleFunc("/v1/healthz", server.health)
+	server.mux.HandleFunc("/v1/readiness", server.readiness)
+	server.mux.HandleFunc("/v1/tenants", server.tenants)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}", server.tenant)
+	server.mux.HandleFunc("/v1/operators", server.operators)
+	server.mux.HandleFunc("/v1/operators/{credential_id}", server.operator)
+	server.mux.HandleFunc("/v1/enrollments", server.enrollments)
+	server.mux.HandleFunc("/v1/enroll", server.enroll)
+	server.mux.HandleFunc("/v1/nodes/{node_id}", server.nodeAdministration)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes", server.nodes)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}", server.node)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands", server.commands)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands/{command_id}", server.command)
+	server.mux.HandleFunc("/executor-uplink/poll", server.executorPoll)
+	server.mux.HandleFunc("/executor-uplink/report", server.executorReport)
+	server.mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
+		writeError(writer, http.StatusNotFound, "not_found", "the requested control-plane route does not exist")
+	})
+}
+
+func (server *Server) health(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (server *Server) readiness(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	if _, err := server.store.Status(); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "not_ready", "durable control state is unavailable")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+func (server *Server) tenants(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet && request.Method != http.MethodPost {
+		methodNotAllowed(writer, http.MethodGet, http.MethodPost)
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	switch request.Method {
+	case http.MethodPost:
+		if !noQuery(writer, request) {
+			return
+		}
+		var input struct {
+			TenantID string `json:"tenant_id"`
+		}
+		if !server.decode(writer, request, &input) {
+			return
+		}
+		tenant, created, err := server.store.CreateTenant(identity, input.TenantID, server.now())
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		status := http.StatusOK
+		if created {
+			status = http.StatusCreated
+		}
+		writeJSON(writer, status, tenantView(tenant))
+	case http.MethodGet:
+		page, ok := parsePage(writer, request)
+		if !ok {
+			return
+		}
+		tenants, err := server.store.ListTenants(identity)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		selected, next := pageTenants(tenants, page)
+		views := make([]tenantResponse, 0, len(selected))
+		for _, tenant := range selected {
+			views = append(views, tenantView(tenant))
+		}
+		writeJSON(writer, http.StatusOK, struct {
+			Tenants   []tenantResponse `json:"tenants"`
+			NextAfter string           `json:"next_after,omitempty"`
+		}{Tenants: views, NextAfter: next})
+	}
+}
+
+func (server *Server) tenant(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	tenant, found, err := server.store.GetTenant(identity, request.PathValue("tenant_id"))
+	if err != nil {
+		server.storeError(writer, err, true)
+		return
+	}
+	if !found {
+		writeError(writer, http.StatusNotFound, "not_found", "tenant was not found")
+		return
+	}
+	writeJSON(writer, http.StatusOK, tenantView(tenant))
+}
+
+func (server *Server) operators(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		Role     controlauth.Role `json:"role"`
+		TenantID string           `json:"tenant_id,omitempty"`
+	}
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	raw, credential, err := server.store.IssueOperator(identity, server.auth, input.Role, input.TenantID, server.now())
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, struct {
+		CredentialID string           `json:"credential_id"`
+		Role         controlauth.Role `json:"role"`
+		TenantID     string           `json:"tenant_id,omitempty"`
+		Token        string           `json:"token"`
+		CreatedAt    string           `json:"created_at"`
+	}{credential.ID, credential.Role, credential.TenantID, raw, credential.CreatedAt})
+}
+
+func (server *Server) operator(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodDelete) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	revoked, err := server.store.RevokeCredential(identity, request.PathValue("credential_id"), server.now())
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	if !revoked {
+		writeError(writer, http.StatusNotFound, "not_found", "operator credential was not found")
+		return
+	}
+	writeNoContent(writer)
+}
+
+func (server *Server) enrollments(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		NodeID     string   `json:"node_id"`
+		TenantIDs  []string `json:"tenant_ids"`
+		TTLSeconds int64    `json:"ttl_seconds"`
+	}
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	now := server.now()
+	if input.TTLSeconds <= 0 || input.TTLSeconds > int64((24*time.Hour)/time.Second) {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "ttl_seconds must be between 1 and 86400")
+		return
+	}
+	raw, enrollment, _, err := server.store.CreateEnrollment(
+		identity, server.auth, input.NodeID, input.TenantIDs, now.Add(time.Duration(input.TTLSeconds)*time.Second), now,
+	)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, struct {
+		EnrollmentID    string   `json:"enrollment_id"`
+		EnrollmentToken string   `json:"enrollment_token"`
+		NodeID          string   `json:"node_id"`
+		TenantIDs       []string `json:"tenant_ids"`
+		ExpiresAt       string   `json:"expires_at"`
+	}{enrollment.ID, raw, enrollment.NodeID, append([]string(nil), enrollment.TenantIDs...), enrollment.ExpiresAt})
+}
+
+func (server *Server) enroll(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	var input struct {
+		EnrollmentToken string `json:"enrollment_token"`
+		RequestID       string `json:"request_id"`
+	}
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	credential, err := server.store.ExchangeEnrollment(server.auth, input.EnrollmentToken, input.RequestID, server.now())
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, credential)
+}
+
+func (server *Server) nodeAdministration(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodDelete) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	revoked, err := server.store.RevokeNode(identity, request.PathValue("node_id"), server.now())
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		NodeID             string `json:"node_id"`
+		RevokedCredentials int    `json:"revoked_credentials"`
+	}{request.PathValue("node_id"), revoked})
+}
+
+func (server *Server) nodes(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) {
+		return
+	}
+	page, ok := parsePage(writer, request)
+	if !ok {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	tenantID := request.PathValue("tenant_id")
+	nodes, err := server.store.ListNodes(identity, tenantID)
+	if err != nil {
+		server.storeError(writer, err, true)
+		return
+	}
+	selected, next := pageNodes(nodes, page)
+	views := make([]nodeResponse, 0, len(selected))
+	for _, node := range selected {
+		views = append(views, nodeView(node))
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		Nodes     []nodeResponse `json:"nodes"`
+		NextAfter string         `json:"next_after,omitempty"`
+	}{Nodes: views, NextAfter: next})
+}
+
+func (server *Server) node(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	node, found, err := server.store.GetNode(identity, request.PathValue("tenant_id"), request.PathValue("node_id"))
+	if err != nil {
+		server.storeError(writer, err, true)
+		return
+	}
+	if !found {
+		writeError(writer, http.StatusNotFound, "not_found", "node was not found")
+		return
+	}
+	writeJSON(writer, http.StatusOK, nodeView(node))
+}
+
+func (server *Server) commands(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		CommandDSSEBase64 string `json:"command_dsse_base64"`
+	}
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	commandRaw, err := base64.StdEncoding.DecodeString(input.CommandDSSEBase64)
+	if err != nil || base64.StdEncoding.EncodeToString(commandRaw) != input.CommandDSSEBase64 {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "command_dsse_base64 must be canonical base64")
+		return
+	}
+	command, created, err := server.store.SubmitCommand(
+		identity, request.PathValue("tenant_id"), request.PathValue("node_id"), commandRaw, server.now(),
+	)
+	if err != nil {
+		server.storeError(writer, err, true)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(writer, status, commandView(command))
+}
+
+func (server *Server) command(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	command, found, err := server.store.GetCommand(identity, request.PathValue("tenant_id"), request.PathValue("node_id"), request.PathValue("command_id"))
+	if err != nil {
+		server.storeError(writer, err, true)
+		return
+	}
+	if !found {
+		writeError(writer, http.StatusNotFound, "not_found", "command was not found")
+		return
+	}
+	writeJSON(writer, http.StatusOK, commandView(command))
+}
+
+func (server *Server) executorPoll(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.nodeIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input controlprotocol.ExecutorPollRequestV3
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	if input.ProtocolVersion != controlprotocol.ExecutorProtocolV3 || input.CredentialScope != "node" || input.NodeID != identity.NodeID {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "poll identity or protocol does not match the authenticated node")
+		return
+	}
+	deliveries, err := server.store.Poll(identity, input.Capabilities, server.now(), server.lease, server.maxPoll)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		ProtocolVersion int                                  `json:"protocol_version"`
+		Deliveries      []controlprotocol.ExecutorDeliveryV3 `json:"deliveries"`
+	}{ProtocolVersion: controlprotocol.ExecutorProtocolV3, Deliveries: deliveries})
+}
+
+func (server *Server) executorReport(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.nodeIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var report controlprotocol.ExecutorReportV3
+	if !server.decode(writer, request, &report) {
+		return
+	}
+	if err := report.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "executor report is invalid")
+		return
+	}
+	applied, err := server.store.ApplyReport(identity, report, server.now())
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, controlprotocol.ExecutorReportResponseV3{
+		ProtocolVersion: controlprotocol.ExecutorProtocolV3, Applied: applied,
+	})
+}
+
+func (server *Server) operatorIdentity(writer http.ResponseWriter, request *http.Request) (controlauth.Identity, bool) {
+	token, ok := bearer(writer, request)
+	if !ok {
+		return controlauth.Identity{}, false
+	}
+	identity, err := server.store.AuthenticateOperator(server.auth, token)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return controlauth.Identity{}, false
+	}
+	return identity, true
+}
+
+func (server *Server) nodeIdentity(writer http.ResponseWriter, request *http.Request) (controlauth.NodeIdentity, bool) {
+	token, ok := bearer(writer, request)
+	if !ok {
+		return controlauth.NodeIdentity{}, false
+	}
+	identity, err := server.store.AuthenticateNode(server.auth, token)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return controlauth.NodeIdentity{}, false
+	}
+	return identity, true
+}
+
+func bearer(writer http.ResponseWriter, request *http.Request) (string, bool) {
+	values := request.Header.Values("Authorization")
+	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {
+		writeError(writer, http.StatusUnauthorized, "unauthorized", "one bearer credential is required")
+		return "", false
+	}
+	token := strings.TrimPrefix(values[0], "Bearer ")
+	if token == "" || len(token) > 4096 || strings.TrimSpace(token) != token || strings.ContainsAny(token, " \t\r\n\x00") {
+		writeError(writer, http.StatusUnauthorized, "unauthorized", "bearer credential is invalid")
+		return "", false
+	}
+	return token, true
+}
+
+func (server *Server) decode(writer http.ResponseWriter, request *http.Request, destination any) bool {
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeError(writer, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+		return false
+	}
+	reader := http.MaxBytesReader(writer, request.Body, maxRequestBytes)
+	defer reader.Close()
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(writer, http.StatusRequestEntityTooLarge, "payload_too_large", errBodyTooLarge.Error())
+		} else {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "request body could not be read")
+		}
+		return false
+	}
+	if err := dsse.DecodeStrictInto(raw, maxRequestBytes, destination); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "request body must be one strict JSON object")
+		return false
+	}
+	return true
+}
+
+func (server *Server) storeError(writer http.ResponseWriter, err error, hideForbidden bool) {
+	switch {
+	case errors.Is(err, controlauth.ErrUnauthorized):
+		writeError(writer, http.StatusUnauthorized, "unauthorized", "control credential is invalid or revoked")
+	case errors.Is(err, controlauth.ErrEnrollmentConsumed), errors.Is(err, controlstore.ErrConflict):
+		writeError(writer, http.StatusConflict, "conflict", "request conflicts with retained control state")
+	case errors.Is(err, controlauth.ErrEnrollmentExpired):
+		writeError(writer, http.StatusGone, "enrollment_expired", "enrollment capability has expired")
+	case errors.Is(err, controlstore.ErrForbidden):
+		if hideForbidden {
+			writeError(writer, http.StatusNotFound, "not_found", "resource was not found")
+		} else {
+			writeError(writer, http.StatusForbidden, "forbidden", "credential does not authorize this operation")
+		}
+	case errors.Is(err, controlstore.ErrNotFound):
+		writeError(writer, http.StatusNotFound, "not_found", "resource was not found")
+	case errors.Is(err, controlstore.ErrInvalid):
+		writeError(writer, http.StatusBadRequest, "invalid_request", "request does not satisfy the control-plane contract")
+	case errors.Is(err, controlstore.ErrCapacityExceeded):
+		writeError(writer, http.StatusServiceUnavailable, "capacity_exceeded", "bounded control-plane capacity is exhausted")
+	case errors.Is(err, controlstore.ErrUnavailable):
+		writeError(writer, http.StatusServiceUnavailable, "not_ready", "durable control state requires recovery")
+	default:
+		server.logger.Error("control store operation failed", "error", err)
+		writeError(writer, http.StatusInternalServerError, "internal_error", "the control plane could not complete the request")
+	}
+}
+
+type tenantResponse struct {
+	TenantID string `json:"tenant_id"`
+	State    string `json:"state"`
+	Created  string `json:"created_at"`
+}
+
+func tenantView(tenant controlstore.Tenant) tenantResponse {
+	state := "inactive"
+	if tenant.Active {
+		state = "active"
+	}
+	return tenantResponse{TenantID: tenant.ID, State: state, Created: tenant.CreatedAt}
+}
+
+type nodeResponse struct {
+	NodeID       string   `json:"node_id"`
+	TenantIDs    []string `json:"tenant_ids"`
+	Capabilities []string `json:"capabilities"`
+	State        string   `json:"state"`
+	CreatedAt    string   `json:"created_at"`
+	LastSeenAt   string   `json:"last_seen_at,omitempty"`
+	RevokedAt    string   `json:"revoked_at,omitempty"`
+}
+
+func nodeView(node controlstore.Node) nodeResponse {
+	state := "revoked"
+	if node.Active {
+		state = "active"
+	}
+	return nodeResponse{
+		NodeID: node.ID, TenantIDs: append([]string(nil), node.TenantIDs...),
+		Capabilities: append([]string(nil), node.Capabilities...), State: state,
+		CreatedAt: node.CreatedAt, LastSeenAt: node.LastSeenAt, RevokedAt: node.RevokedAt,
+	}
+}
+
+type commandResponse struct {
+	CommandID          string `json:"command_id"`
+	DeliveryID         string `json:"delivery_id"`
+	TenantID           string `json:"tenant_id"`
+	NodeID             string `json:"node_id"`
+	CommandDigest      string `json:"command_digest"`
+	State              string `json:"state"`
+	DeliveryGeneration uint64 `json:"delivery_generation,omitempty"`
+	LeaseExpiresAt     string `json:"lease_expires_at,omitempty"`
+	ReportedStatus     string `json:"reported_status,omitempty"`
+	ErrorCode          string `json:"error_code,omitempty"`
+}
+
+func commandView(command controlstore.Command) commandResponse {
+	response := commandResponse{
+		CommandID: command.ID, DeliveryID: command.DeliveryID, TenantID: command.TenantID,
+		NodeID: command.NodeID, CommandDigest: command.Digest, State: string(command.State),
+		DeliveryGeneration: command.DeliveryGeneration, LeaseExpiresAt: command.LeaseUntil,
+	}
+	if command.Terminal != nil {
+		response.ReportedStatus = command.Terminal.Report.ReportedStatus
+		response.ErrorCode = command.Terminal.Report.ErrorCode
+	}
+	return response
+}
+
+type pageRequest struct {
+	after string
+	limit int
+}
+
+func parsePage(writer http.ResponseWriter, request *http.Request) (pageRequest, bool) {
+	for key, values := range request.URL.Query() {
+		if (key != "after" && key != "limit") || len(values) != 1 {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "pagination accepts one after and one limit value")
+			return pageRequest{}, false
+		}
+	}
+	page := pageRequest{after: request.URL.Query().Get("after"), limit: defaultPageSize}
+	if value := request.URL.Query().Get("limit"); value != "" {
+		limit, err := strconv.Atoi(value)
+		if err != nil || limit <= 0 || limit > maxPageSize {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "limit must be between 1 and 500")
+			return pageRequest{}, false
+		}
+		page.limit = limit
+	}
+	if len(page.after) > 128 || strings.ContainsAny(page.after, "\r\n\x00") {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "after cursor is invalid")
+		return pageRequest{}, false
+	}
+	return page, true
+}
+
+func pageTenants(values []controlstore.Tenant, page pageRequest) ([]controlstore.Tenant, string) {
+	start := sort.Search(len(values), func(index int) bool { return values[index].ID > page.after })
+	end := start + page.limit
+	if end >= len(values) {
+		return values[start:], ""
+	}
+	return values[start:end], values[end-1].ID
+}
+
+func pageNodes(values []controlstore.Node, page pageRequest) ([]controlstore.Node, string) {
+	start := sort.Search(len(values), func(index int) bool { return values[index].ID > page.after })
+	end := start + page.limit
+	if end >= len(values) {
+		return values[start:], ""
+	}
+	return values[start:end], values[end-1].ID
+}
+
+func method(writer http.ResponseWriter, request *http.Request, expected string) bool {
+	if request.Method == expected {
+		return true
+	}
+	methodNotAllowed(writer, expected)
+	return false
+}
+
+func methodNotAllowed(writer http.ResponseWriter, allowed ...string) {
+	writer.Header().Set("Allow", strings.Join(allowed, ", "))
+	writeError(writer, http.StatusMethodNotAllowed, "method_not_allowed", "HTTP method is not allowed for this route")
+}
+
+func noQuery(writer http.ResponseWriter, request *http.Request) bool {
+	if request.URL.RawQuery == "" {
+		return true
+	}
+	writeError(writer, http.StatusBadRequest, "invalid_request", "query parameters are not accepted on this route")
+	return false
+}
+
+func writeJSON(writer http.ResponseWriter, status int, value any) {
+	raw, err := json.Marshal(value)
+	if err != nil || len(raw)+1 > maxResponseBytes {
+		writeError(writer, http.StatusInternalServerError, "internal_error", "response could not be encoded within its limit")
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(status)
+	_, _ = writer.Write(append(raw, '\n'))
+}
+
+func writeNoContent(writer http.ResponseWriter) {
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func writeError(writer http.ResponseWriter, status int, code, message string) {
+	raw, err := json.Marshal(struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}{Error: code, Message: message})
+	if err != nil {
+		raw = []byte(`{"error":"internal_error","message":"error response could not be encoded"}`)
+		status = http.StatusInternalServerError
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.WriteHeader(status)
+	_, _ = fmt.Fprintf(writer, "%s\n", raw)
+}
