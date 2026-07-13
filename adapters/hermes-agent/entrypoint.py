@@ -274,7 +274,7 @@ def seed_state(model: str, skill_files: dict[str, bytes]) -> None:
     config = f"""model:
   provider: custom
   name: {model}
-  base_url: http://steward-model:8080/v1
+  base_url: http://steward-relay:8080/v1
   api_key: steward-local
   api_mode: chat_completions
 security:
@@ -428,8 +428,8 @@ def main() -> int:
     model = os.environ.get("OPENAI_MODEL", "steward-fixture-model")
     if not MODEL_RE.fullmatch(model):
         fail("OPENAI_MODEL is invalid")
-    if os.environ.get("OPENAI_BASE_URL", "http://steward-model:8080/v1") != "http://steward-model:8080/v1":
-        fail("OPENAI_BASE_URL must use the fixed feasibility relay endpoint")
+    if os.environ.get("OPENAI_BASE_URL", "http://steward-relay:8080/v1") != "http://steward-relay:8080/v1":
+        fail("OPENAI_BASE_URL must use Steward's fixed inference relay endpoint")
     skill_files = verify_skill()
     seed_state(model, skill_files)
     server = BoundedHTTPServer(("0.0.0.0", 8766), ServiceBridgeHandler)

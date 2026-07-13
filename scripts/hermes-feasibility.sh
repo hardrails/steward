@@ -243,13 +243,13 @@ for _ in $(seq 1 30); do
 	sleep 1
 done
 [[ $fixture_ready == true ]] || stop_gate fixture.services fixture_services_not_ready
-agent_hosts=(--add-host "steward-model:$model_ip" --add-host "steward-mcp:$mcp_ip")
+agent_hosts=(--add-host "steward-relay:$model_ip" --add-host "steward-mcp:$mcp_ip")
 docker run -d --name "$agent" --network-alias steward-agent "${closed_run[@]}" "${agent_hosts[@]}" \
 	--mount "type=bind,src=$state_root,dst=/opt/data" \
-	-e OPENAI_BASE_URL=http://steward-model:8080/v1 -e OPENAI_API_KEY=steward-local \
+	-e OPENAI_BASE_URL=http://steward-relay:8080/v1 -e OPENAI_API_KEY=steward-local \
 	-e OPENAI_MODEL=steward-fixture-model "$image" >/dev/null || stop_gate agent.start agent_start_failed
 record fixture.services passed model_and_mcp_gvisor
-docker inspect --format '{{json .HostConfig.ExtraHosts}}' "$agent" | grep -Fq "steward-model:$model_ip" || stop_gate fixture.network model_host_binding_missing
+docker inspect --format '{{json .HostConfig.ExtraHosts}}' "$agent" | grep -Fq "steward-relay:$model_ip" || stop_gate fixture.network model_host_binding_missing
 docker inspect --format '{{json .HostConfig.ExtraHosts}}' "$agent" | grep -Fq "steward-mcp:$mcp_ip" || stop_gate fixture.network mcp_host_binding_missing
 record fixture.network passed fixed_private_service_hosts
 
@@ -416,7 +416,7 @@ persisted_authority_before_restart=$(find "$state_root" -type f \( -path '*/conf
 docker rm -f "$agent" >/dev/null
 docker run -d --name "$agent" --network-alias steward-agent "${closed_run[@]}" "${agent_hosts[@]}" \
 	--mount "type=bind,src=$state_root,dst=/opt/data" \
-	-e OPENAI_BASE_URL=http://steward-model:8080/v1 -e OPENAI_API_KEY=steward-local \
+	-e OPENAI_BASE_URL=http://steward-relay:8080/v1 -e OPENAI_API_KEY=steward-local \
 	-e OPENAI_MODEL=steward-fixture-model "$image" >/dev/null || stop_gate restart.start agent_restart_failed
 for _ in $(seq 1 90); do
 	if agent_get /health >/dev/null 2>&1; then break; fi
