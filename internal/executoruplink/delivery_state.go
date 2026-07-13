@@ -20,6 +20,9 @@ const (
 	deliveryStateVersion  = 1
 	maxDeliveryStateBytes = 8 << 20
 	maxDeliveryRecords    = 4096
+	// Compact in batches so a long-lived node does not rewrite a near-capacity
+	// state file for every subsequent command.
+	deliveryCompactionTarget = maxDeliveryRecords * 3 / 4
 )
 
 const (
@@ -188,6 +191,7 @@ func (s *DeliveryStore) Accept(delivery controlprotocol.ExecutorDeliveryV3) (del
 			return 0, nil, errors.New("delivery record has invalid phase")
 		}
 	}
+	compactAcknowledgedDeliveries(next)
 	if len(next) >= maxDeliveryRecords {
 		return 0, nil, fmt.Errorf("executor delivery state reached its %d-record limit", maxDeliveryRecords)
 	}
@@ -240,8 +244,11 @@ func (s *DeliveryStore) Reject(delivery controlprotocol.ExecutorDeliveryV3, reje
 		if record.Phase == deliveryPhaseExecuting {
 			rejected = outcomeUnknownReport(record)
 		}
-	} else if len(next) >= maxDeliveryRecords {
-		return nil, fmt.Errorf("executor delivery state reached its %d-record limit", maxDeliveryRecords)
+	} else {
+		compactAcknowledgedDeliveries(next)
+		if len(next) >= maxDeliveryRecords {
+			return nil, fmt.Errorf("executor delivery state reached its %d-record limit", maxDeliveryRecords)
+		}
 	}
 	rejected.DeliveryGeneration = delivery.DeliveryGeneration
 	record = deliveryRecord{
@@ -313,6 +320,39 @@ func (s *DeliveryStore) persistLocked(next map[string]deliveryRecord) error {
 	}
 	s.records = next
 	return nil
+}
+
+// compactAcknowledgedDeliveries makes room only by removing terminal
+// generations whose report was acknowledged and whose local effect is safe to
+// replay through the independent signed-command fence. A done mutation has
+// already advanced that durable fence; a rejected command never entered the
+// handler. Failed and outcome_unknown records are retained even after an
+// acknowledgement because they may describe an effect whose fence did not
+// advance. Accepted, executing, and unacknowledged terminal records are never
+// candidates. Sorting by delivery ID makes the on-disk result deterministic.
+func compactAcknowledgedDeliveries(records map[string]deliveryRecord) {
+	if len(records) < maxDeliveryRecords {
+		return
+	}
+	candidates := make([]string, 0, len(records)-deliveryCompactionTarget)
+	for id, record := range records {
+		if record.Phase != deliveryPhaseTerminal || record.Terminal == nil ||
+			record.SettledGeneration != record.DeliveryGeneration {
+			continue
+		}
+		if record.Terminal.Status == controlprotocol.ExecutorStatusDone ||
+			record.Terminal.Status == controlprotocol.ExecutorStatusRejected {
+			candidates = append(candidates, id)
+		}
+	}
+	sort.Strings(candidates)
+	remove := len(records) - deliveryCompactionTarget
+	if remove > len(candidates) {
+		remove = len(candidates)
+	}
+	for _, id := range candidates[:remove] {
+		delete(records, id)
+	}
 }
 
 func encodeDeliveryState(nodeID string, records map[string]deliveryRecord) ([]byte, error) {

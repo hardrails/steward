@@ -1,6 +1,7 @@
 package executoruplink
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,95 @@ func TestDeliveryStoreIsOwnerOnlyNodeBoundAndStrict(t *testing.T) {
 	}
 	if _, err := LoadDeliveryStore(path, "node-1"); err == nil {
 		t.Fatal("null records silently reset delivery state")
+	}
+}
+
+func TestDeliveryStoreCompactsAcknowledgedTerminalRecordsAtCapacity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deliveries.json")
+	store := newDeliveryStore(t, path)
+	full := make(map[string]deliveryRecord, maxDeliveryRecords)
+	for index := 0; index < maxDeliveryRecords; index++ {
+		delivery := deliveryFixture(fmt.Sprintf("settled-%04d", index), 1)
+		delivery.CommandID = fmt.Sprintf("command-%04d", index)
+		report := reportFixture(delivery, controlprotocol.ExecutorStatusDone)
+		full[delivery.DeliveryID] = deliveryRecord{
+			DeliveryID: delivery.DeliveryID, DeliveryGeneration: 1, SettledGeneration: 1,
+			CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
+			Phase: deliveryPhaseTerminal, Terminal: &report,
+		}
+	}
+	store.records = full
+	newcomer := deliveryFixture("zz-new-delivery", 1)
+	newcomer.CommandID = "new-command"
+	decision, terminal, err := store.Accept(newcomer)
+	if err != nil || decision != deliveryExecute || terminal != nil {
+		t.Fatalf("accept decision=%v terminal=%#v err=%v", decision, terminal, err)
+	}
+	if len(store.records) != deliveryCompactionTarget+1 {
+		t.Fatalf("records=%d, want %d", len(store.records), deliveryCompactionTarget+1)
+	}
+	if _, exists := store.records["settled-0000"]; exists {
+		t.Fatal("deterministic oldest candidate was not compacted")
+	}
+	if _, exists := store.records["settled-4095"]; !exists {
+		t.Fatal("compaction removed more records than its target")
+	}
+	if _, exists := store.records[newcomer.DeliveryID]; !exists {
+		t.Fatal("new delivery was not retained")
+	}
+	reloaded, err := LoadDeliveryStore(path, "node-1")
+	if err != nil || len(reloaded.records) != deliveryCompactionTarget+1 {
+		t.Fatalf("compacted state was not durable: records=%d err=%v", len(reloaded.records), err)
+	}
+}
+
+func TestDeliveryStoreCompactionNeverEvictsUnsettledOrAmbiguousOutcomes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deliveries.json")
+	store := newDeliveryStore(t, path)
+	full := make(map[string]deliveryRecord, maxDeliveryRecords)
+	for index := 0; index < maxDeliveryRecords-2; index++ {
+		delivery := deliveryFixture(fmt.Sprintf("unsettled-%04d", index), 1)
+		delivery.CommandID = fmt.Sprintf("command-%04d", index)
+		report := reportFixture(delivery, controlprotocol.ExecutorStatusDone)
+		full[delivery.DeliveryID] = deliveryRecord{
+			DeliveryID: delivery.DeliveryID, DeliveryGeneration: 1,
+			CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
+			Phase: deliveryPhaseTerminal, Terminal: &report,
+		}
+	}
+	failed := deliveryFixture("settled-failed", 1)
+	failedReport := reportFixture(failed, controlprotocol.ExecutorStatusFailed)
+	full[failed.DeliveryID] = deliveryRecord{
+		DeliveryID: failed.DeliveryID, DeliveryGeneration: 1, SettledGeneration: 1,
+		CommandID: failed.CommandID, CommandDigest: failed.CommandDigest,
+		Phase: deliveryPhaseTerminal, Terminal: &failedReport,
+	}
+	rejected := deliveryFixture("settled-rejected", 1)
+	rejectedReport := reportFixture(rejected, controlprotocol.ExecutorStatusRejected)
+	full[rejected.DeliveryID] = deliveryRecord{
+		DeliveryID: rejected.DeliveryID, DeliveryGeneration: 1, SettledGeneration: 1,
+		CommandID: rejected.CommandID, CommandDigest: rejected.CommandDigest,
+		Phase: deliveryPhaseTerminal, Terminal: &rejectedReport,
+	}
+	store.records = full
+	newcomer := deliveryFixture("zz-new-delivery", 1)
+	newcomer.CommandID = "new-command"
+	if decision, _, err := store.Accept(newcomer); err != nil || decision != deliveryExecute {
+		t.Fatalf("accept decision=%v err=%v", decision, err)
+	}
+	if len(store.records) != maxDeliveryRecords {
+		t.Fatalf("records=%d, want %d", len(store.records), maxDeliveryRecords)
+	}
+	if _, exists := store.records[rejected.DeliveryID]; exists {
+		t.Fatal("acknowledged safe terminal record was not compacted")
+	}
+	if _, exists := store.records[failed.DeliveryID]; !exists {
+		t.Fatal("ambiguous failed outcome was compacted")
+	}
+	for index := 0; index < maxDeliveryRecords-2; index++ {
+		if _, exists := store.records[fmt.Sprintf("unsettled-%04d", index)]; !exists {
+			t.Fatalf("unsettled outcome %d was compacted", index)
+		}
 	}
 }
 
