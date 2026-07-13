@@ -762,20 +762,27 @@ func TestLifecycleTaskTerminalRecoveryAllowsOnlyOneConcurrentFetch(t *testing.T)
 		close(release)
 		t.Fatal("terminal recovery did not reach upstream")
 	}
-	time.Sleep(50 * time.Millisecond)
-	close(release)
-	results := []*httptest.ResponseRecorder{<-responses, <-responses}
-	sort.Slice(results, func(i, j int) bool { return results[i].Code < results[j].Code })
-	if results[0].Code != http.StatusOK || results[1].Code != http.StatusConflict {
-		t.Fatalf("concurrent recovery statuses=%d,%d bodies=%q / %q", results[0].Code, results[1].Code,
-			results[0].Body.String(), results[1].Body.String())
+	var conflicted *httptest.ResponseRecorder
+	select {
+	case conflicted = <-responses:
+		if code := requireGatewayErrorCode(t, conflicted, http.StatusConflict); code != "task_observation_in_progress" {
+			close(release)
+			t.Fatalf("concurrent recovery error=%q", code)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("concurrent terminal recovery did not enforce single-flight")
 	}
-	recovered := decodeLifecycleTaskStatus(t, results[0])
+	close(release)
+	var recoveredResponse *httptest.ResponseRecorder
+	select {
+	case recoveredResponse = <-responses:
+	case <-time.After(2 * time.Second):
+		t.Fatal("single terminal recovery did not finish")
+	}
+	recovered := decodeLifecycleTaskStatus(t, recoveredResponse)
 	if recovered.ObservationBase64 != base64.StdEncoding.EncodeToString(terminalBody) {
 		t.Fatalf("concurrent recovery result=%#v", recovered)
-	}
-	if code := requireGatewayErrorCode(t, results[1], http.StatusConflict); code != "task_observation_in_progress" {
-		t.Fatalf("concurrent recovery error=%q", code)
 	}
 	if observationCalls.Load() != 2 {
 		t.Fatalf("concurrent recoveries reached upstream %d times", observationCalls.Load())
