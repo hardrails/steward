@@ -290,6 +290,8 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	for _, contract := range []string{
 		"--check-layout",
 		"evidence output requires the adapter build attestation",
+		`type(p.get("imported")) is bool`,
+		"if [[ $image_imported == true ]]",
 		"for path in /opt/data /tmp /workspace /dev/shm",
 		"agent writable mount topology is unexpected",
 		"release_root=$root",
@@ -713,6 +715,8 @@ try:
         "readiness_status": "available",
         "setup_needed": False,
     })
+    for non_object in ("[]", "null", json.dumps("unexpected")):
+        assert module.validated_connector_skill_result(non_object) is None
     loaded_messages = connector_messages + [skill_message, {
         "role": "tool",
         "name": "skill_view",
@@ -764,6 +768,8 @@ finally:
 `
 	command := exec.Command(
 		python,
+		"-I",
+		"-B",
 		"-c",
 		program,
 		filepath.Join(root, "fixture_model.py"),

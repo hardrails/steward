@@ -644,10 +644,12 @@ capsule_base64=$(base64 <"$work/capsule.dsse.json" | tr -d '\n')
 
 import_result=$("$ctl_bin" image import -archive "$HERMES_ARCHIVE" -capsule "$work/capsule.dsse.json" \
 	-policy "$work/policy.dsse.json" -site-root-public-key "$work/site.public" -site-root-key-id site-root)
-python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert p["image"]["manifest_digest"]==sys.argv[1] and p["image"]["config_digest"]==sys.argv[2]' \
-	"$manifest_digest" "$config_digest" <<<"$import_result"
-imported_image_digests=("$manifest_digest")
-[[ $config_digest == "$manifest_digest" ]] || imported_image_digests+=("$config_digest")
+image_imported=$(python3 -I -c 'import json,sys; p=json.load(sys.stdin); assert p["image"]["manifest_digest"]==sys.argv[1] and p["image"]["config_digest"]==sys.argv[2] and type(p.get("imported")) is bool; print("true" if p["imported"] else "false")' \
+	"$manifest_digest" "$config_digest" <<<"$import_result")
+if [[ $image_imported == true ]]; then
+	imported_image_digests=("$manifest_digest")
+	[[ $config_digest == "$manifest_digest" ]] || imported_image_digests+=("$config_digest")
+fi
 mark image_imported
 
 token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')

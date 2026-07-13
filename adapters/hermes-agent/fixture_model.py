@@ -215,7 +215,9 @@ def validated_connector_skill_result(content: str) -> str | None:
         result = json.loads(content)
     except (TypeError, ValueError):
         return None
-    document = result.get("content") if isinstance(result, dict) else None
+    if not isinstance(result, dict):
+        return None
+    document = result.get("content")
     if (
         result.get("success") is not True
         or result.get("name") != CONNECTOR_SKILL_NAME
