@@ -92,10 +92,10 @@ type ServiceOperation struct {
 	MaxResponseBytes    int64  `json:"max_response_bytes"`
 	MaxSeconds          int    `json:"max_seconds"`
 	MaxPermitSeconds    int    `json:"max_permit_seconds"`
-	TaskProtocol        string `json:"task_protocol,omitempty"`
-	StatusPathPrefix    string `json:"status_path_prefix,omitempty"`
-	StatusMaxSeconds    int    `json:"status_max_seconds,omitempty"`
-	PollIntervalSeconds int    `json:"poll_interval_seconds,omitempty"`
+	TaskProtocol        string `json:"task_protocol"`
+	StatusPathPrefix    string `json:"status_path_prefix"`
+	StatusMaxSeconds    int    `json:"status_max_seconds"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds"`
 }
 
 // ConnectorReceiptTenantBudget reserves non-borrowing signed receipt capacity
@@ -394,20 +394,8 @@ func ValidateServiceOperation(operation ServiceOperation) error {
 }
 
 func validateServiceTaskLifecycle(operation ServiceOperation) error {
-	configured := 0
-	for _, present := range []bool{
-		operation.TaskProtocol != "", operation.StatusPathPrefix != "",
-		operation.StatusMaxSeconds != 0, operation.PollIntervalSeconds != 0,
-	} {
-		if present {
-			configured++
-		}
-	}
-	if configured == 0 {
-		return nil
-	}
-	if configured != 4 || operation.TaskProtocol != TaskProtocolLifecycleV1 {
-		return errors.New("task lifecycle protocol, status prefix, timeout, and poll interval must be configured together")
+	if operation.TaskProtocol != TaskProtocolLifecycleV1 {
+		return errors.New("task protocol must be lifecycle-v1")
 	}
 	if !canonicalServiceStatusPrefix(operation.StatusPathPrefix) ||
 		operation.StatusMaxSeconds < 1 || operation.StatusMaxSeconds > maxServiceStatusSeconds ||

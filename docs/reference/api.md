@@ -78,7 +78,7 @@ tenant-facing endpoints.
 | `GET /v1/tasks/{task_digest}/permits/{permit_digest}` | Read durable lifecycle evidence without contacting the agent |
 | `POST /v1/tasks/{task_digest}/permits/{permit_digest}/observe` | Ask Gateway to make one policy-bounded status request to the configured agent service |
 
-The path binds two values: the non-reversible task correlation digest and the
+The path binds two values: the deterministic SHA-256 task correlation digest and the
 digest of the exact permit envelope that authorized that task. They must identify
 the same retained authorization. A missing task, a mismatched pair, a legacy task,
 an alternate encoded path, or a query string returns 404. Both requests are
@@ -97,11 +97,14 @@ the recorded run and durably recorded its exact response digest and byte length.
 does not prove the agent did the requested work, that an output is correct, or that
 the report is truthful.
 
-Gateway never persists the agent response body. Only the observation request that
-first durably records a terminal report receives the exact bounded response as
-`observation_base64`. A later GET, repeated POST, or restart returns durable metadata
-without the raw body. A `queued` or `running` report is returned as the transient
-`observed_status`; durable state remains `dispatch_accepted`.
+Gateway never persists the agent response body. A live terminal observation returns
+the exact bounded response as `observation_base64` only after its run ID, terminal
+state, byte length, and SHA-256 digest match durable evidence. If delivery is lost,
+a later POST—including after Gateway restarts—can recover the same report while the
+exact grant remains active. A changed agent report returns 502 and cannot replace
+the durable terminal record. GET remains passive and never returns raw bytes. A
+`queued` or `running` report is returned as the transient `observed_status`; durable
+state remains `dispatch_accepted`.
 
 ## MCP server
 

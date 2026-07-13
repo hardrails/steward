@@ -124,31 +124,29 @@ func TestClientAgainstGatewayStatusAndTerminalObservation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	permitHeader, err := taskpermit.EncodeHeader(rawPermit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dispatchRequest, err := http.NewRequest(http.MethodPost, gatewayHTTP.URL+"/v1/services/"+grant.GrantID+operation.Path, bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	dispatchRequest.Header.Set("Authorization", "Bearer "+serviceToken)
-	dispatchRequest.Header.Set("Content-Type", operation.ContentType)
-	dispatchRequest.Header.Set("X-Steward-Task-Permit", permitHeader)
-	dispatchResponse, err := http.DefaultClient.Do(dispatchRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dispatchResponse.Body.Close()
-	if dispatchResponse.StatusCode != http.StatusAccepted {
-		t.Fatalf("dispatch HTTP status=%d", dispatchResponse.StatusCode)
-	}
-
 	taskDigest := taskpermit.TaskDigest(tenantID, instanceID, taskID)
 	permitDigest := dsse.Digest(rawPermit)
 	client, err := gatewayclient.New(gatewayHTTP.URL, serviceToken)
 	if err != nil {
 		t.Fatal(err)
+	}
+	submission := gatewayclient.TaskSubmission{
+		ServicePath: "/v1/services/" + grant.GrantID + "/", OperationPath: operation.Path,
+		ContentType: operation.ContentType, Request: body, Permit: rawPermit,
+	}
+	dispatched, err := client.Submit(context.Background(), submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatched.RunID != runID || dispatched.Receipt != gatewayclient.TaskReceiptRecorded {
+		t.Fatalf("recorded dispatch=%#v", dispatched)
+	}
+	replayed, err := client.Submit(context.Background(), submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.RunID != runID || replayed.Receipt != gatewayclient.TaskReceiptReplayed || dispatchCalls.Load() != 1 {
+		t.Fatalf("replayed dispatch=%#v agent calls=%d", replayed, dispatchCalls.Load())
 	}
 	status, err := client.Status(context.Background(), taskDigest, permitDigest)
 	if err != nil {
@@ -188,7 +186,17 @@ func TestClientAgainstGatewayStatusAndTerminalObservation(t *testing.T) {
 		persisted.ResultDigest != observed.ResultDigest || persisted.ResponseBytes != observed.ResponseBytes {
 		t.Fatalf("persisted terminal status=%#v", persisted)
 	}
-	if dispatchCalls.Load() != 1 || observationCalls.Load() != 1 {
+	time.Sleep(time.Duration(operation.PollIntervalSeconds)*time.Second + 100*time.Millisecond)
+	recovered, err := client.Observe(context.Background(), taskDigest, permitDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredRaw, err := base64.StdEncoding.DecodeString(recovered.ObservationBase64)
+	if err != nil || !bytes.Equal(recoveredRaw, terminalRaw) || recovered.ResultDigest != observed.ResultDigest ||
+		recovered.ResponseBytes != observed.ResponseBytes || recovered.State != observed.State {
+		t.Fatalf("recovered terminal=%#v raw=%q error=%v", recovered, recoveredRaw, err)
+	}
+	if dispatchCalls.Load() != 1 || observationCalls.Load() != 2 {
 		t.Fatalf("agent dispatch_calls=%d observation_calls=%d", dispatchCalls.Load(), observationCalls.Load())
 	}
 }

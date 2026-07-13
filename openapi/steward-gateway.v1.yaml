@@ -19,10 +19,12 @@ info:
     these states proves that the agent performed the requested work, that an
     output is correct, or that an agent report is truthful.
 
-    Gateway does not persist agent response bodies. The request that first
-    durably records a terminal observation receives the exact bounded response
-    as `observation_base64`. Inspection, repeated observation, and recovery
-    after restart return only durable metadata and never replay that body.
+    Gateway does not persist agent response bodies. A terminal observation
+    returns the exact bounded response as `observation_base64` only after its
+    status, run identifier, byte length, and SHA-256 digest match durable task
+    evidence. A later observation, including after Gateway restart, may recover
+    the same bytes from an active exact grant and must pass the same comparison.
+    Passive inspection never contacts the agent or returns response bytes.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -96,14 +98,18 @@ paths:
         `observed_status` in this response but do not replace the durable
         `dispatch_accepted` state. A valid terminal report is returned only
         after Gateway durably appends its terminal receipt. The response to that
-        first successful terminal append also includes the exact bounded agent
+        successful terminal append also includes the exact bounded agent
         response in `observation_base64`; Gateway persists only its SHA-256
-        digest and byte length.
+        digest and byte length. If delivery is interrupted, a later observation
+        may recover terminal bytes from the same active grant. Gateway returns
+        them only when the new report matches the durable run identifier,
+        terminal state, digest, and length. A changed report returns 502 and
+        does not change durable evidence.
 
-        A task that is already terminal returns its durable metadata without
-        contacting the agent and without replaying raw response bytes. Gateway
-        serializes observations for one task and enforces the configured
-        minimum poll interval and service concurrency limit.
+        Gateway serializes initial and recovery observations for one task and
+        enforces the configured minimum poll interval and service concurrency
+        limit. A durable failure that has no agent-reported terminal result
+        returns metadata without raw response bytes.
 
         This request has no body. A body, transfer coding, or nonzero declared
         content length returns 400.
@@ -249,8 +255,9 @@ components:
           maxLength: 1398104
           description: |
             Canonical base64 of the exact bounded terminal agent response. It is
-            present only on the response that first durably records terminal
-            evidence and is never persisted or replayed.
+            present only on a live observation whose status, run identifier,
+            length, and SHA-256 digest match durable terminal evidence. Gateway
+            does not persist these bytes.
     Error:
       type: object
       additionalProperties: false
@@ -348,7 +355,7 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     InvalidAgentStatus:
-      description: The agent did not return one valid, bounded JSON status for the durably recorded run (`invalid_task_status`).
+      description: The agent returned no valid bounded status (`invalid_task_status`) or a terminal result that does not match durable evidence (`terminal_result_mismatch`).
       headers:
         Cache-Control:
           $ref: "#/components/headers/NoStore"

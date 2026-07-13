@@ -26,6 +26,8 @@ const (
 	maxTaskStatusWireBytes   = 2 << 20
 	maxObservationBytes      = 1 << 20
 	maxGatewayResponseHeader = 64 << 10
+	maxGatewayHeaderWait     = 3 * time.Minute
+	maxGatewayRoundTrip      = 3 * time.Minute
 )
 
 // ErrRedirect means Gateway tried to redirect a task-lifecycle request. The
@@ -71,8 +73,10 @@ const (
 
 // TaskLifecycleStatus mirrors Steward Gateway's steward.task-status.v1 wire
 // response without importing Gateway's server implementation package.
-// ObservationBase64 is present only on the request that first records a live
-// terminal observation; Gateway does not retain or replay those raw bytes.
+// ObservationBase64 is present on a successful agent-reported terminal
+// Observe. Gateway may return the first live observation or re-fetch the exact
+// evidence-bound bytes while the original grant remains active; durable Status
+// and terminal failures without an agent result never return them.
 type TaskLifecycleStatus struct {
 	SchemaVersion     string          `json:"schema_version"`
 	TaskDigest        string          `json:"task_digest"`
@@ -131,7 +135,7 @@ func New(baseURL, token string) (*Client, error) {
 		Proxy:                  nil,
 		DialContext:            dialer.DialContext,
 		DisableCompression:     true,
-		ResponseHeaderTimeout:  45 * time.Second,
+		ResponseHeaderTimeout:  maxGatewayHeaderWait,
 		MaxResponseHeaderBytes: maxGatewayResponseHeader,
 		IdleConnTimeout:        30 * time.Second,
 		MaxIdleConns:           4,
@@ -142,7 +146,7 @@ func New(baseURL, token string) (*Client, error) {
 		token:   token,
 		http: &http.Client{
 			Transport: transport,
-			Timeout:   60 * time.Second,
+			Timeout:   maxGatewayRoundTrip,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return ErrRedirect
 			},
@@ -363,6 +367,9 @@ func validateStatusOperation(status TaskLifecycleStatus, fields map[string]json.
 		}
 		if status.State == StateDispatchAccepted && !observed {
 			return errors.New("nonterminal observation response has no observed status")
+		}
+		if validAgentTaskStatus(AgentTaskStatus(status.State)) && (!observed || !raw) {
+			return errors.New("terminal observation response has no recoverable result")
 		}
 	default:
 		return errors.New("unsupported Gateway task lifecycle operation")

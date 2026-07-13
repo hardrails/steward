@@ -135,81 +135,49 @@ func (s *Server) proxyServiceTask(w http.ResponseWriter, incoming *http.Request,
 			writeGatewayError(w, http.StatusBadGateway, "outcome_unknown", "service returned no bounded run ID; automatic retry is unsafe")
 			return
 		}
-		if operation.TaskProtocol == connectorledger.TaskProtocolLifecycleV1 {
-			dispatch := event
-			dispatch.Phase, dispatch.Outcome = connectorledger.Dispatch, connectorledger.Responded
-			dispatch.HTTPStatus, dispatch.ResponseBytes, dispatch.RunID = response.StatusCode, int64(len(responseBody)), runID
-			ambiguous, err := s.recordServiceTaskDispatch(taskDigest, dispatch)
-			if errors.Is(err, connectorledger.ErrRunIDConflict) {
-				terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), "run_id_conflict")
-				if finishErr := s.finishServiceTask(taskDigest, terminal); finishErr != nil {
-					writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
-					return
-				}
-				w.Header().Set(taskReceiptHeader, "recorded")
-				writeGatewayError(w, http.StatusConflict, "run_id_conflict", "service reused a run ID already bound to another signed task")
+		dispatch := event
+		dispatch.Phase, dispatch.Outcome = connectorledger.Dispatch, connectorledger.Responded
+		dispatch.HTTPStatus, dispatch.ResponseBytes, dispatch.RunID = response.StatusCode, int64(len(responseBody)), runID
+		ambiguous, err := s.recordServiceTaskDispatch(taskDigest, dispatch)
+		if errors.Is(err, connectorledger.ErrRunIDConflict) {
+			terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), "run_id_conflict")
+			if finishErr := s.finishServiceTask(taskDigest, terminal); finishErr != nil {
+				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
 				return
 			}
-			if err != nil {
-				if ambiguous {
-					writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task dispatch evidence is ambiguous; restart Gateway to reconcile it")
-					return
-				}
-				terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), "outcome_unknown")
-				if finishErr := s.finishServiceTask(taskDigest, terminal); finishErr != nil {
-					writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
-					return
-				}
-				w.Header().Set(taskReceiptHeader, "recorded")
-				writeGatewayError(w, http.StatusBadGateway, "outcome_unknown", "service task dispatch could not be recorded; automatic retry is unsafe")
-				return
-			}
-			writeServiceTaskResponse(w, response.StatusCode, runID, "recorded")
+			w.Header().Set(taskReceiptHeader, "recorded")
+			writeGatewayError(w, http.StatusConflict, "run_id_conflict", "service reused a run ID already bound to another signed task")
 			return
 		}
-		terminal := event
-		terminal.Phase, terminal.Outcome = connectorledger.Terminal, connectorledger.Responded
-		terminal.HTTPStatus, terminal.ResponseBytes, terminal.RunID = response.StatusCode, int64(len(responseBody)), runID
-		if err := s.finishServiceTask(taskDigest, terminal); err != nil {
-			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
+		if err != nil {
+			if ambiguous {
+				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task dispatch evidence is ambiguous; restart Gateway to reconcile it")
+				return
+			}
+			terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), "outcome_unknown")
+			if finishErr := s.finishServiceTask(taskDigest, terminal); finishErr != nil {
+				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
+				return
+			}
+			w.Header().Set(taskReceiptHeader, "recorded")
+			writeGatewayError(w, http.StatusBadGateway, "outcome_unknown", "service task dispatch could not be recorded; automatic retry is unsafe")
 			return
 		}
 		writeServiceTaskResponse(w, response.StatusCode, runID, "recorded")
 		return
 	}
 
-	if operation.TaskProtocol == connectorledger.TaskProtocolLifecycleV1 {
-		code, message := "service_task_rejected", "service rejected the task; the signed task is spent"
-		if response.StatusCode >= 300 && response.StatusCode < 400 {
-			code, message = "redirect_denied", "service task redirects are not returned across the trust boundary"
-		}
-		terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), code)
-		if err := s.finishServiceTask(taskDigest, terminal); err != nil {
-			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
-			return
-		}
-		w.Header().Set(taskReceiptHeader, "recorded")
-		writeGatewayError(w, http.StatusBadGateway, code, message)
-		return
+	code, message := "service_task_rejected", "service rejected the task; the signed task is spent"
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		code, message = "redirect_denied", "service task redirects are not returned across the trust boundary"
 	}
-
-	terminal := event
-	terminal.Phase, terminal.Outcome = connectorledger.Terminal, connectorledger.Responded
-	terminal.HTTPStatus, terminal.ResponseBytes = response.StatusCode, int64(len(responseBody))
+	terminal := serviceTaskFailureEvent(event, response.StatusCode, int64(len(responseBody)), code)
 	if err := s.finishServiceTask(taskDigest, terminal); err != nil {
 		writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task result could not be recorded")
 		return
 	}
-	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		w.Header().Set(taskReceiptHeader, "recorded")
-		writeGatewayError(w, http.StatusBadGateway, "redirect_denied", "service task redirects are not returned across the trust boundary")
-		return
-	}
-	if !successfulServiceTaskStatus(response.StatusCode) {
-		w.Header().Set(taskReceiptHeader, "recorded")
-		writeGatewayError(w, http.StatusBadGateway, "service_task_rejected", "service rejected the task; the signed task is spent")
-		return
-	}
+	w.Header().Set(taskReceiptHeader, "recorded")
+	writeGatewayError(w, http.StatusBadGateway, code, message)
 }
 
 func serviceTaskFailureEvent(event connectorledger.Event, status int, responseBytes int64, code string) connectorledger.Event {
@@ -407,11 +375,6 @@ func (s *Server) writeExistingServiceTask(w http.ResponseWriter, state serviceTa
 	}
 	if state.Terminal.Phase == "" {
 		writeGatewayError(w, http.StatusConflict, "task_in_progress", "task authorization is already in progress")
-		return
-	}
-	if state.Terminal.Outcome == connectorledger.Responded &&
-		successfulServiceTaskStatus(state.Terminal.HTTPStatus) && state.Terminal.RunID != "" {
-		writeServiceTaskResponse(w, state.Terminal.HTTPStatus, state.Terminal.RunID, "replayed")
 		return
 	}
 	code := "task_already_spent"

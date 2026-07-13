@@ -118,7 +118,8 @@ func TestConfigValidatesExactServiceTaskOperations(t *testing.T) {
 	validOperation := ServiceOperation{
 		ServiceID: "hermes-api", ID: "hermes.run", Method: http.MethodPost, Path: "/v1/runs",
 		ContentType: "application/json", MaxRequestBytes: 64 << 10, MaxResponseBytes: 1 << 20,
-		MaxSeconds: 30, MaxPermitSeconds: 300,
+		MaxSeconds: 30, MaxPermitSeconds: 300, TaskProtocol: TaskProtocolLifecycleV1,
+		StatusPathPrefix: "/v1/runs/", StatusMaxSeconds: 15, PollIntervalSeconds: 2,
 	}
 	loaded, err := (Config{ServiceOperations: []ServiceOperation{validOperation}}).validateServiceOperations()
 	if err != nil || loaded[validOperation.ServiceID][validOperation.ID] != validOperation {

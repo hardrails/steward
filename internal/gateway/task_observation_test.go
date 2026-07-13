@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,7 +19,14 @@ import (
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/taskpermit"
+	"github.com/hardrails/steward/internal/taskprotocol"
 )
+
+type lifecycleRoundTripper func(*http.Request) (*http.Response, error)
+
+func (transport lifecycleRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
 
 type blockingLifecycleTerminalLog struct {
 	connectorReceiptLog
@@ -336,7 +344,7 @@ func TestLifecycleTaskRoutesRejectAlternateTargetsMethodsAndTransferCoding(t *te
 	}
 }
 
-func TestLifecycleTaskObservationRecordsTerminalOnceAndReplaysImmutably(t *testing.T) {
+func TestLifecycleTaskObservationRecordsTerminalOnceAndRecoversMatchingResult(t *testing.T) {
 	queued := []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"queued"}`)
 	completed := []byte("{\n  \"run_id\": \"" + lifecycleTestRunID + "\",\n  \"status\": \"completed\"\n}\n")
 	var dispatchCalls atomic.Int64
@@ -392,36 +400,387 @@ func TestLifecycleTaskObservationRecordsTerminalOnceAndReplaysImmutably(t *testi
 		t.Fatalf("terminal receipt=%#v", terminal)
 	}
 
-	for _, response := range []*httptest.ResponseRecorder{
-		invokeLifecycleTaskEndpoint(rig, http.MethodGet, taskDigest, false, nil),
-		invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil),
-	} {
-		replayed := requireLifecycleTaskStatus(
-			t, response, taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
-			string(connectorledger.TaskStatusAgentReportedCompleted),
-		)
-		if replayed.ResultDigest != wantDigest || replayed.ResponseBytes != int64(len(completed)) {
-			t.Fatalf("terminal replay=%#v", replayed)
-		}
+	durable := requireLifecycleTaskStatus(
+		t, invokeLifecycleTaskEndpoint(rig, http.MethodGet, taskDigest, false, nil),
+		taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted),
+	)
+	if durable.ObservationBase64 != "" {
+		t.Fatalf("passive status exposed terminal bytes: %#v", durable)
 	}
-	if dispatchCalls.Load() != 1 || observationCalls.Load() != 2 {
+	throttled := invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
+	if code := requireGatewayErrorCode(t, throttled, http.StatusTooManyRequests); code != "task_observation_throttled" {
+		t.Fatalf("terminal recovery throttle error=%q", code)
+	}
+	if observationCalls.Load() != 2 {
+		t.Fatalf("throttled terminal recovery reached upstream %d times", observationCalls.Load())
+	}
+	rig.server.now = func() time.Time {
+		return rig.now.Add(2 * time.Duration(rig.operation.PollIntervalSeconds) * time.Second)
+	}
+	recovered := requireLifecycleTaskStatus(
+		t, invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil),
+		taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted),
+	)
+	if recovered.ResultDigest != wantDigest || recovered.ResponseBytes != int64(len(completed)) ||
+		recovered.ObservationBase64 != base64.StdEncoding.EncodeToString(completed) {
+		t.Fatalf("recovered terminal result=%#v", recovered)
+	}
+	if dispatchCalls.Load() != 1 || observationCalls.Load() != 3 {
 		t.Fatalf("dispatch calls=%d observation calls=%d", dispatchCalls.Load(), observationCalls.Load())
 	}
 	requireLifecycleTaskChain(t, lifecycleReceiptRecords(t, rig), connectorledger.Authorize, connectorledger.Dispatch, connectorledger.Terminal)
 
 	reopenLifecycleServiceTaskRig(t, rig, rig.now.Add(24*time.Hour))
-	for _, response := range []*httptest.ResponseRecorder{
-		invokeLifecycleTaskEndpoint(rig, http.MethodGet, taskDigest, false, nil),
-		invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil),
-	} {
-		requireLifecycleTaskStatus(
-			t, response, taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
-			string(connectorledger.TaskStatusAgentReportedCompleted),
-		)
+	restartedStatus := requireLifecycleTaskStatus(
+		t, invokeLifecycleTaskEndpoint(rig, http.MethodGet, taskDigest, false, nil),
+		taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted),
+	)
+	if restartedStatus.ObservationBase64 != "" {
+		t.Fatalf("restart status exposed terminal bytes: %#v", restartedStatus)
 	}
-	if dispatchCalls.Load() != 1 || observationCalls.Load() != 2 {
+	restartedRecovery := requireLifecycleTaskStatus(
+		t, invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil),
+		taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted),
+	)
+	if restartedRecovery.ObservationBase64 != base64.StdEncoding.EncodeToString(completed) {
+		t.Fatalf("restart recovery=%#v", restartedRecovery)
+	}
+	if dispatchCalls.Load() != 1 || observationCalls.Load() != 4 {
 		t.Fatalf("restart redispatched=%d reobserved=%d", dispatchCalls.Load(), observationCalls.Load())
 	}
+}
+
+func TestLifecycleTaskTerminalRecoveryRejectsChangedAgentEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		status   int
+		body     []byte
+		wantCode string
+	}{
+		{name: "changed same-length result", status: http.StatusOK,
+			body: []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"completed","result":"modified"}`), wantCode: "terminal_result_mismatch"},
+		{name: "changed result length", status: http.StatusOK,
+			body: []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"completed","result":"longer-result"}`), wantCode: "terminal_result_mismatch"},
+		{name: "changed terminal state", status: http.StatusOK,
+			body: []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"failed"}`), wantCode: "terminal_result_mismatch"},
+		{name: "regressed state", status: http.StatusOK,
+			body: []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"running"}`), wantCode: "terminal_result_mismatch"},
+		{name: "missing report", status: http.StatusNotFound,
+			body: []byte(`{"error":"not_found"}`), wantCode: "invalid_task_status"},
+		{name: "empty report", status: http.StatusOK, body: []byte{}, wantCode: "invalid_task_status"},
+		{name: "different run", status: http.StatusOK,
+			body: []byte(`{"run_id":"run_other","status":"completed"}`), wantCode: "invalid_task_status"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			original := []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"completed","result":"original"}`)
+			current := atomic.Pointer[[]byte]{}
+			current.Store(&original)
+			var currentStatus atomic.Int64
+			currentStatus.Store(http.StatusOK)
+			var observationCalls atomic.Int64
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if request.Method == http.MethodPost {
+					w.WriteHeader(http.StatusAccepted)
+					_, _ = w.Write([]byte(`{"run_id":"` + lifecycleTestRunID + `"}`))
+					return
+				}
+				observationCalls.Add(1)
+				w.WriteHeader(int(currentStatus.Load()))
+				_, _ = w.Write(*current.Load())
+			}))
+			defer upstream.Close()
+			rig := newLifecycleServiceTaskRig(t, upstream.URL)
+			taskDigest := dispatchLifecycleTask(t, rig, "task-terminal-recovery-mismatch", []byte(`{"input":"work"}`))
+			recorded := invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
+			requireLifecycleTaskStatus(t, recorded, taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+				string(connectorledger.TaskStatusAgentReportedCompleted))
+
+			current.Store(&test.body)
+			currentStatus.Store(int64(test.status))
+			rig.server.now = func() time.Time {
+				return rig.now.Add(time.Duration(rig.operation.PollIntervalSeconds) * time.Second)
+			}
+			recovery := invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
+			if code := requireGatewayErrorCode(t, recovery, http.StatusBadGateway); code != test.wantCode {
+				t.Fatalf("error code=%q body=%s", code, recovery.Body.String())
+			}
+			if strings.Contains(recovery.Body.String(), "observation_base64") || strings.Contains(recovery.Body.String(), "original") {
+				t.Fatalf("mismatched recovery exposed result: %s", recovery.Body.String())
+			}
+			if observationCalls.Load() != 2 {
+				t.Fatalf("observation calls=%d", observationCalls.Load())
+			}
+			records := lifecycleReceiptRecords(t, rig)
+			requireLifecycleTaskChain(t, records, connectorledger.Authorize, connectorledger.Dispatch, connectorledger.Terminal)
+			if records[2].Receipt.Event.ResultDigest != dsse.Digest(original) {
+				t.Fatalf("durable terminal changed: %#v", records[2].Receipt.Event)
+			}
+		})
+	}
+}
+
+func TestTerminalObservationMatchesEveryDurableCoordinate(t *testing.T) {
+	raw := []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"completed","result":"fixed"}`)
+	report := taskprotocol.Report{RunID: lifecycleTestRunID, Status: taskprotocol.StatusCompleted}
+	terminal := connectorledger.Event{
+		Phase: connectorledger.Terminal, Outcome: connectorledger.Responded, HTTPStatus: http.StatusOK,
+		RunID: lifecycleTestRunID, TaskStatus: connectorledger.TaskStatusAgentReportedCompleted,
+		ResponseBytes: int64(len(raw)), ResultDigest: dsse.Digest(raw),
+	}
+	if !terminalObservationMatches(terminal, raw, report) {
+		t.Fatal("matching durable terminal evidence was rejected")
+	}
+	for name, mutate := range map[string]func(*connectorledger.Event){
+		"phase":          func(event *connectorledger.Event) { event.Phase = connectorledger.Dispatch },
+		"outcome":        func(event *connectorledger.Event) { event.Outcome = connectorledger.Failed },
+		"http status":    func(event *connectorledger.Event) { event.HTTPStatus = http.StatusAccepted },
+		"error code":     func(event *connectorledger.Event) { event.ErrorCode = "changed" },
+		"run id":         func(event *connectorledger.Event) { event.RunID = "run_other" },
+		"task status":    func(event *connectorledger.Event) { event.TaskStatus = connectorledger.TaskStatusAgentReportedFailed },
+		"response bytes": func(event *connectorledger.Event) { event.ResponseBytes++ },
+		"result digest":  func(event *connectorledger.Event) { event.ResultDigest = dsse.Digest([]byte("other")) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := terminal
+			mutate(&changed)
+			if terminalObservationMatches(changed, raw, report) {
+				t.Fatalf("changed durable %s matched", name)
+			}
+		})
+	}
+	changedReport := report
+	changedReport.RunID = "run_other"
+	if terminalObservationMatches(terminal, raw, changedReport) {
+		t.Fatal("changed report run ID matched durable terminal evidence")
+	}
+}
+
+func TestLifecycleTaskTerminalRecoveryRequiresActiveExactGrant(t *testing.T) {
+	terminal := []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"completed"}`)
+	var observationCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if request.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"run_id":"` + lifecycleTestRunID + `"}`))
+			return
+		}
+		observationCalls.Add(1)
+		_, _ = w.Write(terminal)
+	}))
+	defer upstream.Close()
+	rig := newLifecycleServiceTaskRig(t, upstream.URL)
+	taskDigest := dispatchLifecycleTask(t, rig, "task-terminal-inactive-recovery", []byte(`{"input":"work"}`))
+	recorded := invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
+	requireLifecycleTaskStatus(t, recorded, taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted))
+
+	deactivated := httptest.NewRecorder()
+	rig.server.ControlHandler().ServeHTTP(
+		deactivated, httptest.NewRequest(http.MethodPost, "/v1/grants/"+rig.grant.GrantID+"/deactivate", nil),
+	)
+	if deactivated.Code != http.StatusOK {
+		t.Fatalf("deactivate status=%d body=%s", deactivated.Code, deactivated.Body.String())
+	}
+	rig.server.now = func() time.Time { return rig.now.Add(time.Hour) }
+	recovery := invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
+	if code := requireGatewayErrorCode(t, recovery, http.StatusServiceUnavailable); code != "task_observation_unavailable" {
+		t.Fatalf("error code=%q body=%s", code, recovery.Body.String())
+	}
+	if observationCalls.Load() != 1 {
+		t.Fatalf("inactive grant contacted agent %d times", observationCalls.Load())
+	}
+	status := requireLifecycleTaskStatus(
+		t, invokeLifecycleTaskEndpoint(rig, http.MethodGet, taskDigest, false, nil),
+		taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted),
+	)
+	if status.ObservationBase64 != "" {
+		t.Fatalf("passive terminal status exposed result: %#v", status)
+	}
+}
+
+func TestLifecycleTaskTerminalRecoveryRejectsDeactivateReactivateABA(t *testing.T) {
+	terminal := []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"completed","result":"sensitive"}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if request.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"run_id":"` + lifecycleTestRunID + `"}`))
+			return
+		}
+		_, _ = w.Write(terminal)
+	}))
+	defer upstream.Close()
+	rig := newLifecycleServiceTaskRig(t, upstream.URL)
+	taskDigest := dispatchLifecycleTask(t, rig, "task-terminal-recovery-aba", []byte(`{"input":"work"}`))
+	recorded := invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
+	requireLifecycleTaskStatus(t, recorded, taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted))
+	rig.server.now = func() time.Time {
+		return rig.now.Add(time.Duration(rig.operation.PollIntervalSeconds) * time.Second)
+	}
+
+	var recoveryCalls atomic.Int64
+	rig.server.client = &http.Client{Transport: lifecycleRoundTripper(func(request *http.Request) (*http.Response, error) {
+		recoveryCalls.Add(1)
+		deactivated := httptest.NewRecorder()
+		rig.server.ControlHandler().ServeHTTP(
+			deactivated, httptest.NewRequest(http.MethodPost, "/v1/grants/"+rig.grant.GrantID+"/deactivate", nil),
+		)
+		if deactivated.Code != http.StatusOK {
+			return nil, errors.New("fixture could not deactivate grant")
+		}
+		activated := httptest.NewRecorder()
+		rig.server.ControlHandler().ServeHTTP(
+			activated, httptest.NewRequest(http.MethodPost, "/v1/grants/"+rig.grant.GrantID+"/activate", nil),
+		)
+		if activated.Code != http.StatusOK {
+			return nil, errors.New("fixture could not reactivate grant")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(bytes.NewReader(terminal)), ContentLength: int64(len(terminal)), Request: request,
+		}, nil
+	})}
+
+	recovery := invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
+	if code := requireGatewayErrorCode(t, recovery, http.StatusServiceUnavailable); code != "task_observation_revoked" {
+		t.Fatalf("ABA recovery error=%q body=%s", code, recovery.Body.String())
+	}
+	if strings.Contains(recovery.Body.String(), "observation_base64") || strings.Contains(recovery.Body.String(), "sensitive") {
+		t.Fatalf("ABA recovery exposed result: %s", recovery.Body.String())
+	}
+	if recoveryCalls.Load() != 1 {
+		t.Fatalf("recovery calls=%d", recoveryCalls.Load())
+	}
+	requireLifecycleTaskChain(t, lifecycleReceiptRecords(t, rig), connectorledger.Authorize, connectorledger.Dispatch, connectorledger.Terminal)
+	status := requireLifecycleTaskStatus(
+		t, invokeLifecycleTaskEndpoint(rig, http.MethodGet, taskDigest, false, nil),
+		taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted),
+	)
+	if status.ObservationBase64 != "" {
+		t.Fatalf("passive status exposed result after ABA: %#v", status)
+	}
+}
+
+func TestLifecycleTaskTerminalRecoveryIsReadOnlyAfterLedgerFailure(t *testing.T) {
+	terminalBody := []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"completed","result":"stable"}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if request.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"run_id":"` + lifecycleTestRunID + `"}`))
+			return
+		}
+		_, _ = w.Write(terminalBody)
+	}))
+	defer upstream.Close()
+	rig := newLifecycleServiceTaskRig(t, upstream.URL)
+	taskDigest := dispatchLifecycleTask(t, rig, "task-terminal-read-only-recovery", []byte(`{"input":"work"}`))
+	recorded := invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
+	requireLifecycleTaskStatus(t, recorded, taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted))
+
+	rig.server.mu.Lock()
+	beforeState := rig.server.serviceTasks[taskDigest]
+	rig.server.mu.Unlock()
+	beforeLedger := append([]byte(nil), mustReadFile(t, rig.config.ConnectorReceiptFile)...)
+	rig.server.connectorLedger = failedLifecycleReceiptLog{connectorReceiptLog: rig.server.connectorLedger}
+	rig.server.now = func() time.Time {
+		return rig.now.Add(time.Duration(rig.operation.PollIntervalSeconds) * time.Second)
+	}
+
+	recovered := requireLifecycleTaskStatus(
+		t, invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil),
+		taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted),
+	)
+	if recovered.ObservationBase64 != base64.StdEncoding.EncodeToString(terminalBody) {
+		t.Fatalf("read-only recovery=%#v", recovered)
+	}
+	afterLedger := mustReadFile(t, rig.config.ConnectorReceiptFile)
+	if !bytes.Equal(beforeLedger, afterLedger) {
+		t.Fatal("terminal recovery mutated the signed receipt ledger")
+	}
+	rig.server.mu.Lock()
+	afterState := rig.server.serviceTasks[taskDigest]
+	rig.server.mu.Unlock()
+	if afterState.Authorization != beforeState.Authorization || afterState.Dispatch != beforeState.Dispatch ||
+		afterState.Terminal != beforeState.Terminal || afterState.observing {
+		t.Fatalf("terminal recovery changed durable task state: before=%#v after=%#v", beforeState, afterState)
+	}
+}
+
+func TestLifecycleTaskTerminalRecoveryAllowsOnlyOneConcurrentFetch(t *testing.T) {
+	terminalBody := []byte(`{"run_id":"` + lifecycleTestRunID + `","status":"completed","result":"stable"}`)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	var observationCalls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if request.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"run_id":"` + lifecycleTestRunID + `"}`))
+			return
+		}
+		if observationCalls.Add(1) > 1 {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+		}
+		_, _ = w.Write(terminalBody)
+	}))
+	defer upstream.Close()
+	rig := newLifecycleServiceTaskRig(t, upstream.URL)
+	taskDigest := dispatchLifecycleTask(t, rig, "task-concurrent-terminal-recovery", []byte(`{"input":"work"}`))
+	recorded := invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
+	requireLifecycleTaskStatus(t, recorded, taskDigest, "terminal", "agent_reported_completed", lifecycleTestRunID,
+		string(connectorledger.TaskStatusAgentReportedCompleted))
+	rig.server.now = func() time.Time {
+		return rig.now.Add(time.Duration(rig.operation.PollIntervalSeconds) * time.Second)
+	}
+
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	for range 2 {
+		go func() {
+			<-start
+			responses <- invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil)
+		}()
+	}
+	close(start)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("terminal recovery did not reach upstream")
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	results := []*httptest.ResponseRecorder{<-responses, <-responses}
+	sort.Slice(results, func(i, j int) bool { return results[i].Code < results[j].Code })
+	if results[0].Code != http.StatusOK || results[1].Code != http.StatusConflict {
+		t.Fatalf("concurrent recovery statuses=%d,%d bodies=%q / %q", results[0].Code, results[1].Code,
+			results[0].Body.String(), results[1].Body.String())
+	}
+	recovered := decodeLifecycleTaskStatus(t, results[0])
+	if recovered.ObservationBase64 != base64.StdEncoding.EncodeToString(terminalBody) {
+		t.Fatalf("concurrent recovery result=%#v", recovered)
+	}
+	if code := requireGatewayErrorCode(t, results[1], http.StatusConflict); code != "task_observation_in_progress" {
+		t.Fatalf("concurrent recovery error=%q", code)
+	}
+	if observationCalls.Load() != 2 {
+		t.Fatalf("concurrent recoveries reached upstream %d times", observationCalls.Load())
+	}
+	requireLifecycleTaskChain(t, lifecycleReceiptRecords(t, rig), connectorledger.Authorize, connectorledger.Dispatch, connectorledger.Terminal)
 }
 
 func TestLifecycleTaskObservationEnforcesConfiguredPollInterval(t *testing.T) {
@@ -923,18 +1282,25 @@ func TestLifecycleTaskStatusHandlesUnknownLegacyAndAuthorizationOnly(t *testing.
 	})
 
 	t.Run("legacy", func(t *testing.T) {
-		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"run_id":"run_legacy"}`))
-		}))
+		upstream := httptest.NewServer(http.NotFoundHandler())
 		defer upstream.Close()
 		rig := newServiceTaskRig(t, upstream.URL)
 		body := []byte(`{"input":"work","session_id":"legacy-status"}`)
 		permit := taskPermitFor(t, rig, "task-legacy-status", body, nil)
-		if response := invokeServiceTask(rig, body, permit); response.Code != http.StatusOK {
-			t.Fatalf("legacy dispatch status=%d body=%s", response.Code, response.Body.String())
+		rawPermit, err := taskpermit.DecodeHeader(permit)
+		if err != nil {
+			t.Fatal(err)
 		}
 		taskDigest := lifecycleTaskDigest(rig, "task-legacy-status")
+		permitDigest := dsse.Digest(rawPermit)
+		rig.server.mu.Lock()
+		rig.server.serviceTasks[taskDigest] = serviceTaskReceipt{
+			Authorization: connectorledger.Event{Phase: connectorledger.Authorize, PermitDigest: permitDigest},
+			Terminal: connectorledger.Event{Phase: connectorledger.Terminal, Outcome: connectorledger.Responded,
+				HTTPStatus: http.StatusOK, RunID: "run_legacy"},
+		}
+		rig.server.serviceTaskPermits[permitDigest] = taskDigest
+		rig.server.mu.Unlock()
 		requireGatewayErrorCode(t, invokeLifecycleTaskEndpoint(rig, http.MethodGet, taskDigest, false, nil), http.StatusNotFound)
 		requireGatewayErrorCode(t, invokeLifecycleTaskEndpoint(rig, http.MethodPost, taskDigest, true, nil), http.StatusNotFound)
 	})

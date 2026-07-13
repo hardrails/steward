@@ -186,6 +186,7 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	base := []string{
 		"gateway", "service", "set", "-config", path, "-service-id", "hermes-api",
 		"-operation", "hermes.run=POST:/v1/runs", "-max-seconds", "90", "-max-permit-seconds", "240",
+		"-lifecycle", "hermes.run=/v1/runs/",
 	}
 	before, err := os.ReadFile(path)
 	if err != nil {
@@ -211,7 +212,8 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	loaded, _, _, _, err := gateway.LoadConfig(path)
 	if err != nil || len(loaded.ServiceOperations) != 1 || loaded.ServiceOperations[0].ID != "hermes.run" ||
 		loaded.ServiceOperations[0].ContentType != "application/json" || loaded.ServiceOperations[0].MaxSeconds != 90 ||
-		loaded.ServiceOperations[0].MaxPermitSeconds != 240 || len(loaded.ConnectorReceiptTenantBudgets) != 1 ||
+		loaded.ServiceOperations[0].MaxPermitSeconds != 240 || loaded.ServiceOperations[0].TaskProtocol != gateway.TaskProtocolLifecycleV1 ||
+		loaded.ServiceOperations[0].StatusPathPrefix != "/v1/runs/" || len(loaded.ConnectorReceiptTenantBudgets) != 1 ||
 		!strings.Contains(output.String(), "systemctl restart") {
 		t.Fatalf("loaded=%#v budgets=%#v output=%q err=%v", loaded.ServiceOperations, loaded.ConnectorReceiptTenantBudgets, output.String(), err)
 	}
@@ -228,7 +230,7 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 		t.Fatalf("service trust=%s", output.String())
 	}
 	operation := trust.Services[0].Operations[0]
-	if trust.SchemaVersion != serviceTrustSchemaV1 || trust.NodeID != "node-a" || trust.TenantID != "tenant-a" ||
+	if trust.SchemaVersion != serviceTrustSchemaV2 || trust.NodeID != "node-a" || trust.TenantID != "tenant-a" ||
 		trust.Services[0].ServiceID != "hermes-api" || operation.ServiceID != "hermes-api" ||
 		operation.ID != "hermes.run" || operation.Method != http.MethodPost || operation.Path != "/v1/runs" ||
 		operation.PolicyDigest != gateway.ServiceOperationDigest(loaded.ServiceOperations[0]) || operation.MaxPermitSeconds != 240 {
@@ -264,8 +266,9 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	}
 	for _, invalid := range [][]string{
 		append(append([]string(nil), base...), "-operation", "duplicate=POST:/v1/runs"),
-		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=GET:/v1/runs"},
-		{"gateway", "service", "set", "-config", path, "-service-id", "bad service", "-operation", "hermes.run=POST:/v1/runs"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=GET:/v1/runs", "-lifecycle", "hermes.run=/v1/runs/"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "bad service", "-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "hermes.run=/v1/runs/"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs"},
 		append(append([]string(nil), base...), "-tenant-id", "tenant-a"),
 		append(append([]string(nil), base...), "-receipt-epoch", "2"),
 	} {
@@ -283,7 +286,8 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 
 	output.Reset()
 	if err := run([]string{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api",
-		"-operation", "hermes.run=POST:/v1/runs", "-operation", "hermes.batch=POST:/v1/batch"}, &output, &bytes.Buffer{}); err != nil {
+		"-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "hermes.run=/v1/runs/",
+		"-operation", "hermes.batch=POST:/v1/batch", "-lifecycle", "hermes.batch=/v1/batch/"}, &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, _, _, err = gateway.LoadConfig(path)
@@ -300,6 +304,7 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "missing=/v1/runs/"},
 		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-lifecycle", "hermes.run=//"},
 		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-poll-interval", "500ms"},
+		{"gateway", "service", "set", "-config", path, "-service-id", "hermes-api", "-operation", "hermes.run=POST:/v1/runs", "-operation", "hermes.batch=POST:/v1/batch", "-lifecycle", "hermes.run=/v1/runs/"},
 	} {
 		if err := run(invalid, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 			t.Fatalf("invalid lifecycle service config accepted: %v", invalid)
@@ -317,7 +322,8 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	if err := run([]string{
 		"gateway", "service", "set", "-config", path, "-service-id", "hermes-api",
 		"-operation", "hermes.run=POST:/v1/runs", "-operation", "hermes.batch=POST:/v1/batch",
-		"-lifecycle", "hermes.run=/v1/runs/", "-status-max-seconds", "12", "-poll-interval", "3s",
+		"-lifecycle", "hermes.run=/v1/runs/", "-lifecycle", "hermes.batch=/v1/batch/",
+		"-status-max-seconds", "12", "-poll-interval", "3s",
 	}, &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}

@@ -173,7 +173,7 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 	}
 	document := routePolicyDocument{Version: 1}
 	if len(grant.TaskAuthorities) > 0 {
-		document.Version = 5
+		document.Version = 6
 		document.ConnectorReceiptBudgetBytes = connectorReceiptBudget
 		service := &serviceTaskRoutePolicy{ServiceID: grant.ServiceID}
 		for _, authority := range grant.TaskAuthorities {
@@ -191,9 +191,6 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		slices.Sort(operationIDs)
 		for _, id := range operationIDs {
 			operation := serviceOperations[grant.ServiceID][id]
-			if operation.TaskProtocol != "" {
-				document.Version = 6
-			}
 			service.Operations = append(service.Operations, serviceOperationPolicy(operation))
 		}
 		document.ServiceTask = service

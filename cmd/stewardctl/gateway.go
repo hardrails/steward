@@ -27,7 +27,6 @@ type repeatedFlag []string
 const (
 	actionTrustSchemaV1  = "steward.action-trust.v1"
 	maxActionTrustBytes  = 4 << 20
-	serviceTrustSchemaV1 = "steward.service-trust.v1"
 	serviceTrustSchemaV2 = "steward.service-trust.v2"
 	maxServiceTrustBytes = 4 << 20
 )
@@ -87,10 +86,10 @@ type serviceTrustOperation struct {
 	MaxSeconds          int    `json:"max_seconds"`
 	MaxPermitSeconds    int    `json:"max_permit_seconds"`
 	PolicyDigest        string `json:"policy_digest"`
-	TaskProtocol        string `json:"task_protocol,omitempty"`
-	StatusPathPrefix    string `json:"status_path_prefix,omitempty"`
-	StatusMaxSeconds    int    `json:"status_max_seconds,omitempty"`
-	PollIntervalSeconds int    `json:"poll_interval_seconds,omitempty"`
+	TaskProtocol        string `json:"task_protocol"`
+	StatusPathPrefix    string `json:"status_path_prefix"`
+	StatusMaxSeconds    int    `json:"status_max_seconds"`
+	PollIntervalSeconds int    `json:"poll_interval_seconds"`
 }
 
 func (values *repeatedFlag) String() string { return strings.Join(*values, ",") }
@@ -160,7 +159,7 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	receiptEpoch := flags.Uint64("receipt-epoch", 1, "receipt key epoch for an older config")
 	var operations, lifecycles, tenantBudgets repeatedFlag
 	flags.Var(&operations, "operation", "exact ID=POST:/path operation; repeat for more")
-	flags.Var(&lifecycles, "lifecycle", "exact OPERATION_ID=/status/path/ lifecycle mapping; repeat for more")
+	flags.Var(&lifecycles, "lifecycle", "required exact OPERATION_ID=/status/path/ lifecycle mapping; repeat for every operation")
 	flags.Var(&tenantBudgets, "tenant-budget", "exact TENANT=BYTES receipt budget; repeat for more")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
@@ -201,10 +200,10 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if len(lifecyclePaths) == 0 && (flagWasVisited(flags, "status-max-seconds") || flagWasVisited(flags, "poll-interval")) {
-		return errors.New("-status-max-seconds and -poll-interval require at least one -lifecycle mapping")
+	if len(lifecyclePaths) == 0 {
+		return errors.New("gateway service set requires one -lifecycle OPERATION_ID=/status/path/ mapping for every operation")
 	}
-	if len(lifecyclePaths) > 0 && (*pollInterval < time.Second || *pollInterval > 60*time.Second || *pollInterval%time.Second != 0) {
+	if *pollInterval < time.Second || *pollInterval > 60*time.Second || *pollInterval%time.Second != 0 {
 		return errors.New("-poll-interval must be whole seconds from 1s through 1m")
 	}
 	parsed := make([]gateway.ServiceOperation, 0, len(operations))
@@ -221,18 +220,18 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 			return fmt.Errorf("duplicate service operation %q", operation.ID)
 		}
 		seenIDs[operation.ID] = struct{}{}
+		statusPath, lifecycle := lifecyclePaths[operation.ID]
+		if !lifecycle {
+			return fmt.Errorf("service operation %q requires a -lifecycle mapping", operation.ID)
+		}
 		parsedOperation := gateway.ServiceOperation{
 			ServiceID: *serviceID, ID: operation.ID, Method: operation.Method, Path: operation.Path,
 			ContentType: "application/json", MaxRequestBytes: *maxRequest, MaxResponseBytes: *maxResponse,
 			MaxSeconds: *maxSeconds, MaxPermitSeconds: *maxPermitSeconds,
+			TaskProtocol: gateway.TaskProtocolLifecycleV1, StatusPathPrefix: statusPath,
+			StatusMaxSeconds: *statusMaxSeconds, PollIntervalSeconds: int(*pollInterval / time.Second),
 		}
-		if statusPath, lifecycle := lifecyclePaths[operation.ID]; lifecycle {
-			parsedOperation.TaskProtocol = gateway.TaskProtocolLifecycleV1
-			parsedOperation.StatusPathPrefix = statusPath
-			parsedOperation.StatusMaxSeconds = *statusMaxSeconds
-			parsedOperation.PollIntervalSeconds = int(*pollInterval / time.Second)
-			delete(lifecyclePaths, operation.ID)
-		}
+		delete(lifecyclePaths, operation.ID)
 		parsed = append(parsed, parsedOperation)
 	}
 	if len(lifecyclePaths) != 0 {
@@ -341,11 +340,8 @@ func writeServiceTrustInventory(stdout io.Writer, config gateway.Config, nodeID,
 		return fmt.Errorf("tenant %q has no configured receipt budget", tenantID)
 	}
 	byService := make(map[string][]serviceTrustOperation)
-	schemaVersion := serviceTrustSchemaV1
+	schemaVersion := serviceTrustSchemaV2
 	for _, operation := range config.ServiceOperations {
-		if operation.TaskProtocol != "" {
-			schemaVersion = serviceTrustSchemaV2
-		}
 		byService[operation.ServiceID] = append(byService[operation.ServiceID], serviceTrustOperation{
 			ServiceID: operation.ServiceID, ID: operation.ID, Method: operation.Method, Path: operation.Path,
 			ContentType: operation.ContentType, MaxRequestBytes: operation.MaxRequestBytes,

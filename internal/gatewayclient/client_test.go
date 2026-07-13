@@ -228,7 +228,7 @@ func TestClientSeparatesDurableStatusFromLiveObservationResponses(t *testing.T) 
 				`"phase":"dispatch","state":"dispatch_accepted","run_id":"run_1","observed_status":"running"`),
 		},
 		{
-			name: "one-shot terminal bytes",
+			name: "evidence-bound terminal bytes",
 			body: statusJSON(testTaskDigest, fmt.Sprintf(
 				`"phase":"terminal","state":"agent_reported_completed","run_id":"run_1",`+
 					`"task_status":"agent_reported_completed","result_digest":"sha256:%x","response_bytes":%d,`+
@@ -268,6 +268,11 @@ func TestClientRejectsPassiveShapesFromObserve(t *testing.T) {
 			name: "dispatch without observation",
 			body: statusJSON(testTaskDigest, `"phase":"dispatch","state":"dispatch_accepted","run_id":"run_1"`),
 		},
+		{
+			name: "agent terminal without recovered result",
+			body: statusJSON(testTaskDigest, `"phase":"terminal","state":"agent_reported_completed","run_id":"run_1",`+
+				`"task_status":"agent_reported_completed","result_digest":"sha256:`+strings.Repeat("a", 64)+`","response_bytes":1`),
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := statusServer(t, http.StatusOK, nil, test.body)
@@ -280,6 +285,24 @@ func TestClientRejectsPassiveShapesFromObserve(t *testing.T) {
 				t.Fatal("Observe accepted a response that could not result from a live observation")
 			}
 		})
+	}
+}
+
+func TestClientObserveAcceptsDurableObservationFailureWithoutRawResult(t *testing.T) {
+	body := statusJSON(testTaskDigest,
+		`"phase":"terminal","state":"observation_failed","run_id":"run_1","error_code":"outcome_unknown"`)
+	server := statusServer(t, http.StatusOK, nil, body)
+	defer server.Close()
+	client, err := New(server.URL, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.Observe(context.Background(), testTaskDigest, testPermitDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != StateObservationFailed || status.ObservationBase64 != "" {
+		t.Fatalf("status=%#v", status)
 	}
 }
 

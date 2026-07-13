@@ -29,8 +29,9 @@ const (
 var serviceTaskDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
 // TaskLifecycleStatus reports durable Gateway evidence. ObservedStatus and
-// ObservationBase64 exist only in the response to the one request that made a
-// live observation; Gateway does not persist those raw bytes.
+// ObservationBase64 exist only in a response that made a live observation.
+// Gateway does not persist those raw bytes; a later observation may recover
+// terminal bytes only when they still match the durable digest and length.
 type TaskLifecycleStatus struct {
 	SchemaVersion     string                     `json:"schema_version"`
 	TaskDigest        string                     `json:"task_digest"`
@@ -183,7 +184,7 @@ func (s *Server) observeTaskLifecycle(w http.ResponseWriter, request *http.Reque
 		}
 		return
 	}
-	if observation.state.Terminal.Phase == connectorledger.Terminal {
+	if observation.state.Terminal.Phase == connectorledger.Terminal && observation.state.Terminal.TaskStatus == "" {
 		writeTaskLifecycleStatus(w, http.StatusOK, lifecycleStatus(taskDigest, observation.state))
 		return
 	}
@@ -214,6 +215,20 @@ func (s *Server) observeTaskLifecycle(w http.ResponseWriter, request *http.Reque
 	}
 	status := lifecycleStatus(taskDigest, observation.state)
 	status.ObservedStatus = report.Status
+	if observation.state.Terminal.Phase == connectorledger.Terminal {
+		matches := terminalObservationMatches(observation.state.Terminal, raw, report)
+		if !s.taskObservationCanReturnResult(observation) {
+			writeGatewayError(w, http.StatusServiceUnavailable, "task_observation_revoked", "task authority changed before the recovered result could be returned")
+			return
+		}
+		if !matches {
+			writeGatewayError(w, http.StatusBadGateway, "terminal_result_mismatch", "agent terminal result no longer matches durable task evidence")
+			return
+		}
+		status.ObservationBase64 = base64.StdEncoding.EncodeToString(raw)
+		writeTaskLifecycleStatus(w, http.StatusOK, status)
+		return
+	}
 	if !report.Status.Terminal() {
 		writeTaskLifecycleStatus(w, http.StatusOK, status)
 		return
@@ -260,17 +275,18 @@ func (s *Server) beginTaskObservation(taskDigest, permitDigest string) (taskObse
 		s.mu.Unlock()
 		return taskObservation{}, 0, errTaskEvidence
 	}
-	if state.Terminal.Phase == connectorledger.Terminal {
-		s.mu.Unlock()
-		return taskObservation{taskDigest: taskDigest, permitDigest: permitDigest, state: state}, 0, nil
-	}
 	if state.Dispatch.Phase != connectorledger.Dispatch {
 		s.mu.Unlock()
 		return taskObservation{}, 0, errTaskNotDispatched
 	}
+	if state.Terminal.Phase == connectorledger.Terminal && state.Terminal.TaskStatus == "" {
+		s.mu.Unlock()
+		return taskObservation{taskDigest: taskDigest, permitDigest: permitDigest, state: state}, 0, nil
+	}
 	ledger := s.connectorLedger
+	terminal := state.Terminal.Phase == connectorledger.Terminal
 	s.mu.Unlock()
-	if ledger == nil || ledger.Failed() {
+	if !terminal && (ledger == nil || ledger.Failed()) {
 		return taskObservation{}, 0, errTaskEvidence
 	}
 
@@ -284,9 +300,6 @@ func (s *Server) beginTaskObservation(taskDigest, permitDigest string) (taskObse
 	}
 	if taskEvidenceUnavailable(state) {
 		return taskObservation{}, 0, errTaskEvidence
-	}
-	if state.Terminal.Phase == connectorledger.Terminal {
-		return taskObservation{taskDigest: taskDigest, permitDigest: permitDigest, state: state}, 0, nil
 	}
 	if state.Dispatch.Phase != connectorledger.Dispatch {
 		return taskObservation{}, 0, errTaskNotDispatched
@@ -342,11 +355,22 @@ func (s *Server) commitTaskObservation(observation taskObservation, terminal con
 	return s.finishServiceTask(observation.taskDigest, terminal)
 }
 
+// taskObservationCanReturnResult gives terminal recovery the same ordering
+// against grant deactivation as a terminal receipt commit. Once this check
+// succeeds, result disclosure linearizes before a later deactivation; an ABA
+// deactivate/reactivate still fails because the original lease stays canceled.
+func (s *Server) taskObservationCanReturnResult(observation taskObservation) bool {
+	s.taskObservationCommitMu.RLock()
+	defer s.taskObservationCommitMu.RUnlock()
+	return s.taskObservationStillActive(observation)
+}
+
 func (s *Server) finishTaskObservation(taskDigest string) {
 	s.mu.Lock()
-	state := s.serviceTasks[taskDigest]
-	state.observing = false
-	s.serviceTasks[taskDigest] = state
+	if state, exists := s.serviceTasks[taskDigest]; exists {
+		state.observing = false
+		s.serviceTasks[taskDigest] = state
+	}
 	s.mu.Unlock()
 }
 
@@ -368,7 +392,9 @@ func (s *Server) taskObservationStillActiveLocked(observation taskObservation) b
 	grant, active := s.grants[observation.grant.GrantID]
 	operation, configured := s.serviceOperations[observation.operation.ServiceID][observation.operation.ID]
 	return observation.lease.Err() == nil && exists && bound && boundTask == observation.taskDigest &&
-		state.Authorization.PermitDigest == observation.permitDigest && state.Dispatch == observation.state.Dispatch && state.Terminal.Phase == "" && state.observing &&
+		state.Authorization == observation.state.Authorization && state.Authorization.PermitDigest == observation.permitDigest &&
+		state.Dispatch == observation.state.Dispatch &&
+		state.Terminal == observation.state.Terminal && state.observing &&
 		active && grant.Active && grantsEqual(grant, observation.grant) && configured && operation == observation.operation &&
 		s.policyDigests[observation.grant.GrantID] == observation.state.Authorization.RoutePolicyDigest
 }
@@ -432,4 +458,12 @@ func terminalTaskStatus(status taskprotocol.Status) connectorledger.TaskStatus {
 	default:
 		return ""
 	}
+}
+
+func terminalObservationMatches(terminal connectorledger.Event, raw []byte, report taskprotocol.Report) bool {
+	return terminal.Phase == connectorledger.Terminal && terminal.Outcome == connectorledger.Responded &&
+		terminal.HTTPStatus == http.StatusOK && terminal.ErrorCode == "" && terminal.TaskStatus != "" &&
+		report.Status.Terminal() && terminal.RunID == report.RunID &&
+		terminal.TaskStatus == terminalTaskStatus(report.Status) && terminal.ResponseBytes == int64(len(raw)) &&
+		terminal.ResultDigest == dsse.Digest(raw)
 }
