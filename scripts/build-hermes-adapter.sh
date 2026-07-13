@@ -466,7 +466,7 @@ docker create --name "$sandbox_name" \
 	--memory "$sandbox_memory_bytes" --memory-swap "$sandbox_memory_bytes" --cpus "$sandbox_cpus" \
 	--tmpfs "/tmp:rw,nosuid,nodev,size=$sandbox_memory_bytes" \
 	--tmpfs "/output:rw,noexec,nosuid,nodev,size=$sandbox_output_bytes" \
-	--user 65532:65532 --workdir /tmp/build \
+	--user 65532:65532 --workdir /tmp \
 	--env HOME=/tmp/home --env UV_CACHE_DIR=/tmp/uv-cache --env UV_LINK_MODE=copy \
 	--log-driver local --log-opt max-size=1m --log-opt max-file=1 --log-opt compress=false \
 	--mount "type=bind,source=$work/context/upstream,target=/input/upstream,readonly" \
