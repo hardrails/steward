@@ -73,7 +73,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
 	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state ...")
-	fmt.Fprintln(writer, "       stewardctl gateway validate|route ...")
+	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector ...")
 	fmt.Fprintln(writer, "       stewardctl image inspect|import -archive FILE ...")
 	fmt.Fprintln(writer, "       stewardctl upgrade check-drained|inspect-formats -signed-admission configured|unconfigured ...")
 	return errors.New("invalid command")
