@@ -255,6 +255,23 @@ func VerifyRecords(path string, public ed25519.PublicKey, nodeID string, epoch u
 	return verifyFile(file, public, nodeID, epoch, visit)
 }
 
+// Validate inspects an existing ledger without creating it. A missing ledger is
+// a valid prospective path: Open creates the file during normal startup. When
+// the file exists, Validate verifies its permissions, signatures, chain, node
+// identity, and epoch using the public half of the configured private key.
+func Validate(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) (Head, error) {
+	if !validPath(path) || len(private) != ed25519.PrivateKeySize || !validText(nodeID, 256) || epoch == 0 {
+		return Head{}, errors.New("connector ledger requires a clean path, Ed25519 key, bounded node id, and positive epoch")
+	}
+	public := private.Public().(ed25519.PublicKey)
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return Head{NodeID: nodeID, Epoch: epoch, ChainHash: zeroHash(), KeyID: KeyID(public)}, nil
+	} else if err != nil {
+		return Head{}, fmt.Errorf("stat connector ledger: %w", err)
+	}
+	return VerifyRecords(path, public, nodeID, epoch, nil)
+}
+
 func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch uint64, visit func(VerifiedReceipt) error) (Head, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return Head{}, err

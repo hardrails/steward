@@ -194,6 +194,44 @@ func TestConnectorLedgerValidatesEventsFilesAndTaskIDs(t *testing.T) {
 	}
 }
 
+func TestValidateConnectorLedgerIsReadOnlyAndVerifiesExistingChain(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	path := filepath.Join(directory, "prospective.ndjson")
+	head, err := Validate(path, private, "node-a/gateway", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.Sequence != 0 || head.ChainHash != zeroHash() || head.KeyID != KeyID(public) {
+		t.Fatalf("prospective head=%#v", head)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("validation created prospective ledger: %v", err)
+	}
+
+	log, err := Open(path, private, "node-a/gateway", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written, err := log.Append(validEvent(Authorize, Allowed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := Validate(path, private, "node-a/gateway", 3)
+	if err != nil || verified != written {
+		t.Fatalf("verified=%#v written=%#v err=%v", verified, written, err)
+	}
+	if _, err := Validate(path, private, "other-node/gateway", 3); err == nil {
+		t.Fatal("ledger verified under a different node identity")
+	}
+}
+
 func validEvent(phase Phase, outcome Outcome) Event {
 	task, _ := TaskDigest("task-0123456789abcdef")
 	return Event{
