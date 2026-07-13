@@ -219,6 +219,76 @@ func TestConfigSeparatesConnectorCredentialsFromGatewayAuthority(t *testing.T) {
 	})
 }
 
+func TestConfigSeparatesInferenceCredentialsFromAllAuthority(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "sir-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	credential := filepath.Join(directory, "inference-token")
+	connectorCredential := filepath.Join(directory, "connector-token")
+	serviceToken := filepath.Join(directory, "service-token")
+	receiptKey := filepath.Join(directory, "connector-receipts.private.pem")
+	for path, value := range map[string]string{
+		credential: "inference-secret\n", connectorCredential: "connector-secret\n",
+		serviceToken: "service-secret\n", receiptKey: "receipt-key-material\n",
+	} {
+		if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := Config{
+		Version: 1, ControlSocket: filepath.Join(directory, "control.sock"), ServiceAddress: "127.0.0.1:8092",
+		ServiceTokenFile: serviceToken, StateFile: filepath.Join(directory, "state.json"),
+		GrantRoot: filepath.Join(directory, "grants"), ExecutorGID: 1, RelayGID: 1,
+		ConnectorReceiptFile: filepath.Join(directory, "connector-receipts.ndjson"), ConnectorReceiptKeyFile: receiptKey,
+		Connectors: []Connector{connectorFixture(connectorCredential)},
+		Routes:     []Route{{ID: "inference", BaseURL: "https://models.example.test/v1", CredentialFile: credential, MaxConcurrent: 2}},
+	}
+	for name, path := range map[string]string{
+		"service token": serviceToken, "receipt key": receiptKey, "connector credential": connectorCredential,
+		"state": base.StateFile, "grant descendant": filepath.Join(base.GrantRoot, "grant-a", "secret"),
+	} {
+		t.Run("exact "+name, func(t *testing.T) {
+			config := base
+			config.Routes = append([]Route(nil), base.Routes...)
+			config.Routes[0].CredentialFile = path
+			if _, err := config.validateAndLoadRoutes(); err == nil || !strings.Contains(err.Error(), "must be separate") {
+				t.Fatalf("reserved inference credential path accepted: %v", err)
+			}
+		})
+	}
+	for name, target := range map[string]string{
+		"service token": serviceToken, "receipt key": receiptKey, "connector credential": connectorCredential,
+	} {
+		t.Run("hard-link "+name, func(t *testing.T) {
+			alias := filepath.Join(directory, "inference-alias-"+strings.ReplaceAll(name, " ", "-"))
+			if err := os.Link(target, alias); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+			config := base
+			config.Routes = append([]Route(nil), base.Routes...)
+			config.Routes[0].CredentialFile = alias
+			if _, err := config.validateAndLoadRoutes(); err == nil || !strings.Contains(err.Error(), "must not alias") {
+				t.Fatalf("hard-link inference authority alias accepted: %v", err)
+			}
+		})
+	}
+	t.Run("route credential sharing", func(t *testing.T) {
+		alias := filepath.Join(directory, "second-route-token")
+		if err := os.Link(credential, alias); err != nil {
+			t.Skipf("hard links unavailable: %v", err)
+		}
+		config := base
+		config.Routes = append(config.Routes, Route{
+			ID: "secondary", BaseURL: "https://secondary.example.test/v1", CredentialFile: alias, MaxConcurrent: 1,
+		})
+		if _, err := config.validateAndLoadRoutes(); err == nil || !strings.Contains(err.Error(), "must not be shared") {
+			t.Fatalf("shared inference credential accepted: %v", err)
+		}
+	})
+}
+
 func TestReadCredentialUsesOneBoundedVerifiedFile(t *testing.T) {
 	directory := t.TempDir()
 	credential := filepath.Join(directory, "credential")
@@ -289,6 +359,20 @@ func TestReadCredentialUsesOneBoundedVerifiedFile(t *testing.T) {
 			t.Fatal("credential symlink was accepted")
 		}
 	})
+
+	for name, value := range map[string]string{
+		"nul": "secret\x00suffix", "tab": "secret\tsuffix", "unicode": "secret-π",
+	} {
+		t.Run(name+" control", func(t *testing.T) {
+			path := filepath.Join(directory, name+"-credential")
+			if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readCredential(path); err == nil || !strings.Contains(err.Error(), "visible ASCII") {
+				t.Fatalf("unsafe HTTP credential accepted: %v", err)
+			}
+		})
+	}
 }
 
 func TestExactConnectorOriginAndPathBoundaries(t *testing.T) {

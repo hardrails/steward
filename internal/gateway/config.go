@@ -346,6 +346,21 @@ func (c Config) connectorReservedFileIdentities() ([]os.FileInfo, error) {
 	for _, route := range c.Routes {
 		paths = append(paths, route.CredentialFile)
 	}
+	return existingFileIdentities("connector-reserved", paths)
+}
+
+func (c Config) routeReservedFileIdentities() ([]os.FileInfo, error) {
+	paths := []string{
+		c.ServiceTokenFile, c.StateFile, c.EgressAuditFile, c.ControlSocket,
+		c.ConnectorReceiptFile, c.ConnectorReceiptKeyFile,
+	}
+	for _, connector := range c.Connectors {
+		paths = append(paths, connector.CredentialFile)
+	}
+	return existingFileIdentities("inference-reserved", paths)
+}
+
+func existingFileIdentities(label string, paths []string) ([]os.FileInfo, error) {
 	identities := make([]os.FileInfo, 0, len(paths))
 	seen := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
@@ -361,7 +376,7 @@ func (c Config) connectorReservedFileIdentities() ([]os.FileInfo, error) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("inspect connector-reserved path %q: %w", path, err)
+			return nil, fmt.Errorf("inspect %s path %q: %w", label, path, err)
 		}
 		identities = append(identities, info)
 	}
@@ -438,7 +453,12 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 	if err != nil || portErr != nil || port < 1 || port > 65535 || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return nil, errors.New("gateway service_address must be an explicit loopback IP and port")
 	}
+	reservedFiles, err := c.routeReservedFileIdentities()
+	if err != nil {
+		return nil, err
+	}
 	loaded := make(map[string]loadedRoute, len(c.Routes))
+	routeCredentials := make([]os.FileInfo, 0, len(c.Routes))
 	for _, route := range c.Routes {
 		if !bounded(route.ID, 128) || route.MaxConcurrent < 1 || route.MaxConcurrent > 256 {
 			return nil, errors.New("gateway route requires bounded id and max_concurrent from 1 to 256")
@@ -456,14 +476,46 @@ func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
 			if !absoluteClean(route.CredentialFile) {
 				return nil, fmt.Errorf("gateway route %q credential path must be absolute", route.ID)
 			}
-			credential, err = readCredential(route.CredentialFile)
+			if c.reservedRouteCredentialPath(route.CredentialFile) {
+				return nil, fmt.Errorf("gateway route %q credential path must be separate from Gateway and connector authority paths", route.ID)
+			}
+			var credentialInfo os.FileInfo
+			credential, credentialInfo, err = readCredentialWithInfo(route.CredentialFile)
 			if err != nil {
 				return nil, fmt.Errorf("gateway route %q credential: %w", route.ID, err)
 			}
+			for _, reserved := range reservedFiles {
+				if os.SameFile(credentialInfo, reserved) {
+					return nil, fmt.Errorf("gateway route %q credential file must not alias Gateway or connector authority", route.ID)
+				}
+			}
+			for _, prior := range routeCredentials {
+				if os.SameFile(credentialInfo, prior) {
+					return nil, fmt.Errorf("gateway route %q credential file must not be shared by inference routes", route.ID)
+				}
+			}
+			routeCredentials = append(routeCredentials, credentialInfo)
 		}
 		loaded[route.ID] = loadedRoute{Route: route, base: base, credential: credential}
 	}
 	return loaded, nil
+}
+
+func (c Config) reservedRouteCredentialPath(path string) bool {
+	for _, reserved := range []string{
+		c.ServiceTokenFile, c.StateFile, c.EgressAuditFile, c.ControlSocket,
+		c.ConnectorReceiptFile, c.ConnectorReceiptKeyFile,
+	} {
+		if reserved != "" && path == reserved {
+			return true
+		}
+	}
+	for _, connector := range c.Connectors {
+		if connector.CredentialFile != "" && path == connector.CredentialFile {
+			return true
+		}
+	}
+	return pathWithin(path, c.GrantRoot)
 }
 
 var egressHostPattern = regexp.MustCompile(`^(?:\*\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
@@ -590,8 +642,13 @@ func readOpenedCredential(expected os.FileInfo, file *os.File) (string, error) {
 		return "", errors.New("credential changed while reading")
 	}
 	value := strings.TrimSpace(string(raw))
-	if value == "" || strings.ContainsAny(value, "\r\n") {
-		return "", errors.New("credential must contain one non-empty line")
+	if value == "" {
+		return "", errors.New("credential must contain one non-empty visible ASCII line")
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return "", errors.New("credential must contain one non-empty visible ASCII line")
+		}
 	}
 	return value, nil
 }
