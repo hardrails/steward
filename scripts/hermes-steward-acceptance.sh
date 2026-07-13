@@ -44,12 +44,18 @@ state_volume=
 imported_runtime_digest=
 debug_keep=${HERMES_DEBUG_KEEP_FAILED_WORK:-NO}
 [[ $debug_keep == YES || $debug_keep == NO ]] || { echo "hermes-steward-acceptance: HERMES_DEBUG_KEEP_FAILED_WORK must be YES or NO" >&2; exit 2; }
+: >"$work/steps"
+
+mark() {
+	printf '%s\n' "$1" >>"$work/steps"
+}
 
 cleanup() {
 	local status=$?
 	if [[ $status -ne 0 && $debug_keep == YES ]]; then
 		for container in $(docker ps -aq --filter "label=io.hardrails.tenant=$tenant_id" --filter "label=io.hardrails.instance=$instance_id"); do
 			docker logs "$container" >"$work/docker-$container.log" 2>&1 || true
+			docker inspect "$container" >"$work/docker-$container.inspect.json" 2>&1 || true
 		done
 	fi
 	if [[ -n ${runtime_ref:-} && -n ${token:-} ]]; then
@@ -182,6 +188,7 @@ import_result=$("$ctl_bin" image import -archive "$HERMES_ARCHIVE" -capsule "$wo
 python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["image"]["manifest_digest"]==sys.argv[1] and p["image"]["config_digest"]==sys.argv[2]' \
 	"$manifest_digest" "$config_digest" <<<"$import_result"
 imported_runtime_digest=$manifest_digest
+mark image_imported
 
 token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 printf '%s\n' "$token" >"$work/token"
@@ -200,6 +207,7 @@ for _ in $(seq 1 30); do
 	sleep 1
 done
 curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:8090/v1/readiness >/dev/null
+mark executor_ready
 
 admit() {
 	local generation=$1 disposition=$2
@@ -256,15 +264,22 @@ require_admission <<<"$admission_response"
 mapfile -t admission < <(extract_admission <<<"$admission_response")
 runtime_ref=${admission[0]}
 grant_id=${admission[1]}
+mark generation_1_admitted
 curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
+mark generation_1_started
 [[ $(docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref") == runsc ]]
 [[ $(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref") == true ]]
 wait_for_hermes "$grant_id" "$runtime_ref"
+mark generation_1_ready
 state_volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/opt/data"}}{{.Name}}{{end}}{{end}}' "$runtime_ref")
 [[ -n $state_volume ]]
+mark state_volume_observed
 docker exec -u 65532:65532 "$runtime_ref" sh -c 'mkdir -p /opt/data/workspace/nested && printf "alpha\n" > /opt/data/workspace/alpha.txt && printf "beta\n" > /opt/data/workspace/nested/beta.txt'
-curl -fsS -H 'Authorization: Bearer service-secret' "http://127.0.0.1:18091/v1/services/$grant_id/health" | grep -q '"status":"ok"'
+mark workspace_seeded
+curl -fsS -H 'Authorization: Bearer service-secret' "http://127.0.0.1:18091/v1/services/$grant_id/health" | \
+	python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("status")=="ok" and p.get("platform")=="hermes-agent"'
 run_workspace_audit "$grant_id"
+mark generation_1_skill_passed
 curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 runtime_ref=
 
@@ -273,9 +288,11 @@ require_admission <<<"$admission_response"
 mapfile -t admission < <(extract_admission <<<"$admission_response")
 runtime_ref=${admission[0]}
 grant_id=${admission[1]}
+mark generation_2_admitted
 curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
 wait_for_hermes "$grant_id" "$runtime_ref"
 run_workspace_audit "$grant_id"
+mark generation_2_skill_passed
 curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 runtime_ref=
 curl -fsS -X POST http://127.0.0.1:8090/v1/state/purge -H 'Content-Type: application/json' \
