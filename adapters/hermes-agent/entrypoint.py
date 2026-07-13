@@ -23,6 +23,7 @@ from typing import Any
 REVISION = "095b9eed3801c251796df93f48a8f2a527ff6e70"
 STATE = pathlib.Path("/opt/data")
 FIXTURE = pathlib.Path("/opt/steward/skills/steward.workspace-audit")
+CONNECTOR_FIXTURE = pathlib.Path("/opt/steward/skills/steward.connector-work")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 RUN_PATH_RE = re.compile(r"^/v1/runs/run_[a-f0-9]{32}$")
 INTERNAL_API_HOST = "127.0.0.1"
@@ -46,6 +47,23 @@ SKILL_FILES = {
     "workspace-fixture-contract.json": ("read", 0o444),
     "workspace_audit.py": ("execute", 0o555),
 }
+CONNECTOR_SKILL_PUBLIC_KEY_SHA256 = "6eceb945f87b1979b2d5fde2235ddb493c38ae2fa2694c2c6d7dbd0a61a5e564"
+CONNECTOR_SKILL_LIMITS = {
+    "max_request_bytes": 4096,
+    "max_response_bytes": 4096,
+    "timeout_seconds": 10,
+}
+CONNECTOR_SKILL_FILES = {
+    "SKILL.md": ("read", 0o444),
+    "connector-fixture-contract.json": ("read", 0o444),
+    "connector_work.py": ("execute", 0o555),
+}
+CONNECTOR_SKILL_AUTHORITY = {
+    "id": "local-work",
+    "logical_base_url": "http://steward-relay:8081",
+    "operation_id": "perform",
+    "operation_path": "/v1/connectors/local-work/operations/perform",
+}
 NEGOTIATION = {
     "schema_version": "steward.adapter-negotiation.v1",
     "adapter": "hermes-agent",
@@ -55,6 +73,7 @@ NEGOTIATION = {
     "native_protocols": ["http"],
     "capabilities": [
         {"id": "skill", "fixture_id": "steward.workspace-audit"},
+        {"id": "skill", "fixture_id": "steward.connector-work"},
         {"id": "task", "fixture_id": "fixed-response"},
     ],
 }
@@ -360,6 +379,81 @@ def verify_skill() -> dict[str, bytes]:
         prior = name
     if set(verified) != set(SKILL_FILES):
         fail("signed fixture file inventory is incomplete")
+    verify_connector_skill()
+    return verified
+
+
+def verify_connector_skill() -> dict[str, bytes]:
+    fixture_fd = os.open(
+        CONNECTOR_FIXTURE,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        fixture_stat = os.fstat(fixture_fd)
+        if fixture_stat.st_uid != 0 or fixture_stat.st_gid != 0 or stat.S_IMODE(fixture_stat.st_mode) & 0o022:
+            fail("signed connector fixture directory ownership or mode is invalid")
+        require_exact_directory_entries(
+            fixture_fd,
+            set(CONNECTOR_SKILL_FILES) | {"manifest.json", "manifest.sig", "public.pem"},
+        )
+    finally:
+        os.close(fixture_fd)
+    manifest = read_regular_nofollow(CONNECTOR_FIXTURE / "manifest.json", 16384, 0o444)
+    signature_text = read_regular_nofollow(CONNECTOR_FIXTURE / "manifest.sig", 256, 0o444)
+    public_key = read_regular_nofollow(CONNECTOR_FIXTURE / "public.pem", 1024, 0o444)
+    if hashlib.sha256(public_key).hexdigest() != CONNECTOR_SKILL_PUBLIC_KEY_SHA256:
+        fail("signed connector fixture public key does not match the adapter trust root")
+    signature = base64.b64decode(signature_text.strip(), validate=True)
+    if len(signature) != 64:
+        fail("signed connector fixture signature length is invalid")
+    try:
+        from cryptography.hazmat.primitives import serialization
+
+        key = serialization.load_pem_public_key(public_key)
+        key.verify(signature, manifest)
+    except Exception as exc:
+        fail(f"signed connector fixture verification failed: {type(exc).__name__}")
+    try:
+        descriptor = json.loads(manifest)
+    except (TypeError, ValueError):
+        fail("signed connector fixture manifest is not valid JSON")
+    canonical = json.dumps(descriptor, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+    if manifest != canonical or not isinstance(descriptor, dict) or set(descriptor) != {
+        "connector", "entrypoint", "files", "limits", "name", "network", "schema_version", "version"
+    }:
+        fail("signed connector fixture manifest is not canonical or has unknown fields")
+    if (
+        descriptor["schema_version"] != "steward.fixture-skill-manifest.v1"
+        or descriptor["name"] != "steward.connector-work"
+        or descriptor["version"] != "1"
+        or descriptor["network"] is not True
+        or descriptor["entrypoint"] != "connector_work.py"
+        or descriptor["connector"] != CONNECTOR_SKILL_AUTHORITY
+        or descriptor["limits"] != CONNECTOR_SKILL_LIMITS
+    ):
+        fail("signed connector fixture manifest semantics are invalid")
+    files = descriptor["files"]
+    if not isinstance(files, list) or len(files) != len(CONNECTOR_SKILL_FILES):
+        fail("signed connector fixture file inventory is invalid")
+    verified: dict[str, bytes] = {}
+    prior = ""
+    for item in files:
+        if not isinstance(item, dict) or set(item) != {"mode", "path", "sha256"}:
+            fail("signed connector fixture file descriptor is invalid")
+        name = item.get("path")
+        if not isinstance(name, str) or name <= prior or name not in CONNECTOR_SKILL_FILES:
+            fail("signed connector fixture file order or name is invalid")
+        expected_mode = CONNECTOR_SKILL_FILES[name][0]
+        digest = item.get("sha256")
+        if item.get("mode") != expected_mode or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            fail("signed connector fixture file authority is invalid")
+        data = read_regular_nofollow(CONNECTOR_FIXTURE / name, 1 << 20, CONNECTOR_SKILL_FILES[name][1])
+        if hashlib.sha256(data).hexdigest() != digest:
+            fail(f"signed connector fixture file digest mismatch: {name}")
+        verified[name] = data
+        prior = name
+    if set(verified) != set(CONNECTOR_SKILL_FILES):
+        fail("signed connector fixture file inventory is incomplete")
     return verified
 
 
