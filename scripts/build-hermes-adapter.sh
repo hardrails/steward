@@ -461,7 +461,7 @@ dns_probe_name=$sandbox_name-dns
 dns_config=$(docker run --rm --name "$dns_probe_name" \
 	--runtime runsc --network bridge --read-only --cap-drop ALL \
 	--security-opt no-new-privileges:true --pids-limit 16 \
-	--memory 67108864 --memory-swap 67108864 --cpus "$sandbox_cpus" \
+	--memory 268435456 --memory-swap 268435456 --cpus "$sandbox_cpus" \
 	--user 65532:65532 --log-driver none --entrypoint /bin/cat \
 	"$base_image_reference" /etc/resolv.conf) || die "could not read Docker's build DNS configuration"
 dns_probe_name=
