@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/nodeclient"
+	"github.com/hardrails/steward/internal/securefile"
 )
 
 const maxArtifactBytes = dsse.DefaultMaxEnvelopeBytes
@@ -48,6 +50,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	switch arguments[0] {
 	case "keygen":
 		return keygen(arguments[1:], stdout)
+	case "key":
+		return keyCommand(arguments[1:], stdout)
 	case "capsule":
 		return artifact(arguments[1:], stdout, admission.CapsulePayloadType)
 	case "policy":
@@ -69,6 +73,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 
 func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "usage: stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]")
+	fmt.Fprintln(writer, "       stewardctl key match -private-key FILE -public-key FILE")
 	fmt.Fprintln(writer, "       stewardctl capsule sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
@@ -438,6 +443,39 @@ func keygen(arguments []string, stdout io.Writer) error {
 	return err
 }
 
+func keyCommand(arguments []string, stdout io.Writer) error {
+	if len(arguments) == 0 || arguments[0] != "match" {
+		return errors.New("key command requires match")
+	}
+	flags := flag.NewFlagSet("key match", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	privateKeyPath := flags.String("private-key", "", "PEM Ed25519 private key")
+	publicKeyPath := flags.String("public-key", "", "base64 Ed25519 public key")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	if *privateKeyPath == "" || *publicKeyPath == "" || flags.NArg() != 0 {
+		return errors.New("key match requires -private-key and -public-key")
+	}
+	privateKey, err := readPrivateKey(*privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("read private key: %w", err)
+	}
+	publicKey, err := readPublicKey(*publicKeyPath)
+	if err != nil {
+		return fmt.Errorf("read public key: %w", err)
+	}
+	derivedPublicKey, ok := privateKey.Public().(ed25519.PublicKey)
+	if !ok {
+		return errors.New("private key does not contain an Ed25519 public key")
+	}
+	if subtle.ConstantTimeCompare(derivedPublicKey, publicKey) != 1 {
+		return errors.New("Ed25519 private and public keys do not match")
+	}
+	_, err = fmt.Fprintln(stdout, "Ed25519 key pair matches")
+	return err
+}
+
 func artifact(arguments []string, stdout io.Writer, payloadType string) error {
 	if len(arguments) == 0 {
 		return errors.New("artifact command requires sign or verify")
@@ -577,19 +615,7 @@ func readPublicKey(path string) (ed25519.PublicKey, error) {
 }
 
 func readBounded(path string) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxArtifactBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) == 0 || len(data) > maxArtifactBytes {
-		return nil, errors.New("input is empty or exceeds 1 MiB")
-	}
-	return data, nil
+	return securefile.Read(path, maxArtifactBytes, securefile.Regular)
 }
 
 func writeNewFile(path string, contents []byte, mode os.FileMode) error {
