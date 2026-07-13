@@ -114,6 +114,57 @@ func TestConfigValidatesBoundedEgressRoutes(t *testing.T) {
 	}
 }
 
+func TestConfigValidatesExactServiceTaskOperations(t *testing.T) {
+	validOperation := ServiceOperation{
+		ServiceID: "hermes-api", ID: "hermes.run", Method: http.MethodPost, Path: "/v1/runs",
+		ContentType: "application/json", MaxRequestBytes: 64 << 10, MaxResponseBytes: 1 << 20,
+		MaxSeconds: 30, MaxPermitSeconds: 300,
+	}
+	loaded, err := (Config{ServiceOperations: []ServiceOperation{validOperation}}).validateServiceOperations()
+	if err != nil || loaded[validOperation.ServiceID][validOperation.ID] != validOperation {
+		t.Fatalf("loaded=%#v err=%v", loaded, err)
+	}
+
+	for name, mutate := range map[string]func(*Config){
+		"bad service":          func(config *Config) { config.ServiceOperations[0].ServiceID = "bad service" },
+		"bad id":               func(config *Config) { config.ServiceOperations[0].ID = "bad/id" },
+		"non post":             func(config *Config) { config.ServiceOperations[0].Method = http.MethodPut },
+		"query path":           func(config *Config) { config.ServiceOperations[0].Path = "/v1/runs?admin=1" },
+		"wrong content type":   func(config *Config) { config.ServiceOperations[0].ContentType = "application/*+json" },
+		"zero request limit":   func(config *Config) { config.ServiceOperations[0].MaxRequestBytes = 0 },
+		"large request limit":  func(config *Config) { config.ServiceOperations[0].MaxRequestBytes = maxServiceTaskRequestBytes + 1 },
+		"zero response limit":  func(config *Config) { config.ServiceOperations[0].MaxResponseBytes = 0 },
+		"large response limit": func(config *Config) { config.ServiceOperations[0].MaxResponseBytes = maxServiceTaskResponseBytes + 1 },
+		"zero timeout":         func(config *Config) { config.ServiceOperations[0].MaxSeconds = 0 },
+		"long timeout":         func(config *Config) { config.ServiceOperations[0].MaxSeconds = maxServiceTaskSeconds + 1 },
+		"zero permit":          func(config *Config) { config.ServiceOperations[0].MaxPermitSeconds = 0 },
+		"long permit":          func(config *Config) { config.ServiceOperations[0].MaxPermitSeconds = maxServiceTaskPermitSeconds + 1 },
+		"duplicate id": func(config *Config) {
+			config.ServiceOperations = append(config.ServiceOperations, config.ServiceOperations[0])
+		},
+		"ambiguous route": func(config *Config) {
+			duplicate := config.ServiceOperations[0]
+			duplicate.ID = "hermes.start"
+			config.ServiceOperations = append(config.ServiceOperations, duplicate)
+		},
+		"global capacity": func(config *Config) {
+			config.ServiceOperations = make([]ServiceOperation, maxServiceOperations+1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := Config{ServiceOperations: []ServiceOperation{validOperation}}
+			mutate(&config)
+			if _, err := config.validateServiceOperations(); err == nil {
+				t.Fatalf("invalid service operation accepted: %#v", config.ServiceOperations)
+			}
+		})
+	}
+
+	if _, err := (Config{ServiceOperations: []ServiceOperation{validOperation}}).validateAndLoadConnectorReceiptKey(); err == nil {
+		t.Fatal("service task operation without signed receipt identity accepted")
+	}
+}
+
 func TestConfigLoadsFiniteConnectorsAndOwnerOnlyCredentials(t *testing.T) {
 	directory := t.TempDir()
 	credential := filepath.Join(directory, "connector-token")
@@ -576,7 +627,7 @@ func TestActionPermitConfigDoesNotDriftUnrelatedConnector(t *testing.T) {
 		t.Fatalf("unrelated connector drifted: before=%#v after=%#v", before["legacy"], after["legacy"])
 	}
 	grant := connectorGrant("tenant-a", "agent-a", 1, "legacy")
-	if left, right := routePolicyDigest(grant, nil, nil, before, 4<<20), routePolicyDigest(grant, nil, nil, after, 4<<20); left != right {
+	if left, right := routePolicyDigest(grant, nil, nil, before, nil, 4<<20), routePolicyDigest(grant, nil, nil, after, nil, 4<<20); left != right {
 		t.Fatalf("unrelated route policy changed: before=%s after=%s", left, right)
 	}
 
@@ -584,7 +635,7 @@ func TestActionPermitConfigDoesNotDriftUnrelatedConnector(t *testing.T) {
 	changed := after["approved"]
 	changed.CredentialEpoch = 2
 	changedMap := map[string]loadedConnector{"legacy": after["legacy"], "approved": changed}
-	if left, right := routePolicyDigest(approvedGrant, nil, nil, after, 4<<20), routePolicyDigest(approvedGrant, nil, nil, changedMap, 4<<20); left == right {
+	if left, right := routePolicyDigest(approvedGrant, nil, nil, after, nil, 4<<20), routePolicyDigest(approvedGrant, nil, nil, changedMap, nil, 4<<20); left == right {
 		t.Fatal("credential epoch did not change the connector route policy digest")
 	}
 }

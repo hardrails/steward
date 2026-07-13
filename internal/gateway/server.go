@@ -3,8 +3,10 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,20 +42,31 @@ const maxEgressDeniedAttemptsPerTenantMinute = 120
 const maxEgressDeniedAttemptsHostMinute = 480
 
 type Grant struct {
-	GrantID        string   `json:"grant_id"`
-	TenantID       string   `json:"tenant_id"`
-	InstanceID     string   `json:"instance_id"`
-	Generation     uint64   `json:"generation"`
-	RuntimeRef     string   `json:"runtime_ref,omitempty"`
-	CapsuleDigest  string   `json:"capsule_digest,omitempty"`
-	PolicyDigest   string   `json:"policy_digest,omitempty"`
-	RouteID        string   `json:"route_id,omitempty"`
-	ModelAlias     string   `json:"model_alias,omitempty"`
-	Service        bool     `json:"service"`
-	ServiceURL     string   `json:"service_url,omitempty"`
-	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
-	ConnectorIDs   []string `json:"connector_ids,omitempty"`
-	Active         bool     `json:"active"`
+	GrantID         string          `json:"grant_id"`
+	TenantID        string          `json:"tenant_id"`
+	NodeID          string          `json:"node_id,omitempty"`
+	InstanceID      string          `json:"instance_id"`
+	Generation      uint64          `json:"generation"`
+	RuntimeRef      string          `json:"runtime_ref,omitempty"`
+	CapsuleDigest   string          `json:"capsule_digest,omitempty"`
+	PolicyDigest    string          `json:"policy_digest,omitempty"`
+	RouteID         string          `json:"route_id,omitempty"`
+	ModelAlias      string          `json:"model_alias,omitempty"`
+	Service         bool            `json:"service"`
+	ServiceID       string          `json:"service_id,omitempty"`
+	ServiceURL      string          `json:"service_url,omitempty"`
+	TaskAuthorities []TaskAuthority `json:"task_authorities,omitempty"`
+	EgressRouteIDs  []string        `json:"egress_route_ids,omitempty"`
+	ConnectorIDs    []string        `json:"connector_ids,omitempty"`
+	Active          bool            `json:"active"`
+}
+
+// TaskAuthority is non-secret tenant authority authenticated by the signed
+// site policy and carried to Gateway by Executor. Gateway configuration never
+// supplies or widens this tenant-owned key set.
+type TaskAuthority struct {
+	KeyID     string `json:"key_id"`
+	PublicKey string `json:"public_key"`
 }
 
 type grantResponse struct {
@@ -77,6 +90,7 @@ type GrantInspection struct {
 type retainedGrant struct {
 	GrantID                 string                  `json:"grant_id"`
 	TenantID                string                  `json:"tenant_id"`
+	NodeID                  string                  `json:"node_id,omitempty"`
 	InstanceID              string                  `json:"instance_id"`
 	Generation              uint64                  `json:"generation"`
 	RuntimeRef              string                  `json:"runtime_ref,omitempty"`
@@ -85,7 +99,9 @@ type retainedGrant struct {
 	RouteID                 string                  `json:"route_id,omitempty"`
 	ModelAlias              string                  `json:"model_alias,omitempty"`
 	Service                 bool                    `json:"service"`
+	ServiceID               string                  `json:"service_id,omitempty"`
 	ServiceURL              string                  `json:"service_url,omitempty"`
+	TaskAuthorities         []TaskAuthority         `json:"task_authorities,omitempty"`
 	EgressRouteIDs          []string                `json:"egress_route_ids,omitempty"`
 	ConnectorIDs            []string                `json:"connector_ids,omitempty"`
 	Active                  bool                    `json:"active"`
@@ -102,10 +118,11 @@ type retainedConnectorCall struct {
 
 func retainGrant(grant Grant, policyDigest, credentialDigest string, callMaps ...map[string][]string) retainedGrant {
 	retained := retainedGrant{
-		GrantID: grant.GrantID, TenantID: grant.TenantID, InstanceID: grant.InstanceID, Generation: grant.Generation,
+		GrantID: grant.GrantID, TenantID: grant.TenantID, NodeID: grant.NodeID, InstanceID: grant.InstanceID, Generation: grant.Generation,
 		RuntimeRef: grant.RuntimeRef, CapsuleDigest: grant.CapsuleDigest, PolicyDigest: grant.PolicyDigest,
-		RouteID: grant.RouteID, ModelAlias: grant.ModelAlias, Service: grant.Service, ServiceURL: grant.ServiceURL,
-		EgressRouteIDs: append([]string(nil), grant.EgressRouteIDs...), Active: grant.Active,
+		RouteID: grant.RouteID, ModelAlias: grant.ModelAlias, Service: grant.Service, ServiceID: grant.ServiceID, ServiceURL: grant.ServiceURL,
+		TaskAuthorities: append([]TaskAuthority(nil), grant.TaskAuthorities...),
+		EgressRouteIDs:  append([]string(nil), grant.EgressRouteIDs...), Active: grant.Active,
 		ConnectorIDs:      append([]string(nil), grant.ConnectorIDs...),
 		RoutePolicyDigest: policyDigest, CredentialBindingDigest: credentialDigest,
 	}
@@ -128,11 +145,12 @@ func retainGrant(grant Grant, policyDigest, credentialDigest string, callMaps ..
 
 func (retained retainedGrant) grant() Grant {
 	return Grant{
-		GrantID: retained.GrantID, TenantID: retained.TenantID, InstanceID: retained.InstanceID, Generation: retained.Generation,
+		GrantID: retained.GrantID, TenantID: retained.TenantID, NodeID: retained.NodeID, InstanceID: retained.InstanceID, Generation: retained.Generation,
 		RuntimeRef: retained.RuntimeRef, CapsuleDigest: retained.CapsuleDigest, PolicyDigest: retained.PolicyDigest,
-		RouteID: retained.RouteID, ModelAlias: retained.ModelAlias, Service: retained.Service, ServiceURL: retained.ServiceURL,
-		EgressRouteIDs: append([]string(nil), retained.EgressRouteIDs...),
-		ConnectorIDs:   append([]string(nil), retained.ConnectorIDs...), Active: retained.Active,
+		RouteID: retained.RouteID, ModelAlias: retained.ModelAlias, Service: retained.Service, ServiceID: retained.ServiceID, ServiceURL: retained.ServiceURL,
+		TaskAuthorities: append([]TaskAuthority(nil), retained.TaskAuthorities...),
+		EgressRouteIDs:  append([]string(nil), retained.EgressRouteIDs...),
+		ConnectorIDs:    append([]string(nil), retained.ConnectorIDs...), Active: retained.Active,
 	}
 }
 
@@ -169,6 +187,7 @@ type Server struct {
 	routes                   map[string]loadedRoute
 	egressRoutes             map[string]loadedEgressRoute
 	connectors               map[string]loadedConnector
+	serviceOperations        map[string]map[string]ServiceOperation
 	semaphores               map[string]chan struct{}
 	egressSemaphores         map[string]chan struct{}
 	connectorSemaphores      map[string]chan struct{}
@@ -184,6 +203,8 @@ type Server struct {
 	egressStats              map[string]EgressStats
 	connectorCalls           map[string]map[string][]string
 	connectorSpends          map[string]connectorSpendOwner
+	serviceTasks             map[string]serviceTaskReceipt
+	serviceTaskPermits       map[string]string
 	connectorCallCounts      map[string]map[string]int
 	connectorAttempts        map[string]connectorAttemptWindow
 	egressDeniedAttempts     map[string]egressDeniedAttemptWindow
@@ -207,6 +228,11 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		return nil, err
 	}
 	config.loadedConnectors = connectors
+	serviceOperations, err := config.serviceOperationMap()
+	if err != nil {
+		return nil, err
+	}
+	config.loadedServiceOperations = serviceOperations
 	receiptKey, err := config.connectorReceiptPrivateKey()
 	if err != nil {
 		return nil, err
@@ -234,6 +260,7 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 	}
 	server := &Server{
 		config: config, routes: routes, egressRoutes: egressRoutes, connectors: connectors,
+		serviceOperations:        serviceOperations,
 		semaphores:               make(map[string]chan struct{}, len(routes)),
 		egressSemaphores:         make(map[string]chan struct{}, len(egressRoutes)),
 		connectorSemaphores:      make(map[string]chan struct{}, len(connectors)),
@@ -243,7 +270,8 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		listeners: make(map[string]net.Listener), egressListeners: make(map[string]net.Listener), connectorListeners: make(map[string]net.Listener),
 		serviceSemaphores: make(map[string]chan struct{}), egressStats: make(map[string]EgressStats),
 		connectorCalls:  make(map[string]map[string][]string),
-		connectorSpends: receiptIndex.spends, connectorCallCounts: receiptIndex.counts,
+		connectorSpends: receiptIndex.spends, serviceTasks: receiptIndex.tasks, serviceTaskPermits: receiptIndex.permits,
+		connectorCallCounts:  receiptIndex.counts,
 		connectorAttempts:    make(map[string]connectorAttemptWindow),
 		egressDeniedAttempts: make(map[string]egressDeniedAttemptWindow),
 		egressTenantDenials:  make(map[string]egressDeniedAttemptWindow),
@@ -300,6 +328,11 @@ func Validate(config Config, routes map[string]loadedRoute, egressRoutes map[str
 		return StateSummary{}, err
 	}
 	config.loadedConnectors = connectors
+	serviceOperations, err := config.serviceOperationMap()
+	if err != nil {
+		return StateSummary{}, err
+	}
+	config.loadedServiceOperations = serviceOperations
 	receiptKey, err := config.connectorReceiptPrivateKey()
 	if err != nil {
 		return StateSummary{}, err
@@ -329,9 +362,14 @@ func InspectState(config Config, routes map[string]loadedRoute, egressRoutes map
 	if err != nil {
 		return StateSummary{}, err
 	}
+	serviceOperations, err := config.serviceOperationMap()
+	if err != nil {
+		return StateSummary{}, err
+	}
 	validator := &Server{
 		config: config, routes: routes, egressRoutes: egressRoutes, connectors: connectors,
-		grants: make(map[string]Grant), policyDigests: make(map[string]string), credentialDigests: make(map[string]string),
+		serviceOperations: serviceOperations,
+		grants:            make(map[string]Grant), policyDigests: make(map[string]string), credentialDigests: make(map[string]string),
 		connectorCalls: make(map[string]map[string][]string),
 	}
 	return validator.loadExisting()
@@ -351,9 +389,17 @@ func (s *Server) Reload(config Config, routes map[string]loadedRoute, egressRout
 		return err
 	}
 	config.loadedConnectors = connectors
+	serviceOperations, err := config.serviceOperationMap()
+	if err != nil {
+		return err
+	}
+	config.loadedServiceOperations = serviceOperations
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, grant := range s.grants {
+		if len(grant.TaskAuthorities) > 0 && !sameServiceOperations(s.serviceOperations[grant.ServiceID], serviceOperations[grant.ServiceID]) {
+			return fmt.Errorf("reload changes task operations used by retained grant %s", grant.GrantID)
+		}
 		if grant.RouteID != "" {
 			next, ok := routes[grant.RouteID]
 			if !ok {
@@ -382,7 +428,7 @@ func (s *Server) Reload(config Config, routes map[string]loadedRoute, egressRout
 			}
 		}
 		budget, _ := config.connectorReceiptBudget(grant.TenantID)
-		if routePolicyDigest(grant, routes, egressRoutes, connectors, budget) != s.policyDigests[id] ||
+		if routePolicyDigest(grant, routes, egressRoutes, connectors, serviceOperations, budget) != s.policyDigests[id] ||
 			routeCredentialBindingDigest(grant, routes, connectors) != s.credentialDigests[id] {
 			return fmt.Errorf("reload changes route policy used by retained grant %s", grant.GrantID)
 		}
@@ -423,9 +469,10 @@ func (s *Server) Reload(config Config, routes map[string]loadedRoute, egressRout
 		}
 		connectorSemaphores[id] = make(chan struct{}, connector.MaxConcurrent)
 	}
-	s.config.Routes, s.config.EgressRoutes, s.config.Connectors = config.Routes, config.EgressRoutes, config.Connectors
+	s.config.Routes, s.config.EgressRoutes, s.config.Connectors, s.config.ServiceOperations = config.Routes, config.EgressRoutes, config.Connectors, config.ServiceOperations
 	s.config.loadedConnectors = connectors
-	s.routes, s.egressRoutes, s.connectors = routes, egressRoutes, connectors
+	s.config.loadedServiceOperations = serviceOperations
+	s.routes, s.egressRoutes, s.connectors, s.serviceOperations = routes, egressRoutes, connectors, serviceOperations
 	s.semaphores, s.egressSemaphores, s.connectorSemaphores = semaphores, egressSemaphores, connectorSemaphores
 	s.tokenHash = sha256.Sum256([]byte("Bearer " + serviceToken))
 	return nil
@@ -736,18 +783,22 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 func validServiceEnrichment(current, next Grant) bool {
 	return !current.Active && !next.Active && current.ServiceURL == "" && next.ServiceURL != "" &&
 		current.GrantID == next.GrantID && current.TenantID == next.TenantID &&
+		current.NodeID == next.NodeID &&
 		current.InstanceID == next.InstanceID && current.Generation == next.Generation &&
 		current.RuntimeRef == next.RuntimeRef && current.CapsuleDigest == next.CapsuleDigest && current.PolicyDigest == next.PolicyDigest &&
 		current.RouteID == next.RouteID && current.ModelAlias == next.ModelAlias && current.Service == next.Service &&
+		current.ServiceID == next.ServiceID && slices.Equal(current.TaskAuthorities, next.TaskAuthorities) &&
 		slices.Equal(current.EgressRouteIDs, next.EgressRouteIDs) && slices.Equal(current.ConnectorIDs, next.ConnectorIDs)
 }
 
 func grantsEqual(left, right Grant) bool {
 	return left.GrantID == right.GrantID && left.TenantID == right.TenantID &&
+		left.NodeID == right.NodeID &&
 		left.InstanceID == right.InstanceID && left.Generation == right.Generation &&
 		left.RuntimeRef == right.RuntimeRef && left.CapsuleDigest == right.CapsuleDigest && left.PolicyDigest == right.PolicyDigest &&
 		left.RouteID == right.RouteID && left.ModelAlias == right.ModelAlias &&
-		left.Service == right.Service && left.ServiceURL == right.ServiceURL &&
+		left.Service == right.Service && left.ServiceID == right.ServiceID && left.ServiceURL == right.ServiceURL &&
+		slices.Equal(left.TaskAuthorities, right.TaskAuthorities) &&
 		left.Active == right.Active && slices.Equal(left.EgressRouteIDs, right.EgressRouteIDs) && slices.Equal(left.ConnectorIDs, right.ConnectorIDs)
 }
 
@@ -846,8 +897,24 @@ func (s *Server) validGrant(grant Grant) bool {
 	if !validGrantID(grant.GrantID) || !bounded(grant.TenantID, 128) || !bounded(grant.InstanceID, 256) || grant.Generation == 0 ||
 		grant.GrantID != GrantID(grant.TenantID, grant.InstanceID, grant.Generation) ||
 		(grant.RouteID == "" && !grant.Service && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0) ||
-		len(grant.ModelAlias) > 256 || (grant.ServiceURL != "" && !grant.Service) || !validGrantEvidenceContext(grant) {
+		len(grant.ModelAlias) > 256 || (grant.ServiceURL != "" && !grant.Service) ||
+		(!grant.Service && (grant.ServiceID != "" || len(grant.TaskAuthorities) != 0)) || !validGrantEvidenceContext(grant) {
 		return false
+	}
+	if grant.ServiceID != "" && !routeID(grant.ServiceID) {
+		return false
+	}
+	if len(grant.TaskAuthorities) == 0 && (grant.NodeID != "" || grant.ServiceID != "") {
+		return false
+	}
+	if len(grant.TaskAuthorities) > 0 {
+		if grant.ServiceID == "" || !bounded(grant.NodeID, 128) || grant.RuntimeRef == "" || len(s.serviceOperations[grant.ServiceID]) == 0 ||
+			!validTaskAuthorities(grant.TaskAuthorities) {
+			return false
+		}
+		if _, budgeted := s.config.connectorReceiptBudget(grant.TenantID); !budgeted {
+			return false
+		}
 	}
 	if grant.RouteID != "" {
 		if _, ok := s.routes[grant.RouteID]; !ok || !bounded(grant.ModelAlias, 256) {
@@ -908,6 +975,31 @@ func (s *Server) validGrant(grant Grant) bool {
 	}
 	return true
 }
+
+func validTaskAuthorities(authorities []TaskAuthority) bool {
+	if len(authorities) == 0 || len(authorities) > 8 {
+		return false
+	}
+	seenKeys := make(map[string]struct{}, len(authorities))
+	for index, authority := range authorities {
+		if !routeID(authority.KeyID) || index > 0 && authorities[index-1].KeyID >= authority.KeyID {
+			return false
+		}
+		public, err := base64.StdEncoding.DecodeString(authority.PublicKey)
+		if err != nil || len(public) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(public) != authority.PublicKey {
+			return false
+		}
+		if _, duplicate := seenKeys[string(public)]; duplicate {
+			return false
+		}
+		seenKeys[string(public)] = struct{}{}
+	}
+	return true
+}
+
+// TaskAuthoritiesValid exposes the exact grant-shape validation to Executor,
+// which persists the same authority in its workload fingerprint.
+func TaskAuthoritiesValid(authorities []TaskAuthority) bool { return validTaskAuthorities(authorities) }
 
 func validGrantEvidenceContext(grant Grant) bool {
 	present := grant.RuntimeRef != "" || grant.CapsuleDigest != "" || grant.PolicyDigest != ""
@@ -1063,6 +1155,16 @@ func (s *Server) proxyInference(w http.ResponseWriter, incoming *http.Request, g
 func (s *Server) proxyService(w http.ResponseWriter, incoming *http.Request, grant Grant, path string) {
 	if incoming.Method == http.MethodConnect || !safeServicePath(path) {
 		writeGatewayError(w, http.StatusForbidden, "service_denied", "service method or path is not allowed")
+		return
+	}
+	operation, routePolicyDigest, protected := s.serviceTaskOperation(grant, incoming.Method, path)
+	permitPresented := len(incoming.Header.Values(taskPermitHeader)) != 0
+	if protected {
+		s.proxyServiceTask(w, incoming, grant, operation, routePolicyDigest)
+		return
+	}
+	if permitPresented || len(grant.TaskAuthorities) > 0 && incoming.Method != http.MethodGet && incoming.Method != http.MethodHead {
+		writeGatewayError(w, http.StatusForbidden, "service_task_denied", "task-enabled service methods require one configured exact operation and task permit")
 		return
 	}
 	base, client, transport, err := s.serviceUpstream(grant.ServiceURL)
@@ -1324,7 +1426,7 @@ func (s *Server) loadExisting() (StateSummary, error) {
 	}
 	var state snapshot
 	if err := dsse.DecodeStrictInto(raw, maxConfigBytes, &state); err != nil ||
-		(state.Version != 1 && state.Version != 2 && state.Version != 3) || len(state.Grants) > 4096 {
+		(state.Version != 1 && state.Version != 2 && state.Version != 3 && state.Version != 4) || len(state.Grants) > 4096 {
 		return StateSummary{}, errors.New("gateway state is invalid")
 	}
 	for _, retained := range state.Grants {
@@ -1339,11 +1441,18 @@ func (s *Server) loadExisting() (StateSummary, error) {
 		effectivePolicyDigest := s.routePolicyDigestLocked(grant)
 		effectiveCredentialDigest := routeCredentialBindingDigest(grant, s.routes, s.connectors)
 		policyBearing := effectivePolicyDigest != ""
-		if policyBearing && (state.Version < 2 || retained.RoutePolicyDigest == "" || retained.CredentialBindingDigest == "") {
+		credentialBearing := grant.RouteID != "" || len(grant.ConnectorIDs) > 0
+		if policyBearing && (state.Version < 2 || retained.RoutePolicyDigest == "") ||
+			credentialBearing && retained.CredentialBindingDigest == "" {
 			return StateSummary{}, errors.New("gateway state contains a retained grant without a durable route policy binding")
 		}
 		if len(grant.ConnectorIDs) > 0 && state.Version != 3 {
-			return StateSummary{}, errors.New("gateway state contains a connector grant without durable call accounting")
+			if state.Version != 4 {
+				return StateSummary{}, errors.New("gateway state contains a connector grant without durable call accounting")
+			}
+		}
+		if len(grant.TaskAuthorities) > 0 && state.Version != 4 {
+			return StateSummary{}, errors.New("gateway state contains task authority without its durable state format")
 		}
 		if retained.RoutePolicyDigest != effectivePolicyDigest || retained.CredentialBindingDigest != effectiveCredentialDigest {
 			return StateSummary{}, errors.New("gateway state route policy does not match current configuration")
@@ -1370,7 +1479,7 @@ func (s *Server) persistLocked() error {
 		))
 	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i].GrantID < grants[j].GrantID })
-	raw, err := json.Marshal(snapshot{Version: 3, Grants: grants})
+	raw, err := json.Marshal(snapshot{Version: 4, Grants: grants})
 	if err != nil {
 		return err
 	}

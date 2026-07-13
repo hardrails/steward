@@ -35,6 +35,11 @@ const (
 	maxActionAuthorities        = 64
 	maxActionAuthoritiesPerCall = 8
 	maxActionPermitSeconds      = 86400
+	maxServiceOperations        = 128
+	maxServiceTaskRequestBytes  = int64(64 << 10)
+	maxServiceTaskResponseBytes = int64(1 << 20)
+	maxServiceTaskSeconds       = 120
+	maxServiceTaskPermitSeconds = 900
 	minConnectorCredentialBytes = 12
 	maxCredentialBytes          = 16 << 10
 )
@@ -52,6 +57,7 @@ type Config struct {
 	EgressAuditFile               string                         `json:"egress_audit_file,omitempty"`
 	EgressRoutes                  []EgressRoute                  `json:"egress_routes,omitempty"`
 	Connectors                    []Connector                    `json:"connectors,omitempty"`
+	ServiceOperations             []ServiceOperation             `json:"service_operations,omitempty"`
 	ActionAuthorities             []ActionAuthority              `json:"action_authorities,omitempty"`
 	ActionPermitNodeID            string                         `json:"action_permit_node_id,omitempty"`
 	ConnectorReceiptFile          string                         `json:"connector_receipt_file,omitempty"`
@@ -63,8 +69,24 @@ type Config struct {
 	// loadedConnectors contains validated origins, credentials, CIDRs, and
 	// operation indexes populated by LoadConfig. It is deliberately absent from
 	// JSON so secret contents can never be serialized with operator policy.
-	loadedConnectors    map[string]loadedConnector
-	connectorReceiptKey ed25519.PrivateKey
+	loadedConnectors        map[string]loadedConnector
+	loadedServiceOperations map[string]map[string]ServiceOperation
+	connectorReceiptKey     ed25519.PrivateKey
+}
+
+// ServiceOperation is one exact task-bearing service request. It is host
+// policy, not tenant input: a signed task may select only this operation ID and
+// must still bind the exact configured method, path, content type, and limits.
+type ServiceOperation struct {
+	ServiceID        string `json:"service_id"`
+	ID               string `json:"id"`
+	Method           string `json:"method"`
+	Path             string `json:"path"`
+	ContentType      string `json:"content_type"`
+	MaxRequestBytes  int64  `json:"max_request_bytes"`
+	MaxResponseBytes int64  `json:"max_response_bytes"`
+	MaxSeconds       int    `json:"max_seconds"`
+	MaxPermitSeconds int    `json:"max_permit_seconds"`
 }
 
 // ConnectorReceiptTenantBudget reserves non-borrowing signed receipt capacity
@@ -195,6 +217,11 @@ func LoadConfig(path string) (Config, map[string]loadedRoute, map[string]loadedE
 		return Config{}, nil, nil, "", err
 	}
 	config.loadedConnectors = connectors
+	serviceOperations, err := config.validateServiceOperations()
+	if err != nil {
+		return Config{}, nil, nil, "", err
+	}
+	config.loadedServiceOperations = serviceOperations
 	receiptKey, err := config.validateAndLoadConnectorReceiptKey()
 	if err != nil {
 		return Config{}, nil, nil, "", err
@@ -252,8 +279,8 @@ func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error)
 		if len(c.ConnectorReceiptTenantBudgets) != 0 {
 			return nil, errors.New("connector receipt tenant budgets require a connector receipt identity")
 		}
-		if len(c.Connectors) > 0 {
-			return nil, errors.New("connectors require a signed connector receipt ledger")
+		if len(c.Connectors) > 0 || len(c.ServiceOperations) > 0 {
+			return nil, errors.New("connectors and authorized service tasks require a signed connector receipt ledger")
 		}
 		return nil, nil
 	}
@@ -264,8 +291,8 @@ func (c Config) validateAndLoadConnectorReceiptKey() (ed25519.PrivateKey, error)
 	if err != nil {
 		return nil, err
 	}
-	if len(c.Connectors) > 0 && len(c.ConnectorReceiptTenantBudgets) == 0 {
-		return nil, errors.New("connectors require at least one explicit connector receipt tenant budget")
+	if (len(c.Connectors) > 0 || len(c.ServiceOperations) > 0) && len(c.ConnectorReceiptTenantBudgets) == 0 {
+		return nil, errors.New("connectors and authorized service tasks require at least one explicit connector receipt tenant budget")
 	}
 	if !absoluteClean(c.ConnectorReceiptFile) || !absoluteClean(c.ConnectorReceiptKeyFile) ||
 		c.ConnectorReceiptFile == c.ConnectorReceiptKeyFile || c.ConnectorReceiptFile == c.StateFile ||
@@ -305,6 +332,43 @@ func (c Config) connectorMap() (map[string]loadedConnector, error) {
 		return c.loadedConnectors, nil
 	}
 	return c.validateAndLoadConnectors()
+}
+
+func (c Config) serviceOperationMap() (map[string]map[string]ServiceOperation, error) {
+	if c.loadedServiceOperations != nil {
+		return c.loadedServiceOperations, nil
+	}
+	return c.validateServiceOperations()
+}
+
+func (c Config) validateServiceOperations() (map[string]map[string]ServiceOperation, error) {
+	if len(c.ServiceOperations) > maxServiceOperations {
+		return nil, fmt.Errorf("gateway config permits at most %d service operations", maxServiceOperations)
+	}
+	loaded := make(map[string]map[string]ServiceOperation)
+	for _, operation := range c.ServiceOperations {
+		if !routeID(operation.ServiceID) || !routeID(operation.ID) || operation.Method != http.MethodPost ||
+			!canonicalConnectorPath(operation.Path) || operation.ContentType != "application/json" ||
+			operation.MaxRequestBytes < 1 || operation.MaxRequestBytes > maxServiceTaskRequestBytes ||
+			operation.MaxResponseBytes < 1 || operation.MaxResponseBytes > maxServiceTaskResponseBytes ||
+			operation.MaxSeconds < 1 || operation.MaxSeconds > maxServiceTaskSeconds ||
+			operation.MaxPermitSeconds < 1 || operation.MaxPermitSeconds > maxServiceTaskPermitSeconds {
+			return nil, fmt.Errorf("service operation %q/%q has an invalid identity, route, or limit", operation.ServiceID, operation.ID)
+		}
+		if loaded[operation.ServiceID] == nil {
+			loaded[operation.ServiceID] = make(map[string]ServiceOperation)
+		}
+		if _, duplicate := loaded[operation.ServiceID][operation.ID]; duplicate {
+			return nil, fmt.Errorf("duplicate service operation %q/%q", operation.ServiceID, operation.ID)
+		}
+		for _, existing := range loaded[operation.ServiceID] {
+			if existing.Method == operation.Method && existing.Path == operation.Path {
+				return nil, fmt.Errorf("service %q maps one method and path to multiple operation IDs", operation.ServiceID)
+			}
+		}
+		loaded[operation.ServiceID][operation.ID] = operation
+	}
+	return loaded, nil
 }
 
 func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) {
