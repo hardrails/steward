@@ -56,6 +56,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return artifact(arguments[1:], stdout, admission.CapsulePayloadType)
 	case "policy":
 		return artifact(arguments[1:], stdout, admission.PolicyPayloadType)
+	case "permit":
+		return permitCommand(arguments[1:], stdout)
 	case "evidence":
 		return evidenceCommand(arguments[1:], stdout)
 	case "node":
@@ -76,6 +78,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl key match -private-key FILE -public-key FILE")
 	fmt.Fprintln(writer, "       stewardctl capsule sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")
+	fmt.Fprintln(writer, "       stewardctl permit issue|verify|audit ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
 	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state ...")
 	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector ...")
@@ -583,7 +586,7 @@ func validatePayload(payload []byte, payloadType string) error {
 var timeNow = func() time.Time { return time.Now().UTC() }
 
 func readPrivateKey(path string) (ed25519.PrivateKey, error) {
-	raw, err := readBounded(path)
+	raw, err := securefile.Read(path, maxArtifactBytes, securefile.OwnerOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -603,7 +606,7 @@ func readPrivateKey(path string) (ed25519.PrivateKey, error) {
 }
 
 func readPublicKey(path string) (ed25519.PublicKey, error) {
-	raw, err := readBounded(path)
+	raw, err := securefile.Read(path, maxArtifactBytes, securefile.TrustFile)
 	if err != nil {
 		return nil, err
 	}
@@ -626,12 +629,46 @@ func writeNewFile(path string, contents []byte, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	_, writeErr := file.Write(contents)
-	closeErr := file.Close()
-	if writeErr != nil {
-		return writeErr
+	cleanup := func(cause error) error {
+		closeErr := file.Close()
+		removeErr := os.Remove(path)
+		syncErr := syncOutputDirectory(path)
+		return errors.Join(cause, closeErr, removeErr, syncErr)
 	}
-	return closeErr
+	for written := 0; written < len(contents); {
+		count, writeErr := file.Write(contents[written:])
+		if writeErr != nil {
+			return cleanup(writeErr)
+		}
+		if count <= 0 {
+			return cleanup(io.ErrShortWrite)
+		}
+		written += count
+	}
+	if err := file.Sync(); err != nil {
+		return cleanup(err)
+	}
+	if err := file.Close(); err != nil {
+		removeErr := os.Remove(path)
+		syncErr := syncOutputDirectory(path)
+		return errors.Join(err, removeErr, syncErr)
+	}
+	if err := syncOutputDirectory(path); err != nil {
+		removeErr := os.Remove(path)
+		cleanupSyncErr := syncOutputDirectory(path)
+		return errors.Join(err, removeErr, cleanupSyncErr)
+	}
+	return nil
+}
+
+func syncOutputDirectory(path string) error {
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	return errors.Join(syncErr, closeErr)
 }
 
 func publicKeyID(key ed25519.PublicKey) string { return dsse.Digest(key) }
