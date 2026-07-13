@@ -304,8 +304,13 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		"task audit -in",
 		"application/vnd.steward.connector-receipt.v3+json",
 		"tenant_task_private_key_agent_absence_verified",
-		`base64.b64encode(seed).rstrip(b"=")`,
+		`base64.b64encode(value).rstrip(b"=")`,
+		"base64.urlsafe_b64encode",
+		"base64.b32encode",
 		"escaped_trimmed_key",
+		`"$work/service-token"`,
+		`"$work/token"`,
+		`b"steward-task-permit-spend-v1\x00"`,
 		`admissions[admission["grant_id"]] = (generation, admission)`,
 	} {
 		if !strings.Contains(acceptanceScript, contract) {
@@ -315,6 +320,14 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 	connectorKeyContract := `re.fullmatch(r"sha256:[a-f0-9]{64}", str(connector_head.get("key_id", "")))`
 	if !strings.Contains(acceptanceScript, connectorKeyContract) {
 		t.Fatal("Hermes acceptance does not validate the connector receipt key ID emitted by stewardctl")
+	}
+	for name, contract := range map[string]string{
+		"gVisor runtime": `docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref"`,
+		"read-only root": `docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref"`,
+	} {
+		if count := strings.Count(acceptanceScript, contract); count != 2 {
+			t.Fatalf("Hermes acceptance checks %s %d times, want once per generation", name, count)
+		}
 	}
 
 	var feasibility struct {
@@ -392,6 +405,10 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 			Archive                struct {
 				Platform string `json:"platform"`
 			} `json:"archive"`
+			Binaries map[string]struct {
+				SHA256  string `json:"sha256"`
+				Version string `json:"version"`
+			} `json:"binaries"`
 			BuildAttestation struct {
 				Adapter struct {
 					FileSetSHA256 string `json:"file_set_sha256"`
@@ -409,6 +426,11 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 					Revision      string `json:"revision"`
 				} `json:"source"`
 			} `json:"build_attestation"`
+			StewardSource struct {
+				Commit       string `json:"commit"`
+				TrackedDirty *bool  `json:"tracked_dirty"`
+				Tree         string `json:"tree"`
+			} `json:"steward_source"`
 		} `json:"provenance"`
 		ReceiptChain struct {
 			Verified bool `json:"verified"`
@@ -451,7 +473,6 @@ func TestHermesQualificationEvidenceBindsCurrentInputs(t *testing.T) {
 		feasibility.UpstreamRevision != integration.Provenance.BuildAttestation.Source.Revision {
 		t.Fatal("Hermes feasibility and signed-integration evidence bind different source objects")
 	}
-
 	bindings := map[string]string{
 		"adapter file set":    hermesAdapterFileSetSHA256(t, root),
 		"builder":             sha256File(t, filepath.Join(repositoryRoot, "scripts", "build-hermes-adapter.sh")),

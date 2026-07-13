@@ -805,34 +805,67 @@ if output != expected:
 PY
 }
 
-scan_task_key_material() {
+scan_agent_sensitive_material() {
 	local mode=$1
-		python3 -I -c '
+	python3 -I -c '
 import base64, json, os, pathlib, stat, sys
-mode, path_text = sys.argv[1:]
-path = pathlib.Path(path_text)
-info = path.lstat()
-if mode not in {"json", "stream"} or not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077 or not 0 < info.st_size <= 16384:
-    raise SystemExit("hermes-steward-acceptance: task signing key file is unsafe")
-flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
-descriptor = os.open(path, flags)
-try:
-    opened = os.fstat(descriptor)
-    key_parts = []
-    observed = 0
-    while observed <= 16384:
-        chunk = os.read(descriptor, min(65536, 16385 - observed))
-        if not chunk:
-            break
-        key_parts.append(chunk)
-        observed += len(chunk)
-    key = b"".join(key_parts)
-    final = os.fstat(descriptor)
-finally:
-    os.close(descriptor)
-identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
-if len(key) != info.st_size or identity(info) != identity(opened) or identity(opened) != identity(final) or identity(final) != identity(path.lstat()):
-    raise SystemExit("hermes-steward-acceptance: task signing key changed while being read")
+mode, key_path_text, connector_path_text, service_path_text, executor_path_text, origin = sys.argv[1:]
+if mode not in {"json", "stream"}:
+    raise SystemExit("hermes-steward-acceptance: invalid agent-material scan mode")
+
+
+def read_owner_file(path: pathlib.Path) -> bytes:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077 or not 0 < info.st_size <= 16384:
+        raise SystemExit(f"hermes-steward-acceptance: sensitive host file is unsafe: {path.name}")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        parts = []
+        observed = 0
+        while observed <= 16384:
+            chunk = os.read(descriptor, min(65536, 16385 - observed))
+            if not chunk:
+                break
+            parts.append(chunk)
+            observed += len(chunk)
+        final = os.fstat(descriptor)
+        named = path.lstat()
+    finally:
+        os.close(descriptor)
+    data = b"".join(parts)
+    identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+    if len(data) != info.st_size or identity(info) != identity(opened) or identity(opened) != identity(final) or identity(final) != identity(named):
+        raise SystemExit(f"hermes-steward-acceptance: sensitive host file changed while being read: {path.name}")
+    return data
+
+
+def common_encodings(value: bytes) -> tuple[bytes, ...]:
+    if not value:
+        return ()
+    encoded = [
+        value,
+        base64.b64encode(value),
+        base64.b64encode(value).rstrip(b"="),
+        base64.urlsafe_b64encode(value),
+        base64.urlsafe_b64encode(value).rstrip(b"="),
+        base64.b32encode(value),
+        base64.b32encode(value).rstrip(b"="),
+        value.hex().encode(),
+        value.hex().upper().encode(),
+    ]
+    try:
+        text = value.decode("ascii")
+    except UnicodeDecodeError:
+        pass
+    else:
+        encoded.append(json.dumps(text, ensure_ascii=True)[1:-1].encode())
+    return tuple(encoded)
+
+
+key_path = pathlib.Path(key_path_text)
+key = read_owner_file(key_path)
 lines = key.splitlines()
 if lines[:1] != [b"-----BEGIN PRIVATE KEY-----"] or lines[-1:] != [b"-----END PRIVATE KEY-----"] or len(lines) < 3:
     raise SystemExit("hermes-steward-acceptance: task signing key is not one PKCS#8 PEM block")
@@ -845,12 +878,28 @@ if len(der) < 32 or b"\x04\x20" not in der or not der.endswith(b"\x04\x20" + der
 seed = der[-32:]
 escaped_key = json.dumps(key.decode("ascii"), ensure_ascii=True)[1:-1].encode()
 escaped_trimmed_key = json.dumps(key.rstrip(b"\n").decode("ascii"), ensure_ascii=True)[1:-1].encode()
-patterns = tuple(dict.fromkeys((
-    key, der, seed,
-    base64.b64encode(key), base64.b64encode(der), base64.b64encode(seed),
-    base64.b64encode(seed).rstrip(b"="), der.hex().encode(), seed.hex().encode(), seed.hex().upper().encode(),
-    escaped_key, escaped_trimmed_key, os.fsencode(path.resolve(strict=True)),
-)))
+patterns = []
+for value in (key, key.rstrip(b"\n"), der, seed):
+    patterns.extend(common_encodings(value))
+patterns.extend((escaped_key, escaped_trimmed_key, os.fsencode(key_path.resolve(strict=True))))
+for token_path_text in (connector_path_text, service_path_text, executor_path_text):
+    token_path = pathlib.Path(token_path_text)
+    raw_token = read_owner_file(token_path)
+    token = raw_token.strip()
+    if not token or b"\n" in token or b"\r" in token:
+        raise SystemExit(f"hermes-steward-acceptance: sensitive bearer value is invalid: {token_path.name}")
+    patterns.extend(common_encodings(raw_token))
+    patterns.extend(common_encodings(token))
+    patterns.append(os.fsencode(token_path.resolve(strict=True)))
+netloc = origin.removeprefix("http://")
+_host, separator, port = netloc.rpartition(":")
+if not separator or not port.isascii() or not port.isdigit():
+    raise SystemExit("hermes-steward-acceptance: connector origin is invalid")
+patterns.extend((
+    origin.encode(), netloc.encode(), f":{port}".encode(), f": {port}".encode(),
+    f"={port}".encode(), ("\"" + port + "\"").encode(),
+))
+patterns = tuple(dict.fromkeys(pattern for pattern in patterns if pattern))
 limit = (1 << 20) if mode == "json" else (2 << 30)
 overlap = max(map(len, patterns)) - 1
 carry = b""
@@ -861,22 +910,21 @@ while True:
         break
     total += len(chunk)
     if total > limit:
-        raise SystemExit("hermes-steward-acceptance: agent material exceeds task-key scan limit")
+        raise SystemExit("hermes-steward-acceptance: agent material exceeds sensitive-material scan limit")
     combined = carry + chunk
     if any(pattern in combined for pattern in patterns):
-        raise SystemExit("hermes-steward-acceptance: tenant task signing key reached the untrusted agent")
+        raise SystemExit("hermes-steward-acceptance: sensitive host authority or bearer material reached the untrusted agent")
     carry = combined[-overlap:] if overlap else b""
 if total == 0:
     raise SystemExit("hermes-steward-acceptance: agent material stream is empty")
-' "$mode" "$work/task.private"
+' "$mode" "$work/task.private" "$work/connector-token" "$work/service-token" "$work/token" "$connector_origin"
 }
 
-assert_agent_excludes_connector_material() {
-	local runtime=$1 scanner=$root/adapters/hermes-agent/fixture_secret_scan.py inspect_file path presence
+assert_agent_excludes_sensitive_material() {
+	local runtime=$1 inspect_file path presence
 	inspect_file=$work/docker-$runtime.material-inspect.json
 	docker inspect "$runtime" >"$inspect_file"
-	python3 -I "$scanner" json "$work/connector-token" "$connector_origin" <"$inspect_file"
-	scan_task_key_material json <"$inspect_file"
+	scan_agent_sensitive_material json <"$inspect_file"
 	python3 -I - "$inspect_file" <<'PY'
 import json
 import pathlib
@@ -901,9 +949,7 @@ if (
 ):
     raise SystemExit("hermes-steward-acceptance: agent writable mount topology is unexpected")
 PY
-	docker export "$runtime" | \
-		python3 -I "$scanner" stream "$work/connector-token" "$connector_origin"
-	docker export "$runtime" | scan_task_key_material stream
+	docker export "$runtime" | scan_agent_sensitive_material stream
 	for path in /opt/data /tmp /workspace /dev/shm; do
 		presence=$(docker exec "$runtime" /opt/hermes/.venv/bin/python -I -c \
 			'import os,stat,sys; p=sys.argv[1]; print("absent" if not os.path.lexists(p) else "directory" if stat.S_ISDIR(os.lstat(p).st_mode) else "unsafe")' "$path")
@@ -912,9 +958,7 @@ PY
 		directory) ;;
 		*) echo "hermes-steward-acceptance: agent scan path is unsafe: $path" >&2; return 1 ;;
 		esac
-		docker cp "$runtime:$path/." - | \
-			python3 -I "$scanner" stream "$work/connector-token" "$connector_origin"
-		docker cp "$runtime:$path/." - | scan_task_key_material stream
+		docker cp "$runtime:$path/." - | scan_agent_sensitive_material stream
 	done
 }
 
@@ -995,7 +1039,7 @@ if status != {
     raise SystemExit("hermes-steward-acceptance: connector fixture observed unexpected effects")
 PY
 mark connector_fixture_effect_verified
-assert_agent_excludes_connector_material "$runtime_ref"
+assert_agent_excludes_sensitive_material "$runtime_ref"
 mark connector_secret_absence_verified
 mark tenant_task_private_key_agent_absence_verified
 docker exec -u 65532:65532 "$runtime_ref" sh -c 'printf "generation-two\n" > /opt/data/workspace/generation-two.txt'
@@ -1032,16 +1076,24 @@ grant_id=${admission[1]}
 mark generation_2_admitted
 curl -fsS -X POST "http://127.0.0.1:8090/v1/workloads/$runtime_ref/start" -H "Authorization: Bearer $token" >/dev/null
 mark generation_2_started
+[[ $(docker inspect --format '{{.HostConfig.Runtime}}' "$runtime_ref") == runsc ]]
+[[ $(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$runtime_ref") == true ]]
 wait_for_hermes "$grant_id" "$runtime_ref"
 mark generation_2_ready
 run_workspace_audit 2 "$generation_2_workspace_digest" "steward-integration-$run_id-generation-2"
 mark generation_2_skill_passed
+assert_agent_excludes_sensitive_material "$runtime_ref"
 curl -fsS -X DELETE "http://127.0.0.1:8090/v1/workloads/$runtime_ref" -H "Authorization: Bearer $token" >/dev/null
 runtime_ref=
 mark generation_2_destroyed
 curl -fsS -X POST http://127.0.0.1:8090/v1/state/purge -H 'Content-Type: application/json' \
 	-H "Authorization: Bearer $token" \
 	--data-binary "{\"tenant_id\":\"$tenant_id\",\"node_id\":\"$node_id\",\"lineage_id\":\"$lineage_id\",\"generation\":2}" >/dev/null
+volume_inventory=$(docker volume ls --quiet)
+if grep -Fqx -- "$state_volume" <<<"$volume_inventory"; then
+	echo "hermes-steward-acceptance: state purge left the lineage volume present" >&2
+	exit 1
+fi
 state_volume=
 mark state_purged
 "$ctl_bin" evidence verify -in "$work/evidence.bin" -public-key "$work/receipts.public" \
@@ -1216,6 +1268,18 @@ forbidden_material = [
     connector_forbidden_task_id.encode(),
 ]
 issue_by_permit = {}
+
+
+def service_task_digest(task_id: str) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"steward-task-permit-spend-v1\x00")
+    for value in (tenant_id, instance_id, task_id):
+        encoded = value.encode()
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return "sha256:" + digest.hexdigest()
+
+
 for issue_path in sorted(work.glob("task-*.issue.json")):
     issue = json.loads(read_owner_file(issue_path, 4096))
     if set(issue) != {"bundle_path", "permit_digest", "request_digest", "task_id"}:
@@ -1240,7 +1304,7 @@ for issue_path in sorted(work.glob("task-*.issue.json")):
     if set(request_document) != {"input", "session_id"} or not isinstance(request_document["input"], str):
         raise SystemExit("hermes-steward-acceptance: exact task request is invalid")
     forbidden_material.extend((request, request_document["input"].encode(), issue["task_id"].encode()))
-    issue_by_permit[issue["permit_digest"]] = (issue, len(request))
+    issue_by_permit[issue["permit_digest"]] = (issue, len(request), service_task_digest(issue["task_id"]))
 if len(issue_by_permit) != 5:
     raise SystemExit("hermes-steward-acceptance: expected five independently signed Hermes task bundles")
 if (
@@ -1358,7 +1422,7 @@ for receipt in service_receipts:
     if admitted is None or binding is None:
         raise SystemExit("hermes-steward-acceptance: service-task receipt has no exact admission or task bundle")
     generation, admission = admitted
-    issue, request_bytes = binding
+    issue, request_bytes, expected_task_digest = binding
     if (
         event.get("kind") != "service_task"
         or event.get("tenant_id") != tenant_id
@@ -1372,7 +1436,7 @@ for receipt in service_receipts:
         or event.get("service_id") != "hermes-api"
         or event.get("operation_id") != "hermes.run"
         or re.fullmatch(r"sha256:[a-f0-9]{64}", str(event.get("operation_policy_digest", ""))) is None
-        or re.fullmatch(r"sha256:[a-f0-9]{64}", str(event.get("task_digest", ""))) is None
+        or event.get("task_digest") != expected_task_digest
         or event.get("authority_key_id") != task_key_id
         or event.get("request_digest") != issue["request_digest"]
         or event.get("request_bytes") != request_bytes
