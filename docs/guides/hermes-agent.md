@@ -117,9 +117,10 @@ undeclared operation is denied. It then scans container metadata, the read-only
 image layer, the state volume, `/tmp`, `/workspace` when present, and `/dev/shm`
 for the qualification credential, configured origin authority, port, and credential
 path. This is a regression test for the fixed fixture material, not a claim that
-arbitrary upstream responses cannot disclose secrets. Gateway relays bounded
-response bodies and non-Steward headers, so the configured upstream remains trusted
-not to reflect authentication material or private origin details.
+arbitrary upstream responses cannot disclose secrets. Gateway rejects the exact
+configured credential in response headers and the decoded body stream, but the
+upstream remains trusted not to transform that value, disclose private origin
+details, or return other application secrets.
 
 A separate Steward integration gate inspected and imported the archive through a
 publisher-signed capsule and site policy, started Hermes through Executor, and sent

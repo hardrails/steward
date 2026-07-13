@@ -25,7 +25,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
 - [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
 - [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure optional state, inference, and service grants
-- [Authenticated connectors](https://hardrails.github.io/steward/guides/connectors/): Broker exact API operations without directly configuring the workload with upstream credentials or origins; understand response-reflection risk
+- [Authenticated connectors](https://hardrails.github.io/steward/guides/connectors/): Broker exact API operations without directly configuring the workload with upstream credentials or origins; understand exact-response filtering limits
 - [Signed egress](https://hardrails.github.io/steward/guides/egress/): Configure HTTP(S) routes, private CIDRs, audit, and diagnostics
 - [Terraform](https://hardrails.github.io/steward/guides/terraform/): Non-secret cloud bootstrap and AWS hardening
 - [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate a local node with Model Context Protocol 2025-11-25 stdio tools
@@ -56,8 +56,9 @@ quota and is disabled on a shared host. Steward can also grant OpenAI-compatible
 inference without directly configuring or injecting the upstream credential into
 the workload, one private service, and named credential-brokered API operations with
 spend-before-effect call budgets, plus named HTTP(S) routes through a per-instance
-proxy. Configured upstreams remain trusted not to reflect credentials or private
-origin details in responses. Steward denies raw TCP/UDP, transparent
+proxy. Gateway rejects the exact connector credential in response headers and the
+decoded body stream, but configured upstreams remain trusted not to transform that
+credential or disclose private origin details. Steward denies raw TCP/UDP, transparent
 proxying, raw secrets, host mounts, Docker access, privileged mode, and undeclared
 ports. The Executor HTTP API, `stewardctl node`, and `steward-mcp` call the same
 Executor handlers.

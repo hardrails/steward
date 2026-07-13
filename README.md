@@ -190,10 +190,12 @@ connector calls before external effects, rejects stale authority, and binds
 effective route policy into signed receipts.
 
 Connector credential isolation has a precise boundary: Gateway does not hand the
-configured credential to the workload, but it does relay bounded upstream response
-bodies and non-Steward headers. Operators must use an upstream operation that does
-not reflect authentication material. Tenant receipt budgets isolate ledger bytes;
-they do not isolate the shared disk, synchronous writes, or a hostile host root.
+configured credential to the workload and aborts an upstream response if any header
+or decoded body chunk contains that exact value. It does not detect encoded or
+transformed credentials, private-origin disclosure, or application-specific secret
+fields. Operators must still use a narrow trusted upstream. Tenant receipt budgets
+isolate ledger bytes; they do not isolate the shared disk, synchronous writes, or a
+hostile host root.
 
 This claim is intentionally limited. Receipts show what Steward accepted and which
 host mutations it recorded. They do not prove prompt meaning, model honesty,

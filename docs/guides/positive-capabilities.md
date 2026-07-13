@@ -28,11 +28,11 @@ to an exact method, path, origin, credential, and call budget without placing th
 origin or credential in the workload. See
 [Broker authenticated API operations]({{ '/guides/connectors/' | relative_url }}).
 
-These boundaries assume the configured inference and connector upstreams do not
-reflect credentials or private origin details in response bodies or arbitrary
-headers. Gateway relays bounded responses; it does not apply an upstream-specific
-response schema. Treat each upstream as a trusted service and use narrow,
-tenant-specific credentials.
+Gateway rejects the exact configured connector credential in upstream response
+headers and the decoded body stream. It does not detect transformed credentials,
+private-origin disclosure, or other application secrets, and it does not apply an
+upstream-specific response schema. Treat each inference and connector upstream as a
+trusted service and use narrow, tenant-specific credentials.
 
 To use persistent state on a dedicated single-tenant host, set
 `EXECUTOR_STATE_ARG=-allow-unquotaed-state-on-dedicated-host` in

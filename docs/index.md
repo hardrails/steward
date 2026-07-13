@@ -54,8 +54,10 @@ an operator-selected, OpenAI-compatible route without configuring, mounting, or
 injecting the upstream credential into the agent container. Named connectors apply
 the same separation to exact authenticated API operations: Steward directly gives
 the agent a logical operation and finite call budget, not the configured upstream
-origin or secret. Configured upstreams remain trusted not to reflect authentication
-material or private origin details in bounded responses.
+origin or secret. Gateway rejects the exact connector credential in response
+headers and the decoded body stream. Configured upstreams remain trusted not to
+transform that value, disclose private origin details, or return other application
+secrets.
 
 ## Agent adapters
 

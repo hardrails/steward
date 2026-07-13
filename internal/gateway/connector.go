@@ -21,10 +21,13 @@ import (
 )
 
 var (
-	errConnectorCallLimit = errors.New("connector call budget exhausted")
-	errConnectorReplay    = errors.New("connector task was already spent")
-	errConnectorInactive  = errors.New("connector grant is not active")
+	errConnectorCallLimit           = errors.New("connector call budget exhausted")
+	errConnectorReplay              = errors.New("connector task was already spent")
+	errConnectorInactive            = errors.New("connector grant is not active")
+	errConnectorCredentialReflected = errors.New("connector upstream reflected its credential")
 )
+
+const connectorCredentialScanBlockBytes = 32 << 10
 
 func (s *Server) listenConnectorGrantLocked(id string) error {
 	if listener := s.connectorListeners[id]; listener != nil {
@@ -424,6 +427,14 @@ func (s *Server) proxyConnector(
 		writeGatewayError(w, http.StatusBadGateway, "response_too_large", "configured upstream response exceeds the byte limit")
 		return
 	}
+	if headerContainsCredential(response.Header, connector.credential) {
+		if receiptErr := s.finishConnectorReceipt(receipt, response.StatusCode, 0, "credential_reflected"); receiptErr != nil {
+			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
+			return
+		}
+		writeGatewayError(w, http.StatusBadGateway, "credential_reflected", "configured upstream reflected the connector credential")
+		return
+	}
 	copyHeaders(w.Header(), response.Header)
 	for _, name := range []string{
 		"Authorization", "Proxy-Authorization", "X-API-Key", "Set-Cookie", "Location",
@@ -452,7 +463,7 @@ func (s *Server) proxyConnector(
 	prepareBoundedHTTPResponse(w, -1)
 	w.Header().Add("Trailer", connectorReceiptStatusTrailer)
 	w.WriteHeader(response.StatusCode)
-	result := copyHTTPResponseBody(w, response.Body, connector.MaxResponseBytes, true)
+	result := copyConnectorResponseBody(w, response.Body, connector.MaxResponseBytes, connector.credential)
 	errorCode := ""
 	if result.abort {
 		errorCode = result.reason
@@ -468,4 +479,116 @@ func (s *Server) proxyConnector(
 
 func connectorResponseHasNoBody(method string, status int) bool {
 	return method == http.MethodHead || status == http.StatusNoContent || status == http.StatusNotModified
+}
+
+func headerContainsCredential(header http.Header, credential string) bool {
+	foldedCredential := strings.ToLower(credential)
+	for name, values := range header {
+		// net/http canonicalizes field names, so compare their ASCII case-folded
+		// form against the visible-ASCII credential before forwarding either the
+		// name or its values.
+		if strings.Contains(strings.ToLower(name), foldedCredential) {
+			return true
+		}
+		for _, value := range values {
+			if strings.Contains(value, credential) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// credentialRejectingWriter scans fixed-size blocks while retaining
+// len(credential)-1 bytes between scans. The carry detects an exact credential
+// split across blocks; coalescing small upstream writes keeps scan work linear
+// in the response size. It does not buffer the complete bounded response or try
+// to classify transformed data.
+type credentialRejectingWriter struct {
+	destination io.Writer
+	credential  []byte
+	pending     []byte
+	written     int64
+	reflected   bool
+}
+
+func (w *credentialRejectingWriter) Write(value []byte) (int, error) {
+	if w.reflected {
+		return 0, errConnectorCredentialReflected
+	}
+	w.pending = append(w.pending, value...)
+	retain := len(w.credential) - 1
+	if len(w.pending) < connectorCredentialScanBlockBytes+retain {
+		return len(value), nil
+	}
+	if err := w.scanAndFlush(len(w.pending) - retain); err != nil {
+		return len(value), err
+	}
+	return len(value), nil
+}
+
+func (w *credentialRejectingWriter) finish() error {
+	if w.reflected {
+		return errConnectorCredentialReflected
+	}
+	return w.scanAndFlush(len(w.pending))
+}
+
+func (w *credentialRejectingWriter) scanAndFlush(safe int) error {
+	if index := bytes.Index(w.pending, w.credential); index >= 0 {
+		if err := w.flushPrefix(index); err != nil {
+			return err
+		}
+		clear(w.pending)
+		w.pending = nil
+		w.reflected = true
+		return errConnectorCredentialReflected
+	}
+	return w.flushPrefix(safe)
+}
+
+func (w *credentialRejectingWriter) flushPrefix(length int) error {
+	data := w.pending[:length]
+	for len(data) > 0 {
+		count, err := w.destination.Write(data)
+		w.written += int64(count)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[count:]
+	}
+	remaining := copy(w.pending, w.pending[length:])
+	clear(w.pending[remaining:])
+	w.pending = w.pending[:remaining]
+	return nil
+}
+
+func copyConnectorResponseBody(w http.ResponseWriter, body io.Reader, maximum int64, credential string) boundedHTTPResponseResult {
+	destination := flushingResponseWriter{writer: w, controller: http.NewResponseController(w)}
+	filter := credentialRejectingWriter{destination: destination, credential: []byte(credential)}
+	consumed, copyErr := io.Copy(&filter, io.LimitReader(body, maximum))
+	if copyErr == nil {
+		copyErr = filter.finish()
+	}
+	result := boundedHTTPResponseResult{written: filter.written, reason: "completed"}
+	switch {
+	case errors.Is(copyErr, errConnectorCredentialReflected):
+		result.reason, result.abort = "credential_reflected", true
+	case copyErr != nil:
+		result.reason, result.abort = "stream_failed", true
+	case consumed == maximum:
+		var probe [1]byte
+		count, probeErr := io.ReadFull(body, probe[:])
+		switch {
+		case count > 0:
+			result.reason, result.abort = "response_too_large", true
+		case probeErr != nil && !errors.Is(probeErr, io.EOF) && !errors.Is(probeErr, io.ErrUnexpectedEOF):
+			result.reason, result.abort = "stream_failed", true
+		}
+	}
+	w.Header().Set(streamStatusTrailer, result.reason)
+	return result
 }

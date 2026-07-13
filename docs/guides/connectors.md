@@ -39,7 +39,9 @@ printf %s "$TICKET_API_TOKEN" | sudo -u steward-gateway tee \
 unset TICKET_API_TOKEN
 ```
 
-The file must contain one non-empty line. Do not put the value in
+The file must contain one line of 12 to 16,384 visible ASCII bytes. The minimum
+reduces false matches when Gateway filters routine response content. Do not put the
+value in
 `gateway.json`, shell history, a capsule, site policy, or instance intent.
 
 The packaged installer creates a separate Gateway receipt key and configures its
@@ -265,9 +267,12 @@ the application's HTTP status as proof that the requested work happened.
 Steward itself sends the configured credential only from Gateway to the fixed
 upstream operation; it does not directly configure the workload with that
 credential or the private upstream origin. Gateway removes credential, cookie,
-redirect, and `X-Steward-*` response headers, but it does not inspect the response
-body or arbitrary non-Steward headers for reflected authentication material or
-origin details. Use a narrow upstream endpoint that never echoes either value.
+redirect, and `X-Steward-*` response headers. It also rejects the response if any
+header field name, header value, or decoded body stream contains the exact
+configured credential, including a match split across body chunks. Header field
+names are compared without regard to ASCII letter case. It does not detect an
+encoded or transformed credential, private-origin disclosure, or other application
+secrets. Use a narrow trusted upstream endpoint.
 
 These records prove that Steward mediated the documented operation inside its node
 trust boundary. They do not prove what the prompt meant, that the agent's reason was
@@ -288,6 +293,7 @@ host-root attacker preserved the complete record set.
 | `resolution_failed` | Gateway could not resolve the configured origin. The task remains spent and the terminal receipt records the failure. |
 | `grant_revoked` | The grant was deactivated while Gateway was resolving the origin. The task remains spent and the terminal receipt records the revocation. |
 | `request_too_large` / `response_too_large` | The configured body ceiling was reached. |
+| `credential_reflected` | The upstream returned the exact configured credential in a header or decoded body stream. Gateway aborts the response and records a failed terminal outcome. |
 | `connector_evidence_quota_exhausted` | HTTP 503. This tenant has no remaining connector receipt capacity; other tenants cannot lend it unused bytes. |
 | `evidence_unavailable` | Gateway could not durably record an authorization or terminal result. No upstream effect starts unless authorization was recorded. |
 | `upstream_unavailable` | The exact configured origin did not complete the bounded request. The task remains spent. |

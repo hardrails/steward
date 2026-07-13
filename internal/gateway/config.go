@@ -23,15 +23,16 @@ import (
 )
 
 const (
-	maxConfigBytes            = 1 << 20
-	maxConnectors             = 128
-	maxConnectorOperations    = 64
-	maxConnectorAllowedCIDRs  = 64
-	maxConnectorRequestBytes  = int64(4 << 20)
-	maxConnectorResponseBytes = int64(32 << 20)
-	maxConnectorSeconds       = 3600
-	maxConnectorCallsPerGrant = 256
-	maxCredentialBytes        = 16 << 10
+	maxConfigBytes              = 1 << 20
+	maxConnectors               = 128
+	maxConnectorOperations      = 64
+	maxConnectorAllowedCIDRs    = 64
+	maxConnectorRequestBytes    = int64(4 << 20)
+	maxConnectorResponseBytes   = int64(32 << 20)
+	maxConnectorSeconds         = 3600
+	maxConnectorCallsPerGrant   = 256
+	minConnectorCredentialBytes = 12
+	maxCredentialBytes          = 16 << 10
 )
 
 type Config struct {
@@ -323,6 +324,9 @@ func (c Config) validateAndLoadConnectors() (map[string]loadedConnector, error) 
 		credential, credentialInfo, err := readCredentialWithInfo(connector.CredentialFile)
 		if err != nil {
 			return nil, fmt.Errorf("connector %q credential: %w", connector.ID, err)
+		}
+		if len(credential) < minConnectorCredentialBytes {
+			return nil, fmt.Errorf("connector %q credential must contain at least %d visible ASCII bytes", connector.ID, minConnectorCredentialBytes)
 		}
 		for _, reserved := range reservedFiles {
 			if os.SameFile(credentialInfo, reserved) {

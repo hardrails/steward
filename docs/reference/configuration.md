@@ -189,7 +189,8 @@ retained for a stopped workload pins security-relevant route fields; changing on
 rejects the reload.
 
 `connectors` contains at most 128 credential-brokered API policies. Each connector
-defines one exact HTTPS origin, one owner-only credential file, `bearer` or
+defines one exact HTTPS origin, one owner-only credential file containing one line
+of 12 to 16,384 visible ASCII bytes, `bearer` or
 `x-api-key` injection, optional canonical address CIDRs, concurrency, request,
 response, duration, and per-grant call limits, plus at most 64 operations. Each
 operation is one ID, uppercase HTTP method, and canonical exact path without a

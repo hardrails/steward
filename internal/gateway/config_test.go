@@ -394,7 +394,11 @@ func TestExactConnectorOriginAndPathBoundaries(t *testing.T) {
 
 func TestConfigRejectsAmbiguousOrUnboundedConnectors(t *testing.T) {
 	credential := filepath.Join(t.TempDir(), "credential")
-	if err := os.WriteFile(credential, []byte("secret"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("connector-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shortCredential := filepath.Join(t.TempDir(), "short-credential")
+	if err := os.WriteFile(shortCredential, []byte("short"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	tests := []struct {
@@ -414,6 +418,7 @@ func TestConfigRejectsAmbiguousOrUnboundedConnectors(t *testing.T) {
 		{"empty port", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test:" }},
 		{"credential mode", func(c *Config) { c.Connectors[0].CredentialMode = "authorization" }},
 		{"relative credential", func(c *Config) { c.Connectors[0].CredentialFile = "credential" }},
+		{"short credential", func(c *Config) { c.Connectors[0].CredentialFile = shortCredential }},
 		{"bad cidr", func(c *Config) { c.Connectors[0].AllowedCIDRs = []string{"10.0.0.1/8"} }},
 		{"duplicate cidr", func(c *Config) { c.Connectors[0].AllowedCIDRs = []string{"10.0.0.0/8", "10.0.0.0/8"} }},
 		{"zero concurrency", func(c *Config) { c.Connectors[0].MaxConcurrent = 0 }},
@@ -445,6 +450,23 @@ func TestConfigRejectsAmbiguousOrUnboundedConnectors(t *testing.T) {
 				t.Fatalf("invalid connector accepted: %#v", config.Connectors)
 			}
 		})
+	}
+}
+
+func TestConfigEnforcesConnectorCredentialLengthBoundary(t *testing.T) {
+	credential := filepath.Join(t.TempDir(), "credential")
+	config := Config{Connectors: []Connector{connectorFixture(credential)}}
+	if err := os.WriteFile(credential, []byte(strings.Repeat("x", minConnectorCredentialBytes-1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.validateAndLoadConnectors(); err == nil || !strings.Contains(err.Error(), "at least 12 visible ASCII bytes") {
+		t.Fatalf("short connector credential error = %v", err)
+	}
+	if err := os.WriteFile(credential, []byte(strings.Repeat("x", minConnectorCredentialBytes)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.validateAndLoadConnectors(); err != nil {
+		t.Fatalf("minimum-length connector credential rejected: %v", err)
 	}
 }
 

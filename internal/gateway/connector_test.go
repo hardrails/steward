@@ -409,6 +409,126 @@ func TestConnectorReceiptSignalSurvivesHTTPFraming(t *testing.T) {
 	}
 }
 
+func TestCredentialRejectingWriterDetectsSplitCredential(t *testing.T) {
+	tests := []struct {
+		name      string
+		chunks    []string
+		want      string
+		reflected bool
+	}{
+		{name: "split reflection", chunks: []string{"safe:operator-", "secret:unsafe"}, want: "safe:", reflected: true},
+		{name: "near miss", chunks: []string{"safe:operator-secre", "X:done"}, want: "safe:operator-secreX:done"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			filter := credentialRejectingWriter{destination: &output, credential: []byte("operator-secret")}
+			var writeErr error
+			for _, chunk := range test.chunks {
+				if _, writeErr = filter.Write([]byte(chunk)); writeErr != nil {
+					break
+				}
+			}
+			if writeErr == nil {
+				writeErr = filter.finish()
+			}
+			if errors.Is(writeErr, errConnectorCredentialReflected) != test.reflected || output.String() != test.want {
+				t.Fatalf("output=%q error=%v reflected=%t", output.String(), writeErr, filter.reflected)
+			}
+		})
+	}
+}
+
+func TestCredentialRejectingWriterCoalescesTinyWrites(t *testing.T) {
+	var output bytes.Buffer
+	filter := credentialRejectingWriter{destination: &output, credential: []byte("operator-secret")}
+	for range connectorCredentialScanBlockBytes - 1 {
+		if _, err := filter.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if output.Len() != 0 {
+		t.Fatalf("tiny writes were scanned before the fixed block filled: wrote %d bytes", output.Len())
+	}
+	for _, value := range []byte("xoperator-secret") {
+		if _, err := filter.Write([]byte{value}); err != nil {
+			if !errors.Is(err, errConnectorCredentialReflected) {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if err := filter.finish(); !errors.Is(err, errConnectorCredentialReflected) {
+		t.Fatalf("finish error = %v", err)
+	}
+	if !filter.reflected || bytes.Contains(output.Bytes(), []byte("operator-secret")) {
+		t.Fatalf("reflected=%t output length=%d", filter.reflected, output.Len())
+	}
+}
+
+func TestConnectorRejectsReflectedCredentialResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"safe":"prefix","value":"operator-`))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte(`secret","unsafe":true}`))
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{allowedCIDRs: []string{"127.0.0.0/8"}})
+	gatewayServer := httptest.NewServer(rig.server.connectorHandler(rig.grant.GrantID))
+	defer gatewayServer.Close()
+
+	request, err := http.NewRequest(http.MethodGet,
+		gatewayServer.URL+"/v1/connectors/issues/operations/read", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Steward-Task-ID", "task-reflected-credential")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	if readErr == nil || closeErr != nil || bytes.Contains(body, []byte("operator-")) ||
+		response.Trailer.Get(connectorReceiptStatusTrailer) != "" {
+		t.Fatalf("body=%q read=%v close=%v trailers=%v", body, readErr, closeErr, response.Trailer)
+	}
+	assertConnectorTerminalReceipt(t, rig, "task-reflected-credential", "read", "credential_reflected")
+}
+
+func TestConnectorRejectsReflectedCredentialHeader(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{name: "value", header: "X-Upstream-Debug", value: "token=operator-secret"},
+		{name: "field name", header: "X-Operator-Secret-Debug", value: "present"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set(test.header, test.value)
+				_, _ = w.Write([]byte(`{"safe":true}`))
+			}))
+			defer upstream.Close()
+			rig := newConnectorRig(t, upstream.URL, connectorRigOptions{allowedCIDRs: []string{"127.0.0.0/8"}})
+			taskID := "task-reflected-header-" + strings.ReplaceAll(test.name, " ", "-")
+			request := connectorRequest(http.MethodGet, "issues", "read", taskID, nil)
+			response := invokeConnector(rig.server, rig.grant.GrantID, request)
+			if response.Code != http.StatusBadGateway ||
+				!strings.Contains(response.Body.String(), `"error":"credential_reflected"`) ||
+				response.Header().Get(test.header) != "" {
+				t.Fatalf("status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+			}
+			assertConnectorTerminalReceipt(t, rig, taskID, "read", "credential_reflected")
+		})
+	}
+}
+
 func TestConnectorReplaySurvivesRestartAndIsScopedToLogicalInstance(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

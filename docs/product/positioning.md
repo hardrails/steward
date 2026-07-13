@@ -134,10 +134,11 @@ missing, admission fails closed:
   verified IP addresses, concurrency limits, byte limits, and time limits. The
   agent receives a standard proxy, not a raw network interface.
 
-Inference and connector upstreams remain trusted not to reflect authentication
-material or private origin details in bounded response bodies or arbitrary allowed
-headers. These grants isolate how Steward supplies authority; they are not response
-data-loss-prevention filters.
+Gateway rejects the exact connector credential in upstream response headers and the
+decoded body stream. Inference and connector upstreams remain trusted not to encode
+or transform authentication material, disclose private origin details, or return
+other application secrets. These grants isolate how Steward supplies authority;
+they are not general response data-loss-prevention filters.
 
 These contracts include lifecycle ordering, drift inspection, journaling, and
 explicit state purge with a receipt. When the observed outcome of a failed mutation

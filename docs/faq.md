@@ -115,9 +115,10 @@ an owner-only credential file, and finite concurrency, call, byte, and time limi
 Gateway spends a task claim before opening the upstream request, strips
 agent-supplied credentials, and adds the configured credential at the last hop.
 It is not a general secret injector or an HTTPS interception proxy. Gateway relays
-bounded response bodies and non-Steward headers, so a malicious or misconfigured
-upstream can still reflect authentication material. Use a narrow operation that
-does not echo the credential or private origin. See
+bounded responses but rejects any header or decoded body stream containing the
+exact configured credential. A malicious or misconfigured upstream can still
+encode or transform that value, disclose the private origin, or return another
+application secret. Use a narrow trusted operation. See
 [authenticated API operations]({{ '/guides/connectors/' | relative_url }}).
 
 ## Does Steward work without public Internet access?

@@ -170,11 +170,12 @@ fails closed. If Gateway stops between authorization and a terminal record, rest
 records `outcome_unknown`; the operator must treat the upstream result as ambiguous.
 
 Steward itself does not directly configure or give the connector credential or
-private upstream origin to the workload. However, it does not schema-filter an
-upstream response body or arbitrary non-Steward response headers. A malicious or
-misconfigured upstream can reflect authentication material or private origin
-details. Configure a narrow endpoint and tenant-specific credential that never
-echoes either value.
+private upstream origin to the workload. Gateway rejects an upstream response when
+any header or decoded body stream contains the exact configured credential,
+including a value split across body chunks. It does not detect an encoded or
+transformed credential, private-origin disclosure, or application-specific secret
+fields. Configure a narrow endpoint and tenant-specific credential, and continue to
+treat the upstream as trusted.
 
 Deleting the entire connector ledger is indistinguishable from first startup to
 the node alone. Keep its verified head outside the node and compare that checkpoint

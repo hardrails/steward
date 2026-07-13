@@ -93,10 +93,12 @@ The selected connector is intentionally narrower than generic egress. A workload
 names an operation; the operator maps it to one exact upstream method and path.
 Gateway adds an operator-owned credential only after the signed workload grant,
 destination, address, concurrency, call, byte, and time checks agree. The workload
-is not configured with the upstream origin or credential. A malicious upstream can
-still reflect either value in its response, so the operator must choose a narrow
-operation that does not echo authentication material. Generic `CONNECT` remains
-opaque and receives no injected secret.
+is not configured with the upstream origin or credential. Gateway rejects the exact
+credential in response headers and the decoded body stream, including across body
+chunks. A malicious upstream can still encode or transform that value, disclose the
+private origin, or return another application secret, so the operator must choose a
+narrow trusted operation. Generic `CONNECT` remains opaque and receives no injected
+secret.
 
 ## Steward's specific focus
 
