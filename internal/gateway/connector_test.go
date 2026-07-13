@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,26 @@ type connectorRig struct {
 	grant     Grant
 	connector loadedConnector
 }
+
+type blockingConnectorReceiptLog struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	failed  bool
+}
+
+func (log *blockingConnectorReceiptLog) Begin(connectorledger.Event) (connectorledger.Head, error) {
+	log.once.Do(func() { close(log.entered) })
+	<-log.release
+	return connectorledger.Head{}, errors.New("fixture append refused before write")
+}
+
+func (*blockingConnectorReceiptLog) Finish(connectorledger.Event) (connectorledger.Head, error) {
+	return connectorledger.Head{}, errors.New("unexpected fixture finish")
+}
+
+func (log *blockingConnectorReceiptLog) Failed() bool { return log.failed }
+func (*blockingConnectorReceiptLog) Close() error     { return nil }
 
 func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) *connectorRig {
 	t.Helper()
@@ -210,6 +231,90 @@ func TestConnectorBrokersExactOperationAndStripsCallerAuthority(t *testing.T) {
 		receipts[0].TaskDigest != connectorCallDigest("tenant-a", "agent-a", "task-create-1", "issues", "create") ||
 		receipts[0].RoutePolicyDigest == "" || receipts[1].ResponseBytes != int64(len(`{"id":7}`)) {
 		t.Fatalf("receipts=%#v err=%v", receipts, err)
+	}
+}
+
+func TestBlockedConnectorReceiptDoesNotBlockOtherGrantControl(t *testing.T) {
+	rig := newConnectorRig(t, "https://api.example.test", connectorRigOptions{})
+	other := connectorGrant("tenant-b", "agent-b", 1, "issues")
+	registerConnectorGrant(t, rig.server, other)
+	activateConnectorGrant(t, rig.server, other.GrantID)
+	if err := rig.server.connectorLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	blocked := &blockingConnectorReceiptLog{entered: make(chan struct{}), release: make(chan struct{})}
+	rig.server.connectorLedger = blocked
+	digest := connectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "blocked-task", "issues", "create")
+	receipt := connectorReceiptEvent(
+		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, 2,
+	)
+	spendDone := make(chan error, 1)
+	go func() { spendDone <- rig.server.spendConnectorCall(rig.grant.GrantID, "issues", digest, receipt) }()
+	select {
+	case <-blocked.entered:
+	case <-time.After(time.Second):
+		t.Fatal("connector receipt append did not block")
+	}
+
+	controlDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		rig.server.ControlHandler().ServeHTTP(
+			response, httptest.NewRequest(http.MethodPost, "/v1/grants/"+other.GrantID+"/deactivate", nil),
+		)
+		controlDone <- response
+	}()
+	select {
+	case response := <-controlDone:
+		if response.Code != http.StatusOK {
+			t.Fatalf("unrelated deactivation status=%d body=%s", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		close(blocked.release)
+		t.Fatal("blocked receipt append stalled unrelated grant control")
+	}
+	health := httptest.NewRecorder()
+	rig.server.ControlHandler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/v1/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status=%d body=%s", health.Code, health.Body.String())
+	}
+
+	close(blocked.release)
+	if err := <-spendDone; err == nil {
+		t.Fatal("fixture connector spend unexpectedly succeeded")
+	}
+	rig.server.mu.Lock()
+	_, retained := rig.server.connectorSpends[digest]
+	count := rig.server.connectorCallCounts[rig.grant.GrantID]["issues"]
+	rig.server.mu.Unlock()
+	if retained || count != 0 {
+		t.Fatalf("definite pre-append failure retained reservation=%t count=%d", retained, count)
+	}
+}
+
+func TestAmbiguousConnectorReceiptFailureRetainsSpend(t *testing.T) {
+	rig := newConnectorRig(t, "https://api.example.test", connectorRigOptions{})
+	if err := rig.server.connectorLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	close(release)
+	rig.server.connectorLedger = &blockingConnectorReceiptLog{
+		entered: make(chan struct{}), release: release, failed: true,
+	}
+	digest := connectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "ambiguous-task", "issues", "create")
+	receipt := connectorReceiptEvent(
+		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, 2,
+	)
+	if err := rig.server.spendConnectorCall(rig.grant.GrantID, "issues", digest, receipt); err == nil {
+		t.Fatal("ambiguous fixture append unexpectedly succeeded")
+	}
+	rig.server.mu.Lock()
+	_, retained := rig.server.connectorSpends[digest]
+	count := rig.server.connectorCallCounts[rig.grant.GrantID]["issues"]
+	rig.server.mu.Unlock()
+	if !retained || count != 1 {
+		t.Fatalf("ambiguous append retained=%t count=%d", retained, count)
 	}
 }
 

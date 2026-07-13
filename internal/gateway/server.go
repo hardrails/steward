@@ -148,6 +148,13 @@ type connectorAttemptWindow struct {
 	count   int
 }
 
+type connectorReceiptLog interface {
+	Begin(connectorledger.Event) (connectorledger.Head, error)
+	Finish(connectorledger.Event) (connectorledger.Head, error)
+	Failed() bool
+	Close() error
+}
+
 type Server struct {
 	mu                       sync.Mutex
 	config                   Config
@@ -174,7 +181,7 @@ type Server struct {
 	grantLeases              map[string]grantLease
 	egressLeases             map[string]grantLease
 	audit                    *auditLog
-	connectorLedger          *connectorledger.Log
+	connectorLedger          connectorReceiptLog
 	tokenHash                [sha256.Size]byte
 	client                   *http.Client
 }
@@ -209,6 +216,10 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		MaxResponseHeaderBytes: maxHTTPHeaderBytes,
 		IdleConnTimeout:        60 * time.Second,
 	}
+	var receiptWriter connectorReceiptLog
+	if receiptLog != nil {
+		receiptWriter = receiptLog
+	}
 	server := &Server{
 		config: config, routes: routes, egressRoutes: egressRoutes, connectors: connectors,
 		semaphores:               make(map[string]chan struct{}, len(routes)),
@@ -223,7 +234,7 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		connectorSpends: receiptIndex.spends, connectorCallCounts: receiptIndex.counts,
 		connectorAttempts: make(map[string]connectorAttemptWindow),
 		grantLeases:       make(map[string]grantLease), egressLeases: make(map[string]grantLease), audit: audit,
-		connectorLedger: receiptLog,
+		connectorLedger: receiptWriter,
 		tokenHash:       sha256.Sum256([]byte("Bearer " + serviceToken)),
 		client: &http.Client{Transport: transport, Timeout: 2 * time.Minute,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},

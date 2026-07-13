@@ -268,29 +268,49 @@ func connectorCallDigest(tenantID, instanceID, taskID, connectorID, operationID 
 
 func (s *Server) spendConnectorCall(grantID, connectorID, digest string, receipt connectorledger.Event) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	grant, ok := s.grants[grantID]
 	connector, connectorOK := s.connectors[connectorID]
 	if !ok || !grant.Active || !connectorOK || !slicesContainsSorted(grant.ConnectorIDs, connectorID) {
+		s.mu.Unlock()
 		return errConnectorInactive
 	}
 	if _, spent := s.connectorSpends[digest]; spent {
+		s.mu.Unlock()
 		return errConnectorReplay
 	}
 	if s.connectorCallCounts[grantID][connectorID] >= connector.MaxCallsPerGrant {
+		s.mu.Unlock()
 		return errConnectorCallLimit
 	}
-	if s.connectorLedger == nil {
+	ledger := s.connectorLedger
+	if ledger == nil {
+		s.mu.Unlock()
 		return errors.New("connector receipt ledger is unavailable")
 	}
-	if _, err := s.connectorLedger.Begin(receipt); err != nil {
-		return err
-	}
-	s.connectorSpends[digest] = connectorSpendOwner{GrantID: grantID, ConnectorID: connectorID}
+	owner := connectorSpendOwner{GrantID: grantID, ConnectorID: connectorID}
+	s.connectorSpends[digest] = owner
 	if s.connectorCallCounts[grantID] == nil {
 		s.connectorCallCounts[grantID] = make(map[string]int)
 	}
 	s.connectorCallCounts[grantID][connectorID]++
+	s.mu.Unlock()
+
+	// The in-memory reservation serializes replay and budget checks, but the
+	// signed append may block on storage without blocking unrelated grants or
+	// revocation behind the Gateway's global state mutex.
+	if _, err := ledger.Begin(receipt); err != nil {
+		if !ledger.Failed() {
+			s.mu.Lock()
+			if current, reserved := s.connectorSpends[digest]; reserved && current == owner {
+				delete(s.connectorSpends, digest)
+				if s.connectorCallCounts[grantID][connectorID] > 0 {
+					s.connectorCallCounts[grantID][connectorID]--
+				}
+			}
+			s.mu.Unlock()
+		}
+		return err
+	}
 	return nil
 }
 

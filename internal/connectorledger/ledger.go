@@ -321,6 +321,14 @@ func (l *Log) Head() Head {
 	return l.headLocked()
 }
 
+// Failed reports whether an append had an ambiguous write or sync failure.
+// Callers may roll back an in-memory reservation only while this remains false.
+func (l *Log) Failed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.failed
+}
+
 func (l *Log) headLocked() Head {
 	sequence := uint64(0)
 	if l.next > 0 {
