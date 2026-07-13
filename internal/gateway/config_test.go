@@ -140,6 +140,93 @@ func TestConfigLoadsFiniteConnectorsAndOwnerOnlyCredentials(t *testing.T) {
 	}
 }
 
+func TestReadCredentialUsesOneBoundedVerifiedFile(t *testing.T) {
+	directory := t.TempDir()
+	credential := filepath.Join(directory, "credential")
+	if err := os.WriteFile(credential, []byte("expected-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := readCredential(credential); err != nil || value != "expected-secret" {
+		t.Fatalf("credential=%q err=%v", value, err)
+	}
+
+	t.Run("inode replacement", func(t *testing.T) {
+		replacement := filepath.Join(directory, "replacement")
+		if err := os.WriteFile(replacement, []byte("attacker-secret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		expected, err := os.Lstat(credential)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opened, err := os.Open(replacement)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer opened.Close()
+		if value, err := readOpenedCredential(expected, opened); err == nil || value != "" || !strings.Contains(err.Error(), "changed while opening") {
+			t.Fatalf("replacement credential=%q err=%v", value, err)
+		}
+	})
+
+	t.Run("permission replacement", func(t *testing.T) {
+		path := filepath.Join(directory, "permission-change")
+		if err := os.WriteFile(path, []byte("secret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		expected, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opened, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer opened.Close()
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readOpenedCredential(expected, opened); err == nil {
+			t.Fatal("credential whose permissions changed after validation was accepted")
+		}
+	})
+
+	t.Run("oversized", func(t *testing.T) {
+		path := filepath.Join(directory, "oversized")
+		if err := os.WriteFile(path, []byte(strings.Repeat("x", maxCredentialBytes+1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readCredential(path); err == nil {
+			t.Fatal("oversized credential was accepted")
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		path := filepath.Join(directory, "credential-link")
+		if err := os.Symlink(credential, path); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if _, err := readCredential(path); err == nil {
+			t.Fatal("credential symlink was accepted")
+		}
+	})
+}
+
+func TestExactConnectorOriginAndPathBoundaries(t *testing.T) {
+	maximumHost := strings.Repeat("a.", 126) + "a"
+	if len(maximumHost) != 253 {
+		t.Fatalf("maximum host fixture length=%d", len(maximumHost))
+	}
+	if _, err := exactConnectorOrigin("https://" + maximumHost); err != nil {
+		t.Fatalf("253-byte canonical host rejected: %v", err)
+	}
+	for _, path := range []string{"/", "/v1/issues", "/v1/tickets:close"} {
+		if !canonicalConnectorPath(path) {
+			t.Errorf("canonical path %q rejected", path)
+		}
+	}
+}
+
 func TestConfigRejectsAmbiguousOrUnboundedConnectors(t *testing.T) {
 	credential := filepath.Join(t.TempDir(), "credential")
 	if err := os.WriteFile(credential, []byte("secret"), 0o600); err != nil {
@@ -157,6 +244,8 @@ func TestConfigRejectsAmbiguousOrUnboundedConnectors(t *testing.T) {
 		{"http without acknowledgement", func(c *Config) { c.Connectors[0].BaseURL = "http://api.example.test" }},
 		{"trailing slash", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test/" }},
 		{"noncanonical host", func(c *Config) { c.Connectors[0].BaseURL = "https://API.example.test" }},
+		{"wildcard host", func(c *Config) { c.Connectors[0].BaseURL = "https://*.example.test" }},
+		{"overlong host", func(c *Config) { c.Connectors[0].BaseURL = "https://" + strings.Repeat("a.", 127) + "a" }},
 		{"empty port", func(c *Config) { c.Connectors[0].BaseURL = "https://api.example.test:" }},
 		{"credential mode", func(c *Config) { c.Connectors[0].CredentialMode = "authorization" }},
 		{"relative credential", func(c *Config) { c.Connectors[0].CredentialFile = "credential" }},
@@ -176,6 +265,10 @@ func TestConfigRejectsAmbiguousOrUnboundedConnectors(t *testing.T) {
 		{"relative path", func(c *Config) { c.Connectors[0].Operations[0].Path = "v1/issues" }},
 		{"query path", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1/issues?all=true" }},
 		{"encoded path", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1/%69ssues" }},
+		{"space path", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1/issue report" }},
+		{"control path", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1/issues\nadmin" }},
+		{"unicode path", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1/café" }},
+		{"escaped delimiter path", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1/[issues]" }},
 		{"traversal path", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1/../admin" }},
 		{"double slash", func(c *Config) { c.Connectors[0].Operations[0].Path = "/v1//issues" }},
 	}

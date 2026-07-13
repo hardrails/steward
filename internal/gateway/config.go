@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -14,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
@@ -29,6 +31,7 @@ const (
 	maxConnectorResponseBytes = int64(32 << 20)
 	maxConnectorSeconds       = 3600
 	maxConnectorCallsPerGrant = 256
+	maxCredentialBytes        = 16 << 10
 )
 
 type Config struct {
@@ -308,7 +311,8 @@ func exactConnectorOrigin(value string) (*url.URL, error) {
 		return nil, errors.New("must be an exact canonical HTTP(S) origin")
 	}
 	host := base.Hostname()
-	if host == "" || strings.HasSuffix(host, ".") || (!egressHostPattern.MatchString(host) && net.ParseIP(host) == nil) {
+	if host == "" || len(host) > 253 || strings.HasPrefix(host, "*.") || strings.HasSuffix(host, ".") ||
+		(!egressHostPattern.MatchString(host) && net.ParseIP(host) == nil) {
 		return nil, errors.New("must contain a canonical hostname or IP address")
 	}
 	if portText := base.Port(); portText != "" {
@@ -336,8 +340,20 @@ func connectorMethodHasBody(value string) bool {
 }
 
 func canonicalConnectorPath(value string) bool {
-	return strings.HasPrefix(value, "/") && len(value) <= 2048 && pathpkg.Clean(value) == value &&
-		!strings.Contains(value, "//") && !strings.ContainsAny(value, "%\\?#\x00")
+	if !strings.HasPrefix(value, "/") || len(value) > 2048 || pathpkg.Clean(value) != value || strings.Contains(value, "//") {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if !canonicalConnectorPathByte(value[index]) {
+			return false
+		}
+	}
+	return (&url.URL{Path: value}).EscapedPath() == value
+}
+
+func canonicalConnectorPathByte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' ||
+		strings.ContainsRune("/-._~!$&'()*+,;=:@", rune(value))
 }
 
 func (c Config) validateAndLoadRoutes() (map[string]loadedRoute, error) {
@@ -462,18 +478,48 @@ func readCredential(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() <= 0 || info.Size() > 16<<10 {
+	if !validCredentialFileInfo(info) {
 		return "", errors.New("credential must be a bounded owner-only regular file")
 	}
-	raw, err := os.ReadFile(path)
+	// O_NONBLOCK is ignored for regular files but prevents a validated path
+	// from being swapped to a FIFO that would hang Gateway between Lstat and
+	// Open. The descriptor identity and metadata are checked before any read.
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", err
+	}
+	defer file.Close()
+	return readOpenedCredential(info, file)
+}
+
+func readOpenedCredential(expected os.FileInfo, file *os.File) (string, error) {
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(expected, opened) || !validCredentialFileInfo(opened) || opened.Size() != expected.Size() {
+		return "", errors.New("credential changed while opening")
+	}
+	raw := make([]byte, int(opened.Size()))
+	if _, err := io.ReadFull(file, raw); err != nil {
+		return "", err
+	}
+	var extra [1]byte
+	count, readErr := file.Read(extra[:])
+	if count != 0 || !errors.Is(readErr, io.EOF) {
+		return "", errors.New("credential changed while reading")
+	}
+	final, err := file.Stat()
+	if err != nil || !os.SameFile(opened, final) || !validCredentialFileInfo(final) || final.Size() != opened.Size() {
+		return "", errors.New("credential changed while reading")
 	}
 	value := strings.TrimSpace(string(raw))
 	if value == "" || strings.ContainsAny(value, "\r\n") {
 		return "", errors.New("credential must contain one non-empty line")
 	}
 	return value, nil
+}
+
+func validCredentialFileInfo(info os.FileInfo) bool {
+	return info != nil && info.Mode().IsRegular() && info.Mode().Perm()&0o077 == 0 &&
+		info.Size() > 0 && info.Size() <= maxCredentialBytes
 }
 
 func absoluteClean(path string) bool {
