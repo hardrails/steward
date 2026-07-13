@@ -270,6 +270,18 @@ func TestDesiredGatewayGrantBindsConnectorAdmission(t *testing.T) {
 	}
 }
 
+func TestDesiredGatewayGrantPreservesLegacyBlankBindings(t *testing.T) {
+	workload := Workload{TenantID: "tenant-a", InstanceID: "legacy-agent", Runtime: &RuntimeGrant{
+		GrantID: "grant-" + strings.Repeat("a", 64), Generation: 2,
+		Inference: true, RouteID: "local", ModelAlias: "private-model",
+	}}
+	grant := (&Server{}).desiredGatewayGrant(workload, "")
+	if grant.RuntimeRef != "" || grant.CapsuleDigest != "" || grant.PolicyDigest != "" ||
+		grant.GrantID != workload.Runtime.GrantID || grant.RouteID != "local" || grant.ModelAlias != "private-model" {
+		t.Fatalf("legacy grant projection=%#v", grant)
+	}
+}
+
 func TestRuntimeTopologyHappyPathAndLifecycle(t *testing.T) {
 	addresses := testNetworkSpec("tenant-a", "agent-a", 2)
 	workload := Workload{

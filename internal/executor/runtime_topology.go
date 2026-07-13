@@ -82,9 +82,12 @@ func (e *runtimeFailedStart) Unwrap() error { return e.err }
 func (s *Server) desiredGatewayGrant(workload Workload, serviceURL string) gateway.Grant {
 	grant := gateway.Grant{
 		GrantID: workload.Runtime.GrantID, TenantID: workload.TenantID, InstanceID: workload.InstanceID,
-		RuntimeRef:    RuntimeRef(workload.TenantID, workload.InstanceID),
-		CapsuleDigest: workload.Runtime.CapsuleDigest, PolicyDigest: workload.Runtime.PolicyDigest,
 		Generation: workload.Runtime.Generation, Service: workload.Runtime.ServicePort > 0, ServiceURL: serviceURL,
+	}
+	if imageConfigDigest.MatchString(workload.Runtime.CapsuleDigest) && imageConfigDigest.MatchString(workload.Runtime.PolicyDigest) {
+		grant.RuntimeRef = RuntimeRef(workload.TenantID, workload.InstanceID)
+		grant.CapsuleDigest = workload.Runtime.CapsuleDigest
+		grant.PolicyDigest = workload.Runtime.PolicyDigest
 	}
 	grant.EgressRouteIDs = append([]string(nil), workload.Runtime.EgressRouteIDs...)
 	grant.ConnectorIDs = append([]string(nil), workload.Runtime.ConnectorIDs...)
