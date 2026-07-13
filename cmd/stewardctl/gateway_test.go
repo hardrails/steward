@@ -178,6 +178,54 @@ func TestGatewayConnectorSetIsValidatedSecretFreeAndAtomic(t *testing.T) {
 		!strings.Contains(preserveOutput.String(), "systemctl reload") {
 		t.Fatalf("preserved budgets=%#v err=%v", loaded.ConnectorReceiptTenantBudgets, err)
 	}
+	permitArguments := append(append([]string(nil), connectorArguments...),
+		"-action-authority", "approver-a="+publicKey, "-action-authority-tenant", "approver-a=tenant-a",
+		"-action-node-id", "node-a", "-max-action-permit-seconds", "300")
+	if err := run(permitArguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("configure action permit: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || loaded.ActionPermitNodeID != "node-a" || len(loaded.ActionAuthorities) != 1 ||
+		len(loaded.Connectors[0].ActionAuthorityIDs) != 1 || loaded.Connectors[0].ActionAuthorityIDs[0] != "approver-a" ||
+		loaded.ActionAuthorities[0].TenantID != "tenant-a" || loaded.Connectors[0].CredentialEpoch != 1 ||
+		loaded.Connectors[0].MaxActionPermitSeconds != 300 {
+		t.Fatalf("action permit config=%#v connectors=%#v err=%v", loaded.ActionAuthorities, loaded.Connectors, err)
+	}
+	if err := run(connectorArguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("replace connector while preserving action permit: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || len(loaded.Connectors[0].ActionAuthorityIDs) != 1 {
+		t.Fatalf("preserved action permit connector=%#v err=%v", loaded.Connectors[0], err)
+	}
+	changePermitLifetime := append(append([]string(nil), connectorArguments...), "-max-action-permit-seconds", "120")
+	if err := run(changePermitLifetime, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("change preserved action permit lifetime: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || loaded.Connectors[0].MaxActionPermitSeconds != 120 {
+		t.Fatalf("changed action permit lifetime connector=%#v err=%v", loaded.Connectors[0], err)
+	}
+	var trustOutput bytes.Buffer
+	if err := run([]string{"gateway", "connector", "trust", "-config", path}, &trustOutput, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(trustOutput.String(), `"schema_version": "steward.action-trust.v1"`) ||
+		!strings.Contains(trustOutput.String(), `"node_id": "node-a"`) ||
+		!strings.Contains(trustOutput.String(), `"tenant_id": "tenant-a"`) ||
+		!strings.Contains(trustOutput.String(), `"public_key_digest": "sha256:`) ||
+		!strings.Contains(trustOutput.String(), `"credential_epoch": 1`) ||
+		!strings.Contains(trustOutput.String(), `"max_permit_seconds": 120`) ||
+		!strings.Contains(trustOutput.String(), `"create"`) {
+		t.Fatalf("action trust output=%q err=%v", trustOutput.String(), err)
+	}
+	clearPermit := append(append([]string(nil), connectorArguments...), "-clear-action-permit")
+	if err := run(clearPermit, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("clear action permit: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil || loaded.ActionPermitNodeID != "" || len(loaded.ActionAuthorities) != 0 ||
+		len(loaded.Connectors[0].ActionAuthorityIDs) != 0 {
+		t.Fatalf("cleared action permit config=%#v connector=%#v err=%v", loaded.ActionAuthorities, loaded.Connectors[0], err)
+	}
 	upsert := append(append([]string(nil), connectorArguments...), "-tenant-budget", "tenant=west=1048576")
 	var upsertOutput bytes.Buffer
 	if err := run(upsert, &upsertOutput, &bytes.Buffer{}); err != nil {
