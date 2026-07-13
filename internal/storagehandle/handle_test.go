@@ -3,6 +3,8 @@ package storagehandle
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -52,11 +54,8 @@ func TestReferenceBodyIsBounded(t *testing.T) {
 	}
 }
 
-func TestRegistryBindsScopeAndDerivesPath(t *testing.T) {
-	registry, err := NewRegistry("/srv/steward-preprovisioned", 2)
-	if err != nil {
-		t.Fatalf("new registry: %v", err)
-	}
+func TestRegistryBindsScopeAndReturnsDescriptorLease(t *testing.T) {
+	registry := newTestRegistry(t, 2)
 	record := testRecord()
 	created, err := registry.Add(record)
 	if err != nil || !created {
@@ -67,21 +66,19 @@ func TestRegistryBindsScopeAndDerivesPath(t *testing.T) {
 		t.Fatalf("idempotent add: created=%v err=%v", created, err)
 	}
 
-	resolved, err := registry.Resolve(record.Reference, testScope())
+	lease, err := registry.Resolve(record.Reference, testScope())
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if resolved.Path != "/srv/steward-preprovisioned/state/backend_01" {
-		t.Fatalf("path = %q", resolved.Path)
-	}
-	if strings.Contains(string(mustMarshal(t, record.Reference)), resolved.Path) {
-		t.Fatal("wire reference exposed resolved path")
+	t.Cleanup(func() { _ = lease.Close() })
+	if !lease.Valid() || lease.Reference() != record.Reference {
+		t.Fatalf("lease is not bound to reference: valid=%v reference=%#v", lease.Valid(), lease.Reference())
 	}
 	encodedRecord, err := json.Marshal(record)
 	if err != nil {
 		t.Fatalf("marshal record: %v", err)
 	}
-	for _, private := range []string{"tenant_a", "lineage_a", "backend_01", resolved.Path, "ready"} {
+	for _, private := range []string{"tenant_a", "lineage_a", "backend_01", "ready"} {
 		if strings.Contains(string(encodedRecord), private) {
 			t.Fatalf("marshaled record exposed private value %q: %s", private, encodedRecord)
 		}
@@ -95,10 +92,7 @@ func TestRegistryBindsScopeAndDerivesPath(t *testing.T) {
 }
 
 func TestRegistryRejectsRebindingAndCapacityOverflow(t *testing.T) {
-	registry, err := NewRegistry("/srv/steward-preprovisioned", 1)
-	if err != nil {
-		t.Fatalf("new registry: %v", err)
-	}
+	registry := newTestRegistry(t, 1)
 	record := testRecord()
 	if _, err := registry.Add(record); err != nil {
 		t.Fatalf("add: %v", err)
@@ -116,13 +110,14 @@ func TestRegistryRejectsRebindingAndCapacityOverflow(t *testing.T) {
 }
 
 func TestRegistryRevocationCannotResurrect(t *testing.T) {
-	registry, err := NewRegistry("/srv/steward-preprovisioned", 1)
-	if err != nil {
-		t.Fatalf("new registry: %v", err)
-	}
+	registry := newTestRegistry(t, 1)
 	record := testRecord()
 	if _, err := registry.Add(record); err != nil {
 		t.Fatalf("add: %v", err)
+	}
+	lease, err := registry.Resolve(record.Reference, testScope())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
 	}
 	changed, err := registry.Revoke(record.Reference, testScope())
 	if err != nil || !changed {
@@ -135,6 +130,9 @@ func TestRegistryRevocationCannotResurrect(t *testing.T) {
 	if _, err := registry.Resolve(record.Reference, testScope()); !errors.Is(err, ErrRevoked) {
 		t.Fatalf("resolve revoked error = %v", err)
 	}
+	if lease.Valid() {
+		t.Fatal("lease remained valid after revocation")
+	}
 	record.Status = StatusReady
 	if _, err := registry.Add(record); !errors.Is(err, ErrConflict) {
 		t.Fatalf("resurrection error = %v", err)
@@ -142,10 +140,7 @@ func TestRegistryRevocationCannotResurrect(t *testing.T) {
 }
 
 func TestConcurrentAddCreatesOneBinding(t *testing.T) {
-	registry, err := NewRegistry("/srv/steward-preprovisioned", 1)
-	if err != nil {
-		t.Fatalf("new registry: %v", err)
-	}
+	registry := newTestRegistry(t, 1)
 	record := testRecord()
 	var wait sync.WaitGroup
 	var created int
@@ -178,15 +173,91 @@ func TestRegistryRejectsUnsafeRootAndRecord(t *testing.T) {
 			t.Fatalf("root %q error = %v", root, err)
 		}
 	}
-	registry, err := NewRegistry("/srv/steward-preprovisioned", 1)
-	if err != nil {
-		t.Fatalf("new registry: %v", err)
-	}
+	registry := newTestRegistry(t, 1)
 	record := testRecord()
 	record.BackendID = "../escape"
 	if _, err := registry.Add(record); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unsafe backend error = %v", err)
 	}
+}
+
+func TestRegistryRejectsSymlinkBackend(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "state"), 0o700); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "state", "backend_01")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	registry, err := NewRegistry(root, 1)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	if _, err := registry.Add(testRecord()); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := registry.Resolve(testRecord().Reference, testScope()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("symlink resolve error = %v, want ErrInvalid", err)
+	}
+}
+
+func TestRegistryPinsRootDescriptorAcrossPathReplacement(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "root")
+	createBackend(t, root, "state", "backend_01")
+	registry, err := NewRegistry(root, 1)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	if _, err := registry.Add(testRecord()); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	moved := filepath.Join(parent, "moved")
+	if err := os.Rename(root, moved); err != nil {
+		t.Fatalf("rename root: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, root); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	lease, err := registry.Resolve(testRecord().Reference, testScope())
+	if err != nil {
+		t.Fatalf("descriptor-pinned resolve: %v", err)
+	}
+	if !lease.Valid() {
+		t.Fatal("descriptor-pinned lease is invalid")
+	}
+	_ = lease.Close()
+}
+
+func TestConcurrentResolveAndRevoke(t *testing.T) {
+	registry := newTestRegistry(t, 1)
+	record := testRecord()
+	if _, err := registry.Add(record); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	var wait sync.WaitGroup
+	for range 32 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			lease, err := registry.Resolve(record.Reference, testScope())
+			if err == nil {
+				_ = lease.Close()
+				return
+			}
+			if !errors.Is(err, ErrRevoked) {
+				t.Errorf("resolve error = %v", err)
+			}
+		}()
+	}
+	if _, err := registry.Revoke(record.Reference, testScope()); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	wait.Wait()
 }
 
 func testRecord() Record {
@@ -198,6 +269,28 @@ func testRecord() Record {
 
 func testScope() Scope {
 	return Scope{TenantID: "tenant_a", LineageID: "lineage_a", Kind: KindState}
+}
+
+func newTestRegistry(t *testing.T, maxRecords int) *Registry {
+	t.Helper()
+	root := t.TempDir()
+	createBackend(t, root, "state", "backend_01")
+	if err := os.Mkdir(filepath.Join(root, "secret"), 0o700); err != nil {
+		t.Fatalf("mkdir secret: %v", err)
+	}
+	registry, err := NewRegistry(root, maxRecords)
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	return registry
+}
+
+func createBackend(t *testing.T, root, kind, backend string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, kind, backend), 0o700); err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
 }
 
 func mustMarshal(t *testing.T, reference Reference) []byte {

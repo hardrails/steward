@@ -10,8 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 )
 
@@ -74,22 +74,27 @@ type Record struct {
 	Status    Status `json:"-"`
 }
 
-// Resolved is returned only to the trusted host caller. Its path never appears in
-// the public reference or an agent bundle.
-type Resolved struct {
-	Reference
-	Path   string `json:"-"`
-	Status Status `json:"-"`
-}
-
 // Registry is a bounded, mutex-protected view of host-preprovisioned handles.
 // Durable storage and provisioning remain the responsibility of the trusted host
 // harness in this feasibility phase.
 type Registry struct {
 	mu         sync.Mutex
-	root       string
+	root       *os.Root
 	maxRecords int
 	byID       map[string]Record
+	leases     map[string]map[*Lease]struct{}
+	closed     bool
+}
+
+// Lease pins one verified backend directory descriptor. It deliberately exposes
+// no reusable host path. Revocation closes the descriptor and prevents new use;
+// a caller must still stop any workload that already received a mounted backend.
+type Lease struct {
+	mu        sync.RWMutex
+	root      *os.Root
+	reference Reference
+	registry  *Registry
+	closed    bool
 }
 
 // NewRegistry accepts one fixed absolute root selected by the host operator.
@@ -100,7 +105,19 @@ func NewRegistry(root string, maxRecords int) (*Registry, error) {
 	if maxRecords < 1 {
 		return nil, fmt.Errorf("%w: max records must be positive", ErrInvalid)
 	}
-	return &Registry{root: root, maxRecords: maxRecords, byID: make(map[string]Record)}, nil
+	rootDescriptor, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, fmt.Errorf("%w: open backend root: %v", ErrInvalid, err)
+	}
+	info, err := rootDescriptor.Lstat(".")
+	if err != nil || !info.IsDir() {
+		_ = rootDescriptor.Close()
+		return nil, fmt.Errorf("%w: backend root must be a directory", ErrInvalid)
+	}
+	return &Registry{
+		root: rootDescriptor, maxRecords: maxRecords, byID: make(map[string]Record),
+		leases: make(map[string]map[*Lease]struct{}),
+	}, nil
 }
 
 // Add is exact-idempotent. It rejects rebinding an existing opaque ID.
@@ -111,6 +128,9 @@ func (r *Registry) Add(record Record) (bool, error) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return false, ErrRevoked
+	}
 	if existing, ok := r.byID[record.HandleID]; ok {
 		if existing == record {
 			return false, nil
@@ -124,34 +144,56 @@ func (r *Registry) Add(record Record) (bool, error) {
 	return true, nil
 }
 
-// Resolve checks the opaque generation and complete trusted scope before deriving
-// a path below the registry's fixed root.
-func (r *Registry) Resolve(reference Reference, scope Scope) (Resolved, error) {
+// Resolve checks the opaque generation and complete trusted scope before opening
+// the exact backend below the descriptor-pinned registry root.
+func (r *Registry) Resolve(reference Reference, scope Scope) (*Lease, error) {
 	if err := validateReference(reference); err != nil {
-		return Resolved{}, err
+		return nil, err
 	}
 	if err := validateScope(scope); err != nil {
-		return Resolved{}, err
+		return nil, err
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return nil, ErrRevoked
+	}
 	record, ok := r.byID[reference.HandleID]
 	if !ok || record.Generation != reference.Generation || record.Kind != reference.Kind {
-		return Resolved{}, ErrNotFound
+		return nil, ErrNotFound
 	}
 	if record.TenantID != scope.TenantID || record.LineageID != scope.LineageID || record.Kind != scope.Kind {
-		return Resolved{}, ErrScopeMismatch
+		return nil, ErrScopeMismatch
 	}
 	if record.Status != StatusReady {
-		return Resolved{}, ErrRevoked
+		return nil, ErrRevoked
 	}
 
-	path := filepath.Join(r.root, string(record.Kind), record.BackendID)
-	if !withinRoot(r.root, path) {
-		return Resolved{}, fmt.Errorf("%w: derived backend escaped root", ErrInvalid)
+	kindName := string(record.Kind)
+	kindInfo, err := r.root.Lstat(kindName)
+	if err != nil || !kindInfo.IsDir() || kindInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: invalid kind backend", ErrInvalid)
 	}
-	return Resolved{Reference: record.Reference, Path: path, Status: record.Status}, nil
+	kindRoot, err := r.root.OpenRoot(kindName)
+	if err != nil {
+		return nil, fmt.Errorf("%w: open kind backend: %v", ErrInvalid, err)
+	}
+	defer kindRoot.Close()
+	backendInfo, err := kindRoot.Lstat(record.BackendID)
+	if err != nil || !backendInfo.IsDir() || backendInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: invalid handle backend", ErrInvalid)
+	}
+	backendRoot, err := kindRoot.OpenRoot(record.BackendID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: open handle backend: %v", ErrInvalid, err)
+	}
+	lease := &Lease{root: backendRoot, reference: record.Reference, registry: r}
+	if r.leases[record.HandleID] == nil {
+		r.leases[record.HandleID] = make(map[*Lease]struct{})
+	}
+	r.leases[record.HandleID][lease] = struct{}{}
+	return lease, nil
 }
 
 // Revoke is exact-idempotent and never makes a revoked handle ready again.
@@ -164,20 +206,100 @@ func (r *Registry) Revoke(reference Reference, scope Scope) (bool, error) {
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	record, ok := r.byID[reference.HandleID]
 	if !ok || record.Generation != reference.Generation || record.Kind != reference.Kind {
+		r.mu.Unlock()
 		return false, ErrNotFound
 	}
 	if record.TenantID != scope.TenantID || record.LineageID != scope.LineageID || record.Kind != scope.Kind {
+		r.mu.Unlock()
 		return false, ErrScopeMismatch
 	}
 	if record.Status == StatusRevoked {
+		r.mu.Unlock()
 		return false, nil
 	}
 	record.Status = StatusRevoked
 	r.byID[reference.HandleID] = record
+	active := r.leases[reference.HandleID]
+	delete(r.leases, reference.HandleID)
+	r.mu.Unlock()
+	for lease := range active {
+		lease.closeDescriptor()
+	}
 	return true, nil
+}
+
+// Reference returns the public identity bound to the lease.
+func (l *Lease) Reference() Reference {
+	return l.reference
+}
+
+// Valid reports whether the registry has left the descriptor usable. It does not
+// claim that a workload which already received a mount has been stopped.
+func (l *Lease) Valid() bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return !l.closed && l.root != nil
+}
+
+// Close releases this caller's descriptor-bound lease.
+func (l *Lease) Close() error {
+	l.closeDescriptor()
+	if l.registry != nil {
+		l.registry.removeLease(l)
+	}
+	return nil
+}
+
+func (l *Lease) closeDescriptor() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return
+	}
+	l.closed = true
+	if l.root != nil {
+		_ = l.root.Close()
+		l.root = nil
+	}
+}
+
+func (r *Registry) removeLease(lease *Lease) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	byHandle := r.leases[lease.reference.HandleID]
+	delete(byHandle, lease)
+	if len(byHandle) == 0 {
+		delete(r.leases, lease.reference.HandleID)
+	}
+}
+
+// Close revokes every outstanding lease and releases the pinned root descriptor.
+func (r *Registry) Close() error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	var active []*Lease
+	for _, byHandle := range r.leases {
+		for lease := range byHandle {
+			active = append(active, lease)
+		}
+	}
+	r.leases = make(map[string]map[*Lease]struct{})
+	root := r.root
+	r.root = nil
+	r.mu.Unlock()
+	for _, lease := range active {
+		lease.closeDescriptor()
+	}
+	if root != nil {
+		return root.Close()
+	}
+	return nil
 }
 
 // ParseReference reads one bounded strict JSON object. Duplicate and unknown fields
@@ -317,9 +439,4 @@ func validIdentifier(value string) bool {
 		return false
 	}
 	return true
-}
-
-func withinRoot(root, path string) bool {
-	relative, err := filepath.Rel(root, path)
-	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
