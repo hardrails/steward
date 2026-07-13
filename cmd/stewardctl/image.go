@@ -112,7 +112,8 @@ func importImageArchive(arguments []string, stdout io.Writer) error {
 	defer cancel()
 	docker := executor.NewDockerHTTPWithTimeout(*dockerSocket, *timeout)
 	imported := false
-	observed, inspectErr := docker.InspectImage(ctx, expected.ConfigDigest)
+	imageReference := verified.Capsule.Image.Repository + "@" + expected.ManifestDigest
+	observed, inspectErr := docker.InspectSignedImage(ctx, imageReference, expected.ConfigDigest)
 	if errors.Is(inspectErr, executor.ErrNotFound) {
 		loadReader, err := prepared.Reader()
 		if err != nil {
@@ -122,13 +123,13 @@ func importImageArchive(arguments []string, stdout io.Writer) error {
 			return fmt.Errorf("load prepared OCI archive: %w", err)
 		}
 		imported = true
-		observed, inspectErr = docker.InspectImage(ctx, expected.ConfigDigest)
+		observed, inspectErr = docker.InspectSignedImage(ctx, imageReference, expected.ConfigDigest)
 	}
 	if inspectErr != nil {
 		return fmt.Errorf("inspect imported image config: %w", inspectErr)
 	}
 	if err := executor.ValidateImage(observed, executor.ImageRequirement{
-		ConfigDigest: expected.ConfigDigest, OS: expected.Platform.OS,
+		ManifestDigest: expected.ManifestDigest, ConfigDigest: expected.ConfigDigest, OS: expected.Platform.OS,
 		Architecture: expected.Platform.Architecture, Variant: expected.Platform.Variant,
 	}); err != nil {
 		return fmt.Errorf("validate imported image config: %w", err)

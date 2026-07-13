@@ -195,6 +195,38 @@ func TestCreateRunsSecureWorkloadByExactConfigDigest(t *testing.T) {
 	}
 }
 
+func TestCreateRunsContainerdStoreWorkloadByExactManifestDigest(t *testing.T) {
+	var payload map[string]any
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	manifestDigest := "sha256:" + strings.Repeat("a", 64)
+	configDigest := "sha256:" + strings.Repeat("b", 64)
+	workload := Workload{
+		InstanceID: "agent", TenantID: "tenant-a", ProfileID: "generic-v1@v1",
+		Image: "registry.local/agent@" + manifestDigest, ImageConfigDigest: configDigest,
+		ImageRuntimeDigest: manifestDigest, Command: []string{"agent"},
+		Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 16},
+	}
+	if err := workload.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := docker.Create(context.Background(), "executor-image-manifest", workload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["Image"] != manifestDigest {
+		t.Fatalf("Docker create image=%v want exact manifest %s", payload["Image"], manifestDigest)
+	}
+	labels := payload["Labels"].(map[string]any)
+	if labels[workloadImageReferenceLabel] != workload.Image || labels[workloadImageConfigLabel] != configDigest ||
+		labels[workloadImageRuntimeLabel] != manifestDigest {
+		t.Fatalf("signed image identity labels=%#v", labels)
+	}
+}
+
 func TestCreateWithStateUsesOnlyExecutorDerivedVolume(t *testing.T) {
 	var payload map[string]any
 	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -766,9 +798,88 @@ func TestInspectImageProjectsExactConfigPlatformAndVolumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observed.ID != "sha256:"+strings.Repeat("b", 64) || observed.OS != "linux" || observed.Architecture != "arm64" ||
+	if observed.ID != configDigest || observed.ConfigDigest != configDigest || observed.Identity != imageIdentityConfig ||
+		observed.ManifestDigest != "" || observed.OS != "linux" || observed.Architecture != "arm64" ||
 		observed.Variant != "v8" || !observed.ConfigPresent || !reflect.DeepEqual(observed.DeclaredVolumes, []string{"/a", "/z"}) {
 		t.Fatalf("observed=%#v", observed)
+	}
+}
+
+func TestInspectSignedImageUsesClassicConfigIdentityWithoutManifestFallback(t *testing.T) {
+	manifestDigest := "sha256:" + strings.Repeat("a", 64)
+	configDigest := "sha256:" + strings.Repeat("b", 64)
+	requests := 0
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/v1.41/images/"+configDigest+"/json" {
+			t.Fatalf("unexpected classic lookup %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Id": configDigest, "Os": "linux", "Architecture": "amd64", "Config": map[string]any{},
+		})
+	})
+	observed, err := docker.InspectSignedImage(context.Background(), "registry.local/agent@"+manifestDigest, configDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 || observed.Identity != imageIdentityConfig || observed.ID != configDigest ||
+		observed.ConfigDigest != configDigest || observed.ManifestDigest != "" {
+		t.Fatalf("requests=%d observed=%#v", requests, observed)
+	}
+	if err := ValidateImage(observed, ImageRequirement{
+		ManifestDigest: manifestDigest, ConfigDigest: configDigest, OS: "linux", Architecture: "amd64",
+	}); err != nil {
+		t.Fatalf("classic signed identity rejected: %v", err)
+	}
+}
+
+func TestInspectSignedImageFallsBackToContainerdManifestIdentity(t *testing.T) {
+	manifestDigest := "sha256:" + strings.Repeat("a", 64)
+	configDigest := "sha256:" + strings.Repeat("b", 64)
+	var paths []string
+	docker := dockerTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/v1.41/images/" + configDigest + "/json":
+			w.WriteHeader(http.StatusNotFound)
+		case "/v1.41/images/" + manifestDigest + "/json":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id": manifestDigest, "Os": "linux", "Architecture": "amd64", "Config": map[string]any{},
+				"Descriptor": map[string]any{
+					"digest": manifestDigest, "annotations": map[string]string{"config.digest": configDigest},
+				},
+			})
+		default:
+			t.Fatalf("unexpected containerd lookup %s", r.URL.Path)
+		}
+	})
+	observed, err := docker.InspectSignedImage(context.Background(), "registry.local/agent@"+manifestDigest, configDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPaths := []string{"/v1.41/images/" + configDigest + "/json", "/v1.41/images/" + manifestDigest + "/json"}
+	if !reflect.DeepEqual(paths, wantPaths) || observed.Identity != imageIdentityManifest || observed.ID != manifestDigest ||
+		observed.ManifestDigest != manifestDigest || observed.ConfigDigest != configDigest {
+		t.Fatalf("paths=%#v observed=%#v", paths, observed)
+	}
+	if err := ValidateImage(observed, ImageRequirement{
+		ManifestDigest: manifestDigest, ConfigDigest: configDigest, OS: "linux", Architecture: "amd64",
+	}); err != nil {
+		t.Fatalf("containerd signed identity rejected: %v", err)
+	}
+}
+
+func TestInspectSignedImageDoesNotHideConfigLookupFailure(t *testing.T) {
+	requests := 0
+	docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"store unavailable"}`))
+	})
+	_, err := docker.InspectSignedImage(context.Background(),
+		"registry.local/agent@sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64))
+	if err == nil || requests != 1 {
+		t.Fatalf("err=%v requests=%d", err, requests)
 	}
 }
 
@@ -887,6 +998,40 @@ func TestInspectReconstructsSignedImageIdentityAndRequiresExactConfigID(t *testi
 	}
 	if observed.Hardened {
 		t.Fatal("container running a different config ID was accepted")
+	}
+}
+
+func TestInspectReconstructsContainerdRuntimeAndExposesSignedConfigIdentity(t *testing.T) {
+	manifestID := "sha256:" + strings.Repeat("a", 64)
+	configID := "sha256:" + strings.Repeat("b", 64)
+	reference := "registry.local/agent@" + manifestID
+	payload := hardenedWorkloadInspectPayload()
+	payload["Image"] = manifestID
+	config := payload["Config"].(map[string]any)
+	config["Image"] = manifestID
+	labels := config["Labels"].(map[string]string)
+	labels[workloadImageReferenceLabel] = reference
+	labels[workloadImageConfigLabel] = configID
+	labels[workloadImageRuntimeLabel] = manifestID
+	docker := dockerTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(payload)
+	})
+	observed, err := docker.Inspect(context.Background(), "executor-image")
+	if err != nil || !observed.Hardened {
+		t.Fatalf("observed=%#v err=%v", observed, err)
+	}
+	if observed.ImageID != configID || observed.RuntimeImageID != manifestID || observed.Workload.ImageConfigDigest != configID ||
+		observed.Workload.ImageRuntimeDigest != manifestID || observed.Workload.Image != reference {
+		t.Fatalf("image identity=%#v imageID=%s", observed.Workload, observed.ImageID)
+	}
+
+	payload["Image"] = configID
+	observed, err = docker.Inspect(context.Background(), "executor-image")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Hardened {
+		t.Fatal("container running a different runtime digest was accepted")
 	}
 }
 

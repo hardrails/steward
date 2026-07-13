@@ -8,7 +8,7 @@ import (
 func TestValidateImageRequiresExactSafeLocalImage(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	expected := ImageRequirement{ConfigDigest: digest, OS: "linux", Architecture: "arm64", Variant: "v8"}
-	valid := ObservedImage{ID: digest, OS: "linux", Architecture: "arm64", Variant: "v8", ConfigPresent: true}
+	valid := ObservedImage{ID: digest, ConfigDigest: digest, Identity: imageIdentityConfig, OS: "linux", Architecture: "arm64", Variant: "v8", ConfigPresent: true}
 	if err := ValidateImage(valid, expected); err != nil {
 		t.Fatalf("valid image rejected: %v", err)
 	}
@@ -17,18 +17,52 @@ func TestValidateImageRequiresExactSafeLocalImage(t *testing.T) {
 		observed ObservedImage
 		expected ImageRequirement
 	}{
-		{"declared volume", ObservedImage{ID: digest, OS: "linux", Architecture: "arm64", Variant: "v8", ConfigPresent: true, DeclaredVolumes: []string{"/data"}}, expected},
-		{"wrong config", ObservedImage{ID: "sha256:" + strings.Repeat("b", 64), OS: "linux", Architecture: "arm64", Variant: "v8", ConfigPresent: true}, expected},
-		{"wrong os", ObservedImage{ID: digest, OS: "windows", Architecture: "arm64", Variant: "v8", ConfigPresent: true}, expected},
-		{"wrong architecture", ObservedImage{ID: digest, OS: "linux", Architecture: "amd64", Variant: "v8", ConfigPresent: true}, expected},
-		{"wrong variant", ObservedImage{ID: digest, OS: "linux", Architecture: "arm64", Variant: "v7", ConfigPresent: true}, expected},
-		{"missing config", ObservedImage{ID: digest, OS: "linux", Architecture: "arm64", Variant: "v8"}, expected},
+		{"declared volume", ObservedImage{ID: digest, ConfigDigest: digest, Identity: imageIdentityConfig, OS: "linux", Architecture: "arm64", Variant: "v8", ConfigPresent: true, DeclaredVolumes: []string{"/data"}}, expected},
+		{"wrong config", ObservedImage{ID: "sha256:" + strings.Repeat("b", 64), ConfigDigest: "sha256:" + strings.Repeat("b", 64), Identity: imageIdentityConfig, OS: "linux", Architecture: "arm64", Variant: "v8", ConfigPresent: true}, expected},
+		{"wrong os", ObservedImage{ID: digest, ConfigDigest: digest, Identity: imageIdentityConfig, OS: "windows", Architecture: "arm64", Variant: "v8", ConfigPresent: true}, expected},
+		{"wrong architecture", ObservedImage{ID: digest, ConfigDigest: digest, Identity: imageIdentityConfig, OS: "linux", Architecture: "amd64", Variant: "v8", ConfigPresent: true}, expected},
+		{"wrong variant", ObservedImage{ID: digest, ConfigDigest: digest, Identity: imageIdentityConfig, OS: "linux", Architecture: "arm64", Variant: "v7", ConfigPresent: true}, expected},
+		{"missing config", ObservedImage{ID: digest, ConfigDigest: digest, Identity: imageIdentityConfig, OS: "linux", Architecture: "arm64", Variant: "v8"}, expected},
 		{"unsupported signed os", valid, ImageRequirement{ConfigDigest: digest, OS: "windows", Architecture: "arm64", Variant: "v8"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if err := ValidateImage(test.observed, test.expected); err == nil {
 				t.Fatal("unsafe image accepted")
+			}
+		})
+	}
+}
+
+func TestValidateImageRequiresExactContainerdManifestAndConfigPair(t *testing.T) {
+	manifestDigest := "sha256:" + strings.Repeat("a", 64)
+	configDigest := "sha256:" + strings.Repeat("b", 64)
+	expected := ImageRequirement{
+		ManifestDigest: manifestDigest, ConfigDigest: configDigest,
+		OS: "linux", Architecture: "amd64",
+	}
+	valid := ObservedImage{
+		ID: manifestDigest, ManifestDigest: manifestDigest, ConfigDigest: configDigest,
+		Identity: imageIdentityManifest, OS: "linux", Architecture: "amd64", ConfigPresent: true,
+	}
+	if err := ValidateImage(valid, expected); err != nil {
+		t.Fatalf("valid manifest/config pair rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*ObservedImage)
+	}{
+		{"runtime manifest", func(image *ObservedImage) { image.ID = "sha256:" + strings.Repeat("c", 64) }},
+		{"descriptor manifest", func(image *ObservedImage) { image.ManifestDigest = "sha256:" + strings.Repeat("c", 64) }},
+		{"descriptor config", func(image *ObservedImage) { image.ConfigDigest = "sha256:" + strings.Repeat("c", 64) }},
+		{"missing descriptor", func(image *ObservedImage) { image.ManifestDigest = "" }},
+		{"wrong identity mode", func(image *ObservedImage) { image.Identity = imageIdentityConfig }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			observed := valid
+			test.mutate(&observed)
+			if err := ValidateImage(observed, expected); err == nil {
+				t.Fatal("mismatched manifest/config identity accepted")
 			}
 		})
 	}
@@ -46,5 +80,20 @@ func TestWorkloadValidatesOptionalExactConfigDigest(t *testing.T) {
 	workload.ImageConfigDigest = "sha256:not-a-digest"
 	if err := workload.Validate(); err == nil {
 		t.Fatal("invalid internal config digest accepted")
+	}
+	workload.ImageConfigDigest = "sha256:" + strings.Repeat("b", 64)
+	workload.ImageRuntimeDigest = "sha256:not-a-digest"
+	if err := workload.Validate(); err == nil {
+		t.Fatal("invalid internal runtime digest accepted")
+	}
+	workload.ImageRuntimeDigest = "sha256:" + strings.Repeat("a", 64)
+	workload.ImageConfigDigest = ""
+	if err := workload.Validate(); err == nil {
+		t.Fatal("runtime digest without config digest accepted")
+	}
+	workload.ImageConfigDigest = "sha256:" + strings.Repeat("b", 64)
+	workload.ImageRuntimeDigest = "sha256:" + strings.Repeat("c", 64)
+	if err := workload.Validate(); err == nil {
+		t.Fatal("runtime digest unrelated to the signed manifest/config pair accepted")
 	}
 }

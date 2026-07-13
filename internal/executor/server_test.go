@@ -61,7 +61,7 @@ type secureDocker struct {
 	relay              *ObservedRelay
 }
 
-func (d *secureDocker) InspectImage(context.Context, string) (ObservedImage, error) {
+func (d *secureDocker) InspectSignedImage(context.Context, string, string) (ObservedImage, error) {
 	if d.imageErr != nil {
 		return ObservedImage{}, d.imageErr
 	}
@@ -70,7 +70,8 @@ func (d *secureDocker) InspectImage(context.Context, string) (ObservedImage, err
 		imageID = "sha256:" + strings.Repeat("b", 64)
 	}
 	return ObservedImage{
-		ID: imageID, OS: "linux", Architecture: "amd64", ConfigPresent: true,
+		ID: imageID, ConfigDigest: imageID, Identity: imageIdentityConfig,
+		OS: "linux", Architecture: "amd64", ConfigPresent: true,
 		DeclaredVolumes: append([]string(nil), d.volumes...),
 	}, nil
 }

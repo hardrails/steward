@@ -112,9 +112,21 @@ func (s *Server) containmentIdentityMatches(name string, observed ObservedWorklo
 		return false
 	}
 	wantFingerprint := strings.TrimPrefix(record.WorkloadDigest, "sha256:")
+	runtimeImageID := observed.RuntimeImageID
+	if runtimeImageID == "" {
+		// Compatibility for narrow classic-store test doubles and observations
+		// persisted before runtime image identity was projected separately.
+		runtimeImageID = observed.ImageID
+	}
+	configuredRuntimeID := observed.Workload.ImageRuntimeDigest
+	if configuredRuntimeID == "" {
+		configuredRuntimeID = observed.Workload.ImageConfigDigest
+	}
 	if wantFingerprint == "" || observed.Fingerprint != wantFingerprint ||
 		workloadFingerprint(observed.Workload) != wantFingerprint ||
-		observed.ImageID != record.ImageConfigDigest || observed.Workload.ImageConfigDigest != record.ImageConfigDigest {
+		observed.ImageID != record.ImageConfigDigest || observed.Workload.ImageConfigDigest != record.ImageConfigDigest ||
+		runtimeImageID != configuredRuntimeID ||
+		!signedRuntimeDigestMatches(observed.Workload.Image, record.ImageConfigDigest, runtimeImageID) {
 		return false
 	}
 	return true
