@@ -346,7 +346,7 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 		value, err = s.observeTask(ctx, call.Arguments)
 	case "steward_control_tenant_list", "steward_control_tenant_create",
 		"steward_control_node_list", "steward_control_node_status", "steward_control_node_revoke",
-		"steward_control_command_submit", "steward_control_command_status":
+		"steward_control_command_submit", "steward_control_command_status", "steward_control_evidence_status":
 		if s.control == nil {
 			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
 		}
@@ -429,7 +429,7 @@ func nodeTools() []any {
 }
 
 func (s *Server) configuredTools() []any {
-	result := make([]any, 0, 15)
+	result := make([]any, 0, 16)
 	if s.node != nil {
 		result = append(result, nodeTools()...)
 	}
