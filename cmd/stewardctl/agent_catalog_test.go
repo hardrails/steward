@@ -210,6 +210,36 @@ func TestAgentCatalogIssueChecksEveryExternalBinding(t *testing.T) {
 	}
 }
 
+func TestCompareAgentCatalogEntriesIncludesCanaryRequest(t *testing.T) {
+	left := agentcatalog.VerifiedEntry{}
+	right := left
+	left.Release.Release.Canary.Request.Input = "left input"
+	right.Release.Release.Canary.Request.Input = "right input"
+	left.Release.Release.Canary.Request.SessionIDPrefix = "left-session"
+	right.Release.Release.Canary.Request.SessionIDPrefix = "right-session"
+
+	comparison := compareAgentCatalogEntries(left, right)
+	if comparison.Equivalent {
+		t.Fatal("different canary request recipes were reported equivalent")
+	}
+	differences := make(map[string]agentCatalogDifference, len(comparison.Differences))
+	for _, difference := range comparison.Differences {
+		differences[difference.Field] = difference
+	}
+	for field, want := range map[string]agentCatalogDifference{
+		"canary.request.input": {
+			Field: "canary.request.input", Left: "left input", Right: "right input",
+		},
+		"canary.request.session_id_prefix": {
+			Field: "canary.request.session_id_prefix", Left: "left-session", Right: "right-session",
+		},
+	} {
+		if got, exists := differences[field]; !exists || got != want {
+			t.Fatalf("difference %q = %#v, want %#v", field, got, want)
+		}
+	}
+}
+
 func TestAgentCatalogIssuePreflightsSmallInputsBeforeArchiveInspection(t *testing.T) {
 	fixture := newAgentCatalogCLIFixture(t)
 	fixture.source.Entries[1].QualificationEvidence = "missing-qualification-evidence.json"

@@ -770,6 +770,12 @@ func compareAgentCatalogEntries(
 	add("canary.kind", leftOutput.Canary.Kind, rightOutput.Canary.Kind)
 	add("canary.service_id", leftOutput.Canary.ServiceID, rightOutput.Canary.ServiceID)
 	add("canary.operation_id", leftOutput.Canary.OperationID, rightOutput.Canary.OperationID)
+	add("canary.request.input", leftOutput.Canary.Request.Input, rightOutput.Canary.Request.Input)
+	add(
+		"canary.request.session_id_prefix",
+		leftOutput.Canary.Request.SessionIDPrefix,
+		rightOutput.Canary.Request.SessionIDPrefix,
+	)
 	add("canary.required_state_disposition", leftOutput.Canary.RequiredStateDisposition, rightOutput.Canary.RequiredStateDisposition)
 	add("canary.expected_workspace_manifest_digest", leftOutput.Canary.ExpectedWorkspaceManifestDigest, rightOutput.Canary.ExpectedWorkspaceManifestDigest)
 	add("canary.fixture_id", leftOutput.Canary.FixtureID, rightOutput.Canary.FixtureID)
