@@ -30,6 +30,7 @@ const (
 	defaultPageSize           = 100
 	maxPageSize               = 500
 	evidenceChallengeLifetime = 2 * time.Minute
+	maxEvidenceExportAttempts = 3
 )
 
 var errBodyTooLarge = errors.New("request body exceeds 1 MiB")
@@ -397,27 +398,39 @@ func (server *Server) evidenceExport(writer http.ResponseWriter, request *http.R
 		return
 	}
 	nodeID := request.PathValue("node_id")
-	inspection, err := server.store.InspectExecutorEvidence(identity, nodeID)
-	if err != nil {
-		server.storeError(writer, err, false)
-		return
+	for attempt := 0; attempt < maxEvidenceExportAttempts; attempt++ {
+		snapshot, err := server.store.SnapshotExecutorEvidence(identity, nodeID)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		inspection := snapshot.Inspection
+		if inspection.IdentityProof == nil {
+			server.storeError(writer, controlstore.ErrConflict, false)
+			return
+		}
+		statement := controlprotocol.ExecutorEvidenceExportStatementV1{
+			ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1, ControllerInstanceID: server.auth.InstanceID(),
+			ControlNodeID: nodeID, IdentityProof: *inspection.IdentityProof, Status: inspection.Status,
+			ExportedAt: server.now().UTC().Format(time.RFC3339Nano),
+		}
+		export, err := controlprotocol.SignExecutorEvidenceExportV1(statement, server.witnessKey)
+		if err != nil {
+			server.logger.Error("sign Executor evidence export", "error", err, "node_id", nodeID)
+			writeError(writer, http.StatusInternalServerError, "internal_error", "the control plane could not sign a valid evidence export")
+			return
+		}
+		current, err := server.store.ExecutorEvidenceSnapshotCurrent(identity, nodeID, snapshot)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		if current {
+			writeJSON(writer, http.StatusOK, export)
+			return
+		}
 	}
-	if inspection.IdentityProof == nil {
-		server.storeError(writer, controlstore.ErrConflict, false)
-		return
-	}
-	statement := controlprotocol.ExecutorEvidenceExportStatementV1{
-		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1, ControllerInstanceID: server.auth.InstanceID(),
-		ControlNodeID: nodeID, IdentityProof: *inspection.IdentityProof, Status: inspection.Status,
-		ExportedAt: server.now().UTC().Format(time.RFC3339Nano),
-	}
-	export, err := controlprotocol.SignExecutorEvidenceExportV1(statement, server.witnessKey)
-	if err != nil {
-		server.logger.Error("sign Executor evidence export", "error", err, "node_id", nodeID)
-		writeError(writer, http.StatusInternalServerError, "internal_error", "the control plane could not sign a valid evidence export")
-		return
-	}
-	writeJSON(writer, http.StatusOK, export)
+	server.storeError(writer, controlstore.ErrConflict, false)
 }
 
 func (server *Server) evidenceInspection(nodeID string, inspection controlstore.ExecutorEvidenceInspection) controlprotocol.ExecutorEvidenceInspectionV1 {

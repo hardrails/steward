@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -84,6 +85,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	witnessPrivateKey, _, err := controlwitness.LoadPair(parsed.witnessPrivateKeyFile, parsed.witnessPublicKeyFile)
 	if err != nil {
+		return err
+	}
+	if err := validateWitnessTLSKeySeparation(tlsConfig, witnessPrivateKey); err != nil {
 		return err
 	}
 	if parsed.checkConfig {
@@ -327,6 +331,29 @@ func transportConfig(parsed options) (*tls.Config, error) {
 		return nil, fmt.Errorf("load control TLS certificate and key: %w", err)
 	}
 	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}, nil
+}
+
+func validateWitnessTLSKeySeparation(tlsConfig *tls.Config, witnessPrivate ed25519.PrivateKey) error {
+	if tlsConfig == nil {
+		return nil
+	}
+	if len(witnessPrivate) != ed25519.PrivateKeySize || len(tlsConfig.Certificates) != 1 ||
+		len(tlsConfig.Certificates[0].Certificate) == 0 {
+		return errors.New("control TLS and evidence-witness key configuration is invalid")
+	}
+	certificate := tlsConfig.Certificates[0].Leaf
+	if certificate == nil {
+		var err error
+		certificate, err = x509.ParseCertificate(tlsConfig.Certificates[0].Certificate[0])
+		if err != nil {
+			return fmt.Errorf("parse control TLS leaf certificate: %w", err)
+		}
+	}
+	witnessPublic := witnessPrivate.Public().(ed25519.PublicKey)
+	if witnessPublic.Equal(certificate.PublicKey) {
+		return errors.New("control TLS and evidence-witness identities must use different keys")
+	}
+	return nil
 }
 
 func literalLoopback(host string) bool {

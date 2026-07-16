@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -228,6 +229,10 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	nullFramesBody := `{"protocol_version":1,"head_proof":` + mustJSON(t, headProof) + `,"signed_frames_base64":null}`
+	requireError(t, fixture.request(
+		t, http.MethodPost, "/evidence-uplink/report", nodeCredential.Credential, nullFramesBody,
+	), http.StatusBadRequest, "invalid_request")
 	evidenceReport := controlprotocol.ExecutorEvidenceReportV1{
 		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1,
 		HeadProof:       headProof,
@@ -433,6 +438,115 @@ func TestControlPlaneAcceptsRealEvidencePublisherAndExportsCheckpoint(t *testing
 		exported, fixture.witnessPrivate.Public().(ed25519.PublicKey),
 	); err != nil || exported.Statement.Status.Head == nil || exported.Statement.Status.Head.Sequence != 1 {
 		t.Fatalf("real publisher export=%+v err=%v", exported, err)
+	}
+}
+
+func TestEvidenceExportRetriesConcurrentStickyFinding(t *testing.T) {
+	fixture := newServerFixture(t)
+	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken,
+		`{"tenant_id":"tenant-a"}`), http.StatusCreated)
+	credential := enrollNodeThroughAPI(
+		t, fixture, fixture.adminToken, "export-race-enrollment", "node-export-race", []string{"tenant-a"},
+	)
+	identity, err := fixture.store.AuthenticateNode(fixture.server.auth, credential.Credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := fixture.evidenceKeys[credential.NodeID]
+	public := private.Public().(ed25519.PublicKey)
+	poll, err := fixture.store.PollExecutorEvidence(
+		fixture.server.auth,
+		identity,
+		controlprotocol.ExecutorEvidencePollRequestV1{
+			ProtocolVersion:      controlprotocol.ExecutorEvidenceProtocolV1,
+			ControllerInstanceID: fixture.server.auth.InstanceID(),
+			ControlNodeID:        credential.NodeID,
+			Stream:               controlprotocol.ExecutorEvidenceStreamV1,
+			ReceiptNodeID:        credential.NodeID,
+			ReceiptEpoch:         1,
+			PublicKeySHA256:      controlprotocol.ExecutorEvidencePublicKeySHA256(public),
+		},
+		fixture.now.Add(30*time.Second),
+		fixture.now.Add(3*time.Minute),
+	)
+	if err != nil || poll.Status.Head == nil {
+		t.Fatalf("poll=%#v err=%v", poll, err)
+	}
+	base := *poll.Status.Head
+	observed := base
+	observed.Sequence = 1
+	observed.ChainHash = "sha256:" + strings.Repeat("1", 64)
+	claim, err := controlprotocol.NewExecutorEvidenceHeadClaimV1(
+		fixture.server.auth.InstanceID(), credential.NodeID,
+		base, observed, poll.Challenge, nil, public,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceHeadClaimV1(claim, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := controlprotocol.ExecutorEvidenceReportV1{
+		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1,
+		HeadProof:       proof,
+	}
+
+	firstTimestamp := make(chan struct{})
+	releaseTimestamp := make(chan struct{})
+	var timestampCalls atomic.Int32
+	fixture.server.now = func() time.Time {
+		if timestampCalls.Add(1) == 1 {
+			close(firstTimestamp)
+			<-releaseTimestamp
+			return fixture.now.Add(90 * time.Second)
+		}
+		return fixture.now.Add(2 * time.Minute)
+	}
+	request := httptest.NewRequest(
+		http.MethodGet, "/v1/nodes/"+credential.NodeID+"/evidence/export", nil,
+	)
+	request.Header.Set("Authorization", "Bearer "+fixture.adminToken)
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		fixture.server.ServeHTTP(recorder, request)
+		close(done)
+	}()
+	select {
+	case <-firstTimestamp:
+	case <-time.After(5 * time.Second):
+		t.Fatal("evidence export did not reach timestamp construction")
+	}
+
+	findingAt := fixture.now.Add(time.Minute)
+	applied, applyErr := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.server.auth, identity, report, findingAt,
+	)
+	close(releaseTimestamp)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("evidence export did not complete after concurrent finding")
+	}
+	if applyErr != nil || !applied.Applied ||
+		applied.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected {
+		t.Fatalf("concurrent finding response=%#v err=%v", applied, applyErr)
+	}
+	requireStatus(t, recorder, http.StatusOK)
+	var exported controlprotocol.ExecutorEvidenceExportV1
+	decodeResponse(t, recorder, &exported)
+	if err := controlprotocol.VerifyExecutorEvidenceExportV1(
+		exported, fixture.witnessPrivate.Public().(ed25519.PublicKey),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if timestampCalls.Load() < 2 ||
+		exported.Statement.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected ||
+		exported.Statement.Status.Finding == nil ||
+		exported.Statement.Status.Finding.ObservedHead != observed ||
+		exported.Statement.Status.Finding.DetectedAt != findingAt.UTC().Format(time.RFC3339Nano) {
+		t.Fatalf("export omitted concurrent finding after %d attempts: %#v", timestampCalls.Load(), exported.Statement)
 	}
 }
 

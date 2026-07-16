@@ -281,11 +281,17 @@ func TestExecutorEvidenceReportLimitsAndStrictDecode(t *testing.T) {
 	if _, err := DecodeExecutorEvidenceReportV1(raw); err != nil {
 		t.Fatal(err)
 	}
+	emptyRaw, err := json.Marshal(noExtension)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nullFrames := []byte(strings.TrimSuffix(string(emptyRaw), "}") + `,"signed_frames_base64":null}`)
 	for name, candidate := range map[string][]byte{
-		"duplicate": []byte(strings.Replace(string(raw), `"protocol_version":1`, `"protocol_version":1,"protocol_version":1`, 1)),
-		"unknown":   []byte(strings.TrimSuffix(string(raw), "}") + `,"unexpected":true}`),
-		"trailing":  append(append([]byte(nil), raw...), []byte(` {}`)...),
-		"oversized": append(append([]byte(nil), raw...), make([]byte, MaxExecutorEvidenceJSONBytes)...),
+		"duplicate":   []byte(strings.Replace(string(raw), `"protocol_version":1`, `"protocol_version":1,"protocol_version":1`, 1)),
+		"unknown":     []byte(strings.TrimSuffix(string(raw), "}") + `,"unexpected":true}`),
+		"trailing":    append(append([]byte(nil), raw...), []byte(` {}`)...),
+		"oversized":   append(append([]byte(nil), raw...), make([]byte, MaxExecutorEvidenceJSONBytes)...),
+		"null frames": nullFrames,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodeExecutorEvidenceReportV1(candidate); err == nil {

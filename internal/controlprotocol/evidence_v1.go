@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -128,9 +129,29 @@ type ExecutorEvidencePollResponseV1 struct {
 // list can refresh or expose equality, rollback, or a fork by signing the true
 // local head, but it must never advance a controller checkpoint.
 type ExecutorEvidenceReportV1 struct {
-	ProtocolVersion    int                         `json:"protocol_version"`
-	HeadProof          ExecutorEvidenceHeadProofV1 `json:"head_proof"`
-	SignedFramesBase64 []string                    `json:"signed_frames_base64,omitempty"`
+	ProtocolVersion    int                                    `json:"protocol_version"`
+	HeadProof          ExecutorEvidenceHeadProofV1            `json:"head_proof"`
+	SignedFramesBase64 ExecutorEvidenceFrameEncodingsBase64V1 `json:"signed_frames_base64,omitempty"`
+}
+
+// ExecutorEvidenceFrameEncodingsBase64V1 is an optional array when omitted,
+// but an explicit JSON null is invalid. This preserves one unambiguous JSON
+// type for a present frame collection.
+type ExecutorEvidenceFrameEncodingsBase64V1 []string
+
+func (frames *ExecutorEvidenceFrameEncodingsBase64V1) UnmarshalJSON(raw []byte) error {
+	if frames == nil {
+		return errors.New("executor evidence frame collection is nil")
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return errors.New("executor evidence frame collection must be an array")
+	}
+	var decoded []string
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	*frames = decoded
+	return nil
 }
 
 type ExecutorEvidenceReportResponseV1 struct {

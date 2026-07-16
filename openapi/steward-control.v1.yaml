@@ -1449,8 +1449,15 @@ components:
           $ref: "#/components/schemas/ExecutorEvidenceHeadProof"
         signed_frames_base64:
           type: array
+          nullable: false
           maxItems: 128
-          description: Canonical standard-base64 encodings of exact length-prefixed signed evidence frames.
+          x-steward-max-decoded-bytes: 716800
+          description: |
+            Canonical standard-base64 encodings of exact length-prefixed signed
+            evidence frames. When present, this value must be an array rather
+            than null. The complete decoded collection is limited to 716800
+            bytes (700 KiB), and the enclosing JSON request remains subject to
+            the 1 MiB body limit.
           items:
             type: string
             minLength: 1
@@ -1470,12 +1477,30 @@ components:
         status:
           $ref: "#/components/schemas/ExecutorEvidenceStatus"
     ExecutorEvidenceInspection:
+      description: |
+        A legacy node is exactly `unwitnessed` and omits `identity_proof`.
+        Every witnessed state requires the enrolled receipt-key proof.
+      oneOf:
+        - $ref: "#/components/schemas/ExecutorEvidenceUnwitnessedInspection"
+        - $ref: "#/components/schemas/ExecutorEvidenceWitnessedInspection"
+    ExecutorEvidenceUnwitnessedInspection:
       type: object
       additionalProperties: false
       required: [protocol_version, controller_instance_id, control_node_id, status]
-      description: |
-        `identity_proof` is required for every witnessed state and absent only
-        when `status.state` is `unwitnessed` for a legacy node.
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        control_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        status:
+          $ref: "#/components/schemas/ExecutorEvidenceStatusUnwitnessed"
+    ExecutorEvidenceWitnessedInspection:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, controller_instance_id, control_node_id, identity_proof, status]
       properties:
         protocol_version:
           type: integer
@@ -1487,7 +1512,7 @@ components:
         identity_proof:
           $ref: "#/components/schemas/ExecutorEvidenceIdentityProofV1"
         status:
-          $ref: "#/components/schemas/ExecutorEvidenceStatus"
+          $ref: "#/components/schemas/ExecutorEvidenceWitnessedStatus"
     ExecutorEvidenceExport:
       type: object
       additionalProperties: false
@@ -1537,7 +1562,7 @@ components:
         identity_proof:
           $ref: "#/components/schemas/ExecutorEvidenceIdentityProofV1"
         status:
-          $ref: "#/components/schemas/ExecutorEvidenceStatus"
+          $ref: "#/components/schemas/ExecutorEvidenceWitnessedStatus"
         exported_at:
           type: string
           format: date-time
@@ -1637,37 +1662,110 @@ components:
           $ref: "#/components/schemas/SHA256Digest"
         public_key_sha256:
           $ref: "#/components/schemas/SHA256Digest"
-    ExecutorEvidenceFinding:
+    ExecutorEvidenceRollbackFinding:
       type: object
       additionalProperties: false
       required: [kind, detected_at, observed_head]
       properties:
         kind:
           type: string
-          enum: [rollback, equivocation]
+          enum: [rollback]
+        detected_at:
+          type: string
+          format: date-time
+        observed_head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+    ExecutorEvidenceEquivocationFinding:
+      type: object
+      additionalProperties: false
+      required: [kind, detected_at, observed_head]
+      properties:
+        kind:
+          type: string
+          enum: [equivocation]
         detected_at:
           type: string
           format: date-time
         observed_head:
           $ref: "#/components/schemas/ExecutorEvidenceHead"
     ExecutorEvidenceStatus:
-      type: object
-      additionalProperties: false
-      required: [state]
       description: |
         `head` is the last-good controller checkpoint. `finding.observed_head`
         is the conflicting signed local head. `unwitnessed` carries neither.
+      oneOf:
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusUnwitnessed"
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusCurrent"
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusRollbackDetected"
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusEquivocationDetected"
+      discriminator:
+        propertyName: state
+        mapping:
+          unwitnessed: "#/components/schemas/ExecutorEvidenceStatusUnwitnessed"
+          current: "#/components/schemas/ExecutorEvidenceStatusCurrent"
+          rollback_detected: "#/components/schemas/ExecutorEvidenceStatusRollbackDetected"
+          equivocation_detected: "#/components/schemas/ExecutorEvidenceStatusEquivocationDetected"
+    ExecutorEvidenceWitnessedStatus:
+      oneOf:
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusCurrent"
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusRollbackDetected"
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusEquivocationDetected"
+      discriminator:
+        propertyName: state
+        mapping:
+          current: "#/components/schemas/ExecutorEvidenceStatusCurrent"
+          rollback_detected: "#/components/schemas/ExecutorEvidenceStatusRollbackDetected"
+          equivocation_detected: "#/components/schemas/ExecutorEvidenceStatusEquivocationDetected"
+    ExecutorEvidenceStatusUnwitnessed:
+      type: object
+      additionalProperties: false
+      required: [state]
       properties:
         state:
           type: string
-          enum: [unwitnessed, current, rollback_detected, equivocation_detected]
+          enum: [unwitnessed]
+    ExecutorEvidenceStatusCurrent:
+      type: object
+      additionalProperties: false
+      required: [state, head, witnessed_at]
+      properties:
+        state:
+          type: string
+          enum: [current]
+        head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+        witnessed_at:
+          type: string
+          format: date-time
+    ExecutorEvidenceStatusRollbackDetected:
+      type: object
+      additionalProperties: false
+      required: [state, head, witnessed_at, finding]
+      properties:
+        state:
+          type: string
+          enum: [rollback_detected]
         head:
           $ref: "#/components/schemas/ExecutorEvidenceHead"
         witnessed_at:
           type: string
           format: date-time
         finding:
-          $ref: "#/components/schemas/ExecutorEvidenceFinding"
+          $ref: "#/components/schemas/ExecutorEvidenceRollbackFinding"
+    ExecutorEvidenceStatusEquivocationDetected:
+      type: object
+      additionalProperties: false
+      required: [state, head, witnessed_at, finding]
+      properties:
+        state:
+          type: string
+          enum: [equivocation_detected]
+        head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+        witnessed_at:
+          type: string
+          format: date-time
+        finding:
+          $ref: "#/components/schemas/ExecutorEvidenceEquivocationFinding"
     SHA256Digest:
       type: string
       pattern: '^sha256:[0-9a-f]{64}$'

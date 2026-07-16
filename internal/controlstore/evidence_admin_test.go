@@ -7,6 +7,7 @@ import (
 
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/evidence"
 )
 
 func TestInspectExecutorEvidenceIsSiteAdminOnlyAndForensic(t *testing.T) {
@@ -70,6 +71,56 @@ func TestInspectExecutorEvidenceReportsLegacyNodeAsUnwitnessed(t *testing.T) {
 	if err != nil || inspection.IdentityProof != nil ||
 		inspection.Status.State != controlprotocol.ExecutorEvidenceStatusUnwitnessed {
 		t.Fatalf("legacy inspection=%#v err=%v", inspection, err)
+	}
+}
+
+func TestExecutorEvidenceSnapshotDetectsWitnessMutationAndIgnoresRevocation(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	snapshot, err := fixture.store.SnapshotExecutorEvidence(fixture.admin, fixture.identity.NodeID)
+	if err != nil || snapshot.Inspection.Status.Head == nil {
+		t.Fatalf("initial snapshot=%#v err=%v", snapshot.Inspection, err)
+	}
+	snapshot.Inspection.Status.Head.Sequence = 99
+	current, err := fixture.store.ExecutorEvidenceSnapshotCurrent(
+		fixture.admin, fixture.identity.NodeID, snapshot,
+	)
+	if err != nil || !current {
+		t.Fatalf("caller mutation changed opaque snapshot: current=%v err=%v", current, err)
+	}
+
+	fixture.appendReceipt(t, "tenant-a")
+	poll := fixture.poll(t, fixture.now.Add(2*time.Minute))
+	report, _ := fixture.reportFrom(t, evidence.Coordinate{}, poll.Challenge)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, report, fixture.now.Add(2*time.Minute+time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	current, err = fixture.store.ExecutorEvidenceSnapshotCurrent(
+		fixture.admin, fixture.identity.NodeID, snapshot,
+	)
+	if err != nil || current {
+		t.Fatalf("changed witness snapshot current=%v err=%v", current, err)
+	}
+
+	fresh, err := fixture.store.SnapshotExecutorEvidence(fixture.admin, fixture.identity.NodeID)
+	if err != nil || fresh.Inspection.Status.Head == nil || fresh.Inspection.Status.Head.Sequence != 1 {
+		t.Fatalf("fresh snapshot=%#v err=%v", fresh.Inspection, err)
+	}
+	if _, err := fixture.store.RevokeNode(
+		fixture.admin, fixture.identity.NodeID, fixture.now.Add(3*time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	current, err = fixture.store.ExecutorEvidenceSnapshotCurrent(
+		fixture.admin, fixture.identity.NodeID, fresh,
+	)
+	if err != nil || !current {
+		t.Fatalf("node revocation erased forensic snapshot: current=%v err=%v", current, err)
+	}
+	revoked, err := fixture.store.SnapshotExecutorEvidence(fixture.admin, fixture.identity.NodeID)
+	if err != nil || revoked.Inspection.Status.Head == nil || revoked.Inspection.Status.Head.Sequence != 1 {
+		t.Fatalf("revoked node snapshot=%#v err=%v", revoked.Inspection, err)
 	}
 }
 

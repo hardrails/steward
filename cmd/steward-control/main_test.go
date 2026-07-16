@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -319,6 +320,43 @@ func TestTransportConfigLoadsOnlyMatchedOwnerOnlyTLSMaterial(t *testing.T) {
 	}
 }
 
+func TestCheckConfigRejectsTLSKeyReusedAsWitnessIdentity(t *testing.T) {
+	for _, mode := range []string{"copied", "hard-linked"} {
+		t.Run(mode, func(t *testing.T) {
+			stateDirectory := filepath.Join(t.TempDir(), "control")
+			if err := run([]string{
+				"-initialize", "-state-dir", stateDirectory, "-addr", "127.0.0.1:0",
+			}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+				t.Fatal(err)
+			}
+			witnessPrivatePath := filepath.Join(stateDirectory, "witness.private.pem")
+			witnessPrivate, _, err := controlwitness.LoadPair(
+				witnessPrivatePath, filepath.Join(stateDirectory, "witness.public.pem"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tlsDirectory := t.TempDir()
+			certFile, keyFile := writeControlCertificateWithKey(t, tlsDirectory, witnessPrivate)
+			if mode == "hard-linked" {
+				if err := os.Remove(keyFile); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(witnessPrivatePath, keyFile); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = run([]string{
+				"-check-config", "-addr", "0.0.0.0:8443", "-state-dir", stateDirectory,
+				"-tls-cert-file", certFile, "-tls-key-file", keyFile,
+			}, &bytes.Buffer{}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "must use different keys") {
+				t.Fatalf("reused %s TLS/witness identity error=%v", mode, err)
+			}
+		})
+	}
+}
+
 func TestSecretOutputReservationCommitsOrRemovesExactlyOnce(t *testing.T) {
 	var absent *secretOutput
 	if err := absent.commit([]byte("secret")); err == nil {
@@ -477,12 +515,17 @@ func writeControlCertificate(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return writeControlCertificateWithKey(t, t.TempDir(), private)
+}
+
+func writeControlCertificateWithKey(t *testing.T, directory string, private crypto.Signer) (string, string) {
+	t.Helper()
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "steward-control-test"},
 		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
-	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, &private.PublicKey, private)
+	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, private.Public(), private)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +533,6 @@ func writeControlCertificate(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	directory := t.TempDir()
 	certFile := filepath.Join(directory, "server.crt")
 	keyFile := filepath.Join(directory, "server.key")
 	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER}), 0o600); err != nil {

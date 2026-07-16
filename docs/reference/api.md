@@ -61,6 +61,10 @@ signs the exact controller checkpoint returned by its poll, the reported local
 head, frame count, and a domain-separated digest of the exact decoded frames. An
 exact retry is a no-op. A stale report cannot manufacture a rollback finding, and
 adding, removing, replacing, or reordering frames invalidates the proof.
+One report carries at most 128 frames and 700 KiB of decoded frame data; each
+length-prefixed frame is at most 64 KiB plus its four-byte length prefix. The
+frame collection may be omitted when empty but cannot be JSON `null`. The complete
+request body remains limited to 1 MiB.
 
 The online evidence inspection and portable export require a site-admin
 credential. The export embeds a public witness key only to describe its signer;
