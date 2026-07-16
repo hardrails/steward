@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -11,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +23,7 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/executoruplink"
 )
 
@@ -353,6 +357,83 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	}
 	response = fixture.request(t, http.MethodGet, "/v1/tenants/tenant-a", operator.Token, "")
 	requireError(t, response, http.StatusUnauthorized, "unauthorized")
+}
+
+func TestControlPlaneAcceptsRealEvidencePublisherAndExportsCheckpoint(t *testing.T) {
+	fixture := newServerFixture(t)
+	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken,
+		`{"tenant_id":"tenant-a"}`), http.StatusCreated)
+	credential := enrollNodeThroughAPI(t, fixture, fixture.adminToken, "evidence-enrollment", "node-evidence", []string{"tenant-a"})
+	private := fixture.evidenceKeys[credential.NodeID]
+	log, err := evidence.Open(filepath.Join(t.TempDir(), "executor-evidence.bin"), private, credential.NodeID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	if _, err := log.Append(evidence.Event{
+		Type: evidence.AdmissionAllow, TenantID: "tenant-a", RuntimeRef: "runtime-evidence",
+		CapsuleDigest: "sha256:capsule", PolicyDigest: "sha256:policy", Generation: 1,
+		GrantID: "grant-evidence", Outcome: evidence.Allowed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	credentialPath := filepath.Join(t.TempDir(), "node-credential.json")
+	credentialRaw, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(credentialPath, credentialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tlsServer := httptest.NewTLSServer(fixture.server)
+	defer tlsServer.Close()
+	publisher, err := executoruplink.NewEvidencePublisher(executoruplink.EvidencePublisherConfig{
+		BaseURL: tlsServer.URL, CredentialPath: credentialPath,
+		ControllerInstanceID: fixture.server.auth.InstanceID(), PollInterval: time.Second,
+		HTTPClient: tlsServer.Client(), Log: log, PrivateKey: private,
+		SecureExecutor: true, SecureNodeID: credential.NodeID, ProtectedTransport: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		publisher.Run(ctx)
+		close(done)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	var inspection controlprotocol.ExecutorEvidenceInspectionV1
+	for {
+		response := fixture.request(t, http.MethodGet, "/v1/nodes/node-evidence/evidence", fixture.adminToken, "")
+		requireStatus(t, response, http.StatusOK)
+		decodeResponse(t, response, &inspection)
+		if inspection.Status.Head != nil && inspection.Status.Head.Sequence == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("publisher did not advance controller checkpoint: %+v", inspection)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("evidence publisher did not stop after cancellation")
+	}
+
+	response := fixture.request(t, http.MethodGet, "/v1/nodes/node-evidence/evidence/export", fixture.adminToken, "")
+	requireStatus(t, response, http.StatusOK)
+	var exported controlprotocol.ExecutorEvidenceExportV1
+	decodeResponse(t, response, &exported)
+	if err := controlprotocol.VerifyExecutorEvidenceExportV1(
+		exported, fixture.witnessPrivate.Public().(ed25519.PublicKey),
+	); err != nil || exported.Statement.Status.Head == nil || exported.Statement.Status.Head.Sequence != 1 {
+		t.Fatalf("real publisher export=%+v err=%v", exported, err)
+	}
 }
 
 func TestControlPlaneRejectsAmbiguousAndCrossTenantRequests(t *testing.T) {
