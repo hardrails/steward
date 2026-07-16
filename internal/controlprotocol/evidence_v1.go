@@ -81,8 +81,10 @@ type ExecutorEvidenceHeadV1 struct {
 }
 
 // ExecutorEvidenceHeadClaimV1 is a receipt-key-signed response to a fresh
-// controller challenge. It lets a node prove its current compact head even
-// when a restored or forked log has no extension frames to upload.
+// controller challenge. An advancing report binds it to the final submitted
+// frame; an empty divergence report binds it to the node's true local head.
+// The latter lets a restored or forked log prove a conflicting coordinate
+// even when it has no valid extension frames to upload.
 type ExecutorEvidenceHeadClaimV1 struct {
 	ProtocolVersion      int    `json:"protocol_version"`
 	ControllerInstanceID string `json:"controller_instance_id"`
@@ -117,10 +119,10 @@ type ExecutorEvidencePollResponseV1 struct {
 	Status          ExecutorEvidenceStatusV1 `json:"status"`
 }
 
-// ExecutorEvidenceReportV1 always carries a challenge-bound signed local head.
-// SignedFramesBase64 is an optional exact list of length-prefixed evidence
-// frames. An empty list can refresh or expose equality, rollback, or a fork,
-// but it must never advance a controller checkpoint.
+// ExecutorEvidenceReportV1 always carries a challenge-bound signed reported
+// head. With frames, that head must equal the final submitted frame. An empty
+// list can refresh or expose equality, rollback, or a fork by signing the true
+// local head, but it must never advance a controller checkpoint.
 type ExecutorEvidenceReportV1 struct {
 	ProtocolVersion    int                         `json:"protocol_version"`
 	HeadProof          ExecutorEvidenceHeadProofV1 `json:"head_proof"`
