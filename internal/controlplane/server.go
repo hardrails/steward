@@ -37,24 +37,28 @@ const (
 var errBodyTooLarge = errors.New("request body exceeds 1 MiB")
 
 type Config struct {
-	Store             *controlstore.Store
-	Auth              *controlauth.Manager
-	WitnessPrivateKey ed25519.PrivateKey
-	LeaseDuration     time.Duration
-	MaxPoll           int
-	Now               func() time.Time
-	Logger            *slog.Logger
+	Store                *controlstore.Store
+	Auth                 *controlauth.Manager
+	WitnessPrivateKey    ed25519.PrivateKey
+	LeaseDuration        time.Duration
+	MaxPoll              int
+	EnableMetrics        bool
+	OperationsThresholds controlstore.OperationsThresholds
+	Now                  func() time.Time
+	Logger               *slog.Logger
 }
 
 type Server struct {
-	store      *controlstore.Store
-	auth       *controlauth.Manager
-	witnessKey ed25519.PrivateKey
-	lease      time.Duration
-	maxPoll    int
-	now        func() time.Time
-	logger     *slog.Logger
-	mux        *http.ServeMux
+	store                *controlstore.Store
+	auth                 *controlauth.Manager
+	witnessKey           ed25519.PrivateKey
+	lease                time.Duration
+	maxPoll              int
+	enableMetrics        bool
+	operationsThresholds controlstore.OperationsThresholds
+	now                  func() time.Time
+	logger               *slog.Logger
+	mux                  *http.ServeMux
 }
 
 func New(config Config) (*Server, error) {
@@ -62,6 +66,10 @@ func New(config Config) (*Server, error) {
 		config.LeaseDuration > controlstore.MaxDeliveryLease || config.MaxPoll <= 0 ||
 		config.MaxPoll > controlprotocol.MaxExecutorDeliveries || len(config.WitnessPrivateKey) != ed25519.PrivateKeySize {
 		return nil, errors.New("control server requires store, auth, an Ed25519 witness key, a lease no greater than 10 minutes, and a bounded poll batch")
+	}
+	operationsThresholds, err := resolveOperationsThresholds(config.OperationsThresholds)
+	if err != nil {
+		return nil, fmt.Errorf("control server operations thresholds: %w", err)
 	}
 	now := config.Now
 	if now == nil {
@@ -73,7 +81,8 @@ func New(config Config) (*Server, error) {
 	}
 	server := &Server{
 		store: config.Store, auth: config.Auth, witnessKey: append(ed25519.PrivateKey(nil), config.WitnessPrivateKey...), lease: config.LeaseDuration,
-		maxPoll: config.MaxPoll, now: now, logger: logger, mux: http.NewServeMux(),
+		maxPoll: config.MaxPoll, enableMetrics: config.EnableMetrics, operationsThresholds: operationsThresholds,
+		now: now, logger: logger, mux: http.NewServeMux(),
 	}
 	server.routes()
 	return server, nil
@@ -106,10 +115,17 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}", server.node)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands", server.commands)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands/{command_id}", server.command)
+	server.mux.HandleFunc("/v1/operations/summary", server.operationsSummary)
+	server.mux.HandleFunc("/v1/operations/attention", server.operationsAttention)
+	server.mux.HandleFunc("/v1/operations/commands", server.operationsCommands)
+	server.mux.HandleFunc("/v1/operations/credentials", server.operationsCredentials)
 	server.mux.HandleFunc("/executor-uplink/poll", server.executorPoll)
 	server.mux.HandleFunc("/executor-uplink/report", server.executorReport)
 	server.mux.HandleFunc("/evidence-uplink/poll", server.evidencePoll)
 	server.mux.HandleFunc("/evidence-uplink/report", server.evidenceReport)
+	if server.enableMetrics {
+		server.mux.HandleFunc("/metrics", server.metrics)
+	}
 	server.mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
 		writeError(writer, http.StatusNotFound, "not_found", "the requested control-plane route does not exist")
 	})

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -287,6 +288,13 @@ func TestInspectSourceBindsExactArchiveBytesAndImage(t *testing.T) {
 	if inspection.Image.Identity != identity || inspection.Image.BlobCount != 4 {
 		t.Fatalf("source image = %#v, want identity %#v and four blobs", inspection.Image, identity)
 	}
+	if inspection.UncompressedBytes <= inspection.Image.BlobBytes {
+		t.Fatalf(
+			"source uncompressed bytes = %d, want more than blob bytes %d",
+			inspection.UncompressedBytes,
+			inspection.Image.BlobBytes,
+		)
+	}
 
 	prepared, err := PrepareBound(archive, inspection.Image.Identity, inspection.Archive, DefaultLimits())
 	if err != nil {
@@ -294,6 +302,102 @@ func TestInspectSourceBindsExactArchiveBytesAndImage(t *testing.T) {
 	}
 	if err := prepared.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInspectRootSourceRemainsConfinedAfterRootPathReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("renaming an open directory is not portable on Windows")
+	}
+	archive, identity := testArchive(t, archiveOptions{})
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	directory := filepath.Join(parent, "root")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "image.tar"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	moved := filepath.Join(parent, "moved")
+	if err := os.Rename(directory, moved); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(parent, "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "image.tar"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, directory); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := InspectRootSource(root, "image.tar", DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Image.Identity != identity ||
+		inspection.Archive.Digest != testDigest(raw) {
+		t.Fatalf("root-confined inspection = %#v, want original archive", inspection)
+	}
+}
+
+func TestInspectRootSourceRejectsEscapingSymlinkAndBoundsExpansion(t *testing.T) {
+	archive, _ := testArchive(t, archiveOptions{gzip: true, extraBlob: true})
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "image.tar.gz"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	inspection, err := InspectRootSource(root, "image.tar.gz", DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.UncompressedBytes <= int64(len(raw)) {
+		t.Fatalf(
+			"gzip expansion = %d from %d bytes, want positive expansion",
+			inspection.UncompressedBytes,
+			len(raw),
+		)
+	}
+	limits := DefaultLimits()
+	limits.MaxArchiveBytes = int64(len(raw))
+	limits.MaxUncompressedBytes = inspection.UncompressedBytes - 1
+	if limits.MaxUncompressedBytes < limits.MaxArchiveBytes {
+		t.Fatalf("gzip fixture does not permit a valid reduced expansion limit")
+	}
+	if _, err := InspectRootSource(root, "image.tar.gz", limits); err == nil ||
+		(!strings.Contains(err.Error(), "uncompressed byte limit") &&
+			!strings.Contains(err.Error(), "unexpected EOF")) {
+		t.Fatalf("root-confined expansion limit err = %v", err)
+	}
+
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "image.tar.gz"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(directory, "escape")); err != nil {
+		t.Skipf("create escaping symlink fixture: %v", err)
+	}
+	if _, err := InspectRootSource(root, "escape/image.tar.gz", DefaultLimits()); err == nil {
+		t.Fatal("root-confined inspection followed an escaping parent symlink")
 	}
 }
 

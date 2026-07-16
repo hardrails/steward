@@ -25,28 +25,34 @@ contacting a vendor.
 After preparing a Docker and gVisor host and importing the required artifacts, an
 operator can:
 
-1. self-host the bundled controller, create tenants and scoped operators, enroll
-   nodes once, and inspect bounded fleet inventory without a vendor service;
-2. deliver an exact tenant-signed command while keeping the signing key outside
+1. authenticate a curator-signed offline catalog, search or compare outcome-led
+   releases, and inspect the exact signed capsule resources, capabilities,
+   validity, services, state, and companion artifact identities before selection;
+2. self-host the bundled controller, create tenants and scoped operators, enroll
+   nodes once, inspect secret-free inventories, and view deterministic
+   action-required and capacity summaries without a vendor service;
+3. optionally expose authenticated, fixed-cardinality operational metrics without
+   exporting tenant, node, credential, or command identifiers;
+4. deliver an exact tenant-signed command while keeping the signing key outside
    the controller and node;
-3. select a publisher-signed qualified Hermes outcome, verify its exact offline
+5. select a publisher-signed qualified Hermes outcome, verify its exact offline
    archive, activate it through a fixed node-local state machine, authorize the
    deterministic canary with an off-node tenant key, and retain the correlated
    evidence for offline review;
-4. admit a signed, immutable agent profile for one tenant, node, and instance;
-5. require that profile to comply with site-root-signed policy, per-workload
+6. admit a signed, immutable agent profile for one tenant, node, and instance;
+7. require that profile to comply with site-root-signed policy, per-workload
    resource limits, and host/tenant aggregate memory, CPU, PID, and
    workload-count caps;
-6. run the agent in a tenant-labelled, gVisor-sandboxed Docker workload with
+8. run the agent in a tenant-labelled, gVisor-sandboxed Docker workload with
    no default network access, while granting only approved state, inference,
    service, exact connector operations, or named HTTP(S) routes, and optionally
    require an off-node tenant authority to sign the exact request for selected
    agent-service or connector operations;
-7. publish bounded signed receipt deltas to the customer-owned controller on an
+9. publish bounded signed receipt deltas to the customer-owned controller on an
    independent loop, so the controller can retain one exact checkpoint and make an
    authenticated rollback or equivocation finding sticky without becoming a
    receipt warehouse; and
-8. inspect or export the controller's witnessed state under a separate stable
+10. inspect or export the controller's witnessed state under a separate stable
    witness key, while retaining the full node-local receipt chain for detailed
    offline verification.
 
@@ -66,6 +72,9 @@ unsigned correlation records. Site policy, instance intent, live admission, task
 permits, receipt chains, and the controller witness export remain the signed
 authority and evidence. The append-only activation workspace prevents compliant
 retries from rewriting generated history; it does not attest a hostile host.
+The catalog adds local discovery and comparison, not another authority: its
+curator signature authenticates descriptive inventory, while exact artifact
+allowlists, site policy, tenant intent, and live admission decide what can run.
 The current Hermes activation recipe requires a dedicated host with exactly one
 policy tenant because its persistent Docker volume has no hard byte or inode
 quota. It does not weaken Steward's separate stateless shared-host boundary.
@@ -155,7 +164,10 @@ equivocation finding. A site administrator can inspect that state or export it
 under the controller's separate witness key. Full receipt records remain on the
 node. The inspection state is exactly `unwitnessed`, `current`,
 `rollback_detected`, or `equivocation_detected`; it is not a unified health,
-freshness, or action-required status.
+freshness, or action-required status by itself. The controller's separate
+operations view combines that retained state with in-memory report recency, node
+contact, command delivery, and capacity thresholds. Those findings are derived
+facts, not mutable tickets or automatic recovery decisions.
 
 This gives an auditor a bounded question they can answer locally: *what did
 this node accept and record?* It does **not** prove that a model was honest,

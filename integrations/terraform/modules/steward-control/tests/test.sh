@@ -63,7 +63,7 @@ require_text "$repo_root/scripts/control-install-smoke.sh" \
   '--artifact "$terraform_stage/$archive" --checksums "$terraform_stage/checksums.txt"'
 require_text "$repo_root/scripts/control-install-smoke.sh" \
   'install_version_from_terraform_stage v1.0.0'
-grep -Fx -- "ExecStart=/usr/local/bin/steward-control -addr=\${STEWARD_CONTROL_ADDR} -state-dir=\${STEWARD_CONTROL_STATE_DIR} -auth-key-file=\${STEWARD_CONTROL_AUTH_KEY_FILE} -witness-private-key-file=\${STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE} -witness-public-key-file=\${STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE} -tls-cert-file=\${STEWARD_CONTROL_TLS_CERT_FILE} -tls-key-file=\${STEWARD_CONTROL_TLS_KEY_FILE}" \
+grep -Fx -- "ExecStart=/usr/local/bin/steward-control -addr=\${STEWARD_CONTROL_ADDR} -state-dir=\${STEWARD_CONTROL_STATE_DIR} -auth-key-file=\${STEWARD_CONTROL_AUTH_KEY_FILE} -witness-private-key-file=\${STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE} -witness-public-key-file=\${STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE} -tls-cert-file=\${STEWARD_CONTROL_TLS_CERT_FILE} -tls-key-file=\${STEWARD_CONTROL_TLS_KEY_FILE} -enable-metrics=\${STEWARD_CONTROL_ENABLE_METRICS} -node-stale-after=\${STEWARD_CONTROL_NODE_STALE_AFTER} -evidence-stale-after=\${STEWARD_CONTROL_EVIDENCE_STALE_AFTER} -command-overdue-after=\${STEWARD_CONTROL_COMMAND_OVERDUE_AFTER} -capacity-warning-percent=\${STEWARD_CONTROL_CAPACITY_WARNING_PERCENT}" \
   "$repo_root/deploy/systemd/steward-control.service" >/dev/null || {
   echo 'steward-control Terraform test: packaged systemd argv no longer matches the bootstrap identity proof' >&2
   exit 1
@@ -379,6 +379,11 @@ STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=/var/lib/steward-control/witness.privat
 STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=/var/lib/steward-control/witness.public.pem
 STEWARD_CONTROL_TLS_CERT_FILE=
 STEWARD_CONTROL_TLS_KEY_FILE=
+STEWARD_CONTROL_ENABLE_METRICS=false
+STEWARD_CONTROL_NODE_STALE_AFTER=2m
+STEWARD_CONTROL_EVIDENCE_STALE_AFTER=5m
+STEWARD_CONTROL_COMMAND_OVERDUE_AFTER=5m
+STEWARD_CONTROL_CAPACITY_WARNING_PERCENT=80
 ENV
 
 cat >"$work/fake-bin/systemctl" <<'SH'
@@ -475,7 +480,12 @@ run_proof() {
     -auth-key-file=/var/lib/steward-control/auth.key \
     -witness-private-key-file=/var/lib/steward-control/witness.private.pem \
     -witness-public-key-file=/var/lib/steward-control/witness.public.pem \
-    -tls-cert-file= -tls-key-file= >"$PROC_ROOT_FIXTURE/4242/cmdline"
+    -tls-cert-file= -tls-key-file= \
+    -enable-metrics=false \
+    -node-stale-after=2m \
+    -evidence-stale-after=5m \
+    -command-overdue-after=5m \
+    -capacity-warning-percent=80 >"$PROC_ROOT_FIXTURE/4242/cmdline"
   # shellcheck disable=SC2016 # Expand PROOF_FUNCTIONS in the isolated child shell.
   env PROOF_FUNCTIONS="$work/prove-bootstrap-token.sh" \
     admin_token_path="$token_path" control_url=http://127.0.0.1:8443 \

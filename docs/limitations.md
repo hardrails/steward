@@ -85,11 +85,18 @@ Revoking a node or credential disables its authority but retains its record, so 
 continues to count toward the configured ceiling. A command reported as `failed`
 or `outcome_unknown` also continues to consume command capacity. These choices
 preserve audit and replay state, but a long-lived site must monitor record counts
-and raise its configured ceilings before exhaustion. The controller does not yet
-expose aggregate retained-record counts as metrics, so operators must plan from
-expected lifecycle volume and alert on `capacity_exceeded` API responses. There is
-currently no supported purge path for these records. Exceeding a cap fails the
-affected request; it does not evict live or ambiguous authority silently.
+and raise its configured ceilings before exhaustion. The operations summary,
+attention view, and opt-in authenticated metrics expose retained-state usage and
+capacity warnings. They do not add a purge path. Exceeding a cap fails the affected
+request; it does not evict live or ambiguous authority silently.
+
+The action-required view is derived from retained facts. It is not an incident
+tracker, approval queue, or automatic remediation engine. A caller cannot
+acknowledge, dismiss, retry, or clear a finding through that view. Evidence-report
+freshness is intentionally held in bounded process memory rather than the durable
+control format. After a controller restart, evidence age is conservatively stale
+or unknown until each node reports again. The signed checkpoint and sticky
+rollback or equivocation finding remain durable.
 
 Operator and node bearer credentials have no automatic expiry. Enrollment
 capabilities expire and permit one logical exchange, with exact retries returning
@@ -118,6 +125,14 @@ The signed agent release and activation flow currently supports one closed,
 node-local Hermes fresh-state workspace-audit canary. It is not a hosted catalog,
 general workflow engine, remote rollout system, arbitrary command runner, or proof
 framework for user-defined prompts and hooks.
+
+The offline agent catalog is a curator-signed descriptive index. It re-verifies
+the exact embedded releases and exposes signed capsule metadata for local search
+and comparison, but it does not grant deployment authority, install packages,
+rank agents, detect malicious instructions, or prove a skill is safe. Steward does
+not track the highest catalog revision in durable state. Operators must distribute
+the curator public key independently and retain the accepted catalog ID, revision,
+and envelope digest to detect rollback or conflicting revisions.
 
 The recipe requires a dedicated host, a signed policy containing exactly one
 tenant, `-admission-allow-host-admin-intent`, and

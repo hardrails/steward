@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,6 +17,7 @@ import (
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/nodeclient"
 	"github.com/hardrails/steward/internal/securefile"
 )
@@ -47,10 +49,18 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlNodeRevoke(arguments[2:], stdout)
 	case "node-credential revoke":
 		return controlNodeCredentialRevoke(arguments[2:], stdout)
+	case "operations status":
+		return controlOperationsStatus(arguments[2:], stdout)
+	case "attention list":
+		return controlAttentionList(arguments[2:], stdout)
 	case "command submit":
 		return controlCommandSubmit(arguments[2:], stdout)
 	case "command status":
 		return controlCommandStatus(arguments[2:], stdout)
+	case "command list":
+		return controlCommandList(arguments[2:], stdout)
+	case "credential list":
+		return controlCredentialList(arguments[2:], stdout)
 	case "evidence status":
 		return controlEvidenceStatus(arguments[2:], stdout)
 	case "evidence export":
@@ -63,7 +73,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, command submit|status, or evidence status|export|verify")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, operations status, attention list, command submit|status|list, credential list, or evidence status|export|verify")
 }
 
 type controlFlags struct {
@@ -459,6 +469,60 @@ func controlNodeCredentialRevoke(arguments []string, stdout io.Writer) error {
 	return writeControlJSON(stdout, revocation)
 }
 
+func controlOperationsStatus(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control operations status", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "optional tenant-projected scope")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if !validOptionalControlIdentifier(*tenantID, 128) || flags.NArg() != 0 {
+		return errors.New("control operations status accepts only an optional bounded -tenant-id")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	summary, err := client.GetOperationsSummary(ctx, *tenantID)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, summary)
+}
+
+func controlAttentionList(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control attention list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "optional tenant-projected scope")
+	reason := flags.String("reason", "", "optional exact attention reason")
+	cursor := flags.String("cursor", "", "opaque continuation cursor")
+	limit := flags.Int("limit", controlstore.DefaultInventoryPageLimit, "maximum attention items to return")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if !validOptionalControlIdentifier(*tenantID, 128) ||
+		!validControlAttentionReason(*reason) ||
+		!validControlInventoryPage(*cursor, *limit, false) ||
+		flags.NArg() != 0 {
+		return errors.New("control attention list accepts optional bounded tenant, reason, cursor, and a limit between 1 and 500")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	page, err := client.ListAttention(ctx, *tenantID, *reason, *cursor, *limit)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, page)
+}
+
 func controlCommandSubmit(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("control command submit", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -515,10 +579,195 @@ func controlCommandStatus(arguments []string, stdout io.Writer) error {
 	return writeControlJSON(stdout, command)
 }
 
+func controlCommandList(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control command list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "optional tenant-projected scope")
+	nodeID := flags.String("node-id", "", "optional exact node identity")
+	state := flags.String("state", "", "optional pending, leased, or terminal state")
+	terminalStatus := flags.String("terminal-status", "", "optional done, failed, rejected, or outcome_unknown status")
+	cursor := flags.String("cursor", "", "opaque continuation cursor")
+	limit := flags.Int("limit", controlstore.DefaultInventoryPageLimit, "maximum commands to return")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if !validOptionalControlIdentifier(*tenantID, 128) ||
+		!validOptionalControlIdentifier(*nodeID, 128) ||
+		!validControlCommandState(*state) ||
+		!validControlTerminalStatus(*terminalStatus) ||
+		(*terminalStatus != "" && *state != string(controlstore.CommandTerminal)) ||
+		!validControlInventoryPage(*cursor, *limit, false) ||
+		flags.NArg() != 0 {
+		return errors.New("control command list accepts bounded tenant, node, state, terminal status, cursor, and a limit between 1 and 500; terminal status requires state=terminal")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	page, err := client.ListCommandInventory(
+		ctx, *tenantID, *nodeID, *state, *terminalStatus, *cursor, *limit,
+	)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, page)
+}
+
+func controlCredentialList(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control credential list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "optional tenant-projected scope")
+	kind := flags.String("kind", "", "optional operator or node credential kind")
+	role := flags.String("role", "", "optional site_admin or tenant_operator role")
+	nodeID := flags.String("node-id", "", "optional exact node identity")
+	revokedValue := flags.String("revoked", "any", "any, true, or false revocation state")
+	cursor := flags.String("cursor", "", "opaque continuation cursor")
+	limit := flags.Int("limit", controlstore.DefaultInventoryPageLimit, "maximum credentials to return")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	revoked, revokedErr := parseControlRevoked(*revokedValue)
+	if !validOptionalControlIdentifier(*tenantID, 128) ||
+		!validControlCredentialKind(*kind) ||
+		!validControlCredentialRole(*role) ||
+		!validOptionalControlIdentifier(*nodeID, 128) ||
+		(*kind == string(controlauth.KindNode) && *role != "") ||
+		(*kind == string(controlauth.KindOperator) && *nodeID != "") ||
+		(*role != "" && *nodeID != "") ||
+		revokedErr != nil ||
+		!validControlInventoryPage(*cursor, *limit, false) ||
+		flags.NArg() != 0 {
+		return errors.New("control credential list accepts bounded tenant, kind, role, node, revoked, cursor, and a limit between 1 and 500; role and node filters cannot be combined")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	page, err := client.ListCredentialInventory(
+		ctx, *tenantID, *kind, *role, *nodeID, revoked, *cursor, *limit,
+	)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, page)
+}
+
 func writeControlJSON(stdout io.Writer, value any) error {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(value)
+}
+
+func validOptionalControlIdentifier(value string, maximum int) bool {
+	if value == "" {
+		return true
+	}
+	if maximum < 1 || len(value) > maximum || strings.TrimSpace(value) != value {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if (character >= 'A' && character <= 'Z') ||
+			(character >= 'a' && character <= 'z') ||
+			(character >= '0' && character <= '9') ||
+			(index > 0 && (character == '.' || character == '_' || character == '-')) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validControlInventoryPage(cursor string, limit int, allowDefault bool) bool {
+	if allowDefault {
+		if limit < 0 || limit > controlstore.MaxInventoryPageLimit {
+			return false
+		}
+	} else if limit < 1 || limit > controlstore.MaxInventoryPageLimit {
+		return false
+	}
+	if cursor == "" {
+		return true
+	}
+	if len(cursor) > base64.RawURLEncoding.EncodedLen(4096) ||
+		strings.ContainsAny(cursor, "\r\n\x00") {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	return err == nil && len(raw) > 0 && len(raw) <= 4096 &&
+		base64.RawURLEncoding.EncodeToString(raw) == cursor
+}
+
+func validControlAttentionReason(value string) bool {
+	switch controlstore.AttentionReason(value) {
+	case "", controlstore.AttentionNodeNeverSeen, controlstore.AttentionNodeStale,
+		controlstore.AttentionEvidenceUnwitnessed, controlstore.AttentionEvidenceStale,
+		controlstore.AttentionRollbackDetected, controlstore.AttentionEquivocationDetected,
+		controlstore.AttentionCommandPendingOverdue, controlstore.AttentionCommandLeaseExpired,
+		controlstore.AttentionCommandFailed, controlstore.AttentionCommandOutcomeUnknown,
+		controlstore.AttentionCapacityWarning:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlCommandState(value string) bool {
+	switch controlstore.CommandState(value) {
+	case "", controlstore.CommandPending, controlstore.CommandLeased, controlstore.CommandTerminal:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlTerminalStatus(value string) bool {
+	switch value {
+	case "", controlprotocol.ExecutorStatusDone, controlprotocol.ExecutorStatusFailed,
+		controlprotocol.ExecutorStatusRejected, controlprotocol.ExecutorStatusOutcomeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlCredentialKind(value string) bool {
+	switch controlauth.CredentialKind(value) {
+	case "", controlauth.KindOperator, controlauth.KindNode:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlCredentialRole(value string) bool {
+	switch controlauth.Role(value) {
+	case "", controlauth.RoleSiteAdmin, controlauth.RoleTenantOperator:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseControlRevoked(value string) (*bool, error) {
+	switch value {
+	case "any":
+		return nil, nil
+	case "true":
+		revoked := true
+		return &revoked, nil
+	case "false":
+		revoked := false
+		return &revoked, nil
+	default:
+		return nil, errors.New("revoked filter must be any, true, or false")
+	}
 }
 
 func parseTenantIDs(value string) ([]string, error) {

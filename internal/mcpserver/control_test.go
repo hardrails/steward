@@ -13,8 +13,10 @@ import (
 	"testing"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -61,6 +63,80 @@ func (control *fakeControl) GetCommand(_ context.Context, tenantID, nodeID, comm
 	return controlclient.Command{CommandID: commandID, TenantID: tenantID, NodeID: nodeID, State: "terminal"}, control.err
 }
 
+func (control *fakeControl) GetOperationsSummary(_ context.Context, tenantID string) (controlstore.OperationsSummary, error) {
+	control.calls = append(control.calls, "operations-summary:"+tenantID)
+	return controlstore.OperationsSummary{
+		GeneratedAt: "2026-07-16T12:00:00Z",
+		TenantID:    tenantID,
+		Capacity: []controlstore.CapacityUsage{{
+			Resource: controlstore.CapacityNodes, Used: 1, Limit: 10,
+		}},
+		Commands: controlstore.CommandSummary{Total: 1, Pending: 1},
+		Evidence: controlstore.EvidenceSummary{Nodes: 1, ActiveNodes: 1, Witnessed: 1, Current: 1},
+		Attention: controlstore.AttentionSummary{
+			Total: 1, Warnings: 1,
+			Counts: []controlstore.AttentionCount{{
+				Reason: controlstore.AttentionNodeStale, Severity: controlstore.AttentionWarning, Count: 1,
+			}},
+		},
+	}, control.err
+}
+
+func (control *fakeControl) ListAttention(_ context.Context, tenantID, reason, cursor string, limit int) (controlstore.AttentionPage, error) {
+	control.calls = append(
+		control.calls, "attention-list:"+tenantID+":"+reason+":"+cursor+":"+strconv.Itoa(limit),
+	)
+	return controlstore.AttentionPage{
+		Items: []controlstore.AttentionItem{{
+			ID: "attention-a", Reason: controlstore.AttentionReason(reason),
+			Severity: controlstore.AttentionWarning, Resource: controlstore.AttentionResourceNode,
+			TenantID: tenantID, NodeID: "node-a", Since: "2026-07-16T11:55:00Z",
+		}},
+		NextCursor: "next-attention",
+	}, control.err
+}
+
+func (control *fakeControl) ListCommandInventory(
+	_ context.Context, tenantID, nodeID, state, terminalStatus, cursor string, limit int,
+) (controlstore.CommandInventoryPage, error) {
+	control.calls = append(
+		control.calls,
+		"command-list:"+tenantID+":"+nodeID+":"+state+":"+terminalStatus+":"+cursor+":"+strconv.Itoa(limit),
+	)
+	return controlstore.CommandInventoryPage{
+		Commands: []controlstore.CommandMetadata{{
+			TenantID: tenantID, NodeID: nodeID, ID: "command-a", DeliveryID: "delivery-a",
+			Digest: "sha256:" + strings.Repeat("a", 64), State: controlstore.CommandState(state),
+			DeliveryGeneration: 1, CreatedAt: "2026-07-16T11:00:00Z",
+			TerminalStatus: terminalStatus, CompletedAt: "2026-07-16T11:01:00Z",
+		}},
+		NextCursor: "next-command",
+	}, control.err
+}
+
+func (control *fakeControl) ListCredentialInventory(
+	_ context.Context, tenantID, kind, role, nodeID string, revoked *bool, cursor string, limit int,
+) (controlstore.CredentialInventoryPage, error) {
+	revokedFilter := "any"
+	revokedValue := false
+	if revoked != nil {
+		revokedValue = *revoked
+		revokedFilter = strconv.FormatBool(*revoked)
+	}
+	control.calls = append(
+		control.calls,
+		"credential-list:"+tenantID+":"+kind+":"+role+":"+nodeID+":"+revokedFilter+":"+cursor+":"+strconv.Itoa(limit),
+	)
+	return controlstore.CredentialInventoryPage{
+		Credentials: []controlstore.CredentialMetadata{{
+			ID: "credential-a", Kind: controlauth.CredentialKind(kind), Role: controlauth.Role(role),
+			TenantID: tenantID, NodeID: nodeID, RequestID: "request-a",
+			CreatedAt: "2026-07-16T10:00:00Z", Revoked: revokedValue,
+		}},
+		NextCursor: "next-credential",
+	}, control.err
+}
+
 func (control *fakeControl) InspectExecutorEvidence(_ context.Context, nodeID string) (controlprotocol.ExecutorEvidenceInspectionV1, error) {
 	control.calls = append(control.calls, "evidence-status:"+nodeID)
 	return control.inspection, control.err
@@ -72,14 +148,16 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed := controlOnly.configuredTools()
-	if len(listed) != 8 {
+	if len(listed) != 12 {
 		t.Fatalf("control-only tool count=%d", len(listed))
 	}
 	raw := string(mustJSON(t, listed))
 	for _, name := range []string{
 		"steward_control_tenant_list", "steward_control_tenant_create", "steward_control_node_list",
 		"steward_control_node_status", "steward_control_node_revoke", "steward_control_command_submit",
-		"steward_control_command_status", "steward_control_evidence_status",
+		"steward_control_command_status", "steward_control_operations_summary",
+		"steward_control_attention_list", "steward_control_command_list",
+		"steward_control_credential_list", "steward_control_evidence_status",
 	} {
 		if !strings.Contains(raw, name) {
 			t.Fatalf("control tool list omitted %s: %s", name, raw)
@@ -105,6 +183,10 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	requireAnnotations(t, definitions["steward_control_tenant_create"], false, false, true, false)
 	requireAnnotations(t, definitions["steward_control_node_revoke"], false, true, true, false)
 	requireAnnotations(t, definitions["steward_control_command_submit"], false, true, true, true)
+	requireAnnotations(t, definitions["steward_control_operations_summary"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_attention_list"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_command_list"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_credential_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_evidence_status"], true, false, true, false)
 	for toolName, acknowledgment := range map[string]string{
 		"steward_control_tenant_create":  "acknowledge_tenant_creation",
@@ -116,6 +198,18 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		acknowledgmentSchema := properties[acknowledgment].(map[string]any)
 		if acknowledgmentSchema["const"] != true {
 			t.Fatalf("%s does not require %s=true: %#v", toolName, acknowledgment, acknowledgmentSchema)
+		}
+	}
+	for _, toolName := range []string{
+		"steward_control_operations_summary", "steward_control_attention_list",
+		"steward_control_command_list", "steward_control_credential_list",
+	} {
+		schema := definitions[toolName]["inputSchema"].(map[string]any)
+		properties := schema["properties"].(map[string]any)
+		for property := range properties {
+			if strings.HasPrefix(property, "acknowledge_") {
+				t.Fatalf("read-only %s unexpectedly requires %s", toolName, property)
+			}
 		}
 	}
 
@@ -168,17 +262,122 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 			}
 		}
 	}
+	attentionCursor := base64.RawURLEncoding.EncodeToString([]byte("attention-v1\x00attention-a"))
+	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-v1\x00command-a"))
+	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-v1\x00credential-a"))
+	directCalls := []struct {
+		name      string
+		arguments map[string]any
+	}{
+		{
+			name: "steward_control_operations_summary",
+			arguments: map[string]any{
+				"tenant_id": "tenant-a",
+			},
+		},
+		{
+			name: "steward_control_attention_list",
+			arguments: map[string]any{
+				"tenant_id": "tenant-a", "reason": "node_stale",
+				"cursor": attentionCursor, "limit": 25,
+			},
+		},
+		{
+			name: "steward_control_command_list",
+			arguments: map[string]any{
+				"tenant_id": "tenant-a", "node_id": "node-a", "state": "terminal",
+				"terminal_status": "failed", "cursor": commandCursor, "limit": 50,
+			},
+		},
+		{
+			name: "steward_control_credential_list",
+			arguments: map[string]any{
+				"tenant_id": "tenant-a", "kind": "operator", "role": "tenant_operator",
+				"revoked": "false", "cursor": credentialCursor, "limit": 10,
+			},
+		},
+	}
+	for _, call := range directCalls {
+		result, err := callDirectMCPControlTool(t, server, call.name, call.arguments)
+		if err != nil {
+			t.Fatalf("%s failed: %v", call.name, err)
+		}
+		raw := string(mustJSON(t, result))
+		if call.name == "steward_control_command_list" &&
+			(strings.Contains(raw, `"command_dsse"`) || strings.Contains(raw, `"result"`) ||
+				strings.Contains(raw, `"runtime_ref"`) || strings.Contains(raw, `"reported_status"`) ||
+				strings.Contains(raw, `"error_code"`)) {
+			t.Fatalf("command inventory leaked secret-bearing fields: %s", raw)
+		}
+		if call.name == "steward_control_credential_list" &&
+			(strings.Contains(raw, `"token"`) || strings.Contains(raw, `"token_mac"`) ||
+				strings.Contains(raw, `"credential"`)) {
+			t.Fatalf("credential inventory leaked secret-bearing fields: %s", raw)
+		}
+	}
 	wantCalls := []string{
 		"tenant-list:tenant-0:25", "tenant-create:tenant-a", "node-list:tenant-a:node-0:50",
 		"node-status:tenant-a:node-a", "node-revoke:node-a", "command-submit:tenant-a:node-a",
 		"command-status:tenant-a:node-a:command-a",
 		"evidence-status:node-a",
+		"operations-summary:tenant-a",
+		"attention-list:tenant-a:node_stale:" + attentionCursor + ":25",
+		"command-list:tenant-a:node-a:terminal:failed:" + commandCursor + ":50",
+		"credential-list:tenant-a:operator:tenant_operator::false:" + credentialCursor + ":10",
 	}
 	if strings.Join(control.calls, "|") != strings.Join(wantCalls, "|") {
 		t.Fatalf("calls=%#v", control.calls)
 	}
 	if !bytes.Equal(control.command, command) {
 		t.Fatal("MCP did not preserve exact signed command bytes")
+	}
+}
+
+func TestMCPControlOperationsRejectInvalidAndAmbiguousFilters(t *testing.T) {
+	control := &fakeControl{}
+	server, _ := NewConfigured(Config{Control: control, Version: "v1"})
+	validCursor := base64.RawURLEncoding.EncodeToString([]byte("cursor-v1\x00item-a"))
+	tests := []struct {
+		name      string
+		tool      string
+		arguments map[string]any
+	}{
+		{name: "summary unknown field", tool: "steward_control_operations_summary", arguments: map[string]any{"unexpected": true}},
+		{name: "summary invalid tenant", tool: "steward_control_operations_summary", arguments: map[string]any{"tenant_id": "-tenant"}},
+		{name: "attention reason", tool: "steward_control_attention_list", arguments: map[string]any{"reason": "not-a-reason"}},
+		{name: "attention cursor", tool: "steward_control_attention_list", arguments: map[string]any{"cursor": "%%%"}},
+		{name: "attention negative limit", tool: "steward_control_attention_list", arguments: map[string]any{"limit": -1}},
+		{name: "attention oversized limit", tool: "steward_control_attention_list", arguments: map[string]any{"limit": 501}},
+		{name: "command state", tool: "steward_control_command_list", arguments: map[string]any{"state": "running"}},
+		{name: "command terminal without state", tool: "steward_control_command_list", arguments: map[string]any{"terminal_status": "failed"}},
+		{name: "command terminal status", tool: "steward_control_command_list", arguments: map[string]any{"state": "terminal", "terminal_status": "running"}},
+		{name: "command node", tool: "steward_control_command_list", arguments: map[string]any{"node_id": "-node"}},
+		{name: "command cursor", tool: "steward_control_command_list", arguments: map[string]any{"cursor": validCursor + "="}},
+		{name: "credential kind", tool: "steward_control_credential_list", arguments: map[string]any{"kind": "enrollment"}},
+		{name: "credential role", tool: "steward_control_credential_list", arguments: map[string]any{"role": "owner"}},
+		{name: "credential revoked", tool: "steward_control_credential_list", arguments: map[string]any{"revoked": "yes"}},
+		{name: "credential role and node", tool: "steward_control_credential_list", arguments: map[string]any{"role": "tenant_operator", "node_id": "node-a"}},
+		{name: "node credential with role", tool: "steward_control_credential_list", arguments: map[string]any{"kind": "node", "role": "tenant_operator"}},
+		{name: "operator credential with node", tool: "steward_control_credential_list", arguments: map[string]any{"kind": "operator", "node_id": "node-a"}},
+		{name: "credential unknown field", tool: "steward_control_credential_list", arguments: map[string]any{"unexpected": true}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if result, err := callDirectMCPControlTool(t, server, test.tool, test.arguments); err == nil {
+				t.Fatalf("invalid input succeeded: %#v", result)
+			}
+		})
+	}
+	result, err := server.callControlTool(
+		context.Background(),
+		"steward_control_command_list",
+		[]byte(`{"tenant_id":"tenant-a","tenant_id":"tenant-b"}`),
+	)
+	if err == nil || result != nil {
+		t.Fatalf("duplicate argument accepted: result=%#v error=%v", result, err)
+	}
+	if len(control.calls) != 0 {
+		t.Fatalf("invalid calls reached controller: %#v", control.calls)
 	}
 }
 
@@ -277,6 +476,21 @@ func TestMCPControlFailuresAreBoundedAndRedacted(t *testing.T) {
 		strings.Contains(raw, "sensitive_evidence_code") || strings.Contains(raw, "sensitive-evidence-body") || len(raw) > 1024 {
 		t.Fatalf("evidence API failure projection=%s", raw)
 	}
+
+	control.err = &controlclient.APIError{
+		Status: http.StatusBadGateway, Code: "sensitive_operations_code",
+		Message: strings.Repeat("sensitive-operations-body", 500),
+	}
+	directResult, directErr := callDirectMCPControlTool(
+		t, server, "steward_control_operations_summary", map[string]any{"tenant_id": "tenant-a"},
+	)
+	if directErr == nil || directResult != nil ||
+		!strings.Contains(directErr.Error(), "HTTP 502") ||
+		strings.Contains(directErr.Error(), "sensitive_operations_code") ||
+		strings.Contains(directErr.Error(), "sensitive-operations-body") ||
+		len(directErr.Error()) > 1024 {
+		t.Fatalf("operations API failure projection=(%#v, %v)", directResult, directErr)
+	}
 }
 
 func TestMCPControlEvidenceStatusRevalidatesModelVisibleOutput(t *testing.T) {
@@ -308,7 +522,12 @@ func TestMCPControlOnlyInitializationDescribesItsExactSurface(t *testing.T) {
 	}
 	raw := output.String()
 	if !strings.Contains(raw, "Steward Control Plane Operations") || !strings.Contains(raw, "never issues operator or enrollment secrets") ||
-		!strings.Contains(raw, "steward_control_command_submit") || !strings.Contains(raw, "steward_control_evidence_status") ||
+		!strings.Contains(raw, "steward_control_command_submit") ||
+		!strings.Contains(raw, "steward_control_operations_summary") ||
+		!strings.Contains(raw, "steward_control_attention_list") ||
+		!strings.Contains(raw, "steward_control_command_list") ||
+		!strings.Contains(raw, "steward_control_credential_list") ||
+		!strings.Contains(raw, "steward_control_evidence_status") ||
 		strings.Contains(raw, "steward_admit") || strings.Contains(raw, "steward_task_submit") {
 		t.Fatalf("control-only initialization=%s", raw)
 	}
@@ -329,6 +548,15 @@ func callMCPControlTool(t *testing.T, server *Server, name string, arguments map
 		t.Fatalf("%s RPC error=%#v", name, rpcErr)
 	}
 	return result
+}
+
+func callDirectMCPControlTool(t *testing.T, server *Server, name string, arguments map[string]any) (any, error) {
+	t.Helper()
+	rawArguments, err := json.Marshal(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server.callControlTool(context.Background(), name, rawArguments)
 }
 
 func controlToolIsError(result any) bool {

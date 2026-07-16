@@ -117,8 +117,9 @@ transferred archive bytes.
 Follow the [signed-admission guide]({{ '/guides/signed-admission/' | relative_url }})
 to prepare the site policy and instance intent. The policy must permit the
 Hermes profile, required state and service capabilities, and the public task key
-for `hermes-api`. The intent must bind the intended tenant, node, instance,
-lineage, and generation.
+for `hermes-api`. Its publisher and tenant rules must also allow the release
+capsule's exact skill-manifest `{kind, digest}` artifact pair. The intent must bind
+the intended tenant, node, instance, lineage, and generation.
 
 Configure the dedicated activation boundary in the same signed-admission
 transaction:

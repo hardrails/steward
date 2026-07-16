@@ -147,7 +147,7 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 	)
 	if !leader {
 		if err == nil {
-			return store.currentExecutorEvidenceReplayResponse(identity)
+			return store.currentExecutorEvidenceReplayResponse(identity, now)
 		}
 		if revalidateErr := store.revalidateExecutorEvidenceIdentity(identity); revalidateErr != nil {
 			return controlprotocol.ExecutorEvidenceReportResponseV1{}, revalidateErr
@@ -195,6 +195,11 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 		!historicalVerifiedFinding {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalid("executor evidence report predates the retained finding")
 	}
+	defer func() {
+		if err == nil {
+			store.recordExecutorEvidenceReportLocked(identity.NodeID, now)
+		}
+	}()
 	if !tenantSubset(snapshot.nodeTenantIDs, node.TenantIDs) ||
 		!evidenceWitnessEqual(*node.Evidence, snapshot.witness) {
 		if verified.action == executorEvidenceAdvance && exactExecutorEvidenceRetry(*node.Evidence, verified) {
@@ -288,7 +293,7 @@ func (store *Store) revalidateExecutorEvidenceIdentity(identity controlauth.Node
 	return store.revalidateNodeLocked(identity)
 }
 
-func (store *Store) currentExecutorEvidenceReplayResponse(identity controlauth.NodeIdentity) (controlprotocol.ExecutorEvidenceReportResponseV1, error) {
+func (store *Store) currentExecutorEvidenceReplayResponse(identity controlauth.NodeIdentity, now time.Time) (controlprotocol.ExecutorEvidenceReportResponseV1, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
@@ -301,6 +306,7 @@ func (store *Store) currentExecutorEvidenceReplayResponse(identity controlauth.N
 	if !ok || node.Evidence == nil {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, ErrConflict
 	}
+	store.recordExecutorEvidenceReportLocked(identity.NodeID, now)
 	return executorEvidenceReportResponse(false, *node.Evidence), nil
 }
 
@@ -615,6 +621,54 @@ func evidenceWitnessEqual(left, right EvidenceWitness) bool {
 		return left.Finding == nil && right.Finding == nil
 	}
 	return *left.Finding == *right.Finding
+}
+
+func executorEvidenceDurableObservationAt(witness EvidenceWitness) string {
+	latest := witness.PinnedAt
+	for _, candidate := range []string{witness.AdvancedAt, evidenceFindingLastObservedAt(witness.Finding)} {
+		if candidate == "" {
+			continue
+		}
+		candidateTime, candidateErr := parseTimestamp(candidate)
+		latestTime, latestErr := parseTimestamp(latest)
+		if candidateErr == nil && (latestErr != nil || candidateTime.After(latestTime)) {
+			latest = candidate
+		}
+	}
+	return latest
+}
+
+func (store *Store) recordExecutorEvidenceReportLocked(nodeID string, observedAt time.Time) {
+	if store == nil || observedAt.IsZero() {
+		return
+	}
+	node, ok := store.current.nodes[nodeID]
+	if !ok || node.Evidence == nil {
+		return
+	}
+	if store.evidenceLastReports == nil {
+		store.evidenceLastReports = make(map[string]time.Time)
+	}
+	if retained, ok := store.evidenceLastReports[nodeID]; !ok || observedAt.After(retained) {
+		store.evidenceLastReports[nodeID] = observedAt.UTC()
+	}
+}
+
+func (store *Store) executorEvidenceReportRecencyLocked(node Node) (string, bool) {
+	if observedAt, ok := store.evidenceLastReports[node.ID]; ok {
+		return canonicalTimestamp(observedAt), true
+	}
+	if node.Evidence == nil {
+		return "", false
+	}
+	return executorEvidenceDurableObservationAt(*node.Evidence), false
+}
+
+func evidenceFindingLastObservedAt(finding *EvidenceFinding) string {
+	if finding == nil {
+		return ""
+	}
+	return finding.LastObservedAt
 }
 
 func evidenceWitnessCheckpointEqual(left, right EvidenceWitness) bool {

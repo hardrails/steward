@@ -9,11 +9,13 @@ section: How-to
 `steward-mcp` lets a Model Context Protocol (MCP) client operate Steward Control, a
 local Steward node, or both. It communicates through standard input and output; it
 does not open a network listener. Fleet tools call the authenticated Steward
-Control API. Node tools call the same loopback Executor API as `stewardctl node`.
-The read-only evidence tool requires site-admin authority and returns a bounded
-checkpoint projection rather than raw proof signatures or export files. Optional
-task tools call the loopback Gateway API and accept only an exact request with a
-tenant-signed permit.
+Control API. Read-only operations tools return tenant-projected summaries,
+deterministic attention findings, and secret-free command or credential metadata.
+Node tools call the same loopback Executor API as `stewardctl node`. The read-only
+evidence tool requires site-admin authority and returns a bounded checkpoint
+projection rather than raw proof signatures or export files. Optional task tools
+call the loopback Gateway API and accept only an exact request with a tenant-signed
+permit.
 
 MCP is an interface, not an authorization boundary. Executor and Gateway still
 apply signed policy, generation fences, durable replay controls, journals, quotas,
@@ -177,6 +179,10 @@ lineage is one workload's persistent state history.
 | `steward_control_node_revoke` | Site-wide node and credential revocation after `acknowledge_node_revocation=true`; unavailable to a tenant operator without site authority. |
 | `steward_control_command_submit` | Retain one canonical-base64 signed Executor command after `acknowledge_command_submission=true`; the node still verifies signature and policy. |
 | `steward_control_command_status` | Read durable delivery lease and terminal-report metadata for one signed command. |
+| `steward_control_operations_summary` | Read capacity, command, evidence, and action-required totals for the credential's tenant projection or a site-admin-selected scope. |
+| `steward_control_attention_list` | Page through deterministic findings for node contact, evidence, command outcome, and capacity pressure. Findings cannot be acknowledged or cleared through MCP. |
+| `steward_control_command_list` | Page and filter secret-free command metadata without returning the signed command body, terminal result body, reported status text, or error codes. |
+| `steward_control_credential_list` | Page and filter non-secret operator and node credential metadata without returning bearer material or token verifiers. |
 | `steward_control_evidence_status` | Read the site-admin-only last-good receipt checkpoint and sticky rollback or equivocation finding. Returns receipt identity digests but omits raw public keys, signatures, and portable export files. |
 | `steward_admit` | Submit a base64 DSSE capsule and strict instance-intent JSON. |
 | `steward_status` | Read current hardened workload state. |

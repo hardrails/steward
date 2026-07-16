@@ -1,6 +1,6 @@
 ---
 title: Operate the bundled Steward control plane
-description: Install Steward Control, create tenants and scoped operators, enroll multi-tenant nodes, deliver signed commands, use MCP, and protect durable state.
+description: Install Steward Control, manage tenants and nodes, deliver signed commands, inspect fleet attention and safe metrics, use MCP, and protect durable state.
 section: How-to
 ---
 
@@ -8,8 +8,9 @@ section: How-to
 
 `steward-control` is Steward's optional self-hosted fleet service. It gives a site
 one bounded place to create tenants, issue scoped operator credentials, enroll
-nodes, inspect inventory, retain exact signed commands, lease those commands to
-Executor, and record terminal delivery status.
+nodes, inspect secret-free inventory and action-required facts, retain exact
+signed commands, lease those commands to Executor, record terminal delivery
+status, and optionally expose authenticated aggregate metrics.
 
 The controller does not sign commands or decide what a tenant may run. Tenant and
 site private signing keys remain on a trusted signing station or in a separately
@@ -76,6 +77,26 @@ curl --proto '=https' --tlsv1.2 -fsSL \
   sudo /bin/bash -p -s -- --non-interactive \
     --admin-token-out /root/steward-control-admin.token
 ```
+
+Operational metrics are opt-in and authenticated. Enable them during install, and
+set explicit attention thresholds when the defaults do not fit the site's expected
+report and delivery cadence:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/hardrails/steward/releases/latest/download/install-control.sh | \
+  sudo /bin/bash -p -s -- --non-interactive \
+    --admin-token-out /root/steward-control-admin.token \
+    --enable-metrics \
+    --node-stale-after 3m \
+    --evidence-stale-after 7m \
+    --command-overdue-after 10m \
+    --capacity-warning-percent 80
+```
+
+An upgrade preserves these settings unless replacement options are supplied.
+`--disable-metrics` returns to the secure default. Durations accept positive
+canonical `s`, `m`, or `h` values no greater than 8760 hours.
 
 The installer publishes that file with exclusive, no-symlink semantics and mode
 `0600`, then proves the bearer against a temporary loopback controller before it
@@ -517,6 +538,102 @@ issue a semantically equivalent replacement. `terminal_status: failed` is retain
 with the same fail-closed rule for compatibility. Current nodes report a proven
 pre-effect failure as `rejected`, which is safe to retire after acknowledgement.
 
+## Inspect fleet operations and action-required findings
+
+The operations view combines retained controller facts into a bounded,
+tenant-projected status. It does not run commands, clear ambiguity, acknowledge
+findings, or approve remediation.
+
+Read the summary:
+
+```console
+stewardctl control operations status \
+  -control-url "$CONTROL_URL" \
+  -token-file /secure/steward-control/tenant-a-operator.token \
+  -ca-file "$CONTROL_CA"
+```
+
+A tenant operator is always projected to its own tenant. A site administrator can
+omit `-tenant-id` for the site-wide view or select one exact tenant.
+
+List actionable facts, optionally filtering by stable reason:
+
+```console
+stewardctl control attention list \
+  -control-url "$CONTROL_URL" \
+  -token-file /secure/steward-control/tenant-a-operator.token \
+  -ca-file "$CONTROL_CA" \
+  -reason evidence_stale \
+  -limit 100
+```
+
+Reasons cover node contact, evidence witnessing and freshness, retained rollback
+or equivocation, overdue or expired command delivery, failed or unknown command
+outcomes, and capacity pressure. Threshold equality is actionable. Evidence
+freshness is process-local, so every node is conservatively stale or unknown after
+a controller restart until it reports again. The durable checkpoint and sticky
+finding do not reset.
+
+Inspect command metadata across a scope without returning signed command bytes,
+terminal result bodies, reported status text, or error codes:
+
+```console
+stewardctl control command list \
+  -control-url "$CONTROL_URL" \
+  -token-file /secure/steward-control/tenant-a-operator.token \
+  -ca-file "$CONTROL_CA" \
+  -state terminal \
+  -terminal-status outcome_unknown
+```
+
+Inspect non-secret credential metadata without returning bearer material or token
+verifiers:
+
+```console
+stewardctl control credential list \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -kind node \
+  -revoked any
+```
+
+When metrics are enabled, configure the scraper to read a least-privilege operator
+bearer from an owner-only file and send it as the `Authorization: Bearer` header to
+`/metrics`. Do not put the bearer directly in a command line or world-readable
+scraper configuration. Metrics use only fixed labels for scope, resource, state,
+status, reason, and severity. They omit tenant, node, credential, and command IDs,
+prompts, bodies, results, and credentials.
+
+Tenant query parameters are not part of Prometheus series identity. If one
+Prometheus server scrapes several tenant projections from the same controller,
+give each target a distinct trusted label or job. For example:
+
+```yaml
+scrape_configs:
+  - job_name: steward-control-tenants
+    scheme: https
+    metrics_path: /metrics
+    params:
+      tenant_id: [tenant-a]
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/steward-tenant-a.token
+    tls_config:
+      ca_file: /etc/prometheus/pki/steward-control-ca.crt
+    static_configs:
+      - targets: [control.customer.example:8443]
+    relabel_configs:
+      - source_labels: [__param_tenant_id]
+        target_label: steward_tenant
+```
+
+`steward_tenant` is added by the trusted scraper, not emitted by Steward. It
+prevents tenant projections from colliding, but it also places the tenant ID in
+Prometheus labels and storage. Use opaque operator-approved aliases or separate
+jobs when tenant names are sensitive, and keep the number of configured
+projections bounded.
+
 ## Give a trusted MCP client fleet tools
 
 `steward-mcp` can expose controller tools independently of node tools:
@@ -537,7 +654,8 @@ pre-effect failure as `rejected`, which is safe to retire after acknowledgement.
 ```
 
 Control-plane MCP exposes tenant list/create, node list/status/revoke, signed
-command submit/status, and read-only `steward_control_evidence_status`. The
+command submit/status, operations summary, attention, command and credential
+inventory, and read-only `steward_control_evidence_status`. The
 evidence tool projects the checkpoint and finding without returning raw proof
 signatures or export files, and the controller authorizes it only for a site-admin
 credential. Do not place a site-admin token in an MCP client that an untrusted
@@ -589,10 +707,16 @@ it restores the prior release. Back up before an upgrade, and do not delete the
 prior release until the controller has served real enrollment, polling, and command
 status traffic under the new one.
 
+Installing an older controller over a successfully upgraded installation is not a
+supported rollback procedure. Newer configuration keys or durable formats may be
+unknown to the older release. Use the installer's automatic failed-upgrade
+rollback, or restore a complete backup with a release documented as compatible
+with that backup.
+
 ## Current limits
 
 The controller intentionally has no user interface, enterprise single sign-on,
-approval workflow, artifact catalog, automatic placement, desired-state
+approval workflow, automatic placement, desired-state
 reconciliation, multi-controller high availability, or external database adapter.
 Its job is the small reliable path between an already authorized command and a
 node that independently verifies it.
@@ -614,11 +738,11 @@ backup, and restore instead of editing the packaged unit.
 Tenant, node, and credential records are retained even after revocation and keep
 consuming capacity. There is no supported purge or compaction operation for them,
 and an unresolved `failed` or `outcome_unknown` command also remains retained.
-These are safety bounds, not service-level objectives. The controller does not yet
-expose aggregate retained-record counts as metrics. Plan ceilings from expected
-lifecycle volume, alert on `capacity_exceeded` API responses, increase limits
-before known growth crosses them, and test restore procedures before production
-use.
+These are safety bounds, not service-level objectives. Use the operations summary,
+attention view, or opt-in metrics to monitor retained usage, but continue to plan
+ceilings from expected lifecycle volume, alert on `capacity_exceeded` API
+responses, increase limits before known growth crosses them, and test restore
+procedures before production use.
 
 See the [Steward Control OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-control.v1.yaml)
 for exact schemas, status codes, pagination, and error responses.

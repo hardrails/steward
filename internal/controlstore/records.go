@@ -609,6 +609,7 @@ func (store *Store) ExchangeEnrollment(auth *controlauth.Manager, raw, requestID
 		return file, nil
 	}
 	mutations := []mutation{credentialMutation(credential), enrollmentMutation(updated)}
+	pinnedEvidence := false
 	if node.Evidence == nil {
 		node.Evidence = &EvidenceWitness{
 			IdentityProof: proof, ReceiptNodeID: node.ID, Epoch: proof.Claim.ReceiptEpoch,
@@ -617,9 +618,13 @@ func (store *Store) ExchangeEnrollment(auth *controlauth.Manager, raw, requestID
 			ChainHash: evidenceGenesisHash,
 		}
 		mutations = append(mutations, mutation{Kind: mutationNode, Node: &node})
+		pinnedEvidence = true
 	}
 	if err := store.applyMutationsLocked(mutations...); err != nil {
 		return controlauth.NodeCredentialFile{}, err
+	}
+	if pinnedEvidence {
+		store.recordExecutorEvidenceReportLocked(node.ID, now)
 	}
 	return file, nil
 }

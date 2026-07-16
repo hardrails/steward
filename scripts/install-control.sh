@@ -59,6 +59,18 @@ Listener and bootstrap:
   --clear-tls                Remove preserved TLS configuration on a loopback listener
   --admin-token-out FILE     First-install/recovery token path; never overwritten
 
+Operations:
+  --enable-metrics           Expose authenticated Prometheus metrics
+  --disable-metrics          Disable Prometheus metrics (default)
+  --node-stale-after DURATION
+                             Active-node attention threshold (default: 2m)
+  --evidence-stale-after DURATION
+                             Evidence-report attention threshold (default: 5m)
+  --command-overdue-after DURATION
+                             Pending-command attention threshold (default: 5m)
+  --capacity-warning-percent PERCENT
+                             Capacity attention threshold (default: 80)
+
 Automation and inspection:
   --non-interactive          Never prompt
   --yes, -y                  Accept the interactive confirmation
@@ -69,7 +81,10 @@ Automation and inspection:
 Environment equivalents: STEWARD_CONTROL_VERSION, STEWARD_CONTROL_OFFLINE_DIR,
 STEWARD_CONTROL_ARTIFACT, STEWARD_CONTROL_CHECKSUMS, STEWARD_CONTROL_ADDR,
 STEWARD_CONTROL_TLS_CERT, STEWARD_CONTROL_TLS_KEY, and
-STEWARD_CONTROL_ADMIN_TOKEN_OUT.
+STEWARD_CONTROL_ADMIN_TOKEN_OUT. Operations equivalents are
+STEWARD_CONTROL_ENABLE_METRICS, STEWARD_CONTROL_NODE_STALE_AFTER,
+STEWARD_CONTROL_EVIDENCE_STALE_AFTER, STEWARD_CONTROL_COMMAND_OVERDUE_AFTER,
+and STEWARD_CONTROL_CAPACITY_WARNING_PERCENT.
 
 The safe default listens only on loopback. A non-loopback address is rejected
 unless both TLS files are supplied or an existing validated TLS configuration is
@@ -85,8 +100,24 @@ address=${STEWARD_CONTROL_ADDR:-}
 tls_cert=${STEWARD_CONTROL_TLS_CERT:-}
 tls_key=${STEWARD_CONTROL_TLS_KEY:-}
 admin_token_out=${STEWARD_CONTROL_ADMIN_TOKEN_OUT:-}
+enable_metrics=${STEWARD_CONTROL_ENABLE_METRICS:-}
+node_stale_after=${STEWARD_CONTROL_NODE_STALE_AFTER:-}
+evidence_stale_after=${STEWARD_CONTROL_EVIDENCE_STALE_AFTER:-}
+command_overdue_after=${STEWARD_CONTROL_COMMAND_OVERDUE_AFTER:-}
+capacity_warning_percent=${STEWARD_CONTROL_CAPACITY_WARNING_PERCENT:-}
 address_set=false
 [[ -z ${STEWARD_CONTROL_ADDR:-} ]] || address_set=true
+metrics_set=false
+[[ ${STEWARD_CONTROL_ENABLE_METRICS+x} == x ]] && metrics_set=true
+node_stale_set=false
+[[ ${STEWARD_CONTROL_NODE_STALE_AFTER+x} == x ]] && node_stale_set=true
+evidence_stale_set=false
+[[ ${STEWARD_CONTROL_EVIDENCE_STALE_AFTER+x} == x ]] && evidence_stale_set=true
+command_overdue_set=false
+[[ ${STEWARD_CONTROL_COMMAND_OVERDUE_AFTER+x} == x ]] && command_overdue_set=true
+capacity_warning_set=false
+[[ ${STEWARD_CONTROL_CAPACITY_WARNING_PERCENT+x} == x ]] && capacity_warning_set=true
+metrics_cli_choices=0
 tls_supplied=false
 [[ -z $tls_cert && -z $tls_key ]] || tls_supplied=true
 clear_tls=false
@@ -107,6 +138,27 @@ valid_release_version() {
 			if [[ $identifier =~ ^[0-9]+$ && $identifier == 0[0-9]* ]]; then return 1; fi
 		done
 	fi
+}
+
+valid_operations_duration() {
+	local value=$1 magnitude duration_unit multiplier seconds
+	[[ $value =~ ^([1-9][0-9]*)(s|m|h)$ ]] || return 1
+	magnitude=${BASH_REMATCH[1]}
+	duration_unit=${BASH_REMATCH[2]}
+	case "$duration_unit" in
+		s) multiplier=1 ;;
+		m) multiplier=60 ;;
+		h) multiplier=3600 ;;
+		*) return 1 ;;
+	esac
+	(( ${#magnitude} <= 8 )) || return 1
+	seconds=$((10#$magnitude * multiplier))
+	(( seconds > 0 && seconds <= 31536000 ))
+}
+
+valid_capacity_warning_percent() {
+	local value=$1
+	[[ $value =~ ^[1-9][0-9]*$ ]] && (( 10#$value >= 1 && 10#$value <= 100 ))
 }
 
 clean_absolute_path() {
@@ -665,6 +717,12 @@ while [[ $# -gt 0 ]]; do
 		--tls-key) tls_key=${2:-}; tls_supplied=true; shift 2 ;;
 		--clear-tls) clear_tls=true; shift ;;
 		--admin-token-out) admin_token_out=${2:-}; shift 2 ;;
+		--enable-metrics) enable_metrics=true; metrics_set=true; ((metrics_cli_choices += 1)); shift ;;
+		--disable-metrics) enable_metrics=false; metrics_set=true; ((metrics_cli_choices += 1)); shift ;;
+		--node-stale-after) node_stale_after=${2:-}; node_stale_set=true; shift 2 ;;
+		--evidence-stale-after) evidence_stale_after=${2:-}; evidence_stale_set=true; shift 2 ;;
+		--command-overdue-after) command_overdue_after=${2:-}; command_overdue_set=true; shift 2 ;;
+		--capacity-warning-percent) capacity_warning_percent=${2:-}; capacity_warning_set=true; shift 2 ;;
 		--non-interactive) non_interactive=true; shift ;;
 		--yes | -y) assume_yes=true; shift ;;
 		--no-start) start_service=false; shift ;;
@@ -679,6 +737,7 @@ machine=$(uname -m)
 case "$machine" in x86_64 | amd64) goarch=amd64 ;; aarch64 | arm64) goarch=arm64 ;; *) echo "install-control: unsupported architecture $machine" >&2; exit 2 ;; esac
 if [[ -n $offline_dir && -n $artifact ]]; then echo "install-control: choose --offline-dir or --artifact, not both" >&2; exit 2; fi
 if [[ $clear_tls == true && $tls_supplied == true ]]; then echo "install-control: --clear-tls cannot be combined with TLS files" >&2; exit 2; fi
+if (( metrics_cli_choices > 1 )); then echo "install-control: choose --enable-metrics or --disable-metrics, not both" >&2; exit 2; fi
 if [[ $version != latest ]] && ! valid_release_version "$version"; then echo "install-control: version must be latest or a vX.Y.Z release tag" >&2; exit 2; fi
 
 installer_lock_held=false
@@ -737,7 +796,7 @@ read_existing_config() {
 	fi
 	while IFS= read -r line || [[ -n $line ]]; do
 		case "$line" in "" | \#*) continue ;; esac
-		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE|STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE)=([^[:space:]]*)$ ]]; then
+		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE|STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE|STEWARD_CONTROL_ENABLE_METRICS|STEWARD_CONTROL_NODE_STALE_AFTER|STEWARD_CONTROL_EVIDENCE_STALE_AFTER|STEWARD_CONTROL_COMMAND_OVERDUE_AFTER|STEWARD_CONTROL_CAPACITY_WARNING_PERCENT)=([^[:space:]]*)$ ]]; then
 			echo "install-control: unsupported or malformed setting in $config_file" >&2; exit 1
 		fi
 		key=${BASH_REMATCH[1]}
@@ -768,6 +827,25 @@ read_existing_config() {
 			echo "install-control: existing TLS paths are not installer-managed" >&2; exit 1
 		fi
 	fi
+	if [[ ${existing[STEWARD_CONTROL_ENABLE_METRICS]+present} == present &&
+		${existing[STEWARD_CONTROL_ENABLE_METRICS]} != true &&
+		${existing[STEWARD_CONTROL_ENABLE_METRICS]} != false ]]; then
+		echo "install-control: existing metrics setting must be true or false" >&2
+		exit 1
+	fi
+	for key in STEWARD_CONTROL_NODE_STALE_AFTER STEWARD_CONTROL_EVIDENCE_STALE_AFTER \
+		STEWARD_CONTROL_COMMAND_OVERDUE_AFTER; do
+		if [[ ${existing[$key]+present} == present ]] &&
+			! valid_operations_duration "${existing[$key]}"; then
+			echo "install-control: existing $key is outside the supported duration contract" >&2
+			exit 1
+		fi
+	done
+	if [[ ${existing[STEWARD_CONTROL_CAPACITY_WARNING_PERCENT]+present} == present ]] &&
+		! valid_capacity_warning_percent "${existing[STEWARD_CONTROL_CAPACITY_WARNING_PERCENT]}"; then
+		echo "install-control: existing capacity warning percent is invalid" >&2
+		exit 1
+	fi
 	return 0
 }
 
@@ -780,6 +858,46 @@ config_inspect_dir=
 trap - EXIT
 if [[ $address_set == false ]]; then
 	if [[ $have_existing_config == true ]]; then address=${existing[STEWARD_CONTROL_ADDR]}; else address=127.0.0.1:8443; fi
+fi
+if [[ $metrics_set == false ]]; then
+	if [[ $have_existing_config == true &&
+		${existing[STEWARD_CONTROL_ENABLE_METRICS]+present} == present ]]; then
+		enable_metrics=${existing[STEWARD_CONTROL_ENABLE_METRICS]}
+	else
+		enable_metrics=false
+	fi
+fi
+if [[ $node_stale_set == false ]]; then
+	if [[ $have_existing_config == true &&
+		${existing[STEWARD_CONTROL_NODE_STALE_AFTER]+present} == present ]]; then
+		node_stale_after=${existing[STEWARD_CONTROL_NODE_STALE_AFTER]}
+	else
+		node_stale_after=2m
+	fi
+fi
+if [[ $evidence_stale_set == false ]]; then
+	if [[ $have_existing_config == true &&
+		${existing[STEWARD_CONTROL_EVIDENCE_STALE_AFTER]+present} == present ]]; then
+		evidence_stale_after=${existing[STEWARD_CONTROL_EVIDENCE_STALE_AFTER]}
+	else
+		evidence_stale_after=5m
+	fi
+fi
+if [[ $command_overdue_set == false ]]; then
+	if [[ $have_existing_config == true &&
+		${existing[STEWARD_CONTROL_COMMAND_OVERDUE_AFTER]+present} == present ]]; then
+		command_overdue_after=${existing[STEWARD_CONTROL_COMMAND_OVERDUE_AFTER]}
+	else
+		command_overdue_after=5m
+	fi
+fi
+if [[ $capacity_warning_set == false ]]; then
+	if [[ $have_existing_config == true &&
+		${existing[STEWARD_CONTROL_CAPACITY_WARNING_PERCENT]+present} == present ]]; then
+		capacity_warning_percent=${existing[STEWARD_CONTROL_CAPACITY_WARNING_PERCENT]}
+	else
+		capacity_warning_percent=80
+	fi
 fi
 preserve_tls=false
 if [[ $have_existing_config == true && $tls_supplied == false && $clear_tls == false && -n ${existing[STEWARD_CONTROL_TLS_CERT_FILE]} ]]; then
@@ -813,6 +931,20 @@ if [[ $non_interactive == false ]]; then
 	fi
 fi
 if [[ $version != latest ]] && ! valid_release_version "$version"; then echo "install-control: version must be latest or a vX.Y.Z release tag" >&2; exit 2; fi
+if [[ $enable_metrics != true && $enable_metrics != false ]]; then
+	echo "install-control: metrics setting must be true or false" >&2
+	exit 2
+fi
+if ! valid_operations_duration "$node_stale_after" ||
+	! valid_operations_duration "$evidence_stale_after" ||
+	! valid_operations_duration "$command_overdue_after"; then
+	echo "install-control: operations durations must be positive canonical s, m, or h values no greater than 8760h" >&2
+	exit 2
+fi
+if ! valid_capacity_warning_percent "$capacity_warning_percent"; then
+	echo "install-control: capacity warning percent must be an integer from 1 through 100" >&2
+	exit 2
+fi
 
 validate_address() {
 	local value=$1 host port octet
@@ -926,6 +1058,8 @@ if [[ $dry_run == true ]]; then
 	echo "  listen:       $address"
 	echo "  transport:    $([[ $tls_supplied == true || $preserve_tls == true ]] && echo TLS || echo loopback-HTTP)"
 	echo "  state:        $state_dir (preserved)"
+	echo "  metrics:      $([[ $enable_metrics == true ]] && echo authenticated || echo disabled)"
+	echo "  attention:    node=$node_stale_after evidence=$evidence_stale_after command=$command_overdue_after capacity=${capacity_warning_percent}%"
 	echo "  token output: ${admin_token_out:-required on first install}"
 	echo "  service:      $([[ $start_service == true ]] && echo enable-and-start || echo install-only)"
 	echo "  recovery:     $([[ $pending_transaction == true ]] && echo pending-on-next-install || echo none)"
@@ -1650,6 +1784,11 @@ config_tmp=$config_dir/.control.env.$$
 	echo "STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=$witness_public_key"
 	echo "STEWARD_CONTROL_TLS_CERT_FILE=$desired_cert"
 	echo "STEWARD_CONTROL_TLS_KEY_FILE=$desired_key"
+	echo "STEWARD_CONTROL_ENABLE_METRICS=$enable_metrics"
+	echo "STEWARD_CONTROL_NODE_STALE_AFTER=$node_stale_after"
+	echo "STEWARD_CONTROL_EVIDENCE_STALE_AFTER=$evidence_stale_after"
+	echo "STEWARD_CONTROL_COMMAND_OVERDUE_AFTER=$command_overdue_after"
+	echo "STEWARD_CONTROL_CAPACITY_WARNING_PERCENT=$capacity_warning_percent"
 } >"$config_tmp"
 chown root:root "$config_tmp"; chmod 0600 "$config_tmp"; mv "$config_tmp" "$config_file"
 

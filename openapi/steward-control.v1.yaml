@@ -6,7 +6,9 @@ info:
     Public contract for Steward's optional, self-hosted fleet controller. The
     controller manages tenant scopes, operator credentials, one-time node
     enrollment, node inventory, reclaimable delivery of exact tenant-signed
-    Executor commands, and independently witnessed Executor evidence heads.
+    Executor commands, independently witnessed Executor evidence heads, and
+    authenticated read-only fleet operations views. An optional authenticated
+    Prometheus endpoint exposes only bounded aggregate metrics.
 
     `steward-control` is a transport and state authority, not an execution
     authority. Tenant and site private signing keys stay outside this service.
@@ -45,6 +47,10 @@ tags:
     description: Site-admin inspection and portable verification of independently witnessed Executor evidence.
   - name: commands
     description: Exact tenant-signed Executor command submission and status.
+  - name: operations
+    description: Authenticated read-only fleet summaries, inventories, and derived attention.
+  - name: metrics
+    description: Optional authenticated Prometheus exposition of bounded fleet aggregates.
   - name: executor-uplink
     description: Node-authenticated delivery leasing and terminal reports.
   - name: evidence-uplink
@@ -645,6 +651,259 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/operations/summary:
+    get:
+      tags: [operations]
+      operationId: getControlOperationsSummary
+      summary: Summarize visible fleet operations
+      description: |
+        Derives capacity, command, evidence, and attention counts from retained
+        controller state without mutating it. The response is an observation,
+        not execution authority or workflow state: reading it does not
+        acknowledge an item, retry a command, or resolve a finding.
+
+        A site administrator receives a site-wide view when `tenant_id` is
+        omitted and one tenant projection when it is present. A tenant operator
+        receives its own tenant projection whether `tenant_id` is omitted or
+        names that tenant; another tenant is hidden as not found. Site-wide
+        capacity includes the retained tenant count and global limits. A tenant
+        projection uses per-tenant limits and omits tenant capacity.
+
+        Query parameters must be known, non-empty, and occur exactly once.
+      parameters:
+        - $ref: "#/components/parameters/OperationsTenantID"
+      responses:
+        "200":
+          description: A read-only summary generated from the caller's visible projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationsSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/operations/attention:
+    get:
+      tags: [operations]
+      operationId: listControlAttention
+      summary: List visible action-required facts
+      description: |
+        Deterministically derives bounded attention items from retained state
+        and configured freshness and capacity thresholds. Items are facts, not
+        mutable tickets: listing them does not acknowledge, assign, close, or
+        retry anything. An item can appear or disappear as retained state and
+        time change. Its ID remains stable for the same tenant, reason, and
+        resource identity across queries and controller restarts.
+
+        Site administrators may request the site-wide view or one tenant
+        projection. Site-wide node and command facts are still projected per
+        tenant, so a multi-tenant node can produce one item for each affected
+        tenant. Tenant operators can see only their own projection; another
+        tenant is hidden as not found.
+
+        `cursor` is opaque and bound to this endpoint, the caller's effective
+        site-wide or tenant projection, and the `reason` filter. Reusing it
+        across projections or with a changed filter returns `400`. It contains
+        no bearer credential, token MAC, command payload, or result text. A page
+        can contain fewer items than `limit` to keep the encoded response within
+        1 MiB. Query parameters must be known, non-empty, and occur exactly once.
+      parameters:
+        - $ref: "#/components/parameters/OperationsTenantID"
+        - $ref: "#/components/parameters/AttentionReasonFilter"
+        - $ref: "#/components/parameters/OperationsCursor"
+        - $ref: "#/components/parameters/OperationsLimit"
+      responses:
+        "200":
+          description: A bounded page of derived attention facts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttentionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/operations/commands:
+    get:
+      tags: [operations]
+      operationId: listControlCommandInventory
+      summary: List visible command metadata
+      description: |
+        Returns bounded delivery metadata without command payload bytes or
+        node-controlled result text. In particular, this inventory excludes the
+        signed DSSE command, runtime references, reported status text, error
+        codes, free-form result errors, and every other terminal result field.
+        Reading it does not reclaim a lease, retry a command, or otherwise
+        mutate delivery state.
+
+        A site administrator may request the site-wide inventory or one tenant
+        projection. A tenant operator receives only its own commands; another
+        tenant is hidden as not found. `terminal_status` is valid only when
+        `state=terminal`.
+
+        `cursor` is opaque and bound to this endpoint, the caller's effective
+        site-wide or tenant projection, and the `node_id`, `state`, and
+        `terminal_status` filters. Reusing it across projections or with any
+        changed filter returns `400`. It contains no bearer credential, command
+        payload, or result text. A page can contain fewer records than `limit`
+        to keep the encoded response within 1 MiB. Query parameters must be
+        known, non-empty, and occur exactly once.
+      parameters:
+        - $ref: "#/components/parameters/OperationsTenantID"
+        - $ref: "#/components/parameters/OperationsNodeID"
+        - $ref: "#/components/parameters/CommandStateFilter"
+        - $ref: "#/components/parameters/TerminalStatusFilter"
+        - $ref: "#/components/parameters/OperationsCursor"
+        - $ref: "#/components/parameters/OperationsLimit"
+      responses:
+        "200":
+          description: A bounded, metadata-only command page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandInventoryPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/operations/credentials:
+    get:
+      tags: [operations]
+      operationId: listControlCredentialInventory
+      summary: List visible credential metadata
+      description: |
+        Returns only the durable, non-secret half of visible operator and node
+        credentials. Bearer values, token MACs, authentication keys, and other
+        reproducible secret material are never returned.
+
+        A site administrator may request the site-wide inventory or one tenant
+        projection. A tenant projection excludes site-administrator
+        credentials, includes tenant operators bound to that tenant, and
+        includes node credentials bound to that tenant. A multi-tenant node
+        credential is projected to only the requested tenant instead of
+        revealing its other bindings. A tenant outside the caller's scope is
+        hidden as not found.
+
+        `role` and `node_id` cannot be combined. `kind=node` cannot be combined
+        with `role`, and `kind=operator` cannot be combined with `node_id`.
+
+        `cursor` is opaque and bound to this endpoint, the caller's effective
+        site-wide or tenant projection, and the `kind`, `role`, `node_id`, and
+        `revoked` filters. Reusing it across projections or with any changed
+        filter returns `400`. It contains no bearer credential, token MAC, or
+        other reproducible secret. A page can contain fewer records than
+        `limit` to keep the encoded response within 1 MiB. Query parameters
+        must be known, non-empty, and occur exactly once.
+      parameters:
+        - $ref: "#/components/parameters/OperationsTenantID"
+        - $ref: "#/components/parameters/CredentialKindFilter"
+        - $ref: "#/components/parameters/CredentialRoleFilter"
+        - $ref: "#/components/parameters/OperationsNodeID"
+        - $ref: "#/components/parameters/CredentialRevokedFilter"
+        - $ref: "#/components/parameters/OperationsCursor"
+        - $ref: "#/components/parameters/OperationsLimit"
+      responses:
+        "200":
+          description: A bounded page of non-secret credential metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialInventoryPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /metrics:
+    get:
+      tags: [metrics]
+      operationId: getControlMetrics
+      summary: Read optional authenticated Prometheus metrics
+      description: |
+        Exposes the same read-only operations summary as fixed-cardinality
+        Prometheus gauges. This route exists only when metrics are explicitly
+        enabled. When disabled, the controller treats `/metrics` as an unknown
+        route and returns its normal JSON 404 response before authentication.
+
+        When enabled, one valid operator bearer is required. Tenant projection
+        follows the operations endpoints: a site administrator can request the
+        site-wide view or one tenant, while a tenant operator receives only its
+        own tenant and sees another tenant as not found.
+
+        Labels use only closed sets: `scope` is `site` or `tenant`; capacity
+        `resource`, command `state` and `status`, evidence `status`, and
+        attention `reason` and `severity` use the fixed values documented by
+        the operations schemas. Tenant, node, credential, command, request, and
+        other resource identifiers are never metric labels.
+
+        Query parameters must be known, non-empty, and occur exactly once.
+      parameters:
+        - $ref: "#/components/parameters/OperationsTenantID"
+      responses:
+        "200":
+          description: Prometheus text exposition for the caller's visible projection.
+          content:
+            "text/plain; version=0.0.4; charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/ControlPrometheusMetrics"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Metrics are disabled before authentication, the requested tenant does not exist, or the tenant is outside the caller's scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /executor-uplink/poll:
     post:
       tags: [executor-uplink]
@@ -860,6 +1119,109 @@ components:
         minimum: 1
         maximum: 500
         default: 100
+    OperationsTenantID:
+      name: tenant_id
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Optional exact tenant projection. A site administrator can omit it for
+        a site-wide view or name one tenant. A tenant operator can omit it or
+        name its own tenant; another tenant is hidden as not found.
+      schema:
+        $ref: "#/components/schemas/Identifier128"
+    OperationsNodeID:
+      name: node_id
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: Return only records for this exact node identity.
+      schema:
+        $ref: "#/components/schemas/Identifier128"
+    OperationsCursor:
+      name: cursor
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Opaque unpadded base64url continuation cursor. It is bound to one
+        inventory endpoint, one effective site-wide or tenant projection, and
+        every endpoint filter. Cross-projection or changed-filter reuse returns
+        `400`. The cursor contains no bearer credential, token MAC, command
+        payload, or result text.
+      schema:
+        $ref: "#/components/schemas/OperationsCursor"
+    OperationsLimit:
+      name: limit
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Maximum records to return. Defaults to 100. The query value must be the
+        canonical decimal form of an integer from 1 through 500, without a sign
+        or leading zero.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+    AttentionReasonFilter:
+      name: reason
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: Return only attention items with this exact derived reason.
+      schema:
+        $ref: "#/components/schemas/AttentionReason"
+    CommandStateFilter:
+      name: state
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: Return only commands in this durable delivery state.
+      schema:
+        $ref: "#/components/schemas/CommandLifecycleState"
+    TerminalStatusFilter:
+      name: terminal_status
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Return only terminal commands with this node-reported delivery outcome.
+        This filter is valid only when `state=terminal`.
+      schema:
+        $ref: "#/components/schemas/TerminalCommandStatus"
+    CredentialKindFilter:
+      name: kind
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Return only operator or node credentials. `node` cannot be combined
+        with `role`; `operator` cannot be combined with `node_id`.
+      schema:
+        $ref: "#/components/schemas/ControlCredentialKind"
+    CredentialRoleFilter:
+      name: role
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Return only operator credentials with this role. It cannot be combined
+        with `node_id` or `kind=node`.
+      schema:
+        $ref: "#/components/schemas/ControlOperatorRole"
+    CredentialRevokedFilter:
+      name: revoked
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Return only credentials with this revocation state. When omitted, both
+        active and revoked credentials are returned. When present, the raw
+        query value must be the lowercase literal `true` or `false`.
+      schema:
+        type: boolean
   responses:
     BadRequest:
       description: The path, query, strict JSON body, or requested record violates the control contract.
@@ -964,6 +1326,378 @@ components:
         status:
           type: string
           enum: [ready]
+    OperationsCursor:
+      type: string
+      minLength: 1
+      maxLength: 5462
+      pattern: '^[A-Za-z0-9_-]+$'
+      description: |
+        Opaque canonical unpadded base64url cursor. Cursors are bound to an
+        endpoint, the effective site-wide or tenant projection, and every
+        endpoint filter. They contain no bearer credential, token MAC, command
+        payload, or result text.
+    CommandLifecycleState:
+      type: string
+      enum: [pending, leased, terminal]
+    TerminalCommandStatus:
+      type: string
+      enum: [done, failed, rejected, outcome_unknown]
+    ControlCredentialKind:
+      type: string
+      enum: [operator, node]
+    ControlOperatorRole:
+      type: string
+      enum: [site_admin, tenant_operator]
+    CapacityResource:
+      type: string
+      enum: [tenants, nodes, credentials, enrollments, commands]
+    AttentionReason:
+      type: string
+      enum:
+        - node_never_seen
+        - node_stale
+        - evidence_unwitnessed
+        - evidence_stale
+        - rollback_detected
+        - equivocation_detected
+        - command_pending_overdue
+        - command_lease_expired
+        - command_failed
+        - command_outcome_unknown
+        - capacity_warning
+    AttentionSeverity:
+      type: string
+      enum: [warning, critical]
+    AttentionResource:
+      type: string
+      enum: [node, evidence, command, capacity]
+    OperationsSummary:
+      type: object
+      additionalProperties: false
+      description: |
+        Read-only fleet facts derived at `generated_at`. `tenant_id` is omitted
+        for the site-wide projection and present for a tenant projection.
+      required: [generated_at, capacity, commands, evidence, attention]
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        capacity:
+          type: array
+          minItems: 4
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/CapacityUsage"
+        commands:
+          $ref: "#/components/schemas/CommandSummary"
+        evidence:
+          $ref: "#/components/schemas/EvidenceSummary"
+        attention:
+          $ref: "#/components/schemas/AttentionSummary"
+    CapacityUsage:
+      type: object
+      additionalProperties: false
+      required: [resource, used, limit, warning]
+      properties:
+        resource:
+          $ref: "#/components/schemas/CapacityResource"
+        used:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+        warning:
+          type: boolean
+          description: True when usage is at or above the configured percentage of the limit.
+    CommandSummary:
+      type: object
+      additionalProperties: false
+      required: [total, pending, leased, terminal, done, failed, rejected, outcome_unknown]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        pending:
+          type: integer
+          minimum: 0
+        leased:
+          type: integer
+          minimum: 0
+        terminal:
+          type: integer
+          minimum: 0
+        done:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        rejected:
+          type: integer
+          minimum: 0
+        outcome_unknown:
+          type: integer
+          minimum: 0
+    EvidenceSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - nodes
+        - active_nodes
+        - witnessed
+        - unwitnessed
+        - current
+        - stale
+        - rollback_detected
+        - equivocation_detected
+      properties:
+        nodes:
+          type: integer
+          minimum: 0
+        active_nodes:
+          type: integer
+          minimum: 0
+        witnessed:
+          type: integer
+          minimum: 0
+        unwitnessed:
+          type: integer
+          minimum: 0
+        current:
+          type: integer
+          minimum: 0
+        stale:
+          type: integer
+          minimum: 0
+          description: |
+            Active witnessed nodes whose last authenticated evidence report is
+            unknown or at least the configured stale threshold old. Report
+            recency is intentionally conservative after controller restart.
+        rollback_detected:
+          type: integer
+          minimum: 0
+        equivocation_detected:
+          type: integer
+          minimum: 0
+    AttentionSummary:
+      type: object
+      additionalProperties: false
+      required: [total, warnings, critical, counts]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        warnings:
+          type: integer
+          minimum: 0
+        critical:
+          type: integer
+          minimum: 0
+        counts:
+          type: array
+          maxItems: 11
+          items:
+            $ref: "#/components/schemas/AttentionCount"
+    AttentionCount:
+      type: object
+      additionalProperties: false
+      required: [reason, severity, count]
+      properties:
+        reason:
+          $ref: "#/components/schemas/AttentionReason"
+        severity:
+          $ref: "#/components/schemas/AttentionSeverity"
+        count:
+          type: integer
+          minimum: 1
+    AttentionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/AttentionItem"
+        next_cursor:
+          $ref: "#/components/schemas/OperationsCursor"
+    AttentionItem:
+      type: object
+      additionalProperties: false
+      description: |
+        One derived action-required fact. This is not mutable workflow state.
+        Resource-specific fields are present only when applicable.
+      required: [id, reason, severity, resource]
+      properties:
+        id:
+          type: string
+          minLength: 74
+          maxLength: 74
+          pattern: '^attention-[0-9a-f]{64}$'
+          description: Stable identity for the same tenant, reason, and resource identity.
+        reason:
+          $ref: "#/components/schemas/AttentionReason"
+        severity:
+          $ref: "#/components/schemas/AttentionSeverity"
+        resource:
+          $ref: "#/components/schemas/AttentionResource"
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        command_id:
+          $ref: "#/components/schemas/Identifier256"
+        capacity_resource:
+          $ref: "#/components/schemas/CapacityResource"
+        since:
+          type: string
+          format: date-time
+        state:
+          $ref: "#/components/schemas/CommandLifecycleState"
+        status:
+          $ref: "#/components/schemas/TerminalCommandStatus"
+        used:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+    CommandInventoryPage:
+      type: object
+      additionalProperties: false
+      required: [commands]
+      properties:
+        commands:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/CommandMetadata"
+        next_cursor:
+          $ref: "#/components/schemas/OperationsCursor"
+    CommandMetadata:
+      type: object
+      additionalProperties: false
+      description: |
+        Bounded delivery metadata. The signed command bytes and terminal result
+        object, including runtime references and free-form errors, are excluded.
+      required:
+        - tenant_id
+        - node_id
+        - id
+        - delivery_id
+        - digest
+        - state
+        - delivery_generation
+        - created_at
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        id:
+          $ref: "#/components/schemas/Identifier256"
+        delivery_id:
+          $ref: "#/components/schemas/Identifier256"
+        digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        state:
+          $ref: "#/components/schemas/CommandLifecycleState"
+        delivery_generation:
+          type: integer
+          format: int64
+          minimum: 0
+        lease_until:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        terminal_status:
+          $ref: "#/components/schemas/TerminalCommandStatus"
+        completed_at:
+          type: string
+          format: date-time
+    CredentialInventoryPage:
+      type: object
+      additionalProperties: false
+      required: [credentials]
+      properties:
+        credentials:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/CredentialMetadata"
+        next_cursor:
+          $ref: "#/components/schemas/OperationsCursor"
+    CredentialMetadata:
+      type: object
+      additionalProperties: false
+      description: |
+        Durable non-secret credential metadata. Bearer values and token MACs
+        are never included. Operator records use `role` and, for tenant
+        operators, `tenant_id`. Node records use `tenant_ids`, `node_id`, and
+        `audience`. A tenant projection narrows a multi-tenant node credential
+        to the requested tenant.
+      required: [id, kind, created_at, revoked]
+      properties:
+        id:
+          $ref: "#/components/schemas/Identifier128"
+        kind:
+          $ref: "#/components/schemas/ControlCredentialKind"
+        role:
+          $ref: "#/components/schemas/ControlOperatorRole"
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        tenant_ids:
+          type: array
+          minItems: 1
+          maxItems: 128
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        audience:
+          type: string
+          enum: [executor]
+        request_id:
+          allOf:
+            - $ref: "#/components/schemas/Identifier128"
+          description: Operator issuance request identity, when the credential was issued recoverably.
+        created_at:
+          type: string
+          format: date-time
+        revoked:
+          type: boolean
+        revoked_at:
+          type: string
+          format: date-time
+          description: Present exactly when `revoked` is true.
+    ControlPrometheusMetrics:
+      type: string
+      maxLength: 1048576
+      description: |
+        Prometheus text exposition version 0.0.4. The endpoint emits only gauge
+        series with fixed label domains:
+
+        - `steward_control_capacity_used`,
+          `steward_control_capacity_limit`, and
+          `steward_control_capacity_warning` use `scope` and `resource`.
+        - `steward_control_commands` uses `scope`, `state`, and `status`.
+          Emitted combinations are `all/all`, `pending/none`, `leased/none`,
+          and `terminal` with `all`, `done`, `failed`, `rejected`, or
+          `outcome_unknown`.
+        - `steward_control_evidence_nodes` uses `scope` and `status`, where
+          status is `all`, `active`, `witnessed`, `unwitnessed`, `current`,
+          `stale`, `rollback_detected`, or `equivocation_detected`.
+        - `steward_control_attention` uses `scope`, `reason`, and `severity`.
+
+        `scope` is only `site` or `tenant`. No tenant, node, credential,
+        command, request, or other resource identifier is emitted as a label.
     CreateTenantRequest:
       type: object
       additionalProperties: false

@@ -38,10 +38,12 @@ type options struct {
 	witnessPublicKeyFile                 string
 	tlsCertFile, tlsKeyFile              string
 	initialize, initializeWitnessKey     bool
+	enableMetrics                        bool
 	checkConfig, version                 bool
 	leaseDuration, terminalRetention     time.Duration
 	maxPoll                              int
 	limits                               controlstore.Limits
+	operationsThresholds                 controlstore.OperationsThresholds
 }
 
 func main() {
@@ -96,7 +98,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	handler, err := controlplane.New(controlplane.Config{
 		Store: store, Auth: manager, WitnessPrivateKey: witnessPrivateKey, LeaseDuration: parsed.leaseDuration,
-		MaxPoll: parsed.maxPoll, Logger: logger,
+		MaxPoll: parsed.maxPoll, Logger: logger, EnableMetrics: parsed.enableMetrics,
+		OperationsThresholds: parsed.operationsThresholds,
 	})
 	if err != nil {
 		return err
@@ -106,7 +109,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 
 func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	limits := controlstore.DefaultLimits()
-	parsed := options{limits: limits}
+	thresholds := controlstore.DefaultOperationsThresholds()
+	parsed := options{limits: limits, operationsThresholds: thresholds}
 	flags := flag.NewFlagSet("steward-control", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.StringVar(&parsed.address, "addr", defaultListenAddress, "control HTTP(S) listen address")
@@ -119,6 +123,7 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	flags.StringVar(&parsed.tlsKeyFile, "tls-key-file", "", "owner-only TLS server private key PEM")
 	flags.BoolVar(&parsed.initialize, "initialize", false, "initialize state and print a one-time site-admin token")
 	flags.BoolVar(&parsed.initializeWitnessKey, "initialize-witness-key", false, "create or validate the dedicated evidence-witness key pair and exit")
+	flags.BoolVar(&parsed.enableMetrics, "enable-metrics", false, "expose authenticated Prometheus metrics")
 	flags.BoolVar(&parsed.checkConfig, "check-config", false, "validate configuration and durable state without serving")
 	flags.BoolVar(&parsed.version, "version", false, "print version and exit")
 	flags.DurationVar(&parsed.leaseDuration, "delivery-lease", 2*time.Minute, "Executor delivery lease")
@@ -134,6 +139,30 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	flags.IntVar(&parsed.limits.MaxCommandsPerTenant, "max-commands-per-tenant", limits.MaxCommandsPerTenant, "maximum retained commands per tenant")
 	flags.IntVar(&parsed.limits.MaxCommandsPerNode, "max-commands-per-node", limits.MaxCommandsPerNode, "maximum retained commands per node")
 	flags.DurationVar(&parsed.terminalRetention, "terminal-retention", limits.TerminalRetention, "minimum retention for completed command status")
+	flags.DurationVar(
+		&parsed.operationsThresholds.NodeStaleAfter,
+		"node-stale-after",
+		thresholds.NodeStaleAfter,
+		"elapsed time before an active node requires attention",
+	)
+	flags.DurationVar(
+		&parsed.operationsThresholds.EvidenceStaleAfter,
+		"evidence-stale-after",
+		thresholds.EvidenceStaleAfter,
+		"elapsed time before an Executor evidence report requires attention",
+	)
+	flags.DurationVar(
+		&parsed.operationsThresholds.CommandOverdueAfter,
+		"command-overdue-after",
+		thresholds.CommandOverdueAfter,
+		"elapsed time before a pending command requires attention",
+	)
+	flags.IntVar(
+		&parsed.operationsThresholds.CapacityWarningPercent,
+		"capacity-warning-percent",
+		thresholds.CapacityWarningPercent,
+		"capacity percentage at which retained state requires attention",
+	)
 	if err := flags.Parse(arguments); err != nil {
 		return options{}, err
 	}
@@ -208,6 +237,9 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	}
 	parsed.limits.TerminalRetention = parsed.terminalRetention
 	if err := parsed.limits.Validate(); err != nil {
+		return options{}, err
+	}
+	if err := parsed.operationsThresholds.Validate(); err != nil {
 		return options{}, err
 	}
 	if parsed.leaseDuration <= 0 || parsed.leaseDuration > controlstore.MaxDeliveryLease || parsed.maxPoll <= 0 || parsed.maxPoll > 128 {

@@ -50,6 +50,11 @@ func main() {
 	address := flag.String("addr", "127.0.0.1:8443", "")
 	flag.String("tls-cert-file", "", "")
 	flag.String("tls-key-file", "", "")
+	flag.Bool("enable-metrics", false, "")
+	flag.Duration("node-stale-after", 2*time.Minute, "")
+	flag.Duration("evidence-stale-after", 5*time.Minute, "")
+	flag.Duration("command-overdue-after", 5*time.Minute, "")
+	flag.Int("capacity-warning-percent", 80, "")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("steward-control", version)
@@ -329,10 +334,11 @@ make_archive v1.3.0
 
 install_version() {
 	local version=$1
+	shift
 	/bin/bash -p /repo/scripts/install-control.sh --non-interactive \
 		--artifact "$fixture/assets/steward-control_${version}_linux_${test_goarch}.tar.gz" \
 		--checksums "$fixture/assets/checksums.txt" --version "$version" \
-		--admin-token-out /root/steward-control-admin.token
+		--admin-token-out /root/steward-control-admin.token "$@"
 }
 
 install_version_from_terraform_stage() {
@@ -352,6 +358,8 @@ install_version_from_terraform_stage() {
 	--checksums "$fixture/assets/checksums.txt" --version v1.0.0 \
 	--admin-token-out /root/steward-control-admin.token >/tmp/control-clean-dry-run.out
 grep -Fxq '  recovery:     none' /tmp/control-clean-dry-run.out
+grep -Fxq '  metrics:      disabled' /tmp/control-clean-dry-run.out
+grep -Fxq '  attention:    node=2m evidence=5m command=5m capacity=80%' /tmp/control-clean-dry-run.out
 [[ ! -e /run/steward-host-role && ! -e /run/steward-control-installer && ! -e /var/lib/steward-control-installer ]]
 
 install -d -m 0700 -o root -g root /run/steward-host-role
@@ -605,10 +613,31 @@ grep -Fxq 'STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=/var/lib/steward-control/wit
 	/etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=/var/lib/steward-control/witness.public.pem' \
 	/etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_ENABLE_METRICS=false' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_NODE_STALE_AFTER=2m' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_EVIDENCE_STALE_AFTER=5m' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_COMMAND_OVERDUE_AFTER=5m' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_CAPACITY_WARNING_PERCENT=80' /etc/steward-control/control.env
 if find /root -maxdepth 1 -name "$publication_pattern" -print -quit | grep -q .; then
 	echo "control-install-smoke: crash recovery left a temporary admin-token hardlink" >&2
 	exit 1
 fi
+
+install_version v1.0.0 --enable-metrics --node-stale-after 3m \
+	--evidence-stale-after 7m --command-overdue-after 11m \
+	--capacity-warning-percent 75
+grep -Fxq 'STEWARD_CONTROL_ENABLE_METRICS=true' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_NODE_STALE_AFTER=3m' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_EVIDENCE_STALE_AFTER=7m' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_COMMAND_OVERDUE_AFTER=11m' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_CAPACITY_WARNING_PERCENT=75' /etc/steward-control/control.env
+install_version v1.0.0
+grep -Fxq 'STEWARD_CONTROL_ENABLE_METRICS=true' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_NODE_STALE_AFTER=3m' /etc/steward-control/control.env
+install_version v1.0.0 --disable-metrics --node-stale-after 2m \
+	--evidence-stale-after 5m --command-overdue-after 5m \
+	--capacity-warning-percent 80
+grep -Fxq 'STEWARD_CONTROL_ENABLE_METRICS=false' /etc/steward-control/control.env
 
 assert_identity_collision_rejected() {
 	local label=$1 output=$2 doctor_failure=$3
@@ -656,6 +685,11 @@ STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=/var/lib/steward-control/witness.privat
 STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=/var/lib/steward-control/witness.public.pem
 STEWARD_CONTROL_TLS_CERT_FILE=/etc/steward-control/tls.crt
 STEWARD_CONTROL_TLS_KEY_FILE=/etc/steward-control/tls.key
+STEWARD_CONTROL_ENABLE_METRICS=false
+STEWARD_CONTROL_NODE_STALE_AFTER=2m
+STEWARD_CONTROL_EVIDENCE_STALE_AFTER=5m
+STEWARD_CONTROL_COMMAND_OVERDUE_AFTER=5m
+STEWARD_CONTROL_CAPACITY_WARNING_PERCENT=80
 EOF
 chown root:root /etc/steward-control/control.env
 chmod 0600 /etc/steward-control/control.env

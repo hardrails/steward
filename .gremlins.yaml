@@ -12,6 +12,13 @@
 # Floor rationale: measured efficacy is ~78% (Killed 102 / Lived 28). 70 leaves a
 # working margin above the run-to-run jitter inherent to mutation testing while
 # still catching a real regression in the gate-critical packages.
+#
+# Keep execution below the runner's CPU count. Each worker launches a separately
+# compiled package test, and four default workers exhausted the 4-vCPU runner's
+# memory once the control-plane packages grew. Two single-CPU test workers leave
+# memory and scheduler headroom while retaining parallel mutation coverage.
 unleash:
+  workers: 2
+  test-cpu: 1
   threshold:
     efficacy: 70

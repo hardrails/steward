@@ -31,6 +31,11 @@ backup, and restore under the new limit before production use.
 | `-witness-public-key-file` | `<state-dir>/witness.public.pem` | Matching Ed25519 public key distributed to offline verifiers |
 | `-tls-cert-file` | empty | PEM server certificate; must be paired with the key |
 | `-tls-key-file` | empty | Owner-only PEM server private key |
+| `-enable-metrics` | `false` | Expose authenticated Prometheus metrics on `/metrics` |
+| `-node-stale-after` | `2m` | Elapsed time before an active node requires attention |
+| `-evidence-stale-after` | `5m` | Elapsed time before a missing recent evidence report requires attention |
+| `-command-overdue-after` | `5m` | Elapsed time before a pending command requires attention |
+| `-capacity-warning-percent` | `80` | Retained-state percentage at which capacity requires attention |
 | `-delivery-lease` | `2m` | Time-limited node ownership of a delivery; positive and at most `10m` |
 | `-max-poll-deliveries` | `32` | Deliveries considered in one poll; 1 through 128 |
 | `-max-tenants` | `256` | Retained tenant records |
@@ -49,6 +54,28 @@ When the certificate and key are configured, Steward Control accepts TLS 1.3 onl
 The Steward Control client used by `stewardctl control` and `steward-mcp` likewise
 requires TLS 1.3 for HTTPS. Plain HTTP remains limited to a literal loopback
 listener.
+
+The operations thresholds must be positive and no greater than 365 days; the
+capacity percentage must be 1 through 100. Threshold equality is actionable.
+Evidence-report recency is intentionally process-local: after a controller
+restart, evidence is treated as stale or unknown until the node reports again.
+The durable checkpoint and sticky rollback or equivocation finding are unchanged.
+
+Controller metrics are disabled by default. When enabled, `/metrics` requires the
+same Bearer operator credential as the operations API. A site administrator sees
+site-wide values unless it selects one tenant; a tenant operator is projected to
+its own tenant. Metrics use fixed bounded labels for scope, resource, state,
+status, reason, and severity. They do not label tenant, node, credential, or
+command IDs and do not include prompts, bodies, results, or bearer material.
+
+The installer maps these settings through
+`STEWARD_CONTROL_ENABLE_METRICS`,
+`STEWARD_CONTROL_NODE_STALE_AFTER`,
+`STEWARD_CONTROL_EVIDENCE_STALE_AFTER`,
+`STEWARD_CONTROL_COMMAND_OVERDUE_AFTER`, and
+`STEWARD_CONTROL_CAPACITY_WARNING_PERCENT`. Use `--enable-metrics` or
+`--disable-metrics` and the matching threshold options for a one-command change.
+An upgrade preserves existing values when no replacement option is supplied.
 
 `-initialize` creates a store or recovers initial bootstrap state containing no
 tenant, node, enrollment, or command records and at most one bootstrap credential.
