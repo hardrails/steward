@@ -469,6 +469,70 @@ func TestExecutorEvidenceExportUsesDedicatedTrustedWitnessKey(t *testing.T) {
 	}
 }
 
+func TestExecutorEvidenceInspectionBindsControllerNodeAndReceiptIdentity(t *testing.T) {
+	receiptPublic, receiptPrivate := executorEvidenceTestKey(t)
+	identityClaim, err := NewExecutorEvidenceIdentityClaimV1(
+		"controller-a", "enrollment-a", "node-a", "node-a", 1, receiptPublic,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityProof, err := SignExecutorEvidenceIdentityClaimV1(identityClaim, receiptPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := ExecutorEvidenceHeadV1{
+		Stream: ExecutorEvidenceStreamV1, ReceiptNodeID: "node-a", ReceiptEpoch: 1,
+		Sequence: 3, ChainHash: evidenceTestDigest("a"), PublicKeySHA256: identityClaim.PublicKeySHA256,
+	}
+	inspection := ExecutorEvidenceInspectionV1{
+		ProtocolVersion: ExecutorEvidenceProtocolV1, ControllerInstanceID: "controller-a", ControlNodeID: "node-a",
+		IdentityProof: &identityProof,
+		Status: ExecutorEvidenceStatusV1{
+			State: ExecutorEvidenceStatusCurrent, Head: &head, WitnessedAt: "2026-07-16T01:02:03Z",
+		},
+	}
+	if err := inspection.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded, err := DecodeExecutorEvidenceInspectionV1(raw); err != nil || decoded.Status.Head == nil || decoded.Status.Head.Sequence != 3 {
+		t.Fatalf("decoded inspection=%+v err=%v", decoded, err)
+	}
+
+	legacy := ExecutorEvidenceInspectionV1{
+		ProtocolVersion: ExecutorEvidenceProtocolV1, ControllerInstanceID: "controller-a", ControlNodeID: "legacy-node",
+		Status: ExecutorEvidenceStatusV1{State: ExecutorEvidenceStatusUnwitnessed},
+	}
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy inspection is invalid: %v", err)
+	}
+	for name, mutate := range map[string]func(*ExecutorEvidenceInspectionV1){
+		"controller": func(value *ExecutorEvidenceInspectionV1) { value.ControllerInstanceID = "controller-b" },
+		"node":       func(value *ExecutorEvidenceInspectionV1) { value.ControlNodeID = "node-b" },
+		"receipt": func(value *ExecutorEvidenceInspectionV1) {
+			copyHead := *value.Status.Head
+			copyHead.ReceiptNodeID = "node-b"
+			value.Status.Head = &copyHead
+		},
+		"missing proof": func(value *ExecutorEvidenceInspectionV1) { value.IdentityProof = nil },
+		"unwitnessed with proof": func(value *ExecutorEvidenceInspectionV1) {
+			value.Status = ExecutorEvidenceStatusV1{State: ExecutorEvidenceStatusUnwitnessed}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := inspection
+			mutate(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("invalid inspection was accepted")
+			}
+		})
+	}
+}
+
 func TestExecutorEvidencePollAndChallengeValidation(t *testing.T) {
 	public, _ := executorEvidenceTestKey(t)
 	challenge := evidenceTestChallenge(t, 1)

@@ -155,6 +155,16 @@ type ExecutorEvidenceStatusV1 struct {
 	Finding     *ExecutorEvidenceFindingV1 `json:"finding,omitempty"`
 }
 
+// ExecutorEvidenceInspectionV1 is the bounded online view of one controller
+// witness. IdentityProof is absent only for a legacy, unwitnessed node.
+type ExecutorEvidenceInspectionV1 struct {
+	ProtocolVersion      int                              `json:"protocol_version"`
+	ControllerInstanceID string                           `json:"controller_instance_id"`
+	ControlNodeID        string                           `json:"control_node_id"`
+	IdentityProof        *ExecutorEvidenceIdentityProofV1 `json:"identity_proof,omitempty"`
+	Status               ExecutorEvidenceStatusV1         `json:"status"`
+}
+
 // ExecutorEvidenceExportStatementV1 is the non-secret controller assertion
 // carried by an offline witness export. IdentityProof lets an auditor verify
 // that the enrolled node possessed the pinned receipt key.
@@ -561,6 +571,42 @@ func (status ExecutorEvidenceStatusV1) Validate() error {
 	return nil
 }
 
+func (inspection ExecutorEvidenceInspectionV1) Validate() error {
+	if inspection.ProtocolVersion != ExecutorEvidenceProtocolV1 ||
+		!validEvidenceIdentity(inspection.ControllerInstanceID, 128) ||
+		!validEvidenceIdentity(inspection.ControlNodeID, 128) {
+		return errors.New("executor evidence inspection identity is invalid")
+	}
+	if err := inspection.Status.Validate(); err != nil {
+		return err
+	}
+	if inspection.IdentityProof == nil {
+		if inspection.Status.State != ExecutorEvidenceStatusUnwitnessed {
+			return errors.New("witnessed executor evidence inspection omits its identity proof")
+		}
+		return nil
+	}
+	if inspection.Status.State == ExecutorEvidenceStatusUnwitnessed {
+		return errors.New("unwitnessed executor evidence inspection contains an identity proof")
+	}
+	if err := inspection.IdentityProof.Validate(); err != nil {
+		return err
+	}
+	claim := inspection.IdentityProof.Claim
+	if claim.ControllerInstanceID != inspection.ControllerInstanceID || claim.ControlNodeID != inspection.ControlNodeID {
+		return errors.New("executor evidence inspection does not match its enrolled identity")
+	}
+	if inspection.Status.Head == nil {
+		return errors.New("witnessed executor evidence inspection omits its checkpoint")
+	}
+	head := *inspection.Status.Head
+	if head.Stream != claim.Stream || head.ReceiptNodeID != claim.ReceiptNodeID ||
+		head.ReceiptEpoch != claim.ReceiptEpoch || head.PublicKeySHA256 != claim.PublicKeySHA256 {
+		return errors.New("executor evidence inspection checkpoint does not match its enrolled identity")
+	}
+	return nil
+}
+
 func (statement ExecutorEvidenceExportStatementV1) Validate() error {
 	if statement.ProtocolVersion != ExecutorEvidenceProtocolV1 ||
 		!validEvidenceIdentity(statement.ControllerInstanceID, 128) ||
@@ -721,6 +767,12 @@ func DecodeExecutorEvidenceReportV1(raw []byte) (ExecutorEvidenceReportV1, error
 
 func DecodeExecutorEvidenceReportResponseV1(raw []byte) (ExecutorEvidenceReportResponseV1, error) {
 	var value ExecutorEvidenceReportResponseV1
+	err := decodeExecutorEvidenceJSON(raw, &value, func() error { return value.Validate() })
+	return value, err
+}
+
+func DecodeExecutorEvidenceInspectionV1(raw []byte) (ExecutorEvidenceInspectionV1, error) {
+	var value ExecutorEvidenceInspectionV1
 	err := decodeExecutorEvidenceJSON(raw, &value, func() error { return value.Validate() })
 	return value, err
 }
