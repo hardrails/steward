@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/securefile"
 )
@@ -62,11 +63,12 @@ type Operator struct {
 }
 
 type Enrollment struct {
-	EnrollmentID    string   `json:"enrollment_id"`
-	EnrollmentToken string   `json:"enrollment_token"`
-	NodeID          string   `json:"node_id"`
-	TenantIDs       []string `json:"tenant_ids,omitempty"`
-	ExpiresAt       string   `json:"expires_at"`
+	ControllerInstanceID string   `json:"controller_instance_id"`
+	EnrollmentID         string   `json:"enrollment_id"`
+	EnrollmentToken      string   `json:"enrollment_token"`
+	NodeID               string   `json:"node_id"`
+	TenantIDs            []string `json:"tenant_ids,omitempty"`
+	ExpiresAt            string   `json:"expires_at"`
 }
 
 // DecodeEnrollmentCapability strictly decodes an enrollment capability read
@@ -291,6 +293,21 @@ func (c *Client) Enroll(ctx context.Context, enrollmentToken, requestID string) 
 		EnrollmentToken string `json:"enrollment_token"`
 		RequestID       string `json:"request_id"`
 	}{EnrollmentToken: enrollmentToken, RequestID: requestID}, &credential, false)
+	return credential, err
+}
+
+func (c *Client) EnrollWithEvidence(ctx context.Context, enrollmentToken, requestID string, proof controlprotocol.ExecutorEvidenceIdentityProofV1) (NodeCredential, error) {
+	if err := proof.Validate(); err != nil {
+		return NodeCredential{}, fmt.Errorf("validate executor evidence identity proof: %w", err)
+	}
+	var credential NodeCredential
+	err := c.do(ctx, http.MethodPost, "/v1/enroll", struct {
+		EnrollmentToken       string                                          `json:"enrollment_token"`
+		RequestID             string                                          `json:"request_id"`
+		EvidenceIdentityProof controlprotocol.ExecutorEvidenceIdentityProofV1 `json:"evidence_identity_proof"`
+	}{
+		EnrollmentToken: enrollmentToken, RequestID: requestID, EvidenceIdentityProof: proof,
+	}, &credential, false)
 	return credential, err
 }
 
