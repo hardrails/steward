@@ -3,6 +3,7 @@ package ocibundle
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +13,139 @@ import (
 	"syscall"
 	"testing"
 )
+
+func TestContextAwareAPIsPreserveSuccessfulBehavior(t *testing.T) {
+	archive, identity := testArchive(t, archiveOptions{extraBlob: true})
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedArchive := ArchiveIdentity{Digest: testDigest(raw), Bytes: int64(len(raw))}
+
+	image, err := InspectContext(context.Background(), archive, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image.Identity != identity {
+		t.Fatalf("inspected identity = %#v, want %#v", image.Identity, identity)
+	}
+	if _, err := VerifyContext(context.Background(), archive, identity, DefaultLimits()); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := InspectSourceContext(context.Background(), archive, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Archive != expectedArchive || inspection.Image.Identity != identity {
+		t.Fatalf("source inspection = %#v", inspection)
+	}
+	prepared, err := PrepareContext(context.Background(), archive, identity, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err = PrepareBoundContext(context.Background(), archive, identity, expectedArchive, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Archive != expectedArchive || prepared.Image.Identity != identity {
+		t.Fatalf("prepared result = archive %#v image %#v", prepared.Archive, prepared.Image.Identity)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestContextAwareAPIsRejectCanceledContext(t *testing.T) {
+	archive, identity := testArchive(t, archiveOptions{})
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedArchive := ArchiveIdentity{Digest: testDigest(raw), Bytes: int64(len(raw))}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{"inspect", func() error {
+			_, err := InspectContext(ctx, archive, DefaultLimits())
+			return err
+		}},
+		{"verify", func() error {
+			_, err := VerifyContext(ctx, archive, identity, DefaultLimits())
+			return err
+		}},
+		{"inspect source", func() error {
+			_, err := InspectSourceContext(ctx, archive, DefaultLimits())
+			return err
+		}},
+		{"prepare", func() error {
+			_, err := PrepareContext(ctx, archive, identity, DefaultLimits())
+			return err
+		}},
+		{"prepare bound", func() error {
+			_, err := PrepareBoundContext(ctx, archive, identity, expectedArchive, DefaultLimits())
+			return err
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want context cancellation", err)
+			}
+		})
+	}
+}
+
+func TestPrepareBoundContextCancelsSnapshotAndCleansTemporaryFiles(t *testing.T) {
+	archive, identity := testArchive(t, archiveOptions{})
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedArchive := ArchiveIdentity{Digest: testDigest(raw), Bytes: int64(len(raw))}
+	privateTemp := t.TempDir()
+	t.Setenv("TMPDIR", privateTemp)
+
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &cancelWhenSnapshotWrittenContext{
+		Context: base,
+		cancel:  cancel,
+		root:    privateTemp,
+	}
+	if _, err := PrepareBoundContext(ctx, archive, identity, expectedArchive, DefaultLimits()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context cancellation during snapshot", err)
+	}
+	entries, err := os.ReadDir(privateTemp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("private temporary directory retained canceled artifacts: %v", entries)
+	}
+}
+
+func TestSanitizationStopsWhenOutputContextIsCanceled(t *testing.T) {
+	archive, _ := testArchive(t, archiveOptions{})
+	image, err := Inspect(archive, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	output := &cancelAfterWrite{cancel: cancel}
+	if err := writeSanitizedArchiveContext(ctx, archive, output, image, DefaultLimits()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context cancellation", err)
+	}
+	if output.writes != 1 {
+		t.Fatalf("output writes = %d, want cancellation after first write", output.writes)
+	}
+}
 
 func TestPrepareSnapshotsAndSanitizesDockerLoadArchive(t *testing.T) {
 	archive, identity := testArchive(t, archiveOptions{extraBlob: true, repositories: true})
@@ -134,6 +268,56 @@ func TestPrepareBoundRequiresExactSourceBytes(t *testing.T) {
 	if _, err := PrepareBound(archive, identity, ArchiveIdentity{}, DefaultLimits()); err == nil ||
 		!strings.Contains(err.Error(), "expected archive identity") {
 		t.Fatalf("invalid archive identity err = %v", err)
+	}
+}
+
+func TestInspectSourceBindsExactArchiveBytesAndImage(t *testing.T) {
+	archive, identity := testArchive(t, archiveOptions{extraBlob: true})
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := InspectSource(archive, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Archive != (ArchiveIdentity{Digest: testDigest(raw), Bytes: int64(len(raw))}) {
+		t.Fatalf("source archive identity = %#v", inspection.Archive)
+	}
+	if inspection.Image.Identity != identity || inspection.Image.BlobCount != 4 {
+		t.Fatalf("source image = %#v, want identity %#v and four blobs", inspection.Image, identity)
+	}
+
+	prepared, err := PrepareBound(archive, inspection.Image.Identity, inspection.Archive, DefaultLimits())
+	if err != nil {
+		t.Fatalf("prepare inspected source: %v", err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInspectSourceRejectsUnsafePathsAndLimits(t *testing.T) {
+	archive, _ := testArchive(t, archiveOptions{})
+	directory := t.TempDir()
+	symlink := filepath.Join(directory, "image.link")
+	if err := os.Symlink(archive, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectSource(symlink, DefaultLimits()); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("symlink inspection err = %v", err)
+	}
+	if _, err := InspectSource(archive, Limits{}); err == nil || !strings.Contains(err.Error(), "limits") {
+		t.Fatalf("invalid limits err = %v", err)
+	}
+	limits := DefaultLimits()
+	info, err := os.Stat(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits.MaxArchiveBytes = info.Size() - 1
+	if _, err := InspectSource(archive, limits); err == nil || !strings.Contains(err.Error(), "size must be") {
+		t.Fatalf("oversized source err = %v", err)
 	}
 }
 
@@ -362,6 +546,38 @@ var errRejectWrite = errors.New("test sink rejected bytes")
 type rejectingWriter struct{}
 
 func (rejectingWriter) Write([]byte) (int, error) { return 0, errRejectWrite }
+
+type cancelAfterWrite struct {
+	cancel context.CancelFunc
+	writes int
+}
+
+func (writer *cancelAfterWrite) Write(raw []byte) (int, error) {
+	writer.writes++
+	writer.cancel()
+	return len(raw), nil
+}
+
+type cancelWhenSnapshotWrittenContext struct {
+	context.Context
+	cancel context.CancelFunc
+	root   string
+}
+
+func (ctx *cancelWhenSnapshotWrittenContext) Err() error {
+	if err := ctx.Context.Err(); err != nil {
+		return err
+	}
+	matches, _ := filepath.Glob(filepath.Join(ctx.root, ".steward-oci-*", "source.snapshot"))
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err == nil && info.Size() > 0 {
+			ctx.cancel()
+			break
+		}
+	}
+	return ctx.Context.Err()
+}
 
 func readTarEntries(t *testing.T, raw []byte) map[string][]byte {
 	t.Helper()

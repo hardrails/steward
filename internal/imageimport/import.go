@@ -60,6 +60,11 @@ func Execute(ctx context.Context, request Request) (Result, error) {
 			return Result{}, errors.New("image import site-root trust is invalid")
 		}
 	}
+	ctx, cancel := context.WithTimeout(ctx, request.Timeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	verified, err := admission.VerifyCapsuleForImport(
 		request.CapsuleEnvelope,
 		request.PolicyEnvelope,
@@ -81,9 +86,14 @@ func Execute(ctx context.Context, request Request) (Result, error) {
 	}
 	var prepared *ocibundle.Prepared
 	if request.Archive.Digest == "" && request.Archive.Bytes == 0 {
-		prepared, err = ocibundle.Prepare(request.ArchivePath, expected, ocibundle.DefaultLimits())
+		prepared, err = ocibundle.PrepareContext(
+			ctx, request.ArchivePath, expected, ocibundle.DefaultLimits(),
+		)
 	} else {
-		prepared, err = ocibundle.PrepareBound(request.ArchivePath, expected, request.Archive, ocibundle.DefaultLimits())
+		prepared, err = ocibundle.PrepareBoundContext(
+			ctx, request.ArchivePath, expected, request.Archive,
+			ocibundle.DefaultLimits(),
+		)
 	}
 	if err != nil {
 		return Result{}, fmt.Errorf("prepare OCI archive: %w", err)

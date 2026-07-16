@@ -18,6 +18,8 @@ func TestExecuteRejectsIncompleteOrUnboundedRequestBeforeEffects(t *testing.T) {
 		DockerSocket:    "/var/run/docker.sock",
 		Timeout:         time.Minute,
 	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
 	tests := []struct {
 		name    string
 		context context.Context
@@ -25,6 +27,7 @@ func TestExecuteRejectsIncompleteOrUnboundedRequestBeforeEffects(t *testing.T) {
 		want    string
 	}{
 		{name: "nil context", context: nil, want: "context is required"},
+		{name: "canceled context", context: canceled, want: "context canceled"},
 		{name: "missing archive", context: context.Background(), mutate: func(request *Request) {
 			request.ArchivePath = ""
 		}, want: "incomplete or unbounded"},

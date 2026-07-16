@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -88,12 +89,25 @@ type Image struct {
 // image. The archive must be a regular file without group/world write access so
 // its multiple bounded verification passes cannot be raced by another local user.
 func Inspect(archivePath string, limits Limits) (Image, error) {
+	return InspectContext(context.Background(), archivePath, limits)
+}
+
+// InspectContext is Inspect with cancellation propagated through every archive
+// pass. Cancellation never converts a partially inspected archive into a valid
+// image.
+func InspectContext(ctx context.Context, archivePath string, limits Limits) (Image, error) {
+	if err := contextError(ctx); err != nil {
+		return Image{}, err
+	}
 	if err := limits.validate(); err != nil {
 		return Image{}, err
 	}
 	info, err := os.Lstat(archivePath)
 	if err != nil {
 		return Image{}, fmt.Errorf("stat OCI archive: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return Image{}, err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
 		return Image{}, errors.New("OCI archive must be a regular file with no group/world write permission")
@@ -102,17 +116,23 @@ func Inspect(archivePath string, limits Limits) (Image, error) {
 		return Image{}, fmt.Errorf("OCI archive size must be between 1 and %d bytes", limits.MaxArchiveBytes)
 	}
 
-	scan, err := scanArchive(archivePath, limits)
+	scan, err := scanArchiveContext(ctx, archivePath, limits)
 	if err != nil {
 		return Image{}, err
 	}
 	var layout imageLayout
-	if err := decodeStrictJSON(scan.layout, &layout); err != nil || layout.ImageLayoutVersion != "1.0.0" {
+	if err := decodeStrictJSONContext(ctx, scan.layout, &layout); err != nil || layout.ImageLayoutVersion != "1.0.0" {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return Image{}, contextErr
+		}
 		return Image{}, errors.New("OCI archive has an invalid oci-layout document")
 	}
 	var index imageIndex
-	if err := decodeStrictJSON(scan.index, &index); err != nil || index.SchemaVersion != 2 ||
+	if err := decodeStrictJSONContext(ctx, scan.index, &index); err != nil || index.SchemaVersion != 2 ||
 		index.MediaType != ociIndexMediaType || len(index.Manifests) != 1 {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return Image{}, contextErr
+		}
 		return Image{}, errors.New("OCI archive must contain one unambiguous OCI image manifest descriptor")
 	}
 	manifestDescriptor := index.Manifests[0]
@@ -123,13 +143,16 @@ func Inspect(archivePath string, limits Limits) (Image, error) {
 	if err := scan.matchBlob(manifestDescriptor); err != nil {
 		return Image{}, err
 	}
-	manifestRaw, err := readBlob(archivePath, manifestDescriptor.Digest, manifestDescriptor.Size, limits)
+	manifestRaw, err := readBlobContext(ctx, archivePath, manifestDescriptor.Digest, manifestDescriptor.Size, limits)
 	if err != nil {
 		return Image{}, err
 	}
 	var manifest imageManifest
-	if err := decodeStrictJSON(manifestRaw, &manifest); err != nil || manifest.SchemaVersion != 2 ||
+	if err := decodeStrictJSONContext(ctx, manifestRaw, &manifest); err != nil || manifest.SchemaVersion != 2 ||
 		manifest.MediaType != manifestDescriptor.MediaType || manifest.ArtifactType != "" || manifest.Subject != nil {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return Image{}, contextErr
+		}
 		return Image{}, errors.New("OCI image manifest is invalid or is an artifact manifest")
 	}
 	if err := validateDescriptor(manifest.Config, configMediaTypes); err != nil || len(manifest.Config.URLs) != 0 || len(manifest.Config.Data) != 0 {
@@ -143,6 +166,9 @@ func Inspect(archivePath string, limits Limits) (Image, error) {
 	}
 	layerDigests := make([]string, 0, len(manifest.Layers))
 	for _, layer := range manifest.Layers {
+		if err := contextError(ctx); err != nil {
+			return Image{}, err
+		}
 		if err := validateDescriptor(layer, layerMediaTypes); err != nil || len(layer.URLs) != 0 || len(layer.Data) != 0 {
 			return Image{}, fmt.Errorf("invalid OCI layer descriptor: %w", nonNil(err, errors.New("embedded or remote layer content is not allowed")))
 		}
@@ -151,15 +177,18 @@ func Inspect(archivePath string, limits Limits) (Image, error) {
 		}
 		layerDigests = append(layerDigests, layer.Digest)
 	}
-	configRaw, err := readBlob(archivePath, manifest.Config.Digest, manifest.Config.Size, limits)
+	configRaw, err := readBlobContext(ctx, archivePath, manifest.Config.Digest, manifest.Config.Size, limits)
 	if err != nil {
 		return Image{}, err
 	}
-	if err := rejectDuplicateJSON(configRaw); err != nil {
+	if err := rejectDuplicateJSONContext(ctx, configRaw); err != nil {
 		return Image{}, fmt.Errorf("OCI image config is not strict JSON: %w", err)
 	}
 	var config imageConfig
-	if err := json.Unmarshal(configRaw, &config); err != nil {
+	if err := contextError(ctx); err != nil {
+		return Image{}, err
+	}
+	if err := decodeJSONContext(ctx, configRaw, &config); err != nil {
 		return Image{}, fmt.Errorf("decode OCI image config: %w", err)
 	}
 	platform := Platform{OS: config.OS, Architecture: config.Architecture, Variant: config.Variant}
@@ -174,10 +203,13 @@ func Inspect(archivePath string, limits Limits) (Image, error) {
 	}
 	var repoTags []string
 	if len(scan.dockerManifest) != 0 {
-		repoTags, err = validateDockerManifest(scan.dockerManifest, manifest.Config, manifest.Layers)
+		repoTags, err = validateDockerManifestContext(ctx, scan.dockerManifest, manifest.Config, manifest.Layers)
 		if err != nil {
 			return Image{}, err
 		}
+	}
+	if err := contextError(ctx); err != nil {
+		return Image{}, err
 	}
 	return Image{
 		Identity:          Identity{ManifestDigest: manifestDescriptor.Digest, ConfigDigest: manifest.Config.Digest, Platform: platform},
@@ -188,11 +220,23 @@ func Inspect(archivePath string, limits Limits) (Image, error) {
 
 // Verify requires an inspected archive to match an independently signed identity.
 func Verify(archivePath string, expected Identity, limits Limits) (Image, error) {
+	return VerifyContext(context.Background(), archivePath, expected, limits)
+}
+
+// VerifyContext is Verify with cancellation propagated through inspection and
+// identity comparison.
+func VerifyContext(ctx context.Context, archivePath string, expected Identity, limits Limits) (Image, error) {
+	if err := contextError(ctx); err != nil {
+		return Image{}, err
+	}
 	if err := expected.validate(); err != nil {
 		return Image{}, fmt.Errorf("expected image identity: %w", err)
 	}
-	image, err := Inspect(archivePath, limits)
+	image, err := InspectContext(ctx, archivePath, limits)
 	if err != nil {
+		return Image{}, err
+	}
+	if err := contextError(ctx); err != nil {
 		return Image{}, err
 	}
 	if image.Identity != expected {
@@ -320,8 +364,11 @@ func (s archiveScan) matchBlob(value descriptor) error {
 	return nil
 }
 
-func scanArchive(archivePath string, limits Limits) (_ archiveScan, returnErr error) {
-	reader, closeReader, err := openArchive(archivePath, limits)
+func scanArchiveContext(ctx context.Context, archivePath string, limits Limits) (_ archiveScan, returnErr error) {
+	if err := contextError(ctx); err != nil {
+		return archiveScan{}, err
+	}
+	reader, closeReader, err := openArchiveContext(ctx, archivePath, limits)
 	if err != nil {
 		return archiveScan{}, err
 	}
@@ -335,11 +382,20 @@ func scanArchive(archivePath string, limits Limits) (_ archiveScan, returnErr er
 	seen := make(map[string]struct{})
 	var total int64
 	for entries := 0; ; entries++ {
+		if err := contextError(ctx); err != nil {
+			return archiveScan{}, err
+		}
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return archiveScan{}, contextErr
+			}
 			break
 		}
 		if err != nil {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return archiveScan{}, contextErr
+			}
 			return archiveScan{}, fmt.Errorf("read OCI tar header: %w", err)
 		}
 		if entries >= limits.MaxEntries {
@@ -373,6 +429,9 @@ func scanArchive(archivePath string, limits Limits) (_ archiveScan, returnErr er
 			}
 			raw, err := io.ReadAll(io.LimitReader(tarReader, limits.MaxMetadataBytes+1))
 			if err != nil || int64(len(raw)) != header.Size {
+				if contextErr := contextError(ctx); contextErr != nil {
+					return archiveScan{}, contextErr
+				}
 				return archiveScan{}, fmt.Errorf("read OCI metadata %q: %w", name, nonNil(err, io.ErrUnexpectedEOF))
 			}
 			switch name {
@@ -391,6 +450,9 @@ func scanArchive(archivePath string, limits Limits) (_ archiveScan, returnErr er
 			hash := sha256.New()
 			written, err := io.Copy(hash, tarReader)
 			if err != nil || written != header.Size {
+				if contextErr := contextError(ctx); contextErr != nil {
+					return archiveScan{}, contextErr
+				}
 				return archiveScan{}, fmt.Errorf("hash OCI blob %q: %w", name, nonNil(err, io.ErrUnexpectedEOF))
 			}
 			got := hex.EncodeToString(hash.Sum(nil))
@@ -408,19 +470,32 @@ func scanArchive(archivePath string, limits Limits) (_ archiveScan, returnErr er
 	}
 	trailing, err := io.ReadAll(io.LimitReader(reader, maxTrailingZeroBytes+1))
 	if err != nil {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return archiveScan{}, contextErr
+		}
 		return archiveScan{}, fmt.Errorf("read OCI archive trailer: %w", err)
 	}
-	if int64(len(trailing)) > maxTrailingZeroBytes || !allZero(trailing) {
+	if err := contextError(ctx); err != nil {
+		return archiveScan{}, err
+	}
+	zero, err := allZeroContext(ctx, trailing)
+	if err != nil {
+		return archiveScan{}, err
+	}
+	if int64(len(trailing)) > maxTrailingZeroBytes || !zero {
 		return archiveScan{}, errors.New("OCI archive has non-zero or excessive trailing data")
 	}
 	return result, nil
 }
 
-func readBlob(archivePath, digest string, size int64, limits Limits) (_ []byte, returnErr error) {
+func readBlobContext(ctx context.Context, archivePath, digest string, size int64, limits Limits) (_ []byte, returnErr error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
 	if !digestPattern.MatchString(digest) || size < 1 || size > limits.MaxMetadataBytes {
 		return nil, fmt.Errorf("OCI metadata blob %s has invalid or excessive size", digest)
 	}
-	reader, closeReader, err := openArchive(archivePath, limits)
+	reader, closeReader, err := openArchiveContext(ctx, archivePath, limits)
 	if err != nil {
 		return nil, err
 	}
@@ -432,11 +507,20 @@ func readBlob(archivePath, digest string, size int64, limits Limits) (_ []byte, 
 	want := "blobs/sha256/" + strings.TrimPrefix(digest, "sha256:")
 	tarReader := tar.NewReader(reader)
 	for {
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return nil, contextErr
+			}
 			return nil, fmt.Errorf("OCI archive is missing metadata blob %s", digest)
 		}
 		if err != nil {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return nil, contextErr
+			}
 			return nil, fmt.Errorf("read OCI tar header: %w", err)
 		}
 		if strings.TrimSuffix(header.Name, "/") != want {
@@ -447,9 +531,18 @@ func readBlob(archivePath, digest string, size int64, limits Limits) (_ []byte, 
 		}
 		raw, err := io.ReadAll(io.LimitReader(tarReader, limits.MaxMetadataBytes+1))
 		if err != nil || int64(len(raw)) != size {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return nil, contextErr
+			}
 			return nil, fmt.Errorf("read OCI metadata blob %s: %w", digest, nonNil(err, io.ErrUnexpectedEOF))
 		}
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
 		sum := sha256.Sum256(raw)
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
 		if "sha256:"+hex.EncodeToString(sum[:]) != digest {
 			return nil, fmt.Errorf("OCI metadata blob %s changed between verification passes", digest)
 		}
@@ -464,15 +557,21 @@ func regularTarFile(header *tar.Header) bool {
 	return header.Typeflag == tar.TypeReg || header.Typeflag == 0
 }
 
-func openArchive(archivePath string, limits Limits) (io.Reader, func() error, error) {
+func openArchiveContext(ctx context.Context, archivePath string, limits Limits) (io.Reader, func() error, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, nil, err
+	}
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open OCI archive: %w", err)
 	}
-	buffered := bufio.NewReader(io.LimitReader(file, limits.MaxArchiveBytes+1))
+	buffered := bufio.NewReader(contextReader{ctx: ctx, reader: io.LimitReader(file, limits.MaxArchiveBytes+1)})
 	magic, err := buffered.Peek(2)
 	if err != nil {
 		_ = file.Close()
+		if contextErr := contextError(ctx); contextErr != nil {
+			return nil, nil, contextErr
+		}
 		return nil, nil, fmt.Errorf("read OCI archive header: %w", err)
 	}
 	var source io.Reader = buffered
@@ -481,11 +580,14 @@ func openArchive(archivePath string, limits Limits) (io.Reader, func() error, er
 		gzipReader, err = gzip.NewReader(buffered)
 		if err != nil {
 			_ = file.Close()
+			if contextErr := contextError(ctx); contextErr != nil {
+				return nil, nil, contextErr
+			}
 			return nil, nil, fmt.Errorf("open gzip OCI archive: %w", err)
 		}
 		source = gzipReader
 	}
-	limited := io.LimitReader(source, limits.MaxUncompressedBytes+1)
+	limited := io.LimitReader(contextReader{ctx: ctx, reader: source}, limits.MaxUncompressedBytes+1)
 	closeFn := func() error {
 		var first error
 		if gzipReader != nil {
@@ -499,12 +601,18 @@ func openArchive(archivePath string, limits Limits) (io.Reader, func() error, er
 	return limited, closeFn, nil
 }
 
-func validateDockerManifest(raw []byte, config descriptor, layers []descriptor) ([]string, error) {
-	if err := rejectDuplicateJSON(raw); err != nil {
+func validateDockerManifestContext(ctx context.Context, raw []byte, config descriptor, layers []descriptor) ([]string, error) {
+	if err := rejectDuplicateJSONContext(ctx, raw); err != nil {
 		return nil, fmt.Errorf("Docker compatibility manifest is not strict JSON: %w", err)
 	}
 	var values []dockerManifestEntry
-	if err := json.Unmarshal(raw, &values); err != nil || len(values) != 1 {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+	if err := decodeJSONContext(ctx, raw, &values); err != nil || len(values) != 1 {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return nil, contextErr
+		}
 		return nil, errors.New("Docker compatibility manifest must describe exactly one image")
 	}
 	wantConfig := "blobs/sha256/" + strings.TrimPrefix(config.Digest, "sha256:")
@@ -512,6 +620,9 @@ func validateDockerManifest(raw []byte, config descriptor, layers []descriptor) 
 		return nil, errors.New("Docker compatibility manifest disagrees with the OCI manifest")
 	}
 	for index, layer := range layers {
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
 		want := "blobs/sha256/" + strings.TrimPrefix(layer.Digest, "sha256:")
 		if values[0].Layers[index] != want {
 			return nil, errors.New("Docker compatibility layer order disagrees with the OCI manifest")
@@ -522,6 +633,9 @@ func validateDockerManifest(raw []byte, config descriptor, layers []descriptor) 
 	}
 	seen := make(map[string]struct{}, len(values[0].RepoTags))
 	for _, tag := range values[0].RepoTags {
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
 		if tag == "" || len(tag) > 1024 || !utf8.ValidString(tag) || strings.ContainsAny(tag, "\x00\r\n") {
 			return nil, errors.New("Docker compatibility manifest contains an invalid repository tag")
 		}
@@ -540,41 +654,80 @@ func validateDescriptor(value descriptor, mediaTypes map[string]struct{}) error 
 	return nil
 }
 
-func decodeStrictJSON(raw []byte, target any) error {
-	if err := rejectDuplicateJSON(raw); err != nil {
+func decodeStrictJSONContext(ctx context.Context, raw []byte, target any) error {
+	if err := rejectDuplicateJSONContext(ctx, raw); err != nil {
 		return err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: bytes.NewReader(raw)})
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return contextErr
+		}
 		return err
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return contextErr
+		}
 		return errors.New("JSON document must contain exactly one value")
 	}
-	return nil
+	return contextError(ctx)
 }
 
-func rejectDuplicateJSON(raw []byte) error {
+func decodeJSONContext(ctx context.Context, raw []byte, target any) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: bytes.NewReader(raw)})
+	if err := decoder.Decode(target); err != nil {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return contextErr
+		}
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return contextErr
+		}
+		return errors.New("JSON document must contain exactly one value")
+	}
+	return contextError(ctx)
+}
+
+func rejectDuplicateJSONContext(ctx context.Context, raw []byte) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
 	if !utf8.Valid(raw) {
 		return errors.New("JSON is not valid UTF-8")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: bytes.NewReader(raw)})
 	decoder.UseNumber()
-	if err := walkJSON(decoder); err != nil {
+	if err := walkJSONContext(ctx, decoder); err != nil {
 		return err
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return contextErr
+		}
 		return errors.New("JSON document contains trailing data")
 	}
-	return nil
+	return contextError(ctx)
 }
 
-func walkJSON(decoder *json.Decoder) error {
+func walkJSONContext(ctx context.Context, decoder *json.Decoder) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
 	token, err := decoder.Token()
 	if err != nil {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return contextErr
+		}
 		return err
 	}
 	delimiter, ok := token.(json.Delim)
@@ -585,8 +738,14 @@ func walkJSON(decoder *json.Decoder) error {
 	case '{':
 		seen := make(map[string]struct{})
 		for decoder.More() {
+			if err := contextError(ctx); err != nil {
+				return err
+			}
 			keyToken, err := decoder.Token()
 			if err != nil {
+				if contextErr := contextError(ctx); contextErr != nil {
+					return contextErr
+				}
 				return err
 			}
 			key, ok := keyToken.(string)
@@ -597,28 +756,76 @@ func walkJSON(decoder *json.Decoder) error {
 				return fmt.Errorf("duplicate JSON member %q", key)
 			}
 			seen[key] = struct{}{}
-			if err := walkJSON(decoder); err != nil {
+			if err := walkJSONContext(ctx, decoder); err != nil {
 				return err
 			}
 		}
 		end, err := decoder.Token()
 		if err != nil || end != json.Delim('}') {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return contextErr
+			}
 			return errors.New("JSON object is not terminated")
 		}
 	case '[':
 		for decoder.More() {
-			if err := walkJSON(decoder); err != nil {
+			if err := contextError(ctx); err != nil {
+				return err
+			}
+			if err := walkJSONContext(ctx, decoder); err != nil {
 				return err
 			}
 		}
 		end, err := decoder.Token()
 		if err != nil || end != json.Delim(']') {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return contextErr
+			}
 			return errors.New("JSON array is not terminated")
 		}
 	default:
 		return errors.New("unexpected JSON delimiter")
 	}
 	return nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader contextReader) Read(buffer []byte) (int, error) {
+	if err := contextError(reader.ctx); err != nil {
+		return 0, err
+	}
+	count, err := reader.reader.Read(buffer)
+	if contextErr := contextError(reader.ctx); contextErr != nil {
+		return count, contextErr
+	}
+	return count, err
+}
+
+type contextWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+func (writer contextWriter) Write(buffer []byte) (int, error) {
+	if err := contextError(writer.ctx); err != nil {
+		return 0, err
+	}
+	count, err := writer.writer.Write(buffer)
+	if contextErr := contextError(writer.ctx); contextErr != nil {
+		return count, contextErr
+	}
+	return count, err
+}
+
+func contextError(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("OCI operation context is required")
+	}
+	return ctx.Err()
 }
 
 func validArchivePath(value string) bool {
@@ -635,13 +842,18 @@ func lowerHex(value string) bool {
 	return true
 }
 
-func allZero(raw []byte) bool {
-	for _, value := range raw {
+func allZeroContext(ctx context.Context, raw []byte) (bool, error) {
+	for index, value := range raw {
+		if index%4096 == 0 {
+			if err := contextError(ctx); err != nil {
+				return false, err
+			}
+		}
 		if value != 0 {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, contextError(ctx)
 }
 
 func nonNil(primary, fallback error) error {
