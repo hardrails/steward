@@ -2,12 +2,14 @@ package controlstore
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -16,11 +18,14 @@ import (
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/evidence"
 )
 
 const (
-	stateFormatVersion       = 1
-	transactionFormatVersion = 1
+	stateFormatVersion       = 2
+	legacyStateFormatVersion = 1
+	transactionFormatVersion = 2
+	legacyTransactionVersion = 1
 	maxMutationsPerRecord    = 128
 )
 
@@ -92,13 +97,56 @@ type Tenant struct {
 }
 
 type Node struct {
-	ID           string   `json:"id"`
-	TenantIDs    []string `json:"tenant_ids"`
-	Capabilities []string `json:"capabilities"`
-	CreatedAt    string   `json:"created_at"`
-	LastSeenAt   string   `json:"last_seen_at,omitempty"`
-	RevokedAt    string   `json:"revoked_at,omitempty"`
-	Active       bool     `json:"active"`
+	ID           string           `json:"id"`
+	TenantIDs    []string         `json:"tenant_ids"`
+	Capabilities []string         `json:"capabilities"`
+	Evidence     *EvidenceWitness `json:"evidence,omitempty"`
+	CreatedAt    string           `json:"created_at"`
+	LastSeenAt   string           `json:"last_seen_at,omitempty"`
+	RevokedAt    string           `json:"revoked_at,omitempty"`
+	Active       bool             `json:"active"`
+}
+
+type EvidenceFindingReason string
+
+const (
+	EvidenceRollback EvidenceFindingReason = "rollback"
+	EvidenceFork     EvidenceFindingReason = "fork"
+)
+
+// EvidenceFinding retains the first and most recent authenticated divergence
+// without allowing hostile nodes to grow controller state. Count saturates at
+// MaxUint64; a later valid extension never erases the finding.
+type EvidenceFinding struct {
+	FirstReason     EvidenceFindingReason `json:"first_reason"`
+	FirstSequence   uint64                `json:"first_sequence"`
+	FirstChainHash  string                `json:"first_chain_hash"`
+	FirstObservedAt string                `json:"first_observed_at"`
+	LastReason      EvidenceFindingReason `json:"last_reason"`
+	LastSequence    uint64                `json:"last_sequence"`
+	LastChainHash   string                `json:"last_chain_hash"`
+	LastObservedAt  string                `json:"last_observed_at"`
+	Count           uint64                `json:"count"`
+	CountSaturated  bool                  `json:"count_saturated,omitempty"`
+}
+
+// EvidenceWitness is the bounded controller-side state for one Executor
+// receipt chain. Full signed records remain on the node.
+type EvidenceWitness struct {
+	ReceiptNodeID   string           `json:"receipt_node_id"`
+	Epoch           uint64           `json:"epoch"`
+	PublicKeyBase64 string           `json:"public_key_base64"`
+	KeyID           string           `json:"key_id"`
+	PublicKeyDigest string           `json:"public_key_digest"`
+	PinnedAt        string           `json:"pinned_at"`
+	Sequence        uint64           `json:"sequence"`
+	ChainHash       string           `json:"chain_hash"`
+	AdvancedAt      string           `json:"advanced_at,omitempty"`
+	RecordsAccepted uint64           `json:"records_accepted"`
+	LastBatchStart  uint64           `json:"last_batch_start,omitempty"`
+	LastBatchEnd    uint64           `json:"last_batch_end,omitempty"`
+	LastBatchDigest string           `json:"last_batch_digest,omitempty"`
+	Finding         *EvidenceFinding `json:"finding,omitempty"`
 }
 
 type CommandState string
@@ -249,6 +297,7 @@ func (current state) clone() state {
 	for key, node := range current.nodes {
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
 		node.Capabilities = copyStringSlice(node.Capabilities)
+		node.Evidence = cloneEvidenceWitness(node.Evidence)
 		next.nodes[key] = node
 	}
 	for key, credential := range current.credentials {
@@ -265,6 +314,18 @@ func (current state) clone() state {
 		next.commands[key] = cloneCommand(command)
 	}
 	return next
+}
+
+func cloneEvidenceWitness(witness *EvidenceWitness) *EvidenceWitness {
+	if witness == nil {
+		return nil
+	}
+	cloned := *witness
+	if witness.Finding != nil {
+		finding := *witness.Finding
+		cloned.Finding = &finding
+	}
+	return &cloned
 }
 
 func cloneCommand(command Command) Command {
@@ -379,6 +440,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 	for _, node := range current.nodes {
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
 		node.Capabilities = copyStringSlice(node.Capabilities)
+		node.Evidence = cloneEvidenceWitness(node.Evidence)
 		snapshot.Nodes = append(snapshot.Nodes, node)
 	}
 	for _, credential := range current.credentials {
@@ -419,7 +481,7 @@ func decodeState(raw []byte, limit int) (state, error) {
 	if err := dsse.DecodeStrictInto(raw, limit, &snapshot); err != nil {
 		return state{}, err
 	}
-	if snapshot.Version != stateFormatVersion || snapshot.Tenants == nil || snapshot.Nodes == nil ||
+	if snapshot.Version != stateFormatVersion && snapshot.Version != legacyStateFormatVersion || snapshot.Tenants == nil || snapshot.Nodes == nil ||
 		snapshot.Credentials == nil || snapshot.Enrollments == nil || snapshot.Commands == nil {
 		return state{}, errors.New("control snapshot has an invalid version or missing collection")
 	}
@@ -436,6 +498,10 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
 		node.Capabilities = copyStringSlice(node.Capabilities)
+		if snapshot.Version == legacyStateFormatVersion && node.Evidence != nil {
+			return state{}, errors.New("legacy control snapshot contains evidence witness state")
+		}
+		node.Evidence = cloneEvidenceWitness(node.Evidence)
 		current.nodes[node.ID] = node
 	}
 	for _, stored := range snapshot.Credentials {
@@ -484,7 +550,8 @@ func decodeTransaction(raw []byte, limit int) (transaction, error) {
 	if err := dsse.DecodeStrictInto(raw, limit, &value); err != nil {
 		return transaction{}, err
 	}
-	if value.Version != transactionFormatVersion || len(value.Mutations) == 0 || len(value.Mutations) > maxMutationsPerRecord {
+	if value.Version != transactionFormatVersion && value.Version != legacyTransactionVersion ||
+		len(value.Mutations) == 0 || len(value.Mutations) > maxMutationsPerRecord {
 		return transaction{}, errors.New("control transaction has invalid version or mutation count")
 	}
 	return value, nil
@@ -532,8 +599,12 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("node mutation is missing node")
 			}
 			node := *change.Node
+			if value.Version == legacyTransactionVersion && node.Evidence != nil {
+				return state{}, errors.New("legacy control transaction contains evidence witness state")
+			}
 			node.TenantIDs = append([]string(nil), change.Node.TenantIDs...)
 			node.Capabilities = copyStringSlice(change.Node.Capabilities)
+			node.Evidence = cloneEvidenceWitness(change.Node.Evidence)
 			next.nodes[node.ID] = node
 		case mutationCredential:
 			if change.Credential == nil {
@@ -625,6 +696,7 @@ func validateState(current state, limits Limits) error {
 		}
 	}
 	nodesByTenant := make(map[string]int)
+	evidenceKeys := make(map[string]string)
 	for key, node := range current.nodes {
 		if key != node.ID || !validRecordID(node.ID, 128) || !validTenantSet(node.TenantIDs) ||
 			!validCapabilities(node.Capabilities) || !validTimestamp(node.CreatedAt) ||
@@ -644,6 +716,15 @@ func validateState(current state, limits Limits) error {
 			if revoked.Before(created) {
 				return errors.New("control node revocation predates creation")
 			}
+		}
+		if node.Evidence != nil {
+			if err := validateEvidenceWitness(node.ID, node.CreatedAt, *node.Evidence); err != nil {
+				return errors.New("control state contains an invalid evidence witness")
+			}
+			if existingNode, exists := evidenceKeys[node.Evidence.PublicKeyDigest]; exists && existingNode != node.ID {
+				return errors.New("control evidence key is reused across nodes")
+			}
+			evidenceKeys[node.Evidence.PublicKeyDigest] = node.ID
 		}
 		for _, tenantID := range node.TenantIDs {
 			if _, ok := current.tenants[tenantID]; !ok {
@@ -745,6 +826,80 @@ func validateState(current state, limits Limits) error {
 		return ErrCapacityExceeded
 	}
 	return nil
+}
+
+func validateEvidenceWitness(nodeID, nodeCreatedAt string, witness EvidenceWitness) error {
+	public, err := decodeCanonicalBase64(witness.PublicKeyBase64)
+	if err != nil || len(public) != ed25519.PublicKeySize || witness.ReceiptNodeID != nodeID || witness.Epoch == 0 ||
+		witness.KeyID != evidence.KeyID(ed25519.PublicKey(public)) || witness.PublicKeyDigest != digestBytes(public) ||
+		!validTimestamp(witness.PinnedAt) || !validEvidenceCoordinate(witness.Sequence, witness.ChainHash) ||
+		witness.RecordsAccepted != witness.Sequence {
+		return errors.New("evidence witness identity or coordinate is invalid")
+	}
+	created, _ := parseTimestamp(nodeCreatedAt)
+	pinned, _ := parseTimestamp(witness.PinnedAt)
+	if pinned.Before(created) {
+		return errors.New("evidence witness predates node creation")
+	}
+	if witness.Sequence == 0 {
+		if witness.AdvancedAt != "" || witness.LastBatchStart != 0 || witness.LastBatchEnd != 0 || witness.LastBatchDigest != "" {
+			return errors.New("empty evidence witness contains advancement metadata")
+		}
+	} else {
+		if !validTimestamp(witness.AdvancedAt) || witness.LastBatchStart == 0 || witness.LastBatchStart > witness.LastBatchEnd ||
+			witness.LastBatchEnd != witness.Sequence || !validSHA256Digest(witness.LastBatchDigest) {
+			return errors.New("advanced evidence witness is missing its retained batch coordinate")
+		}
+		advanced, _ := parseTimestamp(witness.AdvancedAt)
+		if advanced.Before(pinned) {
+			return errors.New("evidence witness advancement predates pinning")
+		}
+	}
+	if witness.Finding != nil {
+		if err := validateEvidenceFinding(*witness.Finding, pinned); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateEvidenceFinding(finding EvidenceFinding, pinned time.Time) error {
+	if !validEvidenceFindingReason(finding.FirstReason) || !validEvidenceFindingReason(finding.LastReason) ||
+		!validEvidenceCoordinate(finding.FirstSequence, finding.FirstChainHash) ||
+		!validEvidenceCoordinate(finding.LastSequence, finding.LastChainHash) || finding.Count == 0 ||
+		finding.CountSaturated != (finding.Count == math.MaxUint64) ||
+		!validTimestamp(finding.FirstObservedAt) || !validTimestamp(finding.LastObservedAt) {
+		return errors.New("evidence finding is invalid")
+	}
+	first, _ := parseTimestamp(finding.FirstObservedAt)
+	last, _ := parseTimestamp(finding.LastObservedAt)
+	if first.Before(pinned) || last.Before(first) {
+		return errors.New("evidence finding timestamps are inconsistent")
+	}
+	return nil
+}
+
+func validEvidenceFindingReason(reason EvidenceFindingReason) bool {
+	return reason == EvidenceRollback || reason == EvidenceFork
+}
+
+func validEvidenceCoordinate(sequence uint64, chainHash string) bool {
+	if !validSHA256Digest(chainHash) {
+		return false
+	}
+	if sequence == 0 {
+		return chainHash == "sha256:"+strings.Repeat("0", 64)
+	}
+	return chainHash != "sha256:"+strings.Repeat("0", 64)
+}
+
+func validSHA256Digest(value string) bool {
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	raw := strings.TrimPrefix(value, "sha256:")
+	decoded, err := hex.DecodeString(raw)
+	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == raw
 }
 
 func validateCommand(command Command, limits Limits) error {

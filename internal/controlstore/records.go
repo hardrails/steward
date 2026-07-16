@@ -1079,6 +1079,7 @@ func projectNode(node Node, actor controlauth.Identity, tenantID string) Node {
 func cloneNode(node Node) Node {
 	node.TenantIDs = append([]string(nil), node.TenantIDs...)
 	node.Capabilities = copyStringSlice(node.Capabilities)
+	node.Evidence = cloneEvidenceWitness(node.Evidence)
 	return node
 }
 
