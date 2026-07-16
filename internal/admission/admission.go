@@ -506,10 +506,15 @@ func (c ProfileCapsule) Validate(now time.Time) error {
 	if len(c.Artifacts) > 32 {
 		return deny("too many capsule artifacts")
 	}
+	artifactKinds := make(map[string]struct{}, len(c.Artifacts))
 	for _, artifact := range c.Artifacts {
 		if !bounded(artifact.Kind, 128) || !digest(artifact.Digest) {
 			return deny("invalid capsule artifact")
 		}
+		if _, duplicate := artifactKinds[artifact.Kind]; duplicate {
+			return deny("duplicate capsule artifact kind")
+		}
+		artifactKinds[artifact.Kind] = struct{}{}
 	}
 	if c.IssuedAt != "" {
 		if _, err := time.Parse(time.RFC3339, c.IssuedAt); err != nil {

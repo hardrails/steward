@@ -145,6 +145,9 @@ func TestCapsuleValidationRejectsEveryBoundedShape(t *testing.T) {
 		{"too many artifacts", func(c *ProfileCapsule) { c.Artifacts = make([]ArtifactDigest, 33) }},
 		{"artifact kind", func(c *ProfileCapsule) { c.Artifacts[0].Kind = "" }},
 		{"artifact digest", func(c *ProfileCapsule) { c.Artifacts[0].Digest = "bad" }},
+		{"duplicate artifact kind", func(c *ProfileCapsule) {
+			c.Artifacts = append(c.Artifacts, ArtifactDigest{Kind: c.Artifacts[0].Kind, Digest: testDigest('d')})
+		}},
 		{"malformed expiry", func(c *ProfileCapsule) { c.ExpiresAt = "tomorrow" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
