@@ -43,6 +43,11 @@ backup, and restore under the new limit before production use.
 | `-max-commands-per-node` | `256` | Retained commands for one node |
 | `-terminal-retention` | `24h` | Minimum retention before a known terminal outcome may be reclaimed for command capacity |
 
+When the certificate and key are configured, Steward Control accepts TLS 1.3 only.
+The Steward Control client used by `stewardctl control` and `steward-mcp` likewise
+requires TLS 1.3 for HTTPS. Plain HTTP remains limited to a literal loopback
+listener.
+
 `-initialize` creates a store or recovers initial bootstrap state containing no
 tenant, node, enrollment, or command records and at most one bootstrap credential.
 It publishes the first site-administrator token through `-admin-token-file`. That

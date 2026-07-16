@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlprotocol"
@@ -111,6 +112,24 @@ func TestV3ReportsDistinguishRejectedValidationFromUncertainMutation(t *testing.
 
 	if _, err := d.call(context.Background(), http.MethodGet, "/v1/workloads/ref", nil); err == nil || effectMayHaveOccurred(err) {
 		t.Fatalf("read-only handler failure was treated as a possible mutation: %v", err)
+	}
+}
+
+func TestV3ReportBoundsAndSanitizesReportedStatus(t *testing.T) {
+	delivery := deliveryFixture("bounded-status", 1)
+	invalid := "  run\r\n\x00" + string([]byte{0xff}) + strings.Repeat("é", 64) + "  "
+	wire := makeReportV3(delivery, report{Status: controlprotocol.ExecutorStatusDone, ReportedStatus: invalid})
+	if !strings.HasPrefix(wire.ReportedStatus, "run?") || len(wire.ReportedStatus) > 64 ||
+		strings.ContainsAny(wire.ReportedStatus, "\r\n\x00") || !utf8.ValidString(wire.ReportedStatus) {
+		t.Fatalf("sanitized reported status = %q", wire.ReportedStatus)
+	}
+	if err := wire.Validate(); err != nil {
+		t.Fatalf("sanitized report is invalid: %v", err)
+	}
+
+	wire = makeReportV3(delivery, report{Status: controlprotocol.ExecutorStatusDone, ReportedStatus: " \r\n\x00 "})
+	if wire.ReportedStatus != "failed" {
+		t.Fatalf("empty sanitized status = %q, want failed", wire.ReportedStatus)
 	}
 }
 

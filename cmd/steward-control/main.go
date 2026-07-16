@@ -226,7 +226,7 @@ func transportConfig(parsed options) (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load control TLS certificate and key: %w", err)
 	}
-	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}, nil
+	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}, nil
 }
 
 func literalLoopback(host string) bool {
@@ -313,7 +313,7 @@ func serve(address string, handler http.Handler, tlsConfig *tls.Config, logger *
 	server := &http.Server{
 		Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10,
-		TLSConfig: tlsConfig,
+		TLSConfig: tlsConfig, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 	serveErrors := make(chan error, 1)
 	go func() {

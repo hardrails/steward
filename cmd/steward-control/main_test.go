@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -153,7 +154,7 @@ func TestTransportConfigLoadsOnlyMatchedOwnerOnlyTLSMaterial(t *testing.T) {
 	certFile, keyFile := writeControlCertificate(t)
 	parsed := options{address: "0.0.0.0:8443", tlsCertFile: certFile, tlsKeyFile: keyFile}
 	config, err := transportConfig(parsed)
-	if err != nil || config == nil || config.MinVersion != 0x0303 || len(config.Certificates) != 1 {
+	if err != nil || config == nil || config.MinVersion != tls.VersionTLS13 || len(config.Certificates) != 1 {
 		t.Fatalf("valid TLS transport = (%#v, %v)", config, err)
 	}
 

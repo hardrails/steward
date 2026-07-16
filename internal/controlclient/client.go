@@ -155,7 +155,7 @@ func New(baseURL, token string, caPEM []byte) (*Client, error) {
 	if len(token) > 4096 || token != strings.TrimSpace(token) || strings.ContainsAny(token, " \t\r\n\x00") {
 		return nil, errors.New("control token is invalid or exceeds 4096 bytes")
 	}
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
 	if len(caPEM) > 0 {
 		// An explicit private CA is a trust replacement, not an addition to the
 		// host's public Web PKI. This keeps a public CA (or a compromised system

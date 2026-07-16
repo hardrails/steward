@@ -129,9 +129,10 @@ Linux releases also contain `release.json`. Its canonical file map binds every
 binary and host-integration asset by SHA-256. Its `state_formats` map declares the
 minimum and maximum durable format each release reads and the format it writes for
 Gateway state, Gateway connector receipts, admission fences, the operation journal,
-Executor evidence, uplink replay state, and supervisor state. Activation uses these
-ranges to reject an unsafe upgrade or rollback before changing the active-release
-symlink or relay binding.
+Executor evidence, the Executor lifecycle uplink fence, the separate durable
+delivery ledger, and supervisor state. Activation uses these ranges to reject an
+unsafe upgrade or rollback before changing the active-release symlink or relay
+binding.
 
 Current manifests declare `connector_receipt_log` with `read_min: 1`, `read_max: 4`,
 and `write: 4`. Ordinary connector records retain schema 1. Action-permit records use

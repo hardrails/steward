@@ -63,6 +63,10 @@ trusted operator workstation using the matching full Steward release archive; do
 not move an administrator bearer onto an agent workload node merely to obtain a
 client.
 
+When HTTPS is configured, Steward Control accepts TLS 1.3 only. The Steward Control
+client shared by `stewardctl control` and `steward-mcp` also rejects HTTPS servers
+that cannot negotiate TLS 1.3.
+
 The guided first install asks for a path for the first site-administrator bearer.
 For unattended installation, make that choice explicit:
 

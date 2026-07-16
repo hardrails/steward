@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -167,6 +168,9 @@ func TestExplicitControlCAReplacesSystemTrust(t *testing.T) {
 	transport, ok := client.http.Transport.(*http.Transport)
 	if !ok || transport.TLSClientConfig == nil || transport.TLSClientConfig.RootCAs == nil {
 		t.Fatal("control client omitted its explicit private trust pool")
+	}
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("control client minimum TLS version = %#x, want TLS 1.3", transport.TLSClientConfig.MinVersion)
 	}
 	expected := x509.NewCertPool()
 	if !expected.AppendCertsFromPEM(caPEM) {

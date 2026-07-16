@@ -62,10 +62,12 @@ sudo "/opt/steward/releases/$TARGET_RELEASE/stewardctl" upgrade check-drained \
 Use `-signed-admission unconfigured` only when signed admission is intentionally
 disabled. Configured mode requires the fence, journal, and evidence files to exist.
 Both modes validate any file that is present. Packaged paths are defaults; explicit
-flags can select the fence, journal, evidence, uplink, supervisor, and Gateway files.
+flags can select the admission fence, operation journal, Executor evidence log,
+Executor lifecycle uplink fence, Executor delivery ledger, supervisor state, and
+Gateway files.
 
 The bounded JSON result reports active fences, pending journal operations, retained
-Gateway grants, seven observed format versions, target compatibility, and
+Gateway grants, eight observed format versions, target compatibility, and
 `drained`. The inventory includes the Gateway connector receipt log. A `null`
 format means the file is absent or, for the Executor evidence log, has no record
 header yet. Tombstone fences preserve replay history but do not count as active.
@@ -87,10 +89,10 @@ task-enabled grants. A target release must read and preserve that state even if 
 receipt ledger has not yet recorded a service task. Keep state and receipt-format
 compatibility checks together; neither file can be downgraded safely in isolation.
 
-`upgrade inspect-formats` returns the same seven format observations without requiring
-a drained node. Activation uses it after a failed target start to decide whether the
-prior release can safely read the state before restoring the old active-release
-symlink and relay binding.
+`upgrade inspect-formats` returns the same eight format observations without
+requiring a drained node. Activation uses it after a failed target start to decide
+whether the prior release can safely read the state before restoring the old
+active-release symlink and relay binding.
 
 ## Exact-request action permits
 

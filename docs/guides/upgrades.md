@@ -16,8 +16,9 @@ Configuration, durable state, audit logs, relay images, and anti-replay state re
 outside release directories. Each manifest also declares the durable formats the
 release can read and the format it writes. Activation compares those declarations
 with existing Gateway state, connector receipt log, admission fences, operation
-journal, Executor evidence log, uplink state, and supervisor state before a binary
-switch.
+journal, Executor evidence log, Executor lifecycle uplink fence
+(`uplink-state.json`), separate durable delivery ledger
+(`uplink-delivery-state.json`), and supervisor state before a binary switch.
 
 Connector receipt format 1 records ordinary connector events. Format 2 records the
 action-authority key ID, permit digest, and exact request digest for permit-backed

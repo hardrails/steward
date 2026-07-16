@@ -435,7 +435,7 @@ func makeReportV3(delivery controlprotocol.ExecutorDeliveryV3, legacy report) co
 		ProtocolVersion: controlprotocol.ExecutorProtocolV3,
 		DeliveryID:      delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
 		CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
-		Status: legacy.Status, ReportedStatus: legacy.ReportedStatus,
+		Status: legacy.Status, ReportedStatus: boundedReportedStatus(legacy.ReportedStatus),
 		ClaimGeneration: legacy.ClaimGeneration, Result: result,
 	}
 	if legacy.Status == controlprotocol.ExecutorStatusFailed {
@@ -450,6 +450,23 @@ func makeReportV3(delivery controlprotocol.ExecutorDeliveryV3, legacy report) co
 		}
 	}
 	return report
+}
+
+func boundedReportedStatus(value string) string {
+	value = strings.ToValidUTF8(value, "?")
+	value = strings.Map(func(char rune) rune {
+		switch char {
+		case '\r', '\n', 0:
+			return -1
+		default:
+			return char
+		}
+	}, value)
+	value = strings.TrimSpace(truncateUTF8(strings.TrimSpace(value), 64))
+	if value == "" {
+		return "failed"
+	}
+	return value
 }
 
 func truncateUTF8(value string, limit int) string {
