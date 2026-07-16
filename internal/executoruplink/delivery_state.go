@@ -46,17 +46,18 @@ const (
 )
 
 type deliveryRecord struct {
-	ProtocolVersion    int                                            `json:"protocol_version"`
-	DeliveryID         string                                         `json:"delivery_id"`
-	DeliveryGeneration uint64                                         `json:"delivery_generation"`
-	SettledGeneration  uint64                                         `json:"settled_generation,omitempty"`
-	TenantID           string                                         `json:"tenant_id,omitempty"`
-	CommandID          string                                         `json:"command_id"`
-	CommandDigest      string                                         `json:"command_digest"`
-	ClaimGeneration    uint64                                         `json:"claim_generation,omitempty"`
-	Phase              string                                         `json:"phase"`
-	Terminal           *controlprotocol.ExecutorReportV3              `json:"terminal,omitempty"`
-	Admission          *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
+	ProtocolVersion    int                                               `json:"protocol_version"`
+	DeliveryID         string                                            `json:"delivery_id"`
+	DeliveryGeneration uint64                                            `json:"delivery_generation"`
+	SettledGeneration  uint64                                            `json:"settled_generation,omitempty"`
+	TenantID           string                                            `json:"tenant_id,omitempty"`
+	CommandID          string                                            `json:"command_id"`
+	CommandDigest      string                                            `json:"command_digest"`
+	ClaimGeneration    uint64                                            `json:"claim_generation,omitempty"`
+	Phase              string                                            `json:"phase"`
+	Terminal           *controlprotocol.ExecutorReportV3                 `json:"terminal,omitempty"`
+	Admission          *controlprotocol.ExecutorAdmissionProjectionV1    `json:"admission,omitempty"`
+	ActivationCanary   *controlprotocol.ExecutorActivationCanaryResultV1 `json:"activation_canary,omitempty"`
 }
 
 type deliveryStateFile struct {
@@ -524,6 +525,7 @@ func (s *DeliveryStore) Reject(delivery controlprotocol.ExecutorDeliveryV3, reje
 		controlprotocol.ExecutorProtocolV3,
 		rejected,
 		nil,
+		nil,
 	)
 	if terminal == nil {
 		return nil, err
@@ -539,15 +541,16 @@ func (s *DeliveryStore) RejectV4(
 		return nil, err
 	}
 	if err := rejected.Validate(); err != nil || rejected.Status != controlprotocol.ExecutorStatusRejected ||
-		rejected.Result.Admission != nil {
+		rejected.Result.Admission != nil || rejected.Result.ActivationCanary != nil {
 		return nil, errors.New("invalid rejected delivery report")
 	}
-	common, admission := executorReportV4Record(rejected)
+	common, admission, activationCanary := executorReportV4Record(rejected)
 	terminal, err := s.rejectDelivery(
 		executorDeliveryV3(delivery),
 		controlprotocol.ExecutorProtocolV4,
 		common,
 		admission,
+		activationCanary,
 	)
 	if terminal == nil {
 		return nil, err
@@ -564,6 +567,7 @@ func (s *DeliveryStore) rejectDelivery(
 	protocolVersion int,
 	rejected controlprotocol.ExecutorReportV3,
 	admissionProjection *controlprotocol.ExecutorAdmissionProjectionV1,
+	activationCanary *controlprotocol.ExecutorActivationCanaryResultV1,
 ) (*deliveryRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -597,6 +601,7 @@ func (s *DeliveryStore) rejectDelivery(
 		if record.Phase == deliveryPhaseExecuting {
 			rejected = outcomeUnknownReport(record)
 			admissionProjection = nil
+			activationCanary = nil
 		}
 	} else {
 		compactAcknowledgedDeliveries(next, "")
@@ -611,7 +616,8 @@ func (s *DeliveryStore) rejectDelivery(
 		TenantID: record.TenantID, CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
 		ClaimGeneration: rejected.ClaimGeneration,
 		Phase:           deliveryPhaseTerminal, Terminal: &rejected,
-		Admission: cloneAdmissionProjection(admissionProjection),
+		Admission:        cloneAdmissionProjection(admissionProjection),
+		ActivationCanary: cloneActivationCanaryResult(activationCanary),
 	}
 	next[delivery.DeliveryID] = record
 	compactGlobalReservedBytes(next, s.nodeID)
@@ -647,6 +653,7 @@ func (s *DeliveryStore) MarkTerminal(report controlprotocol.ExecutorReportV3) er
 		controlprotocol.ExecutorProtocolV3,
 		report,
 		nil,
+		nil,
 	)
 }
 
@@ -654,7 +661,7 @@ func (s *DeliveryStore) MarkTerminalV4(report controlprotocol.ExecutorReportV4) 
 	if err := report.Validate(); err != nil {
 		return err
 	}
-	common, admission := executorReportV4Record(report)
+	common, admission, activationCanary := executorReportV4Record(report)
 	return s.markTerminal(
 		report.DeliveryID,
 		report.DeliveryGeneration,
@@ -663,6 +670,7 @@ func (s *DeliveryStore) MarkTerminalV4(report controlprotocol.ExecutorReportV4) 
 		controlprotocol.ExecutorProtocolV4,
 		common,
 		admission,
+		activationCanary,
 	)
 }
 
@@ -673,6 +681,7 @@ func (s *DeliveryStore) markTerminal(
 	protocolVersion int,
 	report controlprotocol.ExecutorReportV3,
 	admissionProjection *controlprotocol.ExecutorAdmissionProjectionV1,
+	activationCanary *controlprotocol.ExecutorActivationCanaryResultV1,
 ) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -687,6 +696,7 @@ func (s *DeliveryStore) markTerminal(
 	record.Phase = deliveryPhaseTerminal
 	record.Terminal = cloneExecutorReport(&report)
 	record.Admission = cloneAdmissionProjection(admissionProjection)
+	record.ActivationCanary = cloneActivationCanaryResult(activationCanary)
 	if record.ClaimGeneration == 0 {
 		record.ClaimGeneration = report.ClaimGeneration
 	}
@@ -917,6 +927,7 @@ func reservedDeliveryRecord(record deliveryRecord) deliveryRecord {
 		record.Phase = deliveryPhaseTerminal
 		record.Terminal = &report
 		record.Admission = nil
+		record.ActivationCanary = nil
 	}
 	if record.Phase == deliveryPhaseTerminal && record.SettledGeneration != record.DeliveryGeneration {
 		record.SettledGeneration = record.DeliveryGeneration
@@ -964,7 +975,11 @@ func executorDeliveryV3(delivery controlprotocol.ExecutorDeliveryV4) controlprot
 
 func executorReportV4Record(
 	report controlprotocol.ExecutorReportV4,
-) (controlprotocol.ExecutorReportV3, *controlprotocol.ExecutorAdmissionProjectionV1) {
+) (
+	controlprotocol.ExecutorReportV3,
+	*controlprotocol.ExecutorAdmissionProjectionV1,
+	*controlprotocol.ExecutorActivationCanaryResultV1,
+) {
 	common := controlprotocol.ExecutorReportV3{
 		ProtocolVersion: controlprotocol.ExecutorProtocolV3,
 		DeliveryID:      report.DeliveryID, DeliveryGeneration: report.DeliveryGeneration,
@@ -976,7 +991,9 @@ func executorReportV4Record(
 			Replayed: report.Result.Replayed, Absent: report.Result.Absent,
 		},
 	}
-	return common, cloneAdmissionProjection(report.Result.Admission)
+	return common,
+		cloneAdmissionProjection(report.Result.Admission),
+		cloneActivationCanaryResult(report.Result.ActivationCanary)
 }
 
 func executorReportV4FromRecord(record deliveryRecord) (controlprotocol.ExecutorReportV4, error) {
@@ -999,7 +1016,8 @@ func executorReportV4FromRecord(record deliveryRecord) (controlprotocol.Executor
 		Result: controlprotocol.ExecutorReportResultV4{
 			RuntimeRef: common.Result.RuntimeRef, Error: common.Result.Error,
 			Replayed: common.Result.Replayed, Absent: common.Result.Absent,
-			Admission: cloneAdmissionProjection(record.Admission),
+			Admission:        cloneAdmissionProjection(record.Admission),
+			ActivationCanary: cloneActivationCanaryResult(record.ActivationCanary),
 		},
 	}
 	if err := report.Validate(); err != nil {
@@ -1056,7 +1074,8 @@ func validateDeliveryRecord(record deliveryRecord) error {
 	}
 	switch record.Phase {
 	case deliveryPhaseAccepted, deliveryPhaseExecuting:
-		if record.Terminal != nil || record.Admission != nil || record.SettledGeneration != 0 {
+		if record.Terminal != nil || record.Admission != nil || record.ActivationCanary != nil ||
+			record.SettledGeneration != 0 {
 			return errors.New("non-terminal delivery contains terminal state")
 		}
 		if record.ProtocolVersion == controlprotocol.ExecutorProtocolV4 && record.ClaimGeneration == 0 {
@@ -1070,8 +1089,8 @@ func validateDeliveryRecord(record deliveryRecord) error {
 		}
 		switch record.ProtocolVersion {
 		case controlprotocol.ExecutorProtocolV3:
-			if record.Admission != nil {
-				return errors.New("protocol-3 terminal delivery contains an admission projection")
+			if record.Admission != nil || record.ActivationCanary != nil {
+				return errors.New("protocol-3 terminal delivery contains a protocol-4 projection")
 			}
 			if err := record.Terminal.Validate(); err != nil {
 				return err
@@ -1118,6 +1137,7 @@ func cloneDeliveryRecords(source map[string]deliveryRecord) map[string]deliveryR
 func cloneDeliveryRecord(record deliveryRecord) deliveryRecord {
 	record.Terminal = cloneExecutorReport(record.Terminal)
 	record.Admission = cloneAdmissionProjection(record.Admission)
+	record.ActivationCanary = cloneActivationCanaryResult(record.ActivationCanary)
 	return record
 }
 
@@ -1142,6 +1162,16 @@ func cloneAdmissionProjection(
 	)
 	clone.EgressRouteIDs = append([]string(nil), projection.EgressRouteIDs...)
 	clone.ConnectorIDs = append([]string(nil), projection.ConnectorIDs...)
+	return &clone
+}
+
+func cloneActivationCanaryResult(
+	result *controlprotocol.ExecutorActivationCanaryResultV1,
+) *controlprotocol.ExecutorActivationCanaryResultV1 {
+	if result == nil {
+		return nil
+	}
+	clone := *result
 	return &clone
 }
 

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -188,6 +189,53 @@ func TestCommandViewMakesMissingSuccessfulAdmitProjectionExplicit(t *testing.T) 
 		view.SignedRuntimeRef != command.SignedRuntimeRef ||
 		view.SignedInstanceGeneration != command.SignedInstanceGeneration {
 		t.Fatalf("missing projection view = %+v", view)
+	}
+}
+
+func TestCommandViewExposesOnlyCorrelatedActivationCanaryProjection(t *testing.T) {
+	terminal := []byte(`{"ok":true}`)
+	receipts := []byte("authorize\nterminal\nexport\n")
+	projection := controlprotocol.ExecutorActivationCanaryResultV1{
+		SchemaVersion:        controlprotocol.ExecutorActivationCanaryResultSchemaV1,
+		ActivationID:         "activation-1",
+		AdmissionDigest:      "sha256:" + strings.Repeat("1", 64),
+		TaskDigest:           "sha256:" + strings.Repeat("2", 64),
+		PermitDigest:         "sha256:" + strings.Repeat("3", 64),
+		RunID:                "run_" + strings.Repeat("4", 32),
+		TerminalResultDigest: dsse.Digest(terminal), TerminalResultBytes: int64(len(terminal)),
+		TerminalResultBase64:       base64.StdEncoding.EncodeToString(terminal),
+		GatewayEvidenceBase64:      base64.StdEncoding.EncodeToString(receipts),
+		ActivationCheckpointDigest: "sha256:" + strings.Repeat("5", 64), Qualified: true,
+	}
+	runtimeRef := "executor-" + strings.Repeat("a", 64)
+	command := controlstore.Command{
+		CommandKind: "activation-canary", SignedRuntimeRef: runtimeRef,
+		SignedClaimGeneration: 7, SignedInstanceGeneration: 11,
+		DeliveryProtocol: controlprotocol.ExecutorProtocolV4,
+		State:            controlstore.CommandTerminal,
+		Terminal: &controlstore.TerminalReport{
+			Report: controlprotocol.ExecutorReportV3{
+				ProtocolVersion: controlprotocol.ExecutorProtocolV4,
+				Status:          controlprotocol.ExecutorStatusDone,
+				ReportedStatus:  "running", ClaimGeneration: 7,
+				Result: controlprotocol.ExecutorReportResultV3{RuntimeRef: runtimeRef},
+			},
+			ActivationCanary: &projection,
+		},
+	}
+	view := commandView(command)
+	if view.ActivationCanaryProjectionState != "present" || view.Result == nil ||
+		view.Result.ActivationCanary == nil ||
+		view.Result.ActivationCanary.ActivationCheckpointDigest != projection.ActivationCheckpointDigest ||
+		view.ReportedStatus != "running" || view.SignedInstanceGeneration != 11 {
+		t.Fatalf("activation canary command view = %+v", view)
+	}
+
+	command.Terminal.ActivationCanary = nil
+	view = commandView(command)
+	if view.ActivationCanaryProjectionState != "missing" || view.Result == nil ||
+		view.Result.ActivationCanary != nil {
+		t.Fatalf("missing activation canary command view = %+v", view)
 	}
 }
 

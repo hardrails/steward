@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/dsse"
 )
 
 func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
@@ -261,6 +262,83 @@ func TestClientRejectsInconsistentAdmissionProjectionViews(t *testing.T) {
 			mutate(&candidate)
 			if err := validateCommandAdmissionProjection(candidate); err == nil {
 				t.Fatal("inconsistent admission projection view was accepted")
+			}
+		})
+	}
+}
+
+func TestClientRejectsInconsistentActivationCanaryProjectionViews(t *testing.T) {
+	valid := func() Command {
+		terminal := []byte(`{"ok":true}`)
+		receipts := []byte("authorize\nterminal\nexport\n")
+		projection := controlprotocol.ExecutorActivationCanaryResultV1{
+			SchemaVersion:        controlprotocol.ExecutorActivationCanaryResultSchemaV1,
+			ActivationID:         "activation-1",
+			AdmissionDigest:      "sha256:" + strings.Repeat("1", 64),
+			TaskDigest:           "sha256:" + strings.Repeat("2", 64),
+			PermitDigest:         "sha256:" + strings.Repeat("3", 64),
+			RunID:                "run_" + strings.Repeat("4", 32),
+			TerminalResultDigest: dsse.Digest(terminal), TerminalResultBytes: int64(len(terminal)),
+			TerminalResultBase64:       base64.StdEncoding.EncodeToString(terminal),
+			GatewayEvidenceBase64:      base64.StdEncoding.EncodeToString(receipts),
+			ActivationCheckpointDigest: "sha256:" + strings.Repeat("5", 64), Qualified: true,
+		}
+		claim := uint64(7)
+		return Command{
+			CommandKind: "activation-canary", SignedRuntimeRef: "executor-" + strings.Repeat("a", 64),
+			SignedClaimGeneration: claim, SignedInstanceGeneration: 11,
+			State: "terminal", DeliveryProtocol: controlprotocol.ExecutorProtocolV4,
+			TerminalStatus: controlprotocol.ExecutorStatusDone, ReportedStatus: "running",
+			ClaimGeneration: &claim, ActivationCanaryProjectionState: "present",
+			Result: &CommandResult{
+				RuntimeRef:       "executor-" + strings.Repeat("a", 64),
+				ActivationCanary: &projection,
+			},
+		}
+	}
+	if err := validateCommandProjections(valid()); err != nil {
+		t.Fatalf("valid activation canary projection view: %v", err)
+	}
+	missing := valid()
+	missing.ActivationCanaryProjectionState = "missing"
+	missing.Result.ActivationCanary = nil
+	if err := validateCommandProjections(missing); err != nil {
+		t.Fatalf("detectable missing canary projection view: %v", err)
+	}
+
+	tests := map[string]func(*Command){
+		"projection without state": func(value *Command) { value.ActivationCanaryProjectionState = "" },
+		"omitted missing state": func(value *Command) {
+			value.ActivationCanaryProjectionState = ""
+			value.Result.ActivationCanary = nil
+		},
+		"unknown state":      func(value *Command) { value.ActivationCanaryProjectionState = "unknown" },
+		"wrong command kind": func(value *Command) { value.CommandKind = "start" },
+		"wrong delivery protocol": func(value *Command) {
+			value.DeliveryProtocol = controlprotocol.ExecutorProtocolV3
+		},
+		"terminal status": func(value *Command) { value.TerminalStatus = controlprotocol.ExecutorStatusFailed },
+		"reported status": func(value *Command) { value.ReportedStatus = "passed" },
+		"claim mismatch":  func(value *Command) { *value.ClaimGeneration++ },
+		"runtime mismatch": func(value *Command) {
+			value.Result.RuntimeRef = "executor-" + strings.Repeat("e", 64)
+		},
+		"signed runtime mismatch": func(value *Command) {
+			value.SignedRuntimeRef = "executor-" + strings.Repeat("e", 64)
+		},
+		"missing instance generation": func(value *Command) { value.SignedInstanceGeneration = 0 },
+		"invalid projection":          func(value *Command) { value.Result.ActivationCanary.Qualified = false },
+		"missing payload":             func(value *Command) { value.Result.ActivationCanary = nil },
+		"missing state with payload": func(value *Command) {
+			value.ActivationCanaryProjectionState = "missing"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid()
+			mutate(&candidate)
+			if err := validateCommandProjections(candidate); err == nil {
+				t.Fatal("inconsistent activation canary projection view was accepted")
 			}
 		})
 	}

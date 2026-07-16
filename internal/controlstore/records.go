@@ -878,6 +878,11 @@ func (store *Store) poll(identity controlauth.NodeIdentity, capabilities []strin
 		if len(deliveries) >= max || len(mutations) >= maxMutationsPerRecord {
 			break
 		}
+		if candidate.CommandKind == "activation-canary" &&
+			(protocolVersion != controlprotocol.ExecutorProtocolV4 ||
+				!hasCapability(canonical, controlprotocol.ExecutorCapabilityActivationCanaryV1)) {
+			continue
+		}
 		if candidate.DeliveryGeneration == math.MaxUint64 {
 			return nil, ErrCapacityExceeded
 		}
@@ -922,6 +927,11 @@ func (store *Store) poll(identity controlauth.NodeIdentity, capabilities []strin
 	// versions require `deliveries:[]` on an idle poll. Returning an append to a
 	// nil slice would collapse that distinction and encode JSON null.
 	return deliveries, nil
+}
+
+func hasCapability(capabilities []string, required string) bool {
+	index := sort.SearchStrings(capabilities, required)
+	return index < len(capabilities) && capabilities[index] == required
 }
 
 func (store *Store) ApplyReport(identity controlauth.NodeIdentity, report controlprotocol.ExecutorReportV3, now time.Time) (bool, error) {
@@ -1097,9 +1107,10 @@ func terminalReportFromV4(report controlprotocol.ExecutorReportV4, digest string
 				Absent:     report.Result.Absent,
 			},
 		},
-		Admission:   cloneAdmissionProjection(report.Result.Admission),
-		Digest:      digest,
-		CompletedAt: canonicalTimestamp(completedAt),
+		Admission:        cloneAdmissionProjection(report.Result.Admission),
+		ActivationCanary: cloneActivationCanaryResult(report.Result.ActivationCanary),
+		Digest:           digest,
+		CompletedAt:      canonicalTimestamp(completedAt),
 	}
 }
 

@@ -85,11 +85,12 @@ type ExecutorAdmissionProjectionV1 struct {
 // ExecutorReportResultV4 adds a bounded admission projection without changing
 // the immutable protocol-3 result type.
 type ExecutorReportResultV4 struct {
-	RuntimeRef string                         `json:"runtime_ref,omitempty"`
-	Error      string                         `json:"error,omitempty"`
-	Replayed   bool                           `json:"replayed,omitempty"`
-	Absent     bool                           `json:"absent,omitempty"`
-	Admission  *ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
+	RuntimeRef       string                            `json:"runtime_ref,omitempty"`
+	Error            string                            `json:"error,omitempty"`
+	Replayed         bool                              `json:"replayed,omitempty"`
+	Absent           bool                              `json:"absent,omitempty"`
+	Admission        *ExecutorAdmissionProjectionV1    `json:"admission,omitempty"`
+	ActivationCanary *ExecutorActivationCanaryResultV1 `json:"activation_canary,omitempty"`
 }
 
 // ExecutorReportV4 binds a terminal observation to one exact delivery lease.
@@ -397,6 +398,17 @@ func (report ExecutorReportV4) Validate() error {
 		}
 		if report.ReportedStatus != expectedStatus {
 			return errors.New("admission projection status does not match the reported status")
+		}
+	}
+	if report.Result.ActivationCanary != nil {
+		if err := report.Result.ActivationCanary.Validate(); err != nil {
+			return fmt.Errorf("validate activation canary projection: %w", err)
+		}
+		if report.Status != ExecutorStatusDone || report.ReportedStatus != "running" ||
+			report.ErrorCode != "" || report.Result.Error != "" || report.Result.Replayed ||
+			report.Result.Absent || report.Result.Admission != nil ||
+			!executorRuntimeRef(report.Result.RuntimeRef) {
+			return errors.New("activation canary projection requires an unambiguous successful report with its runtime")
 		}
 	}
 	raw, err := json.Marshal(report)

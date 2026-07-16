@@ -2051,6 +2051,14 @@ components:
             protocol-4 node returned the correlated projection. `missing`
             means the delivery completed without one; callers must not infer
             admission details from another field.
+        activation_canary_projection_state:
+          type: string
+          enum: [missing, present]
+          description: |
+            Present only for a successful terminal `activation-canary` command.
+            `present` means a protocol-4 node returned the bounded, correlated
+            projection. `missing` means the command completed without one; callers
+            must not infer canary qualification from another field.
         result:
           allOf:
             - $ref: "#/components/schemas/ControlCommandResult"
@@ -2095,6 +2103,9 @@ components:
           type: array
           maxItems: 64
           uniqueItems: true
+          description: |
+            A node must include `activation-canary-v1` before the controller can
+            lease an `activation-canary` command to it.
           items:
             $ref: "#/components/schemas/Identifier128"
     ExecutorPollResponse:
@@ -2273,6 +2284,8 @@ components:
           type: boolean
         admission:
           $ref: "#/components/schemas/ExecutorAdmissionProjectionV1"
+        activation_canary:
+          $ref: "#/components/schemas/ExecutorActivationCanaryResultV1"
     ControlCommandResult:
       type: object
       additionalProperties: false
@@ -2289,6 +2302,67 @@ components:
           type: boolean
         admission:
           $ref: "#/components/schemas/ExecutorAdmissionProjectionV1"
+        activation_canary:
+          $ref: "#/components/schemas/ExecutorActivationCanaryResultV1"
+    ExecutorActivationCanaryResultV1:
+      type: object
+      additionalProperties: false
+      description: |
+        Bounded typed projection of one qualified Hermes activation canary. The
+        complete canonical object is limited to 12 KiB. Gateway evidence remains
+        the exact three canonical signed receipt lines; the controller preserves
+        this node observation but does not independently re-authorize execution.
+      required:
+        - schema_version
+        - activation_id
+        - admission_digest
+        - task_digest
+        - permit_digest
+        - run_id
+        - terminal_result_digest
+        - terminal_result_bytes
+        - terminal_result_base64
+        - gateway_evidence_base64
+        - activation_checkpoint_digest
+        - qualified
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.activation-canary-result.v1]
+        activation_id:
+          $ref: "#/components/schemas/Identifier128"
+        admission_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        task_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        permit_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        run_id:
+          type: string
+          pattern: '^run_[a-f0-9]{32}$'
+        terminal_result_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        terminal_result_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 4096
+        terminal_result_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 5464
+        gateway_evidence_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 10924
+          description: Canonical standard-base64 encoding of exactly three newline-terminated Gateway receipt records.
+        activation_checkpoint_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        qualified:
+          type: boolean
+          enum: [true]
     ExecutorAdmissionProjectionV1:
       type: object
       additionalProperties: false

@@ -909,33 +909,35 @@ func nodeView(node controlstore.Node) nodeResponse {
 }
 
 type commandResponse struct {
-	CommandID                string                 `json:"command_id"`
-	DeliveryID               string                 `json:"delivery_id"`
-	TenantID                 string                 `json:"tenant_id"`
-	NodeID                   string                 `json:"node_id"`
-	CommandDigest            string                 `json:"command_digest"`
-	CommandKind              string                 `json:"command_kind,omitempty"`
-	SignedRuntimeRef         string                 `json:"signed_runtime_ref,omitempty"`
-	SignedClaimGeneration    uint64                 `json:"signed_claim_generation,omitempty"`
-	SignedInstanceGeneration uint64                 `json:"signed_instance_generation,omitempty"`
-	State                    string                 `json:"state"`
-	DeliveryProtocol         int                    `json:"delivery_protocol,omitempty"`
-	DeliveryGeneration       uint64                 `json:"delivery_generation,omitempty"`
-	LeaseExpiresAt           string                 `json:"lease_expires_at,omitempty"`
-	TerminalStatus           string                 `json:"terminal_status,omitempty"`
-	ReportedStatus           string                 `json:"reported_status,omitempty"`
-	ErrorCode                string                 `json:"error_code,omitempty"`
-	ClaimGeneration          *uint64                `json:"claim_generation,omitempty"`
-	AdmissionProjectionState string                 `json:"admission_projection_state,omitempty"`
-	Result                   *commandResultResponse `json:"result,omitempty"`
+	CommandID                       string                 `json:"command_id"`
+	DeliveryID                      string                 `json:"delivery_id"`
+	TenantID                        string                 `json:"tenant_id"`
+	NodeID                          string                 `json:"node_id"`
+	CommandDigest                   string                 `json:"command_digest"`
+	CommandKind                     string                 `json:"command_kind,omitempty"`
+	SignedRuntimeRef                string                 `json:"signed_runtime_ref,omitempty"`
+	SignedClaimGeneration           uint64                 `json:"signed_claim_generation,omitempty"`
+	SignedInstanceGeneration        uint64                 `json:"signed_instance_generation,omitempty"`
+	State                           string                 `json:"state"`
+	DeliveryProtocol                int                    `json:"delivery_protocol,omitempty"`
+	DeliveryGeneration              uint64                 `json:"delivery_generation,omitempty"`
+	LeaseExpiresAt                  string                 `json:"lease_expires_at,omitempty"`
+	TerminalStatus                  string                 `json:"terminal_status,omitempty"`
+	ReportedStatus                  string                 `json:"reported_status,omitempty"`
+	ErrorCode                       string                 `json:"error_code,omitempty"`
+	ClaimGeneration                 *uint64                `json:"claim_generation,omitempty"`
+	AdmissionProjectionState        string                 `json:"admission_projection_state,omitempty"`
+	ActivationCanaryProjectionState string                 `json:"activation_canary_projection_state,omitempty"`
+	Result                          *commandResultResponse `json:"result,omitempty"`
 }
 
 type commandResultResponse struct {
-	RuntimeRef string                                         `json:"runtime_ref,omitempty"`
-	Error      string                                         `json:"error,omitempty"`
-	Replayed   bool                                           `json:"replayed,omitempty"`
-	Absent     bool                                           `json:"absent,omitempty"`
-	Admission  *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
+	RuntimeRef       string                                            `json:"runtime_ref,omitempty"`
+	Error            string                                            `json:"error,omitempty"`
+	Replayed         bool                                              `json:"replayed,omitempty"`
+	Absent           bool                                              `json:"absent,omitempty"`
+	Admission        *controlprotocol.ExecutorAdmissionProjectionV1    `json:"admission,omitempty"`
+	ActivationCanary *controlprotocol.ExecutorActivationCanaryResultV1 `json:"activation_canary,omitempty"`
 }
 
 func commandView(command controlstore.Command) commandResponse {
@@ -954,7 +956,8 @@ func commandView(command controlstore.Command) commandResponse {
 		result := commandResultResponse{
 			RuntimeRef: retained.RuntimeRef, Error: retained.Error,
 			Replayed: retained.Replayed, Absent: retained.Absent,
-			Admission: command.Terminal.Admission,
+			Admission:        command.Terminal.Admission,
+			ActivationCanary: command.Terminal.ActivationCanary,
 		}
 		response.TerminalStatus = command.Terminal.Report.Status
 		response.ReportedStatus = command.Terminal.Report.ReportedStatus
@@ -965,6 +968,13 @@ func commandView(command controlstore.Command) commandResponse {
 			response.AdmissionProjectionState = "missing"
 			if command.Terminal.Admission != nil {
 				response.AdmissionProjectionState = "present"
+			}
+		}
+		if command.CommandKind == "activation-canary" &&
+			command.Terminal.Report.Status == controlprotocol.ExecutorStatusDone {
+			response.ActivationCanaryProjectionState = "missing"
+			if command.Terminal.ActivationCanary != nil {
+				response.ActivationCanaryProjectionState = "present"
 			}
 		}
 	}

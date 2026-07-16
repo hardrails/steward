@@ -170,10 +170,11 @@ const (
 )
 
 type TerminalReport struct {
-	Report      controlprotocol.ExecutorReportV3               `json:"report"`
-	Admission   *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
-	Digest      string                                         `json:"digest"`
-	CompletedAt string                                         `json:"completed_at"`
+	Report           controlprotocol.ExecutorReportV3                  `json:"report"`
+	Admission        *controlprotocol.ExecutorAdmissionProjectionV1    `json:"admission,omitempty"`
+	ActivationCanary *controlprotocol.ExecutorActivationCanaryResultV1 `json:"activation_canary,omitempty"`
+	Digest           string                                            `json:"digest"`
+	CompletedAt      string                                            `json:"completed_at"`
 }
 
 type Command struct {
@@ -352,6 +353,7 @@ func cloneCommand(command Command) Command {
 	if command.Terminal != nil {
 		terminal := *command.Terminal
 		terminal.Admission = cloneAdmissionProjection(terminal.Admission)
+		terminal.ActivationCanary = cloneActivationCanaryResult(terminal.ActivationCanary)
 		command.Terminal = &terminal
 	}
 	return command
@@ -365,6 +367,16 @@ func cloneAdmissionProjection(projection *controlprotocol.ExecutorAdmissionProje
 	cloned.TaskAuthorities = append([]controlprotocol.ExecutorTaskAuthorityV1(nil), projection.TaskAuthorities...)
 	cloned.EgressRouteIDs = copyStringSlice(projection.EgressRouteIDs)
 	cloned.ConnectorIDs = copyStringSlice(projection.ConnectorIDs)
+	return &cloned
+}
+
+func cloneActivationCanaryResult(
+	result *controlprotocol.ExecutorActivationCanaryResultV1,
+) *controlprotocol.ExecutorActivationCanaryResultV1 {
+	if result == nil {
+		return nil
+	}
+	cloned := *result
 	return &cloned
 }
 
@@ -429,6 +441,7 @@ func commandToStored(command Command) storedCommand {
 	if command.Terminal != nil {
 		terminal := *command.Terminal
 		terminal.Admission = cloneAdmissionProjection(terminal.Admission)
+		terminal.ActivationCanary = cloneActivationCanaryResult(terminal.ActivationCanary)
 		stored.Terminal = &terminal
 	}
 	return stored
@@ -467,6 +480,7 @@ func commandFromStored(stored storedCommand, supportsExecutorV4 bool) (Command, 
 	if stored.Terminal != nil {
 		terminal := *stored.Terminal
 		terminal.Admission = cloneAdmissionProjection(stored.Terminal.Admission)
+		terminal.ActivationCanary = cloneActivationCanaryResult(stored.Terminal.ActivationCanary)
 		command.Terminal = &terminal
 	}
 	return command, nil
@@ -1058,8 +1072,8 @@ func validExecutorDeliveryProtocol(version int) bool {
 func terminalReportBytes(terminal TerminalReport) ([]byte, error) {
 	switch terminal.Report.ProtocolVersion {
 	case controlprotocol.ExecutorProtocolV3:
-		if terminal.Admission != nil {
-			return nil, errors.New("protocol-3 terminal report contains an admission projection")
+		if terminal.Admission != nil || terminal.ActivationCanary != nil {
+			return nil, errors.New("protocol-3 terminal report contains a protocol-4 projection")
 		}
 		if err := terminal.Report.Validate(); err != nil {
 			return nil, err
@@ -1089,11 +1103,12 @@ func executorReportV4FromTerminal(terminal TerminalReport) controlprotocol.Execu
 		ClaimGeneration:    report.ClaimGeneration,
 		ErrorCode:          report.ErrorCode,
 		Result: controlprotocol.ExecutorReportResultV4{
-			RuntimeRef: report.Result.RuntimeRef,
-			Error:      report.Result.Error,
-			Replayed:   report.Result.Replayed,
-			Absent:     report.Result.Absent,
-			Admission:  cloneAdmissionProjection(terminal.Admission),
+			RuntimeRef:       report.Result.RuntimeRef,
+			Error:            report.Result.Error,
+			Replayed:         report.Result.Replayed,
+			Absent:           report.Result.Absent,
+			Admission:        cloneAdmissionProjection(terminal.Admission),
+			ActivationCanary: cloneActivationCanaryResult(terminal.ActivationCanary),
 		},
 	}
 }
@@ -1108,6 +1123,15 @@ func validateExecutorReportV4Binding(command Command, report controlprotocol.Exe
 			report.Result.Admission.RuntimeRef != command.SignedRuntimeRef ||
 			report.Result.Admission.Generation != command.SignedInstanceGeneration {
 			return errors.New("admission projection differs from signed admit command")
+		}
+	}
+	if report.Result.ActivationCanary != nil {
+		if command.CommandKind != "activation-canary" ||
+			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 ||
+			report.ClaimGeneration != command.SignedClaimGeneration ||
+			command.SignedInstanceGeneration == 0 ||
+			report.Result.RuntimeRef != command.SignedRuntimeRef {
+			return errors.New("activation canary projection differs from its signed command")
 		}
 	}
 	if command.CommandKind == "admit" && report.Status == controlprotocol.ExecutorStatusDone &&
