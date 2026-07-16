@@ -572,6 +572,70 @@ if node.get("node_id") != sys.argv[2] or node.get("tenant_ids") != [sys.argv[3]]
     raise SystemExit("control-acceptance: enrolled node inventory is invalid")
 PY
 
+# The site authority can inspect the independently retained receipt checkpoint,
+# export it under the dedicated witness key, and verify it without contacting
+# the controller. A tenant-scoped operator cannot read this cross-tenant view.
+run_bounded 30 "$work" "$work/evidence-status.stdout" "$work/evidence-status.stderr" \
+	"$ctl_bin" control evidence status -control-url "$control_url" -token-file "$admin_token" \
+	-node-id "$node_id"
+python3 -I - "$work/evidence-status.stdout" "$node_id" <<'PY'
+import json
+import pathlib
+import re
+import sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+status = value.get("status", {})
+head = status.get("head", {})
+claim = value.get("identity_proof", {}).get("claim", {})
+if value.get("protocol_version") != 1 or value.get("control_node_id") != sys.argv[2]:
+    raise SystemExit("control-acceptance: online evidence inspection identity is invalid")
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value.get("controller_instance_id", "")):
+    raise SystemExit("control-acceptance: online evidence inspection omits the controller identity")
+if claim.get("control_node_id") != sys.argv[2] or claim.get("receipt_node_id") != sys.argv[2]:
+    raise SystemExit("control-acceptance: online evidence inspection changed the enrolled receipt identity")
+if status.get("state") != "current" or head.get("sequence") != 0:
+    raise SystemExit("control-acceptance: new node does not expose its witnessed genesis checkpoint")
+if head.get("chain_hash") != "sha256:" + "0" * 64 or not status.get("witnessed_at"):
+    raise SystemExit("control-acceptance: witnessed genesis coordinate is invalid")
+PY
+
+set +e
+run_bounded 30 "$work" "$work/evidence-tenant-denied.stdout" "$work/evidence-tenant-denied.stderr" \
+	"$ctl_bin" control evidence status -control-url "$control_url" -token-file "$operator_token" \
+	-node-id "$node_id"
+evidence_tenant_status=$?
+set -e
+if (( evidence_tenant_status == 0 )) || [[ -s $work/evidence-tenant-denied.stdout ]]; then
+	echo "control-acceptance: tenant operator read the site-wide evidence witness" >&2
+	exit 1
+fi
+
+evidence_export=$work/executor-evidence-witness.json
+run_bounded 30 "$work" "$work/evidence-export.stdout" "$work/evidence-export.stderr" \
+	"$ctl_bin" control evidence export -control-url "$control_url" -token-file "$admin_token" \
+	-node-id "$node_id" -out "$evidence_export"
+assert_owner_file "$evidence_export"
+[[ $(cat "$work/evidence-export.stdout") == "$evidence_export" ]] || {
+	echo "control-acceptance: evidence export did not return only its output path" >&2
+	exit 1
+}
+run_bounded 30 "$work" "$work/evidence-verify.stdout" "$work/evidence-verify.stderr" \
+	"$ctl_bin" control evidence verify -in "$evidence_export" \
+	-witness-public-key "$state_dir/witness.public.pem"
+python3 -I - "$work/evidence-verify.stdout" "$node_id" <<'PY'
+import json
+import pathlib
+import re
+import sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if value.get("verified") is not True or value.get("control_node_id") != sys.argv[2]:
+    raise SystemExit("control-acceptance: offline witness verification did not bind the node")
+if value.get("state") != "current" or value.get("sequence") != 0 or not value.get("exported_at"):
+    raise SystemExit("control-acceptance: offline witness verification changed the checkpoint")
+if not re.fullmatch(r"sha256:[0-9a-f]{64}", value.get("witness_public_key_sha256", "")):
+    raise SystemExit("control-acceptance: offline verification omits the pinned witness digest")
+PY
+
 run_bounded 30 "$work" "$work/keygen.stdout" "$work/keygen.stderr" \
 	"$ctl_bin" keygen -key-id acceptance-tenant-command -private-out "$work/command.private" \
 	-public-out "$work/command.public"
@@ -798,4 +862,4 @@ assert_secret_absent enrollment_token "$enrollment" "${process_outputs[@]}"
 assert_secret_absent credential "$node_credential" "${process_outputs[@]}"
 assert_secret_absent raw "$work/command.private" "${process_outputs[@]}"
 
-echo "Steward Control acceptance passed: initialization, scoped tenancy, deterministic enrollment, exact signed delivery, restart recovery, fencing, and terminal retention verified."
+echo "Steward Control acceptance passed: initialization, scoped tenancy, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."
