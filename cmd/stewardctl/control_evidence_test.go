@@ -222,7 +222,7 @@ func TestControlEvidenceUsageRequiresExactInputs(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	if err := run(nil, &bytes.Buffer{}, &stderr); err == nil ||
-		!strings.Contains(stderr.String(), "control pki|tenant|operator|enrollment|node|command|evidence") {
+		!strings.Contains(stderr.String(), "control pki|tenant|operator|enrollment|node|node-credential|operations|attention|command|credential|evidence") {
 		t.Fatalf("root usage=%q err=%v", stderr.String(), err)
 	}
 	if err := controlUsageError(); err == nil || !strings.Contains(err.Error(), "evidence status|export|verify") {

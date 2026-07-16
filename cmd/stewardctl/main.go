@@ -93,7 +93,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl permit issue|verify|audit ...")
 	fmt.Fprintln(writer, "       stewardctl task issue|verify|audit|submit|status|observe|wait ...")
 	fmt.Fprintln(writer, "       stewardctl executor-command issue|verify ...")
-	fmt.Fprintln(writer, "       stewardctl control pki|tenant|operator|enrollment|node|command|evidence ...")
+	fmt.Fprintln(writer, "       stewardctl control pki|tenant|operator|enrollment|node|node-credential|operations|attention|command|credential|evidence ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
 	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state ...")
 	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector|service ...")
