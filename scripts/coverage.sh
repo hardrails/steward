@@ -22,8 +22,8 @@
 #      binaries' distinct coverage metadata never mix.
 #   2. `go tool covdata textfmt` turns each standalone binary's counters into a
 #      text profile.
-#   3. The three profiles are unioned: a source region counts as covered if the
-#      unit tests or either integration binary covered it. All instrument the
+#   3. The four profiles are unioned: a source region counts as covered if the
+#      unit tests or any integration binary covered it. All instrument the
 #      same package set (-coverpkg=./...), so the union is honest, not double-counting.
 #
 # Usage: scripts/coverage.sh [min-fraction]   (default 0.85)
@@ -35,15 +35,18 @@ out="${COVERAGE_OUT:-coverage.out}"
 
 covdir="$(mktemp -d)"
 executor_covdir="$(mktemp -d)"
+control_covdir="$(mktemp -d)"
 unit="$(mktemp)"
 integration="$(mktemp)"
 executor_integration="$(mktemp)"
-trap 'rm -rf "$covdir" "$executor_covdir" "$unit" "$integration" "$executor_integration"' EXIT
+control_integration="$(mktemp)"
+trap 'rm -rf "$covdir" "$executor_covdir" "$control_covdir" "$unit" "$integration" "$executor_integration" "$control_integration"' EXIT
 
 # -count=1 forces a real test run (no cache): a cached run would not re-execute
 # the integration subprocess, leaving no coverage data in $covdir.
 STEWARD_TEST_COVERDIR="$covdir" \
 	STEWARD_EXECUTOR_TEST_COVERDIR="$executor_covdir" \
+	STEWARD_CONTROL_TEST_COVERDIR="$control_covdir" \
 	go test -count=1 -coverpkg=./... -coverprofile="$unit" ./...
 
 if ! ls "$covdir"/covmeta.* >/dev/null 2>&1; then
@@ -59,6 +62,12 @@ if ! ls "$executor_covdir"/covmeta.* >/dev/null 2>&1; then
 fi
 go tool covdata textfmt -i="$executor_covdir" -o="$executor_integration"
 
+if ! ls "$control_covdir"/covmeta.* >/dev/null 2>&1; then
+	echo "coverage: no Steward Control integration coverage data written to $control_covdir" >&2
+	exit 1
+fi
+go tool covdata textfmt -i="$control_covdir" -o="$control_integration"
+
 # Union the unit and integration profiles. Region key is the source span
 # (field 1); the statement count is field 2; field 3 is the hit count.
 awk 'FNR==1 { next }
@@ -66,13 +75,15 @@ awk 'FNR==1 { next }
 	  if ($3+0 > 0) cov[k]=1 }
 	END { print "mode: set"
 	      for (i=1; i<=n; i++) { k=order[i]; print k, stmts[k], (k in cov)?1:0 } }' \
-	"$unit" "$integration" "$executor_integration" >"$out"
+	"$unit" "$integration" "$executor_integration" "$control_integration" >"$out"
 
-total="$(go tool cover -func="$out" | awk '/^total:/ { gsub("%","",$NF); print $NF }')"
-floor="$(awk -v m="$min" 'BEGIN { printf "%.1f", m*100 }')"
+read -r covered statements < <(awk 'NR > 1 { statements += $2; if ($3+0 > 0) covered += $2 }
+	END { print covered+0, statements+0 }' "$out")
+total="$(awk -v c="$covered" -v s="$statements" 'BEGIN { printf "%.4f", 100*c/s }')"
+floor="$(awk -v m="$min" 'BEGIN { printf "%.4f", m*100 }')"
 echo "coverage: aggregate ${total}% (floor ${floor}%)"
 
-if awk -v t="$total" -v m="$min" 'BEGIN { exit (t/100 + 1e-9 < m) ? 0 : 1 }'; then
+if awk -v c="$covered" -v s="$statements" -v m="$min" 'BEGIN { exit (c/s + 1e-12 < m) ? 0 : 1 }'; then
 	echo "coverage: FAIL — ${total}% is below the ${floor}% floor" >&2
 	exit 1
 fi

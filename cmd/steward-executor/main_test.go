@@ -511,7 +511,7 @@ func buildExecutor(t *testing.T) string {
 	bin := filepath.Join(t.TempDir(), "steward-executor")
 	args := []string{"build", "-o", bin, "."}
 	if os.Getenv("STEWARD_EXECUTOR_TEST_COVERDIR") != "" {
-		args = []string{"build", "-cover", "-o", bin, "."}
+		args = []string{"build", "-cover", "-coverpkg=./...", "-o", bin, "."}
 	}
 	command := exec.Command("go", args...)
 	if output, err := command.CombinedOutput(); err != nil {

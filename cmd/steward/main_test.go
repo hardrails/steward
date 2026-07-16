@@ -882,7 +882,7 @@ func buildSteward(t *testing.T) string {
 	bin := filepath.Join(t.TempDir(), "steward")
 	args := []string{"build", "-o", bin, "."}
 	if integrationCoverDir() != "" {
-		args = []string{"build", "-cover", "-o", bin, "."}
+		args = []string{"build", "-cover", "-coverpkg=./...", "-o", bin, "."}
 	}
 	build := exec.Command("go", args...)
 	if out, err := build.CombinedOutput(); err != nil {
