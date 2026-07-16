@@ -286,6 +286,12 @@ tenant-scoped Executor credential remains available for a single-tenant node but
 does not enable multi-tenant commands. See [Signed admission]({{ '/guides/signed-admission/' | relative_url }})
 and [Executor uplink]({{ '/executor/' | relative_url }}#outbound-executor-uplink).
 
+For a node-scoped credential, `configure-node` selects Executor uplink protocol 4,
+which reports a bounded typed admission result to the controller. If the controller
+supports only the durable lease protocol, add
+`--executor-uplink-protocol-version 3`. Local and tenant-scoped configurations use
+the safe compatibility value `0` and cannot select 3 or 4.
+
 `configure-node` validates the enrollment evidence sidecar, imports the exact
 receipt key used during enrollment, and initializes the durable command and
 signed-admission fences, plus the empty operation journal and evidence chain. A

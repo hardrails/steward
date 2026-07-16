@@ -123,6 +123,9 @@ publishes authenticated evidence checkpoints independently from command polling.
 A controller outage does not stop local enforcement; the signed local chain remains
 the durable outbox until delivery resumes. A legacy
 tenant-scoped credential may omit signed admission but can act only for its tenant.
+Node-scoped enrollment selects uplink protocol 4 automatically. Add
+`--executor-uplink-protocol-version 3` to `configure-node` only for a controller
+that has not implemented protocol 4's typed admission projection.
 
 ## Verify the active node
 

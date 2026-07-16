@@ -207,6 +207,13 @@ intentionally disabled service.
 `--no-restart` is accepted only when all three services are already inactive. This
 prevents the active-release symlink from changing underneath a running process.
 
+Activation preserves `EXECUTOR_UPLINK_PROTOCOL_VERSION` when it is already `0`,
+`3`, or `4`. If an older configuration has no setting, activation writes `0` before
+target preflight. For a node credential with a delivery ledger, `0` retains the
+older implicit protocol 3 behavior; activation never opts an existing node into
+protocol 4. Run `configure-node` to make that protocol change explicitly, after
+reconciling every unsettled delivery.
+
 Target preflight is read-only: it validates existing state, audit, connector
 receipt, journal, evidence, and fence files without creating or appending to them.
 It also reports a missing prospective Gateway state, audit, or connector receipt

@@ -338,21 +338,25 @@ contract.
 
 With a tenant-scoped compatibility credential, Executor posts `{}` to
 `/executor-uplink/poll` and reports terminal outcomes to
-`/executor-uplink/report`. With node scope and a durable delivery-state file, the
-poll body advertises protocol version 3 and its capabilities:
+`/executor-uplink/report`. Packaged node enrollment writes protocol version 4
+explicitly and configures a durable delivery-state file. Its poll body advertises
+the bounded admission projection capability:
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 4,
   "node_id": "executor-1",
   "credential_scope": "node",
-  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "multi-tenant", "read", "state-purge"]
+  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "admission-projection-v1", "multi-tenant", "read", "state-purge"]
 }
 ```
 
-The version-3 response carries fenced delivery records around exact DSSE command
-bytes. Executor persists a delivery as accepted before applying it and reports a
-terminal result after the local command fence and handler settle. A crash after
+Protocols 3 and 4 carry fenced delivery records around exact DSSE command bytes.
+Executor persists a delivery as accepted before applying it and reports a terminal
+result after the local command fence and handler settle. Protocol 4 additionally
+returns the admission decision's exact runtime, claim generation, signed policy
+digest, routes, task authorities, and activation coordinates. The signed command
+retains the corresponding intent bytes. A crash after
 acceptance but before a provable terminal result becomes `outcome_unknown`; it is
 never silently retried as a fresh effect. The controller may reclaim an expired
 lease with a higher delivery generation, but cannot change the signed bytes.
@@ -458,14 +462,17 @@ cannot change its version, scope, tenant, or node identity. The report endpoint
 must acknowledge `{"applied":true}`. A negative or malformed acknowledgement is
 an error, not proof that the control plane stored the outcome.
 
-Protocol version 2 remains available for compatible external controllers when no
-delivery-state file is configured. Tenant-scoped version-1 credentials retain the
-legacy protocol. A node-scoped credential with a delivery ledger defaults to
-protocol 3. Operators can explicitly select protocol 4 with
-`-uplink-protocol-version 4` when the controller supports its bounded, typed
-admission projection. Protocols 3 and 4 share the same durable delivery ledger but
-never share a retained record: startup blocks a protocol switch until every
-unsettled record for the other protocol is reconciled.
+Protocol version 2 remains available to raw-binary deployments of compatible
+external controllers when a node credential has neither an explicit protocol nor a
+delivery-state file. Tenant-scoped version-1 credentials retain the legacy protocol.
+`configure-node` writes `EXECUTOR_UPLINK_PROTOCOL_VERSION=4` for a node-scoped
+credential. Use `--executor-uplink-protocol-version 3` only when the controller has
+not implemented protocol 4. Local and tenant-scoped configurations write `0`.
+During package activation, an older configuration with no setting receives `0`;
+this preserves its prior implicit selection instead of silently switching a running
+node. Protocols 3 and 4 share the same durable delivery ledger but never share a
+retained record: startup blocks a protocol switch until every unsettled record for
+the other protocol is reconciled.
 
 Remote plaintext HTTP is rejected by default. Private-CA and mutual TLS (mTLS)
 deployments use

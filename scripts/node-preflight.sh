@@ -242,7 +242,7 @@ fi
 declare -A executor=()
 required=' EXECUTOR_TOKEN_FILE EXECUTOR_DOCKER_SOCKET EXECUTOR_MAX_MEMORY_BYTES EXECUTOR_MAX_CPU_MILLIS EXECUTOR_MAX_PIDS EXECUTOR_MAX_WORKLOADS EXECUTOR_MAX_WORKLOADS_PER_TENANT '
 uplink=' EXECUTOR_UPLINK_URL EXECUTOR_UPLINK_CREDENTIAL_FILE EXECUTOR_UPLINK_STATE_FILE EXECUTOR_UPLINK_TLS_CA_FILE '
-optional=' EXECUTOR_UPLINK_DELIVERY_STATE_FILE EXECUTOR_EVIDENCE_UPLINK_ENABLED EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG EXECUTOR_STATE_ARG EXECUTOR_MAX_TOTAL_MEMORY_BYTES EXECUTOR_MAX_TOTAL_CPU_MILLIS EXECUTOR_MAX_TOTAL_PIDS EXECUTOR_MAX_TENANT_MEMORY_BYTES EXECUTOR_MAX_TENANT_CPU_MILLIS EXECUTOR_MAX_TENANT_PIDS '
+optional=' EXECUTOR_UPLINK_DELIVERY_STATE_FILE EXECUTOR_UPLINK_PROTOCOL_VERSION EXECUTOR_EVIDENCE_UPLINK_ENABLED EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG EXECUTOR_STATE_ARG EXECUTOR_MAX_TOTAL_MEMORY_BYTES EXECUTOR_MAX_TOTAL_CPU_MILLIS EXECUTOR_MAX_TOTAL_PIDS EXECUTOR_MAX_TENANT_MEMORY_BYTES EXECUTOR_MAX_TENANT_CPU_MILLIS EXECUTOR_MAX_TENANT_PIDS '
 allowed="$required$uplink$optional"
 while IFS= read -r line || [[ -n $line ]]; do
 	[[ -z $line || $line == \#* ]] && continue
@@ -278,6 +278,36 @@ if (( uplink_set != 0 && uplink_set != 4 )); then
 fi
 if [[ -n ${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-} && $uplink_set -ne 4 ]]; then
 	echo "node-preflight: Executor delivery state requires the complete uplink configuration" >&2
+	exit 2
+fi
+validate_executor_uplink_protocol() {
+	local protocol=$1 uplink_count=$2 delivery_file=$3
+	case "$protocol" in
+		0) return 0 ;;
+		3 | 4)
+			if (( uplink_count != 4 )); then
+				echo "node-preflight: Executor uplink protocol $protocol requires the complete uplink configuration" >&2
+				return 2
+			fi
+			if [[ -z $delivery_file ]]; then
+				echo "node-preflight: Executor uplink protocol $protocol requires durable delivery state" >&2
+				return 2
+			fi
+			return 0
+			;;
+		"")
+			echo "node-preflight: missing executor setting EXECUTOR_UPLINK_PROTOCOL_VERSION" >&2
+			return 2
+			;;
+		*)
+			echo "node-preflight: EXECUTOR_UPLINK_PROTOCOL_VERSION must be 0, 3, or 4" >&2
+			return 2
+			;;
+	esac
+}
+uplink_protocol=${executor[EXECUTOR_UPLINK_PROTOCOL_VERSION]:-}
+if ! validate_executor_uplink_protocol "$uplink_protocol" "$uplink_set" \
+	"${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-}"; then
 	exit 2
 fi
 
@@ -432,6 +462,7 @@ runuser -u steward-executor -- "$executor_bin" -check-config \
 	-uplink-credential-file "${executor[EXECUTOR_UPLINK_CREDENTIAL_FILE]}" \
 	-uplink-state-file "${executor[EXECUTOR_UPLINK_STATE_FILE]}" \
 	-uplink-delivery-state-file "${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-}" \
+	-uplink-protocol-version "$uplink_protocol" \
 	-uplink-tls-ca-file "${executor[EXECUTOR_UPLINK_TLS_CA_FILE]}" \
 	-max-memory-bytes "${executor[EXECUTOR_MAX_MEMORY_BYTES]}" \
 	-max-cpu-millis "${executor[EXECUTOR_MAX_CPU_MILLIS]}" \
