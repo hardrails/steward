@@ -8,8 +8,10 @@ import (
 	"strings"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -29,6 +31,10 @@ type Control interface {
 	RevokeNode(context.Context, string) (controlclient.NodeRevocation, error)
 	SubmitCommand(context.Context, string, string, []byte) (controlclient.Command, error)
 	GetCommand(context.Context, string, string, string) (controlclient.Command, error)
+	GetOperationsSummary(context.Context, string) (controlstore.OperationsSummary, error)
+	ListAttention(context.Context, string, string, string, int) (controlstore.AttentionPage, error)
+	ListCommandInventory(context.Context, string, string, string, string, string, int) (controlstore.CommandInventoryPage, error)
+	ListCredentialInventory(context.Context, string, string, string, string, *bool, string, int) (controlstore.CredentialInventoryPage, error)
 	InspectExecutorEvidence(context.Context, string) (controlprotocol.ExecutorEvidenceInspectionV1, error)
 }
 
@@ -69,6 +75,36 @@ type controlCommandStatusArgs struct {
 	TenantID  string `json:"tenant_id"`
 	NodeID    string `json:"node_id"`
 	CommandID string `json:"command_id"`
+}
+
+type controlOperationsSummaryArgs struct {
+	TenantID string `json:"tenant_id,omitempty"`
+}
+
+type controlAttentionListArgs struct {
+	TenantID string `json:"tenant_id,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Cursor   string `json:"cursor,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+
+type controlCommandListArgs struct {
+	TenantID       string `json:"tenant_id,omitempty"`
+	NodeID         string `json:"node_id,omitempty"`
+	State          string `json:"state,omitempty"`
+	TerminalStatus string `json:"terminal_status,omitempty"`
+	Cursor         string `json:"cursor,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+}
+
+type controlCredentialListArgs struct {
+	TenantID string `json:"tenant_id,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	Role     string `json:"role,omitempty"`
+	NodeID   string `json:"node_id,omitempty"`
+	Revoked  string `json:"revoked,omitempty"`
+	Cursor   string `json:"cursor,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
 }
 
 type controlEvidenceStatusArgs struct {
@@ -171,6 +207,76 @@ func (s *Server) callControlTool(ctx context.Context, name string, raw []byte) (
 			return nil, controlFailure("command status", err)
 		}
 		return result, nil
+	case "steward_control_operations_summary":
+		var arguments controlOperationsSummaryArgs
+		if decodeArguments(raw, &arguments) != nil ||
+			!validOptionalControlIdentifier(arguments.TenantID, 128) {
+			return nil, errors.New("steward_control_operations_summary accepts only an optional bounded tenant_id")
+		}
+		result, err := s.control.GetOperationsSummary(ctx, arguments.TenantID)
+		if err != nil {
+			return nil, controlFailure("operations summary", err)
+		}
+		return result, nil
+	case "steward_control_attention_list":
+		var arguments controlAttentionListArgs
+		if decodeArguments(raw, &arguments) != nil ||
+			!validOptionalControlIdentifier(arguments.TenantID, 128) ||
+			!validControlAttentionReason(arguments.Reason) ||
+			!validControlInventoryPage(arguments.Cursor, arguments.Limit) {
+			return nil, errors.New("steward_control_attention_list accepts only bounded tenant_id, reason, cursor, and limit")
+		}
+		result, err := s.control.ListAttention(
+			ctx, arguments.TenantID, arguments.Reason, arguments.Cursor, arguments.Limit,
+		)
+		if err != nil {
+			return nil, controlFailure("attention list", err)
+		}
+		return result, nil
+	case "steward_control_command_list":
+		var arguments controlCommandListArgs
+		if decodeArguments(raw, &arguments) != nil ||
+			!validOptionalControlIdentifier(arguments.TenantID, 128) ||
+			!validOptionalControlIdentifier(arguments.NodeID, 128) ||
+			!validControlCommandState(arguments.State) ||
+			!validControlTerminalStatus(arguments.TerminalStatus) ||
+			(arguments.TerminalStatus != "" && arguments.State != string(controlstore.CommandTerminal)) ||
+			!validControlInventoryPage(arguments.Cursor, arguments.Limit) {
+			return nil, errors.New("steward_control_command_list accepts bounded tenant, node, state, terminal status, cursor, and limit; terminal_status requires state=terminal")
+		}
+		result, err := s.control.ListCommandInventory(
+			ctx, arguments.TenantID, arguments.NodeID, arguments.State,
+			arguments.TerminalStatus, arguments.Cursor, arguments.Limit,
+		)
+		if err != nil {
+			return nil, controlFailure("command list", err)
+		}
+		return result, nil
+	case "steward_control_credential_list":
+		var arguments controlCredentialListArgs
+		if decodeArguments(raw, &arguments) != nil {
+			return nil, errors.New("steward_control_credential_list accepts bounded tenant, kind, role, node, revoked, cursor, and limit; role and node filters cannot be combined")
+		}
+		revoked, revokedErr := parseControlRevoked(arguments.Revoked)
+		if !validOptionalControlIdentifier(arguments.TenantID, 128) ||
+			!validControlCredentialKind(arguments.Kind) ||
+			!validControlCredentialRole(arguments.Role) ||
+			!validOptionalControlIdentifier(arguments.NodeID, 128) ||
+			(arguments.Kind == string(controlauth.KindNode) && arguments.Role != "") ||
+			(arguments.Kind == string(controlauth.KindOperator) && arguments.NodeID != "") ||
+			(arguments.Role != "" && arguments.NodeID != "") ||
+			revokedErr != nil ||
+			!validControlInventoryPage(arguments.Cursor, arguments.Limit) {
+			return nil, errors.New("steward_control_credential_list accepts bounded tenant, kind, role, node, revoked, cursor, and limit; role and node filters cannot be combined")
+		}
+		result, err := s.control.ListCredentialInventory(
+			ctx, arguments.TenantID, arguments.Kind, arguments.Role, arguments.NodeID,
+			revoked, arguments.Cursor, arguments.Limit,
+		)
+		if err != nil {
+			return nil, controlFailure("credential list", err)
+		}
+		return result, nil
 	case "steward_control_evidence_status":
 		var arguments controlEvidenceStatusArgs
 		if decodeArguments(raw, &arguments) != nil || !validControlIdentifier(arguments.NodeID, 128) {
@@ -219,6 +325,92 @@ func validControlPage(after string, limit int) bool {
 	return (after == "" || validControlIdentifier(after, 128)) && limit >= 0 && limit <= 500
 }
 
+func validControlInventoryPage(cursor string, limit int) bool {
+	if limit < 0 || limit > controlstore.MaxInventoryPageLimit {
+		return false
+	}
+	if cursor == "" {
+		return true
+	}
+	if len(cursor) > base64.RawURLEncoding.EncodedLen(4096) ||
+		strings.ContainsAny(cursor, "\r\n\x00") {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	return err == nil && len(raw) > 0 && len(raw) <= 4096 &&
+		base64.RawURLEncoding.EncodeToString(raw) == cursor
+}
+
+func validOptionalControlIdentifier(value string, maximum int) bool {
+	return value == "" || validControlIdentifier(value, maximum)
+}
+
+func validControlAttentionReason(value string) bool {
+	switch controlstore.AttentionReason(value) {
+	case "", controlstore.AttentionNodeNeverSeen, controlstore.AttentionNodeStale,
+		controlstore.AttentionEvidenceUnwitnessed, controlstore.AttentionEvidenceStale,
+		controlstore.AttentionRollbackDetected, controlstore.AttentionEquivocationDetected,
+		controlstore.AttentionCommandPendingOverdue, controlstore.AttentionCommandLeaseExpired,
+		controlstore.AttentionCommandFailed, controlstore.AttentionCommandOutcomeUnknown,
+		controlstore.AttentionCapacityWarning:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlCommandState(value string) bool {
+	switch controlstore.CommandState(value) {
+	case "", controlstore.CommandPending, controlstore.CommandLeased, controlstore.CommandTerminal:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlTerminalStatus(value string) bool {
+	switch value {
+	case "", controlprotocol.ExecutorStatusDone, controlprotocol.ExecutorStatusFailed,
+		controlprotocol.ExecutorStatusRejected, controlprotocol.ExecutorStatusOutcomeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlCredentialKind(value string) bool {
+	switch controlauth.CredentialKind(value) {
+	case "", controlauth.KindOperator, controlauth.KindNode:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlCredentialRole(value string) bool {
+	switch controlauth.Role(value) {
+	case "", controlauth.RoleSiteAdmin, controlauth.RoleTenantOperator:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseControlRevoked(value string) (*bool, error) {
+	switch value {
+	case "", "any":
+		return nil, nil
+	case "true":
+		revoked := true
+		return &revoked, nil
+	case "false":
+		revoked := false
+		return &revoked, nil
+	default:
+		return nil, errors.New("revoked filter must be any, true, or false")
+	}
+}
+
 func validControlIdentifier(value string, maximum int) bool {
 	if maximum < 1 || len(value) < 1 || len(value) > maximum || strings.TrimSpace(value) != value {
 		return false
@@ -259,6 +451,23 @@ func controlTools() []any {
 			"limit": map[string]any{"type": "integer", "minimum": 0, "maximum": 500},
 		}
 	}
+	inventoryProperties := func() map[string]any {
+		return map[string]any{
+			"cursor": map[string]any{
+				"type": "string", "maxLength": base64.RawURLEncoding.EncodedLen(4096),
+				"pattern": "^[A-Za-z0-9_-]*$", "description": "Opaque continuation cursor returned by the same operation and filters.",
+			},
+			"limit": map[string]any{
+				"type": "integer", "minimum": 0, "maximum": controlstore.MaxInventoryPageLimit,
+				"description": "Maximum results. Zero or omission uses the controller default.",
+			},
+		}
+	}
+	optionalTenant := map[string]any{
+		"type": "string", "minLength": 1, "maxLength": 128,
+		"pattern":     "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+		"description": "Optional tenant projection. Omit for the credential's default site-wide or tenant scope.",
+	}
 	return []any{
 		tool("steward_control_tenant_list", "List tenants", "List the tenants visible to the configured control-plane operator credential.",
 			map[string]any{"type": "object", "additionalProperties": false, "properties": pageProperties()}, true, false, true, false),
@@ -288,9 +497,64 @@ func controlTools() []any {
 		tool("steward_control_command_status", "Inspect signed command", "Read durable delivery and terminal-report metadata for one exact signed command.",
 			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tenant_id", "node_id", "command_id"},
 				"properties": map[string]any{"tenant_id": id128, "node_id": id128, "command_id": id256}}, true, false, true, false),
+		tool("steward_control_operations_summary", "Inspect fleet operations", "Read bounded capacity, command, evidence, and derived attention totals for the configured operator scope or one tenant projection. This does not acknowledge findings or grant authority.",
+			map[string]any{"type": "object", "additionalProperties": false,
+				"properties": map[string]any{"tenant_id": optionalTenant}}, true, false, true, false),
+		tool("steward_control_attention_list", "List action-required facts", "List bounded derived attention facts for the configured operator scope or one tenant projection. Findings are read-only and remain governed by their underlying node, evidence, command, or capacity state.",
+			map[string]any{"type": "object", "additionalProperties": false,
+				"properties": mergeControlProperties(
+					mergeControlProperties(inventoryProperties(), "tenant_id", optionalTenant),
+					"reason", map[string]any{"type": "string", "enum": controlAttentionReasonValues()},
+				)}, true, false, true, false),
+		tool("steward_control_command_list", "List command inventory", "List bounded command delivery metadata without signed command bytes, terminal result text, or retry side effects.",
+			map[string]any{"type": "object", "additionalProperties": false,
+				"properties": mergeControlProperties(
+					mergeControlProperties(
+						mergeControlProperties(
+							mergeControlProperties(inventoryProperties(), "tenant_id", optionalTenant),
+							"node_id", id128,
+						),
+						"state", map[string]any{"type": "string", "enum": []string{"pending", "leased", "terminal"}},
+					),
+					"terminal_status", map[string]any{"type": "string", "enum": []string{
+						controlprotocol.ExecutorStatusDone, controlprotocol.ExecutorStatusFailed,
+						controlprotocol.ExecutorStatusRejected, controlprotocol.ExecutorStatusOutcomeUnknown,
+					}},
+				)}, true, false, true, false),
+		tool("steward_control_credential_list", "List credential inventory", "List bounded non-secret credential metadata. Bearer values, token MACs, and reproducible credential material are never returned.",
+			map[string]any{"type": "object", "additionalProperties": false,
+				"properties": mergeControlProperties(
+					mergeControlProperties(
+						mergeControlProperties(
+							mergeControlProperties(
+								mergeControlProperties(inventoryProperties(), "tenant_id", optionalTenant),
+								"kind", map[string]any{"type": "string", "enum": []string{"operator", "node"}},
+							),
+							"role", map[string]any{"type": "string", "enum": []string{"site_admin", "tenant_operator"}},
+						),
+						"node_id", id128,
+					),
+					"revoked", map[string]any{"type": "string", "enum": []string{"any", "true", "false"}},
+				)}, true, false, true, false),
 		tool("steward_control_evidence_status", "Inspect Executor evidence", "Read the controller's bounded last-good Executor receipt checkpoint and any sticky rollback or equivocation finding for one node. Requires a site-admin control-plane credential.",
 			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"node_id"},
 				"properties": map[string]any{"node_id": id128}}, true, false, true, false),
+	}
+}
+
+func controlAttentionReasonValues() []string {
+	return []string{
+		string(controlstore.AttentionNodeNeverSeen),
+		string(controlstore.AttentionNodeStale),
+		string(controlstore.AttentionEvidenceUnwitnessed),
+		string(controlstore.AttentionEvidenceStale),
+		string(controlstore.AttentionRollbackDetected),
+		string(controlstore.AttentionEquivocationDetected),
+		string(controlstore.AttentionCommandPendingOverdue),
+		string(controlstore.AttentionCommandLeaseExpired),
+		string(controlstore.AttentionCommandFailed),
+		string(controlstore.AttentionCommandOutcomeUnknown),
+		string(controlstore.AttentionCapacityWarning),
 	}
 }
 

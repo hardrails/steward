@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/controlstore"
 )
 
 func TestControlDefaultOriginMatchesLoopbackServer(t *testing.T) {
@@ -29,6 +32,9 @@ func TestControlDefaultOriginMatchesLoopbackServer(t *testing.T) {
 
 func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	const nodeCredentialToken = "steward_node_v1_node-cred-11111111111111111111111111111111_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	attentionCursor := base64.RawURLEncoding.EncodeToString([]byte("attention-v1\x00attention-a"))
+	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-v1\x00command-a"))
+	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-v1\x00credential-a"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/enroll" && request.Header.Get("Authorization") != "Bearer admin-secret" {
 			t.Fatalf("authorization=%q path=%q", request.Header.Get("Authorization"), request.URL.Path)
@@ -79,6 +85,38 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 			_, _ = w.Write([]byte(`{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z"}`))
 		case "/v1/nodes/node-1":
 			_, _ = w.Write([]byte(`{"node_id":"node-1","revoked_credentials":1}`))
+		case "/v1/operations/summary":
+			query := request.URL.Query()
+			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" {
+				t.Fatalf("operations summary request=%s %s", request.Method, request.URL.String())
+			}
+			_, _ = w.Write([]byte(`{"generated_at":"2026-07-16T12:00:00Z","tenant_id":"tenant-a","capacity":[],"commands":{"total":1,"pending":1,"leased":0,"terminal":0,"done":0,"failed":0,"rejected":0,"outcome_unknown":0},"evidence":{"nodes":1,"active_nodes":1,"witnessed":1,"unwitnessed":0,"current":1,"stale":0,"rollback_detected":0,"equivocation_detected":0},"attention":{"total":1,"warnings":1,"critical":0,"counts":[{"reason":"node_stale","severity":"warning","count":1}]}}`))
+		case "/v1/operations/attention":
+			query := request.URL.Query()
+			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" ||
+				query.Get("reason") != "node_stale" || query.Get("cursor") != attentionCursor ||
+				query.Get("limit") != "25" {
+				t.Fatalf("attention request=%s %s", request.Method, request.URL.String())
+			}
+			_, _ = w.Write([]byte(`{"items":[{"id":"attention-a","reason":"node_stale","severity":"warning","resource":"node","tenant_id":"tenant-a","node_id":"node-1","since":"2026-07-16T11:55:00Z"}],"next_cursor":"next-attention"}`))
+		case "/v1/operations/commands":
+			query := request.URL.Query()
+			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" ||
+				query.Get("node_id") != "node-1" || query.Get("state") != "terminal" ||
+				query.Get("terminal_status") != "failed" || query.Get("cursor") != commandCursor ||
+				query.Get("limit") != "50" {
+				t.Fatalf("command inventory request=%s %s", request.Method, request.URL.String())
+			}
+			_, _ = w.Write([]byte(`{"commands":[{"tenant_id":"tenant-a","node_id":"node-1","id":"command-1","delivery_id":"delivery-1","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"terminal","delivery_generation":1,"created_at":"2026-07-16T11:00:00Z","terminal_status":"failed","completed_at":"2026-07-16T11:01:00Z"}],"next_cursor":"next-command"}`))
+		case "/v1/operations/credentials":
+			query := request.URL.Query()
+			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" ||
+				query.Get("kind") != "operator" || query.Get("role") != "tenant_operator" ||
+				query.Get("revoked") != "false" || query.Get("cursor") != credentialCursor ||
+				query.Get("limit") != "10" {
+				t.Fatalf("credential inventory request=%s %s", request.Method, request.URL.String())
+			}
+			_, _ = w.Write([]byte(`{"credentials":[{"id":"operator-1","kind":"operator","role":"tenant_operator","tenant_id":"tenant-a","request_id":"request-operator-1","created_at":"2026-07-16T10:00:00Z","revoked":false}],"next_cursor":"next-credential"}`))
 		default:
 			t.Fatalf("unexpected path %q", request.URL.Path)
 		}
@@ -209,6 +247,54 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	if err := run(statusArguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"reported_status":"running"`) {
 		t.Fatalf("status output=%q error=%v", output.String(), err)
 	}
+	output.Reset()
+	operationsArguments := append([]string{"control", "operations", "status"}, common...)
+	operationsArguments = append(operationsArguments, "-tenant-id", "tenant-a")
+	if err := run(operationsArguments, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"generated_at":"2026-07-16T12:00:00Z"`) ||
+		!strings.Contains(output.String(), `"node_stale"`) {
+		t.Fatalf("operations output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	attentionArguments := append([]string{"control", "attention", "list"}, common...)
+	attentionArguments = append(
+		attentionArguments, "-tenant-id", "tenant-a", "-reason", "node_stale",
+		"-cursor", attentionCursor, "-limit", "25",
+	)
+	if err := run(attentionArguments, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"id":"attention-a"`) {
+		t.Fatalf("attention output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	commandListArguments := append([]string{"control", "command", "list"}, common...)
+	commandListArguments = append(
+		commandListArguments, "-tenant-id", "tenant-a", "-node-id", "node-1",
+		"-state", "terminal", "-terminal-status", "failed",
+		"-cursor", commandCursor, "-limit", "50",
+	)
+	if err := run(commandListArguments, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"terminal_status":"failed"`) ||
+		strings.Contains(output.String(), `"command_dsse"`) ||
+		strings.Contains(output.String(), `"result"`) ||
+		strings.Contains(output.String(), `"runtime_ref"`) ||
+		strings.Contains(output.String(), `"reported_status"`) ||
+		strings.Contains(output.String(), `"error_code"`) {
+		t.Fatalf("command inventory output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	credentialListArguments := append([]string{"control", "credential", "list"}, common...)
+	credentialListArguments = append(
+		credentialListArguments, "-tenant-id", "tenant-a", "-kind", "operator",
+		"-role", "tenant_operator", "-revoked", "false",
+		"-cursor", credentialCursor, "-limit", "10",
+	)
+	if err := run(credentialListArguments, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"id":"operator-1"`) ||
+		strings.Contains(output.String(), `"token"`) ||
+		strings.Contains(output.String(), `"token_mac"`) ||
+		strings.Contains(output.String(), `"credential"`) {
+		t.Fatalf("credential inventory output=%q error=%v", output.String(), err)
+	}
 }
 
 func TestControlCommandsRejectAmbiguousScopeAndMissingSecrets(t *testing.T) {
@@ -230,6 +316,81 @@ func TestControlCommandsRejectAmbiguousScopeAndMissingSecrets(t *testing.T) {
 		"-enrollment", "/tmp/enrollment", "-request-id", "request", "-credential-out", "/tmp/credential",
 	}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "evidence private key") {
 		t.Fatalf("missing evidence private key error=%v", err)
+	}
+}
+
+func TestControlOperationsCommandsRejectInvalidFilters(t *testing.T) {
+	validCursor := base64.RawURLEncoding.EncodeToString([]byte("cursor-v1\x00item-a"))
+	tests := []struct {
+		name string
+		call func([]string, io.Writer) error
+		args []string
+	}{
+		{name: "operations tenant", call: controlOperationsStatus, args: []string{"-tenant-id", "-tenant"}},
+		{name: "operations positional", call: controlOperationsStatus, args: []string{"unexpected"}},
+		{name: "attention reason", call: controlAttentionList, args: []string{"-reason", "not-a-reason"}},
+		{name: "attention cursor", call: controlAttentionList, args: []string{"-cursor", "%%%"}},
+		{name: "attention zero limit", call: controlAttentionList, args: []string{"-limit", "0"}},
+		{name: "attention oversized limit", call: controlAttentionList, args: []string{"-limit", "501"}},
+		{name: "command state", call: controlCommandList, args: []string{"-state", "running"}},
+		{name: "command terminal without state", call: controlCommandList, args: []string{"-terminal-status", "failed"}},
+		{name: "command terminal status", call: controlCommandList, args: []string{"-state", "terminal", "-terminal-status", "running"}},
+		{name: "command node", call: controlCommandList, args: []string{"-node-id", "-node"}},
+		{name: "command cursor", call: controlCommandList, args: []string{"-cursor", validCursor + "="}},
+		{name: "credential kind", call: controlCredentialList, args: []string{"-kind", "enrollment"}},
+		{name: "credential role", call: controlCredentialList, args: []string{"-role", "owner"}},
+		{name: "credential revoked", call: controlCredentialList, args: []string{"-revoked", "yes"}},
+		{name: "credential role and node", call: controlCredentialList, args: []string{"-role", "tenant_operator", "-node-id", "node-a"}},
+		{name: "node credential with role", call: controlCredentialList, args: []string{"-kind", "node", "-role", "tenant_operator"}},
+		{name: "operator credential with node", call: controlCredentialList, args: []string{"-kind", "operator", "-node-id", "node-a"}},
+		{name: "credential zero limit", call: controlCredentialList, args: []string{"-limit", "0"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(test.args, &bytes.Buffer{}); err == nil {
+				t.Fatalf("invalid arguments accepted: %#v", test.args)
+			}
+		})
+	}
+}
+
+func TestControlInventoryCursorAndRevokedParsingAreStrict(t *testing.T) {
+	validCursor := base64.RawURLEncoding.EncodeToString([]byte("cursor-v1\x00item-a"))
+	if !validControlInventoryPage(validCursor, 1, false) ||
+		!validControlInventoryPage("", controlstore.MaxInventoryPageLimit, false) {
+		t.Fatal("valid inventory page rejected")
+	}
+	for _, cursor := range []string{
+		"YQ==",
+		"%%%",
+		base64.RawURLEncoding.EncodeToString(make([]byte, 4097)),
+	} {
+		if validControlInventoryPage(cursor, 1, false) {
+			t.Fatalf("invalid cursor %q accepted", cursor)
+		}
+	}
+	if validControlInventoryPage(validCursor, 0, false) ||
+		validControlInventoryPage(validCursor, controlstore.MaxInventoryPageLimit+1, false) {
+		t.Fatal("invalid inventory limit accepted")
+	}
+	for input, expected := range map[string]*bool{
+		"any": nil,
+		"true": func() *bool {
+			value := true
+			return &value
+		}(),
+		"false": func() *bool {
+			value := false
+			return &value
+		}(),
+	} {
+		got, err := parseControlRevoked(input)
+		if err != nil || got == nil != (expected == nil) || got != nil && *got != *expected {
+			t.Fatalf("parseControlRevoked(%q)=(%v,%v), want %v", input, got, err, expected)
+		}
+	}
+	if _, err := parseControlRevoked(""); err == nil {
+		t.Fatal("empty revoked filter accepted by CLI")
 	}
 }
 
