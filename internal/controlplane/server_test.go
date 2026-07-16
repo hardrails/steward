@@ -187,6 +187,50 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 		t.Fatalf("exact enrollment retry changed credential: got %+v want %+v", retried, nodeCredential)
 	}
 
+	evidencePoll := controlprotocol.ExecutorEvidencePollRequestV1{
+		ProtocolVersion:      controlprotocol.ExecutorEvidenceProtocolV1,
+		ControllerInstanceID: enrollment.ControllerInstanceID,
+		ControlNodeID:        enrollment.NodeID,
+		Stream:               proof.Claim.Stream,
+		ReceiptNodeID:        proof.Claim.ReceiptNodeID,
+		ReceiptEpoch:         proof.Claim.ReceiptEpoch,
+		PublicKeySHA256:      proof.Claim.PublicKeySHA256,
+	}
+	response = fixture.request(t, http.MethodPost, "/evidence-uplink/poll", nodeCredential.Credential, mustJSON(t, evidencePoll))
+	requireStatus(t, response, http.StatusOK)
+	var evidencePollResponse controlprotocol.ExecutorEvidencePollResponseV1
+	decodeResponse(t, response, &evidencePollResponse)
+	if err := evidencePollResponse.Validate(); err != nil || evidencePollResponse.Status.Head == nil ||
+		evidencePollResponse.Status.State != controlprotocol.ExecutorEvidenceStatusCurrent ||
+		evidencePollResponse.Status.Head.Sequence != 0 {
+		t.Fatalf("unexpected genesis evidence checkpoint: response=%+v err=%v", evidencePollResponse, err)
+	}
+	evidencePrivate := fixture.evidenceKeys[enrollment.NodeID]
+	evidenceHead := *evidencePollResponse.Status.Head
+	headClaim, err := controlprotocol.NewExecutorEvidenceHeadClaimV1(
+		enrollment.ControllerInstanceID, enrollment.NodeID, evidenceHead, evidenceHead,
+		evidencePollResponse.Challenge, nil, evidencePrivate.Public().(ed25519.PublicKey),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headProof, err := controlprotocol.SignExecutorEvidenceHeadClaimV1(headClaim, evidencePrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceReport := controlprotocol.ExecutorEvidenceReportV1{
+		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1,
+		HeadProof:       headProof,
+	}
+	response = fixture.request(t, http.MethodPost, "/evidence-uplink/report", nodeCredential.Credential, mustJSON(t, evidenceReport))
+	requireStatus(t, response, http.StatusOK)
+	var evidenceReportResponse controlprotocol.ExecutorEvidenceReportResponseV1
+	decodeResponse(t, response, &evidenceReportResponse)
+	if err := evidenceReportResponse.Validate(); err != nil || evidenceReportResponse.Applied ||
+		evidenceReportResponse.Status.Head == nil || *evidenceReportResponse.Status.Head != evidenceHead {
+		t.Fatalf("unexpected evidence acknowledgement: response=%+v err=%v", evidenceReportResponse, err)
+	}
+
 	commandRaw := signedCommand(t, fixture.now, "command-1", "tenant-a", "node-1")
 	response = fixture.request(t, http.MethodPost, "/v1/tenants/tenant-a/nodes/node-1/commands", operator.Token,
 		mustJSON(t, map[string]string{"command_dsse_base64": base64.StdEncoding.EncodeToString(commandRaw)}))

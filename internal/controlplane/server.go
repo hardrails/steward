@@ -24,10 +24,11 @@ import (
 )
 
 const (
-	maxRequestBytes  = 1 << 20
-	maxResponseBytes = 1 << 20
-	defaultPageSize  = 100
-	maxPageSize      = 500
+	maxRequestBytes           = 1 << 20
+	maxResponseBytes          = 1 << 20
+	defaultPageSize           = 100
+	maxPageSize               = 500
+	evidenceChallengeLifetime = 2 * time.Minute
 )
 
 var errBodyTooLarge = errors.New("request body exceeds 1 MiB")
@@ -99,6 +100,8 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands/{command_id}", server.command)
 	server.mux.HandleFunc("/executor-uplink/poll", server.executorPoll)
 	server.mux.HandleFunc("/executor-uplink/report", server.executorReport)
+	server.mux.HandleFunc("/evidence-uplink/poll", server.evidencePoll)
+	server.mux.HandleFunc("/evidence-uplink/report", server.evidenceReport)
 	server.mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
 		writeError(writer, http.StatusNotFound, "not_found", "the requested control-plane route does not exist")
 	})
@@ -508,6 +511,47 @@ func (server *Server) executorReport(writer http.ResponseWriter, request *http.R
 	writeJSON(writer, http.StatusOK, controlprotocol.ExecutorReportResponseV3{
 		ProtocolVersion: controlprotocol.ExecutorProtocolV3, Applied: applied,
 	})
+}
+
+func (server *Server) evidencePoll(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.nodeIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input controlprotocol.ExecutorEvidencePollRequestV1
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	now := server.now()
+	response, err := server.store.PollExecutorEvidence(server.auth, identity, input, now, now.Add(evidenceChallengeLifetime))
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) evidenceReport(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.nodeIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var report controlprotocol.ExecutorEvidenceReportV1
+	if !server.decode(writer, request, &report) {
+		return
+	}
+	response, err := server.store.ApplyExecutorEvidenceReport(server.auth, identity, report, server.now())
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (server *Server) operatorIdentity(writer http.ResponseWriter, request *http.Request) (controlauth.Identity, bool) {

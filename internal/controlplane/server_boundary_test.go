@@ -188,6 +188,8 @@ func TestControlPlaneRejectsProtocolAndPaginationAmbiguity(t *testing.T) {
 		{http.MethodGet, "/v1/tenants/tenant-a/nodes/node-1/commands/missing", ""},
 		{http.MethodPost, "/executor-uplink/poll", `{}`},
 		{http.MethodPost, "/executor-uplink/report", `{}`},
+		{http.MethodPost, "/evidence-uplink/poll", `{}`},
+		{http.MethodPost, "/evidence-uplink/report", `{}`},
 	} {
 		requireError(t, fixture.request(t, request.method, request.path, "", request.body),
 			http.StatusUnauthorized, "unauthorized")
@@ -203,6 +205,8 @@ func TestControlPlaneRejectsProtocolAndPaginationAmbiguity(t *testing.T) {
 		{"/v1/tenants/tenant-a/nodes/node-1/commands", operator},
 		{"/executor-uplink/poll", node.Credential},
 		{"/executor-uplink/report", node.Credential},
+		{"/evidence-uplink/poll", node.Credential},
+		{"/evidence-uplink/report", node.Credential},
 	} {
 		requireError(t, fixture.request(t, http.MethodPost, request.path, request.token, `{`),
 			http.StatusBadRequest, "invalid_request")
@@ -366,6 +370,8 @@ func TestControlPlaneRouteMatrixPreservesIdempotencyAndConcealment(t *testing.T)
 		{http.MethodPost, "/v1/tenants/tenant-a/nodes", operator, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
 		{http.MethodPost, "/v1/tenants/tenant-a/nodes/node-1", operator, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
 		{http.MethodPost, "/executor-uplink/report?unexpected=1", node.Credential, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodPost, "/evidence-uplink/poll?unexpected=1", node.Credential, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodPost, "/evidence-uplink/report?unexpected=1", node.Credential, `{}`, http.StatusBadRequest, "invalid_request"},
 	} {
 		requireError(t, fixture.request(t, request.method, request.path, request.token, request.body), request.status, request.code)
 	}
