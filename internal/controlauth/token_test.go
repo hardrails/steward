@@ -163,7 +163,8 @@ func TestControlInstanceAndEvidenceChallengeBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manager.InstanceID() == "" || manager.InstanceID() == other.InstanceID() || manager.InstanceID() != manager.InstanceID() {
+	instanceID := manager.InstanceID()
+	if instanceID == "" || instanceID == other.InstanceID() || instanceID != manager.InstanceID() {
 		t.Fatal("control instance identity is empty, unstable, or not key-bound")
 	}
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
