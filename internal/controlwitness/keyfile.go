@@ -80,7 +80,11 @@ func Initialize(privatePath, publicPath string) (ed25519.PrivateKey, ed25519.Pub
 // LoadPair securely reads the private and public files and rejects a published
 // public key that does not match the private key.
 func LoadPair(privatePath, publicPath string) (ed25519.PrivateKey, ed25519.PublicKey, error) {
-	if _, err := validatePairPaths(privatePath, publicPath); err != nil {
+	directory, err := validatePairPaths(privatePath, publicPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateDirectory(directory); err != nil {
 		return nil, nil, err
 	}
 	private, err := LoadPrivate(privatePath)

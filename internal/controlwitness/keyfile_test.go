@@ -105,6 +105,15 @@ func TestLoadPairRejectsUnsafeFilesAndMismatch(t *testing.T) {
 	if err := os.Chmod(publicPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadPair(privatePath, publicPath); err == nil {
+		t.Fatal("controller witness pair in a group-accessible directory was accepted")
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
