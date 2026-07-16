@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func TestActivationCanaryClosedContractRoundTrip(t *testing.T) {
 	fixture := newCanaryFixture(t)
 
 	parsedCommand, err := ParseCommandV1(fixture.commandRaw)
-	if err != nil || parsedCommand != fixture.command {
+	if err != nil || !reflect.DeepEqual(parsedCommand, fixture.command) {
 		t.Fatalf("parse command = %#v, %v", parsedCommand, err)
 	}
 	if got := fixture.verified.Request(); !bytes.Equal(got, mustFixedRequest(t, fixture.command.ActivationID)) {
@@ -52,10 +53,15 @@ func TestActivationCanaryClosedContractRoundTrip(t *testing.T) {
 	if bytes.Equal(requestCopy, fixture.verified.Request()) {
 		t.Fatal("verified request accessor exposed mutable state")
 	}
-	if fixture.verified.Command() != fixture.command ||
+	if !reflect.DeepEqual(fixture.verified.Command(), fixture.command) ||
 		fixture.verified.Permit().Statement != fixture.statement ||
 		!fixture.verified.Deadline().Equal(fixture.now.Add(4*time.Minute)) {
 		t.Fatal("verified command accessors lost a binding")
+	}
+	commandCopy := fixture.verified.Command()
+	commandCopy.Admission.TaskAuthorities[0].KeyID = "mutated"
+	if fixture.verified.Command().Admission.TaskAuthorities[0].KeyID == "mutated" {
+		t.Fatal("verified command accessor exposed mutable admission state")
 	}
 
 	parsedResult, err := ParseResultV1(fixture.resultRaw)
@@ -128,6 +134,9 @@ func TestParseCommandV1RejectsAmbiguousOrOpenEndedInput(t *testing.T) {
 	}
 
 	mutations := map[string]func(*CommandV1){
+		"admission digest": func(value *CommandV1) {
+			value.AdmissionDigest = digestOf("other admission")
+		},
 		"arbitrary operation": func(value *CommandV1) { value.OperationID = "shell.run" },
 		"arbitrary request": func(value *CommandV1) {
 			value.RequestBase64 = base64.StdEncoding.EncodeToString(
@@ -190,9 +199,12 @@ func TestVerifyCommandV1RejectsAdmissionAndPermitSubstitution(t *testing.T) {
 	fixture := newCanaryFixture(t)
 
 	commandMutations := map[string]func(*CommandV1){
-		"admission digest": func(value *CommandV1) { value.AdmissionDigest = digestOf("other admission") },
-		"grant":            func(value *CommandV1) { value.GrantID = grantID('e') },
-		"receipt node":     func(value *CommandV1) { value.ReceiptAuthority.NodeID = "other/gateway" },
+		"grant":        func(value *CommandV1) { value.GrantID = grantID('e') },
+		"receipt node": func(value *CommandV1) { value.ReceiptAuthority.NodeID = "other/gateway" },
+		"embedded admission": func(value *CommandV1) {
+			value.Admission.Status = "created"
+			value.AdmissionDigest = dsse.Digest(mustJSON(t, value.Admission))
+		},
 		"begin digest": func(value *CommandV1) {
 			beginRaw, err := base64.StdEncoding.DecodeString(value.ExecutorBeginBase64)
 			if err != nil {
@@ -285,6 +297,71 @@ func TestVerifyCommandV1RejectsAdmissionAndPermitSubstitution(t *testing.T) {
 	badAdmission.Projection.Status = "exited"
 	if _, err := VerifyCommandV1(fixture.commandRaw, badAdmission, fixture.now, taskpermit.MaxValidity); !errors.Is(err, ErrInvalidCommand) {
 		t.Fatalf("exited admission err = %v", err)
+	}
+}
+
+func TestVerifyHistoricalCommandV1UsesSignedIntervalNotAuditorClock(t *testing.T) {
+	fixture := newCanaryFixture(t)
+	afterExpiry := fixture.now.Add(24 * time.Hour)
+	if _, err := VerifyCommandV1(
+		fixture.commandRaw,
+		fixture.admission,
+		afterExpiry,
+		taskpermit.MaxValidity,
+	); !errors.Is(err, ErrInvalidCommand) {
+		t.Fatalf("live verification after expiry err = %v", err)
+	}
+	historical, err := VerifyHistoricalCommandV1(
+		fixture.commandRaw,
+		fixture.admission,
+		taskpermit.MaxValidity,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := VerifyResultV1(
+		historical,
+		fixture.resultRaw,
+		fixture.receiptPublic,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyCheckpointV1(
+		historical,
+		verified,
+		fixture.checkpointRaw,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBuildCheckpointV1RequiresEvidenceForTheExactCommand(t *testing.T) {
+	fixture := newCanaryFixture(t)
+	evidence, err := VerifyEvidenceV1(
+		fixture.verified,
+		fixture.result.RunID,
+		fixture.terminal,
+		fixture.receipts,
+		fixture.receiptPublic,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpointRaw, err := BuildCheckpointV1(fixture.verified, evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(checkpointRaw, fixture.checkpointRaw) {
+		t.Fatal("checkpoint helper did not reproduce the verified checkpoint")
+	}
+
+	evidence.commandKey = digestOf("another command")
+	if _, err := BuildCheckpointV1(fixture.verified, evidence); !errors.Is(err, ErrInvalidResult) {
+		t.Fatalf("command substitution err = %v", err)
+	}
+	if _, err := BuildCheckpointV1(VerifiedCommandV1{}, VerifiedEvidenceV1{}); !errors.Is(err, ErrInvalidResult) {
+		t.Fatalf("unverified values err = %v", err)
 	}
 }
 
@@ -640,7 +717,9 @@ func newCanaryFixture(t *testing.T) canaryFixture {
 	projectionRaw := mustJSON(t, projection)
 	command := CommandV1{
 		SchemaVersion: CommandSchemaV1, ActivationID: activationID,
-		AdmissionDigest: dsse.Digest(projectionRaw), GrantID: statement.GrantID,
+		AdmissionDigest:     dsse.Digest(projectionRaw),
+		Admission:           projection,
+		GrantID:             statement.GrantID,
 		ExecutorBeginBase64: base64.StdEncoding.EncodeToString(beginRaw),
 		OperationID:         statement.OperationID,
 		TaskPermit:          signTaskHeader(t, statement, "tenant-task", taskPrivate),
@@ -677,10 +756,7 @@ func newCanaryFixture(t *testing.T) canaryFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.checkpointRaw, err = activation.MarshalExecutorCheckpointV1(
-		binding, projection.RuntimeRef, projection.CapsuleDigest,
-		projection.RoutePolicyDigest, projection.GrantID, evidence.Gateway,
-	)
+	fixture.checkpointRaw, err = BuildCheckpointV1(verified, evidence)
 	if err != nil {
 		t.Fatal(err)
 	}

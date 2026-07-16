@@ -67,16 +67,17 @@ type ReceiptAuthorityV1 struct {
 // HTTP-header representation of one tenant-signed permit. There is no URL,
 // path, method, prompt, command, environment, or extension field.
 type CommandV1 struct {
-	SchemaVersion       string             `json:"schema_version"`
-	ActivationID        string             `json:"activation_id"`
-	AdmissionDigest     string             `json:"admission_digest"`
-	ExecutorBeginBase64 string             `json:"executor_begin_base64"`
-	GrantID             string             `json:"grant_id"`
-	OperationID         string             `json:"operation_id"`
-	TaskPermit          string             `json:"task_permit"`
-	RequestBase64       string             `json:"request_base64"`
-	Deadline            string             `json:"deadline"`
-	ReceiptAuthority    ReceiptAuthorityV1 `json:"receipt_authority"`
+	SchemaVersion       string                                        `json:"schema_version"`
+	ActivationID        string                                        `json:"activation_id"`
+	AdmissionDigest     string                                        `json:"admission_digest"`
+	Admission           controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission"`
+	ExecutorBeginBase64 string                                        `json:"executor_begin_base64"`
+	GrantID             string                                        `json:"grant_id"`
+	OperationID         string                                        `json:"operation_id"`
+	TaskPermit          string                                        `json:"task_permit"`
+	RequestBase64       string                                        `json:"request_base64"`
+	Deadline            string                                        `json:"deadline"`
+	ReceiptAuthority    ReceiptAuthorityV1                            `json:"receipt_authority"`
 }
 
 // AdmissionContextV1 is trusted local context, not wire data. Projection must
@@ -140,14 +141,15 @@ type VerifiedResultV1 struct {
 	gateway         activation.GatewayEvidenceResultV1
 }
 
-// VerifiedEvidenceV1 is the qualified canary evidence needed to construct the
-// existing activation Executor checkpoint before building the terminal report.
-// Callers should pass Gateway to activation.MarshalExecutorCheckpointV1.
+// VerifiedEvidenceV1 is constructible only by VerifyEvidenceV1. It retains the
+// qualified canary evidence needed to construct the existing activation
+// Executor checkpoint before building the terminal report.
 type VerifiedEvidenceV1 struct {
-	TerminalResult  []byte
-	GatewayReceipts []byte
-	Hermes          activation.HermesCanaryResultV1
-	Gateway         activation.GatewayEvidenceResultV1
+	commandKey      string
+	terminalResult  []byte
+	gatewayReceipts []byte
+	hermes          activation.HermesCanaryResultV1
+	gateway         activation.GatewayEvidenceResultV1
 }
 
 // ParseCommandV1 requires the deterministic MarshalCommandV1 spelling. This
@@ -190,6 +192,13 @@ func (command CommandV1) Validate() error {
 		!digest(command.AdmissionDigest) || !grantIDPattern.MatchString(command.GrantID) ||
 		command.OperationID != agentrelease.HermesOperationID {
 		return invalidCommand("identity or fixed operation is invalid")
+	}
+	if err := command.Admission.Validate(); err != nil {
+		return invalidCommand("admission projection: %v", err)
+	}
+	admissionRaw, err := json.Marshal(command.Admission)
+	if err != nil || command.AdmissionDigest != dsse.Digest(admissionRaw) {
+		return invalidCommand("admission digest does not identify the exact projection")
 	}
 	deadline, ok := canonicalTimestamp(command.Deadline)
 	if !ok || deadline.IsZero() {
@@ -260,7 +269,12 @@ func VerifyCommandV1(
 		return VerifiedCommandV1{}, invalidCommand("admission context: %v", err)
 	}
 	projectionRaw, err := json.Marshal(admission.Projection)
+	if err != nil {
+		return VerifiedCommandV1{}, invalidCommand("marshal trusted admission projection: %v", err)
+	}
+	commandProjectionRaw, err := json.Marshal(command.Admission)
 	if err != nil || command.AdmissionDigest != dsse.Digest(projectionRaw) ||
+		!bytes.Equal(projectionRaw, commandProjectionRaw) ||
 		command.ActivationID != admission.Projection.ActivationID ||
 		command.GrantID != admission.Projection.GrantID {
 		return VerifiedCommandV1{}, invalidCommand("command does not bind the exact admission projection")
@@ -317,7 +331,7 @@ func VerifyCommandV1(
 		return VerifiedCommandV1{}, invalidCommand("deadline is expired or exceeds the task permit")
 	}
 	return VerifiedCommandV1{
-		command: command, commandKey: dsse.Digest(raw), permit: verified,
+		command: cloneCommand(command), commandKey: dsse.Digest(raw), permit: verified,
 		request: append([]byte(nil), request...), deadline: deadline,
 		checkpoint: checkpointExpectationV1{
 			Binding:           begin.Binding,
@@ -327,6 +341,30 @@ func VerifyCommandV1(
 			GrantID:           admission.Projection.GrantID,
 		},
 	}, nil
+}
+
+// VerifyHistoricalCommandV1 authenticates an immutable command without making
+// an old proof depend on the auditor's wall clock. It verifies the permit at
+// the final instant before the command deadline; VerifyResultV1 must then
+// authenticate Gateway authorization and terminal receipt times inside the
+// signed permit and command interval. This is not a live-execution admission
+// check: nodes must use VerifyCommandV1 with their current clock.
+func VerifyHistoricalCommandV1(
+	raw []byte,
+	admission AdmissionContextV1,
+	maxPermitValidity time.Duration,
+) (VerifiedCommandV1, error) {
+	command, err := ParseCommandV1(raw)
+	if err != nil {
+		return VerifiedCommandV1{}, err
+	}
+	deadline, _ := canonicalTimestamp(command.Deadline)
+	return VerifyCommandV1(
+		raw,
+		admission,
+		deadline.Add(-time.Nanosecond),
+		maxPermitValidity,
+	)
 }
 
 func (admission AdmissionContextV1) validate() error {
@@ -363,8 +401,8 @@ func admittedTaskAuthorities(authorities []controlprotocol.ExecutorTaskAuthority
 	return trusted, nil
 }
 
-// Command returns the validated wire value.
-func (verified VerifiedCommandV1) Command() CommandV1 { return verified.command }
+// Command returns a deep copy of the validated wire value.
+func (verified VerifiedCommandV1) Command() CommandV1 { return cloneCommand(verified.command) }
 
 // Permit returns the authenticated task permit and its exact envelope digest.
 func (verified VerifiedCommandV1) Permit() taskpermit.Verified { return verified.permit }
@@ -481,10 +519,37 @@ func VerifyEvidenceV1(
 		return VerifiedEvidenceV1{}, err
 	}
 	return VerifiedEvidenceV1{
-		TerminalResult:  append([]byte(nil), terminal...),
-		GatewayReceipts: append([]byte(nil), receipts...),
-		Hermes:          hermes, Gateway: gatewayResult,
+		commandKey:      command.commandKey,
+		terminalResult:  append([]byte(nil), terminal...),
+		gatewayReceipts: append([]byte(nil), receipts...),
+		hermes:          hermes,
+		gateway:         cloneGatewayEvidence(gatewayResult),
 	}, nil
+}
+
+// BuildCheckpointV1 constructs the only activation checkpoint that can match
+// this verified command and evidence. It does not append the checkpoint to the
+// Executor receipt stream; callers must first pass the returned bytes through
+// BuildResultV1, then request the existing closed Executor checkpoint endpoint.
+func BuildCheckpointV1(
+	command VerifiedCommandV1,
+	evidence VerifiedEvidenceV1,
+) ([]byte, error) {
+	if !digest(command.commandKey) || command.command.SchemaVersion != CommandSchemaV1 ||
+		evidence.commandKey != command.commandKey ||
+		len(evidence.terminalResult) == 0 || len(evidence.gatewayReceipts) == 0 ||
+		!bytes.Equal(evidence.gatewayReceipts, evidence.gateway.Receipts) {
+		return nil, invalidResult("verified command or Gateway evidence is unavailable")
+	}
+	expected := command.checkpoint
+	return activation.MarshalExecutorCheckpointV1(
+		expected.Binding,
+		expected.RuntimeRef,
+		expected.CapsuleDigest,
+		expected.RoutePolicyDigest,
+		expected.GrantID,
+		cloneGatewayEvidence(evidence.gateway),
+	)
 }
 
 // VerifyResultV1 authenticates all three portable Gateway receipts with the
@@ -633,9 +698,9 @@ func VerifyCheckpointV1(
 
 // BuildResultV1 verifies raw Gateway and Hermes evidence, requires an exact
 // matching canonical activation checkpoint, and then returns the bounded
-// qualified projection. Compute checkpointRaw with
-// activation.MarshalExecutorCheckpointV1 but append it only after this function
-// succeeds, so projection overflow can never claim a checkpoint.
+// qualified projection. Compute checkpointRaw with BuildCheckpointV1 but append
+// it only after this function succeeds, so projection overflow can never claim
+// a checkpoint.
 func BuildResultV1(
 	command VerifiedCommandV1,
 	runID string,
@@ -695,6 +760,22 @@ func cloneGatewayEvidence(
 ) activation.GatewayEvidenceResultV1 {
 	result.Receipts = append([]byte(nil), result.Receipts...)
 	return result
+}
+
+func cloneCommand(command CommandV1) CommandV1 {
+	command.Admission.TaskAuthorities = append(
+		[]controlprotocol.ExecutorTaskAuthorityV1(nil),
+		command.Admission.TaskAuthorities...,
+	)
+	command.Admission.EgressRouteIDs = append(
+		[]string(nil),
+		command.Admission.EgressRouteIDs...,
+	)
+	command.Admission.ConnectorIDs = append(
+		[]string(nil),
+		command.Admission.ConnectorIDs...,
+	)
+	return command
 }
 
 func fixedHermesRequest(activationID string) ([]byte, error) {
