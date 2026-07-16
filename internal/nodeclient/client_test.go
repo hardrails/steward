@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/admission"
 )
@@ -70,6 +71,45 @@ func TestClientDrivesBoundedExecutorContract(t *testing.T) {
 	}
 }
 
+func TestClientActivationAdmissionCarriesExactRuntimeIdentity(t *testing.T) {
+	const runtimeRef = "executor-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const activationID = "activation-test"
+	beginDigest := "sha256:" + strings.Repeat("b", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Activation struct {
+				SchemaVersion string `json:"schema_version"`
+				ActivationID  string `json:"activation_id"`
+				BeginDigest   string `json:"begin_digest"`
+			} `json:"activation"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+			body.Activation.SchemaVersion != activationAdmissionRequestSchema ||
+			body.Activation.ActivationID != activationID ||
+			body.Activation.BeginDigest != beginDigest {
+			t.Fatalf("activation request=%#v err=%v", body, err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"runtime_ref":"` + runtimeRef +
+			`","status":"created","activation_id":"` + activationID +
+			`","activation_begin_digest":"` + beginDigest + `"}`))
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := client.AdmitActivation(
+		context.Background(), []byte("capsule"),
+		admission.InstanceIntent{TenantID: "tenant"},
+		activationID, beginDigest,
+	)
+	if err != nil || state.ActivationID != activationID ||
+		state.ActivationBeginDigest != beginDigest {
+		t.Fatalf("state=%#v err=%v", state, err)
+	}
+}
+
 func TestClientRejectsUnsafeOriginsPathsAndErrors(t *testing.T) {
 	for _, origin := range []string{"https://127.0.0.1:8090", "http://example.com:8090", "http://127.0.0.1", "http://127.0.0.1:8090/path"} {
 		if _, err := New(origin, "secret"); err == nil {
@@ -90,6 +130,30 @@ func TestClientRejectsUnsafeOriginsPathsAndErrors(t *testing.T) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict || apiErr.Code != "drift" {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestClientUsesCallerContextAsRequestCeiling(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		select {
+		case <-request.Context().Done():
+		case <-time.After(time.Second):
+			http.Error(w, "request context was not canceled", http.StatusGatewayTimeout)
+		}
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.http.Timeout != 0 {
+		t.Fatalf("HTTP client timeout = %v, want caller context to be the only request ceiling", client.http.Timeout)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = client.Status(ctx, "executor-"+strings.Repeat("a", 64))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Status() error = %v, want context deadline exceeded", err)
 	}
 }
 

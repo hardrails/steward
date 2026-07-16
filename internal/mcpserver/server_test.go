@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/nodeclient"
@@ -18,6 +19,41 @@ type fakeNode struct {
 	destroyed string
 	err       error
 	logs      string
+}
+
+type deadlineObservation struct {
+	deadline time.Time
+	observed time.Time
+	ok       bool
+}
+
+type deadlineNode struct {
+	fakeNode
+	observations []deadlineObservation
+}
+
+func (n *deadlineNode) observe(ctx context.Context) {
+	deadline, ok := ctx.Deadline()
+	n.observations = append(n.observations, deadlineObservation{
+		deadline: deadline,
+		observed: time.Now(),
+		ok:       ok,
+	})
+}
+
+func (n *deadlineNode) Admit(ctx context.Context, capsule []byte, intent admission.InstanceIntent) (nodeclient.State, error) {
+	n.observe(ctx)
+	return n.fakeNode.Admit(ctx, capsule, intent)
+}
+
+func (n *deadlineNode) Status(ctx context.Context, runtimeRef string) (nodeclient.State, error) {
+	n.observe(ctx)
+	return n.fakeNode.Status(ctx, runtimeRef)
+}
+
+func (n *deadlineNode) PurgeState(ctx context.Context, request nodeclient.StatePurge) error {
+	n.observe(ctx)
+	return n.fakeNode.PurgeState(ctx, request)
 }
 
 func (n *fakeNode) Admit(_ context.Context, _ []byte, intent admission.InstanceIntent) (nodeclient.State, error) {
@@ -161,6 +197,68 @@ func TestMCPAllLifecycleToolsAndToolFailures(t *testing.T) {
 	result, rpcErr := server.callTool(context.Background(), json.RawMessage(`{"name":"steward_status","arguments":{"runtime_ref":"`+ref+`"}}`))
 	if rpcErr != nil || !strings.Contains(string(mustJSON(t, result)), `"isError":true`) || len(string(mustJSON(t, result))) > 5000 {
 		t.Fatalf("bounded tool failure result=%#v rpcErr=%#v", result, rpcErr)
+	}
+}
+
+func TestMCPNodeToolsUseBoundedOperationContexts(t *testing.T) {
+	node := &deadlineNode{}
+	server, err := New(node, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := json.Marshal(admission.InstanceIntent{
+		TenantID: "tenant", NodeID: "node", InstanceID: "agent", Generation: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitArguments, err := json.Marshal(map[string]string{
+		"capsule_dsse_base64": base64.StdEncoding.EncodeToString([]byte("capsule")),
+		"intent_json":         string(intent),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := []json.RawMessage{
+		json.RawMessage(`{"name":"steward_admit","arguments":` + string(admitArguments) + `}`),
+		json.RawMessage(`{"name":"steward_status","arguments":{"runtime_ref":"` + runtimeRef() + `"}}`),
+		json.RawMessage(`{"name":"steward_purge_state","arguments":{"tenant_id":"tenant","node_id":"node","lineage_id":"lineage","generation":1}}`),
+	}
+	for _, call := range calls {
+		result, rpcErr := server.callTool(context.Background(), call)
+		if rpcErr != nil || strings.Contains(string(mustJSON(t, result)), `"isError":true`) {
+			t.Fatalf("call=%s result=%#v rpcErr=%#v", call, result, rpcErr)
+		}
+	}
+	if len(node.observations) != len(calls) {
+		t.Fatalf("observations=%d want=%d", len(node.observations), len(calls))
+	}
+	for index, observation := range node.observations {
+		remaining := observation.deadline.Sub(observation.observed)
+		if !observation.ok || remaining <= nodeOperationTimeout-time.Second || remaining > nodeOperationTimeout {
+			t.Fatalf("observation %d deadline_ok=%t remaining=%s", index, observation.ok, remaining)
+		}
+	}
+}
+
+func TestMCPNodeToolsPreserveEarlierCallerDeadline(t *testing.T) {
+	node := &deadlineNode{}
+	server, err := New(node, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentDeadline := time.Now().Add(2 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), parentDeadline)
+	defer cancel()
+	result, rpcErr := server.callTool(ctx, json.RawMessage(`{"name":"steward_status","arguments":{"runtime_ref":"`+runtimeRef()+`"}}`))
+	if rpcErr != nil || strings.Contains(string(mustJSON(t, result)), `"isError":true`) {
+		t.Fatalf("result=%#v rpcErr=%#v", result, rpcErr)
+	}
+	if len(node.observations) != 1 {
+		t.Fatalf("observations=%d want=1", len(node.observations))
+	}
+	if !node.observations[0].ok || !node.observations[0].deadline.Equal(parentDeadline) {
+		t.Fatalf("deadline_ok=%t deadline=%s want=%s", node.observations[0].ok, node.observations[0].deadline, parentDeadline)
 	}
 }
 

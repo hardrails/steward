@@ -21,7 +21,11 @@ import (
 	"github.com/hardrails/steward/internal/securefile"
 )
 
-const maxWireBytes = 1 << 20
+const (
+	maxWireBytes                      = 1 << 20
+	activationAdmissionRequestSchema  = "steward.executor-activation-admission.v1"
+	activationCheckpointRequestSchema = "steward.executor-activation-checkpoint.v1"
+)
 
 type Client struct {
 	baseURL string
@@ -30,22 +34,24 @@ type Client struct {
 }
 
 type State struct {
-	RuntimeRef        string          `json:"runtime_ref"`
-	Status            string          `json:"status"`
-	CapsuleDigest     string          `json:"capsule_digest,omitempty"`
-	PolicyDigest      string          `json:"policy_digest,omitempty"`
-	Generation        uint64          `json:"generation,omitempty"`
-	EvidenceKeyID     string          `json:"evidence_key_id,omitempty"`
-	GrantID           string          `json:"grant_id,omitempty"`
-	ServicePath       string          `json:"service_path,omitempty"`
-	ServiceID         string          `json:"service_id,omitempty"`
-	TaskAuthorities   []TaskAuthority `json:"task_authorities,omitempty"`
-	Logs              string          `json:"logs,omitempty"`
-	EgressProxy       string          `json:"egress_proxy,omitempty"`
-	EgressRouteIDs    []string        `json:"egress_route_ids,omitempty"`
-	ConnectorURL      string          `json:"connector_url,omitempty"`
-	ConnectorIDs      []string        `json:"connector_ids,omitempty"`
-	RoutePolicyDigest string          `json:"route_policy_digest,omitempty"`
+	RuntimeRef            string          `json:"runtime_ref"`
+	Status                string          `json:"status"`
+	CapsuleDigest         string          `json:"capsule_digest,omitempty"`
+	PolicyDigest          string          `json:"policy_digest,omitempty"`
+	Generation            uint64          `json:"generation,omitempty"`
+	EvidenceKeyID         string          `json:"evidence_key_id,omitempty"`
+	GrantID               string          `json:"grant_id,omitempty"`
+	ServicePath           string          `json:"service_path,omitempty"`
+	ServiceID             string          `json:"service_id,omitempty"`
+	TaskAuthorities       []TaskAuthority `json:"task_authorities,omitempty"`
+	Logs                  string          `json:"logs,omitempty"`
+	EgressProxy           string          `json:"egress_proxy,omitempty"`
+	EgressRouteIDs        []string        `json:"egress_route_ids,omitempty"`
+	ConnectorURL          string          `json:"connector_url,omitempty"`
+	ConnectorIDs          []string        `json:"connector_ids,omitempty"`
+	RoutePolicyDigest     string          `json:"route_policy_digest,omitempty"`
+	ActivationID          string          `json:"activation_id,omitempty"`
+	ActivationBeginDigest string          `json:"activation_begin_digest,omitempty"`
 }
 
 // TaskAuthority is the public half of a tenant task-signing key returned by
@@ -111,7 +117,7 @@ func New(baseURL, token string) (*Client, error) {
 	}
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"), token: token,
-		http: &http.Client{Transport: transport, Timeout: 30 * time.Second},
+		http: &http.Client{Transport: transport},
 	}, nil
 }
 
@@ -124,13 +130,52 @@ func NewFromTokenFile(baseURL, tokenPath string) (*Client, error) {
 }
 
 func (c *Client) Admit(ctx context.Context, capsule []byte, intent admission.InstanceIntent) (State, error) {
+	return c.admit(ctx, capsule, intent, "", "")
+}
+
+// AdmitActivation uses Executor's fresh-only admission path and binds the
+// activation begin digest into the signed receipt stream before mutation.
+func (c *Client) AdmitActivation(
+	ctx context.Context,
+	capsule []byte,
+	intent admission.InstanceIntent,
+	activationID, beginDigest string,
+) (State, error) {
+	if activationID == "" || beginDigest == "" {
+		return State{}, errors.New("activation admission identity and begin digest are required")
+	}
+	return c.admit(ctx, capsule, intent, activationID, beginDigest)
+}
+
+func (c *Client) admit(
+	ctx context.Context,
+	capsule []byte,
+	intent admission.InstanceIntent,
+	activationID, beginDigest string,
+) (State, error) {
 	if len(capsule) == 0 || len(capsule) > maxWireBytes/2 {
 		return State{}, errors.New("capsule is empty or exceeds 512 KiB")
 	}
 	body := struct {
-		Capsule string                   `json:"capsule_dsse_base64"`
-		Intent  admission.InstanceIntent `json:"intent"`
+		Capsule    string                   `json:"capsule_dsse_base64"`
+		Intent     admission.InstanceIntent `json:"intent"`
+		Activation *struct {
+			SchemaVersion string `json:"schema_version"`
+			ActivationID  string `json:"activation_id"`
+			BeginDigest   string `json:"begin_digest"`
+		} `json:"activation,omitempty"`
 	}{Capsule: base64.StdEncoding.EncodeToString(capsule), Intent: intent}
+	if activationID != "" {
+		body.Activation = &struct {
+			SchemaVersion string `json:"schema_version"`
+			ActivationID  string `json:"activation_id"`
+			BeginDigest   string `json:"begin_digest"`
+		}{
+			SchemaVersion: activationAdmissionRequestSchema,
+			ActivationID:  activationID,
+			BeginDigest:   beginDigest,
+		}
+	}
 	var state State
 	if err := c.do(ctx, http.MethodPost, "/v1/admissions", body, &state); err != nil {
 		return State{}, err
@@ -168,6 +213,43 @@ func (c *Client) Start(ctx context.Context, runtimeRef string) (State, error) {
 		return State{}, err
 	}
 	return state, nil
+}
+
+// ActivationCheckpoint asks Executor to append one content-free causal marker
+// to the signed receipt stream for an exact running activation.
+func (c *Client) ActivationCheckpoint(
+	ctx context.Context,
+	runtimeRef, activationID, checkpointDigest string,
+) error {
+	body := struct {
+		SchemaVersion    string `json:"schema_version"`
+		ActivationID     string `json:"activation_id"`
+		CheckpointDigest string `json:"checkpoint_digest"`
+	}{
+		SchemaVersion:    activationCheckpointRequestSchema,
+		ActivationID:     activationID,
+		CheckpointDigest: checkpointDigest,
+	}
+	var response struct {
+		SchemaVersion    string `json:"schema_version"`
+		ActivationID     string `json:"activation_id"`
+		CheckpointDigest string `json:"checkpoint_digest"`
+	}
+	if err := c.do(
+		ctx,
+		http.MethodPost,
+		"/v1/workloads/"+runtimeRef+"/activation-checkpoints",
+		body,
+		&response,
+	); err != nil {
+		return err
+	}
+	if response.SchemaVersion != body.SchemaVersion ||
+		response.ActivationID != activationID ||
+		response.CheckpointDigest != checkpointDigest {
+		return errors.New("executor activation checkpoint response changed identity")
+	}
+	return nil
 }
 
 func (c *Client) Stop(ctx context.Context, runtimeRef string) (State, error) {
@@ -281,7 +363,9 @@ func validRuntimePath(path string) bool {
 	rest := strings.TrimPrefix(path, prefix)
 	if separator := strings.IndexByte(rest, '/'); separator >= 0 {
 		suffix := rest[separator:]
-		if suffix != "/start" && suffix != "/stop" && suffix != "/logs" && suffix != "/egress" {
+		if suffix != "/start" && suffix != "/stop" &&
+			suffix != "/logs" && suffix != "/egress" &&
+			suffix != "/activation-checkpoints" {
 			return false
 		}
 		rest = rest[:separator]
