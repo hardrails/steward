@@ -429,7 +429,9 @@ func TestTaskWaitTimeoutCancelsPollingAndRemovesReservation(t *testing.T) {
 	}))
 	defer server.Close()
 	resultPath := filepath.Join(fixture.cli.directory, "timed-out-result.json")
-	err := run(fixture.arguments("wait", server.URL, "-result-out", resultPath, "-wait-timeout", "20ms"),
+	// Leave enough time for the first loopback request under race and coverage
+	// instrumentation, while remaining below the fixture's two-second poll interval.
+	err := run(fixture.arguments("wait", server.URL, "-result-out", resultPath, "-wait-timeout", "1s"),
 		&bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "deadline exceeded") || observations.Load() != 1 {
 		t.Fatalf("error=%v observations=%d", err, observations.Load())

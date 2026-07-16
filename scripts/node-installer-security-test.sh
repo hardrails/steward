@@ -116,12 +116,14 @@ real_path=$PATH
 PATH="$fixture/fake-docker:$PATH"
 FAKE_DOCKER_MODE=ready docker_daemon_reachable
 FAKE_DOCKER_MODE=ready has_runsc
+# shellcheck disable=SC2016 # Literal bash -c fixture; positional parameters expand in the child shell.
 if timeout 25 env FAKE_DOCKER_MODE=sleep /bin/bash -p -c \
 	'source "$1"; work=$2; PATH=$3; docker_daemon_reachable' _ \
 	"$fixture/primitives.sh" "$work" "$PATH"; then
 	echo "node-installer-security-test: sleeping Docker probe succeeded" >&2
 	exit 1
 fi
+# shellcheck disable=SC2016 # Literal bash -c fixture; positional parameters expand in the child shell.
 if timeout 25 env FAKE_DOCKER_MODE=flood /bin/bash -p -c \
 	'source "$1"; work=$2; PATH=$3; has_runsc' _ \
 	"$fixture/primitives.sh" "$work" "$PATH"; then
