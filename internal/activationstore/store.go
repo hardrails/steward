@@ -4,8 +4,8 @@
 package activationstore
 
 import (
-	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -99,6 +99,9 @@ type Store struct {
 	root          *os.Root
 	directoryLock *os.File
 	lock          *os.File
+	// digests binds every readable bounded artifact to the bytes observed when
+	// the workspace opened or when this Store durably created the artifact.
+	digests map[string][sha256.Size]byte
 
 	mu       sync.Mutex
 	closed   bool
@@ -342,10 +345,25 @@ func finishOpen(directory string, identity os.FileInfo, root *os.Root) (*Store, 
 		return nil, err
 	}
 	store.lock = lock
-	if _, err := store.auditLocked(); err != nil {
+	snapshot, err := store.auditLocked()
+	if err != nil {
 		_ = store.closeLocked()
 		return nil, err
 	}
+	digests := make(map[string][sha256.Size]byte, len(snapshot.info))
+	for name := range snapshot.info {
+		kind := classifyName(name)
+		if kind == artifactLock || kind == artifactArchive {
+			continue
+		}
+		raw, err := store.read(name, MaxSmallArtifactBytes, nil)
+		if err != nil {
+			_ = store.closeLocked()
+			return nil, err
+		}
+		digests[name] = sha256.Sum256(raw)
+	}
+	store.digests = digests
 	return store, nil
 }
 
@@ -358,9 +376,10 @@ func StateCheckpointName(sequence uint64) (string, error) {
 	return fmt.Sprintf("%s%012d%s", stateNamePrefix, sequence, stateNameSuffix), nil
 }
 
-// Read returns a stable bounded snapshot of one small artifact. The OCI archive
-// is deliberately excluded; Path is its only surface so the importer can
-// snapshot and verify the large file directly.
+// Read returns a stable bounded snapshot of one small artifact and requires the
+// bytes to match the Store's post-open content baseline. The OCI archive is
+// deliberately excluded; Path is its only surface so the importer can snapshot
+// and verify the large file directly.
 func (store *Store) Read(name string, limit int64) ([]byte, error) {
 	return store.read(name, limit, nil)
 }
@@ -431,20 +450,6 @@ func (store *Store) read(name string, limit int64, afterOpen func(*os.File) erro
 	if err != nil {
 		return closeWith(nil, err)
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return closeWith(nil, err)
-	}
-	confirmed, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil {
-		return closeWith(nil, err)
-	}
-	if !bytes.Equal(raw, confirmed) {
-		return closeWith(nil, fmt.Errorf(
-			"%w: artifact %q returned different bytes across stable reads",
-			ErrUnsafeWorkspace,
-			name,
-		))
-	}
 	after, statErr := file.Stat()
 	current, namedErr := store.root.Lstat(name)
 	if statErr != nil || namedErr != nil || int64(len(raw)) != opened.Size() ||
@@ -456,6 +461,16 @@ func (store *Store) read(name string, limit int64, afterOpen func(*os.File) erro
 			statErr,
 			namedErr,
 		))
+	}
+	if store.digests != nil {
+		expected, ok := store.digests[name]
+		if !ok || sha256.Sum256(raw) != expected {
+			return closeWith(nil, fmt.Errorf(
+				"%w: artifact %q bytes changed after the workspace was opened",
+				ErrUnsafeWorkspace,
+				name,
+			))
+		}
 	}
 	if err := file.Close(); err != nil {
 		return nil, err
@@ -480,27 +495,40 @@ func (store *Store) Import(name string, raw []byte) error {
 }
 
 // ImportArchive securely snapshots one owner-only regular source file into the
-// fixed OCI archive name. A failed copy removes only the unchanged partial
-// destination and directory-syncs that removal before returning.
-func (store *Store) ImportArchive(sourcePath string) error {
-	return store.ImportArchiveContext(context.Background(), sourcePath)
+// fixed OCI archive name and requires its exact expected digest and byte length.
+// A failed copy removes only the unchanged partial destination and
+// directory-syncs that removal before returning.
+func (store *Store) ImportArchive(
+	sourcePath string,
+	expected ocibundle.ArchiveIdentity,
+) error {
+	return store.ImportArchiveContext(context.Background(), sourcePath, expected)
 }
 
 // ImportArchiveContext is ImportArchive with cancellation propagated through
 // the archive copy. Cancellation before durable publication removes and
 // directory-syncs the unchanged partial destination.
-func (store *Store) ImportArchiveContext(ctx context.Context, sourcePath string) error {
-	return store.importArchiveContext(ctx, sourcePath, nil)
+func (store *Store) ImportArchiveContext(
+	ctx context.Context,
+	sourcePath string,
+	expected ocibundle.ArchiveIdentity,
+) error {
+	return store.importArchiveContext(ctx, sourcePath, expected, nil)
 }
 
 // The hook is test-only plumbing for deterministic source changes after open.
-func (store *Store) importArchive(sourcePath string, afterOpen func(*os.File) error) error {
-	return store.importArchiveContext(context.Background(), sourcePath, afterOpen)
+func (store *Store) importArchive(
+	sourcePath string,
+	expected ocibundle.ArchiveIdentity,
+	afterOpen func(*os.File) error,
+) error {
+	return store.importArchiveContext(context.Background(), sourcePath, expected, afterOpen)
 }
 
 func (store *Store) importArchiveContext(
 	ctx context.Context,
 	sourcePath string,
+	expected ocibundle.ArchiveIdentity,
 	afterOpen func(*os.File) error,
 ) error {
 	if ctx == nil {
@@ -511,6 +539,9 @@ func (store *Store) importArchiveContext(
 	}
 	if store == nil {
 		return ErrClosed
+	}
+	if !validArchiveIdentity(expected) {
+		return fmt.Errorf("%w: expected archive identity is invalid", ErrUnsafeWorkspace)
 	}
 	if sourcePath == "" || !filepath.IsAbs(sourcePath) || filepath.Clean(sourcePath) != sourcePath ||
 		strings.ContainsRune(sourcePath, '\x00') {
@@ -572,6 +603,12 @@ func (store *Store) importArchiveContext(
 			fmt.Errorf("%w: archive source changed while opening", ErrUnsafeWorkspace),
 			statErr,
 			namedErr,
+			closeSource(),
+		)
+	}
+	if sourceOpened.Size() != expected.Bytes {
+		return errors.Join(
+			fmt.Errorf("%w: archive source byte length does not match expected identity", ErrUnsafeWorkspace),
 			closeSource(),
 		)
 	}
@@ -662,11 +699,14 @@ func (store *Store) importArchiveContext(
 			destinationCreated,
 		)
 	}
+	hasher := sha256.New()
 	copied, copyErr := io.Copy(
-		archiveImportContextWriter{ctx: ctx, writer: destination},
+		archiveImportContextWriter{
+			ctx: ctx, writer: io.MultiWriter(destination, hasher),
+		},
 		archiveImportContextReader{
 			ctx:    ctx,
-			reader: io.LimitReader(source, ocibundle.DefaultMaxArchiveBytes+1),
+			reader: io.LimitReader(source, expected.Bytes+1),
 		},
 	)
 	if contextErr := ctx.Err(); contextErr != nil {
@@ -679,10 +719,15 @@ func (store *Store) importArchiveContext(
 			destinationCreated,
 		)
 	}
-	if copyErr != nil || copied != sourceOpened.Size() || copied <= 0 ||
+	observedDigest := fmt.Sprintf("sha256:%x", hasher.Sum(nil))
+	if copyErr != nil || copied != sourceOpened.Size() || copied != expected.Bytes ||
+		observedDigest != expected.Digest || copied <= 0 ||
 		copied > ocibundle.DefaultMaxArchiveBytes {
 		return store.failArchiveImportLocked(
-			errors.Join(errors.New("OCI archive source changed size while copying"), copyErr),
+			errors.Join(
+				fmt.Errorf("%w: OCI archive source bytes do not match expected identity", ErrUnsafeWorkspace),
+				copyErr,
+			),
 			source,
 			&sourceOpen,
 			destination,
@@ -1125,6 +1170,10 @@ func (store *Store) writeOnce(name string, raw []byte, operation writeKind) erro
 		store.poisoned = true
 		return errors.Join(err, ErrPoisoned)
 	}
+	if store.digests == nil {
+		store.digests = make(map[string][sha256.Size]byte)
+	}
+	store.digests[name] = sha256.Sum256(raw)
 	return nil
 }
 
@@ -1634,6 +1683,24 @@ func validStateCheckpointName(name string) bool {
 	digits := name[len(stateNamePrefix) : len(stateNamePrefix)+stateSequenceDigits]
 	for _, character := range digits {
 		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validArchiveIdentity(identity ocibundle.ArchiveIdentity) bool {
+	const digestPrefix = "sha256:"
+	if identity.Bytes < 1 || identity.Bytes > ocibundle.DefaultMaxArchiveBytes ||
+		!strings.HasPrefix(identity.Digest, digestPrefix) {
+		return false
+	}
+	digest := strings.TrimPrefix(identity.Digest, digestPrefix)
+	if len(digest) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range digest {
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
 			return false
 		}
 	}

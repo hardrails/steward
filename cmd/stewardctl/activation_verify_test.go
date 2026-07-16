@@ -686,7 +686,7 @@ func newOfflineActivationFixture(t *testing.T) offlineActivationFixture {
 			t.Fatal(err)
 		}
 	}
-	if err := store.ImportArchive(releaseFixture.archivePath); err != nil {
+	if err := store.ImportArchive(releaseFixture.archivePath, plan.Archive); err != nil {
 		t.Fatal(err)
 	}
 	for name, raw := range map[string][]byte{

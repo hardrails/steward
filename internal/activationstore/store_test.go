@@ -3,6 +3,7 @@ package activationstore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -35,6 +36,13 @@ func writeTestFile(t *testing.T, directory, name string, raw []byte, mode os.Fil
 	}
 	if err := os.Chmod(path, mode); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func testArchiveIdentity(raw []byte) ocibundle.ArchiveIdentity {
+	return ocibundle.ArchiveIdentity{
+		Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(raw)),
+		Bytes:  int64(len(raw)),
 	}
 }
 
@@ -505,7 +513,7 @@ func TestImportArchiveSecurelySnapshotsOwnerOnlySource(t *testing.T) {
 	writeTestFile(t, sourceDirectory, filepath.Base(sourcePath), want, 0o600)
 
 	oldMask := syscall.Umask(0o777)
-	err := store.ImportArchive(sourcePath)
+	err := store.ImportArchive(sourcePath, testArchiveIdentity(want))
 	syscall.Umask(oldMask)
 	if err != nil {
 		t.Fatalf("ImportArchive() error = %v", err)
@@ -527,7 +535,7 @@ func TestImportArchiveSecurelySnapshotsOwnerOnlySource(t *testing.T) {
 		info.Size() != int64(len(want)) || links != 1 {
 		t.Fatalf("archive mode=%v size=%d links=%d", info.Mode(), info.Size(), links)
 	}
-	if err := store.ImportArchive(sourcePath); !errors.Is(err, ErrAlreadyExists) {
+	if err := store.ImportArchive(sourcePath, testArchiveIdentity(want)); !errors.Is(err, ErrAlreadyExists) {
 		t.Fatalf("duplicate ImportArchive() error = %v, want ErrAlreadyExists", err)
 	}
 }
@@ -574,12 +582,50 @@ func TestImportArchiveRejectsUnsafeSources(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			directory := testWorkspace(t)
 			store := mustOpenStore(t, directory)
-			err := store.ImportArchive(source(t))
+			err := store.ImportArchive(source(t), testArchiveIdentity([]byte("archive")))
 			if !errors.Is(err, ErrUnsafeWorkspace) {
 				t.Fatalf("ImportArchive() error = %v, want ErrUnsafeWorkspace", err)
 			}
 			if _, err := os.Lstat(filepath.Join(directory, ImageArchiveFileName)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("rejected archive left a destination: %v", err)
+			}
+		})
+	}
+}
+
+func TestImportArchiveRequiresExactExpectedIdentity(t *testing.T) {
+	sourceDirectory := t.TempDir()
+	sourcePath := filepath.Join(sourceDirectory, "archive")
+	sourceRaw := []byte("archive")
+	writeTestFile(t, sourceDirectory, "archive", sourceRaw, 0o600)
+
+	tests := map[string]ocibundle.ArchiveIdentity{
+		"missing identity": {},
+		"malformed digest": {
+			Digest: "sha256:not-a-digest",
+			Bytes:  int64(len(sourceRaw)),
+		},
+		"wrong digest": testArchiveIdentity([]byte("changed")),
+		"wrong length": {
+			Digest: testArchiveIdentity(sourceRaw).Digest,
+			Bytes:  int64(len(sourceRaw) + 1),
+		},
+	}
+	for name, expected := range tests {
+		t.Run(name, func(t *testing.T) {
+			directory := testWorkspace(t)
+			store := mustOpenStore(t, directory)
+			err := store.ImportArchive(sourcePath, expected)
+			if !errors.Is(err, ErrUnsafeWorkspace) {
+				t.Fatalf("ImportArchive() error = %v, want ErrUnsafeWorkspace", err)
+			}
+			if _, statErr := os.Lstat(
+				filepath.Join(directory, ImageArchiveFileName),
+			); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("identity mismatch left an archive destination: %v", statErr)
+			}
+			if _, listErr := store.ListStateCheckpoints(); listErr != nil {
+				t.Fatalf("identity mismatch poisoned the store: %v", listErr)
 			}
 		})
 	}
@@ -592,9 +638,13 @@ func TestImportArchiveFailureRemovesPartialDestination(t *testing.T) {
 		sourceDirectory := t.TempDir()
 		sourcePath := filepath.Join(sourceDirectory, "archive")
 		writeTestFile(t, sourceDirectory, "archive", []byte("archive bytes"), 0o600)
-		err := store.importArchive(sourcePath, func(_ *os.File) error {
-			return os.Truncate(sourcePath, 0)
-		})
+		err := store.importArchive(
+			sourcePath,
+			testArchiveIdentity([]byte("archive bytes")),
+			func(_ *os.File) error {
+				return os.Truncate(sourcePath, 0)
+			},
+		)
 		if err == nil {
 			t.Fatal("ImportArchive() accepted a changing source")
 		}
@@ -615,12 +665,16 @@ func TestImportArchiveFailureRemovesPartialDestination(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = store.importArchive(sourcePath, func(_ *os.File) error {
-			if err := os.WriteFile(sourcePath, []byte("mutated bytes"), 0o600); err != nil {
-				return err
-			}
-			return os.Chtimes(sourcePath, before.ModTime(), before.ModTime())
-		})
+		err = store.importArchive(
+			sourcePath,
+			testArchiveIdentity([]byte("archive bytes")),
+			func(_ *os.File) error {
+				if err := os.WriteFile(sourcePath, []byte("mutated bytes"), 0o600); err != nil {
+					return err
+				}
+				return os.Chtimes(sourcePath, before.ModTime(), before.ModTime())
+			},
+		)
 		if !errors.Is(err, ErrUnsafeWorkspace) {
 			t.Fatalf("ImportArchive() error = %v, want ErrUnsafeWorkspace", err)
 		}
@@ -635,9 +689,13 @@ func TestImportArchiveFailureRemovesPartialDestination(t *testing.T) {
 		sourcePath := filepath.Join(sourceDirectory, "archive")
 		writeTestFile(t, sourceDirectory, "archive", []byte("archive bytes"), 0o600)
 		hookErr := errors.New("injected source failure")
-		err := store.importArchive(sourcePath, func(_ *os.File) error {
-			return hookErr
-		})
+		err := store.importArchive(
+			sourcePath,
+			testArchiveIdentity([]byte("archive bytes")),
+			func(_ *os.File) error {
+				return hookErr
+			},
+		)
 		if !errors.Is(err, hookErr) {
 			t.Fatalf("ImportArchive() error = %v, want injected error", err)
 		}
@@ -656,7 +714,11 @@ func TestImportArchiveContextCancellationRemovesPartialDestination(t *testing.T)
 		writeTestFile(t, sourceDirectory, "archive", []byte("archive bytes"), 0o600)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := store.ImportArchiveContext(ctx, sourcePath); !errors.Is(err, context.Canceled) {
+		if err := store.ImportArchiveContext(
+			ctx,
+			sourcePath,
+			testArchiveIdentity([]byte("archive bytes")),
+		); !errors.Is(err, context.Canceled) {
 			t.Fatalf("ImportArchiveContext() error = %v, want context canceled", err)
 		}
 		if _, err := os.Lstat(filepath.Join(directory, ImageArchiveFileName)); !errors.Is(err, os.ErrNotExist) {
@@ -671,10 +733,16 @@ func TestImportArchiveContextCancellationRemovesPartialDestination(t *testing.T)
 		sourcePath := filepath.Join(sourceDirectory, "archive")
 		writeTestFile(t, sourceDirectory, "archive", bytes.Repeat([]byte("archive"), 8192), 0o600)
 		ctx, cancel := context.WithCancel(context.Background())
-		err := store.importArchiveContext(ctx, sourcePath, func(*os.File) error {
-			cancel()
-			return nil
-		})
+		sourceRaw := bytes.Repeat([]byte("archive"), 8192)
+		err := store.importArchiveContext(
+			ctx,
+			sourcePath,
+			testArchiveIdentity(sourceRaw),
+			func(*os.File) error {
+				cancel()
+				return nil
+			},
+		)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("importArchiveContext() error = %v, want context canceled", err)
 		}
@@ -927,6 +995,38 @@ func TestReadRejectsPathAndInodeChanges(t *testing.T) {
 		})
 		if !errors.Is(err, ErrUnsafeWorkspace) {
 			t.Fatalf("Read(restored mtime) error = %v, want ErrUnsafeWorkspace", err)
+		}
+	})
+	t.Run("newly imported bytes change with restored mtime", func(t *testing.T) {
+		directory := testWorkspace(t)
+		store := mustOpenStore(t, directory)
+		if err := store.Import(ReleaseFileName, []byte("release")); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(directory, ReleaseFileName)
+		before, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("changed"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Read(ReleaseFileName, 64); !errors.Is(err, ErrUnsafeWorkspace) {
+			t.Fatalf("Read(mutated imported file) error = %v, want ErrUnsafeWorkspace", err)
+		}
+	})
+	t.Run("missing content baseline", func(t *testing.T) {
+		directory := testWorkspace(t)
+		store := mustOpenStore(t, directory)
+		if err := store.Import(ReleaseFileName, []byte("release")); err != nil {
+			t.Fatal(err)
+		}
+		delete(store.digests, ReleaseFileName)
+		if _, err := store.Read(ReleaseFileName, 64); !errors.Is(err, ErrUnsafeWorkspace) {
+			t.Fatalf("Read(missing baseline) error = %v, want ErrUnsafeWorkspace", err)
 		}
 	})
 	t.Run("caller bound", func(t *testing.T) {

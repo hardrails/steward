@@ -157,7 +157,7 @@ func createActivation(arguments []string, stdout io.Writer) error {
 		context.Background(),
 		time.Duration(timeouts.ImageImportSeconds)*time.Second,
 	)
-	importErr := store.ImportArchiveContext(copyCtx, archivePath)
+	importErr := store.ImportArchiveContext(copyCtx, archivePath, inputs.plan.Archive)
 	cancelCopy()
 	if importErr != nil {
 		return fmt.Errorf("initialize activation archive: %w", importErr)

@@ -62,13 +62,18 @@ func openRootAndIdentity(t *testing.T, directory string) (*os.Root, os.FileInfo)
 
 func TestAdditionalPublicBoundaries(t *testing.T) {
 	var nilStore *Store
+	archiveIdentity := testArchiveIdentity([]byte("archive"))
 	if _, err := nilStore.Read(ReleaseFileName, 1); !errors.Is(err, ErrClosed) {
 		t.Fatalf("nil Read() error = %v, want ErrClosed", err)
 	}
 	if err := nilStore.WriteOnce(PlanFileName, nil); !errors.Is(err, ErrClosed) {
 		t.Fatalf("nil WriteOnce() error = %v, want ErrClosed", err)
 	}
-	if err := nilStore.ImportArchiveContext(context.Background(), "/missing"); !errors.Is(err, ErrClosed) {
+	if err := nilStore.ImportArchiveContext(
+		context.Background(),
+		"/missing",
+		archiveIdentity,
+	); !errors.Is(err, ErrClosed) {
 		t.Fatalf("nil ImportArchiveContext() error = %v, want ErrClosed", err)
 	}
 	if _, err := nilStore.ListStateCheckpoints(); !errors.Is(err, ErrClosed) {
@@ -87,19 +92,23 @@ func TestAdditionalPublicBoundaries(t *testing.T) {
 	directory := testWorkspace(t)
 	store := mustOpenStore(t, directory)
 	//nolint:staticcheck // This adversarial case verifies the explicit nil-context guard.
-	if err := store.ImportArchiveContext(nil, "/missing"); err == nil {
+	if err := store.ImportArchiveContext(nil, "/missing", archiveIdentity); err == nil {
 		t.Fatal("ImportArchiveContext(nil) succeeded")
 	}
 	uncleanSource := directory + string(filepath.Separator) + ".." +
 		string(filepath.Separator) + filepath.Base(directory) +
 		string(filepath.Separator) + "source"
 	for _, source := range []string{"", "relative", uncleanSource} {
-		if err := store.ImportArchiveContext(context.Background(), source); !errors.Is(err, ErrUnsafeWorkspace) {
+		if err := store.ImportArchiveContext(
+			context.Background(),
+			source,
+			archiveIdentity,
+		); !errors.Is(err, ErrUnsafeWorkspace) {
 			t.Fatalf("ImportArchiveContext(%q) error = %v, want ErrUnsafeWorkspace", source, err)
 		}
 	}
 	missing := filepath.Join(t.TempDir(), "missing.tar")
-	if err := store.ImportArchive(missing); err == nil || !errors.Is(err, os.ErrNotExist) {
+	if err := store.ImportArchive(missing, archiveIdentity); err == nil || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ImportArchive(missing) error = %v, want not-exist", err)
 	}
 	for _, limit := range []int64{0, -1, MaxSmallArtifactBytes + 1} {
@@ -169,9 +178,14 @@ func TestArchiveImportCancellationAtEveryCheckpoint(t *testing.T) {
 	probeStore := mustOpenStore(t, probeDirectory)
 	probeSourceDirectory := t.TempDir()
 	probeSource := filepath.Join(probeSourceDirectory, "archive")
-	writeTestFile(t, probeSourceDirectory, "archive", []byte("archive"), 0o600)
+	probeRaw := []byte("archive")
+	writeTestFile(t, probeSourceDirectory, "archive", probeRaw, 0o600)
 	probe := &stagedCancellationContext{Context: context.Background()}
-	if err := probeStore.ImportArchiveContext(probe, probeSource); err != nil {
+	if err := probeStore.ImportArchiveContext(
+		probe,
+		probeSource,
+		testArchiveIdentity(probeRaw),
+	); err != nil {
 		t.Fatalf("probe ImportArchiveContext() error = %v", err)
 	}
 	if probe.calls < 10 {
@@ -184,12 +198,13 @@ func TestArchiveImportCancellationAtEveryCheckpoint(t *testing.T) {
 			store := mustOpenStore(t, directory)
 			sourceDirectory := t.TempDir()
 			source := filepath.Join(sourceDirectory, "archive")
-			writeTestFile(t, sourceDirectory, "archive", []byte("archive"), 0o600)
+			sourceRaw := []byte("archive")
+			writeTestFile(t, sourceDirectory, "archive", sourceRaw, 0o600)
 			ctx := &stagedCancellationContext{
 				Context:  context.Background(),
 				cancelAt: cancelAt,
 			}
-			err := store.ImportArchiveContext(ctx, source)
+			err := store.ImportArchiveContext(ctx, source, testArchiveIdentity(sourceRaw))
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("ImportArchiveContext(cancelAt=%d) error = %v, want context.Canceled", cancelAt, err)
 			}
