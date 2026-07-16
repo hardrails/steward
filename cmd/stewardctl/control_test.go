@@ -88,6 +88,7 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	tokenPath := filepath.Join(directory, "admin.token")
 	enrollmentPath := filepath.Join(directory, "enrollment.json")
 	credentialPath := filepath.Join(directory, "credential.json")
+	evidenceConfigPath := filepath.Join(directory, "executor-evidence.env")
 	evidencePrivatePath := filepath.Join(directory, "evidence.private.pem")
 	evidencePublicPath := filepath.Join(directory, "evidence.public")
 	operatorTokenPath := filepath.Join(directory, "tenant-operator.token")
@@ -150,7 +151,8 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	output.Reset()
 	if err := run([]string{"control", "enrollment", "exchange", "-control-url", server.URL,
 		"-enrollment", enrollmentPath, "-request-id", "request-1",
-		"-executor-evidence-private-key", evidencePrivatePath, "-credential-out", credentialPath},
+		"-executor-evidence-private-key", evidencePrivatePath, "-credential-out", credentialPath,
+		"-executor-evidence-config-out", evidenceConfigPath},
 		&output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +162,16 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	credential, err := os.ReadFile(credentialPath)
 	if err != nil || !bytes.Contains(credential, []byte(`"credential":"`+nodeCredentialToken+`"`)) {
 		t.Fatalf("credential=%s error=%v", credential, err)
+	}
+	evidenceConfig, err := os.ReadFile(evidenceConfigPath)
+	if err != nil || !bytes.Contains(evidenceConfig, []byte(
+		"STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID=control-test\n"+
+			"STEWARD_EXECUTOR_EVIDENCE_NODE_ID=node-1\n",
+	)) || !bytes.Contains(evidenceConfig, []byte("STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_BASE64=")) {
+		t.Fatalf("evidence config=%s error=%v", evidenceConfig, err)
+	}
+	if info, err := os.Stat(evidenceConfigPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("evidence config mode=%v error=%v", info, err)
 	}
 	output.Reset()
 	nodeCredentialRevokeArguments := append([]string{"control", "node-credential", "revoke"}, common...)
@@ -268,6 +280,7 @@ func TestControlEnrollmentExchangeDoesNotPublishMismatchedCredential(t *testing.
 	privatePath := filepath.Join(directory, "evidence.private.pem")
 	publicPath := filepath.Join(directory, "evidence.public")
 	outputPath := filepath.Join(directory, "credential.json")
+	evidenceConfigPath := filepath.Join(directory, "executor-evidence.env")
 	if err := os.WriteFile(enrollmentPath, []byte(
 		`{"controller_instance_id":"control-test","enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","tenant_ids":["tenant-a"],"expires_at":"2026-07-13T12:15:00Z"}`,
 	), 0o600); err != nil {
@@ -284,11 +297,33 @@ func TestControlEnrollmentExchangeDoesNotPublishMismatchedCredential(t *testing.
 		"-request-id", "request-1",
 		"-executor-evidence-private-key", privatePath,
 		"-credential-out", outputPath,
+		"-executor-evidence-config-out", evidenceConfigPath,
 	}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "outside the enrollment identity") {
 		t.Fatalf("mismatched endpoint response error=%v", err)
 	}
 	if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("mismatched credential output exists: %v", err)
+	}
+	if _, err := os.Stat(evidenceConfigPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched evidence config output exists: %v", err)
+	}
+}
+
+func TestWriteEnrollmentOutputsRollsBackAndRejectsAliases(t *testing.T) {
+	directory := t.TempDir()
+	credentialPath := filepath.Join(directory, "credential.json")
+	configPath := filepath.Join(directory, "evidence.env")
+	if err := writeEnrollmentOutputs(credentialPath, []byte("credential"), credentialPath, []byte("config")); err == nil {
+		t.Fatal("aliased enrollment outputs were accepted")
+	}
+	if err := os.WriteFile(credentialPath, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEnrollmentOutputs(credentialPath, []byte("credential"), configPath, []byte("config")); err == nil {
+		t.Fatal("existing credential output was overwritten")
+	}
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config output survived failed enrollment output: %v", err)
 	}
 }

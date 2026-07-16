@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -243,12 +245,13 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	evidencePrivateKeyPath := flags.String("executor-evidence-private-key", "", "owner-only Executor receipt key")
 	evidenceEpoch := flags.Uint64("executor-evidence-epoch", 1, "Executor receipt epoch")
 	output := flags.String("credential-out", "", "new owner-only Executor credential file")
+	evidenceConfigOutput := flags.String("executor-evidence-config-out", "", "new owner-only Executor evidence enrollment config")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
 	if *enrollmentPath == "" || *requestID == "" || *evidencePrivateKeyPath == "" || *evidenceEpoch != 1 ||
-		*output == "" || flags.NArg() != 0 {
-		return errors.New("control enrollment exchange requires enrollment, request-id, an Executor evidence private key at epoch 1, and credential output")
+		*output == "" || *evidenceConfigOutput == "" || flags.NArg() != 0 {
+		return errors.New("control enrollment exchange requires enrollment, request-id, an Executor evidence private key at epoch 1, credential output, and evidence config output")
 	}
 	raw, err := securefile.Read(*enrollmentPath, 64<<10, securefile.OwnerOnly)
 	if err != nil {
@@ -291,11 +294,52 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := writeNewFile(*output, append(credentialRaw, '\n'), 0o600); err != nil {
+	evidenceConfig := fmt.Appendf(nil,
+		"STEWARD_EXECUTOR_EVIDENCE_CONFIG_VERSION=1\n"+
+			"STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID=%s\n"+
+			"STEWARD_EXECUTOR_EVIDENCE_NODE_ID=%s\n"+
+			"STEWARD_EXECUTOR_EVIDENCE_RECEIPT_EPOCH=%d\n"+
+			"STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_BASE64=%s\n",
+		enrollment.ControllerInstanceID, enrollment.NodeID, *evidenceEpoch, claim.PublicKeyBase64,
+	)
+	if err := writeEnrollmentOutputs(
+		*output, append(credentialRaw, '\n'),
+		*evidenceConfigOutput, evidenceConfig,
+	); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintln(stdout, credentialID)
 	return err
+}
+
+func writeEnrollmentOutputs(credentialPath string, credential []byte, configPath string, config []byte) error {
+	credentialClean, err := filepath.Abs(credentialPath)
+	if err != nil {
+		return err
+	}
+	configClean, err := filepath.Abs(configPath)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(credentialClean) == filepath.Clean(configClean) {
+		return errors.New("credential output and evidence config output must name different files")
+	}
+	for _, path := range []string{credentialPath, configPath} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("enrollment output already exists: %s", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := writeNewFile(configPath, config, 0o600); err != nil {
+		return err
+	}
+	if err := writeNewFile(credentialPath, credential, 0o600); err != nil {
+		removeErr := os.Remove(configPath)
+		syncErr := syncOutputDirectory(configPath)
+		return errors.Join(err, removeErr, syncErr)
+	}
+	return nil
 }
 
 func validateEnrollmentCredential(enrollment controlclient.Enrollment, credential controlclient.NodeCredential) (string, error) {

@@ -495,18 +495,26 @@ assert_owner_file "$evidence_private"
 
 node_credential=$work/node-credential.json
 node_credential_retry=$work/node-credential-retry.json
+evidence_config=$work/executor-evidence.env
+evidence_config_retry=$work/executor-evidence-retry.env
 run_bounded 30 "$work" "$work/exchange.stdout" "$work/exchange.stderr" \
 	"$ctl_bin" control enrollment exchange -control-url "$control_url" -enrollment "$enrollment" \
 	-request-id acceptance-node-exchange -executor-evidence-private-key "$evidence_private" \
-	-credential-out "$node_credential"
+	-credential-out "$node_credential" -executor-evidence-config-out "$evidence_config"
 run_bounded 30 "$work" "$work/exchange-retry.stdout" "$work/exchange-retry.stderr" \
 	"$ctl_bin" control enrollment exchange -control-url "$control_url" -enrollment "$enrollment" \
 	-request-id acceptance-node-exchange -executor-evidence-private-key "$evidence_private" \
-	-credential-out "$node_credential_retry"
+	-credential-out "$node_credential_retry" -executor-evidence-config-out "$evidence_config_retry"
 assert_owner_file "$node_credential"
 assert_owner_file "$node_credential_retry"
+assert_owner_file "$evidence_config"
+assert_owner_file "$evidence_config_retry"
 cmp -s "$node_credential" "$node_credential_retry" || {
 	echo "control-acceptance: deterministic enrollment retry changed the node credential" >&2
+	exit 1
+}
+cmp -s "$evidence_config" "$evidence_config_retry" || {
+	echo "control-acceptance: deterministic enrollment retry changed the evidence config" >&2
 	exit 1
 }
 python3 -I - "$node_credential" "$node_id" "$work/exchange.stdout" "$work/exchange-retry.stdout" <<'PY'
@@ -539,10 +547,12 @@ set +e
 run_bounded 30 "$work" "$work/exchange-replay.stdout" "$work/exchange-replay.stderr" \
 	"$ctl_bin" control enrollment exchange -control-url "$control_url" -enrollment "$enrollment" \
 	-request-id acceptance-different-exchange -executor-evidence-private-key "$evidence_private" \
-	-credential-out "$work/replayed-node-credential.json"
+	-credential-out "$work/replayed-node-credential.json" \
+	-executor-evidence-config-out "$work/replayed-executor-evidence.env"
 replay_status=$?
 set -e
-if (( replay_status == 0 )) || [[ -e $work/replayed-node-credential.json ]]; then
+if (( replay_status == 0 )) || [[ -e $work/replayed-node-credential.json ||
+	-e $work/replayed-executor-evidence.env ]]; then
 	echo "control-acceptance: consumed enrollment accepted a different replay identity" >&2
 	exit 1
 fi
