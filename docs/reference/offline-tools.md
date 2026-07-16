@@ -14,7 +14,10 @@ groups, the signing, verification, audit, and archive-inspection operations use 
 local files; `image import` contacts Docker after offline verification. Commands
 under `stewardctl node` contact the local Executor API. `stewardctl task submit`,
 `status`, `observe`, and `wait` contact an explicit literal-loopback Gateway origin;
-task issue, verify, and audit remain offline.
+task issue, verify, and audit remain offline. `stewardctl control evidence export`
+contacts the customer-owned controller, while `stewardctl control evidence verify`
+checks that portable export entirely offline against a separately pinned witness
+public key.
 
 ## Controller TLS material
 
@@ -45,6 +48,43 @@ The default CA lifetime is five years and the default server lifetime is one yea
 `-server-valid-for` accepts one hour through 398 days and cannot exceed the CA.
 This tool creates files, not an online CA or rotation service. Protect the CA key
 offline when practical and issue a new bounded server certificate before expiry.
+
+## Controller evidence witness exports
+
+A site administrator can create one portable checkpoint from a connected operator
+workstation:
+
+```console
+stewardctl control evidence export \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -out node-a.evidence-witness.json
+```
+
+The command creates an absent mode-`0600` file and never overwrites an existing
+path or symbolic link. The export contains the enrollment-time receipt-key proof,
+the controller's last-good checkpoint, any sticky rollback or equivocation
+finding, and the export time. It does not contain the full receipt log, prompts,
+request bodies, or agent output.
+
+Verify it on a disconnected audit station:
+
+```console
+stewardctl control evidence verify \
+  -in node-a.evidence-witness.json \
+  -witness-public-key steward-control-witness.public.pem
+```
+
+The verifier reads only local files. It checks the receipt identity, checkpoint or
+finding semantics, controller witness signature, and exact match with the supplied
+Ed25519 public key. The key embedded in the export is not trusted by itself. Copy
+the controller's `witness.public.pem` through an independent authenticated channel
+and record its SHA-256 digest when establishing the audit identity. A wrong key,
+changed signed field, duplicate or unknown JSON field, or inconsistent node
+identity fails verification. Reformatting equivalent JSON does not change the
+signed statement.
 
 ## Upgrade inspection
 

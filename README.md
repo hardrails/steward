@@ -79,7 +79,8 @@ certificate and an owner-only key staged through the trusted root-owned path
 described in the guide. See the
 [control-plane guide](https://hardrails.github.io/steward/guides/control-plane/)
 for PKI, tenant creation, scoped operators, one-time node enrollment, signed
-command delivery, backup, and MCP.
+command delivery, separately keyed Executor evidence witnessing, offline export,
+backup, and MCP.
 
 The doctor checks the installed release, Docker and gVisor, systemd services,
 loopback health and readiness, Gateway, fixed evidence stores, and filesystem
@@ -158,7 +159,7 @@ Steward separates those capabilities:
 | Multiple tenants on one host | Each workload has its own gVisor sandbox, per-workload resource limits, host and tenant aggregate memory/CPU/PID reservations, workload-count caps, command authority, and, when needed, private Docker network. Durable admission, command-fence, journal, and receipt records bind the tenant ID. Persistent Docker volumes are disabled on shared hosts because the local volume driver does not provide portable hard byte or inode quotas. |
 | Model, service, and API access | Site policy grants named inference routes, model aliases, service IDs, credential-brokered connector IDs, and HTTP(S) egress routes. A tenant task key can be scoped to one service and sign a short-lived permit for one exact service request; Gateway records authorization before dispatch. The private key is not a Steward node input and is never given to the agent. Connectors separately map logical operations to operator-owned origins and credentials and can require exact-request action permits. Non-borrowing receipt budgets prevent one tenant from consuming another tenant's evidence allocation. The agent gets no general network route. |
 | Remote nodes | Authenticated outbound polling works behind network address translation (NAT) and inbound firewalls. Tenant-signed commands include a short validity window, instance generation, and sequence number so Executor can reject replay. |
-| Audit evidence | Executor writes signed, hash-linked lifecycle receipts. Gateway writes a separate signed chain for connector calls and tenant-signed service-task authorization, dispatch, and terminal observation. Current lifecycle tasks use receipt format 4 with a task-local authorization → dispatch → terminal chain. Permit-backed records bind the authority key, permit, operation policy, and exact request digest. They never contain the raw prompt, request body, or agent result. `stewardctl` verifies both chains and correlates permits offline. |
+| Audit evidence | Executor writes signed, hash-linked lifecycle receipts. It can publish bounded signed deltas to the customer-owned controller, which retains a last-good checkpoint or sticky rollback/equivocation finding and signs portable exports with a separate witness key. Gateway writes a separate signed chain for connector calls and tenant-signed service-task authorization, dispatch, and terminal observation. Permit-backed records bind the authority key, permit, operation policy, and exact request digest. Receipts omit raw prompts, request bodies, and response or result bodies. `stewardctl` verifies node chains and controller exports offline. |
 | Disconnected operation | Static binaries, local public-key infrastructure (PKI), offline image import, and local model gateways do not require a public network service after transfer. |
 | Vendor independence | Public OpenAPI and uplink contracts have no private runtime dependency. |
 
@@ -190,18 +191,18 @@ operator responsibility behind an OpenAI-compatible endpoint.
 A Linux release contains seven static binaries:
 
 - `steward-control` provides the optional self-hosted tenant, enrollment,
-  inventory, and signed-command delivery plane without holding tenant private
-  keys or Docker authority.
+  inventory, signed-command delivery, and separately keyed evidence-witness
+  plane without holding tenant private keys or Docker authority.
 - `steward` tracks lifecycle state and provides the generic outbound uplink.
 - `steward-executor` verifies admission and is the only long-running Steward
   service with Docker-group membership.
 - `steward-gateway` holds upstream credentials and enforces inference, service,
   exact connector-operation, and HTTP(S) egress grants.
 - `steward-relay` is a fixed-destination companion inside one workload network.
-- `stewardctl` manages controller TLS, tenants, operators, enrollment and command
-  delivery; keys and policy; exact-request connector and service-task permits;
-  generic task lifecycle and recovery; OCI import; evidence; and local node
-  actions.
+- `stewardctl` manages controller TLS, tenants, operators, enrollment, command
+  delivery, evidence status, signed witness export, and offline verification;
+  keys and policy; exact-request connector and service-task permits; generic
+  task lifecycle and recovery; OCI import; node evidence; and local node actions.
 - `steward-mcp` exposes bounded fleet and node operations plus optional pre-signed
   task lifecycle tools over MCP stdio.
 

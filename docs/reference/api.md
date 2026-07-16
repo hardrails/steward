@@ -27,8 +27,8 @@ so its origin is `https://...`.
 Every route except health, readiness, and one-time enrollment exchange requires an
 appropriate Bearer credential. Enrollment exchange uses the one-time enrollment
 bearer in its request. Operator credentials are either site-wide or scoped to one
-tenant. Node credentials can call only the Executor poll and report routes for
-their bound node.
+tenant. Node credentials can call only the command and evidence uplink poll and
+report routes for their bound node.
 
 | Method and path | Purpose |
 | --- | --- |
@@ -41,9 +41,12 @@ their bound node.
 | `GET /v1/tenants/{tenant_id}/nodes` | Page through bounded tenant node inventory |
 | `GET /v1/tenants/{tenant_id}/nodes/{node_id}` | Read one tenant-visible node |
 | `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
+| `GET /v1/nodes/{node_id}/evidence` | Read the site-admin-only last-good Executor receipt checkpoint and any sticky divergence finding |
+| `GET /v1/nodes/{node_id}/evidence/export` | Sign a portable evidence checkpoint with the controller's dedicated witness key |
 | `POST /v1/tenants/{tenant_id}/nodes/{node_id}/commands` | Retain one exact signed Executor command |
 | `GET .../commands/{command_id}` | Read durable delivery and terminal status |
 | `POST /executor-uplink/poll`, `POST /executor-uplink/report` | Lease signed commands to an enrolled Executor and settle fenced reports |
+| `POST /evidence-uplink/poll`, `POST /evidence-uplink/report` | Return a credential-bound challenge, then verify and retain a receipt-key-signed evidence batch |
 
 Every request body and response is bounded. Pagination is ordered and uses an
 exclusive `after` cursor. The controller rejects unknown query parameters,
@@ -51,6 +54,19 @@ redirects are not used, and every error has the common
 `{"error":"...","message":"..."}` shape. The controller parses signed-command
 identity to bind it to the route but does not treat that parse as authorization;
 Executor verifies the signature and local policy before applying the command.
+
+Evidence enrollment proves possession of the node receipt key and pins it to one
+controller, enrollment, control node, receipt node, stream, and epoch. A report
+signs the exact controller checkpoint returned by its poll, the reported local
+head, frame count, and a domain-separated digest of the exact decoded frames. An
+exact retry is a no-op. A stale report cannot manufacture a rollback finding, and
+adding, removing, replacing, or reordering frames invalidates the proof.
+
+The online evidence inspection and portable export require a site-admin
+credential. The export embeds a public witness key only to describe its signer;
+offline verification must use a witness public key obtained through an independent
+trusted channel. The controller retains a bounded checkpoint and first sticky
+rollback or equivocation finding, not the full node receipt archive.
 
 See [Operate the bundled control plane]({{ '/guides/control-plane/' | relative_url }})
 for installation and lifecycle examples.
@@ -147,10 +163,13 @@ state remains `dispatch_accepted`.
 ## MCP server
 
 `steward-mcp` implements Model Context Protocol (MCP) `2025-11-25` over standard
-input/output. When configured with a scoped operator credential, its fleet tools
-list and create tenants, list and inspect or revoke nodes, and submit and inspect
-already signed commands through Steward Control. They do not issue operator or
-enrollment secrets. Its admit, status, logs, egress, start, stop, destroy, and
+input/output. With a control-plane operator credential, its fleet tools list
+visible tenants and nodes and submit or inspect already signed commands. A
+site-admin credential is required to create tenants, revoke nodes, or read the
+evidence checkpoint; a tenant-scoped credential confines the remaining fleet
+operations to that tenant. The evidence tool omits raw proof signatures and export
+files. Fleet tools do not issue operator or enrollment secrets. Its admit, status,
+logs, egress, start, stop, destroy, and
 state-purge tools call the loopback Executor API. When configured with a loopback
 Gateway origin, separate owner-only Gateway token, and fixed result directory, it
 also exposes pre-signed task submit, passive status, and one-shot observation

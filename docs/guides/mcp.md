@@ -10,8 +10,10 @@ section: How-to
 local Steward node, or both. It communicates through standard input and output; it
 does not open a network listener. Fleet tools call the authenticated Steward
 Control API. Node tools call the same loopback Executor API as `stewardctl node`.
-Optional task tools call the loopback Gateway API and accept only an exact request
-with a tenant-signed permit.
+The read-only evidence tool requires site-admin authority and returns a bounded
+checkpoint projection rather than raw proof signatures or export files. Optional
+task tools call the loopback Gateway API and accept only an exact request with a
+tenant-signed permit.
 
 MCP is an interface, not an authorization boundary. Executor and Gateway still
 apply signed policy, generation fences, durable replay controls, journals, quotas,
@@ -59,9 +61,14 @@ server:
 
 The token file must be owner-only. The CA is a public trust file and may be mode
 `0644`. Steward Control accepts HTTP only for a literal loopback origin, uses TLS
-1.2 or newer remotely, ignores ambient proxy variables, and never follows a
+1.3 remotely, ignores ambient proxy variables, and never follows a
 redirect with the bearer. When `-control-ca-file` is set, that CA bundle replaces
 the host's system root set for this controller connection.
+
+Use a tenant-scoped operator token for ordinary fleet tools. Configure a separate
+trusted controller-only MCP process with a site-admin token only when the client
+must create tenants, call `steward_control_evidence_status`, or perform site-wide
+revocation. Do not give that process to an untrusted model or shared user.
 
 To expose fleet and local node tools from one process, add `-node-url` and
 `-token-file` to the same argument list. Gateway task tools still require local
@@ -170,6 +177,7 @@ lineage is one workload's persistent state history.
 | `steward_control_node_revoke` | Site-wide node and credential revocation after `acknowledge_node_revocation=true`; unavailable to a tenant operator without site authority. |
 | `steward_control_command_submit` | Retain one canonical-base64 signed Executor command after `acknowledge_command_submission=true`; the node still verifies signature and policy. |
 | `steward_control_command_status` | Read durable delivery lease and terminal-report metadata for one signed command. |
+| `steward_control_evidence_status` | Read the site-admin-only last-good receipt checkpoint and sticky rollback or equivocation finding. Returns receipt identity digests but omits raw public keys, signatures, and portable export files. |
 | `steward_admit` | Submit a base64 DSSE capsule and strict instance-intent JSON. |
 | `steward_status` | Read current hardened workload state. |
 | `steward_logs` | Read bounded container logs. |

@@ -373,6 +373,74 @@ Node revocation is site-wide and revokes every retained credential for that node
 It does not stop workloads already running on a disconnected node. Use a signed
 site cleanup command before revocation when containment is required.
 
+## Inspect and verify the evidence witness
+
+The evidence publisher runs independently from command polling. A controller
+outage does not stop local admission or agent work; the node keeps its signed
+receipt log as the durable outbox. When connectivity returns, Executor submits a
+bounded contiguous batch that signs both the controller checkpoint it observed
+and the exact native frames it sends.
+
+A site administrator can inspect the retained checkpoint without reading the full
+node receipt log:
+
+```console
+stewardctl control evidence status \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -node-id node-a
+```
+
+The response uses these implemented states:
+
+- `current`: the controller has a valid last-good checkpoint for the enrolled
+  receipt identity. This is not a liveness signal and does not prove the host was
+  uncompromised when it created a receipt.
+- `unwitnessed`: a legacy node has no receipt-key proof. A site administrator can
+  issue and exchange a replacement enrollment for that active node before relying
+  on controller witnessing.
+- `rollback_detected`: the node signed a head below the last-good checkpoint.
+- `equivocation_detected`: the node signed a conflicting head or branch.
+
+Rollback and equivocation findings are sticky. Later reports cannot clear the
+finding or advance the checkpoint, and Steward has no evidence-reset endpoint.
+Preserve the node receipt log, controller state, and a signed export for
+investigation. If the node must be replaced, revoke it, create a new global node
+ID with a new receipt key, and enroll that replacement. A revoked node ID is not
+reused; this preserves the old forensic record.
+
+Create a portable export on a trusted operator workstation:
+
+```console
+stewardctl control evidence export \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -node-id node-a \
+  -out node-a.evidence-witness.json
+```
+
+The output file is created once with mode `0600`. The export contains the enrolled
+receipt-key proof, last-good checkpoint, any sticky finding, and export time. The
+controller signs those fields with its separate witness key. The public key
+embedded in the export is descriptive, not trusted by itself.
+
+Verify offline with the witness public key copied through an independent trusted
+channel:
+
+```console
+stewardctl control evidence verify \
+  -in node-a.evidence-witness.json \
+  -witness-public-key /secure/steward-control-witness.public.pem
+```
+
+Verification makes no controller request. It fails if a signed export field
+changed, the receipt identity and checkpoint disagree, or the pinned witness key
+does not match. Reformatting equivalent JSON does not change the signed statement.
+An `unwitnessed` legacy node cannot produce an export because there is no receipt
+identity to bind; the controller returns a conflict instead.
+
 ## Sign, submit, and observe one command
 
 Create commands only on the trusted signing station. The public half of
@@ -451,12 +519,19 @@ pre-effect failure as `rejected`, which is safe to retire after acknowledgement.
 }
 ```
 
-Control-plane MCP exposes tenant list/create, node list/status/revoke, and signed
-command submit/status. It deliberately omits operator and enrollment credential
-issuance so a model-facing tool cannot return new bearer secrets. Mutation tools
-require explicit model-visible acknowledgments, but those booleans are not human
-approval or authorization. The configured operator token and the node-verified
-signature remain the security boundary.
+Control-plane MCP exposes tenant list/create, node list/status/revoke, signed
+command submit/status, and read-only `steward_control_evidence_status`. The
+evidence tool projects the checkpoint and finding without returning raw proof
+signatures or export files, and the controller authorizes it only for a site-admin
+credential. Do not place a site-admin token in an MCP client that an untrusted
+model or user can drive; a tenant-scoped token is the safer default for ordinary
+fleet work.
+
+MCP deliberately omits operator and enrollment credential issuance so a
+model-facing tool cannot return new bearer secrets. Mutation tools require
+explicit model-visible acknowledgments, but those booleans are not human approval
+or authorization. The configured operator token and the node-verified signature
+remain the security boundary.
 
 ## Back up, restore, and upgrade
 
