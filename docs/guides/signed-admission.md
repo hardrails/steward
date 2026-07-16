@@ -165,6 +165,23 @@ no repository name.
 }
 ```
 
+If the capsule binds companion content such as a skill manifest or software bill
+of materials (SBOM), list each exact artifact by kind and digest:
+
+```json
+"artifacts": [{
+  "kind": "steward.agent-release.skill-manifest.v1",
+  "digest": "sha256:PASTE_64_LOWERCASE_HEX"
+}]
+```
+
+Copy the same exact `{kind, digest}` pair into `allowed_artifacts` in both the
+publisher rule and the intended tenant rule. Publisher authorization is checked
+before image import; publisher and tenant authorization are both checked before
+admission. An artifact kind alone is not authority, and changing one byte requires
+a new digest and policy approval. Each policy rule may contain at most 128 exact
+artifact entries.
+
 ```console
 CAPSULE_DIGEST=$(stewardctl capsule sign -in capsule.json \
   -out capsule.dsse.json -key publisher.private.pem -key-id publisher-1)
@@ -191,9 +208,9 @@ sudo stewardctl image import \
 ```
 
 Before calling Docker, import verifies signatures, publisher revocation,
-repository/manifest allowlists, the built-in profile, every blob, and the signed
-manifest/config/platform tuple. Docker receives a sanitized archive with only the
-selected manifest, config, and layers. Steward then
+repository, manifest, and exact companion-artifact allowlists, the built-in
+profile, every blob, and the signed manifest/config/platform tuple. Docker receives
+a sanitized archive with only the selected manifest, config, and layers. Steward then
 inspects the local config and rejects declared volumes or platform drift. Import
 does not authorize an instance; Executor later requires capsule, policy, and tenant
 intent to agree.
@@ -288,11 +305,12 @@ For a deliberately enabled loopback listener, set
 recovery option lets the token authorize every tenant. Otherwise tenant identity
 must come from the authenticated uplink.
 
-Executor verifies signatures and requires capsule, policy, and intent to agree. It
-journals the operation, writes a pre-effect receipt, creates and inspects the gVisor
-container, writes a commit receipt, then advances fences. Lifecycle operations use
-the same identity, journal, and chain. A destroy tombstone prevents generation
-replay.
+Executor verifies signatures and requires capsule, policy, and intent to agree. A
+capsule companion artifact must match an exact allowlist entry under both publisher
+and tenant authority. Executor journals the operation, writes a pre-effect receipt,
+creates and inspects the gVisor container, writes a commit receipt, then advances
+fences. Lifecycle operations use the same identity, journal, and chain. A destroy
+tombstone prevents generation replay.
 
 ## 7. Verify and export receipts without the node
 

@@ -382,13 +382,15 @@ func newOfflineActivationFixture(t *testing.T) offlineActivationFixture {
 			AllowedManifestDigests: []string{
 				capsule.Image.ManifestDigest,
 			},
-			ResourceCeiling: ceiling,
+			AllowedArtifacts: capsule.Artifacts,
+			ResourceCeiling:  ceiling,
 		}},
 		Tenants: []admission.TenantRule{{
-			TenantID:        "tenant-a",
-			PublisherKeyIDs: []string{"publisher-a"},
-			ResourceCeiling: ceiling,
-			ServiceIDs:      []string{agentrelease.HermesServiceID},
+			TenantID:         "tenant-a",
+			PublisherKeyIDs:  []string{"publisher-a"},
+			ResourceCeiling:  ceiling,
+			AllowedArtifacts: capsule.Artifacts,
+			ServiceIDs:       []string{agentrelease.HermesServiceID},
 			TaskKeys: []admission.TaskKey{{
 				KeyID:      "tenant-task",
 				PublicKey:  base64.StdEncoding.EncodeToString(taskPublic),

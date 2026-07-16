@@ -19,11 +19,12 @@ import (
 )
 
 const (
-	CapsulePayloadType = "application/vnd.steward.capsule.v1+json"
-	PolicyPayloadType  = "application/vnd.steward.site-policy.v1+json"
-	CommandPayloadType = "application/vnd.steward.executor-command.v2+json"
-	SchemaV1           = "steward.admission.v1"
-	CommandSchemaV2    = "steward.executor-command.v2"
+	CapsulePayloadType  = "application/vnd.steward.capsule.v1+json"
+	PolicyPayloadType   = "application/vnd.steward.site-policy.v1+json"
+	CommandPayloadType  = "application/vnd.steward.executor-command.v2+json"
+	SchemaV1            = "steward.admission.v1"
+	CommandSchemaV2     = "steward.executor-command.v2"
+	maxAllowedArtifacts = 128
 )
 
 var (
@@ -136,26 +137,28 @@ type SitePolicy struct {
 }
 
 type PublisherRule struct {
-	KeyID                  string         `json:"key_id"`
-	PublicKey              string         `json:"public_key"`
-	Revoked                bool           `json:"revoked"`
-	AllowedProfiles        []ProfileRef   `json:"allowed_profiles"`
-	AllowedRepositories    []string       `json:"allowed_repositories"`
-	AllowedManifestDigests []string       `json:"allowed_manifest_digests,omitempty"`
-	ResourceCeiling        ResourceLimits `json:"resource_ceiling"`
+	KeyID                  string           `json:"key_id"`
+	PublicKey              string           `json:"public_key"`
+	Revoked                bool             `json:"revoked"`
+	AllowedProfiles        []ProfileRef     `json:"allowed_profiles"`
+	AllowedRepositories    []string         `json:"allowed_repositories"`
+	AllowedManifestDigests []string         `json:"allowed_manifest_digests,omitempty"`
+	AllowedArtifacts       []ArtifactDigest `json:"allowed_artifacts,omitempty"`
+	ResourceCeiling        ResourceLimits   `json:"resource_ceiling"`
 }
 
 type TenantRule struct {
-	TenantID              string         `json:"tenant_id"`
-	PublisherKeyIDs       []string       `json:"publisher_key_ids"`
-	ResourceCeiling       ResourceLimits `json:"resource_ceiling"`
-	InferenceRouteIDs     []string       `json:"inference_route_ids,omitempty"`
-	InferenceModelAliases []string       `json:"inference_model_aliases,omitempty"`
-	ServiceIDs            []string       `json:"service_ids,omitempty"`
-	EgressRouteIDs        []string       `json:"egress_route_ids,omitempty"`
-	ConnectorIDs          []string       `json:"connector_ids,omitempty"`
-	CommandKeys           []CommandKey   `json:"command_keys,omitempty"`
-	TaskKeys              []TaskKey      `json:"task_keys,omitempty"`
+	TenantID              string           `json:"tenant_id"`
+	PublisherKeyIDs       []string         `json:"publisher_key_ids"`
+	ResourceCeiling       ResourceLimits   `json:"resource_ceiling"`
+	AllowedArtifacts      []ArtifactDigest `json:"allowed_artifacts,omitempty"`
+	InferenceRouteIDs     []string         `json:"inference_route_ids,omitempty"`
+	InferenceModelAliases []string         `json:"inference_model_aliases,omitempty"`
+	ServiceIDs            []string         `json:"service_ids,omitempty"`
+	EgressRouteIDs        []string         `json:"egress_route_ids,omitempty"`
+	ConnectorIDs          []string         `json:"connector_ids,omitempty"`
+	CommandKeys           []CommandKey     `json:"command_keys,omitempty"`
+	TaskKeys              []TaskKey        `json:"task_keys,omitempty"`
 }
 
 // TaskKey grants one tenant-owned Ed25519 key authority to submit exact,
@@ -259,8 +262,9 @@ func VerifySitePolicy(policyEnvelope []byte, siteRoots map[string]ed25519.Public
 }
 
 // VerifyCapsuleForImport verifies the site policy, publisher signature,
-// revocation state, built-in profile shape, repository, and optional manifest
-// allowlist without selecting a tenant or accepting an instance intent.
+// revocation state, built-in profile shape, repository, optional manifest
+// allowlist, and exact publisher artifact authority without selecting a tenant
+// or accepting an instance intent.
 func VerifyCapsuleForImport(capsuleEnvelope, policyEnvelope []byte, siteRoots map[string]ed25519.PublicKey, now time.Time, profiles Registry) (VerifiedCapsuleImport, error) {
 	verifiedPolicy, err := VerifySitePolicy(policyEnvelope, siteRoots)
 	if err != nil {
@@ -297,6 +301,9 @@ func VerifyCapsuleForImport(capsuleEnvelope, policyEnvelope []byte, siteRoots ma
 	}
 	if len(publisher.AllowedManifestDigests) > 0 && !contains(publisher.AllowedManifestDigests, capsule.Image.ManifestDigest) {
 		return VerifiedCapsuleImport{}, deny("image manifest digest is not authorized")
+	}
+	if !artifactsAllowed(capsule.Artifacts, publisher.AllowedArtifacts) {
+		return VerifiedCapsuleImport{}, deny("capsule artifact is not authorized for publisher")
 	}
 	profile, ok := profiles.Lookup(capsule.Profile)
 	if !ok {
@@ -363,6 +370,12 @@ func Intersect(capsule ProfileCapsule, capsuleDigest string, policy SitePolicy, 
 	}
 	if len(publisher.AllowedManifestDigests) > 0 && !contains(publisher.AllowedManifestDigests, capsule.Image.ManifestDigest) {
 		return EffectiveAdmission{}, deny("image manifest digest is not authorized")
+	}
+	if !artifactsAllowed(capsule.Artifacts, publisher.AllowedArtifacts) {
+		return EffectiveAdmission{}, deny("capsule artifact is not authorized for publisher")
+	}
+	if !artifactsAllowed(capsule.Artifacts, tenant.AllowedArtifacts) {
+		return EffectiveAdmission{}, deny("capsule artifact is not authorized for tenant")
 	}
 	profile, ok := profiles.Lookup(capsule.Profile)
 	if !ok {
@@ -570,6 +583,9 @@ func (p SitePolicy) Validate() error {
 				return deny("invalid allowed manifest digest")
 			}
 		}
+		if err := validateAllowedArtifacts(publisher.AllowedArtifacts, "publisher"); err != nil {
+			return err
+		}
 	}
 	if len(p.SiteCleanupCommandKeys) > 32 {
 		return deny("site has too many cleanup command keys")
@@ -626,6 +642,9 @@ func (p SitePolicy) Validate() error {
 			if _, ok := seenPublishers[keyID]; !ok {
 				return deny("tenant names unknown publisher")
 			}
+		}
+		if err := validateAllowedArtifacts(tenant.AllowedArtifacts, "tenant"); err != nil {
+			return err
 		}
 		if len(tenant.InferenceRouteIDs) > 128 || len(tenant.InferenceModelAliases) > 128 ||
 			(len(tenant.InferenceRouteIDs) == 0) != (len(tenant.InferenceModelAliases) == 0) {
@@ -978,6 +997,30 @@ func containsProfile(values []ProfileRef, wanted ProfileRef) bool {
 		}
 	}
 	return false
+}
+func artifactsAllowed(artifacts, rules []ArtifactDigest) bool {
+	for _, artifact := range artifacts {
+		if !slices.Contains(rules, artifact) {
+			return false
+		}
+	}
+	return true
+}
+func validateAllowedArtifacts(rules []ArtifactDigest, authority string) error {
+	if len(rules) > maxAllowedArtifacts {
+		return deny("%s has too many allowed artifacts", authority)
+	}
+	seen := make(map[ArtifactDigest]struct{}, len(rules))
+	for _, rule := range rules {
+		if !bounded(rule.Kind, 128) || !digest(rule.Digest) {
+			return deny("%s has invalid allowed artifact", authority)
+		}
+		if _, duplicate := seen[rule]; duplicate {
+			return deny("%s has duplicate allowed artifact", authority)
+		}
+		seen[rule] = struct{}{}
+	}
+	return nil
 }
 func bounded(value string, limit int) bool {
 	return strings.TrimSpace(value) != "" && len(value) <= limit && !strings.ContainsRune(value, '\x00')
