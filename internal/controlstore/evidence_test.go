@@ -565,6 +565,155 @@ func TestConcurrentDivergentExecutorEvidenceAdvancesRecordFork(t *testing.T) {
 	}
 }
 
+func TestSequentialSameChallengeDivergenceRecordsFork(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	fixture.appendReceipt(t, "tenant-a")
+	firstDelta, err := fixture.log.ExportDelta(evidence.Coordinate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	forkLog, err := evidence.Open(
+		filepath.Join(t.TempDir(), "sequential-fork-evidence.log"), fixture.private, fixture.identity.NodeID, 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = forkLog.Close() })
+	if _, err := forkLog.Append(evidence.Event{
+		Type: evidence.AdmissionAllow, TenantID: "tenant-a", RuntimeRef: "runtime-sequential-fork",
+		CapsuleDigest: "sha256:capsule", PolicyDigest: "sha256:policy", Generation: 1,
+		GrantID: "grant-a", Outcome: evidence.Allowed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secondDelta, err := forkLog.ExportDelta(evidence.Coordinate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDelta.Head.Sequence != secondDelta.Head.Sequence || firstDelta.Head.ChainHash == secondDelta.Head.ChainHash {
+		t.Fatal("test did not construct equal-sequence divergent chains")
+	}
+
+	poll := fixture.poll(t, fixture.now.Add(2*time.Minute))
+	firstReport := fixture.signedReport(
+		t, evidence.Coordinate{}, firstDelta.Head.Sequence, encodeExecutorEvidenceHash(firstDelta.Head.ChainHash),
+		poll.Challenge, encodeExecutorEvidenceTestFrames(firstDelta.Frames),
+	)
+	secondReport := fixture.signedReport(
+		t, evidence.Coordinate{}, secondDelta.Head.Sequence, encodeExecutorEvidenceHash(secondDelta.Head.ChainHash),
+		poll.Challenge, encodeExecutorEvidenceTestFrames(secondDelta.Frames),
+	)
+	reportAt := fixture.now.Add(2*time.Minute + time.Second)
+	first, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, reportAt,
+	)
+	if err != nil || !first.Applied || first.Status.State != controlprotocol.ExecutorEvidenceStatusCurrent {
+		t.Fatalf("first sequential advancement=%#v err=%v", first, err)
+	}
+	second, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, secondReport, reportAt.Add(time.Second),
+	)
+	if err != nil || !second.Applied ||
+		second.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected ||
+		second.Status.Finding == nil {
+		t.Fatalf("second sequential advancement=%#v err=%v", second, err)
+	}
+	retained := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if retained.Sequence != firstDelta.Head.Sequence ||
+		retained.ChainHash != encodeExecutorEvidenceHash(firstDelta.Head.ChainHash) ||
+		retained.Finding == nil || retained.Finding.FirstReason != EvidenceFork ||
+		retained.Finding.FirstSequence != secondDelta.Head.Sequence ||
+		retained.Finding.FirstChainHash != encodeExecutorEvidenceHash(secondDelta.Head.ChainHash) {
+		t.Fatalf("sequential fork witness=%#v", retained)
+	}
+
+	sequenceAfterFinding := fixture.store.sequence
+	for name, replay := range map[string]controlprotocol.ExecutorEvidenceReportV1{
+		"primary": firstReport, "secondary": secondReport,
+	} {
+		replayed, err := fixture.store.ApplyExecutorEvidenceReport(
+			fixture.auth, fixture.identity, replay, reportAt.Add(2*time.Second),
+		)
+		if err != nil || replayed.Applied ||
+			replayed.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected ||
+			fixture.store.sequence != sequenceAfterFinding {
+			t.Fatalf("%s replay after sequential fork=%#v sequence=%d err=%v",
+				name, replayed, fixture.store.sequence, err)
+		}
+	}
+
+	third := secondReport
+	third.HeadProof.SignatureBase64 = base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+	beforeThird := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, third, reportAt.Add(3*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("third same-challenge variant error=%v", err)
+	}
+	if afterThird := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID); !evidenceWitnessEqual(beforeThird, afterThird) ||
+		fixture.store.sequence != sequenceAfterFinding {
+		t.Fatalf("third same-challenge variant mutated witness=%#v", afterThird)
+	}
+}
+
+func TestSequentialSameChallengeSupersetDoesNotCreateFork(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	fixture.appendReceipt(t, "tenant-a")
+	poll := fixture.poll(t, fixture.now.Add(2*time.Minute))
+	firstReport, firstDelta := fixture.reportFrom(t, evidence.Coordinate{}, poll.Challenge)
+	fixture.appendReceipt(t, "tenant-a")
+	supersetReport, _ := fixture.reportFrom(t, evidence.Coordinate{}, poll.Challenge)
+
+	reportAt := fixture.now.Add(2*time.Minute + time.Second)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, reportAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	before := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, supersetReport, reportAt.Add(time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same-challenge superset error=%v", err)
+	}
+	after := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if !evidenceWitnessEqual(before, after) || after.Finding != nil ||
+		after.Sequence != firstDelta.Head.Sequence {
+		t.Fatalf("same-challenge superset created a finding=%#v", after)
+	}
+}
+
+func TestInvalidPrimaryDoesNotPoisonValidSameChallengeSecondary(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	fixture.appendReceipt(t, "tenant-a")
+	poll := fixture.poll(t, fixture.now.Add(2*time.Minute))
+	valid, delta := fixture.reportFrom(t, evidence.Coordinate{}, poll.Challenge)
+	invalid := valid
+	invalid.HeadProof.SignatureBase64 = base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+	reportAt := fixture.now.Add(2*time.Minute + time.Second)
+
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, invalid, reportAt,
+	); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid primary error=%v", err)
+	}
+	response, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, valid, reportAt.Add(time.Second),
+	)
+	if err != nil || !response.Applied ||
+		response.Status.State != controlprotocol.ExecutorEvidenceStatusCurrent ||
+		response.Status.Head == nil || response.Status.Head.Sequence != delta.Head.Sequence {
+		t.Fatalf("valid secondary response=%#v err=%v", response, err)
+	}
+	retained := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if retained.Sequence != delta.Head.Sequence ||
+		retained.ChainHash != encodeExecutorEvidenceHash(delta.Head.ChainHash) ||
+		retained.Finding != nil {
+		t.Fatalf("valid secondary witness=%#v", retained)
+	}
+}
+
 func TestExecutorEvidenceAcceptsBoundedPrefixHead(t *testing.T) {
 	fixture := newExecutorEvidenceFixture(t, "tenant-a")
 	for index := 0; index < evidence.MaxDeltaRecords+1; index++ {
