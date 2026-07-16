@@ -1,5 +1,5 @@
 #!/bin/bash -p
-# Transactionally install signed-admission trust and generate node-local evidence identity.
+# Transactionally install signed-admission trust and establish node-local evidence identity.
 set -Eeuo pipefail
 set +x
 if ! shopt -qo privileged; then
@@ -23,13 +23,17 @@ Required:
 
 Optional:
   --node-id ID                   Stable node identity (derived from /etc/machine-id by default)
+  --receipt-private-key FILE     Owner-only enrollment receipt private key
+  --receipt-public-key FILE      Matching base64 Ed25519 receipt public key
   --allow-host-admin-intent      Allow the host-local token to select signed tenant intent
   --no-restart                   Validate and commit without restarting an active Executor
   -h, --help                     Show this help
 
-The receipt private key is generated on the node and never accepted as input.
+Pass both receipt-key files to reuse the exact key that proved possession during
+control-plane enrollment. If omitted, a new receipt key is generated on the node.
+An imported key must match any evidence identity already installed on the node.
 The public key is written to /etc/steward/node-receipts.public for enrollment/audit.
-Copy both trust inputs to a protected, root-owned directory first. Inputs in
+Copy all input files to a protected, root-owned directory first. Inputs in
 /tmp, home directories, or writable parent directories are rejected.
 EOF
 }
@@ -38,6 +42,8 @@ policy=
 site_root=
 site_root_key_id=
 node_id=
+receipt_private=
+receipt_public=
 allow_host_admin=false
 restart=true
 node_lock_fd=
@@ -47,6 +53,8 @@ while [[ $# -gt 0 ]]; do
 		--site-root-public-key) site_root=${2:-}; shift 2 ;;
 		--site-root-key-id) site_root_key_id=${2:-}; shift 2 ;;
 		--node-id) node_id=${2:-}; shift 2 ;;
+		--receipt-private-key) receipt_private=${2:-}; shift 2 ;;
+		--receipt-public-key) receipt_public=${2:-}; shift 2 ;;
 		--allow-host-admin-intent) allow_host_admin=true; shift ;;
 		--no-restart) restart=false; shift ;;
 		--node-lock-fd) node_lock_fd=${2:-}; shift 2 ;;
@@ -66,6 +74,11 @@ done
 [[ $site_root_key_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$ ]] || {
 	echo "configure-admission: invalid --site-root-key-id" >&2; exit 2;
 }
+if { [[ -z $receipt_private ]] && [[ -n $receipt_public ]]; } ||
+	{ [[ -n $receipt_private ]] && [[ -z $receipt_public ]]; }; then
+	echo "configure-admission: --receipt-private-key and --receipt-public-key are required together" >&2
+	exit 2
+fi
 
 # BEGIN NODE_LOCK_BOUNDARY
 readonly node_lock_directory=/run/steward-node
@@ -305,6 +318,14 @@ stage_admission_input_sources() {
 	trusted_input_snapshot "$site_root" "$input_stage/site-root.public" \
 		"site-root public key" 4096 false || return
 	site_root=$input_stage/site-root.public
+	if [[ -n ${receipt_private:-} ]]; then
+		trusted_input_snapshot "$receipt_private" "$input_stage/node-receipts.private.pem" \
+			"receipt private key" 16384 true || return
+		receipt_private=$input_stage/node-receipts.private.pem
+		trusted_input_snapshot "$receipt_public" "$input_stage/node-receipts.public" \
+			"receipt public key" 4096 false || return
+		receipt_public=$input_stage/node-receipts.public
+	fi
 }
 
 cleanup_trusted_input_stage() {
@@ -335,8 +356,15 @@ for path in /usr/local/bin/stewardctl /usr/local/bin/steward-executor \
 	/etc/steward/executor.env; do
 	[[ -e $path ]] || { echo "configure-admission: Steward node is missing $path" >&2; exit 2; }
 done
-if [[ -e /etc/steward/node-receipts.private.pem && ! -e /etc/steward/node-receipts.public ]] || \
-	[[ ! -e /etc/steward/node-receipts.private.pem && -e /etc/steward/node-receipts.public ]]; then
+receipt_key_pair_state() {
+	local private_path=$1 public_path=$2 private_present=false public_present=false
+	[[ ! -e $private_path && ! -L $private_path ]] || private_present=true
+	[[ ! -e $public_path && ! -L $public_path ]] || public_present=true
+	[[ $private_present == "$public_present" ]] || return 1
+	[[ $private_present == true ]] && printf 'present\n' || printf 'absent\n'
+}
+if ! receipt_identity_state=$(receipt_key_pair_state \
+	/etc/steward/node-receipts.private.pem /etc/steward/node-receipts.public); then
 	echo "configure-admission: receipt private/public key files must both exist or both be absent" >&2
 	exit 2
 fi
@@ -344,6 +372,23 @@ fi
 # Authenticate and semantically validate the policy before changing host state.
 /usr/local/bin/stewardctl policy verify -in "$policy" -public-key "$site_root" \
 	-key-id "$site_root_key_id" >/dev/null
+if [[ -n $receipt_private ]]; then
+	/usr/local/bin/stewardctl key match -private-key "$receipt_private" \
+		-public-key "$receipt_public" >/dev/null
+fi
+if [[ $receipt_identity_state == present ]]; then
+	/usr/local/bin/stewardctl key match \
+		-private-key /etc/steward/node-receipts.private.pem \
+		-public-key /etc/steward/node-receipts.public >/dev/null
+	if [[ -n $receipt_private ]]; then
+		/usr/local/bin/stewardctl key match \
+			-private-key /etc/steward/node-receipts.private.pem \
+			-public-key "$receipt_public" >/dev/null || {
+			echo "configure-admission: imported receipt key does not match the installed evidence identity" >&2
+			exit 2
+		}
+	fi
+fi
 
 targets=(
 	/etc/steward/executor.env
@@ -393,7 +438,12 @@ trap rollback ERR INT TERM
 
 install -o root -g steward-executor -m 0640 "$policy" /etc/steward/site-policy.dsse.json
 install -o root -g root -m 0644 "$site_root" /etc/steward/site-root.public
-if [[ ! -e /etc/steward/node-receipts.private.pem ]]; then
+if [[ $receipt_identity_state == absent && -n $receipt_private ]]; then
+	install -o steward-executor -g steward-executor -m 0600 \
+		"$receipt_private" /etc/steward/node-receipts.private.pem
+	install -o root -g root -m 0644 \
+		"$receipt_public" /etc/steward/node-receipts.public
+elif [[ $receipt_identity_state == absent ]]; then
 	tmp_private=$(mktemp /etc/steward/.node-receipts.private.XXXXXX)
 	tmp_public=$(mktemp /etc/steward/.node-receipts.public.XXXXXX)
 	rm -f "$tmp_private" "$tmp_public"

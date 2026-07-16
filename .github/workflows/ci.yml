@@ -156,9 +156,14 @@ jobs:
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 2, "write": 2},' "$stage/release.json"
           test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 49
           grep -Fxq 'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' "$stage/deploy/config/executor.env"
+          grep -Fxq 'EXECUTOR_EVIDENCE_UPLINK_ENABLED=false' "$stage/deploy/config/executor.env"
           grep -Fq -- '-uplink-delivery-state-file=${EXECUTOR_UPLINK_DELIVERY_STATE_FILE}' \
             "$stage/deploy/systemd/steward-executor.service"
+          grep -Fq -- '-evidence-uplink=${EXECUTOR_EVIDENCE_UPLINK_ENABLED}' \
+            "$stage/deploy/systemd/steward-executor.service"
           grep -Fq -- '-uplink-delivery-state-file "${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-}"' \
+            "$stage/scripts/node-preflight.sh"
+          grep -Fq -- '-evidence-uplink="$evidence_enabled"' \
             "$stage/scripts/node-preflight.sh"
           cp "$stage/release.json" "$stage/release.first.json"
           bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)"

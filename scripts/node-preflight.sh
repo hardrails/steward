@@ -242,7 +242,7 @@ fi
 declare -A executor=()
 required=' EXECUTOR_TOKEN_FILE EXECUTOR_DOCKER_SOCKET EXECUTOR_MAX_MEMORY_BYTES EXECUTOR_MAX_CPU_MILLIS EXECUTOR_MAX_PIDS EXECUTOR_MAX_WORKLOADS EXECUTOR_MAX_WORKLOADS_PER_TENANT '
 uplink=' EXECUTOR_UPLINK_URL EXECUTOR_UPLINK_CREDENTIAL_FILE EXECUTOR_UPLINK_STATE_FILE EXECUTOR_UPLINK_TLS_CA_FILE '
-optional=' EXECUTOR_UPLINK_DELIVERY_STATE_FILE EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG EXECUTOR_STATE_ARG EXECUTOR_MAX_TOTAL_MEMORY_BYTES EXECUTOR_MAX_TOTAL_CPU_MILLIS EXECUTOR_MAX_TOTAL_PIDS EXECUTOR_MAX_TENANT_MEMORY_BYTES EXECUTOR_MAX_TENANT_CPU_MILLIS EXECUTOR_MAX_TENANT_PIDS '
+optional=' EXECUTOR_UPLINK_DELIVERY_STATE_FILE EXECUTOR_EVIDENCE_UPLINK_ENABLED EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG EXECUTOR_STATE_ARG EXECUTOR_MAX_TOTAL_MEMORY_BYTES EXECUTOR_MAX_TOTAL_CPU_MILLIS EXECUTOR_MAX_TOTAL_PIDS EXECUTOR_MAX_TENANT_MEMORY_BYTES EXECUTOR_MAX_TENANT_CPU_MILLIS EXECUTOR_MAX_TENANT_PIDS '
 allowed="$required$uplink$optional"
 while IFS= read -r line || [[ -n $line ]]; do
 	[[ -z $line || $line == \#* ]] && continue
@@ -283,6 +283,7 @@ fi
 
 admission_args=()
 gateway_args=()
+evidence_args=()
 admission_keys=(EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE \
 	EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE)
 admission_set=0
@@ -324,6 +325,37 @@ elif [[ -n ${executor[EXECUTOR_STATE_ARG]:-} ]]; then
 	echo "node-preflight: persistent-state compatibility requires complete signed admission" >&2
 	exit 2
 fi
+
+evidence_enabled=${executor[EXECUTOR_EVIDENCE_UPLINK_ENABLED]:-false}
+evidence_controller=${executor[EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID]:-}
+evidence_interval=${executor[EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL]:-30s}
+case "$evidence_enabled" in
+	true)
+		if (( uplink_set != 4 || admission_set != ${#admission_keys[@]} )); then
+			echo "node-preflight: Executor evidence uplink requires complete uplink and signed-admission configuration" >&2
+			exit 2
+		fi
+		if [[ ! $evidence_controller =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+			echo "node-preflight: Executor evidence uplink has an invalid controller instance ID" >&2
+			exit 2
+		fi
+		;;
+	false)
+		if [[ -n $evidence_controller ]]; then
+			echo "node-preflight: Executor evidence controller identity requires evidence uplink to be enabled" >&2
+			exit 2
+		fi
+		;;
+	*)
+		echo "node-preflight: EXECUTOR_EVIDENCE_UPLINK_ENABLED must be true or false" >&2
+		exit 2
+		;;
+esac
+evidence_args=(
+	-evidence-uplink="$evidence_enabled"
+	-evidence-uplink-controller-instance-id "$evidence_controller"
+	-evidence-uplink-poll-interval "$evidence_interval"
+)
 
 if [[ ( -e $executor_gateway_env || -L $executor_gateway_env ) && ! -r $executor_gateway_env ]]; then
 	echo "node-preflight: Executor gateway environment is missing or unreadable" >&2
@@ -412,7 +444,7 @@ runuser -u steward-executor -- "$executor_bin" -check-config \
 	-max-tenant-memory-bytes "${executor[EXECUTOR_MAX_TENANT_MEMORY_BYTES]:-2147483648}" \
 	-max-tenant-cpu-millis "${executor[EXECUTOR_MAX_TENANT_CPU_MILLIS]:-2000}" \
 	-max-tenant-pids "${executor[EXECUTOR_MAX_TENANT_PIDS]:-512}" \
-	"${admission_args[@]}" "${gateway_args[@]}"
+	"${evidence_args[@]}" "${admission_args[@]}" "${gateway_args[@]}"
 if [[ -n $unit_dir ]]; then
 	if [[ ! -d $unit_dir || -L $unit_dir ]]; then
 		echo "node-preflight: target unit directory is missing or invalid: $unit_dir" >&2
