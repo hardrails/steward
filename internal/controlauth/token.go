@@ -24,17 +24,19 @@ import (
 )
 
 const (
-	KeyBytes                     = 32
-	operatorPrefix               = "steward_cp_v1"
-	nodePrefix                   = "steward_node_v1"
-	enrollmentPrefix             = "steward_enroll_v1"
-	credentialVersion            = 1
-	enrollmentVersion            = 1
-	maxTokenBytes                = 512
-	maxTenantBindings            = 128
-	evidenceChallengeNonceBytes  = 16
-	evidenceChallengeMACBytes    = sha256.Size
-	maxEvidenceChallengeLifetime = 10 * time.Minute
+	KeyBytes                    = 32
+	operatorPrefix              = "steward_cp_v1"
+	nodePrefix                  = "steward_node_v1"
+	enrollmentPrefix            = "steward_enroll_v1"
+	credentialVersion           = 1
+	enrollmentVersion           = 1
+	maxTokenBytes               = 512
+	maxTenantBindings           = 128
+	evidenceChallengeNonceBytes = 16
+	evidenceChallengeMACBytes   = sha256.Size
+	// MaxEvidenceChallengeLifetime bounds how long a controller must retain
+	// ephemeral replay tombstones after accepting a pre-restart challenge.
+	MaxEvidenceChallengeLifetime = 10 * time.Minute
 
 	// BootstrapRequestID is reserved for the recoverable first-site-admin
 	// handoff. Normal operator issuance must reject this request identity.
@@ -152,7 +154,7 @@ func (m *Manager) InstanceID() string {
 // authenticated node credential. The opaque value contains no bearer secret.
 func (m *Manager) MintEvidenceChallenge(credentialID, nodeID string, now, expiresAt time.Time) (string, error) {
 	if m == nil || !validIdentity(credentialID, 128) || !validIdentity(nodeID, 128) || now.IsZero() ||
-		!expiresAt.After(now) || expiresAt.Sub(now) > maxEvidenceChallengeLifetime {
+		!expiresAt.After(now) || expiresAt.Sub(now) > MaxEvidenceChallengeLifetime {
 		return "", errors.New("evidence challenge requires bounded identities and a short future lifetime")
 	}
 	nonce := make([]byte, evidenceChallengeNonceBytes)
@@ -172,24 +174,32 @@ func (m *Manager) MintEvidenceChallenge(credentialID, nodeID string, now, expire
 // memory. Credential rotation, node substitution, expiry, and byte tampering all
 // invalidate the value.
 func (m *Manager) VerifyEvidenceChallenge(raw, credentialID, nodeID string, now time.Time) error {
+	_, err := m.EvidenceChallengeExpiresAt(raw, credentialID, nodeID, now)
+	return err
+}
+
+// EvidenceChallengeExpiresAt authenticates one challenge and returns its
+// canonical expiry. A caller that adds bounded one-time replay protection can
+// retain the result only until this time without parsing the opaque token again.
+func (m *Manager) EvidenceChallengeExpiresAt(raw, credentialID, nodeID string, now time.Time) (time.Time, error) {
 	if m == nil || !validIdentity(credentialID, 128) || !validIdentity(nodeID, 128) || now.IsZero() || raw == "" {
-		return ErrUnauthorized
+		return time.Time{}, ErrUnauthorized
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != raw ||
 		len(decoded) != 1+8+evidenceChallengeNonceBytes+evidenceChallengeMACBytes {
-		return ErrUnauthorized
+		return time.Time{}, ErrUnauthorized
 	}
 	payload := decoded[:len(decoded)-evidenceChallengeMACBytes]
 	actualMAC := decoded[len(decoded)-evidenceChallengeMACBytes:]
 	if payload[0] != 1 || !m.matches(m.mac("evidence-challenge", string(payload), credentialID, nodeID), actualMAC) {
-		return ErrUnauthorized
+		return time.Time{}, ErrUnauthorized
 	}
 	expiresAt := time.Unix(int64(binary.BigEndian.Uint64(payload[1:9])), 0).UTC()
-	if !expiresAt.After(now.UTC()) || expiresAt.Sub(now.UTC()) > maxEvidenceChallengeLifetime {
-		return ErrUnauthorized
+	if !expiresAt.After(now.UTC()) || expiresAt.Sub(now.UTC()) > MaxEvidenceChallengeLifetime {
+		return time.Time{}, ErrUnauthorized
 	}
-	return nil
+	return expiresAt, nil
 }
 
 // InitializeKey exclusively creates and fsyncs one owner-only raw auth key.

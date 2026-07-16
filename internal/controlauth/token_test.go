@@ -172,6 +172,12 @@ func TestControlInstanceAndEvidenceChallengeBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	expiresAt, err := manager.EvidenceChallengeExpiresAt(
+		challenge, "node-cred-a", "node-a", now.Add(time.Minute),
+	)
+	if err != nil || !expiresAt.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("evidence challenge expiry = (%s, %v)", expiresAt, err)
+	}
 	if err := manager.VerifyEvidenceChallenge(challenge, "node-cred-a", "node-a", now.Add(time.Minute)); err != nil {
 		t.Fatalf("verify exact evidence challenge: %v", err)
 	}

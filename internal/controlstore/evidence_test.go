@@ -243,14 +243,9 @@ func TestExecutorEvidenceFindingsAreStickyAndFenceAdvancement(t *testing.T) {
 	}
 	beforeRegressedTime := retained
 	regressedNow := fixture.now.Add(3*time.Minute + 500*time.Millisecond)
-	regressedChallenge, err := fixture.auth.MintEvidenceChallenge(
-		fixture.identity.CredentialID, fixture.identity.NodeID, regressedNow, regressedNow.Add(5*time.Minute),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	regressedPoll := fixture.poll(t, regressedNow)
 	regressed := fixture.signedReport(
-		t, retainedCoordinate, 1, encodeExecutorEvidenceHash(records[0].ChainHash), regressedChallenge, nil,
+		t, retainedCoordinate, 1, encodeExecutorEvidenceHash(records[0].ChainHash), regressedPoll.Challenge, nil,
 	)
 	if _, err := fixture.store.ApplyExecutorEvidenceReport(
 		fixture.auth, fixture.identity, regressed, regressedNow,
@@ -461,7 +456,8 @@ func TestExecutorEvidenceFindingCASRejectsRegressedObservationTime(t *testing.T)
 	}
 	close(releaseEarlier)
 	earlier := <-earlierResult
-	if !errors.Is(earlier.err, ErrInvalid) || earlier.response.Applied {
+	if earlier.err != nil || earlier.response.Applied ||
+		earlier.response.Status.State != controlprotocol.ExecutorEvidenceStatusRollbackDetected {
 		t.Fatalf("regressed concurrent finding response=%#v err=%v", earlier.response, earlier.err)
 	}
 	finding := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID).Finding
@@ -558,6 +554,14 @@ func TestConcurrentDivergentExecutorEvidenceAdvancesRecordFork(t *testing.T) {
 		retained.Finding == nil || retained.Finding.LastReason != EvidenceFork ||
 		retained.Finding.LastChainHash != encodeExecutorEvidenceHash(secondDelta.Head.ChainHash) {
 		t.Fatalf("concurrent fork witness=%#v", retained)
+	}
+	replayed, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, reportAt.Add(time.Second),
+	)
+	if err != nil || replayed.Applied ||
+		replayed.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected ||
+		replayed.Status.Finding == nil {
+		t.Fatalf("replayed primary after fork response=%#v err=%v", replayed, err)
 	}
 }
 
@@ -770,7 +774,7 @@ func TestConcurrentExecutorEvidenceReportAppliesOnce(t *testing.T) {
 
 	applied := 0
 	for err := range errorsSeen {
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrConflict) {
 			t.Fatalf("concurrent report error=%v", err)
 		}
 	}

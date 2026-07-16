@@ -24,6 +24,11 @@ const (
 // synced to stable storage.
 type Store struct {
 	mu sync.Mutex
+	// evidenceReportMu protects only bounded in-memory challenge consumption.
+	// Durable controller state remains under mu so expensive receipt verification
+	// can be serialized per credential without blocking unrelated store readers.
+	evidenceReportMu sync.Mutex
+	evidenceReports  map[string]*executorEvidenceReportGate
 
 	dir        string
 	limits     Limits

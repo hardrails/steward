@@ -39,8 +39,10 @@ type verifiedExecutorEvidenceReport struct {
 }
 
 // PollExecutorEvidence authenticates the node and pinned receipt identity
-// before minting a short-lived stateless challenge. Polling does not mutate the
-// durable checkpoint.
+// before minting a short-lived challenge. Steward retains only the latest
+// challenge per credential in bounded memory so exact report replays do not
+// repeat expensive signature verification. Polling does not mutate the durable
+// checkpoint.
 func (store *Store) PollExecutorEvidence(auth *controlauth.Manager, identity controlauth.NodeIdentity, request controlprotocol.ExecutorEvidencePollRequestV1, now, expiresAt time.Time) (controlprotocol.ExecutorEvidencePollResponseV1, error) {
 	if store == nil || auth == nil {
 		return controlprotocol.ExecutorEvidencePollResponseV1{}, ErrUnavailable
@@ -73,6 +75,15 @@ func (store *Store) PollExecutorEvidence(auth *controlauth.Manager, identity con
 	if err != nil {
 		return controlprotocol.ExecutorEvidencePollResponseV1{}, err
 	}
+	challengeExpiresAt, err := auth.EvidenceChallengeExpiresAt(
+		challenge, identity.CredentialID, identity.NodeID, now,
+	)
+	if err != nil {
+		return controlprotocol.ExecutorEvidencePollResponseV1{}, err
+	}
+	if err := store.rememberExecutorEvidenceChallenge(identity.CredentialID, challenge, challengeExpiresAt, now); err != nil {
+		return controlprotocol.ExecutorEvidencePollResponseV1{}, err
+	}
 	response := controlprotocol.ExecutorEvidencePollResponseV1{
 		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1,
 		Challenge:       challenge,
@@ -91,16 +102,24 @@ func (store *Store) ApplyExecutorEvidenceReport(auth *controlauth.Manager, ident
 	return store.applyExecutorEvidenceReport(auth, identity, report, now, nil)
 }
 
-func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, identity controlauth.NodeIdentity, report controlprotocol.ExecutorEvidenceReportV1, now time.Time, afterSnapshot func()) (controlprotocol.ExecutorEvidenceReportResponseV1, error) {
+func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, identity controlauth.NodeIdentity, report controlprotocol.ExecutorEvidenceReportV1, now time.Time, afterSnapshot func()) (response controlprotocol.ExecutorEvidenceReportResponseV1, err error) {
 	if store == nil || auth == nil {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, ErrUnavailable
 	}
 	if now.IsZero() {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalid("executor evidence report time is required")
 	}
-	frames, err := report.DecodeFrames()
-	if err != nil {
-		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalidError("decode executor evidence report", err)
+	if report.ProtocolVersion != controlprotocol.ExecutorEvidenceProtocolV1 {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalid("executor evidence report protocol version is invalid")
+	}
+	if len(report.SignedFramesBase64) > controlprotocol.MaxExecutorEvidenceFrames {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalid("executor evidence report exceeds the frame-count limit")
+	}
+	if err := report.HeadProof.Validate(); err != nil {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalidError("validate executor evidence head proof", err)
+	}
+	if uint32(len(report.SignedFramesBase64)) != report.HeadProof.Claim.FrameCount {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalid("executor evidence report frame count does not match the signed claim")
 	}
 
 	snapshot, err := store.executorEvidenceSnapshot(identity)
@@ -109,6 +128,42 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 	}
 	if afterSnapshot != nil {
 		afterSnapshot()
+	}
+	if !executorEvidenceHeadMatchesPin(auth, identity, report.HeadProof.Claim, snapshot.witness) {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, ErrConflict
+	}
+	challengeExpiresAt, err := auth.EvidenceChallengeExpiresAt(
+		report.HeadProof.Claim.Challenge, identity.CredentialID, identity.NodeID, now,
+	)
+	if err != nil {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
+	}
+	reportDigest, err := executorEvidenceReportFingerprint(report)
+	if err != nil {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalidError("fingerprint executor evidence report", err)
+	}
+	attempt, replayResponse, err, leader := store.beginExecutorEvidenceReport(
+		identity.CredentialID, report.HeadProof.Claim.Challenge, reportDigest, challengeExpiresAt, now,
+	)
+	if !leader {
+		if err == nil {
+			return store.currentExecutorEvidenceReplayResponse(identity)
+		}
+		if revalidateErr := store.revalidateExecutorEvidenceIdentity(identity); revalidateErr != nil {
+			return controlprotocol.ExecutorEvidenceReportResponseV1{}, revalidateErr
+		}
+		return replayResponse, err
+	}
+	if err != nil {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
+	}
+	defer func() {
+		store.finishExecutorEvidenceReport(identity.CredentialID, attempt, response, err)
+	}()
+
+	frames, err := report.DecodeFrames()
+	if err != nil {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalidError("decode executor evidence report", err)
 	}
 	verified, err := verifyExecutorEvidenceReport(auth, identity, report.HeadProof, frames, snapshot, now)
 	if err != nil {
@@ -199,6 +254,31 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
 	}
 	return executorEvidenceReportResponse(true, *witness), nil
+}
+
+func (store *Store) revalidateExecutorEvidenceIdentity(identity controlauth.NodeIdentity) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return err
+	}
+	return store.revalidateNodeLocked(identity)
+}
+
+func (store *Store) currentExecutorEvidenceReplayResponse(identity controlauth.NodeIdentity) (controlprotocol.ExecutorEvidenceReportResponseV1, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
+	}
+	if err := store.revalidateNodeLocked(identity); err != nil {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
+	}
+	node, ok := store.current.nodes[identity.NodeID]
+	if !ok || node.Evidence == nil {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, ErrConflict
+	}
+	return executorEvidenceReportResponse(false, *node.Evidence), nil
 }
 
 func (store *Store) executorEvidenceSnapshot(identity controlauth.NodeIdentity) (executorEvidenceSnapshot, error) {
