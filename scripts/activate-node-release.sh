@@ -1,6 +1,25 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Validate and select one complete Steward node release as a serialized transaction.
 set -Eeuo pipefail
+if ! shopt -qo privileged; then
+	echo "activate-node-release: execute this root helper directly or invoke it with /bin/bash -p" >&2
+	exit 2
+fi
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LC_ALL=C
+LANG=C
+HOME=/root
+export PATH LC_ALL LANG HOME
+unset BASH_ENV ENV CDPATH GLOBIGNORE TMPDIR XDG_CONFIG_HOME
+unset DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG DOCKER_CERT_PATH
+unset DOCKER_TLS_VERIFY DOCKER_API_VERSION DOCKER_BUILDKIT BUILDKIT_HOST
+unset STEWARD_CONFIG_FILE STEWARD_EXECUTOR_ENV_FILE STEWARD_EXECUTOR_GATEWAY_ENV_FILE
+unset STEWARD_BIN STEWARD_CONTROL_BIN STEWARD_CTL_BIN STEWARD_MCP_BIN
+unset STEWARD_EXECUTOR_BIN STEWARD_GATEWAY_BIN STEWARD_RELAY_BIN
+unset STEWARD_GATEWAY_CONFIG_FILE STEWARD_CONNECTOR_RECEIPT_PRIVATE_KEY_FILE
+unset STEWARD_CONNECTOR_RECEIPT_PUBLIC_KEY_FILE STEWARD_UNIT_DIR
+IFS=$' \t\n'
+umask 077
 
 usage() {
 	cat <<'EOF' >&2
@@ -16,6 +35,26 @@ if [[ ${EUID} -ne 0 ]]; then
 	echo "activate-node-release: run as root" >&2
 	exit 2
 fi
+find_deployed_control_plane_marker() {
+	local marker
+	for marker in "$@"; do
+		if [[ -e $marker || -L $marker ]]; then
+			printf '%s\n' "$marker"
+			return 0
+		fi
+	done
+	return 1
+}
+if control_plane_marker=$(find_deployed_control_plane_marker \
+	/opt/steward-control \
+	/etc/steward-control \
+	/var/lib/steward-control-installer \
+	/etc/systemd/system/steward-control.service \
+	/usr/local/libexec/steward-control); then
+	echo "activate-node-release: refusing to activate a node release over the deployed Steward control plane marker $control_plane_marker" >&2
+	echo "  Run Steward Control and Steward nodes on separate management hosts; both products own /usr/local/bin/steward-control." >&2
+	exit 2
+fi
 if [[ $# -lt 1 || $# -gt 2 ]]; then usage; exit 2; fi
 version=$1
 restart=false
@@ -28,6 +67,7 @@ esac
 
 valid_release_version() {
 	local candidate=$1 core prerelease identifier
+	(( ${#candidate} <= 128 )) || return 1
 	[[ $candidate =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]] || return 1
 	core=${candidate#v}
 	if [[ $core == *-* ]]; then
@@ -189,12 +229,73 @@ for binary in steward steward-control stewardctl steward-mcp steward-executor st
 	fi
 done
 
-install -d -o root -g root -m 0755 /run/lock
-exec 9>/run/lock/steward-node-activation.lock
-if ! flock -w 60 9; then
-	echo "activate-node-release: another node activation did not finish within 60 seconds" >&2
-	exit 1
-fi
+# BEGIN NODE_LOCK_BOUNDARY
+readonly node_lock_directory=/run/steward-node
+readonly node_lock_file=$node_lock_directory/activation.lock
+readonly node_lock_error_prefix=activate-node-release
+
+prepare_node_lock() {
+	local metadata uid mode
+	if [[ -L /run || ! -d /run ]]; then
+		echo "$node_lock_error_prefix: refusing an unsafe /run directory" >&2
+		return 2
+	fi
+	metadata=$(stat -c '%u:%a' -- /run) || return 2
+	uid=${metadata%%:*}; mode=${metadata#*:}
+	if [[ $uid != 0 ]] || (( (8#$mode & 022) != 0 )); then
+		echo "$node_lock_error_prefix: /run must be root-owned and not group- or world-writable" >&2
+		return 2
+	fi
+	if [[ ! -e $node_lock_directory && ! -L $node_lock_directory ]]; then
+		install -d -o root -g root -m 0700 -- "$node_lock_directory"
+	fi
+	if [[ -L $node_lock_directory || ! -d $node_lock_directory ||
+		$(readlink -e -- "$node_lock_directory" 2>/dev/null) != "$node_lock_directory" ||
+		$(stat -c '%u:%g:%a' -- "$node_lock_directory" 2>/dev/null) != 0:0:700 ]]; then
+		echo "$node_lock_error_prefix: refusing an unsafe node lock directory" >&2
+		return 2
+	fi
+	if [[ ! -e $node_lock_file && ! -L $node_lock_file ]]; then
+		(umask 077; set -o noclobber; : >"$node_lock_file") 2>/dev/null || true
+	fi
+	if [[ -L $node_lock_file || ! -f $node_lock_file ||
+		$(stat -c '%u:%g:%a:%h' -- "$node_lock_file" 2>/dev/null) != 0:0:600:1 ]]; then
+		echo "$node_lock_error_prefix: refusing an unsafe node activation lock" >&2
+		return 2
+	fi
+}
+
+node_lock_fd_matches() {
+	local fd=$1 path_metadata fd_metadata process_id=${BASHPID:-$$}
+	[[ $fd == 9 && -e /proc/$process_id/fd/$fd ]] || return 1
+	path_metadata=$(stat -c '%d:%i:%u:%g:%a:%h' -- "$node_lock_file") || return 1
+	fd_metadata=$(stat -Lc '%d:%i:%u:%g:%a:%h' -- "/proc/$process_id/fd/$fd") || return 1
+	[[ $path_metadata == "$fd_metadata" && $path_metadata == *:0:0:600:1 ]]
+}
+
+acquire_node_lock() {
+	local wait_seconds=${1:-60}
+	[[ $wait_seconds =~ ^[0-9]+$ ]] || return 2
+	command -v flock >/dev/null 2>&1 || {
+		echo "$node_lock_error_prefix: flock is required to serialize node activation" >&2
+		return 2
+	}
+	prepare_node_lock || return
+	exec 9<>"$node_lock_file"
+	if ! node_lock_fd_matches 9; then
+		echo "$node_lock_error_prefix: node activation lock changed while it was opened" >&2
+		exec 9>&-
+		return 2
+	fi
+	if ! flock -w "$wait_seconds" 9; then
+		echo "$node_lock_error_prefix: another node configuration or activation did not finish within $wait_seconds seconds" >&2
+		exec 9>&-
+		return 1
+	fi
+}
+# END NODE_LOCK_BOUNDARY
+
+acquire_node_lock 60
 
 previous_current=
 if [[ -e /opt/steward/current || -L /opt/steward/current ]]; then

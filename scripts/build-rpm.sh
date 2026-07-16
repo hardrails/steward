@@ -17,6 +17,13 @@ command -v rpmbuild >/dev/null || {
 	echo "build-rpm: rpmbuild is required" >&2
 	exit 2
 }
+for forbidden in deploy/config/control.env deploy/systemd/steward-control.service \
+	scripts/install-control.sh scripts/control-doctor.sh; do
+	if [[ -e $stage/$forbidden || -L $stage/$forbidden ]]; then
+		echo "build-rpm: node package stage must not contain controller deployment asset $forbidden" >&2
+		exit 2
+	fi
+done
 for path in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/config/steward.json deploy/config/steward-local.json \
 	deploy/config/executor.env deploy/config/executor-gateway.env deploy/systemd/steward.service \
 	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
@@ -80,6 +87,7 @@ trap cleanup EXIT HUP INT TERM
 mkdir -p "$topdir"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 cp -R "$stage" "$topdir/SOURCES/release"
 cp "$stage/LICENSE" "$stage/README.md" "$topdir/SOURCES/"
+cp "$repo/packaging/debian/preinst" "$topdir/SOURCES/node-role-preinst"
 sed -e "s/@VERSION@/$rpm_version/g" \
 	-e "s/@RELEASE@/$rpm_release/g" \
 	-e "s/@ARCH@/$rpm_arch/g" \

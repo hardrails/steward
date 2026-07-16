@@ -1,17 +1,29 @@
 variable "release_version" {
-  description = "Exact Steward release tag; latest is deliberately forbidden."
+  description = "Exact Steward semantic release tag; latest and build metadata are deliberately forbidden."
   type        = string
   validation {
-    condition     = can(regex("^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$", var.release_version))
-    error_message = "release_version must be an exact vMAJOR.MINOR.PATCH tag."
+    condition = (
+      length(var.release_version) <= 128 &&
+      can(regex("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+)(\\.([0-9A-Za-z-]+))*)?$", var.release_version)) &&
+      alltrue([
+        for identifier in split(".", join("-", slice(split("-", var.release_version), 1, length(split("-", var.release_version))))) :
+        length(regexall("^[0-9]+$", identifier)) == 0 || identifier == "0" || !startswith(identifier, "0")
+      ])
+    )
+    error_message = "release_version must be one exact semantic vMAJOR.MINOR.PATCH tag no longer than 128 characters; latest, build metadata, and numeric prerelease identifiers with leading zeroes are not allowed."
   }
 }
 variable "installer_url" {
-  description = "HTTPS or private HTTP URL of install-steward.sh."
+  description = "Credential-free HTTP(S) URL of install-steward.sh. Query strings and fragments are forbidden because Terraform records this value in state."
   type        = string
   validation {
-    condition     = can(regex("^https?://[^[:space:]]+$", var.installer_url))
-    error_message = "installer_url must be one HTTP(S) URL without whitespace."
+    condition = (
+      length(var.installer_url) <= 512 &&
+      can(regex("^[\\x21-\\x7E]+$", var.installer_url)) &&
+      can(regex("^https?://[^/@[:space:]?#]+(/[^[:space:]?#]*)?$", var.installer_url)) &&
+      length(regexall("^https?://[^/]*@", var.installer_url)) == 0
+    )
+    error_message = "installer_url must be one credential-free ASCII HTTP(S) URL no longer than 512 characters and without whitespace, a query string, or a fragment."
   }
 }
 
@@ -25,7 +37,7 @@ variable "installer_sha256" {
 }
 
 variable "release_mirror" {
-  description = "Optional fully pinned release package and checksum manifest from an operator-controlled mirror."
+  description = "Optional fully pinned release package and checksum manifest from an operator-controlled mirror. URLs cannot contain credentials, query strings, or fragments because Terraform records them in state."
   type = object({
     artifact_url    = string
     artifact_sha256 = string
@@ -34,13 +46,19 @@ variable "release_mirror" {
   })
   default = null
   validation {
-    condition = var.release_mirror == null || (
-      can(regex("^https?://[^[:space:]]+\\.(deb|rpm|tar\\.gz)([?#][^[:space:]]*)?$", var.release_mirror.artifact_url)) &&
+    condition = var.release_mirror == null ? true : (
+      length(var.release_mirror.artifact_url) <= 512 &&
+      can(regex("^[\\x21-\\x7E]+$", var.release_mirror.artifact_url)) &&
+      can(regex("^https?://[^/@[:space:]?#]+/[^[:space:]?#]+\\.(deb|rpm|tar\\.gz)$", var.release_mirror.artifact_url)) &&
+      length(regexall("^https?://[^/]*@", var.release_mirror.artifact_url)) == 0 &&
       can(regex("^[a-f0-9]{64}$", var.release_mirror.artifact_sha256)) &&
-      can(regex("^https?://[^[:space:]]+$", var.release_mirror.manifest_url)) &&
+      length(var.release_mirror.manifest_url) <= 512 &&
+      can(regex("^[\\x21-\\x7E]+$", var.release_mirror.manifest_url)) &&
+      can(regex("^https?://[^/@[:space:]?#]+(/[^[:space:]?#]*)?$", var.release_mirror.manifest_url)) &&
+      length(regexall("^https?://[^/]*@", var.release_mirror.manifest_url)) == 0 &&
       can(regex("^[a-f0-9]{64}$", var.release_mirror.manifest_sha256))
     )
-    error_message = "release_mirror must contain HTTP(S) artifact/manifest URLs and lowercase SHA-256 pins; the artifact URL must end in .deb, .rpm, or .tar.gz."
+    error_message = "release_mirror must contain credential-free ASCII HTTP(S) artifact/manifest URLs no longer than 512 characters and without whitespace, query strings, or fragments, plus lowercase SHA-256 pins; artifact_url must end in .deb, .rpm, or .tar.gz."
   }
 }
 
@@ -65,7 +83,7 @@ variable "gvisor_version" {
   type        = string
   default     = ""
   validation {
-    condition     = var.gvisor_version == "" || can(regex("^[0-9]{8}(?:\\.[0-9]+)?$", var.gvisor_version))
+    condition     = length(var.gvisor_version) <= 64 && (var.gvisor_version == "" || can(regex("^[0-9]{8}(?:\\.[0-9]+)?$", var.gvisor_version)))
     error_message = "gvisor_version must be empty or a pinned YYYYMMDD[.N] release."
   }
 }

@@ -4,6 +4,7 @@ Release:        @RELEASE@%{?dist}
 Summary:        Sovereign Steward agent execution node
 License:        Apache-2.0
 URL:            https://github.com/hardrails/steward
+Source2:        node-role-preinst
 BuildArch:      @ARCH@
 # The payload contains already-stripped, reproducible static Go binaries. Do not
 # let distribution brp scripts mutate them or require a target-architecture
@@ -31,6 +32,8 @@ cp -a %{_sourcedir}/release/. %{buildroot}/usr/lib/steward-node/release/
 install -m 0644 %{_sourcedir}/LICENSE %{buildroot}/usr/share/doc/steward-node/LICENSE
 install -m 0644 %{_sourcedir}/README.md %{buildroot}/usr/share/doc/steward-node/README.md
 
+%pre -f %{SOURCE2}
+
 %post
 if [ "$1" -ge 1 ]; then
     /usr/lib/steward-node/release/scripts/install-node.sh --expected-version '@RELEASE_VERSION@'
@@ -38,29 +41,19 @@ fi
 
 %preun
 if [ "$1" -eq 0 ]; then
-    guard=/usr/lib/steward-node/release/scripts/node-removal-guard.sh
-    [ -x "$guard" ] || guard=/opt/steward/current/integration/scripts/node-removal-guard.sh
-    [ -x "$guard" ] || guard=/usr/local/libexec/steward/node-removal-guard
-    "$guard"
-    systemctl stop steward-gateway.service >/dev/null 2>&1 || true
-    systemctl stop steward.service >/dev/null 2>&1 || true
-    systemctl stop steward-executor.service >/dev/null 2>&1 || true
-    systemctl disable steward-gateway.service steward.service steward-executor.service >/dev/null 2>&1 || true
+    uninstaller=/usr/lib/steward-node/release/scripts/uninstall-node.sh
+    [ -x "$uninstaller" ] || uninstaller=/opt/steward/current/integration/scripts/uninstall-node.sh
+    [ -x "$uninstaller" ] || {
+        echo "steward-node: trusted lifecycle uninstaller is missing; refusing package removal" >&2
+        exit 1
+    }
+    "$uninstaller"
 fi
 
 %postun
 if [ "$1" -eq 0 ]; then
-    for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
-        path="/usr/local/bin/$binary"
-        target=$(readlink "$path" 2>/dev/null || true)
-        case "$target" in
-            /opt/steward/current/* | /opt/steward/releases/*) rm -f "$path" ;;
-        esac
-    done
-    rm -rf /usr/local/libexec/steward
-    rm -f /usr/local/lib/systemd/system/steward.service \
-		/usr/local/lib/systemd/system/steward-executor.service \
-        /usr/local/lib/systemd/system/steward-gateway.service
+    # preun performs all managed-path cleanup while holding Steward's lifecycle
+    # lock. A later postun must not race activation by deleting repaired links.
     systemctl daemon-reload >/dev/null 2>&1 || true
 fi
 

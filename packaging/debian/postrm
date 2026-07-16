@@ -3,17 +3,9 @@ set -e
 
 case "${1:-}" in
 	remove | purge)
-		for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
-			path="/usr/local/bin/$binary"
-			target=$(readlink "$path" 2>/dev/null || true)
-			case "$target" in
-				/opt/steward/current/* | /opt/steward/releases/*) rm -f "$path" ;;
-			esac
-		done
-		rm -rf /usr/local/libexec/steward
-		rm -f /usr/local/lib/systemd/system/steward.service \
-			/usr/local/lib/systemd/system/steward-executor.service \
-			/usr/local/lib/systemd/system/steward-gateway.service
+		# prerm performs all managed-path cleanup while holding Steward's lifecycle
+		# lock. Do not mutate those paths after that lock is released: activation
+		# may legitimately have repaired them while package removal completed.
 		systemctl daemon-reload >/dev/null 2>&1 || true
 		;;
 esac
