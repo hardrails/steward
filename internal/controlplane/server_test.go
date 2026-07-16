@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -547,6 +548,121 @@ func TestEvidenceExportRetriesConcurrentStickyFinding(t *testing.T) {
 		exported.Statement.Status.Finding.ObservedHead != observed ||
 		exported.Statement.Status.Finding.DetectedAt != findingAt.UTC().Format(time.RFC3339Nano) {
 		t.Fatalf("export omitted concurrent finding after %d attempts: %#v", timestampCalls.Load(), exported.Statement)
+	}
+}
+
+func TestEvidenceExportReturnsRetryHintAfterRepeatedAdvancement(t *testing.T) {
+	fixture := newServerFixture(t)
+	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken,
+		`{"tenant_id":"tenant-a"}`), http.StatusCreated)
+	credential := enrollNodeThroughAPI(
+		t, fixture, fixture.adminToken, "export-contention-enrollment", "node-export-contention",
+		[]string{"tenant-a"},
+	)
+	identity, err := fixture.store.AuthenticateNode(fixture.server.auth, credential.Credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := fixture.evidenceKeys[credential.NodeID]
+	public := private.Public().(ed25519.PublicKey)
+	log, err := evidence.Open(
+		filepath.Join(t.TempDir(), "export-contention-evidence.bin"), private, credential.NodeID, 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	pollRequest := controlprotocol.ExecutorEvidencePollRequestV1{
+		ProtocolVersion:      controlprotocol.ExecutorEvidenceProtocolV1,
+		ControllerInstanceID: fixture.server.auth.InstanceID(),
+		ControlNodeID:        credential.NodeID,
+		Stream:               controlprotocol.ExecutorEvidenceStreamV1,
+		ReceiptNodeID:        credential.NodeID,
+		ReceiptEpoch:         1,
+		PublicKeySHA256:      controlprotocol.ExecutorEvidencePublicKeySHA256(public),
+	}
+	timestampCalls := 0
+	fixture.server.now = func() time.Time {
+		timestampCalls++
+		at := fixture.now.Add(time.Duration(timestampCalls) * time.Minute)
+		localBase, err := log.CurrentHead()
+		if err != nil {
+			t.Fatal(err)
+		}
+		poll, err := fixture.store.PollExecutorEvidence(
+			fixture.server.auth, identity, pollRequest, at, at.Add(time.Minute),
+		)
+		if err != nil || poll.Status.Head == nil ||
+			poll.Status.Head.Sequence != localBase.Sequence ||
+			poll.Status.Head.ChainHash != fmt.Sprintf("sha256:%x", localBase.ChainHash) {
+			t.Fatalf("contention poll=%#v local=%#v err=%v", poll, localBase, err)
+		}
+		if _, err := log.Append(evidence.Event{
+			Type: evidence.AdmissionAllow, TenantID: "tenant-a",
+			RuntimeRef:    fmt.Sprintf("runtime-contention-%d", timestampCalls),
+			CapsuleDigest: "sha256:capsule", PolicyDigest: "sha256:policy",
+			Generation: uint64(timestampCalls), GrantID: "grant-contention", Outcome: evidence.Allowed,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		delta, err := log.ExportDelta(evidence.Coordinate{
+			Sequence: localBase.Sequence, ChainHash: localBase.ChainHash,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reported := controlprotocol.ExecutorEvidenceHeadV1{
+			Stream: controlprotocol.ExecutorEvidenceStreamV1, ReceiptNodeID: credential.NodeID,
+			ReceiptEpoch: 1, Sequence: delta.Head.Sequence,
+			ChainHash:       fmt.Sprintf("sha256:%x", delta.Head.ChainHash),
+			PublicKeySHA256: controlprotocol.ExecutorEvidencePublicKeySHA256(public),
+		}
+		claim, err := controlprotocol.NewExecutorEvidenceHeadClaimV1(
+			fixture.server.auth.InstanceID(), credential.NodeID,
+			*poll.Status.Head, reported, poll.Challenge, delta.Frames, public,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof, err := controlprotocol.SignExecutorEvidenceHeadClaimV1(claim, private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encodedFrames := make([]string, len(delta.Frames))
+		for index, frame := range delta.Frames {
+			encodedFrames[index] = base64.StdEncoding.EncodeToString(frame)
+		}
+		applied, err := fixture.store.ApplyExecutorEvidenceReport(
+			fixture.server.auth,
+			identity,
+			controlprotocol.ExecutorEvidenceReportV1{
+				ProtocolVersion:    controlprotocol.ExecutorEvidenceProtocolV1,
+				HeadProof:          proof,
+				SignedFramesBase64: encodedFrames,
+			},
+			at.Add(500*time.Millisecond),
+		)
+		if err != nil || !applied.Applied {
+			t.Fatalf("contention advancement=%#v err=%v", applied, err)
+		}
+		return at.Add(time.Second)
+	}
+
+	response := fixture.request(
+		t, http.MethodGet, "/v1/nodes/"+credential.NodeID+"/evidence/export", fixture.adminToken, "",
+	)
+	requireStatus(t, response, http.StatusConflict)
+	if response.Header().Get("Retry-After") != strconv.Itoa(evidenceExportRetryAfter) ||
+		timestampCalls != maxEvidenceExportAttempts {
+		t.Fatalf("retry-after=%q timestamp calls=%d", response.Header().Get("Retry-After"), timestampCalls)
+	}
+	var problem struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	decodeResponse(t, response, &problem)
+	if problem.Error != "conflict" || !strings.Contains(problem.Message, "retry") {
+		t.Fatalf("retryable conflict=%#v", problem)
 	}
 }
 

@@ -392,6 +392,9 @@ func TestExecutorEvidenceStatusEnforcesFindingSemantics(t *testing.T) {
 	if err := historical.Validate(); err != nil {
 		t.Fatalf("historical finding against an earlier checkpoint is invalid: %v", err)
 	}
+	// A sibling report can advance the retained head after the older comparison
+	// head was captured but before the already-proven finding is committed.
+	// Detection therefore may legitimately predate the later head's witness time.
 	historicalRollback := rollback
 	historicalRollback.Head = &laterHead
 	historicalRollback.WitnessedAt = "2026-07-16T01:04:00Z"

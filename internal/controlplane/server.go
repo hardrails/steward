@@ -31,6 +31,7 @@ const (
 	maxPageSize               = 500
 	evidenceChallengeLifetime = 2 * time.Minute
 	maxEvidenceExportAttempts = 3
+	evidenceExportRetryAfter  = 1
 )
 
 var errBodyTooLarge = errors.New("request body exceeds 1 MiB")
@@ -430,7 +431,13 @@ func (server *Server) evidenceExport(writer http.ResponseWriter, request *http.R
 			return
 		}
 	}
-	server.storeError(writer, controlstore.ErrConflict, false)
+	writer.Header().Set("Retry-After", strconv.Itoa(evidenceExportRetryAfter))
+	writeError(
+		writer,
+		http.StatusConflict,
+		"conflict",
+		"evidence changed while the export was being signed; retry after the indicated delay",
+	)
 }
 
 func (server *Server) evidenceInspection(nodeID string, inspection controlstore.ExecutorEvidenceInspection) controlprotocol.ExecutorEvidenceInspectionV1 {

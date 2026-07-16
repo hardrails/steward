@@ -144,13 +144,22 @@ func NewEvidencePublisher(cfg EvidencePublisherConfig) (*EvidencePublisher, erro
 
 // Run publishes independently until ctx is canceled. Controller outages never
 // stop local enforcement or the command uplink; they only increase this loop's
-// bounded backoff and leave the local receipt log as its durable outbox.
+// bounded backoff and leave the local receipt log as its durable outbox. A
+// retained rollback or equivocation finding stops this publisher because only
+// operator action can establish a new trusted node identity or evidence state.
 func (publisher *EvidencePublisher) Run(ctx context.Context) {
 	failures := 0
 	for {
 		result, err := publisher.publishOnceState(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
+				return
+			}
+			if errors.Is(err, ErrEvidenceDivergence) {
+				publisher.logger.Error(
+					"executor evidence publishing halted; operator action required",
+					"error", err,
+				)
 				return
 			}
 			failures++

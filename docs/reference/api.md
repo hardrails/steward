@@ -72,7 +72,9 @@ offline verification must use a witness public key obtained through an independe
 trusted channel. The controller retains a bounded latest checkpoint and first
 sticky rollback or equivocation finding, including the exact historical
 checkpoint used to classify the observed conflicting head. It does not retain
-the full node receipt archive.
+the full node receipt archive. Evidence export uses optimistic linearization:
+three consecutive witness updates return `409 Conflict` with `Retry-After: 1`;
+a 409 without that header is a retained-state conflict rather than a retry hint.
 
 See [Operate the bundled control plane]({{ '/guides/control-plane/' | relative_url }})
 for installation and lifecycle examples.

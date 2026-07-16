@@ -451,6 +451,13 @@ does not match. Reformatting equivalent JSON does not change the signed statemen
 An `unwitnessed` legacy node cannot produce an export because there is no receipt
 identity to bind; the controller returns a conflict instead.
 
+The controller signs outside the store lock, then confirms that the witness state
+is still current. If three consecutive witness updates prevent that confirmation,
+the export returns `409 Conflict` with `Retry-After: 1`. Wait at least that long,
+add client-side jitter when many operators may retry together, and request a new
+export. A 409 without `Retry-After` is a retained-state conflict such as an
+unwitnessed legacy node; repeating the same request will not repair it.
+
 ## Sign, submit, and observe one command
 
 Create commands only on the trusted signing station. The public half of

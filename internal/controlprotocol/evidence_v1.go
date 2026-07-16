@@ -599,6 +599,10 @@ func (status ExecutorEvidenceStatusV1) Validate() error {
 	}
 	detected, _ := time.Parse(time.RFC3339Nano, status.Finding.DetectedAt)
 	witnessed, _ := time.Parse(time.RFC3339Nano, status.WitnessedAt)
+	// When Head is later than ComparedHead, a report may have proven the
+	// finding before a racing sibling report advanced the retained checkpoint.
+	// Only equal coordinates describe the same witnessed checkpoint and require
+	// finding detection to be at or after its timestamp.
 	if detected.Before(witnessed) && status.Head.Sequence == compared.Sequence {
 		return errors.New("executor evidence finding predates the retained checkpoint")
 	}

@@ -481,6 +481,10 @@ paths:
         offline verifier must use a witness public key obtained through an
         independent trusted channel. Legacy unwitnessed nodes return 409
         because they have no receipt identity to bind into a verifiable export.
+        If three consecutive witness updates prevent the controller from
+        linearizing a signed export, it returns 409 with `Retry-After`. A 409
+        without that header is a retained-state conflict, such as an
+        unwitnessed legacy node, and is not made retryable by this contract.
       responses:
         "200":
           description: Portable controller-witness-signed evidence export.
@@ -893,6 +897,13 @@ components:
             $ref: "#/components/schemas/Error"
     Conflict:
       description: The request conflicts with retained identity, enrollment, delivery, or terminal state.
+      headers:
+        Retry-After:
+          description: Present only when the same request is safe to retry after at least this many seconds.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 3600
       content:
         application/json:
           schema:

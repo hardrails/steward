@@ -160,6 +160,7 @@ func TestClientRejectsUnsafeTransportAndErrors(t *testing.T) {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "3")
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"error":"command_conflict","message":"different signed bytes"}`))
 	}))
@@ -170,8 +171,40 @@ func TestClientRejectsUnsafeTransportAndErrors(t *testing.T) {
 	}
 	_, err = client.SubmitCommand(context.Background(), "tenant-a", "node-1", []byte("x"))
 	api, ok := err.(*APIError)
-	if !ok || api.Status != http.StatusConflict || !strings.Contains(api.Error(), "command_conflict") {
+	if !ok || api.Status != http.StatusConflict || api.RetryAfter != 3*time.Second ||
+		!strings.Contains(api.Error(), "command_conflict") ||
+		!strings.Contains(api.Error(), "retry after 3s") {
 		t.Fatalf("error=%T %v", err, err)
+	}
+}
+
+func TestRetryAfterDurationRejectsAmbiguousHeaders(t *testing.T) {
+	for name, test := range map[string]struct {
+		values []string
+		want   time.Duration
+		valid  bool
+	}{
+		"absent":       {valid: true},
+		"one second":   {values: []string{"1"}, want: time.Second, valid: true},
+		"maximum":      {values: []string{"3600"}, want: time.Hour, valid: true},
+		"duplicate":    {values: []string{"1", "2"}},
+		"combined":     {values: []string{"1, 2"}},
+		"leading plus": {values: []string{"+1"}},
+		"leading zero": {values: []string{"01"}},
+		"zero":         {values: []string{"0"}},
+		"over maximum": {values: []string{"3601"}},
+		"HTTP date":    {values: []string{"Thu, 16 Jul 2026 12:00:00 GMT"}},
+		"empty":        {values: []string{""}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := retryAfterDuration(test.values)
+			if test.valid && (err != nil || got != test.want) {
+				t.Fatalf("retry after=%s want=%s err=%v", got, test.want, err)
+			}
+			if !test.valid && err == nil {
+				t.Fatalf("invalid Retry-After values %q produced %s", test.values, got)
+			}
+		})
 	}
 }
 

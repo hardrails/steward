@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -35,12 +36,19 @@ type Client struct {
 }
 
 type APIError struct {
-	Status  int
-	Code    string
-	Message string
+	Status     int
+	Code       string
+	Message    string
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf(
+			"control HTTP %d %s: %s (retry after %s)",
+			e.Status, e.Code, e.Message, e.RetryAfter,
+		)
+	}
 	return fmt.Sprintf("control HTTP %d %s: %s", e.Status, e.Code, e.Message)
 }
 
@@ -407,7 +415,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any, 
 		if err := dsse.DecodeStrictInto(raw, maxWireBytes, &api); err != nil || api.Error == "" || api.Message == "" {
 			return fmt.Errorf("control HTTP %d returned an invalid error body", response.StatusCode)
 		}
-		return &APIError{Status: response.StatusCode, Code: api.Error, Message: api.Message}
+		retryAfter, err := retryAfterDuration(response.Header.Values("Retry-After"))
+		if err != nil {
+			return fmt.Errorf("control HTTP %d returned an invalid Retry-After header: %w", response.StatusCode, err)
+		}
+		return &APIError{
+			Status: response.StatusCode, Code: api.Error, Message: api.Message,
+			RetryAfter: retryAfter,
+		}
 	}
 	if output == nil {
 		if len(bytes.TrimSpace(raw)) != 0 {
@@ -459,6 +474,29 @@ func paginatedPath(path, after string, limit int) (string, error) {
 func jsonContentType(value string) bool {
 	mediaType, _, err := mime.ParseMediaType(value)
 	return err == nil && mediaType == "application/json"
+}
+
+func retryAfterDuration(values []string) (time.Duration, error) {
+	if len(values) == 0 {
+		return 0, nil
+	}
+	if len(values) != 1 {
+		return 0, errors.New("Retry-After must contain exactly one value")
+	}
+	value := values[0]
+	if value == "" || len(value) > 1 && value[0] == '0' {
+		return 0, errors.New("Retry-After must be canonical positive delta-seconds")
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return 0, errors.New("Retry-After must be canonical positive delta-seconds")
+		}
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds < 1 || seconds > 3600 {
+		return 0, errors.New("Retry-After delta-seconds must be between 1 and 3600")
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 func loopbackHost(host string) bool {

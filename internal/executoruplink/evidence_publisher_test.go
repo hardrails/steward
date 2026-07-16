@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -333,6 +335,55 @@ func TestEvidencePublisherReportsControllerAheadRollbackWithoutBlockingLocalWork
 	controller.mu.Unlock()
 	if _, err := local.Append(publisherEvent(3)); err != nil {
 		t.Fatalf("local enforcement evidence stopped after controller finding: %v", err)
+	}
+}
+
+func TestEvidencePublisherRunStopsAfterControllerFinding(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete, err := evidence.Open(filepath.Join(t.TempDir(), "complete.bin"), private, "node-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendPublisherEvents(t, complete, 2)
+	controllerHead, err := complete.CurrentHead()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := complete.Close(); err != nil {
+		t.Fatal(err)
+	}
+	local, err := evidence.Open(filepath.Join(t.TempDir(), "restored.bin"), private, "node-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	appendPublisherEvents(t, local, 1)
+	controller := newEvidenceWitnessServer(t, public, controllerHead)
+	server := httptest.NewTLSServer(controller)
+	defer server.Close()
+	publisher := newTestEvidencePublisher(t, server, controller.auth.InstanceID(), local, private)
+	var logs bytes.Buffer
+	publisher.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	waitCalls := 0
+	publisher.wait = func(context.Context, time.Duration) bool {
+		waitCalls++
+		return false
+	}
+
+	publisher.Run(context.Background())
+
+	controller.mu.Lock()
+	reportCount := len(controller.reportHeads)
+	controller.mu.Unlock()
+	if waitCalls != 0 || reportCount != 1 ||
+		!strings.Contains(logs.String(), "operator action required") {
+		t.Fatalf("waits=%d reports=%d logs=%q", waitCalls, reportCount, logs.String())
+	}
+	if _, err := local.Append(publisherEvent(3)); err != nil {
+		t.Fatalf("local enforcement evidence stopped with publisher: %v", err)
 	}
 }
 
