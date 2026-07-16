@@ -283,12 +283,16 @@ func (server *Server) enrollments(writer http.ResponseWriter, request *http.Requ
 		status = http.StatusCreated
 	}
 	writeJSON(writer, status, struct {
-		EnrollmentID    string   `json:"enrollment_id"`
-		EnrollmentToken string   `json:"enrollment_token"`
-		NodeID          string   `json:"node_id"`
-		TenantIDs       []string `json:"tenant_ids"`
-		ExpiresAt       string   `json:"expires_at"`
-	}{enrollment.ID, raw, enrollment.NodeID, append([]string(nil), enrollment.TenantIDs...), enrollment.ExpiresAt})
+		ControllerInstanceID string   `json:"controller_instance_id"`
+		EnrollmentID         string   `json:"enrollment_id"`
+		EnrollmentToken      string   `json:"enrollment_token"`
+		NodeID               string   `json:"node_id"`
+		TenantIDs            []string `json:"tenant_ids"`
+		ExpiresAt            string   `json:"expires_at"`
+	}{
+		server.auth.InstanceID(), enrollment.ID, raw, enrollment.NodeID,
+		append([]string(nil), enrollment.TenantIDs...), enrollment.ExpiresAt,
+	})
 }
 
 func (server *Server) enroll(writer http.ResponseWriter, request *http.Request) {
@@ -296,13 +300,16 @@ func (server *Server) enroll(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	var input struct {
-		EnrollmentToken string `json:"enrollment_token"`
-		RequestID       string `json:"request_id"`
+		EnrollmentToken       string                                          `json:"enrollment_token"`
+		RequestID             string                                          `json:"request_id"`
+		EvidenceIdentityProof controlprotocol.ExecutorEvidenceIdentityProofV1 `json:"evidence_identity_proof"`
 	}
 	if !server.decode(writer, request, &input) {
 		return
 	}
-	credential, err := server.store.ExchangeEnrollment(server.auth, input.EnrollmentToken, input.RequestID, server.now())
+	credential, err := server.store.ExchangeEnrollmentWithEvidence(
+		server.auth, input.EnrollmentToken, input.RequestID, input.EvidenceIdentityProof, server.now(),
+	)
 	if err != nil {
 		server.storeError(writer, err, false)
 		return

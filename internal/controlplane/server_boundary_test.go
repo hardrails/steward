@@ -449,14 +449,11 @@ func enrollNodeThroughAPI(t *testing.T, fixture *serverFixture, operator, reques
 		TTLSeconds int      `json:"ttl_seconds"`
 	}{requestID, nodeID, tenantIDs, 900}))
 	requireStatus(t, response, http.StatusCreated)
-	var enrollment struct {
-		Token string `json:"enrollment_token"`
-	}
+	var enrollment testEnrollmentCapability
 	decodeResponse(t, response, &enrollment)
-	response = fixture.request(t, http.MethodPost, "/v1/enroll", "", mustJSON(t, map[string]string{
-		"enrollment_token": enrollment.Token,
-		"request_id":       requestID + "-exchange",
-	}))
+	proof := fixture.evidenceIdentityProof(t, enrollment)
+	response = fixture.request(t, http.MethodPost, "/v1/enroll", "",
+		enrollmentExchangeBody(t, enrollment, requestID+"-exchange", proof))
 	requireStatus(t, response, http.StatusCreated)
 	var credential controlauth.NodeCredentialFile
 	decodeResponse(t, response, &credential)

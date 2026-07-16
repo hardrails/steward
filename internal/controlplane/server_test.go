@@ -24,10 +24,11 @@ import (
 )
 
 type serverFixture struct {
-	server     *Server
-	store      *controlstore.Store
-	now        time.Time
-	adminToken string
+	server       *Server
+	store        *controlstore.Store
+	now          time.Time
+	adminToken   string
+	evidenceKeys map[string]ed25519.PrivateKey
 }
 
 func newServerFixture(t *testing.T) *serverFixture {
@@ -50,7 +51,10 @@ func newServerFixture(t *testing.T) *serverFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := &serverFixture{store: store, now: now, adminToken: adminToken}
+	fixture := &serverFixture{
+		store: store, now: now, adminToken: adminToken,
+		evidenceKeys: make(map[string]ed25519.PrivateKey),
+	}
 	fixture.server, err = New(Config{
 		Store: store, Auth: manager, LeaseDuration: 2 * time.Minute, MaxPoll: 32,
 		Now: func() time.Time { return fixture.now },
@@ -59,6 +63,49 @@ func newServerFixture(t *testing.T) *serverFixture {
 		t.Fatal(err)
 	}
 	return fixture
+}
+
+type testEnrollmentCapability struct {
+	ControllerInstanceID string   `json:"controller_instance_id"`
+	EnrollmentID         string   `json:"enrollment_id"`
+	EnrollmentToken      string   `json:"enrollment_token"`
+	NodeID               string   `json:"node_id"`
+	TenantIDs            []string `json:"tenant_ids"`
+	ExpiresAt            string   `json:"expires_at"`
+}
+
+func (fixture *serverFixture) evidenceIdentityProof(t *testing.T, enrollment testEnrollmentCapability) controlprotocol.ExecutorEvidenceIdentityProofV1 {
+	t.Helper()
+	private, ok := fixture.evidenceKeys[enrollment.NodeID]
+	if !ok {
+		_, generated, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		private = generated
+		fixture.evidenceKeys[enrollment.NodeID] = private
+	}
+	claim, err := controlprotocol.NewExecutorEvidenceIdentityClaimV1(
+		enrollment.ControllerInstanceID, enrollment.EnrollmentID,
+		enrollment.NodeID, enrollment.NodeID, 1, private.Public().(ed25519.PublicKey),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceIdentityClaimV1(claim, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proof
+}
+
+func enrollmentExchangeBody(t *testing.T, enrollment testEnrollmentCapability, requestID string, proof controlprotocol.ExecutorEvidenceIdentityProofV1) string {
+	t.Helper()
+	return mustJSON(t, struct {
+		EnrollmentToken       string                                          `json:"enrollment_token"`
+		RequestID             string                                          `json:"request_id"`
+		EvidenceIdentityProof controlprotocol.ExecutorEvidenceIdentityProofV1 `json:"evidence_identity_proof"`
+	}{enrollment.EnrollmentToken, requestID, proof})
 }
 
 func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
@@ -93,22 +140,29 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	response = fixture.request(t, http.MethodPost, "/v1/enrollments", operator.Token,
 		`{"request_id":"enrollment-request-1","node_id":"node-1","tenant_ids":["tenant-a"],"ttl_seconds":900}`)
 	requireStatus(t, response, http.StatusCreated)
-	var enrollment struct {
-		EnrollmentToken string `json:"enrollment_token"`
-	}
+	var enrollment testEnrollmentCapability
 	decodeResponse(t, response, &enrollment)
+	if enrollment.ControllerInstanceID != fixture.server.auth.InstanceID() || enrollment.EnrollmentID == "" {
+		t.Fatalf("enrollment omitted witness binding: %+v", enrollment)
+	}
 	response = fixture.request(t, http.MethodPost, "/v1/enrollments", operator.Token,
 		`{"request_id":"enrollment-request-1","node_id":"node-1","tenant_ids":["tenant-a"],"ttl_seconds":900}`)
 	requireStatus(t, response, http.StatusOK)
-	var retriedEnrollment struct {
-		EnrollmentToken string `json:"enrollment_token"`
-	}
+	var retriedEnrollment testEnrollmentCapability
 	decodeResponse(t, response, &retriedEnrollment)
-	if retriedEnrollment.EnrollmentToken != enrollment.EnrollmentToken {
+	if retriedEnrollment.EnrollmentToken != enrollment.EnrollmentToken ||
+		retriedEnrollment.EnrollmentID != enrollment.EnrollmentID ||
+		retriedEnrollment.ControllerInstanceID != enrollment.ControllerInstanceID {
 		t.Fatal("exact enrollment issuance retry changed its bearer")
 	}
+	proof := fixture.evidenceIdentityProof(t, enrollment)
+	requireError(t, fixture.request(t, http.MethodPost, "/v1/enroll", "",
+		mustJSON(t, map[string]string{
+			"enrollment_token": enrollment.EnrollmentToken,
+			"request_id":       "request-1",
+		})), http.StatusUnauthorized, "unauthorized")
 	response = fixture.request(t, http.MethodPost, "/v1/enroll", "",
-		mustJSON(t, map[string]string{"enrollment_token": enrollment.EnrollmentToken, "request_id": "request-1"}))
+		enrollmentExchangeBody(t, enrollment, "request-1", proof))
 	requireStatus(t, response, http.StatusCreated)
 	var nodeCredential controlauth.NodeCredentialFile
 	decodeResponse(t, response, &nodeCredential)
@@ -125,7 +179,7 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	// An exact exchange retry is recoverable and returns the same derived node
 	// credential without retaining its bearer secret in the store.
 	response = fixture.request(t, http.MethodPost, "/v1/enroll", "",
-		mustJSON(t, map[string]string{"enrollment_token": enrollment.EnrollmentToken, "request_id": "request-1"}))
+		enrollmentExchangeBody(t, enrollment, "request-1", proof))
 	requireStatus(t, response, http.StatusCreated)
 	var retried controlauth.NodeCredentialFile
 	decodeResponse(t, response, &retried)

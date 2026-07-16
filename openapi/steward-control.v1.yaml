@@ -321,9 +321,14 @@ paths:
       security: []
       description: |
         Returns an Executor node credential. An exact retry with the same
-        enrollment token and request ID returns the same credential while the
-        enrollment remains retained and unexpired. Reusing the token with
-        another request ID returns 409.
+        enrollment token, request ID, and receipt identity returns the same
+        credential while the enrollment remains retained and unexpired. The
+        evidence identity proof demonstrates possession of the Executor receipt
+        private key and binds it to this controller, enrollment, node, stream,
+        and epoch. A later credential rotation for the same node may present a
+        fresh enrollment-bound proof only for the already pinned receipt
+        identity. Reusing the token with another request ID, changing the pinned
+        identity, or reusing a receipt key for another node returns 409.
       requestBody:
         required: true
         content:
@@ -886,8 +891,10 @@ components:
     Enrollment:
       type: object
       additionalProperties: false
-      required: [enrollment_id, enrollment_token, node_id, tenant_ids, expires_at]
+      required: [controller_instance_id, enrollment_id, enrollment_token, node_id, tenant_ids, expires_at]
       properties:
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
         enrollment_id:
           $ref: "#/components/schemas/Identifier128"
         enrollment_token:
@@ -905,12 +912,67 @@ components:
     ExchangeEnrollmentRequest:
       type: object
       additionalProperties: false
-      required: [enrollment_token, request_id]
+      required: [enrollment_token, request_id, evidence_identity_proof]
       properties:
         enrollment_token:
           type: string
         request_id:
           $ref: "#/components/schemas/Identifier128"
+        evidence_identity_proof:
+          $ref: "#/components/schemas/ExecutorEvidenceIdentityProofV1"
+    ExecutorEvidenceIdentityProofV1:
+      type: object
+      additionalProperties: false
+      required: [claim, signature_base64]
+      properties:
+        claim:
+          $ref: "#/components/schemas/ExecutorEvidenceIdentityClaimV1"
+        signature_base64:
+          type: string
+          description: Canonical base64 encoding of a 64-byte Ed25519 signature.
+          minLength: 88
+          maxLength: 88
+          pattern: '^[A-Za-z0-9+/]{86}==$'
+    ExecutorEvidenceIdentityClaimV1:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol_version
+        - controller_instance_id
+        - enrollment_id
+        - control_node_id
+        - stream
+        - receipt_node_id
+        - receipt_epoch
+        - public_key_base64
+        - public_key_sha256
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        enrollment_id:
+          $ref: "#/components/schemas/Identifier128"
+        control_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        stream:
+          type: string
+          enum: [executor]
+        receipt_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        receipt_epoch:
+          type: integer
+          format: int64
+          enum: [1]
+        public_key_base64:
+          type: string
+          description: Canonical base64 encoding of a 32-byte Ed25519 public key.
+          minLength: 44
+          maxLength: 44
+          pattern: '^[A-Za-z0-9+/]{43}=$'
+        public_key_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
     NodeCredential:
       type: object
       additionalProperties: false
