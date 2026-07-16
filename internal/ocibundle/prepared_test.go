@@ -15,11 +15,18 @@ import (
 
 func TestPrepareSnapshotsAndSanitizesDockerLoadArchive(t *testing.T) {
 	archive, identity := testArchive(t, archiveOptions{extraBlob: true, repositories: true})
+	source, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
 	prepared, err := Prepare(archive, identity, DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer prepared.Close()
+	if prepared.Archive != (ArchiveIdentity{Digest: testDigest(source), Bytes: int64(len(source))}) {
+		t.Fatalf("prepared archive identity = %#v", prepared.Archive)
+	}
 	if len(prepared.Image.RepoTags) != 0 || prepared.Image.BlobCount != 3 {
 		t.Fatalf("prepared image metadata = %#v", prepared.Image)
 	}
@@ -91,6 +98,42 @@ func TestPrepareSnapshotsAndSanitizesDockerLoadArchive(t *testing.T) {
 	}
 	if len(image.RepoTags) != 0 || image.BlobCount != 3 {
 		t.Fatalf("sanitized image = %#v", image)
+	}
+}
+
+func TestPrepareBoundRequiresExactSourceBytes(t *testing.T) {
+	archive, identity := testArchive(t, archiveOptions{})
+	source, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := ArchiveIdentity{Digest: testDigest(source), Bytes: int64(len(source))}
+	prepared, err := PrepareBound(archive, identity, expected, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Archive != expected {
+		t.Fatalf("prepared archive identity = %#v, want %#v", prepared.Archive, expected)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	wrongDigest := expected
+	wrongDigest.Digest = testDigest([]byte("different archive"))
+	if _, err := PrepareBound(archive, identity, wrongDigest, DefaultLimits()); err == nil ||
+		!strings.Contains(err.Error(), "signed archive digest and size") {
+		t.Fatalf("wrong archive digest err = %v", err)
+	}
+	wrongSize := expected
+	wrongSize.Bytes++
+	if _, err := PrepareBound(archive, identity, wrongSize, DefaultLimits()); err == nil ||
+		!strings.Contains(err.Error(), "signed archive digest and size") {
+		t.Fatalf("wrong archive size err = %v", err)
+	}
+	if _, err := PrepareBound(archive, identity, ArchiveIdentity{}, DefaultLimits()); err == nil ||
+		!strings.Contains(err.Error(), "expected archive identity") {
+		t.Fatalf("invalid archive identity err = %v", err)
 	}
 }
 

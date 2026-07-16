@@ -2,6 +2,7 @@ package ocibundle
 
 import (
 	"archive/tar"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,12 +13,32 @@ import (
 	"syscall"
 )
 
+// ArchiveIdentity identifies the exact compressed or uncompressed source bytes
+// supplied by an operator. It is separate from Image identity because two
+// archives can contain the same OCI image while differing in metadata or
+// unreferenced content.
+type ArchiveIdentity struct {
+	Digest string `json:"digest"`
+	Bytes  int64  `json:"bytes"`
+}
+
+func (identity ArchiveIdentity) validate(limits Limits) error {
+	if !digestPattern.MatchString(identity.Digest) {
+		return errors.New("archive digest must be one sha256 digest")
+	}
+	if identity.Bytes < 1 || identity.Bytes > limits.MaxArchiveBytes {
+		return fmt.Errorf("archive size must be between 1 and %d bytes", limits.MaxArchiveBytes)
+	}
+	return nil
+}
+
 // Prepared is a verified, tag-free, minimal image archive held by one open,
 // unlinked file descriptor. Reader never resolves the caller's source path, so
 // renames or replacements after Prepare cannot change the bytes Docker sees.
 // Callers must Close a Prepared archive when the Docker request finishes.
 type Prepared struct {
-	Image Image
+	Image   Image
+	Archive ArchiveIdentity
 
 	mu     sync.Mutex
 	file   *os.File
@@ -31,11 +52,28 @@ type Prepared struct {
 // tags or repositories file and contains only the selected manifest, config,
 // and layer blobs.
 func Prepare(archivePath string, expected Identity, limits Limits) (*Prepared, error) {
+	return prepare(archivePath, expected, ArchiveIdentity{}, false, limits)
+}
+
+// PrepareBound additionally requires the exact source archive bytes to match a
+// signed digest and size. The comparison uses the same private snapshot later
+// verified and sanitized for Docker, so a caller never authorizes one pathname
+// read and imports another.
+func PrepareBound(archivePath string, expected Identity, archive ArchiveIdentity, limits Limits) (*Prepared, error) {
+	return prepare(archivePath, expected, archive, true, limits)
+}
+
+func prepare(archivePath string, expected Identity, expectedArchive ArchiveIdentity, bound bool, limits Limits) (*Prepared, error) {
 	if err := limits.validate(); err != nil {
 		return nil, err
 	}
 	if err := expected.validate(); err != nil {
 		return nil, fmt.Errorf("expected image identity: %w", err)
+	}
+	if bound {
+		if err := expectedArchive.validate(limits); err != nil {
+			return nil, fmt.Errorf("expected archive identity: %w", err)
+		}
 	}
 	directory, err := os.MkdirTemp("", ".steward-oci-")
 	if err != nil {
@@ -44,9 +82,14 @@ func Prepare(archivePath string, expected Identity, limits Limits) (*Prepared, e
 	cleanup := func() { _ = os.RemoveAll(directory) }
 
 	snapshotPath := directory + string(os.PathSeparator) + "source.snapshot"
-	if err := snapshotArchive(archivePath, snapshotPath, limits); err != nil {
+	archiveIdentity, err := snapshotArchiveIdentity(archivePath, snapshotPath, limits)
+	if err != nil {
 		cleanup()
 		return nil, err
+	}
+	if bound && archiveIdentity != expectedArchive {
+		cleanup()
+		return nil, errors.New("OCI archive does not match the signed archive digest and size")
 	}
 	image, err := Verify(snapshotPath, expected, limits)
 	if err != nil {
@@ -115,7 +158,7 @@ func Prepare(archivePath string, expected Identity, limits Limits) (*Prepared, e
 		_ = load.Close()
 		return nil, fmt.Errorf("remove private OCI preparation directory: %w", err)
 	}
-	return &Prepared{Image: sanitizedImage, file: load, size: info.Size()}, nil
+	return &Prepared{Image: sanitizedImage, Archive: archiveIdentity, file: load, size: info.Size()}, nil
 }
 
 // Reader returns a fresh bounded view of the already-open load descriptor.
@@ -153,35 +196,40 @@ func (p *Prepared) Close() error {
 }
 
 func snapshotArchive(sourcePath, snapshotPath string, limits Limits) error {
+	_, err := snapshotArchiveIdentity(sourcePath, snapshotPath, limits)
+	return err
+}
+
+func snapshotArchiveIdentity(sourcePath, snapshotPath string, limits Limits) (ArchiveIdentity, error) {
 	before, err := os.Lstat(sourcePath)
 	if err != nil {
-		return fmt.Errorf("stat OCI archive: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("stat OCI archive: %w", err)
 	}
 	if !before.Mode().IsRegular() || before.Mode().Perm()&0o022 != 0 {
-		return errors.New("OCI archive must be a regular file with no group/world write permission")
+		return ArchiveIdentity{}, errors.New("OCI archive must be a regular file with no group/world write permission")
 	}
 	if before.Size() < 1 || before.Size() > limits.MaxArchiveBytes {
-		return fmt.Errorf("OCI archive size must be between 1 and %d bytes", limits.MaxArchiveBytes)
+		return ArchiveIdentity{}, fmt.Errorf("OCI archive size must be between 1 and %d bytes", limits.MaxArchiveBytes)
 	}
 	// O_NONBLOCK is ignored for regular files but prevents an attacker who can
 	// rename entries in the parent directory from swapping a validated path to a
 	// FIFO and hanging the privileged importer between Lstat and Open.
 	source, err := os.OpenFile(sourcePath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return fmt.Errorf("open OCI archive: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("open OCI archive: %w", err)
 	}
 	defer source.Close()
 	opened, err := source.Stat()
 	if err != nil {
-		return fmt.Errorf("stat open OCI archive: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("stat open OCI archive: %w", err)
 	}
 	if !opened.Mode().IsRegular() || opened.Mode().Perm()&0o022 != 0 || !os.SameFile(before, opened) {
-		return errors.New("OCI archive changed while it was opened")
+		return ArchiveIdentity{}, errors.New("OCI archive changed while it was opened")
 	}
 
 	snapshot, err := os.OpenFile(snapshotPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf("create private OCI snapshot: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("create private OCI snapshot: %w", err)
 	}
 	closeSnapshot := true
 	defer func() {
@@ -189,31 +237,35 @@ func snapshotArchive(sourcePath, snapshotPath string, limits Limits) error {
 			_ = snapshot.Close()
 		}
 	}()
-	copied, err := io.Copy(snapshot, io.LimitReader(source, limits.MaxArchiveBytes+1))
+	hasher := sha256.New()
+	copied, err := io.Copy(io.MultiWriter(snapshot, hasher), io.LimitReader(source, limits.MaxArchiveBytes+1))
 	if err != nil {
-		return fmt.Errorf("snapshot OCI archive: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("snapshot OCI archive: %w", err)
 	}
 	if copied != before.Size() || copied > limits.MaxArchiveBytes {
-		return errors.New("OCI archive changed size while it was snapshotted")
+		return ArchiveIdentity{}, errors.New("OCI archive changed size while it was snapshotted")
 	}
 	after, err := source.Stat()
 	if err != nil {
-		return fmt.Errorf("stat snapshotted OCI archive: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("stat snapshotted OCI archive: %w", err)
 	}
 	if !os.SameFile(opened, after) || after.Size() != opened.Size() || after.Mode().Perm()&0o022 != 0 {
-		return errors.New("OCI archive changed while it was snapshotted")
+		return ArchiveIdentity{}, errors.New("OCI archive changed while it was snapshotted")
 	}
 	if err := snapshot.Sync(); err != nil {
-		return fmt.Errorf("sync private OCI snapshot: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("sync private OCI snapshot: %w", err)
 	}
 	if err := snapshot.Chmod(0o400); err != nil {
-		return fmt.Errorf("seal private OCI snapshot: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("seal private OCI snapshot: %w", err)
 	}
 	if err := snapshot.Close(); err != nil {
-		return fmt.Errorf("close private OCI snapshot: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("close private OCI snapshot: %w", err)
 	}
 	closeSnapshot = false
-	return nil
+	return ArchiveIdentity{
+		Digest: fmt.Sprintf("sha256:%x", hasher.Sum(nil)),
+		Bytes:  copied,
+	}, nil
 }
 
 func writeSanitizedArchive(snapshotPath string, output io.Writer, image Image, limits Limits) error {
