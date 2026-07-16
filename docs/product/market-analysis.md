@@ -1,36 +1,45 @@
 ---
 title: Agent execution market analysis
-description: A dated comparison of agent platforms with Steward's local signed admission, exact tenant task dispatch, durable replay control, and offline-verifiable receipts.
+description: A source-backed comparison of agent platforms with Steward's local signed admission, exact task authority, durable replay control, independent evidence witnessing, and offline verification.
 section: Product
 ---
 
 # Agent execution market analysis
 
-> Market snapshot: 2026-07-15. This analysis uses the linked primary sources.
-> A vendor's documented feature is not a security certification, and an omitted
-> feature is not proof that the vendor can never provide it.
+> Source note: This analysis uses linked public primary sources. Product pages
+> change, so recheck them for procurement. A documented feature is not a security
+> certification, and an omitted feature is not proof that a vendor cannot provide
+> it.
 
 Several products offer hardened containers or microVMs—small virtual machines with
 their own kernel—plus egress policy, lifecycle APIs, organization controls,
 observability, audit logs, and self-hosted fleet controllers. These controls no
 longer distinguish a runtime by themselves.
 
-Steward focuses on a customer-owned controller and nodes. The controller enrolls
-nodes and transports already signed commands without holding tenant signing keys.
-Nodes verify local authorization, grant only approved state, inference, service,
-and network operations, and export receipts for offline verification. For
-configured agent-service operations, a tenant-owned key
-can sign one exact request while remaining off-node; Gateway records authorization
-before dispatch and retains node-local replay state. Its product boundary assumes
-the agent can be manipulated; enforcement therefore sits outside the agent process.
+Steward focuses on a customer-owned controller and nodes. Enrollment binds one
+node to a receipt-key identity through proof of possession. The controller
+transports already signed commands without holding tenant signing keys and can
+independently witness bounded, signed Executor evidence batches. A retained
+checkpoint or sticky rollback or equivocation finding can be exported under a
+separate controller witness key for offline verification. Evidence publication is
+asynchronous and does not gate local enforcement.
+
+Nodes verify local authorization and grant only approved state, inference,
+service, and network operations. For configured agent-service operations, a
+tenant-owned key can sign one exact request while remaining off-node; Gateway
+records authorization before dispatch and retains node-local replay state. The
+product boundary assumes the agent can be manipulated, so enforcement remains
+outside the agent process.
 
 Among the products reviewed below, none documents an equivalent combination of
-customer-operated air-gapped fleet control and nodes, site-signed artifact and tenant admission,
-controller-blind tenant signing keys, fenced exact-command delivery,
-service-scoped off-node task keys, exact-request service dispatch, durable node-local
-at-most-once replay control, and offline-verifiable authorization-to-outcome
-receipts. “Not documented” is not proof that a product lacks an internal or future
-capability. This is not a first, only, or certification claim.
+customer-operated air-gapped fleet control and nodes, receipt-key proof during
+enrollment, site-signed artifact and tenant admission, controller-blind tenant
+signing keys, fenced exact-command delivery, service-scoped off-node task keys,
+exact-request service dispatch, durable node-local at-most-once replay control,
+an independently retained receipt checkpoint with rollback or fork findings, and
+offline-verifiable authorization-to-outcome evidence. “Not documented” is not
+proof that a product lacks an internal or future capability. This is not a first,
+only, or certification claim.
 
 Self-hosting is not the differentiator. OpenClaw Machines, OpenSandbox, Kubernetes
 Agent Sandbox, and other systems document customer-operated control components.
@@ -39,9 +48,9 @@ boundary instead.
 
 ## High-level capability matrix
 
-| System | Customer-operated or disconnected boundary | Fleet coordination boundary | Exact operation policy | Separately signed exact task | Durable dispatch replay state | Offline signed authorization-to-outcome evidence |
+| System | Customer-operated or disconnected boundary | Fleet coordination boundary | Exact operation policy | Separately signed exact task | Durable dispatch replay state | Independent evidence checkpoint and offline verification |
 | --- | --- | --- | --- | --- | --- | --- |
-| Steward | Documented for a self-hosted controller and customer-owned Linux nodes, including air-gapped transfer | Bounded single-writer controller: scoped operators, one-time multi-tenant node enrollment, inventory, and fenced delivery of exact signed commands; tenant signing keys stay outside it | Documented for agent-service POSTs and connector methods/paths | Documented tenant key scoped by signed policy to service IDs; exact request digest and length | Documented controller delivery fencing plus node-local at-most-once task spend within one retained ledger epoch | Documented hash-linked Ed25519 chain with offline task/permit correlation |
+| Steward | Documented for a self-hosted controller and customer-owned Linux nodes, including air-gapped transfer | Bounded single-writer controller: scoped operators, one-time multi-tenant node enrollment with receipt-key proof, inventory, and fenced delivery of exact signed commands; tenant signing keys stay outside it | Documented for agent-service POSTs and connector methods/paths | Documented tenant key scoped by signed policy to service IDs; exact request digest and length | Documented controller delivery fencing plus node-local at-most-once task spend within one retained ledger epoch | Documented node-signed hash chain, independently retained controller checkpoint, sticky rollback/equivocation finding, controller-signed offline export, and offline task/permit correlation |
 | [OpenClaw Machines](https://github.com/mathaix/OpenClawMachines) | Apache-2.0 customer-operated control plane and KVM hosts are documented. Its production-shaped deployment uses Cloudflare DNS, Tunnel, Worker, and KV; local evaluation can omit Cloudflare | Postgres-backed accounts and teams, host enrollment, placement, machine lifecycle, durable workflows, backups, and Firecracker workers are documented | Native MCP and workspace integrations are documented; an equivalent site-signed exact-operation fence was not found in the reviewed sources | Not found in the reviewed sources | Durable workflows are documented; an equivalent tenant-signed exact-task spend ledger was not found | Backups and OpenTelemetry/Opik observability are documented; the reviewed sources did not document an offline signed authorization-to-terminal chain |
 | [NVIDIA NemoClaw / OpenShell](https://github.com/NVIDIA/NemoClaw) | OpenShell documents local and cluster drivers; deployment scope varies by driver | Local and cluster sandbox providers are documented; the reviewed sources did not document Steward's separate tenant-signed command queue and node verification boundary | Documented REST, GraphQL, MCP, JSON-RPC, and WebSocket policy | Endpoint-scoped identity tokens are documented; an off-node signature over one exact task request was not found in the reviewed sources | An equivalent exact-task spend ledger was not found in the reviewed sources | Logs and OCSF JSON export are documented; the reviewed sources did not document Steward's offline signed permit-to-terminal chain |
 | [Docker Sandboxes / Governance](https://docs.docker.com/ai/sandboxes/governance/) | Local microVM sandboxes are documented; organization governance depends on Docker sign-in | Organization governance is documented through Docker's service rather than a fully disconnected bundled controller | Network, filesystem, credential, and decision policy are documented | Not found in the reviewed sources | Not found in the reviewed sources | Decision logs are documented; the reviewed sources did not document offline permit-to-terminal signature verification |
@@ -51,15 +60,15 @@ boundary instead.
 
 ## Comparison
 
-| System | Documented focus as of the snapshot | Where Steward's focus differs |
+| System | Documented focus | Where Steward's focus differs |
 | --- | --- | --- |
-| [OpenClaw Machines](https://github.com/mathaix/OpenClawMachines) | Its Apache-2.0 public core documents a Go and Postgres control plane with accounts, teams, placement, durable workflows, host enrollment, lifecycle, and backups; one Firecracker microVM per OpenClaw agent; per-host LiteLLM; browser VMs; native MCP integrations; and a Cloudflare data plane. The production-shaped self-hosting guide requires Cloudflare DNS, Tunnel, Worker, and KV, while local evaluation does not. The controller still needs private or firewall-restricted access to each host agent's authenticated API on port `9090`. The [release page](https://github.com/mathaix/OpenClawMachines/releases) contained no published release at the snapshot date. | Steward does not match its accounts, placement, browser, Firecracker, or integration breadth. Steward's narrower boundary is portable Docker and gVisor nodes plus an optional controller that needs no Postgres or Cloudflare: tenant keys remain outside the controller, nodes verify site-signed artifact and tenant policy, delivery and local task replay are durable, and signed authorization-to-outcome evidence can be checked offline. |
-| [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw) / [OpenShell](https://github.com/NVIDIA/OpenShell) | NemoClaw packages Hermes, OpenClaw, and LangChain Deep Agents around OpenShell. OpenShell documents Docker, rootless Podman, microVM, and Kubernetes drivers; exact REST method, path, and query rules; provider-owned network layers; credential placeholders and rewrites; endpoint-scoped token grants using SPIFFE JWT-SVID; and inspection for REST, GraphQL, MCP, and JSON-RPC. Both current READMEs label the projects alpha; OpenShell describes its current mode as one developer, one environment, and one gateway, and marks Kubernetes deployment experimental. See the current [policy schema](https://docs.nvidia.com/openshell/reference/policy-schema) and [provider architecture](https://docs.nvidia.com/openshell/sandboxes/providers-v2). | Steward does not claim method/path policy, credential injection, or Hermes packaging as unique, and OpenShell documents broader application-protocol inspection. Steward's narrower difference is a disconnected, vendor-independent node that binds site-signed tenant, instance, and artifact admission to a service-scoped tenant signature over one exact request, durable node-local task spend, non-borrowing tenant evidence quotas, and Gateway-signed terminal receipts that can be correlated offline. Maturity labels are dated observations, not permanent comparisons. |
+| [OpenClaw Machines](https://github.com/mathaix/OpenClawMachines) | Its Apache-2.0 public core documents a Go and Postgres control plane with accounts, teams, placement, durable workflows, host enrollment, lifecycle, and backups; one Firecracker microVM per OpenClaw agent; per-host LiteLLM; browser VMs; native MCP integrations; and a Cloudflare data plane. The production-shaped self-hosting guide requires Cloudflare DNS, Tunnel, Worker, and KV, while local evaluation does not. The controller still needs private or firewall-restricted access to each host agent's authenticated API on port `9090`. | Steward does not match its accounts, placement, browser, Firecracker, or integration breadth. Steward's narrower boundary is portable Docker and gVisor nodes plus an optional controller that needs no Postgres or Cloudflare: tenant keys remain outside the controller, nodes verify site-signed artifact and tenant policy, delivery and local task replay are durable, and a node's next report can expose rollback or a fork relative to an independently retained checkpoint before a controller-signed export is checked offline. |
+| [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw) / [OpenShell](https://github.com/NVIDIA/OpenShell) | NemoClaw packages Hermes, OpenClaw, and LangChain Deep Agents around OpenShell. OpenShell documents Docker, rootless Podman, microVM, and Kubernetes drivers; exact REST method, path, and query rules; provider-owned network layers; credential placeholders and rewrites; endpoint-scoped token grants using SPIFFE JWT-SVID; and inspection for REST, GraphQL, MCP, and JSON-RPC. Both current READMEs label the projects alpha; OpenShell describes its current mode as one developer, one environment, and one gateway, and marks Kubernetes deployment experimental. See the current [policy schema](https://docs.nvidia.com/openshell/reference/policy-schema) and [provider architecture](https://docs.nvidia.com/openshell/sandboxes/providers-v2). | Steward does not claim method/path policy, credential injection, or Hermes packaging as unique, and OpenShell documents broader application-protocol inspection. Steward's narrower difference is a disconnected, vendor-independent node that binds site-signed tenant, instance, and artifact admission to a service-scoped tenant signature over one exact request, durable node-local task spend, non-borrowing tenant evidence quotas, Gateway-signed terminal receipts, and an independently retained receipt checkpoint. Maturity labels can change and should be rechecked. |
 | [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) / [AI Governance](https://docs.docker.com/ai/sandboxes/governance/) | Docker documents microVMs, filesystem and network policy, organization sign-in, decision logs, credential injection, DNS policy, and workspace sharing. Linux installation requires Kernel-based Virtual Machine (KVM) support and Docker sign-in; organization governance is a paid capability. | Steward uses Docker and gVisor on an operator-owned node without requiring a vendor login or hosted policy service. It does not claim isolation, egress policy, DNS gating, credential injection, or JSON audit as unique. |
 | [OpenSandbox](https://github.com/alibaba/OpenSandbox) | OpenSandbox documents a sandbox API, Docker and Kubernetes backends, lifecycle control, and [gVisor, Kata, and Firecracker runtimes](https://open-sandbox.ai/guides/secure-container). | Steward adds site-owned admission, tenant/instance replay protection, and operator-verifiable receipts. The projects could complement each other; Steward does not depend on OpenSandbox. |
 | [Kubernetes Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) | The Kubernetes SIG project documents `Sandbox` Custom Resource Definitions (CRDs), templates, claims, warm pools, state, and optional gVisor or Kata isolation. Kubernetes itself [does not define a first-class tenant object](https://kubernetes.io/docs/concepts/security/multi-tenancy/); operators must assemble the isolation policy. | Steward provides one opinionated tenant and evidence contract on a Linux node without making Kubernetes a prerequisite. A future backend could preserve that contract on Kubernetes. |
 | [E2B](https://github.com/e2b-dev/infra) | E2B provides a Firecracker sandbox platform. Its [self-host guide](https://github.com/e2b-dev/infra/blob/main/self-host.md) combines Terraform, Packer, PostgreSQL, DNS, and cloud-specific infrastructure; that is a capable platform, not a one-node offline package. | Steward does not recreate a microVM platform. It provides an offline, site-policy-controlled deployment and evidence boundary for long-lived agents on Docker/gVisor. |
-| [Daytona](https://github.com/daytonaio/daytona) | The public repository contains a broad sandbox API, but its README says public core development stopped after June 2026 and moved to a private codebase. The frozen public source remains under the [GNU Affero General Public License](https://github.com/daytonaio/daytona/blob/main/LICENSE). | Steward's open repository remains the complete node enforcement product. Independent rebuildability and offline maintainability are part of the boundary, not an installation option around a private core. |
+| [Daytona](https://github.com/daytonaio/daytona) | The public repository contains a broad sandbox API, but its README says public core development stopped and moved to a private codebase. The frozen public source remains under the [GNU Affero General Public License](https://github.com/daytonaio/daytona/blob/main/LICENSE). | Steward's open repository remains the complete node enforcement product. Independent rebuildability and offline maintainability are part of the boundary, not an installation option around a private core. |
 | [OpenClaw](https://github.com/openclaw/openclaw/security) | OpenClaw provides agents, tools, skills, memory, and optional Docker sandboxing. Its security documentation says one gateway is not an adversarial multi-tenant boundary and that session or memory scoping does not create per-user authorization. | Steward treats the OpenClaw image, tools, memory, and configuration as untrusted workload content. OpenClaw can supply agent behavior; Steward supplies the external tenant boundary. |
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent/security) | Hermes provides skills, plugins, subagents, scheduled work, and several execution backends. Its security documentation describes a single-user personal-agent model and warns that skills and plugins run with the agent's authority. | Steward qualifies one exact Hermes build and places policy, credentials, resource controls, and evidence outside Hermes. It does not rely on the agent's own permission model for tenant isolation. |
 | [Amazon Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) | AgentCore documents managed runtime, identity, memory, MCP gateway, code interpreter, browser, and OpenTelemetry observability. Its [Virtual Private Cloud (VPC) guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html) describes AWS-managed network interfaces and Identity and Access Management (IAM) service roles. | Steward serves operators who require local keys, artifacts, infrastructure, and operation without a vendor control plane or public Internet. It does not claim an equivalent managed-service portfolio. |
@@ -67,36 +76,65 @@ boundary instead.
 ## Adjacent operator-experience signal: WorkFlux
 
 [WorkFlux](https://www.workflux.ai/docs) is a hosted vertical-automation product,
-not a hardened agent runtime or disconnected fleet controller. Its documentation
-assumes a vendor dashboard, public API, and Internet connectivity. It is therefore
-not included in the security capability matrix above. Its onboarding model still
-provides useful product lessons:
+not a hardened runtime or disconnected fleet controller. Its
+[system requirements](https://www.workflux.ai/docs/system-requirements) describe a
+cloud-based platform that requires Internet connectivity and customer integration
+credentials. Its [privacy policy](https://www.workflux.ai/privacy) says the service
+collects configuration, API credential, integration, usage, and third-party
+integration data. WorkFlux therefore belongs outside the security capability
+matrix above.
 
-- its [agent catalog](https://www.workflux.ai/docs/agents-overview) describes
-  concrete use cases, integrations, and expected outcomes instead of asking a new
-  operator to assemble an abstract platform;
-- its [quick start](https://www.workflux.ai/docs/quick-start) presents a coherent
-  choose, configure, test, activate, and monitor path;
-- its API documentation exposes [scoped credentials](https://www.workflux.ai/docs/api-authentication),
-  [event notifications](https://www.workflux.ai/docs/webhooks), and
-  [operational metrics](https://www.workflux.ai/docs/key-metrics).
+Its public product flow provides useful operator-experience lessons:
 
-Steward should translate those patterns without copying the hosted trust model.
-Qualified Hermes and OpenClaw packages should read like an offline catalog entry:
-exact source revision, required capabilities, integration contract, acceptance
-evidence, and a useful-work example. Activation should join the existing preflight,
-signed canary, transactional installation, doctor, and rollback controls into one
-obvious operator journey. Future controller events should use a bounded durable
-local outbox that can be polled or exported; outbound webhook delivery must not
-become an availability or Internet dependency. Fleet metrics should describe
-controller and node health, queue state, delivery latency, failures, ambiguity, and
-capacity without collecting prompts or claiming business outcomes.
+- the [agent catalog](https://www.workflux.ai/docs/agents-overview) starts with
+  recognizable outcomes, integrations, suitability, and metrics instead of an
+  abstract orchestration primitive;
+- the [quick start](https://www.workflux.ai/docs/quick-start) leads the operator
+  through choose, configure, test, activate, and monitor;
+- [escalation rules](https://www.workflux.ai/docs/escalation-rules) and
+  [webhook events](https://www.workflux.ai/docs/webhooks) make human-attention
+  states explicit, including escalation and integration errors; and
+- the [metrics guide](https://www.workflux.ai/docs/key-metrics) connects activity,
+  latency, resolution, and efficiency measures to operational review.
 
-Steward should not absorb vertical conversation behavior, customer records,
-business return-on-investment calculations, or human-escalation workflows. Those
-belong in independently qualified agents, skills, and customer systems. WorkFlux's
-marketing, compliance, uptime, and outcome claims were not independently verified
-for this analysis.
+The public pages are not fully consistent: the
+[catalog documentation](https://www.workflux.ai/docs/agents-overview) describes
+12 agents while the [catalog page](https://www.workflux.ai/agents) also renders
+“Showing 16 of 16.” Prices and bundle descriptions also vary between pages. These
+sources are useful evidence of product patterns, not validated procurement or
+performance data.
+
+### What Steward should borrow
+
+The translations below are product direction, not a claim that one unified
+operator console already ships. The implemented controller evidence surface is
+deliberately narrow: `unwitnessed`, `current`, `rollback_detected`, and
+`equivocation_detected`, plus site-administrator inspection and a
+witness-signed export. A combined action-required view, freshness policy, metrics
+suite, and durable notification outbox remain proposed work.
+
+| WorkFlux pattern | Steward translation | Boundary |
+| --- | --- | --- |
+| Outcome-led catalog | Publish qualified Hermes, OpenClaw, and later agent packages as concrete recipes: useful work performed, required local services, data touched, capabilities requested, supported isolation, acceptance command, retained evidence, and known limits. | A recipe describes a qualified workload. It is not a new in-process workflow engine or a claim that every agent outcome is correct. |
+| Guided activation | Join selection, trust and key configuration, preflight, hostile-path test, signed activation, health verification, and rollback into one local choose/configure/test/activate/monitor journey. | Activation must remain transactional and fail closed; a smoother path cannot bypass signed policy or node verification. |
+| Action-required lifecycle | Design one bounded view of states that need intervention: incomplete enrollment, failed preflight, ambiguous command or external effect, capacity exhaustion, overdue evidence publication under a future freshness policy, rollback/equivocation finding, revoked identity, or degraded node. | These facts currently live in separate surfaces where implemented. Aggregation must not invent approval, clear ambiguity automatically, or let a model dismiss a finding. |
+| Operational metrics | Report controller and node availability, queue depth, delivery latency, admission failures, capacity, ambiguity, evidence age, and finding state. | Do not collect prompts, response bodies, customer records, or vendor-defined ROI. Security and reliability metrics must be derivable from local retained state. |
+| Event notifications | Build any notification surface on a bounded durable local outbox that can be polled or exported. | Outbound webhooks remain optional adapters; Internet delivery cannot become part of enforcement or recovery. |
+
+### What Steward should reject
+
+Steward should not copy WorkFlux's cloud credential and data model. The WorkFlux
+flow expects customer API credentials, dashboard accounts,
+[public API tokens](https://www.workflux.ai/docs/api-authentication), and
+business-system data. Steward's core should continue to keep tenant signing keys
+outside the controller, add operator-owned connector credentials only at the
+local Gateway's last hop, exclude prompts and bodies from receipts, and operate
+without a vendor account or public API.
+
+Vertical conversation behavior, customer records, business return-on-investment
+calculations, and human case routing belong in independently qualified agents,
+skills, or customer systems. WorkFlux's marketing, compliance, uptime, and outcome
+claims were not independently verified for this analysis.
 
 ## Common platform capabilities
 
@@ -124,6 +162,16 @@ assurance contract:
 - the bundled controller enrolls multi-tenant nodes and durably transports exact
   signed commands while tenant keys, approval decisions, and Docker authority stay
   outside its process;
+- enrollment binds the control-node identity to a node-held receipt key through a
+  signed proof of possession, and rejects reuse of that receipt identity across
+  nodes;
+- Executor can publish signed, bounded evidence deltas independently from command
+  polling; the controller reports `unwitnessed`, `current`,
+  `rollback_detected`, or `equivocation_detected`, retaining one last-good
+  coordinate and one sticky finding instead of becoming a receipt warehouse;
+- a purpose-separated controller witness key signs portable evidence exports, while
+  local admission and agent operation continue when the evidence uplink is
+  unavailable;
 - selected service and connector effects can require tenant-scoped off-node
   signatures over exact request bytes, with permit and request digests retained
   beside stable task identity and terminal observations in Gateway's signed chain;
@@ -149,6 +197,28 @@ and whether a hostile-path test can prove the claim. Pareto selection keeps work
 for which no alternative is better on every material dimension. The adversarial
 pass starts with a separate question: *how could a manipulated agent turn this
 feature into another tenant's incident or an unverifiable external effect?*
+
+### Independent evidence witnessing increment
+
+The selected design extends the node-held signed receipt chain without moving raw
+receipts into the controller. Enrollment pins the node's receipt public key through
+proof of possession. Executor then publishes bounded contiguous batches on an
+independent loop. The controller verifies every frame, retains the last-good head,
+and makes the first authenticated rollback or equivocation finding sticky. A
+separate controller witness key signs an export that an offline verifier can check
+against an out-of-band pinned public key.
+
+| Candidate | Adversarial failure considered | Operator value | Assurance and ownership cost | Pareto decision |
+| --- | --- | --- | --- | --- |
+| Native bounded controller witness | A compromised or restored node removes a witnessed suffix, reports a lower head, presents a conflicting branch, strips frames from a report, or races two valid branches. | High: when the node next reports, a customer-owned management host can detect divergence relative to its retained checkpoint without receiving prompts or a full receipt archive. | Medium: enrollment identity, signed batch binding, durable compare-and-swap, sticky findings, witness-key continuity, export verification, and upgrade behavior must remain one contract. It does not attest a hostile host, prove freshness when publication stops, or compare split views across controllers. | **Implemented.** It materially improves rollback detection while preserving air-gapped operation, bounded storage, zero dependencies, and local-enforcement independence. |
+| Full receipt replication | A controller loses the context needed for later audit because it retained only a head. | Medium: central search becomes easier. | High: duplicates potentially sensitive per-node history, creates an evidence warehouse, expands storage and retention policy, and is unnecessary for rollback detection. | Reject from the controller. Keep full records on the node and export only when an operator chooses. |
+| Hosted transparency or SCITT service | A controller and node collude or present different views to different auditors. | High for public or cross-organization transparency. | High for sovereign sites: adds another availability, identity, data-governance, and synchronization authority. It does not replace node enrollment or receipt validation. | Reject as a requirement. Revisit as an optional export sink when a customer explicitly needs public inclusion and consistency proofs. |
+| Hardware-backed attestation | A hostile host signs fabricated records with a software-held key. | High in selected threat models. | Very high and platform-specific; hardware identity, measured boot, key lifecycle, verifier policy, and recovery are separate systems. | Defer. The controller witness detects a lower or conflicting head when the node next reports relative to what it observed; it does not prove the node was trustworthy when a record was created. |
+
+The native witness remains on the Pareto frontier because it closes the common
+suffix-removal and fork-detection gap with bounded standard-library code and no new
+service. Full replication costs more data authority, while public transparency and
+hardware attestation address stronger but different threat models.
 
 ### Exact service-task dispatch increment
 
@@ -182,8 +252,8 @@ The exact service-task path remains on the Pareto frontier because the alternati
 either leave reusable authority inside the agent, introduce a larger mandatory
 dependency without solving replay and evidence, or broaden the protocol surface.
 The bounded design does not dominate every future option: fleet-wide replay control,
-hardware-backed signing, and external evidence anchoring solve different threats and
-remain separate potential layers.
+hardware-backed signing, and cross-controller or public evidence anchoring solve
+different threats and remain separate potential layers.
 
 ### Exact-effect authorization increment
 
@@ -211,20 +281,21 @@ tasks; neither evaluates or certifies Steward.
 | Quota-backed shared persistent state | A workload exhausts bytes or inodes, or a quota disappears after reboot and silently weakens tenant isolation. | High for long-lived shared-host workloads. | Medium: portable reconciliation evidence would be valuable, but the enforcement is substrate-specific. | High: Docker has no portable hard volume quota that satisfies Steward's restart and reconciliation contract. | Defer. Keep shared-host persistent-state admission closed until a qualified backend exists; this does not reduce the authority of an external connector call. |
 | MicroVM or Kubernetes backend | A container-runtime escape or host-orchestration failure crosses a tenant boundary. | Medium to high for some sites. | Low: [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/), [OpenSandbox](https://open-sandbox.ai/guides/secure-container), and [Kubernetes Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/) already document these substrate choices. | Very high: adds packaging, lifecycle, state, network, and upgrade surfaces while host administration remains trusted. | Defer. Preserve Steward's enforcement contract and consider another backend only when a concrete operator requirement cannot use Docker and gVisor. |
 | Generic workflow engine | A manipulated plan gains another in-process execution path, or Steward duplicates agent behavior and expands its trusted core. | Medium: could simplify one product surface. | Low: Hermes, OpenClaw, and other agent frameworks already own planning, skills, and tool behavior. | Very high: broad semantics and integrations are difficult to bound or prove at the node boundary. | Reject from the Steward process. Keep qualifying external agents and enforce their authority outside them. |
-| External evidence witness | A compromised host key holder rewrites or withholds a purely node-local evidence history. | Medium: improves independent proof for connected deployments. | Medium to high, but it changes the trust model rather than preventing the manipulated agent's exact unauthorized request. | High for disconnected sites: introduces another key, service, availability dependency, synchronization protocol, and recovery path. | Defer. Keep the current host-compromise limitation explicit and revisit a witness as an optional complement, not a prerequisite for local enforcement. |
 | Broad Layer 7 (application-protocol) inspection | An allowed encrypted channel carries a semantically dangerous request or covert exfiltration. | High in selected environments. | Low to medium: OpenShell already documents broader REST, GraphQL, MCP, and JSON-RPC inspection. | Very high: TLS interception, protocol parsers, schemas, and content classification materially expand the trusted core and still cannot prove model intent. | Defer. Prefer exact named connector operations and request-bound permits; keep generic `CONNECT` opaque and credential-free. |
 
 Action permits remained on the Pareto frontier because no deferred candidate provided
 greater immediate reduction of external-effect authority at equal or lower
-assurance cost. Quota-backed state and an optional witness address different trust
-failures and remain plausible later work; substrate breadth, workflow behavior, and
-general protocol inspection are better supplied outside Steward's narrow trusted
-core.
+assurance cost. Quota-backed state addresses a different trust failure and remains
+plausible later work. Stronger cross-controller transparency and hardware
+attestation remain optional future layers around the implemented bounded witness;
+substrate breadth, workflow behavior, and general protocol inspection are better
+supplied outside Steward's narrow trusted core.
 
 ### Existing implementation choices
 
 | Candidate | Adversarial failure considered | Value and assurance evidence | Decision |
 | --- | --- | --- | --- |
+| Receipt-key enrollment and controller witness | A node substitutes a receipt identity, reuses it across nodes, removes an already witnessed suffix, reports a lower checkpoint, forks at one sequence, or amplifies controller storage with full logs or repeated findings. | Enrollment requires receipt-key proof of possession bound to controller, enrollment, and node. The asynchronous publisher signs the exact polled base, reported head, frame count, and canonical frame digest. The controller verifies bounded deltas, retains one checkpoint and sticky finding, and signs offline exports with a separate stable key. | Build the thin native witness. Keep it off the enforcement availability path and claim detection only relative to the retained controller view, not hostile-host attestation or cross-controller consistency. |
 | Tenant-signed service task | A broad host service bearer or manipulated agent submits different task bytes, a concurrent duplicate reaches Hermes twice, or restart hides an ambiguous submission. | Site policy scopes the public key to one tenant and service; Gateway binds one exact request to live admission, records before dispatch, reconstructs spend after restart, and exposes offline correlation. The qualified Hermes workflow separately proves real custom-skill work. | Build the narrow service-operation path in Gateway and an owner-only signing bundle. Claim node-local at-most-once dispatch only; keep run-ID trust and semantic-work limits explicit. |
 | Named, credential-brokered operations | The workload steals a standing credential, changes the destination or operation, replays a task after failure, or obtains a second effect after restart. | Enables useful authenticated work while exact origin, method, path, DNS answers, credential digest, per-grant calls, and tenant-scoped task spend remain outside the agent. Signed authorization and terminal records make crash ambiguity explicit. | Build the narrow connector contract in Gateway. This is on the Pareto frontier for immediate utility, security, and differentiation. |
 | Non-borrowing connector evidence quotas | One noisy tenant fills the shared signed ledger and prevents every other tenant from recording safe terminal outcomes. | Exact per-tenant signed-line accounting reserves worst-case terminal capacity before an effect. An unbudgeted or exhausted tenant fails before upstream work and cannot borrow another tenant's allocation. | Build explicit tenant allocations and restart validation. Keep the shared-disk and shared-`fsync` residual risk visible. |
@@ -264,8 +335,10 @@ an agent with the controls the node records:
    to sign exact request bytes, which Gateway records before dispatch;
 6. selected connector effects can separately require an off-node action key to sign
    the exact request, which Gateway checks and spends before DNS; and
-7. the node emits signed, hash-linked receipts that an operator can verify
-   offline.
+7. the node emits signed, hash-linked receipts and can publish bounded signed
+   deltas to the customer-owned controller independently of command polling; and
+8. the controller retains one witnessed checkpoint or sticky divergence finding
+   and can sign a portable export with a separate witness key.
 
 Gateway brokers inference, authenticated service ingress, named connector
 operations, and HTTP(S) routes without raw network access. Connector credentials
@@ -278,6 +351,14 @@ its local Docker volume has no enforced byte or inode quota and is limited to th
 dedicated-host compatibility mode. Signed receipts record admission and lifecycle
 events; network admissions include the effective route-policy digest. Individual
 traffic records have the narrower guarantees documented in the capability guide.
+
+The controller witness stores no prompts or full receipt archive. It detects a
+lower or conflicting head when the node next reports relative to the exact head it
+retained. Evidence publication can stop without stopping local admission or agent
+work; the current evidence status does not by itself prove freshness. The witness
+does not prove that the node was uncompromised when it signed a record and does not
+detect different views presented to independent controllers unless their exports
+are compared.
 
 For tenant-signed service tasks, Gateway returns a stored successful run ID on an
 exact replay and refuses to redispatch an ambiguous result. The spend is local to
@@ -382,9 +463,11 @@ authorization, and separating trusted instructions from untrusted data.
 - **Not physical isolation.** Docker and gVisor reduce the workload's authority,
   but shared hardware and host root remain trusted.
 - **Not a proof against host compromise.** Without hardware-backed keys or an
-  external evidence anchor, node-local receipts are tamper-evident within the
-  stated trust boundary. They do not prove to an independent party that the host
-  was uncompromised.
+  attested execution boundary, node receipts and controller checkpoints do not
+  prove to an independent party that the host was uncompromised when it signed.
+  The controller witness can detect a lower or conflicting head when the node next
+  reports relative to what that controller already retained; it cannot validate
+  the original event's truth or prove freshness when publication stops.
 - **Not universal air-gap certification.** Steward supports disconnected
   installation and operation after the Docker/gVisor host, approved local image,
   signed policy, and keys are prepared. It does not bootstrap a bare operating
