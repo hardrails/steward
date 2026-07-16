@@ -54,6 +54,9 @@ func main() {
 	uplinkTLSClientCert := flag.String("uplink-tls-client-cert", "", "optional mTLS client certificate for the executor uplink")
 	uplinkTLSClientKey := flag.String("uplink-tls-client-key", "", "optional mTLS client key for the executor uplink")
 	uplinkTLSSkipVerify := flag.Bool("uplink-tls-skip-verify", false, "INSECURE: disable executor uplink server certificate verification")
+	evidenceUplink := flag.Bool("evidence-uplink", false, "publish signed Executor evidence through the protected control-plane uplink")
+	evidenceUplinkControllerInstanceID := flag.String("evidence-uplink-controller-instance-id", "", "control-plane instance identity bound during enrollment")
+	evidenceUplinkPollInterval := flag.Duration("evidence-uplink-poll-interval", 30*time.Second, "base interval between Executor evidence uplink polls")
 	defaults := executor.DefaultHostPolicy()
 	maxMemoryBytes := flag.Int64("max-memory-bytes", defaults.MaxMemoryBytes, "maximum memory bytes for one workload")
 	maxCPUMillis := flag.Int64("max-cpu-millis", defaults.MaxCPUMillis, "maximum CPU millicores for one workload")
@@ -193,6 +196,7 @@ func main() {
 	}
 	var operationJournal *journal.Journal
 	var receiptLog *evidence.Log
+	var receiptPrivate ed25519.PrivateKey
 	var commandPolicy *admission.SitePolicy
 	secureExecutor := false
 	secureNodeID := ""
@@ -226,7 +230,7 @@ func main() {
 			slog.Error("unquotaed persistent state requires a signed site policy with exactly one tenant")
 			os.Exit(2)
 		}
-		receiptPrivate, err := readEd25519PrivateKey(*admissionEvidenceKeyFile)
+		receiptPrivate, err = readEd25519PrivateKey(*admissionEvidenceKeyFile)
 		if err != nil {
 			slog.Error("read evidence private key", "err", err)
 			os.Exit(2)
@@ -301,6 +305,7 @@ func main() {
 	}
 	handler := server.Handler()
 	var poller *executoruplink.Poller
+	var evidencePublisher *executoruplink.EvidencePublisher
 	if *uplinkURL != "" {
 		if *uplinkCredentialFile == "" || *uplinkStateFile == "" {
 			slog.Error("-uplink-credential-file and -uplink-state-file are required with -uplink-url")
@@ -352,9 +357,32 @@ func main() {
 			slog.Error("configure executor uplink", "err", err)
 			os.Exit(2)
 		}
+		if *evidenceUplink {
+			if *evidenceUplinkControllerInstanceID == "" {
+				slog.Error("-evidence-uplink-controller-instance-id is required with -evidence-uplink")
+				os.Exit(2)
+			}
+			evidencePublisher, err = executoruplink.NewEvidencePublisher(executoruplink.EvidencePublisherConfig{
+				BaseURL: *uplinkURL, CredentialPath: *uplinkCredentialFile,
+				ControllerInstanceID: *evidenceUplinkControllerInstanceID,
+				PollInterval:         *evidenceUplinkPollInterval,
+				HTTPClient:           httpClient, Logger: slog.Default(),
+				Log: receiptLog, PrivateKey: receiptPrivate,
+				SecureExecutor: secureExecutor, SecureNodeID: secureNodeID,
+				ProtectedTransport: parsedUplink.Scheme == "https" && !*uplinkTLSSkipVerify,
+			})
+			if err != nil {
+				slog.Error("configure Executor evidence uplink", "err", err)
+				os.Exit(2)
+			}
+		} else if *evidenceUplinkControllerInstanceID != "" {
+			slog.Error("-evidence-uplink-controller-instance-id requires -evidence-uplink")
+			os.Exit(2)
+		}
 	} else if *uplinkCredentialFile != "" || *uplinkStateFile != "" || *uplinkProtocolVersion != 0 ||
 		*uplinkDeliveryStateFile != "" || *uplinkAllowInsecureHTTP ||
-		*uplinkTLSCAFile != "" || *uplinkTLSClientCert != "" || *uplinkTLSClientKey != "" || *uplinkTLSSkipVerify {
+		*uplinkTLSCAFile != "" || *uplinkTLSClientCert != "" || *uplinkTLSClientKey != "" || *uplinkTLSSkipVerify ||
+		*evidenceUplink || *evidenceUplinkControllerInstanceID != "" {
 		slog.Error("executor uplink options require -uplink-url")
 		os.Exit(2)
 	}
@@ -392,6 +420,9 @@ func main() {
 	}
 	if poller != nil {
 		go poller.Run(ctx)
+	}
+	if evidencePublisher != nil {
+		go evidencePublisher.Run(ctx)
 	}
 	if *disableInbound {
 		<-ctx.Done()
