@@ -79,7 +79,8 @@ func DecodeEnrollmentCapability(raw []byte) (Enrollment, error) {
 	if err := dsse.DecodeStrictInto(raw, 64<<10, &enrollment); err != nil {
 		return Enrollment{}, fmt.Errorf("decode enrollment capability: %w", err)
 	}
-	if enrollment.EnrollmentID == "" || enrollment.EnrollmentToken == "" || enrollment.NodeID == "" || enrollment.ExpiresAt == "" {
+	if enrollment.ControllerInstanceID == "" || enrollment.EnrollmentID == "" || enrollment.EnrollmentToken == "" ||
+		enrollment.NodeID == "" || enrollment.ExpiresAt == "" {
 		return Enrollment{}, errors.New("enrollment capability is incomplete")
 	}
 	return enrollment, nil
@@ -287,16 +288,7 @@ func (c *Client) RevokeNodeCredential(ctx context.Context, credentialID string) 
 	return revocation, err
 }
 
-func (c *Client) Enroll(ctx context.Context, enrollmentToken, requestID string) (NodeCredential, error) {
-	var credential NodeCredential
-	err := c.do(ctx, http.MethodPost, "/v1/enroll", struct {
-		EnrollmentToken string `json:"enrollment_token"`
-		RequestID       string `json:"request_id"`
-	}{EnrollmentToken: enrollmentToken, RequestID: requestID}, &credential, false)
-	return credential, err
-}
-
-func (c *Client) EnrollWithEvidence(ctx context.Context, enrollmentToken, requestID string, proof controlprotocol.ExecutorEvidenceIdentityProofV1) (NodeCredential, error) {
+func (c *Client) Enroll(ctx context.Context, enrollmentToken, requestID string, proof controlprotocol.ExecutorEvidenceIdentityProofV1) (NodeCredential, error) {
 	if err := proof.Validate(); err != nil {
 		return NodeCredential{}, fmt.Errorf("validate executor evidence identity proof: %w", err)
 	}

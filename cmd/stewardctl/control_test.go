@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/controlprotocol"
 )
 
@@ -216,5 +217,36 @@ func TestControlCommandsRejectAmbiguousScopeAndMissingSecrets(t *testing.T) {
 		"-enrollment", "/tmp/enrollment", "-request-id", "request", "-credential-out", "/tmp/credential",
 	}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "evidence private key") {
 		t.Fatalf("missing evidence private key error=%v", err)
+	}
+}
+
+func TestEnrollmentCredentialValidationRejectsEndpointSubstitution(t *testing.T) {
+	const token = "steward_node_v1_node-cred-11111111111111111111111111111111_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	enrollment := controlclient.Enrollment{NodeID: "node-1"}
+	valid := controlclient.NodeCredential{
+		Version: 2, Scope: "node", NodeID: "node-1", Credential: token,
+	}
+	if credentialID, err := validateEnrollmentCredential(enrollment, valid); err != nil ||
+		credentialID != "node-cred-11111111111111111111111111111111" {
+		t.Fatalf("valid credential = (%q, %v)", credentialID, err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*controlclient.NodeCredential)
+	}{
+		{"version", func(value *controlclient.NodeCredential) { value.Version = 1 }},
+		{"scope", func(value *controlclient.NodeCredential) { value.Scope = "tenant" }},
+		{"tenant", func(value *controlclient.NodeCredential) { value.TenantID = "tenant-a" }},
+		{"node", func(value *controlclient.NodeCredential) { value.NodeID = "node-other" }},
+		{"bearer", func(value *controlclient.NodeCredential) { value.Credential = "not-a-node-credential" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := valid
+			test.mutate(&changed)
+			if _, err := validateEnrollmentCredential(enrollment, changed); err == nil {
+				t.Fatalf("substituted credential accepted: %+v", changed)
+			}
+		})
 	}
 }

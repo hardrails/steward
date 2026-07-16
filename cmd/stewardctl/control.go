@@ -279,13 +279,13 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	credential, err := client.EnrollWithEvidence(ctx, enrollment.EnrollmentToken, *requestID, proof)
+	credential, err := client.Enroll(ctx, enrollment.EnrollmentToken, *requestID, proof)
 	if err != nil {
 		return err
 	}
-	credentialID, err := controlauth.ParseNodeCredentialID(credential.Credential)
+	credentialID, err := validateEnrollmentCredential(enrollment, credential)
 	if err != nil {
-		return errors.New("control plane returned an invalid node credential")
+		return err
 	}
 	credentialRaw, err := json.Marshal(credential)
 	if err != nil {
@@ -296,6 +296,18 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	}
 	_, err = fmt.Fprintln(stdout, credentialID)
 	return err
+}
+
+func validateEnrollmentCredential(enrollment controlclient.Enrollment, credential controlclient.NodeCredential) (string, error) {
+	if credential.Version != 2 || credential.Scope != "node" || credential.TenantID != "" ||
+		credential.NodeID != enrollment.NodeID {
+		return "", errors.New("control plane returned a node credential outside the enrollment identity")
+	}
+	credentialID, err := controlauth.ParseNodeCredentialID(credential.Credential)
+	if err != nil {
+		return "", errors.New("control plane returned an invalid node credential")
+	}
+	return credentialID, nil
 }
 
 func controlNodeList(arguments []string, stdout io.Writer) error {

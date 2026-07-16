@@ -124,10 +124,10 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 	if enrollment, err := client.CreateEnrollment(ctx, "enrollment-request-1", "node-1", []string{"tenant-a"}, 15*time.Minute); err != nil || enrollment.EnrollmentToken != "secret" {
 		t.Fatalf("enrollment=%#v error=%v", enrollment, err)
 	}
-	if _, err := client.EnrollWithEvidence(ctx, "secret", "request-1", controlprotocol.ExecutorEvidenceIdentityProofV1{}); err == nil {
+	if _, err := client.Enroll(ctx, "secret", "request-1", controlprotocol.ExecutorEvidenceIdentityProofV1{}); err == nil {
 		t.Fatal("invalid evidence identity proof reached the enrollment endpoint")
 	}
-	if credential, err := client.EnrollWithEvidence(ctx, "secret", "request-1", proof); err != nil || credential.Version != 2 {
+	if credential, err := client.Enroll(ctx, "secret", "request-1", proof); err != nil || credential.Version != 2 {
 		t.Fatalf("credential=%#v error=%v", credential, err)
 	}
 	if nodes, err := client.ListNodes(ctx, "tenant-a", "", 100); err != nil || len(nodes.Nodes) != 1 {
@@ -244,6 +244,7 @@ func TestDecodeEnrollmentCapabilityRejectsAmbiguousInput(t *testing.T) {
 		[]byte(`{"controller_instance_id":"control-test","enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z","unexpected":true}`),
 		[]byte(`{"controller_instance_id":"control-test","enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"} {}`),
 		[]byte(`{"controller_instance_id":"control-test","enrollment_id":"enr-1","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"}`),
+		[]byte(`{"enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"}`),
 	} {
 		if _, err := DecodeEnrollmentCapability(raw); err == nil {
 			t.Fatalf("ambiguous enrollment accepted: %s", raw)
