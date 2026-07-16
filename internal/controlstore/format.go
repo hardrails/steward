@@ -13,6 +13,7 @@ const (
 	manifestBytes       = 120
 	snapshotHeaderBytes = 104
 	walHeaderBytes      = 96
+	walFramePrefixBytes = 52
 	walFrameFixedBytes  = 116
 )
 
@@ -199,6 +200,24 @@ func unmarshalWALRecord(body []byte, limit int) (walRecord, error) {
 		return walRecord{}, errors.New("control WAL frame sequence is zero")
 	}
 	return value, nil
+}
+
+// validateIncompleteWALFramePrefix distinguishes a plausible partial append
+// from corruption of the unauthenticated outer frame length. Once the fixed
+// body prefix has reached disk, its independently encoded payload length and
+// sequence must agree with the outer length before recovery may discard it.
+func validateIncompleteWALFramePrefix(prefix []byte, declaredLength int64) error {
+	if len(prefix) < walFramePrefixBytes {
+		return nil
+	}
+	if prefix[0] != diskFormatVersion || !allZero(prefix[1:8]) || binary.BigEndian.Uint64(prefix[8:16]) == 0 {
+		return errors.New("control WAL incomplete frame prefix is invalid")
+	}
+	payloadLength := uint64(binary.BigEndian.Uint32(prefix[48:52]))
+	if payloadLength == 0 || uint64(walFrameFixedBytes)+payloadLength != uint64(declaredLength) {
+		return errors.New("control WAL outer frame length disagrees with its retained body prefix")
+	}
+	return nil
 }
 
 func hashRecord(raw []byte) [sha256.Size]byte {

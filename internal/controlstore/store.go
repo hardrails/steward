@@ -397,6 +397,20 @@ func recoverWAL(file *os.File, size int64, current state, sequence uint64, lastH
 		}
 		offset += 4
 		if length > size-offset {
+			available := size - offset
+			prefixLength := available
+			if prefixLength > walFramePrefixBytes {
+				prefixLength = walFramePrefixBytes
+			}
+			prefix := make([]byte, int(prefixLength))
+			if len(prefix) > 0 {
+				if _, err := file.ReadAt(prefix, offset); err != nil {
+					return state{}, 0, [sha256.Size]byte{}, fmt.Errorf("read incomplete control WAL frame prefix: %w", err)
+				}
+			}
+			if err := validateIncompleteWALFramePrefix(prefix, length); err != nil {
+				return state{}, 0, [sha256.Size]byte{}, err
+			}
 			if err := repairIncompleteTail(file, start); err != nil {
 				return state{}, 0, [sha256.Size]byte{}, err
 			}

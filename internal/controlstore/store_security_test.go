@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -380,6 +381,74 @@ func TestWALRecoveryRejectsInvalidLengthChainTransactionAndState(t *testing.T) {
 			}
 			if _, _, _, err := recoverWAL(file, info.Size(), emptyState(), 0, previous, limits); err == nil {
 				t.Fatal("invalid WAL recovery input was accepted")
+			}
+		})
+	}
+}
+
+func TestWALRecoveryRejectsCorruptedOuterLengthWithoutRollingBack(t *testing.T) {
+	limits := DefaultLimits()
+	tenant := Tenant{ID: "tenant-a", CreatedAt: "2026-07-14T00:00:00Z", Active: true}
+	payload, err := encodeTransaction(mutation{Kind: mutationTenant, Tenant: &tenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := recoveryWALBytes(t, 1, [sha256.Size]byte{}, payload, limits)
+	lengthOffset := walHeaderBytes
+	length := binary.BigEndian.Uint32(raw[lengthOffset : lengthOffset+4])
+	binary.BigEndian.PutUint32(raw[lengthOffset:lengthOffset+4], length+1)
+
+	path := filepath.Join(t.TempDir(), "wal")
+	mustWriteFile(t, path, raw)
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := recoverWAL(file, before.Size(), emptyState(), 0, [sha256.Size]byte{}, limits); err == nil {
+		t.Fatal("complete WAL frame with a corrupted outer length was accepted as an incomplete tail")
+	}
+	after, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("corrupt complete WAL frame was truncated from %d to %d bytes", before.Size(), after.Size())
+	}
+}
+
+func TestWALRecoveryStillRepairsPlausibleIncompleteAppend(t *testing.T) {
+	limits := DefaultLimits()
+	tenant := Tenant{ID: "tenant-a", CreatedAt: "2026-07-14T00:00:00Z", Active: true}
+	payload, err := encodeTransaction(mutation{Kind: mutationTenant, Tenant: &tenant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := recoveryWALBytes(t, 1, [sha256.Size]byte{}, payload, limits)
+	frameBytes := len(complete) - walHeaderBytes
+	for _, retainedFrameBytes := range []int{2, 4 + 10, 4 + walFramePrefixBytes, frameBytes - 1} {
+		t.Run(fmt.Sprintf("retained-%d", retainedFrameBytes), func(t *testing.T) {
+			raw := append([]byte(nil), complete[:walHeaderBytes+retainedFrameBytes]...)
+			path := filepath.Join(t.TempDir(), "wal")
+			mustWriteFile(t, path, raw)
+			file, err := os.OpenFile(path, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			if _, sequence, _, err := recoverWAL(file, int64(len(raw)), emptyState(), 0, [sha256.Size]byte{}, limits); err != nil || sequence != 0 {
+				t.Fatalf("recover plausible incomplete append = (sequence %d, %v)", sequence, err)
+			}
+			info, err := file.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() != walHeaderBytes {
+				t.Fatalf("repaired WAL size = %d, want %d", info.Size(), walHeaderBytes)
 			}
 		})
 	}
