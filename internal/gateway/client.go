@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,15 +12,39 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/taskpermit"
 )
 
-const maxControlResponse = 1 << 20
+const (
+	maxControlResponse          = 1 << 20
+	maxControlErrorCodeBytes    = 128
+	maxControlErrorMessageBytes = 4096
+	maxControlRetryAfterSeconds = 3600
+	maxControlReceiptNodeBytes  = 256
+)
+
+// ControlAPIError is one strictly decoded error from Gateway's host-local
+// control API. RetryAfter is nonzero only when Gateway supplied one canonical,
+// positive delta-seconds value within the control client's retry bound.
+type ControlAPIError struct {
+	Status     int
+	Code       string
+	Message    string
+	RetryAfter time.Duration
+}
+
+// Error preserves the text returned by the control client before structured
+// errors were exposed. Callers should use errors.As instead of parsing it.
+func (e *ControlAPIError) Error() string {
+	return fmt.Sprintf("gateway %s: %s", e.Code, e.Message)
+}
 
 // ControlClient is the Executor's narrow, host-local client for the gateway
 // Unix socket. It deliberately exposes grants rather than a generic HTTP
@@ -125,7 +150,10 @@ func (c *ControlClient) SubmitTask(
 	if submission.SchemaVersion != ControlTaskSubmissionSchemaV1 ||
 		!serviceTaskDigestPattern.MatchString(submission.TaskDigest) ||
 		submission.PermitDigest != dsse.Digest(rawPermit) ||
-		!serviceRunIDPattern.MatchString(submission.RunID) {
+		!serviceRunIDPattern.MatchString(submission.RunID) ||
+		!validControlReceiptNodeID(submission.ReceiptNodeID) ||
+		submission.ReceiptEpoch == 0 ||
+		!canonicalControlReceiptPublicKey(submission.ReceiptPublicKey) {
 		return ControlTaskSubmission{}, errors.New("gateway control task submission response is invalid")
 	}
 	return submission, nil
@@ -307,10 +335,65 @@ func (c *ControlClient) callRaw(
 		Error   string `json:"error"`
 		Message string `json:"message"`
 	}
-	if dsse.DecodeStrictInto(raw, maximum, &payload) == nil && payload.Error != "" && payload.Message != "" {
-		return nil, nil, fmt.Errorf("gateway %s: %s", payload.Error, payload.Message)
+	if response.StatusCode >= 400 && response.StatusCode <= 599 &&
+		dsse.DecodeStrictInto(raw, maximum, &payload) == nil &&
+		validControlError(payload.Error, payload.Message) {
+		retryAfter, retryErr := parseControlRetryAfter(response.Header)
+		if retryErr != nil {
+			return nil, nil, fmt.Errorf("gateway returned HTTP %d with invalid Retry-After header", response.StatusCode)
+		}
+		return nil, nil, &ControlAPIError{
+			Status: response.StatusCode, Code: payload.Error, Message: payload.Message, RetryAfter: retryAfter,
+		}
 	}
 	return nil, nil, fmt.Errorf("gateway returned HTTP %d", response.StatusCode)
+}
+
+func validControlReceiptNodeID(value string) bool {
+	if value == "" || len(value) > maxControlReceiptNodeBytes || !utf8.ValidString(value) ||
+		strings.TrimSpace(value) != value || strings.ContainsRune(value, '\x00') ||
+		!strings.HasSuffix(value, "/gateway") {
+		return false
+	}
+	return bounded(strings.TrimSuffix(value, "/gateway"), 128)
+}
+
+func canonicalControlReceiptPublicKey(value string) bool {
+	if len(value) != base64.StdEncoding.EncodedLen(ed25519.PublicKeySize) {
+		return false
+	}
+	public, err := base64.StdEncoding.DecodeString(value)
+	return err == nil && len(public) == ed25519.PublicKeySize &&
+		base64.StdEncoding.EncodeToString(public) == value
+}
+
+func validControlError(code, message string) bool {
+	if !routeID(code) || len(code) > maxControlErrorCodeBytes ||
+		message == "" || len(message) > maxControlErrorMessageBytes || !utf8.ValidString(message) {
+		return false
+	}
+	for _, character := range message {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func parseControlRetryAfter(header http.Header) (time.Duration, error) {
+	values := header.Values("Retry-After")
+	if len(values) == 0 {
+		return 0, nil
+	}
+	if len(values) != 1 {
+		return 0, errors.New("multiple Retry-After values")
+	}
+	seconds, err := strconv.ParseUint(values[0], 10, 64)
+	if err != nil || seconds == 0 || seconds > maxControlRetryAfterSeconds ||
+		strconv.FormatUint(seconds, 10) != values[0] {
+		return 0, errors.New("invalid Retry-After delta-seconds")
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 func validAbsolutePath(value string) bool {

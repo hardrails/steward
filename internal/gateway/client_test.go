@@ -3,12 +3,36 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
+
+func newTestControlClient(t *testing.T, handler http.Handler) *ControlClient {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "gateway-control-client-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	listener, err := net.Listen("unix", filepath.Join(directory, "control.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: handler}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	client, err := NewControlClient(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
 
 func TestControlClientCoversBoundedGrantLifecycle(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "gc-")
@@ -82,19 +106,77 @@ func TestControlClientCoversBoundedGrantLifecycle(t *testing.T) {
 	}
 }
 
-func TestControlClientReportsStructuredAndOversizedErrors(t *testing.T) {
-	directory, _ := os.MkdirTemp("/tmp", "gc-")
-	defer os.RemoveAll(directory)
-	socket := filepath.Join(directory, "c.sock")
-	listener, _ := net.Listen("unix", socket)
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeGatewayError(w, http.StatusConflict, "conflict", "denied")
-	})}
-	go func() { _ = server.Serve(listener) }()
-	defer server.Close()
-	client, _ := NewControlClient(socket)
+func TestControlClientReportsTypedErrorsWithoutChangingErrorText(t *testing.T) {
+	client := newTestControlClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		writeGatewayError(w, http.StatusTooManyRequests, "task_observation_throttled", "task observation is limited by host policy")
+	}))
 	err := client.Register(context.Background(), Grant{})
-	if err == nil || err.Error() != "gateway conflict: denied" {
-		t.Fatalf("error=%v", err)
+	var apiError *ControlAPIError
+	if !errors.As(err, &apiError) || apiError.Status != http.StatusTooManyRequests ||
+		apiError.Code != "task_observation_throttled" ||
+		apiError.Message != "task observation is limited by host policy" ||
+		apiError.RetryAfter != 7*time.Second ||
+		err.Error() != "gateway task_observation_throttled: task observation is limited by host policy" {
+		t.Fatalf("error=%v typed=%#v", err, apiError)
+	}
+
+	withoutRetry := newTestControlClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeGatewayError(w, http.StatusConflict, "conflict", "denied")
+	}))
+	err = withoutRetry.Register(context.Background(), Grant{})
+	apiError = nil
+	if !errors.As(err, &apiError) || apiError.Status != http.StatusConflict ||
+		apiError.Code != "conflict" || apiError.Message != "denied" || apiError.RetryAfter != 0 ||
+		err.Error() != "gateway conflict: denied" {
+		t.Fatalf("error=%v typed=%#v", err, apiError)
+	}
+}
+
+func TestControlClientRejectsMalformedRetryAfterAndUnboundedErrors(t *testing.T) {
+	validError, err := json.Marshal(map[string]string{"error": "denied", "message": "no"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlongCode, _ := json.Marshal(map[string]string{
+		"error": strings.Repeat("a", maxControlErrorCodeBytes+1), "message": "no",
+	})
+	overlongMessage, _ := json.Marshal(map[string]string{
+		"error": "denied", "message": strings.Repeat("m", maxControlErrorMessageBytes+1),
+	})
+	for _, test := range []struct {
+		name       string
+		body       []byte
+		retryAfter []string
+		want       string
+	}{
+		{name: "zero retry", body: validError, retryAfter: []string{"0"}, want: "invalid Retry-After"},
+		{name: "negative retry", body: validError, retryAfter: []string{"-1"}, want: "invalid Retry-After"},
+		{name: "padded retry", body: validError, retryAfter: []string{"01"}, want: "invalid Retry-After"},
+		{name: "signed retry", body: validError, retryAfter: []string{"+1"}, want: "invalid Retry-After"},
+		{name: "HTTP date retry", body: validError, retryAfter: []string{"Thu, 16 Jul 2026 12:00:00 GMT"}, want: "invalid Retry-After"},
+		{name: "retry above bound", body: validError, retryAfter: []string{"3601"}, want: "invalid Retry-After"},
+		{name: "multiple retry", body: validError, retryAfter: []string{"1", "2"}, want: "invalid Retry-After"},
+		{name: "overlong code", body: overlongCode, want: "gateway returned HTTP 400"},
+		{name: "overlong message", body: overlongMessage, want: "gateway returned HTTP 400"},
+		{name: "control message", body: []byte(`{"error":"denied","message":"bad\u001b"}`), want: "gateway returned HTTP 400"},
+		{name: "duplicate code", body: []byte(`{"error":"denied","error":"other","message":"no"}`), want: "gateway returned HTTP 400"},
+		{name: "trailing JSON", body: append(append([]byte(nil), validError...), []byte(`{}`)...), want: "gateway returned HTTP 400"},
+		{name: "oversized response", body: []byte(strings.Repeat("x", maxControlResponse+1)), want: "gateway control response exceeds limit"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newTestControlClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				for _, value := range test.retryAfter {
+					w.Header().Add("Retry-After", value)
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write(test.body)
+			}))
+			err := client.Register(context.Background(), Grant{})
+			var apiError *ControlAPIError
+			if err == nil || errors.As(err, &apiError) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v typed=%#v want substring=%q", err, apiError, test.want)
+			}
+		})
 	}
 }

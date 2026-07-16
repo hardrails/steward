@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
@@ -56,12 +57,17 @@ type wireControlTaskSubmitRequest struct {
 // ControlTaskSubmission identifies one exact lifecycle task accepted through
 // the host-local Gateway control socket. Replayed means the same signed permit
 // and request returned the already-recorded run without contacting the agent.
+// The receipt fields expose Gateway's configured evidence signer; callers must
+// still compare them with an independently trusted activation authority.
 type ControlTaskSubmission struct {
-	SchemaVersion string `json:"schema_version"`
-	TaskDigest    string `json:"task_digest"`
-	PermitDigest  string `json:"permit_digest"`
-	RunID         string `json:"run_id"`
-	Replayed      bool   `json:"replayed"`
+	SchemaVersion    string `json:"schema_version"`
+	TaskDigest       string `json:"task_digest"`
+	PermitDigest     string `json:"permit_digest"`
+	RunID            string `json:"run_id"`
+	Replayed         bool   `json:"replayed"`
+	ReceiptNodeID    string `json:"receipt_node_id"`
+	ReceiptEpoch     uint64 `json:"receipt_epoch"`
+	ReceiptPublicKey string `json:"receipt_public_key"`
 }
 
 type controlTaskResponseWriter struct {
@@ -127,6 +133,9 @@ func (s *Server) handleControlTaskSubmit(w http.ResponseWriter, request *http.Re
 	s.mu.Lock()
 	grant, active := s.grants[submission.GrantID]
 	operation, configured := s.serviceOperations[grant.ServiceID][submission.OperationID]
+	receiptNodeID := s.config.ConnectorReceiptNodeID
+	receiptEpoch := s.config.ConnectorReceiptEpoch
+	receiptPublic := append(ed25519.PublicKey(nil), s.connectorReceiptPublic...)
 	var lease context.Context
 	var semaphore chan struct{}
 	if active && grant.Active && grant.Service && grant.ServiceURL != "" && configured &&
@@ -138,6 +147,11 @@ func (s *Server) handleControlTaskSubmit(w http.ResponseWriter, request *http.Re
 	if !active || !grant.Active || !grant.Service || grant.ServiceURL == "" || !configured ||
 		operation.TaskProtocol != connectorledger.TaskProtocolLifecycleV1 {
 		writeGatewayError(w, http.StatusNotFound, "service_operation_not_found", "active configured service operation not found")
+		return
+	}
+	if receiptNodeID != ServiceTaskReceiptNodeID(grant.NodeID) || receiptEpoch == 0 ||
+		len(receiptPublic) != ed25519.PublicKeySize {
+		writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "task receipt authority is unavailable")
 		return
 	}
 
@@ -197,11 +211,14 @@ func (s *Server) handleControlTaskSubmit(w http.ResponseWriter, request *http.Re
 		return
 	}
 	writeJSON(w, http.StatusOK, ControlTaskSubmission{
-		SchemaVersion: ControlTaskSubmissionSchemaV1,
-		TaskDigest:    taskDigest,
-		PermitDigest:  permitDigest,
-		RunID:         runID,
-		Replayed:      receipt == "replayed",
+		SchemaVersion:    ControlTaskSubmissionSchemaV1,
+		TaskDigest:       taskDigest,
+		PermitDigest:     permitDigest,
+		RunID:            runID,
+		Replayed:         receipt == "replayed",
+		ReceiptNodeID:    receiptNodeID,
+		ReceiptEpoch:     receiptEpoch,
+		ReceiptPublicKey: base64.StdEncoding.EncodeToString(receiptPublic),
 	})
 }
 
@@ -243,14 +260,12 @@ func (s *Server) writeControlTaskProxyError(w http.ResponseWriter, captured *con
 	}
 	if captured.status < 400 || captured.status > 599 ||
 		dsse.DecodeStrictInto(captured.body.Bytes(), maxControlTaskProxyResponse, &payload) != nil ||
-		payload.Error == "" || payload.Message == "" {
+		!validControlError(payload.Error, payload.Message) {
 		writeGatewayError(w, http.StatusServiceUnavailable, "task_submission_unavailable", "task submission failed without a valid Gateway error")
 		return
 	}
-	if retryAfter := captured.header.Get("Retry-After"); retryAfter != "" {
-		if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds > 0 {
-			w.Header().Set("Retry-After", retryAfter)
-		}
+	if retryAfter, err := parseControlRetryAfter(captured.header); err == nil && retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.FormatInt(int64(retryAfter/time.Second), 10))
 	}
 	writeGatewayError(w, captured.status, payload.Error, payload.Message)
 }

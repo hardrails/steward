@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,8 +15,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hardrails/steward/internal/connectorledger"
+	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/taskpermit"
 )
 
 func invokeControlTaskSubmit(
@@ -98,8 +102,13 @@ func TestControlTaskLifecycleUsesExistingAuthorizationObservationAndEvidence(t *
 		t.Fatalf("first submission status=%d body=%s", first.Code, first.Body.String())
 	}
 	submitted := decodeControlTaskSubmission(t, first)
+	public := rig.config.connectorReceiptKey.Public().(ed25519.PublicKey)
+	publicBase64 := base64.StdEncoding.EncodeToString(public)
 	if submitted.SchemaVersion != ControlTaskSubmissionSchemaV1 ||
 		submitted.RunID != lifecycleTestRunID || submitted.Replayed ||
+		submitted.ReceiptNodeID != rig.config.ConnectorReceiptNodeID ||
+		submitted.ReceiptEpoch != rig.config.ConnectorReceiptEpoch ||
+		submitted.ReceiptPublicKey != publicBase64 ||
 		dispatches.Load() != 1 {
 		t.Fatalf("first submission=%#v dispatches=%d", submitted, dispatches.Load())
 	}
@@ -109,7 +118,11 @@ func TestControlTaskLifecycleUsesExistingAuthorizationObservationAndEvidence(t *
 	if replay.Code != http.StatusOK || !replayed.Replayed ||
 		replayed.TaskDigest != submitted.TaskDigest ||
 		replayed.PermitDigest != submitted.PermitDigest ||
-		replayed.RunID != submitted.RunID || dispatches.Load() != 1 {
+		replayed.RunID != submitted.RunID ||
+		replayed.ReceiptNodeID != submitted.ReceiptNodeID ||
+		replayed.ReceiptEpoch != submitted.ReceiptEpoch ||
+		replayed.ReceiptPublicKey != submitted.ReceiptPublicKey ||
+		dispatches.Load() != 1 {
 		t.Fatalf("replay=%#v status=%d dispatches=%d body=%s", replayed, replay.Code, dispatches.Load(), replay.Body.String())
 	}
 
@@ -168,7 +181,6 @@ func TestControlTaskLifecycleUsesExistingAuthorizationObservationAndEvidence(t *
 		exported.Body.Len() > connectorledger.MaxPortableTaskEvidenceBytes {
 		t.Fatalf("evidence status=%d headers=%v bytes=%d body=%s", exported.Code, exported.Header(), exported.Body.Len(), exported.Body.String())
 	}
-	public := rig.config.connectorReceiptKey.Public().(ed25519.PublicKey)
 	verified, err := connectorledger.VerifyPortableTaskEvidence(
 		exported.Body.Bytes(),
 		public,
@@ -236,6 +248,25 @@ func TestControlClientCoversTypedTaskLifecycleOverUnixSocket(t *testing.T) {
 	if err != nil || submitted.RunID != lifecycleTestRunID || submitted.Replayed {
 		t.Fatalf("submitted=%#v err=%v", submitted, err)
 	}
+	replayed, err := client.SubmitTask(
+		context.Background(),
+		rig.grant.GrantID,
+		rig.operation.ID,
+		permit,
+		body,
+	)
+	if err != nil || !replayed.Replayed || replayed.TaskDigest != submitted.TaskDigest ||
+		replayed.PermitDigest != submitted.PermitDigest || replayed.RunID != submitted.RunID ||
+		replayed.ReceiptNodeID != submitted.ReceiptNodeID ||
+		replayed.ReceiptEpoch != submitted.ReceiptEpoch ||
+		replayed.ReceiptPublicKey != submitted.ReceiptPublicKey {
+		t.Fatalf("replayed=%#v err=%v submitted=%#v", replayed, err, submitted)
+	}
+	publicRaw, err := base64.StdEncoding.DecodeString(submitted.ReceiptPublicKey)
+	if err != nil || submitted.ReceiptNodeID != rig.config.ConnectorReceiptNodeID ||
+		submitted.ReceiptEpoch != rig.config.ConnectorReceiptEpoch {
+		t.Fatalf("receipt authority=%#v decode=%v", submitted, err)
+	}
 	status, err := client.TaskStatus(context.Background(), submitted.TaskDigest, submitted.PermitDigest)
 	if err != nil || status.Phase != connectorledger.Dispatch {
 		t.Fatalf("status=%#v err=%v", status, err)
@@ -245,16 +276,22 @@ func TestControlClientCoversTypedTaskLifecycleOverUnixSocket(t *testing.T) {
 		observed.ObservedStatus == "" || observed.ObservationBase64 == "" {
 		t.Fatalf("observed=%#v err=%v", observed, err)
 	}
+	_, err = client.ObserveTask(context.Background(), submitted.TaskDigest, submitted.PermitDigest)
+	var apiError *ControlAPIError
+	if !errors.As(err, &apiError) || apiError.Status != http.StatusTooManyRequests ||
+		apiError.Code != "task_observation_throttled" || apiError.RetryAfter != time.Duration(rig.operation.PollIntervalSeconds)*time.Second ||
+		apiError.Error() != "gateway task_observation_throttled: task observation is limited by host policy" {
+		t.Fatalf("throttled observation error=%v typed=%#v", err, apiError)
+	}
 	evidence, err := client.ExportTaskEvidence(context.Background(), submitted.TaskDigest, submitted.PermitDigest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	public := rig.config.connectorReceiptKey.Public().(ed25519.PublicKey)
 	if verified, verifyErr := connectorledger.VerifyPortableTaskEvidence(
 		evidence,
-		public,
-		rig.config.ConnectorReceiptNodeID,
-		rig.config.ConnectorReceiptEpoch,
+		ed25519.PublicKey(publicRaw),
+		submitted.ReceiptNodeID,
+		submitted.ReceiptEpoch,
 		submitted.TaskDigest,
 		submitted.PermitDigest,
 	); verifyErr != nil || len(verified.Records) != 3 {
@@ -262,6 +299,57 @@ func TestControlClientCoversTypedTaskLifecycleOverUnixSocket(t *testing.T) {
 	}
 	if _, err := client.TaskStatus(context.Background(), "sha256:bad", submitted.PermitDigest); err == nil {
 		t.Fatal("typed client accepted an invalid task identity")
+	}
+}
+
+func TestControlClientStrictlyValidatesTaskReceiptAuthority(t *testing.T) {
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+	rig := newLifecycleServiceTaskRig(t, upstream.URL)
+	body := []byte(`{"input":"audit workspace","session_id":"receipt-authority"}`)
+	permit := taskPermitFor(t, rig, "task-receipt-authority", body, nil)
+	rawPermit, err := taskpermit.DecodeHeader(permit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, public, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := ControlTaskSubmission{
+		SchemaVersion:    ControlTaskSubmissionSchemaV1,
+		TaskDigest:       "sha256:" + strings.Repeat("a", 64),
+		PermitDigest:     dsse.Digest(rawPermit),
+		RunID:            lifecycleTestRunID,
+		ReceiptNodeID:    "node-a/gateway",
+		ReceiptEpoch:     7,
+		ReceiptPublicKey: base64.StdEncoding.EncodeToString(public),
+	}
+	for name, mutate := range map[string]func(*ControlTaskSubmission){
+		"missing receipt identity": func(value *ControlTaskSubmission) { value.ReceiptNodeID = "" },
+		"wrong receipt suffix":     func(value *ControlTaskSubmission) { value.ReceiptNodeID = "node-a/relay" },
+		"padded receipt identity":  func(value *ControlTaskSubmission) { value.ReceiptNodeID = " node-a/gateway" },
+		"oversized node identity": func(value *ControlTaskSubmission) {
+			value.ReceiptNodeID = strings.Repeat("n", 129) + "/gateway"
+		},
+		"zero receipt epoch": func(value *ControlTaskSubmission) { value.ReceiptEpoch = 0 },
+		"short receipt key": func(value *ControlTaskSubmission) {
+			value.ReceiptPublicKey = base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize-1))
+		},
+		"noncanonical receipt key": func(value *ControlTaskSubmission) {
+			value.ReceiptPublicKey = strings.TrimRight(value.ReceiptPublicKey, "=")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := valid
+			mutate(&response)
+			client := newTestControlClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusOK, response)
+			}))
+			if _, err := client.SubmitTask(context.Background(), rig.grant.GrantID, rig.operation.ID, permit, body); err == nil {
+				t.Fatal("invalid receipt authority was accepted")
+			}
+		})
 	}
 }
 
@@ -363,6 +451,30 @@ func TestControlTaskSurfaceRejectsWideningMismatchAndUnavailableEvidence(t *test
 		t.Fatalf("mismatched task dispatched %d times", dispatches.Load())
 	}
 
+	rig.server.mu.Lock()
+	originalReceiptPublic := append(ed25519.PublicKey(nil), rig.server.connectorReceiptPublic...)
+	rig.server.connectorReceiptPublic = nil
+	rig.server.mu.Unlock()
+	response = invokeControlTaskSubmit(t, rig, body, permit)
+	if code := requireGatewayErrorCode(t, response, http.StatusServiceUnavailable); code != "evidence_unavailable" {
+		t.Fatalf("missing receipt key code=%q", code)
+	}
+	rig.server.mu.Lock()
+	rig.server.connectorReceiptPublic = originalReceiptPublic
+	originalReceiptNodeID := rig.server.config.ConnectorReceiptNodeID
+	rig.server.config.ConnectorReceiptNodeID = "other-node/gateway"
+	rig.server.mu.Unlock()
+	response = invokeControlTaskSubmit(t, rig, body, permit)
+	if code := requireGatewayErrorCode(t, response, http.StatusServiceUnavailable); code != "evidence_unavailable" {
+		t.Fatalf("wrong receipt identity code=%q", code)
+	}
+	rig.server.mu.Lock()
+	rig.server.config.ConnectorReceiptNodeID = originalReceiptNodeID
+	rig.server.mu.Unlock()
+	if dispatches.Load() != 0 {
+		t.Fatalf("unavailable receipt authority dispatched %d tasks", dispatches.Load())
+	}
+
 	submit := invokeControlTaskSubmit(t, rig, body, permit)
 	submitted := decodeControlTaskSubmission(t, submit)
 	if submit.Code != http.StatusOK || dispatches.Load() != 1 {
@@ -411,5 +523,57 @@ func TestControlTaskSurfaceRejectsWideningMismatchAndUnavailableEvidence(t *test
 	unavailable := invokeControlTaskRaw(rig, http.MethodGet, evidencePath, "", nil)
 	if code := requireGatewayErrorCode(t, unavailable, http.StatusServiceUnavailable); code != "evidence_unavailable" {
 		t.Fatalf("unavailable evidence code=%q", code)
+	}
+}
+
+func TestControlTaskProxyErrorsForwardOnlyBoundedCanonicalRetryAdvice(t *testing.T) {
+	server := &Server{}
+	newCaptured := func(code, message string, retryAfter ...string) *controlTaskResponseWriter {
+		captured := newControlTaskResponseWriter()
+		captured.status = http.StatusTooManyRequests
+		for _, value := range retryAfter {
+			captured.header.Add("Retry-After", value)
+		}
+		raw, err := json.Marshal(map[string]string{"error": code, "message": message})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = captured.body.Write(raw)
+		return captured
+	}
+
+	valid := httptest.NewRecorder()
+	setControlTaskHeaders(valid)
+	server.writeControlTaskProxyError(valid, newCaptured("task_observation_throttled", "wait", "7"))
+	if code := requireGatewayErrorCode(t, valid, http.StatusTooManyRequests); code != "task_observation_throttled" ||
+		valid.Header().Get("Retry-After") != "7" {
+		t.Fatalf("valid proxy error code=%q retry=%q", code, valid.Header().Get("Retry-After"))
+	}
+
+	for _, values := range [][]string{{"0"}, {"01"}, {"3601"}, {"1", "2"}} {
+		response := httptest.NewRecorder()
+		setControlTaskHeaders(response)
+		server.writeControlTaskProxyError(response, newCaptured("task_observation_throttled", "wait", values...))
+		if code := requireGatewayErrorCode(t, response, http.StatusTooManyRequests); code != "task_observation_throttled" ||
+			response.Header().Get("Retry-After") != "" {
+			t.Fatalf("invalid retry %v code=%q forwarded=%q", values, code, response.Header().Get("Retry-After"))
+		}
+	}
+
+	for name, captured := range map[string]*controlTaskResponseWriter{
+		"overlong code": newCaptured(strings.Repeat("a", maxControlErrorCodeBytes+1), "wait"),
+		"overlong message": newCaptured(
+			"task_observation_throttled", strings.Repeat("m", maxControlErrorMessageBytes+1),
+		),
+		"control message": newCaptured("task_observation_throttled", "wait\nnow"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			setControlTaskHeaders(response)
+			server.writeControlTaskProxyError(response, captured)
+			if code := requireGatewayErrorCode(t, response, http.StatusServiceUnavailable); code != "task_submission_unavailable" {
+				t.Fatalf("invalid proxy error code=%q", code)
+			}
+		})
 	}
 }
