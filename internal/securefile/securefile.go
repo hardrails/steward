@@ -4,6 +4,7 @@ package securefile
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -77,7 +78,7 @@ func read(path string, limit int64, permissions Permissions, afterOpen func(*os.
 	}
 	current, err := os.Lstat(path)
 	if err != nil {
-		return nil, errors.New("file changed while reading")
+		return nil, fmt.Errorf("stat file after reading: %w", err)
 	}
 	if int64(len(raw)) != opened.Size() ||
 		!validSnapshot(after, limit, permissions) ||
@@ -133,7 +134,7 @@ func readRoot(
 	}
 	current, err := root.Lstat(name)
 	if err != nil {
-		return nil, errors.New("root file changed while reading")
+		return nil, fmt.Errorf("stat root file after reading: %w", err)
 	}
 	if int64(len(raw)) != opened.Size() ||
 		!validSnapshot(after, limit, permissions) ||

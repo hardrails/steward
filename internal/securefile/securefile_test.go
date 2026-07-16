@@ -1,6 +1,7 @@
 package securefile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -84,6 +85,18 @@ func TestReadRejectsSymlinkFIFOReplacementAndGrowth(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "changed while reading") {
 		t.Fatalf("path replacement err=%v", err)
 	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("stable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := read(path, 64, Regular, func(*os.File) error {
+		return os.Remove(path)
+	}); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed path err=%v, want wrapped not-exist error", err)
+	}
 }
 
 func TestReadRootRemainsConfinedAfterRootPathReplacement(t *testing.T) {
@@ -161,5 +174,24 @@ func TestReadRootRejectsEscapingAndFinalSymlinks(t *testing.T) {
 	}
 	if _, err := ReadRoot(root, "final", 64, TrustFile); err == nil {
 		t.Fatal("root-confined read followed a final symlink")
+	}
+}
+
+func TestReadRootPreservesPostReadStatError(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "input")
+	if err := os.WriteFile(path, []byte("stable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if _, err := readRoot(root, "input", 64, Regular, func(*os.File) error {
+		return os.Remove(path)
+	}); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed root path err=%v, want wrapped not-exist error", err)
 	}
 }
