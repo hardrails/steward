@@ -110,6 +110,27 @@ There is no boot-time recovery unit, so system startup alone does not complete o
 roll back an interrupted installation. Do not remove
 `/var/lib/steward-control-installer/transaction` by hand.
 
+The first installation also creates a dedicated Ed25519 evidence-witness identity:
+
+- private key: `/var/lib/steward-control/witness.private.pem`, mode `0600`;
+- public key: `/var/lib/steward-control/witness.public.pem`, mode `0644`.
+
+Both files are inside the service's mode-`0700` state directory. The public file is
+therefore stable but not directly readable by ordinary host users. Copy only the
+public key to an offline verifier or auditor from a root session:
+
+```console
+sudo install -o root -g root -m 0644 \
+  /var/lib/steward-control/witness.public.pem \
+  /secure/steward-control-witness.public.pem
+```
+
+The installer never prints, passes on the command line, rotates, or overwrites the
+private key. On an upgrade from a controller that predates this identity, it
+creates the pair only if both paths are absent. A partial pair, unsafe metadata,
+symlink, or mismatch stops the upgrade so an operator can investigate instead of
+silently accepting a new audit identity.
+
 Verify the installed service:
 
 ```console
@@ -419,11 +440,13 @@ signature remain the security boundary.
 
 ## Back up, restore, and upgrade
 
-The state directory contains the authentication key, credential verifiers,
-tenants, node bindings, exact signed commands, delivery state, and terminal
-reports. Treat a backup as a sensitive control-plane artifact even though bearer
-tokens are not stored in plaintext. The authentication key and retained request
-metadata are sufficient to reproduce credentials that use deterministic retry.
+The state directory contains the authentication key, witness private and public
+keys, credential verifiers, tenants, node bindings, exact signed commands,
+delivery state, and terminal reports. Treat a backup as a sensitive control-plane
+artifact even though bearer tokens are not stored in plaintext. The authentication
+key and retained request metadata are sufficient to reproduce credentials that use
+deterministic retry. The witness private key can sign exports under the controller's
+established audit identity.
 The controller exposes bootstrap recovery only under the narrow conditions above,
 but possession of a backup still carries authentication authority, not just
 inventory.
@@ -434,13 +457,16 @@ inventory.
 3. Protect the backup with the same controls as the live management host.
 4. Restore only the entire directory to a stopped controller of a compatible
    release. On a replacement host, verify that it contains only single-link regular
-   files, set the directory to mode `0700`, and set every file to mode `0600` under
-   the target `steward-control` user and group. Start the service, then run the
-   controller doctor to verify configuration and readiness. The doctor deliberately
-   reports an inactive service as a failure, even when its stopped-state validation
-   succeeds.
+   files, set the directory to mode `0700`, set
+   `witness.public.pem` to mode `0644`, and set every other file to mode `0600`
+   under the target `steward-control` user and group. Start the service, then run
+   the controller doctor to verify configuration and readiness. The doctor
+   deliberately reports an inactive service as a failure, even when its
+   stopped-state validation succeeds.
 
-Never restore only the write-ahead log, snapshot, manifest, or authentication key.
+Never restore only the write-ahead log, snapshot, manifest, authentication key, or
+one witness-key file. Restore the witness pair together or the controller will
+fail closed.
 The write-ahead log is a hash-chained durable transaction file. Startup repairs
 only an incomplete final frame, which is the expected shape of a crash during one
 append; a malformed complete frame or broken chain stops startup.

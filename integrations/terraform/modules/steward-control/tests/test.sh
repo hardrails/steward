@@ -63,7 +63,7 @@ require_text "$repo_root/scripts/control-install-smoke.sh" \
   '--artifact "$terraform_stage/$archive" --checksums "$terraform_stage/checksums.txt"'
 require_text "$repo_root/scripts/control-install-smoke.sh" \
   'install_version_from_terraform_stage v1.0.0'
-grep -Fx -- "ExecStart=/usr/local/bin/steward-control -addr=\${STEWARD_CONTROL_ADDR} -state-dir=\${STEWARD_CONTROL_STATE_DIR} -auth-key-file=\${STEWARD_CONTROL_AUTH_KEY_FILE} -tls-cert-file=\${STEWARD_CONTROL_TLS_CERT_FILE} -tls-key-file=\${STEWARD_CONTROL_TLS_KEY_FILE}" \
+grep -Fx -- "ExecStart=/usr/local/bin/steward-control -addr=\${STEWARD_CONTROL_ADDR} -state-dir=\${STEWARD_CONTROL_STATE_DIR} -auth-key-file=\${STEWARD_CONTROL_AUTH_KEY_FILE} -witness-private-key-file=\${STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE} -witness-public-key-file=\${STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE} -tls-cert-file=\${STEWARD_CONTROL_TLS_CERT_FILE} -tls-key-file=\${STEWARD_CONTROL_TLS_KEY_FILE}" \
   "$repo_root/deploy/systemd/steward-control.service" >/dev/null || {
   echo 'steward-control Terraform test: packaged systemd argv no longer matches the bootstrap identity proof' >&2
   exit 1
@@ -375,6 +375,8 @@ cat >"$work/control.env" <<'ENV'
 STEWARD_CONTROL_ADDR=127.0.0.1:8443
 STEWARD_CONTROL_STATE_DIR=/var/lib/steward-control
 STEWARD_CONTROL_AUTH_KEY_FILE=/var/lib/steward-control/auth.key
+STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=/var/lib/steward-control/witness.private.pem
+STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=/var/lib/steward-control/witness.public.pem
 STEWARD_CONTROL_TLS_CERT_FILE=
 STEWARD_CONTROL_TLS_KEY_FILE=
 ENV
@@ -471,12 +473,16 @@ run_proof() {
     "-addr=$address" \
     -state-dir=/var/lib/steward-control \
     -auth-key-file=/var/lib/steward-control/auth.key \
+    -witness-private-key-file=/var/lib/steward-control/witness.private.pem \
+    -witness-public-key-file=/var/lib/steward-control/witness.public.pem \
     -tls-cert-file= -tls-key-file= >"$PROC_ROOT_FIXTURE/4242/cmdline"
   # shellcheck disable=SC2016 # Expand PROOF_FUNCTIONS in the isolated child shell.
   env PROOF_FUNCTIONS="$work/prove-bootstrap-token.sh" \
     admin_token_path="$token_path" control_url=http://127.0.0.1:8443 \
     control_address=127.0.0.1:8443 control_config="$CONTROL_CONFIG_FIXTURE" \
     control_state_dir=/var/lib/steward-control control_auth_key=/var/lib/steward-control/auth.key \
+    control_witness_private_key=/var/lib/steward-control/witness.private.pem \
+    control_witness_public_key=/var/lib/steward-control/witness.public.pem \
     control_service=steward-control.service binary_link=/usr/local/bin/steward-control \
     release_binary="$RELEASE_BINARY" proc_root="$PROC_ROOT_FIXTURE" work="$work/auth-work" \
     PATH="$work/fake-bin:$PATH" IDENTITY_MODE="$identity_mode" \

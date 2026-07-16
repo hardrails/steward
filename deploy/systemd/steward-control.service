@@ -10,7 +10,7 @@ User=steward-control
 Group=steward-control
 UMask=0077
 EnvironmentFile=/etc/steward-control/control.env
-ExecStart=/usr/local/bin/steward-control -addr=${STEWARD_CONTROL_ADDR} -state-dir=${STEWARD_CONTROL_STATE_DIR} -auth-key-file=${STEWARD_CONTROL_AUTH_KEY_FILE} -tls-cert-file=${STEWARD_CONTROL_TLS_CERT_FILE} -tls-key-file=${STEWARD_CONTROL_TLS_KEY_FILE}
+ExecStart=/usr/local/bin/steward-control -addr=${STEWARD_CONTROL_ADDR} -state-dir=${STEWARD_CONTROL_STATE_DIR} -auth-key-file=${STEWARD_CONTROL_AUTH_KEY_FILE} -witness-private-key-file=${STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE} -witness-public-key-file=${STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE} -tls-cert-file=${STEWARD_CONTROL_TLS_CERT_FILE} -tls-key-file=${STEWARD_CONTROL_TLS_KEY_FILE}
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s

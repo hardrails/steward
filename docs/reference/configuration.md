@@ -25,8 +25,10 @@ backup, and restore under the new limit before production use.
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `-addr` | `127.0.0.1:8443` | Control API listener; a non-loopback address requires TLS |
-| `-state-dir` | `/var/lib/steward-control` | Owner-only durable snapshot, write-ahead log, manifest, authentication key, and lock |
+| `-state-dir` | `/var/lib/steward-control` | Owner-only durable snapshot, write-ahead log, manifest, authentication and witness keys, and lock |
 | `-auth-key-file` | `<state-dir>/auth.key` | Owner-only key used to authenticate opaque bearer credentials |
+| `-witness-private-key-file` | `<state-dir>/witness.private.pem` | Owner-only Ed25519 key used to sign controller evidence-witness exports |
+| `-witness-public-key-file` | `<state-dir>/witness.public.pem` | Matching Ed25519 public key distributed to offline verifiers |
 | `-tls-cert-file` | empty | PEM server certificate; must be paired with the key |
 | `-tls-key-file` | empty | Owner-only PEM server private key |
 | `-delivery-lease` | `2m` | Time-limited node ownership of a delivery; positive and at most `10m` |
@@ -54,8 +56,22 @@ It publishes the first site-administrator token through `-admin-token-file`. Tha
 output must be an absent clean absolute path distinct from the authentication key.
 It is created without following a symlink and never written to standard output.
 The recovered credential is identical to the first one; initialization does not
-mint a second administrator. `-check-config` opens and validates the complete
-durable store and TLS inputs without serving.
+mint a second administrator. Initialization also creates the dedicated witness
+key pair without overwriting either path. `-initialize-witness-key` is the explicit
+migration command for an existing controller created before the pair existed. It
+creates the pair only when both paths are absent, accepts an existing valid pair
+without changing it, and fails on a partial pair, unsafe permissions, symlink, or
+public/private mismatch. `-check-config` opens and validates the complete durable
+store, witness pair, and TLS inputs without serving.
+
+The packaged service keeps both witness files in the owner-only state directory.
+The private key is mode `0600`; the public key is mode `0644`, but the directory is
+mode `0700`, so an unprivileged host account still cannot traverse to it. The
+stable public-key location is
+`/var/lib/steward-control/witness.public.pem`. A root operator can copy that file
+to an auditor or offline verification station. Upgrades and repeated installation
+preserve both files. Steward has no implicit key-rotation path because changing
+this identity would break continuity with previously verified witness exports.
 
 All request bodies, responses, pages, identifiers, and retained collections are
 bounded. Capacity options are startup invariants: restarting with values smaller

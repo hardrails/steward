@@ -35,3 +35,11 @@ Witness upload is asynchronous and never gates local enforcement. Full signed
 records remain on the node; the controller does not become an evidence
 warehouse. Revisit this decision if customers require public transparency,
 cross-controller gossip, or third-party inclusion and consistency proofs.
+
+The controller uses a dedicated Ed25519 witness identity, separate from TLS and
+bearer authentication. Fresh initialization creates an owner-only private key and
+matching public key. Existing controllers use an explicit idempotent migration
+that creates the pair only when both files are absent. Normal startup validates
+the pair and fails on partial state, unsafe permissions, symlinks, or mismatch.
+The installer preserves the identity across upgrades and exposes one stable
+public-key path for offline verifiers.

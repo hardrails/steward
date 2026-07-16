@@ -213,6 +213,8 @@ for path, expected_type, expected_mode in (
     (token_path, "file", 0o600),
     (state_path, "directory", 0o700),
     (state_path / "auth.key", "file", 0o600),
+    (state_path / "witness.private.pem", "file", 0o600),
+    (state_path / "witness.public.pem", "file", 0o644),
 ):
     metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode):

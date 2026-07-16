@@ -33,6 +33,8 @@ locals {
     readonly control_config=/etc/steward-control/control.env
     readonly control_state_dir=/var/lib/steward-control
     readonly control_auth_key=/var/lib/steward-control/auth.key
+    readonly control_witness_private_key=/var/lib/steward-control/witness.private.pem
+    readonly control_witness_public_key=/var/lib/steward-control/witness.public.pem
     readonly control_service=steward-control.service
     readonly proc_root=/proc
     readonly stamp_dir=/var/lib/steward-control-bootstrap
@@ -198,8 +200,9 @@ locals {
       local expected actual size
       [[ -f $control_config && ! -L $control_config ]] || return 1
       [[ $(stat -c '%u:%g:%a:%h' -- "$control_config" 2>/dev/null) == 0:0:600:1 ]] || return 1
-      printf -v expected 'STEWARD_CONTROL_ADDR=%s\nSTEWARD_CONTROL_STATE_DIR=%s\nSTEWARD_CONTROL_AUTH_KEY_FILE=%s\nSTEWARD_CONTROL_TLS_CERT_FILE=\nSTEWARD_CONTROL_TLS_KEY_FILE=' \
-        "$control_address" "$control_state_dir" "$control_auth_key"
+      printf -v expected 'STEWARD_CONTROL_ADDR=%s\nSTEWARD_CONTROL_STATE_DIR=%s\nSTEWARD_CONTROL_AUTH_KEY_FILE=%s\nSTEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=%s\nSTEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=%s\nSTEWARD_CONTROL_TLS_CERT_FILE=\nSTEWARD_CONTROL_TLS_KEY_FILE=' \
+        "$control_address" "$control_state_dir" "$control_auth_key" \
+        "$control_witness_private_key" "$control_witness_public_key"
       size=$(stat -c '%s' -- "$control_config" 2>/dev/null) || return 1
       (( size == $${#expected} + 1 )) || return 1
       actual=$(<"$control_config")
@@ -215,6 +218,8 @@ locals {
         "-addr=$control_address"
         "-state-dir=$control_state_dir"
         "-auth-key-file=$control_auth_key"
+        "-witness-private-key-file=$control_witness_private_key"
+        "-witness-public-key-file=$control_witness_public_key"
         -tls-cert-file=
         -tls-key-file=
       )
