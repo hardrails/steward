@@ -168,8 +168,12 @@ func TestExplicitControlCAReplacesSystemTrust(t *testing.T) {
 	if !ok || transport.TLSClientConfig == nil || transport.TLSClientConfig.RootCAs == nil {
 		t.Fatal("control client omitted its explicit private trust pool")
 	}
-	if subjects := transport.TLSClientConfig.RootCAs.Subjects(); len(subjects) != 1 {
-		t.Fatalf("explicit private CA retained %d trust subjects, want exactly one", len(subjects))
+	expected := x509.NewCertPool()
+	if !expected.AppendCertsFromPEM(caPEM) {
+		t.Fatal("test CA could not be added to the expected trust pool")
+	}
+	if !transport.TLSClientConfig.RootCAs.Equal(expected) {
+		t.Fatal("explicit private CA did not replace the system trust pool")
 	}
 }
 

@@ -402,18 +402,6 @@ func jsonContentType(value string) bool {
 	return err == nil && mediaType == "application/json"
 }
 
-func ensureEOF(decoder *json.Decoder) error {
-	var extra any
-	err := decoder.Decode(&extra)
-	if errors.Is(err, io.EOF) {
-		return nil
-	}
-	if err == nil {
-		return errors.New("response contains trailing JSON")
-	}
-	return err
-}
-
 func loopbackHost(host string) bool {
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
