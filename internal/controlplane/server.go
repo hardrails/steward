@@ -4,6 +4,7 @@
 package controlplane
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -24,37 +25,43 @@ import (
 )
 
 const (
-	maxRequestBytes  = 1 << 20
-	maxResponseBytes = 1 << 20
-	defaultPageSize  = 100
-	maxPageSize      = 500
+	maxRequestBytes           = 1 << 20
+	maxResponseBytes          = 1 << 20
+	defaultPageSize           = 100
+	maxPageSize               = 500
+	evidenceChallengeLifetime = 2 * time.Minute
+	maxEvidenceExportAttempts = 3
+	evidenceExportRetryAfter  = 1
 )
 
 var errBodyTooLarge = errors.New("request body exceeds 1 MiB")
 
 type Config struct {
-	Store         *controlstore.Store
-	Auth          *controlauth.Manager
-	LeaseDuration time.Duration
-	MaxPoll       int
-	Now           func() time.Time
-	Logger        *slog.Logger
+	Store             *controlstore.Store
+	Auth              *controlauth.Manager
+	WitnessPrivateKey ed25519.PrivateKey
+	LeaseDuration     time.Duration
+	MaxPoll           int
+	Now               func() time.Time
+	Logger            *slog.Logger
 }
 
 type Server struct {
-	store   *controlstore.Store
-	auth    *controlauth.Manager
-	lease   time.Duration
-	maxPoll int
-	now     func() time.Time
-	logger  *slog.Logger
-	mux     *http.ServeMux
+	store      *controlstore.Store
+	auth       *controlauth.Manager
+	witnessKey ed25519.PrivateKey
+	lease      time.Duration
+	maxPoll    int
+	now        func() time.Time
+	logger     *slog.Logger
+	mux        *http.ServeMux
 }
 
 func New(config Config) (*Server, error) {
 	if config.Store == nil || config.Auth == nil || config.LeaseDuration <= 0 ||
-		config.LeaseDuration > controlstore.MaxDeliveryLease || config.MaxPoll <= 0 || config.MaxPoll > controlprotocol.MaxExecutorDeliveries {
-		return nil, errors.New("control server requires store, auth, a lease no greater than 10 minutes, and a bounded poll batch")
+		config.LeaseDuration > controlstore.MaxDeliveryLease || config.MaxPoll <= 0 ||
+		config.MaxPoll > controlprotocol.MaxExecutorDeliveries || len(config.WitnessPrivateKey) != ed25519.PrivateKeySize {
+		return nil, errors.New("control server requires store, auth, an Ed25519 witness key, a lease no greater than 10 minutes, and a bounded poll batch")
 	}
 	now := config.Now
 	if now == nil {
@@ -65,7 +72,7 @@ func New(config Config) (*Server, error) {
 		logger = slog.Default()
 	}
 	server := &Server{
-		store: config.Store, auth: config.Auth, lease: config.LeaseDuration,
+		store: config.Store, auth: config.Auth, witnessKey: append(ed25519.PrivateKey(nil), config.WitnessPrivateKey...), lease: config.LeaseDuration,
 		maxPoll: config.MaxPoll, now: now, logger: logger, mux: http.NewServeMux(),
 	}
 	server.routes()
@@ -93,12 +100,16 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/enroll", server.enroll)
 	server.mux.HandleFunc("/v1/node-credentials/{credential_id}", server.nodeCredential)
 	server.mux.HandleFunc("/v1/nodes/{node_id}", server.nodeAdministration)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence", server.evidenceAdministration)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/export", server.evidenceExport)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes", server.nodes)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}", server.node)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands", server.commands)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands/{command_id}", server.command)
 	server.mux.HandleFunc("/executor-uplink/poll", server.executorPoll)
 	server.mux.HandleFunc("/executor-uplink/report", server.executorReport)
+	server.mux.HandleFunc("/evidence-uplink/poll", server.evidencePoll)
+	server.mux.HandleFunc("/evidence-uplink/report", server.evidenceReport)
 	server.mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
 		writeError(writer, http.StatusNotFound, "not_found", "the requested control-plane route does not exist")
 	})
@@ -283,12 +294,16 @@ func (server *Server) enrollments(writer http.ResponseWriter, request *http.Requ
 		status = http.StatusCreated
 	}
 	writeJSON(writer, status, struct {
-		EnrollmentID    string   `json:"enrollment_id"`
-		EnrollmentToken string   `json:"enrollment_token"`
-		NodeID          string   `json:"node_id"`
-		TenantIDs       []string `json:"tenant_ids"`
-		ExpiresAt       string   `json:"expires_at"`
-	}{enrollment.ID, raw, enrollment.NodeID, append([]string(nil), enrollment.TenantIDs...), enrollment.ExpiresAt})
+		ControllerInstanceID string   `json:"controller_instance_id"`
+		EnrollmentID         string   `json:"enrollment_id"`
+		EnrollmentToken      string   `json:"enrollment_token"`
+		NodeID               string   `json:"node_id"`
+		TenantIDs            []string `json:"tenant_ids"`
+		ExpiresAt            string   `json:"expires_at"`
+	}{
+		server.auth.InstanceID(), enrollment.ID, raw, enrollment.NodeID,
+		append([]string(nil), enrollment.TenantIDs...), enrollment.ExpiresAt,
+	})
 }
 
 func (server *Server) enroll(writer http.ResponseWriter, request *http.Request) {
@@ -296,13 +311,16 @@ func (server *Server) enroll(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	var input struct {
-		EnrollmentToken string `json:"enrollment_token"`
-		RequestID       string `json:"request_id"`
+		EnrollmentToken       string                                          `json:"enrollment_token"`
+		RequestID             string                                          `json:"request_id"`
+		EvidenceIdentityProof controlprotocol.ExecutorEvidenceIdentityProofV1 `json:"evidence_identity_proof"`
 	}
 	if !server.decode(writer, request, &input) {
 		return
 	}
-	credential, err := server.store.ExchangeEnrollment(server.auth, input.EnrollmentToken, input.RequestID, server.now())
+	credential, err := server.store.ExchangeEnrollment(
+		server.auth, input.EnrollmentToken, input.RequestID, input.EvidenceIdentityProof, server.now(),
+	)
 	if err != nil {
 		server.storeError(writer, err, false)
 		return
@@ -348,6 +366,85 @@ func (server *Server) nodeAdministration(writer http.ResponseWriter, request *ht
 		NodeID             string `json:"node_id"`
 		RevokedCredentials int    `json:"revoked_credentials"`
 	}{request.PathValue("node_id"), revoked})
+}
+
+func (server *Server) evidenceAdministration(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	inspection, err := server.store.InspectExecutorEvidence(identity, request.PathValue("node_id"))
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	response := server.evidenceInspection(request.PathValue("node_id"), inspection)
+	if err := response.Validate(); err != nil {
+		server.logger.Error("retained Executor evidence inspection is invalid", "error", err, "node_id", request.PathValue("node_id"))
+		writeError(writer, http.StatusInternalServerError, "internal_error", "the control plane could not encode valid evidence state")
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) evidenceExport(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	nodeID := request.PathValue("node_id")
+	for attempt := 0; attempt < maxEvidenceExportAttempts; attempt++ {
+		snapshot, err := server.store.SnapshotExecutorEvidence(identity, nodeID)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		inspection := snapshot.Inspection
+		if inspection.IdentityProof == nil {
+			server.storeError(writer, controlstore.ErrConflict, false)
+			return
+		}
+		statement := controlprotocol.ExecutorEvidenceExportStatementV1{
+			ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1, ControllerInstanceID: server.auth.InstanceID(),
+			ControlNodeID: nodeID, IdentityProof: *inspection.IdentityProof, Status: inspection.Status,
+			ExportedAt: server.now().UTC().Format(time.RFC3339Nano),
+		}
+		export, err := controlprotocol.SignExecutorEvidenceExportV1(statement, server.witnessKey)
+		if err != nil {
+			server.logger.Error("sign Executor evidence export", "error", err, "node_id", nodeID)
+			writeError(writer, http.StatusInternalServerError, "internal_error", "the control plane could not sign a valid evidence export")
+			return
+		}
+		current, err := server.store.ExecutorEvidenceSnapshotCurrent(identity, nodeID, snapshot)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		if current {
+			writeJSON(writer, http.StatusOK, export)
+			return
+		}
+	}
+	writer.Header().Set("Retry-After", strconv.Itoa(evidenceExportRetryAfter))
+	writeError(
+		writer,
+		http.StatusConflict,
+		"conflict",
+		"evidence changed while the export was being signed; retry after the indicated delay",
+	)
+}
+
+func (server *Server) evidenceInspection(nodeID string, inspection controlstore.ExecutorEvidenceInspection) controlprotocol.ExecutorEvidenceInspectionV1 {
+	return controlprotocol.ExecutorEvidenceInspectionV1{
+		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1, ControllerInstanceID: server.auth.InstanceID(),
+		ControlNodeID: nodeID, IdentityProof: inspection.IdentityProof, Status: inspection.Status,
+	}
 }
 
 func (server *Server) nodes(writer http.ResponseWriter, request *http.Request) {
@@ -501,6 +598,47 @@ func (server *Server) executorReport(writer http.ResponseWriter, request *http.R
 	writeJSON(writer, http.StatusOK, controlprotocol.ExecutorReportResponseV3{
 		ProtocolVersion: controlprotocol.ExecutorProtocolV3, Applied: applied,
 	})
+}
+
+func (server *Server) evidencePoll(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.nodeIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input controlprotocol.ExecutorEvidencePollRequestV1
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	now := server.now()
+	response, err := server.store.PollExecutorEvidence(server.auth, identity, input, now, now.Add(evidenceChallengeLifetime))
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) evidenceReport(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.nodeIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var report controlprotocol.ExecutorEvidenceReportV1
+	if !server.decode(writer, request, &report) {
+		return
+	}
+	response, err := server.store.ApplyExecutorEvidenceReport(server.auth, identity, report, server.now())
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (server *Server) operatorIdentity(writer http.ResponseWriter, request *http.Request) (controlauth.Identity, bool) {

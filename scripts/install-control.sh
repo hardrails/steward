@@ -18,6 +18,8 @@ readonly release_url="$project_url/releases"
 readonly service_user=steward-control
 readonly service_group=steward-control
 readonly state_dir=/var/lib/steward-control
+readonly witness_private_key=$state_dir/witness.private.pem
+readonly witness_public_key=$state_dir/witness.public.pem
 readonly config_dir=/etc/steward-control
 readonly config_file=$config_dir/control.env
 readonly releases_dir=/opt/steward-control/releases
@@ -735,7 +737,7 @@ read_existing_config() {
 	fi
 	while IFS= read -r line || [[ -n $line ]]; do
 		case "$line" in "" | \#*) continue ;; esac
-		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE)=([^[:space:]]*)$ ]]; then
+		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE|STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE)=([^[:space:]]*)$ ]]; then
 			echo "install-control: unsupported or malformed setting in $config_file" >&2; exit 1
 		fi
 		key=${BASH_REMATCH[1]}
@@ -747,6 +749,19 @@ read_existing_config() {
 	done
 	if [[ ${existing[STEWARD_CONTROL_STATE_DIR]} != "$state_dir" || ${existing[STEWARD_CONTROL_AUTH_KEY_FILE]} != "$state_dir/auth.key" ]]; then
 		echo "install-control: existing state paths are not installer-managed" >&2; exit 1
+	fi
+	if { [[ ${existing[STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE]+present} == present ]] &&
+		[[ ${existing[STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE]+present} != present ]]; } ||
+		{ [[ ${existing[STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE]+present} != present ]] &&
+			[[ ${existing[STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE]+present} == present ]]; }; then
+		echo "install-control: existing witness key configuration is partial" >&2
+		exit 1
+	fi
+	if [[ ${existing[STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE]+present} == present ]] &&
+		[[ ${existing[STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE]} != "$witness_private_key" ||
+			${existing[STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE]} != "$witness_public_key" ]]; then
+		echo "install-control: existing witness key paths are not installer-managed" >&2
+		exit 1
 	fi
 	if [[ -n ${existing[STEWARD_CONTROL_TLS_CERT_FILE]} || -n ${existing[STEWARD_CONTROL_TLS_KEY_FILE]} ]]; then
 		if [[ ${existing[STEWARD_CONTROL_TLS_CERT_FILE]} != "$tls_cert_dest" || ${existing[STEWARD_CONTROL_TLS_KEY_FILE]} != "$tls_key_dest" ]]; then
@@ -1029,14 +1044,16 @@ publish_admin_token() {
 	fi
 }
 validate_state_tree() {
-	local expected_uid=$1 expected_gid=$2 entry metadata
+	local expected_uid=$1 expected_gid=$2 entry metadata expected_mode
 	while IFS= read -r -d '' entry; do
 		if [[ ! -f $entry || -L $entry ]]; then
 			echo "install-control: durable state contains a link or special object: $entry" >&2
 			return 1
 		fi
+		expected_mode=600
+		[[ $entry != "$witness_public_key" ]] || expected_mode=644
 		metadata=$(stat -c '%u:%g:%a:%h' -- "$entry")
-		if [[ $metadata != "$expected_uid:$expected_gid:600:1" ]]; then
+		if [[ $metadata != "$expected_uid:$expected_gid:$expected_mode:1" ]]; then
 			echo "install-control: durable state file has unsafe ownership, mode, or link count: $entry" >&2
 			return 1
 		fi
@@ -1629,6 +1646,8 @@ config_tmp=$config_dir/.control.env.$$
 	echo "STEWARD_CONTROL_ADDR=$address"
 	echo "STEWARD_CONTROL_STATE_DIR=$state_dir"
 	echo "STEWARD_CONTROL_AUTH_KEY_FILE=$state_dir/auth.key"
+	echo "STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=$witness_private_key"
+	echo "STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=$witness_public_key"
 	echo "STEWARD_CONTROL_TLS_CERT_FILE=$desired_cert"
 	echo "STEWARD_CONTROL_TLS_KEY_FILE=$desired_key"
 } >"$config_tmp"
@@ -1686,7 +1705,9 @@ if [[ $handoff_needed == true ]]; then
 	fi
 	handoff_file=$handoff_dir/admin.token
 	initialize_args=(-initialize -addr 127.0.0.1:0 -state-dir "$state_dir" \
-		-auth-key-file "$state_dir/auth.key" -admin-token-file "$handoff_file")
+		-auth-key-file "$state_dir/auth.key" -admin-token-file "$handoff_file" \
+		-witness-private-key-file "$witness_private_key" \
+		-witness-public-key-file "$witness_public_key")
 	if [[ $state_identity == service ]]; then
 		if ! timeout --signal=TERM --kill-after=2 30 \
 			runuser -u "$service_user" -- "$release_dir/steward-control" "${initialize_args[@]}" >/dev/null; then
@@ -1720,6 +1741,17 @@ if [[ $(stat -c '%u:%g:%a' -- "$state_dir") != "$service_uid:$service_gid:700" ]
 fi
 validate_state_tree "$service_uid" "$service_gid"
 
+witness_args=(-initialize-witness-key -addr 127.0.0.1:0 -state-dir "$state_dir" \
+	-auth-key-file "$state_dir/auth.key" \
+	-witness-private-key-file "$witness_private_key" \
+	-witness-public-key-file "$witness_public_key")
+if ! timeout --signal=TERM --kill-after=2 30 \
+	runuser -u "$service_user" -- "$release_dir/steward-control" "${witness_args[@]}" >/dev/null; then
+	echo "install-control: controller witness-key initialization failed or exceeded its 30-second bound; existing key files were not replaced" >&2
+	exit 1
+fi
+validate_state_tree "$service_uid" "$service_gid"
+
 if [[ $handoff_needed == true ]]; then
 	handoff_digest=$(sha256sum "$handoff_file" | awk '{print $1}')
 	[[ $handoff_digest =~ ^[0-9a-f]{64}$ ]] || { echo "install-control: could not bind the admin token handoff to the durable journal" >&2; exit 1; }
@@ -1730,7 +1762,10 @@ if [[ $handoff_needed == true ]]; then
 	handoff_dir=
 fi
 
-check_args=(-check-config -addr "$address" -state-dir "$state_dir" -auth-key-file "$state_dir/auth.key")
+check_args=(-check-config -addr "$address" -state-dir "$state_dir" \
+	-auth-key-file "$state_dir/auth.key" \
+	-witness-private-key-file "$witness_private_key" \
+	-witness-public-key-file "$witness_public_key")
 if [[ -n $desired_cert ]]; then check_args+=(-tls-cert-file "$desired_cert" -tls-key-file "$desired_key"); fi
 if ! timeout --signal=TERM --kill-after=2 15 \
 	runuser -u "$service_user" -- "$release_dir/steward-control" "${check_args[@]}" >/dev/null; then
@@ -1768,5 +1803,6 @@ rm -rf "$work"
 echo "Steward Control $version is installed."
 echo "  listener: $address"
 echo "  state:    $state_dir"
+echo "  witness public key: $witness_public_key"
 echo "  doctor:   sudo $doctor_link"
 if [[ $admin_token_created == true ]]; then echo "  admin token: $admin_token_out (contents shown once in that file only)"; fi

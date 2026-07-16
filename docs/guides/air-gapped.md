@@ -148,10 +148,11 @@ sudo /usr/local/libexec/steward-control/control-doctor \
 
 Use `stewardctl` from the matching full release archive on a trusted administration
 system to create tenants and exchange a short-lived enrollment. The dedicated
-controller archive does not include operator clients. Transfer the resulting
-node-scoped Executor credential and public CA certificate to each staged node
-through the facility's authenticated channel; tenant and site private signing keys
-stay on their separate signing systems. Follow the
+controller archive does not include operator clients. Generate the receipt key on
+the staged node, use it for the enrollment proof, and retain it there. Transfer the
+resulting node-scoped Executor credential, evidence config, and public CA
+certificate through the facility's authenticated channel; tenant and site private
+signing keys stay on their separate signing systems. Follow the
 [control-plane guide]({{ '/guides/control-plane/' | relative_url }}) for the exact
 commands and retry rules.
 
@@ -162,6 +163,12 @@ RELEASE_TAG="<release-tag>"
 sudo install -d -o root -g root -m 0700 /root/steward-enrollment
 sudo install -o root -g root -m 0600 \
   /media/enrollment/executor-node.json /root/steward-enrollment/executor-node.json
+sudo install -o root -g root -m 0600 \
+  /media/enrollment/executor-evidence.env /root/steward-enrollment/executor-evidence.env
+sudo install -o root -g root -m 0600 \
+  /secure/node-receipts.private.pem /root/steward-enrollment/node-receipts.private.pem
+sudo install -o root -g root -m 0644 \
+  /secure/node-receipts.public /root/steward-enrollment/node-receipts.public
 sudo install -o root -g root -m 0644 \
   /media/enrollment/control-plane-ca.pem /root/steward-enrollment/control-plane-ca.pem
 sudo install -o root -g root -m 0644 \
@@ -176,7 +183,10 @@ sudo /bin/bash -p "/root/steward-$RELEASE_TAG/install-steward.sh" \
   --admission-policy /root/steward-enrollment/site-policy.dsse.json \
   --site-root-public-key /root/steward-enrollment/site-root.public \
   --site-root-key-id site-root-1 \
-  --node-id node-a
+  --node-id node-a \
+  --executor-evidence-config /root/steward-enrollment/executor-evidence.env \
+  --executor-evidence-private-key /root/steward-enrollment/node-receipts.private.pem \
+  --executor-evidence-public-key /root/steward-enrollment/node-receipts.public
 ```
 
 For offline gVisor installation add:

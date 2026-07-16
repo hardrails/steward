@@ -9,6 +9,7 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlclient"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -28,6 +29,7 @@ type Control interface {
 	RevokeNode(context.Context, string) (controlclient.NodeRevocation, error)
 	SubmitCommand(context.Context, string, string, []byte) (controlclient.Command, error)
 	GetCommand(context.Context, string, string, string) (controlclient.Command, error)
+	InspectExecutorEvidence(context.Context, string) (controlprotocol.ExecutorEvidenceInspectionV1, error)
 }
 
 type controlListArgs struct {
@@ -67,6 +69,26 @@ type controlCommandStatusArgs struct {
 	TenantID  string `json:"tenant_id"`
 	NodeID    string `json:"node_id"`
 	CommandID string `json:"command_id"`
+}
+
+type controlEvidenceStatusArgs struct {
+	NodeID string `json:"node_id"`
+}
+
+type controlEvidenceStatusResult struct {
+	ProtocolVersion      int                                      `json:"protocol_version"`
+	ControllerInstanceID string                                   `json:"controller_instance_id"`
+	ControlNodeID        string                                   `json:"control_node_id"`
+	ReceiptIdentity      *controlEvidenceReceiptIdentity          `json:"receipt_identity,omitempty"`
+	Status               controlprotocol.ExecutorEvidenceStatusV1 `json:"status"`
+}
+
+type controlEvidenceReceiptIdentity struct {
+	EnrollmentID    string `json:"enrollment_id"`
+	Stream          string `json:"stream"`
+	ReceiptNodeID   string `json:"receipt_node_id"`
+	ReceiptEpoch    uint64 `json:"receipt_epoch"`
+	PublicKeySHA256 string `json:"public_key_sha256"`
 }
 
 func (s *Server) callControlTool(ctx context.Context, name string, raw []byte) (any, error) {
@@ -149,6 +171,30 @@ func (s *Server) callControlTool(ctx context.Context, name string, raw []byte) (
 			return nil, controlFailure("command status", err)
 		}
 		return result, nil
+	case "steward_control_evidence_status":
+		var arguments controlEvidenceStatusArgs
+		if decodeArguments(raw, &arguments) != nil || !validControlIdentifier(arguments.NodeID, 128) {
+			return nil, errors.New("steward_control_evidence_status requires node_id")
+		}
+		result, err := s.control.InspectExecutorEvidence(ctx, arguments.NodeID)
+		if err != nil {
+			return nil, controlFailure("evidence status", err)
+		}
+		if err := result.Validate(); err != nil {
+			return nil, controlFailure("evidence status", err)
+		}
+		projected := controlEvidenceStatusResult{
+			ProtocolVersion: result.ProtocolVersion, ControllerInstanceID: result.ControllerInstanceID,
+			ControlNodeID: result.ControlNodeID, Status: result.Status,
+		}
+		if result.IdentityProof != nil {
+			claim := result.IdentityProof.Claim
+			projected.ReceiptIdentity = &controlEvidenceReceiptIdentity{
+				EnrollmentID: claim.EnrollmentID, Stream: claim.Stream, ReceiptNodeID: claim.ReceiptNodeID,
+				ReceiptEpoch: claim.ReceiptEpoch, PublicKeySHA256: claim.PublicKeySHA256,
+			}
+		}
+		return projected, nil
 	default:
 		return nil, errors.New("unknown control-plane tool")
 	}
@@ -242,6 +288,9 @@ func controlTools() []any {
 		tool("steward_control_command_status", "Inspect signed command", "Read durable delivery and terminal-report metadata for one exact signed command.",
 			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tenant_id", "node_id", "command_id"},
 				"properties": map[string]any{"tenant_id": id128, "node_id": id128, "command_id": id256}}, true, false, true, false),
+		tool("steward_control_evidence_status", "Inspect Executor evidence", "Read the controller's bounded last-good Executor receipt checkpoint and any sticky rollback or equivocation finding for one node. Requires a site-admin control-plane credential.",
+			map[string]any{"type": "object", "additionalProperties": false, "required": []string{"node_id"},
+				"properties": map[string]any{"node_id": id128}}, true, false, true, false),
 	}
 }
 

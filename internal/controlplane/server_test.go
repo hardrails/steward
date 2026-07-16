@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -11,7 +12,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,14 +25,17 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/executoruplink"
 )
 
 type serverFixture struct {
-	server     *Server
-	store      *controlstore.Store
-	now        time.Time
-	adminToken string
+	server         *Server
+	store          *controlstore.Store
+	now            time.Time
+	adminToken     string
+	witnessPrivate ed25519.PrivateKey
+	evidenceKeys   map[string]ed25519.PrivateKey
 }
 
 func newServerFixture(t *testing.T) *serverFixture {
@@ -50,15 +58,66 @@ func newServerFixture(t *testing.T) *serverFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := &serverFixture{store: store, now: now, adminToken: adminToken}
+	fixture := &serverFixture{
+		store: store, now: now, adminToken: adminToken, witnessPrivate: testWitnessPrivate(),
+		evidenceKeys: make(map[string]ed25519.PrivateKey),
+	}
 	fixture.server, err = New(Config{
-		Store: store, Auth: manager, LeaseDuration: 2 * time.Minute, MaxPoll: 32,
+		Store: store, Auth: manager, WitnessPrivateKey: fixture.witnessPrivate,
+		LeaseDuration: 2 * time.Minute, MaxPoll: 32,
 		Now: func() time.Time { return fixture.now },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return fixture
+}
+
+func testWitnessPrivate() ed25519.PrivateKey {
+	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x7a}, ed25519.SeedSize))
+}
+
+type testEnrollmentCapability struct {
+	ControllerInstanceID string   `json:"controller_instance_id"`
+	EnrollmentID         string   `json:"enrollment_id"`
+	EnrollmentToken      string   `json:"enrollment_token"`
+	NodeID               string   `json:"node_id"`
+	TenantIDs            []string `json:"tenant_ids"`
+	ExpiresAt            string   `json:"expires_at"`
+}
+
+func (fixture *serverFixture) evidenceIdentityProof(t *testing.T, enrollment testEnrollmentCapability) controlprotocol.ExecutorEvidenceIdentityProofV1 {
+	t.Helper()
+	private, ok := fixture.evidenceKeys[enrollment.NodeID]
+	if !ok {
+		_, generated, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		private = generated
+		fixture.evidenceKeys[enrollment.NodeID] = private
+	}
+	claim, err := controlprotocol.NewExecutorEvidenceIdentityClaimV1(
+		enrollment.ControllerInstanceID, enrollment.EnrollmentID,
+		enrollment.NodeID, enrollment.NodeID, 1, private.Public().(ed25519.PublicKey),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceIdentityClaimV1(claim, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proof
+}
+
+func enrollmentExchangeBody(t *testing.T, enrollment testEnrollmentCapability, requestID string, proof controlprotocol.ExecutorEvidenceIdentityProofV1) string {
+	t.Helper()
+	return mustJSON(t, struct {
+		EnrollmentToken       string                                          `json:"enrollment_token"`
+		RequestID             string                                          `json:"request_id"`
+		EvidenceIdentityProof controlprotocol.ExecutorEvidenceIdentityProofV1 `json:"evidence_identity_proof"`
+	}{enrollment.EnrollmentToken, requestID, proof})
 }
 
 func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
@@ -93,22 +152,29 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	response = fixture.request(t, http.MethodPost, "/v1/enrollments", operator.Token,
 		`{"request_id":"enrollment-request-1","node_id":"node-1","tenant_ids":["tenant-a"],"ttl_seconds":900}`)
 	requireStatus(t, response, http.StatusCreated)
-	var enrollment struct {
-		EnrollmentToken string `json:"enrollment_token"`
-	}
+	var enrollment testEnrollmentCapability
 	decodeResponse(t, response, &enrollment)
+	if enrollment.ControllerInstanceID != fixture.server.auth.InstanceID() || enrollment.EnrollmentID == "" {
+		t.Fatalf("enrollment omitted witness binding: %+v", enrollment)
+	}
 	response = fixture.request(t, http.MethodPost, "/v1/enrollments", operator.Token,
 		`{"request_id":"enrollment-request-1","node_id":"node-1","tenant_ids":["tenant-a"],"ttl_seconds":900}`)
 	requireStatus(t, response, http.StatusOK)
-	var retriedEnrollment struct {
-		EnrollmentToken string `json:"enrollment_token"`
-	}
+	var retriedEnrollment testEnrollmentCapability
 	decodeResponse(t, response, &retriedEnrollment)
-	if retriedEnrollment.EnrollmentToken != enrollment.EnrollmentToken {
+	if retriedEnrollment.EnrollmentToken != enrollment.EnrollmentToken ||
+		retriedEnrollment.EnrollmentID != enrollment.EnrollmentID ||
+		retriedEnrollment.ControllerInstanceID != enrollment.ControllerInstanceID {
 		t.Fatal("exact enrollment issuance retry changed its bearer")
 	}
+	proof := fixture.evidenceIdentityProof(t, enrollment)
+	requireError(t, fixture.request(t, http.MethodPost, "/v1/enroll", "",
+		mustJSON(t, map[string]string{
+			"enrollment_token": enrollment.EnrollmentToken,
+			"request_id":       "request-1",
+		})), http.StatusUnauthorized, "unauthorized")
 	response = fixture.request(t, http.MethodPost, "/v1/enroll", "",
-		mustJSON(t, map[string]string{"enrollment_token": enrollment.EnrollmentToken, "request_id": "request-1"}))
+		enrollmentExchangeBody(t, enrollment, "request-1", proof))
 	requireStatus(t, response, http.StatusCreated)
 	var nodeCredential controlauth.NodeCredentialFile
 	decodeResponse(t, response, &nodeCredential)
@@ -125,12 +191,80 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	// An exact exchange retry is recoverable and returns the same derived node
 	// credential without retaining its bearer secret in the store.
 	response = fixture.request(t, http.MethodPost, "/v1/enroll", "",
-		mustJSON(t, map[string]string{"enrollment_token": enrollment.EnrollmentToken, "request_id": "request-1"}))
+		enrollmentExchangeBody(t, enrollment, "request-1", proof))
 	requireStatus(t, response, http.StatusCreated)
 	var retried controlauth.NodeCredentialFile
 	decodeResponse(t, response, &retried)
 	if retried != nodeCredential {
 		t.Fatalf("exact enrollment retry changed credential: got %+v want %+v", retried, nodeCredential)
+	}
+
+	evidencePoll := controlprotocol.ExecutorEvidencePollRequestV1{
+		ProtocolVersion:      controlprotocol.ExecutorEvidenceProtocolV1,
+		ControllerInstanceID: enrollment.ControllerInstanceID,
+		ControlNodeID:        enrollment.NodeID,
+		Stream:               proof.Claim.Stream,
+		ReceiptNodeID:        proof.Claim.ReceiptNodeID,
+		ReceiptEpoch:         proof.Claim.ReceiptEpoch,
+		PublicKeySHA256:      proof.Claim.PublicKeySHA256,
+	}
+	response = fixture.request(t, http.MethodPost, "/evidence-uplink/poll", nodeCredential.Credential, mustJSON(t, evidencePoll))
+	requireStatus(t, response, http.StatusOK)
+	var evidencePollResponse controlprotocol.ExecutorEvidencePollResponseV1
+	decodeResponse(t, response, &evidencePollResponse)
+	if err := evidencePollResponse.Validate(); err != nil || evidencePollResponse.Status.Head == nil ||
+		evidencePollResponse.Status.State != controlprotocol.ExecutorEvidenceStatusCurrent ||
+		evidencePollResponse.Status.Head.Sequence != 0 {
+		t.Fatalf("unexpected genesis evidence checkpoint: response=%+v err=%v", evidencePollResponse, err)
+	}
+	evidencePrivate := fixture.evidenceKeys[enrollment.NodeID]
+	evidenceHead := *evidencePollResponse.Status.Head
+	headClaim, err := controlprotocol.NewExecutorEvidenceHeadClaimV1(
+		enrollment.ControllerInstanceID, enrollment.NodeID, evidenceHead, evidenceHead,
+		evidencePollResponse.Challenge, nil, evidencePrivate.Public().(ed25519.PublicKey),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headProof, err := controlprotocol.SignExecutorEvidenceHeadClaimV1(headClaim, evidencePrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nullFramesBody := `{"protocol_version":1,"head_proof":` + mustJSON(t, headProof) + `,"signed_frames_base64":null}`
+	requireError(t, fixture.request(
+		t, http.MethodPost, "/evidence-uplink/report", nodeCredential.Credential, nullFramesBody,
+	), http.StatusBadRequest, "invalid_request")
+	evidenceReport := controlprotocol.ExecutorEvidenceReportV1{
+		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1,
+		HeadProof:       headProof,
+	}
+	response = fixture.request(t, http.MethodPost, "/evidence-uplink/report", nodeCredential.Credential, mustJSON(t, evidenceReport))
+	requireStatus(t, response, http.StatusOK)
+	var evidenceReportResponse controlprotocol.ExecutorEvidenceReportResponseV1
+	decodeResponse(t, response, &evidenceReportResponse)
+	if err := evidenceReportResponse.Validate(); err != nil || evidenceReportResponse.Applied ||
+		evidenceReportResponse.Status.Head == nil || *evidenceReportResponse.Status.Head != evidenceHead {
+		t.Fatalf("unexpected evidence acknowledgement: response=%+v err=%v", evidenceReportResponse, err)
+	}
+
+	response = fixture.request(t, http.MethodGet, "/v1/nodes/"+enrollment.NodeID+"/evidence", fixture.adminToken, "")
+	requireStatus(t, response, http.StatusOK)
+	var inspection controlprotocol.ExecutorEvidenceInspectionV1
+	decodeResponse(t, response, &inspection)
+	if err := inspection.Validate(); err != nil || inspection.IdentityProof == nil ||
+		inspection.ControllerInstanceID != enrollment.ControllerInstanceID || inspection.ControlNodeID != enrollment.NodeID ||
+		inspection.Status.Head == nil || *inspection.Status.Head != evidenceHead {
+		t.Fatalf("unexpected online evidence inspection: inspection=%+v err=%v", inspection, err)
+	}
+
+	response = fixture.request(t, http.MethodGet, "/v1/nodes/"+enrollment.NodeID+"/evidence/export", fixture.adminToken, "")
+	requireStatus(t, response, http.StatusOK)
+	var evidenceExport controlprotocol.ExecutorEvidenceExportV1
+	decodeResponse(t, response, &evidenceExport)
+	if err := controlprotocol.VerifyExecutorEvidenceExportV1(
+		evidenceExport, fixture.witnessPrivate.Public().(ed25519.PublicKey),
+	); err != nil || evidenceExport.Statement.Status.Head == nil || *evidenceExport.Statement.Status.Head != evidenceHead {
+		t.Fatalf("unexpected offline evidence export: export=%+v err=%v", evidenceExport, err)
 	}
 
 	commandRaw := signedCommand(t, fixture.now, "command-1", "tenant-a", "node-1")
@@ -231,6 +365,307 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	requireError(t, response, http.StatusUnauthorized, "unauthorized")
 }
 
+func TestControlPlaneAcceptsRealEvidencePublisherAndExportsCheckpoint(t *testing.T) {
+	fixture := newServerFixture(t)
+	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken,
+		`{"tenant_id":"tenant-a"}`), http.StatusCreated)
+	credential := enrollNodeThroughAPI(t, fixture, fixture.adminToken, "evidence-enrollment", "node-evidence", []string{"tenant-a"})
+	private := fixture.evidenceKeys[credential.NodeID]
+	log, err := evidence.Open(filepath.Join(t.TempDir(), "executor-evidence.bin"), private, credential.NodeID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	if _, err := log.Append(evidence.Event{
+		Type: evidence.AdmissionAllow, TenantID: "tenant-a", RuntimeRef: "runtime-evidence",
+		CapsuleDigest: "sha256:capsule", PolicyDigest: "sha256:policy", Generation: 1,
+		GrantID: "grant-evidence", Outcome: evidence.Allowed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	credentialPath := filepath.Join(t.TempDir(), "node-credential.json")
+	credentialRaw, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(credentialPath, credentialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tlsServer := httptest.NewTLSServer(fixture.server)
+	defer tlsServer.Close()
+	publisher, err := executoruplink.NewEvidencePublisher(executoruplink.EvidencePublisherConfig{
+		BaseURL: tlsServer.URL, CredentialPath: credentialPath,
+		ControllerInstanceID: fixture.server.auth.InstanceID(), PollInterval: time.Second,
+		HTTPClient: tlsServer.Client(), Log: log, PrivateKey: private,
+		SecureExecutor: true, SecureNodeID: credential.NodeID, ProtectedTransport: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		publisher.Run(ctx)
+		close(done)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	var inspection controlprotocol.ExecutorEvidenceInspectionV1
+	for {
+		response := fixture.request(t, http.MethodGet, "/v1/nodes/node-evidence/evidence", fixture.adminToken, "")
+		requireStatus(t, response, http.StatusOK)
+		decodeResponse(t, response, &inspection)
+		if inspection.Status.Head != nil && inspection.Status.Head.Sequence == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("publisher did not advance controller checkpoint: %+v", inspection)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("evidence publisher did not stop after cancellation")
+	}
+
+	response := fixture.request(t, http.MethodGet, "/v1/nodes/node-evidence/evidence/export", fixture.adminToken, "")
+	requireStatus(t, response, http.StatusOK)
+	var exported controlprotocol.ExecutorEvidenceExportV1
+	decodeResponse(t, response, &exported)
+	if err := controlprotocol.VerifyExecutorEvidenceExportV1(
+		exported, fixture.witnessPrivate.Public().(ed25519.PublicKey),
+	); err != nil || exported.Statement.Status.Head == nil || exported.Statement.Status.Head.Sequence != 1 {
+		t.Fatalf("real publisher export=%+v err=%v", exported, err)
+	}
+}
+
+func TestEvidenceExportRetriesConcurrentStickyFinding(t *testing.T) {
+	fixture := newServerFixture(t)
+	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken,
+		`{"tenant_id":"tenant-a"}`), http.StatusCreated)
+	credential := enrollNodeThroughAPI(
+		t, fixture, fixture.adminToken, "export-race-enrollment", "node-export-race", []string{"tenant-a"},
+	)
+	identity, err := fixture.store.AuthenticateNode(fixture.server.auth, credential.Credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := fixture.evidenceKeys[credential.NodeID]
+	public := private.Public().(ed25519.PublicKey)
+	poll, err := fixture.store.PollExecutorEvidence(
+		fixture.server.auth,
+		identity,
+		controlprotocol.ExecutorEvidencePollRequestV1{
+			ProtocolVersion:      controlprotocol.ExecutorEvidenceProtocolV1,
+			ControllerInstanceID: fixture.server.auth.InstanceID(),
+			ControlNodeID:        credential.NodeID,
+			Stream:               controlprotocol.ExecutorEvidenceStreamV1,
+			ReceiptNodeID:        credential.NodeID,
+			ReceiptEpoch:         1,
+			PublicKeySHA256:      controlprotocol.ExecutorEvidencePublicKeySHA256(public),
+		},
+		fixture.now.Add(30*time.Second),
+		fixture.now.Add(3*time.Minute),
+	)
+	if err != nil || poll.Status.Head == nil {
+		t.Fatalf("poll=%#v err=%v", poll, err)
+	}
+	base := *poll.Status.Head
+	observed := base
+	observed.Sequence = 1
+	observed.ChainHash = "sha256:" + strings.Repeat("1", 64)
+	claim, err := controlprotocol.NewExecutorEvidenceHeadClaimV1(
+		fixture.server.auth.InstanceID(), credential.NodeID,
+		base, observed, poll.Challenge, nil, public,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceHeadClaimV1(claim, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := controlprotocol.ExecutorEvidenceReportV1{
+		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1,
+		HeadProof:       proof,
+	}
+
+	firstTimestamp := make(chan struct{})
+	releaseTimestamp := make(chan struct{})
+	var timestampCalls atomic.Int32
+	fixture.server.now = func() time.Time {
+		if timestampCalls.Add(1) == 1 {
+			close(firstTimestamp)
+			<-releaseTimestamp
+			return fixture.now.Add(90 * time.Second)
+		}
+		return fixture.now.Add(2 * time.Minute)
+	}
+	request := httptest.NewRequest(
+		http.MethodGet, "/v1/nodes/"+credential.NodeID+"/evidence/export", nil,
+	)
+	request.Header.Set("Authorization", "Bearer "+fixture.adminToken)
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		fixture.server.ServeHTTP(recorder, request)
+		close(done)
+	}()
+	select {
+	case <-firstTimestamp:
+	case <-time.After(5 * time.Second):
+		t.Fatal("evidence export did not reach timestamp construction")
+	}
+
+	findingAt := fixture.now.Add(time.Minute)
+	applied, applyErr := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.server.auth, identity, report, findingAt,
+	)
+	close(releaseTimestamp)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("evidence export did not complete after concurrent finding")
+	}
+	if applyErr != nil || !applied.Applied ||
+		applied.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected {
+		t.Fatalf("concurrent finding response=%#v err=%v", applied, applyErr)
+	}
+	requireStatus(t, recorder, http.StatusOK)
+	var exported controlprotocol.ExecutorEvidenceExportV1
+	decodeResponse(t, recorder, &exported)
+	if err := controlprotocol.VerifyExecutorEvidenceExportV1(
+		exported, fixture.witnessPrivate.Public().(ed25519.PublicKey),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if timestampCalls.Load() < 2 ||
+		exported.Statement.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected ||
+		exported.Statement.Status.Finding == nil ||
+		exported.Statement.Status.Finding.ObservedHead != observed ||
+		exported.Statement.Status.Finding.DetectedAt != findingAt.UTC().Format(time.RFC3339Nano) {
+		t.Fatalf("export omitted concurrent finding after %d attempts: %#v", timestampCalls.Load(), exported.Statement)
+	}
+}
+
+func TestEvidenceExportReturnsRetryHintAfterRepeatedAdvancement(t *testing.T) {
+	fixture := newServerFixture(t)
+	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken,
+		`{"tenant_id":"tenant-a"}`), http.StatusCreated)
+	credential := enrollNodeThroughAPI(
+		t, fixture, fixture.adminToken, "export-contention-enrollment", "node-export-contention",
+		[]string{"tenant-a"},
+	)
+	identity, err := fixture.store.AuthenticateNode(fixture.server.auth, credential.Credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := fixture.evidenceKeys[credential.NodeID]
+	public := private.Public().(ed25519.PublicKey)
+	log, err := evidence.Open(
+		filepath.Join(t.TempDir(), "export-contention-evidence.bin"), private, credential.NodeID, 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	pollRequest := controlprotocol.ExecutorEvidencePollRequestV1{
+		ProtocolVersion:      controlprotocol.ExecutorEvidenceProtocolV1,
+		ControllerInstanceID: fixture.server.auth.InstanceID(),
+		ControlNodeID:        credential.NodeID,
+		Stream:               controlprotocol.ExecutorEvidenceStreamV1,
+		ReceiptNodeID:        credential.NodeID,
+		ReceiptEpoch:         1,
+		PublicKeySHA256:      controlprotocol.ExecutorEvidencePublicKeySHA256(public),
+	}
+	timestampCalls := 0
+	fixture.server.now = func() time.Time {
+		timestampCalls++
+		at := fixture.now.Add(time.Duration(timestampCalls) * time.Minute)
+		localBase, err := log.CurrentHead()
+		if err != nil {
+			t.Fatal(err)
+		}
+		poll, err := fixture.store.PollExecutorEvidence(
+			fixture.server.auth, identity, pollRequest, at, at.Add(time.Minute),
+		)
+		if err != nil || poll.Status.Head == nil ||
+			poll.Status.Head.Sequence != localBase.Sequence ||
+			poll.Status.Head.ChainHash != fmt.Sprintf("sha256:%x", localBase.ChainHash) {
+			t.Fatalf("contention poll=%#v local=%#v err=%v", poll, localBase, err)
+		}
+		if _, err := log.Append(evidence.Event{
+			Type: evidence.AdmissionAllow, TenantID: "tenant-a",
+			RuntimeRef:    fmt.Sprintf("runtime-contention-%d", timestampCalls),
+			CapsuleDigest: "sha256:capsule", PolicyDigest: "sha256:policy",
+			Generation: uint64(timestampCalls), GrantID: "grant-contention", Outcome: evidence.Allowed,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		delta, err := log.ExportDelta(evidence.Coordinate{
+			Sequence: localBase.Sequence, ChainHash: localBase.ChainHash,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reported := controlprotocol.ExecutorEvidenceHeadV1{
+			Stream: controlprotocol.ExecutorEvidenceStreamV1, ReceiptNodeID: credential.NodeID,
+			ReceiptEpoch: 1, Sequence: delta.Head.Sequence,
+			ChainHash:       fmt.Sprintf("sha256:%x", delta.Head.ChainHash),
+			PublicKeySHA256: controlprotocol.ExecutorEvidencePublicKeySHA256(public),
+		}
+		claim, err := controlprotocol.NewExecutorEvidenceHeadClaimV1(
+			fixture.server.auth.InstanceID(), credential.NodeID,
+			*poll.Status.Head, reported, poll.Challenge, delta.Frames, public,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof, err := controlprotocol.SignExecutorEvidenceHeadClaimV1(claim, private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encodedFrames := make([]string, len(delta.Frames))
+		for index, frame := range delta.Frames {
+			encodedFrames[index] = base64.StdEncoding.EncodeToString(frame)
+		}
+		applied, err := fixture.store.ApplyExecutorEvidenceReport(
+			fixture.server.auth,
+			identity,
+			controlprotocol.ExecutorEvidenceReportV1{
+				ProtocolVersion:    controlprotocol.ExecutorEvidenceProtocolV1,
+				HeadProof:          proof,
+				SignedFramesBase64: encodedFrames,
+			},
+			at.Add(500*time.Millisecond),
+		)
+		if err != nil || !applied.Applied {
+			t.Fatalf("contention advancement=%#v err=%v", applied, err)
+		}
+		return at.Add(time.Second)
+	}
+
+	response := fixture.request(
+		t, http.MethodGet, "/v1/nodes/"+credential.NodeID+"/evidence/export", fixture.adminToken, "",
+	)
+	requireStatus(t, response, http.StatusConflict)
+	if response.Header().Get("Retry-After") != strconv.Itoa(evidenceExportRetryAfter) ||
+		timestampCalls != maxEvidenceExportAttempts {
+		t.Fatalf("retry-after=%q timestamp calls=%d", response.Header().Get("Retry-After"), timestampCalls)
+	}
+	var problem struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	decodeResponse(t, response, &problem)
+	if problem.Error != "conflict" || !strings.Contains(problem.Message, "retry") {
+		t.Fatalf("retryable conflict=%#v", problem)
+	}
+}
+
 func TestControlPlaneRejectsAmbiguousAndCrossTenantRequests(t *testing.T) {
 	fixture := newServerFixture(t)
 	requireStatus(t, fixture.request(t, http.MethodPost, "/v1/tenants", fixture.adminToken, `{"tenant_id":"tenant-a"}`), http.StatusCreated)
@@ -314,16 +749,23 @@ func TestNodePaginationHonorsEncodedResponseBound(t *testing.T) {
 func TestControlServerLeaseLimitMatchesStore(t *testing.T) {
 	fixture := newServerFixture(t)
 	if _, err := New(Config{
-		Store: fixture.store, Auth: fixture.server.auth, LeaseDuration: controlstore.MaxDeliveryLease,
-		MaxPoll: 1,
+		Store: fixture.store, Auth: fixture.server.auth, WitnessPrivateKey: fixture.witnessPrivate,
+		LeaseDuration: controlstore.MaxDeliveryLease,
+		MaxPoll:       1,
 	}); err != nil {
 		t.Fatalf("maximum store lease rejected: %v", err)
 	}
 	if _, err := New(Config{
-		Store: fixture.store, Auth: fixture.server.auth, LeaseDuration: controlstore.MaxDeliveryLease + time.Nanosecond,
-		MaxPoll: 1,
+		Store: fixture.store, Auth: fixture.server.auth, WitnessPrivateKey: fixture.witnessPrivate,
+		LeaseDuration: controlstore.MaxDeliveryLease + time.Nanosecond,
+		MaxPoll:       1,
 	}); err == nil {
 		t.Fatal("lease above the store maximum was accepted")
+	}
+	if _, err := New(Config{
+		Store: fixture.store, Auth: fixture.server.auth, LeaseDuration: time.Minute, MaxPoll: 1,
+	}); err == nil {
+		t.Fatal("missing evidence witness key was accepted")
 	}
 }
 

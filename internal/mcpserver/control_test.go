@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,13 +14,15 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlclient"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
 type fakeControl struct {
-	calls   []string
-	command []byte
-	err     error
+	calls      []string
+	command    []byte
+	inspection controlprotocol.ExecutorEvidenceInspectionV1
+	err        error
 }
 
 func (control *fakeControl) ListTenants(_ context.Context, after string, limit int) (controlclient.TenantList, error) {
@@ -58,20 +61,25 @@ func (control *fakeControl) GetCommand(_ context.Context, tenantID, nodeID, comm
 	return controlclient.Command{CommandID: commandID, TenantID: tenantID, NodeID: nodeID, State: "terminal"}, control.err
 }
 
+func (control *fakeControl) InspectExecutorEvidence(_ context.Context, nodeID string) (controlprotocol.ExecutorEvidenceInspectionV1, error) {
+	control.calls = append(control.calls, "evidence-status:"+nodeID)
+	return control.inspection, control.err
+}
+
 func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	controlOnly, err := NewConfigured(Config{Control: &fakeControl{}, Version: "v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	listed := controlOnly.configuredTools()
-	if len(listed) != 7 {
+	if len(listed) != 8 {
 		t.Fatalf("control-only tool count=%d", len(listed))
 	}
 	raw := string(mustJSON(t, listed))
 	for _, name := range []string{
 		"steward_control_tenant_list", "steward_control_tenant_create", "steward_control_node_list",
 		"steward_control_node_status", "steward_control_node_revoke", "steward_control_command_submit",
-		"steward_control_command_status",
+		"steward_control_command_status", "steward_control_evidence_status",
 	} {
 		if !strings.Contains(raw, name) {
 			t.Fatalf("control tool list omitted %s: %s", name, raw)
@@ -97,6 +105,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	requireAnnotations(t, definitions["steward_control_tenant_create"], false, false, true, false)
 	requireAnnotations(t, definitions["steward_control_node_revoke"], false, true, true, false)
 	requireAnnotations(t, definitions["steward_control_command_submit"], false, true, true, true)
+	requireAnnotations(t, definitions["steward_control_evidence_status"], true, false, true, false)
 	for toolName, acknowledgment := range map[string]string{
 		"steward_control_tenant_create":  "acknowledge_tenant_creation",
 		"steward_control_node_revoke":    "acknowledge_node_revocation",
@@ -124,7 +133,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 }
 
 func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
-	control := &fakeControl{}
+	control := &fakeControl{inspection: testControlEvidenceInspection(t)}
 	server, err := NewConfigured(Config{Control: control, Version: "v1"})
 	if err != nil {
 		t.Fatal(err)
@@ -144,17 +153,26 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 			"acknowledge_command_submission": true,
 		}},
 		{name: "steward_control_command_status", arguments: map[string]any{"tenant_id": "tenant-a", "node_id": "node-a", "command_id": "command-a"}},
+		{name: "steward_control_evidence_status", arguments: map[string]any{"node_id": "node-a"}},
 	}
 	for _, call := range calls {
 		result := callMCPControlTool(t, server, call.name, call.arguments)
 		if controlToolIsError(result) {
 			t.Fatalf("%s failed: %#v", call.name, result)
 		}
+		if call.name == "steward_control_evidence_status" {
+			raw := string(mustJSON(t, result))
+			if !strings.Contains(raw, `"state":"current"`) || !strings.Contains(raw, `"public_key_sha256"`) ||
+				strings.Contains(raw, `"public_key_base64"`) || strings.Contains(raw, `"signature_base64"`) {
+				t.Fatalf("unsafe or incomplete model-visible evidence status=%s", raw)
+			}
+		}
 	}
 	wantCalls := []string{
 		"tenant-list:tenant-0:25", "tenant-create:tenant-a", "node-list:tenant-a:node-0:50",
 		"node-status:tenant-a:node-a", "node-revoke:node-a", "command-submit:tenant-a:node-a",
 		"command-status:tenant-a:node-a:command-a",
+		"evidence-status:node-a",
 	}
 	if strings.Join(control.calls, "|") != strings.Join(wantCalls, "|") {
 		t.Fatalf("calls=%#v", control.calls)
@@ -206,6 +224,9 @@ func TestMCPControlRejectsAmbiguousIdentifiersAndCommandBytes(t *testing.T) {
 		{name: "invalid cursor", tool: "steward_control_tenant_list", arguments: map[string]any{"after": " bad"}},
 		{name: "oversized page", tool: "steward_control_node_list", arguments: map[string]any{"tenant_id": "tenant-a", "limit": 501}},
 		{name: "invalid node", tool: "steward_control_node_status", arguments: map[string]any{"tenant_id": "tenant-a", "node_id": "-node"}},
+		{name: "missing evidence node", tool: "steward_control_evidence_status", arguments: map[string]any{}},
+		{name: "invalid evidence node", tool: "steward_control_evidence_status", arguments: map[string]any{"node_id": "-node"}},
+		{name: "unknown evidence argument", tool: "steward_control_evidence_status", arguments: map[string]any{"node_id": "node-a", "unexpected": true}},
 		{name: "malformed base64", tool: "steward_control_command_submit", arguments: replaceControlArgument(validSubmit, "command_dsse_base64", "%%%")},
 		{name: "noncanonical base64", tool: "steward_control_command_submit", arguments: replaceControlArgument(validSubmit, "command_dsse_base64", base64.StdEncoding.EncodeToString(command)+"\n")},
 		{name: "not DSSE", tool: "steward_control_command_submit", arguments: replaceControlArgument(validSubmit, "command_dsse_base64", base64.StdEncoding.EncodeToString([]byte(`{"not":"dsse"}`)))},
@@ -245,6 +266,33 @@ func TestMCPControlFailuresAreBoundedAndRedacted(t *testing.T) {
 	if !controlToolIsError(result) || !strings.Contains(raw, "failed validation or transport") || strings.Contains(raw, "transport-secret") || len(raw) > 1024 {
 		t.Fatalf("transport failure projection=%s", raw)
 	}
+
+	control.err = &controlclient.APIError{
+		Status: http.StatusForbidden, Code: "sensitive_evidence_code",
+		Message: strings.Repeat("sensitive-evidence-body", 500),
+	}
+	result = callMCPControlTool(t, server, "steward_control_evidence_status", map[string]any{"node_id": "node-a"})
+	raw = string(mustJSON(t, result))
+	if !controlToolIsError(result) || !strings.Contains(raw, "HTTP 403") ||
+		strings.Contains(raw, "sensitive_evidence_code") || strings.Contains(raw, "sensitive-evidence-body") || len(raw) > 1024 {
+		t.Fatalf("evidence API failure projection=%s", raw)
+	}
+}
+
+func TestMCPControlEvidenceStatusRevalidatesModelVisibleOutput(t *testing.T) {
+	control := &fakeControl{inspection: controlprotocol.ExecutorEvidenceInspectionV1{
+		ProtocolVersion:      controlprotocol.ExecutorEvidenceProtocolV1,
+		ControllerInstanceID: strings.Repeat("sensitive-invalid-controller", 100),
+		ControlNodeID:        "node-a",
+		Status:               controlprotocol.ExecutorEvidenceStatusV1{State: controlprotocol.ExecutorEvidenceStatusUnwitnessed},
+	}}
+	server, _ := NewConfigured(Config{Control: control, Version: "v1"})
+	result := callMCPControlTool(t, server, "steward_control_evidence_status", map[string]any{"node_id": "node-a"})
+	raw := string(mustJSON(t, result))
+	if !controlToolIsError(result) || !strings.Contains(raw, "failed validation or transport") ||
+		strings.Contains(raw, "sensitive-invalid-controller") || len(raw) > 1024 {
+		t.Fatalf("invalid evidence projection=%s", raw)
+	}
 }
 
 func TestMCPControlOnlyInitializationDescribesItsExactSurface(t *testing.T) {
@@ -260,7 +308,8 @@ func TestMCPControlOnlyInitializationDescribesItsExactSurface(t *testing.T) {
 	}
 	raw := output.String()
 	if !strings.Contains(raw, "Steward Control Plane Operations") || !strings.Contains(raw, "never issues operator or enrollment secrets") ||
-		!strings.Contains(raw, "steward_control_command_submit") || strings.Contains(raw, "steward_admit") || strings.Contains(raw, "steward_task_submit") {
+		!strings.Contains(raw, "steward_control_command_submit") || !strings.Contains(raw, "steward_control_evidence_status") ||
+		strings.Contains(raw, "steward_admit") || strings.Contains(raw, "steward_task_submit") {
 		t.Fatalf("control-only initialization=%s", raw)
 	}
 }
@@ -317,6 +366,40 @@ func testControlCommand(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func testControlEvidenceInspection(t *testing.T) controlprotocol.ExecutorEvidenceInspectionV1 {
+	t.Helper()
+	private := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	public := private.Public().(ed25519.PublicKey)
+	claim, err := controlprotocol.NewExecutorEvidenceIdentityClaimV1(
+		"controller-a", "enrollment-a", "node-a", "node-a", 1, public,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceIdentityClaimV1(claim, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection := controlprotocol.ExecutorEvidenceInspectionV1{
+		ProtocolVersion:      controlprotocol.ExecutorEvidenceProtocolV1,
+		ControllerInstanceID: "controller-a",
+		ControlNodeID:        "node-a",
+		IdentityProof:        &proof,
+		Status: controlprotocol.ExecutorEvidenceStatusV1{
+			State: controlprotocol.ExecutorEvidenceStatusCurrent,
+			Head: &controlprotocol.ExecutorEvidenceHeadV1{
+				Stream: controlprotocol.ExecutorEvidenceStreamV1, ReceiptNodeID: "node-a", ReceiptEpoch: 1,
+				ChainHash: "sha256:" + strings.Repeat("0", 64), PublicKeySHA256: claim.PublicKeySHA256,
+			},
+			WitnessedAt: "2026-07-16T01:02:03Z",
+		},
+	}
+	if err := inspection.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return inspection
 }
 
 func replaceControlArgument(source map[string]any, name string, value any) map[string]any {

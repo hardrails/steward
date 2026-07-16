@@ -29,6 +29,12 @@ Signed admission (all trust inputs are optional as one group):
   --site-root-public-key FILE   Base64 Ed25519 site-root public key
   --site-root-key-id ID         Signature key ID used by the policy
   --node-id ID                  Stable node ID (machine-derived if omitted)
+  --executor-evidence-config FILE
+                                Enrollment evidence config from stewardctl
+  --executor-evidence-private-key FILE
+                                Receipt private key used during enrollment
+  --executor-evidence-public-key FILE
+                                Matching receipt public key
   --allow-host-admin-intent     Let the host token select signed tenant intent
 
 Optional:
@@ -57,6 +63,9 @@ admission_policy=
 site_root=
 site_root_key_id=
 node_id=
+executor_evidence_config=
+receipt_private=
+receipt_public=
 allow_host_admin=false
 start_services=true
 local_only=false
@@ -71,6 +80,9 @@ while [[ $# -gt 0 ]]; do
 		--site-root-public-key) site_root=${2:-}; shift 2 ;;
 		--site-root-key-id) site_root_key_id=${2:-}; shift 2 ;;
 		--node-id) node_id=${2:-}; shift 2 ;;
+		--executor-evidence-config) executor_evidence_config=${2:-}; shift 2 ;;
+		--executor-evidence-private-key) receipt_private=${2:-}; shift 2 ;;
+		--executor-evidence-public-key) receipt_public=${2:-}; shift 2 ;;
 		--allow-host-admin-intent) allow_host_admin=true; shift ;;
 		--local-only) local_only=true; shift ;;
 		--no-start) start_services=false; shift ;;
@@ -126,6 +138,22 @@ if (( admission_required == 0 )) && { [[ -n $node_id ]] || [[ $allow_host_admin 
 	echo "configure-node: --node-id and --allow-host-admin-intent require signed admission trust inputs" >&2
 	exit 2
 fi
+evidence_input_count=0
+for value in "$executor_evidence_config" "$receipt_private" "$receipt_public"; do
+	[[ -z $value ]] || ((evidence_input_count += 1))
+done
+if (( evidence_input_count != 0 && evidence_input_count != 3 )); then
+	echo "configure-node: Executor evidence enrollment requires config, private key, and public key together" >&2
+	exit 2
+fi
+if (( evidence_input_count == 3 && admission_required != 3 )); then
+	echo "configure-node: Executor evidence enrollment requires signed-admission trust inputs in the same transaction" >&2
+	exit 2
+fi
+if (( evidence_input_count == 3 )) && [[ $local_only == true ]]; then
+	echo "configure-node: Executor evidence enrollment requires a remote control plane" >&2
+	exit 2
+fi
 if (( admission_required == 3 )); then
 	[[ $site_root_key_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$ ]] || {
 		echo "configure-node: invalid --site-root-key-id" >&2
@@ -143,7 +171,8 @@ for identity in steward steward-executor steward-gateway; do
 	}
 done
 for path in /etc/steward/steward.json /etc/steward/executor.env \
-	/usr/local/bin/steward-executor /usr/local/libexec/steward/node-preflight; do
+	/usr/local/bin/stewardctl /usr/local/bin/steward-executor \
+	/usr/local/libexec/steward/node-preflight; do
 	if [[ ! -e $path ]]; then
 		echo "configure-node: missing installed path $path; install Steward first" >&2
 		exit 2
@@ -332,6 +361,17 @@ stage_node_input_sources() {
 			"site-root public key" 4096 false || return
 		site_root=$input_stage/site-root.public
 	fi
+	if (( evidence_input_count == 3 )); then
+		trusted_input_snapshot "$executor_evidence_config" "$input_stage/executor-evidence.env" \
+			"Executor evidence config" 4096 true || return
+		executor_evidence_config=$input_stage/executor-evidence.env
+		trusted_input_snapshot "$receipt_private" "$input_stage/node-receipts.private.pem" \
+			"receipt private key" 16384 true || return
+		receipt_private=$input_stage/node-receipts.private.pem
+		trusted_input_snapshot "$receipt_public" "$input_stage/node-receipts.public" \
+			"receipt public key" 4096 false || return
+		receipt_public=$input_stage/node-receipts.public
+	fi
 }
 
 cleanup_trusted_input_stage() {
@@ -426,6 +466,79 @@ input_stage=
 trap cleanup_trusted_input_stage EXIT
 create_trusted_input_stage
 stage_node_input_sources
+
+evidence_controller_instance_id=
+evidence_node_id=
+evidence_public_key=
+evidence_config_error() {
+	echo "configure-node: $1" >&2
+	return 2
+}
+parse_executor_evidence_config() {
+	local line key value invalid_bytes
+	declare -A seen=()
+	invalid_bytes=$(LC_ALL=C tr -d '\12\40-\176' <"$executor_evidence_config" | wc -c)
+	if [[ $invalid_bytes != 0 ]]; then
+		evidence_config_error "Executor evidence config must contain printable ASCII lines"
+		return
+	fi
+	while IFS= read -r line || [[ -n $line ]]; do
+		if [[ ! $line =~ ^([A-Z0-9_]+)=(.*)$ ]]; then
+			evidence_config_error "Executor evidence config contains an invalid line"
+			return
+		fi
+		key=${BASH_REMATCH[1]}
+		value=${BASH_REMATCH[2]}
+		if [[ ${seen[$key]+present} == present ]]; then
+			evidence_config_error "Executor evidence config contains duplicate settings"
+			return
+		fi
+		seen[$key]=1
+		case "$key" in
+			STEWARD_EXECUTOR_EVIDENCE_CONFIG_VERSION)
+				if [[ $value != 1 ]]; then
+					evidence_config_error "unsupported Executor evidence config version"
+					return
+				fi
+				;;
+			STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID)
+				evidence_controller_instance_id=$value
+				;;
+			STEWARD_EXECUTOR_EVIDENCE_NODE_ID)
+				evidence_node_id=$value
+				;;
+			STEWARD_EXECUTOR_EVIDENCE_RECEIPT_EPOCH)
+				if [[ $value != 1 ]]; then
+					evidence_config_error "unsupported Executor receipt epoch"
+					return
+				fi
+				;;
+			STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_BASE64)
+				evidence_public_key=$value
+				;;
+			*)
+				evidence_config_error "Executor evidence config contains an unknown setting"
+				return
+				;;
+		esac
+	done <"$executor_evidence_config"
+	if (( ${#seen[@]} != 5 )) ||
+		[[ ! $evidence_controller_instance_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] ||
+		[[ ! $evidence_node_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] ||
+		[[ ! $evidence_public_key =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+		evidence_config_error "Executor evidence config is incomplete or invalid"
+		return
+	fi
+}
+if (( evidence_input_count == 3 )); then
+	parse_executor_evidence_config
+	receipt_public_value=$(<"$receipt_public")
+	if [[ $receipt_public_value != "$evidence_public_key" ]]; then
+		evidence_config_error "receipt public key does not match the enrollment evidence config"
+	fi
+	/usr/local/bin/stewardctl key match -private-key "$receipt_private" \
+		-public-key "$receipt_public" >/dev/null
+fi
 
 install -d -o root -g root -m 0755 /etc/steward
 backup_dir=$(mktemp -d /etc/steward/.configure-backup.XXXXXX)
@@ -539,7 +652,9 @@ mv -f "$steward_tmp" /etc/steward/steward.json
 steward_tmp=
 
 executor_tmp=$(mktemp /etc/steward/.executor.env.XXXXXX)
-awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" -v local_only="$local_only" '
+awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" -v local_only="$local_only" \
+	-v evidence_enabled="$([[ $evidence_input_count -eq 3 ]] && printf true || printf false)" \
+	-v evidence_controller="$evidence_controller_instance_id" '
 	/^EXECUTOR_UPLINK_URL=/ {
 		print "EXECUTOR_UPLINK_URL=" (local_only == "true" ? "" : url)
 		found_url = 1
@@ -566,9 +681,27 @@ awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" -v loc
 		found_ca = 1
 		next
 	}
+	/^EXECUTOR_EVIDENCE_UPLINK_ENABLED=/ {
+		if (found_evidence_enabled++) exit 3
+		print "EXECUTOR_EVIDENCE_UPLINK_ENABLED=" evidence_enabled
+		next
+	}
+	/^EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID=/ {
+		if (found_evidence_controller++) exit 3
+		print "EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID=" evidence_controller
+		next
+	}
+	/^EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL=/ {
+		if (found_evidence_interval++) exit 3
+		print
+		next
+	}
 	{ print }
 	END {
 		if (!found_delivery) print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE="
+		if (!found_evidence_enabled) print "EXECUTOR_EVIDENCE_UPLINK_ENABLED=" evidence_enabled
+		if (!found_evidence_controller) print "EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID=" evidence_controller
+		if (!found_evidence_interval) print "EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL=30s"
 		if (!found_url || !found_credential || !found_state || !found_ca) exit 3
 	}
 ' /etc/steward/executor.env >"$executor_tmp"
@@ -615,6 +748,13 @@ if [[ $local_only == false ]]; then
 	if [[ $executor_only == true && $executor_credential_scope != node ]]; then
 		transaction_error "steward-control requires a node-scoped Executor credential"
 	fi
+	if [[ $executor_credential_scope == node && $evidence_input_count -ne 3 ]]; then
+		transaction_error "a node-scoped Executor credential requires the enrollment evidence config and receipt key pair"
+	fi
+	if (( evidence_input_count == 3 )) &&
+		[[ $executor_credential_scope != node || $executor_credential_node_id != "$evidence_node_id" ]]; then
+		transaction_error "Executor evidence enrollment identity does not match the node credential"
+	fi
 fi
 if [[ -n $executor_token ]]; then
 	install_atomic "$executor_token" /etc/steward/executor-token \
@@ -651,6 +791,12 @@ if (( admission_required == 3 )); then
 		--no-restart
 	)
 	[[ -z $node_id ]] || admission_args+=(--node-id "$node_id")
+	if (( evidence_input_count == 3 )); then
+		admission_args+=(
+			--receipt-private-key "$receipt_private"
+			--receipt-public-key "$receipt_public"
+		)
+	fi
 	[[ $allow_host_admin == false ]] || admission_args+=(--allow-host-admin-intent)
 	/usr/local/libexec/steward/configure-admission "${admission_args[@]}"
 fi
@@ -691,6 +837,9 @@ if [[ $executor_credential_scope == node ]]; then
 	' /etc/steward/executor.env)
 	if [[ -z $configured_node_id || $configured_node_id != "$executor_credential_node_id" ]]; then
 		transaction_error "node-scoped Executor credential node ID does not match signed admission"
+	fi
+	if (( evidence_input_count == 3 )) && [[ $configured_node_id != "$evidence_node_id" ]]; then
+		transaction_error "Executor evidence enrollment identity does not match signed admission"
 	fi
 	if [[ ! -e $uplink_delivery_state && ! -L $uplink_delivery_state ]]; then
 		uplink_delivery_state_created=true

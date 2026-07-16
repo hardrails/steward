@@ -122,6 +122,10 @@ func TestNodeAdministrationFencesEveryCredentialAndTenantView(t *testing.T) {
 		http.StatusNotFound, "not_found")
 	requireError(t, fixture.request(t, http.MethodDelete, "/v1/nodes/node-1", operatorB, ""),
 		http.StatusForbidden, "forbidden")
+	requireError(t, fixture.request(t, http.MethodGet, "/v1/nodes/node-1/evidence", operatorA, ""),
+		http.StatusForbidden, "forbidden")
+	requireError(t, fixture.request(t, http.MethodGet, "/v1/nodes/node-1/evidence/export", operatorB, ""),
+		http.StatusForbidden, "forbidden")
 
 	response = fixture.request(t, http.MethodDelete, "/v1/nodes/node-1", fixture.adminToken, "")
 	requireStatus(t, response, http.StatusOK)
@@ -182,12 +186,16 @@ func TestControlPlaneRejectsProtocolAndPaginationAmbiguity(t *testing.T) {
 		{http.MethodPost, "/v1/enrollments", `{}`},
 		{http.MethodDelete, "/v1/node-credentials/missing", ""},
 		{http.MethodDelete, "/v1/nodes/node-1", ""},
+		{http.MethodGet, "/v1/nodes/node-1/evidence", ""},
+		{http.MethodGet, "/v1/nodes/node-1/evidence/export", ""},
 		{http.MethodGet, "/v1/tenants/tenant-a/nodes", ""},
 		{http.MethodGet, "/v1/tenants/tenant-a/nodes/node-1", ""},
 		{http.MethodPost, "/v1/tenants/tenant-a/nodes/node-1/commands", `{}`},
 		{http.MethodGet, "/v1/tenants/tenant-a/nodes/node-1/commands/missing", ""},
 		{http.MethodPost, "/executor-uplink/poll", `{}`},
 		{http.MethodPost, "/executor-uplink/report", `{}`},
+		{http.MethodPost, "/evidence-uplink/poll", `{}`},
+		{http.MethodPost, "/evidence-uplink/report", `{}`},
 	} {
 		requireError(t, fixture.request(t, request.method, request.path, "", request.body),
 			http.StatusUnauthorized, "unauthorized")
@@ -203,6 +211,8 @@ func TestControlPlaneRejectsProtocolAndPaginationAmbiguity(t *testing.T) {
 		{"/v1/tenants/tenant-a/nodes/node-1/commands", operator},
 		{"/executor-uplink/poll", node.Credential},
 		{"/executor-uplink/report", node.Credential},
+		{"/evidence-uplink/poll", node.Credential},
+		{"/evidence-uplink/report", node.Credential},
 	} {
 		requireError(t, fixture.request(t, http.MethodPost, request.path, request.token, `{`),
 			http.StatusBadRequest, "invalid_request")
@@ -363,9 +373,15 @@ func TestControlPlaneRouteMatrixPreservesIdempotencyAndConcealment(t *testing.T)
 		{http.MethodGet, "/v1/enroll", "", "", http.StatusMethodNotAllowed, "method_not_allowed"},
 		{http.MethodDelete, "/v1/node-credentials/missing", fixture.adminToken, "", http.StatusNotFound, "not_found"},
 		{http.MethodPost, "/v1/nodes/node-1", fixture.adminToken, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodPost, "/v1/nodes/node-1/evidence", fixture.adminToken, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodGet, "/v1/nodes/node-1/evidence?unexpected=1", fixture.adminToken, "", http.StatusBadRequest, "invalid_request"},
+		{http.MethodPost, "/v1/nodes/node-1/evidence/export", fixture.adminToken, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodGet, "/v1/nodes/node-1/evidence/export?unexpected=1", fixture.adminToken, "", http.StatusBadRequest, "invalid_request"},
 		{http.MethodPost, "/v1/tenants/tenant-a/nodes", operator, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
 		{http.MethodPost, "/v1/tenants/tenant-a/nodes/node-1", operator, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
 		{http.MethodPost, "/executor-uplink/report?unexpected=1", node.Credential, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodPost, "/evidence-uplink/poll?unexpected=1", node.Credential, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodPost, "/evidence-uplink/report?unexpected=1", node.Credential, `{}`, http.StatusBadRequest, "invalid_request"},
 	} {
 		requireError(t, fixture.request(t, request.method, request.path, request.token, request.body), request.status, request.code)
 	}
@@ -416,7 +432,9 @@ func TestReadinessFailsClosedAfterDurableStoreClosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(Config{Store: store, Auth: manager, LeaseDuration: time.Minute, MaxPoll: 1})
+	server, err := New(Config{
+		Store: store, Auth: manager, WitnessPrivateKey: testWitnessPrivate(), LeaseDuration: time.Minute, MaxPoll: 1,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,14 +467,11 @@ func enrollNodeThroughAPI(t *testing.T, fixture *serverFixture, operator, reques
 		TTLSeconds int      `json:"ttl_seconds"`
 	}{requestID, nodeID, tenantIDs, 900}))
 	requireStatus(t, response, http.StatusCreated)
-	var enrollment struct {
-		Token string `json:"enrollment_token"`
-	}
+	var enrollment testEnrollmentCapability
 	decodeResponse(t, response, &enrollment)
-	response = fixture.request(t, http.MethodPost, "/v1/enroll", "", mustJSON(t, map[string]string{
-		"enrollment_token": enrollment.Token,
-		"request_id":       requestID + "-exchange",
-	}))
+	proof := fixture.evidenceIdentityProof(t, enrollment)
+	response = fixture.request(t, http.MethodPost, "/v1/enroll", "",
+		enrollmentExchangeBody(t, enrollment, requestID+"-exchange", proof))
 	requireStatus(t, response, http.StatusCreated)
 	var credential controlauth.NodeCredentialFile
 	decodeResponse(t, response, &credential)

@@ -16,10 +16,26 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hardrails/steward/internal/controlprotocol"
 )
 
 func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 	commandRaw := []byte(`{"payloadType":"x"}`)
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := controlprotocol.NewExecutorEvidenceIdentityClaimV1(
+		"control-test", "enr_1", "node-1", "node-1", 1, public,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceIdentityClaimV1(claim, private)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/enroll" && request.Header.Get("Authorization") != "Bearer operator" {
 			t.Fatalf("missing operator bearer on %s", request.URL.Path)
@@ -46,10 +62,20 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 		case "/v1/operators/operator-1":
 			w.WriteHeader(http.StatusNoContent)
 		case "/v1/enrollments":
-			_, _ = w.Write([]byte(`{"enrollment_id":"enr_1","enrollment_token":"secret","node_id":"node-1","tenant_ids":["tenant-a"],"expires_at":"2026-07-13T12:15:00Z"}`))
+			_, _ = w.Write([]byte(`{"controller_instance_id":"control-test","enrollment_id":"enr_1","enrollment_token":"secret","node_id":"node-1","tenant_ids":["tenant-a"],"expires_at":"2026-07-13T12:15:00Z"}`))
 		case "/v1/enroll":
 			if request.Header.Get("Authorization") != "" {
 				t.Fatal("enrollment leaked operator bearer")
+			}
+			var input struct {
+				EnrollmentToken       string                                          `json:"enrollment_token"`
+				RequestID             string                                          `json:"request_id"`
+				EvidenceIdentityProof controlprotocol.ExecutorEvidenceIdentityProofV1 `json:"evidence_identity_proof"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil ||
+				input.EnrollmentToken != "secret" || input.RequestID != "request-1" ||
+				input.EvidenceIdentityProof != proof {
+				t.Fatalf("enrollment exchange request=%+v error=%v", input, err)
 			}
 			_, _ = w.Write([]byte(`{"version":2,"scope":"node","node_id":"node-1","credential":"node-secret"}`))
 		case "/v1/tenants/tenant-a/nodes/node-1/commands":
@@ -98,7 +124,10 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 	if enrollment, err := client.CreateEnrollment(ctx, "enrollment-request-1", "node-1", []string{"tenant-a"}, 15*time.Minute); err != nil || enrollment.EnrollmentToken != "secret" {
 		t.Fatalf("enrollment=%#v error=%v", enrollment, err)
 	}
-	if credential, err := client.Enroll(ctx, "secret", "request-1"); err != nil || credential.Version != 2 {
+	if _, err := client.Enroll(ctx, "secret", "request-1", controlprotocol.ExecutorEvidenceIdentityProofV1{}); err == nil {
+		t.Fatal("invalid evidence identity proof reached the enrollment endpoint")
+	}
+	if credential, err := client.Enroll(ctx, "secret", "request-1", proof); err != nil || credential.Version != 2 {
 		t.Fatalf("credential=%#v error=%v", credential, err)
 	}
 	if nodes, err := client.ListNodes(ctx, "tenant-a", "", 100); err != nil || len(nodes.Nodes) != 1 {
@@ -131,6 +160,7 @@ func TestClientRejectsUnsafeTransportAndErrors(t *testing.T) {
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "3")
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"error":"command_conflict","message":"different signed bytes"}`))
 	}))
@@ -141,8 +171,40 @@ func TestClientRejectsUnsafeTransportAndErrors(t *testing.T) {
 	}
 	_, err = client.SubmitCommand(context.Background(), "tenant-a", "node-1", []byte("x"))
 	api, ok := err.(*APIError)
-	if !ok || api.Status != http.StatusConflict || !strings.Contains(api.Error(), "command_conflict") {
+	if !ok || api.Status != http.StatusConflict || api.RetryAfter != 3*time.Second ||
+		!strings.Contains(api.Error(), "command_conflict") ||
+		!strings.Contains(api.Error(), "retry after 3s") {
 		t.Fatalf("error=%T %v", err, err)
+	}
+}
+
+func TestRetryAfterDurationRejectsAmbiguousHeaders(t *testing.T) {
+	for name, test := range map[string]struct {
+		values []string
+		want   time.Duration
+		valid  bool
+	}{
+		"absent":       {valid: true},
+		"one second":   {values: []string{"1"}, want: time.Second, valid: true},
+		"maximum":      {values: []string{"3600"}, want: time.Hour, valid: true},
+		"duplicate":    {values: []string{"1", "2"}},
+		"combined":     {values: []string{"1, 2"}},
+		"leading plus": {values: []string{"+1"}},
+		"leading zero": {values: []string{"01"}},
+		"zero":         {values: []string{"0"}},
+		"over maximum": {values: []string{"3601"}},
+		"HTTP date":    {values: []string{"Thu, 16 Jul 2026 12:00:00 GMT"}},
+		"empty":        {values: []string{""}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := retryAfterDuration(test.values)
+			if test.valid && (err != nil || got != test.want) {
+				t.Fatalf("retry after=%s want=%s err=%v", got, test.want, err)
+			}
+			if !test.valid && err == nil {
+				t.Fatalf("invalid Retry-After values %q produced %s", test.values, got)
+			}
+		})
 	}
 }
 
@@ -206,15 +268,16 @@ func TestClientRejectsAmbiguousResponsesAndPagination(t *testing.T) {
 }
 
 func TestDecodeEnrollmentCapabilityRejectsAmbiguousInput(t *testing.T) {
-	valid := []byte(`{"enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"}`)
+	valid := []byte(`{"controller_instance_id":"control-test","enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"}`)
 	if enrollment, err := DecodeEnrollmentCapability(valid); err != nil || enrollment.NodeID != "node-1" {
 		t.Fatalf("valid enrollment=%+v error=%v", enrollment, err)
 	}
 	for _, raw := range [][]byte{
-		[]byte(`{"enrollment_id":"enr-1","enrollment_token":"first","enrollment_token":"second","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"}`),
-		[]byte(`{"enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z","unexpected":true}`),
-		[]byte(`{"enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"} {}`),
-		[]byte(`{"enrollment_id":"enr-1","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"}`),
+		[]byte(`{"controller_instance_id":"control-test","enrollment_id":"enr-1","enrollment_token":"first","enrollment_token":"second","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"}`),
+		[]byte(`{"controller_instance_id":"control-test","enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z","unexpected":true}`),
+		[]byte(`{"controller_instance_id":"control-test","enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"} {}`),
+		[]byte(`{"controller_instance_id":"control-test","enrollment_id":"enr-1","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"}`),
+		[]byte(`{"enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","expires_at":"2026-07-13T12:00:00Z"}`),
 	} {
 		if _, err := DecodeEnrollmentCapability(raw); err == nil {
 			t.Fatalf("ambiguous enrollment accepted: %s", raw)

@@ -39,11 +39,14 @@ const smokeToken = "steward_cp_v1_smoke_bootstrap"
 
 func main() {
 	initialize := flag.Bool("initialize", false, "")
+	initializeWitness := flag.Bool("initialize-witness-key", false, "")
 	check := flag.Bool("check-config", false, "")
 	showVersion := flag.Bool("version", false, "")
 	state := flag.String("state-dir", "/var/lib/steward-control", "")
 	auth := flag.String("auth-key-file", "/var/lib/steward-control/auth.key", "")
 	admin := flag.String("admin-token-file", "", "")
+	witnessPrivate := flag.String("witness-private-key-file", "/var/lib/steward-control/witness.private.pem", "")
+	witnessPublic := flag.String("witness-public-key-file", "/var/lib/steward-control/witness.public.pem", "")
 	address := flag.String("addr", "127.0.0.1:8443", "")
 	flag.String("tls-cert-file", "", "")
 	flag.String("tls-key-file", "", "")
@@ -58,6 +61,7 @@ func main() {
 		writeIfAbsent(*auth, make([]byte, 32))
 		writeIfAbsent(filepath.Join(*state, "snapshot.1"), []byte("snapshot\n"))
 		writeIfAbsent(*admin, []byte(smokeToken+"\n"))
+		ensureWitness(*witnessPrivate, *witnessPublic)
 		if pauseInitialize == "true" {
 			time.Sleep(2 * time.Second)
 		}
@@ -72,6 +76,11 @@ func main() {
 	if _, err := os.ReadFile(*auth); err != nil {
 		must(err)
 	}
+	if *initializeWitness {
+		ensureWitness(*witnessPrivate, *witnessPublic)
+		return
+	}
+	ensureWitness(*witnessPrivate, *witnessPublic)
 	lock, err := os.OpenFile(filepath.Join(*state, "LOCK"), os.O_RDWR|os.O_CREATE, 0o600)
 	must(err)
 	must(syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
@@ -99,16 +108,56 @@ func main() {
 }
 
 func writeIfAbsent(path string, value []byte) {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	writeIfAbsentMode(path, value, 0o600)
+}
+
+func writeIfAbsentMode(path string, value []byte, mode os.FileMode) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if os.IsExist(err) {
 		return
 	}
 	must(err)
+	must(file.Chmod(mode))
 	if _, err := file.Write(value); err != nil {
 		_ = file.Close()
 		must(err)
 	}
 	must(file.Close())
+}
+
+func ensureWitness(privatePath, publicPath string) {
+	privateInfo, privateErr := os.Lstat(privatePath)
+	publicInfo, publicErr := os.Lstat(publicPath)
+	privateMissing := os.IsNotExist(privateErr)
+	publicMissing := os.IsNotExist(publicErr)
+	if privateErr != nil && !privateMissing {
+		must(privateErr)
+	}
+	if publicErr != nil && !publicMissing {
+		must(publicErr)
+	}
+	if privateMissing != publicMissing {
+		must(fmt.Errorf("partial witness key pair"))
+	}
+	if privateMissing {
+		writeIfAbsentMode(privatePath, []byte("smoke-witness-private\n"), 0o600)
+		writeIfAbsentMode(publicPath, []byte("smoke-witness-public\n"), 0o644)
+		privateInfo, privateErr = os.Lstat(privatePath)
+		publicInfo, publicErr = os.Lstat(publicPath)
+		must(privateErr)
+		must(publicErr)
+	}
+	if !privateInfo.Mode().IsRegular() || privateInfo.Mode().Perm() != 0o600 ||
+		!publicInfo.Mode().IsRegular() || publicInfo.Mode().Perm() != 0o644 {
+		must(fmt.Errorf("unsafe witness key metadata"))
+	}
+	privateRaw, err := os.ReadFile(privatePath)
+	must(err)
+	publicRaw, err := os.ReadFile(publicPath)
+	must(err)
+	if string(privateRaw) != "smoke-witness-private\n" || string(publicRaw) != "smoke-witness-public\n" {
+		must(fmt.Errorf("mismatched witness key pair"))
+	}
 }
 
 func must(err error) {
@@ -545,11 +594,17 @@ grep -Fq 'recovered the previous controller state from an interrupted durable tr
 [[ ! -e /var/lib/steward-control-installer/transaction ]]
 [[ $(readlink /opt/steward-control/current) == /opt/steward-control/releases/v1.0.0 ]]
 [[ $(stat -c '%U:%G %a' /var/lib/steward-control) == 'steward-control:steward-control 700' ]]
+[[ $(stat -c '%U:%G %a' /var/lib/steward-control/witness.private.pem) == 'steward-control:steward-control 600' ]]
+[[ $(stat -c '%U:%G %a' /var/lib/steward-control/witness.public.pem) == 'steward-control:steward-control 644' ]]
 [[ $(stat -c '%U:%G %a' /root/steward-control-admin.token) == 'root:root 600' ]]
 [[ $(stat -c '%h' /root/steward-control-admin.token) == 1 ]]
 [[ $(id -nG steward-control) == steward-control ]]
 [[ -f /run/fake-systemctl/active && -f /run/fake-systemctl/enabled ]]
 grep -Fxq 'STEWARD_CONTROL_ADDR=127.0.0.1:8443' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=/var/lib/steward-control/witness.private.pem' \
+	/etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=/var/lib/steward-control/witness.public.pem' \
+	/etc/steward-control/control.env
 if find /root -maxdepth 1 -name "$publication_pattern" -print -quit | grep -q .; then
 	echo "control-install-smoke: crash recovery left a temporary admin-token hardlink" >&2
 	exit 1
@@ -597,6 +652,8 @@ cat >/etc/steward-control/control.env <<'EOF'
 STEWARD_CONTROL_ADDR=0.0.0.0:8443
 STEWARD_CONTROL_STATE_DIR=/var/lib/steward-control
 STEWARD_CONTROL_AUTH_KEY_FILE=/var/lib/steward-control/auth.key
+STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=/var/lib/steward-control/witness.private.pem
+STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=/var/lib/steward-control/witness.public.pem
 STEWARD_CONTROL_TLS_CERT_FILE=/etc/steward-control/tls.crt
 STEWARD_CONTROL_TLS_KEY_FILE=/etc/steward-control/tls.key
 EOF
@@ -651,14 +708,64 @@ grep -Fq 'FAIL steward-control service identity is missing, privileged, login-ca
 	/tmp/control-unlocked-password-doctor.out
 passwd -l steward-control >/dev/null
 
-state_hash=$(sha256sum /var/lib/steward-control/CURRENT /var/lib/steward-control/auth.key /var/lib/steward-control/snapshot.1)
+witness_private=/var/lib/steward-control/witness.private.pem
+witness_public=/var/lib/steward-control/witness.public.pem
+cp -p "$witness_private" "$fixture/witness.private.pem"
+cp -p "$witness_public" "$fixture/witness.public.pem"
+assert_witness_state_rejected() {
+	local label=$1
+	if install_version v1.0.0 >"/tmp/control-witness-$label.out" 2>&1; then
+		echo "control-install-smoke: installer accepted $label witness-key state" >&2
+		exit 1
+	fi
+	[[ $(readlink /opt/steward-control/current) == /opt/steward-control/releases/v1.0.0 ]]
+	[[ ! -e /var/lib/steward-control-installer/transaction ]]
+}
+
+chmod 0640 "$witness_private"
+assert_witness_state_rejected unsafe-permissions
+chmod 0600 "$witness_private"
+
+rm -f "$witness_public"
+assert_witness_state_rejected partial-pair
+[[ ! -e $witness_public ]]
+install -m 0644 -o steward-control -g steward-control "$fixture/witness.public.pem" "$witness_public"
+
+rm -f "$witness_public"
+ln -s "$fixture/witness.public.pem" "$witness_public"
+assert_witness_state_rejected public-symlink
+rm -f "$witness_public"
+install -m 0644 -o steward-control -g steward-control "$fixture/witness.public.pem" "$witness_public"
+
+printf '%s\n' mismatched-public-key >"$witness_public"
+chown steward-control:steward-control "$witness_public"
+chmod 0644 "$witness_public"
+assert_witness_state_rejected mismatched-pair
+install -m 0644 -o steward-control -g steward-control "$fixture/witness.public.pem" "$witness_public"
+
+# Simulate an upgrade from durable state and control.env created before witness
+# keys existed. The candidate must create the pair once, publish the stable
+# paths, and preserve the bytes on every later rerun and upgrade.
+rm -f "$witness_private" "$witness_public"
+sed -i '/^STEWARD_CONTROL_WITNESS_.*_KEY_FILE=/d' /etc/steward-control/control.env
+install_version v1.0.0
+[[ $(stat -c '%U:%G %a' "$witness_private") == 'steward-control:steward-control 600' ]]
+[[ $(stat -c '%U:%G %a' "$witness_public") == 'steward-control:steward-control 644' ]]
+legacy_witness_hash=$(sha256sum "$witness_private" "$witness_public")
+grep -Fxq "STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=$witness_private" /etc/steward-control/control.env
+grep -Fxq "STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=$witness_public" /etc/steward-control/control.env
+
+state_hash=$(sha256sum /var/lib/steward-control/CURRENT /var/lib/steward-control/auth.key \
+	/var/lib/steward-control/snapshot.1 "$witness_private" "$witness_public")
 token_hash=$(sha256sum /root/steward-control-admin.token)
 install_version v1.0.0
 [[ $(sha256sum /root/steward-control-admin.token) == "$token_hash" ]]
+[[ $(sha256sum "$witness_private" "$witness_public") == "$legacy_witness_hash" ]]
 
 install_version v1.1.0
 [[ $(readlink /opt/steward-control/current) == /opt/steward-control/releases/v1.1.0 ]]
-[[ $(sha256sum /var/lib/steward-control/CURRENT /var/lib/steward-control/auth.key /var/lib/steward-control/snapshot.1) == "$state_hash" ]]
+[[ $(sha256sum /var/lib/steward-control/CURRENT /var/lib/steward-control/auth.key \
+	/var/lib/steward-control/snapshot.1 "$witness_private" "$witness_public") == "$state_hash" ]]
 [[ $(sha256sum /root/steward-control-admin.token) == "$token_hash" ]]
 
 for query in activity enablement; do
@@ -1098,6 +1205,8 @@ install_real() {
 install_real
 [[ $(/usr/local/bin/steward-control -version) == 'steward-control v9.9.0' ]]
 [[ $(stat -c '%U:%G %a' /var/lib/steward-control) == 'steward-control:steward-control 700' ]]
+[[ $(stat -c '%U:%G %a' /var/lib/steward-control/witness.private.pem) == 'steward-control:steward-control 600' ]]
+[[ $(stat -c '%U:%G %a' /var/lib/steward-control/witness.public.pem) == 'steward-control:steward-control 644' ]]
 [[ $(stat -c '%U:%G %a' /root/steward-control-admin.token) == 'root:root 600' ]]
 [[ $(stat -c '%h' /root/steward-control-admin.token) == 1 ]]
 if find /root -maxdepth 1 -name "$publication_pattern" -print -quit | grep -q .; then
@@ -1105,10 +1214,14 @@ if find /root -maxdepth 1 -name "$publication_pattern" -print -quit | grep -q .;
 	exit 1
 fi
 real_token_hash=$(sha256sum /root/steward-control-admin.token)
+real_witness_hash=$(sha256sum /var/lib/steward-control/witness.private.pem \
+	/var/lib/steward-control/witness.public.pem)
 ln /root/steward-control-admin.token "${publication_prefix}interrupted-link"
 install_real >/dev/null
 [[ ! -e ${publication_prefix}interrupted-link ]]
 [[ $(stat -c '%h' /root/steward-control-admin.token) == 1 ]]
+[[ $(sha256sum /var/lib/steward-control/witness.private.pem \
+	/var/lib/steward-control/witness.public.pem) == "$real_witness_hash" ]]
 
 cp -p /root/steward-control-admin.token "${publication_prefix}interrupted-temp"
 rm /root/steward-control-admin.token

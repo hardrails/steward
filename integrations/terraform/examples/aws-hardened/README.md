@@ -16,8 +16,10 @@ The instance is staged, not enrolled. This is intentional: reusable credentials 
 Terraform variables, user data, tags, outputs, or provisioners become recoverable
 from Terraform state or EC2 console history. Deliver the enrollment bundle later
 through your approved temporary channel, such as a short-lived AWS Systems Manager
-Session Manager session,
-then run `/usr/local/libexec/steward/configure-node` and remove the bundle.
+Session Manager session. The bundle includes the node credential, evidence config,
+receipt key pair, CA, and signed-admission trust; the receipt key is the same one
+used for enrollment proof-of-possession. Then run
+`/usr/local/libexec/steward/configure-node` and remove the bundle.
 
 Later rendered user-data changes are ignored rather than applied to the enrolled EC2
 instance, and the bootstrap script records successful completion so it cannot be

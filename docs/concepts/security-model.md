@@ -21,8 +21,9 @@ controller can expose fleet metadata, create or revoke credentials within the
 compromised operator's scope, deny service, and repeatedly offer valid signed
 commands it already has. It cannot mint the tenant signature that Executor requires
 or add container authority outside the signed command schema. Operators still
-trust the controller host, TLS key, authentication key, and durable state for fleet
-confidentiality, availability, and correct credential enforcement.
+trust the controller host, TLS key, authentication key, evidence-witness private
+key, and durable state for fleet confidentiality, availability, correct credential
+enforcement, and authentic controller witness exports.
 
 A sandbox reduces the ways untrusted code can attack the host. It does not prove
 that a tenant authorized a particular task or stop a manipulated agent from changing
@@ -230,8 +231,9 @@ matters.
 ## Operator responsibilities
 
 Patch the controller and node hosts, Docker, gVisor, and Steward. Authenticate
-imported artifacts; protect controller TLS and authentication keys, controller
-backups, enrollment, receipt, off-node action-authority, and tenant task keys; keep
+imported artifacts; protect controller TLS, authentication, and evidence-witness
+private keys, controller backups, enrollment, receipt, off-node action-authority,
+and tenant task keys; keep
 management listeners on loopback or disabled; monitor capacity and audit output;
 and preserve anti-replay state during backup and rollback. An exported
 action-trust inventory is

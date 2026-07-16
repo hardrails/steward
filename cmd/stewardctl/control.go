@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlclient"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/nodeclient"
 	"github.com/hardrails/steward/internal/securefile"
 )
@@ -47,13 +51,19 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlCommandSubmit(arguments[2:], stdout)
 	case "command status":
 		return controlCommandStatus(arguments[2:], stdout)
+	case "evidence status":
+		return controlEvidenceStatus(arguments[2:], stdout)
+	case "evidence export":
+		return controlEvidenceExport(arguments[2:], stdout)
+	case "evidence verify":
+		return controlEvidenceVerify(arguments[2:], stdout)
 	default:
 		return controlUsageError()
 	}
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, or command submit|status")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, command submit|status, or evidence status|export|verify")
 }
 
 type controlFlags struct {
@@ -238,12 +248,16 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	common := addControlFlags(flags, false)
 	enrollmentPath := flags.String("enrollment", "", "owner-only enrollment capability file")
 	requestID := flags.String("request-id", "", "stable idempotency identity")
+	evidencePrivateKeyPath := flags.String("executor-evidence-private-key", "", "owner-only Executor receipt key")
+	evidenceEpoch := flags.Uint64("executor-evidence-epoch", 1, "Executor receipt epoch")
 	output := flags.String("credential-out", "", "new owner-only Executor credential file")
+	evidenceConfigOutput := flags.String("executor-evidence-config-out", "", "new owner-only Executor evidence enrollment config")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if *enrollmentPath == "" || *requestID == "" || *output == "" || flags.NArg() != 0 {
-		return errors.New("control enrollment exchange requires enrollment, request-id, and credential output")
+	if *enrollmentPath == "" || *requestID == "" || *evidencePrivateKeyPath == "" || *evidenceEpoch != 1 ||
+		*output == "" || *evidenceConfigOutput == "" || flags.NArg() != 0 {
+		return errors.New("control enrollment exchange requires enrollment, request-id, an Executor evidence private key at epoch 1, credential output, and evidence config output")
 	}
 	raw, err := securefile.Read(*enrollmentPath, 64<<10, securefile.OwnerOnly)
 	if err != nil {
@@ -253,29 +267,97 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("enrollment capability file is invalid: %w", err)
 	}
+	evidencePrivate, err := readPrivateKey(*evidencePrivateKeyPath)
+	if err != nil {
+		return fmt.Errorf("read Executor evidence private key: %w", err)
+	}
+	claim, err := controlprotocol.NewExecutorEvidenceIdentityClaimV1(
+		enrollment.ControllerInstanceID, enrollment.EnrollmentID, enrollment.NodeID, enrollment.NodeID,
+		*evidenceEpoch, evidencePrivate.Public().(ed25519.PublicKey),
+	)
+	if err != nil {
+		return fmt.Errorf("create Executor evidence identity claim: %w", err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceIdentityClaimV1(claim, evidencePrivate)
+	if err != nil {
+		return fmt.Errorf("sign Executor evidence identity claim: %w", err)
+	}
 	client, err := common.client(false)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	credential, err := client.Enroll(ctx, enrollment.EnrollmentToken, *requestID)
+	credential, err := client.Enroll(ctx, enrollment.EnrollmentToken, *requestID, proof)
 	if err != nil {
 		return err
 	}
-	credentialID, err := controlauth.ParseNodeCredentialID(credential.Credential)
+	credentialID, err := validateEnrollmentCredential(enrollment, credential)
 	if err != nil {
-		return errors.New("control plane returned an invalid node credential")
+		return err
 	}
 	credentialRaw, err := json.Marshal(credential)
 	if err != nil {
 		return err
 	}
-	if err := writeNewFile(*output, append(credentialRaw, '\n'), 0o600); err != nil {
+	evidenceConfig := fmt.Appendf(nil,
+		"STEWARD_EXECUTOR_EVIDENCE_CONFIG_VERSION=1\n"+
+			"STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID=%s\n"+
+			"STEWARD_EXECUTOR_EVIDENCE_NODE_ID=%s\n"+
+			"STEWARD_EXECUTOR_EVIDENCE_RECEIPT_EPOCH=%d\n"+
+			"STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_BASE64=%s\n",
+		enrollment.ControllerInstanceID, enrollment.NodeID, *evidenceEpoch, claim.PublicKeyBase64,
+	)
+	if err := writeEnrollmentOutputs(
+		*output, append(credentialRaw, '\n'),
+		*evidenceConfigOutput, evidenceConfig,
+	); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintln(stdout, credentialID)
 	return err
+}
+
+func writeEnrollmentOutputs(credentialPath string, credential []byte, configPath string, config []byte) error {
+	credentialClean, err := filepath.Abs(credentialPath)
+	if err != nil {
+		return err
+	}
+	configClean, err := filepath.Abs(configPath)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(credentialClean) == filepath.Clean(configClean) {
+		return errors.New("credential output and evidence config output must name different files")
+	}
+	for _, path := range []string{credentialPath, configPath} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("enrollment output already exists: %s", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := writeNewFile(configPath, config, 0o600); err != nil {
+		return err
+	}
+	if err := writeNewFile(credentialPath, credential, 0o600); err != nil {
+		removeErr := os.Remove(configPath)
+		syncErr := syncOutputDirectory(configPath)
+		return errors.Join(err, removeErr, syncErr)
+	}
+	return nil
+}
+
+func validateEnrollmentCredential(enrollment controlclient.Enrollment, credential controlclient.NodeCredential) (string, error) {
+	if credential.Version != 2 || credential.Scope != "node" || credential.TenantID != "" ||
+		credential.NodeID != enrollment.NodeID {
+		return "", errors.New("control plane returned a node credential outside the enrollment identity")
+	}
+	credentialID, err := controlauth.ParseNodeCredentialID(credential.Credential)
+	if err != nil {
+		return "", errors.New("control plane returned an invalid node credential")
+	}
+	return credentialID, nil
 }
 
 func controlNodeList(arguments []string, stdout io.Writer) error {

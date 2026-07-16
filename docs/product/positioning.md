@@ -1,6 +1,6 @@
 ---
 title: Why Steward exists
-description: "Steward's product direction: operator-controlled local admission, credential-brokered operations, tenant-bound commands, and offline-verifiable receipts."
+description: "Steward's product direction: operator-controlled local admission, credential-brokered operations, tenant-bound commands, independently witnessed evidence, and offline verification."
 section: Product
 ---
 
@@ -37,11 +37,20 @@ operator can:
    no default network access, while granting only approved state, inference,
    service, exact connector operations, or named HTTP(S) routes, and optionally
    require an off-node tenant authority to sign the exact request for selected
-   agent-service or connector operations; and
-6. export a node-local, tamper-evident receipt of the accepted inputs and recorded
-   enforcement decisions. Tamper-evident means changes within the supplied chain
-   can be detected; detecting removal of a complete suffix requires an independently
-   retained exact head. It does not mean the host cannot replace the entire chain.
+   agent-service or connector operations;
+6. publish bounded signed receipt deltas to the customer-owned controller on an
+   independent loop, so the controller can retain one exact checkpoint and make an
+   authenticated rollback or equivocation finding sticky without becoming a
+   receipt warehouse; and
+7. inspect or export the controller's witnessed state under a separate stable
+   witness key, while retaining the full node-local receipt chain for detailed
+   offline verification.
+
+Tamper-evident means changes within a supplied chain can be detected. The
+controller witness also detects a lower or conflicting head when the node next
+reports relative to the exact head it retained. It does not prove that the host
+was uncompromised when it signed a record or that evidence remains fresh when a
+node stops publishing.
 
 The operator keeps control of keys, policy, artifacts, infrastructure, and
 evidence when external services are unavailable. Steward does not rely on the
@@ -71,6 +80,14 @@ optional connector action permit    -> Gateway durable authorization -> upstream
               |
               v
 node-local signed, hash-linked enforcement receipt
+              |
+              +-- bounded signed evidence uplink (asynchronous)
+                                      |
+                                      v
+                  controller checkpoint or sticky finding
+                                      |
+                                      v
+                       witness-signed offline export
 ```
 
 Each input has a separate purpose:
@@ -85,14 +102,19 @@ Each input has a separate purpose:
 - An **instance intent** is a separately authenticated command to run a profile for
   a tenant, node, and instance. A generation fence—an increasing counter keyed by
   `(tenant_id, instance_id)`—prevents an older command from replacing newer state.
+- A **receipt identity** is a node-held Ed25519 key proven during one enrollment
+  exchange and pinned to the controller, enrollment, and control-node identity.
+  The controller rejects reuse of that receipt identity by another node.
 - A **task permit** is a tenant-key-signed, short-lived statement for one exact
   configured service request. Signed site policy scopes that public key to explicit
   service IDs; the private key remains off-node. The permit cannot add a capability
   that the profile, site policy, intent, and active grant did not already allow.
 
-Steward grants only what all three inputs allow. A trusted publisher can authorize
-a profile and its maximum capabilities, but cannot choose a tenant's schedule or
-identity.
+Steward grants a workload only the intersection of the profile capsule, site
+policy, and instance intent. A trusted publisher can authorize a profile and its
+maximum capabilities, but cannot choose a tenant's schedule or identity. Receipt
+identity authenticates evidence, while a task permit can narrow one already
+granted operation but cannot add a capability.
 
 ## A receipt is not an agent transcript
 
@@ -110,6 +132,17 @@ terminal outcome. Service-task records may retain the run ID observed from the
 agent, but that value is untrusted application output. Both receipt chains exclude prompts, model
 responses, agent logs, the meaning of agent actions, credentials, and bodies.
 
+When evidence uplink is enabled, Executor publishes receipt checkpoints on a loop
+independent from command polling. Each receipt-key proof binds the controller's
+polled base, the reported head, and the exact submitted frame count and digest.
+The controller verifies the bounded delta and retains only the last-good
+coordinate, exact last batch identity, and first authenticated rollback or
+equivocation finding. A site administrator can inspect that state or export it
+under the controller's separate witness key. Full receipt records remain on the
+node. The inspection state is exactly `unwitnessed`, `current`,
+`rollback_detected`, or `equivocation_detected`; it is not a unified health,
+freshness, or action-required status.
+
 This gives an auditor a bounded question they can answer locally: *what did
 this node accept and record?* It does **not** prove that a model was honest,
 that an agent's explanation was true, that an upstream service behaved as
@@ -121,15 +154,18 @@ claim, not exactly-once execution across nodes or inside an upstream system. An
 unknown outcome stays spent because a duplicate effect is worse than visible
 ambiguity.
 
-The receipt is tamper-evident only within the supplied chain and documented node
-trust boundary. The host root user, host kernel, Docker, gVisor, signing-key
-protection, and operator configuration remain trusted. Steward does not claim
-hardware attestation (proof tied to hardware state), protection from a hostile host
-administrator, cross-node anchoring, detection when all trailing records are
-removed without an external checkpoint, or formal certification. Executor holds
-the lifecycle receipt key. Gateway holds a different connector receipt key and
-also performs the network effect that key records. Neither key is isolated in a
-separate signing service.
+The receipt remains bounded by node trust. The host root user, host kernel, Docker,
+gVisor, signing-key protection, and operator configuration are trusted. The
+controller witness detects a lower or conflicting head when the node next reports
+relative to the exact head it retained. It does not prove freshness when
+publication stops, prove that a hostile host recorded true events, provide
+hardware attestation (proof tied to hardware state), or detect different views
+presented to independent controllers unless their exports are compared.
+
+Executor holds the lifecycle receipt key. Gateway holds a different connector
+receipt key and also performs the network effect that key records. Steward Control
+holds a purpose-separated witness key used only for controller evidence exports.
+These keys are software-held and are not isolated in separate signing services.
 
 ## Capabilities require explicit grants
 
@@ -203,23 +239,26 @@ Existing sandboxes and agent platforms can complement Steward. Steward addresses
 specific question: can a customer-operated node enforce a locally authorized
 deployment, narrow selected external effects—including an agent-service task—to one
 independently signed request, prevent a second node-local dispatch within the
-retained ledger epoch, and produce portable evidence of that enforcement while
-disconnected?
+retained ledger epoch, and let a separate customer-owned controller retain and
+sign a bounded evidence checkpoint without becoming an enforcement dependency?
 
 An open-source or self-hosted fleet controller is not unique to Steward. The
 differentiator under evaluation is the complete authorization-to-enforcement path:
-controller-blind tenant keys, node-local signed admission, durable replay fences,
-and evidence that remains verifiable offline.
+controller-blind tenant keys, receipt-key proof during enrollment, node-local
+signed admission, durable replay fences, independent rollback/fork witnessing, and
+evidence that remains verifiable offline.
 
-Among the systems in the dated comparison, no reviewed product documents the same
+Among the systems in the linked comparison, no reviewed product documents the same
 combination of a customer-operated air-gapped fleet controller and nodes,
-site-signed artifact and tenant admission, controller-blind tenant signing keys,
-service-scoped off-node task keys, exact-request dispatch, durable delivery and
-node-local replay control, and offline-verifiable authorization-to-outcome receipts.
-This is a limited statement about linked public documentation, not a claim that
-Steward is first, unique, certified, or immune to defects.
+receipt-key-bound enrollment, site-signed artifact and tenant admission,
+controller-blind tenant signing keys, service-scoped off-node task keys,
+exact-request dispatch, durable delivery and node-local replay control,
+independently retained divergence findings, and offline-verifiable
+authorization-to-outcome evidence. This is a limited statement about linked public
+documentation, not a claim that Steward is first, unique, certified, or immune to
+defects.
 See the [market analysis]({{ '/product/market-analysis/' | relative_url }}) for a
-dated comparison and its limits.
+source-backed comparison and its limits.
 
 ## Operator responsibilities
 

@@ -17,9 +17,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/securefile"
 )
@@ -33,12 +36,19 @@ type Client struct {
 }
 
 type APIError struct {
-	Status  int
-	Code    string
-	Message string
+	Status     int
+	Code       string
+	Message    string
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf(
+			"control HTTP %d %s: %s (retry after %s)",
+			e.Status, e.Code, e.Message, e.RetryAfter,
+		)
+	}
 	return fmt.Sprintf("control HTTP %d %s: %s", e.Status, e.Code, e.Message)
 }
 
@@ -62,11 +72,12 @@ type Operator struct {
 }
 
 type Enrollment struct {
-	EnrollmentID    string   `json:"enrollment_id"`
-	EnrollmentToken string   `json:"enrollment_token"`
-	NodeID          string   `json:"node_id"`
-	TenantIDs       []string `json:"tenant_ids,omitempty"`
-	ExpiresAt       string   `json:"expires_at"`
+	ControllerInstanceID string   `json:"controller_instance_id"`
+	EnrollmentID         string   `json:"enrollment_id"`
+	EnrollmentToken      string   `json:"enrollment_token"`
+	NodeID               string   `json:"node_id"`
+	TenantIDs            []string `json:"tenant_ids,omitempty"`
+	ExpiresAt            string   `json:"expires_at"`
 }
 
 // DecodeEnrollmentCapability strictly decodes an enrollment capability read
@@ -77,7 +88,8 @@ func DecodeEnrollmentCapability(raw []byte) (Enrollment, error) {
 	if err := dsse.DecodeStrictInto(raw, 64<<10, &enrollment); err != nil {
 		return Enrollment{}, fmt.Errorf("decode enrollment capability: %w", err)
 	}
-	if enrollment.EnrollmentID == "" || enrollment.EnrollmentToken == "" || enrollment.NodeID == "" || enrollment.ExpiresAt == "" {
+	if enrollment.ControllerInstanceID == "" || enrollment.EnrollmentID == "" || enrollment.EnrollmentToken == "" ||
+		enrollment.NodeID == "" || enrollment.ExpiresAt == "" {
 		return Enrollment{}, errors.New("enrollment capability is incomplete")
 	}
 	return enrollment, nil
@@ -285,12 +297,18 @@ func (c *Client) RevokeNodeCredential(ctx context.Context, credentialID string) 
 	return revocation, err
 }
 
-func (c *Client) Enroll(ctx context.Context, enrollmentToken, requestID string) (NodeCredential, error) {
+func (c *Client) Enroll(ctx context.Context, enrollmentToken, requestID string, proof controlprotocol.ExecutorEvidenceIdentityProofV1) (NodeCredential, error) {
+	if err := proof.Validate(); err != nil {
+		return NodeCredential{}, fmt.Errorf("validate executor evidence identity proof: %w", err)
+	}
 	var credential NodeCredential
 	err := c.do(ctx, http.MethodPost, "/v1/enroll", struct {
-		EnrollmentToken string `json:"enrollment_token"`
-		RequestID       string `json:"request_id"`
-	}{EnrollmentToken: enrollmentToken, RequestID: requestID}, &credential, false)
+		EnrollmentToken       string                                          `json:"enrollment_token"`
+		RequestID             string                                          `json:"request_id"`
+		EvidenceIdentityProof controlprotocol.ExecutorEvidenceIdentityProofV1 `json:"evidence_identity_proof"`
+	}{
+		EnrollmentToken: enrollmentToken, RequestID: requestID, EvidenceIdentityProof: proof,
+	}, &credential, false)
 	return credential, err
 }
 
@@ -309,6 +327,40 @@ func (c *Client) GetCommand(ctx context.Context, tenantID, nodeID, commandID str
 		"/commands/" + url.PathEscape(commandID)
 	err := c.do(ctx, http.MethodGet, path, nil, &command, true)
 	return command, err
+}
+
+// InspectExecutorEvidence returns the controller's validated online witness
+// state for one node.
+func (c *Client) InspectExecutorEvidence(ctx context.Context, nodeID string) (controlprotocol.ExecutorEvidenceInspectionV1, error) {
+	path, err := executorEvidencePath(nodeID, "")
+	if err != nil {
+		return controlprotocol.ExecutorEvidenceInspectionV1{}, err
+	}
+	var inspection controlprotocol.ExecutorEvidenceInspectionV1
+	if err := c.do(ctx, http.MethodGet, path, nil, &inspection, true); err != nil {
+		return controlprotocol.ExecutorEvidenceInspectionV1{}, err
+	}
+	if err := inspection.Validate(); err != nil {
+		return controlprotocol.ExecutorEvidenceInspectionV1{}, fmt.Errorf("validate control evidence inspection: %w", err)
+	}
+	return inspection, nil
+}
+
+// ExportExecutorEvidence returns a validated, independently signed witness
+// export suitable for later offline verification.
+func (c *Client) ExportExecutorEvidence(ctx context.Context, nodeID string) (controlprotocol.ExecutorEvidenceExportV1, error) {
+	path, err := executorEvidencePath(nodeID, "/export")
+	if err != nil {
+		return controlprotocol.ExecutorEvidenceExportV1{}, err
+	}
+	var export controlprotocol.ExecutorEvidenceExportV1
+	if err := c.do(ctx, http.MethodGet, path, nil, &export, true); err != nil {
+		return controlprotocol.ExecutorEvidenceExportV1{}, err
+	}
+	if err := export.Validate(); err != nil {
+		return controlprotocol.ExecutorEvidenceExportV1{}, fmt.Errorf("validate control evidence export: %w", err)
+	}
+	return export, nil
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, output any, authenticated bool) error {
@@ -363,7 +415,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any, 
 		if err := dsse.DecodeStrictInto(raw, maxWireBytes, &api); err != nil || api.Error == "" || api.Message == "" {
 			return fmt.Errorf("control HTTP %d returned an invalid error body", response.StatusCode)
 		}
-		return &APIError{Status: response.StatusCode, Code: api.Error, Message: api.Message}
+		retryAfter, err := retryAfterDuration(response.Header.Values("Retry-After"))
+		if err != nil {
+			return fmt.Errorf("control HTTP %d returned an invalid Retry-After header: %w", response.StatusCode, err)
+		}
+		return &APIError{
+			Status: response.StatusCode, Code: api.Error, Message: api.Message,
+			RetryAfter: retryAfter,
+		}
 	}
 	if output == nil {
 		if len(bytes.TrimSpace(raw)) != 0 {
@@ -378,6 +437,21 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any, 
 		return fmt.Errorf("decode control response: %w", err)
 	}
 	return nil
+}
+
+func executorEvidencePath(nodeID, suffix string) (string, error) {
+	if nodeID == "" || len(nodeID) > 128 || !utf8.ValidString(nodeID) ||
+		strings.TrimSpace(nodeID) != nodeID || strings.ContainsAny(nodeID, "\r\n\x00") {
+		return "", errors.New("control evidence node identity is invalid")
+	}
+	for index, character := range nodeID {
+		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' || index > 0 && (character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return "", errors.New("control evidence node identity is invalid")
+	}
+	return "/v1/nodes/" + url.PathEscape(nodeID) + "/evidence" + suffix, nil
 }
 
 func paginatedPath(path, after string, limit int) (string, error) {
@@ -400,6 +474,29 @@ func paginatedPath(path, after string, limit int) (string, error) {
 func jsonContentType(value string) bool {
 	mediaType, _, err := mime.ParseMediaType(value)
 	return err == nil && mediaType == "application/json"
+}
+
+func retryAfterDuration(values []string) (time.Duration, error) {
+	if len(values) == 0 {
+		return 0, nil
+	}
+	if len(values) != 1 {
+		return 0, errors.New("Retry-After must contain exactly one value")
+	}
+	value := values[0]
+	if value == "" || len(value) > 1 && value[0] == '0' {
+		return 0, errors.New("Retry-After must be canonical positive delta-seconds")
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return 0, errors.New("Retry-After must be canonical positive delta-seconds")
+		}
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds < 1 || seconds > 3600 {
+		return 0, errors.New("Retry-After delta-seconds must be between 1 and 3600")
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 func loopbackHost(host string) bool {

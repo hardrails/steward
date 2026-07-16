@@ -38,6 +38,16 @@ extract_boundary() {
 	grep -Fq 'trusted_input_snapshot() {' "$destination"
 }
 
+extract_function() {
+	local source=$1 name=$2 destination=$3
+	awk -v signature="$name() {" '
+		$0 == signature { copying=1 }
+		copying { print }
+		copying && $0 == "}" { exit }
+	' "$source" >>"$destination"
+	grep -Fq "$name() {" "$destination"
+}
+
 exercise_common_boundary() (
 	set -Eeuo pipefail
 	local source=$1 kind=$2
@@ -131,6 +141,11 @@ set_node_sources() {
 	admission_required=3
 	admission_policy=$fixture/policy.json
 	site_root=$fixture/site-root.public
+	executor_evidence_config=$fixture/evidence.env
+	receipt_private=$fixture/receipts.private.pem
+	receipt_public=$fixture/receipts.public
+	# shellcheck disable=SC2034 # Consumed by the extracted production function.
+	evidence_input_count=3
 }
 
 exercise_node_staging() (
@@ -140,11 +155,11 @@ exercise_node_staging() (
 	# shellcheck source=/dev/null
 	source "$helper"
 	mkdir -m 0700 "$fixture"
-	for name in steward.json executor.json token; do
+	for name in steward.json executor.json token evidence.env receipts.private.pem; do
 		printf '%s:trusted\n' "$name" >"$fixture/$name"
 		chmod 0600 "$fixture/$name"
 	done
-	for name in ca.pem policy.json site-root.public; do
+	for name in ca.pem policy.json site-root.public receipts.public; do
 		printf '%s:trusted\n' "$name" >"$fixture/$name"
 		chmod 0644 "$fixture/$name"
 	done
@@ -160,14 +175,21 @@ exercise_node_staging() (
 	[[ $executor_token == "$input_stage/executor-token" ]]
 	[[ $admission_policy == "$input_stage/site-policy.dsse.json" ]]
 	[[ $site_root == "$input_stage/site-root.public" ]]
+	[[ $executor_evidence_config == "$input_stage/executor-evidence.env" ]]
+	[[ $receipt_private == "$input_stage/node-receipts.private.pem" ]]
+	[[ $receipt_public == "$input_stage/node-receipts.public" ]]
 	printf 'attacker\n' >"$fixture/steward.json"
 	printf 'attacker\n' >"$fixture/executor.json"
 	printf 'attacker\n' >"$fixture/ca.pem"
 	printf 'attacker\n' >"$fixture/token"
 	printf 'attacker\n' >"$fixture/policy.json"
 	printf 'attacker\n' >"$fixture/site-root.public"
+	printf 'attacker\n' >"$fixture/evidence.env"
+	printf 'attacker\n' >"$fixture/receipts.private.pem"
+	printf 'attacker\n' >"$fixture/receipts.public"
 	for snapshot in "$steward_credential" "$executor_credential" "$ca_file" \
-		"$executor_token" "$admission_policy" "$site_root"; do
+		"$executor_token" "$admission_policy" "$site_root" "$executor_evidence_config" \
+		"$receipt_private" "$receipt_public"; do
 		if grep -Fq attacker "$snapshot"; then
 			echo "configure-input-boundary-test: configure-node snapshot followed a mutated source" >&2
 			exit 1
@@ -181,6 +203,9 @@ exercise_node_staging() (
 	truncate -s 4096 "$fixture/token"
 	truncate -s 1048576 "$fixture/policy.json"
 	truncate -s 4096 "$fixture/site-root.public"
+	truncate -s 4096 "$fixture/evidence.env"
+	truncate -s 16384 "$fixture/receipts.private.pem"
+	truncate -s 4096 "$fixture/receipts.public"
 	input_stage=
 	create_trusted_input_stage
 	set_node_sources "$fixture"
@@ -191,13 +216,16 @@ exercise_node_staging() (
 	[[ $(stat -c %s "$executor_token") -eq 4096 ]]
 	[[ $(stat -c %s "$admission_policy") -eq 1048576 ]]
 	[[ $(stat -c %s "$site_root") -eq 4096 ]]
+	[[ $(stat -c %s "$executor_evidence_config") -eq 4096 ]]
+	[[ $(stat -c %s "$receipt_private") -eq 16384 ]]
+	[[ $(stat -c %s "$receipt_public") -eq 4096 ]]
 	rm -rf -- "$input_stage"
 
 	local target cap status
 	while IFS=: read -r target cap; do
-		for name in steward.json executor.json token; do chmod 0600 "$fixture/$name"; done
-		for name in ca.pem policy.json site-root.public; do chmod 0644 "$fixture/$name"; done
-		for name in steward.json executor.json ca.pem token policy.json site-root.public; do
+		for name in steward.json executor.json token evidence.env receipts.private.pem; do chmod 0600 "$fixture/$name"; done
+		for name in ca.pem policy.json site-root.public receipts.public; do chmod 0644 "$fixture/$name"; done
+		for name in steward.json executor.json ca.pem token policy.json site-root.public evidence.env receipts.private.pem receipts.public; do
 			truncate -s 1 "$fixture/$name"
 		done
 		truncate -s "$((cap + 1))" "$fixture/$target"
@@ -221,6 +249,9 @@ ca.pem:1048576
 token:4096
 policy.json:1048576
 site-root.public:4096
+evidence.env:4096
+receipts.private.pem:16384
+receipts.public:4096
 EOF
 )
 
@@ -233,9 +264,14 @@ exercise_admission_staging() (
 	mkdir -m 0700 "$fixture"
 	printf 'trusted-policy\n' >"$fixture/policy.json"
 	printf 'trusted-root\n' >"$fixture/site-root.public"
-	chmod 0644 "$fixture/policy.json" "$fixture/site-root.public"
+	printf 'trusted-private\n' >"$fixture/receipts.private.pem"
+	printf 'trusted-public\n' >"$fixture/receipts.public"
+	chmod 0644 "$fixture/policy.json" "$fixture/site-root.public" "$fixture/receipts.public"
+	chmod 0600 "$fixture/receipts.private.pem"
 	policy=$fixture/policy.json
 	site_root=$fixture/site-root.public
+	receipt_private=$fixture/receipts.private.pem
+	receipt_public=$fixture/receipts.public
 	# shellcheck disable=SC2034 # Consumed by the extracted production function.
 	input_stage_prefix=/run/steward-admission-stage-test.
 	input_stage=
@@ -243,15 +279,22 @@ exercise_admission_staging() (
 	stage_admission_input_sources
 	[[ $policy == "$input_stage/site-policy.dsse.json" ]]
 	[[ $site_root == "$input_stage/site-root.public" ]]
+	[[ $receipt_private == "$input_stage/node-receipts.private.pem" ]]
+	[[ $receipt_public == "$input_stage/node-receipts.public" ]]
 	printf 'attacker-policy\n' >"$fixture/policy.json"
 	printf 'attacker-root\n' >"$fixture/site-root.public"
+	printf 'attacker-private\n' >"$fixture/receipts.private.pem"
+	printf 'attacker-public\n' >"$fixture/receipts.public"
 	[[ $(<"$policy") == trusted-policy ]]
 	[[ $(<"$site_root") == trusted-root ]]
+	[[ $(<"$receipt_private") == trusted-private ]]
+	[[ $(<"$receipt_public") == trusted-public ]]
 	rm -rf -- "$input_stage"
 
 	truncate -s 1048577 "$fixture/policy.json"
 	truncate -s 1 "$fixture/site-root.public"
 	policy=$fixture/policy.json site_root=$fixture/site-root.public input_stage=
+	receipt_private=$fixture/receipts.private.pem receipt_public=$fixture/receipts.public
 	create_trusted_input_stage
 	set +e
 	stage_admission_input_sources >"$fixture/policy.out" 2>"$fixture/policy.err"
@@ -264,6 +307,7 @@ exercise_admission_staging() (
 	truncate -s 1 "$fixture/policy.json"
 	truncate -s 4097 "$fixture/site-root.public"
 	policy=$fixture/policy.json site_root=$fixture/site-root.public input_stage=
+	receipt_private=$fixture/receipts.private.pem receipt_public=$fixture/receipts.public
 	create_trusted_input_stage
 	set +e
 	stage_admission_input_sources >"$fixture/root.out" 2>"$fixture/root.err"
@@ -274,10 +318,86 @@ exercise_admission_staging() (
 	rm -rf -- "$input_stage"
 )
 
+exercise_receipt_pair_presence() (
+	set -Eeuo pipefail
+	local helper=$work/receipt-key-pair-state.sh fixture=$work/receipt-key-pair
+	awk '
+		$0 == "receipt_key_pair_state() {" { copying=1 }
+		copying { print }
+		copying && $0 == "}" { exit }
+	' "$root/scripts/configure-admission.sh" >"$helper"
+	# shellcheck source=/dev/null
+	source "$helper"
+	mkdir -m 0700 "$fixture"
+	private=$fixture/private.pem
+	public=$fixture/public
+	[[ $(receipt_key_pair_state "$private" "$public") == absent ]]
+	: >"$private"
+	if receipt_key_pair_state "$private" "$public" >/dev/null; then
+		echo "configure-input-boundary-test: private-only receipt identity was accepted" >&2
+		exit 1
+	fi
+	: >"$public"
+	[[ $(receipt_key_pair_state "$private" "$public") == present ]]
+	rm -f "$private" "$public"
+	ln -s "$fixture/missing-private" "$private"
+	if receipt_key_pair_state "$private" "$public" >/dev/null; then
+		echo "configure-input-boundary-test: broken private-only receipt identity was accepted" >&2
+		exit 1
+	fi
+	ln -s "$fixture/missing-public" "$public"
+	[[ $(receipt_key_pair_state "$private" "$public") == present ]]
+)
+
+exercise_evidence_config_parser() (
+	set -Eeuo pipefail
+	local helper=$work/evidence-config-parser.sh fixture=$work/evidence-config.env
+	: >"$helper"
+	extract_function "$root/scripts/configure-node.sh" evidence_config_error "$helper"
+	extract_function "$root/scripts/configure-node.sh" parse_executor_evidence_config "$helper"
+	# shellcheck source=/dev/null
+	source "$helper"
+	public_key="$(printf 'A%.0s' {1..43})="
+	cat >"$fixture" <<EOF
+STEWARD_EXECUTOR_EVIDENCE_CONFIG_VERSION=1
+STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID=control-a
+STEWARD_EXECUTOR_EVIDENCE_NODE_ID=node-a
+STEWARD_EXECUTOR_EVIDENCE_RECEIPT_EPOCH=1
+STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_BASE64=$public_key
+EOF
+	executor_evidence_config=$fixture
+	evidence_controller_instance_id=
+	evidence_node_id=
+	evidence_public_key=
+	parse_executor_evidence_config
+	[[ $evidence_controller_instance_id == control-a ]]
+	[[ $evidence_node_id == node-a ]]
+	[[ $evidence_public_key == "$public_key" ]]
+
+	printf 'UNKNOWN=value\n' >>"$fixture"
+	if (set -e; parse_executor_evidence_config) >/dev/null 2>&1; then
+		echo "configure-input-boundary-test: unknown evidence config setting was accepted" >&2
+		exit 1
+	fi
+	sed -i '/^UNKNOWN=/d; s#^STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID=.*#STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID=bad/controller#' "$fixture"
+	if (set -e; parse_executor_evidence_config) >/dev/null 2>&1; then
+		echo "configure-input-boundary-test: invalid controller identity was accepted" >&2
+		exit 1
+	fi
+	sed -i 's#^STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID=.*#STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID=control-a#' "$fixture"
+	printf '\0' >>"$fixture"
+	if (set -e; parse_executor_evidence_config) >/dev/null 2>&1; then
+		echo "configure-input-boundary-test: non-text evidence config was accepted" >&2
+		exit 1
+	fi
+)
+
 exercise_common_boundary "$root/scripts/configure-node.sh" node
 exercise_common_boundary "$root/scripts/configure-admission.sh" admission
 exercise_node_staging
 exercise_admission_staging
+exercise_receipt_pair_presence
+exercise_evidence_config_parser
 
 node_stage_line=$(grep -n '^stage_node_input_sources$' "$root/scripts/configure-node.sh" | cut -d: -f1)
 node_mutation_line=$(grep -n '^install -d -o root -g root -m 0755 /etc/steward$' \

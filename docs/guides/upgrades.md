@@ -88,6 +88,13 @@ durable state, then switches the service. It preserves
 `/etc/steward-control` and `/var/lib/steward-control`. If candidate activation
 fails, it restores the prior release and service state.
 
+The controller's evidence-witness key pair is part of durable state. Upgrades
+preserve `/var/lib/steward-control/witness.private.pem` and
+`witness.public.pem`. When upgrading state created before those files existed, the
+installer creates them once and records their stable paths in `control.env`. It
+never replaces an existing file: a partial pair, mismatched pair, symlink, or
+unsafe permissions stop activation.
+
 The installer also persists a root-only transaction journal. After a process kill
 or power loss, rerun the same installer command; its next invocation restores the
 prior links, configuration, token handoff, and service state before attempting the

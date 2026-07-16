@@ -276,7 +276,7 @@ if [[ -r $config && -f $config && ! -L $config && $(stat -c '%h' -- "$config" 2>
 		case "$line" in
 			"" | \#*) continue ;;
 		esac
-		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE)=([^[:space:]]*)$ ]]; then
+		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE|STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE)=([^[:space:]]*)$ ]]; then
 			config_valid=false
 			continue
 		fi
@@ -287,16 +287,34 @@ if [[ -r $config && -f $config && ! -L $config && $(stat -c '%h' -- "$config" 2>
 else
 	config_valid=false
 fi
-for key in STEWARD_CONTROL_ADDR STEWARD_CONTROL_STATE_DIR STEWARD_CONTROL_AUTH_KEY_FILE STEWARD_CONTROL_TLS_CERT_FILE STEWARD_CONTROL_TLS_KEY_FILE; do
+for key in STEWARD_CONTROL_ADDR STEWARD_CONTROL_STATE_DIR STEWARD_CONTROL_AUTH_KEY_FILE \
+	STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE \
+	STEWARD_CONTROL_TLS_CERT_FILE STEWARD_CONTROL_TLS_KEY_FILE; do
 	[[ ${settings[$key]+present} == present ]] || config_valid=false
 done
 if [[ ${settings[STEWARD_CONTROL_STATE_DIR]:-} != "$state" ||
-	${settings[STEWARD_CONTROL_AUTH_KEY_FILE]:-} != "$state/auth.key" ]] ||
+	${settings[STEWARD_CONTROL_AUTH_KEY_FILE]:-} != "$state/auth.key" ||
+	${settings[STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE]:-} != "$state/witness.private.pem" ||
+	${settings[STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE]:-} != "$state/witness.public.pem" ]] ||
 	{ [[ -z ${settings[STEWARD_CONTROL_TLS_CERT_FILE]:-} ]] && [[ -n ${settings[STEWARD_CONTROL_TLS_KEY_FILE]:-} ]]; } ||
 	{ [[ -n ${settings[STEWARD_CONTROL_TLS_CERT_FILE]:-} ]] && [[ -z ${settings[STEWARD_CONTROL_TLS_KEY_FILE]:-} ]]; }; then
 	config_valid=false
 fi
 if [[ $config_valid == true ]]; then pass "control.env contains only supported settings"; else fail "control.env is invalid"; fi
+
+if [[ $config_valid == true ]]; then
+	require_metadata "${settings[STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE]}" steward-control:steward-control 600 regular
+	require_metadata "${settings[STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE]}" steward-control:steward-control 644 regular
+	for witness_path in "${settings[STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE]}" \
+		"${settings[STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE]}"; do
+		if (( $(stat -c '%s' -- "$witness_path" 2>/dev/null || printf '16385') <= 0 ||
+			$(stat -c '%s' -- "$witness_path" 2>/dev/null || printf '16385') > 16384 )); then
+			fail "$witness_path size is outside the 16 KiB witness-key bound"
+		else
+			pass "$witness_path size is within the 16 KiB witness-key bound"
+		fi
+	done
+fi
 
 if [[ -L $binary && -x $binary && $(readlink -f -- "$binary" 2>/dev/null) == /opt/steward-control/releases/*/steward-control ]]; then
 	pass "$binary selects an immutable release"
@@ -377,7 +395,10 @@ if bounded_systemctl is-active --quiet "$unit"; then
 else
 	fail "steward-control is not active"
 	if [[ $config_valid == true && -x $binary ]]; then
-		args=(-check-config -addr "${settings[STEWARD_CONTROL_ADDR]}" -state-dir "$state" -auth-key-file "$state/auth.key")
+		args=(-check-config -addr "${settings[STEWARD_CONTROL_ADDR]}" -state-dir "$state" \
+			-auth-key-file "$state/auth.key" \
+			-witness-private-key-file "${settings[STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE]}" \
+			-witness-public-key-file "${settings[STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE]}")
 		if [[ -n ${settings[STEWARD_CONTROL_TLS_CERT_FILE]} ]]; then
 			args+=(-tls-cert-file "${settings[STEWARD_CONTROL_TLS_CERT_FILE]}" -tls-key-file "${settings[STEWARD_CONTROL_TLS_KEY_FILE]}")
 		fi

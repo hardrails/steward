@@ -213,6 +213,8 @@ for path, expected_type, expected_mode in (
     (token_path, "file", 0o600),
     (state_path, "directory", 0o700),
     (state_path / "auth.key", "file", 0o600),
+    (state_path / "witness.private.pem", "file", 0o600),
+    (state_path / "witness.public.pem", "file", 0o644),
 ):
     metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode):
@@ -222,6 +224,42 @@ for path, expected_type, expected_mode in (
         raise SystemExit(f"control-acceptance: sensitive {expected_type} has unsafe type or mode")
 if token_path.read_bytes().rstrip(b"\n") in stdout_path.read_bytes() + stderr_path.read_bytes():
     raise SystemExit("control-acceptance: bootstrap bearer reached process output")
+PY
+
+# Preserve the controller witness identity outside mutable controller state before
+# the service first starts. Later verification must use this pinned copy, including
+# after a restart, so a replaced controller key cannot authorize its own exports.
+pinned_witness=$work/pinned-witness.public.pem
+python3 -I - "$state_dir/witness.public.pem" "$pinned_witness" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+source = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2])
+metadata = source.lstat()
+if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+    raise SystemExit("control-acceptance: witness trust source is not a regular file")
+raw = source.read_bytes()
+if not raw or len(raw) > 1 << 20:
+    raise SystemExit("control-acceptance: witness trust source is empty or oversized")
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(destination, flags, 0o600)
+try:
+    written = 0
+    while written < len(raw):
+        count = os.write(descriptor, raw[written:])
+        if count <= 0:
+            raise SystemExit("control-acceptance: pinned witness copy was incomplete")
+        written += count
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+if destination.read_bytes() != raw or stat.S_IMODE(destination.lstat().st_mode) != 0o600:
+    raise SystemExit("control-acceptance: pinned witness copy is not exact and owner-only")
 PY
 
 extract_address() {
@@ -486,18 +524,35 @@ cmp -s "$enrollment" "$enrollment_retry" || {
 }
 assert_secret_absent enrollment_token "$enrollment" "$work/enrollment.stdout" "$work/enrollment.stderr"
 
+evidence_private=$work/executor-evidence.private
+evidence_public=$work/executor-evidence.public
+run_bounded 30 "$work" "$work/evidence-keygen.stdout" "$work/evidence-keygen.stderr" \
+	"$ctl_bin" keygen -key-id acceptance-executor-evidence -private-out "$evidence_private" \
+	-public-out "$evidence_public"
+assert_owner_file "$evidence_private"
+
 node_credential=$work/node-credential.json
 node_credential_retry=$work/node-credential-retry.json
+evidence_config=$work/executor-evidence.env
+evidence_config_retry=$work/executor-evidence-retry.env
 run_bounded 30 "$work" "$work/exchange.stdout" "$work/exchange.stderr" \
 	"$ctl_bin" control enrollment exchange -control-url "$control_url" -enrollment "$enrollment" \
-	-request-id acceptance-node-exchange -credential-out "$node_credential"
+	-request-id acceptance-node-exchange -executor-evidence-private-key "$evidence_private" \
+	-credential-out "$node_credential" -executor-evidence-config-out "$evidence_config"
 run_bounded 30 "$work" "$work/exchange-retry.stdout" "$work/exchange-retry.stderr" \
 	"$ctl_bin" control enrollment exchange -control-url "$control_url" -enrollment "$enrollment" \
-	-request-id acceptance-node-exchange -credential-out "$node_credential_retry"
+	-request-id acceptance-node-exchange -executor-evidence-private-key "$evidence_private" \
+	-credential-out "$node_credential_retry" -executor-evidence-config-out "$evidence_config_retry"
 assert_owner_file "$node_credential"
 assert_owner_file "$node_credential_retry"
+assert_owner_file "$evidence_config"
+assert_owner_file "$evidence_config_retry"
 cmp -s "$node_credential" "$node_credential_retry" || {
 	echo "control-acceptance: deterministic enrollment retry changed the node credential" >&2
+	exit 1
+}
+cmp -s "$evidence_config" "$evidence_config_retry" || {
+	echo "control-acceptance: deterministic enrollment retry changed the evidence config" >&2
 	exit 1
 }
 python3 -I - "$node_credential" "$node_id" "$work/exchange.stdout" "$work/exchange-retry.stdout" <<'PY'
@@ -529,10 +584,13 @@ assert_secret_absent credential "$node_credential" "$work/exchange.stdout" "$wor
 set +e
 run_bounded 30 "$work" "$work/exchange-replay.stdout" "$work/exchange-replay.stderr" \
 	"$ctl_bin" control enrollment exchange -control-url "$control_url" -enrollment "$enrollment" \
-	-request-id acceptance-different-exchange -credential-out "$work/replayed-node-credential.json"
+	-request-id acceptance-different-exchange -executor-evidence-private-key "$evidence_private" \
+	-credential-out "$work/replayed-node-credential.json" \
+	-executor-evidence-config-out "$work/replayed-executor-evidence.env"
 replay_status=$?
 set -e
-if (( replay_status == 0 )) || [[ -e $work/replayed-node-credential.json ]]; then
+if (( replay_status == 0 )) || [[ -e $work/replayed-node-credential.json ||
+	-e $work/replayed-executor-evidence.env ]]; then
 	echo "control-acceptance: consumed enrollment accepted a different replay identity" >&2
 	exit 1
 fi
@@ -548,6 +606,139 @@ import sys
 node = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if node.get("node_id") != sys.argv[2] or node.get("tenant_ids") != [sys.argv[3]] or node.get("state") != "active":
     raise SystemExit("control-acceptance: enrolled node inventory is invalid")
+PY
+
+# The site authority can inspect the independently retained receipt checkpoint,
+# export it under the dedicated witness key, and verify it without contacting
+# the controller. A tenant-scoped operator cannot read this cross-tenant view.
+run_bounded 30 "$work" "$work/evidence-status.stdout" "$work/evidence-status.stderr" \
+	"$ctl_bin" control evidence status -control-url "$control_url" -token-file "$admin_token" \
+	-node-id "$node_id"
+python3 -I - "$work/evidence-status.stdout" "$node_id" "$enrollment" "$evidence_public" \
+	"$evidence_config" <<'PY'
+import base64
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+node_id = sys.argv[2]
+enrollment = json.loads(pathlib.Path(sys.argv[3]).read_text())
+public_text = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8").strip()
+try:
+    public = base64.b64decode(public_text, validate=True)
+except ValueError:
+    raise SystemExit("control-acceptance: generated evidence public key is not canonical base64") from None
+if len(public) != 32 or base64.b64encode(public).decode("ascii") != public_text:
+    raise SystemExit("control-acceptance: generated evidence public key is not canonical Ed25519")
+public_digest = "sha256:" + hashlib.sha256(public).hexdigest()
+
+config = {}
+for line in pathlib.Path(sys.argv[5]).read_text(encoding="utf-8").splitlines():
+    name, separator, content = line.partition("=")
+    if not separator or not name or name in config:
+        raise SystemExit("control-acceptance: evidence handoff config is ambiguous")
+    config[name] = content
+expected_config_keys = {
+    "STEWARD_EXECUTOR_EVIDENCE_CONFIG_VERSION",
+    "STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID",
+    "STEWARD_EXECUTOR_EVIDENCE_NODE_ID",
+    "STEWARD_EXECUTOR_EVIDENCE_RECEIPT_EPOCH",
+    "STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_BASE64",
+}
+if set(config) != expected_config_keys:
+    raise SystemExit("control-acceptance: evidence handoff config fields are incomplete")
+
+status = value.get("status", {})
+head = status.get("head", {})
+claim = value.get("identity_proof", {}).get("claim", {})
+controller_id = enrollment.get("controller_instance_id")
+if value.get("protocol_version") != 1 or value.get("control_node_id") != node_id:
+    raise SystemExit("control-acceptance: online evidence inspection identity is invalid")
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", controller_id or "") or \
+        value.get("controller_instance_id") != controller_id:
+    raise SystemExit("control-acceptance: online evidence inspection omits the controller identity")
+expected_claim = {
+    "protocol_version": 1,
+    "controller_instance_id": controller_id,
+    "enrollment_id": enrollment.get("enrollment_id"),
+    "control_node_id": node_id,
+    "stream": "executor",
+    "receipt_node_id": node_id,
+    "receipt_epoch": 1,
+    "public_key_base64": public_text,
+    "public_key_sha256": public_digest,
+}
+for field, expected in expected_claim.items():
+    if claim.get(field) != expected:
+        raise SystemExit(f"control-acceptance: enrolled evidence claim changed {field}")
+if config != {
+    "STEWARD_EXECUTOR_EVIDENCE_CONFIG_VERSION": "1",
+    "STEWARD_EXECUTOR_EVIDENCE_CONTROLLER_INSTANCE_ID": controller_id,
+    "STEWARD_EXECUTOR_EVIDENCE_NODE_ID": node_id,
+    "STEWARD_EXECUTOR_EVIDENCE_RECEIPT_EPOCH": "1",
+    "STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_BASE64": public_text,
+}:
+    raise SystemExit("control-acceptance: Executor evidence handoff differs from the enrolled claim")
+expected_head = {
+    "stream": claim.get("stream"),
+    "receipt_node_id": claim.get("receipt_node_id"),
+    "receipt_epoch": claim.get("receipt_epoch"),
+    "sequence": 0,
+    "chain_hash": "sha256:" + "0" * 64,
+    "public_key_sha256": claim.get("public_key_sha256"),
+}
+for field, expected in expected_head.items():
+    if head.get(field) != expected:
+        raise SystemExit(f"control-acceptance: witnessed genesis changed {field}")
+if claim.get("control_node_id") != node_id or claim.get("receipt_node_id") != node_id:
+    raise SystemExit("control-acceptance: online evidence inspection changed the enrolled receipt identity")
+if status.get("state") != "current" or head.get("sequence") != 0:
+    raise SystemExit("control-acceptance: new node does not expose its witnessed genesis checkpoint")
+if not status.get("witnessed_at"):
+    raise SystemExit("control-acceptance: witnessed genesis coordinate is invalid")
+PY
+
+http_json GET "/v1/nodes/$node_id/evidence" "" raw "$operator_token" 403 \
+	"$work/evidence-tenant-denied.json"
+http_json GET "/v1/nodes/$node_id/evidence/export" "" raw "$operator_token" 403 \
+	"$work/evidence-export-tenant-denied.json"
+python3 -I - "$work/evidence-tenant-denied.json" "$work/evidence-export-tenant-denied.json" <<'PY'
+import json
+import pathlib
+import sys
+for path in sys.argv[1:]:
+    value = json.loads(pathlib.Path(path).read_text())
+    if value.get("error") != "forbidden" or not value.get("message"):
+        raise SystemExit("control-acceptance: evidence endpoint did not return the stable forbidden error")
+PY
+
+tenant_denied_export=$work/tenant-denied-evidence-witness.json
+set +e
+run_bounded 30 "$work" "$work/evidence-export-tenant-cli.stdout" \
+	"$work/evidence-export-tenant-cli.stderr" "$ctl_bin" control evidence export \
+	-control-url "$control_url" -token-file "$operator_token" -node-id "$node_id" \
+	-out "$tenant_denied_export"
+evidence_tenant_export_status=$?
+set -e
+if (( evidence_tenant_export_status == 0 )) || [[ -e $tenant_denied_export ]] || \
+	[[ -s $work/evidence-export-tenant-cli.stdout ]]; then
+	echo "control-acceptance: denied tenant evidence export published output" >&2
+	exit 1
+fi
+
+evidence_export=$work/executor-evidence-witness.json
+run_bounded 30 "$work" "$work/evidence-export.stdout" "$work/evidence-export.stderr" \
+	"$ctl_bin" control evidence export -control-url "$control_url" -token-file "$admin_token" \
+	-node-id "$node_id" -out "$evidence_export"
+assert_owner_file "$evidence_export"
+python3 -I - "$work/evidence-export.stdout" "$evidence_export" <<'PY'
+import pathlib
+import sys
+if pathlib.Path(sys.argv[1]).read_text(encoding="utf-8") != f"{sys.argv[2]}\n":
+    raise SystemExit("control-acceptance: evidence export did not return exactly its output path")
 PY
 
 run_bounded 30 "$work" "$work/keygen.stdout" "$work/keygen.stderr" \
@@ -671,8 +862,133 @@ PY
 # Recover the leased command and its delivery fence from durable state before
 # accepting the node's terminal observation.
 stop_control
+
+# Verification is genuinely offline here: the controller process is stopped and
+# the verifier receives only the export plus the public key pinned before first
+# startup. Exercise both signature tampering and a different valid witness key.
+run_bounded 30 "$work" "$work/evidence-verify.stdout" "$work/evidence-verify.stderr" \
+	"$ctl_bin" control evidence verify -in "$evidence_export" \
+	-witness-public-key "$pinned_witness"
+python3 -I - "$work/evidence-verify.stdout" "$work/evidence-status.stdout" \
+	"$evidence_export" "$node_id" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+online = json.loads(pathlib.Path(sys.argv[2]).read_text())
+export = json.loads(pathlib.Path(sys.argv[3]).read_text())
+if value.get("verified") is not True or value.get("control_node_id") != sys.argv[4]:
+    raise SystemExit("control-acceptance: offline witness verification did not bind the node")
+if value.get("controller_instance_id") != online.get("controller_instance_id"):
+    raise SystemExit("control-acceptance: offline witness verification changed the controller identity")
+if value.get("state") != "current" or value.get("sequence") != 0 or not value.get("exported_at"):
+    raise SystemExit("control-acceptance: offline witness verification changed the checkpoint")
+digest = value.get("witness_public_key_sha256", "")
+if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or digest != export.get("witness_public_key_sha256"):
+    raise SystemExit("control-acceptance: offline verification omits the pinned witness digest")
+if value.get("exported_at") != export.get("statement", {}).get("exported_at"):
+    raise SystemExit("control-acceptance: offline verification changed the export time")
+PY
+
+tampered_export=$work/executor-evidence-witness-tampered.json
+python3 -I - "$evidence_export" "$tampered_export" <<'PY'
+import json
+import pathlib
+import sys
+
+source = json.loads(pathlib.Path(sys.argv[1]).read_text())
+source["statement"]["exported_at"] = "2999-01-01T00:00:00Z"
+with pathlib.Path(sys.argv[2]).open("x", encoding="utf-8") as output:
+    json.dump(source, output, indent=2)
+    output.write("\n")
+PY
+assert_owner_file "$tampered_export"
+set +e
+run_bounded 30 "$work" "$work/evidence-tampered.stdout" "$work/evidence-tampered.stderr" \
+	"$ctl_bin" control evidence verify -in "$tampered_export" \
+	-witness-public-key "$pinned_witness"
+tampered_status=$?
+set -e
+if (( tampered_status == 0 )) || [[ -s $work/evidence-tampered.stdout ]]; then
+	echo "control-acceptance: changed signed export field passed offline verification" >&2
+	exit 1
+fi
+
+wrong_state=$work/wrong-witness-state
+wrong_admin=$work/wrong-witness-admin.token
+run_bounded 30 "$work" "$work/wrong-witness-initialize.stdout" \
+	"$work/wrong-witness-initialize.stderr" "$control_bin" -initialize \
+	-state-dir "$wrong_state" -admin-token-file "$wrong_admin" -addr 127.0.0.1:0
+wrong_witness_public=$wrong_state/witness.public.pem
+wrong_witness_private=$wrong_state/witness.private.pem
+set +e
+run_bounded 30 "$work" "$work/evidence-wrong-key.stdout" "$work/evidence-wrong-key.stderr" \
+	"$ctl_bin" control evidence verify -in "$evidence_export" \
+	-witness-public-key "$wrong_witness_public"
+wrong_key_status=$?
+set -e
+if (( wrong_key_status == 0 )) || [[ -s $work/evidence-wrong-key.stdout ]]; then
+	echo "control-acceptance: unpinned witness key authorized an evidence export" >&2
+	exit 1
+fi
+
 start_control control-recovered
 http_json GET /v1/readiness "" none "" 200 "$work/recovered-readiness.json"
+
+# Restart must preserve both the last-good evidence checkpoint and the dedicated
+# witness identity. Re-export under the recovered controller and verify both
+# generations with the original pinned public key.
+run_bounded 30 "$work" "$work/evidence-status-recovered.stdout" \
+	"$work/evidence-status-recovered.stderr" "$ctl_bin" control evidence status \
+	-control-url "$control_url" -token-file "$admin_token" -node-id "$node_id"
+cmp -s "$work/evidence-status.stdout" "$work/evidence-status-recovered.stdout" || {
+	echo "control-acceptance: controller restart changed the retained evidence witness" >&2
+	exit 1
+}
+evidence_export_recovered=$work/executor-evidence-witness-recovered.json
+run_bounded 30 "$work" "$work/evidence-export-recovered.stdout" \
+	"$work/evidence-export-recovered.stderr" "$ctl_bin" control evidence export \
+	-control-url "$control_url" -token-file "$admin_token" -node-id "$node_id" \
+	-out "$evidence_export_recovered"
+assert_owner_file "$evidence_export_recovered"
+python3 -I - "$work/evidence-export-recovered.stdout" "$evidence_export_recovered" <<'PY'
+import pathlib
+import sys
+if pathlib.Path(sys.argv[1]).read_text(encoding="utf-8") != f"{sys.argv[2]}\n":
+    raise SystemExit("control-acceptance: recovered evidence export returned extra output")
+PY
+run_bounded 30 "$work" "$work/evidence-verify-recovered-old.stdout" \
+	"$work/evidence-verify-recovered-old.stderr" "$ctl_bin" control evidence verify \
+	-in "$evidence_export" -witness-public-key "$pinned_witness"
+run_bounded 30 "$work" "$work/evidence-verify-recovered.stdout" \
+	"$work/evidence-verify-recovered.stderr" "$ctl_bin" control evidence verify \
+	-in "$evidence_export_recovered" -witness-public-key "$pinned_witness"
+python3 -I - "$evidence_export" "$evidence_export_recovered" \
+	"$work/evidence-verify-recovered-old.stdout" "$work/evidence-verify-recovered.stdout" <<'PY'
+import json
+import pathlib
+import sys
+
+old_export = json.loads(pathlib.Path(sys.argv[1]).read_text())
+new_export = json.loads(pathlib.Path(sys.argv[2]).read_text())
+old_verified = json.loads(pathlib.Path(sys.argv[3]).read_text())
+new_verified = json.loads(pathlib.Path(sys.argv[4]).read_text())
+old_statement = dict(old_export["statement"])
+new_statement = dict(new_export["statement"])
+old_statement.pop("exported_at")
+new_statement.pop("exported_at")
+if old_statement != new_statement:
+    raise SystemExit("control-acceptance: restart changed the exported evidence statement")
+for field in ("witness_public_key_base64", "witness_public_key_sha256"):
+    if old_export.get(field) != new_export.get(field):
+        raise SystemExit("control-acceptance: restart rotated the evidence witness identity")
+for field in ("verified", "controller_instance_id", "control_node_id", "state", "sequence", "finding", "witness_public_key_sha256"):
+    if old_verified.get(field) != new_verified.get(field):
+        raise SystemExit(f"control-acceptance: recovered verification changed {field}")
+PY
+
 run_bounded 30 "$work" "$work/leased-status.stdout" "$work/leased-status.stderr" \
 	"$ctl_bin" control command status -control-url "$control_url" -token-file "$operator_token" \
 	-tenant-id "$tenant_id" -node-id "$node_id" -command-id "$command_id"
@@ -774,6 +1090,10 @@ assert_secret_absent raw "$admin_token" "${process_outputs[@]}"
 assert_secret_absent raw "$operator_token" "${process_outputs[@]}"
 assert_secret_absent enrollment_token "$enrollment" "${process_outputs[@]}"
 assert_secret_absent credential "$node_credential" "${process_outputs[@]}"
+assert_secret_absent raw "$evidence_private" "${process_outputs[@]}"
+assert_secret_absent raw "$state_dir/witness.private.pem" "${process_outputs[@]}"
+assert_secret_absent raw "$wrong_admin" "${process_outputs[@]}"
+assert_secret_absent raw "$wrong_witness_private" "${process_outputs[@]}"
 assert_secret_absent raw "$work/command.private" "${process_outputs[@]}"
 
-echo "Steward Control acceptance passed: initialization, scoped tenancy, deterministic enrollment, exact signed delivery, restart recovery, fencing, and terminal retention verified."
+echo "Steward Control acceptance passed: initialization, scoped tenancy, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."

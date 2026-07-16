@@ -110,6 +110,27 @@ There is no boot-time recovery unit, so system startup alone does not complete o
 roll back an interrupted installation. Do not remove
 `/var/lib/steward-control-installer/transaction` by hand.
 
+The first installation also creates a dedicated Ed25519 evidence-witness identity:
+
+- private key: `/var/lib/steward-control/witness.private.pem`, mode `0600`;
+- public key: `/var/lib/steward-control/witness.public.pem`, mode `0644`.
+
+Both files are inside the service's mode-`0700` state directory. The public file is
+therefore stable but not directly readable by ordinary host users. Copy only the
+public key to an offline verifier or auditor from a root session:
+
+```console
+sudo install -o root -g root -m 0644 \
+  /var/lib/steward-control/witness.public.pem \
+  /secure/steward-control-witness.public.pem
+```
+
+The installer never prints, passes on the command line, rotates, or overwrites the
+private key. On an upgrade from a controller that predates this identity, it
+creates the pair only if both paths are absent. A partial pair, unsafe metadata,
+symlink, or mismatch stops the upgrade so an operator can investigate instead of
+silently accepting a new audit identity.
+
 Verify the installed service:
 
 ```console
@@ -256,25 +277,38 @@ lifetime, operator token, and a new absent output path. The controller returns t
 same enrollment capability. A changed request conflicts instead of leaving a
 second live secret. Once the capability has expired, use a new request ID.
 
-On the staged node, exchange it for a node-scoped Executor credential. The request
-ID makes a retry deterministic if the first response is lost. Use the same request
-ID and an absent output path on retry.
+On the staged node, create the receipt key that will sign local enforcement
+evidence. Keep the private key on the node. The exchange proves possession of this
+key and emits a protected evidence-config sidecar that binds the controller, node,
+receipt epoch, and public key.
 
 ```console
+sudo stewardctl keygen \
+  -key-id node-a-receipts \
+  -private-out /secure/enrollment/node-receipts.private.pem \
+  -public-out /secure/enrollment/node-receipts.public
 sudo stewardctl control enrollment exchange \
   -control-url "$CONTROL_URL" \
   -ca-file /secure/enrollment/control-ca.crt \
   -enrollment /secure/enrollment/node-a.enrollment.json \
   -request-id node-a-first-exchange \
-  -credential-out /secure/enrollment/executor-node.json
+  -executor-evidence-private-key /secure/enrollment/node-receipts.private.pem \
+  -credential-out /secure/enrollment/executor-node.json \
+  -executor-evidence-config-out /secure/enrollment/executor-evidence.env
 ```
 
+The request ID makes a retry deterministic if the first response is lost. Reuse the
+same receipt key and request ID, but choose new absent paths for both outputs.
+
 The resulting credential is an owner-only Executor transport credential. It
-identifies the node, not a tenant. Configure the node with the same node ID, the
-controller CA, and a site-root-signed policy that contains the public command keys
-for every bound tenant. The private command and site-root keys must not enter the
-node or controller. Follow the [node enrollment procedure]({{ '/getting-started/enroll/' | relative_url }})
-for the complete transaction.
+identifies the node, not a tenant. The evidence sidecar is non-secret authority
+metadata, but keep it owner-only so another local user cannot alter the controller
+binding before installation. Configure the node with both files, the exact receipt
+key pair, the controller CA, and a site-root-signed policy that contains the public
+command keys for every bound tenant. The private command and site-root keys must
+not enter the node or controller. Follow the
+[node enrollment procedure]({{ '/getting-started/enroll/' | relative_url }}) for
+the complete transaction.
 
 The exchange command prints the non-secret node credential ID. Record it for
 rotation and targeted revocation. To rotate, a site administrator issues and
@@ -286,7 +320,14 @@ replaces the credential, and restarts the node services:
 sudo /usr/local/libexec/steward/configure-node \
   --control-plane-url "$CONTROL_URL" \
   --executor-credential /secure/enrollment/executor-node-rotated.json \
-  --ca-file /secure/enrollment/control-ca.crt
+  --ca-file /secure/enrollment/control-ca.crt \
+  --admission-policy /secure/enrollment/site-policy.dsse.json \
+  --site-root-public-key /secure/enrollment/site-root.public \
+  --site-root-key-id site-root-1 \
+  --node-id node-a \
+  --executor-evidence-config /secure/enrollment/executor-evidence-rotated.env \
+  --executor-evidence-private-key /secure/enrollment/node-receipts.private.pem \
+  --executor-evidence-public-key /secure/enrollment/node-receipts.public
 ```
 
 Confirm that `last_seen_at` advances while the replacement is installed. Only then
@@ -331,6 +372,91 @@ stewardctl control node status \
 Node revocation is site-wide and revokes every retained credential for that node.
 It does not stop workloads already running on a disconnected node. Use a signed
 site cleanup command before revocation when containment is required.
+
+## Inspect and verify the evidence witness
+
+The evidence publisher runs independently from command polling. A controller
+outage does not stop local admission or agent work; the node keeps its signed
+receipt log as the durable outbox. When connectivity returns, Executor submits a
+bounded contiguous batch that signs both the controller checkpoint it observed
+and the exact native frames it sends.
+
+A site administrator can inspect the retained checkpoint without reading the full
+node receipt log:
+
+```console
+stewardctl control evidence status \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -node-id node-a
+```
+
+The response uses these implemented states:
+
+- `current`: the controller has a valid last-good checkpoint for the enrolled
+  receipt identity. This is not a liveness signal and does not prove the host was
+  uncompromised when it created a receipt.
+- `unwitnessed`: a legacy node has no receipt-key proof. A site administrator can
+  issue and exchange a replacement enrollment for that active node before relying
+  on controller witnessing.
+- `rollback_detected`: the node signed a head below the checkpoint named in
+  `finding.compared_head`.
+- `equivocation_detected`: the node signed a head or branch that conflicts with
+  `finding.compared_head`.
+
+Rollback and equivocation findings are sticky. Later reports cannot clear the
+finding or advance the checkpoint, and Steward has no evidence-reset endpoint.
+The status `head` is the latest retained last-good checkpoint. It normally
+equals `finding.compared_head`, but it can be later when another valid report
+advances the checkpoint while a historical conflict is being verified. The
+finding retains both the exact comparison checkpoint and the conflicting
+`observed_head`, so an inspection or signed export remains unambiguous. In that
+historical case, `finding.detected_at` can be earlier than the `witnessed_at`
+time attached to the later status head.
+Preserve the node receipt log, controller state, and a signed export for
+investigation. If the node must be replaced, revoke it, create a new global node
+ID with a new receipt key, and enroll that replacement. A revoked node ID is not
+reused; this preserves the old forensic record.
+
+Create a portable export on a trusted operator workstation:
+
+```console
+stewardctl control evidence export \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -node-id node-a \
+  -out node-a.evidence-witness.json
+```
+
+The output file is created once with mode `0600`. The export contains the
+enrolled receipt-key proof, latest last-good checkpoint, any sticky finding and
+its exact comparison checkpoint, and export time. The controller signs those
+fields with its separate witness key. The public key embedded in the export is
+descriptive, not trusted by itself.
+
+Verify offline with the witness public key copied through an independent trusted
+channel:
+
+```console
+stewardctl control evidence verify \
+  -in node-a.evidence-witness.json \
+  -witness-public-key /secure/steward-control-witness.public.pem
+```
+
+Verification makes no controller request. It fails if a signed export field
+changed, the receipt identity and checkpoint disagree, or the pinned witness key
+does not match. Reformatting equivalent JSON does not change the signed statement.
+An `unwitnessed` legacy node cannot produce an export because there is no receipt
+identity to bind; the controller returns a conflict instead.
+
+The controller signs outside the store lock, then confirms that the witness state
+is still current. If three consecutive witness updates prevent that confirmation,
+the export returns `409 Conflict` with `Retry-After: 1`. Wait at least that long,
+add client-side jitter when many operators may retry together, and request a new
+export. A 409 without `Retry-After` is a retained-state conflict such as an
+unwitnessed legacy node; repeating the same request will not repair it.
 
 ## Sign, submit, and observe one command
 
@@ -410,20 +536,29 @@ pre-effect failure as `rejected`, which is safe to retire after acknowledgement.
 }
 ```
 
-Control-plane MCP exposes tenant list/create, node list/status/revoke, and signed
-command submit/status. It deliberately omits operator and enrollment credential
-issuance so a model-facing tool cannot return new bearer secrets. Mutation tools
-require explicit model-visible acknowledgments, but those booleans are not human
-approval or authorization. The configured operator token and the node-verified
-signature remain the security boundary.
+Control-plane MCP exposes tenant list/create, node list/status/revoke, signed
+command submit/status, and read-only `steward_control_evidence_status`. The
+evidence tool projects the checkpoint and finding without returning raw proof
+signatures or export files, and the controller authorizes it only for a site-admin
+credential. Do not place a site-admin token in an MCP client that an untrusted
+model or user can drive; a tenant-scoped token is the safer default for ordinary
+fleet work.
+
+MCP deliberately omits operator and enrollment credential issuance so a
+model-facing tool cannot return new bearer secrets. Mutation tools require
+explicit model-visible acknowledgments, but those booleans are not human approval
+or authorization. The configured operator token and the node-verified signature
+remain the security boundary.
 
 ## Back up, restore, and upgrade
 
-The state directory contains the authentication key, credential verifiers,
-tenants, node bindings, exact signed commands, delivery state, and terminal
-reports. Treat a backup as a sensitive control-plane artifact even though bearer
-tokens are not stored in plaintext. The authentication key and retained request
-metadata are sufficient to reproduce credentials that use deterministic retry.
+The state directory contains the authentication key, witness private and public
+keys, credential verifiers, tenants, node bindings, exact signed commands,
+delivery state, and terminal reports. Treat a backup as a sensitive control-plane
+artifact even though bearer tokens are not stored in plaintext. The authentication
+key and retained request metadata are sufficient to reproduce credentials that use
+deterministic retry. The witness private key can sign exports under the controller's
+established audit identity.
 The controller exposes bootstrap recovery only under the narrow conditions above,
 but possession of a backup still carries authentication authority, not just
 inventory.
@@ -434,13 +569,16 @@ inventory.
 3. Protect the backup with the same controls as the live management host.
 4. Restore only the entire directory to a stopped controller of a compatible
    release. On a replacement host, verify that it contains only single-link regular
-   files, set the directory to mode `0700`, and set every file to mode `0600` under
-   the target `steward-control` user and group. Start the service, then run the
-   controller doctor to verify configuration and readiness. The doctor deliberately
-   reports an inactive service as a failure, even when its stopped-state validation
-   succeeds.
+   files, set the directory to mode `0700`, set
+   `witness.public.pem` to mode `0644`, and set every other file to mode `0600`
+   under the target `steward-control` user and group. Start the service, then run
+   the controller doctor to verify configuration and readiness. The doctor
+   deliberately reports an inactive service as a failure, even when its
+   stopped-state validation succeeds.
 
-Never restore only the write-ahead log, snapshot, manifest, or authentication key.
+Never restore only the write-ahead log, snapshot, manifest, authentication key, or
+one witness-key file. Restore the witness pair together or the controller will
+fail closed.
 The write-ahead log is a hash-chained durable transaction file. Startup repairs
 only an incomplete final frame, which is the expected shape of a crash during one
 append; a malformed complete frame or broken chain stops startup.

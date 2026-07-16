@@ -584,12 +584,29 @@ func TestGatewayStartRestoresEphemeralServiceGrantDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- reopened.Start(ctx) }()
 	deadline := time.Now().Add(3 * time.Second)
+	client := unixHTTPClient(config.ControlSocket)
+	ready := false
+	for time.Now().Before(deadline) {
+		health, requestErr := client.Get("http://gateway/v1/healthz")
+		if requestErr == nil {
+			_ = health.Body.Close()
+			if health.StatusCode == http.StatusOK {
+				ready = true
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("gateway did not become ready after restoring service grants")
+	}
 	directory := GrantDirectory(config.GrantRoot, grant.GrantID)
 	for time.Now().Before(deadline) {
-		if info, statErr := os.Stat(directory); statErr == nil && info.IsDir() {
+		if info, statErr := os.Stat(directory); statErr == nil && info.IsDir() && info.Mode().Perm() == 0o730 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)

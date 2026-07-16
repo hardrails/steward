@@ -7,8 +7,10 @@ section: How-to guide
 # Configure signed admission and offline receipts
 
 This guide configures signed authority. Author artifacts with `stewardctl` on an
-operator workstation, transfer only required public material through an approved
-process, and let the node generate its receipt key.
+operator workstation and transfer only the required trust material through an
+approved process. A standalone signed-admission node can generate its receipt key.
+A control-plane-enrolled node must import the exact receipt key that proved
+possession during enrollment.
 
 ## 1. Create independent keys
 
@@ -28,8 +30,8 @@ stewardctl keygen -key-id site-cleanup \
 node, tenant command keys on a separate tenant signing station or service outside
 Steward Control, and the independent cleanup key in a site incident-response
 system. Site policy gives the node only public keys. Never put receipt or command
-private keys in Terraform, cloud-init, tags, or enrollment archives. The node
-generates its receipt key.
+private keys in Terraform, cloud-init, tags, or cloud-provider metadata. Generate a
+control-plane receipt key on the staged node and keep its private half there.
 
 ## 2. Sign the local site policy
 
@@ -208,8 +210,9 @@ created the node's base local or remote enrollment. A package staged with
 `--stage-only` does not yet have the token and base configuration that preflight
 requires. On a configured node, `configure-admission` adds signed trust without
 changing its control-plane credential, or replaces policy on an enrolled node.
-The command verifies policy, installs public trust, generates the receipt key,
-initializes missing fence, journal, and evidence stores with their service ownership,
+The command verifies policy, installs public trust, imports a supplied receipt key
+pair or generates one when no enrollment identity exists, initializes missing
+fence, journal, and evidence stores with their service ownership,
 ensures that the active release has a verified relay-image binding, runs preflight,
 and restarts an active Executor. A failed transaction removes only stores and keys
 that it created. Authenticate the two files, then copy them into a protected
@@ -228,6 +231,10 @@ sudo /usr/local/libexec/steward/configure-admission \
   --site-root-key-id site-root-1 \
   --node-id node-a
 ```
+
+For a control-plane-enrolled node, also pass `--receipt-private-key` and
+`--receipt-public-key` using the pair created before enrollment exchange. The
+helper validates the pair and refuses to replace an installed evidence identity.
 
 Rollback here covers handled process errors only. After `SIGKILL` or power loss,
 keep the node services stopped and follow an approved whole-configuration recovery;

@@ -25,8 +25,10 @@ backup, and restore under the new limit before production use.
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `-addr` | `127.0.0.1:8443` | Control API listener; a non-loopback address requires TLS |
-| `-state-dir` | `/var/lib/steward-control` | Owner-only durable snapshot, write-ahead log, manifest, authentication key, and lock |
+| `-state-dir` | `/var/lib/steward-control` | Owner-only durable snapshot, write-ahead log, manifest, authentication and witness keys, and lock |
 | `-auth-key-file` | `<state-dir>/auth.key` | Owner-only key used to authenticate opaque bearer credentials |
+| `-witness-private-key-file` | `<state-dir>/witness.private.pem` | Owner-only Ed25519 key used to sign controller evidence-witness exports |
+| `-witness-public-key-file` | `<state-dir>/witness.public.pem` | Matching Ed25519 public key distributed to offline verifiers |
 | `-tls-cert-file` | empty | PEM server certificate; must be paired with the key |
 | `-tls-key-file` | empty | Owner-only PEM server private key |
 | `-delivery-lease` | `2m` | Time-limited node ownership of a delivery; positive and at most `10m` |
@@ -54,8 +56,22 @@ It publishes the first site-administrator token through `-admin-token-file`. Tha
 output must be an absent clean absolute path distinct from the authentication key.
 It is created without following a symlink and never written to standard output.
 The recovered credential is identical to the first one; initialization does not
-mint a second administrator. `-check-config` opens and validates the complete
-durable store and TLS inputs without serving.
+mint a second administrator. Initialization also creates the dedicated witness
+key pair without overwriting either path. `-initialize-witness-key` is the explicit
+migration command for an existing controller created before the pair existed. It
+creates the pair only when both paths are absent, accepts an existing valid pair
+without changing it, and fails on a partial pair, unsafe permissions, symlink, or
+public/private mismatch. `-check-config` opens and validates the complete durable
+store, witness pair, and TLS inputs without serving.
+
+The packaged service keeps both witness files in the owner-only state directory.
+The private key is mode `0600`; the public key is mode `0644`, but the directory is
+mode `0700`, so an unprivileged host account still cannot traverse to it. The
+stable public-key location is
+`/var/lib/steward-control/witness.public.pem`. A root operator can copy that file
+to an auditor or offline verification station. Upgrades and repeated installation
+preserve both files. Steward has no implicit key-rotation path because changing
+this identity would break continuity with previously verified witness exports.
 
 All request bodies, responses, pages, identifiers, and retained collections are
 bounded. Capacity options are startup invariants: restarting with values smaller
@@ -148,6 +164,9 @@ outbound-only deployment.
 | `-uplink-tls-ca-file` | system roots | Private CA bundle; when set, replaces the system root set |
 | `-uplink-tls-client-cert`, `-uplink-tls-client-key` | empty | Optional mTLS identity |
 | `-uplink-tls-skip-verify` | `false` | Disable server certificate verification (dangerous; forbidden with node-scoped credentials) |
+| `-evidence-uplink` | `false` | Publish signed Executor receipt checkpoints independently from command polling |
+| `-evidence-uplink-controller-instance-id` | empty | Controller identity authenticated during enrollment; required when evidence uplink is enabled |
+| `-evidence-uplink-poll-interval` | `30s` | Base evidence checkpoint cadence; accepted range is 1 second to 1 hour |
 | `-max-memory-bytes` | `536870912` | Per-workload admission ceiling |
 | `-max-cpu-millis` | `1000` | Per-workload CPU ceiling |
 | `-max-pids` | `128` | Per-workload process ceiling |
@@ -220,8 +239,13 @@ overwrite that backup, migrate a current-format file, or guess a tenant.
 
 Signed admission is all-or-nothing: if any trust input is set, the policy, site-root
 key and ID, node ID, and evidence key are all required. The packaged unit accepts
-optional `EXECUTOR_ADMISSION_*` values from `/etc/steward/executor.env`. See
-[signed admission and receipts]({{ '/guides/signed-admission/' | relative_url }}).
+optional `EXECUTOR_ADMISSION_*` values from `/etc/steward/executor.env`.
+`EXECUTOR_EVIDENCE_UPLINK_ENABLED`,
+`EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID`, and
+`EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL` map the enrollment evidence handoff to the
+three evidence-uplink flags. Evidence publishing additionally requires a
+node-scoped credential, matching receipt key and node identity, and verified HTTPS.
+See [signed admission and receipts]({{ '/guides/signed-admission/' | relative_url }}).
 
 A tenant policy may contain at most eight `task_keys`. Each entry has a unique
 bounded `key_id`, one canonical base64 Ed25519 `public_key`, and one through 32

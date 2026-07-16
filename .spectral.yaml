@@ -1,1 +1,80 @@
 extends: ["spectral:oas"]
+
+rules:
+  steward-evidence-status-variants:
+    description: Executor evidence status must retain four closed state variants.
+    severity: error
+    given: "$.components.schemas.ExecutorEvidenceStatus"
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          type: object
+          required: [oneOf, discriminator]
+          properties:
+            oneOf:
+              type: array
+              minItems: 4
+              maxItems: 4
+            discriminator:
+              type: object
+              required: [propertyName, mapping]
+              properties:
+                propertyName:
+                  const: state
+                mapping:
+                  type: object
+                  required: [unwitnessed, current, rollback_detected, equivocation_detected]
+  steward-evidence-witnessed-status-variants:
+    description: Witnessed evidence status must exclude the legacy unwitnessed shape.
+    severity: error
+    given: "$.components.schemas.ExecutorEvidenceWitnessedStatus"
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          type: object
+          required: [oneOf, discriminator]
+          properties:
+            oneOf:
+              type: array
+              minItems: 3
+              maxItems: 3
+            discriminator:
+              type: object
+              required: [propertyName, mapping]
+              properties:
+                propertyName:
+                  const: state
+                mapping:
+                  type: object
+                  required: [current, rollback_detected, equivocation_detected]
+  steward-evidence-inspection-variants:
+    description: Evidence inspection must distinguish unwitnessed and proof-bearing shapes.
+    severity: error
+    given: "$.components.schemas.ExecutorEvidenceInspection"
+    then:
+      field: oneOf
+      function: length
+      functionOptions:
+        min: 2
+        max: 2
+  steward-evidence-frame-bounds:
+    description: Evidence report frames must remain non-null and retain their aggregate bound.
+    severity: error
+    given: "$.components.schemas.ExecutorEvidenceReport.properties.signed_frames_base64"
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          type: object
+          required: [type, nullable, maxItems, x-steward-max-decoded-bytes]
+          properties:
+            type:
+              const: array
+            nullable:
+              const: false
+            maxItems:
+              const: 128
+            x-steward-max-decoded-bytes:
+              const: 716800

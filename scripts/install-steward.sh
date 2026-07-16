@@ -48,6 +48,12 @@ Node enrollment:
   --site-root-public-key FILE   Base64 Ed25519 site-root public key
   --site-root-key-id ID         Signature key ID used by the policy
   --node-id ID                  Stable node ID (machine-derived if omitted)
+  --executor-evidence-config FILE
+                                Evidence config emitted by enrollment exchange
+  --executor-evidence-private-key FILE
+                                Receipt private key used during enrollment
+  --executor-evidence-public-key FILE
+                                Matching receipt public key
   --allow-host-admin-intent     Let the host token select signed tenant intent
   --local-only                  Use loopback HTTP, CLI, and MCP without remote enrollment
   --reuse-configuration         Reuse and validate existing /etc/steward enrollment
@@ -70,7 +76,9 @@ STEWARD_OFFLINE_DIR, STEWARD_ARTIFACT, STEWARD_CHECKSUMS,
 STEWARD_CONTROL_PLANE_URL, STEWARD_CREDENTIAL_FILE,
 STEWARD_EXECUTOR_CREDENTIAL_FILE, STEWARD_CA_FILE, STEWARD_EXECUTOR_TOKEN_FILE,
 STEWARD_ADMISSION_POLICY_FILE, STEWARD_SITE_ROOT_PUBLIC_KEY_FILE,
-STEWARD_SITE_ROOT_KEY_ID, STEWARD_NODE_ID, STEWARD_ALLOW_HOST_ADMIN_INTENT,
+STEWARD_SITE_ROOT_KEY_ID, STEWARD_NODE_ID, STEWARD_EXECUTOR_EVIDENCE_CONFIG_FILE,
+STEWARD_EXECUTOR_EVIDENCE_PRIVATE_KEY_FILE, STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_FILE,
+STEWARD_ALLOW_HOST_ADMIN_INTENT,
 STEWARD_LOCAL_ONLY, STEWARD_INSTALL_GVISOR, STEWARD_GVISOR_DIR, and STEWARD_GVISOR_VERSION.
 
 Supported node targets: Debian/Ubuntu (DEB), RHEL/Rocky/Alma/Fedora/Amazon Linux/
@@ -95,6 +103,9 @@ admission_policy=${STEWARD_ADMISSION_POLICY_FILE:-}
 site_root=${STEWARD_SITE_ROOT_PUBLIC_KEY_FILE:-}
 site_root_key_id=${STEWARD_SITE_ROOT_KEY_ID:-}
 node_id=${STEWARD_NODE_ID:-}
+executor_evidence_config=${STEWARD_EXECUTOR_EVIDENCE_CONFIG_FILE:-}
+receipt_private=${STEWARD_EXECUTOR_EVIDENCE_PRIVATE_KEY_FILE:-}
+receipt_public=${STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_FILE:-}
 allow_host_admin=${STEWARD_ALLOW_HOST_ADMIN_INTENT:-false}
 gvisor_dir=${STEWARD_GVISOR_DIR:-}
 gvisor_version=${STEWARD_GVISOR_VERSION:-latest}
@@ -267,6 +278,9 @@ while [[ $# -gt 0 ]]; do
 		--site-root-public-key) site_root=${2:-}; shift 2 ;;
 		--site-root-key-id) site_root_key_id=${2:-}; shift 2 ;;
 		--node-id) node_id=${2:-}; shift 2 ;;
+		--executor-evidence-config) executor_evidence_config=${2:-}; shift 2 ;;
+		--executor-evidence-private-key) receipt_private=${2:-}; shift 2 ;;
+		--executor-evidence-public-key) receipt_public=${2:-}; shift 2 ;;
 		--allow-host-admin-intent) allow_host_admin=true; shift ;;
 		--local-only) local_only=true; shift ;;
 		--reuse-configuration) reuse_configuration=true; shift ;;
@@ -366,7 +380,8 @@ if [[ $non_interactive == false && ! -r /dev/tty ]]; then
 fi
 if [[ $non_interactive == false ]]; then
 	remote_inputs_supplied=false
-	for value in "$control_plane_url" "$steward_credential" "$executor_credential" "$ca_file"; do
+	for value in "$control_plane_url" "$steward_credential" "$executor_credential" "$ca_file" \
+		"$executor_evidence_config" "$receipt_private" "$receipt_public"; do
 		[[ -z $value ]] || remote_inputs_supplied=true
 	done
 	echo "Steward guided node installation"
@@ -408,6 +423,9 @@ if [[ $non_interactive == false ]]; then
 					site_root=$(prompt "Site-root public key path: " "$site_root")
 					site_root_key_id=$(prompt "Site-root key ID: " "$site_root_key_id")
 					node_id=$(prompt "Stable node ID [derive from machine-id]: " "$node_id")
+					executor_evidence_config=$(prompt "Executor evidence enrollment config path: " "$executor_evidence_config")
+					receipt_private=$(prompt "Executor receipt private key path: " "$receipt_private")
+					receipt_public=$(prompt "Executor receipt public key path: " "$receipt_public")
 				else
 					admission_answer=$(prompt "Configure signed multi-tenant admission now? [y/N] " "no")
 					case "$admission_answer" in
@@ -425,7 +443,8 @@ if [[ $non_interactive == false ]]; then
 fi
 
 remote_inputs_supplied=false
-for value in "$control_plane_url" "$steward_credential" "$executor_credential" "$ca_file"; do
+for value in "$control_plane_url" "$steward_credential" "$executor_credential" "$ca_file" \
+	"$executor_evidence_config" "$receipt_private" "$receipt_public"; do
 	[[ -z $value ]] || remote_inputs_supplied=true
 done
 
@@ -472,6 +491,18 @@ if (( admission_required == 3 )); then
 		exit 2
 	fi
 fi
+evidence_input_count=0
+for value in "$executor_evidence_config" "$receipt_private" "$receipt_public"; do
+	[[ -z $value ]] || ((evidence_input_count += 1))
+done
+if (( evidence_input_count != 0 && evidence_input_count != 3 )); then
+	echo "install-steward: Executor evidence enrollment requires config, private key, and public key together" >&2
+	exit 2
+fi
+if (( evidence_input_count == 3 && admission_required != 3 )); then
+	echo "install-steward: Executor evidence enrollment requires signed-admission trust inputs" >&2
+	exit 2
+fi
 if [[ $stage_only == true && $admission_required -ne 0 ]]; then
 	echo "install-steward: --stage-only cannot configure signed admission; deliver trust after staging" >&2
 	exit 2
@@ -499,6 +530,10 @@ fi
 if [[ $executor_only_remote == true && $admission_required -ne 3 ]]; then
 	echo "install-steward: bundled steward-control enrollment requires complete signed-admission inputs" >&2
 	echo "  Pass --admission-policy, --site-root-public-key, and --site-root-key-id." >&2
+	exit 2
+fi
+if [[ $executor_only_remote == true && $evidence_input_count -ne 3 ]]; then
+	echo "install-steward: bundled steward-control enrollment requires the Executor evidence config and receipt key pair" >&2
 	exit 2
 fi
 
@@ -603,6 +638,7 @@ if [[ $dry_run == true ]]; then
 	echo "  source:       ${artifact:-${offline_dir:-$release_url}}"
 	echo "  enrollment:   $enrollment_plan"
 	echo "  admission:    $([[ $admission_required -eq 3 ]] && printf 'signed' || printf 'unchanged')"
+	echo "  evidence:     $([[ $evidence_input_count -eq 3 ]] && printf 'witnessed-uplink' || printf 'disabled')"
 	echo "  service start: $start_services"
 	echo "  gVisor install: $install_gvisor"
 	exit 0
@@ -662,6 +698,14 @@ if [[ $stage_only == false && $reuse_configuration == false ]]; then
 		for input in "$admission_policy" "$site_root"; do
 			if [[ ! -f $input || ! -r $input || -L $input ]]; then
 				echo "install-steward: admission trust input must be a readable regular file, not a symlink: $input" >&2
+				exit 2
+			fi
+		done
+	fi
+	if (( evidence_input_count == 3 )); then
+		for input in "$executor_evidence_config" "$receipt_private" "$receipt_public"; do
+			if [[ ! -f $input || ! -r $input || -L $input ]]; then
+				echo "install-steward: Executor evidence input must be a readable regular file, not a symlink: $input" >&2
 				exit 2
 			fi
 		done
@@ -1195,6 +1239,13 @@ else
 		)
 		[[ -z $node_id ]] || configure_args+=(--node-id "$node_id")
 		[[ $allow_host_admin == false ]] || configure_args+=(--allow-host-admin-intent)
+	fi
+	if (( evidence_input_count == 3 )); then
+		configure_args+=(
+			--executor-evidence-config "$executor_evidence_config"
+			--executor-evidence-private-key "$receipt_private"
+			--executor-evidence-public-key "$receipt_public"
+		)
 	fi
 	/usr/local/libexec/steward/configure-node "${configure_args[@]}"
 fi

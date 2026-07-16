@@ -5,8 +5,8 @@ info:
   description: |
     Public contract for Steward's optional, self-hosted fleet controller. The
     controller manages tenant scopes, operator credentials, one-time node
-    enrollment, node inventory, and reclaimable delivery of exact
-    tenant-signed Executor commands.
+    enrollment, node inventory, reclaimable delivery of exact tenant-signed
+    Executor commands, and independently witnessed Executor evidence heads.
 
     `steward-control` is a transport and state authority, not an execution
     authority. Tenant and site private signing keys stay outside this service.
@@ -41,10 +41,14 @@ tags:
     description: One-time node enrollment capabilities.
   - name: nodes
     description: Tenant-projected node inventory and site-wide revocation.
+  - name: evidence
+    description: Site-admin inspection and portable verification of independently witnessed Executor evidence.
   - name: commands
     description: Exact tenant-signed Executor command submission and status.
   - name: executor-uplink
     description: Node-authenticated delivery leasing and terminal reports.
+  - name: evidence-uplink
+    description: Node-authenticated publication of signed, append-only Executor evidence checkpoints.
 paths:
   /v1/healthz:
     get:
@@ -321,9 +325,14 @@ paths:
       security: []
       description: |
         Returns an Executor node credential. An exact retry with the same
-        enrollment token and request ID returns the same credential while the
-        enrollment remains retained and unexpired. Reusing the token with
-        another request ID returns 409.
+        enrollment token, request ID, and receipt identity returns the same
+        credential while the enrollment remains retained and unexpired. The
+        evidence identity proof demonstrates possession of the Executor receipt
+        private key and binds it to this controller, enrollment, node, stream,
+        and epoch. A later credential rotation for the same node may present a
+        fresh enrollment-bound proof only for the already pinned receipt
+        identity. Reusing the token with another request ID, changing the pinned
+        identity, or reusing a receipt key for another node returns 409.
       requestBody:
         required: true
         content:
@@ -417,6 +426,84 @@ paths:
           $ref: "#/components/responses/NotFound"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/nodes/{node_id}/evidence:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    get:
+      tags: [evidence]
+      operationId: inspectExecutorEvidence
+      summary: Inspect one node's witnessed evidence state
+      description: |
+        Requires a site-administrator credential because the retained witness
+        is a site-wide forensic view, not tenant-projected inventory. Returns
+        the latest last-good checkpoint and any sticky rollback or
+        equivocation finding, including the exact historical checkpoint
+        against which the conflicting head was evaluated. Revoked nodes remain
+        inspectable. A legacy node that predates receipt-key enrollment is
+        returned as `unwitnessed` without an identity proof.
+      responses:
+        "200":
+          description: Bounded online evidence inspection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutorEvidenceInspection"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/nodes/{node_id}/evidence/export:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    get:
+      tags: [evidence]
+      operationId: exportExecutorEvidence
+      summary: Export a portable signed evidence checkpoint
+      description: |
+        Requires a site-administrator credential. Signs the enrolled receipt
+        identity, latest last-good checkpoint, any sticky finding and its exact
+        comparison checkpoint, and export time with the controller's dedicated
+        evidence-witness key. The embedded public key is descriptive only; an
+        offline verifier must use a witness public key obtained through an
+        independent trusted channel. Legacy unwitnessed nodes return 409
+        because they have no receipt identity to bind into a verifiable export.
+        If three consecutive witness updates prevent the controller from
+        linearizing a signed export, it returns 409 with `Retry-After`. A 409
+        without that header is a retained-state conflict, such as an
+        unwitnessed legacy node, and is not made retryable by this contract.
+      responses:
+        "200":
+          description: Portable controller-witness-signed evidence export.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutorEvidenceExport"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -640,6 +727,88 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /evidence-uplink/poll:
+    post:
+      tags: [evidence-uplink]
+      operationId: pollExecutorEvidenceCheckpoint
+      summary: Read the witnessed checkpoint and obtain a report challenge
+      description: |
+        Authenticates the node and its receipt-key identity before returning the
+        last durable controller checkpoint. The challenge is stateless, bound to
+        the node credential, and expires after two minutes.
+        Polling never refreshes or advances durable evidence state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutorEvidencePollRequest"
+      responses:
+        "200":
+          description: The current checkpoint and a short-lived report challenge.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutorEvidencePollResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /evidence-uplink/report:
+    post:
+      tags: [evidence-uplink]
+      operationId: reportExecutorEvidenceCheckpoint
+      summary: Verify and retain an Executor evidence checkpoint
+      description: |
+        Verifies the challenge-bound receipt-key signature and every submitted
+        signed frame before advancing the durable checkpoint. A byte-identical
+        retry is acknowledged without another mutation. An authenticated local
+        head behind, or conflicting with, the checkpoint evaluated for that
+        report records a bounded rollback or equivocation finding and stops
+        later advancement. The retained status may already contain a later
+        valid checkpoint when a concurrently verified historical conflict is
+        durably recorded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutorEvidenceReport"
+      responses:
+        "200":
+          description: The report was applied or safely recognized as an exact no-op.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutorEvidenceReportResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
 components:
   securitySchemes:
     bearerAuth:
@@ -728,6 +897,13 @@ components:
             $ref: "#/components/schemas/Error"
     Conflict:
       description: The request conflicts with retained identity, enrollment, delivery, or terminal state.
+      headers:
+        Retry-After:
+          description: Present only when the same request is safe to retry after at least this many seconds.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 3600
       content:
         application/json:
           schema:
@@ -886,8 +1062,10 @@ components:
     Enrollment:
       type: object
       additionalProperties: false
-      required: [enrollment_id, enrollment_token, node_id, tenant_ids, expires_at]
+      required: [controller_instance_id, enrollment_id, enrollment_token, node_id, tenant_ids, expires_at]
       properties:
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
         enrollment_id:
           $ref: "#/components/schemas/Identifier128"
         enrollment_token:
@@ -905,12 +1083,67 @@ components:
     ExchangeEnrollmentRequest:
       type: object
       additionalProperties: false
-      required: [enrollment_token, request_id]
+      required: [enrollment_token, request_id, evidence_identity_proof]
       properties:
         enrollment_token:
           type: string
         request_id:
           $ref: "#/components/schemas/Identifier128"
+        evidence_identity_proof:
+          $ref: "#/components/schemas/ExecutorEvidenceIdentityProofV1"
+    ExecutorEvidenceIdentityProofV1:
+      type: object
+      additionalProperties: false
+      required: [claim, signature_base64]
+      properties:
+        claim:
+          $ref: "#/components/schemas/ExecutorEvidenceIdentityClaimV1"
+        signature_base64:
+          type: string
+          description: Canonical base64 encoding of a 64-byte Ed25519 signature.
+          minLength: 88
+          maxLength: 88
+          pattern: '^[A-Za-z0-9+/]{86}==$'
+    ExecutorEvidenceIdentityClaimV1:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol_version
+        - controller_instance_id
+        - enrollment_id
+        - control_node_id
+        - stream
+        - receipt_node_id
+        - receipt_epoch
+        - public_key_base64
+        - public_key_sha256
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        enrollment_id:
+          $ref: "#/components/schemas/Identifier128"
+        control_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        stream:
+          type: string
+          enum: [executor]
+        receipt_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        receipt_epoch:
+          type: integer
+          format: int64
+          enum: [1]
+        public_key_base64:
+          type: string
+          description: Canonical base64 encoding of a 32-byte Ed25519 public key.
+          minLength: 44
+          maxLength: 44
+          pattern: '^[A-Za-z0-9+/]{43}=$'
+        public_key_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
     NodeCredential:
       type: object
       additionalProperties: false
@@ -1174,6 +1407,402 @@ components:
           enum: [3]
         applied:
           type: boolean
+    ExecutorEvidencePollRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol_version
+        - controller_instance_id
+        - control_node_id
+        - stream
+        - receipt_node_id
+        - receipt_epoch
+        - public_key_sha256
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        control_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        stream:
+          type: string
+          enum: [executor]
+        receipt_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        receipt_epoch:
+          type: integer
+          minimum: 1
+        public_key_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
+    ExecutorEvidencePollResponse:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, challenge, status]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        challenge:
+          type: string
+          minLength: 43
+          maxLength: 342
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: Canonical unpadded base64url stateless challenge bound to the node credential.
+        status:
+          $ref: "#/components/schemas/ExecutorEvidenceStatus"
+    ExecutorEvidenceReport:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, head_proof]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        head_proof:
+          $ref: "#/components/schemas/ExecutorEvidenceHeadProof"
+        signed_frames_base64:
+          type: array
+          nullable: false
+          maxItems: 128
+          x-steward-max-decoded-bytes: 716800
+          description: |
+            Canonical standard-base64 encodings of exact length-prefixed signed
+            evidence frames. When present, this value must be an array rather
+            than null. The complete decoded collection is limited to 716800
+            bytes (700 KiB), and the enclosing JSON request remains subject to
+            the 1 MiB body limit.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 87388
+            pattern: '^[A-Za-z0-9+/]+={0,2}$'
+    ExecutorEvidenceReportResponse:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, applied, status]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        applied:
+          type: boolean
+          description: True when the controller durably advanced the checkpoint or recorded a new finding.
+        status:
+          $ref: "#/components/schemas/ExecutorEvidenceStatus"
+    ExecutorEvidenceInspection:
+      description: |
+        A legacy node is exactly `unwitnessed` and omits `identity_proof`.
+        Every witnessed state requires the enrolled receipt-key proof.
+      oneOf:
+        - $ref: "#/components/schemas/ExecutorEvidenceUnwitnessedInspection"
+        - $ref: "#/components/schemas/ExecutorEvidenceWitnessedInspection"
+    ExecutorEvidenceUnwitnessedInspection:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, controller_instance_id, control_node_id, status]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        control_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        status:
+          $ref: "#/components/schemas/ExecutorEvidenceStatusUnwitnessed"
+    ExecutorEvidenceWitnessedInspection:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, controller_instance_id, control_node_id, identity_proof, status]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        control_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        identity_proof:
+          $ref: "#/components/schemas/ExecutorEvidenceIdentityProofV1"
+        status:
+          $ref: "#/components/schemas/ExecutorEvidenceWitnessedStatus"
+    ExecutorEvidenceExport:
+      type: object
+      additionalProperties: false
+      required:
+        - payload_type
+        - statement
+        - witness_public_key_base64
+        - witness_public_key_sha256
+        - signature_base64
+      properties:
+        payload_type:
+          type: string
+          enum: [application/vnd.steward.executor-evidence-witness.v1+binary]
+        statement:
+          $ref: "#/components/schemas/ExecutorEvidenceExportStatement"
+        witness_public_key_base64:
+          type: string
+          minLength: 44
+          maxLength: 44
+          pattern: '^[A-Za-z0-9+/]{43}=$'
+          description: Self-describing Ed25519 public key; not a trust anchor.
+        witness_public_key_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
+        signature_base64:
+          type: string
+          minLength: 88
+          maxLength: 88
+          pattern: '^[A-Za-z0-9+/]{86}==$'
+    ExecutorEvidenceExportStatement:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol_version
+        - controller_instance_id
+        - control_node_id
+        - identity_proof
+        - status
+        - exported_at
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        control_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        identity_proof:
+          $ref: "#/components/schemas/ExecutorEvidenceIdentityProofV1"
+        status:
+          $ref: "#/components/schemas/ExecutorEvidenceWitnessedStatus"
+        exported_at:
+          type: string
+          format: date-time
+    ExecutorEvidenceHeadProof:
+      type: object
+      additionalProperties: false
+      required: [claim, signature_base64]
+      properties:
+        claim:
+          $ref: "#/components/schemas/ExecutorEvidenceHeadClaim"
+        signature_base64:
+          type: string
+          description: Canonical base64 encoding of a 64-byte Ed25519 signature.
+          minLength: 88
+          maxLength: 88
+          pattern: '^[A-Za-z0-9+/]{86}==$'
+    ExecutorEvidenceHeadClaim:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol_version
+        - controller_instance_id
+        - control_node_id
+        - stream
+        - receipt_node_id
+        - receipt_epoch
+        - base_sequence
+        - base_chain_hash
+        - sequence
+        - chain_hash
+        - frame_count
+        - frames_digest
+        - public_key_sha256
+        - challenge
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        control_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        stream:
+          type: string
+          enum: [executor]
+        receipt_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        receipt_epoch:
+          type: integer
+          minimum: 1
+        base_sequence:
+          type: integer
+          minimum: 0
+          description: Sequence from the controller checkpoint returned by the associated poll.
+        base_chain_hash:
+          allOf:
+            - $ref: "#/components/schemas/SHA256Digest"
+          description: Chain hash from the controller checkpoint returned by the associated poll.
+        sequence:
+          type: integer
+          minimum: 0
+        chain_hash:
+          $ref: "#/components/schemas/SHA256Digest"
+        frame_count:
+          type: integer
+          minimum: 0
+          maximum: 128
+          description: Number of decoded signed frames committed by this proof.
+        frames_digest:
+          allOf:
+            - $ref: "#/components/schemas/SHA256Digest"
+          description: Domain-separated digest over frame count, each decoded frame length, and exact frame bytes.
+        public_key_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
+        challenge:
+          type: string
+          minLength: 43
+          maxLength: 342
+          pattern: '^[A-Za-z0-9_-]+$'
+    ExecutorEvidenceHead:
+      type: object
+      additionalProperties: false
+      required: [stream, receipt_node_id, receipt_epoch, sequence, chain_hash, public_key_sha256]
+      properties:
+        stream:
+          type: string
+          enum: [executor]
+        receipt_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        receipt_epoch:
+          type: integer
+          minimum: 1
+        sequence:
+          type: integer
+          minimum: 0
+        chain_hash:
+          $ref: "#/components/schemas/SHA256Digest"
+        public_key_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
+    ExecutorEvidenceRollbackFinding:
+      type: object
+      additionalProperties: false
+      description: |
+        The compared and observed heads use the same receipt identity, and the
+        observed sequence is lower than the compared sequence.
+      required: [kind, detected_at, compared_head, observed_head]
+      properties:
+        kind:
+          type: string
+          enum: [rollback]
+        detected_at:
+          type: string
+          format: date-time
+        compared_head:
+          allOf:
+            - $ref: "#/components/schemas/ExecutorEvidenceHead"
+          description: Exact controller checkpoint against which the observed head was evaluated.
+        observed_head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+    ExecutorEvidenceEquivocationFinding:
+      type: object
+      additionalProperties: false
+      description: |
+        The compared and observed heads use the same receipt identity. The
+        observed sequence is at or above the compared sequence; heads at the
+        same sequence have different chain hashes.
+      required: [kind, detected_at, compared_head, observed_head]
+      properties:
+        kind:
+          type: string
+          enum: [equivocation]
+        detected_at:
+          type: string
+          format: date-time
+        compared_head:
+          allOf:
+            - $ref: "#/components/schemas/ExecutorEvidenceHead"
+          description: Exact controller checkpoint against which the observed head was evaluated.
+        observed_head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+    ExecutorEvidenceStatus:
+      description: |
+        `head` is the latest last-good controller checkpoint.
+        `finding.compared_head` is the exact checkpoint used to classify
+        `finding.observed_head` as rollback or equivocation. `head` can be later
+        than `compared_head` when a concurrently verified historical conflict
+        is recorded. It must use the same receipt identity, cannot precede
+        `compared_head`, and must have the same hash when both sequences are
+        equal. `finding.detected_at` may precede `witnessed_at` only when `head`
+        is later than `compared_head`. `unwitnessed` carries none of these
+        heads.
+      oneOf:
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusUnwitnessed"
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusCurrent"
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusRollbackDetected"
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusEquivocationDetected"
+      discriminator:
+        propertyName: state
+        mapping:
+          unwitnessed: "#/components/schemas/ExecutorEvidenceStatusUnwitnessed"
+          current: "#/components/schemas/ExecutorEvidenceStatusCurrent"
+          rollback_detected: "#/components/schemas/ExecutorEvidenceStatusRollbackDetected"
+          equivocation_detected: "#/components/schemas/ExecutorEvidenceStatusEquivocationDetected"
+    ExecutorEvidenceWitnessedStatus:
+      oneOf:
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusCurrent"
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusRollbackDetected"
+        - $ref: "#/components/schemas/ExecutorEvidenceStatusEquivocationDetected"
+      discriminator:
+        propertyName: state
+        mapping:
+          current: "#/components/schemas/ExecutorEvidenceStatusCurrent"
+          rollback_detected: "#/components/schemas/ExecutorEvidenceStatusRollbackDetected"
+          equivocation_detected: "#/components/schemas/ExecutorEvidenceStatusEquivocationDetected"
+    ExecutorEvidenceStatusUnwitnessed:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [unwitnessed]
+    ExecutorEvidenceStatusCurrent:
+      type: object
+      additionalProperties: false
+      required: [state, head, witnessed_at]
+      properties:
+        state:
+          type: string
+          enum: [current]
+        head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+        witnessed_at:
+          type: string
+          format: date-time
+    ExecutorEvidenceStatusRollbackDetected:
+      type: object
+      additionalProperties: false
+      required: [state, head, witnessed_at, finding]
+      properties:
+        state:
+          type: string
+          enum: [rollback_detected]
+        head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+        witnessed_at:
+          type: string
+          format: date-time
+        finding:
+          $ref: "#/components/schemas/ExecutorEvidenceRollbackFinding"
+    ExecutorEvidenceStatusEquivocationDetected:
+      type: object
+      additionalProperties: false
+      required: [state, head, witnessed_at, finding]
+      properties:
+        state:
+          type: string
+          enum: [equivocation_detected]
+        head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+        witnessed_at:
+          type: string
+          format: date-time
+        finding:
+          $ref: "#/components/schemas/ExecutorEvidenceEquivocationFinding"
     SHA256Digest:
       type: string
       pattern: '^sha256:[0-9a-f]{64}$'

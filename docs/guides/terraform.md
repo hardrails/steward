@@ -33,12 +33,13 @@ resource "example_linux_server" "agent_node" {
 `stage` installs versioned files without enrolling, configuring, or starting the
 node. The base image must already provide systemd and a local `docker` group; the
 Docker daemon does not need to run during staging. This is the production default.
-Later, deliver enrollment credentials through an authenticated temporary channel
-and run `configure-node`, which restores the prior configuration if validation
-fails. Remove the enrollment bundle afterward. Terraform stores variables and
-rendered user data in state, and a cloud provider may retain user-data history.
-Never pass bearer tokens, private keys, credentials, secret-manager results, or
-authenticated URLs to this module.
+Later, deliver the node credential, evidence config, receipt key pair, CA, and
+signed-admission trust through an authenticated temporary channel and run
+`configure-node`, which restores the prior configuration if validation fails.
+Remove the enrollment handoff afterward. Terraform stores variables and rendered
+user data in state, and a cloud provider may retain user-data history. Never pass
+bearer tokens, private keys, credentials, secret-manager results, or authenticated
+URLs to this module.
 The mirror object is optional. When present, cloud-init verifies both
 artifact and manifest hashes before the installer confirms that the manifest lists
 the artifact. It never falls back to a public release endpoint.
@@ -165,16 +166,20 @@ sudo /usr/local/libexec/steward/configure-node \
   --admission-policy /secure/enrollment/site-policy.dsse.json \
   --site-root-public-key /secure/enrollment/site-root.public \
   --site-root-key-id site-root-1 \
-  --node-id node-a
+  --node-id node-a \
+  --executor-evidence-config /secure/enrollment/executor-evidence.env \
+  --executor-evidence-private-key /secure/enrollment/node-receipts.private.pem \
+  --executor-evidence-public-key /secure/enrollment/node-receipts.public
 ```
 
-The node-scoped credential's node ID must match `--node-id` and every signed
-instance and command statement. The site policy does not contain a node ID. Include
-tenant command public keys with explicit operation scopes in that site-root-signed
-policy, and require verified HTTPS. Tenant signing private keys stay on a trusted
-signing station or separate signing service; they enter neither Steward Control nor
-Terraform state or cloud-init. Delete the delivered bundle after successful
-configuration.
+The node-scoped credential's node ID must match `--node-id`, the evidence handoff,
+and every signed instance and command statement. The receipt key pair is created
+outside Terraform and delivered through the same short-lived authenticated
+channel. The site policy does not contain a node ID. Include tenant command public
+keys with explicit operation scopes in that site-root-signed policy, and require
+verified HTTPS. Tenant signing private keys stay on a trusted signing station or
+separate signing service; they enter neither Steward Control nor Terraform state or
+cloud-init. Delete the delivered handoff bundle after successful configuration.
 
 `local` creates a loopback-only evaluation node and generates host-local tokens on
 first boot. It does not enable signed tenant admission because a workload node must

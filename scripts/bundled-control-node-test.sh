@@ -24,19 +24,35 @@ signed_admission=(
 	--site-root-key-id site-root
 	--node-id node-1
 )
+evidence_enrollment=(
+	--executor-evidence-config /trust/executor-evidence.env
+	--executor-evidence-private-key /trust/node-receipts.private.pem
+	--executor-evidence-public-key /trust/node-receipts.public
+)
 
 bash -n "$installer" "$configurator"
 
-/bin/bash -p "$installer" "${common_remote[@]}" "${signed_admission[@]}" \
+/bin/bash -p "$installer" "${common_remote[@]}" "${signed_admission[@]}" "${evidence_enrollment[@]}" \
 	>"$work/bundled.plan"
 grep -Fqx '  enrollment:   bundled-control-executor-only' "$work/bundled.plan"
 grep -Fqx '  admission:    signed' "$work/bundled.plan"
+grep -Fqx '  evidence:     witnessed-uplink' "$work/bundled.plan"
 
 /bin/bash -p "$installer" "${common_remote[@]}" \
 	--steward-credential /trust/generic-supervisor.json \
 	>"$work/generic.plan"
 grep -Fqx '  enrollment:   generic-supervisor-and-executor' "$work/generic.plan"
 grep -Fqx '  admission:    unchanged' "$work/generic.plan"
+grep -Fqx '  evidence:     disabled' "$work/generic.plan"
+
+if /bin/bash -p "$installer" "${common_remote[@]}" "${signed_admission[@]}" \
+	>"$work/no-evidence.out" 2>"$work/no-evidence.err"; then
+	echo "bundled-control-node-test: bundled control accepted missing evidence enrollment inputs" >&2
+	exit 1
+fi
+grep -Fqx \
+	'install-steward: bundled steward-control enrollment requires the Executor evidence config and receipt key pair' \
+	"$work/no-evidence.err"
 
 if /bin/bash -p "$installer" "${common_remote[@]}" >"$work/unsigned.out" 2>"$work/unsigned.err"; then
 	echo "bundled-control-node-test: bundled control accepted missing signed admission" >&2

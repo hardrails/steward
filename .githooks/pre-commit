@@ -24,7 +24,9 @@ stashed=0
 [ "$after" -gt "$before" ] && stashed=1
 
 restore() {
-	[ "$stashed" -eq 1 ] && git stash pop --quiet
+	if [ "$stashed" -eq 1 ]; then
+		git stash pop --quiet
+	fi
 }
 trap restore EXIT
 

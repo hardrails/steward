@@ -23,11 +23,13 @@ release_mirror = {
 ```
 
 Use `bootstrap_mode = "stage"` for production nodes that will enroll later. Deliver
-the enrollment credentials through an authenticated, short-lived channel, then run
-Steward's all-or-nothing node configurator. Do not pass credentials, private keys,
-tokens, or secret-manager results into this module. Do not put credentials in URL
-user information or query strings. Terraform records every input and rendered user
-data in state, and a cloud provider may retain user-data history. Treat every module
+the node credential, evidence config, receipt key pair, CA, and signed-admission
+trust through an authenticated, short-lived channel, then run Steward's
+all-or-nothing node configurator. The receipt key must be the same key used during
+enrollment proof-of-possession. Do not pass credentials, private keys, tokens, or
+secret-manager results into this module. Do not put credentials in URL user
+information or query strings. Terraform records every input and rendered user data
+in state, and a cloud provider may retain user-data history. Treat every module
 value as recoverable by those administrators.
 
 `bootstrap_mode = "local"` is useful for an isolated evaluation server. It generates
