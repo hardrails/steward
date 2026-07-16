@@ -582,6 +582,29 @@ func (l *Log) NextSequence() uint64 {
 	return l.next
 }
 
+// CurrentHead returns the exact compact head already authenticated when the
+// log was opened and updated after each fsynced append. Unlike ExportDelta, it
+// describes the whole local chain rather than the end of one bounded batch.
+// An evidence publisher uses this snapshot to prove rollback when a retained
+// controller checkpoint is no longer present in the local log.
+func (l *Log) CurrentHead() (Head, error) {
+	if l == nil {
+		return Head{}, errors.New("evidence log is unavailable")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file == nil {
+		return Head{}, errors.New("evidence log is closed")
+	}
+	if l.next == 0 {
+		return Head{}, errors.New("evidence log has an invalid in-memory coordinate")
+	}
+	return Head{
+		NodeID: l.nodeID, Epoch: l.epoch, Sequence: l.next - 1,
+		ChainHash: l.lastHash, KeyID: l.keyID,
+	}, nil
+}
+
 // ExportDelta returns the next bounded group of exact signed frames after an
 // externally retained chain coordinate. The coordinate must match this log
 // exactly; a caller cannot skip a missing or changed receipt.

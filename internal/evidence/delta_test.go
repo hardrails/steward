@@ -134,6 +134,34 @@ func TestExportDeltaRequiresAnExactPresentCoordinate(t *testing.T) {
 	}
 }
 
+func TestCurrentHeadTracksFsyncedAppendsAndRejectsClosedLog(t *testing.T) {
+	log, _, _ := newLog(t)
+	if _, err := log.Append(event(AdmissionAllow)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(event(JournalCommit)); err != nil {
+		t.Fatal(err)
+	}
+	head, err := log.CurrentHead()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.NodeID != log.nodeID || head.Epoch != log.epoch || head.Sequence != 2 ||
+		head.ChainHash != log.lastHash || head.KeyID != log.keyID {
+		t.Fatalf("current head = %#v", head)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.CurrentHead(); err == nil {
+		t.Fatal("closed evidence log returned a current head")
+	}
+	var absent *Log
+	if _, err := absent.CurrentHead(); err == nil {
+		t.Fatal("nil evidence log returned a current head")
+	}
+}
+
 func TestExportDeltaIsRecordBoundedAndResumable(t *testing.T) {
 	log, _, public := newLog(t)
 	defer log.Close()
