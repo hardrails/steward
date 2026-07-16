@@ -12,7 +12,8 @@ instance; rejects stale policy and generations; durably journals host changes; a
 creates signed, hash-linked receipts for offline verification. Optional capabilities
 include inference, a private service, credential-brokered connector operations,
 tenant-signed exact service tasks, deny-by-default HTTP(S) egress, command-line and Model Context Protocol (MCP)
-operations, and Terraform bootstrap. Persistent
+operations, Terraform bootstrap, and a fixed proof-carrying activation path for
+one qualified Hermes canary. Persistent
 state is available only through the dedicated-host compatibility mode described
 below.
 
@@ -107,8 +108,94 @@ An operator must initialize a fence once; startup never recreates a missing fenc
 
 The packaged Executor exposes a bearer-protected loopback API for `stewardctl node`
 and `steward-mcp`. A control plane can send `admit` through the authenticated
-Executor uplink. Local admission also requires the explicit host-admin-intent flag.
-The local token grants host-administrator authority, not tenant authentication.
+Executor uplink. Local admission and activation-checkpoint calls also require the
+explicit host-admin-intent flag. The local token grants host-administrator
+authority, not tenant authentication.
+
+## Proof-carrying activation is deliberately narrow
+
+The signed agent release and activation flow currently supports one closed,
+node-local Hermes fresh-state workspace-audit canary. It is not a hosted catalog,
+general workflow engine, remote rollout system, arbitrary command runner, or proof
+framework for user-defined prompts and hooks.
+
+The recipe requires a dedicated host, a signed policy containing exactly one
+tenant, `-admission-allow-host-admin-intent`, and
+`-allow-unquotaed-state-on-dedicated-host`. The local token therefore has
+host-administrator authority, and the Hermes state volume has no hard byte or
+inode quota. The coordinator rejects a multi-tenant policy. Steward's stateless
+shared-host isolation remains available outside this recipe.
+
+The signed release binds outcome text, an embedded capsule, exact offline archive,
+qualification-evidence digest, fixed canary, and limitations. It does not prove the
+outcome occurred and grants no tenant, node, image-import, capability, or task
+authority. The qualification evidence and exact skill manifest remain external
+artifacts that the operator must authenticate and inspect.
+
+The activation plan, canary challenge, state checkpoints, and final proof manifest
+are bounded correlation records, not signatures. Authenticity comes from the
+separately verified release, capsule, task permit, Executor and Gateway receipt
+chains, controller witness export, and externally pinned public keys. A proof file
+without those companions proves no execution or authority.
+
+The `release_verified` state is only a local resumability checkpoint. It is not
+historical authorization evidence. Final collection and offline verification
+re-evaluate the release, capsule, site policy, retained intent, and exact task at
+Gateway's signed authorization-receipt time.
+
+The owner-only activation workspace creates generated artifacts once and appends
+sequential state checkpoints. This prevents an ordinary retry or second compliant
+coordinator from overwriting prior generated history. Its lock is advisory, and
+the workspace is not protected from host root or another process with the same
+operating-system authority. Verify authenticated copies on a separate trusted
+system when node compromise is in scope.
+
+Activation uses signed receipt order instead of comparing independent Gateway and
+controller clocks. After authority, policy, and read-only admission preflights
+pass, Executor records a content-free `activation_begin` marker before the
+admission-allow receipt, mutation journal, or host mutation. After Steward
+verifies Gateway's authorization, dispatch, and terminal receipts, it records a
+content-free `activation_checkpoint`. The final controller witness must cover this
+order:
+
+`activation_begin` → fresh admission allow → admission commit → runtime start →
+`activation_checkpoint` → final witness head
+
+The live Executor log check allows unrelated tenant suffix receipts but rejects
+later receipts for the same activation and matching lifecycle-invalidating
+events. This causal join is not a cross-system trusted timestamp or hostile-host
+attestation. Host root can still replace local logs and keys together before
+evidence is copied off-node.
+
+`activation run` is resumable and idempotent against retained checkpoints while
+the applicable deadline remains open. Transient local file, Docker, Executor,
+Gateway, network, and incomplete evidence-source errors remain retryable after
+the operator corrects the condition. The canary has one absolute deadline
+anchored to the `canary_authorized` checkpoint. Submission recovery and terminal
+observation share it; a retry does not reset it. Expiry becomes sticky
+`action_required` with reason `canary_timeout` and cannot resume. An attached task
+that fails the full activation binding, a terminal canary failure, and invalid or
+conflicting retained evidence also become sticky `action_required`. Terminal
+canary failures include a terminal submit rejection, a non-completed Hermes state,
+and a completed result that fails the closed recipe. Retained-evidence failures
+use reason `evidence_invalid` because a retry cannot replace write-once bytes. The
+coordinator does not clear those states, mint replacement authority, or destroy
+the failed workload. Recovery requires the operator to stop and destroy that
+workload, create a new activation ID, and use an instance generation greater than
+the failed activation.
+
+The portable Executor evidence delta spans signed receipt coordinates rather than
+filtering away chain links. Although the current recipe admits only one policy
+tenant, the range can include unrelated node receipts or older retained history.
+Executor receipt frames exclude prompts, request bodies, result bodies, and
+workspace content. The activation workspace separately retains the bounded canary
+result and should still be handled as sensitive operational evidence.
+
+Controller-driven end-to-end activation remains unavailable because the control
+uplink does not carry the full admission projection needed for exact
+post-admission task authorization. See
+[agent activation]({{ '/guides/agent-activation/' | relative_url }}) for the
+implemented `create`, `run`, `attach`, `status`, and offline `verify` procedure.
 
 ## Durable control stores have fixed lifetime limits
 

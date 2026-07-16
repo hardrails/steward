@@ -150,5 +150,13 @@ Gateway state format 4 retains service identity and tenant task authorities for
 task-authorized grants. A release whose reader or writer stops at an observed or
 configuration-required format is not a safe rollback target.
 
+Current manifests declare `evidence_log` readers 1 through 2 and writer 2. Evidence
+format 1 contains the original closed Executor event vocabulary. Format 2 adds
+`activation_begin` and `activation_checkpoint`. Both formats can coexist in one
+signed chain, and inspection reports the highest version present. Executor fsyncs
+the format 2 begin marker after read-only admission preflights and before the
+admission-allow receipt, mutation journal, or host mutation. An older reader is
+therefore rejected before rollback even if the workload was later destroyed.
+
 See [platform support]({{ '/reference/platform-support/' | relative_url }}) and
 [air-gapped installation]({{ '/guides/air-gapped/' | relative_url }}).

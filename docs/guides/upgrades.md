@@ -37,6 +37,20 @@ Current release manifests declare `gateway_state` readers 1 through 4 and writer
 Format 4 retains the service identity and tenant task authorities of task-authorized
 grants. Activation therefore blocks a rollback that cannot preserve those bindings.
 
+Executor evidence format 1 contains the original admission, mutation, lifecycle,
+policy, drift, and revocation vocabulary. Format 2 adds the closed
+`activation_begin` and `activation_checkpoint` marker types. One signed evidence
+chain may contain both formats, and the inspector reports the highest format
+present. Current release manifests declare `evidence_log` readers 1 through 2 and
+writer 2.
+
+After authority, policy, and read-only admission preflights pass, Executor fsyncs
+`activation_begin` before the admission-allow receipt, mutation journal, or host
+mutation. The evidence log therefore reaches format 2 before that activation can
+start a workload or produce a checkpoint. Once a format 2 marker exists,
+destroying the workload does not downgrade the append-only log; a release whose
+evidence reader stops at format 1 is no longer a safe rollback target.
+
 Staging verifies the manifest and writes only a new immutable release directory.
 It does not change active helpers or units and does not run `systemctl daemon-reload`.
 
@@ -202,6 +216,12 @@ therefore not a safe rollback target. Action-authority configuration requires fo
 lower the prospective requirement only before a record of that format has been
 written; it does not rewrite or downgrade existing evidence. Do not split, edit, or
 reserialize a mixed ledger to regain rollback eligibility.
+
+The same rule applies to Executor evidence: after read-only admission preflights,
+the target activation marker is written as evidence format 2 before the
+admission-allow receipt or host mutation. The rollback inspection must run after
+target services stop and before an older release is restored, so it sees that
+durable marker and rejects an evidence reader limited to format 1.
 
 ## Roll back the release
 

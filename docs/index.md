@@ -1,6 +1,6 @@
 ---
 title: Steward — locally authorized AI agent execution on Linux
-description: Run untrusted agents with Docker/gVisor isolation, exact tenant-signed tasks, durable replay control, and offline-verifiable receipts.
+description: Run untrusted agents with signed outcome releases, Docker/gVisor isolation, exact tenant-signed tasks, durable replay control, and offline-verifiable receipts.
 home: true
 ---
 
@@ -80,6 +80,13 @@ service-task path scopes a tenant key to `hermes-api`, signs the exact run reque
 dispatches it through Gateway, and audits authorization, dispatch, and terminal records
 offline. The run ID remains application output from the untrusted Hermes service.
 
+A publisher-signed agent release can present that qualified work as an observable
+outcome while binding the exact capsule, offline archive, deterministic canary,
+qualification-evidence digest, and known limits. Steward then follows a fixed
+choose/configure/preflight/activate/canary/prove/monitor contract. The release
+describes the workload; local policy, tenant intent, live admission, and the
+off-node task key still authorize it.
+
 The official Hermes image remains inadmissible. Steward ships the pinned builder,
 not a prebuilt Hermes OCI archive, because dependency and base-image notices are
 incomplete. Operators build, inspect, and sign their exact output. OpenClaw remains
@@ -98,6 +105,7 @@ secrets, host mounts, privileged mode, or undeclared ports.
 </div>
 
 [Build and run the Hermes Agent adapter]({{ '/guides/hermes-agent/' | relative_url }}) ·
+[Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }}) ·
 [Review the OpenClaw adapter contract]({{ '/guides/openclaw/' | relative_url }}) ·
 [Configure positive capabilities]({{ '/guides/positive-capabilities/' | relative_url }}) ·
 [Broker authenticated API operations]({{ '/guides/connectors/' | relative_url }}) ·

@@ -39,13 +39,13 @@ private-origin disclosure, or other application secrets, and it does not apply a
 upstream-specific response schema. Treat each inference and connector upstream as a
 trusted service and use narrow, tenant-specific credentials.
 
-To use persistent state on a dedicated single-tenant host, set
-`EXECUTOR_STATE_ARG=-allow-unquotaed-state-on-dedicated-host` in
-`/etc/steward/executor.env`, then run preflight and restart Executor. The flag name
-is deliberately explicit: a tenant can fill the backing filesystem because the
-volume has no portable hard quota. Executor also requires complete signed admission
-with a verified policy containing exactly one tenant. Do not enable it on a shared
-host.
+To use persistent state, pass
+`--allow-unquotaed-state-on-dedicated-host` to the installer, `configure-node`, or
+`configure-admission` in the same transaction as the signed-admission trust inputs.
+The configurator runs preflight before committing the change. Executor accepts the
+flag only when the verified policy contains exactly one tenant. The flag name is
+deliberately explicit: a tenant can fill the backing filesystem because the volume
+has no portable hard byte or inode quota. Do not enable it on a shared host.
 
 These networks require Docker Engine 28 or newer. Isolated bridge gateway mode lets
 the agent reach its relay but not host services through the bridge gateway.

@@ -185,7 +185,7 @@ outbound-only deployment.
 | `-admission-node-id` | empty | Stable node ID bound into intents and receipts |
 | `-admission-fence-file` | `/var/lib/steward-executor/admission-fences.bin` | Highest accepted policy/generation snapshot; capped at 4 MiB and 65,535 records |
 | `-initialize-admission-fence` | `false` | Exclusively create the empty fence and exit; normal startup never recreates it |
-| `-admission-allow-host-admin-intent` | `false` | Emergency: let the host-wide local token select an intent tenant |
+| `-admission-allow-host-admin-intent` | `false` | Dedicated-host compatibility: let the host-wide local token select an intent tenant and authorize signed lifecycle and activation-checkpoint calls; the token is host-administrator authority, not tenant authentication |
 | `-admission-journal-file` | `/var/lib/steward-executor/operation-journal.bin` | Append-only host-mutation journal; capped at 16 MiB |
 | `-admission-evidence-file` | `/var/lib/steward-executor/evidence.bin` | Append-only signed receipt chain; capped at 64 MiB |
 | `-admission-evidence-key-file` | empty | Owner-only PKCS#8 Ed25519 receipt private key |
@@ -255,10 +255,15 @@ keys whose scope includes the admitted `service_id` into the runtime grant; the
 private task key stays off-node. A service with no matching task key keeps the
 ordinary host-authenticated service behavior.
 
-The packaged unit maps `EXECUTOR_STATE_ARG` to the dedicated-host state flag.
-Leave it empty on a shared host. The packaged aggregate settings reserve memory,
-CPU, and PIDs for the host and each tenant, including fixed relay overhead. They do
-not cap disk bytes, inodes, or I/O bandwidth.
+The installer, `configure-node`, and `configure-admission` accept
+`--allow-unquotaed-state-on-dedicated-host`. The non-interactive installer also
+accepts `STEWARD_ALLOW_UNQUOTAED_STATE_ON_DEDICATED_HOST=true`. These interfaces
+map `EXECUTOR_STATE_ARG` to the dedicated-host state flag and run node preflight
+before committing the configuration. Preflight accepts the flag only with complete
+signed admission and a verified policy containing exactly one tenant. Omit it on a
+shared host. The packaged aggregate settings reserve memory, CPU, and PIDs for the
+host and each tenant, including fixed relay overhead. They do not cap disk bytes,
+inodes, or I/O bandwidth.
 
 `/etc/steward/executor-gateway.env` is either the empty packaged default or a
 symbolic link that selects a root-owned relay binding under

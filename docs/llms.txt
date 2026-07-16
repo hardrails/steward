@@ -5,8 +5,10 @@
 > authorize one exact external effect. Steward adds signed local policy,
 > service-scoped tenant task keys, exact-request dispatch, Docker/gVisor
 > enforcement, durable anti-replay records, and offline-verifiable receipts without
-> requiring a hosted service. It includes an optional self-hosted controller while
-> keeping the node contracts independently implementable.
+> requiring a hosted service. A signed agent release can also bind one qualified
+> outcome to an exact offline archive, deterministic canary, evidence digest, and
+> known limits without granting runtime authority. Steward includes an optional
+> self-hosted controller while keeping the node contracts independently implementable.
 
 Documentation scope: current supported capabilities
 License: Apache-2.0
@@ -25,6 +27,7 @@ Documentation: https://hardrails.github.io/steward/
 
 ## How-to guides
 
+- [Proof-carrying agent activation](https://hardrails.github.io/steward/guides/agent-activation/): Verify a signed outcome-led Hermes release and exact archive, keep task signing off-node, run the deterministic canary, and retain an offline-verifiable evidence set
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
 - [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
 - [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure optional state, inference, service, connector, and HTTP(S) egress grants
@@ -49,7 +52,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Platform support](https://hardrails.github.io/steward/reference/platform-support/): Supported hosts and artifacts
 - [Configuration](https://hardrails.github.io/steward/reference/configuration/): Flags, defaults, paths, and validation
 - [APIs](https://hardrails.github.io/steward/reference/api/): Authoritative OpenAPI contracts
-- [Image, permit, task, and evidence tools](https://hardrails.github.io/steward/reference/offline-tools/): Verify and import signed Open Container Initiative (OCI) archives; issue and audit exact connector and service-task permits; dispatch a qualified Hermes run; verify receipt chains
+- [Agent release, image, permit, task, and evidence tools](https://hardrails.github.io/steward/reference/offline-tools/): Issue and verify signed outcome releases; verify and import Open Container Initiative (OCI) archives; issue and audit exact connector and service-task permits; dispatch a qualified Hermes run; verify receipt chains
 - [Release artifacts](https://hardrails.github.io/steward/reference/release-artifacts/): Filenames and checksum verification
 
 ## Important capability boundary

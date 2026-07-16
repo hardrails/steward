@@ -132,6 +132,11 @@ If that result path already exists, inspect and preserve it and choose a differe
 new path under the same protected parent. Changing the output path does not change
 task authority; changing the bundle or task ID does.
 
+The node-doctor canary verifies the general signed-task path. To select an
+outcome-led release, verify its exact offline archive, activate a newly admitted
+Hermes instance, keep canary signing off-node, and retain a portable evidence set,
+follow [Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }}).
+
 ## Inspect before piping to root
 
 The single command trusts the fetched script before inspection. For higher

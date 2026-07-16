@@ -1,11 +1,12 @@
 ---
 title: Local operator tools
-description: Create control TLS material, inspect OCI archives, verify evidence, and check release drain and durable-state compatibility with stewardctl.
+description: Issue and verify signed agent releases, inspect OCI archives, create control TLS material, verify evidence, and check durable-state compatibility with stewardctl.
 section: Reference
 ---
 
 # Local operator tools
 
+`stewardctl agent-release` issues and verifies outcome-led signed agent releases,
 `stewardctl image` inspects and imports image media, `stewardctl permit` signs and
 audits exact connector authority, `stewardctl task` signs and audits exact
 agent-service requests, and `stewardctl evidence` verifies receipts without a
@@ -18,6 +19,334 @@ task issue, verify, and audit remain offline. `stewardctl control evidence expor
 contacts the customer-owned controller, while `stewardctl control evidence verify`
 checks that portable export entirely offline against a separately pinned witness
 public key.
+
+## Signed agent releases
+
+An agent release is a publisher-signed description of one qualified outcome. It
+binds an embedded signed capsule, the exact offline archive digest and byte length,
+the archive's image identity, one fixed Hermes canary, the qualification-evidence
+digest, and explicit limitations. It grants no tenant, node, image-import,
+capability, or task authority.
+
+Issue a release with the same Ed25519 publisher key and key ID that signed the
+embedded capsule:
+
+```console
+stewardctl agent-release issue \
+  -capsule hermes.capsule.dsse.json \
+  -archive hermes-agent-adapter.tar \
+  -skill-manifest steward.workspace-audit.manifest.json \
+  -qualification-evidence hermes-qualification.json \
+  -release-id hermes-workspace-audit-site-build-001 \
+  -title "Audit a Hermes workspace" \
+  -summary "Run the signed Steward workspace-audit skill in a newly admitted Hermes instance." \
+  -outcome "Return the canonical empty-workspace manifest through one tenant-authorized Hermes run." \
+  -completed-at 2026-07-16T12:00:00Z \
+  -limitation "Qualified only for the exact documented linux/amd64 adapter under runsc." \
+  -key publisher.private.pem \
+  -key-id publisher-key-id \
+  -out hermes-workspace-audit.release.dsse.json
+```
+
+`-completed-at` must be the real qualification completion time in canonical UTC
+`YYYY-MM-DDTHH:MM:SSZ` form. Supply one through eight distinct `-limitation`
+values. The command reads at most 1 MiB for the skill manifest and 4 MiB for
+qualification evidence, inspects the bounded archive, creates a new mode-`0600`
+DSSE envelope, and refuses to overwrite an existing output.
+
+The command hashes the supplied skill manifest and qualification evidence. It does
+not parse those files, perform the qualification, or prove their claims. The
+embedded capsule must already identify the same skill-manifest digest and exact
+image tuple, use the built-in Hermes service profile, and be valid at issuance.
+
+Verify a release with a publisher public key obtained through an independent
+authenticated channel:
+
+```console
+stewardctl agent-release verify \
+  -in hermes-workspace-audit.release.dsse.json \
+  -public-key publisher.public.pem \
+  -key-id publisher-key-id \
+  -archive hermes-agent-adapter.tar
+```
+
+Verification checks the release signature, the embedded capsule under the same key
+and key ID, all duplicated bindings, the capsule validity period, and the closed
+Hermes canary. With `-archive`, it also verifies the exact archive digest, length,
+manifest, configuration, and platform identity without importing the image.
+Without that flag, the JSON output reports `archive.status` as `not_requested`.
+
+Both commands emit bounded JSON containing the release identity, publisher key,
+release and capsule digests, outcome display, archive and image identity, canary,
+qualification, and verification status. See
+[agent activation]({{ '/guides/agent-activation/' | relative_url }}) for the
+authority boundary and the complete operator journey.
+
+## Proof-carrying agent activation
+
+`stewardctl activation` coordinates one fixed Hermes workspace-audit activation.
+It retains exact inputs, write-once handoff artifacts, sequential state
+checkpoints, and the final portable proof in an owner-only workspace. The
+coordinator does not hold the tenant task-signing key.
+
+The current recipe requires a dedicated host, a signed site policy with exactly
+one tenant, and Executor configured with both
+`-admission-allow-host-admin-intent` and
+`-allow-unquotaed-state-on-dedicated-host`. The packaged configuration helpers
+expose these as `--allow-host-admin-intent` and
+`--allow-unquotaed-state-on-dedicated-host`. The persistent volume has no hard
+byte or inode quota, and the local token has host-administrator authority for
+both admission and the later activation checkpoint. It is not tenant
+authentication. Do not use this recipe on a shared host.
+
+Create a new workspace from the signed release, exact archive, site authority,
+instance intent, and a current finding-free controller witness captured before
+admission. Steward snapshots the archive into the workspace and verifies that
+copy before publishing the activation plan:
+
+```console
+stewardctl activation create \
+  -dir "$ACTIVATION_DIR" \
+  -release hermes-workspace-audit.release.dsse.json \
+  -policy site-policy.dsse.json \
+  -intent instance-intent.json \
+  -archive hermes-agent-adapter.tar \
+  -publisher-public-key publisher.public.pem \
+  -publisher-key-id publisher-key-id \
+  -site-root-public-key site-root.public \
+  -site-root-key-id site-root-1 \
+  -baseline-witness node-a.activation-baseline.json \
+  -witness-public-key steward-control-witness.public.pem
+```
+
+`-activation-id` is optional. If omitted, Steward generates a stable random ID.
+The plan records these optional timeout flags:
+
+| Flag | Default |
+| --- | ---: |
+| `-preflight-timeout` | `30s` |
+| `-image-import-timeout` | `30m` |
+| `-admission-timeout` | `1m` |
+| `-startup-timeout` | `2m` |
+| `-canary-timeout` | `5m` |
+| `-evidence-timeout` | `1m` |
+
+Each timeout must be a whole number of seconds from one second through 24 hours.
+Most values bound one command attempt. The canary timeout becomes one absolute
+deadline when `canary_authorized` is recorded. Submission, lost-response
+recovery, and terminal observation share that deadline, and rerunning does not
+reset it. Expiry records sticky `action_required` with reason `canary_timeout`;
+the activation cannot resume.
+The workspace path must not exist. Its existing parent and ancestors must be
+directories owned by root or the effective user. A user-owned ancestor cannot be
+group- or world-writable; a writable root-owned ancestor is accepted only with the
+sticky bit.
+
+Advance the activation with the same pinned trust inputs:
+
+```console
+stewardctl activation run \
+  -dir "$ACTIVATION_DIR" \
+  -publisher-public-key publisher.public.pem \
+  -publisher-key-id publisher-key-id \
+  -site-root-public-key site-root.public \
+  -site-root-key-id site-root-1 \
+  -witness-public-key steward-control-witness.public.pem
+```
+
+The local runtime flags have these packaged defaults:
+
+| Flag | Default |
+| --- | --- |
+| `-node-url` | `http://127.0.0.1:8090` |
+| `-node-token-file` | `/etc/steward/executor-token` |
+| `-gateway-config` | `/etc/steward/gateway.json` |
+| `-docker-socket` | `/var/run/docker.sock` |
+| `-executor-evidence-log` | `/var/lib/steward-executor/evidence.bin` |
+
+Override a flag only when the installed node uses a different trusted local path
+or literal-loopback Executor origin. The `release_verified` state is a local
+resumability checkpoint, not historical authorization evidence. Live preflight,
+image import, and fresh admission use current-time checks. Final evidence
+collection and offline verification re-evaluate the exact release, capsule, site
+policy, retained intent, and task at the signed timestamp in Gateway's
+authorization receipt.
+
+Gateway configuration is loaded only while live preflight, submission,
+observation, or receipt collection remains necessary. A workspace with a complete
+retained terminal result and status, complete retained evidence,
+or `evidence_collected` can continue without a usable Gateway config, receipt
+private key, ledger, Executor endpoint, Docker socket, or live evidence source.
+Terminal `passed` and `action_required` workspaces can be reopened for status
+without those live dependencies, but `action_required` cannot resume.
+
+The first handoff stops at `canary_challenge_ready` with
+`waiting_for: "canary_task"`. Copy these files to the tenant signing station:
+
+- `canary.challenge.json`
+- `admission.json`
+- `intent.json`
+- `service-trust.json`
+- `canary.request.json`
+
+After reviewing the unsigned challenge and authenticated companion files, issue
+one task with the tenant key:
+
+```console
+stewardctl task issue \
+  -admission admission.json \
+  -intent intent.json \
+  -trust service-trust.json \
+  -request canary.request.json \
+  -operation-id hermes.run \
+  -valid-for 5m \
+  -clock-skew 5s \
+  -key hermes-task-approver.private.pem \
+  -key-id hermes-task-approver \
+  -out canary.task.json
+
+stewardctl task verify \
+  -in canary.task.json \
+  -public-key hermes-task-approver.public \
+  -key-id hermes-task-approver \
+  -request canary.request.json
+```
+
+The canary task must expire no later than the embedded workload capsule. Set
+`-valid-for` so the issued permit remains inside that signed validity window.
+
+Return the owner-only bundle to the node, attach it once, and rerun the same
+`activation run` command:
+
+```console
+stewardctl activation attach \
+  -dir "$ACTIVATION_DIR" \
+  -kind canary-task \
+  -in canary.task.json
+```
+
+The next `run` performs the complete activation and challenge binding. The
+tenant-specific service policy derived from the current Gateway configuration
+must remain byte-for-byte consistent while live submission, observation, or
+Gateway receipt collection remains necessary. If it changes during those phases,
+restore the exact configuration and rerun.
+
+After Hermes reports a verified terminal result, the coordinator verifies
+Gateway's signed authorization, dispatch, and terminal receipts; re-evaluates the
+task and retained activation inputs at Gateway's signed authorization time; and
+asks Executor to append a content-free signed activation checkpoint. That request
+contains the activation ID and checkpoint digest, not the begin digest. Executor
+matches the persisted begin digest to its earlier signed marker, requires ready
+reconciliation, and proves the exact runtime topology is still running. The
+node-local request uses the explicitly enabled host-administrator authority. It
+then stops at `agent_reported_terminal` with `waiting_for: "final_witness"`.
+Obtain a signed controller evidence export after the evidence uplink has published
+that checkpoint:
+
+If a crash leaves the phase at `agent_reported_terminal` before the checkpoint
+artifact is retained, `activation status` reports
+`waiting_for: "activation_checkpoint"`. Rerun `activation run`; `activation
+attach -kind final-witness` remains blocked until the checkpoint exists.
+
+```console
+stewardctl control evidence export \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -node-id node-a \
+  -out node-a.activation-final.json
+```
+
+Verify that the export is current, finding-free, later than the baseline, and
+includes this signed order:
+
+`activation_begin` → fresh admission allow → admission commit → runtime start →
+`activation_checkpoint` → final witness head
+
+The local Executor log must contain that coordinate. This receipt order provides
+the causal link; Gateway and controller clocks are not compared. Unrelated tenant
+receipts may follow the witnessed head in the live log, but a later receipt for
+this activation or a matching lifecycle-invalidating event fails the activation.
+Verify before attachment because attachments are write-once:
+
+```console
+stewardctl control evidence verify \
+  -in node-a.activation-final.json \
+  -witness-public-key steward-control-witness.public.pem
+
+stewardctl activation attach \
+  -dir "$ACTIVATION_DIR" \
+  -kind final-witness \
+  -in node-a.activation-final.json
+```
+
+Rerun the same `activation run` command to collect the bounded Executor evidence
+delta, verify Gateway receipts, write `proof.json`, and reach `passed`. The proof
+records the exact activation-begin and activation-checkpoint digests so offline
+verification requires both signed markers and their order.
+
+`activation run` is resumable and idempotent against retained checkpoints while
+the applicable deadline remains open. Transient local file, Docker, Executor,
+Gateway, network, and incomplete evidence-source errors remain retryable after
+the operator corrects the condition. Degraded Executor readiness blocks the
+activation checkpoint until reconciliation succeeds. An attached task that fails
+the full activation binding records sticky `action_required` with
+`canary_authorization_invalid`; a terminal submit rejection, non-completed Hermes
+state, or completed result that fails the closed recipe records
+`canary_terminal_failure`; an expired absolute canary deadline records
+`canary_timeout`; invalid or conflicting retained evidence records
+`evidence_invalid`. These terminal states cannot resume. Preserve the failed
+workspace, stop and destroy its workload, then create a new activation ID with an
+instance generation greater than the failed activation. The coordinator does not
+mint replacement task authority.
+
+Inspect local progress with:
+
+```console
+stewardctl activation status -dir "$ACTIVATION_DIR"
+```
+
+This status command intentionally verifies only unsigned workspace consistency
+and always reports `verified: false`. Do not treat it as authenticated evidence.
+
+On a disconnected audit system, verify the complete copied workspace and its
+signed companions:
+
+```console
+stewardctl activation verify \
+  -dir "$ACTIVATION_DIR" \
+  -publisher-public-key publisher.public.pem \
+  -publisher-key-id publisher-key-id \
+  -site-root-public-key site-root.public \
+  -site-root-key-id site-root-1 \
+  -witness-public-key steward-control-witness.public.pem \
+  -gateway-receipt-public-key connector-receipts.public
+```
+
+`activation verify` has no network, Docker, client, or socket dependency.
+Executor's receipt public key comes from the enrolled identity proof in the
+baseline witness. Gateway's receipt public key is separate; the packaged copy is
+normally `/etc/steward/connector-receipts.public`.
+`canary.submit.json` retains the exact task and permit digests, run ID, dispatch
+receipt marker, receipt node, epoch, and Gateway public key. Offline verification
+requires the supplied historical Gateway key to match those bytes and the proof;
+the current packaged key may differ after rotation.
+
+Use a verifier that reads Executor evidence formats 1 through 2 and recognizes
+the closed `activation_begin` and `activation_checkpoint` event types. Older
+format-1-only verifiers reject those event types rather than silently skipping
+evidence they do not understand.
+
+The portable Executor delta spans the signed receipt coordinates between the two
+controller witnesses. The current recipe requires one policy tenant, but the range
+can still include unrelated node receipts or older retained history. Executor
+receipt frames exclude prompts, request bodies, result bodies, and workspace
+content. The activation workspace separately retains the bounded canary result and
+remains sensitive operational evidence.
+
+See [Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }})
+for input preparation, the baseline-witness procedure, phase semantics, and proof
+limits.
 
 ## Controller TLS material
 
@@ -124,6 +453,14 @@ present. It is at least 2 when Gateway configures an action authority and 4 when
 configures a current service-task operation, even before the receipt file exists or
 that operation is used, because live configuration can write that format. A target
 whose manifest cannot read and preserve the observed format is incompatible.
+
+Executor evidence format 1 contains the original closed event vocabulary. Format 2
+adds `activation_begin` and `activation_checkpoint`. A signed evidence chain may
+contain both versions; the observed format is the highest receipt version present.
+The begin marker is fsynced after read-only admission preflights and before the
+admission-allow receipt, mutation journal, or host mutation. Its format 2 receipt
+therefore remains an upgrade boundary even after the workload is destroyed. A
+target whose evidence reader stops at format 1 is incompatible with that log.
 
 Gateway state format 4 retains the service ID and public tenant task authorities of
 task-enabled grants. A target release must read and preserve that state even if the

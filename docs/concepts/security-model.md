@@ -1,6 +1,6 @@
 ---
 title: Security model and tenant isolation
-description: Evaluate Steward's trust assumptions, Docker and gVisor workload controls, tenant isolation properties, fail-closed behavior, and residual host risks.
+description: Evaluate Steward's trust assumptions, proof-carrying activation, Docker and gVisor workload controls, tenant isolation, fail-closed behavior, and residual host risks.
 section: Explanation
 ---
 
@@ -38,6 +38,7 @@ Every admitted agent container receives one fixed policy:
 | --- | --- |
 | Supply chain | Offline import accepts one bounded Docker or Open Container Initiative (OCI) archive, verifies each descriptor and blob, and requires the signed manifest, config, and platform identity. Executor never pulls an image, runs the exact local config ID, and rejects image-declared volumes. |
 | Signed authority (opt-in) | Executor intersects a publisher-signed workload profile, operator-signed site policy, and tenant/node/instance request. Durable policy and generation records reject rollback. A generation record is a high-water mark that prevents older authority from acting on newer state. |
+| Proof-carrying activation | A publisher-signed agent release binds outcome text, the embedded capsule, exact archive, fixed Hermes canary, qualification-evidence digest, and limitations without granting runtime authority. A fixed node-local state machine derives its canary challenge from real admission, keeps the default task key off-node, retains generated artifacts and sequential checkpoints in an owner-only append-only workspace, and correlates the deterministic result with signed receipt and controller-witness evidence. The current recipe requires a dedicated host with exactly one policy tenant, host-administrator local admission, and explicitly enabled unquotaed persistent state. The plan, challenge, state, and proof are not signatures or hostile-host attestation. |
 | Sandbox | Docker must advertise `runsc`, the gVisor runtime. Every untrusted agent runs in its own gVisor sandbox. |
 | Identity | The container runs as fixed UID/GID `65532:65532`; the caller cannot select a user. |
 | Privilege and namespaces | Executor drops every Linux capability and sets `no-new-privileges`. Interprocess communication (IPC) and control-group (cgroup) namespaces are private; process ID (PID) and hostname/domain-name (UTS) namespaces use Docker's private modes. Host, peer-container, shareable namespace, and custom cgroup-parent settings are rejected. |
@@ -209,6 +210,20 @@ an authorization before dispatch and later signed a status and run ID. It does n
 establish that the agent performed useful work, that its output was true, or that an
 upstream effect occurred exactly once. A missing terminal remains an unknown
 outcome. Raw request bytes and prompts are deliberately excluded.
+
+The built-in activation canary narrows that statement for one qualified fixture:
+it additionally checks the activation-scoped Hermes session and the canonical
+empty-workspace audit result. The activation proof then correlates that bounded
+result with exact task, permit, receipt, and witness coordinates. Executor signs
+an activation-begin marker after read-only admission preflights and before the
+admission-allow receipt or host mutation. After Gateway signs authorization,
+dispatch, and terminal evidence, Executor signs a checkpoint that binds that
+exact evidence. Live collection requires the final controller witness to cover
+the begin, admission, start, and checkpoint sequence; allows unrelated tenant
+suffix receipts; and rejects later receipts for the same activation or
+lifecycle-invalidating events. The proof manifest is unsigned, and the canary
+does not establish the safety or correctness of arbitrary models, prompts,
+plugins, skills, workspaces, or later behavior.
 
 Node-local receipts are not hostile-host attestation. Host root can replace the
 binary, keys, and logs together. The chain does not include prompts, model output,

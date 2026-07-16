@@ -32,8 +32,17 @@ existing security contracts:
 - a resumable node-local runner verifies and imports the image, admits and
   starts the workload, then pauses for a task permit derived from the real
   Executor admission response;
+- after authority, policy, image, capacity, and other read-only admission
+  preflights pass, Executor signs an idempotent `activation_begin` marker before
+  the admission-allow receipt, mutation journal, or host mutation; its digest
+  binds the activation, runtime, state lineage, and capsule;
+- final collection verifies Gateway's signed authorization, dispatch, and
+  terminal receipts, re-evaluates the release, capsule, site policy, retained
+  intent, and task at the signed authorization time, then asks Executor to sign
+  an `activation_checkpoint` that binds that terminal evidence;
 - a portable activation proof binds the signed inputs, exact canary, terminal
-  result, and signed evidence needed for independent offline verification.
+  result, both activation-marker digests, and signed evidence needed for
+  independent offline verification.
 
 The default flow keeps the tenant task-signing key off the node. It emits a
 bounded signing challenge after admission and resumes only when the matching
@@ -44,7 +53,7 @@ validation or widen authority.
 **Tradeoff:** Steward owns a small amount of orchestration code and a public
 release format. In return, an operator can activate useful agent work without
 trusting a hosted control plane, and an auditor can verify the result without
-network access. The first release supports one closed Hermes workspace-audit
+network access. The implemented path supports one closed Hermes workspace-audit
 canary and node-local transport; broader recipes remain unsupported until they
 have equally precise contracts.
 
@@ -60,12 +69,35 @@ policy and route-policy digests.
 Agent releases are descriptive and publisher-signed, but never grant tenant,
 node, connector, egress, inference, or task authority. Site policy, instance
 intent, Executor admission, and tenant task permits remain authoritative.
+`release_verified` is a local resumability state, not historical authority.
+Final and offline verification use Gateway's signed authorization-receipt time.
+
+The final controller witness must cover this signed Executor order:
+`activation_begin`, fresh admission allow, admission commit, runtime start,
+`activation_checkpoint`, then the witness head. This creates a causal join
+between Gateway terminal evidence and the Executor chain without comparing
+Gateway and controller clocks.
 
 Activation is a fixed state machine rather than a programmable workflow.
-Changed immutable inputs cannot resume an existing activation. Ambiguous
-external effects become a sticky `action_required` state and are inspected
-before any retry. The coordinator never mints replacement authority, silently
-destroys a failed workload, or treats missing evidence as success.
+Changed immutable inputs cannot resume an existing activation. An attached task
+that fails the complete activation binding, a terminal canary failure, and
+invalid or conflicting retained evidence become sticky `action_required` states.
+Terminal canary failures include a terminal submit rejection, a non-completed
+Hermes state, and a completed result that fails the closed recipe. Transient local
+file, Docker, Executor, Gateway, network, and incomplete evidence-source errors
+remain retryable against the same retained checkpoints while their applicable
+deadline remains open. Canary authorization starts one absolute deadline for
+submission, recovery, and terminal observation; retry does not reset it, and
+expiry becomes sticky `action_required` with reason `canary_timeout`.
+Retained-evidence failures use `evidence_invalid` because write-once bytes cannot
+be repaired by retry. The coordinator never mints replacement authority, silently
+destroys a failed workload, or treats missing evidence as success. A replacement
+requires the operator to stop and destroy the failed workload, choose a new
+activation ID, and advance the instance generation beyond the failed activation.
+
+The Executor evidence contract adds the closed event types `activation_begin`
+and `activation_checkpoint`. Verifiers that do not recognize them reject the
+evidence instead of silently skipping unknown causal markers.
 
 Controller-driven end-to-end activation remains deferred. The current control
 uplink reports a runtime reference and status, but not the complete admission

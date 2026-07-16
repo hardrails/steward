@@ -116,6 +116,29 @@ OpenClaw has not completed this qualification and remains a layout contract. See
 [OpenClaw]({{ '/guides/openclaw/' | relative_url }}) guides before signing an exact
 adapter archive.
 
+## What is a signed agent release?
+
+A signed agent release is a publisher-authenticated description of one qualified
+agent outcome. It binds the outcome text, embedded workload capsule, exact offline
+OCI archive digest and image identity, fixed canary, qualification-evidence
+digest, and known limitations.
+
+It does not authorize a deployment. Site policy, instance intent, live Executor
+admission, Gateway configuration, and the tenant's exact task permit remain
+separate authority. The default activation path creates its canary challenge only
+after admission and keeps the tenant private key off-node. A deterministic Hermes
+workspace-audit result is then correlated with Executor, Gateway, and controller
+witness evidence for offline review.
+
+The activation workspace is append-only for generated artifacts and state
+checkpoints, but it is not proof against compromised host root. The final proof
+manifest is also unsigned. Executor signs one marker after read-only admission
+preflights and before the admission-allow receipt or host mutation. It signs a
+second marker after Steward verifies Gateway's terminal evidence; the final
+controller witness must cover both. An auditor must verify those signed companions
+and pinned keys. See
+[agent activation]({{ '/guides/agent-activation/' | relative_url }}).
+
 ## Can Terraform manage Steward?
 
 Steward ships provider-neutral cloud-init modules for node staging and controller
