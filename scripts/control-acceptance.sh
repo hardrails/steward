@@ -503,20 +503,21 @@ cmp -s "$node_credential" "$node_credential_retry" || {
 python3 -I - "$node_credential" "$node_id" "$work/exchange.stdout" "$work/exchange-retry.stdout" <<'PY'
 import json
 import pathlib
+import re
 import sys
 credential = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if credential.get("version") != 2 or credential.get("scope") != "node" or credential.get("node_id") != sys.argv[2]:
     raise SystemExit("control-acceptance: node credential is invalid")
 token = credential.get("credential", "")
-prefix, separator, _ = token.rpartition("_")
-credential_id = prefix.removeprefix("steward_node_v1_") if separator else ""
-if not credential_id.startswith("node-cred-"):
+match = re.fullmatch(r"steward_node_v1_(node-cred-[a-f0-9]{32})_[A-Za-z0-9_-]{43}", token)
+if match is None:
     raise SystemExit("control-acceptance: node credential omits its revocation identity")
+credential_id = match.group(1)
 if pathlib.Path(sys.argv[3]).read_text() != f"{credential_id}\n" or pathlib.Path(sys.argv[4]).read_text() != f"{credential_id}\n":
     raise SystemExit("control-acceptance: enrollment exchange did not return only the credential ID")
 PY
 node_credential_id=$(tr -d '\n' <"$work/exchange.stdout")
-[[ $node_credential_id =~ ^node-cred-[A-Za-z0-9._-]+$ ]] || {
+[[ $node_credential_id =~ ^node-cred-[a-f0-9]{32}$ ]] || {
 	echo "control-acceptance: enrollment exchange returned an invalid credential ID" >&2
 	exit 1
 }

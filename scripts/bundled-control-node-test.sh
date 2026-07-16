@@ -27,18 +27,18 @@ signed_admission=(
 
 bash -n "$installer" "$configurator"
 
-bash "$installer" "${common_remote[@]}" "${signed_admission[@]}" \
+/bin/bash -p "$installer" "${common_remote[@]}" "${signed_admission[@]}" \
 	>"$work/bundled.plan"
 grep -Fqx '  enrollment:   bundled-control-executor-only' "$work/bundled.plan"
 grep -Fqx '  admission:    signed' "$work/bundled.plan"
 
-bash "$installer" "${common_remote[@]}" \
+/bin/bash -p "$installer" "${common_remote[@]}" \
 	--steward-credential /trust/generic-supervisor.json \
 	>"$work/generic.plan"
 grep -Fqx '  enrollment:   generic-supervisor-and-executor' "$work/generic.plan"
 grep -Fqx '  admission:    unchanged' "$work/generic.plan"
 
-if bash "$installer" "${common_remote[@]}" >"$work/unsigned.out" 2>"$work/unsigned.err"; then
+if /bin/bash -p "$installer" "${common_remote[@]}" >"$work/unsigned.out" 2>"$work/unsigned.err"; then
 	echo "bundled-control-node-test: bundled control accepted missing signed admission" >&2
 	exit 1
 fi
@@ -46,10 +46,10 @@ grep -Fqx \
 	'install-steward: bundled steward-control enrollment requires complete signed-admission inputs' \
 	"$work/unsigned.err"
 
-bash "$installer" --non-interactive --dry-run --local-only \
+/bin/bash -p "$installer" --non-interactive --dry-run --local-only \
 	--version v0.0.0 --package tar >"$work/local.plan"
 grep -Fqx '  enrollment:   local-only' "$work/local.plan"
-bash "$installer" --non-interactive --dry-run --stage-only \
+/bin/bash -p "$installer" --non-interactive --dry-run --stage-only \
 	--version v0.0.0 --package tar >"$work/staged.plan"
 grep -Fqx '  enrollment:   staged-only' "$work/staged.plan"
 
