@@ -117,11 +117,96 @@ func TestBootstrapSiteAdminRetrySurvivesReopenOnlyWhilePristine(t *testing.T) {
 
 func TestBootstrapSiteAdminDoesNotReproduceRevokedCredential(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
-	if revoked, err := fixture.store.RevokeCredential(fixture.admin, fixture.adminRecord.ID, fixture.now.Add(time.Minute)); err != nil || !revoked {
+	backupRaw, _, _, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, "backup-site-admin", controlauth.RoleSiteAdmin, "", fixture.now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := fixture.store.AuthenticateOperator(fixture.auth, backupRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked, err := fixture.store.RevokeCredential(backup, fixture.adminRecord.ID, fixture.now.Add(2*time.Minute)); err != nil || !revoked {
 		t.Fatalf("revoke bootstrap credential = (%v, %v)", revoked, err)
 	}
-	if _, _, _, err := fixture.store.BootstrapSiteAdmin(fixture.auth, fixture.now.Add(2*time.Minute)); !errors.Is(err, ErrConflict) {
+	if _, _, _, err := fixture.store.BootstrapSiteAdmin(fixture.auth, fixture.now.Add(3*time.Minute)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("revoked bootstrap retry error = %v", err)
+	}
+}
+
+func TestOperatorRevocationRetainsOneRecoverableSiteAdministrator(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	if revoked, err := fixture.store.RevokeOperator(
+		fixture.admin, fixture.adminRecord.ID, fixture.now.Add(time.Minute),
+	); !errors.Is(err, ErrConflict) || revoked {
+		t.Fatalf("last site administrator revocation = (%v, %v)", revoked, err)
+	}
+	if _, err := fixture.store.AuthenticateOperator(fixture.auth, fixture.adminRaw); err != nil {
+		t.Fatalf("rejected revocation invalidated the bootstrap administrator: %v", err)
+	}
+
+	backupRaw, backupRecord, _, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, "backup-site-admin", controlauth.RoleSiteAdmin, "", fixture.now.Add(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := fixture.store.AuthenticateOperator(fixture.auth, backupRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked, err := fixture.store.RevokeOperator(
+		backup, fixture.adminRecord.ID, fixture.now.Add(3*time.Minute),
+	); err != nil || !revoked {
+		t.Fatalf("revocation with a backup administrator = (%v, %v)", revoked, err)
+	}
+	if revoked, err := fixture.store.RevokeOperator(
+		backup, backupRecord.ID, fixture.now.Add(4*time.Minute),
+	); !errors.Is(err, ErrConflict) || revoked {
+		t.Fatalf("backup administrator revoked itself as the last administrator = (%v, %v)", revoked, err)
+	}
+}
+
+func TestDetachedOperatorAndNodeIdentitiesAreFencedAtMutationTime(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	backupRaw, _, _, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, "atomic-revocation-backup", controlauth.RoleSiteAdmin, "", fixture.now.Add(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := fixture.store.AuthenticateOperator(fixture.auth, backupRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked, err := fixture.store.RevokeOperator(
+		backup, fixture.admin.CredentialID, fixture.now.Add(3*time.Minute),
+	); err != nil || !revoked {
+		t.Fatalf("revoke detached operator = (%v, %v)", revoked, err)
+	}
+	if _, _, err := fixture.store.CreateTenant(
+		fixture.admin, "tenant-after-revocation", fixture.now.Add(4*time.Minute),
+	); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("detached revoked operator reached mutation: %v", err)
+	}
+
+	if _, revoked, err := fixture.store.RevokeNodeCredential(
+		backup, node.CredentialID, fixture.now.Add(5*time.Minute),
+	); err != nil || !revoked {
+		t.Fatalf("revoke detached node = (%v, %v)", revoked, err)
+	}
+	if _, err := fixture.store.Poll(
+		node, []string{}, fixture.now.Add(6*time.Minute), time.Minute, 1,
+	); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("detached revoked node polled work: %v", err)
+	}
+	if _, err := fixture.store.ApplyReport(
+		node, validMissingReport(), fixture.now.Add(6*time.Minute),
+	); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("detached revoked node reported work: %v", err)
 	}
 }
 

@@ -117,6 +117,37 @@ func (store *Store) AuthenticateNode(auth *controlauth.Manager, raw string) (con
 	return auth.AuthenticateNode(raw, cloneCredential(credential))
 }
 
+// revalidateOperatorLocked closes the gap between HTTP bearer authentication
+// and the durable operation. A credential can be revoked while a bounded
+// request body is still arriving; every operation therefore confirms the
+// detached identity against current state while holding the same mutex used by
+// revocation and mutation.
+func (store *Store) revalidateOperatorLocked(actor controlauth.Identity) error {
+	credential, ok := store.current.credentials[actor.CredentialID]
+	if !ok || credential.Revoked || credential.Kind != controlauth.KindOperator ||
+		credential.Role != actor.Role || credential.TenantID != actor.TenantID {
+		return controlauth.ErrUnauthorized
+	}
+	return nil
+}
+
+// revalidateNodeLocked gives poll/report the same atomic revocation boundary.
+// The durable node binding is included because node revocation and tenant-set
+// changes must fence an already authenticated long request as well.
+func (store *Store) revalidateNodeLocked(identity controlauth.NodeIdentity) error {
+	credential, ok := store.current.credentials[identity.CredentialID]
+	if !ok || credential.Revoked || credential.Kind != controlauth.KindNode ||
+		credential.NodeID != identity.NodeID || credential.Audience != identity.Audience ||
+		!equalStrings(credential.TenantIDs, identity.TenantIDs) {
+		return controlauth.ErrUnauthorized
+	}
+	node, ok := store.current.nodes[credential.NodeID]
+	if !ok || !node.Active || !tenantSubset(credential.TenantIDs, node.TenantIDs) {
+		return controlauth.ErrUnauthorized
+	}
+	return nil
+}
+
 func (store *Store) CreateTenant(actor controlauth.Identity, tenantID string, now time.Time) (Tenant, bool, error) {
 	if store == nil {
 		return Tenant{}, false, ErrUnavailable
@@ -130,6 +161,9 @@ func (store *Store) CreateTenant(actor controlauth.Identity, tenantID string, no
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
+		return Tenant{}, false, err
+	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
 		return Tenant{}, false, err
 	}
 	if existing, ok := store.current.tenants[tenantID]; ok {
@@ -151,6 +185,9 @@ func (store *Store) GetTenant(actor controlauth.Identity, tenantID string) (Tena
 	if err := store.availableLocked(); err != nil {
 		return Tenant{}, false, err
 	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
+		return Tenant{}, false, err
+	}
 	if !controlauth.AuthorizedTenant(actor, tenantID) {
 		return Tenant{}, false, nil
 	}
@@ -165,6 +202,9 @@ func (store *Store) ListTenants(actor controlauth.Identity) ([]Tenant, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
+		return nil, err
+	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
 		return nil, err
 	}
 	result := make([]Tenant, 0, len(store.current.tenants))
@@ -201,6 +241,9 @@ func (store *Store) IssueOperator(actor controlauth.Identity, auth *controlauth.
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
+		return "", controlauth.Credential{}, false, err
+	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
 		return "", controlauth.Credential{}, false, err
 	}
 	for _, existing := range store.current.credentials {
@@ -268,6 +311,9 @@ func (store *Store) RevokeNodeCredential(actor controlauth.Identity, credentialI
 	if err := store.availableLocked(); err != nil {
 		return "", false, err
 	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
+		return "", false, err
+	}
 	credential, ok := store.current.credentials[credentialID]
 	if !ok || credential.Kind != controlauth.KindNode {
 		return "", false, ErrNotFound
@@ -302,6 +348,9 @@ func (store *Store) revokeCredential(actor controlauth.Identity, credentialID st
 	if err := store.availableLocked(); err != nil {
 		return false, err
 	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
+		return false, err
+	}
 	credential, ok := store.current.credentials[credentialID]
 	if !ok || operatorOnly && credential.Kind != controlauth.KindOperator {
 		return false, ErrNotFound
@@ -312,6 +361,17 @@ func (store *Store) revokeCredential(actor controlauth.Identity, credentialID st
 	created, _ := parseTimestamp(credential.CreatedAt)
 	if now.Before(created) {
 		return false, invalid("revocation time precedes credential creation")
+	}
+	if credential.Kind == controlauth.KindOperator && credential.Role == controlauth.RoleSiteAdmin {
+		liveSiteAdmins := 0
+		for _, candidate := range store.current.credentials {
+			if candidate.Kind == controlauth.KindOperator && candidate.Role == controlauth.RoleSiteAdmin && !candidate.Revoked {
+				liveSiteAdmins++
+			}
+		}
+		if liveSiteAdmins <= 1 {
+			return false, ErrConflict
+		}
 	}
 	credential.Revoked = true
 	credential.RevokedAt = canonicalTimestamp(now)
@@ -336,6 +396,9 @@ func (store *Store) RevokeNode(actor controlauth.Identity, nodeID string, now ti
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
+		return 0, err
+	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
 		return 0, err
 	}
 	node, ok := store.current.nodes[nodeID]
@@ -401,6 +464,9 @@ func (store *Store) createEnrollment(actor controlauth.Identity, auth *controlau
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
+		return "", controlauth.Enrollment{}, Node{}, false, err
+	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
 		return "", controlauth.Enrollment{}, Node{}, false, err
 	}
 	for _, tenantID := range canonical {
@@ -535,6 +601,9 @@ func (store *Store) ListNodes(actor controlauth.Identity, tenantID string) ([]No
 	if err := store.availableLocked(); err != nil {
 		return nil, err
 	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
+		return nil, err
+	}
 	if !controlauth.AuthorizedTenant(actor, tenantID) {
 		return nil, ErrNotFound
 	}
@@ -558,6 +627,9 @@ func (store *Store) GetNode(actor controlauth.Identity, tenantID, nodeID string)
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
+		return Node{}, false, err
+	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
 		return Node{}, false, err
 	}
 	if !controlauth.AuthorizedTenant(actor, tenantID) {
@@ -593,6 +665,9 @@ func (store *Store) SubmitCommand(actor controlauth.Identity, tenantID, nodeID s
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
+		return Command{}, false, err
+	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
 		return Command{}, false, err
 	}
 	tenant, ok := store.current.tenants[tenantID]
@@ -651,6 +726,9 @@ func (store *Store) GetCommand(actor controlauth.Identity, tenantID, nodeID, com
 	if err := store.availableLocked(); err != nil {
 		return Command{}, false, err
 	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
+		return Command{}, false, err
+	}
 	if !controlauth.AuthorizedTenant(actor, tenantID) {
 		return Command{}, false, nil
 	}
@@ -675,6 +753,9 @@ func (store *Store) Poll(identity controlauth.NodeIdentity, capabilities []strin
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
+		return nil, err
+	}
+	if err := store.revalidateNodeLocked(identity); err != nil {
 		return nil, err
 	}
 	node, ok := store.current.nodes[identity.NodeID]
@@ -782,6 +863,9 @@ func (store *Store) ApplyReport(identity controlauth.NodeIdentity, report contro
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
+		return false, err
+	}
+	if err := store.revalidateNodeLocked(identity); err != nil {
 		return false, err
 	}
 	node, ok := store.current.nodes[identity.NodeID]

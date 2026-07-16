@@ -240,7 +240,10 @@ paths:
       tags: [operators]
       operationId: revokeControlOperator
       summary: Revoke an operator credential
-      description: Requires a site-administrator credential. Revocation is durable before this response.
+      description: |
+        Requires a site-administrator credential. Revocation is durable before
+        this response. The controller returns 409 rather than revoke the last
+        live site administrator.
       responses:
         "204":
           description: The credential was revoked. The response has no body.
@@ -254,6 +257,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":

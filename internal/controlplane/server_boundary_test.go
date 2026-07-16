@@ -3,9 +3,11 @@ package controlplane
 import (
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +15,77 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 )
+
+type gatedRequestBody struct {
+	raw     []byte
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	offset  int
+}
+
+func newGatedRequestBody(raw string) *gatedRequestBody {
+	return &gatedRequestBody{raw: []byte(raw), started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (body *gatedRequestBody) Read(destination []byte) (int, error) {
+	body.once.Do(func() { close(body.started) })
+	<-body.release
+	if body.offset == len(body.raw) {
+		return 0, io.EOF
+	}
+	written := copy(destination, body.raw[body.offset:])
+	body.offset += written
+	return written, nil
+}
+
+func TestRevocationFencesRequestsAuthenticatedBeforeTheirBodiesArrive(t *testing.T) {
+	fixture := newServerFixture(t)
+	admin, err := fixture.store.AuthenticateOperator(fixture.server.auth, fixture.adminToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupRaw, _, _, err := fixture.store.IssueOperator(
+		admin, fixture.server.auth, "revocation-race-backup", controlauth.RoleSiteAdmin, "", fixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := fixture.store.AuthenticateOperator(fixture.server.auth, backupRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := newGatedRequestBody(`{"request_id":"revocation-race-mint","role":"site_admin"}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/operators", body)
+	request.Header.Set("Authorization", "Bearer "+fixture.adminToken)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		fixture.server.ServeHTTP(response, request)
+		close(done)
+	}()
+	select {
+	case <-body.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("operator request did not reach its gated body")
+	}
+	if revoked, err := fixture.store.RevokeOperator(backup, admin.CredentialID, fixture.now.Add(time.Minute)); err != nil || !revoked {
+		t.Fatalf("revoke authenticated operator = (%v, %v)", revoked, err)
+	}
+	close(body.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revoked operator request did not finish")
+	}
+	requireError(t, response, http.StatusUnauthorized, "unauthorized")
+	status, err := fixture.store.Status()
+	if err != nil || status.Credentials != 2 {
+		t.Fatalf("revoked in-flight request minted a credential: status=%+v err=%v", status, err)
+	}
+}
 
 func TestNodeAdministrationFencesEveryCredentialAndTenantView(t *testing.T) {
 	fixture := newServerFixture(t)

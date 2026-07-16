@@ -56,7 +56,16 @@ func TestRecordAPIsFailClosedForUnavailableAndInvalidCallers(t *testing.T) {
 func TestRecordAPIsRejectBoundaryViolationsWithoutMutation(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")
-	nonAdmin := controlauth.Identity{CredentialID: "tenant-operator", Role: controlauth.RoleTenantOperator, TenantID: "tenant-a"}
+	nonAdminRaw, _, _, err := fixture.store.IssueOperator(
+		fixture.admin, fixture.auth, "boundary-tenant-operator", controlauth.RoleTenantOperator, "tenant-a", fixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonAdmin, err := fixture.store.AuthenticateOperator(fixture.auth, nonAdminRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
 	invalidActor := controlauth.Identity{CredentialID: "invalid"}
 	before, err := fixture.store.Status()
 	if err != nil {
@@ -69,7 +78,7 @@ func TestRecordAPIsRejectBoundaryViolationsWithoutMutation(t *testing.T) {
 		_, _, err := fixture.store.CreateTenant(fixture.admin, "tenant-b", time.Time{})
 		return err
 	}(), ErrInvalid)
-	assertErrorIs(t, func() error { _, err := fixture.store.ListTenants(invalidActor); return err }(), ErrForbidden)
+	assertErrorIs(t, func() error { _, err := fixture.store.ListTenants(invalidActor); return err }(), controlauth.ErrUnauthorized)
 	assertErrorIs(t, func() error {
 		_, _, _, err := fixture.store.IssueOperator(nonAdmin, fixture.auth, "request", controlauth.RoleSiteAdmin, "", fixture.now)
 		return err
@@ -190,7 +199,7 @@ func TestRecordAPIsFenceUnknownNodesCommandsAndReports(t *testing.T) {
 	fixture.createTenant(t, "tenant-a")
 	_, identity := fixture.createNode(t, "tenant-a")
 
-	if _, found, err := fixture.store.GetTenant(controlauth.Identity{}, "tenant-a"); err != nil || found {
+	if _, found, err := fixture.store.GetTenant(controlauth.Identity{}, "tenant-a"); !errors.Is(err, controlauth.ErrUnauthorized) || found {
 		t.Fatalf("unauthorized tenant lookup = (%v, %v)", found, err)
 	}
 	if _, found, err := fixture.store.GetNode(fixture.admin, "tenant-a", "missing"); err != nil || found {
@@ -202,7 +211,7 @@ func TestRecordAPIsFenceUnknownNodesCommandsAndReports(t *testing.T) {
 	assertErrorIs(t, func() error {
 		_, err := fixture.store.Poll(controlauth.NodeIdentity{NodeID: "missing", TenantIDs: []string{"tenant-a"}, Audience: "executor"}, []string{}, fixture.now, time.Minute, 1)
 		return err
-	}(), ErrNotFound)
+	}(), controlauth.ErrUnauthorized)
 	for _, call := range []func() error{
 		func() error { _, err := fixture.store.Poll(identity, nil, fixture.now, time.Minute, 1); return err },
 		func() error {

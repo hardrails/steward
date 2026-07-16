@@ -215,7 +215,10 @@ stewardctl control operator issue \
 ```
 
 The command prints the non-secret credential ID. Record it so the site
-administrator can revoke the credential later:
+administrator can revoke the credential later. Before rotating a site
+administrator, issue and verify a replacement site-administrator token. The
+controller refuses to revoke the last live site administrator because a
+populated store cannot recreate the bootstrap credential safely.
 
 ```console
 stewardctl control operator revoke \
@@ -303,6 +306,11 @@ operators by issuing a replacement with a new request ID, verifying it, and
 revoking the old credential ID. Rotate node bearers through the staged procedure
 above. Enrollment capabilities expire and allow one logical exchange; an exact
 retry reproduces the same node credential rather than creating another one.
+
+Revocation also fences requests that authenticated before their bodies arrived.
+The controller rechecks the credential under the durable operation lock, so a
+slow or interrupted request cannot finish a mutation after its operator or node
+credential has been revoked.
 
 Once Executor polls successfully, inventory reports its capabilities and last
 contact time:

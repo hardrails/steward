@@ -35,7 +35,7 @@ their bound node.
 | `GET /v1/healthz`, `GET /v1/readiness` | Process liveness and durable-store readiness |
 | `POST /v1/tenants`, `GET /v1/tenants` | Create and page through tenants |
 | `GET /v1/tenants/{tenant_id}` | Read one visible tenant |
-| `POST /v1/operators`, `DELETE /v1/operators/{credential_id}` | Issue idempotent scoped operators and revoke operator credentials |
+| `POST /v1/operators`, `DELETE /v1/operators/{credential_id}` | Issue idempotent scoped operators and revoke them; the last live site administrator cannot be revoked |
 | `POST /v1/enrollments`, `POST /v1/enroll` | Idempotently create a one-time node enrollment and exchange it |
 | `DELETE /v1/node-credentials/{credential_id}` | Revoke one node bearer during staged credential rotation |
 | `GET /v1/tenants/{tenant_id}/nodes` | Page through bounded tenant node inventory |
