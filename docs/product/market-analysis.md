@@ -6,7 +6,7 @@ section: Product
 
 # Agent execution market analysis
 
-> Market snapshot: 2026-07-13. This analysis uses the linked primary sources.
+> Market snapshot: 2026-07-15. This analysis uses the linked primary sources.
 > A vendor's documented feature is not a security certification, and an omitted
 > feature is not proof that the vendor can never provide it.
 
@@ -63,6 +63,40 @@ boundary instead.
 | [OpenClaw](https://github.com/openclaw/openclaw/security) | OpenClaw provides agents, tools, skills, memory, and optional Docker sandboxing. Its security documentation says one gateway is not an adversarial multi-tenant boundary and that session or memory scoping does not create per-user authorization. | Steward treats the OpenClaw image, tools, memory, and configuration as untrusted workload content. OpenClaw can supply agent behavior; Steward supplies the external tenant boundary. |
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent/security) | Hermes provides skills, plugins, subagents, scheduled work, and several execution backends. Its security documentation describes a single-user personal-agent model and warns that skills and plugins run with the agent's authority. | Steward qualifies one exact Hermes build and places policy, credentials, resource controls, and evidence outside Hermes. It does not rely on the agent's own permission model for tenant isolation. |
 | [Amazon Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html) | AgentCore documents managed runtime, identity, memory, MCP gateway, code interpreter, browser, and OpenTelemetry observability. Its [Virtual Private Cloud (VPC) guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html) describes AWS-managed network interfaces and Identity and Access Management (IAM) service roles. | Steward serves operators who require local keys, artifacts, infrastructure, and operation without a vendor control plane or public Internet. It does not claim an equivalent managed-service portfolio. |
+
+## Adjacent operator-experience signal: WorkFlux
+
+[WorkFlux](https://www.workflux.ai/docs) is a hosted vertical-automation product,
+not a hardened agent runtime or disconnected fleet controller. Its documentation
+assumes a vendor dashboard, public API, and Internet connectivity. It is therefore
+not included in the security capability matrix above. Its onboarding model still
+provides useful product lessons:
+
+- its [agent catalog](https://www.workflux.ai/docs/agents-overview) describes
+  concrete use cases, integrations, and expected outcomes instead of asking a new
+  operator to assemble an abstract platform;
+- its [quick start](https://www.workflux.ai/docs/quick-start) presents a coherent
+  choose, configure, test, activate, and monitor path;
+- its API documentation exposes [scoped credentials](https://www.workflux.ai/docs/api-authentication),
+  [event notifications](https://www.workflux.ai/docs/webhooks), and
+  [operational metrics](https://www.workflux.ai/docs/key-metrics).
+
+Steward should translate those patterns without copying the hosted trust model.
+Qualified Hermes and OpenClaw packages should read like an offline catalog entry:
+exact source revision, required capabilities, integration contract, acceptance
+evidence, and a useful-work example. Activation should join the existing preflight,
+signed canary, transactional installation, doctor, and rollback controls into one
+obvious operator journey. Future controller events should use a bounded durable
+local outbox that can be polled or exported; outbound webhook delivery must not
+become an availability or Internet dependency. Fleet metrics should describe
+controller and node health, queue state, delivery latency, failures, ambiguity, and
+capacity without collecting prompts or claiming business outcomes.
+
+Steward should not absorb vertical conversation behavior, customer records,
+business return-on-investment calculations, or human-escalation workflows. Those
+belong in independently qualified agents, skills, and customer systems. WorkFlux's
+marketing, compliance, uptime, and outcome claims were not independently verified
+for this analysis.
 
 ## Common platform capabilities
 
