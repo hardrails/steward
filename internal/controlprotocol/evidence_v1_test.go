@@ -376,6 +376,9 @@ func TestExecutorEvidenceStatusEnforcesFindingSemantics(t *testing.T) {
 	}
 
 	for name, candidate := range map[string]ExecutorEvidenceStatusV1{
+		"unimplemented stale state": {
+			State: "stale", Head: &head, WitnessedAt: witnessed,
+		},
 		"unwitnessed with head": {
 			State: ExecutorEvidenceStatusUnwitnessed, Head: &head,
 		},

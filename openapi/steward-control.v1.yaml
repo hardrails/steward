@@ -1660,7 +1660,7 @@ components:
       properties:
         state:
           type: string
-          enum: [unwitnessed, current, stale, rollback_detected, equivocation_detected]
+          enum: [unwitnessed, current, rollback_detected, equivocation_detected]
         head:
           $ref: "#/components/schemas/ExecutorEvidenceHead"
         witnessed_at:

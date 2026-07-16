@@ -28,7 +28,6 @@ const (
 
 	ExecutorEvidenceStatusUnwitnessed          = "unwitnessed"
 	ExecutorEvidenceStatusCurrent              = "current"
-	ExecutorEvidenceStatusStale                = "stale"
 	ExecutorEvidenceStatusRollbackDetected     = "rollback_detected"
 	ExecutorEvidenceStatusEquivocationDetected = "equivocation_detected"
 
@@ -524,7 +523,7 @@ func (status ExecutorEvidenceStatusV1) Validate() error {
 			return errors.New("unwitnessed executor evidence status contains a checkpoint")
 		}
 		return nil
-	case ExecutorEvidenceStatusCurrent, ExecutorEvidenceStatusStale:
+	case ExecutorEvidenceStatusCurrent:
 		if status.Head == nil || status.Finding != nil || !validCanonicalEvidenceTime(status.WitnessedAt) {
 			return errors.New("executor evidence checkpoint status is incomplete")
 		}
