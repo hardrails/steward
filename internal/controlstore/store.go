@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
@@ -29,6 +30,10 @@ type Store struct {
 	// can be serialized per credential without blocking unrelated store readers.
 	evidenceReportMu sync.Mutex
 	evidenceReports  map[string]*executorEvidenceReportGate
+	// evidenceLastReports is a bounded, non-authoritative freshness cache under
+	// mu. It is intentionally not serialized so an older binary can reopen
+	// state after an installer rollback.
+	evidenceLastReports map[string]time.Time
 
 	dir        string
 	limits     Limits
@@ -116,7 +121,8 @@ func Initialize(directory string, limits Limits) (*Store, error) {
 	keepLock = true
 	return &Store{
 		dir: directory, limits: limits, lock: lock, wal: wal, generation: 1,
-		current: initial, syncFile: func(file *os.File) error { return file.Sync() },
+		current: initial, evidenceLastReports: make(map[string]time.Time),
+		syncFile: func(file *os.File) error { return file.Sync() },
 	}, nil
 }
 
@@ -215,7 +221,8 @@ func Open(directory string, limits Limits) (*Store, error) {
 	return &Store{
 		dir: directory, limits: limits, lock: lock, wal: wal, generation: selected.Generation,
 		sequence: sequence, lastHash: lastHash, current: current,
-		syncFile: func(file *os.File) error { return file.Sync() },
+		evidenceLastReports: make(map[string]time.Time),
+		syncFile:            func(file *os.File) error { return file.Sync() },
 	}, nil
 }
 
