@@ -226,10 +226,10 @@ func (publisher *EvidencePublisher) publishOnce(ctx context.Context) (bool, erro
 	default:
 		return false, fmt.Errorf("export Executor evidence delta: %w", err)
 	}
+	reported := executorEvidenceProtocolHead(reportedHead, publisher.public)
 	claim, err := controlprotocol.NewExecutorEvidenceHeadClaimV1(
-		publisher.controllerInstanceID, publisher.expectedNodeID, publisher.expectedNodeID,
-		publisher.epoch, reportedHead.Sequence, formattedEvidenceHash(reportedHead.ChainHash),
-		pollResponse.Challenge, publisher.public,
+		publisher.controllerInstanceID, publisher.expectedNodeID,
+		*pollResponse.Status.Head, reported, pollResponse.Challenge, frames, publisher.public,
 	)
 	if err != nil {
 		return false, err
@@ -250,7 +250,7 @@ func (publisher *EvidencePublisher) publishOnce(ctx context.Context) (bool, erro
 	}); err != nil {
 		return false, fmt.Errorf("report evidence checkpoint: %w", err)
 	}
-	if err := publisher.validateReportResponse(reportResponse, claim.Head(), len(frames)); err != nil {
+	if err := publisher.validateReportResponse(reportResponse, reported, len(frames)); err != nil {
 		return false, err
 	}
 	return reportResponse.Applied, nil
@@ -341,6 +341,14 @@ func evidenceCoordinate(head controlprotocol.ExecutorEvidenceHeadV1) (evidence.C
 	var hash [sha256.Size]byte
 	copy(hash[:], raw)
 	return evidence.Coordinate{Sequence: head.Sequence, ChainHash: hash}, nil
+}
+
+func executorEvidenceProtocolHead(head evidence.Head, public ed25519.PublicKey) controlprotocol.ExecutorEvidenceHeadV1 {
+	return controlprotocol.ExecutorEvidenceHeadV1{
+		Stream: controlprotocol.ExecutorEvidenceStreamV1, ReceiptNodeID: head.NodeID,
+		ReceiptEpoch: head.Epoch, Sequence: head.Sequence, ChainHash: formattedEvidenceHash(head.ChainHash),
+		PublicKeySHA256: controlprotocol.ExecutorEvidencePublicKeySHA256(public),
+	}
 }
 
 func formattedEvidenceHash(hash [sha256.Size]byte) string {

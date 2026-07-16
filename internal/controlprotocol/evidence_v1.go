@@ -43,6 +43,7 @@ const (
 	executorEvidenceHeadProofPayloadTypeV1       = "application/vnd.steward.executor-evidence-head-proof.v1+binary"
 	executorEvidenceEnrollmentProofDomainV1      = "steward-executor-evidence-enrollment-proof-v1\x00"
 	executorEvidenceHeadProofDomainV1            = "steward-executor-evidence-head-proof-v1\x00"
+	executorEvidenceFramesDigestDomainV1         = "steward-executor-evidence-frames-v1\x00"
 	executorEvidenceExportDomainV1               = "steward-executor-evidence-witness-export-v1\x00"
 )
 
@@ -81,10 +82,10 @@ type ExecutorEvidenceHeadV1 struct {
 }
 
 // ExecutorEvidenceHeadClaimV1 is a receipt-key-signed response to a fresh
-// controller challenge. An advancing report binds it to the final submitted
-// frame; an empty divergence report binds it to the node's true local head.
-// The latter lets a restored or forked log prove a conflicting coordinate
-// even when it has no valid extension frames to upload.
+// controller challenge. It binds the polled controller checkpoint, the
+// reported local head, and the exact decoded frames submitted with the report.
+// An empty report may prove equality or a conflicting local coordinate, but it
+// cannot be transformed into an advancement by adding frames after signing.
 type ExecutorEvidenceHeadClaimV1 struct {
 	ProtocolVersion      int    `json:"protocol_version"`
 	ControllerInstanceID string `json:"controller_instance_id"`
@@ -92,8 +93,12 @@ type ExecutorEvidenceHeadClaimV1 struct {
 	Stream               string `json:"stream"`
 	ReceiptNodeID        string `json:"receipt_node_id"`
 	ReceiptEpoch         uint64 `json:"receipt_epoch"`
+	BaseSequence         uint64 `json:"base_sequence"`
+	BaseChainHash        string `json:"base_chain_hash"`
 	Sequence             uint64 `json:"sequence"`
 	ChainHash            string `json:"chain_hash"`
+	FrameCount           uint32 `json:"frame_count"`
+	FramesDigest         string `json:"frames_digest"`
 	PublicKeySHA256      string `json:"public_key_sha256"`
 	Challenge            string `json:"challenge"`
 }
@@ -285,20 +290,51 @@ func (head ExecutorEvidenceHeadV1) Validate() error {
 	return nil
 }
 
-func NewExecutorEvidenceHeadClaimV1(controllerInstanceID, controlNodeID, receiptNodeID string, receiptEpoch, sequence uint64, chainHash, challenge string, public ed25519.PublicKey) (ExecutorEvidenceHeadClaimV1, error) {
+func NewExecutorEvidenceHeadClaimV1(
+	controllerInstanceID, controlNodeID string,
+	base, reported ExecutorEvidenceHeadV1,
+	challenge string,
+	frames [][]byte,
+	public ed25519.PublicKey,
+) (ExecutorEvidenceHeadClaimV1, error) {
 	if len(public) != ed25519.PublicKeySize {
 		return ExecutorEvidenceHeadClaimV1{}, errors.New("executor evidence public key has invalid length")
 	}
+	if err := validateExecutorEvidenceDecodedFrames(frames); err != nil {
+		return ExecutorEvidenceHeadClaimV1{}, err
+	}
+	if err := base.Validate(); err != nil {
+		return ExecutorEvidenceHeadClaimV1{}, fmt.Errorf("executor evidence base head is invalid: %w", err)
+	}
+	if err := reported.Validate(); err != nil {
+		return ExecutorEvidenceHeadClaimV1{}, fmt.Errorf("executor evidence reported head is invalid: %w", err)
+	}
+	if !sameExecutorEvidenceIdentity(base, reported) {
+		return ExecutorEvidenceHeadClaimV1{}, errors.New("executor evidence base and reported heads use different receipt identities")
+	}
+	publicKeySHA256 := ExecutorEvidencePublicKeySHA256(public)
+	if reported.PublicKeySHA256 != publicKeySHA256 {
+		return ExecutorEvidenceHeadClaimV1{}, errors.New("executor evidence heads do not match the supplied public key")
+	}
 	claim := ExecutorEvidenceHeadClaimV1{
 		ProtocolVersion: ExecutorEvidenceProtocolV1, ControllerInstanceID: controllerInstanceID,
-		ControlNodeID: controlNodeID, Stream: ExecutorEvidenceStreamV1, ReceiptNodeID: receiptNodeID,
-		ReceiptEpoch: receiptEpoch, Sequence: sequence, ChainHash: chainHash,
-		PublicKeySHA256: ExecutorEvidencePublicKeySHA256(public), Challenge: challenge,
+		ControlNodeID: controlNodeID, Stream: reported.Stream, ReceiptNodeID: reported.ReceiptNodeID,
+		ReceiptEpoch: reported.ReceiptEpoch, BaseSequence: base.Sequence, BaseChainHash: base.ChainHash,
+		Sequence: reported.Sequence, ChainHash: reported.ChainHash,
+		FrameCount: uint32(len(frames)), FramesDigest: ExecutorEvidenceFramesDigestV1(frames),
+		PublicKeySHA256: publicKeySHA256, Challenge: challenge,
 	}
 	if err := claim.Validate(); err != nil {
 		return ExecutorEvidenceHeadClaimV1{}, err
 	}
 	return claim, nil
+}
+
+func (claim ExecutorEvidenceHeadClaimV1) Base() ExecutorEvidenceHeadV1 {
+	return ExecutorEvidenceHeadV1{
+		Stream: claim.Stream, ReceiptNodeID: claim.ReceiptNodeID, ReceiptEpoch: claim.ReceiptEpoch,
+		Sequence: claim.BaseSequence, ChainHash: claim.BaseChainHash, PublicKeySHA256: claim.PublicKeySHA256,
+	}
 }
 
 func (claim ExecutorEvidenceHeadClaimV1) Head() ExecutorEvidenceHeadV1 {
@@ -315,7 +351,25 @@ func (claim ExecutorEvidenceHeadClaimV1) Validate() error {
 		!validEvidenceChallenge(claim.Challenge) {
 		return errors.New("executor evidence head proof identity or challenge is invalid")
 	}
-	return claim.Head().Validate()
+	if err := claim.Base().Validate(); err != nil {
+		return err
+	}
+	if err := claim.Head().Validate(); err != nil {
+		return err
+	}
+	if claim.FrameCount > MaxExecutorEvidenceFrames || !ValidSHA256Digest(claim.FramesDigest) {
+		return errors.New("executor evidence head proof frame binding is invalid")
+	}
+	if claim.FrameCount == 0 && claim.FramesDigest != ExecutorEvidenceFramesDigestV1(nil) {
+		return errors.New("empty executor evidence head proof has a non-empty frame digest")
+	}
+	if claim.FrameCount > 0 {
+		if claim.BaseSequence > ^uint64(0)-uint64(claim.FrameCount) ||
+			claim.Sequence != claim.BaseSequence+uint64(claim.FrameCount) {
+			return errors.New("executor evidence advancing head does not match its frame count")
+		}
+	}
+	return nil
 }
 
 // ExecutorEvidenceHeadProofStatementV1 returns the exact challenge-bound bytes
@@ -332,8 +386,12 @@ func ExecutorEvidenceHeadProofStatementV1(claim ExecutorEvidenceHeadClaimV1) ([]
 	statement = appendEvidenceText(statement, claim.Stream)
 	statement = appendEvidenceText(statement, claim.ReceiptNodeID)
 	statement = appendEvidenceUint64(statement, claim.ReceiptEpoch)
+	statement = appendEvidenceUint64(statement, claim.BaseSequence)
+	statement = appendEvidenceText(statement, claim.BaseChainHash)
 	statement = appendEvidenceUint64(statement, claim.Sequence)
 	statement = appendEvidenceText(statement, claim.ChainHash)
+	statement = appendEvidenceUint64(statement, uint64(claim.FrameCount))
+	statement = appendEvidenceText(statement, claim.FramesDigest)
 	statement = appendEvidenceText(statement, claim.PublicKeySHA256)
 	statement = appendEvidenceText(statement, claim.Challenge)
 	return statement, nil
@@ -405,13 +463,7 @@ func (response ExecutorEvidencePollResponseV1) Validate() error {
 }
 
 func (report ExecutorEvidenceReportV1) Validate() error {
-	if report.ProtocolVersion != ExecutorEvidenceProtocolV1 {
-		return errors.New("executor evidence report protocol version is invalid")
-	}
-	if err := report.HeadProof.Validate(); err != nil {
-		return err
-	}
-	_, err := decodeExecutorEvidenceFrames(report.SignedFramesBase64)
+	_, err := report.DecodeFrames()
 	return err
 }
 
@@ -424,7 +476,16 @@ func (report ExecutorEvidenceReportV1) DecodeFrames() ([][]byte, error) {
 	if err := report.HeadProof.Validate(); err != nil {
 		return nil, err
 	}
-	return decodeExecutorEvidenceFrames(report.SignedFramesBase64)
+	frames, err := decodeExecutorEvidenceFrames(report.SignedFramesBase64)
+	if err != nil {
+		return nil, err
+	}
+	claim := report.HeadProof.Claim
+	if uint32(len(frames)) != claim.FrameCount ||
+		ExecutorEvidenceFramesDigestV1(frames) != claim.FramesDigest {
+		return nil, errors.New("executor evidence report frames do not match the signed frame binding")
+	}
+	return frames, nil
 }
 
 func (response ExecutorEvidenceReportResponseV1) Validate() error {
@@ -687,6 +748,23 @@ func DecodeExecutorEvidenceChallengeV1(value string) ([]byte, error) {
 	return raw, nil
 }
 
+// ExecutorEvidenceFramesDigestV1 returns the canonical domain-separated digest
+// of the exact decoded native frames. It hashes frame count, each frame length,
+// and each frame byte; JSON and base64 encodings are deliberately excluded.
+func ExecutorEvidenceFramesDigestV1(frames [][]byte) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(executorEvidenceFramesDigestDomainV1))
+	var encoded [4]byte
+	binary.BigEndian.PutUint32(encoded[:], uint32(len(frames)))
+	_, _ = hash.Write(encoded[:])
+	for _, frame := range frames {
+		binary.BigEndian.PutUint32(encoded[:], uint32(len(frame)))
+		_, _ = hash.Write(encoded[:])
+		_, _ = hash.Write(frame)
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+}
+
 // ExecutorEvidencePublicKeySHA256 returns the full, lowercase SHA-256 digest of
 // an Ed25519 public key. It deliberately does not use evidence.KeyID, whose
 // shorter display identifier is insufficient for a trust pin.
@@ -710,7 +788,6 @@ func decodeExecutorEvidenceFrames(encoded []string) ([][]byte, error) {
 		return nil, fmt.Errorf("executor evidence report contains %d frames, limit is %d", len(encoded), MaxExecutorEvidenceFrames)
 	}
 	frames := make([][]byte, 0, len(encoded))
-	total := 0
 	for index, value := range encoded {
 		if value == "" || len(value) > base64.StdEncoding.EncodedLen(MaxExecutorEvidenceFrameBytes) {
 			return nil, fmt.Errorf("executor evidence frame %d is empty or exceeds its limit", index)
@@ -719,20 +796,33 @@ func decodeExecutorEvidenceFrames(encoded []string) ([][]byte, error) {
 		if err != nil || base64.StdEncoding.EncodeToString(frame) != value {
 			return nil, fmt.Errorf("executor evidence frame %d is not canonical base64", index)
 		}
+		frames = append(frames, frame)
+	}
+	if err := validateExecutorEvidenceDecodedFrames(frames); err != nil {
+		return nil, err
+	}
+	return frames, nil
+}
+
+func validateExecutorEvidenceDecodedFrames(frames [][]byte) error {
+	if len(frames) > MaxExecutorEvidenceFrames {
+		return fmt.Errorf("executor evidence report contains %d frames, limit is %d", len(frames), MaxExecutorEvidenceFrames)
+	}
+	total := 0
+	for index, frame := range frames {
 		if len(frame) < 5 || len(frame) > MaxExecutorEvidenceFrameBytes {
-			return nil, fmt.Errorf("executor evidence frame %d has invalid length", index)
+			return fmt.Errorf("executor evidence frame %d has invalid length", index)
 		}
 		envelopeBytes := binary.BigEndian.Uint32(frame[:4])
 		if envelopeBytes == 0 || envelopeBytes > 64<<10 || uint64(envelopeBytes) != uint64(len(frame)-4) {
-			return nil, fmt.Errorf("executor evidence frame %d has an invalid length prefix", index)
+			return fmt.Errorf("executor evidence frame %d has an invalid length prefix", index)
 		}
 		total += len(frame)
 		if total > MaxExecutorEvidenceDecodedBytes {
-			return nil, fmt.Errorf("executor evidence frames exceed %d decoded bytes", MaxExecutorEvidenceDecodedBytes)
+			return fmt.Errorf("executor evidence frames exceed %d decoded bytes", MaxExecutorEvidenceDecodedBytes)
 		}
-		frames = append(frames, frame)
 	}
-	return frames, nil
+	return nil
 }
 
 func executorEvidencePublicKey(encoded, digest string) (ed25519.PublicKey, error) {

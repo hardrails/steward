@@ -111,6 +111,11 @@ func (server *evidenceWitnessServer) ServeHTTP(writer http.ResponseWriter, reque
 			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		if report.HeadProof.Claim.Base() != server.head {
+			server.t.Errorf("report base=%+v want %+v", report.HeadProof.Claim.Base(), server.head)
+			writer.WriteHeader(http.StatusConflict)
+			return
+		}
 		reported := report.HeadProof.Claim.Head()
 		server.reportHeads = append(server.reportHeads, reported)
 		server.frameCounts = append(server.frameCounts, len(frames))

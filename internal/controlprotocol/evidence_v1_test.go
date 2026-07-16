@@ -81,8 +81,16 @@ func TestExecutorEvidenceEnrollmentProofBindsCompleteIdentity(t *testing.T) {
 func TestExecutorEvidenceHeadProofIsChallengeBound(t *testing.T) {
 	public, private := executorEvidenceTestKey(t)
 	challenge := evidenceTestChallenge(t, 1)
+	base := ExecutorEvidenceHeadV1{
+		Stream: ExecutorEvidenceStreamV1, ReceiptNodeID: "node-a", ReceiptEpoch: 7,
+		Sequence: 10, ChainHash: evidenceTestDigest("b"), PublicKeySHA256: ExecutorEvidencePublicKeySHA256(public),
+	}
+	reported := base
+	reported.Sequence = 11
+	reported.ChainHash = evidenceTestDigest("a")
+	frames := [][]byte{evidenceTestFrame(32)}
 	claim, err := NewExecutorEvidenceHeadClaimV1(
-		"controller-a", "node-a", "node-a", 7, 11, evidenceTestDigest("a"), challenge, public,
+		"controller-a", "node-a", base, reported, challenge, frames, public,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -103,10 +111,20 @@ func TestExecutorEvidenceHeadProofIsChallengeBound(t *testing.T) {
 		"control node": func(value *ExecutorEvidenceHeadProofV1) { value.Claim.ControlNodeID = "node-b" },
 		"receipt node": func(value *ExecutorEvidenceHeadProofV1) { value.Claim.ReceiptNodeID = "node-b" },
 		"epoch":        func(value *ExecutorEvidenceHeadProofV1) { value.Claim.ReceiptEpoch++ },
-		"sequence":     func(value *ExecutorEvidenceHeadProofV1) { value.Claim.Sequence++ },
-		"chain hash":   func(value *ExecutorEvidenceHeadProofV1) { value.Claim.ChainHash = evidenceTestDigest("b") },
-		"key digest":   func(value *ExecutorEvidenceHeadProofV1) { value.Claim.PublicKeySHA256 = evidenceTestDigest("b") },
-		"challenge":    func(value *ExecutorEvidenceHeadProofV1) { value.Claim.Challenge = evidenceTestChallenge(t, 2) },
+		"base sequence": func(value *ExecutorEvidenceHeadProofV1) {
+			value.Claim.BaseSequence--
+		},
+		"base chain hash": func(value *ExecutorEvidenceHeadProofV1) {
+			value.Claim.BaseChainHash = evidenceTestDigest("c")
+		},
+		"sequence":    func(value *ExecutorEvidenceHeadProofV1) { value.Claim.Sequence++ },
+		"chain hash":  func(value *ExecutorEvidenceHeadProofV1) { value.Claim.ChainHash = evidenceTestDigest("b") },
+		"frame count": func(value *ExecutorEvidenceHeadProofV1) { value.Claim.FrameCount++ },
+		"frames digest": func(value *ExecutorEvidenceHeadProofV1) {
+			value.Claim.FramesDigest = evidenceTestDigest("c")
+		},
+		"key digest": func(value *ExecutorEvidenceHeadProofV1) { value.Claim.PublicKeySHA256 = evidenceTestDigest("b") },
+		"challenge":  func(value *ExecutorEvidenceHeadProofV1) { value.Claim.Challenge = evidenceTestChallenge(t, 2) },
 		"signature": func(value *ExecutorEvidenceHeadProofV1) {
 			value.SignatureBase64 = mutateEvidenceSignature(t, value.SignatureBase64)
 		},
@@ -123,6 +141,15 @@ func TestExecutorEvidenceHeadProofIsChallengeBound(t *testing.T) {
 	otherPublic, _ := executorEvidenceTestKey(t)
 	if err := VerifyExecutorEvidenceHeadProofV1(proof, otherPublic); err == nil {
 		t.Fatal("head proof verified with a different key")
+	}
+	foreignBase := base
+	foreignReported := reported
+	foreignBase.PublicKeySHA256 = ExecutorEvidencePublicKeySHA256(otherPublic)
+	foreignReported.PublicKeySHA256 = foreignBase.PublicKeySHA256
+	if _, err := NewExecutorEvidenceHeadClaimV1(
+		"controller-a", "node-a", foreignBase, foreignReported, challenge, frames, public,
+	); err == nil {
+		t.Fatal("constructor silently replaced a mismatched head key digest")
 	}
 
 	identityClaim, err := NewExecutorEvidenceIdentityClaimV1(
@@ -146,8 +173,16 @@ func TestExecutorEvidenceHeadProofIsChallengeBound(t *testing.T) {
 
 func TestExecutorEvidenceReportLimitsAndStrictDecode(t *testing.T) {
 	public, private := executorEvidenceTestKey(t)
+	base := ExecutorEvidenceHeadV1{
+		Stream: ExecutorEvidenceStreamV1, ReceiptNodeID: "node-a", ReceiptEpoch: 1,
+		Sequence: 0, ChainHash: evidenceTestDigest("0"), PublicKeySHA256: ExecutorEvidencePublicKeySHA256(public),
+	}
+	reported := base
+	reported.Sequence = 1
+	reported.ChainHash = evidenceTestDigest("a")
+	frame := evidenceTestFrame(32)
 	headClaim, err := NewExecutorEvidenceHeadClaimV1(
-		"controller-a", "node-a", "node-a", 1, 1, evidenceTestDigest("a"), evidenceTestChallenge(t, 1), public,
+		"controller-a", "node-a", base, reported, evidenceTestChallenge(t, 1), [][]byte{frame}, public,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +191,6 @@ func TestExecutorEvidenceReportLimitsAndStrictDecode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frame := evidenceTestFrame(32)
 	report := ExecutorEvidenceReportV1{
 		ProtocolVersion: ExecutorEvidenceProtocolV1, HeadProof: headProof,
 		SignedFramesBase64: []string{base64.StdEncoding.EncodeToString(frame)},
@@ -171,8 +205,73 @@ func TestExecutorEvidenceReportLimitsAndStrictDecode(t *testing.T) {
 
 	noExtension := report
 	noExtension.SignedFramesBase64 = nil
+	if err := noExtension.Validate(); err == nil {
+		t.Fatal("frame-stripped signed report was accepted")
+	}
+
+	equalityClaim, err := NewExecutorEvidenceHeadClaimV1(
+		"controller-a", "node-a", reported, reported, evidenceTestChallenge(t, 2), nil, public,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	equalityProof, err := SignExecutorEvidenceHeadClaimV1(equalityClaim, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noExtension = ExecutorEvidenceReportV1{
+		ProtocolVersion: ExecutorEvidenceProtocolV1, HeadProof: equalityProof,
+	}
 	if err := noExtension.Validate(); err != nil {
-		t.Fatalf("challenge-bound no-extension report is invalid: %v", err)
+		t.Fatalf("properly signed no-extension report is invalid: %v", err)
+	}
+	if equalityClaim.FramesDigest != ExecutorEvidenceFramesDigestV1(nil) {
+		t.Fatalf("empty frames digest=%q", equalityClaim.FramesDigest)
+	}
+	invalidEmptyDigest := equalityClaim
+	invalidEmptyDigest.FramesDigest = evidenceTestDigest("b")
+	if err := invalidEmptyDigest.Validate(); err == nil {
+		t.Fatal("empty claim with a non-empty frame digest was accepted")
+	}
+
+	added := report
+	added.SignedFramesBase64 = append(append([]string(nil), report.SignedFramesBase64...),
+		base64.StdEncoding.EncodeToString(frame))
+	if err := added.Validate(); err == nil {
+		t.Fatal("frame added after signing was accepted")
+	}
+	replaced := report
+	replacementFrame := append([]byte(nil), frame...)
+	replacementFrame[len(replacementFrame)-1] ^= 1
+	replaced.SignedFramesBase64 = []string{base64.StdEncoding.EncodeToString(replacementFrame)}
+	if err := replaced.Validate(); err == nil {
+		t.Fatal("frame replaced after signing was accepted")
+	}
+
+	secondFrame := evidenceTestFrame(31)
+	twoFrameReported := base
+	twoFrameReported.Sequence = 2
+	twoFrameReported.ChainHash = evidenceTestDigest("c")
+	twoFrameClaim, err := NewExecutorEvidenceHeadClaimV1(
+		"controller-a", "node-a", base, twoFrameReported, evidenceTestChallenge(t, 3),
+		[][]byte{frame, secondFrame}, public,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	twoFrameProof, err := SignExecutorEvidenceHeadClaimV1(twoFrameClaim, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reordered := ExecutorEvidenceReportV1{
+		ProtocolVersion: ExecutorEvidenceProtocolV1, HeadProof: twoFrameProof,
+		SignedFramesBase64: []string{
+			base64.StdEncoding.EncodeToString(secondFrame),
+			base64.StdEncoding.EncodeToString(frame),
+		},
+	}
+	if err := reordered.Validate(); err == nil {
+		t.Fatal("frames reordered after signing were accepted")
 	}
 
 	raw, err := json.Marshal(report)
