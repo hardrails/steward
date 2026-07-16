@@ -586,6 +586,9 @@ func (p SitePolicy) Validate() error {
 		if err := validateAllowedArtifacts(publisher.AllowedArtifacts, "publisher"); err != nil {
 			return err
 		}
+		if len(publisher.AllowedArtifacts) > 0 && len(publisher.AllowedManifestDigests) == 0 {
+			return deny("publisher artifact authority requires an exact allowed manifest digest")
+		}
 	}
 	if len(p.SiteCleanupCommandKeys) > 32 {
 		return deny("site has too many cleanup command keys")

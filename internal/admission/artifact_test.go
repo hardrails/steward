@@ -97,6 +97,52 @@ func TestVerifyCapsuleForImportRequiresPublisherArtifactAuthority(t *testing.T) 
 	}
 }
 
+func TestArtifactAuthorityRequiresTheExactImageManifest(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule, policy := testCapsule(), testPolicy(public)
+	intent := testIntent(testDigest('d'))
+	caller := AuthenticatedIdentity{TenantID: "tenant-a", NodeID: "node-a"}
+	if _, err := Intersect(
+		capsule, intent.CapsuleDigest, policy, testDigest('e'), "publisher-1", "site-root",
+		intent, caller, PersistedFences{}, DefaultProfiles(),
+	); err != nil {
+		t.Fatalf("exact image and artifact authorities rejected: %v", err)
+	}
+
+	changedImage := capsule
+	changedImage.Image.ManifestDigest = testDigest('f')
+	if _, err := Intersect(
+		changedImage, intent.CapsuleDigest, policy, testDigest('e'), "publisher-1", "site-root",
+		intent, caller, PersistedFences{}, DefaultProfiles(),
+	); err == nil || !strings.Contains(err.Error(), "image manifest digest is not authorized") {
+		t.Fatalf("same artifact declaration on another image err=%v", err)
+	}
+}
+
+func TestPublisherArtifactRulesFailWithoutExactManifestAuthority(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := testPolicy(public)
+	policy.Publishers[0].AllowedManifestDigests = nil
+	if err := policy.Validate(); err == nil ||
+		!strings.Contains(err.Error(), "artifact authority requires an exact allowed manifest digest") {
+		t.Fatalf("artifact rule without image authority err=%v", err)
+	}
+
+	capsule := testCapsule()
+	capsule.Artifacts = nil
+	policy.Publishers[0].AllowedArtifacts = nil
+	policy.Tenants[0].AllowedArtifacts = nil
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("artifact-free publisher policy unexpectedly requires an image pin: %v", err)
+	}
+}
+
 func TestSitePolicyValidatesExactAllowedArtifactRules(t *testing.T) {
 	public, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
