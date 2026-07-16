@@ -216,6 +216,54 @@ func TestOpenForValidationIsStrictlyReadOnly(t *testing.T) {
 	}
 }
 
+func TestInspectFormatReportsExistingVersionAndRejectsUnsafeOrMalformedLogs(t *testing.T) {
+	log, path, _ := newLog(t)
+	for _, kind := range []EventType{AdmissionAllow, JournalCommit} {
+		if _, err := log.Append(event(kind)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := InspectFormat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !summary.Present || summary.FormatVersion != receiptVersion || summary.Records != 2 {
+		t.Fatalf("format summary = %#v", summary)
+	}
+	if _, err := InspectFormat(""); err == nil {
+		t.Fatal("InspectFormat accepted an empty path")
+	}
+	if _, err := InspectFormat(filepath.Join(filepath.Dir(path), "missing.log")); err == nil ||
+		!strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing format error = %v", err)
+	}
+	if _, err := InspectFormat(filepath.Dir(path)); err == nil {
+		t.Fatal("InspectFormat accepted a directory")
+	}
+
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectFormat(path); err == nil {
+		t.Fatal("InspectFormat accepted group/world-readable evidence")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, path, original[:len(original)-1])
+	if _, err := InspectFormat(path); err == nil || !strings.Contains(err.Error(), "inspect evidence") {
+		t.Fatalf("truncated format error = %v", err)
+	}
+}
+
 func TestOpenRejectsConcurrentWriterThroughHardLink(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
