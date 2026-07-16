@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlclient"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/nodeclient"
 	"github.com/hardrails/steward/internal/securefile"
 )
@@ -238,12 +240,15 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	common := addControlFlags(flags, false)
 	enrollmentPath := flags.String("enrollment", "", "owner-only enrollment capability file")
 	requestID := flags.String("request-id", "", "stable idempotency identity")
+	evidencePrivateKeyPath := flags.String("executor-evidence-private-key", "", "owner-only Executor receipt key")
+	evidenceEpoch := flags.Uint64("executor-evidence-epoch", 1, "Executor receipt epoch")
 	output := flags.String("credential-out", "", "new owner-only Executor credential file")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if *enrollmentPath == "" || *requestID == "" || *output == "" || flags.NArg() != 0 {
-		return errors.New("control enrollment exchange requires enrollment, request-id, and credential output")
+	if *enrollmentPath == "" || *requestID == "" || *evidencePrivateKeyPath == "" || *evidenceEpoch != 1 ||
+		*output == "" || flags.NArg() != 0 {
+		return errors.New("control enrollment exchange requires enrollment, request-id, an Executor evidence private key at epoch 1, and credential output")
 	}
 	raw, err := securefile.Read(*enrollmentPath, 64<<10, securefile.OwnerOnly)
 	if err != nil {
@@ -253,13 +258,28 @@ func controlEnrollmentExchange(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("enrollment capability file is invalid: %w", err)
 	}
+	evidencePrivate, err := readPrivateKey(*evidencePrivateKeyPath)
+	if err != nil {
+		return fmt.Errorf("read Executor evidence private key: %w", err)
+	}
+	claim, err := controlprotocol.NewExecutorEvidenceIdentityClaimV1(
+		enrollment.ControllerInstanceID, enrollment.EnrollmentID, enrollment.NodeID, enrollment.NodeID,
+		*evidenceEpoch, evidencePrivate.Public().(ed25519.PublicKey),
+	)
+	if err != nil {
+		return fmt.Errorf("create Executor evidence identity claim: %w", err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceIdentityClaimV1(claim, evidencePrivate)
+	if err != nil {
+		return fmt.Errorf("sign Executor evidence identity claim: %w", err)
+	}
 	client, err := common.client(false)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	credential, err := client.Enroll(ctx, enrollment.EnrollmentToken, *requestID)
+	credential, err := client.EnrollWithEvidence(ctx, enrollment.EnrollmentToken, *requestID, proof)
 	if err != nil {
 		return err
 	}

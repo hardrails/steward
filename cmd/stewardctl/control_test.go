@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hardrails/steward/internal/controlprotocol"
 )
 
 func TestControlDefaultOriginMatchesLoopbackServer(t *testing.T) {
@@ -41,10 +44,25 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 		case "/v1/operators/operator-1":
 			w.WriteHeader(http.StatusNoContent)
 		case "/v1/enrollments":
-			_, _ = w.Write([]byte(`{"enrollment_id":"enr_1","enrollment_token":"enroll-secret","node_id":"node-1","tenant_ids":["tenant-a"],"expires_at":"2026-07-13T12:15:00Z"}`))
+			_, _ = w.Write([]byte(`{"controller_instance_id":"control-test","enrollment_id":"enr_1","enrollment_token":"enroll-secret","node_id":"node-1","tenant_ids":["tenant-a"],"expires_at":"2026-07-13T12:15:00Z"}`))
 		case "/v1/enroll":
 			if request.Header.Get("Authorization") != "" {
 				t.Fatal("operator token sent to enrollment exchange")
+			}
+			var input struct {
+				EnrollmentToken       string                                          `json:"enrollment_token"`
+				RequestID             string                                          `json:"request_id"`
+				EvidenceIdentityProof controlprotocol.ExecutorEvidenceIdentityProofV1 `json:"evidence_identity_proof"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil ||
+				input.EnrollmentToken != "enroll-secret" || input.RequestID != "request-1" ||
+				input.EvidenceIdentityProof.Validate() != nil ||
+				input.EvidenceIdentityProof.Claim.ControllerInstanceID != "control-test" ||
+				input.EvidenceIdentityProof.Claim.EnrollmentID != "enr_1" ||
+				input.EvidenceIdentityProof.Claim.ControlNodeID != "node-1" ||
+				input.EvidenceIdentityProof.Claim.ReceiptNodeID != "node-1" ||
+				input.EvidenceIdentityProof.Claim.ReceiptEpoch != 1 {
+				t.Fatalf("enrollment proof request=%+v error=%v", input, err)
 			}
 			_, _ = w.Write([]byte(`{"version":2,"scope":"node","node_id":"node-1","credential":"` + nodeCredentialToken + `"}`))
 		case "/v1/node-credentials/node-cred-11111111111111111111111111111111":
@@ -68,12 +86,19 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	tokenPath := filepath.Join(directory, "admin.token")
 	enrollmentPath := filepath.Join(directory, "enrollment.json")
 	credentialPath := filepath.Join(directory, "credential.json")
+	evidencePrivatePath := filepath.Join(directory, "evidence.private.pem")
+	evidencePublicPath := filepath.Join(directory, "evidence.public")
 	operatorTokenPath := filepath.Join(directory, "tenant-operator.token")
 	commandPath := filepath.Join(directory, "command.dsse.json")
 	if err := os.WriteFile(tokenPath, []byte("admin-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(commandPath, []byte(`{"payloadType":"opaque"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"keygen", "-private-out", evidencePrivatePath, "-public-out", evidencePublicPath,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	common := []string{"-control-url", server.URL, "-token-file", tokenPath}
@@ -122,7 +147,8 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	}
 	output.Reset()
 	if err := run([]string{"control", "enrollment", "exchange", "-control-url", server.URL,
-		"-enrollment", enrollmentPath, "-request-id", "request-1", "-credential-out", credentialPath},
+		"-enrollment", enrollmentPath, "-request-id", "request-1",
+		"-executor-evidence-private-key", evidencePrivatePath, "-credential-out", credentialPath},
 		&output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
@@ -185,5 +211,10 @@ func TestControlCommandsRejectAmbiguousScopeAndMissingSecrets(t *testing.T) {
 	}
 	if err := controlTenantCreate([]string{"-tenant-id", "tenant-a"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "token") {
 		t.Fatalf("missing token error=%v", err)
+	}
+	if err := controlEnrollmentExchange([]string{
+		"-enrollment", "/tmp/enrollment", "-request-id", "request", "-credential-out", "/tmp/credential",
+	}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "evidence private key") {
+		t.Fatalf("missing evidence private key error=%v", err)
 	}
 }
