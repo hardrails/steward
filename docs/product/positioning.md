@@ -1,6 +1,6 @@
 ---
 title: Why Steward exists
-description: "Steward's product direction: operator-controlled local admission, credential-brokered operations, tenant-bound commands, independently witnessed evidence, and offline verification."
+description: "Steward's product direction: outcome-led signed agent releases, operator-controlled local admission, tenant-bound commands, independently witnessed evidence, and offline verification."
 section: Product
 ---
 
@@ -29,20 +29,24 @@ operator can:
    nodes once, and inspect bounded fleet inventory without a vendor service;
 2. deliver an exact tenant-signed command while keeping the signing key outside
    the controller and node;
-3. admit a signed, immutable agent profile for one tenant, node, and instance;
-4. require that profile to comply with site-root-signed policy, per-workload
+3. select a publisher-signed qualified Hermes outcome, verify its exact offline
+   archive, activate it through a fixed node-local state machine, authorize the
+   deterministic canary with an off-node tenant key, and retain the correlated
+   evidence for offline review;
+4. admit a signed, immutable agent profile for one tenant, node, and instance;
+5. require that profile to comply with site-root-signed policy, per-workload
    resource limits, and host/tenant aggregate memory, CPU, PID, and
    workload-count caps;
-5. run the agent in a tenant-labelled, gVisor-sandboxed Docker workload with
+6. run the agent in a tenant-labelled, gVisor-sandboxed Docker workload with
    no default network access, while granting only approved state, inference,
    service, exact connector operations, or named HTTP(S) routes, and optionally
    require an off-node tenant authority to sign the exact request for selected
    agent-service or connector operations;
-6. publish bounded signed receipt deltas to the customer-owned controller on an
+7. publish bounded signed receipt deltas to the customer-owned controller on an
    independent loop, so the controller can retain one exact checkpoint and make an
    authenticated rollback or equivocation finding sticky without becoming a
    receipt warehouse; and
-7. inspect or export the controller's witnessed state under a separate stable
+8. inspect or export the controller's witnessed state under a separate stable
    witness key, while retaining the full node-local receipt chain for detailed
    offline verification.
 
@@ -55,6 +59,16 @@ node stops publishing.
 The operator keeps control of keys, policy, artifacts, infrastructure, and
 evidence when external services are unavailable. Steward does not rely on the
 agent's own account of its behavior.
+
+The agent release makes a qualified outcome understandable and portable, but it
+does not grant runtime authority. The activation plan and final proof are also
+unsigned correlation records. Site policy, instance intent, live admission, task
+permits, receipt chains, and the controller witness export remain the signed
+authority and evidence. The append-only activation workspace prevents compliant
+retries from rewriting generated history; it does not attest a hostile host.
+The current Hermes activation recipe requires a dedicated host with exactly one
+policy tenant because its persistent Docker volume has no hard byte or inode
+quota. It does not weaken Steward's separate stateless shared-host boundary.
 
 ## The control path
 

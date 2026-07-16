@@ -48,14 +48,32 @@ func TestExportAndVerifyDeltaFromExactCoordinate(t *testing.T) {
 			t.Fatalf("delta frame %d changed native signed bytes", index)
 		}
 	}
-	verified, err := VerifyDelta(delta.Frames, public, "node-a", 1, Coordinate{}, func(tenantID string) bool {
-		return tenantID == "tenant-a" || tenantID == "tenant-b"
-	})
+	var visited []VerifiedReceipt
+	verified, err := VerifyDeltaRecords(
+		delta.Frames, public, "node-a", 1, Coordinate{},
+		func(tenantID string) bool {
+			return tenantID == "tenant-a" || tenantID == "tenant-b"
+		},
+		func(record VerifiedReceipt) error {
+			visited = append(visited, record)
+			return nil
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if verified != completeHead {
 		t.Fatalf("verified delta head=%#v want %#v", verified, completeHead)
+	}
+	if len(visited) != len(complete) {
+		t.Fatalf("visited delta receipts=%d want %d", len(visited), len(complete))
+	}
+	for index := range visited {
+		if visited[index].Receipt != complete[index].Receipt ||
+			visited[index].ChainHash != complete[index].ChainHash ||
+			!bytes.Equal(visited[index].Frame, complete[index].Frame) {
+			t.Fatalf("visited receipt %d changed exact evidence", index)
+		}
 	}
 
 	firstCoordinate := Coordinate{Sequence: first.Sequence, ChainHash: complete[0].ChainHash}

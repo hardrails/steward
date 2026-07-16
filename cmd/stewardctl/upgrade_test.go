@@ -132,7 +132,7 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
 		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 2},
 		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
-		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
+		"evidence_log":          {ReadMin: 1, ReadMax: 2, Write: 2},
 		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
 		"operation_journal":     {ReadMin: 1, ReadMax: 1, Write: 1},
 		"supervisor_state":      {ReadMin: 1, ReadMax: 1, Write: 1},
@@ -273,6 +273,77 @@ func TestUpgradeCheckDrainedReportsAllLegacyFormats(t *testing.T) {
 		if !strings.Contains(output.String(), fragment) {
 			t.Fatalf("legacy format snapshot missing %s: %s", fragment, output.String())
 		}
+	}
+}
+
+func TestUpgradeInspectionReportsHighestMixedEvidenceFormatAndBlocksLegacyReader(t *testing.T) {
+	fixture := newUpgradeFixture(t)
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := evidence.Open(fixture.evidence, private, "node-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary := evidence.Event{
+		Type: evidence.AdmissionAllow, TenantID: "tenant-a",
+		RuntimeRef: "runtime-a", CapsuleDigest: digest('a'),
+		PolicyDigest: digest('b'), Generation: 1,
+		GrantID: "grant-a", Outcome: evidence.Allowed,
+	}
+	if _, err := log.Append(ordinary); err != nil {
+		t.Fatal(err)
+	}
+	begin := ordinary
+	begin.Type = evidence.ActivationBegin
+	begin.GrantID = "activation-a"
+	begin.MetadataHash = digest('c')
+	if _, err := log.AppendActivationBegin(begin); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := begin
+	checkpoint.Type = evidence.ActivationCheckpoint
+	checkpoint.Outcome = evidence.Committed
+	checkpoint.MetadataHash = digest('d')
+	if _, err := log.AppendActivationCheckpoint(checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := run(
+		fixture.arguments("inspect-formats", "configured"),
+		&output, &bytes.Buffer{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"evidence_log":2`) ||
+		!strings.Contains(output.String(), `"target_compatible":true`) {
+		t.Fatalf("mixed evidence format report=%s", output.String())
+	}
+
+	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
+		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 2},
+		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
+		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
+		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
+		"operation_journal":     {ReadMin: 1, ReadMax: 1, Write: 1},
+		"supervisor_state":      {ReadMin: 1, ReadMax: 1, Write: 1},
+		"uplink_delivery_state": {ReadMin: 2, ReadMax: 2, Write: 2},
+		"uplink_state":          {ReadMin: 1, ReadMax: 2, Write: 2},
+	})
+	output.Reset()
+	err = run(
+		fixture.arguments("inspect-formats", "configured"),
+		&output, &bytes.Buffer{},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "evidence_log version 2 is outside reader range 1-1") ||
+		!strings.Contains(output.String(), `"target_compatible":false`) {
+		t.Fatalf("legacy evidence compatibility output=%s error=%v", output.String(), err)
 	}
 }
 

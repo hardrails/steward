@@ -47,6 +47,9 @@ func TestAppendAndVerifyChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if first.Version != receiptVersionV1 || second.Version != receiptVersionV1 {
+		t.Fatalf("ordinary receipt versions = %d, %d; want format 1", first.Version, second.Version)
+	}
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +238,7 @@ func TestInspectFormatReportsExistingVersionAndRejectsUnsafeOrMalformedLogs(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !summary.Present || summary.FormatVersion != receiptVersion || summary.Records != 2 {
+	if !summary.Present || summary.FormatVersion != receiptVersionV1 || summary.Records != 2 {
 		t.Fatalf("format summary = %#v", summary)
 	}
 	if _, err := InspectFormat(""); err == nil {
@@ -612,7 +615,7 @@ func TestVerifyAnyRecordsEnforcesInputAndLineBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := file.Truncate(maxLogBytes + 1); err != nil {
+	if err := file.Truncate(MaxLogBytes + 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
@@ -635,7 +638,8 @@ func TestVerifyAnyRecordsEnforcesInputAndLineBounds(t *testing.T) {
 func TestClosedEvidenceVocabularyHasStableNames(t *testing.T) {
 	events := []EventType{AdmissionAllow, AdmissionDeny, JournalPrepare, JournalCommit, JournalCompensate,
 		GatewayRegistration, InferenceAuthorize, InferenceTerminal, ServiceMapping, LifecycleStart,
-		LifecycleStop, LifecycleDestroy, StatePurge, PolicyReload, Drift, Revocation}
+		LifecycleStop, LifecycleDestroy, StatePurge, PolicyReload, Drift,
+		Revocation, ActivationBegin, ActivationCheckpoint}
 	for _, value := range events {
 		if EventName(value) == "" {
 			t.Fatalf("event %d has no name", value)

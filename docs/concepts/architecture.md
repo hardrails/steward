@@ -1,6 +1,6 @@
 ---
 title: Steward architecture
-description: Understand Steward's service separation, signed local admission path, Docker and gVisor isolation, offline receipts, and separately controlled inference.
+description: Understand Steward's service separation, proof-carrying agent activation, signed local admission, Docker and gVisor isolation, and offline receipts.
 section: Explanation
 ---
 
@@ -45,7 +45,7 @@ Service ingress: authenticated host caller -> Gateway -> relay -> agent
 Signed task: owner-only bundle -> loopback Gateway -> exact service POST
 
 Management/node steward-mcp: bounded stdio adapter for Control, Executor, and optional task tools
-Mostly offline stewardctl: keys, signed capsule/policy, task permits, receipts;
+Mostly offline stewardctl: keys, signed releases/capsules/policy, task permits, receipts;
                          image import uses Docker; task lifecycle uses loopback Gateway
 Inference system: separately selected and operated
 ```
@@ -175,6 +175,44 @@ local Docker daemon after offline verification. Generic `task submit`, `status`,
 `observe`, and `wait` are explicitly online operations that accept only a
 literal-loopback Gateway origin; remote operators use an authenticated SSH path
 rather than exposing Gateway.
+
+## Proof-carrying agent activation
+
+A publisher-signed agent release adds an operator-facing outcome to the existing
+capsule while binding the exact offline archive, fixed qualification canary,
+qualification-evidence digest, and known limitations. It remains descriptive. The
+site policy, instance intent, live Executor decision, Gateway configuration, and
+tenant task permit still authorize the deployment and canary.
+
+The one-shot activation coordinator composes existing local interfaces through a
+fixed state machine. An unsigned plan binds exact inputs and finite timeouts. An
+owner-only workspace retains generated artifacts once and appends sequential state
+checkpoints. After authority, policy, and read-only admission preflights pass,
+Executor signs an `activation_begin` marker before the admission-allow receipt,
+mutation journal, or host mutation. The marker binds the activation and runtime
+identity. After real admission, the coordinator emits an unsigned challenge that
+binds the runtime reference, grant, policies, request, and public task
+authorities. The default flow pauses until a separate signing station returns the
+matching tenant-signed task bundle; the private key does not enter the node.
+
+The current Hermes recipe is a dedicated-host composition, not a shared-host
+activation path. It requires exactly one tenant in the signed site policy,
+host-administrator local admission, and the explicit unquotaed-state compatibility
+setting because Docker's portable local volume driver does not enforce hard byte
+or inode quotas.
+
+The initial canary is only the closed Hermes fresh-state workspace audit. A final
+unsigned proof manifest correlates the passed state, exact result digest, task and
+permit, activation-begin and activation-checkpoint digests, Executor and Gateway
+receipt coordinates, and the controller witness coordinate. After verifying
+Gateway's authorization, dispatch, and terminal receipts, the coordinator writes
+the checkpoint digest to Executor's signed chain. The final witness must cover
+that checkpoint and have no later receipts for the same activation; unrelated
+tenant suffix receipts are allowed. Signed receipt order provides the causal link
+without comparing Gateway and controller clocks. Authenticity comes from
+separately verified signed companions and externally pinned public keys. The
+activation workspace prevents a compliant retry from rewriting generated history,
+but does not provide hostile-host attestation.
 
 ## Controller replaceability and authority separation
 

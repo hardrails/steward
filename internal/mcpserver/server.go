@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/dsse"
@@ -23,6 +24,7 @@ import (
 const ProtocolVersion = "2025-11-25"
 const maxMessageBytes = 1 << 20
 const maxToolResultBytes = 1 << 20
+const nodeOperationTimeout = 30 * time.Second
 
 type Node interface {
 	Admit(context.Context, []byte, admission.InstanceIntent) (nodeclient.State, error)
@@ -287,7 +289,9 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 		if decodeErr := dsse.DecodeStrictInto([]byte(arguments.IntentJSON), maxMessageBytes, &intent); decodeErr != nil {
 			return toolFailure("intent_json must be one strict instance intent"), nil
 		}
-		value, err = s.node.Admit(ctx, capsule, intent)
+		nodeCtx, cancel := context.WithTimeout(ctx, nodeOperationTimeout)
+		defer cancel()
+		value, err = s.node.Admit(nodeCtx, capsule, intent)
 	case "steward_status", "steward_logs", "steward_egress", "steward_start", "steward_stop", "steward_destroy":
 		if s.node == nil {
 			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
@@ -296,11 +300,13 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 		if decodeArguments(call.Arguments, &arguments) != nil || arguments.RuntimeRef == "" {
 			return toolFailure(call.Name + " requires runtime_ref"), nil
 		}
+		nodeCtx, cancel := context.WithTimeout(ctx, nodeOperationTimeout)
+		defer cancel()
 		switch call.Name {
 		case "steward_status":
-			value, err = s.node.Status(ctx, arguments.RuntimeRef)
+			value, err = s.node.Status(nodeCtx, arguments.RuntimeRef)
 		case "steward_logs":
-			value, err = s.node.Logs(ctx, arguments.RuntimeRef)
+			value, err = s.node.Logs(nodeCtx, arguments.RuntimeRef)
 		case "steward_egress":
 			egress, ok := s.node.(interface {
 				EgressStats(context.Context, string) (nodeclient.EgressStats, error)
@@ -308,13 +314,13 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 			if !ok {
 				return toolFailure("egress statistics are unavailable"), nil
 			}
-			value, err = egress.EgressStats(ctx, arguments.RuntimeRef)
+			value, err = egress.EgressStats(nodeCtx, arguments.RuntimeRef)
 		case "steward_start":
-			value, err = s.node.Start(ctx, arguments.RuntimeRef)
+			value, err = s.node.Start(nodeCtx, arguments.RuntimeRef)
 		case "steward_stop":
-			value, err = s.node.Stop(ctx, arguments.RuntimeRef)
+			value, err = s.node.Stop(nodeCtx, arguments.RuntimeRef)
 		case "steward_destroy":
-			err = s.node.Destroy(ctx, arguments.RuntimeRef)
+			err = s.node.Destroy(nodeCtx, arguments.RuntimeRef)
 			value = map[string]any{"runtime_ref": arguments.RuntimeRef, "destroyed": err == nil}
 		}
 	case "steward_purge_state":
@@ -325,7 +331,9 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 		if decodeArguments(call.Arguments, &arguments) != nil || arguments.TenantID == "" || arguments.NodeID == "" || arguments.LineageID == "" || arguments.Generation == 0 {
 			return toolFailure("steward_purge_state requires tenant_id, node_id, lineage_id, and generation"), nil
 		}
-		err = s.node.PurgeState(ctx, nodeclient.StatePurge{
+		nodeCtx, cancel := context.WithTimeout(ctx, nodeOperationTimeout)
+		defer cancel()
+		err = s.node.PurgeState(nodeCtx, nodeclient.StatePurge{
 			TenantID: arguments.TenantID, NodeID: arguments.NodeID, LineageID: arguments.LineageID, Generation: arguments.Generation,
 		})
 		value = map[string]any{"tenant_id": arguments.TenantID, "lineage_id": arguments.LineageID, "purged": err == nil}

@@ -26,6 +26,12 @@ The dependency and base-image notice inventory is incomplete, so Steward does no
 redistribute an adapter OCI archive. Operators build and approve the exact image in
 their own environment.
 
+For the guided path from an outcome-led signed release through admission, off-node
+canary authorization, deterministic result checking, and offline proof, use
+[Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }}).
+The manual procedures on this page remain the detailed source for building,
+qualifying, configuring, and troubleshooting the adapter.
+
 ## Why the official image remains inadmissible
 
 At the pinned revision, the official image starts as root through `/init`, uses

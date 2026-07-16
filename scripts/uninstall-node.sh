@@ -262,9 +262,6 @@ if [[ -e $node_role_claim_directory || -L $node_role_claim_directory ]]; then
 fi
 
 # BEGIN QUIESCED_REMOVAL
-guard_args=()
-if [[ $purge_data == true ]]; then guard_args+=(--purge-data); fi
-
 was_gateway=false
 was_steward=false
 was_executor=false
@@ -288,7 +285,11 @@ trap restore_services_after_failed_removal EXIT HUP INT TERM
 [[ $was_steward == false ]] || systemctl stop steward.service
 [[ $was_executor == false ]] || systemctl stop steward-executor.service
 guard_status=0
-"$guard_bin" "${guard_args[@]}" || guard_status=$?
+if [[ $purge_data == true ]]; then
+	"$guard_bin" --purge-data || guard_status=$?
+else
+	"$guard_bin" || guard_status=$?
+fi
 if (( guard_status != 0 )); then
 	echo "uninstall-node: drain proof failed after services were stopped; restoring their previous active state" >&2
 	exit "$guard_status"

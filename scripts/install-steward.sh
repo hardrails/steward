@@ -55,6 +55,10 @@ Node enrollment:
   --executor-evidence-public-key FILE
                                 Matching receipt public key
   --allow-host-admin-intent     Let the host token select signed tenant intent
+  --allow-unquotaed-state-on-dedicated-host
+                                Allow persistent Docker volumes only when the
+                                signed policy contains exactly one tenant; no
+                                hard byte or inode quota is enforced
   --local-only                  Use loopback HTTP, CLI, and MCP without remote enrollment
   --reuse-configuration         Reuse and validate existing /etc/steward enrollment
   --stage-only                  Install files only; Docker daemon/runsc may be offline
@@ -79,6 +83,7 @@ STEWARD_ADMISSION_POLICY_FILE, STEWARD_SITE_ROOT_PUBLIC_KEY_FILE,
 STEWARD_SITE_ROOT_KEY_ID, STEWARD_NODE_ID, STEWARD_EXECUTOR_EVIDENCE_CONFIG_FILE,
 STEWARD_EXECUTOR_EVIDENCE_PRIVATE_KEY_FILE, STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_FILE,
 STEWARD_ALLOW_HOST_ADMIN_INTENT,
+STEWARD_ALLOW_UNQUOTAED_STATE_ON_DEDICATED_HOST,
 STEWARD_LOCAL_ONLY, STEWARD_INSTALL_GVISOR, STEWARD_GVISOR_DIR, and STEWARD_GVISOR_VERSION.
 
 Supported node targets: Debian/Ubuntu (DEB), RHEL/Rocky/Alma/Fedora/Amazon Linux/
@@ -107,6 +112,7 @@ executor_evidence_config=${STEWARD_EXECUTOR_EVIDENCE_CONFIG_FILE:-}
 receipt_private=${STEWARD_EXECUTOR_EVIDENCE_PRIVATE_KEY_FILE:-}
 receipt_public=${STEWARD_EXECUTOR_EVIDENCE_PUBLIC_KEY_FILE:-}
 allow_host_admin=${STEWARD_ALLOW_HOST_ADMIN_INTENT:-false}
+allow_unquotaed_state=${STEWARD_ALLOW_UNQUOTAED_STATE_ON_DEDICATED_HOST:-false}
 gvisor_dir=${STEWARD_GVISOR_DIR:-}
 gvisor_version=${STEWARD_GVISOR_VERSION:-latest}
 install_gvisor=${STEWARD_INSTALL_GVISOR:-false}
@@ -282,6 +288,7 @@ while [[ $# -gt 0 ]]; do
 		--executor-evidence-private-key) receipt_private=${2:-}; shift 2 ;;
 		--executor-evidence-public-key) receipt_public=${2:-}; shift 2 ;;
 		--allow-host-admin-intent) allow_host_admin=true; shift ;;
+		--allow-unquotaed-state-on-dedicated-host) allow_unquotaed_state=true; shift ;;
 		--local-only) local_only=true; shift ;;
 		--reuse-configuration) reuse_configuration=true; shift ;;
 		--stage-only) stage_only=true; shift ;;
@@ -308,6 +315,11 @@ case "$local_only" in true | false) ;; *)
 esac
 case "$allow_host_admin" in true | false) ;; *)
 	echo "install-steward: STEWARD_ALLOW_HOST_ADMIN_INTENT must be true or false" >&2; exit 2 ;;
+esac
+case "$allow_unquotaed_state" in true | false) ;; *)
+	echo "install-steward: STEWARD_ALLOW_UNQUOTAED_STATE_ON_DEDICATED_HOST must be true or false" >&2
+	exit 2
+	;;
 esac
 if (( ${#gvisor_version} > 64 )) ||
 	[[ $gvisor_version != latest && ! $gvisor_version =~ ^[0-9]{8}(\.[0-9]+)?$ ]]; then
@@ -481,6 +493,10 @@ if (( admission_required == 0 )) && { [[ -n $node_id ]] || [[ $allow_host_admin 
 	echo "install-steward: --node-id and --allow-host-admin-intent require signed admission trust inputs" >&2
 	exit 2
 fi
+if (( admission_required == 0 )) && [[ $allow_unquotaed_state == true ]]; then
+	echo "install-steward: --allow-unquotaed-state-on-dedicated-host requires signed admission trust inputs" >&2
+	exit 2
+fi
 if (( admission_required == 3 )); then
 	[[ $site_root_key_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$ ]] || {
 		echo "install-steward: invalid --site-root-key-id" >&2
@@ -639,6 +655,7 @@ if [[ $dry_run == true ]]; then
 	echo "  enrollment:   $enrollment_plan"
 	echo "  admission:    $([[ $admission_required -eq 3 ]] && printf 'signed' || printf 'unchanged')"
 	echo "  evidence:     $([[ $evidence_input_count -eq 3 ]] && printf 'witnessed-uplink' || printf 'disabled')"
+	echo "  state:        $([[ $allow_unquotaed_state == true ]] && printf 'dedicated-host-unquotaed' || printf 'disabled')"
 	echo "  service start: $start_services"
 	echo "  gVisor install: $install_gvisor"
 	exit 0
@@ -1239,6 +1256,8 @@ else
 		)
 		[[ -z $node_id ]] || configure_args+=(--node-id "$node_id")
 		[[ $allow_host_admin == false ]] || configure_args+=(--allow-host-admin-intent)
+		[[ $allow_unquotaed_state == false ]] ||
+			configure_args+=(--allow-unquotaed-state-on-dedicated-host)
 	fi
 	if (( evidence_input_count == 3 )); then
 		configure_args+=(

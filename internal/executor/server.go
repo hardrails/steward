@@ -27,7 +27,11 @@ import (
 	"github.com/hardrails/steward/internal/journal"
 )
 
-const maxBodyBytes = 1 << 20
+const (
+	maxBodyBytes                      = 1 << 20
+	activationAdmissionRequestSchema  = "steward.executor-activation-admission.v1"
+	activationCheckpointRequestSchema = "steward.executor-activation-checkpoint.v1"
+)
 
 // Server is the authenticated control boundary in front of the local Docker API.
 // The bearer token is a host-control credential; tenant authorization belongs in the
@@ -209,6 +213,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/workloads", s.provision)
 	mux.HandleFunc("POST /v1/admissions", s.secureProvision)
 	mux.HandleFunc("POST /v1/state/purge", s.purgeState)
+	mux.HandleFunc(
+		"POST /v1/workloads/{id}/activation-checkpoints",
+		s.activationCheckpoint,
+	)
 	mux.HandleFunc("POST /v1/workloads/{id}/start", s.start)
 	mux.HandleFunc("POST /v1/workloads/{id}/stop", s.stop)
 	mux.HandleFunc("DELETE /v1/workloads/{id}", s.destroy)
@@ -248,26 +256,35 @@ func (s *Server) readiness(w http.ResponseWriter, _ *http.Request) {
 }
 
 type secureProvisionRequest struct {
-	CapsuleDSSEBase64 string                   `json:"capsule_dsse_base64"`
-	Intent            admission.InstanceIntent `json:"intent"`
+	CapsuleDSSEBase64 string                      `json:"capsule_dsse_base64"`
+	Intent            admission.InstanceIntent    `json:"intent"`
+	Activation        *activationAdmissionRequest `json:"activation,omitempty"`
+}
+
+type activationAdmissionRequest struct {
+	SchemaVersion string `json:"schema_version"`
+	ActivationID  string `json:"activation_id"`
+	BeginDigest   string `json:"begin_digest"`
 }
 
 type secureProvisionResponse struct {
-	RuntimeRef        string                  `json:"runtime_ref"`
-	Status            string                  `json:"status"`
-	CapsuleDigest     string                  `json:"capsule_digest"`
-	PolicyDigest      string                  `json:"policy_digest"`
-	Generation        uint64                  `json:"generation"`
-	EvidenceKeyID     string                  `json:"evidence_key_id"`
-	GrantID           string                  `json:"grant_id,omitempty"`
-	ServicePath       string                  `json:"service_path,omitempty"`
-	ServiceID         string                  `json:"service_id,omitempty"`
-	TaskAuthorities   []gateway.TaskAuthority `json:"task_authorities,omitempty"`
-	EgressProxy       string                  `json:"egress_proxy,omitempty"`
-	EgressRouteIDs    []string                `json:"egress_route_ids,omitempty"`
-	ConnectorURL      string                  `json:"connector_url,omitempty"`
-	ConnectorIDs      []string                `json:"connector_ids,omitempty"`
-	RoutePolicyDigest string                  `json:"route_policy_digest,omitempty"`
+	RuntimeRef            string                  `json:"runtime_ref"`
+	Status                string                  `json:"status"`
+	CapsuleDigest         string                  `json:"capsule_digest"`
+	PolicyDigest          string                  `json:"policy_digest"`
+	Generation            uint64                  `json:"generation"`
+	EvidenceKeyID         string                  `json:"evidence_key_id"`
+	GrantID               string                  `json:"grant_id,omitempty"`
+	ServicePath           string                  `json:"service_path,omitempty"`
+	ServiceID             string                  `json:"service_id,omitempty"`
+	TaskAuthorities       []gateway.TaskAuthority `json:"task_authorities,omitempty"`
+	EgressProxy           string                  `json:"egress_proxy,omitempty"`
+	EgressRouteIDs        []string                `json:"egress_route_ids,omitempty"`
+	ConnectorURL          string                  `json:"connector_url,omitempty"`
+	ConnectorIDs          []string                `json:"connector_ids,omitempty"`
+	RoutePolicyDigest     string                  `json:"route_policy_digest,omitempty"`
+	ActivationID          string                  `json:"activation_id,omitempty"`
+	ActivationBeginDigest string                  `json:"activation_begin_digest,omitempty"`
 }
 
 type purgeStateRequest struct {
@@ -275,6 +292,12 @@ type purgeStateRequest struct {
 	NodeID     string `json:"node_id"`
 	LineageID  string `json:"lineage_id"`
 	Generation uint64 `json:"generation"`
+}
+
+type activationCheckpointRequest struct {
+	SchemaVersion    string `json:"schema_version"`
+	ActivationID     string `json:"activation_id"`
+	CheckpointDigest string `json:"checkpoint_digest"`
 }
 
 func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +314,13 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 	var request secureProvisionRequest
 	if err := dsse.DecodeStrictInto(raw, maxBodyBytes, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be one strict admission object")
+		return
+	}
+	if request.Activation != nil &&
+		(request.Activation.SchemaVersion != activationAdmissionRequestSchema ||
+			!activationCheckpointID(request.Activation.ActivationID) ||
+			!imageConfigDigest.MatchString(request.Activation.BeginDigest)) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "activation admission metadata is invalid")
 		return
 	}
 	capsuleEnvelope, err := base64.StdEncoding.DecodeString(request.CapsuleDSSEBase64)
@@ -399,6 +429,14 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if request.Activation != nil {
+		if workload.Runtime == nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "activation admission requires a signed runtime capability topology")
+			return
+		}
+		workload.Runtime.ActivationID = request.Activation.ActivationID
+		workload.Runtime.ActivationBeginDigest = request.Activation.BeginDigest
+	}
 	if effective.Intent.Capabilities.State {
 		if !s.secure.allowUnquotaedState {
 			writeError(w, http.StatusNotImplemented, "capability_unavailable", "persistent state is disabled because the configured Docker volume has no hard byte or inode quota")
@@ -421,7 +459,7 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "policy_rejected", err.Error())
 		return
 	}
-	s.provisionSecureWorkload(w, r, workload, effective)
+	s.provisionSecureWorkload(w, r, workload, effective, request.Activation)
 }
 
 func (s *Server) purgeState(w http.ResponseWriter, r *http.Request) {
@@ -554,11 +592,119 @@ func (s *Server) purgeState(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// activationCheckpoint appends a content-free causal join to the signed
+// Executor receipt stream. The caller supplies only a bounded activation
+// identity and digest; every lifecycle binding is derived from the current
+// signed fence and re-proven running under the mutation lock.
+func (s *Server) activationCheckpoint(w http.ResponseWriter, r *http.Request) {
+	if s.secure == nil {
+		writeError(w, http.StatusServiceUnavailable, "secure_admission_unavailable", "signed admission is not configured on this node")
+		return
+	}
+	name, ok := runtimeRef(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_runtime_ref", "invalid executor runtime_ref")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body exceeds the activation checkpoint limit")
+		return
+	}
+	var request activationCheckpointRequest
+	if err := dsse.DecodeStrictInto(raw, maxBodyBytes, &request); err != nil ||
+		request.SchemaVersion != activationCheckpointRequestSchema ||
+		!activationCheckpointID(request.ActivationID) ||
+		!imageConfigDigest.MatchString(request.CheckpointDigest) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be one bounded activation checkpoint")
+		return
+	}
+
+	s.provisionMu.Lock()
+	defer s.provisionMu.Unlock()
+	if s.secureMutationBlockedLocked() {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; activation checkpoint is blocked until reconciliation succeeds")
+		return
+	}
+	observed, err := s.managed(r.Context(), name)
+	if err != nil {
+		writeDockerError(w, err)
+		return
+	}
+	record, ok := s.secureLifecycleRecord(observed)
+	if !ok || !s.principalAuthorizesRecord(r.Context(), record) ||
+		!s.currentPolicyAuthorizesRecord(record) {
+		writeError(w, http.StatusForbidden, "signed_lifecycle_required", "workload is not bound to the current authenticated signed admission")
+		return
+	}
+	runtime := observed.Workload.Runtime
+	if name != RuntimeRef(observed.Workload.TenantID, observed.Workload.InstanceID) ||
+		runtime == nil ||
+		runtime.ActivationID != request.ActivationID ||
+		!imageConfigDigest.MatchString(runtime.ActivationBeginDigest) {
+		writeError(w, http.StatusConflict, "activation_runtime_mismatch", "workload is not bound to the requested activation admission")
+		return
+	}
+	if !lifecycleMatches(observed.Status, true) ||
+		s.proveRuntimeTopologyState(
+			r.Context(), observed.Workload, true, record.RoutePolicyDigest,
+		) != nil {
+		writeError(w, http.StatusConflict, "workload_drift", "activation checkpoint requires the exact signed runtime topology to be running")
+		return
+	}
+	event := evidence.Event{
+		Type:          evidence.ActivationCheckpoint,
+		TenantID:      record.TenantID,
+		RuntimeRef:    name,
+		CapsuleDigest: record.CapsuleDigest,
+		PolicyDigest:  record.PolicyDigest,
+		Generation:    record.Generation,
+		GrantID:       request.ActivationID,
+		Outcome:       evidence.Committed,
+		MetadataHash:  request.CheckpointDigest,
+	}
+	if _, err := s.secure.evidence.AppendActivationCheckpoint(event); err != nil {
+		if errors.Is(err, evidence.ErrActivationMarkerConflict) {
+			writeError(w, http.StatusConflict, "activation_checkpoint_conflict", err.Error())
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusCreated, request)
+}
+
 func boundedRuntimeText(value string, limit int) bool {
 	return strings.TrimSpace(value) != "" && len(value) <= limit && !strings.ContainsRune(value, '\x00')
 }
 
-func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request, workload Workload, effective admission.EffectiveAdmission) {
+func activationCheckpointID(value string) bool {
+	if len(value) == 0 || len(value) > 128 || !asciiAlphaNumeric(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		char := value[index]
+		if !asciiAlphaNumeric(char) && char != '.' && char != '_' && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiAlphaNumeric(value byte) bool {
+	return value >= 'A' && value <= 'Z' ||
+		value >= 'a' && value <= 'z' ||
+		value >= '0' && value <= '9'
+}
+
+func (s *Server) provisionSecureWorkload(
+	w http.ResponseWriter,
+	r *http.Request,
+	workload Workload,
+	effective admission.EffectiveAdmission,
+	activationRequest *activationAdmissionRequest,
+) {
 	name := RuntimeRef(workload.TenantID, workload.InstanceID)
 	s.provisionMu.Lock()
 	defer s.provisionMu.Unlock()
@@ -610,7 +756,10 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusConflict, "runtime_drift", "isolated runtime topology does not match the signed capability grant")
 			return
 		}
-		s.writeSecureResponse(r.Context(), w, http.StatusOK, name, observed.Status, effective, committedRecord.RoutePolicyDigest)
+		s.writeSecureResponse(
+			r.Context(), w, http.StatusOK, name, observed.Status, effective,
+			workload.Runtime, committedRecord.RoutePolicyDigest,
+		)
 		return
 	}
 	if !errors.Is(err, ErrNotFound) {
@@ -652,6 +801,43 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 	opID, err := newOperationID(name, effective.Intent.Generation)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "create operation identity")
+		return
+	}
+	if activationRequest != nil {
+		begin := evidence.Event{
+			Type:          evidence.ActivationBegin,
+			TenantID:      workload.TenantID,
+			RuntimeRef:    name,
+			CapsuleDigest: effective.CapsuleDigest,
+			PolicyDigest:  effective.PolicyDigest,
+			Generation:    effective.Intent.Generation,
+			GrantID:       activationRequest.ActivationID,
+			Outcome:       evidence.Allowed,
+			MetadataHash:  activationRequest.BeginDigest,
+		}
+		if _, err := s.secure.evidence.AppendActivationBegin(begin); err != nil {
+			if errors.Is(err, evidence.ErrActivationMarkerConflict) {
+				writeError(w, http.StatusConflict, "activation_admission_conflict", err.Error())
+			} else {
+				writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
+			}
+			return
+		}
+	}
+	// Persist the authorization decision after every read-only preflight but
+	// before the journal or host can change. This is not a workload-success
+	// receipt; JournalCommit remains the durable mutation outcome.
+	grantID := "workload"
+	if workload.Runtime != nil {
+		grantID = workload.Runtime.GrantID
+	}
+	allowed := evidence.Event{
+		Type: evidence.AdmissionAllow, TenantID: workload.TenantID, RuntimeRef: name,
+		CapsuleDigest: effective.CapsuleDigest, PolicyDigest: effective.PolicyDigest,
+		Generation: effective.Intent.Generation, GrantID: grantID, Outcome: evidence.Allowed,
+	}
+	if _, err := s.secure.evidence.Append(allowed); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
 		return
 	}
 	if _, err := s.secure.journal.Prepare(opID, name, effective.Intent.Generation); err != nil {
@@ -787,7 +973,10 @@ func (s *Server) provisionSecureWorkload(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", err.Error())
 		return
 	}
-	s.writeSecureResponse(r.Context(), w, http.StatusCreated, name, observed.Status, effective, routePolicyDigest)
+	s.writeSecureResponse(
+		r.Context(), w, http.StatusCreated, name, observed.Status, effective,
+		workload.Runtime, routePolicyDigest,
+	)
 }
 
 // legacyRuntimeReplay returns the exact external-effect-authority-free runtime
@@ -814,6 +1003,7 @@ func runtimeGrantEqualExceptAdmissionBindings(left, right *RuntimeGrant) bool {
 		left.GrantID == right.GrantID && left.NodeID == right.NodeID && left.Generation == right.Generation && left.Inference == right.Inference &&
 		left.RouteID == right.RouteID && left.RelayIP == right.RelayIP && left.AgentIP == right.AgentIP &&
 		left.ModelAlias == right.ModelAlias && left.ServicePort == right.ServicePort && left.ServiceID == right.ServiceID &&
+		left.ActivationID == right.ActivationID && left.ActivationBeginDigest == right.ActivationBeginDigest &&
 		slices.Equal(left.TaskAuthorities, right.TaskAuthorities) &&
 		slices.Equal(left.EgressRouteIDs, right.EgressRouteIDs) && slices.Equal(left.ConnectorIDs, right.ConnectorIDs)
 }
@@ -917,47 +1107,73 @@ func removeAndConfirmStateAbsent(ctx context.Context, docker StateDocker, name s
 	return errors.Is(inspectErr, ErrNotFound)
 }
 
-func (s *Server) writeSecureResponse(ctx context.Context, w http.ResponseWriter, status int, runtimeRef, runtimeStatus string, effective admission.EffectiveAdmission, expectedRoutePolicyDigest string) {
-	response := secureProvisionResponse{
-		RuntimeRef: runtimeRef, Status: runtimeStatus, CapsuleDigest: effective.CapsuleDigest,
-		PolicyDigest: effective.PolicyDigest, Generation: effective.Intent.Generation,
-		EvidenceKeyID: evidence.KeyID(s.secure.evidence.PublicKey()),
-	}
-	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Service || effective.Intent.Capabilities.Egress || effective.Intent.Capabilities.Connector {
-		response.GrantID = gateway.GrantID(effective.Intent.TenantID, effective.Intent.InstanceID, effective.Intent.Generation)
-	}
-	if effective.Intent.Capabilities.Service {
-		response.ServicePath = "/v1/services/" + response.GrantID + "/"
-		taskAuthorities, err := admittedTaskAuthorities(effective)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "enforcement_failed", "signed task authority could not be returned")
-			return
-		}
-		if len(taskAuthorities) > 0 {
-			response.ServiceID = effective.Intent.ServiceID
-			response.TaskAuthorities = taskAuthorities
-		}
-	}
-	if effective.Intent.Capabilities.Egress {
-		response.EgressProxy = "http://steward-relay:8082"
-		response.EgressRouteIDs = admission.CanonicalRouteIDs(effective.Intent.EgressRouteIDs)
-	}
-	if effective.Intent.Capabilities.Connector {
-		response.ConnectorURL = "http://steward-relay:8081"
-		response.ConnectorIDs = admission.CanonicalConnectorIDs(effective.Intent.ConnectorIDs)
-	}
-	if effective.Intent.Capabilities.Inference || effective.Intent.Capabilities.Egress || effective.Intent.Capabilities.Connector || len(response.TaskAuthorities) > 0 {
+func (s *Server) writeSecureResponse(
+	ctx context.Context,
+	w http.ResponseWriter,
+	status int,
+	runtimeRef, runtimeStatus string,
+	effective admission.EffectiveAdmission,
+	runtime *RuntimeGrant,
+	expectedRoutePolicyDigest string,
+) {
+	response := s.secureResponse(
+		runtimeRef, runtimeStatus, effective.CapsuleDigest, effective.PolicyDigest,
+		effective.Intent.Generation, runtime, expectedRoutePolicyDigest,
+	)
+	if runtimeNeedsGatewayPolicy(runtime) {
 		inspection, err := s.secure.gateway.InspectWithPolicy(ctx, response.GrantID)
 		if err != nil || !imageConfigDigest.MatchString(expectedRoutePolicyDigest) || inspection.RoutePolicyDigest != expectedRoutePolicyDigest {
 			writeError(w, http.StatusServiceUnavailable, "gateway_unavailable", "effective gateway route policy could not be verified")
 			return
 		}
-		response.RoutePolicyDigest = expectedRoutePolicyDigest
 	} else if expectedRoutePolicyDigest != "" {
 		writeError(w, http.StatusServiceUnavailable, "fence_unavailable", "committed route policy binding is inconsistent with the admitted capabilities")
 		return
 	}
 	writeJSON(w, status, response)
+}
+
+func (s *Server) secureResponse(
+	runtimeRef, runtimeStatus, capsuleDigest, policyDigest string,
+	generation uint64,
+	runtime *RuntimeGrant,
+	routePolicyDigest string,
+) secureProvisionResponse {
+	response := secureProvisionResponse{
+		RuntimeRef: runtimeRef, Status: runtimeStatus,
+		CapsuleDigest: capsuleDigest, PolicyDigest: policyDigest,
+		Generation:        generation,
+		EvidenceKeyID:     evidence.KeyID(s.secure.evidence.PublicKey()),
+		RoutePolicyDigest: routePolicyDigest,
+	}
+	if runtime == nil {
+		return response
+	}
+	response.GrantID = runtime.GrantID
+	if runtime.ServicePort > 0 {
+		response.ServicePath = "/v1/services/" + runtime.GrantID + "/"
+		response.ServiceID = runtime.ServiceID
+		response.TaskAuthorities = append(
+			[]gateway.TaskAuthority(nil), runtime.TaskAuthorities...,
+		)
+	}
+	if len(runtime.EgressRouteIDs) > 0 {
+		response.EgressProxy = "http://steward-relay:8082"
+		response.EgressRouteIDs = append([]string(nil), runtime.EgressRouteIDs...)
+	}
+	if len(runtime.ConnectorIDs) > 0 {
+		response.ConnectorURL = "http://steward-relay:8081"
+		response.ConnectorIDs = append([]string(nil), runtime.ConnectorIDs...)
+	}
+	response.ActivationID = runtime.ActivationID
+	response.ActivationBeginDigest = runtime.ActivationBeginDigest
+	return response
+}
+
+func runtimeNeedsGatewayPolicy(runtime *RuntimeGrant) bool {
+	return runtime != nil &&
+		(runtime.Inference || len(runtime.EgressRouteIDs) > 0 ||
+			len(runtime.ConnectorIDs) > 0 || len(runtime.TaskAuthorities) > 0)
 }
 
 func admittedTaskAuthorities(effective admission.EffectiveAdmission) ([]gateway.TaskAuthority, error) {
@@ -1655,6 +1871,7 @@ func (s *Server) secureDestroy(w http.ResponseWriter, r *http.Request) {
 func (s *Server) secureLifecycleRecord(observed ObservedWorkload) (admission.FenceRecord, bool) {
 	record, ok := s.secure.fences.Record(observed.Workload.TenantID, observed.Workload.InstanceID)
 	if !ok || !record.Present ||
+		observed.Fingerprint != workloadFingerprint(observed.Workload) ||
 		observed.Fingerprint != strings.TrimPrefix(record.WorkloadDigest, "sha256:") ||
 		observed.ImageID != record.ImageConfigDigest ||
 		RuntimeRef(record.TenantID, record.InstanceID) != RuntimeRef(observed.Workload.TenantID, observed.Workload.InstanceID) {
@@ -1687,6 +1904,24 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	observed, err := s.managed(r.Context(), name)
 	if err != nil {
 		writeDockerError(w, err)
+		return
+	}
+	if s.secure != nil {
+		record, ok := s.secureLifecycleRecord(observed)
+		if !ok {
+			writeError(w, http.StatusConflict, "workload_drift", "workload does not match its committed signed admission")
+			return
+		}
+		runtime := observed.Workload.Runtime
+		if runtimeNeedsGatewayPolicy(runtime) != (record.RoutePolicyDigest != "") ||
+			record.RoutePolicyDigest != "" && !imageConfigDigest.MatchString(record.RoutePolicyDigest) {
+			writeError(w, http.StatusConflict, "workload_drift", "workload route policy does not match its committed signed admission")
+			return
+		}
+		writeJSON(w, http.StatusOK, s.secureResponse(
+			name, observed.Status, record.CapsuleDigest, record.PolicyDigest,
+			record.Generation, runtime, record.RoutePolicyDigest,
+		))
 		return
 	}
 	response := map[string]any{"runtime_ref": name, "status": observed.Status}

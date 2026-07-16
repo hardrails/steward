@@ -2,6 +2,8 @@ package ocibundle
 
 import (
 	"archive/tar"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,12 +14,84 @@ import (
 	"syscall"
 )
 
+// ArchiveIdentity identifies the exact compressed or uncompressed source bytes
+// supplied by an operator. It is separate from Image identity because two
+// archives can contain the same OCI image while differing in metadata or
+// unreferenced content.
+type ArchiveIdentity struct {
+	Digest string `json:"digest"`
+	Bytes  int64  `json:"bytes"`
+}
+
+// SourceInspection binds the exact source archive bytes to the image identity
+// parsed from those same bytes. It is suitable for constructing a signed
+// offline release before a later PrepareBound call verifies the archive again.
+type SourceInspection struct {
+	Archive ArchiveIdentity `json:"archive"`
+	Image   Image           `json:"image"`
+}
+
+func (identity ArchiveIdentity) validate(limits Limits) error {
+	if !digestPattern.MatchString(identity.Digest) {
+		return errors.New("archive digest must be one sha256 digest")
+	}
+	if identity.Bytes < 1 || identity.Bytes > limits.MaxArchiveBytes {
+		return fmt.Errorf("archive size must be between 1 and %d bytes", limits.MaxArchiveBytes)
+	}
+	return nil
+}
+
+// InspectSource snapshots an untrusted archive through one stable descriptor,
+// hashes it while copying, and inspects only the sealed private snapshot. It
+// does not retain the source bytes after returning or build a Docker load
+// archive.
+func InspectSource(archivePath string, limits Limits) (SourceInspection, error) {
+	return InspectSourceContext(context.Background(), archivePath, limits)
+}
+
+// InspectSourceContext is InspectSource with cancellation propagated through
+// snapshotting and inspection. Its private snapshot is removed on every error,
+// including cancellation.
+func InspectSourceContext(ctx context.Context, archivePath string, limits Limits) (SourceInspection, error) {
+	if err := contextError(ctx); err != nil {
+		return SourceInspection{}, err
+	}
+	if err := limits.validate(); err != nil {
+		return SourceInspection{}, err
+	}
+	directory, err := os.MkdirTemp("", ".steward-oci-inspect-")
+	if err != nil {
+		return SourceInspection{}, fmt.Errorf("create private OCI inspection directory: %w", err)
+	}
+	cleanup := func() error { return os.RemoveAll(directory) }
+	snapshotPath := directory + string(os.PathSeparator) + "source.snapshot"
+	archive, err := snapshotArchiveIdentityContext(ctx, archivePath, snapshotPath, limits)
+	if err != nil {
+		return SourceInspection{}, errors.Join(err, cleanup())
+	}
+	image, err := InspectContext(ctx, snapshotPath, limits)
+	if err != nil {
+		return SourceInspection{}, errors.Join(err, cleanup())
+	}
+	if err := contextError(ctx); err != nil {
+		return SourceInspection{}, errors.Join(err, cleanup())
+	}
+	if err := cleanup(); err != nil {
+		return SourceInspection{}, fmt.Errorf("remove private OCI inspection directory: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return SourceInspection{}, err
+	}
+	return SourceInspection{Archive: archive, Image: image}, nil
+}
+
 // Prepared is a verified, tag-free, minimal image archive held by one open,
 // unlinked file descriptor. Reader never resolves the caller's source path, so
 // renames or replacements after Prepare cannot change the bytes Docker sees.
 // Callers must Close a Prepared archive when the Docker request finishes.
 type Prepared struct {
-	Image Image
+	Image   Image
+	Archive ArchiveIdentity
 
 	mu     sync.Mutex
 	file   *os.File
@@ -31,11 +105,44 @@ type Prepared struct {
 // tags or repositories file and contains only the selected manifest, config,
 // and layer blobs.
 func Prepare(archivePath string, expected Identity, limits Limits) (*Prepared, error) {
+	return PrepareContext(context.Background(), archivePath, expected, limits)
+}
+
+// PrepareContext is Prepare with cancellation propagated through snapshotting,
+// verification, sanitization, and the final verification pass.
+func PrepareContext(ctx context.Context, archivePath string, expected Identity, limits Limits) (*Prepared, error) {
+	return prepare(ctx, archivePath, expected, ArchiveIdentity{}, false, limits)
+}
+
+// PrepareBound additionally requires the exact source archive bytes to match a
+// signed digest and size. The comparison uses the same private snapshot later
+// verified and sanitized for Docker, so a caller never authorizes one pathname
+// read and imports another.
+func PrepareBound(archivePath string, expected Identity, archive ArchiveIdentity, limits Limits) (*Prepared, error) {
+	return PrepareBoundContext(context.Background(), archivePath, expected, archive, limits)
+}
+
+// PrepareBoundContext is PrepareBound with cancellation propagated through
+// every preflight pass. A canceled call returns no Prepared archive and closes
+// and removes all private intermediate artifacts.
+func PrepareBoundContext(ctx context.Context, archivePath string, expected Identity, archive ArchiveIdentity, limits Limits) (*Prepared, error) {
+	return prepare(ctx, archivePath, expected, archive, true, limits)
+}
+
+func prepare(ctx context.Context, archivePath string, expected Identity, expectedArchive ArchiveIdentity, bound bool, limits Limits) (*Prepared, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
 	if err := limits.validate(); err != nil {
 		return nil, err
 	}
 	if err := expected.validate(); err != nil {
 		return nil, fmt.Errorf("expected image identity: %w", err)
+	}
+	if bound {
+		if err := expectedArchive.validate(limits); err != nil {
+			return nil, fmt.Errorf("expected archive identity: %w", err)
+		}
 	}
 	directory, err := os.MkdirTemp("", ".steward-oci-")
 	if err != nil {
@@ -44,11 +151,20 @@ func Prepare(archivePath string, expected Identity, limits Limits) (*Prepared, e
 	cleanup := func() { _ = os.RemoveAll(directory) }
 
 	snapshotPath := directory + string(os.PathSeparator) + "source.snapshot"
-	if err := snapshotArchive(archivePath, snapshotPath, limits); err != nil {
+	archiveIdentity, err := snapshotArchiveIdentityContext(ctx, archivePath, snapshotPath, limits)
+	if err != nil {
 		cleanup()
 		return nil, err
 	}
-	image, err := Verify(snapshotPath, expected, limits)
+	if err := contextError(ctx); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if bound && archiveIdentity != expectedArchive {
+		cleanup()
+		return nil, errors.New("OCI archive does not match the signed archive digest and size")
+	}
+	image, err := VerifyContext(ctx, snapshotPath, expected, limits)
 	if err != nil {
 		cleanup()
 		return nil, err
@@ -67,15 +183,21 @@ func Prepare(archivePath string, expected Identity, limits Limits) (*Prepared, e
 		cleanup()
 		return nil, cause
 	}
-	if err := writeSanitizedArchive(snapshotPath, load, image, limits); err != nil {
+	if err := writeSanitizedArchiveContext(ctx, snapshotPath, load, image, limits); err != nil {
 		return fail(err)
 	}
 	if err := load.Sync(); err != nil {
 		return fail(fmt.Errorf("sync private Docker load archive: %w", err))
 	}
+	if err := contextError(ctx); err != nil {
+		return fail(err)
+	}
 	info, err := load.Stat()
 	if err != nil {
 		return fail(fmt.Errorf("stat private Docker load archive: %w", err))
+	}
+	if err := contextError(ctx); err != nil {
+		return fail(err)
 	}
 	if info.Size() < 1 || info.Size() > limits.MaxUncompressedBytes+int64(limits.MaxEntries+8)*1024 {
 		return fail(errors.New("sanitized Docker load archive has an invalid size"))
@@ -83,11 +205,14 @@ func Prepare(archivePath string, expected Identity, limits Limits) (*Prepared, e
 	if err := load.Chmod(0o400); err != nil {
 		return fail(fmt.Errorf("seal private Docker load archive: %w", err))
 	}
+	if err := contextError(ctx); err != nil {
+		return fail(err)
+	}
 	if err := load.Close(); err != nil {
 		return fail(fmt.Errorf("close writable Docker load archive: %w", err))
 	}
 	load = nil
-	sanitizedImage, err := Verify(loadPath, expected, limits)
+	sanitizedImage, err := VerifyContext(ctx, loadPath, expected, limits)
 	if err != nil {
 		return fail(fmt.Errorf("verify sanitized Docker load archive: %w", err))
 	}
@@ -102,6 +227,9 @@ func Prepare(archivePath string, expected Identity, limits Limits) (*Prepared, e
 	if err != nil {
 		return fail(fmt.Errorf("stat sealed Docker load archive: %w", err))
 	}
+	if err := contextError(ctx); err != nil {
+		return fail(err)
+	}
 	if !sealedInfo.Mode().IsRegular() || sealedInfo.Mode().Perm() != 0o400 || sealedInfo.Size() != info.Size() || !os.SameFile(info, sealedInfo) {
 		return fail(errors.New("sealed Docker load archive changed while it was reopened"))
 	}
@@ -115,7 +243,11 @@ func Prepare(archivePath string, expected Identity, limits Limits) (*Prepared, e
 		_ = load.Close()
 		return nil, fmt.Errorf("remove private OCI preparation directory: %w", err)
 	}
-	return &Prepared{Image: sanitizedImage, file: load, size: info.Size()}, nil
+	if err := contextError(ctx); err != nil {
+		_ = load.Close()
+		return nil, err
+	}
+	return &Prepared{Image: sanitizedImage, Archive: archiveIdentity, file: load, size: info.Size()}, nil
 }
 
 // Reader returns a fresh bounded view of the already-open load descriptor.
@@ -153,71 +285,127 @@ func (p *Prepared) Close() error {
 }
 
 func snapshotArchive(sourcePath, snapshotPath string, limits Limits) error {
+	return snapshotArchiveContext(context.Background(), sourcePath, snapshotPath, limits)
+}
+
+func snapshotArchiveContext(ctx context.Context, sourcePath, snapshotPath string, limits Limits) error {
+	_, err := snapshotArchiveIdentityContext(ctx, sourcePath, snapshotPath, limits)
+	return err
+}
+
+func snapshotArchiveIdentityContext(ctx context.Context, sourcePath, snapshotPath string, limits Limits) (_ ArchiveIdentity, returnErr error) {
+	if err := contextError(ctx); err != nil {
+		return ArchiveIdentity{}, err
+	}
 	before, err := os.Lstat(sourcePath)
 	if err != nil {
-		return fmt.Errorf("stat OCI archive: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("stat OCI archive: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return ArchiveIdentity{}, err
 	}
 	if !before.Mode().IsRegular() || before.Mode().Perm()&0o022 != 0 {
-		return errors.New("OCI archive must be a regular file with no group/world write permission")
+		return ArchiveIdentity{}, errors.New("OCI archive must be a regular file with no group/world write permission")
 	}
 	if before.Size() < 1 || before.Size() > limits.MaxArchiveBytes {
-		return fmt.Errorf("OCI archive size must be between 1 and %d bytes", limits.MaxArchiveBytes)
+		return ArchiveIdentity{}, fmt.Errorf("OCI archive size must be between 1 and %d bytes", limits.MaxArchiveBytes)
 	}
 	// O_NONBLOCK is ignored for regular files but prevents an attacker who can
 	// rename entries in the parent directory from swapping a validated path to a
 	// FIFO and hanging the privileged importer between Lstat and Open.
 	source, err := os.OpenFile(sourcePath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return fmt.Errorf("open OCI archive: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("open OCI archive: %w", err)
 	}
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 	opened, err := source.Stat()
 	if err != nil {
-		return fmt.Errorf("stat open OCI archive: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("stat open OCI archive: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return ArchiveIdentity{}, err
 	}
 	if !opened.Mode().IsRegular() || opened.Mode().Perm()&0o022 != 0 || !os.SameFile(before, opened) {
-		return errors.New("OCI archive changed while it was opened")
+		return ArchiveIdentity{}, errors.New("OCI archive changed while it was opened")
 	}
 
 	snapshot, err := os.OpenFile(snapshotPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf("create private OCI snapshot: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("create private OCI snapshot: %w", err)
 	}
-	closeSnapshot := true
+	snapshotOpen := true
 	defer func() {
-		if closeSnapshot {
-			_ = snapshot.Close()
+		if snapshotOpen {
+			if closeErr := snapshot.Close(); closeErr != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("close private OCI snapshot: %w", closeErr))
+			}
+		}
+		if returnErr != nil {
+			if removeErr := os.Remove(snapshotPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				returnErr = errors.Join(returnErr, fmt.Errorf("remove incomplete private OCI snapshot: %w", removeErr))
+			}
 		}
 	}()
-	copied, err := io.Copy(snapshot, io.LimitReader(source, limits.MaxArchiveBytes+1))
+	hasher := sha256.New()
+	snapshotWriter := contextWriter{ctx: ctx, writer: io.MultiWriter(snapshot, hasher)}
+	sourceReader := contextReader{ctx: ctx, reader: io.LimitReader(source, limits.MaxArchiveBytes+1)}
+	copied, err := io.Copy(snapshotWriter, sourceReader)
 	if err != nil {
-		return fmt.Errorf("snapshot OCI archive: %w", err)
+		if contextErr := contextError(ctx); contextErr != nil {
+			return ArchiveIdentity{}, contextErr
+		}
+		return ArchiveIdentity{}, fmt.Errorf("snapshot OCI archive: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return ArchiveIdentity{}, err
 	}
 	if copied != before.Size() || copied > limits.MaxArchiveBytes {
-		return errors.New("OCI archive changed size while it was snapshotted")
+		return ArchiveIdentity{}, errors.New("OCI archive changed size while it was snapshotted")
 	}
 	after, err := source.Stat()
 	if err != nil {
-		return fmt.Errorf("stat snapshotted OCI archive: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("stat snapshotted OCI archive: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return ArchiveIdentity{}, err
 	}
 	if !os.SameFile(opened, after) || after.Size() != opened.Size() || after.Mode().Perm()&0o022 != 0 {
-		return errors.New("OCI archive changed while it was snapshotted")
+		return ArchiveIdentity{}, errors.New("OCI archive changed while it was snapshotted")
 	}
 	if err := snapshot.Sync(); err != nil {
-		return fmt.Errorf("sync private OCI snapshot: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("sync private OCI snapshot: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return ArchiveIdentity{}, err
 	}
 	if err := snapshot.Chmod(0o400); err != nil {
-		return fmt.Errorf("seal private OCI snapshot: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("seal private OCI snapshot: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return ArchiveIdentity{}, err
 	}
 	if err := snapshot.Close(); err != nil {
-		return fmt.Errorf("close private OCI snapshot: %w", err)
+		return ArchiveIdentity{}, fmt.Errorf("close private OCI snapshot: %w", err)
 	}
-	closeSnapshot = false
-	return nil
+	snapshotOpen = false
+	if err := contextError(ctx); err != nil {
+		return ArchiveIdentity{}, err
+	}
+	return ArchiveIdentity{
+		Digest: fmt.Sprintf("sha256:%x", hasher.Sum(nil)),
+		Bytes:  copied,
+	}, nil
 }
 
 func writeSanitizedArchive(snapshotPath string, output io.Writer, image Image, limits Limits) error {
-	scan, err := scanArchive(snapshotPath, limits)
+	return writeSanitizedArchiveContext(context.Background(), snapshotPath, output, image, limits)
+}
+
+func writeSanitizedArchiveContext(ctx context.Context, snapshotPath string, output io.Writer, image Image, limits Limits) (returnErr error) {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	scan, err := scanArchiveContext(ctx, snapshotPath, limits)
 	if err != nil {
 		return fmt.Errorf("rescan private OCI snapshot: %w", err)
 	}
@@ -242,8 +430,14 @@ func writeSanitizedArchive(snapshotPath string, output io.Writer, image Image, l
 	if err != nil {
 		return fmt.Errorf("encode sanitized OCI index: %w", err)
 	}
+	if err := contextError(ctx); err != nil {
+		return err
+	}
 	layers := make([]string, len(image.LayerDigests))
 	for index, digest := range image.LayerDigests {
+		if err := contextError(ctx); err != nil {
+			return err
+		}
 		layers[index] = blobPath(digest)
 	}
 	dockerManifestRaw, err := json.Marshal([]dockerManifestEntry{{
@@ -252,9 +446,15 @@ func writeSanitizedArchive(snapshotPath string, output io.Writer, image Image, l
 	if err != nil {
 		return fmt.Errorf("encode sanitized Docker manifest: %w", err)
 	}
+	if err := contextError(ctx); err != nil {
+		return err
+	}
 
 	wanted := make(map[string]blobInfo, len(image.LayerDigests)+2)
 	for _, digest := range append(append([]string{}, image.ManifestDigest, image.ConfigDigest), image.LayerDigests...) {
+		if err := contextError(ctx); err != nil {
+			return err
+		}
 		info, ok := scan.blobs[digest]
 		if !ok {
 			return fmt.Errorf("verified OCI blob %s disappeared from private snapshot", digest)
@@ -262,12 +462,18 @@ func writeSanitizedArchive(snapshotPath string, output io.Writer, image Image, l
 		wanted[blobPath(digest)] = info
 	}
 
-	tarWriter := tar.NewWriter(output)
+	tarWriter := tar.NewWriter(contextWriter{ctx: ctx, writer: output})
 	writeBytes := func(name string, raw []byte) error {
+		if err := contextError(ctx); err != nil {
+			return err
+		}
 		if err := writeSanitizedHeader(tarWriter, name, int64(len(raw))); err != nil {
 			return err
 		}
 		if _, err := tarWriter.Write(raw); err != nil {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return contextErr
+			}
 			return fmt.Errorf("write sanitized archive path %q: %w", name, err)
 		}
 		return nil
@@ -282,19 +488,29 @@ func writeSanitizedArchive(snapshotPath string, output io.Writer, image Image, l
 		return err
 	}
 
-	reader, closeReader, err := openArchive(snapshotPath, limits)
+	reader, closeReader, err := openArchiveContext(ctx, snapshotPath, limits)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if closeErr := closeReader(); closeErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close private OCI snapshot: %w", closeErr))
+		}
+	}()
 	tarReader := tar.NewReader(reader)
 	seen := make(map[string]struct{}, len(wanted))
 	for {
+		if err := contextError(ctx); err != nil {
+			return err
+		}
 		header, nextErr := tarReader.Next()
 		if errors.Is(nextErr, io.EOF) {
 			break
 		}
 		if nextErr != nil {
-			_ = closeReader()
+			if contextErr := contextError(ctx); contextErr != nil {
+				return contextErr
+			}
 			return fmt.Errorf("read private OCI snapshot: %w", nextErr)
 		}
 		name := strings.TrimSuffix(header.Name, "/")
@@ -303,30 +519,30 @@ func writeSanitizedArchive(snapshotPath string, output io.Writer, image Image, l
 			continue
 		}
 		if header.Size != info.size || !regularTarFile(header) {
-			_ = closeReader()
 			return fmt.Errorf("verified OCI blob %q changed before sanitization", name)
 		}
 		if err := writeSanitizedHeader(tarWriter, name, header.Size); err != nil {
-			_ = closeReader()
 			return err
 		}
 		written, copyErr := io.CopyN(tarWriter, tarReader, header.Size)
 		if copyErr != nil || written != header.Size {
-			_ = closeReader()
+			if contextErr := contextError(ctx); contextErr != nil {
+				return contextErr
+			}
 			return fmt.Errorf("copy sanitized OCI blob %q: %w", name, nonNil(copyErr, io.ErrUnexpectedEOF))
 		}
 		seen[name] = struct{}{}
-	}
-	if err := closeReader(); err != nil {
-		return fmt.Errorf("close private OCI snapshot: %w", err)
 	}
 	if len(seen) != len(wanted) {
 		return errors.New("private OCI snapshot is missing a verified blob during sanitization")
 	}
 	if err := tarWriter.Close(); err != nil {
+		if contextErr := contextError(ctx); contextErr != nil {
+			return contextErr
+		}
 		return fmt.Errorf("finish sanitized Docker load archive: %w", err)
 	}
-	return nil
+	return contextError(ctx)
 }
 
 func writeSanitizedHeader(writer *tar.Writer, name string, size int64) error {

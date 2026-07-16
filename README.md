@@ -26,6 +26,12 @@ instance. It prevents a delayed command for an older instance from acting on its
 replacement. Steward records each accepted host mutation in a signed receipt
 chain that can be verified without a network connection.
 
+For a qualified agent outcome, a publisher can also sign one release that binds
+operator-facing outcome text, the embedded workload profile, exact offline image
+archive, deterministic canary, qualification-evidence digest, and known limits.
+The release remains descriptive: local site policy, tenant intent, live admission,
+and an exact tenant-signed task still control what runs.
+
 Steward includes a replaceable open-source control plane, while nodes remain
 independently operable through public contracts. Nothing has a build-time or
 runtime dependency on a private package, API, account, or hosted service.
@@ -123,6 +129,71 @@ exact task instead of creating replacement authority. The
 and [Hermes guide](https://hardrails.github.io/steward/guides/hermes-agent/#authorize-and-run-one-exact-hermes-task)
 show signing, verification, dispatch, recovery, result handling, and offline audit.
 
+### From a signed release to offline proof
+
+A publisher-signed agent release describes useful work in operator terms while
+binding the exact workload capsule, offline image archive, deterministic canary,
+qualification evidence digest, and known limitations. It is descriptive metadata,
+not tenant, node, image-import, or task authority.
+
+Authenticate the publisher key separately, then verify both the release and the
+transferred archive:
+
+```console
+stewardctl agent-release verify \
+  -in hermes-workspace-audit.release.dsse.json \
+  -public-key publisher.public.pem \
+  -key-id publisher-key-id \
+  -archive hermes-agent-adapter.tar
+```
+
+Steward's activation contract then follows a fixed
+choose/configure/preflight/activate/canary/prove/monitor journey. The default
+canary flow derives its signing challenge from the real admission response, so the
+tenant private key stays off-node. Generated artifacts and state checkpoints are
+retained in an owner-only append-only workspace, and the final proof correlates the
+exact result with Executor, Gateway, and controller-witness evidence for offline
+review. Executor signs one activation marker after read-only admission preflights
+and before the admission-allow receipt or host mutation. It signs another after
+Steward verifies Gateway's terminal evidence, creating a receipt-ordered causal
+link that does not depend on comparing service clocks. A proof manifest is a
+correlation record; its signed companions and pinned public keys still require
+independent verification.
+
+The built-in Hermes recipe currently requires a dedicated host whose signed site
+policy contains exactly one tenant. It uses persistent Docker state, which has no
+portable hard byte or inode quota, and it uses the explicitly enabled host-local
+administrator path for node-local admission. Steward still supports stateless
+multi-tenant workloads on a shared host; this specific activation recipe does not.
+
+The concrete workflow is:
+
+1. `stewardctl activation create` verifies and snapshots the release, policy,
+   intent, archive, and pre-admission controller witness.
+2. `stewardctl activation run` imports, records an activation-begin marker,
+   admits, starts, and pauses for a tenant-signed canary task derived from the
+   real admission.
+3. `stewardctl activation attach -kind canary-task` adds that owner-only bundle;
+   rerunning advances through the deterministic Hermes result, verifies Gateway
+   receipts, and records an Executor activation checkpoint.
+4. `stewardctl activation attach -kind final-witness` adds a controller evidence
+   export that covers that checkpoint; rerunning writes the proof.
+5. `stewardctl activation verify` authenticates the copied workspace and signed
+   evidence entirely offline. `activation status` is only an unverified local
+   progress view.
+
+Runs are resumable against retained checkpoints while the applicable deadline
+remains open. The canary uses one absolute deadline anchored to its
+`canary_authorized` checkpoint; retries do not reset it, and expiry becomes sticky
+`action_required`. Invalid canary authorization, terminal canary failure, and
+invalid or conflicting retained evidence are also sticky. Recovery requires
+stopping and destroying the failed workload, then using a new activation ID and
+an instance generation greater than the failed activation.
+
+Read [Activate a qualified Hermes release](https://hardrails.github.io/steward/guides/agent-activation/)
+for the exact commands, handoff files, runtime overrides, threat boundaries,
+failure handling, and proof limits.
+
 `steward-mcp` exposes bounded Steward Control fleet operations, Executor lifecycle
 operations, or both to a local Model Context Protocol (MCP) client over standard
 input and output. Starting it directly waits for an MCP client; this example
@@ -201,8 +272,9 @@ A Linux release contains seven static binaries:
 - `steward-relay` is a fixed-destination companion inside one workload network.
 - `stewardctl` manages controller TLS, tenants, operators, enrollment, command
   delivery, evidence status, signed witness export, and offline verification;
-  keys and policy; exact-request connector and service-task permits; generic
-  task lifecycle and recovery; OCI import; node evidence; and local node actions.
+  keys and policy; outcome-led signed agent releases; exact-request connector and
+  service-task permits; generic task lifecycle and recovery; OCI import; node
+  evidence; and local node actions.
 - `steward-mcp` exposes bounded fleet and node operations plus optional pre-signed
   task lifecycle tools over MCP stdio.
 
@@ -363,6 +435,7 @@ without access to private source or infrastructure.
 ## Documentation
 
 - [Install and enroll](https://hardrails.github.io/steward/getting-started/)
+- [Activate a qualified Hermes release](https://hardrails.github.io/steward/guides/agent-activation/)
 - [Operate a workload](https://hardrails.github.io/steward/guides/workload-lifecycle/)
 - [Install without public network access](https://hardrails.github.io/steward/guides/air-gapped/)
 - [Configure signed admission](https://hardrails.github.io/steward/guides/signed-admission/)

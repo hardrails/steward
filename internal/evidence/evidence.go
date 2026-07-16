@@ -30,15 +30,16 @@ const (
 	MaxEnvelopeBytes = 64 << 10
 	MaxDeltaRecords  = 128
 	MaxDeltaBytes    = 700 << 10
-	maxLogBytes      = 64 << 20
+	MaxLogBytes      = 64 << 20
 	maxExportBytes   = 256 << 20
 	maxExportLine    = 128 << 10
-	receiptVersion   = 1
+	receiptVersionV1 = 1
+	receiptVersionV2 = 2
 	envelopeVersion  = 1
 	checkpointStride = MaxDeltaRecords
 	// A valid frame is at least five bytes. This cap is therefore looser than
 	// the number of sparse checkpoints that can fit in a bounded valid log.
-	maxCheckpointCount = maxLogBytes/(5*checkpointStride) + 2
+	maxCheckpointCount = MaxLogBytes/(5*checkpointStride) + 2
 )
 
 var chainDomain = []byte("steward-evidence-chain-v1\x00")
@@ -49,27 +50,33 @@ var chainDomain = []byte("steward-evidence-chain-v1\x00")
 // export errors, especially I/O failures, must not be treated as divergence.
 var ErrDeltaCoordinate = errors.New("evidence delta coordinate does not match the local log")
 
+// ErrActivationMarkerConflict means an idempotent begin/checkpoint request
+// disagrees with the activation identity already retained in the signed log.
+var ErrActivationMarkerConflict = errors.New("activation marker conflicts with retained evidence")
+
 // EventType is deliberately a closed receipt vocabulary. New decisions require
 // an explicit format version/change rather than arbitrary event strings.
 type EventType byte
 
 const (
-	AdmissionAllow      EventType = 1
-	AdmissionDeny       EventType = 2
-	JournalPrepare      EventType = 3
-	JournalCommit       EventType = 4
-	JournalCompensate   EventType = 5
-	GatewayRegistration EventType = 6
-	InferenceAuthorize  EventType = 7
-	InferenceTerminal   EventType = 8
-	ServiceMapping      EventType = 9
-	LifecycleStart      EventType = 10
-	LifecycleStop       EventType = 11
-	LifecycleDestroy    EventType = 12
-	StatePurge          EventType = 13
-	PolicyReload        EventType = 14
-	Drift               EventType = 15
-	Revocation          EventType = 16
+	AdmissionAllow       EventType = 1
+	AdmissionDeny        EventType = 2
+	JournalPrepare       EventType = 3
+	JournalCommit        EventType = 4
+	JournalCompensate    EventType = 5
+	GatewayRegistration  EventType = 6
+	InferenceAuthorize   EventType = 7
+	InferenceTerminal    EventType = 8
+	ServiceMapping       EventType = 9
+	LifecycleStart       EventType = 10
+	LifecycleStop        EventType = 11
+	LifecycleDestroy     EventType = 12
+	StatePurge           EventType = 13
+	PolicyReload         EventType = 14
+	Drift                EventType = 15
+	Revocation           EventType = 16
+	ActivationBegin      EventType = 17
+	ActivationCheckpoint EventType = 18
 )
 
 // Outcome is a closed result vocabulary. Details belong in bounded,
@@ -148,11 +155,12 @@ type Delta struct {
 	More   bool
 }
 
-// FormatSummary reports the receipt version physically observed in an
-// existing evidence log. Empty logs contain no receipt header, so
-// FormatVersion is zero. This is a structural, read-only compatibility check;
-// callers that need authenticity must also verify the chain with its public
-// key through OpenForValidation or VerifyRecords.
+// FormatSummary reports a receipt version structurally observed in an existing
+// evidence log. InspectFormat requires every record to share FormatVersion;
+// InspectRequiredFormat permits a mixed chain and reports the highest version
+// a reader must support. Empty logs contain no receipt header, so
+// FormatVersion is zero. Callers that need authenticity must also verify the
+// chain with its public key through OpenForValidation or VerifyRecords.
 type FormatSummary struct {
 	Present       bool
 	FormatVersion int
@@ -173,20 +181,36 @@ type Envelope struct {
 // Log owns a private signing key for one node receipt chain. Callers should
 // append authorization receipts before an externally visible side effect.
 type Log struct {
-	mu          sync.Mutex
-	path        string
-	file        *os.File
-	private     ed25519.PrivateKey
-	public      ed25519.PublicKey
-	readOnly    bool
-	nodeID      string
-	epoch       uint64
-	keyID       string
-	next        uint64
-	lastHash    [sha256.Size]byte
-	logBytes    int64
-	modTimeNano int64
-	checkpoints []logCheckpoint
+	mu                    sync.Mutex
+	path                  string
+	file                  *os.File
+	private               ed25519.PrivateKey
+	public                ed25519.PublicKey
+	readOnly              bool
+	nodeID                string
+	epoch                 uint64
+	keyID                 string
+	next                  uint64
+	lastHash              [sha256.Size]byte
+	logBytes              int64
+	modTimeNano           int64
+	checkpoints           []logCheckpoint
+	activationBegins      map[activationMarkerKey]activationMarker
+	activationCheckpoints map[activationMarkerKey]activationMarker
+}
+
+type activationMarkerKey struct {
+	TenantID   string
+	RuntimeRef string
+	Generation uint64
+}
+
+type activationMarker struct {
+	ActivationID  string
+	CapsuleDigest string
+	PolicyDigest  string
+	Digest        string
+	Receipt       Receipt
 }
 
 // logCheckpoint is created only from a fully verified receipt or a successful
@@ -235,6 +259,13 @@ func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) 
 		_ = f.Close()
 		return nil, fmt.Errorf("verify evidence %q: %w", path, err)
 	}
+	begins, activationCheckpoints, err := verifyActivationMarkers(
+		f, public, nodeID, epoch,
+	)
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("verify activation markers in evidence %q: %w", path, err)
+	}
 	verifiedInfo, err := validateEvidencePathFile(path, f)
 	if err != nil || verifiedInfo.Size() != logBytes ||
 		verifiedInfo.Size() != openedInfo.Size() || !verifiedInfo.ModTime().Equal(openedInfo.ModTime()) {
@@ -243,7 +274,8 @@ func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) 
 	}
 	return &Log{path: path, file: f, private: private, public: append(ed25519.PublicKey(nil), public...), nodeID: nodeID, epoch: epoch,
 		keyID: KeyID(public), next: next, lastHash: last, logBytes: logBytes,
-		modTimeNano: verifiedInfo.ModTime().UnixNano(), checkpoints: checkpoints}, nil
+		modTimeNano: verifiedInfo.ModTime().UnixNano(), checkpoints: checkpoints,
+		activationBegins: begins, activationCheckpoints: activationCheckpoints}, nil
 }
 
 func openEvidenceForAppend(path string) (*os.File, bool, error) {
@@ -283,8 +315,8 @@ func openEvidenceForAppendAfterMissing(path string, afterMissing func()) (*os.Fi
 		if !before.Mode().IsRegular() || before.Mode().Perm()&0o077 != 0 {
 			return nil, false, fmt.Errorf("evidence %q must be a regular file with mode 0600 or stricter", path)
 		}
-		if before.Size() > maxLogBytes {
-			return nil, false, fmt.Errorf("evidence %q exceeds %d bytes", path, maxLogBytes)
+		if before.Size() > MaxLogBytes {
+			return nil, false, fmt.Errorf("evidence %q exceeds %d bytes", path, MaxLogBytes)
 		}
 		file, openErr := openEvidenceDescriptor(path, syscall.O_RDWR|syscall.O_APPEND, 0)
 		if errors.Is(openErr, syscall.ENOENT) {
@@ -344,7 +376,7 @@ func validateEvidencePathFile(path string, file *os.File) (os.FileInfo, error) {
 	}
 	if !opened.Mode().IsRegular() || !pathInfo.Mode().IsRegular() ||
 		opened.Mode().Perm()&0o077 != 0 || pathInfo.Mode().Perm()&0o077 != 0 ||
-		opened.Size() > maxLogBytes || pathInfo.Size() > maxLogBytes {
+		opened.Size() > MaxLogBytes || pathInfo.Size() > MaxLogBytes {
 		return nil, fmt.Errorf("evidence %q must remain a bounded regular file with mode 0600 or stricter", path)
 	}
 	if !os.SameFile(pathInfo, opened) {
@@ -375,8 +407,8 @@ func OpenForValidation(path string, public ed25519.PublicKey, nodeID string, epo
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("evidence %q must be a regular file with mode 0600 or stricter", path)
 	}
-	if info.Size() > maxLogBytes {
-		return nil, fmt.Errorf("evidence %q exceeds %d bytes", path, maxLogBytes)
+	if info.Size() > MaxLogBytes {
+		return nil, fmt.Errorf("evidence %q exceeds %d bytes", path, MaxLogBytes)
 	}
 	f, err := openEvidenceDescriptor(path, syscall.O_RDONLY, 0)
 	if err != nil {
@@ -408,9 +440,22 @@ func OpenForValidation(path string, public ed25519.PublicKey, nodeID string, epo
 }
 
 // InspectFormat validates every frame and receipt structurally through a
-// read-only descriptor and reports the observed receipt version. It never
-// creates a missing log or changes file metadata.
+// read-only descriptor and reports the one receipt version shared by every
+// record. It rejects mixed-version logs, never creates a missing log, and
+// never changes file metadata.
 func InspectFormat(path string) (FormatSummary, error) {
+	return inspectFormat(path, false)
+}
+
+// InspectRequiredFormat validates every frame and receipt structurally through
+// a read-only descriptor and reports the highest receipt version a reader must
+// support. It accepts mixed-version logs because ordinary format 1 receipts and
+// format 2 activation markers intentionally share one signed chain.
+func InspectRequiredFormat(path string) (FormatSummary, error) {
+	return inspectFormat(path, true)
+}
+
+func inspectFormat(path string, allowMixed bool) (FormatSummary, error) {
 	if path == "" {
 		return FormatSummary{}, errors.New("evidence path is required")
 	}
@@ -421,7 +466,7 @@ func InspectFormat(path string) (FormatSummary, error) {
 	if err != nil {
 		return FormatSummary{}, fmt.Errorf("stat evidence %q: %w", path, err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > maxLogBytes {
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > MaxLogBytes {
 		return FormatSummary{}, fmt.Errorf("evidence %q must be a bounded regular file with mode 0600 or stricter", path)
 	}
 	file, err := os.Open(path)
@@ -433,7 +478,7 @@ func InspectFormat(path string) (FormatSummary, error) {
 	if err != nil {
 		return FormatSummary{}, fmt.Errorf("stat opened evidence %q: %w", path, err)
 	}
-	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0o077 != 0 || openedInfo.Size() > maxLogBytes {
+	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0o077 != 0 || openedInfo.Size() > MaxLogBytes {
 		return FormatSummary{}, fmt.Errorf("evidence %q changed while it was opened for format inspection", path)
 	}
 	summary := FormatSummary{Present: true}
@@ -453,10 +498,15 @@ func InspectFormat(path string) (FormatSummary, error) {
 		if err != nil {
 			return FormatSummary{}, fmt.Errorf("inspect evidence %q: %w", path, err)
 		}
-		if summary.FormatVersion != 0 && summary.FormatVersion != int(receipt.Version) {
-			return FormatSummary{}, fmt.Errorf("evidence %q contains mixed receipt format versions", path)
+		if !allowMixed && summary.FormatVersion != 0 &&
+			summary.FormatVersion != int(receipt.Version) {
+			return FormatSummary{}, fmt.Errorf(
+				"evidence %q contains mixed receipt format versions", path,
+			)
 		}
-		summary.FormatVersion = int(receipt.Version)
+		if int(receipt.Version) > summary.FormatVersion {
+			summary.FormatVersion = int(receipt.Version)
+		}
 		summary.Records++
 	}
 }
@@ -472,7 +522,7 @@ func Verify(path string, public ed25519.PublicKey, nodeID string, epoch uint64) 
 		return nil, err
 	}
 	defer f.Close()
-	if err := validateInputFile(f, maxLogBytes, "evidence log"); err != nil {
+	if err := validateInputFile(f, MaxLogBytes, "evidence log"); err != nil {
 		return nil, err
 	}
 	_, _, last, err := verifyFileWithLast(f, public, nodeID, epoch)
@@ -493,7 +543,7 @@ func VerifyRecords(path string, public ed25519.PublicKey, nodeID string, epoch u
 		return Head{}, err
 	}
 	defer f.Close()
-	if err := validateInputFile(f, maxLogBytes, "evidence log"); err != nil {
+	if err := validateInputFile(f, MaxLogBytes, "evidence log"); err != nil {
 		return Head{}, err
 	}
 	next, hash, _, err := verifyFileWithVisitor(f, public, nodeID, epoch, visit)
@@ -509,6 +559,22 @@ func VerifyRecords(path string, public ed25519.PublicKey, nodeID string, epoch u
 // epoch, receipt-schema and chain-coordinate checks as full-file verification,
 // then requires every receipt tenant to be accepted by tenantMember.
 func VerifyDelta(frames [][]byte, public ed25519.PublicKey, nodeID string, epoch uint64, prior Coordinate, tenantMember func(string) bool) (Head, error) {
+	return VerifyDeltaRecords(frames, public, nodeID, epoch, prior, tenantMember, nil)
+}
+
+// VerifyDeltaRecords applies the same bounded delta verification as
+// VerifyDelta and visits each authenticated receipt only after its tenant and
+// chain coordinates have been accepted. Frame is an independent copy of the
+// exact signed frame supplied by the caller.
+func VerifyDeltaRecords(
+	frames [][]byte,
+	public ed25519.PublicKey,
+	nodeID string,
+	epoch uint64,
+	prior Coordinate,
+	tenantMember func(string) bool,
+	visit func(VerifiedReceipt) error,
+) (Head, error) {
 	if len(public) != ed25519.PublicKeySize || !validText(nodeID, 256) || epoch == 0 || tenantMember == nil {
 		return Head{}, errors.New("evidence delta verification arguments are invalid")
 	}
@@ -542,6 +608,14 @@ func VerifyDelta(frames [][]byte, public ed25519.PublicKey, nodeID string, epoch
 		}
 		if !tenantMember(receipt.TenantID) {
 			return Head{}, fmt.Errorf("evidence delta record %d has unauthorized tenant", index+1)
+		}
+		if visit != nil {
+			if err := visit(VerifiedReceipt{
+				Receipt: receipt, ChainHash: current,
+				Frame: append([]byte(nil), frame...),
+			}); err != nil {
+				return Head{}, err
+			}
 		}
 		head.Sequence = receipt.Sequence
 		head.ChainHash = current
@@ -579,8 +653,8 @@ func VerifyAnyRecords(path string, public ed25519.PublicKey, nodeID string, epoc
 		if err != nil {
 			return Head{}, err
 		}
-		if info.Size() > maxLogBytes {
-			return Head{}, fmt.Errorf("evidence log exceeds %d bytes", maxLogBytes)
+		if info.Size() > MaxLogBytes {
+			return Head{}, fmt.Errorf("evidence log exceeds %d bytes", MaxLogBytes)
 		}
 		next, hash, _, err := verifyFileWithVisitor(f, public, nodeID, epoch, visit)
 		if err != nil {
@@ -627,6 +701,10 @@ func EventName(value EventType) string {
 		return "drift"
 	case Revocation:
 		return "revocation"
+	case ActivationBegin:
+		return "activation_begin"
+	case ActivationCheckpoint:
+		return "activation_checkpoint"
 	default:
 		return ""
 	}
@@ -655,6 +733,39 @@ func (l *Log) Append(event Event) (Receipt, error) {
 	if err := validateEvent(event); err != nil {
 		return Receipt{}, err
 	}
+	if event.Type == ActivationBegin ||
+		event.Type == ActivationCheckpoint {
+		return Receipt{}, errors.New("activation markers require their idempotent append methods")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.appendLocked(event)
+}
+
+// AppendActivationBegin records at most one activation identity for a fresh
+// tenant/runtime/generation tuple. Exact retries return the original receipt;
+// a different identity or digest fails closed without growing the global log.
+func (l *Log) AppendActivationBegin(event Event) (Receipt, error) {
+	return l.appendActivationMarker(event, ActivationBegin)
+}
+
+// AppendActivationCheckpoint records at most one terminal checkpoint for the
+// activation established by AppendActivationBegin. Exact retries are
+// idempotent; unknown activations and conflicting digests are rejected.
+func (l *Log) AppendActivationCheckpoint(event Event) (Receipt, error) {
+	return l.appendActivationMarker(event, ActivationCheckpoint)
+}
+
+func (l *Log) appendActivationMarker(
+	event Event,
+	expected EventType,
+) (Receipt, error) {
+	if err := validateEvent(event); err != nil {
+		return Receipt{}, err
+	}
+	if event.Type != expected {
+		return Receipt{}, errors.New("activation marker uses the wrong event type")
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.file == nil {
@@ -669,7 +780,78 @@ func (l *Log) Append(event Event) (Receipt, error) {
 	if _, err := l.verifyTailLocked(); err != nil {
 		return Receipt{}, l.failClosedLocked(err)
 	}
-	receipt := Receipt{Version: receiptVersion, NodeID: l.nodeID, Epoch: l.epoch,
+	key := activationMarkerKey{
+		TenantID: event.TenantID, RuntimeRef: event.RuntimeRef,
+		Generation: event.Generation,
+	}
+	candidate := activationMarker{
+		ActivationID:  event.GrantID,
+		CapsuleDigest: event.CapsuleDigest,
+		PolicyDigest:  event.PolicyDigest,
+		Digest:        event.MetadataHash,
+	}
+	if expected == ActivationBegin {
+		if event.Outcome != Allowed || event.ErrorCode != "" ||
+			event.MetadataHash == "" {
+			return Receipt{}, errors.New("activation begin has invalid closed semantics")
+		}
+		if existing, ok := l.activationBegins[key]; ok {
+			if existing.ActivationID == candidate.ActivationID &&
+				existing.CapsuleDigest == candidate.CapsuleDigest &&
+				existing.PolicyDigest == candidate.PolicyDigest &&
+				existing.Digest == candidate.Digest {
+				return existing.Receipt, nil
+			}
+			return Receipt{}, fmt.Errorf("%w: activation begin disagrees with the retained fresh admission identity", ErrActivationMarkerConflict)
+		}
+	} else {
+		begin, ok := l.activationBegins[key]
+		if !ok || begin.ActivationID != candidate.ActivationID ||
+			begin.CapsuleDigest != candidate.CapsuleDigest ||
+			begin.PolicyDigest != candidate.PolicyDigest {
+			return Receipt{}, fmt.Errorf("%w: activation checkpoint has no matching fresh admission identity", ErrActivationMarkerConflict)
+		}
+		if event.Outcome != Committed || event.ErrorCode != "" ||
+			event.MetadataHash == "" {
+			return Receipt{}, errors.New("activation checkpoint has invalid closed semantics")
+		}
+		if existing, ok := l.activationCheckpoints[key]; ok {
+			if existing.ActivationID == candidate.ActivationID &&
+				existing.CapsuleDigest == candidate.CapsuleDigest &&
+				existing.PolicyDigest == candidate.PolicyDigest &&
+				existing.Digest == candidate.Digest {
+				return existing.Receipt, nil
+			}
+			return Receipt{}, fmt.Errorf("%w: activation checkpoint disagrees with the retained activation identity", ErrActivationMarkerConflict)
+		}
+	}
+	receipt, err := l.appendLocked(event)
+	if err != nil {
+		return Receipt{}, err
+	}
+	candidate.Receipt = receipt
+	if expected == ActivationBegin {
+		l.activationBegins[key] = candidate
+	} else {
+		l.activationCheckpoints[key] = candidate
+	}
+	return receipt, nil
+}
+
+func (l *Log) appendLocked(event Event) (Receipt, error) {
+	if l.file == nil {
+		return Receipt{}, errors.New("evidence log is closed")
+	}
+	if l.readOnly {
+		return Receipt{}, errors.New("evidence log is open for validation only")
+	}
+	if err := l.validateFileStateLocked(); err != nil {
+		return Receipt{}, l.failClosedLocked(err)
+	}
+	if _, err := l.verifyTailLocked(); err != nil {
+		return Receipt{}, l.failClosedLocked(err)
+	}
+	receipt := Receipt{Version: receiptVersionForEvent(event.Type), NodeID: l.nodeID, Epoch: l.epoch,
 		Sequence: l.next, PreviousHash: l.lastHash, Event: event}
 	payload, err := marshalReceipt(receipt)
 	if err != nil {
@@ -686,7 +868,7 @@ func (l *Log) Append(event Event) (Receipt, error) {
 		return Receipt{}, errors.New("evidence envelope exceeds size limit")
 	}
 	frameSize := int64(4 + len(raw))
-	if l.logBytes > maxLogBytes-frameSize {
+	if l.logBytes > MaxLogBytes-frameSize {
 		return Receipt{}, errors.New("evidence log would exceed size limit")
 	}
 	if receipt.Sequence%checkpointStride == 0 && len(l.checkpoints) >= maxCheckpointCount {
@@ -859,7 +1041,7 @@ func (l *Log) exportDelta(after Coordinate) (Delta, int, error) {
 		}
 		scannedRecords++
 		scannedBytes += int64(4 + len(raw))
-		if scannedBytes > l.logBytes || scannedBytes > maxLogBytes {
+		if scannedBytes > l.logBytes || scannedBytes > MaxLogBytes {
 			err := fmt.Errorf("evidence log exceeds its verified %d-byte boundary", l.logBytes)
 			return Delta{}, scannedRecords, l.failClosedLocked(err)
 		}
@@ -932,7 +1114,7 @@ func (l *Log) verifyTailLocked() (int, error) {
 		}
 		scannedRecords++
 		offset += int64(4 + len(raw))
-		if offset > l.logBytes || offset > maxLogBytes {
+		if offset > l.logBytes || offset > MaxLogBytes {
 			return scannedRecords, errors.New("evidence tail exceeds its verified byte boundary")
 		}
 		_, current, err := verifyEnvelope(raw, l.public, l.nodeID, l.epoch, expected, previous)
@@ -999,6 +1181,95 @@ func verifyFileWithVisitor(f *os.File, public ed25519.PublicKey, nodeID string, 
 	return next, previous, last, err
 }
 
+func verifyActivationMarkers(
+	f *os.File,
+	public ed25519.PublicKey,
+	nodeID string,
+	epoch uint64,
+) (
+	map[activationMarkerKey]activationMarker,
+	map[activationMarkerKey]activationMarker,
+	error,
+) {
+	begins := make(map[activationMarkerKey]activationMarker)
+	checkpoints := make(map[activationMarkerKey]activationMarker)
+	_, _, _, err := verifyFileWithVisitor(
+		f, public, nodeID, epoch,
+		func(record VerifiedReceipt) error {
+			return applyActivationMarker(
+				begins, checkpoints, record.Receipt,
+			)
+		},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return begins, checkpoints, nil
+}
+
+func applyActivationMarker(
+	begins map[activationMarkerKey]activationMarker,
+	checkpoints map[activationMarkerKey]activationMarker,
+	receipt Receipt,
+) error {
+	if receipt.Type != ActivationBegin &&
+		receipt.Type != ActivationCheckpoint {
+		return nil
+	}
+	key := activationMarkerKey{
+		TenantID: receipt.TenantID, RuntimeRef: receipt.RuntimeRef,
+		Generation: receipt.Generation,
+	}
+	marker := activationMarker{
+		ActivationID:  receipt.GrantID,
+		CapsuleDigest: receipt.CapsuleDigest,
+		PolicyDigest:  receipt.PolicyDigest,
+		Digest:        receipt.MetadataHash,
+		Receipt:       receipt,
+	}
+	// Exact retries through the append APIs reuse the retained receipt and do
+	// not write another frame. A second physical marker therefore means the log
+	// was corrupted or written outside those APIs and must fail closed.
+	if receipt.Type == ActivationBegin {
+		if receipt.Outcome != Allowed || receipt.ErrorCode != "" ||
+			receipt.MetadataHash == "" {
+			return errors.New("activation begin receipt has invalid closed semantics")
+		}
+		if existing, ok := begins[key]; ok {
+			if existing.ActivationID == marker.ActivationID &&
+				existing.CapsuleDigest == marker.CapsuleDigest &&
+				existing.PolicyDigest == marker.PolicyDigest &&
+				existing.Digest == marker.Digest {
+				return errors.New("evidence contains duplicate activation begin markers")
+			}
+			return errors.New("evidence contains conflicting activation begin markers")
+		}
+		begins[key] = marker
+		return nil
+	}
+	begin, ok := begins[key]
+	if !ok || begin.ActivationID != marker.ActivationID ||
+		begin.CapsuleDigest != marker.CapsuleDigest ||
+		begin.PolicyDigest != marker.PolicyDigest {
+		return errors.New("activation checkpoint has no matching activation begin")
+	}
+	if receipt.Outcome != Committed || receipt.ErrorCode != "" ||
+		receipt.MetadataHash == "" {
+		return errors.New("activation checkpoint receipt has invalid closed semantics")
+	}
+	if existing, ok := checkpoints[key]; ok {
+		if existing.ActivationID == marker.ActivationID &&
+			existing.CapsuleDigest == marker.CapsuleDigest &&
+			existing.PolicyDigest == marker.PolicyDigest &&
+			existing.Digest == marker.Digest {
+			return errors.New("evidence contains duplicate activation checkpoints")
+		}
+		return errors.New("evidence contains conflicting activation checkpoints")
+	}
+	checkpoints[key] = marker
+	return nil
+}
+
 func verifyFileState(
 	f *os.File,
 	public ed25519.PublicKey,
@@ -1027,8 +1298,8 @@ func verifyFileState(
 			return 0, [sha256.Size]byte{}, nil, nil, 0, err
 		}
 		total += int64(4 + len(raw))
-		if total > maxLogBytes {
-			return 0, [sha256.Size]byte{}, nil, nil, 0, fmt.Errorf("evidence log exceeds %d bytes", maxLogBytes)
+		if total > MaxLogBytes {
+			return 0, [sha256.Size]byte{}, nil, nil, 0, fmt.Errorf("evidence log exceeds %d bytes", MaxLogBytes)
 		}
 		receipt, current, err := verifyEnvelope(raw, public, nodeID, epoch, expected, previous)
 		if err != nil {
@@ -1367,7 +1638,11 @@ func chainHash(previous [sha256.Size]byte, pae []byte) [sha256.Size]byte {
 // strings are uint16 length-prefixed; no maps, optional fields, or JSON parser
 // are involved in the signed interpretation.
 func marshalReceipt(value Receipt) ([]byte, error) {
-	if value.Version != receiptVersion || !validText(value.NodeID, 256) || value.Epoch == 0 || value.Sequence == 0 || value.Generation == 0 {
+	if !validReceiptVersionForEvent(value.Version, value.Type) {
+		return nil, errors.New("receipt format version does not match its closed event vocabulary")
+	}
+	if !validText(value.NodeID, 256) || value.Epoch == 0 ||
+		value.Sequence == 0 || value.Generation == 0 {
 		return nil, errors.New("invalid receipt coordinates")
 	}
 	if err := validateEvent(value.Event); err != nil {
@@ -1393,7 +1668,8 @@ func marshalReceipt(value Receipt) ([]byte, error) {
 }
 
 func unmarshalReceipt(raw []byte) (Receipt, error) {
-	if len(raw) < 1+2+8+8+sha256.Size+1+2+2+2+2+8+2+1+2+2 || raw[0] != receiptVersion {
+	if len(raw) < 1+2+8+8+sha256.Size+1+2+2+2+2+8+2+1+2+2 ||
+		(raw[0] != receiptVersionV1 && raw[0] != receiptVersionV2) {
 		return Receipt{}, errors.New("invalid receipt version or length")
 	}
 	value := Receipt{Version: raw[0]}
@@ -1492,8 +1768,25 @@ func validateEvent(value Event) error {
 	return nil
 }
 
-func validEvent(value EventType) bool { return value >= AdmissionAllow && value <= Revocation }
+func validEvent(value EventType) bool {
+	return value >= AdmissionAllow && value <= ActivationCheckpoint
+}
 func validOutcome(value Outcome) bool { return value >= Allowed && value <= Compensated }
+
+// Format 2 keeps the binary layout but extends the closed vocabulary with
+// activation markers. Keeping ordinary events at format 1 avoids pretending
+// that their signed meaning changed, while the higher marker version makes an
+// older reader visibly ineligible for rollback.
+func receiptVersionForEvent(value EventType) byte {
+	if value == ActivationBegin || value == ActivationCheckpoint {
+		return receiptVersionV2
+	}
+	return receiptVersionV1
+}
+
+func validReceiptVersionForEvent(version byte, event EventType) bool {
+	return version == receiptVersionForEvent(event)
+}
 
 func appendUint64(dst []byte, value uint64) []byte {
 	var encoded [8]byte

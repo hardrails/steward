@@ -453,6 +453,10 @@ func readServiceTrust(path string, intent admission.InstanceIntent, operationID 
 	if err != nil {
 		return serviceTrustOperation{}, fmt.Errorf("read service trust inventory: %w", err)
 	}
+	return decodeServiceTrust(raw, intent, operationID)
+}
+
+func decodeServiceTrust(raw []byte, intent admission.InstanceIntent, operationID string) (serviceTrustOperation, error) {
 	var inventory serviceTrustInventory
 	if err := dsse.DecodeStrictInto(raw, maxServiceTrustBytes, &inventory); err != nil {
 		return serviceTrustOperation{}, fmt.Errorf("decode service trust inventory: %w", err)

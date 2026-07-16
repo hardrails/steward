@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -412,6 +413,712 @@ func TestSecureAdmissionCreatesOnlyFromSignedIntersection(t *testing.T) {
 	if response.Code != http.StatusOK || len(docker.created) != 1 {
 		t.Fatalf("idempotent status=%d creates=%d body=%s", response.Code, len(docker.created), response.Body.String())
 	}
+}
+
+func TestSecureAdmissionAllowReceiptBindsDecisionBeforeJournal(t *testing.T) {
+	docker := &secureDocker{}
+	server, err := NewServer(docker, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{Inference: true})
+	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
+	config.Topology, config.Gateway = docker, grants
+	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+	config.GrantRoot, config.RelayGID = "/run/steward-gateway/grants", 1234
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+
+	response := submitSecureAdmission(t, server, capsule, intent)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	receipts := verifiedExecutorReceipts(t, config.Evidence)
+	if len(receipts) != 3 ||
+		receipts[0].Sequence != 1 || receipts[0].Type != evidence.AdmissionAllow ||
+		receipts[1].Sequence != 2 || receipts[1].Type != evidence.JournalPrepare ||
+		receipts[2].Sequence != 3 || receipts[2].Type != evidence.JournalCommit {
+		t.Fatalf("receipt order = %#v", receipts)
+	}
+	wantAllow := evidence.Event{
+		Type: evidence.AdmissionAllow, TenantID: intent.TenantID,
+		RuntimeRef:    RuntimeRef(intent.TenantID, intent.InstanceID),
+		CapsuleDigest: intent.CapsuleDigest, PolicyDigest: dsse.Digest(config.PolicyEnvelope),
+		Generation: intent.Generation,
+		GrantID:    gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation),
+		Outcome:    evidence.Allowed,
+	}
+	if receipts[0].Event != wantAllow {
+		t.Fatalf("admission allow = %#v, want %#v", receipts[0].Event, wantAllow)
+	}
+
+	response = submitSecureAdmission(t, server, capsule, intent)
+	if response.Code != http.StatusOK {
+		t.Fatalf("idempotent status=%d body=%s", response.Code, response.Body.String())
+	}
+	if retried := verifiedExecutorReceipts(t, config.Evidence); len(retried) != len(receipts) {
+		t.Fatalf("idempotent retry appended receipts: before=%#v after=%#v", receipts, retried)
+	}
+}
+
+func TestActivationAdmissionPersistsExactIdentityAndProjectsSecureStatus(t *testing.T) {
+	docker := &secureDocker{}
+	server, err := NewServer(docker, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule, intent, config := secureAdmissionFixtureFor(
+		t, admission.Capabilities{Inference: true, Service: true},
+	)
+	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
+	config.Topology, config.Gateway = docker, grants
+	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+	config.GrantRoot, config.RelayGID = "/run/steward-gateway/grants", 1234
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	activationID := "activation-test"
+	beginDigest := "sha256:" + strings.Repeat("e", 64)
+	submit := func(id, digest string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(secureProvisionRequest{
+			CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule),
+			Intent:            intent,
+			Activation: &activationAdmissionRequest{
+				SchemaVersion: activationAdmissionRequestSchema,
+				ActivationID:  id,
+				BeginDigest:   digest,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(
+			http.MethodPost, "/v1/admissions", bytes.NewReader(body),
+		)
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+
+	response := submit(activationID, beginDigest)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("activation admission status=%d body=%s", response.Code, response.Body.String())
+	}
+	var admitted secureProvisionResponse
+	if err := json.NewDecoder(response.Body).Decode(&admitted); err != nil {
+		t.Fatal(err)
+	}
+	if admitted.ActivationID != activationID ||
+		admitted.ActivationBeginDigest != beginDigest ||
+		docker.observed == nil || docker.observed.Workload.Runtime == nil ||
+		docker.observed.Workload.Runtime.ActivationID != activationID ||
+		docker.observed.Workload.Runtime.ActivationBeginDigest != beginDigest {
+		t.Fatalf("admitted=%#v observed=%#v", admitted, docker.observed)
+	}
+
+	response = submit(activationID, beginDigest)
+	if response.Code != http.StatusOK || len(docker.created) != 1 {
+		t.Fatalf("exact replay status=%d creates=%d body=%s", response.Code, len(docker.created), response.Body.String())
+	}
+	for name, candidate := range map[string]activationAdmissionRequest{
+		"different activation": {
+			SchemaVersion: activationAdmissionRequestSchema,
+			ActivationID:  "activation-other",
+			BeginDigest:   beginDigest,
+		},
+		"different begin": {
+			SchemaVersion: activationAdmissionRequestSchema,
+			ActivationID:  activationID,
+			BeginDigest:   "sha256:" + strings.Repeat("f", 64),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := submit(candidate.ActivationID, candidate.BeginDigest)
+			if response.Code != http.StatusConflict || len(docker.created) != 1 {
+				t.Fatalf("status=%d creates=%d body=%s", response.Code, len(docker.created), response.Body.String())
+			}
+		})
+	}
+
+	ref := RuntimeRef(intent.TenantID, intent.InstanceID)
+	request := httptest.NewRequest(http.MethodGet, "/v1/workloads/"+ref, nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status projection=%d body=%s", response.Code, response.Body.String())
+	}
+	var status secureProvisionResponse
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.RuntimeRef != admitted.RuntimeRef ||
+		status.CapsuleDigest != admitted.CapsuleDigest ||
+		status.PolicyDigest != admitted.PolicyDigest ||
+		status.Generation != admitted.Generation ||
+		status.EvidenceKeyID != admitted.EvidenceKeyID ||
+		status.GrantID != admitted.GrantID ||
+		status.ServicePath != admitted.ServicePath ||
+		status.ServiceID != admitted.ServiceID ||
+		!slices.Equal(status.TaskAuthorities, admitted.TaskAuthorities) ||
+		status.RoutePolicyDigest != admitted.RoutePolicyDigest ||
+		status.ActivationID != activationID ||
+		status.ActivationBeginDigest != beginDigest {
+		t.Fatalf("status=%#v admitted=%#v", status, admitted)
+	}
+
+	docker.observed.Workload.Runtime.ActivationID = "activation-other"
+	request = httptest.NewRequest(http.MethodGet, "/v1/workloads/"+ref, nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("drift status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+type activationCheckpointServerFixture struct {
+	server       *Server
+	docker       *secureDocker
+	grants       *gatewayFixture
+	config       SecureAdmissionConfig
+	ref          string
+	activationID string
+	beginDigest  string
+}
+
+func newActivationCheckpointServerFixture(
+	t *testing.T,
+	withActivation bool,
+) activationCheckpointServerFixture {
+	t.Helper()
+	docker := &secureDocker{}
+	server, err := NewServer(docker, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule, intent, config := secureAdmissionFixtureFor(
+		t, admission.Capabilities{Inference: true},
+	)
+	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
+	config.Topology, config.Gateway = docker, grants
+	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+	config.GrantRoot, config.RelayGID = "/run/steward-gateway/grants", 1234
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	fixture := activationCheckpointServerFixture{
+		server: server, docker: docker, grants: grants, config: config,
+		ref:          RuntimeRef(intent.TenantID, intent.InstanceID),
+		activationID: "activation-checkpoint-test",
+		beginDigest:  "sha256:" + strings.Repeat("e", 64),
+	}
+	requestBody := secureProvisionRequest{
+		CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule),
+		Intent:            intent,
+	}
+	if withActivation {
+		requestBody.Activation = &activationAdmissionRequest{
+			SchemaVersion: activationAdmissionRequestSchema,
+			ActivationID:  fixture.activationID,
+			BeginDigest:   fixture.beginDigest,
+		}
+	}
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost, "/v1/admissions", bytes.NewReader(body),
+	)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("activation fixture admission status=%d body=%s", response.Code, response.Body.String())
+	}
+	return fixture
+}
+
+func (f activationCheckpointServerFixture) start(t *testing.T) {
+	t.Helper()
+	assertLifecycleStatus(
+		t, f.server, http.MethodPost, "/v1/workloads/"+f.ref+"/start",
+		context.Background(), http.StatusOK,
+	)
+}
+
+func postActivationCheckpoint(
+	t *testing.T,
+	server *Server,
+	ref, activationID, checkpointDigest string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	return postActivationCheckpointWithContext(
+		t, server, context.Background(),
+		ref, activationID, checkpointDigest,
+	)
+}
+
+func postActivationCheckpointWithContext(
+	t *testing.T,
+	server *Server,
+	ctx context.Context,
+	ref, activationID, checkpointDigest string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(activationCheckpointRequest{
+		SchemaVersion:    activationCheckpointRequestSchema,
+		ActivationID:     activationID,
+		CheckpointDigest: checkpointDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/workloads/"+ref+"/activation-checkpoints",
+		bytes.NewReader(body),
+	).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
+}
+
+func TestActivationCheckpointAppendsOnceForExactRunningActivation(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, true)
+	fixture.start(t)
+	checkpointDigest := "sha256:" + strings.Repeat("f", 64)
+	before := fixture.config.Evidence.NextSequence()
+
+	response := postActivationCheckpoint(
+		t, fixture.server, fixture.ref, fixture.activationID, checkpointDigest,
+	)
+	if response.Code != http.StatusCreated ||
+		fixture.config.Evidence.NextSequence() != before+1 {
+		t.Fatalf(
+			"checkpoint status=%d next=%d want=%d body=%s",
+			response.Code, fixture.config.Evidence.NextSequence(), before+1,
+			response.Body.String(),
+		)
+	}
+	var decoded activationCheckpointRequest
+	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.SchemaVersion != activationCheckpointRequestSchema ||
+		decoded.ActivationID != fixture.activationID ||
+		decoded.CheckpointDigest != checkpointDigest {
+		t.Fatalf("checkpoint response=%#v", decoded)
+	}
+	receipts := verifiedExecutorReceipts(t, fixture.config.Evidence)
+	last := receipts[len(receipts)-1]
+	if last.Type != evidence.ActivationCheckpoint ||
+		last.RuntimeRef != fixture.ref ||
+		last.GrantID != fixture.activationID ||
+		last.MetadataHash != checkpointDigest ||
+		last.Outcome != evidence.Committed {
+		t.Fatalf("activation checkpoint receipt=%#v", last)
+	}
+
+	response = postActivationCheckpoint(
+		t, fixture.server, fixture.ref, fixture.activationID, checkpointDigest,
+	)
+	if response.Code != http.StatusCreated ||
+		fixture.config.Evidence.NextSequence() != before+1 {
+		t.Fatalf(
+			"exact retry status=%d next=%d want=%d body=%s",
+			response.Code, fixture.config.Evidence.NextSequence(), before+1,
+			response.Body.String(),
+		)
+	}
+
+	response = postActivationCheckpoint(
+		t, fixture.server, fixture.ref, fixture.activationID,
+		"sha256:"+strings.Repeat("a", 64),
+	)
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "activation_checkpoint_conflict") ||
+		fixture.config.Evidence.NextSequence() != before+1 {
+		t.Fatalf(
+			"conflict status=%d next=%d want=%d body=%s",
+			response.Code, fixture.config.Evidence.NextSequence(), before+1,
+			response.Body.String(),
+		)
+	}
+}
+
+func TestActivationCheckpointRejectsDifferentActivationAndRuntimeIdentity(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, true)
+	fixture.start(t)
+	checkpointDigest := "sha256:" + strings.Repeat("f", 64)
+	before := fixture.config.Evidence.NextSequence()
+
+	for name, identity := range map[string][2]string{
+		"different activation": {
+			fixture.ref, "activation-other",
+		},
+		"different runtime": {
+			RuntimeRef("tenant-a", "agent-other"), fixture.activationID,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := postActivationCheckpoint(
+				t, fixture.server, identity[0], identity[1], checkpointDigest,
+			)
+			if response.Code != http.StatusConflict ||
+				!strings.Contains(response.Body.String(), "activation_runtime_mismatch") ||
+				fixture.config.Evidence.NextSequence() != before {
+				t.Fatalf(
+					"status=%d next=%d want=%d body=%s",
+					response.Code, fixture.config.Evidence.NextSequence(), before,
+					response.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestActivationCheckpointRequiresActivationAdmissionAndRetainedBegin(t *testing.T) {
+	t.Run("nonactivation runtime", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, false)
+		fixture.start(t)
+		before := fixture.config.Evidence.NextSequence()
+		response := postActivationCheckpoint(
+			t, fixture.server, fixture.ref, fixture.activationID,
+			"sha256:"+strings.Repeat("f", 64),
+		)
+		if response.Code != http.StatusConflict ||
+			!strings.Contains(response.Body.String(), "activation_runtime_mismatch") ||
+			fixture.config.Evidence.NextSequence() != before {
+			t.Fatalf(
+				"status=%d next=%d want=%d body=%s",
+				response.Code, fixture.config.Evidence.NextSequence(), before,
+				response.Body.String(),
+			)
+		}
+	})
+
+	t.Run("checkpoint before retained begin", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		fixture.start(t)
+		_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		empty, err := evidence.Open(
+			filepath.Join(t.TempDir(), "empty-evidence.bin"),
+			privateKey, "node-a", 1,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = empty.Close() })
+		fixture.server.secure.evidence = empty
+		response := postActivationCheckpoint(
+			t, fixture.server, fixture.ref, fixture.activationID,
+			"sha256:"+strings.Repeat("f", 64),
+		)
+		if response.Code != http.StatusConflict ||
+			!strings.Contains(response.Body.String(), "activation_checkpoint_conflict") ||
+			empty.NextSequence() != 1 {
+			t.Fatalf(
+				"status=%d next=%d body=%s",
+				response.Code, empty.NextSequence(), response.Body.String(),
+			)
+		}
+	})
+}
+
+func TestActivationCheckpointRejectsUnauthorizedAndInvalidBodies(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, true)
+	before := fixture.config.Evidence.NextSequence()
+	validBody, err := json.Marshal(activationCheckpointRequest{
+		SchemaVersion:    activationCheckpointRequestSchema,
+		ActivationID:     fixture.activationID,
+		CheckpointDigest: "sha256:" + strings.Repeat("f", 64),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name       string
+		body       []byte
+		authorized bool
+		want       int
+	}{
+		{
+			name: "unauthorized", body: validBody,
+			authorized: false, want: http.StatusUnauthorized,
+		},
+		{
+			name: "malformed", body: []byte(`{"schema_version":`),
+			authorized: true, want: http.StatusBadRequest,
+		},
+		{
+			name: "unknown field",
+			body: append(
+				bytes.TrimSuffix(validBody, []byte("}")),
+				[]byte(`,"unexpected":true}`)...,
+			),
+			authorized: true, want: http.StatusBadRequest,
+		},
+		{
+			name:       "oversized",
+			body:       bytes.Repeat([]byte("x"), maxBodyBytes+1),
+			authorized: true, want: http.StatusBadRequest,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/v1/workloads/"+fixture.ref+"/activation-checkpoints",
+				bytes.NewReader(test.body),
+			)
+			if test.authorized {
+				request.Header.Set("Authorization", "Bearer secret")
+			}
+			response := httptest.NewRecorder()
+			fixture.server.Handler().ServeHTTP(response, request)
+			if response.Code != test.want ||
+				fixture.config.Evidence.NextSequence() != before {
+				t.Fatalf(
+					"status=%d want=%d next=%d want_next=%d body=%s",
+					response.Code, test.want, fixture.config.Evidence.NextSequence(),
+					before, response.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestActivationCheckpointFailsClosedForStoppedDriftedOrRevokedRuntime(t *testing.T) {
+	checkpointDigest := "sha256:" + strings.Repeat("f", 64)
+	t.Run("degraded reconciliation", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		fixture.start(t)
+		fixture.server.reconcileMu.Lock()
+		fixture.server.reconcileAttempted = true
+		fixture.server.reconcileReport = ReconcileReport{
+			Ready: false,
+			Failures: []ReconcileFailure{{
+				Code:    "test_degraded",
+				Message: "test degraded readiness",
+			}},
+		}
+		fixture.server.reconcileMu.Unlock()
+		before := fixture.config.Evidence.NextSequence()
+		response := postActivationCheckpoint(
+			t, fixture.server, fixture.ref, fixture.activationID, checkpointDigest,
+		)
+		if response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(response.Body.String(), "reconciliation_required") ||
+			fixture.config.Evidence.NextSequence() != before {
+			t.Fatalf(
+				"status=%d next=%d want=%d body=%s",
+				response.Code, fixture.config.Evidence.NextSequence(), before,
+				response.Body.String(),
+			)
+		}
+	})
+
+	t.Run("direct host token needs explicit administrator authority", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		fixture.start(t)
+		fixture.server.secure.allowHostAdmin = false
+		before := fixture.config.Evidence.NextSequence()
+		response := postActivationCheckpoint(
+			t, fixture.server, fixture.ref, fixture.activationID, checkpointDigest,
+		)
+		if response.Code != http.StatusForbidden ||
+			!strings.Contains(response.Body.String(), "signed_lifecycle_required") ||
+			fixture.config.Evidence.NextSequence() != before {
+			t.Fatalf(
+				"host status=%d next=%d want=%d body=%s",
+				response.Code, fixture.config.Evidence.NextSequence(), before,
+				response.Body.String(),
+			)
+		}
+		response = postActivationCheckpointWithContext(
+			t, fixture.server,
+			WithAdmissionPrincipal(
+				context.Background(), "tenant-a", "node-a", 1,
+			),
+			fixture.ref, fixture.activationID, checkpointDigest,
+		)
+		if response.Code != http.StatusCreated ||
+			fixture.config.Evidence.NextSequence() != before+1 {
+			t.Fatalf(
+				"tenant status=%d next=%d want=%d body=%s",
+				response.Code, fixture.config.Evidence.NextSequence(), before+1,
+				response.Body.String(),
+			)
+		}
+	})
+
+	t.Run("stopped", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		before := fixture.config.Evidence.NextSequence()
+		response := postActivationCheckpoint(
+			t, fixture.server, fixture.ref, fixture.activationID, checkpointDigest,
+		)
+		if response.Code != http.StatusConflict ||
+			!strings.Contains(response.Body.String(), "workload_drift") ||
+			fixture.config.Evidence.NextSequence() != before {
+			t.Fatalf(
+				"status=%d next=%d want=%d body=%s",
+				response.Code, fixture.config.Evidence.NextSequence(), before,
+				response.Body.String(),
+			)
+		}
+	})
+
+	t.Run("topology drift", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		fixture.start(t)
+		fixture.docker.network.Internal = false
+		before := fixture.config.Evidence.NextSequence()
+		response := postActivationCheckpoint(
+			t, fixture.server, fixture.ref, fixture.activationID, checkpointDigest,
+		)
+		if response.Code != http.StatusConflict ||
+			!strings.Contains(response.Body.String(), "workload_drift") ||
+			fixture.config.Evidence.NextSequence() != before {
+			t.Fatalf(
+				"status=%d next=%d want=%d body=%s",
+				response.Code, fixture.config.Evidence.NextSequence(), before,
+				response.Body.String(),
+			)
+		}
+	})
+
+	t.Run("current policy", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		fixture.start(t)
+		fixture.server.secure.policyEnvelope = append(
+			append([]byte(nil), fixture.server.secure.policyEnvelope...), '\n',
+		)
+		before := fixture.config.Evidence.NextSequence()
+		response := postActivationCheckpoint(
+			t, fixture.server, fixture.ref, fixture.activationID, checkpointDigest,
+		)
+		if response.Code != http.StatusForbidden ||
+			!strings.Contains(response.Body.String(), "signed_lifecycle_required") ||
+			fixture.config.Evidence.NextSequence() != before {
+			t.Fatalf(
+				"status=%d next=%d want=%d body=%s",
+				response.Code, fixture.config.Evidence.NextSequence(), before,
+				response.Body.String(),
+			)
+		}
+	})
+}
+
+func TestActivationCheckpointReturnsUnavailableWhenEvidenceIsClosed(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, true)
+	fixture.start(t)
+	before := fixture.config.Evidence.NextSequence()
+	if err := fixture.config.Evidence.Close(); err != nil {
+		t.Fatal(err)
+	}
+	response := postActivationCheckpoint(
+		t, fixture.server, fixture.ref, fixture.activationID,
+		"sha256:"+strings.Repeat("f", 64),
+	)
+	if response.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(response.Body.String(), "evidence_unavailable") ||
+		fixture.config.Evidence.NextSequence() != before {
+		t.Fatalf(
+			"status=%d next=%d want=%d body=%s",
+			response.Code, fixture.config.Evidence.NextSequence(), before,
+			response.Body.String(),
+		)
+	}
+}
+
+func TestSecureAdmissionAllowReceiptFailureBlocksMutation(t *testing.T) {
+	docker := &secureDocker{}
+	server, err := NewServer(docker, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{State: true, Inference: true})
+	intent.Capabilities.State = true
+	intent.StateDisposition = "new"
+	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
+	config.Topology, config.Gateway = docker, grants
+	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+	config.GrantRoot, config.RelayGID = "/run/steward-gateway/grants", 1234
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Evidence.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	response := submitSecureAdmission(t, server, capsule, intent)
+	_, journalMutated := config.Journal.FormatVersion()
+	if response.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(response.Body.String(), "evidence_unavailable") ||
+		config.Evidence.NextSequence() != 1 || journalMutated ||
+		len(config.Journal.Pending()) != 0 || len(docker.created) != 0 ||
+		docker.observed != nil || docker.volume != nil || docker.network != nil ||
+		docker.relay != nil || len(grants.grants) != 0 {
+		t.Fatalf(
+			"status=%d evidence_next=%d journal_mutated=%t pending=%#v docker=%#v grants=%#v body=%s",
+			response.Code, config.Evidence.NextSequence(), journalMutated,
+			config.Journal.Pending(), docker, grants.grants, response.Body.String(),
+		)
+	}
+}
+
+func TestSecureAdmissionPreflightRejectionEmitsNoAllow(t *testing.T) {
+	t.Run("signed admission", func(t *testing.T) {
+		docker := &secureDocker{}
+		server, _ := NewServer(docker, "secret", nil)
+		capsule, intent, config := secureAdmissionFixture(t)
+		capsule[len(capsule)-1] ^= 1
+		if err := server.EnableSecureAdmission(config); err != nil {
+			t.Fatal(err)
+		}
+		assertRejectedAdmissionHasNoReceipts(t, server, docker, capsule, intent, config, http.StatusForbidden)
+	})
+
+	t.Run("image identity", func(t *testing.T) {
+		docker := &secureDocker{imageID: "sha256:" + strings.Repeat("c", 64)}
+		server, _ := NewServer(docker, "secret", nil)
+		capsule, intent, config := secureAdmissionFixture(t)
+		if err := server.EnableSecureAdmission(config); err != nil {
+			t.Fatal(err)
+		}
+		assertRejectedAdmissionHasNoReceipts(t, server, docker, capsule, intent, config, http.StatusConflict)
+	})
+
+	t.Run("state disposition", func(t *testing.T) {
+		docker := &secureDocker{}
+		server, _ := NewServer(docker, "secret", nil)
+		capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{State: true})
+		intent.Capabilities.State = true
+		intent.StateDisposition = "resume"
+		if err := server.EnableSecureAdmission(config); err != nil {
+			t.Fatal(err)
+		}
+		assertRejectedAdmissionHasNoReceipts(t, server, docker, capsule, intent, config, http.StatusConflict)
+	})
+
+	t.Run("capacity", func(t *testing.T) {
+		docker := &secureDocker{fakeDocker: fakeDocker{total: 32}}
+		server, _ := NewServer(docker, "secret", nil)
+		capsule, intent, config := secureAdmissionFixture(t)
+		if err := server.EnableSecureAdmission(config); err != nil {
+			t.Fatal(err)
+		}
+		assertRejectedAdmissionHasNoReceipts(t, server, docker, capsule, intent, config, http.StatusServiceUnavailable)
+	})
 }
 
 func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing.T) {
@@ -1225,6 +1932,81 @@ func TestSecureAdmissionBoundaryAndCapabilityFailures(t *testing.T) {
 		}
 		assertAdmissionResponse(t, server, capsule, intent, context.Background(), http.StatusBadGateway)
 	})
+}
+
+func submitSecureAdmission(
+	t *testing.T,
+	server *Server,
+	capsule []byte,
+	intent admission.InstanceIntent,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(secureProvisionRequest{
+		CapsuleDSSEBase64: base64.StdEncoding.EncodeToString(capsule),
+		Intent:            intent,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/admissions", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
+}
+
+func verifiedExecutorReceipts(t *testing.T, log *evidence.Log) []evidence.Receipt {
+	t.Helper()
+	delta, err := log.ExportDelta(evidence.Coordinate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta.More {
+		t.Fatal("test evidence exceeds one bounded delta")
+	}
+	path := filepath.Join(t.TempDir(), "evidence.bin")
+	if err := os.WriteFile(path, bytes.Join(delta.Frames, nil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receipts := make([]evidence.Receipt, 0, len(delta.Frames))
+	head, err := evidence.VerifyRecords(
+		path, log.PublicKey(), delta.Head.NodeID, delta.Head.Epoch,
+		func(record evidence.VerifiedReceipt) error {
+			receipts = append(receipts, record.Receipt)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.Sequence != uint64(len(receipts)) || head != delta.Head {
+		t.Fatalf("materialized evidence head = %#v, want %#v", head, delta.Head)
+	}
+	return receipts
+}
+
+func assertRejectedAdmissionHasNoReceipts(
+	t *testing.T,
+	server *Server,
+	docker *secureDocker,
+	capsule []byte,
+	intent admission.InstanceIntent,
+	config SecureAdmissionConfig,
+	wantStatus int,
+) {
+	t.Helper()
+	response := submitSecureAdmission(t, server, capsule, intent)
+	receipts := verifiedExecutorReceipts(t, config.Evidence)
+	_, journalMutated := config.Journal.FormatVersion()
+	if response.Code != wantStatus || len(receipts) != 0 || journalMutated ||
+		len(config.Journal.Pending()) != 0 || len(docker.created) != 0 ||
+		docker.observed != nil || docker.volume != nil || docker.network != nil || docker.relay != nil {
+		t.Fatalf(
+			"status=%d want=%d receipts=%#v journal_mutated=%t pending=%#v docker=%#v body=%s",
+			response.Code, wantStatus, receipts, journalMutated,
+			config.Journal.Pending(), docker, response.Body.String(),
+		)
+	}
 }
 
 func assertAdmissionResponse(t *testing.T, server *Server, capsule []byte, intent admission.InstanceIntent, ctx context.Context, want int) {

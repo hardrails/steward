@@ -108,10 +108,11 @@ Every endpoint except `GET /v1/healthz` requires
 
 | Method and path | Purpose |
 | --- | --- |
-| `POST /v1/admissions` | Verify a publisher-signed profile, local policy, and tenant-bound instance request; journal the mutation; and create a receipt-bound workload |
+| `POST /v1/admissions` | Verify a publisher-signed profile, local policy, and tenant-bound instance request; optionally bind an activation begin digest; journal the mutation; and create a receipt-bound workload |
+| `POST /v1/workloads/{runtime_ref}/activation-checkpoints` | Append an idempotent, content-free signed checkpoint after a running activation has verified terminal Gateway evidence |
 | `POST /v1/state/purge` | Permanently purge an inactive, authorized state lineage with a receipt |
 | `POST /v1/workloads` | Validate and create a stopped gVisor container |
-| `GET /v1/workloads/{runtime_ref}` | Read observed container state |
+| `GET /v1/workloads/{runtime_ref}` | Read observed container state; signed runtimes also return their complete committed admission projection |
 | `POST .../start`, `.../stop` | Idempotent lifecycle operation; while reconciliation is degraded, start is blocked and stop becomes a safety-only containment operation |
 | `GET .../logs` | Read a combined log tail capped at 1 MiB |
 | `GET .../egress` | Read bounded allow/deny, byte, and last-destination statistics for a signed egress grant |
@@ -119,13 +120,50 @@ Every endpoint except `GET /v1/healthz` requires
 | `GET /v1/healthz` | Process liveness |
 | `GET /v1/readiness` | Report readiness and the latest bounded reconciliation summary for present signed runtimes |
 
+The signed admission request can include an optional `activation` object with
+schema `steward.executor-activation-admission.v1`, a bounded `activation_id`, and
+a canonical SHA-256 `begin_digest`. Executor requires the signed runtime
+capability topology. After authority, policy, image, capacity, and other read-only
+preflights pass, Executor writes an idempotent `activation_begin` receipt before
+the admission-allow receipt, mutation journal, or host mutation. It stores the
+activation identity with the runtime. An exact replay can recover the same
+admission; a different activation ID or begin digest conflicts. The object does
+not grant authority and does not bypass capsule, policy, intent, generation,
+capacity, or topology checks.
+
+The activation-checkpoint endpoint accepts one strict JSON object capped by the
+same 1 MiB request limit as admission. It requires schema
+`steward.executor-activation-checkpoint.v1`, the same bounded activation ID, and a
+canonical SHA-256 `checkpoint_digest`; the request does not carry a begin digest.
+Executor derives all lifecycle identity from the committed signed fence. An
+uplink-injected tenant principal must match the retained tenant, node, and
+generation. A direct host-local call is accepted only when
+`-admission-allow-host-admin-intent` is explicitly enabled, in which case the
+loopback bearer acts with host-administrator authority rather than tenant
+authentication. Current site policy must still authorize the fence. The request
+activation ID must match the live runtime, the persisted begin digest must match
+the earlier signed marker, reconciliation must be ready, and the exact topology
+must be running. An exact retry does not add another receipt. A missing begin
+marker, conflicting digest, runtime drift, degraded reconciliation, or unavailable
+evidence log fails closed. The response and every error use the schemas in the
+Executor OpenAPI contract.
+
+For a securely admitted workload, `GET /v1/workloads/{runtime_ref}` returns the
+capsule and policy digests, generation, evidence key ID, grant and route-policy
+identity, service and public task authorities, configured egress or connector
+projection, and—when activation metadata was used—`activation_id` and
+`activation_begin_digest`. This lets a caller recover an exact admission response
+after an ambiguous transport failure without treating a different live workload
+as the same activation.
+
 Executor readiness describes the latest scan of present signed runtimes. With no
 present runtime that needs Gateway, it does not probe Gateway health. Capability
 availability is checked separately during admission and may still fail closed.
-When readiness is 503, signed admission, start, destroy, and state purge are
-blocked. An authenticated stop can still deactivate the Gateway grant identified
-by the retained signed admission record and stop exactly identified local agent and
-relay containers. It never settles the operation journal or removes a drifted object.
+When readiness is 503, signed admission, activation checkpoint, start, destroy,
+and state purge are blocked. An authenticated stop can still deactivate the
+Gateway grant identified by the retained signed admission record and stop exactly
+identified local agent and relay containers. It never settles the operation
+journal or removes a drifted object.
 
 ## Gateway task lifecycle API
 

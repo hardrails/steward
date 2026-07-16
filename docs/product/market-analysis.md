@@ -76,7 +76,8 @@ boundary instead.
 ## Adjacent operator-experience signal: WorkFlux
 
 [WorkFlux](https://www.workflux.ai/docs) is a hosted vertical-automation product,
-not a hardened runtime or disconnected fleet controller. Its
+whose public materials do not document a customer-operated runtime or disconnected
+fleet controller. Its
 [system requirements](https://www.workflux.ai/docs/system-requirements) describe a
 cloud-based platform that requires Internet connectivity and customer integration
 credentials. Its [privacy policy](https://www.workflux.ai/privacy) says the service
@@ -97,27 +98,38 @@ Its public product flow provides useful operator-experience lessons:
 - the [metrics guide](https://www.workflux.ai/docs/key-metrics) connects activity,
   latency, resolution, and efficiency measures to operational review.
 
-The public pages are not fully consistent: the
+The public pages are not fully consistent. The
 [catalog documentation](https://www.workflux.ai/docs/agents-overview) describes
-12 agents while the [catalog page](https://www.workflux.ai/agents) also renders
-“Showing 16 of 16.” Prices and bundle descriptions also vary between pages. These
-sources are useful evidence of product patterns, not validated procurement or
-performance data.
+12 agents, while the [catalog page](https://www.workflux.ai/agents) and current
+[pricing page](https://www.workflux.ai/pricing) describe 16. The
+[quick start](https://www.workflux.ai/docs/quick-start) describes a Professional
+bundle of 3–5 agents for $1,299 per month, while the pricing page describes five
+agents for $999 per month. Individual prices also differ between pages. These
+sources are useful evidence of product patterns, not validated procurement,
+availability, or performance data.
 
-### What Steward should borrow
+WorkFlux also describes its agents as production-ready and advertises rapid
+deployment, uptime, return on investment, savings, and outcome measures. This
+analysis found those statements on WorkFlux's own pages; it did not independently
+test or validate them.
 
-The translations below are product direction, not a claim that one unified
-operator console already ships. The implemented controller evidence surface is
-deliberately narrow: `unwitnessed`, `current`, `rollback_detected`, and
-`equivocation_detected`, plus site-administrator inspection and a
-witness-signed export. A combined action-required view, freshness policy, metrics
-suite, and durable notification outbox remain proposed work.
+### Borrow the journey; own the proof
+
+Steward should reuse the understandable progression from useful outcome to
+configuration, activation, and monitoring. It should not reuse hosted credential
+custody, vendor-controlled evidence, or Internet-dependent operation.
+
+The first two rows describe Steward's signed-release and fixed activation
+contracts. They do not imply a broad hosted catalog or general workflow engine.
+The remaining rows are design signals. A unified fleet-wide action-required view,
+freshness policy, metrics suite, and durable notification outbox do not currently
+ship.
 
 | WorkFlux pattern | Steward translation | Boundary |
 | --- | --- | --- |
-| Outcome-led catalog | Publish qualified Hermes, OpenClaw, and later agent packages as concrete recipes: useful work performed, required local services, data touched, capabilities requested, supported isolation, acceptance command, retained evidence, and known limits. | A recipe describes a qualified workload. It is not a new in-process workflow engine or a claim that every agent outcome is correct. |
-| Guided activation | Join selection, trust and key configuration, preflight, hostile-path test, signed activation, health verification, and rollback into one local choose/configure/test/activate/monitor journey. | Activation must remain transactional and fail closed; a smoother path cannot bypass signed policy or node verification. |
-| Action-required lifecycle | Design one bounded view of states that need intervention: incomplete enrollment, failed preflight, ambiguous command or external effect, capacity exhaustion, overdue evidence publication under a future freshness policy, rollback/equivocation finding, revoked identity, or degraded node. | These facts currently live in separate surfaces where implemented. Aggregation must not invent approval, clear ambiguity automatically, or let a model dismiss a finding. |
+| Outcome-led release artifact | A publisher-signed agent release names the useful outcome and binds the exact workload capsule, offline archive, deterministic canary, qualification-evidence digest, and known limitations. | Display text is descriptive publisher metadata. The release cannot authorize a tenant, node, image import, capability, or task, and it is not proof that the outcome occurred. Steward does not yet provide a local catalog for importing, searching, comparing, or tracking these releases. |
+| Guided activation | Use one local choose/configure/preflight/activate/canary/prove/monitor journey. Bind exact inputs in an unsigned plan, retain sequential state in an owner-only append-only workspace, derive the canary challenge from real admission, keep the default task-signing key off-node, verify one deterministic Hermes result, and correlate signed evidence for offline review. | The state machine accepts no arbitrary hooks or workflow code. Invalid canary authority, terminal canary failure, retained-evidence conflict, and expiry of the absolute canary deadline become sticky `action_required`; other transient local, network, and incomplete evidence-source errors remain retryable while their applicable deadline is open. Replacement requires a new activation ID and higher instance generation after the failed workload is stopped and destroyed. The initial recipe is only the closed node-local Hermes workspace audit and requires a dedicated host with exactly one policy tenant because its persistent volume has no hard storage quota. |
+| Action-required lifecycle | Extend activation's sticky `action_required` state into one bounded fleet view of incomplete enrollment, failed preflight, ambiguous command or external effect, capacity exhaustion, overdue evidence publication under a future freshness policy, rollback/equivocation finding, revoked identity, or degraded node. | These facts currently live in separate surfaces where implemented. Aggregation must not invent approval, clear ambiguity automatically, or let a model dismiss a finding. |
 | Operational metrics | Report controller and node availability, queue depth, delivery latency, admission failures, capacity, ambiguity, evidence age, and finding state. | Do not collect prompts, response bodies, customer records, or vendor-defined ROI. Security and reliability metrics must be derivable from local retained state. |
 | Event notifications | Build any notification surface on a bounded durable local outbox that can be polled or exported. | Outbound webhooks remain optional adapters; Internet delivery cannot become part of enforcement or recovery. |
 
@@ -125,7 +137,7 @@ suite, and durable notification outbox remain proposed work.
 
 Steward should not copy WorkFlux's cloud credential and data model. The WorkFlux
 flow expects customer API credentials, dashboard accounts,
-[public API tokens](https://www.workflux.ai/docs/api-authentication), and
+[OAuth client credentials and bearer access tokens](https://www.workflux.ai/docs/api-authentication), and
 business-system data. Steward's core should continue to keep tenant signing keys
 outside the controller, add operator-owned connector credentials only at the
 local Gateway's last hop, exclude prompts and bodies from receipts, and operate

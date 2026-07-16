@@ -220,7 +220,7 @@ func inspectUpgradeState(options upgradeOptions) (upgradeInspection, error) {
 		return upgradeInspection{}, err
 	}
 	if present {
-		summary, err := evidence.InspectFormat(options.evidenceFile)
+		summary, err := evidence.InspectRequiredFormat(options.evidenceFile)
 		if err != nil {
 			return upgradeInspection{}, fmt.Errorf("inspect evidence log: %w", err)
 		}
