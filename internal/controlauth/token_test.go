@@ -154,6 +154,56 @@ func TestEnrollmentExchangeIsDeterministicAndOneRequestOnly(t *testing.T) {
 	}
 }
 
+func TestControlInstanceAndEvidenceChallengeBindings(t *testing.T) {
+	manager, err := New(bytes.Repeat([]byte{0x4a}, KeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := New(bytes.Repeat([]byte{0x4b}, KeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.InstanceID() == "" || manager.InstanceID() == other.InstanceID() || manager.InstanceID() != manager.InstanceID() {
+		t.Fatal("control instance identity is empty, unstable, or not key-bound")
+	}
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	challenge, err := manager.MintEvidenceChallenge("node-cred-a", "node-a", now, now.Add(5*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.VerifyEvidenceChallenge(challenge, "node-cred-a", "node-a", now.Add(time.Minute)); err != nil {
+		t.Fatalf("verify exact evidence challenge: %v", err)
+	}
+	for name, verify := range map[string]func() error{
+		"credential": func() error {
+			return manager.VerifyEvidenceChallenge(challenge, "node-cred-b", "node-a", now.Add(time.Minute))
+		},
+		"node": func() error {
+			return manager.VerifyEvidenceChallenge(challenge, "node-cred-a", "node-b", now.Add(time.Minute))
+		},
+		"controller": func() error {
+			return other.VerifyEvidenceChallenge(challenge, "node-cred-a", "node-a", now.Add(time.Minute))
+		},
+		"expired": func() error {
+			return manager.VerifyEvidenceChallenge(challenge, "node-cred-a", "node-a", now.Add(5*time.Minute))
+		},
+		"tampered": func() error {
+			replacement := "A"
+			if challenge[len(challenge)-1] == 'A' {
+				replacement = "B"
+			}
+			return manager.VerifyEvidenceChallenge(challenge[:len(challenge)-1]+replacement, "node-cred-a", "node-a", now.Add(time.Minute))
+		},
+	} {
+		if err := verify(); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("%s substitution error = %v", name, err)
+		}
+	}
+	if _, err := manager.MintEvidenceChallenge("node-cred-a", "node-a", now, now.Add(11*time.Minute)); err == nil {
+		t.Fatal("challenge lifetime above the bound was accepted")
+	}
+}
+
 func TestEnrollmentRejectsDuplicateBindingsAndTampering(t *testing.T) {
 	manager, err := New(bytes.Repeat([]byte{17}, KeyBytes))
 	if err != nil {
