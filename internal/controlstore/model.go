@@ -133,20 +133,21 @@ type EvidenceFinding struct {
 // EvidenceWitness is the bounded controller-side state for one Executor
 // receipt chain. Full signed records remain on the node.
 type EvidenceWitness struct {
-	ReceiptNodeID   string           `json:"receipt_node_id"`
-	Epoch           uint64           `json:"epoch"`
-	PublicKeyBase64 string           `json:"public_key_base64"`
-	KeyID           string           `json:"key_id"`
-	PublicKeyDigest string           `json:"public_key_digest"`
-	PinnedAt        string           `json:"pinned_at"`
-	Sequence        uint64           `json:"sequence"`
-	ChainHash       string           `json:"chain_hash"`
-	AdvancedAt      string           `json:"advanced_at,omitempty"`
-	RecordsAccepted uint64           `json:"records_accepted"`
-	LastBatchStart  uint64           `json:"last_batch_start,omitempty"`
-	LastBatchEnd    uint64           `json:"last_batch_end,omitempty"`
-	LastBatchDigest string           `json:"last_batch_digest,omitempty"`
-	Finding         *EvidenceFinding `json:"finding,omitempty"`
+	IdentityProof   controlprotocol.ExecutorEvidenceIdentityProofV1 `json:"identity_proof"`
+	ReceiptNodeID   string                                          `json:"receipt_node_id"`
+	Epoch           uint64                                          `json:"epoch"`
+	PublicKeyBase64 string                                          `json:"public_key_base64"`
+	KeyID           string                                          `json:"key_id"`
+	PublicKeyDigest string                                          `json:"public_key_digest"`
+	PinnedAt        string                                          `json:"pinned_at"`
+	Sequence        uint64                                          `json:"sequence"`
+	ChainHash       string                                          `json:"chain_hash"`
+	AdvancedAt      string                                          `json:"advanced_at,omitempty"`
+	RecordsAccepted uint64                                          `json:"records_accepted"`
+	LastBatchStart  uint64                                          `json:"last_batch_start,omitempty"`
+	LastBatchEnd    uint64                                          `json:"last_batch_end,omitempty"`
+	LastBatchDigest string                                          `json:"last_batch_digest,omitempty"`
+	Finding         *EvidenceFinding                                `json:"finding,omitempty"`
 }
 
 type CommandState string
@@ -829,8 +830,12 @@ func validateState(current state, limits Limits) error {
 }
 
 func validateEvidenceWitness(nodeID, nodeCreatedAt string, witness EvidenceWitness) error {
-	public, err := decodeCanonicalBase64(witness.PublicKeyBase64)
-	if err != nil || len(public) != ed25519.PublicKeySize || witness.ReceiptNodeID != nodeID || witness.Epoch == 0 ||
+	public, err := controlprotocol.VerifyExecutorEvidenceIdentityProofV1(witness.IdentityProof)
+	claim := witness.IdentityProof.Claim
+	if err != nil || len(public) != ed25519.PublicKeySize || claim.ControlNodeID != nodeID ||
+		claim.Stream != controlprotocol.ExecutorEvidenceStreamV1 || claim.ReceiptNodeID != witness.ReceiptNodeID ||
+		claim.ReceiptEpoch != witness.Epoch || claim.PublicKeyBase64 != witness.PublicKeyBase64 ||
+		claim.PublicKeySHA256 != witness.PublicKeyDigest || witness.ReceiptNodeID != nodeID || witness.Epoch == 0 ||
 		witness.KeyID != evidence.KeyID(ed25519.PublicKey(public)) || witness.PublicKeyDigest != digestBytes(public) ||
 		!validTimestamp(witness.PinnedAt) || !validEvidenceCoordinate(witness.Sequence, witness.ChainHash) ||
 		witness.RecordsAccepted != witness.Sequence {

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/evidence"
 )
 
@@ -73,6 +74,9 @@ func TestEvidenceWitnessValidationRejectsIdentityCoordinateAndKeyReuse(t *testin
 	valid := testEvidenceWitness(t, node)
 
 	mutations := []func(*EvidenceWitness){
+		func(value *EvidenceWitness) {
+			value.IdentityProof.SignatureBase64 = base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+		},
 		func(value *EvidenceWitness) { value.ReceiptNodeID = "node-other" },
 		func(value *EvidenceWitness) { value.Epoch = 0 },
 		func(value *EvidenceWitness) { value.PublicKeyBase64 += "=" },
@@ -95,14 +99,19 @@ func TestEvidenceWitnessValidationRejectsIdentityCoordinateAndKeyReuse(t *testin
 		}
 	}
 
+	sharedPublic, sharedPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	candidate := baseline.clone()
 	first := candidate.nodes[node.ID]
-	first.Evidence = &valid
+	firstWitness := testEvidenceWitnessWithKey(t, first, sharedPublic, sharedPrivate)
+	first.Evidence = &firstWitness
 	candidate.nodes[first.ID] = first
 	second := cloneNode(first)
 	second.ID = "node-second"
-	second.Evidence = cloneEvidenceWitness(first.Evidence)
-	second.Evidence.ReceiptNodeID = second.ID
+	secondWitness := testEvidenceWitnessWithKey(t, second, sharedPublic, sharedPrivate)
+	second.Evidence = &secondWitness
 	candidate.nodes[second.ID] = second
 	if err := validateState(candidate, limits); err == nil {
 		t.Fatal("one evidence public key was accepted for two historical nodes")
@@ -139,11 +148,27 @@ func TestAdvancedEvidenceWitnessAndBoundedFindingValidate(t *testing.T) {
 
 func testEvidenceWitness(t *testing.T, node Node) EvidenceWitness {
 	t.Helper()
-	public, _, err := ed25519.GenerateKey(rand.Reader)
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testEvidenceWitnessWithKey(t, node, public, private)
+}
+
+func testEvidenceWitnessWithKey(t *testing.T, node Node, public ed25519.PublicKey, private ed25519.PrivateKey) EvidenceWitness {
+	t.Helper()
+	claim, err := controlprotocol.NewExecutorEvidenceIdentityClaimV1(
+		"control-test", "enrollment-test", node.ID, node.ID, 1, public,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceIdentityClaimV1(claim, private)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return EvidenceWitness{
+		IdentityProof: proof,
 		ReceiptNodeID: node.ID, Epoch: 1,
 		PublicKeyBase64: base64.StdEncoding.EncodeToString(public), KeyID: evidence.KeyID(public),
 		PublicKeyDigest: digestBytes(public), PinnedAt: node.CreatedAt,
