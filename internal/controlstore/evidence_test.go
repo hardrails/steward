@@ -1038,6 +1038,73 @@ func TestVerifiedRollbackSurvivesSiblingAdvancementAfterSnapshot(t *testing.T) {
 	}
 }
 
+func TestVerifiedFindingSurvivesTenantExpansionAfterSnapshot(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	fixture.createTenant(t, "tenant-b")
+	fixture.appendReceipt(t, "tenant-a")
+	firstPoll := fixture.poll(t, fixture.now.Add(2*time.Minute))
+	firstReport, firstDelta := fixture.reportFrom(t, evidence.Coordinate{}, firstPoll.Challenge)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, fixture.now.Add(2*time.Minute+time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	forkDelta := fixture.divergentDelta(t, "runtime-tenant-expansion-race")
+	if forkDelta.Head.Sequence != firstDelta.Head.Sequence ||
+		forkDelta.Head.ChainHash == firstDelta.Head.ChainHash {
+		t.Fatal("test did not construct a divergent equal-sequence branch")
+	}
+	forkPoll := fixture.poll(t, fixture.now.Add(3*time.Minute))
+	forkReport := fixture.signedReport(
+		t, evidence.Coordinate{}, forkDelta.Head.Sequence, encodeExecutorEvidenceHash(forkDelta.Head.ChainHash),
+		forkPoll.Challenge, encodeExecutorEvidenceTestFrames(forkDelta.Frames),
+	)
+
+	type applyResult struct {
+		response controlprotocol.ExecutorEvidenceReportResponseV1
+		err      error
+	}
+	snapshotTaken := make(chan struct{})
+	continueVerification := make(chan struct{})
+	result := make(chan applyResult, 1)
+	go func() {
+		response, err := fixture.store.applyExecutorEvidenceReport(
+			fixture.auth, fixture.identity, forkReport, fixture.now.Add(3*time.Minute+time.Second),
+			func() {
+				close(snapshotTaken)
+				<-continueVerification
+			},
+		)
+		result <- applyResult{response: response, err: err}
+	}()
+	<-snapshotTaken
+	if _, _, _, err := fixture.store.CreateEnrollment(
+		fixture.admin, fixture.auth, fixture.identity.NodeID, []string{"tenant-b"},
+		fixture.now.Add(2*time.Hour), fixture.now.Add(3*time.Minute+2*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	close(continueVerification)
+	fork := <-result
+	if fork.err != nil || !fork.response.Applied ||
+		fork.response.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected {
+		t.Fatalf("tenant-expansion fork response=%#v err=%v", fork.response, fork.err)
+	}
+	if err := fork.response.Validate(); err != nil {
+		t.Fatalf("tenant-expansion fork response is not protocol-valid: %v", err)
+	}
+	node := retainedExecutorEvidenceNode(t, fixture.store, fixture.identity.NodeID)
+	if !equalStrings(node.TenantIDs, []string{"tenant-a", "tenant-b"}) ||
+		node.Evidence == nil ||
+		node.Evidence.Sequence != firstDelta.Head.Sequence ||
+		node.Evidence.ChainHash != encodeExecutorEvidenceHash(firstDelta.Head.ChainHash) ||
+		node.Evidence.Finding == nil ||
+		node.Evidence.Finding.FirstChainHash != encodeExecutorEvidenceHash(forkDelta.Head.ChainHash) {
+		t.Fatalf("tenant-expansion fork node=%#v", node)
+	}
+}
+
 func TestHeadOnlyPreviewDoesNotBecomeHistoricalForkAfterSiblingAdvance(t *testing.T) {
 	fixture := newExecutorEvidenceFixture(t, "tenant-a")
 	sibling := fixture.siblingIdentity(t, "sibling-preview-race-exchange", fixture.now.Add(time.Minute))
@@ -1094,6 +1161,103 @@ func TestHeadOnlyPreviewDoesNotBecomeHistoricalForkAfterSiblingAdvance(t *testin
 		retained.ChainHash != encodeExecutorEvidenceHash(advanceDelta.Head.ChainHash) ||
 		retained.Finding != nil {
 		t.Fatalf("head-only preview created a historical fork=%#v", retained)
+	}
+}
+
+func TestHeadOnlyPreviewBecomesHistoricalForkAfterDivergentSiblingAdvance(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	sibling := fixture.siblingIdentity(t, "sibling-divergent-preview-race-exchange", fixture.now.Add(time.Minute))
+	fixture.appendReceipt(t, "tenant-a")
+	firstPoll := fixture.poll(t, fixture.now.Add(2*time.Minute))
+	firstReport, firstDelta := fixture.reportFrom(t, evidence.Coordinate{}, firstPoll.Challenge)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, fixture.now.Add(2*time.Minute+time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.appendReceipt(t, "tenant-a")
+	firstCoordinate := evidence.Coordinate{Sequence: firstDelta.Head.Sequence, ChainHash: firstDelta.Head.ChainHash}
+	previewDelta, err := fixture.log.ExportDelta(firstCoordinate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	divergentDelta := fixture.divergentExtensionDelta(t, firstCoordinate, "runtime-divergent-preview-race")
+	if divergentDelta.Head.Sequence != previewDelta.Head.Sequence ||
+		divergentDelta.Head.ChainHash == previewDelta.Head.ChainHash {
+		t.Fatal("test did not construct divergent equal-sequence extensions")
+	}
+	previewPoll := fixture.poll(t, fixture.now.Add(3*time.Minute))
+	advancePoll, err := fixture.store.PollExecutorEvidence(
+		fixture.auth, sibling, fixture.request,
+		fixture.now.Add(3*time.Minute), fixture.now.Add(8*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewReport := fixture.signedReport(
+		t, firstCoordinate, previewDelta.Head.Sequence, encodeExecutorEvidenceHash(previewDelta.Head.ChainHash),
+		previewPoll.Challenge, nil,
+	)
+	advanceReport := fixture.signedReport(
+		t, firstCoordinate, divergentDelta.Head.Sequence, encodeExecutorEvidenceHash(divergentDelta.Head.ChainHash),
+		advancePoll.Challenge, encodeExecutorEvidenceTestFrames(divergentDelta.Frames),
+	)
+
+	type applyResult struct {
+		response controlprotocol.ExecutorEvidenceReportResponseV1
+		err      error
+	}
+	previewAt := fixture.now.Add(3*time.Minute + time.Second)
+	advancedAt := fixture.now.Add(3*time.Minute + 2*time.Second)
+	snapshotTaken := make(chan struct{})
+	continueVerification := make(chan struct{})
+	result := make(chan applyResult, 1)
+	go func() {
+		response, err := fixture.store.applyExecutorEvidenceReport(
+			fixture.auth, fixture.identity, previewReport, previewAt,
+			func() {
+				close(snapshotTaken)
+				<-continueVerification
+			},
+		)
+		result <- applyResult{response: response, err: err}
+	}()
+	<-snapshotTaken
+	advanced, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, sibling, advanceReport, advancedAt,
+	)
+	if err != nil || !advanced.Applied ||
+		advanced.Status.Head == nil ||
+		advanced.Status.Head.ChainHash != encodeExecutorEvidenceHash(divergentDelta.Head.ChainHash) {
+		t.Fatalf("sibling divergent advancement=%#v err=%v", advanced, err)
+	}
+	close(continueVerification)
+	preview := <-result
+	if preview.err != nil || !preview.response.Applied ||
+		preview.response.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected {
+		t.Fatalf("racing divergent preview response=%#v err=%v", preview.response, preview.err)
+	}
+	if err := preview.response.Validate(); err != nil {
+		t.Fatalf("racing divergent preview response is not protocol-valid: %v", err)
+	}
+	finding := preview.response.Status.Finding
+	if finding == nil ||
+		finding.ComparedHead.ChainHash != encodeExecutorEvidenceHash(divergentDelta.Head.ChainHash) ||
+		finding.ObservedHead.ChainHash != encodeExecutorEvidenceHash(previewDelta.Head.ChainHash) ||
+		finding.DetectedAt != canonicalTimestamp(advancedAt) {
+		t.Fatalf("racing divergent preview finding=%#v", finding)
+	}
+	retained := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if retained.Sequence != divergentDelta.Head.Sequence ||
+		retained.ChainHash != encodeExecutorEvidenceHash(divergentDelta.Head.ChainHash) ||
+		retained.AdvancedAt != canonicalTimestamp(advancedAt) ||
+		retained.Finding == nil ||
+		retained.Finding.FirstComparedSequence != divergentDelta.Head.Sequence ||
+		retained.Finding.FirstComparedChainHash != encodeExecutorEvidenceHash(divergentDelta.Head.ChainHash) ||
+		retained.Finding.FirstChainHash != encodeExecutorEvidenceHash(previewDelta.Head.ChainHash) ||
+		retained.Finding.FirstObservedAt != canonicalTimestamp(advancedAt) {
+		t.Fatalf("racing divergent preview witness=%#v", retained)
 	}
 }
 
@@ -1426,6 +1590,48 @@ func (fixture executorEvidenceFixture) divergentDelta(t *testing.T, runtimeRef s
 		t.Fatal(err)
 	}
 	delta, err := log.ExportDelta(evidence.Coordinate{})
+	if closeErr := log.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return delta
+}
+
+func (fixture executorEvidenceFixture) divergentExtensionDelta(
+	t *testing.T,
+	base evidence.Coordinate,
+	runtimeRef string,
+) evidence.Delta {
+	t.Helper()
+	log, err := evidence.Open(
+		filepath.Join(t.TempDir(), "divergent-extension-evidence.log"),
+		fixture.private,
+		fixture.identity.NodeID,
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []evidence.Event{
+		{
+			Type: evidence.AdmissionAllow, TenantID: "tenant-a", RuntimeRef: "runtime-a",
+			CapsuleDigest: "sha256:capsule", PolicyDigest: "sha256:policy", Generation: 1,
+			GrantID: "grant-a", Outcome: evidence.Allowed,
+		},
+		{
+			Type: evidence.AdmissionAllow, TenantID: "tenant-a", RuntimeRef: runtimeRef,
+			CapsuleDigest: "sha256:capsule", PolicyDigest: "sha256:policy", Generation: 2,
+			GrantID: "grant-a", Outcome: evidence.Allowed,
+		},
+	} {
+		if _, err := log.Append(event); err != nil {
+			_ = log.Close()
+			t.Fatal(err)
+		}
+	}
+	delta, err := log.ExportDelta(base)
 	if closeErr := log.Close(); err == nil {
 		err = closeErr
 	}
