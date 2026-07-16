@@ -441,9 +441,9 @@ func runActivation(arguments []string, stdout io.Writer) error {
 				)
 			}
 			if !stored {
-				gatewayLocal, err := loadLiveGateway()
-				if err != nil {
-					return err
+				gatewayLocal, loadErr := loadLiveGateway()
+				if loadErr != nil {
+					return loadErr
 				}
 				canaryDeadline, deadlineErr := activationCanaryDeadline(
 					chain,
