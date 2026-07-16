@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"net/http"
 	"net/http/httptest"
@@ -248,5 +249,46 @@ func TestEnrollmentCredentialValidationRejectsEndpointSubstitution(t *testing.T)
 				t.Fatalf("substituted credential accepted: %+v", changed)
 			}
 		})
+	}
+}
+
+func TestControlEnrollmentExchangeDoesNotPublishMismatchedCredential(t *testing.T) {
+	const token = "steward_node_v1_node-cred-11111111111111111111111111111111_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/enroll" {
+			t.Fatalf("unexpected path %q", request.URL.Path)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"version":2,"scope":"node","node_id":"node-other","credential":"` + token + `"}`))
+	}))
+	defer server.Close()
+
+	directory := t.TempDir()
+	enrollmentPath := filepath.Join(directory, "enrollment.json")
+	privatePath := filepath.Join(directory, "evidence.private.pem")
+	publicPath := filepath.Join(directory, "evidence.public")
+	outputPath := filepath.Join(directory, "credential.json")
+	if err := os.WriteFile(enrollmentPath, []byte(
+		`{"controller_instance_id":"control-test","enrollment_id":"enr-1","enrollment_token":"secret","node_id":"node-1","tenant_ids":["tenant-a"],"expires_at":"2026-07-13T12:15:00Z"}`,
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"keygen", "-private-out", privatePath, "-public-out", publicPath,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	err := controlEnrollmentExchange([]string{
+		"-control-url", server.URL,
+		"-enrollment", enrollmentPath,
+		"-request-id", "request-1",
+		"-executor-evidence-private-key", privatePath,
+		"-credential-out", outputPath,
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "outside the enrollment identity") {
+		t.Fatalf("mismatched endpoint response error=%v", err)
+	}
+	if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched credential output exists: %v", err)
 	}
 }
