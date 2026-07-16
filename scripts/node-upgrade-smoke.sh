@@ -9,8 +9,7 @@ relay_test=true
 relay_test_root=
 node_lock_test_created=false
 legacy_lock_test_created=false
-uninstall_test_release=
-uninstall_test_parent_created=false
+uninstall_test_package_root_created=false
 if [[ ${EUID} -ne 0 ]]; then
 	if ! sudo -n true 2>/dev/null; then
 		if [[ ${STEWARD_REQUIRE_ROOT_SMOKE:-0} == 1 ]]; then
@@ -29,11 +28,8 @@ cleanup() {
 	if [[ $node_lock_test_created == true ]]; then
 		"${as_root[@]}" rm -rf -- /run/steward-node
 	fi
-	if [[ -n $uninstall_test_release ]]; then
-		"${as_root[@]}" rm -rf -- "$uninstall_test_release"
-	fi
-	if [[ $uninstall_test_parent_created == true ]]; then
-		"${as_root[@]}" rmdir /opt/steward/releases /opt/steward 2>/dev/null || true
+	if [[ $uninstall_test_package_root_created == true ]]; then
+		"${as_root[@]}" rm -rf -- /usr/lib/steward-node
 	fi
 	if [[ -n $relay_test_root ]]; then
 		if (( ${#as_root[@]} > 0 )); then "${as_root[@]}" rm -rf -- "$relay_test_root"; else rm -rf -- "$relay_test_root"; fi
@@ -287,15 +283,24 @@ EOF
 }
 
 exercise_uninstall_symlink_boundary() {
-	local version="v0.0.0-uninstall-boundary.${BASHPID:-$$}" trusted_resolver trusted_guard attacker_guard link status
-	uninstall_test_release="/opt/steward/releases/$version"
-	if [[ -e $uninstall_test_release || -L $uninstall_test_release ]]; then
-		echo "node-upgrade-smoke: uninstall boundary fixture release already exists" >&2
+	local package_root=/usr/lib/steward-node
+	local package_release=$package_root/release
+	local trusted_resolver trusted_guard attacker_guard link status
+	if [[ -e $package_root || -L $package_root ]]; then
+		echo "node-upgrade-smoke: native uninstall boundary fixture root already exists" >&2
 		return 1
 	fi
-	[[ -e /opt/steward || -L /opt/steward ]] || uninstall_test_parent_created=true
+	# Hosted runner images intentionally make /opt writable for tool installs.
+	# Use the other production-approved location so this fixture tests trusted
+	# sibling resolution without weakening the uninstaller's ancestor checks.
+	if ! "${as_root[@]}" mkdir -m 0755 -- "$package_root"; then
+		echo "node-upgrade-smoke: could not claim the native uninstall boundary fixture root" >&2
+		return 1
+	fi
+	uninstall_test_package_root_created=true
+	"${as_root[@]}" chown root:root "$package_root"
 	"${as_root[@]}" install -d -o root -g root -m 0755 \
-		"$uninstall_test_release/integration/scripts"
+		"$package_release/scripts"
 	trusted_resolver="$work/trusted-uninstall-resolver.sh"
 	{
 		printf '%s\n' '#!/bin/bash -p' 'set -euo pipefail' \
@@ -311,7 +316,7 @@ EOF
 		return 1
 	}
 	"${as_root[@]}" install -o root -g root -m 0755 "$trusted_resolver" \
-		"$uninstall_test_release/integration/scripts/uninstall-node.sh"
+		"$package_release/scripts/uninstall-node.sh"
 	trusted_guard="$work/trusted-node-removal-guard.sh"
 	cat >"$trusted_guard" <<'EOF'
 #!/bin/bash -p
@@ -319,7 +324,7 @@ EOF
 exit 73
 EOF
 	"${as_root[@]}" install -o root -g root -m 0755 "$trusted_guard" \
-		"$uninstall_test_release/integration/scripts/node-removal-guard.sh"
+		"$package_release/scripts/node-removal-guard.sh"
 	attacker_guard="$work/node-removal-guard.sh"
 	cat >"$attacker_guard" <<'EOF'
 #!/bin/bash -p
@@ -328,7 +333,7 @@ exit 74
 EOF
 	chmod 0755 "$attacker_guard"
 	link="$work/uninstall-node.sh"
-	ln -s "$uninstall_test_release/integration/scripts/uninstall-node.sh" "$link"
+	ln -s "$package_release/scripts/uninstall-node.sh" "$link"
 	set +e
 	"${as_root[@]}" env \
 		"SMOKE_TRUSTED_GUARD_MARKER=$work/trusted-guard-ran" \
