@@ -172,33 +172,54 @@ func TestExecutorMainServesHealthAndShutsDown(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	exit := make(chan error, 1)
+	go func() { exit <- cmd.Wait() }()
+	exited := false
 	t.Cleanup(func() {
-		if cmd.ProcessState == nil {
+		if !exited {
 			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
+			<-exit
 		}
 	})
 	url := "http://" + addr + "/v1/healthz"
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if response, err := http.Get(url); err == nil {
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	client := &http.Client{Timeout: time.Second}
+	ready := false
+	for !ready {
+		if response, err := client.Get(url); err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				break
+				ready = true
+				continue
 			}
 		}
-		time.Sleep(25 * time.Millisecond)
+		select {
+		case err := <-exit:
+			exited = true
+			t.Fatalf("executor exited before becoming healthy: err=%v output=%s", err, output.String())
+		case <-deadline.C:
+			_ = cmd.Process.Kill()
+			err := <-exit
+			exited = true
+			t.Fatalf("executor health timed out: err=%v output=%s", err, output.String())
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
-	response, err := http.Get(url)
-	if err != nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("executor health failed: response=%v err=%v output=%s", response, err, output.String())
-	}
-	response.Body.Close()
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitCommand(cmd, 5*time.Second); err != nil {
-		t.Fatalf("executor shutdown: %v output=%s", err, output.String())
+	select {
+	case err := <-exit:
+		exited = true
+		if err != nil {
+			t.Fatalf("executor shutdown: %v output=%s", err, output.String())
+		}
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		err := <-exit
+		exited = true
+		t.Fatalf("executor shutdown timed out: %v output=%s", err, output.String())
 	}
 }
 
