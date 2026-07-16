@@ -36,6 +36,10 @@ Signed admission (all trust inputs are optional as one group):
   --executor-evidence-public-key FILE
                                 Matching receipt public key
   --allow-host-admin-intent     Let the host token select signed tenant intent
+  --allow-unquotaed-state-on-dedicated-host
+                                Allow persistent Docker volumes only when the
+                                signed policy contains exactly one tenant; no
+                                hard byte or inode quota is enforced
 
 Optional:
   --local-only                 Configure loopback HTTP, CLI, and MCP without an uplink
@@ -67,6 +71,7 @@ executor_evidence_config=
 receipt_private=
 receipt_public=
 allow_host_admin=false
+allow_unquotaed_state=false
 start_services=true
 local_only=false
 while [[ $# -gt 0 ]]; do
@@ -84,6 +89,7 @@ while [[ $# -gt 0 ]]; do
 		--executor-evidence-private-key) receipt_private=${2:-}; shift 2 ;;
 		--executor-evidence-public-key) receipt_public=${2:-}; shift 2 ;;
 		--allow-host-admin-intent) allow_host_admin=true; shift ;;
+		--allow-unquotaed-state-on-dedicated-host) allow_unquotaed_state=true; shift ;;
 		--local-only) local_only=true; shift ;;
 		--no-start) start_services=false; shift ;;
 		-h | --help) usage; exit 0 ;;
@@ -136,6 +142,10 @@ if (( admission_required != 0 && admission_required != 3 )); then
 fi
 if (( admission_required == 0 )) && { [[ -n $node_id ]] || [[ $allow_host_admin == true ]]; }; then
 	echo "configure-node: --node-id and --allow-host-admin-intent require signed admission trust inputs" >&2
+	exit 2
+fi
+if (( admission_required == 0 )) && [[ $allow_unquotaed_state == true ]]; then
+	echo "configure-node: --allow-unquotaed-state-on-dedicated-host requires signed admission trust inputs" >&2
 	exit 2
 fi
 evidence_input_count=0
@@ -798,6 +808,8 @@ if (( admission_required == 3 )); then
 		)
 	fi
 	[[ $allow_host_admin == false ]] || admission_args+=(--allow-host-admin-intent)
+	[[ $allow_unquotaed_state == false ]] ||
+		admission_args+=(--allow-unquotaed-state-on-dedicated-host)
 	/usr/local/libexec/steward/configure-admission "${admission_args[@]}"
 fi
 

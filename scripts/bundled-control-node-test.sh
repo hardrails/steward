@@ -5,6 +5,7 @@ set -Eeuo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 installer="$root/scripts/install-steward.sh"
 configurator="$root/scripts/configure-node.sh"
+admission_configurator="$root/scripts/configure-admission.sh"
 work=$(mktemp -d "${TMPDIR:-/tmp}/steward-bundled-control-test.XXXXXX")
 cleanup() { rm -rf -- "$work"; }
 trap cleanup EXIT HUP INT TERM
@@ -30,13 +31,27 @@ evidence_enrollment=(
 	--executor-evidence-public-key /trust/node-receipts.public
 )
 
-bash -n "$installer" "$configurator"
+bash -n "$installer" "$configurator" "$admission_configurator"
+for helper in "$installer" "$configurator" "$admission_configurator"; do
+	/bin/bash -p "$helper" --help >"$work/${helper##*/}.help"
+	grep -Fq -- '--allow-unquotaed-state-on-dedicated-host' "$work/${helper##*/}.help"
+done
 
 /bin/bash -p "$installer" "${common_remote[@]}" "${signed_admission[@]}" "${evidence_enrollment[@]}" \
 	>"$work/bundled.plan"
 grep -Fqx '  enrollment:   bundled-control-executor-only' "$work/bundled.plan"
 grep -Fqx '  admission:    signed' "$work/bundled.plan"
 grep -Fqx '  evidence:     witnessed-uplink' "$work/bundled.plan"
+grep -Fqx '  state:        disabled' "$work/bundled.plan"
+
+/bin/bash -p "$installer" "${common_remote[@]}" "${signed_admission[@]}" "${evidence_enrollment[@]}" \
+	--allow-unquotaed-state-on-dedicated-host >"$work/dedicated-state.plan"
+grep -Fqx '  state:        dedicated-host-unquotaed' "$work/dedicated-state.plan"
+
+STEWARD_ALLOW_UNQUOTAED_STATE_ON_DEDICATED_HOST=true \
+	/bin/bash -p "$installer" "${common_remote[@]}" "${signed_admission[@]}" \
+	"${evidence_enrollment[@]}" >"$work/dedicated-state-env.plan"
+grep -Fqx '  state:        dedicated-host-unquotaed' "$work/dedicated-state-env.plan"
 
 /bin/bash -p "$installer" "${common_remote[@]}" \
 	--steward-credential /trust/generic-supervisor.json \
@@ -44,6 +59,29 @@ grep -Fqx '  evidence:     witnessed-uplink' "$work/bundled.plan"
 grep -Fqx '  enrollment:   generic-supervisor-and-executor' "$work/generic.plan"
 grep -Fqx '  admission:    unchanged' "$work/generic.plan"
 grep -Fqx '  evidence:     disabled' "$work/generic.plan"
+grep -Fqx '  state:        disabled' "$work/generic.plan"
+
+if /bin/bash -p "$installer" "${common_remote[@]}" \
+	--steward-credential /trust/generic-supervisor.json \
+	--allow-unquotaed-state-on-dedicated-host \
+	>"$work/state-without-admission.out" 2>"$work/state-without-admission.err"; then
+	echo "bundled-control-node-test: dedicated-host state accepted missing signed admission" >&2
+	exit 1
+fi
+grep -Fqx \
+	'install-steward: --allow-unquotaed-state-on-dedicated-host requires signed admission trust inputs' \
+	"$work/state-without-admission.err"
+
+if STEWARD_ALLOW_UNQUOTAED_STATE_ON_DEDICATED_HOST=invalid \
+	/bin/bash -p "$installer" --non-interactive --dry-run --stage-only \
+	--version v0.0.0 --package tar \
+	>"$work/invalid-state-env.out" 2>"$work/invalid-state-env.err"; then
+	echo "bundled-control-node-test: installer accepted an invalid dedicated-host state environment value" >&2
+	exit 1
+fi
+grep -Fqx \
+	'install-steward: STEWARD_ALLOW_UNQUOTAED_STATE_ON_DEDICATED_HOST must be true or false' \
+	"$work/invalid-state-env.err"
 
 if /bin/bash -p "$installer" "${common_remote[@]}" "${signed_admission[@]}" \
 	>"$work/no-evidence.out" 2>"$work/no-evidence.err"; then
@@ -100,5 +138,10 @@ fi
 grep -Fq 'rm -f -- /etc/steward/uplink-credential.json' "$configurator"
 grep -Fq 'uplink_delivery_state_created=true' "$configurator"
 grep -Fq 'steward-control requires a node-scoped Executor credential' "$configurator"
+grep -Fq 'admission_args+=(--allow-unquotaed-state-on-dedicated-host)' "$configurator"
+grep -Fq 'configure_args+=(--allow-unquotaed-state-on-dedicated-host)' "$installer"
+grep -Fq "printf 'EXECUTOR_STATE_ARG=-allow-unquotaed-state-on-dedicated-host" \
+	"$admission_configurator"
+grep -Fq "awk '!/^EXECUTOR_STATE_ARG=/" "$admission_configurator"
 
 echo "bundled-control-node-test: bundled control enrollment checks passed"

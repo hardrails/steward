@@ -26,6 +26,10 @@ Optional:
   --receipt-private-key FILE     Owner-only enrollment receipt private key
   --receipt-public-key FILE      Matching base64 Ed25519 receipt public key
   --allow-host-admin-intent      Allow the host-local token to select signed tenant intent
+  --allow-unquotaed-state-on-dedicated-host
+                                 Allow persistent Docker volumes only when the
+                                 signed policy contains exactly one tenant; no
+                                 hard byte or inode quota is enforced
   --no-restart                   Validate and commit without restarting an active Executor
   -h, --help                     Show this help
 
@@ -45,6 +49,7 @@ node_id=
 receipt_private=
 receipt_public=
 allow_host_admin=false
+allow_unquotaed_state=false
 restart=true
 node_lock_fd=
 while [[ $# -gt 0 ]]; do
@@ -56,6 +61,7 @@ while [[ $# -gt 0 ]]; do
 		--receipt-private-key) receipt_private=${2:-}; shift 2 ;;
 		--receipt-public-key) receipt_public=${2:-}; shift 2 ;;
 		--allow-host-admin-intent) allow_host_admin=true; shift ;;
+		--allow-unquotaed-state-on-dedicated-host) allow_unquotaed_state=true; shift ;;
 		--no-restart) restart=false; shift ;;
 		--node-lock-fd) node_lock_fd=${2:-}; shift 2 ;;
 		-h | --help) usage; exit 0 ;;
@@ -459,7 +465,7 @@ elif [[ $receipt_identity_state == absent ]]; then
 fi
 
 tmp_env=$(mktemp /etc/steward/.executor.env.XXXXXX)
-awk '!/^EXECUTOR_ADMISSION_(POLICY_FILE|SITE_ROOT_PUBLIC_KEY_FILE|SITE_ROOT_KEY_ID|NODE_ID|EVIDENCE_KEY_FILE|HOST_ADMIN_ARG)=/' \
+awk '!/^EXECUTOR_STATE_ARG=/ && !/^EXECUTOR_ADMISSION_(POLICY_FILE|SITE_ROOT_PUBLIC_KEY_FILE|SITE_ROOT_KEY_ID|NODE_ID|EVIDENCE_KEY_FILE|HOST_ADMIN_ARG)=/' \
 	/etc/steward/executor.env >"$tmp_env"
 {
 	printf 'EXECUTOR_ADMISSION_POLICY_FILE=/etc/steward/site-policy.dsse.json\n'
@@ -467,6 +473,11 @@ awk '!/^EXECUTOR_ADMISSION_(POLICY_FILE|SITE_ROOT_PUBLIC_KEY_FILE|SITE_ROOT_KEY_
 	printf 'EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID=%s\n' "$site_root_key_id"
 	printf 'EXECUTOR_ADMISSION_NODE_ID=%s\n' "$node_id"
 	printf 'EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE=/etc/steward/node-receipts.private.pem\n'
+	if [[ $allow_unquotaed_state == true ]]; then
+		printf 'EXECUTOR_STATE_ARG=-allow-unquotaed-state-on-dedicated-host\n'
+	else
+		printf 'EXECUTOR_STATE_ARG=\n'
+	fi
 	if [[ $allow_host_admin == true ]]; then
 		printf 'EXECUTOR_ADMISSION_HOST_ADMIN_ARG=-admission-allow-host-admin-intent\n'
 	else
