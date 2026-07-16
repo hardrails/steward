@@ -192,7 +192,8 @@ func TestDeliveryStoreIsOwnerOnlyNodeBoundAndStrict(t *testing.T) {
 	}
 	missingTenant := deliveryFixture("missing-tenant", 1)
 	raw, err := json.Marshal(deliveryStateFile{Version: deliveryStateVersion, NodeID: "node-1", Records: []deliveryRecord{{
-		DeliveryID: missingTenant.DeliveryID, DeliveryGeneration: 1,
+		ProtocolVersion: controlprotocol.ExecutorProtocolV3,
+		DeliveryID:      missingTenant.DeliveryID, DeliveryGeneration: 1,
 		CommandID: missingTenant.CommandID, CommandDigest: missingTenant.CommandDigest, Phase: deliveryPhaseAccepted,
 	}}})
 	if err != nil {

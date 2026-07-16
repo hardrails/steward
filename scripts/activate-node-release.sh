@@ -168,7 +168,7 @@ write_canonical_manifest() {
 		printf '    "gateway_state": {"read_min": 1, "read_max": 4, "write": 4},\n'
 		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
-		printf '    "uplink_delivery_state": {"read_min": 2, "read_max": 2, "write": 2},\n'
+		printf '    "uplink_delivery_state": {"read_min": 2, "read_max": 3, "write": 3},\n'
 		printf '    "uplink_state": {"read_min": 2, "read_max": 2, "write": 2}\n'
 		printf '  },\n'
 		printf '  "files": {\n'
@@ -647,9 +647,10 @@ if [[ $topology_enabled == true ]]; then
 	target_gateway_env="/var/lib/steward-node/relay-images/$version.env"
 fi
 
-# A node-scoped credential can reach the bundled control plane only through
-# protocol 3. Upgrade it after writers are stopped and compatibility is proven,
-# but before target preflight. Tenant-scoped credentials remain on protocol 1.
+# A node-scoped credential uses durable protocol 3 by default and can explicitly
+# select protocol 4. Prepare its ledger after writers are stopped and compatibility
+# is proven, but before target preflight. Tenant-scoped credentials remain on
+# protocol 1.
 prepare_uplink_delivery_state
 
 STEWARD_BIN="$release_dir/steward" \

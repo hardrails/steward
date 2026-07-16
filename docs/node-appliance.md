@@ -384,6 +384,12 @@ durable-format reader ranges is not eligible. Preserve `/var/lib/steward`,
 restoring them changes lifecycle, route commitments, audit, identity, or anti-replay
 state and needs a separate operator-approved recovery procedure.
 
+The delivery ledger has a specific one-way transition. Upgrade inspection leaves a
+format-2 `uplink-delivery-state.json` unchanged, while normal Executor startup
+atomically migrates it to format 3 before polling. After that startup, a prior
+release limited to format 2 is not eligible for software rollback, even if the
+ledger is empty. Draining the node does not downgrade the file.
+
 The guided upgrade is:
 
 ```console

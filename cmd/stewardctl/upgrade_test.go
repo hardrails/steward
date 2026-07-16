@@ -136,7 +136,7 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
 		"operation_journal":     {ReadMin: 1, ReadMax: 1, Write: 1},
 		"supervisor_state":      {ReadMin: 1, ReadMax: 1, Write: 1},
-		"uplink_delivery_state": {ReadMin: 2, ReadMax: 2, Write: 2},
+		"uplink_delivery_state": {ReadMin: 2, ReadMax: 3, Write: 3},
 		"uplink_state":          {ReadMin: 1, ReadMax: 2, Write: 2},
 	})
 	return fixture
@@ -156,7 +156,7 @@ func writeUpgradeManifest(t *testing.T, path string, formats map[string]releaseF
 	t.Helper()
 	uplinkDelivery := formats["uplink_delivery_state"]
 	if uplinkDelivery == (releaseFormatRange{}) {
-		uplinkDelivery = releaseFormatRange{ReadMin: 2, ReadMax: 2, Write: 2}
+		uplinkDelivery = releaseFormatRange{ReadMin: 2, ReadMax: 3, Write: 3}
 	}
 	raw, err := json.Marshal(releaseManifest{
 		Schema: "steward.release.v2", Version: "v9.9.9", OS: "linux", Architecture: "amd64",
@@ -190,7 +190,7 @@ func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 	if err := run(fixture.arguments("check-drained", "configured"), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"signed_admission\":\"configured\",\"active_fences\":0,\"pending_operations\":0,\"retained_gateway_grants\":0,\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_delivery_state\":2,\"uplink_state\":2},\"target_compatible\":true,\"drained\":true}\n"
+	want := "{\"signed_admission\":\"configured\",\"active_fences\":0,\"pending_operations\":0,\"retained_gateway_grants\":0,\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_delivery_state\":3,\"uplink_state\":2},\"target_compatible\":true,\"drained\":true}\n"
 	if output.String() != want {
 		t.Fatalf("check-drained snapshot\n got: %s want: %s", output.String(), want)
 	}
@@ -211,7 +211,7 @@ func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 	if err := run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want = "{\"signed_admission\":\"configured\",\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_delivery_state\":2,\"uplink_state\":2},\"target_compatible\":true}\n"
+	want = "{\"signed_admission\":\"configured\",\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_delivery_state\":3,\"uplink_state\":2},\"target_compatible\":true}\n"
 	if output.String() != want {
 		t.Fatalf("inspect-formats snapshot\n got: %s want: %s", output.String(), want)
 	}
@@ -219,6 +219,13 @@ func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 
 func TestUpgradeCheckDrainedReportsAllLegacyFormats(t *testing.T) {
 	fixture := newUpgradeFixture(t)
+	if err := os.WriteFile(
+		fixture.uplinkDelivery,
+		[]byte(`{"version":2,"node_id":"node-a","records":[]}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
 	legacyFence := []byte{'S', 'T', 'F', 'N', 1}
 	legacyFence = binary.BigEndian.AppendUint64(legacyFence, 0)
 	legacyFence = binary.BigEndian.AppendUint32(legacyFence, 0)
@@ -332,7 +339,7 @@ func TestUpgradeInspectionReportsHighestMixedEvidenceFormatAndBlocksLegacyReader
 		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
 		"operation_journal":     {ReadMin: 1, ReadMax: 1, Write: 1},
 		"supervisor_state":      {ReadMin: 1, ReadMax: 1, Write: 1},
-		"uplink_delivery_state": {ReadMin: 2, ReadMax: 2, Write: 2},
+		"uplink_delivery_state": {ReadMin: 2, ReadMax: 3, Write: 3},
 		"uplink_state":          {ReadMin: 1, ReadMax: 2, Write: 2},
 	})
 	output.Reset()
@@ -550,8 +557,8 @@ func TestUpgradeManifestRequiresAndChecksUplinkDeliveryStateFormat(t *testing.T)
 	}
 	output.Reset()
 	err = run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "uplink_delivery_state version 2 is outside reader range 1-1") ||
-		!strings.Contains(output.String(), `"uplink_delivery_state":2`) ||
+	if err == nil || !strings.Contains(err.Error(), "uplink_delivery_state version 3 is outside reader range 1-1") ||
+		!strings.Contains(output.String(), `"uplink_delivery_state":3`) ||
 		!strings.Contains(output.String(), `"target_compatible":false`) {
 		t.Fatalf("delivery-state compatibility output=%s error=%v", output.String(), err)
 	}

@@ -460,8 +460,12 @@ an error, not proof that the control plane stored the outcome.
 
 Protocol version 2 remains available for compatible external controllers when no
 delivery-state file is configured. Tenant-scoped version-1 credentials retain the
-legacy protocol. The bundled controller enrolls node-scoped credentials and uses
-version 3.
+legacy protocol. A node-scoped credential with a delivery ledger defaults to
+protocol 3. Operators can explicitly select protocol 4 with
+`-uplink-protocol-version 4` when the controller supports its bounded, typed
+admission projection. Protocols 3 and 4 share the same durable delivery ledger but
+never share a retained record: startup blocks a protocol switch until every
+unsettled record for the other protocol is reconciled.
 
 Remote plaintext HTTP is rejected by default. Private-CA and mutual TLS (mTLS)
 deployments use
@@ -486,6 +490,11 @@ Monitor these files and capacity-plan the node's retained identity count; a full
 store makes the affected mutation fail closed without consuming another tenant's
 reserved share. See
 [capability boundaries]({{ '/limitations/' | relative_url }}#durable-control-stores-have-fixed-lifetime-limits).
+
+The current delivery-ledger format is 3 and remains able to read format 2. Normal
+Executor startup atomically migrates a readable format-2 ledger before polling;
+read-only configuration and upgrade checks do not. The migration has no supported
+reverse operation, so a release limited to format 2 cannot be selected afterward.
 
 ## Deployment invariant
 

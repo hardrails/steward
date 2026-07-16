@@ -46,7 +46,7 @@ func main() {
 	initializeUplinkState := flag.Bool("initialize-uplink-state", false, "initialize a new empty executor uplink fence and exit")
 	migrateUplinkStateTenant := flag.String("migrate-uplink-state-v1-tenant", "", "explicitly bind a version-1 uplink fence to this tenant and migrate it to version 2")
 	uplinkProtocolVersion := flag.Int("uplink-protocol-version", 0, "executor uplink protocol (0 selects from credential and delivery state)")
-	uplinkDeliveryStateFile := flag.String("uplink-delivery-state-file", "", "owner-only durable delivery state required for executor uplink protocol 3")
+	uplinkDeliveryStateFile := flag.String("uplink-delivery-state-file", "", "owner-only durable delivery state required for executor uplink protocol 3 or 4")
 	initializeUplinkDeliveryState := flag.Bool("initialize-uplink-delivery-state", false, "initialize node-bound executor uplink delivery state and exit")
 	uplinkPollInterval := flag.Duration("uplink-poll-interval", 10*time.Second, "base interval between executor uplink polls")
 	uplinkAllowInsecureHTTP := flag.Bool("uplink-allow-insecure-http", false, "explicitly allow plaintext HTTP to a non-loopback uplink")

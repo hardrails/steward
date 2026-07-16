@@ -8,14 +8,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/executor"
+	"github.com/hardrails/steward/internal/gateway"
 )
+
+const activationAdmissionRequestSchema = "steward.executor-activation-admission.v1"
+
+var errLocalResponseLimit = errors.New("local executor response exceeds its byte limit")
 
 type command struct {
 	CommandID          string          `json:"command_id"`
@@ -55,6 +62,9 @@ type report struct {
 	// effectUncertain is local protocol evidence, not part of legacy wire JSON.
 	// It distinguishes validation failures from an error after ServeHTTP began.
 	effectUncertain bool
+	// admission is retained only for a protocol-4 successful signed admit. It
+	// is deliberately outside legacy report JSON.
+	admission *controlprotocol.ExecutorAdmissionProjectionV1
 }
 
 type uncertainEffectError struct{ cause error }
@@ -85,6 +95,36 @@ type workloadPayload struct {
 type admissionPayload struct {
 	CapsuleDSSEBase64 string                   `json:"capsule_dsse_base64"`
 	Intent            admission.InstanceIntent `json:"intent"`
+	Activation        *admissionActivation     `json:"activation,omitempty"`
+}
+
+type admissionActivation struct {
+	SchemaVersion string `json:"schema_version"`
+	ActivationID  string `json:"activation_id"`
+	BeginDigest   string `json:"begin_digest"`
+}
+
+// executorAdmissionResponse pins Executor's public response exactly. The
+// protocol projection adds its own schema marker after this strict local
+// response has been decoded.
+type executorAdmissionResponse struct {
+	RuntimeRef            string                                    `json:"runtime_ref"`
+	Status                string                                    `json:"status"`
+	CapsuleDigest         string                                    `json:"capsule_digest"`
+	PolicyDigest          string                                    `json:"policy_digest"`
+	Generation            uint64                                    `json:"generation"`
+	EvidenceKeyID         string                                    `json:"evidence_key_id"`
+	GrantID               string                                    `json:"grant_id,omitempty"`
+	ServicePath           string                                    `json:"service_path,omitempty"`
+	ServiceID             string                                    `json:"service_id,omitempty"`
+	TaskAuthorities       []controlprotocol.ExecutorTaskAuthorityV1 `json:"task_authorities,omitempty"`
+	EgressProxy           string                                    `json:"egress_proxy,omitempty"`
+	EgressRouteIDs        []string                                  `json:"egress_route_ids,omitempty"`
+	ConnectorURL          string                                    `json:"connector_url,omitempty"`
+	ConnectorIDs          []string                                  `json:"connector_ids,omitempty"`
+	RoutePolicyDigest     string                                    `json:"route_policy_digest,omitempty"`
+	ActivationID          string                                    `json:"activation_id,omitempty"`
+	ActivationBeginDigest string                                    `json:"activation_begin_digest,omitempty"`
 }
 
 type purgePayload struct {
@@ -92,12 +132,13 @@ type purgePayload struct {
 }
 
 type dispatcher struct {
-	handler    http.Handler
-	token      string
-	tenantID   string
-	nodeID     string
-	nodeScoped bool
-	state      *StateStore
+	handler          http.Handler
+	token            string
+	tenantID         string
+	nodeID           string
+	nodeScoped       bool
+	projectAdmission bool
+	state            *StateStore
 }
 
 func (d *dispatcher) execute(ctx context.Context, cmd command) report {
@@ -145,7 +186,19 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 	}
 
 	runtimeRef := executor.RuntimeRef(cmd.TenantID, instanceID)
-	reported, err := d.apply(ctx, cmd, cmd.TenantID, instanceID, runtimeRef)
+	var reported string
+	var projection *controlprotocol.ExecutorAdmissionProjectionV1
+	if d.projectAdmission && cmd.Kind == "admit" {
+		reported, projection, err = d.applyAdmissionV4(
+			ctx,
+			cmd,
+			cmd.TenantID,
+			instanceID,
+			runtimeRef,
+		)
+	} else {
+		reported, err = d.apply(ctx, cmd, cmd.TenantID, instanceID, runtimeRef)
+	}
 	if err != nil {
 		rep.effectUncertain = effectMayHaveOccurred(err)
 		rep.Result["error"] = err.Error()
@@ -170,6 +223,7 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 	rep.Status = "done"
 	rep.ReportedStatus = reported
 	rep.Result["runtime_ref"] = runtimeRef
+	rep.admission = cloneAdmissionProjection(projection)
 	if absent {
 		rep.Result["absent"] = true
 	}
@@ -188,13 +242,9 @@ func commandIsStale(cmd command, current position) bool {
 func (d *dispatcher) apply(ctx context.Context, cmd command, tenantID, instanceID, runtimeRef string) (string, error) {
 	switch cmd.Kind {
 	case "admit":
-		var payload admissionPayload
-		if err := dsse.DecodeStrictInto(cmd.Payload, maxWireBytes, &payload); err != nil {
-			return "", fmt.Errorf("invalid signed admission payload: %w", err)
-		}
-		if payload.Intent.TenantID != tenantID || payload.Intent.NodeID != d.nodeID ||
-			payload.Intent.InstanceID != instanceID || payload.Intent.Generation != uint64(cmd.InstanceGeneration) {
-			return "", errors.New("signed admission intent does not match enrolled command identity and generation")
+		payload, err := d.decodeAdmissionPayload(cmd, tenantID, instanceID)
+		if err != nil {
+			return "", err
 		}
 		ctx = executor.WithAdmissionPrincipal(ctx, tenantID, d.nodeID, cmd.InstanceGeneration)
 		return d.call(ctx, http.MethodPost, "/v1/admissions", payload)
@@ -266,6 +316,200 @@ func (d *dispatcher) apply(ctx context.Context, cmd command, tenantID, instanceI
 	}
 }
 
+func (d *dispatcher) decodeAdmissionPayload(
+	cmd command,
+	tenantID, instanceID string,
+) (admissionPayload, error) {
+	var payload admissionPayload
+	if err := dsse.DecodeStrictInto(cmd.Payload, maxWireBytes, &payload); err != nil {
+		return admissionPayload{}, fmt.Errorf("invalid signed admission payload: %w", err)
+	}
+	if payload.Intent.TenantID != tenantID || payload.Intent.NodeID != d.nodeID ||
+		payload.Intent.InstanceID != instanceID ||
+		payload.Intent.Generation != uint64(cmd.InstanceGeneration) {
+		return admissionPayload{}, errors.New("signed admission intent does not match enrolled command identity and generation")
+	}
+	if payload.Activation != nil &&
+		(payload.Activation.SchemaVersion != activationAdmissionRequestSchema ||
+			!boundedRouteIdentifier(payload.Activation.ActivationID) ||
+			!controlprotocol.ValidSHA256Digest(payload.Activation.BeginDigest)) {
+		return admissionPayload{}, errors.New("signed admission activation metadata is invalid")
+	}
+	return payload, nil
+}
+
+func (d *dispatcher) applyAdmissionV4(
+	ctx context.Context,
+	cmd command,
+	tenantID, instanceID, runtimeRef string,
+) (string, *controlprotocol.ExecutorAdmissionProjectionV1, error) {
+	payload, err := d.decodeAdmissionPayload(cmd, tenantID, instanceID)
+	if err != nil {
+		return "", nil, err
+	}
+	ctx = executor.WithAdmissionPrincipal(ctx, tenantID, d.nodeID, cmd.InstanceGeneration)
+	return d.callAdmissionV4(ctx, payload, runtimeRef)
+}
+
+func (d *dispatcher) callAdmissionV4(
+	ctx context.Context,
+	payload admissionPayload,
+	expectedRuntimeRef string,
+) (string, *controlprotocol.ExecutorAdmissionProjectionV1, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", nil, err
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		"http://executor.local/v1/admissions",
+		bytes.NewReader(raw),
+	)
+	if err != nil {
+		return "", nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+d.token)
+	req.Header.Set("Content-Type", "application/json")
+	response := newLocalResponse(controlprotocol.MaxExecutorReportBytes)
+	d.handler.ServeHTTP(response, req)
+	if response.overflow {
+		return "", nil, localCallError(http.MethodPost, errLocalResponseLimit)
+	}
+	if response.status >= 400 {
+		return "", nil, localCallError(
+			http.MethodPost,
+			fmt.Errorf(
+				"local executor returned HTTP %d: %s",
+				response.status,
+				strings.TrimSpace(response.body.String()),
+			),
+		)
+	}
+	if response.body.Len() == 0 ||
+		response.body.Len() > controlprotocol.MaxExecutorReportBytes {
+		return "", nil, localCallError(
+			http.MethodPost,
+			errors.New("local executor admission response is empty or exceeds the protocol-4 projection limit"),
+		)
+	}
+	var local executorAdmissionResponse
+	if err := dsse.DecodeStrictInto(
+		response.body.Bytes(),
+		controlprotocol.MaxExecutorReportBytes,
+		&local,
+	); err != nil {
+		return "", nil, localCallError(
+			http.MethodPost,
+			fmt.Errorf("decode strict local executor admission response: %w", err),
+		)
+	}
+	projection := controlprotocol.ExecutorAdmissionProjectionV1{
+		SchemaVersion:         controlprotocol.ExecutorAdmissionProjectionSchemaV1,
+		RuntimeRef:            local.RuntimeRef,
+		Status:                local.Status,
+		CapsuleDigest:         local.CapsuleDigest,
+		PolicyDigest:          local.PolicyDigest,
+		Generation:            local.Generation,
+		EvidenceKeyID:         local.EvidenceKeyID,
+		GrantID:               local.GrantID,
+		ServicePath:           local.ServicePath,
+		ServiceID:             local.ServiceID,
+		TaskAuthorities:       append([]controlprotocol.ExecutorTaskAuthorityV1(nil), local.TaskAuthorities...),
+		EgressProxy:           local.EgressProxy,
+		EgressRouteIDs:        append([]string(nil), local.EgressRouteIDs...),
+		ConnectorURL:          local.ConnectorURL,
+		ConnectorIDs:          append([]string(nil), local.ConnectorIDs...),
+		RoutePolicyDigest:     local.RoutePolicyDigest,
+		ActivationID:          local.ActivationID,
+		ActivationBeginDigest: local.ActivationBeginDigest,
+	}
+	if err := projection.Validate(); err != nil {
+		return "", nil, localCallError(
+			http.MethodPost,
+			fmt.Errorf("validate local executor admission projection: %w", err),
+		)
+	}
+	if err := correlateAdmissionProjection(payload, expectedRuntimeRef, projection); err != nil {
+		return "", nil, localCallError(http.MethodPost, err)
+	}
+	reportedStatus := "stopped"
+	if projection.Status == "running" {
+		reportedStatus = "running"
+	}
+	return reportedStatus, &projection, nil
+}
+
+func correlateAdmissionProjection(
+	payload admissionPayload,
+	expectedRuntimeRef string,
+	projection controlprotocol.ExecutorAdmissionProjectionV1,
+) error {
+	intent := payload.Intent
+	if projection.RuntimeRef != expectedRuntimeRef ||
+		projection.Generation != intent.Generation ||
+		projection.CapsuleDigest != intent.CapsuleDigest {
+		return errors.New("local executor admission response changed signed runtime identity, generation, or capsule digest")
+	}
+	needsGrant := intent.Capabilities.Inference ||
+		intent.Capabilities.Service ||
+		intent.Capabilities.Egress ||
+		intent.Capabilities.Connector
+	expectedGrantID := ""
+	if needsGrant {
+		expectedGrantID = gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation)
+	}
+	if projection.GrantID != expectedGrantID {
+		return errors.New("local executor admission response changed the command-bound runtime grant")
+	}
+	if intent.Capabilities.Service != (projection.ServicePath != "") {
+		return errors.New("local executor admission response changed the signed service capability")
+	}
+	if intent.Capabilities.Service && projection.ServiceID != intent.ServiceID {
+		return errors.New("local executor admission response changed the signed service identity")
+	}
+	expectedEgress := admission.CanonicalRouteIDs(intent.EgressRouteIDs)
+	if !slices.Equal(projection.EgressRouteIDs, expectedEgress) {
+		return errors.New("local executor admission response changed the signed egress routes")
+	}
+	expectedConnectors := admission.CanonicalConnectorIDs(intent.ConnectorIDs)
+	if !slices.Equal(projection.ConnectorIDs, expectedConnectors) {
+		return errors.New("local executor admission response changed the signed connector routes")
+	}
+	needsRoutePolicy := intent.Capabilities.Inference ||
+		len(projection.TaskAuthorities) > 0 ||
+		len(expectedEgress) > 0 ||
+		len(expectedConnectors) > 0
+	if needsRoutePolicy != (projection.RoutePolicyDigest != "") {
+		return errors.New("local executor admission response changed the effective route-policy binding")
+	}
+	if payload.Activation == nil {
+		if projection.ActivationID != "" || projection.ActivationBeginDigest != "" {
+			return errors.New("local executor admission response introduced unsigned activation metadata")
+		}
+	} else if projection.ActivationID != payload.Activation.ActivationID ||
+		projection.ActivationBeginDigest != payload.Activation.BeginDigest {
+		return errors.New("local executor admission response changed signed activation metadata")
+	}
+	return nil
+}
+
+func boundedRouteIdentifier(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for index, character := range value {
+		if character >= 'A' && character <= 'Z' ||
+			character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' ||
+			index > 0 && (character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func validateLifecyclePayload(cmd command) error {
 	if !cmd.signed {
 		return nil
@@ -298,8 +542,11 @@ func (d *dispatcher) call(ctx context.Context, method, target string, body any) 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	res := newLocalResponse()
+	res := newLocalResponse(1 << 20)
 	d.handler.ServeHTTP(res, req)
+	if res.overflow {
+		return "", localCallError(method, errLocalResponseLimit)
+	}
 	if res.status >= 400 {
 		return "", localCallError(method, fmt.Errorf("local executor returned HTTP %d: %s", res.status, strings.TrimSpace(res.body.String())))
 	}
@@ -331,15 +578,32 @@ func (d *dispatcher) call(ctx context.Context, method, target string, body any) 
 }
 
 type localResponse struct {
-	header http.Header
-	body   bytes.Buffer
-	status int
+	header   http.Header
+	body     bytes.Buffer
+	status   int
+	limit    int
+	overflow bool
 }
 
-func newLocalResponse() *localResponse               { return &localResponse{header: make(http.Header), status: 200} }
-func (r *localResponse) Header() http.Header         { return r.header }
-func (r *localResponse) WriteHeader(status int)      { r.status = status }
-func (r *localResponse) Write(p []byte) (int, error) { return r.body.Write(p) }
+func newLocalResponse(limit int) *localResponse {
+	return &localResponse{header: make(http.Header), status: 200, limit: limit}
+}
+
+func (r *localResponse) Header() http.Header    { return r.header }
+func (r *localResponse) WriteHeader(status int) { r.status = status }
+func (r *localResponse) Write(p []byte) (int, error) {
+	if r.overflow || r.limit <= r.body.Len() {
+		r.overflow = true
+		return 0, errLocalResponseLimit
+	}
+	remaining := r.limit - r.body.Len()
+	if len(p) > remaining {
+		written, _ := r.body.Write(p[:remaining])
+		r.overflow = true
+		return written, errLocalResponseLimit
+	}
+	return r.body.Write(p)
+}
 
 func requireEOF(decoder *json.Decoder) error {
 	var extra any

@@ -66,7 +66,8 @@ type Config struct {
 	Now                func() time.Time
 	// ProtocolVersion zero preserves tenant v1 and selects node v3 only when a
 	// DeliveryState store is present. Explicit 2 keeps the signed-command v2
-	// compatibility protocol; explicit 3 requires DeliveryState.
+	// compatibility protocol; explicit 3 or 4 requires DeliveryState. Protocol
+	// 4 is never selected implicitly.
 	ProtocolVersion int
 	DeliveryState   *DeliveryStore
 	// ValidateOnly checks delivery state without converting pre-crash executing
@@ -132,23 +133,42 @@ func NewPoller(cfg Config) (*Poller, error) {
 				protocolVersion = controlprotocol.ExecutorProtocolV3
 			}
 		}
-		if protocolVersion != 2 && protocolVersion != controlprotocol.ExecutorProtocolV3 {
-			return nil, fmt.Errorf("node-scoped uplink protocol version must be 2 or %d", controlprotocol.ExecutorProtocolV3)
+		if protocolVersion != 2 &&
+			protocolVersion != controlprotocol.ExecutorProtocolV3 &&
+			protocolVersion != controlprotocol.ExecutorProtocolV4 {
+			return nil, fmt.Errorf(
+				"node-scoped uplink protocol version must be 2, %d, or %d",
+				controlprotocol.ExecutorProtocolV3,
+				controlprotocol.ExecutorProtocolV4,
+			)
 		}
-		if protocolVersion == controlprotocol.ExecutorProtocolV3 {
+		if protocolVersion == controlprotocol.ExecutorProtocolV3 ||
+			protocolVersion == controlprotocol.ExecutorProtocolV4 {
 			if cfg.DeliveryState == nil {
-				return nil, errors.New("executor uplink protocol 3 requires durable delivery state")
+				return nil, fmt.Errorf(
+					"executor uplink protocol %d requires durable delivery state",
+					protocolVersion,
+				)
 			}
 			if cfg.DeliveryState.NodeID() != credential.NodeID {
 				return nil, errors.New("executor delivery state node ID does not match the uplink credential")
 			}
+			if err := cfg.DeliveryState.PrepareProtocol(protocolVersion, true); err != nil {
+				return nil, fmt.Errorf("validate executor delivery protocol state: %w", err)
+			}
 			if !cfg.ValidateOnly {
+				if err := cfg.DeliveryState.PrepareProtocol(protocolVersion, false); err != nil {
+					return nil, fmt.Errorf("prepare executor delivery protocol state: %w", err)
+				}
+				if err := cfg.DeliveryState.MigrateFormat(); err != nil {
+					return nil, fmt.Errorf("migrate executor delivery state: %w", err)
+				}
 				if err := cfg.DeliveryState.RecoverExecuting(); err != nil {
 					return nil, fmt.Errorf("recover executor delivery state: %w", err)
 				}
 			}
 		} else if cfg.DeliveryState != nil {
-			return nil, errors.New("executor delivery state is only valid with uplink protocol 3")
+			return nil, errors.New("executor delivery state is only valid with uplink protocol 3 or 4")
 		}
 	} else {
 		if protocolVersion != 0 && protocolVersion != 1 {
@@ -181,6 +201,7 @@ func NewPoller(cfg Config) (*Poller, error) {
 		dispatcher: dispatcher{
 			handler: cfg.Handler, token: cfg.LocalToken, tenantID: credential.TenantID,
 			nodeID: credential.NodeID, nodeScoped: credential.NodeScoped(), state: cfg.State,
+			projectAdmission: protocolVersion == controlprotocol.ExecutorProtocolV4,
 		},
 	}, nil
 }
@@ -231,8 +252,9 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 		credential.TenantID != p.expected.TenantID || credential.NodeID != p.expected.NodeID {
 		return errors.New("rotated uplink credential changed version, scope, tenant_id, or node_id; refusing it")
 	}
-	if p.protocolVersion == controlprotocol.ExecutorProtocolV3 {
-		drained, err := p.retryUnacknowledgedReportsV3(ctx, credential.Credential)
+	if p.protocolVersion == controlprotocol.ExecutorProtocolV3 ||
+		p.protocolVersion == controlprotocol.ExecutorProtocolV4 {
+		drained, err := p.retryUnacknowledgedReports(ctx, credential.Credential)
 		if err != nil {
 			return err
 		}
@@ -242,13 +264,27 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 	}
 	requestBody := []byte(`{}`)
 	if credential.NodeScoped() {
-		if p.protocolVersion == controlprotocol.ExecutorProtocolV3 {
+		switch p.protocolVersion {
+		case controlprotocol.ExecutorProtocolV3:
 			requestBody, err = json.Marshal(controlprotocol.ExecutorPollRequestV3{
 				ProtocolVersion: controlprotocol.ExecutorProtocolV3,
 				NodeID:          credential.NodeID, CredentialScope: "node",
 				Capabilities: []string{"signed-commands-v2", "delivery-leases-v3", "multi-tenant", "read", "state-purge"},
 			})
-		} else {
+		case controlprotocol.ExecutorProtocolV4:
+			requestBody, err = json.Marshal(controlprotocol.ExecutorPollRequestV4{
+				ProtocolVersion: controlprotocol.ExecutorProtocolV4,
+				NodeID:          credential.NodeID, CredentialScope: "node",
+				Capabilities: []string{
+					"signed-commands-v2",
+					"delivery-leases-v3",
+					controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
+					"multi-tenant",
+					"read",
+					"state-purge",
+				},
+			})
+		default:
 			requestBody, err = json.Marshal(pollRequest{
 				ProtocolVersion: 2, NodeID: credential.NodeID, CredentialScope: "node",
 				Capabilities: []string{"signed-commands-v2", "multi-tenant", "read", "state-purge"},
@@ -276,8 +312,11 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read poll response: %w", err)
 	}
-	if p.protocolVersion == controlprotocol.ExecutorProtocolV3 {
+	switch p.protocolVersion {
+	case controlprotocol.ExecutorProtocolV3:
 		return p.processPollV3(ctx, credential, raw)
+	case controlprotocol.ExecutorProtocolV4:
+		return p.processPollV4(ctx, credential, raw)
 	}
 	var payload pollResponse
 	if err := dsse.DecodeStrictInto(raw, maxWireBytes, &payload); err != nil {
@@ -308,6 +347,13 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 	return nil
 }
 
+func (p *Poller) retryUnacknowledgedReports(ctx context.Context, credential string) (bool, error) {
+	if p.protocolVersion == controlprotocol.ExecutorProtocolV4 {
+		return p.retryUnacknowledgedReportsV4(ctx, credential)
+	}
+	return p.retryUnacknowledgedReportsV3(ctx, credential)
+}
+
 func (p *Poller) retryUnacknowledgedReportsV3(ctx context.Context, credential string) (bool, error) {
 	reports, more, err := p.deliveryState.UnacknowledgedReports(maxCommandsPerPoll)
 	if err != nil {
@@ -325,6 +371,23 @@ func (p *Poller) retryUnacknowledgedReportsV3(ctx context.Context, credential st
 	return !more, nil
 }
 
+func (p *Poller) retryUnacknowledgedReportsV4(ctx context.Context, credential string) (bool, error) {
+	reports, more, err := p.deliveryState.UnacknowledgedReportsV4(maxCommandsPerPoll)
+	if err != nil {
+		return false, fmt.Errorf("list unacknowledged executor reports v4: %w", err)
+	}
+	var failures []error
+	for index, report := range reports {
+		if err := p.sendReportV4(ctx, credential, report); err != nil {
+			failures = append(failures, fmt.Errorf("retry terminal report v4 %d: %w", index, err))
+		}
+	}
+	if err := errors.Join(failures...); err != nil {
+		return false, err
+	}
+	return !more, nil
+}
+
 func (p *Poller) processPollV3(ctx context.Context, credential *stewarduplink.Credential, raw []byte) error {
 	payload, err := controlprotocol.DecodeExecutorPollResponseV3(raw, maxWireBytes)
 	if err != nil {
@@ -333,6 +396,20 @@ func (p *Poller) processPollV3(ctx context.Context, credential *stewarduplink.Cr
 	var failures []error
 	for index, rawDelivery := range payload.Deliveries {
 		if err := p.processDeliveryV3(ctx, credential, rawDelivery); err != nil {
+			failures = append(failures, fmt.Errorf("delivery %d: %w", index, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (p *Poller) processPollV4(ctx context.Context, credential *stewarduplink.Credential, raw []byte) error {
+	payload, err := controlprotocol.DecodeExecutorPollResponseV4(raw, maxWireBytes)
+	if err != nil {
+		return fmt.Errorf("decode executor poll v4 response: %w", err)
+	}
+	var failures []error
+	for index, rawDelivery := range payload.Deliveries {
+		if err := p.processDeliveryV4(ctx, credential, rawDelivery); err != nil {
 			failures = append(failures, fmt.Errorf("delivery %d: %w", index, err))
 		}
 	}
@@ -389,6 +466,99 @@ func (p *Poller) processDeliveryV3(ctx context.Context, credential *stewarduplin
 	}
 }
 
+func (p *Poller) processDeliveryV4(ctx context.Context, credential *stewarduplink.Credential, raw []byte) error {
+	delivery, err := controlprotocol.DecodeExecutorDeliveryV4(raw)
+	if err != nil {
+		return fmt.Errorf("decode wrapper: %w", err)
+	}
+	commandRaw, err := base64.StdEncoding.DecodeString(delivery.CommandDSSEBase64)
+	if err != nil || base64.StdEncoding.EncodeToString(commandRaw) != delivery.CommandDSSEBase64 {
+		return p.rejectDeliveryV4(
+			ctx,
+			credential.Credential,
+			delivery,
+			"invalid_command_encoding",
+			"signed command encoding is invalid",
+			err,
+		)
+	}
+	if dsse.Digest(commandRaw) != delivery.CommandDigest {
+		return p.rejectDeliveryV4(
+			ctx,
+			credential.Credential,
+			delivery,
+			"command_digest_mismatch",
+			"signed command digest does not match its delivery",
+			nil,
+		)
+	}
+	cmd, err := p.decodeCommand(commandRaw, credential)
+	if err != nil {
+		return p.rejectDeliveryV4(
+			ctx,
+			credential.Credential,
+			delivery,
+			"invalid_signed_command",
+			"signed command was rejected",
+			err,
+		)
+	}
+	if cmd.CommandID != delivery.CommandID {
+		return p.rejectDeliveryV4(
+			ctx,
+			credential.Credential,
+			delivery,
+			"command_identity_mismatch",
+			"delivery command ID does not match the signed command",
+			nil,
+		)
+	}
+	expectedDeliveryID, err := controlprotocol.ExecutorDeliveryID(
+		cmd.TenantID,
+		cmd.NodeID,
+		cmd.CommandID,
+	)
+	if err != nil || delivery.DeliveryID != expectedDeliveryID {
+		return p.rejectDeliveryV4(
+			ctx,
+			credential.Credential,
+			delivery,
+			"delivery_identity_mismatch",
+			"delivery ID does not match the verified tenant, node, and command",
+			err,
+		)
+	}
+	decision, terminal, err := p.deliveryState.AcceptV4(
+		delivery,
+		cmd.TenantID,
+		cmd.ClaimGeneration,
+	)
+	if err != nil {
+		return fmt.Errorf("persist accepted delivery: %w", err)
+	}
+	switch decision {
+	case deliveryStale:
+		return nil
+	case deliveryReport:
+		if terminal == nil {
+			return errors.New("terminal delivery has no retained report")
+		}
+		return p.sendReportV4(ctx, credential.Credential, *terminal)
+	case deliveryExecute:
+		if err := p.deliveryState.MarkExecuting(delivery.DeliveryID); err != nil {
+			return fmt.Errorf("persist executing delivery: %w", err)
+		}
+		localReport := p.dispatcher.execute(ctx, cmd)
+		report := makeReportV4(delivery, localReport, cmd.Kind == "admit")
+		if err := p.deliveryState.MarkTerminalV4(report); err != nil {
+			return fmt.Errorf("persist terminal delivery: %w", err)
+		}
+		return p.sendReportV4(ctx, credential.Credential, report)
+	default:
+		return errors.New("delivery store returned an invalid decision")
+	}
+}
+
 func (p *Poller) rejectDeliveryV3(
 	ctx context.Context,
 	credential string,
@@ -415,6 +585,42 @@ func (p *Poller) rejectDeliveryV3(
 		return nil
 	}
 	return p.sendReportV3(ctx, credential, *terminal)
+}
+
+func (p *Poller) rejectDeliveryV4(
+	ctx context.Context,
+	credential string,
+	delivery controlprotocol.ExecutorDeliveryV4,
+	errorCode, detail string,
+	cause error,
+) error {
+	if cause != nil {
+		p.logger.Warn(
+			"executor uplink rejected signed delivery",
+			"delivery_id",
+			delivery.DeliveryID,
+			"error_code",
+			errorCode,
+			"error",
+			cause,
+		)
+	}
+	rejected := controlprotocol.ExecutorReportV4{
+		ProtocolVersion: controlprotocol.ExecutorProtocolV4,
+		DeliveryID:      delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
+		CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
+		Status: controlprotocol.ExecutorStatusRejected, ReportedStatus: "failed",
+		ErrorCode: errorCode,
+		Result:    controlprotocol.ExecutorReportResultV4{Error: detail},
+	}
+	terminal, err := p.deliveryState.RejectV4(delivery, rejected)
+	if err != nil {
+		return fmt.Errorf("persist rejected delivery: %w", err)
+	}
+	if terminal == nil {
+		return nil
+	}
+	return p.sendReportV4(ctx, credential, *terminal)
 }
 
 func makeReportV3(delivery controlprotocol.ExecutorDeliveryV3, legacy report) controlprotocol.ExecutorReportV3 {
@@ -447,6 +653,63 @@ func makeReportV3(delivery controlprotocol.ExecutorDeliveryV3, legacy report) co
 			// remains reserved for legacy ambiguous reports and is never compacted.
 			report.Status = controlprotocol.ExecutorStatusRejected
 			report.ErrorCode = "executor_command_rejected"
+		}
+	}
+	return report
+}
+
+func makeReportV4(
+	delivery controlprotocol.ExecutorDeliveryV4,
+	legacy report,
+	admitCommand bool,
+) controlprotocol.ExecutorReportV4 {
+	result := controlprotocol.ExecutorReportResultV4{}
+	if value, ok := legacy.Result["runtime_ref"].(string); ok {
+		result.RuntimeRef = truncateUTF8(value, 1024)
+	}
+	if value, ok := legacy.Result["error"].(string); ok {
+		result.Error = truncateUTF8(value, 4096)
+	}
+	if value, ok := legacy.Result["replayed"].(bool); ok {
+		result.Replayed = value
+	}
+	if value, ok := legacy.Result["absent"].(bool); ok {
+		result.Absent = value
+	}
+	if admitCommand &&
+		legacy.Status == controlprotocol.ExecutorStatusDone &&
+		!result.Replayed &&
+		!result.Absent &&
+		result.Error == "" {
+		result.Admission = cloneAdmissionProjection(legacy.admission)
+	}
+	report := controlprotocol.ExecutorReportV4{
+		ProtocolVersion: controlprotocol.ExecutorProtocolV4,
+		DeliveryID:      delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
+		CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
+		Status: legacy.Status, ReportedStatus: boundedReportedStatus(legacy.ReportedStatus),
+		ClaimGeneration: legacy.ClaimGeneration, Result: result,
+	}
+	if legacy.Status == controlprotocol.ExecutorStatusFailed {
+		report.Result.Admission = nil
+		if legacy.effectUncertain {
+			report.Status = controlprotocol.ExecutorStatusOutcomeUnknown
+			report.ErrorCode = "outcome_unknown"
+		} else {
+			report.Status = controlprotocol.ExecutorStatusRejected
+			report.ErrorCode = "executor_command_rejected"
+		}
+	}
+	if err := report.Validate(); err != nil && report.Result.Admission != nil {
+		// Executor has already returned success and the lifecycle fence is
+		// durable, but an invalid or oversized projection must never escape.
+		// Persist an explicit ambiguous outcome so an operator reconciles the
+		// node instead of trusting a partial admission observation.
+		report.Status = controlprotocol.ExecutorStatusOutcomeUnknown
+		report.ReportedStatus = "failed"
+		report.ErrorCode = "outcome_unknown"
+		report.Result = controlprotocol.ExecutorReportResultV4{
+			Error: "successful admission projection was invalid or exceeded its protocol limit; reconcile the node",
 		}
 	}
 	return report
@@ -609,6 +872,67 @@ func (p *Poller) sendReportV3(ctx context.Context, credential string, report con
 	}
 	// Both true and false are acknowledgements. False is the control plane's
 	// stale-or-duplicate no-op and must never cause command reexecution.
+	if err := p.deliveryState.Settle(report.DeliveryID, report.DeliveryGeneration); err != nil {
+		return fmt.Errorf("persist executor report acknowledgement: %w", err)
+	}
+	return nil
+}
+
+func (p *Poller) sendReportV4(
+	ctx context.Context,
+	credential string,
+	report controlprotocol.ExecutorReportV4,
+) error {
+	if err := report.Validate(); err != nil {
+		return fmt.Errorf("validate executor report v4: %w", err)
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	if len(raw) > controlprotocol.MaxExecutorReportBytes {
+		return errors.New("executor uplink report v4 exceeds wire limit")
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		p.reportURL,
+		bytes.NewReader(raw),
+	)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+credential)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return wireError("report", resp)
+	}
+	responseBody, err := readBounded(resp.Body, controlprotocol.MaxExecutorReportBytes)
+	if err != nil {
+		return fmt.Errorf("read executor report v4 response: %w", err)
+	}
+	var response controlprotocol.ExecutorReportResponseV4
+	if err := dsse.DecodeStrictInto(
+		responseBody,
+		controlprotocol.MaxExecutorReportBytes,
+		&response,
+	); err != nil {
+		return fmt.Errorf("decode executor report v4 response: %w", err)
+	}
+	if response.ProtocolVersion != controlprotocol.ExecutorProtocolV4 {
+		return fmt.Errorf(
+			"executor report acknowledgement protocol_version is %d, want %d",
+			response.ProtocolVersion,
+			controlprotocol.ExecutorProtocolV4,
+		)
+	}
+	// Applied false is the same stale-or-duplicate terminal acknowledgement as
+	// protocol 3 and must never cause command reexecution.
 	if err := p.deliveryState.Settle(report.DeliveryID, report.DeliveryGeneration); err != nil {
 		return fmt.Errorf("persist executor report acknowledgement: %w", err)
 	}

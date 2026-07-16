@@ -833,10 +833,11 @@ admission_env_complete() {
 	' /etc/steward/executor.env
 }
 
-# Node-scoped credentials select protocol 3 and therefore require the durable
-# delivery ledger. Tenant-scoped credentials retain protocol 1 with an empty
-# delivery-state setting. Initialization is create-only: an existing ledger is
-# never reset, and final preflight verifies its owner, format, and node binding.
+# Node-scoped credentials select durable protocol 3 by default and can explicitly
+# select protocol 4, so they require the delivery ledger. Tenant-scoped credentials
+# retain protocol 1 with an empty delivery-state setting. Initialization is
+# create-only: an existing ledger is never reset, and final preflight verifies its
+# owner, format, and node binding.
 if [[ $executor_credential_scope == node ]]; then
 	if ! admission_env_complete; then
 		transaction_error "a node-scoped Executor credential requires complete signed admission"

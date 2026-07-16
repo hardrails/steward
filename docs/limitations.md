@@ -226,7 +226,7 @@ lifetime:
 | `operation-journal.bin` | 16 MiB | Prepared and terminal host-mutation records |
 | `admission-fences.bin` | 4 MiB and 65,535 records | One retained record for each tenant and instance pair, including destroyed tombstones |
 | `uplink-state.json` | 1 MiB encoded | One retained anti-replay position for each tenant and instance pair seen through Executor uplink |
-| `uplink-delivery-state.json` | 8 MiB and 4,096 records; 32 records and 1 MiB of reserved terminal encoding per verified tenant | Accepted, executing, unacknowledged, and ambiguous version-3 deliveries |
+| `uplink-delivery-state.json` | 8 MiB and 4,096 records; 32 records and 1 MiB of reserved terminal encoding per verified tenant | Accepted, executing, unacknowledged, and ambiguous protocol-3 or protocol-4 deliveries |
 
 These are retention limits, not live-workload limits. Destroying a workload does
 not remove the history needed to reject replay. The evidence log and operation
