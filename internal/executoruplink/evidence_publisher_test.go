@@ -143,6 +143,7 @@ func (server *evidenceWitnessServer) ServeHTTP(writer http.ResponseWriter, reque
 				state = controlprotocol.ExecutorEvidenceStatusRollbackDetected
 			}
 			retained := server.head
+			response.Applied = true
 			response.Status = controlprotocol.ExecutorEvidenceStatusV1{
 				State: state, Head: &retained, WitnessedAt: server.now.Format(time.RFC3339Nano),
 				Finding: &controlprotocol.ExecutorEvidenceFindingV1{

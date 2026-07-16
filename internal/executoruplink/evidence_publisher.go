@@ -316,7 +316,7 @@ func (publisher *EvidencePublisher) validateReportResponse(
 		return err
 	}
 	if response.Status.Finding != nil {
-		if response.Applied || response.Status.Finding.ObservedHead != reported {
+		if response.Status.Finding.ObservedHead != reported {
 			return errors.New("controller evidence finding does not match the signed report")
 		}
 		return ErrEvidenceDivergence
