@@ -27,8 +27,9 @@ type ArchiveIdentity struct {
 // parsed from those same bytes. It is suitable for constructing a signed
 // offline release before a later PrepareBound call verifies the archive again.
 type SourceInspection struct {
-	Archive ArchiveIdentity `json:"archive"`
-	Image   Image           `json:"image"`
+	Archive           ArchiveIdentity `json:"archive"`
+	Image             Image           `json:"image"`
+	UncompressedBytes int64           `json:"-"`
 }
 
 func (identity ArchiveIdentity) validate(limits Limits) error {
@@ -82,7 +83,63 @@ func InspectSourceContext(ctx context.Context, archivePath string, limits Limits
 	if err := contextError(ctx); err != nil {
 		return SourceInspection{}, err
 	}
-	return SourceInspection{Archive: archive, Image: image}, nil
+	return SourceInspection{
+		Archive: archive, Image: image, UncompressedBytes: image.uncompressedBytes,
+	}, nil
+}
+
+// InspectRootSource is InspectSource for an archive name confined beneath a
+// descriptor-pinned root. Mutable ancestor renames and escaping symlinks cannot
+// redirect the source open outside that root.
+func InspectRootSource(root *os.Root, archiveName string, limits Limits) (SourceInspection, error) {
+	return InspectRootSourceContext(context.Background(), root, archiveName, limits)
+}
+
+// InspectRootSourceContext is InspectRootSource with cancellation propagated
+// through root-confined snapshotting and inspection.
+func InspectRootSourceContext(
+	ctx context.Context,
+	root *os.Root,
+	archiveName string,
+	limits Limits,
+) (SourceInspection, error) {
+	if err := contextError(ctx); err != nil {
+		return SourceInspection{}, err
+	}
+	if root == nil || archiveName == "" {
+		return SourceInspection{}, errors.New("OCI archive root and name are required")
+	}
+	if err := limits.validate(); err != nil {
+		return SourceInspection{}, err
+	}
+	directory, err := os.MkdirTemp("", ".steward-oci-inspect-")
+	if err != nil {
+		return SourceInspection{}, fmt.Errorf("create private OCI inspection directory: %w", err)
+	}
+	cleanup := func() error { return os.RemoveAll(directory) }
+	snapshotPath := directory + string(os.PathSeparator) + "source.snapshot"
+	archive, err := snapshotArchiveRootIdentityContext(
+		ctx, root, archiveName, snapshotPath, limits,
+	)
+	if err != nil {
+		return SourceInspection{}, errors.Join(err, cleanup())
+	}
+	image, err := InspectContext(ctx, snapshotPath, limits)
+	if err != nil {
+		return SourceInspection{}, errors.Join(err, cleanup())
+	}
+	if err := contextError(ctx); err != nil {
+		return SourceInspection{}, errors.Join(err, cleanup())
+	}
+	if err := cleanup(); err != nil {
+		return SourceInspection{}, fmt.Errorf("remove private OCI inspection directory: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return SourceInspection{}, err
+	}
+	return SourceInspection{
+		Archive: archive, Image: image, UncompressedBytes: image.uncompressedBytes,
+	}, nil
 }
 
 // Prepared is a verified, tag-free, minimal image archive held by one open,
@@ -318,6 +375,50 @@ func snapshotArchiveIdentityContext(ctx context.Context, sourcePath, snapshotPat
 		return ArchiveIdentity{}, fmt.Errorf("open OCI archive: %w", err)
 	}
 	defer func() { _ = source.Close() }()
+	return snapshotOpenedArchiveIdentityContext(ctx, before, source, snapshotPath, limits)
+}
+
+func snapshotArchiveRootIdentityContext(
+	ctx context.Context,
+	root *os.Root,
+	sourceName string,
+	snapshotPath string,
+	limits Limits,
+) (_ ArchiveIdentity, returnErr error) {
+	if err := contextError(ctx); err != nil {
+		return ArchiveIdentity{}, err
+	}
+	before, err := root.Lstat(sourceName)
+	if err != nil {
+		return ArchiveIdentity{}, fmt.Errorf("stat root-confined OCI archive: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return ArchiveIdentity{}, err
+	}
+	if !before.Mode().IsRegular() || before.Mode().Perm()&0o022 != 0 {
+		return ArchiveIdentity{}, errors.New("root-confined OCI archive must be a regular file with no group/world write permission")
+	}
+	if before.Size() < 1 || before.Size() > limits.MaxArchiveBytes {
+		return ArchiveIdentity{}, fmt.Errorf(
+			"root-confined OCI archive size must be between 1 and %d bytes",
+			limits.MaxArchiveBytes,
+		)
+	}
+	source, err := root.OpenFile(sourceName, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return ArchiveIdentity{}, fmt.Errorf("open root-confined OCI archive: %w", err)
+	}
+	defer func() { _ = source.Close() }()
+	return snapshotOpenedArchiveIdentityContext(ctx, before, source, snapshotPath, limits)
+}
+
+func snapshotOpenedArchiveIdentityContext(
+	ctx context.Context,
+	before os.FileInfo,
+	source *os.File,
+	snapshotPath string,
+	limits Limits,
+) (_ ArchiveIdentity, returnErr error) {
 	opened, err := source.Stat()
 	if err != nil {
 		return ArchiveIdentity{}, fmt.Errorf("stat open OCI archive: %w", err)

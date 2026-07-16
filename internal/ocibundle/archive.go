@@ -83,6 +83,8 @@ type Image struct {
 	RepoTags          []string `json:"repo_tags,omitempty"`
 	BlobCount         int      `json:"blob_count"`
 	BlobBytes         int64    `json:"blob_bytes"`
+
+	uncompressedBytes int64
 }
 
 // Inspect validates all archive entries and blobs and returns its one selected
@@ -215,6 +217,7 @@ func InspectContext(ctx context.Context, archivePath string, limits Limits) (Ima
 		Identity:          Identity{ManifestDigest: manifestDescriptor.Digest, ConfigDigest: manifest.Config.Digest, Platform: platform},
 		ManifestMediaType: manifestDescriptor.MediaType, ConfigMediaType: manifest.Config.MediaType,
 		LayerDigests: layerDigests, RepoTags: repoTags, BlobCount: len(scan.blobs), BlobBytes: scan.blobBytes,
+		uncompressedBytes: scan.uncompressedBytes,
 	}, nil
 }
 
@@ -351,6 +354,7 @@ type archiveScan struct {
 	layout, index, dockerManifest []byte
 	blobs                         map[string]blobInfo
 	blobBytes                     int64
+	uncompressedBytes             int64
 }
 
 func (s archiveScan) matchBlob(value descriptor) error {
@@ -485,6 +489,7 @@ func scanArchiveContext(ctx context.Context, archivePath string, limits Limits) 
 	if int64(len(trailing)) > maxTrailingZeroBytes || !zero {
 		return archiveScan{}, errors.New("OCI archive has non-zero or excessive trailing data")
 	}
+	result.uncompressedBytes = total
 	return result, nil
 }
 

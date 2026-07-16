@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -30,6 +31,15 @@ const (
 	maxAgentCatalogSourceBytes = int64(256 << 10)
 	maxAgentCatalogPathBytes   = 4096
 	maxAgentCatalogQueryBytes  = 128
+	// One catalog issuance may inspect at most 64 GiB of signed archive bytes.
+	// This still permits all 64 entries when each archive is at most 1 GiB, or
+	// three maximum-size 20 GiB archives with 4 GiB of headroom, while bounding
+	// the source snapshot and hashing work caused by one untrusted manifest.
+	maxAgentCatalogAggregateArchiveBytes = int64(64 << 30)
+	// Valid archives may consume at most 128 GiB of first-pass tar payload
+	// bytes across one issuance. Each archive also retains the lower existing
+	// 40 GiB per-archive ceiling.
+	maxAgentCatalogAggregateUncompressedBytes = int64(128 << 30)
 )
 
 type agentCatalogSource struct {
@@ -50,10 +60,19 @@ type agentCatalogSourceEntry struct {
 	QualificationEvidence string `json:"qualification_evidence"`
 }
 
+type agentCatalogPreflightEntry struct {
+	source          agentCatalogSourceEntry
+	releaseRaw      []byte
+	publisherPublic ed25519.PublicKey
+	release         agentrelease.Verified
+	bindings        agentcatalog.ArtifactBindings
+}
+
 type agentCatalogEntryOutput struct {
 	EntryID               string                        `json:"entry_id"`
 	Status                string                        `json:"status"`
 	ReleaseID             string                        `json:"release_id"`
+	CapsuleID             string                        `json:"capsule_id"`
 	PublisherKeyID        string                        `json:"publisher_key_id"`
 	PublisherKeyDigest    string                        `json:"publisher_key_digest"`
 	ReleaseEnvelopeDigest string                        `json:"release_envelope_digest"`
@@ -67,6 +86,7 @@ type agentCatalogEntryOutput struct {
 	Capabilities          admission.Capabilities        `json:"capabilities"`
 	State                 admission.StateShape          `json:"state"`
 	Service               admission.ServiceShape        `json:"service"`
+	Command               []string                      `json:"command"`
 	Artifacts             []admission.ArtifactDigest    `json:"artifacts"`
 	Display               agentrelease.Display          `json:"display"`
 	Image                 admission.ImageIdentity       `json:"image"`
@@ -147,8 +167,16 @@ func issueAgentCatalog(arguments []string, stdout io.Writer) error {
 		*outputPath == "" || flags.NArg() != 0 {
 		return errors.New("agent-catalog issue requires -manifest, -key, -key-id, -out, and no positional arguments")
 	}
-	sourceRaw, err := securefile.Read(
-		*manifestPath, maxAgentCatalogSourceBytes, securefile.TrustFile,
+	if !agentCatalogBoundedIdentifier(*keyID, 256) {
+		return errors.New("agent catalog curator key ID is invalid")
+	}
+	inputRoot, manifestName, err := openAgentCatalogInputRoot(*manifestPath)
+	if err != nil {
+		return fmt.Errorf("open agent catalog input root: %w", err)
+	}
+	defer inputRoot.Close()
+	sourceRaw, err := securefile.ReadRoot(
+		inputRoot, manifestName, maxAgentCatalogSourceBytes, securefile.TrustFile,
 	)
 	if err != nil {
 		return fmt.Errorf("read agent catalog source: %w", err)
@@ -157,41 +185,8 @@ func issueAgentCatalog(arguments []string, stdout io.Writer) error {
 	if err := dsse.DecodeStrictInto(sourceRaw, int(maxAgentCatalogSourceBytes), &source); err != nil {
 		return fmt.Errorf("decode agent catalog source: %w", err)
 	}
-	if source.SchemaVersion != agentCatalogSourceSchemaV1 || !agentCatalogIdentifier(source.CatalogID) ||
-		source.Revision == 0 || len(source.Entries) == 0 ||
-		len(source.Entries) > agentcatalog.MaxEntries {
-		return errors.New("agent catalog source identity or entry count is invalid")
-	}
-	if !agentCatalogBoundedIdentifier(*keyID, 256) {
-		return errors.New("agent catalog curator key ID is invalid")
-	}
-	manifestDirectory := filepath.Dir(*manifestPath)
-	seenEntryIDs := make(map[string]struct{}, len(source.Entries))
-	for _, sourceEntry := range source.Entries {
-		if !agentCatalogIdentifier(sourceEntry.EntryID) ||
-			!agentCatalogStatus(sourceEntry.Status) ||
-			!agentCatalogBoundedIdentifier(sourceEntry.PublisherKeyID, 256) {
-			return errors.New("agent catalog source entry identity or status is invalid")
-		}
-		if _, exists := seenEntryIDs[sourceEntry.EntryID]; exists {
-			return fmt.Errorf("agent catalog source contains duplicate entry ID %q", sourceEntry.EntryID)
-		}
-		seenEntryIDs[sourceEntry.EntryID] = struct{}{}
-		paths := []struct {
-			label string
-			value string
-		}{
-			{label: "release", value: sourceEntry.Release},
-			{label: "publisher public key", value: sourceEntry.PublisherPublicKey},
-			{label: "archive", value: sourceEntry.Archive},
-			{label: "skill manifest", value: sourceEntry.SkillManifest},
-			{label: "qualification evidence", value: sourceEntry.QualificationEvidence},
-		}
-		for _, path := range paths {
-			if _, err := resolveAgentCatalogPath(manifestDirectory, path.value); err != nil {
-				return fmt.Errorf("entry %q %s path: %w", sourceEntry.EntryID, path.label, err)
-			}
-		}
+	if err := validateAgentCatalogSource(source); err != nil {
+		return err
 	}
 	privateKey, err := readPrivateKey(*privateKeyPath)
 	if err != nil {
@@ -202,12 +197,25 @@ func issueAgentCatalog(arguments []string, stdout io.Writer) error {
 		return errors.New("curator private key does not contain an Ed25519 public key")
 	}
 	now := timeNow().UTC()
-	entries := make([]agentcatalog.Entry, 0, len(source.Entries))
-	for _, sourceEntry := range source.Entries {
-		entry, err := buildAgentCatalogEntry(manifestDirectory, sourceEntry, now)
+	preflightEntries, err := preflightAgentCatalogEntries(inputRoot, source.Entries, now)
+	if err != nil {
+		return err
+	}
+	entries := make([]agentcatalog.Entry, 0, len(preflightEntries))
+	remainingUncompressed := maxAgentCatalogAggregateUncompressedBytes
+	for _, preflightEntry := range preflightEntries {
+		entry, uncompressedBytes, err := buildAgentCatalogEntry(
+			inputRoot,
+			preflightEntry,
+			remainingUncompressed,
+		)
 		if err != nil {
 			return err
 		}
+		if uncompressedBytes < 1 || uncompressedBytes > remainingUncompressed {
+			return errors.New("agent catalog archive inspection returned invalid uncompressed usage")
+		}
+		remainingUncompressed -= uncompressedBytes
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(left, right int) bool {
@@ -238,61 +246,188 @@ func issueAgentCatalog(arguments []string, stdout io.Writer) error {
 	return writeAgentCatalogResult(stdout, catalogResult(verified, "issued", verified.Entries))
 }
 
-func buildAgentCatalogEntry(
-	manifestDirectory string,
-	source agentCatalogSourceEntry,
+func validateAgentCatalogSource(source agentCatalogSource) error {
+	if source.SchemaVersion != agentCatalogSourceSchemaV1 || !agentCatalogIdentifier(source.CatalogID) ||
+		source.Revision == 0 || len(source.Entries) == 0 ||
+		len(source.Entries) > agentcatalog.MaxEntries {
+		return errors.New("agent catalog source identity or entry count is invalid")
+	}
+	seenEntryIDs := make(map[string]struct{}, len(source.Entries))
+	for _, sourceEntry := range source.Entries {
+		if !agentCatalogIdentifier(sourceEntry.EntryID) ||
+			!agentCatalogStatus(sourceEntry.Status) ||
+			!agentCatalogBoundedIdentifier(sourceEntry.PublisherKeyID, 256) {
+			return errors.New("agent catalog source entry identity or status is invalid")
+		}
+		if _, exists := seenEntryIDs[sourceEntry.EntryID]; exists {
+			return fmt.Errorf("agent catalog source contains duplicate entry ID %q", sourceEntry.EntryID)
+		}
+		seenEntryIDs[sourceEntry.EntryID] = struct{}{}
+		paths := []struct {
+			label string
+			value string
+		}{
+			{label: "release", value: sourceEntry.Release},
+			{label: "publisher public key", value: sourceEntry.PublisherPublicKey},
+			{label: "archive", value: sourceEntry.Archive},
+			{label: "skill manifest", value: sourceEntry.SkillManifest},
+			{label: "qualification evidence", value: sourceEntry.QualificationEvidence},
+		}
+		for _, path := range paths {
+			if err := validateAgentCatalogRelativePath(path.value); err != nil {
+				return fmt.Errorf("entry %q %s path: %w", sourceEntry.EntryID, path.label, err)
+			}
+		}
+	}
+	return nil
+}
+
+func preflightAgentCatalogEntries(
+	inputRoot *os.Root,
+	sourceEntries []agentCatalogSourceEntry,
 	now time.Time,
-) (agentcatalog.Entry, error) {
-	if !agentCatalogIdentifier(source.EntryID) || !agentCatalogStatus(source.Status) ||
-		!agentCatalogBoundedIdentifier(source.PublisherKeyID, 256) {
-		return agentcatalog.Entry{}, errors.New("agent catalog source entry identity or status is invalid")
+) ([]agentCatalogPreflightEntry, error) {
+	preflight := make([]agentCatalogPreflightEntry, 0, len(sourceEntries))
+	seenReleaseIDs := make(map[string]struct{}, len(sourceEntries))
+	seenReleaseDigests := make(map[string]struct{}, len(sourceEntries))
+	publisherDigests := make(map[string]string, len(sourceEntries))
+	for _, source := range sourceEntries {
+		releaseRaw, err := securefile.ReadRoot(
+			inputRoot, source.Release, agentrelease.MaxEnvelopeBytes, securefile.TrustFile,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("entry %q read agent release: %w", source.EntryID, err)
+		}
+		publisherPublic, err := readAgentCatalogPublicKey(
+			inputRoot,
+			source.PublisherPublicKey,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("entry %q read publisher public key: %w", source.EntryID, err)
+		}
+		publicKeyDigest := dsse.Digest(publisherPublic)
+		if digest, exists := publisherDigests[source.PublisherKeyID]; exists &&
+			digest != publicKeyDigest {
+			return nil, fmt.Errorf(
+				"agent catalog publisher key ID %q resolves to multiple public keys",
+				source.PublisherKeyID,
+			)
+		}
+		publisherDigests[source.PublisherKeyID] = publicKeyDigest
+		release, err := agentrelease.Verify(
+			releaseRaw,
+			map[string]ed25519.PublicKey{source.PublisherKeyID: publisherPublic},
+			now,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("entry %q verify agent release: %w", source.EntryID, err)
+		}
+		if release.PublisherKeyID != source.PublisherKeyID {
+			return nil, fmt.Errorf("entry %q publisher key ID does not match release", source.EntryID)
+		}
+		releaseIdentity := release.PublisherKeyID + "\x00" + release.Release.ReleaseID
+		if _, exists := seenReleaseIDs[releaseIdentity]; exists {
+			return nil, fmt.Errorf(
+				"agent catalog source contains duplicate publisher/release identity %q/%q",
+				release.PublisherKeyID,
+				release.Release.ReleaseID,
+			)
+		}
+		seenReleaseIDs[releaseIdentity] = struct{}{}
+		if _, exists := seenReleaseDigests[release.EnvelopeDigest]; exists {
+			return nil, errors.New("agent catalog source contains duplicate release envelope")
+		}
+		seenReleaseDigests[release.EnvelopeDigest] = struct{}{}
+		skillManifest, err := securefile.ReadRoot(
+			inputRoot,
+			source.SkillManifest,
+			agentcatalog.MaxSkillManifestBytes,
+			securefile.TrustFile,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("entry %q read skill manifest: %w", source.EntryID, err)
+		}
+		if dsse.Digest(skillManifest) != release.Release.Canary.SkillManifestDigest {
+			return nil, fmt.Errorf("entry %q skill manifest bytes do not match release", source.EntryID)
+		}
+		qualificationEvidence, err := securefile.ReadRoot(
+			inputRoot,
+			source.QualificationEvidence,
+			agentcatalog.MaxQualificationEvidenceBytes,
+			securefile.TrustFile,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("entry %q read qualification evidence: %w", source.EntryID, err)
+		}
+		if dsse.Digest(qualificationEvidence) != release.Release.Qualification.EvidenceDigest {
+			return nil, fmt.Errorf("entry %q qualification evidence bytes do not match release", source.EntryID)
+		}
+		preflight = append(preflight, agentCatalogPreflightEntry{
+			source:          source,
+			releaseRaw:      releaseRaw,
+			publisherPublic: publisherPublic,
+			release:         release,
+			bindings: agentcatalog.ArtifactBindings{
+				Archive: agentcatalog.FileBinding{
+					SHA256Digest: release.Release.Archive.SHA256Digest,
+					SizeBytes:    release.Release.Archive.SizeBytes,
+				},
+				SkillManifest: agentcatalog.FileBinding{
+					SHA256Digest: dsse.Digest(skillManifest),
+					SizeBytes:    int64(len(skillManifest)),
+				},
+				QualificationEvidence: agentcatalog.FileBinding{
+					SHA256Digest: dsse.Digest(qualificationEvidence),
+					SizeBytes:    int64(len(qualificationEvidence)),
+				},
+			},
+		})
 	}
-	releasePath, err := resolveAgentCatalogPath(manifestDirectory, source.Release)
-	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q release path: %w", source.EntryID, err)
+	if err := validateAgentCatalogArchiveBudget(preflight); err != nil {
+		return nil, err
 	}
-	publicKeyPath, err := resolveAgentCatalogPath(manifestDirectory, source.PublisherPublicKey)
-	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q publisher key path: %w", source.EntryID, err)
-	}
-	archivePath, err := resolveAgentCatalogPath(manifestDirectory, source.Archive)
-	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q archive path: %w", source.EntryID, err)
-	}
-	skillManifestPath, err := resolveAgentCatalogPath(manifestDirectory, source.SkillManifest)
-	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q skill manifest path: %w", source.EntryID, err)
-	}
-	qualificationEvidencePath, err := resolveAgentCatalogPath(manifestDirectory, source.QualificationEvidence)
-	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q qualification evidence path: %w", source.EntryID, err)
-	}
+	return preflight, nil
+}
 
-	releaseRaw, err := securefile.Read(
-		releasePath, agentrelease.MaxEnvelopeBytes, securefile.TrustFile,
-	)
-	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q read agent release: %w", source.EntryID, err)
+func validateAgentCatalogArchiveBudget(entries []agentCatalogPreflightEntry) error {
+	remaining := maxAgentCatalogAggregateArchiveBytes
+	for _, entry := range entries {
+		size := entry.release.Release.Archive.SizeBytes
+		if size < 1 || size > remaining {
+			return fmt.Errorf(
+				"agent catalog aggregate archive inspection budget exceeds %d bytes",
+				maxAgentCatalogAggregateArchiveBytes,
+			)
+		}
+		remaining -= size
 	}
-	publisherPublic, err := readPublicKey(publicKeyPath)
-	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q read publisher public key: %w", source.EntryID, err)
-	}
-	release, err := agentrelease.Verify(
-		releaseRaw,
-		map[string]ed25519.PublicKey{source.PublisherKeyID: publisherPublic},
-		now,
-	)
-	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q verify agent release: %w", source.EntryID, err)
-	}
-	if release.PublisherKeyID != source.PublisherKeyID {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q publisher key ID does not match release", source.EntryID)
-	}
+	return nil
+}
 
-	inspection, err := ocibundle.InspectSource(archivePath, ocibundle.DefaultLimits())
+func buildAgentCatalogEntry(
+	inputRoot *os.Root,
+	preflight agentCatalogPreflightEntry,
+	remainingUncompressed int64,
+) (agentcatalog.Entry, int64, error) {
+	source := preflight.source
+	release := preflight.release
+	if remainingUncompressed < release.Release.Archive.SizeBytes {
+		return agentcatalog.Entry{}, 0, fmt.Errorf(
+			"agent catalog aggregate uncompressed archive budget exceeds %d bytes",
+			maxAgentCatalogAggregateUncompressedBytes,
+		)
+	}
+	limits := ocibundle.DefaultLimits()
+	// The signed byte length is an inspection ceiling, not only a comparison
+	// after parsing. A publisher cannot understate a large untrusted archive to
+	// bypass the aggregate source-byte budget and force the larger snapshot.
+	limits.MaxArchiveBytes = release.Release.Archive.SizeBytes
+	if remainingUncompressed < limits.MaxUncompressedBytes {
+		limits.MaxUncompressedBytes = remainingUncompressed
+	}
+	inspection, err := ocibundle.InspectRootSource(inputRoot, source.Archive, limits)
 	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q inspect archive: %w", source.EntryID, err)
+		return agentcatalog.Entry{}, 0, fmt.Errorf("entry %q inspect archive: %w", source.EntryID, err)
 	}
 	if inspection.Archive.Digest != release.Release.Archive.SHA256Digest ||
 		inspection.Archive.Bytes != release.Release.Archive.SizeBytes ||
@@ -303,53 +438,20 @@ func buildAgentCatalogEntry(
 			Architecture: release.Release.Archive.Image.Platform.Architecture,
 			Variant:      release.Release.Archive.Image.Platform.Variant,
 		}) {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q archive bytes or image identity do not match release", source.EntryID)
-	}
-	skillManifest, err := securefile.Read(
-		skillManifestPath, agentcatalog.MaxSkillManifestBytes, securefile.TrustFile,
-	)
-	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q read skill manifest: %w", source.EntryID, err)
-	}
-	if dsse.Digest(skillManifest) != release.Release.Canary.SkillManifestDigest {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q skill manifest bytes do not match release", source.EntryID)
-	}
-	qualificationEvidence, err := securefile.Read(
-		qualificationEvidencePath,
-		agentcatalog.MaxQualificationEvidenceBytes,
-		securefile.TrustFile,
-	)
-	if err != nil {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q read qualification evidence: %w", source.EntryID, err)
-	}
-	if dsse.Digest(qualificationEvidence) != release.Release.Qualification.EvidenceDigest {
-		return agentcatalog.Entry{}, fmt.Errorf("entry %q qualification evidence bytes do not match release", source.EntryID)
+		return agentcatalog.Entry{}, 0, fmt.Errorf("entry %q archive bytes or image identity do not match release", source.EntryID)
 	}
 	return agentcatalog.Entry{
 		EntryID: source.EntryID,
 		Status:  source.Status,
 		Publisher: agentcatalog.PublisherIdentity{
 			KeyID:                  source.PublisherKeyID,
-			Ed25519PublicKeyBase64: base64.StdEncoding.EncodeToString(publisherPublic),
-			PublicKeyDigest:        dsse.Digest(publisherPublic),
+			Ed25519PublicKeyBase64: base64.StdEncoding.EncodeToString(preflight.publisherPublic),
+			PublicKeyDigest:        dsse.Digest(preflight.publisherPublic),
 		},
-		ReleaseDSSEBase64:     base64.StdEncoding.EncodeToString(releaseRaw),
-		ReleaseEnvelopeDigest: dsse.Digest(releaseRaw),
-		Bindings: agentcatalog.ArtifactBindings{
-			Archive: agentcatalog.FileBinding{
-				SHA256Digest: inspection.Archive.Digest,
-				SizeBytes:    inspection.Archive.Bytes,
-			},
-			SkillManifest: agentcatalog.FileBinding{
-				SHA256Digest: dsse.Digest(skillManifest),
-				SizeBytes:    int64(len(skillManifest)),
-			},
-			QualificationEvidence: agentcatalog.FileBinding{
-				SHA256Digest: dsse.Digest(qualificationEvidence),
-				SizeBytes:    int64(len(qualificationEvidence)),
-			},
-		},
-	}, nil
+		ReleaseDSSEBase64:     base64.StdEncoding.EncodeToString(preflight.releaseRaw),
+		ReleaseEnvelopeDigest: dsse.Digest(preflight.releaseRaw),
+		Bindings:              preflight.bindings,
+	}, inspection.UncompressedBytes, nil
 }
 
 func readAgentCatalogCommand(operation string, arguments []string, stdout io.Writer) error {
@@ -496,6 +598,7 @@ func agentCatalogEntryResult(entry agentcatalog.VerifiedEntry) agentCatalogEntry
 		EntryID:               entry.Entry.EntryID,
 		Status:                entry.Entry.Status,
 		ReleaseID:             entry.Release.Release.ReleaseID,
+		CapsuleID:             entry.Release.Capsule.CapsuleID,
 		PublisherKeyID:        entry.Release.PublisherKeyID,
 		PublisherKeyDigest:    entry.Entry.Publisher.PublicKeyDigest,
 		ReleaseEnvelopeDigest: entry.Release.EnvelopeDigest,
@@ -509,6 +612,7 @@ func agentCatalogEntryResult(entry agentcatalog.VerifiedEntry) agentCatalogEntry
 		Capabilities:          entry.Release.Capsule.Capabilities,
 		State:                 entry.Release.Capsule.State,
 		Service:               entry.Release.Capsule.Service,
+		Command:               append([]string(nil), entry.Release.Capsule.Command...),
 		Artifacts:             append([]admission.ArtifactDigest(nil), entry.Release.Capsule.Artifacts...),
 		Display:               entry.Release.Release.Display,
 		Image:                 entry.Release.Release.Archive.Image,
@@ -529,12 +633,30 @@ func filterAgentCatalogEntries(
 		if status != "" && entry.Entry.Status != status {
 			continue
 		}
-		if needle != "" && !strings.Contains(strings.ToLower(agentCatalogSearchText(entry)), needle) {
+		if needle != "" && !agentCatalogMatchesQuery(entry, needle) {
 			continue
 		}
 		filtered = append(filtered, entry)
 	}
 	return filtered
+}
+
+func agentCatalogMatchesQuery(entry agentcatalog.VerifiedEntry, needle string) bool {
+	capabilities := entry.Release.Capsule.Capabilities
+	switch needle {
+	case "capability:state":
+		return capabilities.State
+	case "capability:inference":
+		return capabilities.Inference
+	case "capability:service":
+		return capabilities.Service
+	case "capability:egress":
+		return capabilities.Egress
+	case "capability:connector":
+		return capabilities.Connector
+	default:
+		return strings.Contains(strings.ToLower(agentCatalogSearchText(entry)), needle)
+	}
 }
 
 func agentCatalogSearchText(entry agentcatalog.VerifiedEntry) string {
@@ -543,6 +665,7 @@ func agentCatalogSearchText(entry agentcatalog.VerifiedEntry) string {
 		entry.Entry.EntryID,
 		entry.Entry.Status,
 		release.ReleaseID,
+		entry.Release.Capsule.CapsuleID,
 		entry.Release.PublisherKeyID,
 		release.Display.Title,
 		release.Display.Summary,
@@ -565,22 +688,7 @@ func agentCatalogSearchText(entry agentcatalog.VerifiedEntry) string {
 		strconv.Itoa(entry.Release.Capsule.Service.Port),
 		release.Qualification.Runtime,
 	}
-	capabilities := entry.Release.Capsule.Capabilities
-	if capabilities.State {
-		values = append(values, "capability:state")
-	}
-	if capabilities.Inference {
-		values = append(values, "capability:inference")
-	}
-	if capabilities.Service {
-		values = append(values, "capability:service")
-	}
-	if capabilities.Egress {
-		values = append(values, "capability:egress")
-	}
-	if capabilities.Connector {
-		values = append(values, "capability:connector")
-	}
+	values = append(values, entry.Release.Capsule.Command...)
 	for _, artifact := range entry.Release.Capsule.Artifacts {
 		values = append(values, artifact.Kind, artifact.Digest)
 	}
@@ -617,6 +725,7 @@ func compareAgentCatalogEntries(
 	}
 	add("status", leftOutput.Status, rightOutput.Status)
 	add("release_id", leftOutput.ReleaseID, rightOutput.ReleaseID)
+	add("capsule.id", leftOutput.CapsuleID, rightOutput.CapsuleID)
 	add("publisher_key_id", leftOutput.PublisherKeyID, rightOutput.PublisherKeyID)
 	add("publisher_key_digest", leftOutput.PublisherKeyDigest, rightOutput.PublisherKeyDigest)
 	add("release_envelope_digest", leftOutput.ReleaseEnvelopeDigest, rightOutput.ReleaseEnvelopeDigest)
@@ -639,6 +748,7 @@ func compareAgentCatalogEntries(
 	add("state.path", leftOutput.State.Path, rightOutput.State.Path)
 	add("service.id", leftOutput.Service.ID, rightOutput.Service.ID)
 	add("service.port", strconv.Itoa(leftOutput.Service.Port), strconv.Itoa(rightOutput.Service.Port))
+	add("command", agentCatalogCommandText(leftOutput.Command), agentCatalogCommandText(rightOutput.Command))
 	add("artifacts", agentCatalogArtifactsText(leftOutput.Artifacts), agentCatalogArtifactsText(rightOutput.Artifacts))
 	add("archive.sha256_digest", leftOutput.Bindings.Archive.SHA256Digest, rightOutput.Bindings.Archive.SHA256Digest)
 	add("archive.size_bytes", strconv.FormatInt(leftOutput.Bindings.Archive.SizeBytes, 10), strconv.FormatInt(rightOutput.Bindings.Archive.SizeBytes, 10))
@@ -676,6 +786,13 @@ func compareAgentCatalogEntries(
 	}
 }
 
+func agentCatalogCommandText(command []string) string {
+	// A slice of strings has no unsupported JSON values, so Marshal cannot
+	// fail. JSON preserves argument boundaries and escapes embedded controls.
+	raw, _ := json.Marshal(command)
+	return string(raw)
+}
+
 func agentCatalogArtifactsText(artifacts []admission.ArtifactDigest) string {
 	sorted := append([]admission.ArtifactDigest(nil), artifacts...)
 	sort.Slice(sorted, func(left, right int) bool {
@@ -691,14 +808,79 @@ func agentCatalogArtifactsText(artifacts []admission.ArtifactDigest) string {
 	return strings.Join(values, "\n")
 }
 
-func resolveAgentCatalogPath(directory, value string) (string, error) {
-	if value == "" || len(value) > maxAgentCatalogPathBytes || strings.ContainsRune(value, '\x00') {
-		return "", errors.New("path is empty or exceeds its bound")
+func openAgentCatalogInputRoot(manifestPath string) (*os.Root, string, error) {
+	absoluteManifest, err := filepath.Abs(manifestPath)
+	if err != nil {
+		return nil, "", err
 	}
-	if filepath.IsAbs(value) {
-		return filepath.Clean(value), nil
+	canonicalDirectory, err := filepath.EvalSymlinks(filepath.Dir(absoluteManifest))
+	if err != nil {
+		return nil, "", err
 	}
-	return filepath.Clean(filepath.Join(directory, value)), nil
+	before, err := os.Lstat(canonicalDirectory)
+	if err != nil {
+		return nil, "", err
+	}
+	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, "", errors.New("manifest parent is not a stable directory")
+	}
+	root, err := os.OpenRoot(canonicalDirectory)
+	if err != nil {
+		return nil, "", err
+	}
+	anchored, anchoredErr := root.Stat(".")
+	current, currentErr := os.Lstat(canonicalDirectory)
+	if anchoredErr != nil || currentErr != nil ||
+		!os.SameFile(before, anchored) || !os.SameFile(before, current) {
+		_ = root.Close()
+		return nil, "", errors.Join(
+			errors.New("manifest parent changed while opening its confined root"),
+			anchoredErr,
+			currentErr,
+		)
+	}
+	manifestName := filepath.Base(filepath.Clean(absoluteManifest))
+	if manifestName == "." || manifestName == string(filepath.Separator) ||
+		strings.ContainsRune(manifestName, '\x00') {
+		_ = root.Close()
+		return nil, "", errors.New("agent catalog manifest name is invalid")
+	}
+	return root, manifestName, nil
+}
+
+func readAgentCatalogPublicKey(root *os.Root, name string) (ed25519.PublicKey, error) {
+	raw, err := securefile.ReadRoot(root, name, maxArtifactBytes, securefile.TrustFile)
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(decoded) != ed25519.PublicKeySize {
+		return nil, errors.New("public key is not base64 Ed25519")
+	}
+	return ed25519.PublicKey(decoded), nil
+}
+
+func validateAgentCatalogRelativePath(value string) error {
+	if value == "" || len(value) > maxAgentCatalogPathBytes ||
+		strings.ContainsRune(value, '\x00') || !utf8.ValidString(value) {
+		return errors.New("path is empty or exceeds its bound")
+	}
+	if filepath.IsAbs(value) || filepath.VolumeName(value) != "" {
+		return errors.New("path must be relative to the manifest directory")
+	}
+	for _, component := range strings.FieldsFunc(value, func(character rune) bool {
+		return character == '/' || character == '\\'
+	}) {
+		if component == ".." {
+			return errors.New("path must not contain a '..' component")
+		}
+	}
+	cleaned := filepath.Clean(value)
+	if cleaned == "." || cleaned == "" || cleaned == ".." ||
+		strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+		return errors.New("path must name a file beneath the manifest directory")
+	}
+	return nil
 }
 
 func agentCatalogStatus(value string) bool {
@@ -728,16 +910,23 @@ func agentCatalogBoundedIdentifier(value string, maxBytes int) bool {
 	if value == "" || len(value) > maxBytes || strings.TrimSpace(value) != value {
 		return false
 	}
+	if !agentCatalogAlphaNumeric(value[0]) {
+		return false
+	}
 	for index := 0; index < len(value); index++ {
 		character := value[index]
-		if !((character >= 'A' && character <= 'Z') ||
-			(character >= 'a' && character <= 'z') ||
-			(character >= '0' && character <= '9') ||
+		if !(agentCatalogAlphaNumeric(character) ||
 			character == '.' || character == '_' || character == '-') {
 			return false
 		}
 	}
 	return true
+}
+
+func agentCatalogAlphaNumeric(character byte) bool {
+	return (character >= 'A' && character <= 'Z') ||
+		(character >= 'a' && character <= 'z') ||
+		(character >= '0' && character <= '9')
 }
 
 func writeAgentCatalogResult(stdout io.Writer, output agentCatalogResult) error {

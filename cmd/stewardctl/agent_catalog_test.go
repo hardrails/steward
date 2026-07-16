@@ -1,16 +1,25 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/agentcatalog"
+	"github.com/hardrails/steward/internal/agentrelease"
+	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/securefile"
 )
 
 type agentCatalogCLIFixture struct {
@@ -42,6 +51,8 @@ func TestAgentCatalogIssueVerifyBrowseAndCompare(t *testing.T) {
 		issuedResult.Count != 2 || len(issuedResult.Entries) != 2 ||
 		issuedResult.Entries[0].EntryID != "hermes-next" ||
 		issuedResult.Entries[1].EntryID != "hermes-primary" ||
+		issuedResult.Entries[0].CapsuleID != "hermes-workspace-audit-next" ||
+		!slices.Equal(issuedResult.Entries[0].Command, []string{"serve", "--candidate", "line one\nline two"}) ||
 		issuedResult.Entries[0].Profile.ID != "hermes-v1" ||
 		issuedResult.Entries[0].Resources.MemoryBytes != 768<<20 ||
 		!issuedResult.Entries[0].Capabilities.Inference ||
@@ -110,18 +121,32 @@ func TestAgentCatalogIssueVerifyBrowseAndCompare(t *testing.T) {
 		compareResult.Comparison.Right.EntryID != "hermes-next" {
 		t.Fatalf("compare result = %#v", compareResult)
 	}
-	differenceFields := make(map[string]struct{}, len(compareResult.Comparison.Differences))
+	differences := make(map[string]agentCatalogDifference, len(compareResult.Comparison.Differences))
 	for _, difference := range compareResult.Comparison.Differences {
-		differenceFields[difference.Field] = struct{}{}
+		differences[difference.Field] = difference
 	}
 	for _, field := range []string{
+		"capsule.id",
+		"command",
 		"resources.memory_bytes",
 		"capabilities.inference",
 		"capsule.expires_at",
 	} {
-		if _, exists := differenceFields[field]; !exists {
+		if _, exists := differences[field]; !exists {
 			t.Fatalf("compare result omits %q: %#v", field, compareResult.Comparison)
 		}
+	}
+	commandDifference := differences["command"]
+	var leftCommand, rightCommand []string
+	if err := json.Unmarshal([]byte(commandDifference.Left), &leftCommand); err != nil {
+		t.Fatalf("left command difference is not canonical JSON: %v", err)
+	}
+	if err := json.Unmarshal([]byte(commandDifference.Right), &rightCommand); err != nil {
+		t.Fatalf("right command difference is not canonical JSON: %v", err)
+	}
+	if !slices.Equal(leftCommand, compareResult.Comparison.Left.Command) ||
+		!slices.Equal(rightCommand, compareResult.Comparison.Right.Command) {
+		t.Fatalf("command difference is ambiguous: %#v", commandDifference)
 	}
 }
 
@@ -182,6 +207,330 @@ func TestAgentCatalogIssueChecksEveryExternalBinding(t *testing.T) {
 				t.Fatalf("invalid catalog output exists: %v", err)
 			}
 		})
+	}
+}
+
+func TestAgentCatalogIssuePreflightsSmallInputsBeforeArchiveInspection(t *testing.T) {
+	fixture := newAgentCatalogCLIFixture(t)
+	fixture.source.Entries[1].QualificationEvidence = "missing-qualification-evidence.json"
+	fixture.writeSource(t)
+	file, err := os.OpenFile(fixture.releaseFixture.archivePath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("archive drift that must not be inspected first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = run(fixture.issueArguments(), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "read qualification evidence") ||
+		strings.Contains(err.Error(), "inspect archive") {
+		t.Fatalf("small-input preflight err = %v", err)
+	}
+}
+
+func TestAgentCatalogIssueRejectsDuplicateReleaseIdentityBeforeArchiveInspection(t *testing.T) {
+	fixture := newAgentCatalogCLIFixture(t)
+	fixture.source.Entries[1].Release = fixture.source.Entries[0].Release
+	for index := range fixture.source.Entries {
+		fixture.source.Entries[index].Archive = "missing-archive.tar"
+	}
+	fixture.writeSource(t)
+	err := run(fixture.issueArguments(), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil ||
+		!strings.Contains(err.Error(), "duplicate publisher/release identity") ||
+		strings.Contains(err.Error(), "inspect archive") {
+		t.Fatalf("duplicate release identity err = %v", err)
+	}
+}
+
+func TestAgentCatalogIssueRejectsAggregateArchiveBudgetBeforeInspection(t *testing.T) {
+	fixture := newAgentCatalogCLIFixture(t)
+	releaseRaw, err := os.ReadFile(fixture.releaseFixture.outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisherPublic, err := readPublicKey(fixture.releaseFixture.publicKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := agentrelease.Verify(
+		releaseRaw,
+		map[string]ed25519.PublicKey{"publisher-a": publisherPublic},
+		fixture.releaseFixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisherPrivate, err := readPrivateKey(fixture.releaseFixture.privateKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceEntries := make([]agentCatalogSourceEntry, 0, 4)
+	for index := 0; index < 4; index++ {
+		release := verified.Release
+		release.ReleaseID = fmt.Sprintf("aggregate-budget-%d", index)
+		release.Archive.SizeBytes = agentrelease.MaxArchiveBytes
+		raw, err := agentrelease.Sign(
+			release,
+			"publisher-a",
+			publisherPrivate,
+			fixture.releaseFixture.now,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(
+			fixture.releaseFixture.directory,
+			fmt.Sprintf("aggregate-budget-%d.release.dsse.json", index),
+		)
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sourceEntries = append(sourceEntries, agentCatalogSourceEntry{
+			EntryID:               fmt.Sprintf("aggregate-budget-%d", index),
+			Status:                agentcatalog.StatusCandidate,
+			Release:               filepath.Base(path),
+			PublisherKeyID:        "publisher-a",
+			PublisherPublicKey:    filepath.Base(fixture.releaseFixture.publicKeyPath),
+			Archive:               "missing-archive.tar",
+			SkillManifest:         filepath.Base(fixture.releaseFixture.skillManifestPath),
+			QualificationEvidence: filepath.Base(fixture.releaseFixture.qualificationEvidencePath),
+		})
+	}
+	fixture.source.Entries = sourceEntries
+	fixture.writeSource(t)
+	err = run(fixture.issueArguments(), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil ||
+		!strings.Contains(err.Error(), "aggregate archive inspection budget") ||
+		strings.Contains(err.Error(), "inspect archive") {
+		t.Fatalf("aggregate archive budget err = %v", err)
+	}
+}
+
+func TestAgentCatalogManifestPathsStayConfined(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(*testing.T, *agentCatalogCLIFixture)
+		wantError string
+	}{
+		{
+			name: "absolute path",
+			configure: func(_ *testing.T, fixture *agentCatalogCLIFixture) {
+				fixture.source.Entries[0].Release = fixture.releaseFixture.outputPath
+			},
+			wantError: "path must be relative",
+		},
+		{
+			name: "parent traversal",
+			configure: func(_ *testing.T, fixture *agentCatalogCLIFixture) {
+				fixture.source.Entries[0].Release = "../agent-release.dsse.json"
+			},
+			wantError: "must not contain a '..' component",
+		},
+		{
+			name: "symlink parent escape",
+			configure: func(t *testing.T, fixture *agentCatalogCLIFixture) {
+				outside := t.TempDir()
+				link := filepath.Join(fixture.releaseFixture.directory, "outside")
+				if err := os.Symlink(outside, link); err != nil {
+					t.Skipf("create symlink fixture: %v", err)
+				}
+				fixture.source.Entries[0].Release = filepath.Join("outside", "release.dsse.json")
+			},
+			wantError: "path escapes from parent",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAgentCatalogCLIFixture(t)
+			test.configure(t, &fixture)
+			fixture.writeSource(t)
+			err := run(fixture.issueArguments(), &bytes.Buffer{}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("confined path err = %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentCatalogInputRootSurvivesParentReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("renaming an open directory is not portable on Windows")
+	}
+	parent := t.TempDir()
+	directory := filepath.Join(parent, "catalog")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(directory, "catalog-source.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"manifest":"inside"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "input"), []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, _, err := openAgentCatalogInputRoot(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	moved := filepath.Join(parent, "moved")
+	if err := os.Rename(directory, moved); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(parent, "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "input"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, directory); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := securefile.ReadRoot(root, "input", 64, securefile.TrustFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "inside" {
+		t.Fatalf("catalog root read = %q, want inside", raw)
+	}
+}
+
+func TestAgentCatalogArchiveHonorsRemainingUncompressedBudget(t *testing.T) {
+	fixture := newAgentCatalogCLIFixture(t)
+	archivePath := filepath.Join(fixture.releaseFixture.directory, "expansion.tar.gz")
+	archiveRaw := writeAgentCatalogExpansionArchive(t, archivePath)
+	releaseRaw, err := os.ReadFile(fixture.releaseFixture.outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisherPublic, err := readPublicKey(fixture.releaseFixture.publicKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := agentrelease.Verify(
+		releaseRaw,
+		map[string]ed25519.PublicKey{"publisher-a": publisherPublic},
+		fixture.releaseFixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := verified.Release
+	release.ReleaseID = "compressed-expansion"
+	release.Archive.SHA256Digest = dsse.Digest(archiveRaw)
+	release.Archive.SizeBytes = int64(len(archiveRaw))
+	publisherPrivate, err := readPrivateKey(fixture.releaseFixture.privateKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedRelease, err := agentrelease.Sign(
+		release,
+		"publisher-a",
+		publisherPrivate,
+		fixture.releaseFixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releasePath := filepath.Join(
+		fixture.releaseFixture.directory,
+		"compressed-expansion.release.dsse.json",
+	)
+	if err := os.WriteFile(releasePath, signedRelease, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.source.Entries = []agentCatalogSourceEntry{{
+		EntryID:               "compressed-expansion",
+		Status:                agentcatalog.StatusCandidate,
+		Release:               filepath.Base(releasePath),
+		PublisherKeyID:        "publisher-a",
+		PublisherPublicKey:    filepath.Base(fixture.releaseFixture.publicKeyPath),
+		Archive:               filepath.Base(archivePath),
+		SkillManifest:         filepath.Base(fixture.releaseFixture.skillManifestPath),
+		QualificationEvidence: filepath.Base(fixture.releaseFixture.qualificationEvidencePath),
+	}}
+	fixture.writeSource(t)
+	root, _, err := openAgentCatalogInputRoot(fixture.manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	preflight, err := preflightAgentCatalogEntries(
+		root,
+		fixture.source.Entries,
+		fixture.releaseFixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := max(int64(64<<10), int64(len(archiveRaw)))
+	if _, _, err := buildAgentCatalogEntry(root, preflight[0], remaining); err == nil ||
+		!strings.Contains(err.Error(), "uncompressed byte limit") {
+		t.Fatalf("remaining uncompressed budget err = %v", err)
+	}
+}
+
+func TestAgentCatalogIdentifiersRequireLeadingAlphaNumericBeforeInputIO(t *testing.T) {
+	t.Run("curator key ID", func(t *testing.T) {
+		err := run([]string{
+			"agent-catalog", "issue",
+			"-manifest", "missing-manifest.json",
+			"-key", "missing-key",
+			"-key-id", "-curator",
+			"-out", "unused",
+		}, &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "curator key ID is invalid") ||
+			strings.Contains(err.Error(), "read agent catalog source") {
+			t.Fatalf("leading punctuation key ID err = %v", err)
+		}
+	})
+
+	t.Run("entry ID", func(t *testing.T) {
+		fixture := newAgentCatalogCLIFixture(t)
+		fixture.source.Entries[0].EntryID = ".hermes"
+		fixture.source.Entries[0].Release = "missing-release.dsse.json"
+		fixture.writeSource(t)
+		err := run(fixture.issueArguments(), &bytes.Buffer{}, &bytes.Buffer{})
+		if err == nil ||
+			!strings.Contains(err.Error(), "entry identity or status is invalid") ||
+			strings.Contains(err.Error(), "read agent release") {
+			t.Fatalf("leading punctuation entry ID err = %v", err)
+		}
+	})
+}
+
+func TestAgentCatalogCapabilitySearchCannotBeSpoofedByPublisherText(t *testing.T) {
+	fixture := newAgentCatalogCLIFixture(t)
+	if err := run(fixture.issueArguments(), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := loadVerifiedAgentCatalog(agentCatalogReadOptions{
+		inputPath: fixture.catalogPath, publicKeyPath: fixture.curatorPublic, keyID: "curator-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range verified.Entries {
+		if verified.Entries[index].Entry.EntryID != "hermes-primary" {
+			continue
+		}
+		if verified.Entries[index].Release.Capsule.Capabilities.Inference {
+			t.Fatal("spoofing fixture unexpectedly grants inference")
+		}
+		verified.Entries[index].Release.Release.Display.Summary =
+			"Publisher text says capability:inference despite the verified capsule."
+		verified.Entries[index].Release.Release.Qualification.Limitations = append(
+			verified.Entries[index].Release.Release.Qualification.Limitations,
+			"capability:inference",
+		)
+	}
+	filtered := filterAgentCatalogEntries(verified.Entries, "", "CAPABILITY:INFERENCE")
+	if len(filtered) != 1 || filtered[0].Entry.EntryID != "hermes-next" {
+		t.Fatalf("structural capability search was spoofed by publisher text: %#v", filtered)
 	}
 }
 
@@ -261,6 +610,7 @@ func newAgentCatalogCLIFixture(t *testing.T) agentCatalogCLIFixture {
 	}
 	secondCapsule := releaseFixture.capsule(t)
 	secondCapsule.CapsuleID = "hermes-workspace-audit-next"
+	secondCapsule.Command = []string{"serve", "--candidate", "line one\nline two"}
 	secondCapsule.Resources.MemoryBytes = 768 << 20
 	secondCapsule.Capabilities.Inference = true
 	secondCapsule.ExpiresAt = releaseFixture.now.Add(8 * time.Minute).Format(time.RFC3339)
@@ -367,4 +717,39 @@ func decodeAgentCatalogResult(t *testing.T, raw []byte) agentCatalogResult {
 		t.Fatalf("result schema = %q", output.SchemaVersion)
 	}
 	return output
+}
+
+func writeAgentCatalogExpansionArchive(t *testing.T, path string) []byte {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipWriter := gzip.NewWriter(file)
+	tarWriter := tar.NewWriter(gzipWriter)
+	const expandedBytes = 1 << 20
+	if err := tarWriter.WriteHeader(&tar.Header{
+		Name: "blobs/sha256/" + strings.Repeat("0", 64),
+		Mode: 0o600,
+		Size: expandedBytes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarWriter.Write(bytes.Repeat([]byte{0}, expandedBytes)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
