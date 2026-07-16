@@ -50,6 +50,7 @@ if [[ ${EUID} -ne 0 ]]; then
 	exit 2
 fi
 
+# BEGIN UNINSTALL_TRUST_BOUNDARY
 valid_release_version() {
 	local candidate=$1 core prerelease identifier
 	(( ${#candidate} <= 128 )) || return 1
@@ -114,6 +115,7 @@ guard_bin=$(trusted_root_executable "$script_dir/node-removal-guard.sh") || {
 	echo "uninstall-node: installed release has no trusted node-removal guard" >&2
 	exit 2
 }
+# END UNINSTALL_TRUST_BOUNDARY
 
 # BEGIN HOST_ROLE_LOCK_BOUNDARY
 readonly host_role_lock_directory=/run/steward-host-role

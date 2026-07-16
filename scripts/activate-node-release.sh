@@ -316,9 +316,27 @@ transition=true
 was_gateway=false
 was_steward=false
 was_executor=false
-systemctl is-active --quiet steward-gateway.service && was_gateway=true
-systemctl is-active --quiet steward.service && was_steward=true
-systemctl is-active --quiet steward-executor.service && was_executor=true
+read_service_activity() {
+	local unit=$1 state status=0
+	state=$(systemctl is-active "$unit" 2>/dev/null) || status=$?
+	case "$status:$state" in
+		0:active) printf '%s\n' active ;;
+		*:inactive)
+			(( status != 0 )) || return 2
+			printf '%s\n' inactive
+			;;
+		*)
+			echo "activate-node-release: could not determine the exact systemd state of $unit" >&2
+			return 2
+			;;
+	esac
+}
+gateway_activity=$(read_service_activity steward-gateway.service) || exit 2
+steward_activity=$(read_service_activity steward.service) || exit 2
+executor_activity=$(read_service_activity steward-executor.service) || exit 2
+[[ $gateway_activity == active ]] && was_gateway=true
+[[ $steward_activity == active ]] && was_steward=true
+[[ $executor_activity == active ]] && was_executor=true
 if [[ $restart == false && ( $was_gateway == true || $was_steward == true || $was_executor == true ) ]]; then
 	echo "activate-node-release: --no-restart is unsafe while a Steward service is active" >&2
 	echo "  Re-run with --restart, or stop Gateway, Steward, and Executor first." >&2
@@ -393,11 +411,25 @@ start_previous_services() {
 }
 
 stop_active_services() {
-	local failed=false
-	systemctl is-active --quiet steward-gateway.service && systemctl stop steward-gateway.service || true
-	systemctl is-active --quiet steward.service && systemctl stop steward.service || true
-	systemctl is-active --quiet steward-executor.service && systemctl stop steward-executor.service || true
+	local failed=false state unit
+	for unit in steward-gateway.service steward.service steward-executor.service; do
+		state=$(read_service_activity "$unit") || { failed=true; continue; }
+		if [[ $state == active ]] && ! systemctl stop "$unit"; then
+			failed=true
+			continue
+		fi
+		state=$(read_service_activity "$unit") || { failed=true; continue; }
+		[[ $state == inactive ]] || failed=true
+	done
 	[[ $failed == false ]]
+}
+
+replace_selector() {
+	local temporary=$1 destination=$2
+	# Arm rollback before mv can change the destination or be interrupted after it
+	# has done so. Restoring an unchanged selector is safe.
+	selectors_switched=true
+	mv -Tf -- "$temporary" "$destination"
 }
 
 restore_selectors() {
@@ -456,9 +488,10 @@ activation_exit() {
 		failure_handled=true
 		set +e
 		if [[ $selectors_switched == true ]]; then
-			stop_active_services
-			safe_restore=true
-			if [[ $target_services_started == true ]]; then
+			services_quiesced=false
+			if stop_active_services; then services_quiesced=true; fi
+			safe_restore=$services_quiesced
+			if [[ $services_quiesced == true && $target_services_started == true ]]; then
 				safe_restore=false
 				if [[ -n $previous_current && -f $previous_current/release.json ]]; then
 					if "$release_dir/integration/scripts/node-removal-guard.sh" >/dev/null && \
@@ -481,6 +514,9 @@ activation_exit() {
 				elif [[ $executor_restore_ok == true ]]; then
 					echo "activate-node-release: activation failed; restored prior selectors, but one or more prior services did not restart" >&2
 				fi
+			elif [[ $services_quiesced == false ]]; then
+				echo "activate-node-release: activation failed and one or more target services could not be proven stopped" >&2
+				echo "  Target selectors remain selected. Stop all Steward services and verify they are inactive before repairing selectors." >&2
 			else
 				echo "activate-node-release: activation failed after target services started; durable formats are not proven readable by the prior release" >&2
 				echo "  Target selectors remain selected and Steward services are stopped. Repair the target or follow an approved state migration; do not force a binary rollback." >&2
@@ -743,13 +779,12 @@ if [[ $topology_enabled == true ]]; then
 	selector_tmp="/etc/steward/.executor-gateway.env.new.$$"
 	rm -f "$selector_tmp"
 	ln -s "$target_gateway_env" "$selector_tmp"
-	mv -Tf "$selector_tmp" "$gateway_env"
+	replace_selector "$selector_tmp" "$gateway_env"
 fi
 current_tmp="/opt/steward/.current.new.$$"
 rm -f "$current_tmp"
 ln -s "$release_dir" "$current_tmp"
-mv -Tf "$current_tmp" /opt/steward/current
-selectors_switched=true
+replace_selector "$current_tmp" /opt/steward/current
 systemctl daemon-reload
 
 if [[ $restart == true ]]; then

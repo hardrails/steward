@@ -287,7 +287,7 @@ EOF
 }
 
 exercise_uninstall_symlink_boundary() {
-	local version=v0.0.0-uninstall-boundary trusted_guard attacker_guard link status
+	local version="v0.0.0-uninstall-boundary.${BASHPID:-$$}" trusted_resolver trusted_guard attacker_guard link status
 	uninstall_test_release="/opt/steward/releases/$version"
 	if [[ -e $uninstall_test_release || -L $uninstall_test_release ]]; then
 		echo "node-upgrade-smoke: uninstall boundary fixture release already exists" >&2
@@ -296,7 +296,21 @@ exercise_uninstall_symlink_boundary() {
 	[[ -e /opt/steward || -L /opt/steward ]] || uninstall_test_parent_created=true
 	"${as_root[@]}" install -d -o root -g root -m 0755 \
 		"$uninstall_test_release/integration/scripts"
-	"${as_root[@]}" install -o root -g root -m 0755 "$root/scripts/uninstall-node.sh" \
+	trusted_resolver="$work/trusted-uninstall-resolver.sh"
+	{
+		printf '%s\n' '#!/bin/bash -p' 'set -euo pipefail' \
+			'PATH=/usr/sbin:/usr/bin:/sbin:/bin' 'export PATH' "IFS=\$' \\t\\n'" 'umask 077'
+		sed -n '/^# BEGIN UNINSTALL_TRUST_BOUNDARY$/,/^# END UNINSTALL_TRUST_BOUNDARY$/p' \
+			"$root/scripts/uninstall-node.sh"
+		cat <<'EOF'
+"$guard_bin"
+EOF
+	} >"$trusted_resolver"
+	grep -Fq 'trusted_root_executable() {' "$trusted_resolver" || {
+		echo "node-upgrade-smoke: could not extract the uninstaller trust boundary" >&2
+		return 1
+	}
+	"${as_root[@]}" install -o root -g root -m 0755 "$trusted_resolver" \
 		"$uninstall_test_release/integration/scripts/uninstall-node.sh"
 	trusted_guard="$work/trusted-node-removal-guard.sh"
 	cat >"$trusted_guard" <<'EOF'
@@ -322,10 +336,121 @@ EOF
 		"$link" >"$work/uninstall-symlink.out" 2>"$work/uninstall-symlink.err"
 	status=$?
 	set -e
-	if (( status != 73 )) || [[ ! -f $work/trusted-guard-ran || -e $work/attacker-guard-ran ]]; then
+	if [[ -e $work/attacker-guard-ran ]]; then
 		echo "node-upgrade-smoke: uninstaller followed an untrusted invocation sibling" >&2
+		sed 's/^/  stdout: /' "$work/uninstall-symlink.out" >&2
+		sed 's/^/  stderr: /' "$work/uninstall-symlink.err" >&2
 		return 1
 	fi
+	if (( status != 73 )) || [[ ! -f $work/trusted-guard-ran ]]; then
+		echo "node-upgrade-smoke: trusted uninstaller sibling resolution did not complete (status=$status, trusted_marker=$([[ -f $work/trusted-guard-ran ]] && echo present || echo missing))" >&2
+		sed 's/^/  stdout: /' "$work/uninstall-symlink.out" >&2
+		sed 's/^/  stderr: /' "$work/uninstall-symlink.err" >&2
+		return 1
+	fi
+}
+
+exercise_activation_service_boundaries() {
+	local helper function_name
+	helper="$work/exercise-activation-service-boundaries.sh"
+	{
+		printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail'
+		for function_name in read_service_activity stop_active_services replace_selector; do
+			sed -n "/^${function_name}() {$/,/^}$/p" "$root/scripts/activate-node-release.sh"
+		done
+		cat <<'EOF'
+SMOKE_GATEWAY_ACTIVITY=inactive
+SMOKE_STEWARD_ACTIVITY=inactive
+SMOKE_EXECUTOR_ACTIVITY=inactive
+SMOKE_STOP_FAILURE=
+SMOKE_STICKY_STOP=
+systemctl() {
+	local operation=${1:-} unit=${2:-} state
+	case "$operation" in
+		is-active)
+			case "$unit" in
+				steward-gateway.service) state=$SMOKE_GATEWAY_ACTIVITY ;;
+				steward.service) state=$SMOKE_STEWARD_ACTIVITY ;;
+				steward-executor.service) state=$SMOKE_EXECUTOR_ACTIVITY ;;
+				*) state=query-error ;;
+			esac
+			case "$state" in
+				active) echo active; return 0 ;;
+				inactive) echo inactive; return 3 ;;
+				query-error) return 2 ;;
+				*) echo "$state"; return 3 ;;
+			esac
+			;;
+		stop)
+			[[ $unit != "$SMOKE_STOP_FAILURE" ]] || return 71
+			if [[ $unit != "$SMOKE_STICKY_STOP" ]]; then
+				case "$unit" in
+					steward-gateway.service) SMOKE_GATEWAY_ACTIVITY=inactive ;;
+					steward.service) SMOKE_STEWARD_ACTIVITY=inactive ;;
+					steward-executor.service) SMOKE_EXECUTOR_ACTIVITY=inactive ;;
+					*) return 2 ;;
+				esac
+			fi
+			;;
+		*) return 2 ;;
+	esac
+}
+
+SMOKE_STEWARD_ACTIVITY=activating
+if read_service_activity steward.service >/dev/null 2>&1; then
+	echo 'node-upgrade-smoke: activation accepted a transitional systemd state' >&2
+	exit 1
+fi
+SMOKE_STEWARD_ACTIVITY=query-error
+if read_service_activity steward.service >/dev/null 2>&1; then
+	echo 'node-upgrade-smoke: activation treated a failed systemd query as inactive' >&2
+	exit 1
+fi
+
+SMOKE_GATEWAY_ACTIVITY=active
+SMOKE_STEWARD_ACTIVITY=active
+SMOKE_EXECUTOR_ACTIVITY=active
+SMOKE_STOP_FAILURE=steward.service
+if stop_active_services >/dev/null 2>&1; then
+	echo 'node-upgrade-smoke: rollback ignored a failed service stop' >&2
+	exit 1
+fi
+[[ $SMOKE_STEWARD_ACTIVITY == active ]]
+
+SMOKE_STOP_FAILURE=
+SMOKE_GATEWAY_ACTIVITY=active
+SMOKE_STEWARD_ACTIVITY=active
+SMOKE_EXECUTOR_ACTIVITY=active
+SMOKE_STICKY_STOP=steward-executor.service
+if stop_active_services >/dev/null 2>&1; then
+	echo 'node-upgrade-smoke: rollback did not verify service inactivity after stop' >&2
+	exit 1
+fi
+[[ $SMOKE_EXECUTOR_ACTIVITY == active ]]
+
+SMOKE_STICKY_STOP=
+stop_active_services
+[[ $SMOKE_GATEWAY_ACTIVITY == inactive ]]
+[[ $SMOKE_STEWARD_ACTIVITY == inactive ]]
+[[ $SMOKE_EXECUTOR_ACTIVITY == inactive ]]
+
+selectors_switched=false
+mv() { return 72; }
+if replace_selector /tmp/source /tmp/destination; then
+	echo 'node-upgrade-smoke: selector replacement failure unexpectedly succeeded' >&2
+	exit 1
+fi
+[[ $selectors_switched == true ]]
+EOF
+	} >"$helper"
+	chmod 0755 "$helper"
+	for function_name in read_service_activity stop_active_services replace_selector; do
+		grep -Fq "$function_name() {" "$helper" || {
+			echo "node-upgrade-smoke: could not extract activation helper $function_name" >&2
+			return 1
+		}
+	done
+	bash "$helper"
 }
 
 exercise_uninstall_quiesce_boundary() {
@@ -525,6 +650,7 @@ else
 	echo "node-upgrade-smoke: configuration lock boundary check skipped (passwordless root unavailable)"
 	echo "node-upgrade-smoke: uninstall sibling boundary check skipped (passwordless root unavailable)"
 fi
+exercise_activation_service_boundaries
 exercise_uninstall_quiesce_boundary
 exercise_delivery_activation
 if [[ $relay_test == true ]]; then

@@ -315,6 +315,68 @@ bounded_systemctl() {
 	timeout --signal=TERM --kill-after=2 15 systemctl "$@"
 }
 
+snapshot_control_service_state() {
+	local activity activity_status=0 enablement enablement_status=0
+	activity=$(bounded_systemctl is-active steward-control.service 2>/dev/null) || activity_status=$?
+	enablement=$(bounded_systemctl is-enabled steward-control.service 2>/dev/null) || enablement_status=$?
+
+	case "$activity" in
+		active)
+			(( activity_status == 0 )) || {
+				echo "install-control: systemd reported an inconsistent active state for steward-control.service" >&2
+				return 1
+			}
+			service_was_active=true
+			;;
+		inactive)
+			(( activity_status != 0 )) || {
+				echo "install-control: systemd reported an inconsistent inactive state for steward-control.service" >&2
+				return 1
+			}
+			service_was_active=false
+			;;
+		unknown)
+			(( activity_status != 0 )) || return 1
+			service_was_active=false
+			;;
+		*)
+			echo "install-control: could not determine the exact activity state of steward-control.service" >&2
+			return 1
+			;;
+	esac
+
+	case "$enablement" in
+		enabled)
+			(( enablement_status == 0 )) || {
+				echo "install-control: systemd reported an inconsistent enabled state for steward-control.service" >&2
+				return 1
+			}
+			service_was_enabled=true
+			;;
+		disabled)
+			(( enablement_status != 0 )) || {
+				echo "install-control: systemd reported an inconsistent disabled state for steward-control.service" >&2
+				return 1
+			}
+			service_was_enabled=false
+			;;
+		not-found)
+			(( enablement_status != 0 )) || return 1
+			service_was_enabled=false
+			;;
+		*)
+			echo "install-control: could not determine the exact enablement state of steward-control.service" >&2
+			return 1
+			;;
+	esac
+
+	if [[ $activity == unknown && $enablement != not-found ]] ||
+		[[ $enablement == not-found && $activity == active ]]; then
+		echo "install-control: systemd reported inconsistent activity and enablement states for steward-control.service" >&2
+		return 1
+	fi
+}
+
 recover_new_admin_token() {
 	local destination=$1 expected_digest=${2:-} parent destination_id candidate metadata
 	local destination_links destination_inode candidate_inode candidate_digest candidate_size
@@ -1537,8 +1599,7 @@ fi
 if [[ -e $current_link && ! -L $current_link ]] || [[ -e $binary_link && ! -L $binary_link ]] || [[ -e $doctor_link && ! -L $doctor_link ]] || [[ -e $unit_link && ! -L $unit_link ]]; then
 	echo "install-control: refusing to replace a non-installer file at a managed link path" >&2; exit 1
 fi
-bounded_systemctl is-active --quiet steward-control.service && service_was_active=true
-bounded_systemctl is-enabled --quiet steward-control.service && service_was_enabled=true
+snapshot_control_service_state || exit 1
 if ! prepare_durable_transaction; then
 	echo "install-control: could not persist the rollback journal before changing controller state" >&2
 	exit 1

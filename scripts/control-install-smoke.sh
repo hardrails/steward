@@ -191,8 +191,37 @@ kill_installer_behind_timeout() {
 }
 printf '%s\n' "$*" >>"$state/calls"
 case ${1:-} in
-	is-active) [[ -f $state/active ]] ;;
-	is-enabled) [[ -f $state/enabled ]] ;;
+	is-active)
+		if [[ -f $state/fail-activity-query ]]; then
+			echo 'fake systemctl: activity query failed' >&2
+			exit 2
+		fi
+		quiet=false
+		for argument in "$@"; do [[ $argument != --quiet ]] || quiet=true; done
+		if [[ ! -e /etc/systemd/system/steward-control.service && ! -L /etc/systemd/system/steward-control.service ]]; then
+			[[ $quiet == true ]] || echo unknown
+			exit 4
+		fi
+		if [[ -f $state/active ]]; then
+			[[ $quiet == true ]] || echo active
+			exit 0
+		fi
+		[[ $quiet == true ]] || echo inactive
+		exit 3
+		;;
+	is-enabled)
+		if [[ -f $state/fail-enablement-query ]]; then
+			echo 'fake systemctl: enablement query failed' >&2
+			exit 2
+		fi
+		if [[ ! -e /etc/systemd/system/steward-control.service && ! -L /etc/systemd/system/steward-control.service ]]; then
+			echo not-found
+			exit 1
+		fi
+		if [[ -f $state/enabled ]]; then echo enabled; exit 0; fi
+		echo disabled
+		exit 1
+		;;
 	stop)
 		rm -f "$state/active"
 		if [[ -f $state/kill-on-stop ]]; then
@@ -631,6 +660,20 @@ install_version v1.1.0
 [[ $(readlink /opt/steward-control/current) == /opt/steward-control/releases/v1.1.0 ]]
 [[ $(sha256sum /var/lib/steward-control/CURRENT /var/lib/steward-control/auth.key /var/lib/steward-control/snapshot.1) == "$state_hash" ]]
 [[ $(sha256sum /root/steward-control-admin.token) == "$token_hash" ]]
+
+for query in activity enablement; do
+	touch "/run/fake-systemctl/fail-${query}-query"
+	if install_version v1.1.0 >"/tmp/control-${query}-query-failure.out" 2>&1; then
+		echo "control-install-smoke: ambiguous systemd $query query was accepted" >&2
+		exit 1
+	fi
+	rm -f "/run/fake-systemctl/fail-${query}-query"
+	grep -Fq "could not determine the exact ${query} state of steward-control.service" \
+		"/tmp/control-${query}-query-failure.out"
+	[[ $(readlink /opt/steward-control/current) == /opt/steward-control/releases/v1.1.0 ]]
+	[[ -f /run/fake-systemctl/active && -f /run/fake-systemctl/enabled ]]
+	[[ ! -e /var/lib/steward-control-installer/transaction ]]
+done
 
 assert_durable_crash_recovery() {
 	local kill_marker=$1 label=$2 status config_hash pending_copy state_before
