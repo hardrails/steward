@@ -171,9 +171,10 @@ PY
 
 control_bin=${STEWARD_CONTROL_BIN:-$work/steward-control}
 ctl_bin=${STEWARDCTL_BIN:-$work/stewardctl}
-if [[ ! -x $control_bin || ! -x $ctl_bin ]]; then
+mcp_bin=${STEWARD_MCP_BIN:-$work/steward-mcp}
+if [[ ! -x $control_bin || ! -x $ctl_bin || ! -x $mcp_bin ]]; then
 	command -v go >/dev/null 2>&1 || {
-		echo "control-acceptance: go is required unless both binary paths are provided" >&2
+		echo "control-acceptance: go is required unless all binary paths are provided" >&2
 		exit 2
 	}
 fi
@@ -185,7 +186,11 @@ if [[ ! -x $ctl_bin ]]; then
 	run_bounded 180 "$root" "$work/build-ctl.stdout" "$work/build-ctl.stderr" \
 		go build -o "$ctl_bin" ./cmd/stewardctl
 fi
-[[ -x $control_bin && -x $ctl_bin ]] || {
+if [[ ! -x $mcp_bin ]]; then
+	run_bounded 180 "$root" "$work/build-mcp.stdout" "$work/build-mcp.stderr" \
+		go build -o "$mcp_bin" ./cmd/steward-mcp
+fi
+[[ -x $control_bin && -x $ctl_bin && -x $mcp_bin ]] || {
 	echo "control-acceptance: Steward binaries are not executable" >&2
 	exit 2
 }
@@ -296,9 +301,11 @@ PY
 
 start_control() {
 	local label=$1
+	shift
 	local address=
 	local index
 	"$control_bin" -state-dir "$state_dir" -addr 127.0.0.1:0 -delivery-lease 1m \
+		"$@" \
 		>"$work/$label.stdout" 2>"$work/$label.stderr" &
 	control_pid=$!
 	index=0
@@ -318,6 +325,63 @@ start_control() {
 		return 1
 	}
 	control_url=http://$address
+}
+
+# Run one bounded MCP stdio session. Requests and both outputs are regular
+# files so bearer paths, protocol output, and diagnostics can be audited after
+# the child exits.
+run_mcp_session() {
+	local request_path=$1
+	local stdout_path=$2
+	local stderr_path=$3
+	shift 3
+	python3 -I - "$request_path" "$stdout_path" "$stderr_path" "$@" <<'PY'
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+
+request_path, stdout_path, stderr_path = map(pathlib.Path, sys.argv[1:4])
+command = sys.argv[4:]
+limit = 1 << 20
+request = request_path.read_bytes()
+if not request or len(request) > limit or not command:
+    raise SystemExit("control-acceptance: invalid MCP session request")
+try:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        close_fds=True,
+    )
+except OSError as error:
+    raise SystemExit(f"control-acceptance: MCP process could not start: {error.strerror}") from None
+try:
+    stdout, stderr = process.communicate(request, timeout=30)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        stdout, stderr = process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+    raise SystemExit("control-acceptance: MCP session exceeded its timeout") from None
+stdout_path.write_bytes(stdout)
+stderr_path.write_bytes(stderr)
+if len(stdout) > limit or len(stderr) > limit:
+    raise SystemExit("control-acceptance: MCP session output exceeded 1 MiB")
+if process.returncode != 0:
+    raise SystemExit(process.returncode if 0 < process.returncode < 126 else 1)
+PY
 }
 
 # Perform one bounded JSON HTTP exchange without proxies or redirects. TOKEN_KIND
@@ -401,6 +465,57 @@ sys.stdout.buffer.write(raw)
 PY
 }
 
+# Perform one authenticated metrics exchange without proxies or redirects and
+# preserve only its bounded Prometheus text body.
+http_metrics() {
+	local path=$1
+	local token_path=$2
+	local output_path=$3
+	python3 -I - "$control_url$path" "$token_path" >"$output_path" <<'PY'
+import pathlib
+import sys
+import urllib.error
+import urllib.request
+
+url, token_path = sys.argv[1:]
+limit = 1 << 20
+if not url.startswith("http://127.0.0.1:"):
+    raise SystemExit("control-acceptance: unsafe metrics request")
+token = pathlib.Path(token_path).read_text(encoding="utf-8").strip()
+if not token or len(token) > 4096 or any(character.isspace() for character in token):
+    raise SystemExit("control-acceptance: metrics bearer file is invalid")
+request = urllib.request.Request(url, method="GET")
+request.add_header("Accept", "text/plain")
+request.add_header("Authorization", f"Bearer {token}")
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+try:
+    response = opener.open(request, timeout=5)
+except urllib.error.HTTPError as error:
+    raise SystemExit(f"control-acceptance: metrics HTTP status {error.code}, expected 200") from None
+except OSError as error:
+    raise SystemExit(f"control-acceptance: metrics exchange failed: {error.__class__.__name__}") from None
+with response:
+    content_type = response.headers.get("Content-Type", "")
+    cache_control = response.headers.get("Cache-Control", "")
+    content_options = response.headers.get("X-Content-Type-Options", "")
+    raw = response.read(limit + 1)
+if response.status != 200:
+    raise SystemExit(f"control-acceptance: metrics HTTP status {response.status}, expected 200")
+if content_type != "text/plain; version=0.0.4; charset=utf-8":
+    raise SystemExit("control-acceptance: metrics content type is not the fixed Prometheus format")
+if cache_control != "no-store" or content_options != "nosniff":
+    raise SystemExit("control-acceptance: metrics response omitted defensive headers")
+if not raw or len(raw) > limit:
+    raise SystemExit("control-acceptance: metrics response is empty or exceeds 1 MiB")
+sys.stdout.buffer.write(raw)
+PY
+}
+
 assert_owner_file() {
 	python3 -I - "$1" <<'PY'
 import pathlib
@@ -443,10 +558,11 @@ for target in targets:
 PY
 }
 
-start_control control-first
+start_control control-first -node-stale-after=1ns
 http_json GET /v1/healthz "" none "" 200 "$work/health.json"
 http_json GET /v1/readiness "" none "" 200 "$work/readiness.json"
-python3 -I - "$work/health.json" "$work/readiness.json" <<'PY'
+http_json GET /metrics "" none "" 404 "$work/metrics-disabled.json"
+python3 -I - "$work/health.json" "$work/readiness.json" "$work/metrics-disabled.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -454,6 +570,9 @@ if json.loads(pathlib.Path(sys.argv[1]).read_text()) != {"status": "ok"}:
     raise SystemExit("control-acceptance: health response is invalid")
 if json.loads(pathlib.Path(sys.argv[2]).read_text()) != {"status": "ready"}:
     raise SystemExit("control-acceptance: readiness response is invalid")
+disabled = json.loads(pathlib.Path(sys.argv[3]).read_text())
+if disabled.get("error") != "not_found" or not disabled.get("message"):
+    raise SystemExit("control-acceptance: metrics were not absent before explicit opt-in")
 PY
 
 tenant_id=acceptance-tenant
@@ -606,6 +725,146 @@ import sys
 node = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if node.get("node_id") != sys.argv[2] or node.get("tenant_ids") != [sys.argv[3]] or node.get("state") != "active":
     raise SystemExit("control-acceptance: enrolled node inventory is invalid")
+PY
+
+# The operations surface is authenticated, tenant projected, query strict, and
+# metadata only. Exercise both its HTTP contract and the human-facing CLI
+# before the node has polled so the node_never_seen finding is deterministic.
+for route in /v1/operations/summary /v1/operations/attention \
+	/v1/operations/commands /v1/operations/credentials; do
+	safe_name=${route##*/}
+	http_json GET "$route" "" none "" 401 "$work/operations-$safe_name-unauthorized.json"
+done
+run_bounded 30 "$work" "$work/operations-status.stdout" "$work/operations-status.stderr" \
+	"$ctl_bin" control operations status -control-url "$control_url" -token-file "$operator_token"
+http_json GET "/v1/operations/summary?tenant_id=$tenant_id" "" raw "$admin_token" 200 \
+	"$work/operations-summary-admin.json"
+python3 -I - "$work/operations-status.stdout" "$work/operations-summary-admin.json" \
+	"$tenant_id" "$node_id" <<'PY'
+import json
+import pathlib
+import sys
+
+def object_keys(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield key
+            yield from object_keys(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from object_keys(child)
+
+for path in sys.argv[1:3]:
+    summary = json.loads(pathlib.Path(path).read_text())
+    if summary.get("tenant_id") != sys.argv[3] or not summary.get("generated_at"):
+        raise SystemExit("control-acceptance: operations summary did not retain tenant scope")
+    capacity = summary.get("capacity")
+    if not isinstance(capacity, list) or {entry.get("resource") for entry in capacity} != {
+        "nodes", "credentials", "enrollments", "commands",
+    }:
+        raise SystemExit("control-acceptance: tenant operations capacity inventory is incomplete")
+    if summary.get("evidence", {}).get("nodes") != 1:
+        raise SystemExit("control-acceptance: tenant operations evidence count is invalid")
+    if summary.get("commands", {}).get("total") != 0:
+        raise SystemExit("control-acceptance: operations summary counted a command before submission")
+    if summary.get("attention", {}).get("total", 0) < 1:
+        raise SystemExit("control-acceptance: operations summary omitted derived attention")
+    raw = pathlib.Path(path).read_text()
+    if sys.argv[4] in raw:
+        raise SystemExit("control-acceptance: operations summary exposed a node identity")
+    forbidden = {"credential", "token", "command_dsse", "payload", "result"}
+    leaked = forbidden.intersection(object_keys(summary))
+    if leaked:
+        raise SystemExit(f"control-acceptance: operations summary exposed {sorted(leaked)}")
+PY
+
+for route in \
+	"/v1/operations/summary?tenant_id=$other_tenant_id" \
+	"/v1/operations/attention?tenant_id=$other_tenant_id" \
+	"/v1/operations/commands?tenant_id=$other_tenant_id" \
+	"/v1/operations/credentials?tenant_id=$other_tenant_id"; do
+	safe_name=$(printf '%s' "$route" | tr '/?=&' '-----')
+	http_json GET "$route" "" raw "$operator_token" 404 "$work/$safe_name.json"
+done
+
+for route in \
+	"/v1/operations/summary?unexpected=1" \
+	"/v1/operations/summary?tenant_id=$tenant_id&tenant_id=$tenant_id" \
+	"/v1/operations/attention?reason=" \
+	"/v1/operations/attention?reason=not_a_reason" \
+	"/v1/operations/attention?limit=01" \
+	"/v1/operations/commands?state=unknown" \
+	"/v1/operations/commands?cursor=a&cursor=b" \
+	"/v1/operations/credentials?revoked=1" \
+	"/v1/operations/credentials?kind=unknown"; do
+	safe_name=$(printf '%s' "$route" | tr '/?=&' '-----')
+	http_json GET "$route" "" raw "$admin_token" 400 "$work/$safe_name.json"
+done
+
+run_bounded 30 "$work" "$work/attention-never-seen.stdout" "$work/attention-never-seen.stderr" \
+	"$ctl_bin" control attention list -control-url "$control_url" -token-file "$operator_token" \
+	-reason node_never_seen -limit 1
+run_bounded 30 "$work" "$work/credentials-first.stdout" "$work/credentials-first.stderr" \
+	"$ctl_bin" control credential list -control-url "$control_url" -token-file "$operator_token" \
+	-revoked false -limit 1
+credential_cursor=$(python3 -I - "$work/attention-never-seen.stdout" \
+	"$work/credentials-first.stdout" "$tenant_id" "$node_id" <<'PY'
+import base64
+import json
+import pathlib
+import sys
+
+attention = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if len(attention.get("items", [])) != 1:
+    raise SystemExit("control-acceptance: filtered attention page is not exactly bounded")
+item = attention["items"][0]
+if item.get("reason") != "node_never_seen" or item.get("tenant_id") != sys.argv[3] or item.get("node_id") != sys.argv[4]:
+    raise SystemExit("control-acceptance: node-never-seen attention fact is invalid")
+credentials = json.loads(pathlib.Path(sys.argv[2]).read_text())
+if len(credentials.get("credentials", [])) != 1:
+    raise SystemExit("control-acceptance: first credential page is not exactly bounded")
+cursor = credentials.get("next_cursor", "")
+try:
+    decoded = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+except ValueError:
+    raise SystemExit("control-acceptance: credential continuation cursor is invalid base64url") from None
+canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode()
+if not cursor or canonical != cursor or len(decoded) <= 33 or decoded[0] != 1:
+    raise SystemExit("control-acceptance: credential continuation cursor is not canonical and versioned")
+print(cursor)
+PY
+)
+run_bounded 30 "$work" "$work/credentials-second.stdout" "$work/credentials-second.stderr" \
+	"$ctl_bin" control credential list -control-url "$control_url" -token-file "$operator_token" \
+	-revoked false -cursor "$credential_cursor" -limit 1
+python3 -I - "$work/credentials-first.stdout" "$work/credentials-second.stdout" \
+	"$tenant_id" "$node_id" "$node_credential" "$admin_token" "$operator_token" <<'PY'
+import json
+import pathlib
+import sys
+
+pages = [json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:3]]
+records = [record for page in pages for record in page.get("credentials", [])]
+if len(records) != 2 or len({record.get("id") for record in records}) != 2:
+    raise SystemExit("control-acceptance: credential cursor repeated or skipped visible metadata")
+if pages[1].get("next_cursor"):
+    raise SystemExit("control-acceptance: final credential page retained a continuation cursor")
+kinds = {record.get("kind") for record in records}
+if kinds != {"operator", "node"}:
+    raise SystemExit("control-acceptance: tenant credential inventory returned the wrong kinds")
+node_records = [record for record in records if record.get("kind") == "node"]
+if len(node_records) != 1 or node_records[0].get("tenant_ids") != [sys.argv[3]] or node_records[0].get("node_id") != sys.argv[4]:
+    raise SystemExit("control-acceptance: tenant credential projection crossed its scope")
+raw = b"".join(pathlib.Path(path).read_bytes() for path in sys.argv[1:3])
+node_secret = json.loads(pathlib.Path(sys.argv[5]).read_text())["credential"].encode()
+for secret_path in sys.argv[6:8]:
+    if pathlib.Path(secret_path).read_bytes().strip() in raw:
+        raise SystemExit("control-acceptance: credential inventory disclosed an operator bearer")
+if node_secret in raw:
+    raise SystemExit("control-acceptance: credential inventory disclosed a node bearer")
+for forbidden in (b'"credential":', b'"token"', b'"token_mac"', b'"mac"'):
+    if forbidden in raw:
+        raise SystemExit("control-acceptance: credential inventory exposed secret-bearing fields")
 PY
 
 # The site authority can inspect the independently retained receipt checkpoint,
@@ -809,6 +1068,36 @@ if command.get("command_digest") != digest or command.get("state") != "pending" 
 PY
 assert_secret_absent raw "$operator_token" "$work/command-submit.stdout" "$work/command-submit.stderr" \
 	"$work/command-submit-retry.stdout" "$work/command-submit-retry.stderr"
+
+run_bounded 30 "$work" "$work/command-list-pending.stdout" "$work/command-list-pending.stderr" \
+	"$ctl_bin" control command list -control-url "$control_url" -token-file "$operator_token" \
+	-tenant-id "$tenant_id" -node-id "$node_id" -state pending -limit 1
+python3 -I - "$work/command-list-pending.stdout" "$work/command.dsse.json" \
+	"$command_id" "$tenant_id" "$node_id" <<'PY'
+import base64
+import json
+import pathlib
+import sys
+
+page = json.loads(pathlib.Path(sys.argv[1]).read_text())
+commands = page.get("commands", [])
+if len(commands) != 1 or page.get("next_cursor"):
+    raise SystemExit("control-acceptance: pending command inventory is not exactly bounded")
+command = commands[0]
+if command.get("id") != sys.argv[3] or command.get("tenant_id") != sys.argv[4] or \
+        command.get("node_id") != sys.argv[5] or command.get("state") != "pending":
+    raise SystemExit("control-acceptance: pending command inventory changed command identity")
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+signed = pathlib.Path(sys.argv[2]).read_bytes()
+if signed in raw or base64.b64encode(signed) in raw:
+    raise SystemExit("control-acceptance: command inventory exposed signed command bytes")
+for forbidden in (
+    b'"command_dsse', b'"payload"', b'"result"', b'"runtime_ref"',
+    b'"reported_status"', b'"error_code"',
+):
+    if forbidden in raw:
+        raise SystemExit("control-acceptance: command inventory exposed execution content")
+PY
 
 printf '%s\n' "{\"protocol_version\":3,\"node_id\":\"$node_id\",\"credential_scope\":\"node\",\"capabilities\":[\"delivery-leases-v3\",\"signed-commands-v2\"]}" \
 	>"$work/poll-request.json"
@@ -1046,6 +1335,177 @@ if status.get("claim_generation") != report["claim_generation"] or status.get("r
     raise SystemExit("control-acceptance: terminal result or signed claim fence was hidden or changed")
 PY
 
+run_bounded 30 "$work" "$work/command-list-terminal.stdout" "$work/command-list-terminal.stderr" \
+	"$ctl_bin" control command list -control-url "$control_url" -token-file "$operator_token" \
+	-tenant-id "$tenant_id" -node-id "$node_id" -state terminal -terminal-status done -limit 1
+python3 -I - "$work/command-list-terminal.stdout" "$command_id" "$tenant_id" "$node_id" <<'PY'
+import json
+import pathlib
+import sys
+
+page = json.loads(pathlib.Path(sys.argv[1]).read_text())
+commands = page.get("commands", [])
+if len(commands) != 1 or page.get("next_cursor"):
+    raise SystemExit("control-acceptance: terminal command filter is not exactly bounded")
+command = commands[0]
+if command.get("id") != sys.argv[2] or command.get("tenant_id") != sys.argv[3] or \
+        command.get("node_id") != sys.argv[4] or command.get("state") != "terminal" or \
+        command.get("terminal_status") != "done":
+    raise SystemExit("control-acceptance: terminal command inventory changed retained metadata")
+if any(field in command for field in (
+        "result", "payload", "command_dsse_base64", "runtime_ref", "reported_status", "error_code",
+)):
+    raise SystemExit("control-acceptance: terminal command inventory exposed execution content")
+PY
+
+# Exercise the same read-only fleet views through a real control-only MCP
+# process. Structured and text results must agree, remain tenant scoped, and
+# exclude the signed command, terminal result, and all bearer material.
+python3 -I - "$work/mcp-operations.requests" "$tenant_id" "$other_tenant_id" "$node_id" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+tenant_id, other_tenant_id, node_id = sys.argv[2:]
+messages = [
+    {
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "control-acceptance", "version": "1"},
+        },
+    },
+    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+    {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {
+            "name": "steward_control_operations_summary",
+            "arguments": {"tenant_id": tenant_id},
+        },
+    },
+    {
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {
+            "name": "steward_control_attention_list",
+            "arguments": {"tenant_id": tenant_id, "limit": 1},
+        },
+    },
+    {
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {
+            "name": "steward_control_command_list",
+            "arguments": {
+                "tenant_id": tenant_id, "node_id": node_id, "state": "terminal",
+                "terminal_status": "done", "limit": 1,
+            },
+        },
+    },
+    {
+        "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "params": {
+            "name": "steward_control_credential_list",
+            "arguments": {
+                "tenant_id": tenant_id, "kind": "node", "node_id": node_id,
+                "limit": 1,
+            },
+        },
+    },
+    {
+        "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+        "params": {
+            "name": "steward_control_operations_summary",
+            "arguments": {"tenant_id": other_tenant_id},
+        },
+    },
+]
+with path.open("x", encoding="utf-8") as output:
+    for message in messages:
+        output.write(json.dumps(message, separators=(",", ":")) + "\n")
+PY
+run_mcp_session "$work/mcp-operations.requests" "$work/mcp-operations.stdout" \
+	"$work/mcp-operations.stderr" "$mcp_bin" -control-url "$control_url" \
+	-control-token-file "$operator_token"
+python3 -I - "$work/mcp-operations.stdout" "$work/mcp-operations.stderr" \
+	"$tenant_id" "$other_tenant_id" "$node_id" "$command_id" "$node_credential" \
+	"$admin_token" "$operator_token" "$work/command.dsse.json" <<'PY'
+import base64
+import json
+import pathlib
+import sys
+
+stdout_path, stderr_path = map(pathlib.Path, sys.argv[1:3])
+tenant_id, other_tenant_id, node_id, command_id = sys.argv[3:7]
+if stderr_path.read_bytes():
+    raise SystemExit("control-acceptance: control-only MCP session wrote diagnostics")
+responses = {}
+for line in stdout_path.read_text(encoding="utf-8").splitlines():
+    value = json.loads(line)
+    if value.get("jsonrpc") != "2.0" or value.get("id") in responses:
+        raise SystemExit("control-acceptance: MCP response identity is invalid")
+    responses[value.get("id")] = value
+if set(responses) != {1, 2, 3, 4, 5, 6} or "error" in responses[1]:
+    raise SystemExit("control-acceptance: MCP lifecycle responses are incomplete")
+
+structured = {}
+for identifier in range(2, 6):
+    response = responses[identifier]
+    if "error" in response:
+        raise SystemExit(f"control-acceptance: MCP operations tool {identifier} returned an RPC error")
+    result = response.get("result", {})
+    if result.get("isError") is not False:
+        raise SystemExit(f"control-acceptance: MCP operations tool {identifier} returned a tool error")
+    content = result.get("content")
+    if not isinstance(content, list) or len(content) != 1 or content[0].get("type") != "text":
+        raise SystemExit("control-acceptance: MCP operations tool omitted its bounded text projection")
+    structured[identifier] = result.get("structuredContent")
+    if json.loads(content[0].get("text", "")) != structured[identifier]:
+        raise SystemExit("control-acceptance: MCP structured and text projections disagree")
+
+summary = structured[2]
+if summary.get("tenant_id") != tenant_id or summary.get("commands", {}).get("terminal") != 1:
+    raise SystemExit("control-acceptance: MCP operations summary changed tenant or command scope")
+attention = structured[3]
+if not isinstance(attention.get("items"), list):
+    raise SystemExit("control-acceptance: MCP attention result is not a bounded page")
+for item in attention["items"]:
+    if item.get("tenant_id") != tenant_id:
+        raise SystemExit("control-acceptance: MCP attention result crossed tenant scope")
+commands = structured[4].get("commands", [])
+if len(commands) != 1 or commands[0].get("id") != command_id or \
+        commands[0].get("tenant_id") != tenant_id or commands[0].get("node_id") != node_id or \
+        commands[0].get("state") != "terminal" or commands[0].get("terminal_status") != "done":
+    raise SystemExit("control-acceptance: MCP command inventory is invalid")
+if any(field in commands[0] for field in (
+        "result", "payload", "command_dsse_base64", "runtime_ref", "reported_status", "error_code",
+)):
+    raise SystemExit("control-acceptance: MCP command inventory exposed execution content")
+credentials = structured[5].get("credentials", [])
+if len(credentials) != 1 or credentials[0].get("kind") != "node" or \
+        credentials[0].get("node_id") != node_id or credentials[0].get("tenant_ids") != [tenant_id]:
+    raise SystemExit("control-acceptance: MCP credential inventory is invalid")
+if any(field in credentials[0] for field in ("credential", "token", "token_mac", "mac")):
+    raise SystemExit("control-acceptance: MCP credential inventory exposed secret-bearing fields")
+denied = responses[6].get("result", {})
+denied_content = denied.get("content", [])
+if denied.get("isError") is not True or len(denied_content) != 1 or \
+        "HTTP 404" not in denied_content[0].get("text", "") or \
+        other_tenant_id in denied_content[0].get("text", ""):
+    raise SystemExit("control-acceptance: MCP tenant isolation did not fail closed and redact scope")
+
+raw = stdout_path.read_bytes()
+node_secret = json.loads(pathlib.Path(sys.argv[7]).read_text())["credential"].encode()
+for secret in (
+    node_secret,
+    pathlib.Path(sys.argv[8]).read_bytes().strip(),
+    pathlib.Path(sys.argv[9]).read_bytes().strip(),
+    pathlib.Path(sys.argv[10]).read_bytes(),
+    base64.b64encode(pathlib.Path(sys.argv[10]).read_bytes()),
+):
+    if secret in raw:
+        raise SystemExit("control-acceptance: MCP operations output disclosed protected bytes")
+PY
+
 http_json POST /executor-uplink/poll "$work/poll-request.json" json "$node_credential" 200 "$work/terminal-poll.json"
 python3 -I - "$work/terminal-poll.json" <<'PY'
 import json
@@ -1078,8 +1538,88 @@ if value.get("error") != "unauthorized":
 PY
 
 stop_control
+start_control control-metrics -enable-metrics=true
+http_json GET /metrics "" none "" 401 "$work/metrics-unauthorized.json"
+http_json GET /metrics "" raw "$work/invalid.token" 401 "$work/metrics-invalid-bearer.json"
+http_json GET "/metrics?unknown=1" "" raw "$admin_token" 400 "$work/metrics-unknown-query.json"
+http_json GET "/metrics?tenant_id=$tenant_id&tenant_id=$tenant_id" "" raw "$admin_token" 400 \
+	"$work/metrics-duplicate-query.json"
+http_json GET "/metrics?tenant_id=$other_tenant_id" "" raw "$operator_token" 404 \
+	"$work/metrics-cross-tenant.json"
+http_metrics /metrics "$admin_token" "$work/metrics-site.prom"
+http_metrics /metrics "$operator_token" "$work/metrics-tenant.prom"
+http_metrics "/metrics?tenant_id=$tenant_id" "$admin_token" "$work/metrics-admin-tenant.prom"
+python3 -I - "$work/metrics-site.prom" "$work/metrics-tenant.prom" \
+	"$work/metrics-admin-tenant.prom" "$tenant_id" "$other_tenant_id" "$node_id" \
+	"$command_id" "$node_credential_id" "$node_credential" "$admin_token" "$operator_token" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+site_path, tenant_path, admin_tenant_path = map(pathlib.Path, sys.argv[1:4])
+tenant_id, other_tenant_id, node_id, command_id, credential_id = sys.argv[4:9]
+allowed_labels = {"scope", "resource", "state", "status", "reason", "severity"}
+required_families = {
+    "steward_control_capacity_used",
+    "steward_control_capacity_limit",
+    "steward_control_capacity_warning",
+    "steward_control_commands",
+    "steward_control_evidence_nodes",
+}
+texts = {
+    "site": site_path.read_text(encoding="utf-8"),
+    "tenant": tenant_path.read_text(encoding="utf-8"),
+    "admin_tenant": admin_tenant_path.read_text(encoding="utf-8"),
+}
+if texts["tenant"] != texts["admin_tenant"]:
+    # generated_at is not exported, so two credentials selecting the same
+    # tenant projection must receive exactly the same fixed-cardinality text.
+    raise SystemExit("control-acceptance: metrics tenant projection depended on operator identity")
+for name, text in texts.items():
+    expected_scope = "site" if name == "site" else "tenant"
+    samples = []
+    families = set()
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"(steward_control_[a-z0-9_]+)\{([^}]*)\} ([0-9]+)", line)
+        if match is None:
+            raise SystemExit(f"control-acceptance: invalid or unbounded Prometheus sample: {line}")
+        family, labels_text, _ = match.groups()
+        labels = {}
+        for label in labels_text.split(","):
+            label_match = re.fullmatch(r'([a-z_]+)="([a-z0-9_]+)"', label)
+            if label_match is None or label_match.group(1) in labels:
+                raise SystemExit(f"control-acceptance: invalid metric label: {label}")
+            labels[label_match.group(1)] = label_match.group(2)
+        if not labels or not set(labels).issubset(allowed_labels) or labels.get("scope") != expected_scope:
+            raise SystemExit("control-acceptance: metrics used an identifier label or changed scope")
+        families.add(family)
+        samples.append(line)
+    if not required_families.issubset(families) or len(samples) > 128:
+        raise SystemExit("control-acceptance: metrics families are incomplete or cardinality is unbounded")
+
+raw = "".join(texts.values()).encode()
+node_secret = json.loads(pathlib.Path(sys.argv[9]).read_text())["credential"].encode()
+for secret in (
+    tenant_id.encode(), other_tenant_id.encode(), node_id.encode(), command_id.encode(),
+    credential_id.encode(), node_secret, pathlib.Path(sys.argv[10]).read_bytes().strip(),
+    pathlib.Path(sys.argv[11]).read_bytes().strip(),
+):
+    if secret in raw:
+        raise SystemExit("control-acceptance: metrics exposed an object identity or bearer")
+for forbidden in (
+    b"tenant_id=", b"node_id=", b"credential_id=", b"command_id=",
+    b"tenant=", b"node=", b"credential=", b"command=",
+):
+    if forbidden in raw:
+        raise SystemExit("control-acceptance: metrics exposed a high-cardinality label")
+PY
+stop_control
 for log in "$work/control-first.stdout" "$work/control-first.stderr" \
-	"$work/control-recovered.stdout" "$work/control-recovered.stderr"; do
+	"$work/control-recovered.stdout" "$work/control-recovered.stderr" \
+	"$work/control-metrics.stdout" "$work/control-metrics.stderr"; do
 	[[ $(wc -c <"$log") -le 1048576 ]] || {
 		echo "control-acceptance: controller diagnostic output exceeded 1 MiB" >&2
 		exit 1
@@ -1096,4 +1636,4 @@ assert_secret_absent raw "$wrong_admin" "${process_outputs[@]}"
 assert_secret_absent raw "$wrong_witness_private" "${process_outputs[@]}"
 assert_secret_absent raw "$work/command.private" "${process_outputs[@]}"
 
-echo "Steward Control acceptance passed: initialization, scoped tenancy, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."
+echo "Steward Control acceptance passed: initialization, scoped tenancy, operations HTTP/CLI/MCP, secret-free inventories, opt-in fixed-cardinality metrics, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."

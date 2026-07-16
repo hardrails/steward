@@ -81,6 +81,27 @@ require_metadata() {
 	fi
 }
 
+valid_operations_duration() {
+	local value=$1 magnitude duration_unit multiplier seconds
+	[[ $value =~ ^([1-9][0-9]*)(s|m|h)$ ]] || return 1
+	magnitude=${BASH_REMATCH[1]}
+	duration_unit=${BASH_REMATCH[2]}
+	case "$duration_unit" in
+		s) multiplier=1 ;;
+		m) multiplier=60 ;;
+		h) multiplier=3600 ;;
+		*) return 1 ;;
+	esac
+	(( ${#magnitude} <= 8 )) || return 1
+	seconds=$((10#$magnitude * multiplier))
+	(( seconds > 0 && seconds <= 31536000 ))
+}
+
+valid_capacity_warning_percent() {
+	local value=$1
+	[[ $value =~ ^[1-9][0-9]*$ ]] && (( 10#$value >= 1 && 10#$value <= 100 ))
+}
+
 trusted_root_directory_chain() {
 	local directory=$1 current metadata uid mode
 	[[ -d $directory && ! -L $directory && $(readlink -e -- "$directory" 2>/dev/null) == "$directory" ]] || return 1
@@ -276,7 +297,7 @@ if [[ -r $config && -f $config && ! -L $config && $(stat -c '%h' -- "$config" 2>
 		case "$line" in
 			"" | \#*) continue ;;
 		esac
-		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE|STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE)=([^[:space:]]*)$ ]]; then
+		if [[ ! $line =~ ^(STEWARD_CONTROL_ADDR|STEWARD_CONTROL_STATE_DIR|STEWARD_CONTROL_AUTH_KEY_FILE|STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE|STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE|STEWARD_CONTROL_TLS_CERT_FILE|STEWARD_CONTROL_TLS_KEY_FILE|STEWARD_CONTROL_ENABLE_METRICS|STEWARD_CONTROL_NODE_STALE_AFTER|STEWARD_CONTROL_EVIDENCE_STALE_AFTER|STEWARD_CONTROL_COMMAND_OVERDUE_AFTER|STEWARD_CONTROL_CAPACITY_WARNING_PERCENT)=([^[:space:]]*)$ ]]; then
 			config_valid=false
 			continue
 		fi
@@ -289,7 +310,9 @@ else
 fi
 for key in STEWARD_CONTROL_ADDR STEWARD_CONTROL_STATE_DIR STEWARD_CONTROL_AUTH_KEY_FILE \
 	STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE \
-	STEWARD_CONTROL_TLS_CERT_FILE STEWARD_CONTROL_TLS_KEY_FILE; do
+	STEWARD_CONTROL_TLS_CERT_FILE STEWARD_CONTROL_TLS_KEY_FILE STEWARD_CONTROL_ENABLE_METRICS \
+	STEWARD_CONTROL_NODE_STALE_AFTER STEWARD_CONTROL_EVIDENCE_STALE_AFTER \
+	STEWARD_CONTROL_COMMAND_OVERDUE_AFTER STEWARD_CONTROL_CAPACITY_WARNING_PERCENT; do
 	[[ ${settings[$key]+present} == present ]] || config_valid=false
 done
 if [[ ${settings[STEWARD_CONTROL_STATE_DIR]:-} != "$state" ||
@@ -297,7 +320,13 @@ if [[ ${settings[STEWARD_CONTROL_STATE_DIR]:-} != "$state" ||
 	${settings[STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE]:-} != "$state/witness.private.pem" ||
 	${settings[STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE]:-} != "$state/witness.public.pem" ]] ||
 	{ [[ -z ${settings[STEWARD_CONTROL_TLS_CERT_FILE]:-} ]] && [[ -n ${settings[STEWARD_CONTROL_TLS_KEY_FILE]:-} ]]; } ||
-	{ [[ -n ${settings[STEWARD_CONTROL_TLS_CERT_FILE]:-} ]] && [[ -z ${settings[STEWARD_CONTROL_TLS_KEY_FILE]:-} ]]; }; then
+	{ [[ -n ${settings[STEWARD_CONTROL_TLS_CERT_FILE]:-} ]] && [[ -z ${settings[STEWARD_CONTROL_TLS_KEY_FILE]:-} ]]; } ||
+	{ [[ ${settings[STEWARD_CONTROL_ENABLE_METRICS]:-} != true ]] &&
+		[[ ${settings[STEWARD_CONTROL_ENABLE_METRICS]:-} != false ]]; } ||
+	! valid_operations_duration "${settings[STEWARD_CONTROL_NODE_STALE_AFTER]:-}" ||
+	! valid_operations_duration "${settings[STEWARD_CONTROL_EVIDENCE_STALE_AFTER]:-}" ||
+	! valid_operations_duration "${settings[STEWARD_CONTROL_COMMAND_OVERDUE_AFTER]:-}" ||
+	! valid_capacity_warning_percent "${settings[STEWARD_CONTROL_CAPACITY_WARNING_PERCENT]:-}"; then
 	config_valid=false
 fi
 if [[ $config_valid == true ]]; then pass "control.env contains only supported settings"; else fail "control.env is invalid"; fi
@@ -398,7 +427,12 @@ else
 		args=(-check-config -addr "${settings[STEWARD_CONTROL_ADDR]}" -state-dir "$state" \
 			-auth-key-file "$state/auth.key" \
 			-witness-private-key-file "${settings[STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE]}" \
-			-witness-public-key-file "${settings[STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE]}")
+			-witness-public-key-file "${settings[STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE]}" \
+			-enable-metrics="${settings[STEWARD_CONTROL_ENABLE_METRICS]}" \
+			-node-stale-after "${settings[STEWARD_CONTROL_NODE_STALE_AFTER]}" \
+			-evidence-stale-after "${settings[STEWARD_CONTROL_EVIDENCE_STALE_AFTER]}" \
+			-command-overdue-after "${settings[STEWARD_CONTROL_COMMAND_OVERDUE_AFTER]}" \
+			-capacity-warning-percent "${settings[STEWARD_CONTROL_CAPACITY_WARNING_PERCENT]}")
 		if [[ -n ${settings[STEWARD_CONTROL_TLS_CERT_FILE]} ]]; then
 			args+=(-tls-cert-file "${settings[STEWARD_CONTROL_TLS_CERT_FILE]}" -tls-key-file "${settings[STEWARD_CONTROL_TLS_KEY_FILE]}")
 		fi

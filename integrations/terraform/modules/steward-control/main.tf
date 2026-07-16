@@ -200,7 +200,7 @@ locals {
       local expected actual size
       [[ -f $control_config && ! -L $control_config ]] || return 1
       [[ $(stat -c '%u:%g:%a:%h' -- "$control_config" 2>/dev/null) == 0:0:600:1 ]] || return 1
-      printf -v expected 'STEWARD_CONTROL_ADDR=%s\nSTEWARD_CONTROL_STATE_DIR=%s\nSTEWARD_CONTROL_AUTH_KEY_FILE=%s\nSTEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=%s\nSTEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=%s\nSTEWARD_CONTROL_TLS_CERT_FILE=\nSTEWARD_CONTROL_TLS_KEY_FILE=' \
+      printf -v expected 'STEWARD_CONTROL_ADDR=%s\nSTEWARD_CONTROL_STATE_DIR=%s\nSTEWARD_CONTROL_AUTH_KEY_FILE=%s\nSTEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=%s\nSTEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=%s\nSTEWARD_CONTROL_TLS_CERT_FILE=\nSTEWARD_CONTROL_TLS_KEY_FILE=\nSTEWARD_CONTROL_ENABLE_METRICS=false\nSTEWARD_CONTROL_NODE_STALE_AFTER=2m\nSTEWARD_CONTROL_EVIDENCE_STALE_AFTER=5m\nSTEWARD_CONTROL_COMMAND_OVERDUE_AFTER=5m\nSTEWARD_CONTROL_CAPACITY_WARNING_PERCENT=80' \
         "$control_address" "$control_state_dir" "$control_auth_key" \
         "$control_witness_private_key" "$control_witness_public_key"
       size=$(stat -c '%s' -- "$control_config" 2>/dev/null) || return 1
@@ -222,6 +222,11 @@ locals {
         "-witness-public-key-file=$control_witness_public_key"
         -tls-cert-file=
         -tls-key-file=
+        -enable-metrics=false
+        -node-stale-after=2m
+        -evidence-stale-after=5m
+        -command-overdue-after=5m
+        -capacity-warning-percent=80
       )
       [[ -r $proc_root/$pid/cmdline ]] || return 1
       while IFS= read -r -d '' argument; do actual+=("$argument"); done <"$proc_root/$pid/cmdline"
