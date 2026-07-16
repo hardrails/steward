@@ -307,7 +307,7 @@ func (server *Server) enroll(writer http.ResponseWriter, request *http.Request) 
 	if !server.decode(writer, request, &input) {
 		return
 	}
-	credential, err := server.store.ExchangeEnrollmentWithEvidence(
+	credential, err := server.store.ExchangeEnrollment(
 		server.auth, input.EnrollmentToken, input.RequestID, input.EvidenceIdentityProof, server.now(),
 	)
 	if err != nil {

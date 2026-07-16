@@ -39,7 +39,7 @@ func TestRecordAPIsFailClosedForUnavailableAndInvalidCallers(t *testing.T) {
 		return err
 	}(), ErrUnavailable)
 	assertErrorIs(t, func() error {
-		_, err := unavailable.ExchangeEnrollmentWithEvidence(nil, "token", "request", controlprotocol.ExecutorEvidenceIdentityProofV1{}, now)
+		_, err := unavailable.ExchangeEnrollment(nil, "token", "request", controlprotocol.ExecutorEvidenceIdentityProofV1{}, now)
 		return err
 	}(), ErrUnavailable)
 	assertErrorIs(t, func() error { _, err := unavailable.ListNodes(operator, "tenant-a"); return err }(), ErrUnavailable)
@@ -162,15 +162,15 @@ func TestRecordAPIsRejectBoundaryViolationsWithoutMutation(t *testing.T) {
 	assertErrorIs(t, err, ErrNotFound)
 
 	assertErrorIs(t, func() error {
-		_, err := fixture.store.ExchangeEnrollmentWithEvidence(nil, "token", "request", controlprotocol.ExecutorEvidenceIdentityProofV1{}, fixture.now)
+		_, err := fixture.store.ExchangeEnrollment(nil, "token", "request", controlprotocol.ExecutorEvidenceIdentityProofV1{}, fixture.now)
 		return err
 	}(), controlauth.ErrUnauthorized)
 	assertErrorIs(t, func() error {
-		_, err := fixture.store.ExchangeEnrollmentWithEvidence(fixture.auth, "token", "bad id", controlprotocol.ExecutorEvidenceIdentityProofV1{}, fixture.now)
+		_, err := fixture.store.ExchangeEnrollment(fixture.auth, "token", "bad id", controlprotocol.ExecutorEvidenceIdentityProofV1{}, fixture.now)
 		return err
 	}(), ErrInvalid)
 	assertErrorIs(t, func() error {
-		_, err := fixture.store.ExchangeEnrollmentWithEvidence(fixture.auth, "not-a-token", "request", controlprotocol.ExecutorEvidenceIdentityProofV1{}, fixture.now)
+		_, err := fixture.store.ExchangeEnrollment(fixture.auth, "not-a-token", "request", controlprotocol.ExecutorEvidenceIdentityProofV1{}, fixture.now)
 		return err
 	}(), controlauth.ErrUnauthorized)
 	assertErrorIs(t, func() error { _, err := fixture.store.ListNodes(nonAdmin, "tenant-b"); return err }(), ErrNotFound)

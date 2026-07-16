@@ -550,55 +550,7 @@ func (store *Store) createEnrollment(actor controlauth.Identity, auth *controlau
 	return raw, cloneEnrollment(enrollment), projectNode(node, actor, canonical[0]), true, nil
 }
 
-// ExchangeEnrollment retains the pre-witness exchange contract while callers
-// migrate to ExchangeEnrollmentWithEvidence in the same unreleased branch.
-// It is removed once every control-plane entry point supplies proof of
-// possession for the Executor receipt key.
-func (store *Store) ExchangeEnrollment(auth *controlauth.Manager, raw, requestID string, now time.Time) (controlauth.NodeCredentialFile, error) {
-	if store == nil {
-		return controlauth.NodeCredentialFile{}, ErrUnavailable
-	}
-	if auth == nil {
-		return controlauth.NodeCredentialFile{}, controlauth.ErrUnauthorized
-	}
-	if !validRecordID(requestID, 128) || now.IsZero() {
-		return controlauth.NodeCredentialFile{}, invalid("enrollment request identity and time are required")
-	}
-	id, err := auth.EnrollmentID(raw)
-	if err != nil {
-		return controlauth.NodeCredentialFile{}, controlauth.ErrUnauthorized
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if err := store.availableLocked(); err != nil {
-		return controlauth.NodeCredentialFile{}, err
-	}
-	enrollment, ok := store.current.enrollments[id]
-	if !ok {
-		return controlauth.NodeCredentialFile{}, controlauth.ErrUnauthorized
-	}
-	node, ok := store.current.nodes[enrollment.NodeID]
-	if !ok || !node.Active || !tenantSubset(enrollment.TenantIDs, node.TenantIDs) {
-		return controlauth.NodeCredentialFile{}, controlauth.ErrUnauthorized
-	}
-	file, credential, updated, err := auth.Exchange(raw, requestID, now, cloneEnrollment(enrollment))
-	if err != nil {
-		return controlauth.NodeCredentialFile{}, err
-	}
-	if existing, exists := store.current.credentials[credential.ID]; exists {
-		if !credentialsEqual(existing, credential) || !enrollmentsEqual(enrollment, updated) {
-			return controlauth.NodeCredentialFile{}, ErrConflict
-		}
-		return file, nil
-	}
-	mutations := []mutation{credentialMutation(credential), enrollmentMutation(updated)}
-	if err := store.applyMutationsLocked(mutations...); err != nil {
-		return controlauth.NodeCredentialFile{}, err
-	}
-	return file, nil
-}
-
-func (store *Store) ExchangeEnrollmentWithEvidence(auth *controlauth.Manager, raw, requestID string, proof controlprotocol.ExecutorEvidenceIdentityProofV1, now time.Time) (controlauth.NodeCredentialFile, error) {
+func (store *Store) ExchangeEnrollment(auth *controlauth.Manager, raw, requestID string, proof controlprotocol.ExecutorEvidenceIdentityProofV1, now time.Time) (controlauth.NodeCredentialFile, error) {
 	if store == nil {
 		return controlauth.NodeCredentialFile{}, ErrUnavailable
 	}

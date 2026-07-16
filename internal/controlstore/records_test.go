@@ -71,7 +71,7 @@ func (fixture recordsFixture) createNode(t *testing.T, tenants ...string) (strin
 	}
 	private := newEvidencePrivateKey(t)
 	proof := evidenceIdentityProof(t, fixture.auth, enrollment, private)
-	credential, err := fixture.store.ExchangeEnrollmentWithEvidence(fixture.auth, raw, "request-1", proof, fixture.now.Add(time.Minute))
+	credential, err := fixture.store.ExchangeEnrollment(fixture.auth, raw, "request-1", proof, fixture.now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestEnrollmentExchangePinsEvidenceAtomicallyAndSurvivesReopen(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	credential, err := fixture.store.ExchangeEnrollmentWithEvidence(
+	credential, err := fixture.store.ExchangeEnrollment(
 		fixture.auth, raw, "exchange-1", proof, fixture.now.Add(2*time.Minute),
 	)
 	if err != nil {
@@ -475,7 +475,7 @@ func TestEnrollmentExchangePinsEvidenceAtomicallyAndSurvivesReopen(t *testing.T)
 	if _, err := fixture.store.AuthenticateNode(fixture.auth, credential.Credential); err != nil {
 		t.Fatalf("reopened credential: %v", err)
 	}
-	retried, err := fixture.store.ExchangeEnrollmentWithEvidence(
+	retried, err := fixture.store.ExchangeEnrollment(
 		fixture.auth, raw, "exchange-1", proof, fixture.now.Add(3*time.Minute),
 	)
 	if err != nil || retried != credential {
@@ -498,7 +498,7 @@ func TestEnrollmentEvidenceIdentityAllowsSameKeyCredentialRotation(t *testing.T)
 		t.Fatal(err)
 	}
 	firstProof := evidenceIdentityProof(t, fixture.auth, firstEnrollment, private)
-	firstCredential, err := fixture.store.ExchangeEnrollmentWithEvidence(
+	firstCredential, err := fixture.store.ExchangeEnrollment(
 		fixture.auth, firstRaw, "exchange-1", firstProof, fixture.now.Add(2*time.Minute),
 	)
 	if err != nil {
@@ -512,13 +512,13 @@ func TestEnrollmentEvidenceIdentityAllowsSameKeyCredentialRotation(t *testing.T)
 		t.Fatal(err)
 	}
 	rotatedProof := evidenceIdentityProof(t, fixture.auth, rotatedEnrollment, private)
-	rotatedCredential, err := fixture.store.ExchangeEnrollmentWithEvidence(
+	rotatedCredential, err := fixture.store.ExchangeEnrollment(
 		fixture.auth, rotatedRaw, "exchange-2", rotatedProof, fixture.now.Add(4*time.Minute),
 	)
 	if err != nil || rotatedCredential == firstCredential {
 		t.Fatalf("same-key credential rotation = (%+v, %v)", rotatedCredential, err)
 	}
-	retried, err := fixture.store.ExchangeEnrollmentWithEvidence(
+	retried, err := fixture.store.ExchangeEnrollment(
 		fixture.auth, rotatedRaw, "exchange-2", rotatedProof, fixture.now.Add(5*time.Minute),
 	)
 	if err != nil || retried != rotatedCredential {
@@ -547,7 +547,7 @@ func TestEnrollmentEvidenceIdentityAllowsSameKeyCredentialRotation(t *testing.T)
 		signedEvidenceIdentityProof(t, "control-other", conflictingEnrollment.ID, "node-1", "node-1", 1, private),
 	}
 	for index, conflict := range conflicts {
-		if _, err := fixture.store.ExchangeEnrollmentWithEvidence(
+		if _, err := fixture.store.ExchangeEnrollment(
 			fixture.auth, conflictingRaw, "exchange-3", conflict, fixture.now.Add(7*time.Minute),
 		); !errors.Is(err, ErrConflict) {
 			t.Fatalf("changed evidence identity %d error = %v", index, err)
@@ -555,7 +555,7 @@ func TestEnrollmentEvidenceIdentityAllowsSameKeyCredentialRotation(t *testing.T)
 	}
 	forged := evidenceIdentityProof(t, fixture.auth, conflictingEnrollment, private)
 	forged.SignatureBase64 = strings.Repeat("A", len(forged.SignatureBase64))
-	if _, err := fixture.store.ExchangeEnrollmentWithEvidence(
+	if _, err := fixture.store.ExchangeEnrollment(
 		fixture.auth, conflictingRaw, "exchange-3", forged, fixture.now.Add(7*time.Minute),
 	); !errors.Is(err, controlauth.ErrUnauthorized) {
 		t.Fatalf("forged evidence proof error = %v", err)
@@ -576,7 +576,7 @@ func TestEnrollmentEvidenceIdentityAllowsSameKeyCredentialRotation(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.ExchangeEnrollmentWithEvidence(
+	if _, err := fixture.store.ExchangeEnrollment(
 		fixture.auth, reusedRaw, "exchange-4", reusedProof, fixture.now.Add(9*time.Minute),
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("cross-node receipt key reuse error = %v", err)
@@ -617,7 +617,7 @@ func TestConcurrentEnrollmentExchangePinsOnlyOneReceiptKey(t *testing.T) {
 		input := input
 		go func() {
 			<-start
-			_, err := fixture.store.ExchangeEnrollmentWithEvidence(
+			_, err := fixture.store.ExchangeEnrollment(
 				fixture.auth, input.raw, input.requestID, input.proof, fixture.now.Add(3*time.Minute),
 			)
 			results <- err
@@ -710,11 +710,11 @@ func TestMultiTenantWorkflowFencesReportsAndRevokesCredentials(t *testing.T) {
 	}
 	evidencePrivate := newEvidencePrivateKey(t)
 	proof := evidenceIdentityProof(t, fixture.auth, enrollment, evidencePrivate)
-	credentialFile, err := fixture.store.ExchangeEnrollmentWithEvidence(fixture.auth, enrollmentRaw, "exchange-1", proof, fixture.now.Add(2*time.Minute))
+	credentialFile, err := fixture.store.ExchangeEnrollment(fixture.auth, enrollmentRaw, "exchange-1", proof, fixture.now.Add(2*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	retry, err := fixture.store.ExchangeEnrollmentWithEvidence(fixture.auth, enrollmentRaw, "exchange-1", proof, fixture.now.Add(3*time.Minute))
+	retry, err := fixture.store.ExchangeEnrollment(fixture.auth, enrollmentRaw, "exchange-1", proof, fixture.now.Add(3*time.Minute))
 	if err != nil || retry != credentialFile {
 		t.Fatalf("deterministic exchange retry = (%+v, %v)", retry, err)
 	}
