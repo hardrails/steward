@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
@@ -320,6 +321,40 @@ func (c *Client) GetCommand(ctx context.Context, tenantID, nodeID, commandID str
 	return command, err
 }
 
+// InspectExecutorEvidence returns the controller's validated online witness
+// state for one node.
+func (c *Client) InspectExecutorEvidence(ctx context.Context, nodeID string) (controlprotocol.ExecutorEvidenceInspectionV1, error) {
+	path, err := executorEvidencePath(nodeID, "")
+	if err != nil {
+		return controlprotocol.ExecutorEvidenceInspectionV1{}, err
+	}
+	var inspection controlprotocol.ExecutorEvidenceInspectionV1
+	if err := c.do(ctx, http.MethodGet, path, nil, &inspection, true); err != nil {
+		return controlprotocol.ExecutorEvidenceInspectionV1{}, err
+	}
+	if err := inspection.Validate(); err != nil {
+		return controlprotocol.ExecutorEvidenceInspectionV1{}, fmt.Errorf("validate control evidence inspection: %w", err)
+	}
+	return inspection, nil
+}
+
+// ExportExecutorEvidence returns a validated, independently signed witness
+// export suitable for later offline verification.
+func (c *Client) ExportExecutorEvidence(ctx context.Context, nodeID string) (controlprotocol.ExecutorEvidenceExportV1, error) {
+	path, err := executorEvidencePath(nodeID, "/export")
+	if err != nil {
+		return controlprotocol.ExecutorEvidenceExportV1{}, err
+	}
+	var export controlprotocol.ExecutorEvidenceExportV1
+	if err := c.do(ctx, http.MethodGet, path, nil, &export, true); err != nil {
+		return controlprotocol.ExecutorEvidenceExportV1{}, err
+	}
+	if err := export.Validate(); err != nil {
+		return controlprotocol.ExecutorEvidenceExportV1{}, fmt.Errorf("validate control evidence export: %w", err)
+	}
+	return export, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body, output any, authenticated bool) error {
 	if !strings.HasPrefix(path, "/v1/") || strings.Contains(path, "//") || strings.ContainsAny(path, "\r\n\x00") {
 		return errors.New("invalid control API path")
@@ -387,6 +422,21 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any, 
 		return fmt.Errorf("decode control response: %w", err)
 	}
 	return nil
+}
+
+func executorEvidencePath(nodeID, suffix string) (string, error) {
+	if nodeID == "" || len(nodeID) > 128 || !utf8.ValidString(nodeID) ||
+		strings.TrimSpace(nodeID) != nodeID || strings.ContainsAny(nodeID, "\r\n\x00") {
+		return "", errors.New("control evidence node identity is invalid")
+	}
+	for index, character := range nodeID {
+		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' || index > 0 && (character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return "", errors.New("control evidence node identity is invalid")
+	}
+	return "/v1/nodes/" + url.PathEscape(nodeID) + "/evidence" + suffix, nil
 }
 
 func paginatedPath(path, after string, limit int) (string, error) {

@@ -51,13 +51,19 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlCommandSubmit(arguments[2:], stdout)
 	case "command status":
 		return controlCommandStatus(arguments[2:], stdout)
+	case "evidence status":
+		return controlEvidenceStatus(arguments[2:], stdout)
+	case "evidence export":
+		return controlEvidenceExport(arguments[2:], stdout)
+	case "evidence verify":
+		return controlEvidenceVerify(arguments[2:], stdout)
 	default:
 		return controlUsageError()
 	}
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, or command submit|status")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, command submit|status, or evidence status|export|verify")
 }
 
 type controlFlags struct {
