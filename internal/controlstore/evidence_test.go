@@ -714,6 +714,134 @@ func TestInvalidPrimaryDoesNotPoisonValidSameChallengeSecondary(t *testing.T) {
 	}
 }
 
+func TestDivergentBranchOnFreshChallengeRecordsFork(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	fixture.appendReceipt(t, "tenant-a")
+	firstDelta, err := fixture.log.ExportDelta(evidence.Coordinate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDelta := fixture.divergentDelta(t, "runtime-fresh-challenge-fork")
+
+	firstPoll := fixture.poll(t, fixture.now.Add(2*time.Minute))
+	firstReport := fixture.signedReport(
+		t, evidence.Coordinate{}, firstDelta.Head.Sequence, encodeExecutorEvidenceHash(firstDelta.Head.ChainHash),
+		firstPoll.Challenge, encodeExecutorEvidenceTestFrames(firstDelta.Frames),
+	)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, fixture.now.Add(2*time.Minute+time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	secondPoll := fixture.poll(t, fixture.now.Add(3*time.Minute))
+	secondReport := fixture.signedReport(
+		t, evidence.Coordinate{}, secondDelta.Head.Sequence, encodeExecutorEvidenceHash(secondDelta.Head.ChainHash),
+		secondPoll.Challenge, encodeExecutorEvidenceTestFrames(secondDelta.Frames),
+	)
+	response, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, secondReport, fixture.now.Add(3*time.Minute+time.Second),
+	)
+	if err != nil || !response.Applied ||
+		response.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected {
+		t.Fatalf("fresh-challenge fork response=%#v err=%v", response, err)
+	}
+	retained := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if retained.ChainHash != encodeExecutorEvidenceHash(firstDelta.Head.ChainHash) ||
+		retained.Finding == nil ||
+		retained.Finding.FirstChainHash != encodeExecutorEvidenceHash(secondDelta.Head.ChainHash) {
+		t.Fatalf("fresh-challenge fork witness=%#v", retained)
+	}
+}
+
+func TestSiblingCredentialDivergentBranchRecordsFork(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	sibling := fixture.siblingIdentity(t, "sibling-evidence-exchange", fixture.now.Add(time.Minute))
+	fixture.appendReceipt(t, "tenant-a")
+	firstDelta, err := fixture.log.ExportDelta(evidence.Coordinate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDelta := fixture.divergentDelta(t, "runtime-sibling-credential-fork")
+	firstPoll := fixture.poll(t, fixture.now.Add(3*time.Minute))
+	secondPoll, err := fixture.store.PollExecutorEvidence(
+		fixture.auth, sibling, fixture.request,
+		fixture.now.Add(3*time.Minute), fixture.now.Add(8*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReport := fixture.signedReport(
+		t, evidence.Coordinate{}, firstDelta.Head.Sequence, encodeExecutorEvidenceHash(firstDelta.Head.ChainHash),
+		firstPoll.Challenge, encodeExecutorEvidenceTestFrames(firstDelta.Frames),
+	)
+	secondReport := fixture.signedReport(
+		t, evidence.Coordinate{}, secondDelta.Head.Sequence, encodeExecutorEvidenceHash(secondDelta.Head.ChainHash),
+		secondPoll.Challenge, encodeExecutorEvidenceTestFrames(secondDelta.Frames),
+	)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, fixture.now.Add(3*time.Minute+time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	response, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, sibling, secondReport, fixture.now.Add(3*time.Minute+2*time.Second),
+	)
+	if err != nil || !response.Applied ||
+		response.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected {
+		t.Fatalf("sibling-credential fork response=%#v err=%v", response, err)
+	}
+	retained := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if retained.ChainHash != encodeExecutorEvidenceHash(firstDelta.Head.ChainHash) ||
+		retained.Finding == nil ||
+		retained.Finding.FirstChainHash != encodeExecutorEvidenceHash(secondDelta.Head.ChainHash) {
+		t.Fatalf("sibling-credential fork witness=%#v", retained)
+	}
+}
+
+func TestSiblingCredentialIdenticalBranchIsNoop(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	sibling := fixture.siblingIdentity(t, "sibling-identical-exchange", fixture.now.Add(time.Minute))
+	fixture.appendReceipt(t, "tenant-a")
+	delta, err := fixture.log.ExportDelta(evidence.Coordinate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPoll := fixture.poll(t, fixture.now.Add(3*time.Minute))
+	secondPoll, err := fixture.store.PollExecutorEvidence(
+		fixture.auth, sibling, fixture.request,
+		fixture.now.Add(3*time.Minute), fixture.now.Add(8*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstReport := fixture.signedReport(
+		t, evidence.Coordinate{}, delta.Head.Sequence, encodeExecutorEvidenceHash(delta.Head.ChainHash),
+		firstPoll.Challenge, encodeExecutorEvidenceTestFrames(delta.Frames),
+	)
+	secondReport := fixture.signedReport(
+		t, evidence.Coordinate{}, delta.Head.Sequence, encodeExecutorEvidenceHash(delta.Head.ChainHash),
+		secondPoll.Challenge, encodeExecutorEvidenceTestFrames(delta.Frames),
+	)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, fixture.now.Add(3*time.Minute+time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	before := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	sequence := fixture.store.sequence
+	response, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, sibling, secondReport, fixture.now.Add(3*time.Minute+2*time.Second),
+	)
+	if err != nil || response.Applied ||
+		response.Status.State != controlprotocol.ExecutorEvidenceStatusCurrent {
+		t.Fatalf("sibling identical response=%#v err=%v", response, err)
+	}
+	after := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if !evidenceWitnessEqual(before, after) || after.Finding != nil || fixture.store.sequence != sequence {
+		t.Fatalf("sibling identical report mutated witness=%#v", after)
+	}
+}
+
 func TestExecutorEvidenceAcceptsBoundedPrefixHead(t *testing.T) {
 	fixture := newExecutorEvidenceFixture(t, "tenant-a")
 	for index := 0; index < evidence.MaxDeltaRecords+1; index++ {
@@ -1024,6 +1152,55 @@ func (fixture executorEvidenceFixture) appendReceipt(t *testing.T, tenantID stri
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func (fixture executorEvidenceFixture) divergentDelta(t *testing.T, runtimeRef string) evidence.Delta {
+	t.Helper()
+	log, err := evidence.Open(
+		filepath.Join(t.TempDir(), "divergent-evidence.log"), fixture.private, fixture.identity.NodeID, 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(evidence.Event{
+		Type: evidence.AdmissionAllow, TenantID: "tenant-a", RuntimeRef: runtimeRef,
+		CapsuleDigest: "sha256:capsule", PolicyDigest: "sha256:policy", Generation: 1,
+		GrantID: "grant-a", Outcome: evidence.Allowed,
+	}); err != nil {
+		_ = log.Close()
+		t.Fatal(err)
+	}
+	delta, err := log.ExportDelta(evidence.Coordinate{})
+	if closeErr := log.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return delta
+}
+
+func (fixture executorEvidenceFixture) siblingIdentity(t *testing.T, exchangeNonce string, now time.Time) controlauth.NodeIdentity {
+	t.Helper()
+	raw, enrollment, _, err := fixture.store.CreateEnrollment(
+		fixture.admin, fixture.auth, fixture.identity.NodeID, fixture.identity.TenantIDs,
+		now.Add(time.Hour), now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := evidenceIdentityProof(t, fixture.auth, enrollment, fixture.private)
+	credential, err := fixture.store.ExchangeEnrollment(
+		fixture.auth, raw, exchangeNonce, proof, now.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fixture.store.AuthenticateNode(fixture.auth, credential.Credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return identity
 }
 
 func (fixture executorEvidenceFixture) reportFrom(t *testing.T, coordinate evidence.Coordinate, challenge string) (controlprotocol.ExecutorEvidenceReportV1, evidence.Delta) {

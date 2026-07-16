@@ -13,13 +13,11 @@ import (
 const maxExecutorEvidenceChallengeVariants = 2
 
 type executorEvidenceReportAttempt struct {
-	challenge   [sha256.Size]byte
-	report      [sha256.Size]byte
-	expiresAt   time.Time
-	secondary   bool
-	primaryHead *controlprotocol.ExecutorEvidenceHeadV1
-	response    controlprotocol.ExecutorEvidenceReportResponseV1
-	err         error
+	challenge [sha256.Size]byte
+	report    [sha256.Size]byte
+	expiresAt time.Time
+	response  controlprotocol.ExecutorEvidenceReportResponseV1
+	err       error
 }
 
 type executorEvidenceReportGate struct {
@@ -116,16 +114,6 @@ func (store *Store) beginExecutorEvidenceReport(
 		challenge: challengeDigest,
 		report:    reportDigest,
 		expiresAt: expiresAt.UTC(),
-		secondary: secondary,
-	}
-	if secondary {
-		primary := gate.completed[0]
-		if primary.err == nil && primary.response.Applied &&
-			primary.response.Status.State == controlprotocol.ExecutorEvidenceStatusCurrent &&
-			primary.response.Status.Head != nil {
-			head := *primary.response.Status.Head
-			attempt.primaryHead = &head
-		}
 	}
 	if restartFallback {
 		gate.issuedUntil = now.UTC().Add(controlauth.MaxEvidenceChallengeLifetime)

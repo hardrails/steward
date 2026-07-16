@@ -165,7 +165,7 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 	if err != nil {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalidError("decode executor evidence report", err)
 	}
-	verified, err := verifyExecutorEvidenceReport(auth, identity, report.HeadProof, frames, snapshot, attempt, now)
+	verified, err := verifyExecutorEvidenceReport(auth, identity, report.HeadProof, frames, snapshot, now)
 	if err != nil {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
 	}
@@ -305,7 +305,7 @@ func (store *Store) executorEvidenceSnapshot(identity controlauth.NodeIdentity) 
 	}, nil
 }
 
-func verifyExecutorEvidenceReport(auth *controlauth.Manager, identity controlauth.NodeIdentity, proof controlprotocol.ExecutorEvidenceHeadProofV1, frames [][]byte, snapshot executorEvidenceSnapshot, attempt *executorEvidenceReportAttempt, now time.Time) (verifiedExecutorEvidenceReport, error) {
+func verifyExecutorEvidenceReport(auth *controlauth.Manager, identity controlauth.NodeIdentity, proof controlprotocol.ExecutorEvidenceHeadProofV1, frames [][]byte, snapshot executorEvidenceSnapshot, now time.Time) (verifiedExecutorEvidenceReport, error) {
 	witness := snapshot.witness
 	public, err := controlprotocol.VerifyExecutorEvidenceIdentityProofV1(witness.IdentityProof)
 	if err != nil || len(public) != ed25519.PublicKeySize {
@@ -385,7 +385,7 @@ func verifyExecutorEvidenceReport(auth *controlauth.Manager, identity controlaut
 			verified.action = executorEvidenceNoop
 			return verified, nil
 		}
-		if admittedSequentialExecutorEvidenceFork(attempt, witness, verified) {
+		if verifiedExecutorEvidenceFork(witness, verified) {
 			verified.action = executorEvidenceFinding
 			verified.reason = EvidenceFork
 			return verified, nil
@@ -434,19 +434,12 @@ func verifyExecutorEvidenceReport(auth *controlauth.Manager, identity controlaut
 	return verified, nil
 }
 
-func admittedSequentialExecutorEvidenceFork(attempt *executorEvidenceReportAttempt, witness EvidenceWitness, report verifiedExecutorEvidenceReport) bool {
-	if attempt == nil || !attempt.secondary || attempt.primaryHead == nil ||
-		witness.Finding != nil || report.action != executorEvidenceAdvance {
+func verifiedExecutorEvidenceFork(witness EvidenceWitness, report verifiedExecutorEvidenceReport) bool {
+	if witness.Finding != nil || report.action != executorEvidenceAdvance {
 		return false
 	}
 	current := executorEvidenceHead(witness)
-	return *attempt.primaryHead == current &&
-		witness.Sequence > 0 &&
-		witness.LastBatchStart == report.baseSequence+1 &&
-		witness.LastBatchEnd == witness.Sequence &&
-		report.batchStart == witness.LastBatchStart &&
-		report.batchEnd == witness.LastBatchEnd &&
-		report.head.Sequence == witness.Sequence &&
+	return report.head.Sequence == current.Sequence &&
 		report.head.ChainHash != witness.ChainHash
 }
 
