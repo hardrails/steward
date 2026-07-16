@@ -134,15 +134,51 @@ func TestAdvancedEvidenceWitnessAndBoundedFindingValidate(t *testing.T) {
 	witness.LastBatchEnd = 2
 	witness.LastBatchDigest = digestBytes([]byte("exact signed batch"))
 	witness.Finding = &EvidenceFinding{
-		FirstReason: EvidenceRollback, FirstSequence: 0, FirstChainHash: zeroEvidenceHash(),
+		FirstReason: EvidenceRollback, FirstComparedSequence: 2, FirstComparedChainHash: witness.ChainHash,
+		FirstSequence: 0, FirstChainHash: zeroEvidenceHash(),
 		FirstObservedAt: canonicalTimestamp(pinned.Add(2 * time.Minute)),
-		LastReason:      EvidenceFork, LastSequence: 1, LastChainHash: digestBytes([]byte("fork")),
+		LastReason:      EvidenceFork, LastComparedSequence: 1, LastComparedChainHash: digestBytes([]byte("compared")),
+		LastSequence: 1, LastChainHash: digestBytes([]byte("fork")),
 		LastObservedAt: canonicalTimestamp(pinned.Add(3 * time.Minute)), Count: 2,
 	}
 	node.Evidence = &witness
 	current.nodes[node.ID] = node
 	if err := validateState(current, limits); err != nil {
 		t.Fatalf("valid advanced witness: %v", err)
+	}
+	for name, mutate := range map[string]func(*EvidenceFinding){
+		"missing comparison": func(value *EvidenceFinding) {
+			value.FirstComparedSequence = 0
+			value.FirstComparedChainHash = ""
+		},
+		"rollback not below comparison": func(value *EvidenceFinding) {
+			value.FirstSequence = value.FirstComparedSequence
+			value.FirstChainHash = value.FirstComparedChainHash
+		},
+		"fork identical to comparison": func(value *EvidenceFinding) {
+			value.LastSequence = value.LastComparedSequence
+			value.LastChainHash = value.LastComparedChainHash
+		},
+		"comparison beyond current": func(value *EvidenceFinding) {
+			value.LastComparedSequence = witness.Sequence + 1
+			value.LastComparedChainHash = digestBytes([]byte("future comparison"))
+			value.LastSequence = value.LastComparedSequence
+			value.LastChainHash = digestBytes([]byte("future fork"))
+		},
+		"equal-sequence comparison conflicts with current": func(value *EvidenceFinding) {
+			value.FirstComparedSequence = witness.Sequence
+			value.FirstComparedChainHash = digestBytes([]byte("foreign current"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := current.clone()
+			changed := candidate.nodes[node.ID]
+			mutate(changed.Evidence.Finding)
+			candidate.nodes[node.ID] = changed
+			if err := validateState(candidate, limits); err == nil {
+				t.Fatal("invalid historical evidence finding was accepted")
+			}
+		})
 	}
 }
 

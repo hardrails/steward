@@ -64,8 +64,9 @@ stewardctl control evidence export \
 ```
 
 The command creates an absent mode-`0600` file and never overwrites an existing
-path or symbolic link. The export contains the enrollment-time receipt-key proof,
-the controller's last-good checkpoint, any sticky rollback or equivocation
+path or symbolic link. The export contains the enrollment-time receipt-key
+proof, the controller's latest last-good checkpoint, any sticky rollback or
+equivocation finding, the exact historical checkpoint used to classify that
 finding, and the export time. It does not contain the full receipt log, prompts,
 request bodies, or agent output.
 
@@ -77,14 +78,14 @@ stewardctl control evidence verify \
   -witness-public-key steward-control-witness.public.pem
 ```
 
-The verifier reads only local files. It checks the receipt identity, checkpoint or
-finding semantics, controller witness signature, and exact match with the supplied
-Ed25519 public key. The key embedded in the export is not trusted by itself. Copy
-the controller's `witness.public.pem` through an independent authenticated channel
-and record its SHA-256 digest when establishing the audit identity. A wrong key,
-changed signed field, duplicate or unknown JSON field, or inconsistent node
-identity fails verification. Reformatting equivalent JSON does not change the
-signed statement.
+The verifier reads only local files. It checks the receipt identity, current and
+historical checkpoint ordering, rollback or equivocation semantics, controller
+witness signature, and exact match with the supplied Ed25519 public key. The key
+embedded in the export is not trusted by itself. Copy the controller's
+`witness.public.pem` through an independent authenticated channel and record its
+SHA-256 digest when establishing the audit identity. A wrong key, changed signed
+field, duplicate or unknown JSON field, or inconsistent node identity fails
+verification. Reformatting equivalent JSON does not change the signed statement.
 
 ## Upgrade inspection
 

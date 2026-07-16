@@ -115,19 +115,24 @@ const (
 )
 
 // EvidenceFinding retains the first and most recent authenticated divergence
-// without allowing hostile nodes to grow controller state. Count saturates at
+// together with the exact controller checkpoints used for comparison, without
+// allowing hostile nodes to grow controller state. Count saturates at
 // MaxUint64; a later valid extension never erases the finding.
 type EvidenceFinding struct {
-	FirstReason     EvidenceFindingReason `json:"first_reason"`
-	FirstSequence   uint64                `json:"first_sequence"`
-	FirstChainHash  string                `json:"first_chain_hash"`
-	FirstObservedAt string                `json:"first_observed_at"`
-	LastReason      EvidenceFindingReason `json:"last_reason"`
-	LastSequence    uint64                `json:"last_sequence"`
-	LastChainHash   string                `json:"last_chain_hash"`
-	LastObservedAt  string                `json:"last_observed_at"`
-	Count           uint64                `json:"count"`
-	CountSaturated  bool                  `json:"count_saturated,omitempty"`
+	FirstReason            EvidenceFindingReason `json:"first_reason"`
+	FirstComparedSequence  uint64                `json:"first_compared_sequence"`
+	FirstComparedChainHash string                `json:"first_compared_chain_hash"`
+	FirstSequence          uint64                `json:"first_sequence"`
+	FirstChainHash         string                `json:"first_chain_hash"`
+	FirstObservedAt        string                `json:"first_observed_at"`
+	LastReason             EvidenceFindingReason `json:"last_reason"`
+	LastComparedSequence   uint64                `json:"last_compared_sequence"`
+	LastComparedChainHash  string                `json:"last_compared_chain_hash"`
+	LastSequence           uint64                `json:"last_sequence"`
+	LastChainHash          string                `json:"last_chain_hash"`
+	LastObservedAt         string                `json:"last_observed_at"`
+	Count                  uint64                `json:"count"`
+	CountSaturated         bool                  `json:"count_saturated,omitempty"`
 }
 
 // EvidenceWitness is the bounded controller-side state for one Executor
@@ -861,20 +866,34 @@ func validateEvidenceWitness(nodeID, nodeCreatedAt string, witness EvidenceWitne
 		}
 	}
 	if witness.Finding != nil {
-		if err := validateEvidenceFinding(*witness.Finding, pinned); err != nil {
+		if err := validateEvidenceFinding(*witness.Finding, pinned, witness.Sequence, witness.ChainHash); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateEvidenceFinding(finding EvidenceFinding, pinned time.Time) error {
+func validateEvidenceFinding(finding EvidenceFinding, pinned time.Time, currentSequence uint64, currentChainHash string) error {
 	if !validEvidenceFindingReason(finding.FirstReason) || !validEvidenceFindingReason(finding.LastReason) ||
+		!validEvidenceCoordinate(finding.FirstComparedSequence, finding.FirstComparedChainHash) ||
 		!validEvidenceCoordinate(finding.FirstSequence, finding.FirstChainHash) ||
+		!validEvidenceCoordinate(finding.LastComparedSequence, finding.LastComparedChainHash) ||
 		!validEvidenceCoordinate(finding.LastSequence, finding.LastChainHash) || finding.Count == 0 ||
 		finding.CountSaturated != (finding.Count == math.MaxUint64) ||
 		!validTimestamp(finding.FirstObservedAt) || !validTimestamp(finding.LastObservedAt) {
 		return errors.New("evidence finding is invalid")
+	}
+	if !validEvidenceFindingComparison(
+		finding.FirstReason, finding.FirstComparedSequence, finding.FirstComparedChainHash,
+		finding.FirstSequence, finding.FirstChainHash,
+	) || !validEvidenceFindingComparison(
+		finding.LastReason, finding.LastComparedSequence, finding.LastComparedChainHash,
+		finding.LastSequence, finding.LastChainHash,
+	) || currentSequence < finding.FirstComparedSequence ||
+		(currentSequence == finding.FirstComparedSequence && currentChainHash != finding.FirstComparedChainHash) ||
+		currentSequence < finding.LastComparedSequence ||
+		(currentSequence == finding.LastComparedSequence && currentChainHash != finding.LastComparedChainHash) {
+		return errors.New("evidence finding does not conflict with a retained checkpoint")
 	}
 	first, _ := parseTimestamp(finding.FirstObservedAt)
 	last, _ := parseTimestamp(finding.LastObservedAt)
@@ -882,6 +901,18 @@ func validateEvidenceFinding(finding EvidenceFinding, pinned time.Time) error {
 		return errors.New("evidence finding timestamps are inconsistent")
 	}
 	return nil
+}
+
+func validEvidenceFindingComparison(reason EvidenceFindingReason, comparedSequence uint64, comparedChainHash string, observedSequence uint64, observedChainHash string) bool {
+	switch reason {
+	case EvidenceRollback:
+		return observedSequence < comparedSequence
+	case EvidenceFork:
+		return observedSequence > comparedSequence ||
+			(observedSequence == comparedSequence && observedChainHash != comparedChainHash)
+	default:
+		return false
+	}
 }
 
 func validEvidenceFindingReason(reason EvidenceFindingReason) bool {

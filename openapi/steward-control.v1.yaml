@@ -440,10 +440,11 @@ paths:
       description: |
         Requires a site-administrator credential because the retained witness
         is a site-wide forensic view, not tenant-projected inventory. Returns
-        the last-good checkpoint and any sticky rollback or equivocation
-        finding. Revoked nodes remain inspectable. A legacy node that predates
-        receipt-key enrollment is returned as `unwitnessed` without an identity
-        proof.
+        the latest last-good checkpoint and any sticky rollback or
+        equivocation finding, including the exact historical checkpoint
+        against which the conflicting head was evaluated. Revoked nodes remain
+        inspectable. A legacy node that predates receipt-key enrollment is
+        returned as `unwitnessed` without an identity proof.
       responses:
         "200":
           description: Bounded online evidence inspection.
@@ -474,12 +475,12 @@ paths:
       summary: Export a portable signed evidence checkpoint
       description: |
         Requires a site-administrator credential. Signs the enrolled receipt
-        identity, last-good checkpoint, any sticky finding, and export time
-        with the controller's dedicated evidence-witness key. The embedded
-        public key is descriptive only; an offline verifier must use a witness
-        public key obtained through an independent trusted channel. Legacy
-        unwitnessed nodes return 409 because they have no receipt identity to
-        bind into a verifiable export.
+        identity, latest last-good checkpoint, any sticky finding and its exact
+        comparison checkpoint, and export time with the controller's dedicated
+        evidence-witness key. The embedded public key is descriptive only; an
+        offline verifier must use a witness public key obtained through an
+        independent trusted channel. Legacy unwitnessed nodes return 409
+        because they have no receipt identity to bind into a verifiable export.
       responses:
         "200":
           description: Portable controller-witness-signed evidence export.
@@ -770,8 +771,11 @@ paths:
         Verifies the challenge-bound receipt-key signature and every submitted
         signed frame before advancing the durable checkpoint. A byte-identical
         retry is acknowledged without another mutation. An authenticated local
-        head behind, or conflicting with, the retained checkpoint records a
-        bounded rollback or equivocation finding and stops later advancement.
+        head behind, or conflicting with, the checkpoint evaluated for that
+        report records a bounded rollback or equivocation finding and stops
+        later advancement. The retained status may already contain a later
+        valid checkpoint when a concurrently verified historical conflict is
+        durably recorded.
       requestBody:
         required: true
         content:
@@ -1665,7 +1669,10 @@ components:
     ExecutorEvidenceRollbackFinding:
       type: object
       additionalProperties: false
-      required: [kind, detected_at, observed_head]
+      description: |
+        The compared and observed heads use the same receipt identity, and the
+        observed sequence is lower than the compared sequence.
+      required: [kind, detected_at, compared_head, observed_head]
       properties:
         kind:
           type: string
@@ -1673,12 +1680,20 @@ components:
         detected_at:
           type: string
           format: date-time
+        compared_head:
+          allOf:
+            - $ref: "#/components/schemas/ExecutorEvidenceHead"
+          description: Exact controller checkpoint against which the observed head was evaluated.
         observed_head:
           $ref: "#/components/schemas/ExecutorEvidenceHead"
     ExecutorEvidenceEquivocationFinding:
       type: object
       additionalProperties: false
-      required: [kind, detected_at, observed_head]
+      description: |
+        The compared and observed heads use the same receipt identity. The
+        observed sequence is at or above the compared sequence; heads at the
+        same sequence have different chain hashes.
+      required: [kind, detected_at, compared_head, observed_head]
       properties:
         kind:
           type: string
@@ -1686,12 +1701,23 @@ components:
         detected_at:
           type: string
           format: date-time
+        compared_head:
+          allOf:
+            - $ref: "#/components/schemas/ExecutorEvidenceHead"
+          description: Exact controller checkpoint against which the observed head was evaluated.
         observed_head:
           $ref: "#/components/schemas/ExecutorEvidenceHead"
     ExecutorEvidenceStatus:
       description: |
-        `head` is the last-good controller checkpoint. `finding.observed_head`
-        is the conflicting signed local head. `unwitnessed` carries neither.
+        `head` is the latest last-good controller checkpoint.
+        `finding.compared_head` is the exact checkpoint used to classify
+        `finding.observed_head` as rollback or equivocation. `head` can be later
+        than `compared_head` when a concurrently verified historical conflict
+        is recorded. It must use the same receipt identity, cannot precede
+        `compared_head`, and must have the same hash when both sequences are
+        equal. `finding.detected_at` may precede `witnessed_at` only when `head`
+        is later than `compared_head`. `unwitnessed` carries none of these
+        heads.
       oneOf:
         - $ref: "#/components/schemas/ExecutorEvidenceStatusUnwitnessed"
         - $ref: "#/components/schemas/ExecutorEvidenceStatusCurrent"

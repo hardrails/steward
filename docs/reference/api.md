@@ -69,8 +69,10 @@ request body remains limited to 1 MiB.
 The online evidence inspection and portable export require a site-admin
 credential. The export embeds a public witness key only to describe its signer;
 offline verification must use a witness public key obtained through an independent
-trusted channel. The controller retains a bounded checkpoint and first sticky
-rollback or equivocation finding, not the full node receipt archive.
+trusted channel. The controller retains a bounded latest checkpoint and first
+sticky rollback or equivocation finding, including the exact historical
+checkpoint used to classify the observed conflicting head. It does not retain
+the full node receipt archive.
 
 See [Operate the bundled control plane]({{ '/guides/control-plane/' | relative_url }})
 for installation and lifecycle examples.

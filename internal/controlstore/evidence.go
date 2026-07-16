@@ -185,16 +185,41 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 	if executorEvidenceTimeBefore(now, node.Evidence.PinnedAt) {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalid("executor evidence report predates key pinning")
 	}
-	if executorEvidenceTimeBefore(now, node.Evidence.AdvancedAt) {
+	historicalFindingRemainsProven := verified.reason == EvidenceRollback ||
+		(verified.reason == EvidenceFork &&
+			verified.head.Sequence == snapshot.witness.Sequence &&
+			verified.head.ChainHash != snapshot.witness.ChainHash)
+	historicalVerifiedFinding := verified.action == executorEvidenceFinding &&
+		historicalFindingRemainsProven &&
+		equalStrings(node.TenantIDs, snapshot.nodeTenantIDs) &&
+		evidenceWitnessPinEqual(*node.Evidence, snapshot.witness) &&
+		!evidenceWitnessCheckpointEqual(*node.Evidence, snapshot.witness)
+	if executorEvidenceTimeBefore(now, node.Evidence.AdvancedAt) && !historicalVerifiedFinding {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalid("executor evidence report predates the retained checkpoint")
 	}
 	if node.Evidence.Finding != nil &&
-		executorEvidenceTimeBefore(now, node.Evidence.Finding.LastObservedAt) {
+		executorEvidenceTimeBefore(now, node.Evidence.Finding.LastObservedAt) &&
+		!historicalVerifiedFinding {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, invalid("executor evidence report predates the retained finding")
 	}
 	if !equalStrings(node.TenantIDs, snapshot.nodeTenantIDs) || !evidenceWitnessEqual(*node.Evidence, snapshot.witness) {
 		if verified.action == executorEvidenceAdvance && exactExecutorEvidenceRetry(*node.Evidence, verified) {
 			return executorEvidenceReportResponse(false, *node.Evidence), nil
+		}
+		if historicalVerifiedFinding {
+			if node.Evidence.Finding != nil {
+				return executorEvidenceReportResponse(false, *node.Evidence), nil
+			}
+			updated := cloneNode(node)
+			witness := cloneEvidenceWitness(node.Evidence)
+			recordExecutorEvidenceFinding(
+				witness, verified.reason, executorEvidenceHead(snapshot.witness), verified.head, now,
+			)
+			updated.Evidence = witness
+			if err := store.applyMutationsLocked(mutation{Kind: mutationNode, Node: &updated}); err != nil {
+				return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
+			}
+			return executorEvidenceReportResponse(true, *witness), nil
 		}
 		if (verified.action == executorEvidenceFinding || verified.action == executorEvidenceNoop) &&
 			equalStrings(node.TenantIDs, snapshot.nodeTenantIDs) &&
@@ -214,7 +239,9 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 			!executorEvidenceTimeBefore(now, node.Evidence.AdvancedAt) {
 			updated := cloneNode(node)
 			witness := cloneEvidenceWitness(node.Evidence)
-			recordExecutorEvidenceFinding(witness, EvidenceFork, verified.head, now)
+			recordExecutorEvidenceFinding(
+				witness, EvidenceFork, executorEvidenceHead(*node.Evidence), verified.head, now,
+			)
 			updated.Evidence = witness
 			if err := store.applyMutationsLocked(mutation{Kind: mutationNode, Node: &updated}); err != nil {
 				return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
@@ -244,7 +271,9 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 		witness.LastBatchDigest = verified.batchDigest
 	case executorEvidenceFinding:
 		if witness.Finding == nil {
-			recordExecutorEvidenceFinding(witness, verified.reason, verified.head, now)
+			recordExecutorEvidenceFinding(
+				witness, verified.reason, executorEvidenceHead(*witness), verified.head, now,
+			)
 		}
 	default:
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, ErrConflict
@@ -477,6 +506,11 @@ func executorEvidenceStatus(witness EvidenceWitness) controlprotocol.ExecutorEvi
 		return status
 	}
 	finding := witness.Finding
+	compared := controlprotocol.ExecutorEvidenceHeadV1{
+		Stream: controlprotocol.ExecutorEvidenceStreamV1, ReceiptNodeID: witness.ReceiptNodeID,
+		ReceiptEpoch: witness.Epoch, Sequence: finding.FirstComparedSequence,
+		ChainHash: finding.FirstComparedChainHash, PublicKeySHA256: witness.PublicKeyDigest,
+	}
 	observed := controlprotocol.ExecutorEvidenceHeadV1{
 		Stream: controlprotocol.ExecutorEvidenceStreamV1, ReceiptNodeID: witness.ReceiptNodeID,
 		ReceiptEpoch: witness.Epoch, Sequence: finding.FirstSequence,
@@ -489,7 +523,7 @@ func executorEvidenceStatus(witness EvidenceWitness) controlprotocol.ExecutorEvi
 		status.State = controlprotocol.ExecutorEvidenceStatusRollbackDetected
 	}
 	status.Finding = &controlprotocol.ExecutorEvidenceFindingV1{
-		Kind: kind, DetectedAt: finding.FirstObservedAt, ObservedHead: observed,
+		Kind: kind, DetectedAt: finding.FirstObservedAt, ComparedHead: compared, ObservedHead: observed,
 	}
 	return status
 }
@@ -510,15 +544,16 @@ func executorEvidenceReportResponse(applied bool, witness EvidenceWitness) contr
 	}
 }
 
-func recordExecutorEvidenceFinding(witness *EvidenceWitness, reason EvidenceFindingReason, observed controlprotocol.ExecutorEvidenceHeadV1, now time.Time) {
+func recordExecutorEvidenceFinding(witness *EvidenceWitness, reason EvidenceFindingReason, compared, observed controlprotocol.ExecutorEvidenceHeadV1, now time.Time) {
 	if witness.Finding != nil {
 		return
 	}
 	timestamp := canonicalTimestamp(now)
 	witness.Finding = &EvidenceFinding{
-		FirstReason: reason, FirstSequence: observed.Sequence, FirstChainHash: observed.ChainHash,
-		FirstObservedAt: timestamp, LastReason: reason, LastSequence: observed.Sequence,
-		LastChainHash: observed.ChainHash, LastObservedAt: timestamp, Count: 1,
+		FirstReason: reason, FirstComparedSequence: compared.Sequence, FirstComparedChainHash: compared.ChainHash,
+		FirstSequence: observed.Sequence, FirstChainHash: observed.ChainHash, FirstObservedAt: timestamp,
+		LastReason: reason, LastComparedSequence: compared.Sequence, LastComparedChainHash: compared.ChainHash,
+		LastSequence: observed.Sequence, LastChainHash: observed.ChainHash, LastObservedAt: timestamp, Count: 1,
 	}
 }
 

@@ -842,6 +842,261 @@ func TestSiblingCredentialIdenticalBranchIsNoop(t *testing.T) {
 	}
 }
 
+func TestVerifiedForkSurvivesSiblingAdvancementAfterSnapshot(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	sibling := fixture.siblingIdentity(t, "sibling-race-exchange", fixture.now.Add(time.Minute))
+	fixture.appendReceipt(t, "tenant-a")
+	firstPoll := fixture.poll(t, fixture.now.Add(2*time.Minute))
+	firstReport, firstDelta := fixture.reportFrom(t, evidence.Coordinate{}, firstPoll.Challenge)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, fixture.now.Add(2*time.Minute+time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	forkDelta := fixture.divergentDelta(t, "runtime-sibling-snapshot-fork")
+	if forkDelta.Head.Sequence != firstDelta.Head.Sequence || forkDelta.Head.ChainHash == firstDelta.Head.ChainHash {
+		t.Fatal("test did not construct a divergent equal-sequence branch")
+	}
+	fixture.appendReceipt(t, "tenant-a")
+	forkPoll := fixture.poll(t, fixture.now.Add(3*time.Minute))
+	advancePoll, err := fixture.store.PollExecutorEvidence(
+		fixture.auth, sibling, fixture.request,
+		fixture.now.Add(3*time.Minute), fixture.now.Add(8*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forkReport := fixture.signedReport(
+		t, evidence.Coordinate{}, forkDelta.Head.Sequence, encodeExecutorEvidenceHash(forkDelta.Head.ChainHash),
+		forkPoll.Challenge, encodeExecutorEvidenceTestFrames(forkDelta.Frames),
+	)
+	firstCoordinate := evidence.Coordinate{Sequence: firstDelta.Head.Sequence, ChainHash: firstDelta.Head.ChainHash}
+	advanceReport, advanceDelta := fixture.reportFrom(t, firstCoordinate, advancePoll.Challenge)
+
+	type applyResult struct {
+		response controlprotocol.ExecutorEvidenceReportResponseV1
+		err      error
+	}
+	snapshotTaken := make(chan struct{})
+	continueVerification := make(chan struct{})
+	result := make(chan applyResult, 1)
+	go func() {
+		response, err := fixture.store.applyExecutorEvidenceReport(
+			fixture.auth, fixture.identity, forkReport, fixture.now.Add(3*time.Minute+time.Second),
+			func() {
+				close(snapshotTaken)
+				<-continueVerification
+			},
+		)
+		result <- applyResult{response: response, err: err}
+	}()
+	<-snapshotTaken
+	advanced, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, sibling, advanceReport, fixture.now.Add(3*time.Minute+2*time.Second),
+	)
+	if err != nil || !advanced.Applied ||
+		advanced.Status.Head == nil || advanced.Status.Head.Sequence != advanceDelta.Head.Sequence {
+		t.Fatalf("sibling advancement=%#v err=%v", advanced, err)
+	}
+	close(continueVerification)
+	fork := <-result
+	if fork.err != nil || !fork.response.Applied ||
+		fork.response.Status.State != controlprotocol.ExecutorEvidenceStatusEquivocationDetected {
+		t.Fatalf("racing fork response=%#v err=%v", fork.response, fork.err)
+	}
+	if err := fork.response.Validate(); err != nil {
+		t.Fatalf("racing fork response is not protocol-valid: %v", err)
+	}
+	retained := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if retained.Sequence != advanceDelta.Head.Sequence ||
+		retained.ChainHash != encodeExecutorEvidenceHash(advanceDelta.Head.ChainHash) ||
+		retained.Finding == nil ||
+		retained.Finding.FirstChainHash != encodeExecutorEvidenceHash(forkDelta.Head.ChainHash) {
+		t.Fatalf("racing fork witness=%#v", retained)
+	}
+	status := executorEvidenceStatus(retained)
+	if err := status.Validate(); err != nil {
+		t.Fatalf("historical fork status is not protocol-valid: %v", err)
+	}
+	poll := fixture.poll(t, fixture.now.Add(4*time.Minute))
+	if poll.Status.Finding == nil ||
+		poll.Status.Finding.ComparedHead.Sequence != firstDelta.Head.Sequence ||
+		poll.Status.Head == nil || poll.Status.Head.Sequence != advanceDelta.Head.Sequence {
+		t.Fatalf("historical fork poll=%#v", poll)
+	}
+	inspection, err := fixture.store.InspectExecutorEvidence(fixture.admin, fixture.identity.NodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := inspection.Status.Validate(); err != nil {
+		t.Fatalf("historical fork inspection is not protocol-valid: %v", err)
+	}
+	witnessPrivate := newEvidencePrivateKey(t)
+	statement := controlprotocol.ExecutorEvidenceExportStatementV1{
+		ProtocolVersion:      controlprotocol.ExecutorEvidenceProtocolV1,
+		ControllerInstanceID: fixture.auth.InstanceID(),
+		ControlNodeID:        fixture.identity.NodeID,
+		IdentityProof:        *inspection.IdentityProof,
+		Status:               inspection.Status,
+		ExportedAt:           canonicalTimestamp(fixture.now.Add(4*time.Minute + time.Second)),
+	}
+	exported, err := controlprotocol.SignExecutorEvidenceExportV1(statement, witnessPrivate)
+	if err != nil {
+		t.Fatalf("sign historical fork export: %v", err)
+	}
+	if err := controlprotocol.VerifyExecutorEvidenceExportV1(
+		exported, witnessPrivate.Public().(ed25519.PublicKey),
+	); err != nil {
+		t.Fatalf("verify historical fork export: %v", err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	recovered := retainedExecutorEvidence(t, reopened, fixture.identity.NodeID)
+	if !evidenceWitnessEqual(retained, recovered) {
+		t.Fatalf("recovered historical fork=%#v want %#v", recovered, retained)
+	}
+	if err := executorEvidenceStatus(recovered).Validate(); err != nil {
+		t.Fatalf("recovered historical fork status is invalid: %v", err)
+	}
+}
+
+func TestVerifiedRollbackSurvivesSiblingAdvancementAfterSnapshot(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	sibling := fixture.siblingIdentity(t, "sibling-rollback-race-exchange", fixture.now.Add(time.Minute))
+	fixture.appendReceipt(t, "tenant-a")
+	firstPoll := fixture.poll(t, fixture.now.Add(2*time.Minute))
+	firstReport, firstDelta := fixture.reportFrom(t, evidence.Coordinate{}, firstPoll.Challenge)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, fixture.now.Add(2*time.Minute+time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.appendReceipt(t, "tenant-a")
+	rollbackPoll := fixture.poll(t, fixture.now.Add(3*time.Minute))
+	advancePoll, err := fixture.store.PollExecutorEvidence(
+		fixture.auth, sibling, fixture.request,
+		fixture.now.Add(3*time.Minute), fixture.now.Add(8*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCoordinate := evidence.Coordinate{Sequence: firstDelta.Head.Sequence, ChainHash: firstDelta.Head.ChainHash}
+	rollbackReport := fixture.signedReport(
+		t, firstCoordinate, 0, zeroEvidenceHash(), rollbackPoll.Challenge, nil,
+	)
+	advanceReport, advanceDelta := fixture.reportFrom(t, firstCoordinate, advancePoll.Challenge)
+
+	type applyResult struct {
+		response controlprotocol.ExecutorEvidenceReportResponseV1
+		err      error
+	}
+	snapshotTaken := make(chan struct{})
+	continueVerification := make(chan struct{})
+	result := make(chan applyResult, 1)
+	go func() {
+		response, err := fixture.store.applyExecutorEvidenceReport(
+			fixture.auth, fixture.identity, rollbackReport, fixture.now.Add(3*time.Minute+time.Second),
+			func() {
+				close(snapshotTaken)
+				<-continueVerification
+			},
+		)
+		result <- applyResult{response: response, err: err}
+	}()
+	<-snapshotTaken
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, sibling, advanceReport, fixture.now.Add(3*time.Minute+2*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	close(continueVerification)
+	rollback := <-result
+	if rollback.err != nil || !rollback.response.Applied ||
+		rollback.response.Status.State != controlprotocol.ExecutorEvidenceStatusRollbackDetected ||
+		rollback.response.Status.Finding == nil ||
+		rollback.response.Status.Finding.ComparedHead.Sequence != firstDelta.Head.Sequence ||
+		rollback.response.Status.Finding.ObservedHead.Sequence != 0 {
+		t.Fatalf("racing rollback response=%#v err=%v", rollback.response, rollback.err)
+	}
+	if err := rollback.response.Validate(); err != nil {
+		t.Fatalf("racing rollback response is not protocol-valid: %v", err)
+	}
+	retained := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if retained.Sequence != advanceDelta.Head.Sequence ||
+		retained.ChainHash != encodeExecutorEvidenceHash(advanceDelta.Head.ChainHash) ||
+		retained.Finding == nil || retained.Finding.FirstReason != EvidenceRollback ||
+		retained.Finding.FirstComparedSequence != firstDelta.Head.Sequence {
+		t.Fatalf("racing rollback witness=%#v", retained)
+	}
+}
+
+func TestHeadOnlyPreviewDoesNotBecomeHistoricalForkAfterSiblingAdvance(t *testing.T) {
+	fixture := newExecutorEvidenceFixture(t, "tenant-a")
+	sibling := fixture.siblingIdentity(t, "sibling-preview-race-exchange", fixture.now.Add(time.Minute))
+	fixture.appendReceipt(t, "tenant-a")
+	firstPoll := fixture.poll(t, fixture.now.Add(2*time.Minute))
+	firstReport, firstDelta := fixture.reportFrom(t, evidence.Coordinate{}, firstPoll.Challenge)
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, fixture.identity, firstReport, fixture.now.Add(2*time.Minute+time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.appendReceipt(t, "tenant-a")
+	previewPoll := fixture.poll(t, fixture.now.Add(3*time.Minute))
+	advancePoll, err := fixture.store.PollExecutorEvidence(
+		fixture.auth, sibling, fixture.request,
+		fixture.now.Add(3*time.Minute), fixture.now.Add(8*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCoordinate := evidence.Coordinate{Sequence: firstDelta.Head.Sequence, ChainHash: firstDelta.Head.ChainHash}
+	advanceReport, advanceDelta := fixture.reportFrom(t, firstCoordinate, advancePoll.Challenge)
+	previewReport := fixture.signedReport(
+		t, firstCoordinate, advanceDelta.Head.Sequence, encodeExecutorEvidenceHash(advanceDelta.Head.ChainHash),
+		previewPoll.Challenge, nil,
+	)
+
+	snapshotTaken := make(chan struct{})
+	continueVerification := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		_, err := fixture.store.applyExecutorEvidenceReport(
+			fixture.auth, fixture.identity, previewReport, fixture.now.Add(3*time.Minute+time.Second),
+			func() {
+				close(snapshotTaken)
+				<-continueVerification
+			},
+		)
+		result <- err
+	}()
+	<-snapshotTaken
+	if _, err := fixture.store.ApplyExecutorEvidenceReport(
+		fixture.auth, sibling, advanceReport, fixture.now.Add(3*time.Minute+2*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	close(continueVerification)
+	if err := <-result; !errors.Is(err, ErrInvalid) {
+		t.Fatalf("superseded head-only preview error=%v", err)
+	}
+	retained := retainedExecutorEvidence(t, fixture.store, fixture.identity.NodeID)
+	if retained.Sequence != advanceDelta.Head.Sequence ||
+		retained.ChainHash != encodeExecutorEvidenceHash(advanceDelta.Head.ChainHash) ||
+		retained.Finding != nil {
+		t.Fatalf("head-only preview created a historical fork=%#v", retained)
+	}
+}
+
 func TestExecutorEvidenceAcceptsBoundedPrefixHead(t *testing.T) {
 	fixture := newExecutorEvidenceFixture(t, "tenant-a")
 	for index := 0; index < evidence.MaxDeltaRecords+1; index++ {

@@ -362,7 +362,8 @@ func TestExecutorEvidenceStatusEnforcesFindingSemantics(t *testing.T) {
 	rollback := ExecutorEvidenceStatusV1{
 		State: ExecutorEvidenceStatusRollbackDetected, Head: &head, WitnessedAt: witnessed,
 		Finding: &ExecutorEvidenceFindingV1{
-			Kind: ExecutorEvidenceFindingRollback, DetectedAt: "2026-07-16T01:03:00Z", ObservedHead: rollbackHead,
+			Kind: ExecutorEvidenceFindingRollback, DetectedAt: "2026-07-16T01:03:00Z",
+			ComparedHead: head, ObservedHead: rollbackHead,
 		},
 	}
 	if err := rollback.Validate(); err != nil {
@@ -374,12 +375,32 @@ func TestExecutorEvidenceStatusEnforcesFindingSemantics(t *testing.T) {
 	equivocation := ExecutorEvidenceStatusV1{
 		State: ExecutorEvidenceStatusEquivocationDetected, Head: &head, WitnessedAt: witnessed,
 		Finding: &ExecutorEvidenceFindingV1{
-			Kind: ExecutorEvidenceFindingEquivocation, DetectedAt: "2026-07-16T01:03:00Z", ObservedHead: forkHead,
+			Kind: ExecutorEvidenceFindingEquivocation, DetectedAt: "2026-07-16T01:03:00Z",
+			ComparedHead: head, ObservedHead: forkHead,
 		},
 	}
 	if err := equivocation.Validate(); err != nil {
 		t.Fatal(err)
 	}
+
+	laterHead := head
+	laterHead.Sequence++
+	laterHead.ChainHash = evidenceTestDigest("c")
+	historical := equivocation
+	historical.Head = &laterHead
+	historical.WitnessedAt = "2026-07-16T01:04:00Z"
+	if err := historical.Validate(); err != nil {
+		t.Fatalf("historical finding against an earlier checkpoint is invalid: %v", err)
+	}
+	historicalRollback := rollback
+	historicalRollback.Head = &laterHead
+	historicalRollback.WitnessedAt = "2026-07-16T01:04:00Z"
+	if err := historicalRollback.Validate(); err != nil {
+		t.Fatalf("historical rollback against an earlier checkpoint is invalid: %v", err)
+	}
+
+	laterForkHead := laterHead
+	laterForkHead.ChainHash = evidenceTestDigest("d")
 
 	for name, candidate := range map[string]ExecutorEvidenceStatusV1{
 		"unimplemented stale state": {
@@ -391,19 +412,75 @@ func TestExecutorEvidenceStatusEnforcesFindingSemantics(t *testing.T) {
 		"rollback not lower": {
 			State: ExecutorEvidenceStatusRollbackDetected, Head: &head, WitnessedAt: witnessed,
 			Finding: &ExecutorEvidenceFindingV1{
-				Kind: ExecutorEvidenceFindingRollback, DetectedAt: "2026-07-16T01:03:00Z", ObservedHead: head,
+				Kind: ExecutorEvidenceFindingRollback, DetectedAt: "2026-07-16T01:03:00Z",
+				ComparedHead: head, ObservedHead: head,
+			},
+		},
+		"rollback lower than current but not compared head": {
+			State: ExecutorEvidenceStatusRollbackDetected, Head: &laterHead, WitnessedAt: "2026-07-16T01:04:00Z",
+			Finding: &ExecutorEvidenceFindingV1{
+				Kind: ExecutorEvidenceFindingRollback, DetectedAt: "2026-07-16T01:03:00Z",
+				ComparedHead: head, ObservedHead: forkHead,
 			},
 		},
 		"equivocation identical": {
 			State: ExecutorEvidenceStatusEquivocationDetected, Head: &head, WitnessedAt: witnessed,
 			Finding: &ExecutorEvidenceFindingV1{
-				Kind: ExecutorEvidenceFindingEquivocation, DetectedAt: "2026-07-16T01:03:00Z", ObservedHead: head,
+				Kind: ExecutorEvidenceFindingEquivocation, DetectedAt: "2026-07-16T01:03:00Z",
+				ComparedHead: head, ObservedHead: head,
 			},
 		},
 		"finding predates head": {
 			State: ExecutorEvidenceStatusRollbackDetected, Head: &head, WitnessedAt: witnessed,
 			Finding: &ExecutorEvidenceFindingV1{
-				Kind: ExecutorEvidenceFindingRollback, DetectedAt: "2026-07-16T01:00:00Z", ObservedHead: rollbackHead,
+				Kind: ExecutorEvidenceFindingRollback, DetectedAt: "2026-07-16T01:00:00Z",
+				ComparedHead: head, ObservedHead: rollbackHead,
+			},
+		},
+		"checkpoint behind compared head": {
+			State: ExecutorEvidenceStatusEquivocationDetected, Head: &head, WitnessedAt: witnessed,
+			Finding: &ExecutorEvidenceFindingV1{
+				Kind: ExecutorEvidenceFindingEquivocation, DetectedAt: "2026-07-16T01:03:00Z",
+				ComparedHead: laterHead, ObservedHead: laterForkHead,
+			},
+		},
+		"checkpoint conflicts with equal-sequence compared head": {
+			State: ExecutorEvidenceStatusEquivocationDetected, Head: &head, WitnessedAt: witnessed,
+			Finding: &ExecutorEvidenceFindingV1{
+				Kind: ExecutorEvidenceFindingEquivocation, DetectedAt: "2026-07-16T01:03:00Z",
+				ComparedHead: forkHead, ObservedHead: head,
+			},
+		},
+		"historical finding changes identity": {
+			State: ExecutorEvidenceStatusEquivocationDetected, Head: &laterHead, WitnessedAt: "2026-07-16T01:04:00Z",
+			Finding: &ExecutorEvidenceFindingV1{
+				Kind: ExecutorEvidenceFindingEquivocation, DetectedAt: "2026-07-16T01:03:00Z",
+				ComparedHead: ExecutorEvidenceHeadV1{
+					Stream: ExecutorEvidenceStreamV1, ReceiptNodeID: "node-b", ReceiptEpoch: head.ReceiptEpoch,
+					Sequence: head.Sequence, ChainHash: head.ChainHash, PublicKeySHA256: head.PublicKeySHA256,
+				},
+				ObservedHead: ExecutorEvidenceHeadV1{
+					Stream: ExecutorEvidenceStreamV1, ReceiptNodeID: "node-b", ReceiptEpoch: head.ReceiptEpoch,
+					Sequence: forkHead.Sequence, ChainHash: forkHead.ChainHash, PublicKeySHA256: head.PublicKeySHA256,
+				},
+			},
+		},
+		"missing compared head": {
+			State: ExecutorEvidenceStatusRollbackDetected, Head: &head, WitnessedAt: witnessed,
+			Finding: &ExecutorEvidenceFindingV1{
+				Kind: ExecutorEvidenceFindingRollback, DetectedAt: "2026-07-16T01:03:00Z",
+				ObservedHead: rollbackHead,
+			},
+		},
+		"observed head changes compared identity": {
+			State: ExecutorEvidenceStatusEquivocationDetected, Head: &head, WitnessedAt: witnessed,
+			Finding: &ExecutorEvidenceFindingV1{
+				Kind: ExecutorEvidenceFindingEquivocation, DetectedAt: "2026-07-16T01:03:00Z",
+				ComparedHead: head,
+				ObservedHead: ExecutorEvidenceHeadV1{
+					Stream: ExecutorEvidenceStreamV1, ReceiptNodeID: "node-b", ReceiptEpoch: head.ReceiptEpoch,
+					Sequence: forkHead.Sequence, ChainHash: forkHead.ChainHash, PublicKeySHA256: head.PublicKeySHA256,
+				},
 			},
 		},
 	} {
@@ -475,6 +552,36 @@ func TestExecutorEvidenceExportUsesDedicatedTrustedWitnessKey(t *testing.T) {
 	}
 	if _, err := SignExecutorEvidenceExportV1(statement, receiptPrivate); err == nil {
 		t.Fatal("receipt key was reused as the controller witness key")
+	}
+
+	laterHead := head
+	laterHead.Sequence++
+	laterHead.ChainHash = evidenceTestDigest("c")
+	observedHead := head
+	observedHead.ChainHash = evidenceTestDigest("b")
+	historicalStatement := statement
+	historicalStatement.Status = ExecutorEvidenceStatusV1{
+		State: ExecutorEvidenceStatusEquivocationDetected, Head: &laterHead,
+		WitnessedAt: "2026-07-16T01:04:00Z",
+		Finding: &ExecutorEvidenceFindingV1{
+			Kind: ExecutorEvidenceFindingEquivocation, DetectedAt: "2026-07-16T01:03:00Z",
+			ComparedHead: head, ObservedHead: observedHead,
+		},
+	}
+	historicalStatement.ExportedAt = "2026-07-16T01:05:00Z"
+	historicalExport, err := SignExecutorEvidenceExportV1(historicalStatement, witnessPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedComparedHead := historicalExport
+	tamperedFinding := *historicalExport.Statement.Status.Finding
+	tamperedComparedHead.Statement.Status.Finding = &tamperedFinding
+	tamperedComparedHead.Statement.Status.Finding.ComparedHead.ChainHash = evidenceTestDigest("d")
+	if err := tamperedComparedHead.Statement.Validate(); err != nil {
+		t.Fatalf("test mutation made the unsigned statement invalid: %v", err)
+	}
+	if err := tamperedComparedHead.Validate(); err == nil {
+		t.Fatal("export accepted a compared head changed after signing")
 	}
 }
 

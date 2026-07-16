@@ -400,11 +400,20 @@ The response uses these implemented states:
 - `unwitnessed`: a legacy node has no receipt-key proof. A site administrator can
   issue and exchange a replacement enrollment for that active node before relying
   on controller witnessing.
-- `rollback_detected`: the node signed a head below the last-good checkpoint.
-- `equivocation_detected`: the node signed a conflicting head or branch.
+- `rollback_detected`: the node signed a head below the checkpoint named in
+  `finding.compared_head`.
+- `equivocation_detected`: the node signed a head or branch that conflicts with
+  `finding.compared_head`.
 
 Rollback and equivocation findings are sticky. Later reports cannot clear the
 finding or advance the checkpoint, and Steward has no evidence-reset endpoint.
+The status `head` is the latest retained last-good checkpoint. It normally
+equals `finding.compared_head`, but it can be later when another valid report
+advances the checkpoint while a historical conflict is being verified. The
+finding retains both the exact comparison checkpoint and the conflicting
+`observed_head`, so an inspection or signed export remains unambiguous. In that
+historical case, `finding.detected_at` can be earlier than the `witnessed_at`
+time attached to the later status head.
 Preserve the node receipt log, controller state, and a signed export for
 investigation. If the node must be replaced, revoke it, create a new global node
 ID with a new receipt key, and enroll that replacement. A revoked node ID is not
@@ -421,10 +430,11 @@ stewardctl control evidence export \
   -out node-a.evidence-witness.json
 ```
 
-The output file is created once with mode `0600`. The export contains the enrolled
-receipt-key proof, last-good checkpoint, any sticky finding, and export time. The
-controller signs those fields with its separate witness key. The public key
-embedded in the export is descriptive, not trusted by itself.
+The output file is created once with mode `0600`. The export contains the
+enrolled receipt-key proof, latest last-good checkpoint, any sticky finding and
+its exact comparison checkpoint, and export time. The controller signs those
+fields with its separate witness key. The public key embedded in the export is
+descriptive, not trusted by itself.
 
 Verify offline with the witness public key copied through an independent trusted
 channel:

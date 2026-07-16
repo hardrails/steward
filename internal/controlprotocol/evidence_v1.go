@@ -160,11 +160,14 @@ type ExecutorEvidenceReportResponseV1 struct {
 	Status          ExecutorEvidenceStatusV1 `json:"status"`
 }
 
-// ExecutorEvidenceFindingV1 retains the signed head that conflicted with the
-// controller's last-good checkpoint. Status.Head remains that last-good head.
+// ExecutorEvidenceFindingV1 retains the signed head that conflicted with one
+// controller checkpoint. ComparedHead is that exact historical checkpoint;
+// Status.Head may be a later last-good checkpoint retained before the finding
+// was durably recorded.
 type ExecutorEvidenceFindingV1 struct {
 	Kind         string                 `json:"kind"`
 	DetectedAt   string                 `json:"detected_at"`
+	ComparedHead ExecutorEvidenceHeadV1 `json:"compared_head"`
 	ObservedHead ExecutorEvidenceHeadV1 `json:"observed_head"`
 }
 
@@ -529,12 +532,30 @@ func (finding ExecutorEvidenceFindingV1) Validate() error {
 	if !validCanonicalEvidenceTime(finding.DetectedAt) {
 		return errors.New("executor evidence finding timestamp is invalid")
 	}
+	if err := finding.ComparedHead.Validate(); err != nil {
+		return err
+	}
+	if err := finding.ObservedHead.Validate(); err != nil {
+		return err
+	}
+	if !sameExecutorEvidenceIdentity(finding.ComparedHead, finding.ObservedHead) {
+		return errors.New("executor evidence finding changed the compared receipt identity")
+	}
 	switch finding.Kind {
-	case ExecutorEvidenceFindingRollback, ExecutorEvidenceFindingEquivocation:
+	case ExecutorEvidenceFindingRollback:
+		if finding.ObservedHead.Sequence >= finding.ComparedHead.Sequence {
+			return errors.New("executor evidence rollback finding is not lower than the compared checkpoint")
+		}
+	case ExecutorEvidenceFindingEquivocation:
+		if finding.ObservedHead.Sequence < finding.ComparedHead.Sequence ||
+			(finding.ObservedHead.Sequence == finding.ComparedHead.Sequence &&
+				finding.ObservedHead.ChainHash == finding.ComparedHead.ChainHash) {
+			return errors.New("executor evidence equivocation finding does not conflict with the compared checkpoint")
+		}
 	default:
 		return errors.New("executor evidence finding kind is invalid")
 	}
-	return finding.ObservedHead.Validate()
+	return nil
 }
 
 func (status ExecutorEvidenceStatusV1) Validate() error {
@@ -568,24 +589,17 @@ func (status ExecutorEvidenceStatusV1) Validate() error {
 	if err := status.Finding.Validate(); err != nil {
 		return err
 	}
-	observed := status.Finding.ObservedHead
-	if !sameExecutorEvidenceIdentity(*status.Head, observed) {
+	compared := status.Finding.ComparedHead
+	if !sameExecutorEvidenceIdentity(*status.Head, compared) {
 		return errors.New("executor evidence finding changed the pinned receipt identity")
 	}
-	switch status.Finding.Kind {
-	case ExecutorEvidenceFindingRollback:
-		if observed.Sequence >= status.Head.Sequence {
-			return errors.New("executor evidence rollback finding is not lower than the checkpoint")
-		}
-	case ExecutorEvidenceFindingEquivocation:
-		if observed.Sequence < status.Head.Sequence ||
-			observed.Sequence == status.Head.Sequence && observed.ChainHash == status.Head.ChainHash {
-			return errors.New("executor evidence equivocation finding does not conflict with the checkpoint")
-		}
+	if status.Head.Sequence < compared.Sequence ||
+		(status.Head.Sequence == compared.Sequence && status.Head.ChainHash != compared.ChainHash) {
+		return errors.New("executor evidence checkpoint predates or conflicts with the finding comparison checkpoint")
 	}
 	detected, _ := time.Parse(time.RFC3339Nano, status.Finding.DetectedAt)
 	witnessed, _ := time.Parse(time.RFC3339Nano, status.WitnessedAt)
-	if detected.Before(witnessed) {
+	if detected.Before(witnessed) && status.Head.Sequence == compared.Sequence {
 		return errors.New("executor evidence finding predates the retained checkpoint")
 	}
 	return nil
@@ -691,6 +705,7 @@ func ExecutorEvidenceExportSigningStatementV1(statement ExecutorEvidenceExportSt
 		out = append(out, 1)
 		out = appendEvidenceText(out, status.Finding.Kind)
 		out = appendEvidenceText(out, status.Finding.DetectedAt)
+		out = appendEvidenceHead(out, status.Finding.ComparedHead)
 		out = appendEvidenceHead(out, status.Finding.ObservedHead)
 	}
 	out = appendEvidenceText(out, statement.ExportedAt)

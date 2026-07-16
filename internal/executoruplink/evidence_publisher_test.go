@@ -153,7 +153,8 @@ func (server *evidenceWitnessServer) ServeHTTP(writer http.ResponseWriter, reque
 			response.Status = controlprotocol.ExecutorEvidenceStatusV1{
 				State: state, Head: &retained, WitnessedAt: server.now.Format(time.RFC3339Nano),
 				Finding: &controlprotocol.ExecutorEvidenceFindingV1{
-					Kind: kind, DetectedAt: server.now.Format(time.RFC3339Nano), ObservedHead: reported,
+					Kind: kind, DetectedAt: server.now.Format(time.RFC3339Nano),
+					ComparedHead: retained, ObservedHead: reported,
 				},
 			}
 		}
