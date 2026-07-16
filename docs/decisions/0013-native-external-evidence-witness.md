@@ -6,11 +6,12 @@
 
 ## Context
 
-Steward needs to detect when a managed node later removes or replaces signed
-Executor evidence that an independent control host has already observed. The
-witness must work in an air gap, keep controller storage bounded, preserve the
-zero-dependency build, and remain outside the workload-enforcement availability
-path.
+Steward needs to detect when a managed node later signs and reports an Executor
+evidence head below or conflicting with a checkpoint already observed by a
+separate control host. Silence is not evidence of freshness or continued on-disk
+retention. The witness must work in an air gap, keep controller storage bounded,
+preserve the zero-dependency build, and remain outside the workload-enforcement
+availability path.
 
 ## Decision
 
@@ -19,10 +20,11 @@ controller witness. Enrollment pins the node's evidence public identity. The
 node then sends bounded contiguous signed deltas, and the controller retains
 only the latest verified coordinate plus bounded divergence findings.
 
-**Tradeoff:** This detects rollback or a fork relative to one controller without
-adding a database, transparency service, or second audit-log format. It does not
-detect split views between independent controllers unless their checkpoints are
-compared.
+**Tradeoff:** This detects a lower or conflicting signed head when the node reports
+it relative to one controller, without adding a database, transparency service, or
+second audit-log format. It does not prove liveness, reveal silent deletion while a
+node keeps reporting the retained head, or detect split views between independent
+controllers unless their checkpoints are compared.
 
 **Rejected:** Rekor, a hosted transparency service, or a separate SCITT service,
 because each adds another state authority and operational dependency without
