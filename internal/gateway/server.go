@@ -217,6 +217,7 @@ type Server struct {
 	egressLeases             map[string]grantLease
 	audit                    *auditLog
 	connectorLedger          connectorReceiptLog
+	connectorReceiptPublic   ed25519.PublicKey
 	now                      func() time.Time
 	tokenHash                [sha256.Size]byte
 	client                   *http.Client
@@ -279,7 +280,7 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		egressDeniedAttempts: make(map[string]egressDeniedAttemptWindow),
 		egressTenantDenials:  make(map[string]egressDeniedAttemptWindow),
 		grantLeases:          make(map[string]grantLease), egressLeases: make(map[string]grantLease), audit: audit,
-		connectorLedger: receiptWriter, now: time.Now,
+		connectorLedger: receiptWriter, connectorReceiptPublic: connectorReceiptPublicKey(receiptKey), now: time.Now,
 		tokenHash: sha256.Sum256([]byte("Bearer " + serviceToken)),
 		client: &http.Client{Transport: transport, Timeout: 2 * time.Minute,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
@@ -584,6 +585,8 @@ func (s *Server) Start(ctx context.Context) error {
 
 func (s *Server) ControlHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/tasks", s.handleControlTaskSubmit)
+	mux.HandleFunc("/v1/tasks/", s.handleControlTask)
 	mux.HandleFunc("POST /v1/grants", s.register)
 	mux.HandleFunc("POST /v1/grants/{id}/activate", s.activate)
 	mux.HandleFunc("POST /v1/grants/{id}/deactivate", s.deactivate)
