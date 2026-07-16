@@ -155,11 +155,11 @@ type Delta struct {
 	More   bool
 }
 
-// FormatSummary reports the highest semantic receipt version observed in an
-// existing evidence log. A log may contain both version 1 ordinary receipts
-// and version 2 activation markers in one signed chain. Empty logs contain no
-// receipt header, so FormatVersion is zero. This is a structural, read-only
-// compatibility check; callers that need authenticity must also verify the
+// FormatSummary reports a receipt version structurally observed in an existing
+// evidence log. InspectFormat requires every record to share FormatVersion;
+// InspectRequiredFormat permits a mixed chain and reports the highest version
+// a reader must support. Empty logs contain no receipt header, so
+// FormatVersion is zero. Callers that need authenticity must also verify the
 // chain with its public key through OpenForValidation or VerifyRecords.
 type FormatSummary struct {
 	Present       bool
@@ -440,9 +440,22 @@ func OpenForValidation(path string, public ed25519.PublicKey, nodeID string, epo
 }
 
 // InspectFormat validates every frame and receipt structurally through a
-// read-only descriptor and reports the observed receipt version. It never
-// creates a missing log or changes file metadata.
+// read-only descriptor and reports the one receipt version shared by every
+// record. It rejects mixed-version logs, never creates a missing log, and
+// never changes file metadata.
 func InspectFormat(path string) (FormatSummary, error) {
+	return inspectFormat(path, false)
+}
+
+// InspectRequiredFormat validates every frame and receipt structurally through
+// a read-only descriptor and reports the highest receipt version a reader must
+// support. It accepts mixed-version logs because ordinary format 1 receipts and
+// format 2 activation markers intentionally share one signed chain.
+func InspectRequiredFormat(path string) (FormatSummary, error) {
+	return inspectFormat(path, true)
+}
+
+func inspectFormat(path string, allowMixed bool) (FormatSummary, error) {
 	if path == "" {
 		return FormatSummary{}, errors.New("evidence path is required")
 	}
@@ -484,6 +497,12 @@ func InspectFormat(path string) (FormatSummary, error) {
 		receipt, err := unmarshalReceipt(envelope.Payload)
 		if err != nil {
 			return FormatSummary{}, fmt.Errorf("inspect evidence %q: %w", path, err)
+		}
+		if !allowMixed && summary.FormatVersion != 0 &&
+			summary.FormatVersion != int(receipt.Version) {
+			return FormatSummary{}, fmt.Errorf(
+				"evidence %q contains mixed receipt format versions", path,
+			)
 		}
 		if int(receipt.Version) > summary.FormatVersion {
 			summary.FormatVersion = int(receipt.Version)
@@ -1208,6 +1227,9 @@ func applyActivationMarker(
 		Digest:        receipt.MetadataHash,
 		Receipt:       receipt,
 	}
+	// Exact retries through the append APIs reuse the retained receipt and do
+	// not write another frame. A second physical marker therefore means the log
+	// was corrupted or written outside those APIs and must fail closed.
 	if receipt.Type == ActivationBegin {
 		if receipt.Outcome != Allowed || receipt.ErrorCode != "" ||
 			receipt.MetadataHash == "" {

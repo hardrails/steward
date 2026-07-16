@@ -74,6 +74,16 @@ func TestActivationMarkersUpgradeLegacyEvidenceToSemanticFormatTwo(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	ordinaryAfterBegin, err := log.Append(event(JournalCommit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordinaryAfterBegin.Version != receiptVersionV1 {
+		t.Fatalf(
+			"ordinary receipt after marker version=%d want %d",
+			ordinaryAfterBegin.Version, receiptVersionV1,
+		)
+	}
 	checkpoint, err := log.AppendActivationCheckpoint(
 		activationMarkerEvent(ActivationCheckpoint),
 	)
@@ -91,12 +101,16 @@ func TestActivationMarkersUpgradeLegacyEvidenceToSemanticFormatTwo(t *testing.T)
 		t.Fatal(err)
 	}
 
-	summary, err := InspectFormat(path)
+	if _, err := InspectFormat(path); err == nil ||
+		!bytes.Contains([]byte(err.Error()), []byte("mixed receipt format versions")) {
+		t.Fatalf("strict mixed-format inspection error=%v", err)
+	}
+	summary, err := InspectRequiredFormat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !summary.Present || summary.FormatVersion != receiptVersionV2 ||
-		summary.Records != 3 {
+		summary.Records != 4 {
 		t.Fatalf("mixed-format summary=%#v", summary)
 	}
 	last, err := Verify(path, public, "node-a", 1)

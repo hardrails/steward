@@ -1632,34 +1632,42 @@ func ensureActivationCanaryResult(
 	}
 	defer cancel()
 	poll := time.Duration(task.Bundle.Operation.PollIntervalSeconds) * time.Second
+	terminalCompletionConfirmed := false
 	for {
-		status, err := client.Status(ctx, submit.TaskDigest, submit.PermitDigest)
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) ||
-				errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return nil, gatewayclient.TaskLifecycleStatus{},
-					&activationCanaryTimeoutError{deadline: deadline}
+		if !terminalCompletionConfirmed {
+			status, err := client.Status(
+				ctx, submit.TaskDigest, submit.PermitDigest,
+			)
+			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) ||
+					errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					return nil, gatewayclient.TaskLifecycleStatus{},
+						&activationCanaryTimeoutError{deadline: deadline}
+				}
+				return nil, gatewayclient.TaskLifecycleStatus{}, err
 			}
-			return nil, gatewayclient.TaskLifecycleStatus{}, err
-		}
-		if status.Phase == gatewayclient.PhaseTerminal {
-			if status.State != string(gatewayclient.AgentReportedCompleted) {
-				return nil, status, activationTerminalStatusError(
-					store, status, "",
-				)
-			}
-			if resultPresent {
-				if status.RunID != submit.RunID ||
-					status.ResultDigest != dsse.Digest(resultRaw) ||
-					status.ResponseBytes != int64(len(resultRaw)) {
+			if status.Phase == gatewayclient.PhaseTerminal {
+				if status.State != string(gatewayclient.AgentReportedCompleted) {
 					return nil, status, activationTerminalStatusError(
-						store, status, "retained_result_mismatch",
+						store, status, "",
 					)
 				}
-				if err := storeActivationTerminalStatus(store, status); err != nil {
-					return nil, status, err
+				terminalCompletionConfirmed = true
+				if resultPresent {
+					if status.RunID != submit.RunID ||
+						status.ResultDigest != dsse.Digest(resultRaw) ||
+						status.ResponseBytes != int64(len(resultRaw)) {
+						return nil, status, activationTerminalStatusError(
+							store, status, "retained_result_mismatch",
+						)
+					}
+					if err := storeActivationTerminalStatus(
+						store, status,
+					); err != nil {
+						return nil, status, err
+					}
+					return resultRaw, status, nil
 				}
-				return resultRaw, status, nil
 			}
 		}
 

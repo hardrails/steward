@@ -1026,6 +1026,75 @@ func TestEnsureActivationCanaryResultAcceptsOnlyClosedTerminalEvidence(t *testin
 		}
 	})
 
+	t.Run("completed status is not re-polled while result catches up", func(t *testing.T) {
+		fixture, task := verifiedActivationRunTask(t)
+		fixture.inputs.plan.Timeouts.CanarySeconds = 5
+		task.Bundle.Operation.PollIntervalSeconds = 0
+		submit := activationSubmitForTask(task)
+		resultRaw := activationHermesResult(
+			t, fixture.inputs.plan.ActivationID, submit.RunID,
+		)
+		store := newActivationRunStore(t)
+		var statusCalls, observeCalls int
+		server := httptest.NewServer(http.HandlerFunc(func(
+			writer http.ResponseWriter,
+			request *http.Request,
+		) {
+			switch {
+			case request.Method == http.MethodGet:
+				statusCalls++
+				writeActivationGatewayResponse(
+					t, writer, submit,
+					activationGatewayTerminalFields(
+						resultRaw, "completed", false, submit.RunID,
+					),
+				)
+			case request.Method == http.MethodPost &&
+				strings.HasSuffix(request.URL.Path, "/observe"):
+				observeCalls++
+				fields := fmt.Sprintf(
+					`"phase":"dispatch","state":"dispatch_accepted",`+
+						`"run_id":%q,"observed_status":"running"`,
+					submit.RunID,
+				)
+				if observeCalls > 1 {
+					fields = activationGatewayTerminalFields(
+						resultRaw, "completed", true, submit.RunID,
+					)
+				}
+				writeActivationGatewayResponse(
+					t, writer, submit, fields,
+				)
+			default:
+				t.Errorf(
+					"unexpected request %s %s",
+					request.Method, request.URL.Path,
+				)
+				http.Error(writer, "unexpected", http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+		client, err := gatewayclient.New(server.URL, "activation-token")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, status, err := ensureActivationCanaryResult(
+			store, fixture.inputs, task, submit, client,
+			time.Now().Add(5*time.Second),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, resultRaw) ||
+			status.State != string(gatewayclient.AgentReportedCompleted) ||
+			statusCalls != 1 || observeCalls != 2 {
+			t.Fatalf(
+				"result=%s status=%#v statusCalls=%d observeCalls=%d",
+				got, status, statusCalls, observeCalls,
+			)
+		}
+	})
+
 	t.Run("terminal failure", func(t *testing.T) {
 		fixture, task := verifiedActivationRunTask(t)
 		fixture.inputs.plan.Timeouts.CanarySeconds = 5
