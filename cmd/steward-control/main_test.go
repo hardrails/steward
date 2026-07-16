@@ -144,6 +144,11 @@ func TestParseOptionsRejectsUnsafePathsAndCapacity(t *testing.T) {
 		{"-state-dir", "/tmp/control", "-max-poll-deliveries", "0"},
 		{"-state-dir", "/tmp/control", "-max-poll-deliveries", "129"},
 		{"-state-dir", "/tmp/control", "-max-tenants", "0"},
+		{"-state-dir", "/tmp/control", "-node-stale-after", "0s"},
+		{"-state-dir", "/tmp/control", "-evidence-stale-after", (controlstore.MaxOperationsThreshold + time.Second).String()},
+		{"-state-dir", "/tmp/control", "-command-overdue-after", "-1s"},
+		{"-state-dir", "/tmp/control", "-capacity-warning-percent", "0"},
+		{"-state-dir", "/tmp/control", "-capacity-warning-percent", "101"},
 		{"-state-dir", "/tmp/control", "-addr", "missing-port"},
 	} {
 		if _, err := parseOptions(arguments, &bytes.Buffer{}); err == nil {
@@ -152,6 +157,24 @@ func TestParseOptionsRejectsUnsafePathsAndCapacity(t *testing.T) {
 	}
 	if _, err := parseOptions([]string{"-state-dir", "/tmp/control", "-max-nodes", "100", "-max-nodes-per-tenant", "50"}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("paired low node limits rejected: %v", err)
+	}
+	parsed, err := parseOptions([]string{
+		"-state-dir", "/tmp/control",
+		"-enable-metrics",
+		"-node-stale-after", "3m",
+		"-evidence-stale-after", "7m",
+		"-command-overdue-after", "11m",
+		"-capacity-warning-percent", "75",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("valid operations options rejected: %v", err)
+	}
+	if !parsed.enableMetrics ||
+		parsed.operationsThresholds != (controlstore.OperationsThresholds{
+			NodeStaleAfter: 3 * time.Minute, EvidenceStaleAfter: 7 * time.Minute,
+			CommandOverdueAfter: 11 * time.Minute, CapacityWarningPercent: 75,
+		}) {
+		t.Fatalf("operations options = %+v metrics=%v", parsed.operationsThresholds, parsed.enableMetrics)
 	}
 }
 

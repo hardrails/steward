@@ -17,6 +17,7 @@ const (
 	MaxInventoryPageLimit     = 500
 	MaxOperationsThreshold    = 365 * 24 * time.Hour
 	maxOperationsCursorBytes  = 4096
+	operationsCursorVersion   = 1
 )
 
 // OperationsThresholds controls when derived operational facts require
@@ -75,8 +76,6 @@ type CommandMetadata struct {
 	LeaseUntil         string       `json:"lease_until,omitempty"`
 	CreatedAt          string       `json:"created_at"`
 	TerminalStatus     string       `json:"terminal_status,omitempty"`
-	ReportedStatus     string       `json:"reported_status,omitempty"`
-	ErrorCode          string       `json:"error_code,omitempty"`
 	CompletedAt        string       `json:"completed_at,omitempty"`
 }
 
@@ -254,13 +253,9 @@ func (store *Store) ListCommandInventory(actor controlauth.Identity, query Comma
 	if err != nil {
 		return CommandInventoryPage{}, err
 	}
-	after, err := decodeOperationsCursor("command-v1", query.Cursor)
-	if err != nil {
-		return CommandInventoryPage{}, err
-	}
 	if query.NodeID != "" && !validRecordID(query.NodeID, 128) ||
 		query.State != "" && !validCommandState(query.State) ||
-		query.TerminalStatus != "" && !validTerminalStatus(query.TerminalStatus) {
+		query.TerminalStatus != "" && (!validTerminalStatus(query.TerminalStatus) || query.State != CommandTerminal) {
 		return CommandInventoryPage{}, invalid("command inventory filter is invalid")
 	}
 
@@ -273,6 +268,13 @@ func (store *Store) ListCommandInventory(actor controlauth.Identity, query Comma
 		return CommandInventoryPage{}, err
 	}
 	scope, err := store.resolveOperationsScopeLocked(actor, query.TenantID)
+	if err != nil {
+		return CommandInventoryPage{}, err
+	}
+	cursorBinding := operationsCursorBinding(
+		"command-v1", scope, query.NodeID, string(query.State), query.TerminalStatus,
+	)
+	after, err := decodeOperationsCursor(cursorBinding, query.Cursor)
 	if err != nil {
 		return CommandInventoryPage{}, err
 	}
@@ -294,7 +296,9 @@ func (store *Store) ListCommandInventory(actor controlauth.Identity, query Comma
 			continue
 		}
 		if len(page.Commands) == limit {
-			page.NextCursor = encodeOperationsCursor("command-v1", commandInventorySortKey(page.Commands[len(page.Commands)-1]))
+			page.NextCursor = encodeOperationsCursor(
+				cursorBinding, commandInventorySortKey(page.Commands[len(page.Commands)-1]),
+			)
 			break
 		}
 		page.Commands = append(page.Commands, commandMetadata(store.current.commands[key]))
@@ -312,13 +316,12 @@ func (store *Store) ListCredentialInventory(actor controlauth.Identity, query Cr
 	if err != nil {
 		return CredentialInventoryPage{}, err
 	}
-	after, err := decodeOperationsCursor("credential-v1", query.Cursor)
-	if err != nil {
-		return CredentialInventoryPage{}, err
-	}
 	if query.Kind != "" && query.Kind != controlauth.KindOperator && query.Kind != controlauth.KindNode ||
 		query.Role != "" && query.Role != controlauth.RoleSiteAdmin && query.Role != controlauth.RoleTenantOperator ||
-		query.NodeID != "" && !validRecordID(query.NodeID, 128) {
+		query.NodeID != "" && !validRecordID(query.NodeID, 128) ||
+		query.Role != "" && query.NodeID != "" ||
+		query.Kind == controlauth.KindNode && query.Role != "" ||
+		query.Kind == controlauth.KindOperator && query.NodeID != "" {
 		return CredentialInventoryPage{}, invalid("credential inventory filter is invalid")
 	}
 
@@ -331,6 +334,14 @@ func (store *Store) ListCredentialInventory(actor controlauth.Identity, query Cr
 		return CredentialInventoryPage{}, err
 	}
 	scope, err := store.resolveOperationsScopeLocked(actor, query.TenantID)
+	if err != nil {
+		return CredentialInventoryPage{}, err
+	}
+	cursorBinding := operationsCursorBinding(
+		"credential-v1", scope, string(query.Kind), string(query.Role), query.NodeID,
+		operationsRevokedFilter(query.Revoked),
+	)
+	after, err := decodeOperationsCursor(cursorBinding, query.Cursor)
 	if err != nil {
 		return CredentialInventoryPage{}, err
 	}
@@ -353,7 +364,9 @@ func (store *Store) ListCredentialInventory(actor controlauth.Identity, query Cr
 			continue
 		}
 		if len(page.Credentials) == limit {
-			page.NextCursor = encodeOperationsCursor("credential-v1", page.Credentials[len(page.Credentials)-1].ID)
+			page.NextCursor = encodeOperationsCursor(
+				cursorBinding, page.Credentials[len(page.Credentials)-1].ID,
+			)
 			break
 		}
 		page.Credentials = append(page.Credentials, credentialMetadata(store.current.credentials[id], scope))
@@ -414,11 +427,6 @@ func (store *Store) ListAttention(actor controlauth.Identity, query AttentionQue
 	if err != nil {
 		return AttentionPage{}, err
 	}
-	after, err := decodeOperationsCursor("attention-v1", query.Cursor)
-	if err != nil {
-		return AttentionPage{}, err
-	}
-
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
@@ -431,10 +439,15 @@ func (store *Store) ListAttention(actor controlauth.Identity, query AttentionQue
 	if err != nil {
 		return AttentionPage{}, err
 	}
+	cursorBinding := operationsCursorBinding("attention-v1", scope, string(query.Reason))
+	after, err := decodeOperationsCursor(cursorBinding, query.Cursor)
+	if err != nil {
+		return AttentionPage{}, err
+	}
 
 	collector := &attentionCollector{
 		after: after, limit: limit, reason: query.Reason,
-		items: make([]AttentionItem, 0, limit),
+		items: make([]AttentionItem, 0, limit), cursorBinding: cursorBinding,
 	}
 	store.emitAttentionLocked(collector, scope, query.Now, query.Thresholds)
 	return collector.page(), nil
@@ -445,17 +458,36 @@ type attentionSink interface {
 }
 
 func (store *Store) emitAttentionLocked(sink attentionSink, scope operationsScope, now time.Time, thresholds OperationsThresholds) {
-	if scope.siteWide &&
-		!store.addCapacityAttention(sink, operationsScope{siteWide: true}, thresholds.CapacityWarningPercent) {
+	if scope.siteWide {
+		if !store.addCapacityAttention(
+			sink, operationsScope{siteWide: true}, thresholds.CapacityWarningPercent,
+		) {
+			return
+		}
+		index := store.buildSiteAttentionIndexLocked()
+		for _, tenantID := range index.tenantIDs {
+			if !addCapacityUsageAttention(
+				sink, tenantID,
+				tenantCapacityUsage(index.capacity[tenantID], store.limits, thresholds.CapacityWarningPercent),
+			) {
+				return
+			}
+			for _, nodeID := range index.nodeIDs[tenantID] {
+				if !store.addNodeAttention(sink, tenantID, store.current.nodes[nodeID], now, thresholds) {
+					return
+				}
+			}
+			for _, key := range index.commandKeys[tenantID] {
+				if !addCommandAttention(sink, store.current.commands[key], now, thresholds) {
+					return
+				}
+			}
+		}
 		return
 	}
-	tenantIDs := []string{scope.tenantID}
-	if scope.siteWide {
-		tenantIDs = make([]string, 0, len(store.current.tenants))
-		for tenantID := range store.current.tenants {
-			tenantIDs = append(tenantIDs, tenantID)
-		}
-		sort.Strings(tenantIDs)
+
+	if !store.addCapacityAttention(sink, scope, thresholds.CapacityWarningPercent) {
+		return
 	}
 	nodes := make([]Node, 0, len(store.current.nodes))
 	for _, node := range store.current.nodes {
@@ -468,27 +500,21 @@ func (store *Store) emitAttentionLocked(sink attentionSink, scope operationsScop
 	}
 	sort.Strings(commandKeys)
 
-	for _, tenantID := range tenantIDs {
-		tenantScope := operationsScope{tenantID: tenantID}
-		if !store.addCapacityAttention(sink, tenantScope, thresholds.CapacityWarningPercent) {
+	for _, node := range nodes {
+		if !tenantMember(node.TenantIDs, scope.tenantID) {
+			continue
+		}
+		if !store.addNodeAttention(sink, scope.tenantID, node, now, thresholds) {
 			return
 		}
-		for _, node := range nodes {
-			if !tenantMember(node.TenantIDs, tenantID) {
-				continue
-			}
-			if !store.addNodeAttention(sink, tenantID, node, now, thresholds) {
-				return
-			}
+	}
+	for _, key := range commandKeys {
+		command := store.current.commands[key]
+		if command.TenantID != scope.tenantID {
+			continue
 		}
-		for _, key := range commandKeys {
-			command := store.current.commands[key]
-			if command.TenantID != tenantID {
-				continue
-			}
-			if !addCommandAttention(sink, command, now, thresholds) {
-				return
-			}
+		if !addCommandAttention(sink, command, now, thresholds) {
+			return
 		}
 	}
 }
@@ -496,6 +522,108 @@ func (store *Store) emitAttentionLocked(sink attentionSink, scope operationsScop
 type operationsScope struct {
 	tenantID string
 	siteWide bool
+}
+
+type tenantCapacityCounts struct {
+	nodes       int
+	credentials int
+	enrollments int
+	commands    int
+}
+
+type siteAttentionIndex struct {
+	tenantIDs   []string
+	capacity    map[string]tenantCapacityCounts
+	nodeIDs     map[string][]string
+	commandKeys map[string][]string
+}
+
+// buildSiteAttentionIndexLocked projects each retained record family once.
+// Site-wide attention previously rescanned every retained map for every tenant
+// while holding the store's single mutex, allowing an authenticated summary or
+// metrics scrape to delay command polling at high configured limits.
+func (store *Store) buildSiteAttentionIndexLocked() siteAttentionIndex {
+	index := siteAttentionIndex{
+		tenantIDs:   make([]string, 0, len(store.current.tenants)),
+		capacity:    make(map[string]tenantCapacityCounts, len(store.current.tenants)),
+		nodeIDs:     make(map[string][]string, len(store.current.tenants)),
+		commandKeys: make(map[string][]string, len(store.current.tenants)),
+	}
+	for tenantID := range store.current.tenants {
+		index.tenantIDs = append(index.tenantIDs, tenantID)
+		index.capacity[tenantID] = tenantCapacityCounts{}
+	}
+	sort.Strings(index.tenantIDs)
+
+	nodeIDs := make([]string, 0, len(store.current.nodes))
+	for nodeID := range store.current.nodes {
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	sort.Strings(nodeIDs)
+	for _, nodeID := range nodeIDs {
+		node := store.current.nodes[nodeID]
+		for _, tenantID := range node.TenantIDs {
+			counts, exists := index.capacity[tenantID]
+			if !exists {
+				continue
+			}
+			counts.nodes++
+			index.capacity[tenantID] = counts
+			index.nodeIDs[tenantID] = append(index.nodeIDs[tenantID], nodeID)
+		}
+	}
+
+	for _, credential := range store.current.credentials {
+		switch credential.Kind {
+		case controlauth.KindOperator:
+			if credential.Role != controlauth.RoleTenantOperator {
+				continue
+			}
+			counts, exists := index.capacity[credential.TenantID]
+			if !exists {
+				continue
+			}
+			counts.credentials++
+			index.capacity[credential.TenantID] = counts
+		case controlauth.KindNode:
+			for _, tenantID := range credential.TenantIDs {
+				counts, exists := index.capacity[tenantID]
+				if !exists {
+					continue
+				}
+				counts.credentials++
+				index.capacity[tenantID] = counts
+			}
+		}
+	}
+
+	for _, enrollment := range store.current.enrollments {
+		for _, tenantID := range enrollment.TenantIDs {
+			counts, exists := index.capacity[tenantID]
+			if !exists {
+				continue
+			}
+			counts.enrollments++
+			index.capacity[tenantID] = counts
+		}
+	}
+
+	commandKeys := make([]string, 0, len(store.current.commands))
+	for key := range store.current.commands {
+		commandKeys = append(commandKeys, key)
+	}
+	sort.Strings(commandKeys)
+	for _, key := range commandKeys {
+		command := store.current.commands[key]
+		counts, exists := index.capacity[command.TenantID]
+		if !exists {
+			continue
+		}
+		counts.commands++
+		index.capacity[command.TenantID] = counts
+		index.commandKeys[command.TenantID] = append(index.commandKeys[command.TenantID], key)
+	}
+	return index
 }
 
 func (store *Store) resolveOperationsScopeLocked(actor controlauth.Identity, requested string) (operationsScope, error) {
@@ -532,8 +660,6 @@ func commandMetadata(command Command) CommandMetadata {
 	}
 	if command.Terminal != nil {
 		metadata.TerminalStatus = command.Terminal.Report.Status
-		metadata.ReportedStatus = command.Terminal.Report.ReportedStatus
-		metadata.ErrorCode = command.Terminal.Report.ErrorCode
 		metadata.CompletedAt = command.Terminal.CompletedAt
 	}
 	return metadata
@@ -716,12 +842,13 @@ func (store *Store) evidenceSummaryLocked(scope operationsScope, now time.Time, 
 }
 
 type attentionCollector struct {
-	after   string
-	limit   int
-	reason  AttentionReason
-	items   []AttentionItem
-	lastKey string
-	more    bool
+	after         string
+	limit         int
+	reason        AttentionReason
+	items         []AttentionItem
+	lastKey       string
+	more          bool
+	cursorBinding [sha256.Size]byte
 }
 
 func (collector *attentionCollector) add(item AttentionItem) bool {
@@ -787,20 +914,26 @@ func (store *Store) attentionSummaryLocked(scope operationsScope, now time.Time,
 func (collector *attentionCollector) page() AttentionPage {
 	page := AttentionPage{Items: collector.items}
 	if collector.more && collector.lastKey != "" {
-		page.NextCursor = encodeOperationsCursor("attention-v1", collector.lastKey)
+		page.NextCursor = encodeOperationsCursor(collector.cursorBinding, collector.lastKey)
 	}
 	return page
 }
 
 func (store *Store) addCapacityAttention(sink attentionSink, scope operationsScope, warningPercent int) bool {
+	return addCapacityUsageAttention(
+		sink, scope.tenantID, store.capacityUsageLocked(scope, warningPercent),
+	)
+}
+
+func addCapacityUsageAttention(sink attentionSink, tenantID string, usages []CapacityUsage) bool {
 	items := make([]AttentionItem, 0, 5)
-	for _, usage := range store.capacityUsageLocked(scope, warningPercent) {
+	for _, usage := range usages {
 		if !usage.Warning {
 			continue
 		}
 		item := AttentionItem{
 			Reason: AttentionCapacityWarning, Severity: AttentionWarning,
-			Resource: AttentionResourceCapacity, TenantID: scope.tenantID,
+			Resource: AttentionResourceCapacity, TenantID: tenantID,
 			CapacityResource: usage.Resource, Used: usage.Used, Limit: usage.Limit,
 		}
 		item.ID = stableAttentionID(item)
@@ -813,6 +946,15 @@ func (store *Store) addCapacityAttention(sink attentionSink, scope operationsSco
 		}
 	}
 	return true
+}
+
+func tenantCapacityUsage(counts tenantCapacityCounts, limits Limits, warningPercent int) []CapacityUsage {
+	return markCapacityWarnings([]CapacityUsage{
+		{Resource: CapacityNodes, Used: counts.nodes, Limit: limits.MaxNodesPerTenant},
+		{Resource: CapacityCredentials, Used: counts.credentials, Limit: limits.MaxCredentialsPerTenant},
+		{Resource: CapacityEnrollments, Used: counts.enrollments, Limit: limits.MaxEnrollmentsPerTenant},
+		{Resource: CapacityCommands, Used: counts.commands, Limit: limits.MaxCommandsPerTenant},
+	}, warningPercent)
 }
 
 func (store *Store) addNodeAttention(sink attentionSink, tenantID string, node Node, now time.Time, thresholds OperationsThresholds) bool {
@@ -981,11 +1123,46 @@ func normalizeInventoryLimit(limit int) (int, error) {
 	return limit, nil
 }
 
-func encodeOperationsCursor(domain, key string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(domain + "\x00" + key))
+func operationsCursorBinding(domain string, scope operationsScope, filters ...string) [sha256.Size]byte {
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("steward-operations-cursor-binding-v1\x00"))
+	_, _ = digest.Write([]byte(domain))
+	_, _ = digest.Write([]byte{0})
+	if scope.siteWide {
+		_, _ = digest.Write([]byte("site"))
+	} else {
+		_, _ = digest.Write([]byte("tenant"))
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write([]byte(scope.tenantID))
+	}
+	for _, filter := range filters {
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write([]byte(filter))
+	}
+	var binding [sha256.Size]byte
+	copy(binding[:], digest.Sum(nil))
+	return binding
 }
 
-func decodeOperationsCursor(domain, cursor string) (string, error) {
+func operationsRevokedFilter(revoked *bool) string {
+	if revoked == nil {
+		return "any"
+	}
+	if *revoked {
+		return "true"
+	}
+	return "false"
+}
+
+func encodeOperationsCursor(binding [sha256.Size]byte, key string) string {
+	raw := make([]byte, 1+sha256.Size+len(key))
+	raw[0] = operationsCursorVersion
+	copy(raw[1:], binding[:])
+	copy(raw[1+sha256.Size:], key)
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeOperationsCursor(binding [sha256.Size]byte, cursor string) (string, error) {
 	if cursor == "" {
 		return "", nil
 	}
@@ -994,10 +1171,11 @@ func decodeOperationsCursor(domain, cursor string) (string, error) {
 		return "", invalid("operations cursor is invalid")
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(cursor)
-	prefix := domain + "\x00"
-	if err != nil || len(raw) > maxOperationsCursorBytes || !strings.HasPrefix(string(raw), prefix) ||
-		len(raw) == len(prefix) {
+	if err != nil || len(raw) > maxOperationsCursorBytes ||
+		base64.RawURLEncoding.EncodeToString(raw) != cursor ||
+		len(raw) <= 1+sha256.Size || raw[0] != operationsCursorVersion ||
+		string(raw[1:1+sha256.Size]) != string(binding[:]) {
 		return "", invalid("operations cursor is invalid")
 	}
-	return string(raw[len(prefix):]), nil
+	return string(raw[1+sha256.Size:]), nil
 }

@@ -1,6 +1,7 @@
 package controlstore
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"slices"
@@ -101,14 +102,18 @@ func TestCommandInventoryPaginatesFiltersAndProjectsTenants(t *testing.T) {
 		State: CommandTerminal, TerminalStatus: controlprotocol.ExecutorStatusFailed,
 	})
 	if err != nil || len(failed.Commands) != 1 || failed.Commands[0].ID != "command-failed" ||
-		failed.Commands[0].ErrorCode != "operations-test" {
+		failed.Commands[0].TerminalStatus != controlprotocol.ExecutorStatusFailed {
 		t.Fatalf("failed command filter = (%+v, %v)", failed, err)
 	}
 	raw, err := json.Marshal(failed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "command_dsse") || strings.Contains(string(raw), "runtime_ref") {
+	if strings.Contains(string(raw), "command_dsse") ||
+		strings.Contains(string(raw), "runtime_ref") ||
+		strings.Contains(string(raw), "reported_status") ||
+		strings.Contains(string(raw), "error_code") ||
+		strings.Contains(string(raw), "operations-test") {
 		t.Fatalf("command inventory exposed payload or result data: %s", raw)
 	}
 
@@ -121,11 +126,54 @@ func TestCommandInventoryPaginatesFiltersAndProjectsTenants(t *testing.T) {
 			t.Fatalf("tenant command inventory leaked %q", command.TenantID)
 		}
 	}
+	operatorFirst, err := fixture.store.ListCommandInventory(operatorA, CommandInventoryQuery{Limit: 1})
+	if err != nil || operatorFirst.NextCursor == "" {
+		t.Fatalf("implicit tenant command cursor page = (%+v, %v)", operatorFirst, err)
+	}
+	operatorSecond, err := fixture.store.ListCommandInventory(operatorA, CommandInventoryQuery{
+		TenantID: "tenant-a", Limit: 1, Cursor: operatorFirst.NextCursor,
+	})
+	if err != nil || len(operatorSecond.Commands) != 1 {
+		t.Fatalf("effective tenant scope cursor reuse = (%+v, %v)", operatorSecond, err)
+	}
 	if _, err := fixture.store.ListCommandInventory(operatorA, CommandInventoryQuery{TenantID: "tenant-b"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-tenant command inventory error = %v", err)
 	}
 	if _, err := fixture.store.ListCommandInventory(fixture.admin, CommandInventoryQuery{
-		Cursor: encodeOperationsCursor("credential-v1", "credential"),
+		State: CommandPending, TerminalStatus: controlprotocol.ExecutorStatusFailed,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("terminal status without terminal state error = %v", err)
+	}
+	if _, err := fixture.store.ListCommandInventory(fixture.admin, CommandInventoryQuery{
+		State: CommandPending, Cursor: first.NextCursor,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("changed-filter command cursor error = %v", err)
+	}
+	tenantFirst, err := fixture.store.ListCommandInventory(fixture.admin, CommandInventoryQuery{
+		TenantID: "tenant-a", Limit: 1,
+	})
+	if err != nil || tenantFirst.NextCursor == "" {
+		t.Fatalf("tenant command cursor page = (%+v, %v)", tenantFirst, err)
+	}
+	if _, err := fixture.store.ListCommandInventory(fixture.admin, CommandInventoryQuery{
+		TenantID: "tenant-b", Limit: 1, Cursor: tenantFirst.NextCursor,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("cross-scope command cursor error = %v", err)
+	}
+	canonical := encodeOperationsCursor(
+		operationsCursorBinding("command-v1", operationsScope{siteWide: true}, "", "", ""),
+		"x",
+	)
+	if _, err := fixture.store.ListCommandInventory(fixture.admin, CommandInventoryQuery{
+		Cursor: operationsCursorTrailingBitAlias(t, canonical),
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("non-canonical command cursor error = %v", err)
+	}
+	if _, err := fixture.store.ListCommandInventory(fixture.admin, CommandInventoryQuery{
+		Cursor: encodeOperationsCursor(
+			operationsCursorBinding("credential-v1", operationsScope{siteWide: true}, "", "", "", "any"),
+			"credential",
+		),
 	}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("cross-domain cursor error = %v", err)
 	}
@@ -169,6 +217,53 @@ func TestCredentialInventoryNeverReturnsSecretsAndProjectsMultiTenantNodes(t *te
 	global, err := fixture.store.ListCredentialInventory(fixture.admin, CredentialInventoryQuery{Limit: 2})
 	if err != nil || len(global.Credentials) != 2 || global.NextCursor == "" {
 		t.Fatalf("global credential page = (%+v, %v)", global, err)
+	}
+	if _, err := fixture.store.ListCredentialInventory(fixture.admin, CredentialInventoryQuery{
+		Kind: controlauth.KindOperator, Cursor: global.NextCursor,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("changed-filter credential cursor error = %v", err)
+	}
+	tenantFirst, err := fixture.store.ListCredentialInventory(fixture.admin, CredentialInventoryQuery{
+		TenantID: "tenant-a", Limit: 1,
+	})
+	if err != nil || tenantFirst.NextCursor == "" {
+		t.Fatalf("tenant credential cursor page = (%+v, %v)", tenantFirst, err)
+	}
+	if _, err := fixture.store.ListCredentialInventory(fixture.admin, CredentialInventoryQuery{
+		TenantID: "tenant-b", Limit: 1, Cursor: tenantFirst.NextCursor,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("cross-scope credential cursor error = %v", err)
+	}
+	active := false
+	activeFirst, err := fixture.store.ListCredentialInventory(fixture.admin, CredentialInventoryQuery{
+		Revoked: &active, Limit: 1,
+	})
+	if err != nil || activeFirst.NextCursor == "" {
+		t.Fatalf("active credential cursor page = (%+v, %v)", activeFirst, err)
+	}
+	revoked := true
+	if _, err := fixture.store.ListCredentialInventory(fixture.admin, CredentialInventoryQuery{
+		Revoked: &revoked, Cursor: activeFirst.NextCursor,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("changed-revocation credential cursor error = %v", err)
+	}
+	cursorRaw, err := base64.RawURLEncoding.DecodeString(activeFirst.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{nodeRaw, fixture.adminRaw, "token_mac"} {
+		if strings.Contains(string(cursorRaw), secret) || strings.Contains(activeFirst.NextCursor, secret) {
+			t.Fatalf("credential cursor exposed secret material %q", secret)
+		}
+	}
+	for name, query := range map[string]CredentialInventoryQuery{
+		"role with node":      {Role: controlauth.RoleTenantOperator, NodeID: "node-1"},
+		"node kind with role": {Kind: controlauth.KindNode, Role: controlauth.RoleTenantOperator},
+		"operator with node":  {Kind: controlauth.KindOperator, NodeID: "node-1"},
+	} {
+		if _, err := fixture.store.ListCredentialInventory(fixture.admin, query); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("%s credential filter error = %v", name, err)
+		}
 	}
 	if _, revoked, err := fixture.store.RevokeNodeCredential(
 		fixture.admin, nodeIdentity.CredentialID, fixture.now.Add(5*time.Minute),
@@ -303,6 +398,30 @@ func TestAttentionAndSummaryAreDeterministicProjectedStickyAndNonMutating(t *tes
 	operationsAssertAttentionSummaryParity(t, items, summary.Attention)
 	if fixture.store.sequence != sequence {
 		t.Fatal("operations summary mutated retained state")
+	}
+	firstAttention, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
+		Now: now, Thresholds: DefaultOperationsThresholds(), Limit: 1,
+	})
+	if err != nil || firstAttention.NextCursor == "" {
+		t.Fatalf("attention cursor page = (%+v, %v)", firstAttention, err)
+	}
+	if _, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
+		Reason: AttentionNodeStale, Now: now, Thresholds: DefaultOperationsThresholds(),
+		Cursor: firstAttention.NextCursor,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("changed-filter attention cursor error = %v", err)
+	}
+	tenantAttention, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
+		TenantID: "tenant-a", Now: now, Thresholds: DefaultOperationsThresholds(), Limit: 1,
+	})
+	if err != nil || tenantAttention.NextCursor == "" {
+		t.Fatalf("tenant attention cursor page = (%+v, %v)", tenantAttention, err)
+	}
+	if _, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
+		TenantID: "tenant-b", Now: now, Thresholds: DefaultOperationsThresholds(),
+		Cursor: tenantAttention.NextCursor,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("cross-scope attention cursor error = %v", err)
 	}
 
 	tenantItems := operationsAllAttention(t, fixture.store, operatorA, "", now, 500)
@@ -545,3 +664,29 @@ func operationsAttentionReasonCount(
 }
 
 func zeroEvidenceCoordinate() evidence.Coordinate { return evidence.Coordinate{} }
+
+func operationsCursorTrailingBitAlias(t *testing.T, canonical string) string {
+	t.Helper()
+	unusedBits := 0
+	switch len(canonical) % 4 {
+	case 2:
+		unusedBits = 4
+	case 3:
+		unusedBits = 2
+	default:
+		t.Fatalf("cursor has no unused trailing bits: %q", canonical)
+	}
+	alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	index := strings.IndexByte(alphabet, canonical[len(canonical)-1])
+	if index < 0 {
+		t.Fatalf("cursor has invalid final character: %q", canonical)
+	}
+	alias := []byte(canonical)
+	alias[len(alias)-1] = alphabet[index^(1<<(unusedBits-1))]
+	canonicalRaw, canonicalErr := base64.RawURLEncoding.DecodeString(canonical)
+	aliasRaw, aliasErr := base64.RawURLEncoding.DecodeString(string(alias))
+	if canonicalErr != nil || aliasErr != nil || !slices.Equal(canonicalRaw, aliasRaw) {
+		t.Fatal("test setup did not produce an equivalent trailing-bit alias")
+	}
+	return string(alias)
+}

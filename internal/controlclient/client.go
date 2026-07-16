@@ -23,11 +23,15 @@ import (
 	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/securefile"
 )
 
-const maxWireBytes = 1 << 20
+const (
+	maxWireBytes             = 1 << 20
+	maxOperationsCursorBytes = 4096
+)
 
 type Client struct {
 	baseURL string
@@ -329,6 +333,67 @@ func (c *Client) GetCommand(ctx context.Context, tenantID, nodeID, commandID str
 	return command, err
 }
 
+func (c *Client) GetOperationsSummary(ctx context.Context, tenantID string) (controlstore.OperationsSummary, error) {
+	path, err := operationsPath("/v1/operations/summary", map[string]string{"tenant_id": tenantID}, nil, "", 0)
+	if err != nil {
+		return controlstore.OperationsSummary{}, err
+	}
+	var summary controlstore.OperationsSummary
+	err = c.do(ctx, http.MethodGet, path, nil, &summary, true)
+	return summary, err
+}
+
+func (c *Client) ListAttention(ctx context.Context, tenantID, reason, cursor string, limit int) (controlstore.AttentionPage, error) {
+	path, err := operationsPath(
+		"/v1/operations/attention",
+		map[string]string{"tenant_id": tenantID, "reason": reason}, nil, cursor, limit,
+	)
+	if err != nil {
+		return controlstore.AttentionPage{}, err
+	}
+	var page controlstore.AttentionPage
+	err = c.do(ctx, http.MethodGet, path, nil, &page, true)
+	return page, err
+}
+
+func (c *Client) ListCommandInventory(ctx context.Context, tenantID, nodeID, state, terminalStatus, cursor string, limit int) (controlstore.CommandInventoryPage, error) {
+	if terminalStatus != "" && state != string(controlstore.CommandTerminal) {
+		return controlstore.CommandInventoryPage{}, errors.New("control operations terminal_status requires state=terminal")
+	}
+	path, err := operationsPath(
+		"/v1/operations/commands",
+		map[string]string{
+			"tenant_id": tenantID, "node_id": nodeID, "state": state, "terminal_status": terminalStatus,
+		},
+		nil, cursor, limit,
+	)
+	if err != nil {
+		return controlstore.CommandInventoryPage{}, err
+	}
+	var page controlstore.CommandInventoryPage
+	err = c.do(ctx, http.MethodGet, path, nil, &page, true)
+	return page, err
+}
+
+func (c *Client) ListCredentialInventory(ctx context.Context, tenantID, kind, role, nodeID string, revoked *bool, cursor string, limit int) (controlstore.CredentialInventoryPage, error) {
+	if role != "" && nodeID != "" ||
+		kind == "node" && role != "" ||
+		kind == "operator" && nodeID != "" {
+		return controlstore.CredentialInventoryPage{}, errors.New("control operations credential filters are incompatible")
+	}
+	path, err := operationsPath(
+		"/v1/operations/credentials",
+		map[string]string{"tenant_id": tenantID, "kind": kind, "role": role, "node_id": nodeID},
+		revoked, cursor, limit,
+	)
+	if err != nil {
+		return controlstore.CredentialInventoryPage{}, err
+	}
+	var page controlstore.CredentialInventoryPage
+	err = c.do(ctx, http.MethodGet, path, nil, &page, true)
+	return page, err
+}
+
 // InspectExecutorEvidence returns the controller's validated online witness
 // state for one node.
 func (c *Client) InspectExecutorEvidence(ctx context.Context, nodeID string) (controlprotocol.ExecutorEvidenceInspectionV1, error) {
@@ -469,6 +534,64 @@ func paginatedPath(path, after string, limit int) (string, error) {
 		return path + "?" + encoded, nil
 	}
 	return path, nil
+}
+
+func operationsPath(path string, fields map[string]string, revoked *bool, cursor string, limit int) (string, error) {
+	if limit < 0 || limit > controlstore.MaxInventoryPageLimit {
+		return "", errors.New("control operations pagination is outside its bounds")
+	}
+	query := url.Values{}
+	for name, value := range fields {
+		if value == "" {
+			continue
+		}
+		maximum := 128
+		if name == "state" || name == "terminal_status" || name == "kind" || name == "role" || name == "reason" {
+			maximum = 64
+		}
+		if err := validateOperationsQueryValue(name, value, maximum); err != nil {
+			return "", err
+		}
+		query.Set(name, value)
+	}
+	if cursor != "" {
+		if err := validateOperationsCursor(cursor); err != nil {
+			return "", err
+		}
+		query.Set("cursor", cursor)
+	}
+	if limit != 0 {
+		query.Set("limit", strconv.Itoa(limit))
+	}
+	if revoked != nil {
+		query.Set("revoked", strconv.FormatBool(*revoked))
+	}
+	if encoded := query.Encode(); encoded != "" {
+		return path + "?" + encoded, nil
+	}
+	return path, nil
+}
+
+func validateOperationsQueryValue(name, value string, maximum int) error {
+	if value == "" || len(value) > maximum || !utf8.ValidString(value) ||
+		value != strings.TrimSpace(value) || strings.ContainsAny(value, "\r\n\x00") {
+		return fmt.Errorf("control operations %s filter is invalid or exceeds %d bytes", name, maximum)
+	}
+	return nil
+}
+
+func validateOperationsCursor(cursor string) error {
+	if err := validateOperationsQueryValue(
+		"cursor", cursor, base64.RawURLEncoding.EncodedLen(maxOperationsCursorBytes),
+	); err != nil {
+		return err
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil || len(raw) == 0 || len(raw) > maxOperationsCursorBytes ||
+		base64.RawURLEncoding.EncodeToString(raw) != cursor {
+		return errors.New("control operations cursor is not canonical bounded base64url")
+	}
+	return nil
 }
 
 func jsonContentType(value string) bool {
