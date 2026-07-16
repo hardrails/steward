@@ -277,25 +277,38 @@ lifetime, operator token, and a new absent output path. The controller returns t
 same enrollment capability. A changed request conflicts instead of leaving a
 second live secret. Once the capability has expired, use a new request ID.
 
-On the staged node, exchange it for a node-scoped Executor credential. The request
-ID makes a retry deterministic if the first response is lost. Use the same request
-ID and an absent output path on retry.
+On the staged node, create the receipt key that will sign local enforcement
+evidence. Keep the private key on the node. The exchange proves possession of this
+key and emits a protected evidence-config sidecar that binds the controller, node,
+receipt epoch, and public key.
 
 ```console
+sudo stewardctl keygen \
+  -key-id node-a-receipts \
+  -private-out /secure/enrollment/node-receipts.private.pem \
+  -public-out /secure/enrollment/node-receipts.public
 sudo stewardctl control enrollment exchange \
   -control-url "$CONTROL_URL" \
   -ca-file /secure/enrollment/control-ca.crt \
   -enrollment /secure/enrollment/node-a.enrollment.json \
   -request-id node-a-first-exchange \
-  -credential-out /secure/enrollment/executor-node.json
+  -executor-evidence-private-key /secure/enrollment/node-receipts.private.pem \
+  -credential-out /secure/enrollment/executor-node.json \
+  -executor-evidence-config-out /secure/enrollment/executor-evidence.env
 ```
 
+The request ID makes a retry deterministic if the first response is lost. Reuse the
+same receipt key and request ID, but choose new absent paths for both outputs.
+
 The resulting credential is an owner-only Executor transport credential. It
-identifies the node, not a tenant. Configure the node with the same node ID, the
-controller CA, and a site-root-signed policy that contains the public command keys
-for every bound tenant. The private command and site-root keys must not enter the
-node or controller. Follow the [node enrollment procedure]({{ '/getting-started/enroll/' | relative_url }})
-for the complete transaction.
+identifies the node, not a tenant. The evidence sidecar is non-secret authority
+metadata, but keep it owner-only so another local user cannot alter the controller
+binding before installation. Configure the node with both files, the exact receipt
+key pair, the controller CA, and a site-root-signed policy that contains the public
+command keys for every bound tenant. The private command and site-root keys must
+not enter the node or controller. Follow the
+[node enrollment procedure]({{ '/getting-started/enroll/' | relative_url }}) for
+the complete transaction.
 
 The exchange command prints the non-secret node credential ID. Record it for
 rotation and targeted revocation. To rotate, a site administrator issues and
@@ -307,7 +320,14 @@ replaces the credential, and restarts the node services:
 sudo /usr/local/libexec/steward/configure-node \
   --control-plane-url "$CONTROL_URL" \
   --executor-credential /secure/enrollment/executor-node-rotated.json \
-  --ca-file /secure/enrollment/control-ca.crt
+  --ca-file /secure/enrollment/control-ca.crt \
+  --admission-policy /secure/enrollment/site-policy.dsse.json \
+  --site-root-public-key /secure/enrollment/site-root.public \
+  --site-root-key-id site-root-1 \
+  --node-id node-a \
+  --executor-evidence-config /secure/enrollment/executor-evidence-rotated.env \
+  --executor-evidence-private-key /secure/enrollment/node-receipts.private.pem \
+  --executor-evidence-public-key /secure/enrollment/node-receipts.public
 ```
 
 Confirm that `last_seen_at` advances while the replacement is installed. Only then

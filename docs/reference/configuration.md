@@ -164,6 +164,9 @@ outbound-only deployment.
 | `-uplink-tls-ca-file` | system roots | Private CA bundle; when set, replaces the system root set |
 | `-uplink-tls-client-cert`, `-uplink-tls-client-key` | empty | Optional mTLS identity |
 | `-uplink-tls-skip-verify` | `false` | Disable server certificate verification (dangerous; forbidden with node-scoped credentials) |
+| `-evidence-uplink` | `false` | Publish signed Executor receipt checkpoints independently from command polling |
+| `-evidence-uplink-controller-instance-id` | empty | Controller identity authenticated during enrollment; required when evidence uplink is enabled |
+| `-evidence-uplink-poll-interval` | `30s` | Base evidence checkpoint cadence; accepted range is 1 second to 1 hour |
 | `-max-memory-bytes` | `536870912` | Per-workload admission ceiling |
 | `-max-cpu-millis` | `1000` | Per-workload CPU ceiling |
 | `-max-pids` | `128` | Per-workload process ceiling |
@@ -236,8 +239,13 @@ overwrite that backup, migrate a current-format file, or guess a tenant.
 
 Signed admission is all-or-nothing: if any trust input is set, the policy, site-root
 key and ID, node ID, and evidence key are all required. The packaged unit accepts
-optional `EXECUTOR_ADMISSION_*` values from `/etc/steward/executor.env`. See
-[signed admission and receipts]({{ '/guides/signed-admission/' | relative_url }}).
+optional `EXECUTOR_ADMISSION_*` values from `/etc/steward/executor.env`.
+`EXECUTOR_EVIDENCE_UPLINK_ENABLED`,
+`EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID`, and
+`EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL` map the enrollment evidence handoff to the
+three evidence-uplink flags. Evidence publishing additionally requires a
+node-scoped credential, matching receipt key and node identity, and verified HTTPS.
+See [signed admission and receipts]({{ '/guides/signed-admission/' | relative_url }}).
 
 A tenant policy may contain at most eight `task_keys`. Each entry has a unique
 bounded `key_id`, one canonical base64 Ed25519 `public_key`, and one through 32
