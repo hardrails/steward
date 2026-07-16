@@ -21,6 +21,7 @@ func (e *PolicyError) Error() string { return e.Message }
 var imageDigest = regexp.MustCompile(`^.+@sha256:[a-f0-9]{64}$`)
 var imageConfigDigest = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 var relayImageDigest = regexp.MustCompile(`^(?:.+@)?sha256:[a-f0-9]{64}$`)
+var activationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // Workload is the complete, intentionally small request accepted by the privileged
 // executor. Image references must be immutable digests; tags are never accepted.
@@ -109,24 +110,26 @@ type StateMount struct {
 }
 
 type RuntimeGrant struct {
-	NetworkName     string                  `json:"network_name"`
-	Subnet          string                  `json:"subnet"`
-	Gateway         string                  `json:"gateway"`
-	GrantID         string                  `json:"grant_id"`
-	NodeID          string                  `json:"node_id,omitempty"`
-	Generation      uint64                  `json:"generation"`
-	Inference       bool                    `json:"inference"`
-	RouteID         string                  `json:"route_id,omitempty"`
-	RelayIP         string                  `json:"relay_ip"`
-	AgentIP         string                  `json:"agent_ip"`
-	ModelAlias      string                  `json:"model_alias,omitempty"`
-	ServicePort     int                     `json:"service_port,omitempty"`
-	ServiceID       string                  `json:"service_id,omitempty"`
-	TaskAuthorities []gateway.TaskAuthority `json:"task_authorities,omitempty"`
-	EgressRouteIDs  []string                `json:"egress_route_ids,omitempty"`
-	ConnectorIDs    []string                `json:"connector_ids,omitempty"`
-	CapsuleDigest   string                  `json:"capsule_digest,omitempty"`
-	PolicyDigest    string                  `json:"policy_digest,omitempty"`
+	NetworkName           string                  `json:"network_name"`
+	Subnet                string                  `json:"subnet"`
+	Gateway               string                  `json:"gateway"`
+	GrantID               string                  `json:"grant_id"`
+	NodeID                string                  `json:"node_id,omitempty"`
+	Generation            uint64                  `json:"generation"`
+	Inference             bool                    `json:"inference"`
+	RouteID               string                  `json:"route_id,omitempty"`
+	RelayIP               string                  `json:"relay_ip"`
+	AgentIP               string                  `json:"agent_ip"`
+	ModelAlias            string                  `json:"model_alias,omitempty"`
+	ServicePort           int                     `json:"service_port,omitempty"`
+	ServiceID             string                  `json:"service_id,omitempty"`
+	TaskAuthorities       []gateway.TaskAuthority `json:"task_authorities,omitempty"`
+	EgressRouteIDs        []string                `json:"egress_route_ids,omitempty"`
+	ConnectorIDs          []string                `json:"connector_ids,omitempty"`
+	CapsuleDigest         string                  `json:"capsule_digest,omitempty"`
+	PolicyDigest          string                  `json:"policy_digest,omitempty"`
+	ActivationID          string                  `json:"activation_id,omitempty"`
+	ActivationBeginDigest string                  `json:"activation_begin_digest,omitempty"`
 }
 
 // Resources are mandatory cgroup limits. Docker has no resource limits by default,
@@ -277,6 +280,11 @@ func (w Workload) Validate() error {
 			(w.Runtime.Inference && !boundedText(w.Runtime.RouteID, 128)) ||
 			(!w.Runtime.Inference && (w.Runtime.ModelAlias != "" || w.Runtime.RouteID != "")) ||
 			(!w.Runtime.Inference && w.Runtime.ServicePort == 0 && len(w.Runtime.EgressRouteIDs) == 0 && len(w.Runtime.ConnectorIDs) == 0) ||
+			(w.Runtime.ActivationID == "") !=
+				(w.Runtime.ActivationBeginDigest == "") ||
+			(w.Runtime.ActivationID != "" &&
+				(!activationIDPattern.MatchString(w.Runtime.ActivationID) ||
+					!imageConfigDigest.MatchString(w.Runtime.ActivationBeginDigest))) ||
 			len(w.Runtime.EgressRouteIDs) > 32 || len(w.Runtime.ConnectorIDs) > 32 {
 			return &PolicyError{"internal runtime capability topology is invalid"}
 		}

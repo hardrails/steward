@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Executor API
-  version: "1.6.0"
+  version: "1.0.0"
   description: |
     Public host-local contract for Steward's separate Docker/gVisor executor
     process. The control plane supplies a fully resolved generic OCI workload;
@@ -157,6 +157,13 @@ paths:
         Before any mutation, Executor
         resolves the signed config digest locally, verifies the exact platform,
         rejects image-declared volumes, and executes by that immutable config ID.
+        An optional activation object binds a bounded activation ID and the
+        digest of a content-free begin assertion to this exact admission. When
+        present, Executor requires the signed runtime-capability topology. After
+        authority, policy, image, capacity, and other read-only preflights pass,
+        it appends an idempotent signed activation-begin receipt before the
+        admission-allow receipt, mutation journal, or host mutation. This
+        metadata grants no authority; all normal admission checks still apply.
         Admission is blocked while the latest reconciliation is degraded or a
         prior journaled mutation remains ambiguous.
       requestBody:
@@ -191,7 +198,7 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          description: Existing workload drift, unavailable exact image or prepared network, or unsafe local image metadata prevented admission.
+          description: Existing workload drift, unavailable exact image or prepared network, unsafe local image metadata, or a conflicting retained activation-begin identity prevented admission.
           content:
             application/json:
               schema:
@@ -208,6 +215,73 @@ paths:
           $ref: "#/components/responses/DockerError"
         "503":
           description: Signed admission is unconfigured, capacity is exhausted, or durable journal/evidence state requires recovery.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/workloads/{runtime_ref}/activation-checkpoints:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    post:
+      tags: [admission]
+      operationId: appendActivationCheckpoint
+      summary: Append a signed causal checkpoint for a running activation
+      description: |
+        Accepts one strict JSON object no larger than 1 MiB and appends a
+        content-free activation checkpoint to Executor's signed receipt stream.
+        The request supplies only a bounded activation ID and the SHA-256 digest
+        of the exact checkpoint assertion. Executor derives the tenant, runtime,
+        capsule, policy, and generation from the committed signed-admission
+        fence. An uplink-injected tenant principal must match that fence. A
+        direct host-local call has no tenant principal and is accepted only when
+        `-admission-allow-host-admin-intent` is explicitly enabled; the bearer
+        then acts with host-administrator authority. Current site policy must
+        still authorize the fence. Executor also requires ready reconciliation
+        and proves the exact admitted runtime topology is running before writing
+        the receipt. The persisted activation ID must match the request, and the
+        persisted begin digest must match the earlier activation-begin receipt;
+        the checkpoint request does not carry a begin digest. An exact retry is
+        idempotent and does not grow the evidence log; a conflicting identity or
+        digest fails closed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivationCheckpoint"
+      responses:
+        "201":
+          description: The checkpoint was appended, or an exact retained checkpoint was replayed idempotently.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivationCheckpoint"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The workload is not bound to the current uplink tenant principal or explicitly enabled host-administrator authority and site policy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: The running workload or its required topology drifted, or the checkpoint conflicts with retained activation evidence.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "503":
+          description: Signed admission is unavailable, reconciliation is degraded, or the signed evidence log cannot safely retain the checkpoint.
           content:
             application/json:
               schema:
@@ -274,14 +348,20 @@ paths:
       tags: [workloads]
       operationId: getWorkload
       summary: Read current workload status
-      description: Returns Docker's current status only for an Executor-managed, still-hardened container.
+      description: |
+        Returns Docker's current status only for an Executor-managed,
+        still-hardened container. When signed admission is configured, the
+        response also projects the complete committed admission identity,
+        including optional activation correlation fields.
       responses:
         "200":
-          description: Current Docker workload status.
+          description: Current Docker workload status and, for a signed runtime, its committed admission projection.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WorkloadState"
+                oneOf:
+                  - $ref: "#/components/schemas/WorkloadState"
+                  - $ref: "#/components/schemas/SignedAdmissionState"
         "400":
           $ref: "#/components/responses/InvalidRuntimeRef"
         "401":
@@ -555,6 +635,47 @@ components:
           description: Exact JSON DSSE envelope encoded with standard base64.
         intent:
           $ref: "#/components/schemas/InstanceIntent"
+        activation:
+          $ref: "#/components/schemas/ActivationAdmission"
+    ActivationAdmission:
+      type: object
+      additionalProperties: false
+      required: [schema_version, activation_id, begin_digest]
+      description: |
+        Optional fresh-admission correlation metadata. After authority, policy,
+        and read-only preflights pass, Executor appends the begin digest to its
+        signed receipt stream before the admission-allow receipt, mutation
+        journal, or host mutation. It persists both identity fields with the
+        admitted runtime. These fields grant no admission or lifecycle
+        authority.
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.executor-activation-admission.v1]
+        activation_id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        begin_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+    ActivationCheckpoint:
+      type: object
+      additionalProperties: false
+      required: [schema_version, activation_id, checkpoint_digest]
+      description: |
+        Content-free request and acknowledgment for one causal checkpoint in the
+        signed Executor receipt stream. The digest identifies the coordinator's
+        separately retained canonical checkpoint assertion.
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.executor-activation-checkpoint.v1]
+        activation_id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        checkpoint_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
     InstanceIntent:
       type: object
       additionalProperties: false
@@ -727,6 +848,14 @@ components:
           type: string
           pattern: "^sha256:[a-f0-9]{64}$"
           description: Deterministic non-secret digest of the effective inference, task-authorized service, egress, and connector route policy retained by Gateway.
+        activation_id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          description: Present only when admission used activation correlation metadata.
+        activation_begin_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+          description: Digest written to signed Executor evidence after read-only admission preflights and before the admission-allow receipt or host mutation; present with activation_id.
     TaskAuthority:
       type: object
       additionalProperties: false

@@ -330,6 +330,8 @@ func TestCreateWithSignedConnectorInjectsOnlyFixedRelayURLAndAdmissionBindings(t
 			Subnet: addresses.Subnet, Gateway: addresses.Gateway, RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
 			ConnectorIDs:  []string{"git.read", "issues.create"},
 			CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
+			ActivationID:          "activation-test",
+			ActivationBeginDigest: "sha256:" + strings.Repeat("e", 64),
 		}}
 	if err := docker.Create(context.Background(), "executor-connector", workload); err != nil {
 		t.Fatal(err)
@@ -342,8 +344,47 @@ func TestCreateWithSignedConnectorInjectsOnlyFixedRelayURLAndAdmissionBindings(t
 	labels := payload["Labels"].(map[string]any)
 	if labels[runtimeConnectorsLabel] != "git.read,issues.create" ||
 		labels[runtimeCapsuleDigestLabel] != workload.Runtime.CapsuleDigest ||
-		labels[runtimePolicyDigestLabel] != workload.Runtime.PolicyDigest {
+		labels[runtimePolicyDigestLabel] != workload.Runtime.PolicyDigest ||
+		labels[runtimeActivationIDLabel] != workload.Runtime.ActivationID ||
+		labels[runtimeActivationBeginDigestLabel] != workload.Runtime.ActivationBeginDigest {
 		t.Fatalf("labels=%#v", labels)
+	}
+}
+
+func TestRuntimeAdmissionBindingsRequireExactActivationPair(t *testing.T) {
+	valid := &RuntimeGrant{
+		CapsuleDigest:         "sha256:" + strings.Repeat("a", 64),
+		PolicyDigest:          "sha256:" + strings.Repeat("b", 64),
+		ActivationID:          "activation-test",
+		ActivationBeginDigest: "sha256:" + strings.Repeat("c", 64),
+	}
+	if !validRuntimeAdmissionBindings(valid) {
+		t.Fatal("valid activation admission bindings were rejected")
+	}
+	for name, mutate := range map[string]func(*RuntimeGrant){
+		"missing activation id": func(runtime *RuntimeGrant) {
+			runtime.ActivationID = ""
+		},
+		"missing begin digest": func(runtime *RuntimeGrant) {
+			runtime.ActivationBeginDigest = ""
+		},
+		"missing signed bindings": func(runtime *RuntimeGrant) {
+			runtime.CapsuleDigest, runtime.PolicyDigest = "", ""
+		},
+		"invalid activation id": func(runtime *RuntimeGrant) {
+			runtime.ActivationID = "activation/id"
+		},
+		"invalid begin digest": func(runtime *RuntimeGrant) {
+			runtime.ActivationBeginDigest = "sha256:invalid"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := *valid
+			mutate(&candidate)
+			if validRuntimeAdmissionBindings(&candidate) {
+				t.Fatal("invalid activation admission bindings were accepted")
+			}
+		})
 	}
 }
 
@@ -1244,6 +1285,8 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 		Subnet:          addresses.Subnet, Gateway: addresses.Gateway,
 		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP, ConnectorIDs: []string{"git.read", "issues.create"},
 		CapsuleDigest: "sha256:" + strings.Repeat("d", 64), PolicyDigest: "sha256:" + strings.Repeat("e", 64),
+		ActivationID:          "activation-test",
+		ActivationBeginDigest: "sha256:" + strings.Repeat("f", 64),
 	}
 	workload := Workload{
 		InstanceID: "agent-1", TenantID: "tenant-a", ProfileID: "openclaw-v1@v1",
@@ -1278,7 +1321,9 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 					runtimeSubnetLabel: addresses.Subnet, runtimeGatewayLabel: addresses.Gateway,
 					runtimeServicePortLabel: "8080", runtimeRelayIPLabel: addresses.RelayIP, runtimeAgentIPLabel: addresses.AgentIP,
 					runtimeConnectorsLabel: "git.read,issues.create", runtimeCapsuleDigestLabel: runtime.CapsuleDigest,
-					runtimePolicyDigestLabel: runtime.PolicyDigest,
+					runtimePolicyDigestLabel:          runtime.PolicyDigest,
+					runtimeActivationIDLabel:          runtime.ActivationID,
+					runtimeActivationBeginDigestLabel: runtime.ActivationBeginDigest,
 				},
 			},
 			"HostConfig": enforceClosedDockerHostPolicy(map[string]any{
