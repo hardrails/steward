@@ -5,6 +5,7 @@ package evidence
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -26,6 +27,8 @@ const (
 	PayloadType      = "application/vnd.steward.receipt.v1+binary"
 	ExportFormat     = "application/vnd.steward.evidence-export.v1+ndjson"
 	MaxEnvelopeBytes = 64 << 10
+	MaxDeltaRecords  = 128
+	MaxDeltaBytes    = 700 << 10
 	maxLogBytes      = 64 << 20
 	maxExportBytes   = 256 << 20
 	maxExportLine    = 128 << 10
@@ -114,6 +117,22 @@ type Head struct {
 	Sequence  uint64
 	ChainHash [sha256.Size]byte
 	KeyID     string
+}
+
+// Coordinate identifies an exact durable position in a receipt chain. The
+// genesis coordinate is sequence zero with a zero chain hash.
+type Coordinate struct {
+	Sequence  uint64
+	ChainHash [sha256.Size]byte
+}
+
+// Delta carries an exact bounded prefix after a requested coordinate. Frames
+// retain the native four-byte length prefix and signed envelope bytes. Head is
+// the coordinate derived after the last returned frame, or the supplied
+// coordinate when no newer receipt exists.
+type Delta struct {
+	Frames [][]byte
+	Head   Head
 }
 
 // FormatSummary reports the receipt version physically observed in an
@@ -340,6 +359,54 @@ func VerifyRecords(path string, public ed25519.PublicKey, nodeID string, epoch u
 	return Head{NodeID: nodeID, Epoch: epoch, Sequence: next - 1, ChainHash: hash, KeyID: KeyID(public)}, nil
 }
 
+// VerifyDelta authenticates a bounded sequence of exact native frames starting
+// immediately after a trusted, externally retained prior coordinate. It does
+// not authenticate that prior coordinate itself. It applies the same key, node,
+// epoch, receipt-schema and chain-coordinate checks as full-file verification,
+// then requires every receipt tenant to be accepted by tenantMember.
+func VerifyDelta(frames [][]byte, public ed25519.PublicKey, nodeID string, epoch uint64, prior Coordinate, tenantMember func(string) bool) (Head, error) {
+	if len(public) != ed25519.PublicKeySize || !validText(nodeID, 256) || epoch == 0 || tenantMember == nil {
+		return Head{}, errors.New("evidence delta verification arguments are invalid")
+	}
+	if err := validateCoordinate(prior); err != nil {
+		return Head{}, err
+	}
+	if len(frames) > MaxDeltaRecords {
+		return Head{}, fmt.Errorf("evidence delta exceeds %d records", MaxDeltaRecords)
+	}
+	total := 0
+	for _, frame := range frames {
+		if len(frame) < 5 || len(frame) > MaxEnvelopeBytes+4 {
+			return Head{}, errors.New("evidence delta contains an invalid frame size")
+		}
+		if total > MaxDeltaBytes-len(frame) {
+			return Head{}, fmt.Errorf("evidence delta exceeds %d decoded bytes", MaxDeltaBytes)
+		}
+		total += len(frame)
+	}
+	if uint64(len(frames)) > ^uint64(0)-prior.Sequence {
+		return Head{}, errors.New("evidence delta sequence would overflow")
+	}
+
+	head := Head{NodeID: nodeID, Epoch: epoch, Sequence: prior.Sequence, ChainHash: prior.ChainHash, KeyID: KeyID(public)}
+	expected := prior.Sequence + 1
+	previous := prior.ChainHash
+	for index, frame := range frames {
+		receipt, current, err := verifyCanonicalFrame(frame, public, nodeID, epoch, expected, previous)
+		if err != nil {
+			return Head{}, fmt.Errorf("verify evidence delta record %d: %w", index+1, err)
+		}
+		if !tenantMember(receipt.TenantID) {
+			return Head{}, fmt.Errorf("evidence delta record %d has unauthorized tenant", index+1)
+		}
+		head.Sequence = receipt.Sequence
+		head.ChainHash = current
+		previous = current
+		expected++
+	}
+	return head, nil
+}
+
 // VerifyAnyRecords auto-detects and verifies either the native length-framed
 // evidence log or Steward's portable NDJSON export. Portable receipt fields are
 // checked projections of the embedded signed frames; the frames, not the JSON
@@ -515,6 +582,77 @@ func (l *Log) NextSequence() uint64 {
 	return l.next
 }
 
+// ExportDelta returns the next bounded group of exact signed frames after an
+// externally retained chain coordinate. The coordinate must match this log
+// exactly; a caller cannot skip a missing or changed receipt.
+func (l *Log) ExportDelta(after Coordinate) (Delta, error) {
+	if err := validateCoordinate(after); err != nil {
+		return Delta{}, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file == nil {
+		return Delta{}, errors.New("evidence log is closed")
+	}
+	if _, err := l.file.Seek(0, io.SeekStart); err != nil {
+		return Delta{}, err
+	}
+
+	result := Delta{Head: Head{
+		NodeID: l.nodeID, Epoch: l.epoch, Sequence: after.Sequence,
+		ChainHash: after.ChainHash, KeyID: l.keyID,
+	}}
+	found := after.Sequence == 0
+	var previous [sha256.Size]byte
+	var expected uint64 = 1
+	var scanned int64
+	total := 0
+	for {
+		raw, err := readFrame(l.file)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return Delta{}, err
+		}
+		scanned += int64(4 + len(raw))
+		if scanned > maxLogBytes {
+			return Delta{}, fmt.Errorf("evidence log exceeds %d bytes", maxLogBytes)
+		}
+		receipt, current, err := verifyEnvelope(raw, l.public, l.nodeID, l.epoch, expected, previous)
+		if err != nil {
+			return Delta{}, err
+		}
+		previous = current
+		expected++
+
+		if receipt.Sequence <= after.Sequence {
+			if receipt.Sequence == after.Sequence {
+				if current != after.ChainHash {
+					return Delta{}, errors.New("evidence delta coordinate does not match the log")
+				}
+				found = true
+			}
+			continue
+		}
+		if !found {
+			return Delta{}, errors.New("evidence delta coordinate is not present in the log")
+		}
+		frame := frameBytes(raw)
+		if len(result.Frames) == MaxDeltaRecords || total > MaxDeltaBytes-len(frame) {
+			break
+		}
+		result.Frames = append(result.Frames, frame)
+		total += len(frame)
+		result.Head.Sequence = receipt.Sequence
+		result.Head.ChainHash = current
+	}
+	if !found {
+		return Delta{}, errors.New("evidence delta coordinate is not present in the log")
+	}
+	return result, nil
+}
+
 // KeyID is a stable non-secret identifier for a receipt public key.
 func KeyID(public ed25519.PublicKey) string {
 	sum := sha256.Sum256(public)
@@ -612,6 +750,40 @@ func verifyFrame(frame []byte, public ed25519.PublicKey, nodeID string, epoch, e
 		return Receipt{}, [sha256.Size]byte{}, errors.New("portable evidence contains an invalid signed frame")
 	}
 	return verifyEnvelope(frame[4:], public, nodeID, epoch, expected, previous)
+}
+
+func verifyCanonicalFrame(frame []byte, public ed25519.PublicKey, nodeID string, epoch, expected uint64, previous [sha256.Size]byte) (Receipt, [sha256.Size]byte, error) {
+	if len(frame) < 5 {
+		return Receipt{}, [sha256.Size]byte{}, errors.New("evidence delta contains a short signed frame")
+	}
+	size := binary.BigEndian.Uint32(frame[:4])
+	if size == 0 || size > MaxEnvelopeBytes || uint64(size) != uint64(len(frame)-4) {
+		return Receipt{}, [sha256.Size]byte{}, errors.New("evidence delta contains an invalid signed frame")
+	}
+	envelope, err := unmarshalEnvelope(frame[4:])
+	if err != nil {
+		return Receipt{}, [sha256.Size]byte{}, err
+	}
+	canonicalEnvelope, err := marshalEnvelope(envelope)
+	if err != nil || !bytes.Equal(canonicalEnvelope, frame[4:]) {
+		return Receipt{}, [sha256.Size]byte{}, errors.New("evidence delta contains a non-canonical envelope")
+	}
+	receipt, err := unmarshalReceipt(envelope.Payload)
+	if err != nil {
+		return Receipt{}, [sha256.Size]byte{}, err
+	}
+	canonicalReceipt, err := marshalReceipt(receipt)
+	if err != nil || !bytes.Equal(canonicalReceipt, envelope.Payload) {
+		return Receipt{}, [sha256.Size]byte{}, errors.New("evidence delta contains a non-canonical receipt")
+	}
+	return verifyEnvelope(frame[4:], public, nodeID, epoch, expected, previous)
+}
+
+func validateCoordinate(value Coordinate) error {
+	if value.Sequence == 0 && value.ChainHash != [sha256.Size]byte{} {
+		return errors.New("evidence genesis coordinate must have a zero chain hash")
+	}
+	return nil
 }
 
 type portableLine struct {
