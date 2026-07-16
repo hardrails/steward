@@ -1,24 +1,25 @@
 ---
 title: Local operator tools
-description: Issue and verify signed agent releases, inspect OCI archives, create control TLS material, verify evidence, and check durable-state compatibility with stewardctl.
+description: Curate and verify signed agent releases, inspect OCI archives, create control TLS material, verify evidence, and check durable-state compatibility with stewardctl.
 section: Reference
 ---
 
 # Local operator tools
 
 `stewardctl agent-release` issues and verifies outcome-led signed agent releases,
+`stewardctl agent-catalog` curates and searches signed release inventories,
 `stewardctl image` inspects and imports image media, `stewardctl permit` signs and
 audits exact connector authority, `stewardctl task` signs and audits exact
 agent-service requests, and `stewardctl evidence` verifies receipts without a
 registry, transparency service, or vendor control plane. Within those command
-groups, the signing, verification, audit, and archive-inspection operations use only
-local files; `image import` contacts Docker after offline verification. Commands
-under `stewardctl node` contact the local Executor API. `stewardctl task submit`,
-`status`, `observe`, and `wait` contact an explicit literal-loopback Gateway origin;
-task issue, verify, and audit remain offline. `stewardctl control evidence export`
-contacts the customer-owned controller, while `stewardctl control evidence verify`
-checks that portable export entirely offline against a separately pinned witness
-public key.
+groups, the signing, verification, catalog, audit, and archive-inspection
+operations use only local files; `image import` contacts Docker after offline
+verification. Commands under `stewardctl node` contact the local Executor API.
+`stewardctl task submit`, `status`, `observe`, and `wait` contact an explicit
+literal-loopback Gateway origin; task issue, verify, and audit remain offline.
+`stewardctl control evidence export` contacts the customer-owned controller,
+while `stewardctl control evidence verify` checks that portable export entirely
+offline against a separately pinned witness public key.
 
 ## Signed agent releases
 
@@ -81,6 +82,170 @@ release and capsule digests, outcome display, archive and image identity, canary
 qualification, and verification status. See
 [agent activation]({{ '/guides/agent-activation/' | relative_url }}) for the
 authority boundary and the complete operator journey.
+
+## Signed offline agent catalogs
+
+An agent catalog is a curator-signed inventory of exact agent releases. It
+embeds each release envelope and its pinned Ed25519 publisher identity, and
+records the archive, skill-manifest, and qualification-evidence files checked at
+catalog issuance.
+
+The catalog's signed authority is fixed to `descriptive-only`. The status values
+`candidate`, `approved`, and `retired` are curator metadata. They do not
+authorize or deny image import, workload admission, capabilities, tenant tasks,
+or rollout.
+
+Create a strict source manifest:
+
+```json
+{
+  "schema_version": "steward.agent-catalog-source.v1",
+  "catalog_id": "approved-site-agents",
+  "revision": 12,
+  "entries": [
+    {
+      "entry_id": "hermes-workspace-audit",
+      "status": "approved",
+      "release": "inputs/hermes-workspace-audit.release.dsse.json",
+      "publisher_key_id": "publisher-key-id",
+      "publisher_public_key": "inputs/publisher.public",
+      "archive": "inputs/hermes-agent-adapter.tar",
+      "skill_manifest": "inputs/steward.workspace-audit.manifest.json",
+      "qualification_evidence": "inputs/hermes-qualification.json"
+    }
+  ]
+}
+```
+
+Every input path must be relative to the manifest directory and contain no
+`..` component. Steward opens the directory once as a descriptor-pinned root,
+so replacing its pathname cannot redirect later reads. Absolute paths and
+symlinks that escape the pinned root are rejected. Catalog, entry, curator-key,
+and publisher-key IDs start with an ASCII letter or digit and then use only
+ASCII letters, digits, `.`, `_`, or `-`. The manifest is bounded to 256 KiB and
+may contain 1 to 64 entries with unique IDs. Issue a new catalog with an
+owner-only curator key:
+
+```console
+stewardctl agent-catalog issue \
+  -manifest catalog-source.json \
+  -key curator.private.pem \
+  -key-id site-agent-curator \
+  -out approved-site-agents.revision-12.dsse.json
+```
+
+Before opening an archive, issuance verifies every small release, publisher-key,
+skill-manifest, and qualification-evidence input; rejects duplicate
+publisher/release identities; and rejects more than 64 GiB of aggregate signed
+source archive bytes. The limit supports 64 one-GiB archives or three
+maximum-size 20 GiB archives with 4 GiB of headroom. It bounds source snapshot
+and hashing work. The signed byte length is also the entry's inspection ceiling,
+so an understated larger source is rejected before copying. Each archive
+separately keeps its 20 GiB source and 40 GiB uncompressed parser limits. A
+separate 128 GiB cumulative limit bounds first-pass uncompressed tar payload
+bytes across the issuance. Each valid archive subtracts its exact measured
+payload from the remaining budget, and the next archive receives the smaller of
+40 GiB and that remainder. The cumulative limit permits three 40 GiB archives
+with 8 GiB of headroom, or an average of 2 GiB across 64 entries. Inspection
+uses a fixed number of archive passes, so this accepted-payload ceiling bounds
+parser and decompression work by a constant multiple; it does not cap total
+bytes processed across all passes at 128 GiB. Steward inspects each archive
+through a private snapshot and checks every exact binding. It writes a new
+mode-`0600` file, refuses to overwrite an existing path, and executes or imports
+none of the supplied content.
+
+Verify the transferred catalog with a curator public key obtained through an
+independent authenticated channel:
+
+```console
+stewardctl agent-catalog verify \
+  -in approved-site-agents.revision-12.dsse.json \
+  -public-key curator.public \
+  -key-id site-agent-curator
+```
+
+Verification reverifies embedded publisher signatures and capsules at the
+signed catalog issue time. This proves the catalog's historical bindings; it
+does not establish current deployability. Run `agent-release verify` with the
+publisher key and exact archive at the current time before import or activation.
+
+List all entries or filter by exact status:
+
+```console
+stewardctl agent-catalog list \
+  -in approved-site-agents.revision-12.dsse.json \
+  -public-key curator.public \
+  -key-id site-agent-curator
+
+stewardctl agent-catalog list \
+  -in approved-site-agents.revision-12.dsse.json \
+  -public-key curator.public \
+  -key-id site-agent-curator \
+  -status approved
+```
+
+Search with one bounded, case-insensitive query. Exact `capability:*` queries
+evaluate verified capsule booleans and cannot be satisfied by publisher-written
+display or limitation text. Other queries search signed outcome, identity, image,
+platform, capsule validity and command, profile, resource, state, service,
+artifact, qualification, and limitation metadata:
+
+```console
+stewardctl agent-catalog search \
+  -in approved-site-agents.revision-12.dsse.json \
+  -public-key curator.public \
+  -key-id site-agent-curator \
+  -query "capability:inference" \
+  -status approved
+```
+
+Show one exact entry:
+
+```console
+stewardctl agent-catalog show \
+  -in approved-site-agents.revision-12.dsse.json \
+  -public-key curator.public \
+  -key-id site-agent-curator \
+  -entry-id hermes-workspace-audit
+```
+
+The result includes outcome text, exact release and capsule IDs and digests, the
+exact capsule command argument array, capsule issue and expiry times, profile,
+image, resources, capabilities, state and service shapes, artifacts, external
+file bindings, canary, qualification, and limitations.
+
+Compare two exact entries:
+
+```console
+stewardctl agent-catalog compare \
+  -in approved-site-agents.revision-12.dsse.json \
+  -public-key curator.public \
+  -key-id site-agent-curator \
+  -left-entry-id hermes-workspace-audit \
+  -right-entry-id hermes-workspace-audit-candidate
+```
+
+Comparison emits both verified entries and deterministic field differences.
+Command differences use JSON arrays so argument boundaries remain unambiguous.
+It does not rank releases or select a winner.
+
+Catalog curation does not update site policy. Copy every exact artifact
+`{kind, digest}` pair into `allowed_artifacts` in the matching publisher rule
+and each intended tenant rule, and pin the entry's exact image manifest in the
+publisher rule's `allowed_manifest_digests`. Steward requires both exact values
+but does not create per-image artifact tuples: multiple manifests and artifacts
+in one publisher rule form a cross-product. Use separate publisher keys and rules
+when that authority is too broad. Steward does not scan the image or prove it
+contains the companion bytes. Verify those exact bytes through the signed release
+before policy approval. A `retired` label does not revoke existing authority.
+
+Steward verifies one detached revision at a time. Keep the highest accepted
+catalog ID, revision, and envelope digest outside the transfer media. Reject a
+lower revision and investigate the same revision with a different digest.
+
+See [offline agent catalogs]({{ '/guides/agent-catalog/' | relative_url }}) for
+the complete curation, air-gapped transfer, policy, current-deployability, and
+rollback procedure.
 
 ## Proof-carrying agent activation
 

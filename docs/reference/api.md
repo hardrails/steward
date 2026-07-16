@@ -45,12 +45,18 @@ report routes for their bound node.
 | `GET /v1/nodes/{node_id}/evidence/export` | Sign a portable evidence checkpoint with the controller's dedicated witness key |
 | `POST /v1/tenants/{tenant_id}/nodes/{node_id}/commands` | Retain one exact signed Executor command |
 | `GET .../commands/{command_id}` | Read durable delivery and terminal status |
+| `GET /v1/operations/summary` | Read tenant-projected capacity, command, evidence, and attention totals |
+| `GET /v1/operations/attention` | Page and filter deterministic action-required facts |
+| `GET /v1/operations/commands` | Page and filter command metadata without command or result bodies |
+| `GET /v1/operations/credentials` | Page and filter non-secret credential metadata |
+| `GET /metrics` | Optional authenticated Prometheus exposition with fixed bounded labels |
 | `POST /executor-uplink/poll`, `POST /executor-uplink/report` | Lease signed commands to an enrolled Executor and settle fenced reports |
 | `POST /evidence-uplink/poll`, `POST /evidence-uplink/report` | Return a credential-bound challenge, then verify and retain a receipt-key-signed evidence batch |
 
-Every request body and response is bounded. Pagination is ordered and uses an
-exclusive `after` cursor. The controller rejects unknown query parameters,
-redirects are not used, and every error has the common
+Every request body and response is bounded. Tenant and node inventory uses the
+exclusive `after` cursor. Operations inventory uses an opaque `cursor` that is
+valid only with the same filters. The controller rejects duplicate and unknown
+query parameters, redirects are not used, and every error has the common
 `{"error":"...","message":"..."}` shape. The controller parses signed-command
 identity to bind it to the route but does not treat that parse as authorization;
 Executor verifies the signature and local policy before applying the command.
@@ -75,6 +81,22 @@ checkpoint used to classify the observed conflicting head. It does not retain
 the full node receipt archive. Evidence export uses optimistic linearization:
 three consecutive witness updates return `409 Conflict` with `Retry-After: 1`;
 a 409 without that header is a retained-state conflict rather than a retry hint.
+
+Operations findings are derived observations, not mutable tickets. The API cannot
+acknowledge, dismiss, retry, or clear them. A tenant operator is always projected
+to its own tenant; a cross-tenant filter is indistinguishable from an unknown
+resource. Command inventory excludes signed command bytes, terminal result bodies,
+reported status text, and error codes. Credential inventory excludes bearer
+material and token verifiers.
+
+Evidence-report recency is intentionally held in bounded process memory. After a
+controller restart, evidence is conservatively stale or unknown until the node
+reports again; the durable checkpoint and sticky rollback or equivocation finding
+remain intact. `/metrics` is absent unless explicitly enabled and still requires
+an operator bearer. It does not label tenant, node, credential, or command IDs or
+include prompts, bodies, results, or credentials. When one scraper requests
+several tenant projections, it must add distinct trusted target labels or jobs;
+the `tenant_id` query parameter alone is not part of Prometheus series identity.
 
 See [Operate the bundled control plane]({{ '/guides/control-plane/' | relative_url }})
 for installation and lifecycle examples.
@@ -210,11 +232,12 @@ state remains `dispatch_accepted`.
 
 `steward-mcp` implements Model Context Protocol (MCP) `2025-11-25` over standard
 input/output. With a control-plane operator credential, its fleet tools list
-visible tenants and nodes and submit or inspect already signed commands. A
-site-admin credential is required to create tenants, revoke nodes, or read the
-evidence checkpoint; a tenant-scoped credential confines the remaining fleet
-operations to that tenant. The evidence tool omits raw proof signatures and export
-files. Fleet tools do not issue operator or enrollment secrets. Its admit, status,
+visible tenants and nodes, submit or inspect already signed commands, read
+operations and attention summaries, and page secret-free command or credential
+metadata. A site-admin credential is required to create tenants, revoke nodes, or
+read the evidence checkpoint; a tenant-scoped credential confines the remaining
+fleet operations to that tenant. The evidence tool omits raw proof signatures and
+export files. Fleet tools do not issue operator or enrollment secrets. Its admit, status,
 logs, egress, start, stop, destroy, and
 state-purge tools call the loopback Executor API. When configured with a loopback
 Gateway origin, separate owner-only Gateway token, and fixed result directory, it

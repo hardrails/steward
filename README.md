@@ -86,7 +86,8 @@ described in the guide. See the
 [control-plane guide](https://hardrails.github.io/steward/guides/control-plane/)
 for PKI, tenant creation, scoped operators, one-time node enrollment, signed
 command delivery, separately keyed Executor evidence witnessing, offline export,
-backup, and MCP.
+secret-free command and credential inventory, derived action-required findings,
+opt-in authenticated metrics, backup, and MCP.
 
 The doctor checks the installed release, Docker and gVisor, systemd services,
 loopback health and readiness, Gateway, fixed evidence stores, and filesystem
@@ -128,6 +129,31 @@ exact task instead of creating replacement authority. The
 [task lifecycle reference](https://hardrails.github.io/steward/reference/offline-tools/#submit-and-recover-a-service-task)
 and [Hermes guide](https://hardrails.github.io/steward/guides/hermes-agent/#authorize-and-run-one-exact-hermes-task)
 show signing, verification, dispatch, recovery, result handling, and offline audit.
+
+### Choose an agent release without a hosted registry
+
+A curator can sign an offline catalog of exact publisher-signed releases. The
+catalog presents useful outcomes and the signed capsule data needed for selection:
+resources, capabilities, validity, state, services, and exact companion artifact
+identities. Its signature authenticates descriptive inventory; it does not grant
+deployment authority or prove a skill is safe.
+
+```console
+stewardctl agent-catalog verify \
+  -in agents.catalog.dsse.json \
+  -public-key curator.public.pem \
+  -key-id curator-key-id
+
+stewardctl agent-catalog search \
+  -in agents.catalog.dsse.json \
+  -public-key curator.public.pem \
+  -key-id curator-key-id \
+  -query capability:inference
+```
+
+Read the
+[offline agent catalog guide](https://hardrails.github.io/steward/guides/agent-catalog/)
+for issuing, transferring, comparing, and pinning catalog revisions.
 
 ### From a signed release to offline proof
 

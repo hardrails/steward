@@ -105,6 +105,7 @@ secrets, host mounts, privileged mode, or undeclared ports.
 </div>
 
 [Build and run the Hermes Agent adapter]({{ '/guides/hermes-agent/' | relative_url }}) ·
+[Browse an offline agent catalog]({{ '/guides/agent-catalog/' | relative_url }}) ·
 [Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }}) ·
 [Review the OpenClaw adapter contract]({{ '/guides/openclaw/' | relative_url }}) ·
 [Configure positive capabilities]({{ '/guides/positive-capabilities/' | relative_url }}) ·

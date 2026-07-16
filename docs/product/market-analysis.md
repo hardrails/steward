@@ -119,18 +119,16 @@ Steward should reuse the understandable progression from useful outcome to
 configuration, activation, and monitoring. It should not reuse hosted credential
 custody, vendor-controlled evidence, or Internet-dependent operation.
 
-The first two rows describe Steward's signed-release and fixed activation
-contracts. They do not imply a broad hosted catalog or general workflow engine.
-The remaining rows are design signals. A unified fleet-wide action-required view,
-freshness policy, metrics suite, and durable notification outbox do not currently
-ship.
+The first four rows describe bounded Steward contracts. They do not imply a broad
+hosted catalog, semantic workflow engine, or automatic remediation system. A
+durable notification outbox remains future work.
 
 | WorkFlux pattern | Steward translation | Boundary |
 | --- | --- | --- |
-| Outcome-led release artifact | A publisher-signed agent release names the useful outcome and binds the exact workload capsule, offline archive, deterministic canary, qualification-evidence digest, and known limitations. | Display text is descriptive publisher metadata. The release cannot authorize a tenant, node, image import, capability, or task, and it is not proof that the outcome occurred. Steward does not yet provide a local catalog for importing, searching, comparing, or tracking these releases. |
+| Outcome-led release artifact | A publisher-signed agent release names the useful outcome and binds the exact workload capsule, offline archive, deterministic canary, qualification-evidence digest, and known limitations. A separately curator-signed offline catalog can group exact releases and expose their signed capabilities, resources, service shape, validity, and artifact identities for local search and comparison. | Publisher and curator text is descriptive metadata. Neither signature authorizes a tenant, node, image import, capability, or task, and neither proves that the outcome occurred. Catalog revision monotonicity remains an operator distribution responsibility. |
 | Guided activation | Use one local choose/configure/preflight/activate/canary/prove/monitor journey. Bind exact inputs in an unsigned plan, retain sequential state in an owner-only append-only workspace, derive the canary challenge from real admission, keep the default task-signing key off-node, verify one deterministic Hermes result, and correlate signed evidence for offline review. | The state machine accepts no arbitrary hooks or workflow code. Invalid canary authority, terminal canary failure, retained-evidence conflict, and expiry of the absolute canary deadline become sticky `action_required`; other transient local, network, and incomplete evidence-source errors remain retryable while their applicable deadline is open. Replacement requires a new activation ID and higher instance generation after the failed workload is stopped and destroyed. The initial recipe is only the closed node-local Hermes workspace audit and requires a dedicated host with exactly one policy tenant because its persistent volume has no hard storage quota. |
-| Action-required lifecycle | Extend activation's sticky `action_required` state into one bounded fleet view of incomplete enrollment, failed preflight, ambiguous command or external effect, capacity exhaustion, overdue evidence publication under a future freshness policy, rollback/equivocation finding, revoked identity, or degraded node. | These facts currently live in separate surfaces where implemented. Aggregation must not invent approval, clear ambiguity automatically, or let a model dismiss a finding. |
-| Operational metrics | Report controller and node availability, queue depth, delivery latency, admission failures, capacity, ambiguity, evidence age, and finding state. | Do not collect prompts, response bodies, customer records, or vendor-defined ROI. Security and reliability metrics must be derivable from local retained state. |
+| Action-required lifecycle | Derive one tenant-projected fleet view for never-seen or stale nodes, missing or stale evidence, rollback or equivocation findings, overdue or expired command delivery, failed or unknown command outcomes, and retained-state capacity pressure. | Findings are deterministic observations, not mutable tickets. Steward does not let a model acknowledge, dismiss, retry, or clear them, and it does not infer approval from operational state. |
+| Operational metrics | Expose opt-in authenticated controller metrics for retained-state capacity, command state and terminal outcome, evidence state, and attention reason and severity. | Metrics use fixed bounded labels and exclude tenant, node, credential, and command identifiers, prompts, bodies, results, credentials, and vendor-defined return-on-investment claims. Evidence-report freshness becomes conservatively unknown after a controller restart until the node reports again. |
 | Event notifications | Build any notification surface on a bounded durable local outbox that can be polled or exported. | Outbound webhooks remain optional adapters; Internet delivery cannot become part of enforcement or recovery. |
 
 ### What Steward should reject
@@ -419,6 +417,21 @@ authorization, and separating trusted instructions from untrusted data.
   vulnerabilities, unexpected code execution, and memory/context poisoning.
   Steward's narrow grants and artifact/policy binding address only part of that
   risk set; they do not make prompts or agents intrinsically safe.
+- The 2026 [Skill-Inject preprint](https://arxiv.org/abs/2602.20156) reports high
+  attack success from malicious instructions embedded in agent skill files and
+  argues that simple filtering or model scaling is insufficient. The
+  [BadSkill preprint](https://arxiv.org/abs/2604.09378) demonstrates a separate
+  risk from backdoored model artifacts bundled inside skills. These are recent,
+  non-peer-reviewed studies, but they support treating skill instructions, code,
+  and embedded artifacts as one untrusted supply-chain unit rather than trusting
+  a familiar skill name.
+- The 2026 [MalSkillBench preprint](https://arxiv.org/abs/2606.07131) reports that
+  code scanners and prompt-injection defenses each miss parts of the combined
+  code-and-instruction threat. Steward therefore binds exact skill and
+  qualification-evidence digests in a release and catalog, while leaving semantic
+  malware detection and behavioral safety claims outside the catalog signature.
+  Exact-byte provenance reduces substitution risk; it does not prove that a skill
+  is benign.
 - A 2026 [sandbox-assurance research framework](https://arxiv.org/abs/2606.18532)
   argues that sandbox assurance depends on controllability, observability,
   containment, reproducibility, and governance artifacts. This research does not

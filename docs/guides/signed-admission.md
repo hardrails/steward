@@ -182,6 +182,17 @@ admission. An artifact kind alone is not authority, and changing one byte requir
 a new digest and policy approval. Each policy rule may contain at most 128 exact
 artifact entries.
 
+A publisher rule with `allowed_artifacts` must also list the capsule's exact image
+manifest digest in `allowed_manifest_digests`. Admission therefore requires both
+an exact approved image manifest and an exact approved artifact declaration; an
+unlisted image cannot reuse the declaration. These two allowlists form an
+intersection, not a per-image tuple map. If one publisher rule lists several
+manifests and several artifacts, any listed manifest may declare any listed
+artifact. Use separate publisher rules and keys when that cross-product is too
+broad. This check does not scan the image or prove that it contains those bytes.
+Verify the exact companion artifact separately through the signed agent release
+or another operator-controlled process before adding its digest to policy.
+
 ```console
 CAPSULE_DIGEST=$(stewardctl capsule sign -in capsule.json \
   -out capsule.dsse.json -key publisher.private.pem -key-id publisher-1)
