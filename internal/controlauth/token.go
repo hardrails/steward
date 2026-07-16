@@ -28,7 +28,6 @@ const (
 	operatorPrefix               = "steward_cp_v1"
 	nodePrefix                   = "steward_node_v1"
 	enrollmentPrefix             = "steward_enroll_v1"
-	evidenceChallengePrefix      = "steward_evidence_challenge_v1_"
 	credentialVersion            = 1
 	enrollmentVersion            = 1
 	maxTokenBytes                = 512
@@ -146,7 +145,7 @@ func (m *Manager) InstanceID() string {
 	digest := sha256.New()
 	_, _ = digest.Write([]byte("steward-control-instance-v1\x00"))
 	_, _ = digest.Write(m.key[:])
-	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
+	return "control-" + hex.EncodeToString(digest.Sum(nil))
 }
 
 // MintEvidenceChallenge returns a short-lived stateless challenge bound to one
@@ -160,52 +159,30 @@ func (m *Manager) MintEvidenceChallenge(credentialID, nodeID string, now, expire
 	if _, err := io.ReadFull(m.random, nonce); err != nil {
 		return "", fmt.Errorf("generate evidence challenge: %w", err)
 	}
-	payload := make([]byte, 1+8+2+2+len(credentialID)+len(nodeID)+len(nonce))
+	payload := make([]byte, 1+8+len(nonce))
 	payload[0] = 1
 	binary.BigEndian.PutUint64(payload[1:9], uint64(expiresAt.UTC().Unix()))
-	binary.BigEndian.PutUint16(payload[9:11], uint16(len(credentialID)))
-	binary.BigEndian.PutUint16(payload[11:13], uint16(len(nodeID)))
-	offset := 13
-	copy(payload[offset:], credentialID)
-	offset += len(credentialID)
-	copy(payload[offset:], nodeID)
-	offset += len(nodeID)
-	copy(payload[offset:], nonce)
-	mac := m.mac("evidence-challenge", string(payload))
+	copy(payload[9:], nonce)
+	mac := m.mac("evidence-challenge", string(payload), credentialID, nodeID)
 	raw := append(payload, mac...)
-	return evidenceChallengePrefix + base64.RawURLEncoding.EncodeToString(raw), nil
+	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 // VerifyEvidenceChallenge authenticates one challenge without retaining server
 // memory. Credential rotation, node substitution, expiry, and byte tampering all
 // invalidate the value.
 func (m *Manager) VerifyEvidenceChallenge(raw, credentialID, nodeID string, now time.Time) error {
-	if m == nil || !validIdentity(credentialID, 128) || !validIdentity(nodeID, 128) || now.IsZero() ||
-		!strings.HasPrefix(raw, evidenceChallengePrefix) {
+	if m == nil || !validIdentity(credentialID, 128) || !validIdentity(nodeID, 128) || now.IsZero() || raw == "" {
 		return ErrUnauthorized
 	}
-	encoded := strings.TrimPrefix(raw, evidenceChallengePrefix)
-	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != encoded ||
-		len(decoded) < 13+evidenceChallengeNonceBytes+evidenceChallengeMACBytes {
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != raw ||
+		len(decoded) != 1+8+evidenceChallengeNonceBytes+evidenceChallengeMACBytes {
 		return ErrUnauthorized
 	}
 	payload := decoded[:len(decoded)-evidenceChallengeMACBytes]
 	actualMAC := decoded[len(decoded)-evidenceChallengeMACBytes:]
-	if payload[0] != 1 || !m.matches(m.mac("evidence-challenge", string(payload)), actualMAC) {
-		return ErrUnauthorized
-	}
-	credentialLength := int(binary.BigEndian.Uint16(payload[9:11]))
-	nodeLength := int(binary.BigEndian.Uint16(payload[11:13]))
-	expectedLength := 13 + credentialLength + nodeLength + evidenceChallengeNonceBytes
-	if credentialLength == 0 || nodeLength == 0 || expectedLength != len(payload) {
-		return ErrUnauthorized
-	}
-	offset := 13
-	challengedCredential := string(payload[offset : offset+credentialLength])
-	offset += credentialLength
-	challengedNode := string(payload[offset : offset+nodeLength])
-	if challengedCredential != credentialID || challengedNode != nodeID {
+	if payload[0] != 1 || !m.matches(m.mac("evidence-challenge", string(payload), credentialID, nodeID), actualMAC) {
 		return ErrUnauthorized
 	}
 	expiresAt := time.Unix(int64(binary.BigEndian.Uint64(payload[1:9])), 0).UTC()
