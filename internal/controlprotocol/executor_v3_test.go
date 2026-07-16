@@ -72,3 +72,27 @@ func TestExecutorDeliveryAndReportValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestExecutorDeliveryIDIsCanonicalAndIdentityBound(t *testing.T) {
+	got, err := ExecutorDeliveryID("tenant-a", "node-1", "command-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "delivery-02519f7270ebb1adc5355b772ed5c5f26411e856735e8bd4076ca7094196f8c0"
+	if got != want {
+		t.Fatalf("delivery ID = %q, want %q", got, want)
+	}
+	for _, identity := range [][3]string{
+		{"tenant-b", "node-1", "command-1"},
+		{"tenant-a", "node-2", "command-1"},
+		{"tenant-a", "node-1", "command-2"},
+	} {
+		candidate, err := ExecutorDeliveryID(identity[0], identity[1], identity[2])
+		if err != nil || candidate == got {
+			t.Fatalf("identity %#v produced delivery ID %q, err=%v", identity, candidate, err)
+		}
+	}
+	if _, err := ExecutorDeliveryID("", "node-1", "command-1"); err == nil {
+		t.Fatal("empty tenant identity produced a delivery ID")
+	}
+}

@@ -57,9 +57,9 @@ bounded. Capacity options are startup invariants: restarting with values smaller
 than the retained state fails rather than deleting records. The store permits one
 active writer and has no live multi-replica mode. Expired enrollments and old
 commands with known terminal outcomes are reclaimed only when their capacity is
-needed. Pending, leased, and `outcome_unknown` commands are not automatically
-reclaimed. Revoked credentials and nodes remain retained and count toward their
-ceilings; there is no supported purge operation for them.
+needed. Pending, leased, `failed`, and `outcome_unknown` commands are not
+automatically reclaimed. Revoked credentials and nodes remain retained and count
+toward their ceilings; there is no supported purge operation for them.
 
 The packaged `control-doctor` accepts `--json`, `--probe-url URL`, and
 `--ca-file PEM`. On a TLS wildcard listener, the default check can prove only that

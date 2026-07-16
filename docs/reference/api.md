@@ -289,6 +289,10 @@ output formats, and failure boundaries.
 - Runtime references are opaque; clients must not parse meaning from them.
 - Executor uplink delivery invokes the same handlers as its direct API. The generic
   supervisor uplink calls the same lifecycle tracker through a bounded dispatcher.
+- A version-3 Executor delivery ID is derived from the verified tenant, node, and
+  command identity. The unsigned wrapper cannot select an alias. `done` and
+  `rejected` are safe terminal results; `failed` and `outcome_unknown` remain
+  non-replayable until an operator reconciles the effect.
 
 Multi-tenant uplink uses a node credential and DSSE
 `steward.executor-command.v2` statements. DSSE binds a typed payload to its

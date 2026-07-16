@@ -4,6 +4,8 @@ package controlprotocol
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,19 @@ const (
 	ExecutorStatusRejected       = "rejected"
 	ExecutorStatusOutcomeUnknown = "outcome_unknown"
 )
+
+// ExecutorDeliveryID binds one transport lease identity to the verified
+// tenant, node, and signed command. Nodes recompute it after signature
+// verification so an untrusted controller cannot replay one command through
+// aliases in the delivery ledger.
+func ExecutorDeliveryID(tenantID, nodeID, commandID string) (string, error) {
+	if !boundedText(tenantID, 128) || !boundedText(nodeID, 128) || !boundedText(commandID, 256) {
+		return "", errors.New("delivery tenant, node, and command identity must be bounded")
+	}
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("steward-control-delivery-v1\x00" + tenantID + "\x00" + nodeID + "\x00" + commandID))
+	return "delivery-" + hex.EncodeToString(digest.Sum(nil)), nil
+}
 
 // ExecutorPollRequestV3 advertises support for lease-wrapped, tenant-signed
 // Executor commands. The node bearer authenticates transport only.

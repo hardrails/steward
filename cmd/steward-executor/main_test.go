@@ -627,7 +627,7 @@ func TestExecutorMainCheckConfigValidatesSecureAdmission(t *testing.T) {
 		DeliveryID: "executing-delivery", DeliveryGeneration: 1, CommandID: "executing-command",
 		CommandDigest: "sha256:" + strings.Repeat("a", 64), CommandDSSEBase64: "e30=",
 	}
-	if _, _, err := deliveryStore.Accept(executingDelivery); err != nil {
+	if _, _, err := deliveryStore.Accept(executingDelivery, "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := deliveryStore.MarkExecuting(executingDelivery.DeliveryID); err != nil {

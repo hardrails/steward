@@ -357,6 +357,16 @@ acceptance but before a provable terminal result becomes `outcome_unknown`; it i
 never silently retried as a fresh effect. The controller may reclaim an expired
 lease with a higher delivery generation, but cannot change the signed bytes.
 
+After signature verification, Executor recomputes the delivery ID as
+`delivery-` plus lowercase hexadecimal SHA-256 of the UTF-8 bytes
+`steward-control-delivery-v1\0<tenant_id>\0<node_id>\0<command_id>`. It rejects a
+different outer ID, so an untrusted controller cannot present one signed command
+under aliases to bypass the local delivery fence. `done` means the handler
+succeeded and the lifecycle fence is durable. `rejected` means no mutating effect
+could have occurred. `outcome_unknown` means a mutating handler was entered but
+its result or the following fence write could not be proved. Legacy `failed`
+records remain non-replayable and are not compacted automatically.
+
 Every delivered command is a DSSE envelope with payload type
 `application/vnd.steward.executor-command.v2+json`. The verified payload has this
 fixed JSON shape:
@@ -464,11 +474,17 @@ HTTPS.
 
 Executor's durable anti-replay and audit files are deliberately finite. The
 evidence log is capped at 64 MiB, the operation journal at 16 MiB, the admission
-fence snapshot at 4 MiB and 65,535 records, and Executor uplink state at 1 MiB.
-Destroyed identities remain as tombstones or positions because deleting them would
-permit replay. There is currently no supported compaction or rollover command.
+fence snapshot at 4 MiB and 65,535 records, the lifecycle uplink fence at 1 MiB,
+and the delivery ledger at 8 MiB and 4,096 records. The delivery ledger also caps
+one verified tenant at 32 records and 1 MiB of worst-case terminal reservation.
+Before entering a mutating handler, Executor proves that every accepted or
+executing delivery can grow into the largest valid JSON terminal report. Settled
+`done` and `rejected` entries may be compacted; ambiguous entries remain. Destroyed
+identities remain as tombstones or positions because deleting them would permit
+replay. There is currently no supported manual compaction or rollover command.
 Monitor these files and capacity-plan the node's retained identity count; a full
-store makes the affected mutation fail closed. See
+store makes the affected mutation fail closed without consuming another tenant's
+reserved share. See
 [capability boundaries]({{ '/limitations/' | relative_url }}#durable-control-stores-have-fixed-lifetime-limits).
 
 ## Deployment invariant

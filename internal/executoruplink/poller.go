@@ -358,7 +358,11 @@ func (p *Poller) processDeliveryV3(ctx context.Context, credential *stewarduplin
 	if cmd.CommandID != delivery.CommandID {
 		return p.rejectDeliveryV3(ctx, credential.Credential, delivery, "command_identity_mismatch", "delivery command ID does not match the signed command", nil)
 	}
-	decision, terminal, err := p.deliveryState.Accept(delivery)
+	expectedDeliveryID, err := controlprotocol.ExecutorDeliveryID(cmd.TenantID, cmd.NodeID, cmd.CommandID)
+	if err != nil || delivery.DeliveryID != expectedDeliveryID {
+		return p.rejectDeliveryV3(ctx, credential.Credential, delivery, "delivery_identity_mismatch", "delivery ID does not match the verified tenant, node, and command", err)
+	}
+	decision, terminal, err := p.deliveryState.Accept(delivery, cmd.TenantID)
 	if err != nil {
 		return fmt.Errorf("persist accepted delivery: %w", err)
 	}
@@ -435,7 +439,15 @@ func makeReportV3(delivery controlprotocol.ExecutorDeliveryV3, legacy report) co
 		ClaimGeneration: legacy.ClaimGeneration, Result: result,
 	}
 	if legacy.Status == controlprotocol.ExecutorStatusFailed {
-		report.ErrorCode = "executor_command_failed"
+		if legacy.effectUncertain {
+			report.Status = controlprotocol.ExecutorStatusOutcomeUnknown
+			report.ErrorCode = "outcome_unknown"
+		} else {
+			// A completed pre-handler validation failure is safe to retire. Failed
+			// remains reserved for legacy ambiguous reports and is never compacted.
+			report.Status = controlprotocol.ExecutorStatusRejected
+			report.ErrorCode = "executor_command_rejected"
+		}
 	}
 	return report
 }

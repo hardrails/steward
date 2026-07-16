@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlprotocol"
 )
 
 func TestDispatcherOverridesTenantAndInstanceAndFencesReplay(t *testing.T) {
@@ -67,6 +69,80 @@ func TestDispatcherRejectsCrossTenantAndUnknownPayloadFields(t *testing.T) {
 	}
 	if mutations != 0 {
 		t.Fatalf("rejected commands mutated executor %d times", mutations)
+	}
+}
+
+func TestV3ReportsDistinguishRejectedValidationFromUncertainMutation(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "handler failed after entry", http.StatusInternalServerError)
+	})
+	d := dispatcher{
+		handler: handler, token: "token", tenantID: "tenant-a", nodeID: "node-1",
+		state: newStateStore(t, filepath.Join(t.TempDir(), "state.json")),
+	}
+	base := command{
+		CommandID: "effect-uncertain", TenantID: "tenant-a", NodeID: "node-1",
+		RuntimeRef: "uplink:6:node-1:agent-1", Kind: "provision",
+		Payload:         json.RawMessage(`{"profile_id":"hermes-v1","image":"registry/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"memory_bytes":1048576,"cpu_millis":100,"pids":32},"egress":{}}`),
+		ClaimGeneration: 1, InstanceGeneration: 1, CommandSequence: 1,
+	}
+	uncertain := d.execute(context.Background(), base)
+	if uncertain.Status != controlprotocol.ExecutorStatusFailed || !uncertain.effectUncertain {
+		t.Fatalf("post-handler failure = %#v", uncertain)
+	}
+	delivery := deliveryFixture("effect-boundary", 1)
+	delivery.CommandID = base.CommandID
+	uncertainWire := makeReportV3(delivery, uncertain)
+	if uncertainWire.Status != controlprotocol.ExecutorStatusOutcomeUnknown || uncertainWire.ErrorCode != "outcome_unknown" {
+		t.Fatalf("uncertain wire report = %#v", uncertainWire)
+	}
+
+	base.CommandID = "pre-handler-rejection"
+	base.Payload = json.RawMessage(`{"unexpected":true}`)
+	rejected := d.execute(context.Background(), base)
+	if rejected.Status != controlprotocol.ExecutorStatusFailed || rejected.effectUncertain {
+		t.Fatalf("pre-handler validation = %#v", rejected)
+	}
+	delivery.CommandID = base.CommandID
+	rejectedWire := makeReportV3(delivery, rejected)
+	if rejectedWire.Status != controlprotocol.ExecutorStatusRejected || rejectedWire.ErrorCode != "executor_command_rejected" {
+		t.Fatalf("rejected wire report = %#v", rejectedWire)
+	}
+
+	if _, err := d.call(context.Background(), http.MethodGet, "/v1/workloads/ref", nil); err == nil || effectMayHaveOccurred(err) {
+		t.Fatalf("read-only handler failure was treated as a possible mutation: %v", err)
+	}
+}
+
+func TestV3FencePersistenceFailureAfterHandlerSuccessIsOutcomeUnknown(t *testing.T) {
+	directory := t.TempDir()
+	state := newStateStore(t, filepath.Join(directory, "state.json"))
+	d := dispatcher{
+		handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"status":"created"}`))
+		}),
+		token: "token", tenantID: "tenant-a", nodeID: "node-1", state: state,
+	}
+	if err := os.RemoveAll(directory); err != nil {
+		t.Fatal(err)
+	}
+	cmd := command{
+		CommandID: "fence-persist-failure", TenantID: "tenant-a", NodeID: "node-1",
+		RuntimeRef: "uplink:6:node-1:agent-1", Kind: "provision",
+		Payload:         json.RawMessage(`{"profile_id":"hermes-v1","image":"registry/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","resources":{"memory_bytes":1048576,"cpu_millis":100,"pids":32},"egress":{}}`),
+		ClaimGeneration: 1, InstanceGeneration: 1, CommandSequence: 1,
+	}
+	local := d.execute(context.Background(), cmd)
+	if local.Status != controlprotocol.ExecutorStatusFailed || !local.effectUncertain ||
+		!strings.Contains(local.Result["error"].(string), "persist command fence") {
+		t.Fatalf("fence persistence report = %#v", local)
+	}
+	delivery := deliveryFixture("fence-persist-failure", 1)
+	delivery.CommandID = cmd.CommandID
+	wire := makeReportV3(delivery, local)
+	if wire.Status != controlprotocol.ExecutorStatusOutcomeUnknown || wire.ErrorCode != "outcome_unknown" {
+		t.Fatalf("fence persistence wire report = %#v", wire)
 	}
 }
 

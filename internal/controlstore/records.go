@@ -950,7 +950,8 @@ func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Tim
 	result := make([]Command, 0)
 	for _, command := range store.current.commands {
 		if command.State != CommandTerminal || command.Terminal == nil ||
-			command.Terminal.Report.Status == controlprotocol.ExecutorStatusOutcomeUnknown {
+			command.Terminal.Report.Status == controlprotocol.ExecutorStatusOutcomeUnknown ||
+			command.Terminal.Report.Status == controlprotocol.ExecutorStatusFailed {
 			continue
 		}
 		completed, _ := parseTimestamp(command.Terminal.CompletedAt)

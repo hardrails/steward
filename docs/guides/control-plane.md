@@ -383,7 +383,9 @@ node report. A terminal response includes `terminal_status`, the signed
 `claim_generation`, and bounded `result` details such as `runtime_ref`, replay or
 absence markers, and a safe error string. `terminal_status: outcome_unknown` means
 the node cannot prove whether the local effect completed; do not automatically
-issue a semantically equivalent replacement.
+issue a semantically equivalent replacement. `terminal_status: failed` is retained
+with the same fail-closed rule for compatibility. Current nodes report a proven
+pre-effect failure as `rejected`, which is safe to retire after acknowledgement.
 
 ## Give a trusted MCP client fleet tools
 
@@ -458,8 +460,8 @@ credentials, 4,096 enrollment capabilities, and 16,384 commands, with smaller
 per-tenant and per-node ceilings. Expired enrollment records are reclaimed when a
 new enrollment needs space. Commands with known terminal outcomes become eligible
 for reclamation after the configured minimum retention period, which defaults to
-24 hours. Pending, leased, and `outcome_unknown` commands are not reclaimed
-automatically.
+24 hours. Pending, leased, `failed`, and `outcome_unknown` commands are not
+reclaimed automatically.
 
 The durable format separately caps its encoded snapshot and write-ahead log at 64
 MiB each. The packaged systemd service caps the process at 256 tasks, 4,096 open
@@ -469,11 +471,12 @@ backup, and restore instead of editing the packaged unit.
 
 Tenant, node, and credential records are retained even after revocation and keep
 consuming capacity. There is no supported purge or compaction operation for them,
-and an unresolved `outcome_unknown` command also remains retained. These are
-safety bounds, not service-level objectives. The controller does not yet expose
-aggregate retained-record counts as metrics. Plan ceilings from expected lifecycle
-volume, alert on `capacity_exceeded` API responses, increase limits before known
-growth crosses them, and test restore procedures before production use.
+and an unresolved `failed` or `outcome_unknown` command also remains retained.
+These are safety bounds, not service-level objectives. The controller does not yet
+expose aggregate retained-record counts as metrics. Plan ceilings from expected
+lifecycle volume, alert on `capacity_exceeded` API responses, increase limits
+before known growth crosses them, and test restore procedures before production
+use.
 
 See the [Steward Control OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-control.v1.yaml)
 for exact schemas, status codes, pagination, and error responses.

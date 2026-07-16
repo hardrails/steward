@@ -748,8 +748,10 @@ func validateState(current state, limits Limits) error {
 }
 
 func validateCommand(command Command, limits Limits) error {
+	expectedDeliveryID, deliveryIDError := controlprotocol.ExecutorDeliveryID(command.TenantID, command.NodeID, command.ID)
 	if !validRecordID(command.TenantID, 128) || !validRecordID(command.NodeID, 128) ||
 		!validRecordID(command.ID, 256) || !validRecordID(command.DeliveryID, 256) ||
+		deliveryIDError != nil || command.DeliveryID != expectedDeliveryID ||
 		len(command.CommandDSSE) == 0 || len(command.CommandDSSE) > limits.MaxCommandBytes ||
 		command.Digest != digestBytes(command.CommandDSSE) || !validTimestamp(command.CreatedAt) {
 		return errors.New("invalid command identity or bytes")
@@ -799,9 +801,8 @@ func digestBytes(raw []byte) string {
 }
 
 func deliveryID(tenantID, nodeID, commandID string) string {
-	digest := sha256.New()
-	_, _ = digest.Write([]byte("steward-control-delivery-v1\x00" + tenantID + "\x00" + nodeID + "\x00" + commandID))
-	return "delivery-" + hex.EncodeToString(digest.Sum(nil))
+	value, _ := controlprotocol.ExecutorDeliveryID(tenantID, nodeID, commandID)
+	return value
 }
 
 func commandKey(tenantID, nodeID, commandID string) string {

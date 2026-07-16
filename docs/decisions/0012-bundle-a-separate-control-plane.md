@@ -60,10 +60,14 @@ The delivery wrapper is unsigned transport metadata. It carries a delivery ID an
 generation beside the digest and exact bytes of the signed command. Reclaim may
 advance the delivery generation, but it cannot change the tenant-signed command.
 The node verifies the signature, tenant policy, node identity, command identity,
-digest, lifecycle generation, and sequence before execution. It durably records
-accepted, executing, and terminal delivery states. After a crash during execution,
-an unprovable outcome becomes `outcome_unknown`; Steward does not automatically
-repeat a possibly completed external effect.
+digest, lifecycle generation, and sequence before execution. It also recomputes a
+domain-separated delivery ID from the verified tenant, node, and command, rather
+than trusting the wrapper's ID. It durably records accepted, executing, and
+terminal delivery states and reserves the largest possible terminal encoding
+before handler entry. After a crash or error during a mutating handler, an
+unprovable outcome becomes `outcome_unknown`; Steward does not automatically repeat
+a possibly completed external effect. Per-tenant record and byte reservations keep
+one tenant's ambiguous history from consuming the entire shared-node ledger.
 
 The controller is a bounded single-writer service. It uses Go's standard-library
 HTTP, TLS, cryptography, JSON, and filesystem primitives plus Steward's existing

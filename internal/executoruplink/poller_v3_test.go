@@ -227,6 +227,57 @@ func TestV3InvalidSignedDeliveryIsRejectedWithoutBlockingValidSibling(t *testing
 	}
 }
 
+func TestV3RejectsControllerDeliveryAliasesBeforeHandlerEntry(t *testing.T) {
+	fixture := newV3Fixture(t, 1)
+	canonical := fixture.deliveries[0]
+	alias := canonical
+	alias.DeliveryID = canonical.DeliveryID + "-alias"
+	var polls atomic.Int32
+	var localCalls atomic.Int32
+	var reports []controlprotocol.ExecutorReportV3
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/executor-uplink/poll":
+			delivery := canonical
+			if polls.Add(1) > 1 {
+				delivery = alias
+			}
+			_ = json.NewEncoder(w).Encode(controlprotocol.ExecutorPollResponseV3{
+				ProtocolVersion: controlprotocol.ExecutorProtocolV3,
+				Deliveries:      []json.RawMessage{mustJSON(t, delivery)},
+			})
+		case "/executor-uplink/report":
+			var report controlprotocol.ExecutorReportV3
+			if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+				t.Error(err)
+			}
+			reports = append(reports, report)
+			_ = json.NewEncoder(w).Encode(controlprotocol.ExecutorReportResponseV3{
+				ProtocolVersion: controlprotocol.ExecutorProtocolV3, Applied: true,
+			})
+		}
+	}))
+	defer server.Close()
+	poller := fixture.poller(t, server, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		localCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "running"})
+	}))
+	if err := poller.pollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := poller.pollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if localCalls.Load() != 1 {
+		t.Fatalf("aliased signed command entered the handler; calls=%d", localCalls.Load())
+	}
+	if len(reports) != 2 || reports[0].Status != controlprotocol.ExecutorStatusDone ||
+		reports[1].Status != controlprotocol.ExecutorStatusRejected ||
+		reports[1].ErrorCode != "delivery_identity_mismatch" || reports[1].DeliveryID != alias.DeliveryID {
+		t.Fatalf("alias reports=%#v", reports)
+	}
+}
+
 func TestV3MalformedWrapperDoesNotBlockValidSibling(t *testing.T) {
 	fixture := newV3Fixture(t, 1)
 	var localCalls atomic.Int32
@@ -360,8 +411,12 @@ func newV3Fixture(t *testing.T, count int) *v3Fixture {
 			ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano), Payload: json.RawMessage(`{}`),
 		}
 		signed := signCommand(t, statement, "tenant-command", private)
+		deliveryID, err := controlprotocol.ExecutorDeliveryID(statement.TenantID, statement.NodeID, statement.CommandID)
+		if err != nil {
+			t.Fatal(err)
+		}
 		deliveries[index] = controlprotocol.ExecutorDeliveryV3{
-			DeliveryID: "delivery-" + string(rune('a'+index)), DeliveryGeneration: 1,
+			DeliveryID: deliveryID, DeliveryGeneration: 1,
 			CommandID: statement.CommandID, CommandDigest: dsse.Digest(signed),
 			CommandDSSEBase64: base64.StdEncoding.EncodeToString(signed),
 		}

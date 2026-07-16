@@ -567,8 +567,10 @@ paths:
         The node bearer must match the body node ID. Pending and expired leases
         are claimed durably before the response. A reclaimed delivery has a
         higher delivery generation, which fences a late report from an older
-        lease. The complete encoded response is capped at 1 MiB before any
-        lease is published.
+        lease. `delivery_id` is `delivery-` plus lowercase hexadecimal SHA-256
+        of the UTF-8 bytes `steward-control-delivery-v1\0<tenant_id>\0<node_id>\0<command_id>`.
+        The node recomputes it after verifying the signed command. The complete
+        encoded response is capped at 1 MiB before any lease is published.
       requestBody:
         required: true
         content:
@@ -1024,7 +1026,11 @@ components:
         terminal_status:
           type: string
           enum: [done, failed, rejected, outcome_unknown]
-          description: Node delivery outcome. Present only after the command becomes terminal.
+          description: |
+            Node delivery outcome, present only after the command becomes
+            terminal. `done` and `rejected` are known replay-safe. `failed` and
+            `outcome_unknown` remain retained and must not be retried
+            automatically.
         reported_status:
           type: string
           maxLength: 64
@@ -1077,6 +1083,10 @@ components:
     ExecutorDelivery:
       type: object
       additionalProperties: false
+      description: |
+        Unsigned lease metadata around exact tenant-signed command bytes. The
+        node verifies the signature and recomputes delivery_id before accepting
+        this record into its durable delivery ledger.
       required: [delivery_id, delivery_generation, command_id, command_digest, command_dsse_base64]
       properties:
         delivery_id:
@@ -1122,6 +1132,12 @@ components:
         status:
           type: string
           enum: [done, failed, rejected, outcome_unknown]
+          description: |
+            `done` proves handler success and a durable lifecycle fence.
+            `rejected` proves no mutating effect could have occurred. `failed`
+            is a retained fail-closed compatibility result. `outcome_unknown`
+            means a mutating effect may have occurred and must not be retried
+            automatically.
         reported_status:
           type: string
           maxLength: 64

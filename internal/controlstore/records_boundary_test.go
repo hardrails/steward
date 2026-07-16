@@ -400,6 +400,10 @@ func TestTerminalPruningPrioritizesTheConstrainedTenantAndNode(t *testing.T) {
 	unknown.ID = "unknown-outcome"
 	unknown.Terminal.Report.Status = controlprotocol.ExecutorStatusOutcomeUnknown
 	fixture.store.current.commands[commandKey(unknown.TenantID, unknown.NodeID, unknown.ID)] = unknown
+	legacyFailed := cloneCommand(seed)
+	legacyFailed.ID = "legacy-failed"
+	legacyFailed.Terminal.Report.Status = controlprotocol.ExecutorStatusFailed
+	fixture.store.current.commands[commandKey(legacyFailed.TenantID, legacyFailed.NodeID, legacyFailed.ID)] = legacyFailed
 	pending := cloneCommand(seed)
 	pending.ID, pending.State, pending.Terminal = "pending", CommandPending, nil
 	fixture.store.current.commands[commandKey(pending.TenantID, pending.NodeID, pending.ID)] = pending
