@@ -17,7 +17,14 @@ command -v dpkg-deb >/dev/null || {
 	echo "build-deb: dpkg-deb is required" >&2
 	exit 2
 }
-for path in steward stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/config/steward.json deploy/config/steward-local.json \
+for forbidden in deploy/config/control.env deploy/systemd/steward-control.service \
+	scripts/install-control.sh scripts/control-doctor.sh; do
+	if [[ -e $stage/$forbidden || -L $stage/$forbidden ]]; then
+		echo "build-deb: node package stage must not contain controller deployment asset $forbidden" >&2
+		exit 2
+	fi
+done
+for path in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/config/steward.json deploy/config/steward-local.json \
 	deploy/config/executor.env deploy/config/executor-gateway.env deploy/systemd/steward.service \
 	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
 	deploy/config/gateway.json.in scripts/install-node.sh \
@@ -78,7 +85,7 @@ trap cleanup EXIT HUP INT TERM
 install -d -m 0755 "$package_root/DEBIAN" \
 	"$package_root/usr/lib/steward-node/release" \
 	"$package_root/usr/share/doc/steward-node"
-cp -R "$stage/steward" "$stage/stewardctl" "$stage/steward-mcp" "$stage/steward-executor" \
+cp -R "$stage/steward" "$stage/steward-control" "$stage/stewardctl" "$stage/steward-mcp" "$stage/steward-executor" \
 	"$stage/steward-gateway" "$stage/steward-relay" "$stage/adapters" "$stage/deploy" "$stage/scripts" \
 	"$stage/release.json" \
 	"$package_root/usr/lib/steward-node/release/"
@@ -90,7 +97,7 @@ sed -e "s/@VERSION@/$deb_version/g" -e "s/@ARCH@/$deb_arch/g" \
 sed -e "s/@RELEASE_VERSION@/$version/g" "$repo/packaging/debian/postinst" \
 	>"$package_root/DEBIAN/postinst"
 chmod 0755 "$package_root/DEBIAN/postinst"
-for script in prerm postrm; do
+for script in preinst prerm postrm; do
 	install -m 0755 "$repo/packaging/debian/$script" "$package_root/DEBIAN/$script"
 done
 

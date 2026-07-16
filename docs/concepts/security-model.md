@@ -14,6 +14,16 @@ infrastructure (PKI), and node enrollment process.
 This is a shared-host isolation model, not a claim that software isolation equals
 separate physical hardware.
 
+Steward Control is security-critical but does not sit inside the node's Docker
+trust boundary. Its separate unprivileged service account has no Docker socket,
+shell runner, agent runtime, or tenant and site private signing keys. A compromised
+controller can expose fleet metadata, create or revoke credentials within the
+compromised operator's scope, deny service, and repeatedly offer valid signed
+commands it already has. It cannot mint the tenant signature that Executor requires
+or add container authority outside the signed command schema. Operators still
+trust the controller host, TLS key, authentication key, and durable state for fleet
+confidentiality, availability, and correct credential enforcement.
+
 A sandbox reduces the ways untrusted code can attack the host. It does not prove
 that a tenant authorized a particular task or stop a manipulated agent from changing
 request content inside a reusable service grant. Tenant-signed service tasks address
@@ -207,7 +217,8 @@ matters.
 
 ## Security boundary exclusions
 
-- The control plane does not receive Docker access.
+- Steward Control receives no Docker access or tenant and site private signing
+  keys.
 - Agent containers do not receive host paths or Docker access.
 - `steward -enable-process-exec` runs trusted operator-authored local processes. It
   is not a tenant sandbox and has no resource isolation.
@@ -218,10 +229,12 @@ matters.
 
 ## Operator responsibilities
 
-Patch the host, Docker, gVisor, and Steward. Authenticate imported artifacts,
-protect enrollment, receipt, off-node action-authority, and tenant task keys, keep management
-listeners on loopback or disabled, monitor capacity and audit output, and preserve
-anti-replay state during backup and rollback. An exported action-trust inventory is
+Patch the controller and node hosts, Docker, gVisor, and Steward. Authenticate
+imported artifacts; protect controller TLS and authentication keys, controller
+backups, enrollment, receipt, off-node action-authority, and tenant task keys; keep
+management listeners on loopback or disabled; monitor capacity and audit output;
+and preserve anti-replay state during backup and rollback. An exported
+action-trust inventory is
 unsigned and non-secret: authenticate it as operator input. It is a signing
 preflight, not authority; Gateway's live configuration makes the final decision.
 The same rule applies to an exported service-trust inventory. Keep Gateway on

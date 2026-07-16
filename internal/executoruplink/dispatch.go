@@ -52,6 +52,26 @@ type report struct {
 	ReportedStatus  string         `json:"reported_status"`
 	ClaimGeneration uint64         `json:"claim_generation"`
 	Result          map[string]any `json:"result"`
+	// effectUncertain is local protocol evidence, not part of legacy wire JSON.
+	// It distinguishes validation failures from an error after ServeHTTP began.
+	effectUncertain bool
+}
+
+type uncertainEffectError struct{ cause error }
+
+func (err uncertainEffectError) Error() string { return err.cause.Error() }
+func (err uncertainEffectError) Unwrap() error { return err.cause }
+
+func effectMayHaveOccurred(err error) bool {
+	var uncertain uncertainEffectError
+	return errors.As(err, &uncertain)
+}
+
+func localCallError(method string, cause error) error {
+	if method == http.MethodGet {
+		return cause
+	}
+	return uncertainEffectError{cause: cause}
 }
 
 type workloadPayload struct {
@@ -127,6 +147,7 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 	runtimeRef := executor.RuntimeRef(cmd.TenantID, instanceID)
 	reported, err := d.apply(ctx, cmd, cmd.TenantID, instanceID, runtimeRef)
 	if err != nil {
+		rep.effectUncertain = effectMayHaveOccurred(err)
 		rep.Result["error"] = err.Error()
 		return rep
 	}
@@ -141,6 +162,7 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 			Generation:      cmd.InstanceGeneration, Sequence: cmd.CommandSequence,
 			ReportedStatus: reported, Absent: absent,
 		}); err != nil {
+			rep.effectUncertain = true
 			rep.Result["error"] = "persist command fence: " + err.Error()
 			return rep
 		}
@@ -279,7 +301,7 @@ func (d *dispatcher) call(ctx context.Context, method, target string, body any) 
 	res := newLocalResponse()
 	d.handler.ServeHTTP(res, req)
 	if res.status >= 400 {
-		return "", fmt.Errorf("local executor returned HTTP %d: %s", res.status, strings.TrimSpace(res.body.String()))
+		return "", localCallError(method, fmt.Errorf("local executor returned HTTP %d: %s", res.status, strings.TrimSpace(res.body.String())))
 	}
 	if res.status == http.StatusNoContent {
 		return "stopped", nil
@@ -288,7 +310,7 @@ func (d *dispatcher) call(ctx context.Context, method, target string, body any) 
 		Status string `json:"status"`
 	}
 	if err := json.NewDecoder(io.LimitReader(&res.body, 1<<20)).Decode(&payload); err != nil {
-		return "", fmt.Errorf("decode local executor response: %w", err)
+		return "", localCallError(method, fmt.Errorf("decode local executor response: %w", err))
 	}
 	switch payload.Status {
 	case "running":
@@ -304,7 +326,7 @@ func (d *dispatcher) call(ctx context.Context, method, target string, body any) 
 	case "dead":
 		return "failed", nil
 	default:
-		return "", fmt.Errorf("local executor returned unsupported status %q", payload.Status)
+		return "", localCallError(method, fmt.Errorf("local executor returned unsupported status %q", payload.Status))
 	}
 }
 

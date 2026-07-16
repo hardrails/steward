@@ -7,8 +7,18 @@ locals {
   manifest_url      = try(var.release_mirror.manifest_url, "")
   manifest_sha256   = try(var.release_mirror.manifest_sha256, "")
   bootstrap_script  = <<-SCRIPT
-    #!/usr/bin/env bash
+    #!/bin/bash -p
     set -Eeuo pipefail
+    if ! shopt -qo privileged; then
+      echo 'steward-bootstrap: execute this root bootstrap directly or invoke it with /bin/bash -p' >&2
+      exit 2
+    fi
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH LC_ALL=C LANG=C
+    unset BASH_ENV ENV CDPATH GLOBIGNORE CURL_HOME XDG_CONFIG_HOME
+    unset CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
+    unset TAR_OPTIONS GZIP POSIXLY_CORRECT TMPDIR
+    IFS=$' \t\n'
     umask 077
     stamp_dir=/var/lib/steward-bootstrap
     stamp=$stamp_dir/complete
@@ -52,10 +62,39 @@ locals {
     installer_url=$(printf '%s' '${base64encode(var.installer_url)}' | base64 -d)
     installer_expected=$(printf '%s' '${base64encode(var.installer_sha256)}' | base64 -d)
     mirror_enabled='${local.mirror_enabled}'
-    work=$(mktemp -d /var/tmp/steward-bootstrap.XXXXXX)
+    work=$(mktemp -d /run/steward-bootstrap.XXXXXX)
+    if [[ ! -d $work || -L $work || $(readlink -e -- "$work" 2>/dev/null) != "$work" ||
+      $(stat -c '%u:%g:%a' -- "$work") != 0:0:700 ]]; then
+      echo 'steward-bootstrap: could not create a trusted root-only work directory' >&2
+      exit 1
+    fi
     trap 'rm -rf "$work"' EXIT
     fetch() {
-      curl --fail --silent --show-error --location --proto '=https,http' "$1" -o "$2"
+      local url=$1 output=$2 limit=$3 blocks size
+      [[ $limit =~ ^[0-9]+$ ]] && (( limit > 0 && limit % 1024 == 0 )) || return 1
+      blocks=$((limit / 1024))
+      rm -f -- "$output"
+      if ! (
+        ulimit -c 0
+        ulimit -f "$blocks"
+        exec timeout --signal=TERM --kill-after=5 190 \
+          curl -q --fail --silent --show-error --location --proto '=https,http' \
+          --retry 3 --retry-connrefused --connect-timeout 15 --max-time 180 \
+          --max-filesize "$limit" --output "$output" "$url"
+      ); then
+        rm -f -- "$output"
+        return 1
+      fi
+      if [[ ! -f $output || -L $output ]]; then
+        rm -f -- "$output"
+        return 1
+      fi
+      size=$(stat -c '%s' -- "$output") || { rm -f -- "$output"; return 1; }
+      if (( size <= 0 || size > limit )) ||
+        [[ $(stat -c '%u:%g:%a:%h' -- "$output") != 0:0:600:1 ]]; then
+        rm -f -- "$output"
+        return 1
+      fi
     }
     verify() {
       local actual
@@ -65,7 +104,7 @@ locals {
         exit 1
       fi
     }
-    fetch "$installer_url" "$work/install-steward.sh"
+    fetch "$installer_url" "$work/install-steward.sh" 4194304
     verify "$work/install-steward.sh" "$installer_expected"
     chmod 0700 "$work/install-steward.sh"
     if [[ $mirror_enabled == true ]]; then
@@ -78,15 +117,15 @@ locals {
         *.deb|*.rpm|*.tar.gz) ;;
         *) echo 'steward-bootstrap: mirrored artifact has an unsupported filename' >&2; exit 2 ;;
       esac
-      fetch "$artifact_url" "$work/$artifact_name"
-      fetch "$manifest_url" "$work/checksums.txt"
+      fetch "$artifact_url" "$work/$artifact_name" 268435456
+      fetch "$manifest_url" "$work/checksums.txt" 4194304
       verify "$work/$artifact_name" "$artifact_expected"
       verify "$work/checksums.txt" "$manifest_expected"
-      bash "$work/install-steward.sh" --non-interactive --yes \
+      /bin/bash -p "$work/install-steward.sh" --non-interactive --yes \
         --version '${var.release_version}' ${local.install_mode_args} ${local.gvisor_args} \
         --artifact "$work/$artifact_name" --checksums "$work/checksums.txt"
     else
-      bash "$work/install-steward.sh" --non-interactive --yes \
+      /bin/bash -p "$work/install-steward.sh" --non-interactive --yes \
         --version '${var.release_version}' ${local.install_mode_args} ${local.gvisor_args}
     fi
     release_manifest='/opt/steward/releases/${var.release_version}/release.json'

@@ -3,6 +3,7 @@ package uplink
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -34,10 +35,11 @@ type TLSConfig struct {
 }
 
 // NewHTTPClient builds the outbound uplink HTTP client with a transport whose
-// crypto/tls settings come from cfg. It clones http.DefaultTransport (preserving
-// its connection-pool, proxy, and HTTP/2 defaults) and overrides only the
-// TLSClientConfig, then applies the same httpTimeout the default uplink client
-// uses so a blackholed control plane cannot wedge a request.
+// crypto/tls settings come from cfg. It clones http.DefaultTransport to retain
+// its connection-pool and HTTP/2 defaults, then disables ambient proxy discovery
+// and redirects so a node bearer cannot be forwarded to a destination that was
+// not explicitly configured. It applies the same httpTimeout the default uplink
+// client uses so a blackholed control plane cannot wedge a request.
 //
 // It fails closed: an unreadable CA file, a CA file with no usable certificate, a
 // client certificate set without its key (or the reverse), or a cert/key pair
@@ -94,6 +96,13 @@ func NewHTTPClient(cfg TLSConfig) (*http.Client, error) {
 
 	// http.DefaultTransport is always *http.Transport in the standard library.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	transport.TLSClientConfig = tlsConfig
-	return &http.Client{Timeout: httpTimeout, Transport: transport}, nil
+	return &http.Client{
+		Timeout:   httpTimeout,
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("uplink redirects are disabled")
+		},
+	}, nil
 }

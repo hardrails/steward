@@ -1,6 +1,6 @@
 ---
 title: APIs and protocol schemas
-description: Authoritative Steward supervisor, Executor, and Gateway OpenAPI contracts, endpoint summaries, authentication, error shapes, and outbound uplink protocol documentation.
+description: Authoritative Steward Control, supervisor, Executor, and Gateway OpenAPI contracts, endpoint summaries, authentication, error shapes, and outbound uplink protocol documentation.
 section: Reference
 ---
 
@@ -11,11 +11,49 @@ endpoints and schemas in machine-readable form. Any behavior/specification misma
 is a defect, not an extension clients should use.
 
 - [Steward supervisor OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward.v1.yaml)
+- [Steward Control OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-control.v1.yaml)
 - [Steward Executor OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-executor.v1.yaml)
 - [Steward Gateway task lifecycle OpenAPI](https://github.com/hardrails/steward/blob/main/openapi/steward-gateway.v1.yaml)
 - [Raw supervisor YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward.v1.yaml)
+- [Raw Steward Control YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-control.v1.yaml)
 - [Raw Executor YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-executor.v1.yaml)
 - [Raw Gateway task lifecycle YAML](https://raw.githubusercontent.com/hardrails/steward/main/openapi/steward-gateway.v1.yaml)
+
+## Steward Control API
+
+Default base URL: `http://127.0.0.1:8443`. A non-loopback listener requires TLS,
+so its origin is `https://...`.
+
+Every route except health, readiness, and one-time enrollment exchange requires an
+appropriate Bearer credential. Enrollment exchange uses the one-time enrollment
+bearer in its request. Operator credentials are either site-wide or scoped to one
+tenant. Node credentials can call only the Executor poll and report routes for
+their bound node.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /v1/healthz`, `GET /v1/readiness` | Process liveness and durable-store readiness |
+| `POST /v1/tenants`, `GET /v1/tenants` | Create and page through tenants |
+| `GET /v1/tenants/{tenant_id}` | Read one visible tenant |
+| `POST /v1/operators`, `DELETE /v1/operators/{credential_id}` | Issue idempotent scoped operators and revoke them; the last live site administrator cannot be revoked |
+| `POST /v1/enrollments`, `POST /v1/enroll` | Idempotently create a one-time node enrollment and exchange it |
+| `DELETE /v1/node-credentials/{credential_id}` | Revoke one node bearer during staged credential rotation |
+| `GET /v1/tenants/{tenant_id}/nodes` | Page through bounded tenant node inventory |
+| `GET /v1/tenants/{tenant_id}/nodes/{node_id}` | Read one tenant-visible node |
+| `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
+| `POST /v1/tenants/{tenant_id}/nodes/{node_id}/commands` | Retain one exact signed Executor command |
+| `GET .../commands/{command_id}` | Read durable delivery and terminal status |
+| `POST /executor-uplink/poll`, `POST /executor-uplink/report` | Lease signed commands to an enrolled Executor and settle fenced reports |
+
+Every request body and response is bounded. Pagination is ordered and uses an
+exclusive `after` cursor. The controller rejects unknown query parameters,
+redirects are not used, and every error has the common
+`{"error":"...","message":"..."}` shape. The controller parses signed-command
+identity to bind it to the route but does not treat that parse as authorization;
+Executor verifies the signature and local policy before applying the command.
+
+See [Operate the bundled control plane]({{ '/guides/control-plane/' | relative_url }})
+for installation and lifecycle examples.
 
 ## Supervisor API
 
@@ -109,14 +147,17 @@ state remains `dispatch_accepted`.
 ## MCP server
 
 `steward-mcp` implements Model Context Protocol (MCP) `2025-11-25` over standard
-input/output. Its admit, status, logs, egress, start, stop, destroy, and state-purge
-tools call the loopback Executor API. When configured with a loopback Gateway
-origin, separate owner-only Gateway token, and fixed result directory, it also
-exposes pre-signed task submit, passive status, and one-shot observation tools. Raw
-agent output is written only to a deterministic owner-only file; MCP receives its
-path, digest, length, and status metadata. The task-submit acknowledgment is not
-human approval: signed permit and Gateway policy remain authoritative. It is a
-local adapter, not another authority or remote endpoint. See
+input/output. When configured with a scoped operator credential, its fleet tools
+list and create tenants, list and inspect or revoke nodes, and submit and inspect
+already signed commands through Steward Control. They do not issue operator or
+enrollment secrets. Its admit, status, logs, egress, start, stop, destroy, and
+state-purge tools call the loopback Executor API. When configured with a loopback
+Gateway origin, separate owner-only Gateway token, and fixed result directory, it
+also exposes pre-signed task submit, passive status, and one-shot observation
+tools. Raw agent output is written only to a deterministic owner-only file; MCP
+receives its path, digest, length, and status metadata. The task-submit
+acknowledgment is not human approval: signed permit and Gateway policy remain
+authoritative. The adapter opens no listener and adds no authority of its own. See
 [MCP setup]({{ '/guides/mcp/' | relative_url }}).
 
 ## Per-workload connector protocol
@@ -248,6 +289,10 @@ output formats, and failure boundaries.
 - Runtime references are opaque; clients must not parse meaning from them.
 - Executor uplink delivery invokes the same handlers as its direct API. The generic
   supervisor uplink calls the same lifecycle tracker through a bounded dispatcher.
+- A version-3 Executor delivery ID is derived from the verified tenant, node, and
+  command identity. The unsigned wrapper cannot select an alias. `done` and
+  `rejected` are safe terminal results; `failed` and `outcome_unknown` remain
+  non-replayable until an operator reconciles the effect.
 
 Multi-tenant uplink uses a node credential and DSSE
 `steward.executor-command.v2` statements. DSSE binds a typed payload to its

@@ -41,9 +41,13 @@ func main() {
 	disableInbound := flag.Bool("disable-inbound-listener", false, "run outbound-only without binding the host-local HTTP API")
 	uplinkURL := flag.String("uplink-url", "", "optional control-plane base URL for outbound executor commands")
 	uplinkCredentialFile := flag.String("uplink-credential-file", "", "path to versioned executor uplink credential")
+	inspectUplinkCredential := flag.Bool("inspect-uplink-credential", false, "validate an uplink credential and print its scope and node ID, then exit")
 	uplinkStateFile := flag.String("uplink-state-file", "", "path to durable executor command-fencing state")
 	initializeUplinkState := flag.Bool("initialize-uplink-state", false, "initialize a new empty executor uplink fence and exit")
 	migrateUplinkStateTenant := flag.String("migrate-uplink-state-v1-tenant", "", "explicitly bind a version-1 uplink fence to this tenant and migrate it to version 2")
+	uplinkProtocolVersion := flag.Int("uplink-protocol-version", 0, "executor uplink protocol (0 selects from credential and delivery state)")
+	uplinkDeliveryStateFile := flag.String("uplink-delivery-state-file", "", "owner-only durable delivery state required for executor uplink protocol 3")
+	initializeUplinkDeliveryState := flag.Bool("initialize-uplink-delivery-state", false, "initialize node-bound executor uplink delivery state and exit")
 	uplinkPollInterval := flag.Duration("uplink-poll-interval", 10*time.Second, "base interval between executor uplink polls")
 	uplinkAllowInsecureHTTP := flag.Bool("uplink-allow-insecure-http", false, "explicitly allow plaintext HTTP to a non-loopback uplink")
 	uplinkTLSCAFile := flag.String("uplink-tls-ca-file", "", "optional PEM CA bundle for the executor uplink")
@@ -83,9 +87,35 @@ func main() {
 		fmt.Println("steward-executor " + buildinfo.Resolve())
 		return
 	}
-	if *initializeUplinkState && *migrateUplinkStateTenant != "" {
-		slog.Error("uplink state initialization and migration are mutually exclusive")
+	oneShotActions := 0
+	for _, selected := range []bool{
+		*inspectUplinkCredential, *initializeUplinkState, *migrateUplinkStateTenant != "",
+		*initializeUplinkDeliveryState, *initializeAdmissionFence,
+	} {
+		if selected {
+			oneShotActions++
+		}
+	}
+	if oneShotActions > 1 {
+		slog.Error("credential inspection, state initialization, and migration actions are mutually exclusive")
 		os.Exit(2)
+	}
+	if *inspectUplinkCredential {
+		if *uplinkCredentialFile == "" {
+			slog.Error("credential inspection requires -uplink-credential-file")
+			os.Exit(2)
+		}
+		metadata, err := stewarduplink.InspectCredential(*uplinkCredentialFile)
+		if err != nil {
+			slog.Error("inspect executor uplink credential", "err", err)
+			os.Exit(2)
+		}
+		scope := "tenant"
+		if metadata.NodeScoped() {
+			scope = "node"
+		}
+		fmt.Printf("%s\n%s\n", scope, metadata.NodeID)
+		return
 	}
 	if *initializeUplinkState {
 		if err := executoruplink.InitializeStateStore(*uplinkStateFile); err != nil {
@@ -102,6 +132,18 @@ func main() {
 			os.Exit(2)
 		}
 		fmt.Printf("migrated executor uplink state %s; preserved version-1 backup %s\n", *uplinkStateFile, backup)
+		return
+	}
+	if *initializeUplinkDeliveryState {
+		if *uplinkDeliveryStateFile == "" || *admissionNodeID == "" {
+			slog.Error("delivery-state initialization requires -uplink-delivery-state-file and -admission-node-id")
+			os.Exit(2)
+		}
+		if err := executoruplink.InitializeDeliveryStore(*uplinkDeliveryStateFile, *admissionNodeID); err != nil {
+			slog.Error("initialize executor uplink delivery state", "err", err)
+			os.Exit(2)
+		}
+		fmt.Println("initialized executor uplink delivery state " + *uplinkDeliveryStateFile)
 		return
 	}
 	if *initializeAdmissionFence {
@@ -269,6 +311,18 @@ func main() {
 			slog.Error("load executor uplink state", "err", err)
 			os.Exit(2)
 		}
+		var deliveryState *executoruplink.DeliveryStore
+		if *uplinkDeliveryStateFile != "" {
+			if secureNodeID == "" {
+				slog.Error("executor uplink delivery state requires signed admission and -admission-node-id")
+				os.Exit(2)
+			}
+			deliveryState, err = executoruplink.LoadDeliveryStore(*uplinkDeliveryStateFile, secureNodeID)
+			if err != nil {
+				slog.Error("load executor uplink delivery state", "err", err)
+				os.Exit(2)
+			}
+		}
 		httpClient, err := stewarduplink.NewHTTPClient(stewarduplink.TLSConfig{
 			CAFile: *uplinkTLSCAFile, ClientCertFile: *uplinkTLSClientCert,
 			ClientKeyFile: *uplinkTLSClientKey, SkipVerify: *uplinkTLSSkipVerify,
@@ -291,13 +345,15 @@ func main() {
 			HTTPClient: httpClient, Handler: handler, LocalToken: token, State: state,
 			Logger: slog.Default(), SecureExecutor: secureExecutor, SecureNodeID: secureNodeID,
 			ProtectedTransport: parsedUplink.Scheme == "https" && !*uplinkTLSSkipVerify,
-			CommandPolicy:      commandPolicy,
+			CommandPolicy:      commandPolicy, ProtocolVersion: *uplinkProtocolVersion,
+			DeliveryState: deliveryState, ValidateOnly: *checkConfig,
 		})
 		if err != nil {
 			slog.Error("configure executor uplink", "err", err)
 			os.Exit(2)
 		}
-	} else if *uplinkCredentialFile != "" || *uplinkStateFile != "" || *uplinkAllowInsecureHTTP ||
+	} else if *uplinkCredentialFile != "" || *uplinkStateFile != "" || *uplinkProtocolVersion != 0 ||
+		*uplinkDeliveryStateFile != "" || *uplinkAllowInsecureHTTP ||
 		*uplinkTLSCAFile != "" || *uplinkTLSClientCert != "" || *uplinkTLSClientKey != "" || *uplinkTLSSkipVerify {
 		slog.Error("executor uplink options require -uplink-url")
 		os.Exit(2)

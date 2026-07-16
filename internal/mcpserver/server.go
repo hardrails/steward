@@ -1,7 +1,7 @@
 // Package mcpserver implements Steward's deliberately narrow MCP stdio tools
 // adapter. It supports the MCP 2025-11-25 lifecycle and tools capability,
-// delegates node operations to the public loopback Executor contract, and can
-// optionally expose Gateway's bounded task-lifecycle client.
+// delegates operations to Steward's public node and control-plane contracts,
+// and can optionally expose Gateway's bounded task-lifecycle client.
 package mcpserver
 
 import (
@@ -36,19 +36,23 @@ type Node interface {
 
 type Server struct {
 	node        Node
+	control     Control
 	tasks       TaskGateway
 	resultStore *taskResultStore
 	version     string
 }
 
+// Config selects the independently optional MCP operation surfaces.
+type Config struct {
+	Node                Node
+	Control             Control
+	Tasks               TaskGateway
+	TaskResultDirectory string
+	Version             string
+}
+
 func New(node Node, version string) (*Server, error) {
-	if node == nil {
-		return nil, errors.New("MCP node client is required")
-	}
-	if strings.TrimSpace(version) == "" {
-		return nil, errors.New("MCP server version is required")
-	}
-	return &Server{node: node, version: version}, nil
+	return NewConfigured(Config{Node: node, Version: version})
 }
 
 // NewWithTasks adds the optional Gateway-backed task lifecycle tools. The
@@ -56,18 +60,35 @@ func New(node Node, version string) (*Server, error) {
 // owner-only directory; terminal agent bytes are written there and never
 // returned over MCP stdio.
 func NewWithTasks(node Node, tasks TaskGateway, resultDirectory, version string) (*Server, error) {
-	server, err := New(node, version)
+	return NewConfigured(Config{
+		Node: node, Tasks: tasks, TaskResultDirectory: resultDirectory, Version: version,
+	})
+}
+
+// NewConfigured builds an MCP surface from independently optional node and
+// control-plane clients. Gateway task tools require a node configuration so a
+// controller-only process cannot acquire an ambient path to agent execution.
+func NewConfigured(config Config) (*Server, error) {
+	if strings.TrimSpace(config.Version) == "" {
+		return nil, errors.New("MCP server version is required")
+	}
+	if config.Node == nil && config.Control == nil {
+		return nil, errors.New("MCP node or control client is required")
+	}
+	if config.Tasks != nil && config.Node == nil {
+		return nil, errors.New("MCP Gateway task tools require a node client")
+	}
+	if config.Tasks == nil && config.TaskResultDirectory != "" {
+		return nil, errors.New("MCP task result directory requires a Gateway task client")
+	}
+	server := &Server{node: config.Node, control: config.Control, tasks: config.Tasks, version: config.Version}
+	if config.Tasks == nil {
+		return server, nil
+	}
+	store, err := newTaskResultStore(config.TaskResultDirectory)
 	if err != nil {
 		return nil, err
 	}
-	if tasks == nil {
-		return nil, errors.New("MCP Gateway task client is required")
-	}
-	store, err := newTaskResultStore(resultDirectory)
-	if err != nil {
-		return nil, err
-	}
-	server.tasks = tasks
 	server.resultStore = store
 	return server, nil
 }
@@ -149,14 +170,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output, logWriter i
 				break
 			}
 			initializedResponse = true
-			instructions := "Use read tools freely. Confirm create, stop, destroy, and other lifecycle mutations with the operator before invoking them."
-			serverTitle := "Steward Node Operations"
-			serverDescription := "Manage one locally authorized Steward node through its public enforcement boundary."
-			if s.tasks != nil {
-				instructions += " Task submission starts signed real-world work. The acknowledgment argument is not proof of human approval; signed permits and Gateway policy authorize the exact work. Terminal agent output is saved only in the configured owner-only, quota-bounded result directory."
-				serverTitle = "Steward Node and Task Operations"
-				serverDescription = "Manage one locally authorized Steward node and bounded Gateway task lifecycle through their public enforcement boundaries."
-			}
+			serverTitle, serverDescription, instructions := s.initializationMetadata()
 			result = map[string]any{
 				"protocolVersion": ProtocolVersion,
 				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
@@ -173,7 +187,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output, logWriter i
 				callErr = &rpcError{Code: -32002, Message: "MCP session is not initialized"}
 				break
 			}
-			result = map[string]any{"tools": tools(s.tasks != nil)}
+			result = map[string]any{"tools": s.configuredTools()}
 		case "tools/call":
 			if !initialized {
 				callErr = &rpcError{Code: -32002, Message: "MCP session is not initialized"}
@@ -258,6 +272,9 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 	var err error
 	switch call.Name {
 	case "steward_admit":
+		if s.node == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
 		var arguments admitArgs
 		if decodeArguments(call.Arguments, &arguments) != nil || arguments.CapsuleDSSEBase64 == "" || arguments.IntentJSON == "" {
 			return toolFailure("steward_admit requires capsule_dsse_base64 and intent_json"), nil
@@ -272,6 +289,9 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 		}
 		value, err = s.node.Admit(ctx, capsule, intent)
 	case "steward_status", "steward_logs", "steward_egress", "steward_start", "steward_stop", "steward_destroy":
+		if s.node == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
 		var arguments runtimeArgs
 		if decodeArguments(call.Arguments, &arguments) != nil || arguments.RuntimeRef == "" {
 			return toolFailure(call.Name + " requires runtime_ref"), nil
@@ -298,6 +318,9 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 			value = map[string]any{"runtime_ref": arguments.RuntimeRef, "destroyed": err == nil}
 		}
 	case "steward_purge_state":
+		if s.node == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
 		var arguments purgeStateArgs
 		if decodeArguments(call.Arguments, &arguments) != nil || arguments.TenantID == "" || arguments.NodeID == "" || arguments.LineageID == "" || arguments.Generation == 0 {
 			return toolFailure("steward_purge_state requires tenant_id, node_id, lineage_id, and generation"), nil
@@ -321,6 +344,13 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
 		}
 		value, err = s.observeTask(ctx, call.Arguments)
+	case "steward_control_tenant_list", "steward_control_tenant_create",
+		"steward_control_node_list", "steward_control_node_status", "steward_control_node_revoke",
+		"steward_control_command_submit", "steward_control_command_status":
+		if s.control == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
+		value, err = s.callControlTool(ctx, call.Name, call.Arguments)
 	default:
 		return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
 	}
@@ -359,11 +389,19 @@ func toolFailure(message string) any {
 }
 
 func tools(includeTasks bool) []any {
+	result := nodeTools()
+	if includeTasks {
+		result = append(result, taskTools()...)
+	}
+	return result
+}
+
+func nodeTools() []any {
 	runtimeSchema := map[string]any{
 		"type": "object", "additionalProperties": false, "required": []string{"runtime_ref"},
 		"properties": map[string]any{"runtime_ref": map[string]any{"type": "string", "pattern": "^executor-[a-f0-9]{64}$"}},
 	}
-	result := []any{
+	return []any{
 		tool("steward_admit", "Admit signed agent", "Admit one publisher-signed capsule and tenant-bound intent on the configured Steward node.", map[string]any{
 			"type": "object", "additionalProperties": false, "required": []string{"capsule_dsse_base64", "intent_json"},
 			"properties": map[string]any{
@@ -388,10 +426,52 @@ func tools(includeTasks bool) []any {
 			},
 		}, false, true, true, false),
 	}
-	if includeTasks {
+}
+
+func (s *Server) configuredTools() []any {
+	result := make([]any, 0, 15)
+	if s.node != nil {
+		result = append(result, nodeTools()...)
+	}
+	if s.control != nil {
+		result = append(result, controlTools()...)
+	}
+	if s.tasks != nil {
 		result = append(result, taskTools()...)
 	}
 	return result
+}
+
+func (s *Server) initializationMetadata() (string, string, string) {
+	var title, description string
+	switch {
+	case s.node != nil && s.control != nil && s.tasks != nil:
+		title = "Steward Node, Control Plane, and Task Operations"
+		description = "Manage a locally authorized Steward node, its bundled control plane, and bounded Gateway task lifecycle through their public enforcement boundaries."
+	case s.node != nil && s.control != nil:
+		title = "Steward Node and Control Plane Operations"
+		description = "Manage a locally authorized Steward node and its bundled control plane through their public enforcement boundaries."
+	case s.node != nil && s.tasks != nil:
+		title = "Steward Node and Task Operations"
+		description = "Manage one locally authorized Steward node and bounded Gateway task lifecycle through their public enforcement boundaries."
+	case s.control != nil:
+		title = "Steward Control Plane Operations"
+		description = "Manage tenants, node inventory, and exact signed-command delivery through Steward's bundled control plane."
+	default:
+		title = "Steward Node Operations"
+		description = "Manage one locally authorized Steward node through its public enforcement boundary."
+	}
+	instructions := "Use read tools freely."
+	if s.node != nil {
+		instructions += " Confirm create, stop, destroy, and other node lifecycle mutations with the operator before invoking them."
+	}
+	if s.control != nil {
+		instructions += " Control-plane MCP never issues operator or enrollment secrets. Mutation acknowledgments are model-visible safety checks, not authority; the configured operator credential and exact signed command remain authoritative."
+	}
+	if s.tasks != nil {
+		instructions += " Task submission starts signed real-world work. The acknowledgment argument is not proof of human approval; signed permits and Gateway policy authorize the exact work. Terminal agent output is saved only in the configured owner-only, quota-bounded result directory."
+	}
+	return title, description, instructions
 }
 
 func tool(name, title, description string, schema map[string]any, readOnly, destructive, idempotent, openWorld bool) map[string]any {

@@ -18,9 +18,10 @@ separate process because it has different authority:
   application-kernel sandbox that
   reduces direct exposure to the host kernel. The root-run, one-shot
   `stewardctl image import` command is a separate bounded Docker client.
-- A control plane owns tenants, users, approvals, desired state, rollout policy,
-  and profile resolution. Executor implements none of those systems and does not
-  depend on a particular control plane.
+- Steward Control can own tenant records, enrollment, inventory, and signed-command
+  delivery. Higher-level operator systems own users, approvals, desired state,
+  rollout policy, and profile resolution. Executor implements none of those
+  systems and does not depend on a particular controller.
 - `steward-gateway` and a per-instance `steward-relay` broker approved inference,
   one declared service, and named signed HTTP(S) routes. The agent receives no raw
   host or Internet route.
@@ -308,8 +309,9 @@ authority:
 }
 ```
 
-Tenant private keys stay with tenant-authorized control-plane signers. A separate
-site incident-response signer holds the cleanup private key. Cleanup keys can
+Tenant private keys stay on a tenant-authorized signing station or separate signing
+service outside Steward Control. A separate site incident-response signer holds
+the cleanup private key. Cleanup keys can
 authorize only `stop`, `destroy`, and `purge`; they cannot authorize `admit`,
 `start`, or `read`. Their top-level placement lets a site remove a compromised
 tenant key or tenant rule without losing containment of that tenant's existing
@@ -327,27 +329,45 @@ expiry, operation, and payload. Executor also checks the command against the
 principal stored at admission, so a cleanup signer cannot redirect an operation by
 changing unsigned transport fields.
 
-Steward does not include a remote command signer, queue, or hosted control plane.
-An independent control plane must protect tenant private keys, create DSSE
-envelopes, authenticate the node bearer, and apply its own approval and scheduling
-policy.
+Steward includes the optional self-hosted `steward-control` queue, enrollment, and
+delivery service. It does not include a remote signer, approval workflow, or
+scheduler. A trusted signing station or separately operated signing service must
+protect tenant private keys and create DSSE envelopes before submitting them to
+the controller. A compatible external controller may implement the same public
+contract.
 
 With a tenant-scoped compatibility credential, Executor posts `{}` to
 `/executor-uplink/poll` and reports terminal outcomes to
-`/executor-uplink/report`. With node scope, the poll body advertises the protocol
-and capabilities:
+`/executor-uplink/report`. With node scope and a durable delivery-state file, the
+poll body advertises protocol version 3 and its capabilities:
 
 ```json
 {
-  "protocol_version": 2,
+  "protocol_version": 3,
   "node_id": "executor-1",
   "credential_scope": "node",
-  "capabilities": ["signed-commands-v2", "multi-tenant", "read", "state-purge"]
+  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "multi-tenant", "read", "state-purge"]
 }
 ```
 
-The response must set `protocol_version` to `2`. Every member of `commands` must
-be a DSSE envelope with payload type
+The version-3 response carries fenced delivery records around exact DSSE command
+bytes. Executor persists a delivery as accepted before applying it and reports a
+terminal result after the local command fence and handler settle. A crash after
+acceptance but before a provable terminal result becomes `outcome_unknown`; it is
+never silently retried as a fresh effect. The controller may reclaim an expired
+lease with a higher delivery generation, but cannot change the signed bytes.
+
+After signature verification, Executor recomputes the delivery ID as
+`delivery-` plus lowercase hexadecimal SHA-256 of the UTF-8 bytes
+`steward-control-delivery-v1\0<tenant_id>\0<node_id>\0<command_id>`. It rejects a
+different outer ID, so an untrusted controller cannot present one signed command
+under aliases to bypass the local delivery fence. `done` means the handler
+succeeded and the lifecycle fence is durable. `rejected` means no mutating effect
+could have occurred. `outcome_unknown` means a mutating handler was entered but
+its result or the following fence write could not be proved. Legacy `failed`
+records remain non-replayable and are not compacted automatically.
+
+Every delivered command is a DSSE envelope with payload type
 `application/vnd.steward.executor-command.v2+json`. The verified payload has this
 fixed JSON shape:
 
@@ -438,21 +458,33 @@ cannot change its version, scope, tenant, or node identity. The report endpoint
 must acknowledge `{"applied":true}`. A negative or malformed acknowledgement is
 an error, not proof that the control plane stored the outcome.
 
+Protocol version 2 remains available for compatible external controllers when no
+delivery-state file is configured. Tenant-scoped version-1 credentials retain the
+legacy protocol. The bundled controller enrolls node-scoped credentials and uses
+version 3.
+
 Remote plaintext HTTP is rejected by default. Private-CA and mutual TLS (mTLS)
 deployments use
 `-uplink-tls-ca-file`, `-uplink-tls-client-cert`, and
-`-uplink-tls-client-key`; the private key must be owner-only.
+`-uplink-tls-client-key`; an explicit CA bundle replaces system roots, and the
+private key must be owner-only.
 `-uplink-tls-skip-verify` and `-uplink-allow-insecure-http` are explicit, logged
 compatibility exceptions. Node-scoped credentials reject both and require verified
 HTTPS.
 
 Executor's durable anti-replay and audit files are deliberately finite. The
 evidence log is capped at 64 MiB, the operation journal at 16 MiB, the admission
-fence snapshot at 4 MiB and 65,535 records, and Executor uplink state at 1 MiB.
-Destroyed identities remain as tombstones or positions because deleting them would
-permit replay. There is currently no supported compaction or rollover command.
+fence snapshot at 4 MiB and 65,535 records, the lifecycle uplink fence at 1 MiB,
+and the delivery ledger at 8 MiB and 4,096 records. The delivery ledger also caps
+one verified tenant at 32 records and 1 MiB of worst-case terminal reservation.
+Before entering a mutating handler, Executor proves that every accepted or
+executing delivery can grow into the largest valid JSON terminal report. Settled
+`done` and `rejected` entries may be compacted; ambiguous entries remain. Destroyed
+identities remain as tombstones or positions because deleting them would permit
+replay. There is currently no supported manual compaction or rollover command.
 Monitor these files and capacity-plan the node's retained identity count; a full
-store makes the affected mutation fail closed. See
+store makes the affected mutation fail closed without consuming another tenant's
+reserved share. See
 [capability boundaries]({{ '/limitations/' | relative_url }}#durable-control-stores-have-fixed-lifetime-limits).
 
 ## Deployment invariant

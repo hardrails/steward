@@ -59,6 +59,52 @@ func TestLoadCredentialNodeScopeRequiresExplicitSecurityGuard(t *testing.T) {
 	}
 }
 
+func TestInspectCredentialReturnsOnlyValidatedMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		content  string
+		version  int
+		scope    string
+		tenantID string
+		nodeID   string
+	}{
+		{
+			name: "tenant", content: `{"version":1,"tenant_id":"tenant-a","node_id":"node-1","credential":"tenant-secret"}`,
+			version: 1, tenantID: "tenant-a", nodeID: "node-1",
+		},
+		{
+			name: "node", content: `{"version":2,"scope":"node","node_id":"node-2","credential":"node-secret"}`,
+			version: 2, scope: "node", nodeID: "node-2",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "credential.json")
+			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			metadata, err := InspectCredential(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if metadata.Version != test.version || metadata.Scope != test.scope ||
+				metadata.TenantID != test.tenantID || metadata.NodeID != test.nodeID {
+				t.Fatalf("metadata = %#v", metadata)
+			}
+			if metadata.NodeScoped() != (test.scope == "node") {
+				t.Fatalf("NodeScoped() = %t", metadata.NodeScoped())
+			}
+		})
+	}
+
+	insecure := filepath.Join(t.TempDir(), "insecure.json")
+	if err := os.WriteFile(insecure, []byte(`{"version":2,"scope":"node","node_id":"node-2","credential":"secret"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if metadata, err := InspectCredential(insecure); err == nil || metadata != (CredentialMetadata{}) {
+		t.Fatalf("insecure credential inspection returned metadata=%#v err=%v", metadata, err)
+	}
+}
+
 func TestLoadCredentialRejectsAmbiguousCredentialVersions(t *testing.T) {
 	for name, content := range map[string]string{
 		"v1 with scope": `{"version":1,"scope":"node","tenant_id":"tenant-a","node_id":"node-7","credential":"token"}`,

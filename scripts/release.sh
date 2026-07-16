@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Cross-compile Steward for every published target, package each build as a
 # self-contained .tar.gz (the target's usable process binaries + LICENSE + README;
 # Linux also carries the offline node-appliance assets), and write a SHA-256 checksums
@@ -12,7 +12,7 @@
 # injection. Checkout builds otherwise have Main.Version="(devel)" and VCS metadata
 # identifies a commit rather than the release tag; -trimpath may omit that metadata
 # entirely. The explicit stamp makes every cross-compiled archive and package agree
-# with its filename. The host-native assertion below independently executes all six
+# with its filename. The host-native assertion below independently executes all seven
 # binaries and fails a release if the stamp ever stops working.
 #
 # Usage: scripts/release.sh
@@ -25,6 +25,11 @@
 #                           remains the complete public matrix. CI narrows this to
 #                           one architecture per native package-building runner.
 set -euo pipefail
+if ! shopt -qo privileged; then
+	echo "release: invoke this script with /bin/bash -p so caller-controlled shell startup files and exported functions are ignored" >&2
+	exit 2
+fi
+unset BASH_ENV ENV TAR_OPTIONS GZIP POSIXLY_CORRECT
 
 cd "$(dirname "$0")/.."
 
@@ -52,13 +57,14 @@ for target in "${targets[@]}"; do
 	esac
 done
 
-# VERSION labels artifacts and is stamped into all six binaries. On a tag push
+# VERSION labels artifacts and is stamped into all seven binaries. On a tag push
 # GITHUB_REF_NAME is authoritative; a local dry run falls back to `git describe`,
 # then to "dev" outside any checkout.
 VERSION="${STEWARD_RELEASE_VERSION:-${GITHUB_REF_NAME:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}}"
 
 valid_release_version() {
 	local candidate=$1 core prerelease identifier
+	(( ${#candidate} <= 128 )) || return 1
 	[[ $candidate =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]] || return 1
 	core=${candidate#v}
 	if [[ $core == *-* ]]; then
@@ -73,9 +79,17 @@ valid_release_version() {
 	return 0
 }
 
+if [[ ${STEWARD_RELEASE_VERSION+x} == x ]] && ! valid_release_version "$VERSION"; then
+	echo "release: explicit STEWARD_RELEASE_VERSION must be a release tag of at most 128 bytes" >&2
+	exit 2
+fi
+
 if [[ ${GITHUB_REF_TYPE:-} != tag ]] && ! valid_release_version "$VERSION"; then
 	dev_identity=${VERSION//[^0-9A-Za-z-]/-}
-	VERSION="v0.0.0-dev.source-${dev_identity:-local}"
+	dev_prefix=v0.0.0-dev.source-
+	dev_identity=${dev_identity:-local}
+	VERSION="${dev_prefix}${dev_identity:0:$((128 - ${#dev_prefix}))}"
+	valid_release_version "$VERSION" || { echo "release: could not derive a bounded development release identity" >&2; exit 2; }
 fi
 release_ldflags="-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=${VERSION}"
 
@@ -121,7 +135,9 @@ for target in "${targets[@]}"; do
 		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/stewardctl" ./cmd/stewardctl
 	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-mcp" ./cmd/steward-mcp
-	files=(steward stewardctl steward-mcp LICENSE README.md)
+	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-control" ./cmd/steward-control
+	files=(steward steward-control stewardctl steward-mcp LICENSE README.md)
 	if [ "$goos" = "linux" ]; then
 		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-executor" ./cmd/steward-executor
@@ -129,9 +145,31 @@ for target in "${targets[@]}"; do
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-gateway" ./cmd/steward-gateway
 		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-relay" ./cmd/steward-relay
+		# The controller is deployed independently from the Docker-bearing node
+		# appliance. Publish a small, closed-inventory archive for install-control.sh
+		# instead of allowing controller authority to ride inside a node package.
+		control_stage="$(mktemp -d)"
+		install -m 0755 "${stage}/steward-control" "${control_stage}/steward-control"
+		install -m 0755 scripts/control-doctor.sh "${control_stage}/control-doctor.sh"
+		install -m 0644 deploy/systemd/steward-control.service "${control_stage}/steward-control.service"
+		install -m 0644 deploy/config/control.env "${control_stage}/control.env"
+		install -m 0644 LICENSE "${control_stage}/LICENSE"
+		control_archive="${dist}/steward-control_${VERSION}_linux_${goarch}.tar.gz"
+		control_files=(LICENSE control.env control-doctor.sh steward-control steward-control.service)
+		if tar --no-xattrs -cf /dev/null -T /dev/null >/dev/null 2>&1; then
+			COPYFILE_DISABLE=1 tar --no-xattrs -C "$control_stage" -czf "$control_archive" "${control_files[@]}"
+		else
+			COPYFILE_DISABLE=1 tar -C "$control_stage" -czf "$control_archive" "${control_files[@]}"
+		fi
+		rm -rf "$control_stage"
 		mkdir -p "${stage}/adapters" "${stage}/deploy" "${stage}/scripts"
 		cp -R adapters/hermes-agent "${stage}/adapters/"
 		cp -R deploy/config deploy/systemd "${stage}/deploy/"
+		# Controller deployment assets belong only to the dedicated archive. The
+		# node archive and native packages retain the binary for operator tooling,
+		# but never install or activate a controller service.
+		rm -f "${stage}/deploy/config/control.env" \
+			"${stage}/deploy/systemd/steward-control.service"
 		cp scripts/install-node.sh scripts/activate-node-release.sh \
 			scripts/node-preflight.sh scripts/node-doctor.sh scripts/configure-node.sh scripts/configure-admission.sh \
 			scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
@@ -140,12 +178,12 @@ for target in "${targets[@]}"; do
 			"${stage}/scripts/"
 		chmod 0755 "${stage}"/scripts/*.sh
 		# Bind the exact node payload before wrapping it in an archive or native
-		# package. The canonical manifest records the target and SHA-256 of all six
+		# package. The canonical manifest records the target and SHA-256 of all seven
 		# binaries plus every integration file installed with that release.
-		bash scripts/write-release-manifest.sh "$stage" "$VERSION" "$goos" "$goarch"
-		files=(steward stewardctl steward-mcp steward-executor steward-gateway steward-relay release.json LICENSE README.md adapters deploy scripts)
+		/bin/bash -p scripts/write-release-manifest.sh "$stage" "$VERSION" "$goos" "$goarch"
+		files=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay release.json LICENSE README.md adapters deploy scripts)
 	fi
-	# Ship the license and readme alongside all six binaries so the download is
+	# Ship the license and readme alongside all seven binaries so the download is
 	# self-contained and license-compliant.
 	cp LICENSE README.md "${stage}/"
 	# Never carry workstation xattrs (notably macOS provenance) into the sovereign
@@ -161,13 +199,13 @@ for target in "${targets[@]}"; do
 			"${files[@]}"
 	fi
 	if [ "$goos" = "linux" ] && command -v dpkg-deb >/dev/null 2>&1; then
-		bash scripts/build-deb.sh "$stage" "$VERSION" "$goarch" \
+		/bin/bash -p scripts/build-deb.sh "$stage" "$VERSION" "$goarch" \
 			"${dist}/steward-node_${VERSION}_${goarch}.deb"
 	elif [ "$goos" = "linux" ]; then
 		echo "release: dpkg-deb unavailable; skipping Debian package for ${goarch}"
 	fi
 	if [ "$goos" = "linux" ] && command -v rpmbuild >/dev/null 2>&1; then
-		bash scripts/build-rpm.sh "$stage" "$VERSION" "$goarch" \
+		/bin/bash -p scripts/build-rpm.sh "$stage" "$VERSION" "$goarch" \
 			"${dist}/steward-node_${VERSION}_${goarch}.rpm"
 	elif [ "$goos" = "linux" ]; then
 		echo "release: rpmbuild unavailable; skipping RPM package for ${goarch}"
@@ -178,6 +216,7 @@ done
 # The reviewed installer is itself a release asset so users can download one
 # immutable script beside the packages, or carry it into an air-gapped site.
 install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
+install -m 0755 scripts/install-control.sh "${dist}/install-control.sh"
 
 # SHA-256 over every archive, in one checksums.txt (the conventional shape a
 # consumer verifies with `sha256sum -c`). Prefer sha256sum (Linux/CI); fall back
@@ -185,7 +224,7 @@ install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
 (
 	cd "$dist"
 	shopt -s nullglob
-	artifacts=(./*.tar.gz ./*.deb ./*.rpm ./install-steward.sh)
+	artifacts=(./*.tar.gz ./*.deb ./*.rpm ./install-steward.sh ./install-control.sh)
 	if (( ${#artifacts[@]} == 0 )); then
 		echo "release: no artifacts were built" >&2
 		exit 1
@@ -202,31 +241,34 @@ install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
 # manual workflow dispatches, and local dry runs.
 native_dir="$(mktemp -d)"
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward" ./cmd/steward
+go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-control" ./cmd/steward-control
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-executor" ./cmd/steward-executor
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/stewardctl" ./cmd/stewardctl
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-mcp" ./cmd/steward-mcp
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-gateway" ./cmd/steward-gateway
 go build -trimpath -ldflags "$release_ldflags" -o "$native_dir/steward-relay" ./cmd/steward-relay
 reported="$("$native_dir/steward" -version | awk '{print $2}')"
+control_reported="$("$native_dir/steward-control" -version | awk '{print $2}')"
 executor_reported="$("$native_dir/steward-executor" -version | awk '{print $2}')"
 ctl_reported="$("$native_dir/stewardctl" -version | awk '{print $2}')"
 mcp_reported="$("$native_dir/steward-mcp" -version | awk '{print $2}')"
 gateway_reported="$("$native_dir/steward-gateway" -version | awk '{print $2}')"
 relay_reported="$("$native_dir/steward-relay" -version | awk '{print $2}')"
 echo "release: host-native steward self-reports version '${reported}'"
+echo "release: host-native steward-control self-reports version '${control_reported}'"
 echo "release: host-native steward-executor self-reports version '${executor_reported}'"
 echo "release: host-native stewardctl self-reports version '${ctl_reported}'"
 echo "release: host-native steward-mcp self-reports version '${mcp_reported}'"
 echo "release: host-native steward-gateway self-reports version '${gateway_reported}'"
 echo "release: host-native steward-relay self-reports version '${relay_reported}'"
-if [ "${reported}" != "${VERSION}" ] || [ "${executor_reported}" != "${VERSION}" ] || [ "${ctl_reported}" != "${VERSION}" ] || [ "${mcp_reported}" != "${VERSION}" ] || [ "${gateway_reported}" != "${VERSION}" ] || [ "${relay_reported}" != "${VERSION}" ]; then
+if [ "${reported}" != "${VERSION}" ] || [ "${control_reported}" != "${VERSION}" ] || [ "${executor_reported}" != "${VERSION}" ] || [ "${ctl_reported}" != "${VERSION}" ] || [ "${mcp_reported}" != "${VERSION}" ] || [ "${gateway_reported}" != "${VERSION}" ] || [ "${relay_reported}" != "${VERSION}" ]; then
 	echo "release: FATAL — one or more release binaries do not report version '${VERSION}'." >&2
-	echo "  The explicit release-version linker stamp did not reach all six binaries," >&2
+	echo "  The explicit release-version linker stamp did not reach all seven binaries," >&2
 	echo "  so the artifacts would misreport their version. Ensure scripts/release.sh" >&2
-	echo "  supplies release_ldflags to all six entry points. See docs/releasing.md." >&2
+	echo "  supplies release_ldflags to all seven entry points. See docs/releasing.md." >&2
 	exit 1
 fi
-echo "release: version assertion OK — all six binaries self-report ${VERSION}"
+echo "release: version assertion OK — all seven binaries self-report ${VERSION}"
 rm -rf "$native_dir"
 
 echo "release: artifacts in ${dist}/:"

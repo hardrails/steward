@@ -40,6 +40,53 @@ separate Unix identity and connector receipt key but also performs the connector
 network effect it records. A compromise of either service can forge that service's
 node-local receipts; neither key is isolated in a separate signer.
 
+## Steward Control is a bounded single-writer service
+
+The bundled controller stores tenant records, operator and node credential
+verifiers, one-time enrollment state, node inventory, exact signed command bytes,
+delivery leases, and terminal reports. It has no tenant private signing key and no
+Docker socket. Executor still verifies each signature, node identity, tenant
+policy, generation, sequence, and validity window.
+
+This separation limits authority but does not make the controller untrusted. A
+compromised site administrator can create tenants and operators, enroll or revoke
+nodes, read fleet metadata, deny service, and submit or repeatedly offer any valid
+signed command it possesses. Node replay fences prevent a stale accepted command
+from becoming new authority, but a controller can delay a still-valid command. A
+tenant operator can do the corresponding operations only inside its tenant scope.
+
+The built-in durable store supports one active process. It uses an exclusive file
+lock, bounded hash-chained write-ahead log and snapshot, but has no multi-replica
+consensus, automatic failover, external database adapter, point-in-time online
+backup, or cross-site replication. Stop the service and copy the whole owner-only
+state directory as one unit. Health and readiness report local process and store
+state; they are not a high-availability guarantee.
+
+Default ceilings retain 256 tenants, 4,096 nodes, 16,384 credentials, 4,096
+enrollments, and 16,384 commands, with smaller per-tenant and per-node caps.
+Expired enrollments are reclaimed when another enrollment needs capacity. A
+command with a known terminal outcome may be reclaimed only after its configured
+minimum retention period, and only when another command needs capacity. Pending or
+leased commands and commands reported as `failed` or `outcome_unknown` are never
+reclaimed automatically.
+
+Tenant, node, and credential records have no delete or compaction operation.
+Revoking a node or credential disables its authority but retains its record, so it
+continues to count toward the configured ceiling. A command reported as `failed`
+or `outcome_unknown` also continues to consume command capacity. These choices
+preserve audit and replay state, but a long-lived site must monitor record counts
+and raise its configured ceilings before exhaustion. The controller does not yet
+expose aggregate retained-record counts as metrics, so operators must plan from
+expected lifecycle volume and alert on `capacity_exceeded` API responses. There is
+currently no supported purge path for these records. Exceeding a cap fails the
+affected request; it does not evict live or ambiguous authority silently.
+
+Operator and node bearer credentials have no automatic expiry. Enrollment
+capabilities expire and permit one logical exchange, with exact retries returning
+the same node credential. Long-lived bearers must be rotated and revoked
+explicitly. A site administrator can revoke one node credential during a staged
+rotation without disabling the node or its replacement credential.
+
 ## Signed admission is opt-in
 
 The host-control `/v1/workloads` endpoint is available only without signed
@@ -68,14 +115,17 @@ lifetime:
 | `operation-journal.bin` | 16 MiB | Prepared and terminal host-mutation records |
 | `admission-fences.bin` | 4 MiB and 65,535 records | One retained record for each tenant and instance pair, including destroyed tombstones |
 | `uplink-state.json` | 1 MiB encoded | One retained anti-replay position for each tenant and instance pair seen through Executor uplink |
+| `uplink-delivery-state.json` | 8 MiB and 4,096 records; 32 records and 1 MiB of reserved terminal encoding per verified tenant | Accepted, executing, unacknowledged, and ambiguous version-3 deliveries |
 
 These are retention limits, not live-workload limits. Destroying a workload does
 not remove the history needed to reject replay. The evidence log and operation
-journal are append-only, while the fence and uplink files rewrite bounded
-snapshots without discarding old identities.
+journal are append-only, while the fence and lifecycle uplink files rewrite
+bounded snapshots without discarding old identities. The delivery ledger removes
+only acknowledged `done` and `rejected` records when it needs capacity; it retains
+ambiguous history.
 
-Steward currently has no supported command to compact, prune, or roll over these
-stores. Monitor their file sizes and the number of tenant/instance identities
+Steward currently has no supported command to manually compact, prune, or roll
+over these stores. Monitor their file sizes and the number of tenant/instance identities
 before they approach a limit. When a store cannot safely accept the next record,
 the affected signed mutation fails closed. Do not truncate, replace, or restore
 one file independently: doing so can remove evidence or replay protection. A

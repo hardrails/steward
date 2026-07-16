@@ -20,10 +20,12 @@ The uplink reverses the connection. Steward opens an outbound HTTP connection to
 control plane, polls for queued commands, applies them locally, and reports the
 result. The control plane never needs to open a connection to the node.
 
-Steward contains the client half only. An independent control plane must provide
-enrollment, credential issuance, command queuing and claim leases (time-limited
-ownership of claimed commands), the poll and report endpoints, and retirement of
-completed or superseded commands.
+The optional bundled controller provides enrollment, credential issuance, command
+queuing, delivery leases (time-limited ownership of claimed commands), poll and
+report endpoints, and terminal command status for Executor's signed multi-tenant
+protocol. This document describes the simpler generic supervisor uplink. A
+compatible external controller can provide its endpoints; the bundled controller
+does not currently implement the generic supervisor protocol.
 
 ## Boundaries and invariants
 
@@ -54,7 +56,7 @@ the environment, which overrides the JSON config file.
 | `-uplink-credential-file` | `STEWARD_UPLINK_CREDENTIAL_FILE` | empty | Owner-only credential JSON. Required when the uplink is enabled. |
 | `-uplink-poll-interval` | `STEWARD_UPLINK_POLL_INTERVAL` | `10s` | Base poll cadence before jitter and failure backoff. |
 | `-uplink-command-queue-depth` | `STEWARD_UPLINK_COMMAND_QUEUE_DEPTH` | `256` | Maximum queued plus in-flight commands. Must be positive. |
-| `-uplink-tls-ca-file` | `STEWARD_UPLINK_TLS_CA_FILE` | empty | PEM CA bundle for a private control-plane CA; empty uses system roots. |
+| `-uplink-tls-ca-file` | `STEWARD_UPLINK_TLS_CA_FILE` | empty | PEM CA bundle for a private control-plane CA; when set, it replaces system roots. |
 | `-uplink-tls-client-cert` | `STEWARD_UPLINK_TLS_CLIENT_CERT` | empty | PEM client certificate for mutual TLS (mTLS). Requires the client key. |
 | `-uplink-tls-client-key` | `STEWARD_UPLINK_TLS_CLIENT_KEY` | empty | Owner-only PEM private key for mTLS. Requires the client certificate. |
 | `-uplink-tls-skip-verify` | `STEWARD_UPLINK_TLS_SKIP_VERIFY` | `false` | Dangerous diagnostic option that disables server-certificate verification. |
@@ -102,7 +104,8 @@ network. Use verified HTTPS in any environment where the network is not fully
 trusted.
 
 For HTTPS, Steward requires TLS 1.2 or later and verifies the server certificate
-against system roots unless `-uplink-tls-ca-file` supplies a private CA. A client
+against system roots unless `-uplink-tls-ca-file` supplies a private CA. An
+explicit CA replaces the system root set; it is not added to it. A client
 certificate and key enable mTLS; both must be configured together, and the private
 key must be owner-only. Invalid CA, certificate, or key inputs stop startup.
 
@@ -117,6 +120,12 @@ black-holed request. Every request carries:
 Authorization: Bearer <credential>
 Content-Type: application/json
 ```
+
+The client does not inherit `HTTP_PROXY`, `HTTPS_PROXY`, or `NO_PROXY`, and it does
+not follow redirects. This prevents an ambient host setting or control-plane
+redirect from forwarding the node bearer to a destination that was not explicitly
+configured. Sites that require an outbound proxy must terminate that policy in an
+explicit local network path rather than injecting an unreviewed process-wide proxy.
 
 Poll responses, reports, and report responses are each limited to 1 MiB. Steward
 rejects an oversized poll response as a whole rather than parsing a truncated batch.

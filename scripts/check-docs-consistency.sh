@@ -52,8 +52,8 @@ report_matches \
 	docs/_config.yml docs/_layouts/default.html
 
 report_matches \
-	'component counts are stale; the node has six binaries and three systemd services' \
-	'((both|two)[[:space:]]+(Steward[[:space:]]+)?services|all[[:space:]]+three[[:space:]]+(binaries|entry[[:space:]]+points))' \
+	'component counts are stale; the node package has seven binaries and three systemd services' \
+	'((both|two)[[:space:]]+(Steward[[:space:]]+)?services|all[[:space:]]+three[[:space:]]+(binaries|entry[[:space:]]+points)|six([[:space:]]+[[:alnum:]_-]+){0,2}[[:space:]]+(binaries|entry[[:space:]]+points))' \
 	"${docs_files[@]}"
 
 # Removed commands and superseded current-file schemas are particularly dangerous

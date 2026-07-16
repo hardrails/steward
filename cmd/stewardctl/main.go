@@ -60,6 +60,10 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return permitCommand(arguments[1:], stdout)
 	case "task":
 		return taskCommand(arguments[1:], stdout)
+	case "executor-command":
+		return executorCommand(arguments[1:], stdout)
+	case "control":
+		return controlCommand(arguments[1:], stdout)
 	case "evidence":
 		return evidenceCommand(arguments[1:], stdout)
 	case "node":
@@ -82,6 +86,8 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl permit issue|verify|audit ...")
 	fmt.Fprintln(writer, "       stewardctl task issue|verify|audit|submit|status|observe|wait ...")
+	fmt.Fprintln(writer, "       stewardctl executor-command issue|verify ...")
+	fmt.Fprintln(writer, "       stewardctl control pki|tenant|operator|enrollment|node|command ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
 	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state ...")
 	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector|service ...")
@@ -580,6 +586,12 @@ func validatePayload(payload []byte, payloadType string) error {
 			return err
 		}
 		return policy.Validate()
+	case admission.CommandPayloadType:
+		var command admission.CommandStatement
+		if err := dsse.DecodeStrictInto(payload, maxArtifactBytes, &command); err != nil {
+			return err
+		}
+		return command.Validate(timeNow())
 	default:
 		return errors.New("unsupported payload type")
 	}

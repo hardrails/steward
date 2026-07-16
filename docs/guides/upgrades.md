@@ -6,17 +6,19 @@ section: How-to guide
 
 # Upgrade and roll back Steward
 
-Steward stores immutable releases under `/opt/steward/releases/<version>` and selects
-the complete release through the `/opt/steward/current` symbolic link. A release
-contains all six binaries, the systemd units, helper scripts, configuration
-templates, and `release.json`. The manifest binds the release tag, operating
+Steward nodes store immutable releases under `/opt/steward/releases/<version>` and
+select the complete node release through the `/opt/steward/current` symbolic link.
+The node payload contains all seven binaries, three node systemd units, helper
+scripts, configuration templates, and `release.json`; it never installs a
+controller service. The manifest binds the release tag, operating
 system, architecture, and SHA-256 digest of every executable and integration file.
 Configuration, durable state, audit logs, relay images, and anti-replay state remain
 outside release directories. Each manifest also declares the durable formats the
 release can read and the format it writes. Activation compares those declarations
 with existing Gateway state, connector receipt log, admission fences, operation
-journal, Executor evidence log, uplink state, and supervisor state before a binary
-switch.
+journal, Executor evidence log, Executor lifecycle uplink fence
+(`uplink-state.json`), separate durable delivery ledger
+(`uplink-delivery-state.json`), and supervisor state before a binary switch.
 
 Connector receipt format 1 records ordinary connector events. Format 2 records the
 action-authority key ID, permit digest, and exact request digest for permit-backed
@@ -44,18 +46,63 @@ On an enrolled node, the guided upgrade validates and preserves the existing
 configuration:
 
 ```console
-curl -fsSLo install-steward.sh \
+curl --proto '=https' --tlsv1.2 -fsSLo install-steward.sh \
   https://github.com/hardrails/steward/releases/latest/download/install-steward.sh
-sudo bash install-steward.sh --reuse-configuration
+less install-steward.sh
+sudo install -d -o root -g root -m 0700 /root/steward-upgrade
+sudo install -o root -g root -m 0700 install-steward.sh \
+  /root/steward-upgrade/install-steward.sh
+sudo /bin/bash -p /root/steward-upgrade/install-steward.sh --reuse-configuration
 ```
 
 To download and install without activating or requiring a running Docker daemon:
 
 ```console
-sudo bash install-steward.sh --non-interactive --stage-only
+sudo /bin/bash -p /root/steward-upgrade/install-steward.sh \
+  --non-interactive --stage-only
 ```
 
 Native packages also leave the active release unchanged and do not restart services.
+
+## Upgrade Steward Control separately
+
+The controller installer keeps immutable releases under
+`/opt/steward-control/releases/<version>` and selects
+`/opt/steward-control/current`. It does not invoke the node activator or modify
+`/opt/steward`.
+
+```console
+curl --proto '=https' --tlsv1.2 -fsSLo install-control.sh \
+  https://github.com/hardrails/steward/releases/latest/download/install-control.sh
+less install-control.sh
+sudo install -d -o root -g root -m 0700 /root/steward-control-upgrade
+sudo install -o root -g root -m 0700 install-control.sh \
+  /root/steward-control-upgrade/install-control.sh
+sudo /bin/bash -p /root/steward-control-upgrade/install-control.sh
+sudo /usr/local/libexec/steward-control/control-doctor
+```
+
+The installer downloads and verifies the dedicated controller archive, stages an
+immutable release, validates its binary, service configuration, TLS inputs, and
+durable state, then switches the service. It preserves
+`/etc/steward-control` and `/var/lib/steward-control`. If candidate activation
+fails, it restores the prior release and service state.
+
+The installer also persists a root-only transaction journal. After a process kill
+or power loss, rerun the same installer command; its next invocation restores the
+prior links, configuration, token handoff, and service state before attempting the
+upgrade again. No boot-time unit performs that recovery automatically.
+
+For a TLS service bound to `0.0.0.0` or `::`, the default doctor verifies only a
+local TCP connection because a wildcard address is not a certificate identity.
+Pass `--probe-url` with the real HTTPS origin and `--ca-file` with its private CA to
+verify certificate identity and HTTP readiness after an upgrade.
+
+Stop the controller before taking a backup; its exclusive writer lock and
+hash-chained state require copying the complete state directory as one unit. Keep
+the prior release and a tested backup until enrollment, node polling, and command
+status have succeeded under the new release. Do not run the old and new controller
+over one state directory or restore one state file independently.
 
 Staging does not build or select a relay image. When Gateway and relay topology is
 configured, activation builds the target release's `steward-relay` in a `scratch`
@@ -182,6 +229,7 @@ bypassing the integrity check.
 ```console
 readlink -f /opt/steward/current
 steward -version
+steward-control -version
 steward-executor -version
 steward-gateway -version
 steward-relay -version

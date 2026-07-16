@@ -1,0 +1,1189 @@
+openapi: 3.0.3
+info:
+  title: Steward Control API
+  version: "1.0.0"
+  description: |
+    Public contract for Steward's optional, self-hosted fleet controller. The
+    controller manages tenant scopes, operator credentials, one-time node
+    enrollment, node inventory, and reclaimable delivery of exact
+    tenant-signed Executor commands.
+
+    `steward-control` is a transport and state authority, not an execution
+    authority. Tenant and site private signing keys stay outside this service.
+    The controller does not need a Docker socket and cannot invoke an agent or
+    weaken a node's local admission policy. Each node verifies the inner DSSE
+    command before acting; the outer delivery lease is unsigned and grants no
+    execution authority.
+
+    The built-in store is a bounded, single-writer durable store intended for
+    one active controller process. A second process cannot open the same state
+    directory. Remote listeners require TLS; plaintext is allowed only on a
+    literal loopback address. Every JSON body and response is limited to 1 MiB.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: Steward
+    url: https://github.com/hardrails/steward
+servers:
+  - url: http://127.0.0.1:8443
+    description: Default loopback listener
+security:
+  - bearerAuth: []
+tags:
+  - name: health
+    description: Unauthenticated process and durable-state probes.
+  - name: tenants
+    description: Site and tenant scope administration.
+  - name: operators
+    description: Scoped operator credential issuance and revocation.
+  - name: enrollment
+    description: One-time node enrollment capabilities.
+  - name: nodes
+    description: Tenant-projected node inventory and site-wide revocation.
+  - name: commands
+    description: Exact tenant-signed Executor command submission and status.
+  - name: executor-uplink
+    description: Node-authenticated delivery leasing and terminal reports.
+paths:
+  /v1/healthz:
+    get:
+      tags: [health]
+      operationId: controlHealth
+      summary: Check process liveness
+      description: Confirms that the controller process is serving HTTP. It does not read durable state.
+      security: []
+      responses:
+        "200":
+          description: The process is serving HTTP.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/readiness:
+    get:
+      tags: [health]
+      operationId: controlReadiness
+      summary: Check durable-state readiness
+      description: Confirms that the already-open durable store is not poisoned by an earlier write failure.
+      security: []
+      responses:
+        "200":
+          description: Durable control state is available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants:
+    get:
+      tags: [tenants]
+      operationId: listControlTenants
+      summary: List visible tenants
+      description: Site administrators see every tenant. A tenant operator sees only its tenant.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Tenants sorted by tenant ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      tags: [tenants]
+      operationId: createControlTenant
+      summary: Create a tenant
+      description: Requires a site-administrator credential. Repeating the same tenant ID is idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenantRequest"
+      responses:
+        "201":
+          description: The tenant was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "200":
+          description: The tenant already existed and was returned unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [tenants]
+      operationId: getControlTenant
+      summary: Get one visible tenant
+      description: A tenant outside the caller's scope is indistinguishable from an unknown tenant.
+      responses:
+        "200":
+          description: Tenant status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/operators:
+    post:
+      tags: [operators]
+      operationId: issueControlOperator
+      summary: Issue a scoped operator bearer
+      description: |
+        Requires a site-administrator credential. The returned token is shown
+        once; the controller retains only a keyed digest. Store it in an
+        owner-only file before discarding the response. `request_id` makes an
+        interrupted issuance recoverable: an exact retry returns the same
+        bearer, while changing the requested role or scope returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueOperatorRequest"
+      responses:
+        "201":
+          description: A new operator bearer was issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuedOperator"
+        "200":
+          description: An exact request-ID retry reproduced the retained operator bearer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuedOperator"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/operators/{credential_id}:
+    parameters:
+      - $ref: "#/components/parameters/CredentialID"
+    delete:
+      tags: [operators]
+      operationId: revokeControlOperator
+      summary: Revoke an operator credential
+      description: |
+        Requires a site-administrator credential. Revocation is durable before
+        this response. The controller returns 409 rather than revoke the last
+        live site administrator.
+      responses:
+        "204":
+          description: The credential was revoked. The response has no body.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/enrollments:
+    post:
+      tags: [enrollment]
+      operationId: createControlEnrollment
+      summary: Create a one-time node enrollment capability
+      description: |
+        A tenant operator may bind one node to its own tenant. A site
+        administrator may bind a node to multiple tenants. The capability
+        expires within 24 hours. An exact `request_id` retry by the same
+        operator credential reproduces the bearer after an interrupted response;
+        changing the node, tenant set, or lifetime returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEnrollmentRequest"
+      responses:
+        "200":
+          description: An exact issuance retry returned the retained enrollment capability.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Enrollment"
+        "201":
+          description: A new enrollment capability was issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Enrollment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/enroll:
+    post:
+      tags: [enrollment]
+      operationId: exchangeControlEnrollment
+      summary: Exchange a one-time enrollment capability
+      security: []
+      description: |
+        Returns an Executor node credential. An exact retry with the same
+        enrollment token and request ID returns the same credential while the
+        enrollment remains retained and unexpired. Reusing the token with
+        another request ID returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExchangeEnrollmentRequest"
+      responses:
+        "201":
+          description: Node credential issued, or reproduced for an exact retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeCredential"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          $ref: "#/components/responses/EnrollmentExpired"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/node-credentials/{credential_id}:
+    parameters:
+      - name: credential_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Identifier128"
+    delete:
+      tags: [nodes]
+      operationId: revokeControlNodeCredential
+      summary: Revoke one node transport credential
+      description: |
+        Requires a site-administrator credential. This disables only the named
+        node bearer so a replacement can be enrolled and verified before the
+        old credential is revoked. It does not revoke the node or sibling
+        credentials. An exact retry returns `revoked: false`.
+      responses:
+        "200":
+          description: The credential is revoked or was already revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeCredentialRevocation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/nodes/{node_id}:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    delete:
+      tags: [nodes]
+      operationId: revokeControlNode
+      summary: Revoke a node and its retained capabilities
+      description: Requires a site-administrator credential. Revocation disables all retained node credentials and enrollment capabilities atomically.
+      responses:
+        "200":
+          description: Node revocation result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeRevocation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/nodes:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [nodes]
+      operationId: listControlNodes
+      summary: List nodes visible in one tenant
+      description: Returns only nodes bound to the path tenant; a tenant outside the caller's scope is hidden as not found. A page may contain fewer records than `limit` to keep the complete encoded response within 1 MiB; `next_after` continues the scan.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Tenant-projected nodes sorted by node ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/nodes/{node_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/NodeID"
+    get:
+      tags: [nodes]
+      operationId: getControlNode
+      summary: Get one tenant-projected node
+      description: A tenant operator sees only its authorized tenant binding, even when the physical node also serves other tenants.
+      responses:
+        "200":
+          description: Node status and last durable capability observation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/nodes/{node_id}/commands:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/NodeID"
+    post:
+      tags: [commands]
+      operationId: submitControlCommand
+      summary: Submit an exact tenant-signed Executor command
+      description: |
+        The controller parses only the strict signed route identity. It stores
+        and later delivers the exact DSSE bytes without verifying or replacing
+        the tenant signature. Repeating the same command ID and exact bytes is
+        idempotent; different bytes under the same route return 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitCommandRequest"
+      responses:
+        "201":
+          description: Command accepted into durable pending state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Command"
+        "200":
+          description: The exact retained command was returned unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Command"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/nodes/{node_id}/commands/{command_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/NodeID"
+      - $ref: "#/components/parameters/CommandID"
+    get:
+      tags: [commands]
+      operationId: getControlCommand
+      summary: Get durable delivery status
+      description: Reports controller delivery state and the node's terminal observation. It does not prove that the agent's work was correct.
+      responses:
+        "200":
+          description: Durable command delivery status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Command"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /executor-uplink/poll:
+    post:
+      tags: [executor-uplink]
+      operationId: pollControlDeliveries
+      summary: Lease commands for an authenticated node
+      description: |
+        The node bearer must match the body node ID. Pending and expired leases
+        are claimed durably before the response. A reclaimed delivery has a
+        higher delivery generation, which fences a late report from an older
+        lease. `delivery_id` is `delivery-` plus lowercase hexadecimal SHA-256
+        of the UTF-8 bytes `steward-control-delivery-v1\0<tenant_id>\0<node_id>\0<command_id>`.
+        The node recomputes it after verifying the signed command. The complete
+        encoded response is capped at 1 MiB before any lease is published.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutorPollRequest"
+      responses:
+        "200":
+          description: Zero or more independently verifiable deliveries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutorPollResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /executor-uplink/report:
+    post:
+      tags: [executor-uplink]
+      operationId: reportControlDelivery
+      summary: Record one terminal node observation
+      description: |
+        The delivery ID, generation, command ID, and digest fence the report.
+        `applied=false` acknowledges a stale or byte-identical duplicate report;
+        it does not ask the node to execute the command again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutorReport"
+      responses:
+        "200":
+          description: The terminal report was applied or safely recognized as stale or duplicate.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutorReportResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Steward control credential
+  parameters:
+    TenantID:
+      name: tenant_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier128"
+    NodeID:
+      name: node_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier128"
+    CredentialID:
+      name: credential_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier128"
+    CommandID:
+      name: command_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier256"
+    After:
+      name: after
+      in: query
+      required: false
+      description: Return records whose ID is lexicographically greater than this cursor.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum records to return. Defaults to 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+  responses:
+    BadRequest:
+      description: The path, query, strict JSON body, or requested record violates the control contract.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: The bearer is missing, malformed, unknown, or revoked.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: The operator role does not authorize this site-wide operation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: The resource does not exist or is outside the caller's tenant scope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    MethodNotAllowed:
+      description: The HTTP method is not allowed for this route.
+      headers:
+        Allow:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: The request conflicts with retained identity, enrollment, delivery, or terminal state.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    EnrollmentExpired:
+      description: The one-time enrollment capability expired before exchange.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    PayloadTooLarge:
+      description: The request body exceeds 1 MiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnsupportedMediaType:
+      description: Content-Type is not application/json.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: The controller could not complete the request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unavailable:
+      description: Durable state is unavailable or a configured capacity bound is exhausted.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error, message]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready]
+    CreateTenantRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_id]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+    Tenant:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, state, created_at]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        state:
+          type: string
+          enum: [active, inactive]
+        created_at:
+          type: string
+          format: date-time
+    TenantList:
+      type: object
+      additionalProperties: false
+      required: [tenants]
+      properties:
+        tenants:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/Tenant"
+        next_after:
+          $ref: "#/components/schemas/Identifier128"
+    IssueOperatorRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, role]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
+        role:
+          type: string
+          enum: [site_admin, tenant_operator]
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+      oneOf:
+        - properties:
+            role:
+              type: string
+              enum: [site_admin]
+          not:
+            required: [tenant_id]
+        - required: [tenant_id]
+          properties:
+            role:
+              type: string
+              enum: [tenant_operator]
+    IssuedOperator:
+      type: object
+      additionalProperties: false
+      required: [credential_id, role, token, created_at]
+      properties:
+        credential_id:
+          $ref: "#/components/schemas/Identifier128"
+        role:
+          type: string
+          enum: [site_admin, tenant_operator]
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        token:
+          type: string
+          writeOnly: true
+        created_at:
+          type: string
+          format: date-time
+    CreateEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, node_id, tenant_ids, ttl_seconds]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        tenant_ids:
+          type: array
+          minItems: 1
+          maxItems: 128
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        ttl_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 86400
+    Enrollment:
+      type: object
+      additionalProperties: false
+      required: [enrollment_id, enrollment_token, node_id, tenant_ids, expires_at]
+      properties:
+        enrollment_id:
+          $ref: "#/components/schemas/Identifier128"
+        enrollment_token:
+          type: string
+          writeOnly: true
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        tenant_ids:
+          type: array
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        expires_at:
+          type: string
+          format: date-time
+    ExchangeEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [enrollment_token, request_id]
+      properties:
+        enrollment_token:
+          type: string
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
+    NodeCredential:
+      type: object
+      additionalProperties: false
+      required: [version, scope, node_id, credential]
+      properties:
+        version:
+          type: integer
+          enum: [2]
+        scope:
+          type: string
+          enum: [node]
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        credential:
+          type: string
+          writeOnly: true
+    NodeCredentialRevocation:
+      type: object
+      additionalProperties: false
+      required: [credential_id, node_id, revoked]
+      properties:
+        credential_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        revoked:
+          type: boolean
+    Node:
+      type: object
+      additionalProperties: false
+      required: [node_id, tenant_ids, capabilities, state, created_at]
+      properties:
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        tenant_ids:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        capabilities:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        state:
+          type: string
+          enum: [active, revoked]
+        created_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+    NodeList:
+      type: object
+      additionalProperties: false
+      required: [nodes]
+      properties:
+        nodes:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/Node"
+        next_after:
+          $ref: "#/components/schemas/Identifier128"
+    NodeRevocation:
+      type: object
+      additionalProperties: false
+      required: [node_id, revoked_credentials]
+      properties:
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        revoked_credentials:
+          type: integer
+          minimum: 0
+    SubmitCommandRequest:
+      type: object
+      additionalProperties: false
+      required: [command_dsse_base64]
+      properties:
+        command_dsse_base64:
+          type: string
+          format: byte
+          description: Canonical standard-base64 encoding of the exact DSSE JSON bytes.
+    Command:
+      type: object
+      additionalProperties: false
+      required: [command_id, delivery_id, tenant_id, node_id, command_digest, state]
+      properties:
+        command_id:
+          $ref: "#/components/schemas/Identifier256"
+        delivery_id:
+          $ref: "#/components/schemas/Identifier256"
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        command_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        state:
+          type: string
+          enum: [pending, leased, terminal]
+        delivery_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        lease_expires_at:
+          type: string
+          format: date-time
+        terminal_status:
+          type: string
+          enum: [done, failed, rejected, outcome_unknown]
+          description: |
+            Node delivery outcome, present only after the command becomes
+            terminal. `done` and `rejected` are known replay-safe. `failed` and
+            `outcome_unknown` remain retained and must not be retried
+            automatically.
+        reported_status:
+          type: string
+          maxLength: 64
+          description: Node-local workload status. Present only after the command becomes terminal.
+        error_code:
+          type: string
+          maxLength: 128
+          description: Stable node error classification when one was reported.
+        claim_generation:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Signed lifecycle fence observed by the node. Present only after the command becomes terminal.
+        result:
+          allOf:
+            - $ref: "#/components/schemas/ExecutorReportResult"
+          description: Bounded node result details. Present only after the command becomes terminal.
+    ExecutorPollRequest:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, node_id, credential_scope, capabilities]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [3]
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        credential_scope:
+          type: string
+          enum: [node]
+        capabilities:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+    ExecutorPollResponse:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, deliveries]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [3]
+        deliveries:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/ExecutorDelivery"
+    ExecutorDelivery:
+      type: object
+      additionalProperties: false
+      description: |
+        Unsigned lease metadata around exact tenant-signed command bytes. The
+        node verifies the signature and recomputes delivery_id before accepting
+        this record into its durable delivery ledger.
+      required: [delivery_id, delivery_generation, command_id, command_digest, command_dsse_base64]
+      properties:
+        delivery_id:
+          $ref: "#/components/schemas/Identifier256"
+        delivery_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        command_id:
+          $ref: "#/components/schemas/Identifier256"
+        command_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        command_dsse_base64:
+          type: string
+          format: byte
+    ExecutorReport:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol_version
+        - delivery_id
+        - delivery_generation
+        - command_id
+        - command_digest
+        - status
+        - reported_status
+        - claim_generation
+        - result
+      properties:
+        protocol_version:
+          type: integer
+          enum: [3]
+        delivery_id:
+          $ref: "#/components/schemas/Identifier256"
+        delivery_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        command_id:
+          $ref: "#/components/schemas/Identifier256"
+        command_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        status:
+          type: string
+          enum: [done, failed, rejected, outcome_unknown]
+          description: |
+            `done` proves handler success and a durable lifecycle fence.
+            `rejected` proves no mutating effect could have occurred. `failed`
+            is a retained fail-closed compatibility result. `outcome_unknown`
+            means a mutating effect may have occurred and must not be retried
+            automatically.
+        reported_status:
+          type: string
+          maxLength: 64
+        claim_generation:
+          type: integer
+          format: int64
+          minimum: 0
+        error_code:
+          type: string
+          maxLength: 128
+        result:
+          $ref: "#/components/schemas/ExecutorReportResult"
+    ExecutorReportResult:
+      type: object
+      additionalProperties: false
+      properties:
+        runtime_ref:
+          type: string
+          maxLength: 1024
+        error:
+          type: string
+          maxLength: 4096
+        replayed:
+          type: boolean
+        absent:
+          type: boolean
+    ExecutorReportResponse:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, applied]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [3]
+        applied:
+          type: boolean
+    SHA256Digest:
+      type: string
+      pattern: '^sha256:[0-9a-f]{64}$'
+    Identifier128:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    Identifier256:
+      type: string
+      minLength: 1
+      maxLength: 256
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'

@@ -7,11 +7,11 @@ home: true
 <section class="hero">
   <p class="eyebrow">Open-source, operator-controlled agent infrastructure</p>
   <h1>A sandbox is only the beginning.</h1>
-  <p class="hero-lede">A sandbox limits untrusted code, but does not establish who authorized it, which tenant it represents, or whether a sensitive request was replayed. Steward verifies local artifact and tenant policy, runs the agent with Docker + gVisor, can require an off-node tenant key to sign one exact service request, and records enforcement receipts that remain verifiable offline.</p>
-  <div class="status-line"><span>Signed local admission</span><span>Exact tenant-signed tasks</span><span>Durable replay control</span><span>Offline-verifiable receipts</span><span>Apache-2.0</span></div>
+  <p class="hero-lede">A sandbox limits untrusted code, but does not establish who authorized it, which tenant it represents, or whether a sensitive request was replayed. Steward adds a self-hosted fleet controller, verifies local artifact and tenant policy, runs the agent with Docker + gVisor, can require an off-node tenant key to sign one exact service request, and records enforcement receipts that remain verifiable offline.</p>
+  <div class="status-line"><span>Self-hosted fleet control</span><span>Signed local admission</span><span>Exact tenant-signed tasks</span><span>Durable replay control</span><span>Offline-verifiable receipts</span><span>Apache-2.0</span></div>
   <div class="install-box">
     <header><span>Interactive Linux install</span><button class="copy-button" type="button">Copy</button></header>
-    <pre><code>curl -fsSL https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | sudo bash</code></pre>
+    <pre><code>curl --proto '=https' --tlsv1.2 -fsSL https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | sudo /bin/bash -p</code></pre>
   </div>
   <p><a href="{{ '/getting-started/' | relative_url }}">Start with installation →</a></p>
 </section>
@@ -33,16 +33,18 @@ home: true
     <p><a href="{{ '/getting-started/' | relative_url }}">Install a node →</a></p>
   </div>
   <div>
-    <h3>I integrate a control plane</h3>
-    <p>Use the public OpenAPI and outbound uplink contracts from any independently operated control plane.</p>
-    <p><a href="{{ '/reference/api/' | relative_url }}">Read the contracts →</a></p>
+    <h3>I operate a fleet</h3>
+    <p>Install the bundled controller, create tenants and scoped operators, enroll nodes once, and deliver exact signed commands without placing signing keys in the controller.</p>
+    <p><a href="{{ '/guides/control-plane/' | relative_url }}">Operate Steward Control →</a></p>
   </div>
 </div>
 
 ## System boundary
 
 <div class="architecture-strip">
-  <div><small>Authorization inputs</small><strong>Workload profile + site policy + instance request</strong><p>Artifact limits, local trust, tenant and instance identity</p></div>
+  <div><small>Authorization inputs</small><strong>Workload profile + site policy + signed command</strong><p>Artifact limits, local trust, tenant and instance identity</p></div>
+  <span class="arrow">→</span>
+  <div><small>Management host</small><strong>Steward Control</strong><p>Enrollment, bounded inventory, exact command delivery; no signing keys or Docker</p></div>
   <span class="arrow">→</span>
   <div><small>Linux node</small><strong>Steward node services</strong><p>Admission, capability gateway, durable anti-replay state, signed receipts</p></div>
   <span class="arrow">→</span>
@@ -108,10 +110,12 @@ secrets, host mounts, privileged mode, or undeclared ports.
 ## Market position
 
 Many products now provide sandbox lifecycle, small virtual-machine isolation,
-egress policy, credential injection, and JSON audit logs. Steward focuses on
-operator-owned authorization tied to the node's recorded enforcement decision,
-including exact tenant-signed service tasks, durable node-local replay control, and
-offline correlation at disconnected sites. Among the products reviewed, none
+egress policy, credential injection, JSON audit logs, and self-hosted fleet
+control. Steward focuses on
+an operator-owned controller and authorization tied to the node's recorded
+enforcement decision, including external signing keys, exact tenant-signed service
+tasks, durable delivery and node-local replay control, and offline correlation at
+disconnected sites. Among the products reviewed, none
 documents this complete combination; that statement is limited to the linked public
 documentation and snapshot date. Read the
 [dated comparison]({{ '/product/market-analysis/' | relative_url }}) and its claim

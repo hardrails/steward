@@ -3,14 +3,13 @@ set -e
 
 case "${1:-}" in
 	remove | deconfigure)
-		guard=/usr/lib/steward-node/release/scripts/node-removal-guard.sh
-		[ -x "$guard" ] || guard=/opt/steward/current/integration/scripts/node-removal-guard.sh
-		[ -x "$guard" ] || guard=/usr/local/libexec/steward/node-removal-guard
-		"$guard"
-		systemctl stop steward-gateway.service >/dev/null 2>&1 || true
-		systemctl stop steward.service >/dev/null 2>&1 || true
-		systemctl stop steward-executor.service >/dev/null 2>&1 || true
-		systemctl disable steward-gateway.service steward.service steward-executor.service >/dev/null 2>&1 || true
+		uninstaller=/usr/lib/steward-node/release/scripts/uninstall-node.sh
+		[ -x "$uninstaller" ] || uninstaller=/opt/steward/current/integration/scripts/uninstall-node.sh
+		[ -x "$uninstaller" ] || {
+			echo "steward-node: trusted lifecycle uninstaller is missing; refusing package removal" >&2
+			exit 1
+		}
+		"$uninstaller"
 		;;
 esac
 

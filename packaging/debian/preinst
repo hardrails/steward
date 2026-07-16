@@ -1,0 +1,71 @@
+#!/bin/sh
+# Reserve the node host role before dpkg unpacks any payload paths.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH LC_ALL=C LANG=C
+unset BASH_ENV ENV CDPATH TMPDIR
+umask 077
+
+[ "$(id -u)" -eq 0 ] || { echo 'steward-node preinst: root is required' >&2; exit 1; }
+[ -d /run ] && [ ! -L /run ] && [ "$(stat -c '%u' /run)" = 0 ] || {
+	echo 'steward-node preinst: unsafe /run' >&2; exit 1;
+}
+run_mode=$(stat -c '%a' /run)
+[ $((0$run_mode & 022)) -eq 0 ] || { echo 'steward-node preinst: writable /run' >&2; exit 1; }
+
+lock_dir=/run/steward-host-role
+lock_file=$lock_dir/role.lock
+claim_dir=/var/lib/steward-node-installer
+claim_file=$claim_dir/claim
+if [ ! -e "$lock_dir" ] && [ ! -L "$lock_dir" ]; then
+	install -d -o root -g root -m 0700 "$lock_dir"
+fi
+[ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] &&
+	[ "$(readlink -e "$lock_dir")" = "$lock_dir" ] &&
+	[ "$(stat -c '%u:%g:%a' "$lock_dir")" = 0:0:700 ] || {
+	echo 'steward-node preinst: unsafe host-role lock directory' >&2; exit 1;
+}
+if [ ! -e "$lock_file" ] && [ ! -L "$lock_file" ]; then
+	(set -C; : >"$lock_file") 2>/dev/null || true
+fi
+[ -f "$lock_file" ] && [ ! -L "$lock_file" ] &&
+	[ "$(stat -c '%u:%g:%a:%h' "$lock_file")" = 0:0:600:1 ] || {
+	echo 'steward-node preinst: unsafe host-role lock' >&2; exit 1;
+}
+exec 7<>"$lock_file"
+path_metadata=$(stat -c '%d:%i:%u:%g:%a:%h' "$lock_file")
+fd_metadata=$(stat -Lc '%d:%i:%u:%g:%a:%h' "/proc/$$/fd/7")
+[ "$path_metadata" = "$fd_metadata" ] || { echo 'steward-node preinst: host-role lock changed' >&2; exit 1; }
+flock -w 60 7 || { echo 'steward-node preinst: host-role lock timed out' >&2; exit 1; }
+
+for marker in /opt/steward-control /etc/steward-control /var/lib/steward-control-installer \
+	/etc/systemd/system/steward-control.service /usr/local/libexec/steward-control; do
+	if [ -e "$marker" ] || [ -L "$marker" ]; then
+		echo "steward-node preinst: refusing controller host marker $marker" >&2
+		exit 1
+	fi
+done
+[ -d /var/lib ] && [ ! -L /var/lib ] && [ "$(stat -c '%u' /var/lib)" = 0 ] || {
+	echo 'steward-node preinst: unsafe /var/lib' >&2; exit 1;
+}
+var_mode=$(stat -c '%a' /var/lib)
+[ $((0$var_mode & 022)) -eq 0 ] || { echo 'steward-node preinst: writable /var/lib' >&2; exit 1; }
+if [ ! -e "$claim_dir" ] && [ ! -L "$claim_dir" ]; then
+	install -d -o root -g root -m 0700 "$claim_dir"
+fi
+[ -d "$claim_dir" ] && [ ! -L "$claim_dir" ] &&
+	[ "$(readlink -e "$claim_dir")" = "$claim_dir" ] &&
+	[ "$(stat -c '%u:%g:%a' "$claim_dir")" = 0:0:700 ] || {
+	echo 'steward-node preinst: unsafe node-role reservation directory' >&2; exit 1;
+}
+if [ ! -e "$claim_file" ] && [ ! -L "$claim_file" ]; then
+	(set -C; printf 'steward.node-role-claim.v1\n' >"$claim_file") || exit 1
+fi
+[ -f "$claim_file" ] && [ ! -L "$claim_file" ] &&
+	[ "$(stat -c '%u:%g:%a:%h:%s' "$claim_file")" = 0:0:600:1:27 ] &&
+	[ "$(cat "$claim_file")" = steward.node-role-claim.v1 ] || {
+	echo 'steward-node preinst: unsafe node-role reservation' >&2; exit 1;
+}
+sync -f "$claim_file"
+sync -f "$claim_dir"
+exit 0

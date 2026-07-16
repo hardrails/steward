@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/executoruplink"
@@ -406,6 +407,43 @@ func TestExecutorMainInitializesFenceOnceWithoutDocker(t *testing.T) {
 		t.Skip("builds the real executor binary")
 	}
 	bin := buildExecutor(t)
+	for _, test := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "tenant",
+			content: `{"version":1,"tenant_id":"tenant-a","node_id":"node-tenant","credential":"do-not-print-tenant-secret"}`,
+			want:    "tenant\nnode-tenant\n",
+		},
+		{
+			name:    "node",
+			content: `{"version":2,"scope":"node","node_id":"node-scoped","credential":"do-not-print-node-secret"}`,
+			want:    "node\nnode-scoped\n",
+		},
+	} {
+		t.Run("inspect credential "+test.name, func(t *testing.T) {
+			credentialPath := filepath.Join(t.TempDir(), "credential.json")
+			if err := os.WriteFile(credentialPath, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command(bin, "-inspect-uplink-credential", "-uplink-credential-file", credentialPath)
+			command.Env = executorEnv()
+			output, err := command.CombinedOutput()
+			if err != nil || string(output) != test.want {
+				t.Fatalf("inspect credential: err=%v output=%q want=%q", err, output, test.want)
+			}
+			if strings.Contains(string(output), "secret") {
+				t.Fatalf("credential inspection exposed the bearer: %q", output)
+			}
+		})
+	}
+	missingCredential := exec.Command(bin, "-inspect-uplink-credential")
+	missingCredential.Env = executorEnv()
+	if output, err := missingCredential.CombinedOutput(); err == nil || !strings.Contains(string(output), "requires -uplink-credential-file") {
+		t.Fatalf("credential inspection accepted a missing path: err=%v output=%s", err, output)
+	}
 	path := filepath.Join(t.TempDir(), "state.json")
 	command := exec.Command(bin, "-initialize-uplink-state", "-uplink-state-file", path)
 	command.Env = executorEnv()
@@ -443,6 +481,29 @@ func TestExecutorMainInitializesFenceOnceWithoutDocker(t *testing.T) {
 	if output, err := command.CombinedOutput(); err == nil {
 		t.Fatalf("second migration or downgrade was accepted: %s", output)
 	}
+
+	deliveryPath := filepath.Join(t.TempDir(), "delivery-state.json")
+	command = exec.Command(bin,
+		"-initialize-uplink-delivery-state",
+		"-uplink-delivery-state-file", deliveryPath,
+		"-admission-node-id", "node-a",
+	)
+	command.Env = executorEnv()
+	if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), "initialized executor uplink delivery state") {
+		t.Fatalf("initialize delivery state: err=%v output=%s", err, output)
+	}
+	if _, err := executoruplink.LoadDeliveryStore(deliveryPath, "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.Command(bin,
+		"-initialize-uplink-delivery-state",
+		"-uplink-delivery-state-file", deliveryPath,
+		"-admission-node-id", "node-a",
+	)
+	command.Env = executorEnv()
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("second delivery-state initialization overwrote state: %s", output)
+	}
 }
 
 func buildExecutor(t *testing.T) string {
@@ -450,7 +511,7 @@ func buildExecutor(t *testing.T) string {
 	bin := filepath.Join(t.TempDir(), "steward-executor")
 	args := []string{"build", "-o", bin, "."}
 	if os.Getenv("STEWARD_EXECUTOR_TEST_COVERDIR") != "" {
-		args = []string{"build", "-cover", "-o", bin, "."}
+		args = []string{"build", "-cover", "-coverpkg=./...", "-o", bin, "."}
 	}
 	command := exec.Command("go", args...)
 	if output, err := command.CombinedOutput(); err != nil {
@@ -467,9 +528,14 @@ func TestExecutorMainCheckConfigValidatesSecureAdmission(t *testing.T) {
 	dir := t.TempDir()
 	sitePublic, sitePrivate, _ := ed25519.GenerateKey(rand.Reader)
 	publisherPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	cleanupPublic, _, _ := ed25519.GenerateKey(rand.Reader)
 	_, receiptPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	policy := admission.SitePolicy{
 		SchemaVersion: admission.SchemaV1, PolicyID: "site-a", PolicyEpoch: 1,
+		SiteCleanupCommandKeys: []admission.CommandKey{{
+			KeyID: "site-cleanup", PublicKey: base64.StdEncoding.EncodeToString(cleanupPublic),
+			Operations: []string{"stop", "destroy", "purge"},
+		}},
 		Publishers: []admission.PublisherRule{{
 			KeyID: "publisher-a", PublicKey: base64.StdEncoding.EncodeToString(publisherPublic),
 			AllowedProfiles:     []admission.ProfileRef{{ID: "generic-v1", Version: "v1"}},
@@ -540,6 +606,49 @@ func TestExecutorMainCheckConfigValidatesSecureAdmission(t *testing.T) {
 	after := snapshotExecutorTree(t, dir)
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("secure check-config changed durable files\nbefore=%#v\nafter=%#v", before, after)
+	}
+	uplinkCredentialPath := filepath.Join(dir, "uplink-credential.json")
+	if err := os.WriteFile(uplinkCredentialPath, []byte(`{"version":2,"scope":"node","node_id":"node-a","credential":"opaque"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	uplinkStatePath := filepath.Join(dir, "uplink-state.json")
+	if err := executoruplink.InitializeStateStore(uplinkStatePath); err != nil {
+		t.Fatal(err)
+	}
+	deliveryStatePath := filepath.Join(dir, "delivery-state.json")
+	if err := executoruplink.InitializeDeliveryStore(deliveryStatePath, "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	deliveryStore, err := executoruplink.LoadDeliveryStore(deliveryStatePath, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	executingDelivery := controlprotocol.ExecutorDeliveryV3{
+		DeliveryID: "executing-delivery", DeliveryGeneration: 1, CommandID: "executing-command",
+		CommandDigest: "sha256:" + strings.Repeat("a", 64), CommandDSSEBase64: "e30=",
+	}
+	if _, _, err := deliveryStore.Accept(executingDelivery, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := deliveryStore.MarkExecuting(executingDelivery.DeliveryID); err != nil {
+		t.Fatal(err)
+	}
+	v3Args := append(append([]string(nil), args...),
+		"-uplink-url", "https://control.invalid",
+		"-uplink-credential-file", uplinkCredentialPath,
+		"-uplink-state-file", uplinkStatePath,
+		"-uplink-protocol-version", "3",
+		"-uplink-delivery-state-file", deliveryStatePath,
+	)
+	v3Before := snapshotExecutorTree(t, dir)
+	v3Check := exec.Command(bin, v3Args...)
+	v3Check.Env = executorEnv()
+	if output, err := v3Check.CombinedOutput(); err != nil || string(output) != "executor configuration valid\n" {
+		t.Fatalf("v3 check config: err=%v output=%s", err, output)
+	}
+	v3After := snapshotExecutorTree(t, dir)
+	if !reflect.DeepEqual(v3Before, v3After) {
+		t.Fatalf("v3 check-config recovered or changed durable files\nbefore=%#v\nafter=%#v", v3Before, v3After)
 	}
 	pendingJournalPath := filepath.Join(dir, "pending-journal.bin")
 	pendingJournal, err := journal.Open(pendingJournalPath)

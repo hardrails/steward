@@ -5,7 +5,8 @@
 > authorize one exact external effect. Steward adds signed local policy,
 > service-scoped tenant task keys, exact-request dispatch, Docker/gVisor
 > enforcement, durable anti-replay records, and offline-verifiable receipts without
-> depending on a specific control plane.
+> requiring a hosted service. It includes an optional self-hosted controller while
+> keeping the node contracts independently implementable.
 
 Documentation scope: current supported capabilities
 License: Apache-2.0
@@ -16,6 +17,7 @@ Documentation: https://hardrails.github.io/steward/
 
 - [Overview](https://hardrails.github.io/steward/): Purpose, enforced boundary, and documentation map
 - [Install](https://hardrails.github.io/steward/getting-started/): Interactive and unattended Linux installation
+- [Operate Steward Control](https://hardrails.github.io/steward/guides/control-plane/): Install the bundled controller, create tenants and operators, enroll nodes, deliver signed commands, and protect durable state
 - [Why Steward exists](https://hardrails.github.io/steward/product/positioning/): Operator problem, authorization path, and receipt limits
 - [Market analysis](https://hardrails.github.io/steward/product/market-analysis/): Dated competitive matrix and research signals
 - [Limitations](https://hardrails.github.io/steward/limitations/): Current capabilities, exclusions, and trusted components
@@ -30,7 +32,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Authenticated connectors](https://hardrails.github.io/steward/guides/connectors/): Broker exact API operations without directly configuring the workload with upstream credentials or origins; optionally require a tenant-scoped signature over one exact request; verify permit-to-receipt linkage offline
 - [Signed egress](https://hardrails.github.io/steward/guides/egress/): Configure HTTP(S) routes, private CIDRs, audit, and diagnostics
 - [Terraform](https://hardrails.github.io/steward/guides/terraform/): Non-secret cloud bootstrap and AWS hardening
-- [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate a local node with Model Context Protocol 2025-11-25 stdio tools
+- [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate the fleet controller, a local node, or both with Model Context Protocol 2025-11-25 stdio tools
 - [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Build the exact-pinned qualified adapter; review its gVisor qualification evidence, signed workspace and connector skills, service API, and limits
 - [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): Review the layout contract, bounded WebSocket path, and adapter acceptance gate
 - [Air-gapped installation](https://hardrails.github.io/steward/guides/air-gapped/): Offline import and verification
@@ -40,7 +42,7 @@ Documentation: https://hardrails.github.io/steward/
 
 - [Architecture](https://hardrails.github.io/steward/concepts/architecture/): Process and system boundaries
 - [Security model](https://hardrails.github.io/steward/concepts/security-model/): Trust, isolation, and residual risks
-- [Control-plane boundary](https://hardrails.github.io/steward/concepts/control-plane-boundary/): Steward versus an independent control plane
+- [Control-plane boundary](https://hardrails.github.io/steward/concepts/control-plane-boundary/): Responsibilities kept separate between Steward Control and each node
 
 ## Reference
 

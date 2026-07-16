@@ -1,15 +1,27 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Trusted disposable-host harness for Phase 1 adapter feasibility. This is not the
 # production quota or secret service and must never be exposed to an untrusted API.
 set -euo pipefail
+if ! shopt -qo privileged; then
+	echo "preprovision-feasibility-handle: execute this root helper directly or invoke it with /bin/bash -p" >&2
+	exit 2
+fi
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LC_ALL=C
+LANG=C
+HOME=/root
+export PATH LC_ALL LANG HOME
+unset BASH_ENV ENV CDPATH GLOBIGNORE TMPDIR XDG_CONFIG_HOME
+IFS=$' \t\n'
+umask 077
 
 usage() {
 	cat <<'USAGE'
 Usage: sudo scripts/preprovision-feasibility-handle.sh KIND TENANT LINEAGE HANDLE_ID GENERATION
 
 KIND is state or secret. The harness derives every directory below the fixed
-STEWARD_FEASIBILITY_ROOT (default /var/lib/steward/feasibility-handles). It accepts
-no path, mount option, UID, GID, device, command, or secret value.
+/var/lib/steward/feasibility-handles root. It accepts no path, mount option, UID,
+GID, device, command, or secret value.
 USAGE
 }
 
@@ -20,8 +32,8 @@ tenant=$2
 lineage=$3
 handle_id=$4
 generation=$5
-root=${STEWARD_FEASIBILITY_ROOT:-/var/lib/steward/feasibility-handles}
-max_handles=${STEWARD_FEASIBILITY_MAX_HANDLES:-64}
+root=/var/lib/steward/feasibility-handles
+max_handles=64
 
 [[ $kind == state || $kind == secret ]] || { echo "invalid kind" >&2; exit 2; }
 for value in "$tenant" "$lineage" "$handle_id"; do
@@ -39,27 +51,47 @@ if [[ $generation_too_large == true ]]; then
 	echo "generation exceeds uint64" >&2
 	exit 2
 fi
-if [[ ! $max_handles =~ ^[1-9][0-9]*$ ]] || (( max_handles > 1024 )); then
-	echo "invalid STEWARD_FEASIBILITY_MAX_HANDLES" >&2
-	exit 2
-fi
-[[ $root == /* && $root != / ]] || {
-	echo "STEWARD_FEASIBILITY_ROOT must be a clean absolute non-root path" >&2
-	exit 2
-}
-[[ $root != *//* && $root != */./* && $root != */. && $root != */../* && $root != */.. && $root != */ ]] || {
-	echo "STEWARD_FEASIBILITY_ROOT must be clean" >&2
-	exit 2
-}
-if (( EUID != 0 )) && [[ ${STEWARD_FEASIBILITY_ALLOW_UNPRIVILEGED:-0} != 1 ]]; then
-	echo "root is required; the unprivileged override is for disposable tests only" >&2
+if (( EUID != 0 )); then
+	echo "root is required" >&2
 	exit 1
 fi
 for command in flock sha256sum sort sync; do
 	command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 2; }
 done
 
-umask 077
+trusted_root_directory_chain() {
+	local directory=$1 current metadata uid mode
+	[[ -d $directory && ! -L $directory && $(readlink -e -- "$directory" 2>/dev/null) == "$directory" ]] || return 1
+	current=$directory
+	while :; do
+		metadata=$(stat -c '%u:%a' -- "$current") || return 1
+		uid=${metadata%%:*}; mode=${metadata#*:}
+		[[ $uid == 0 ]] && (( (8#$mode & 022) == 0 )) || return 1
+		[[ $current == / ]] && break
+		current=$(dirname -- "$current")
+	done
+}
+
+if ! trusted_root_directory_chain /var/lib; then
+	echo "refusing an unsafe /var/lib directory chain" >&2
+	exit 1
+fi
+if [[ ! -e /var/lib/steward && ! -L /var/lib/steward ]]; then
+	install -d -o root -g root -m 0750 /var/lib/steward
+fi
+if ! trusted_root_directory_chain /var/lib/steward; then
+	echo "refusing an unsafe /var/lib/steward directory chain" >&2
+	exit 1
+fi
+if [[ ! -e $root && ! -L $root ]]; then
+	install -d -o root -g root -m 0700 -- "$root"
+fi
+if [[ -L $root || ! -d $root || $(stat -c '%u:%g:%a' -- "$root") != 0:0:700 ]] ||
+	! trusted_root_directory_chain "$root"; then
+	echo "refusing an unsafe feasibility root" >&2
+	exit 1
+fi
+
 registry_root=$root/registry
 payload_root=$root/payload
 state_root=$payload_root/state
@@ -68,20 +100,31 @@ secret_root=$payload_root/secret
 	echo "refusing symlinked root" >&2
 	exit 1
 }
-install -d -m 0700 -- "$root" "$registry_root"
-install -d -m 0711 -- "$payload_root" "$state_root" "$secret_root"
+for directory in "$registry_root" "$payload_root" "$state_root" "$secret_root"; do
+	if [[ -e $directory || -L $directory ]]; then
+		[[ -d $directory && ! -L $directory && $(stat -c %u -- "$directory") == 0 ]] || {
+			echo "refusing an unsafe existing feasibility directory $directory" >&2
+			exit 1
+		}
+	fi
+done
+[[ -d $registry_root ]] || install -d -o root -g root -m 0700 -- "$registry_root"
+[[ -d $payload_root ]] || install -d -o root -g root -m 0711 -- "$payload_root"
+[[ -d $state_root ]] || install -d -o root -g root -m 0711 -- "$state_root"
+[[ -d $secret_root ]] || install -d -o root -g root -m 0711 -- "$secret_root"
 [[ ! -L $root && ! -L $registry_root && ! -L $payload_root && ! -L $state_root && ! -L $secret_root ]] || {
 	echo "refusing symlinked root" >&2
 	exit 1
 }
-if (( EUID == 0 )); then
-	for directory in "$root" "$registry_root" "$payload_root" "$state_root" "$secret_root"; do
-		[[ $(stat -c %u -- "$directory") == 0 ]] || { echo "root must own $directory" >&2; exit 1; }
-	done
-fi
+[[ $(stat -c '%u:%g:%a' -- "$registry_root") == 0:0:700 ]] || { echo "registry directory mode drifted" >&2; exit 1; }
+for directory in "$payload_root" "$state_root" "$secret_root"; do
+	[[ $(stat -c '%u:%g:%a' -- "$directory") == 0:0:711 ]] || { echo "payload directory mode drifted" >&2; exit 1; }
+done
 
-exec 9>"$root/registry.lock"
-flock -w 10 9 || { echo "handle registry is busy" >&2; exit 4; }
+# Lock the already-validated root directory itself. This avoids opening a
+# caller-precreated lock pathname and therefore cannot follow a lock symlink.
+exec 9<"$root"
+flock -x -w 10 9 || { echo "handle registry is busy" >&2; exit 4; }
 
 backend_id=$(printf '%s\0%s\0%s' "$kind" "$handle_id" "$generation" | sha256sum | cut -c1-32)
 backend="$payload_root/$kind/$backend_id"

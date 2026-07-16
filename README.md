@@ -26,8 +26,9 @@ instance. It prevents a delayed command for an older instance from acting on its
 replacement. Steward records each accepted host mutation in a signed receipt
 chain that can be verified without a network connection.
 
-Steward is independent of any control plane. It has no build-time or runtime
-dependency on a private package, API, account, or hosted service.
+Steward includes a replaceable open-source control plane, while nodes remain
+independently operable through public contracts. Nothing has a build-time or
+runtime dependency on a private package, API, account, or hosted service.
 
 ## Install on Linux
 
@@ -39,8 +40,13 @@ installation, pin `--gvisor-version` to a dated gVisor release or use the verifi
 offline path.
 
 ```bash
-curl -fsSL https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | sudo bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | sudo /bin/bash -p
 ```
+
+The `-p` flag is required. It prevents a root installer from loading
+user-controlled Bash startup files or imported shell functions before its own
+validation runs.
 
 The guided flow first offers a loopback-only evaluation, then remote enrollment.
 Declining both leaves the software installed, disabled, and unconfigured. Remote
@@ -59,10 +65,26 @@ After configuration and activation, verify the node before admitting a workload:
 sudo /usr/local/libexec/steward/node-doctor
 ```
 
+To coordinate multiple nodes, install the bundled controller on a separate
+systemd Linux management host:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/hardrails/steward/releases/latest/download/install-control.sh | sudo /bin/bash -p
+```
+
+It defaults to literal loopback, creates no Docker authority, and keeps tenant
+signing keys outside the service. A remote listener requires an explicit TLS
+certificate and an owner-only key staged through the trusted root-owned path
+described in the guide. See the
+[control-plane guide](https://hardrails.github.io/steward/guides/control-plane/)
+for PKI, tenant creation, scoped operators, one-time node enrollment, signed
+command delivery, backup, and MCP.
+
 The doctor checks the installed release, Docker and gVisor, systemd services,
 loopback health and readiness, Gateway, fixed evidence stores, and filesystem
 capacity without changing node state. Its optional canary submits a real signed
-task and records agent-reported completion; see the [node verification procedure](https://hardrails.github.io/steward/getting-started/#verify-the-node).
+task and records agent-reported completion; see the [node verification procedure](https://hardrails.github.io/steward/getting-started/#verify-the-selected-installation-mode).
 
 For a first workload, follow the
 [loopback evaluation lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/)
@@ -100,18 +122,20 @@ exact task instead of creating replacement authority. The
 and [Hermes guide](https://hardrails.github.io/steward/guides/hermes-agent/#authorize-and-run-one-exact-hermes-task)
 show signing, verification, dispatch, recovery, result handling, and offline audit.
 
-`steward-mcp` exposes the same bounded Executor lifecycle operations to a local
-Model Context Protocol (MCP) client over standard input and output. Starting it
-directly waits for an MCP client:
+`steward-mcp` exposes bounded Steward Control fleet operations, Executor lifecycle
+operations, or both to a local Model Context Protocol (MCP) client over standard
+input and output. Starting it directly waits for an MCP client; this example
+enables only the local node tools:
 
 ```bash
 sudo steward-mcp -node-url http://127.0.0.1:8090 \
   -token-file /etc/steward/executor-token
 ```
 
-Optional task tools require a loopback Gateway credential and a dedicated
+Fleet tools require a scoped control operator token and the controller CA; they do
+not expose operator or enrollment secret issuance. Optional task tools require a loopback Gateway credential and a dedicated
 owner-only result directory. The task signing key still stays off-node; MCP can
-submit only a pre-signed exact request. Both bearer tokens are host-administrator
+submit only a pre-signed exact request. These bearer tokens are privileged
 credentials and must not be exposed to an untrusted agent or MCP client.
 
 MCP is a standard tool interface for AI clients. See the
@@ -140,18 +164,19 @@ Steward separates those capabilities:
 
 Steward is for platform and security teams running agents on customer-controlled
 Linux, regulated or sovereign operators, and control-plane builders that need a
-small public node contract.
+small public fleet and node contract.
 
-Steward is not an agent framework, inference server, hosted control plane, or
-general-purpose container orchestrator. Model serving remains a separate operator
-responsibility behind an OpenAI-compatible endpoint.
+Steward is not an agent framework, inference server, hosted control-plane service,
+or general-purpose container orchestrator. Model serving remains a separate
+operator responsibility behind an OpenAI-compatible endpoint.
 
 ## Components and trust boundaries
 
 ```text
-  local CLI / MCP or independent remote control plane
-                         |
-                         v
+  tenant/site signer -- exact signed command --> steward-control
+                                                 ^
+                                                 | node-initiated HTTPS
+                                                 v
   +------------------- Steward node -------------------+
   | steward | steward-executor | steward-gateway       |
   | state   | admission+Docker | inference+connectors  |
@@ -162,23 +187,30 @@ responsibility behind an OpenAI-compatible endpoint.
            approved inference + connectors + HTTP(S) routes
 ```
 
-A Linux release contains six static binaries:
+A Linux release contains seven static binaries:
 
+- `steward-control` provides the optional self-hosted tenant, enrollment,
+  inventory, and signed-command delivery plane without holding tenant private
+  keys or Docker authority.
 - `steward` tracks lifecycle state and provides the generic outbound uplink.
 - `steward-executor` verifies admission and is the only long-running Steward
   service with Docker-group membership.
 - `steward-gateway` holds upstream credentials and enforces inference, service,
   exact connector-operation, and HTTP(S) egress grants.
 - `steward-relay` is a fixed-destination companion inside one workload network.
-- `stewardctl` manages keys, policy, exact-request connector and service-task
-  permits, generic task lifecycle and recovery, OCI import, evidence, and local
-  node actions.
-- `steward-mcp` exposes bounded node operations and optional pre-signed task
-  lifecycle tools over MCP stdio.
+- `stewardctl` manages controller TLS, tenants, operators, enrollment and command
+  delivery; keys and policy; exact-request connector and service-task permits;
+  generic task lifecycle and recovery; OCI import; evidence; and local node
+  actions.
+- `steward-mcp` exposes bounded fleet and node operations plus optional pre-signed
+  task lifecycle tools over MCP stdio.
 
-`steward`, `steward-executor`, and `steward-gateway` run as separate systemd
-services and Unix users. Only Executor joins the Docker group. Agent containers,
-the supervisor, Gateway, and MCP server never receive the Docker socket.
+`steward-control`, `steward`, `steward-executor`, and `steward-gateway` run as
+separate services and Unix users when deployed. The node installer enables only
+the three node services; the controller has its own explicit installation path.
+On a node, Executor must be the Docker group's only member because Docker socket
+access is root-equivalent. The controller, agent containers, supervisor,
+Gateway, and MCP server never receive the Docker socket.
 `sudo stewardctl image import` is a deliberate one-shot exception: it verifies and
 sanitizes one bounded image archive, then connects directly to Docker to load it.
 The root-only relay-image build helper also invokes Docker during node setup.
@@ -222,8 +254,8 @@ hardware side channels.
 
 ## What is different
 
-Sandboxes, lifecycle APIs, egress allowlists, and credential injection are necessary
-but widely available. Steward connects them into a portable
+Sandboxes, lifecycle APIs, self-hosted fleet controllers, egress allowlists, and
+credential injection are necessary but widely available. Steward connects them into a portable
 authorization-to-enforcement record. Local keys and policy identify the artifact,
 tenant, instance, and capability. An off-node tenant key can authorize one exact
 service request, while a separate optional action key can authorize one exact
@@ -322,8 +354,9 @@ Its public contracts are hand-written and CI-linted:
 
 - [`openapi/steward.v1.yaml`](openapi/steward.v1.yaml)
 - [`openapi/steward-executor.v1.yaml`](openapi/steward-executor.v1.yaml)
+- [`openapi/steward-control.v1.yaml`](openapi/steward-control.v1.yaml)
 
-An operator can clone this repository alone, audit it, and build all six binaries
+An operator can clone this repository alone, audit it, and build all seven binaries
 without access to private source or infrastructure.
 
 ## Documentation

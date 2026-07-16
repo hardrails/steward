@@ -61,6 +61,9 @@ evidence_file=${STEWARD_DOCTOR_EVIDENCE_FILE:-/var/lib/steward-executor/evidence
 uplink_state_file=${STEWARD_DOCTOR_UPLINK_STATE_FILE:-}
 uplink_state_overridden=false
 [[ -z ${STEWARD_DOCTOR_UPLINK_STATE_FILE:-} ]] || uplink_state_overridden=true
+uplink_delivery_state_file=${STEWARD_DOCTOR_UPLINK_DELIVERY_STATE_FILE:-}
+uplink_delivery_state_overridden=false
+[[ -z ${STEWARD_DOCTOR_UPLINK_DELIVERY_STATE_FILE:-} ]] || uplink_delivery_state_overridden=true
 connector_receipt_file=${STEWARD_DOCTOR_CONNECTOR_RECEIPT_FILE:-/var/lib/steward-gateway/connector-receipts.ndjson}
 
 declare -a check_ids=() check_statuses=() check_messages=()
@@ -233,6 +236,9 @@ validate_configuration() {
 	if [[ -n $uplink_state_file ]]; then
 		valid_absolute_ascii_path "$uplink_state_file" || { usage_error 'Executor uplink state path must be an absolute printable-ASCII path'; return 2; }
 	fi
+	if [[ -n $uplink_delivery_state_file ]]; then
+		valid_absolute_ascii_path "$uplink_delivery_state_file" || { usage_error 'Executor uplink delivery-state path must be an absolute printable-ASCII path'; return 2; }
+	fi
 	if [[ $canary_requested == true ]]; then
 		valid_absolute_ascii_path "$canary_bundle" || { usage_error 'canary bundle must be an absolute printable-ASCII path'; return 2; }
 		valid_absolute_ascii_path "$canary_result" || { usage_error 'canary result must be an absolute printable-ASCII path'; return 2; }
@@ -372,7 +378,7 @@ exit_on_signal() {
 }
 
 configure_docker_target() {
-	local line key value docker_seen=false token_seen=false uplink_seen=false docker_config_dir
+	local line key value docker_seen=false token_seen=false uplink_seen=false uplink_delivery_seen=false docker_config_dir
 	local environment before after owner mode size device inode mtime ctime mode_value
 	if [[ ! -f $executor_env_file || -L $executor_env_file ]]; then
 		add_check docker.target fail 'Executor environment is not a regular, non-symlink file'
@@ -430,6 +436,14 @@ configure_docker_target() {
 			fi
 			[[ $uplink_state_overridden == true ]] || uplink_state_file=$value
 			uplink_seen=true
+			;;
+		EXECUTOR_UPLINK_DELIVERY_STATE_FILE)
+			if [[ $uplink_delivery_seen == true || $value == *[[:space:]]* ]] || { [[ -n $value ]] && ! valid_absolute_ascii_path "$value"; }; then
+				add_check docker.target fail 'Executor uplink delivery-state path is duplicate or invalid'
+				return 1
+			fi
+			[[ $uplink_delivery_state_overridden == true ]] || uplink_delivery_state_file=$value
+			uplink_delivery_seen=true
 			;;
 		esac
 	done <<<"$environment"
@@ -743,12 +757,18 @@ check_capacity() {
 	if [[ -n $uplink_state_file ]]; then
 		inspect_store executor_uplink_state "$uplink_state_file" $((1 << 20))
 	fi
+	if [[ -n $uplink_delivery_state_file ]]; then
+		inspect_store executor_uplink_delivery_state "$uplink_delivery_state_file" $((8 << 20))
+	fi
 	inspect_store connector_receipts "$connector_receipt_file" $((64 << 20))
 	inspect_filesystem_for "$fence_file"
 	inspect_filesystem_for "$journal_file"
 	inspect_filesystem_for "$evidence_file"
 	if [[ -n $uplink_state_file ]]; then
 		inspect_filesystem_for "$uplink_state_file"
+	fi
+	if [[ -n $uplink_delivery_state_file ]]; then
+		inspect_filesystem_for "$uplink_delivery_state_file"
 	fi
 	inspect_filesystem_for "$connector_receipt_file"
 }

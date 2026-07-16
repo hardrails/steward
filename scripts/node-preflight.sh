@@ -1,11 +1,26 @@
-#!/usr/bin/env bash
-# Validate the installed node, trust material, six binaries, and three services.
+#!/bin/bash -p
+# Validate the installed node, trust material, seven binaries, and three services.
 set -euo pipefail
+if ! shopt -qo privileged; then
+	echo "node-preflight: execute this root helper directly or invoke it with /bin/bash -p" >&2
+	exit 2
+fi
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin
+LC_ALL=C
+LANG=C
+HOME=/root
+export PATH LC_ALL LANG HOME
+unset BASH_ENV ENV CDPATH GLOBIGNORE TMPDIR XDG_CONFIG_HOME
+unset DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG DOCKER_CERT_PATH
+unset DOCKER_TLS_VERIFY DOCKER_API_VERSION DOCKER_BUILDKIT BUILDKIT_HOST
+IFS=$' \t\n'
+umask 077
 
 steward_config=${STEWARD_CONFIG_FILE:-/etc/steward/steward.json}
 executor_env=${STEWARD_EXECUTOR_ENV_FILE:-/etc/steward/executor.env}
 executor_gateway_env=${STEWARD_EXECUTOR_GATEWAY_ENV_FILE:-/etc/steward/executor-gateway.env}
 steward_bin=${STEWARD_BIN:-/usr/local/bin/steward}
+control_bin=${STEWARD_CONTROL_BIN:-/usr/local/bin/steward-control}
 ctl_bin=${STEWARD_CTL_BIN:-/usr/local/bin/stewardctl}
 mcp_bin=${STEWARD_MCP_BIN:-/usr/local/bin/steward-mcp}
 executor_bin=${STEWARD_EXECUTOR_BIN:-/usr/local/bin/steward-executor}
@@ -15,6 +30,100 @@ gateway_config=${STEWARD_GATEWAY_CONFIG_FILE:-/etc/steward/gateway.json}
 connector_receipt_private=${STEWARD_CONNECTOR_RECEIPT_PRIVATE_KEY_FILE:-/etc/steward/connector-receipts.private.pem}
 connector_receipt_public=${STEWARD_CONNECTOR_RECEIPT_PUBLIC_KEY_FILE:-/etc/steward/connector-receipts.public}
 unit_dir=${STEWARD_UNIT_DIR:-}
+
+valid_release_version() {
+	local candidate=$1 core prerelease identifier
+	(( ${#candidate} <= 128 )) || return 1
+	[[ $candidate =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]] || return 1
+	core=${candidate#v}
+	if [[ $core == *-* ]]; then
+		prerelease=${core#*-}
+		IFS=. read -r -a identifiers <<<"$prerelease"
+		for identifier in "${identifiers[@]}"; do
+			[[ $identifier =~ ^[0-9]+$ && $identifier == 0[0-9]* ]] && return 1
+		done
+	fi
+	return 0
+}
+
+trusted_root_directory_chain() {
+	local directory=$1 current metadata uid mode
+	[[ -d $directory && ! -L $directory && $(readlink -e -- "$directory" 2>/dev/null) == "$directory" ]] || return 1
+	current=$directory
+	while :; do
+		metadata=$(stat -c '%u:%a' -- "$current") || return 1
+		uid=${metadata%%:*}; mode=${metadata#*:}
+		[[ $uid == 0 ]] && (( (8#$mode & 022) == 0 )) || return 1
+		[[ $current == / ]] && break
+		current=$(dirname -- "$current")
+	done
+}
+
+resolve_managed_binary() {
+	local requested=$1 expected_name=$2 resolved relative release metadata uid mode links
+	resolved=$(readlink -e -- "$requested" 2>/dev/null) || return 1
+	[[ -f $resolved && ! -L $resolved && -x $resolved ]] || return 1
+	case "$resolved" in /opt/steward/releases/*/"$expected_name") ;; *) return 1 ;; esac
+	relative=${resolved#/opt/steward/releases/}
+	release=${relative%%/*}
+	valid_release_version "$release" || return 1
+	[[ $resolved == "/opt/steward/releases/$release/$expected_name" ]] || return 1
+	trusted_root_directory_chain "$(dirname -- "$resolved")" || return 1
+	metadata=$(stat -c '%u:%a:%h' -- "$resolved") || return 1
+	IFS=: read -r uid mode links <<<"$metadata"
+	[[ $uid == 0 && $links == 1 ]] && (( (8#$mode & 022) == 0 )) || return 1
+	printf '%s\n' "$resolved"
+}
+
+for mapping in \
+	"$steward_config:/etc/steward/steward.json:Steward configuration" \
+	"$executor_env:/etc/steward/executor.env:Executor environment" \
+	"$gateway_config:/etc/steward/gateway.json:Gateway configuration" \
+	"$connector_receipt_private:/etc/steward/connector-receipts.private.pem:connector receipt private key" \
+	"$connector_receipt_public:/etc/steward/connector-receipts.public:connector receipt public key"; do
+	IFS=: read -r configured expected label <<<"$mapping"
+	if [[ $configured != "$expected" ]]; then
+		echo "node-preflight: $label path is fixed at $expected" >&2
+		exit 2
+	fi
+done
+case "$executor_gateway_env" in
+	/etc/steward/executor-gateway.env) ;;
+	/var/lib/steward-node/relay-images/*.env)
+		binding_version=${executor_gateway_env##*/}
+		binding_version=${binding_version%.env}
+		valid_release_version "$binding_version" || {
+			echo "node-preflight: Executor gateway binding has an invalid release name" >&2
+			exit 2
+		}
+		;;
+	*)
+		echo "node-preflight: Executor gateway environment must be the installed selector or an immutable release binding" >&2
+		exit 2
+		;;
+esac
+if [[ -n $unit_dir ]]; then
+	case "$unit_dir" in /opt/steward/releases/*/integration/deploy/systemd) ;; *)
+		echo "node-preflight: target unit directory must belong to an installed immutable release" >&2
+		exit 2
+		;; esac
+	unit_relative=${unit_dir#/opt/steward/releases/}
+	unit_version=${unit_relative%%/*}
+	if ! valid_release_version "$unit_version" ||
+		[[ $unit_dir != "/opt/steward/releases/$unit_version/integration/deploy/systemd" ]] ||
+		! trusted_root_directory_chain "$unit_dir"; then
+		echo "node-preflight: target unit directory is outside the trusted release tree" >&2
+		exit 2
+	fi
+fi
+
+steward_bin=$(resolve_managed_binary "$steward_bin" steward) || { echo "node-preflight: refusing unmanaged steward executable" >&2; exit 2; }
+control_bin=$(resolve_managed_binary "$control_bin" steward-control) || { echo "node-preflight: refusing unmanaged steward-control executable" >&2; exit 2; }
+ctl_bin=$(resolve_managed_binary "$ctl_bin" stewardctl) || { echo "node-preflight: refusing unmanaged stewardctl executable" >&2; exit 2; }
+mcp_bin=$(resolve_managed_binary "$mcp_bin" steward-mcp) || { echo "node-preflight: refusing unmanaged steward-mcp executable" >&2; exit 2; }
+executor_bin=$(resolve_managed_binary "$executor_bin" steward-executor) || { echo "node-preflight: refusing unmanaged steward-executor executable" >&2; exit 2; }
+gateway_bin=$(resolve_managed_binary "$gateway_bin" steward-gateway) || { echo "node-preflight: refusing unmanaged steward-gateway executable" >&2; exit 2; }
+relay_bin=$(resolve_managed_binary "$relay_bin" steward-relay) || { echo "node-preflight: refusing unmanaged steward-relay executable" >&2; exit 2; }
 
 hash_file() {
 	if command -v sha256sum >/dev/null 2>&1; then
@@ -45,8 +154,8 @@ if ! docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
 	echo "node-preflight: Docker runtime runsc is required" >&2
 	exit 2
 fi
-binary_names=(steward stewardctl steward-mcp steward-executor steward-gateway steward-relay)
-binary_paths=("$steward_bin" "$ctl_bin" "$mcp_bin" "$executor_bin" "$gateway_bin" "$relay_bin")
+binary_names=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay)
+binary_paths=("$steward_bin" "$control_bin" "$ctl_bin" "$mcp_bin" "$executor_bin" "$gateway_bin" "$relay_bin")
 for binary in "${binary_paths[@]}"; do
 	if [[ ! -x $binary ]]; then
 		echo "node-preflight: missing executable $binary" >&2
@@ -133,7 +242,7 @@ fi
 declare -A executor=()
 required=' EXECUTOR_TOKEN_FILE EXECUTOR_DOCKER_SOCKET EXECUTOR_MAX_MEMORY_BYTES EXECUTOR_MAX_CPU_MILLIS EXECUTOR_MAX_PIDS EXECUTOR_MAX_WORKLOADS EXECUTOR_MAX_WORKLOADS_PER_TENANT '
 uplink=' EXECUTOR_UPLINK_URL EXECUTOR_UPLINK_CREDENTIAL_FILE EXECUTOR_UPLINK_STATE_FILE EXECUTOR_UPLINK_TLS_CA_FILE '
-optional=' EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG EXECUTOR_STATE_ARG EXECUTOR_MAX_TOTAL_MEMORY_BYTES EXECUTOR_MAX_TOTAL_CPU_MILLIS EXECUTOR_MAX_TOTAL_PIDS EXECUTOR_MAX_TENANT_MEMORY_BYTES EXECUTOR_MAX_TENANT_CPU_MILLIS EXECUTOR_MAX_TENANT_PIDS '
+optional=' EXECUTOR_UPLINK_DELIVERY_STATE_FILE EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG EXECUTOR_STATE_ARG EXECUTOR_MAX_TOTAL_MEMORY_BYTES EXECUTOR_MAX_TOTAL_CPU_MILLIS EXECUTOR_MAX_TOTAL_PIDS EXECUTOR_MAX_TENANT_MEMORY_BYTES EXECUTOR_MAX_TENANT_CPU_MILLIS EXECUTOR_MAX_TENANT_PIDS '
 allowed="$required$uplink$optional"
 while IFS= read -r line || [[ -n $line ]]; do
 	[[ -z $line || $line == \#* ]] && continue
@@ -167,6 +276,10 @@ if (( uplink_set != 0 && uplink_set != 4 )); then
 	echo "node-preflight: Executor uplink settings must be all set or all empty" >&2
 	exit 2
 fi
+if [[ -n ${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-} && $uplink_set -ne 4 ]]; then
+	echo "node-preflight: Executor delivery state requires the complete uplink configuration" >&2
+	exit 2
+fi
 
 admission_args=()
 gateway_args=()
@@ -178,6 +291,10 @@ for key in "${admission_keys[@]}"; do
 done
 if (( admission_set != 0 && admission_set != ${#admission_keys[@]} )); then
 	echo "node-preflight: signed admission settings must be all set or all absent" >&2
+	exit 2
+fi
+if [[ -n ${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-} && $admission_set -ne ${#admission_keys[@]} ]]; then
+	echo "node-preflight: Executor delivery state requires complete signed admission" >&2
 	exit 2
 fi
 if (( admission_set == ${#admission_keys[@]} )); then
@@ -282,6 +399,7 @@ runuser -u steward-executor -- "$executor_bin" -check-config \
 	-uplink-url "${executor[EXECUTOR_UPLINK_URL]}" \
 	-uplink-credential-file "${executor[EXECUTOR_UPLINK_CREDENTIAL_FILE]}" \
 	-uplink-state-file "${executor[EXECUTOR_UPLINK_STATE_FILE]}" \
+	-uplink-delivery-state-file "${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-}" \
 	-uplink-tls-ca-file "${executor[EXECUTOR_UPLINK_TLS_CA_FILE]}" \
 	-max-memory-bytes "${executor[EXECUTOR_MAX_MEMORY_BYTES]}" \
 	-max-cpu-millis "${executor[EXECUTOR_MAX_CPU_MILLIS]}" \
