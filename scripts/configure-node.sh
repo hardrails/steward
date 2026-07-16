@@ -1,6 +1,16 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Provision node trust material, validate it, and optionally start Steward.
 set -Eeuo pipefail
+set +x
+if ! shopt -qo privileged; then
+	echo "configure-node: execute this root helper directly or invoke it with /bin/bash -p" >&2
+	exit 2
+fi
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH LC_ALL=C LANG=C
+unset BASH_ENV CDPATH ENV GLOBIGNORE POSIXLY_CORRECT
+IFS=$' \t\n'
+umask 077
 
 usage() {
 	cat <<'EOF'
@@ -32,6 +42,9 @@ previous files under /etc/steward and removes state files created by this run.
 Existing Executor fence, delivery, journal, and evidence state is never reset.
 When --steward-credential is omitted, the Executor credential must be
 node-scoped and signed admission must already exist or be supplied in this run.
+Copy every input file to a protected, root-owned directory before invoking this
+command. Input files in /tmp, home directories, or writable parent directories
+are rejected.
 EOF
 }
 
@@ -91,23 +104,15 @@ if [[ $local_only == true ]]; then
 	fi
 else
 	for input in "$executor_credential" "$ca_file"; do
-		if [[ -z $input || ! -f $input || ! -r $input ]]; then
-			echo "configure-node: required Executor enrollment input is not a readable regular file: ${input:-<unset>}" >&2
+		if [[ -z $input ]]; then
+			echo "configure-node: required Executor enrollment input is missing" >&2
 			exit 2
 		fi
 	done
-	if [[ -n $steward_credential && ( ! -f $steward_credential || ! -r $steward_credential ) ]]; then
-		echo "configure-node: supervisor credential is not a readable regular file: $steward_credential" >&2
-		exit 2
-	fi
 fi
 executor_only=false
 if [[ $local_only == false && -z $steward_credential ]]; then
 	executor_only=true
-fi
-if [[ -n $executor_token && ( ! -f $executor_token || ! -r $executor_token ) ]]; then
-	echo "configure-node: Executor token is not a readable regular file: $executor_token" >&2
-	exit 2
 fi
 admission_required=0
 for value in "$admission_policy" "$site_root" "$site_root_key_id"; do
@@ -122,12 +127,6 @@ if (( admission_required == 0 )) && { [[ -n $node_id ]] || [[ $allow_host_admin 
 	exit 2
 fi
 if (( admission_required == 3 )); then
-	for input in "$admission_policy" "$site_root"; do
-		if [[ ! -f $input || ! -r $input || -L $input ]]; then
-			echo "configure-node: admission trust input must be a readable regular file, not a symlink: $input" >&2
-			exit 2
-		fi
-	done
 	[[ $site_root_key_id =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$ ]] || {
 		echo "configure-node: invalid --site-root-key-id" >&2
 		exit 2
@@ -155,22 +154,278 @@ if (( admission_required == 3 )) && [[ ! -x /usr/local/libexec/steward/configure
 	exit 2
 fi
 
-acquire_node_lock() {
-	local lock_file=${1:-/run/lock/steward-node-activation.lock}
-	local wait_seconds=${2:-60}
-	if ! command -v flock >/dev/null 2>&1; then
-		echo "configure-node: flock is required to serialize node configuration" >&2
+# BEGIN TRUSTED_INPUT_BOUNDARY
+# Operator-supplied files are hostile until they have been copied into this
+# process's private root-owned staging directory. Requiring a protected parent
+# chain prevents a non-root writer from replacing a validated path between the
+# metadata checks and the no-follow snapshot.
+trusted_input_error() {
+	echo "configure-node: $1; copy the input to a protected root-owned directory and retry" >&2
+	return 2
+}
+
+trusted_input_clean_absolute_path() {
+	local path=$1
+	[[ $path == /* && $path != / && $path != //* && $path != */ && \
+		$path != *//* && $path != *[[:cntrl:]]* ]] || return 1
+	case "/${path#/}/" in
+		*/./* | */../*) return 1 ;;
+	esac
+}
+
+trusted_input_validate_directory() {
+	local directory=$1 label=$2 metadata raw_mode owner raw_value permissions
+	if [[ -L $directory ]] || ! metadata=$(stat -c '%f|%u' -- "$directory" 2>/dev/null); then
+		trusted_input_error "$label has an unsafe ancestor: $directory"
+		return
+	fi
+	IFS='|' read -r raw_mode owner <<<"$metadata"
+	if [[ ! $raw_mode =~ ^[0-9a-fA-F]+$ || ! $owner =~ ^[0-9]+$ ]]; then
+		trusted_input_error "$label ancestor metadata is invalid: $directory"
+		return
+	fi
+	raw_value=$((16#$raw_mode))
+	permissions=$((raw_value & 07777))
+	if (( (raw_value & 0170000) != 0040000 || owner != 0 || (permissions & 0022) != 0 )); then
+		trusted_input_error "$label must be beneath root-owned directories that are not group/world-writable: $directory"
+		return
+	fi
+}
+
+trusted_input_validate_ancestors() {
+	local path=$1 label=$2 parent current remaining component
+	parent=${path%/*}
+	[[ -n $parent ]] || parent=/
+	trusted_input_validate_directory / "$label" || return
+	current=/
+	remaining=${parent#/}
+	while [[ -n $remaining ]]; do
+		component=${remaining%%/*}
+		if [[ $remaining == */* ]]; then
+			remaining=${remaining#*/}
+		else
+			remaining=
+		fi
+		current=${current%/}/$component
+		trusted_input_validate_directory "$current" "$label" || return
+	done
+}
+
+trusted_input_snapshot() {
+	local source=$1 destination=$2 label=$3 max_bytes=$4 owner_only=$5
+	local before after raw_mode owner group links size rest raw_value permissions
+	if ! trusted_input_clean_absolute_path "$source"; then
+		trusted_input_error "$label path must be a clean absolute path"
+		return
+	fi
+	trusted_input_validate_ancestors "$source" "$label" || return
+	if [[ -L $source ]] || ! before=$(stat -c '%d|%i|%f|%u|%g|%h|%s|%b|%B|%y|%z|%w' -- "$source" 2>/dev/null); then
+		trusted_input_error "$label must be a non-symlink regular file"
+		return
+	fi
+	IFS='|' read -r _ _ raw_mode owner group links size rest <<<"$before"
+	if [[ ! $raw_mode =~ ^[0-9a-fA-F]+$ || ! $owner =~ ^[0-9]+$ || \
+		! $group =~ ^[0-9]+$ || ! $links =~ ^[0-9]+$ || ! $size =~ ^[0-9]+$ ]]; then
+		trusted_input_error "$label metadata is invalid"
+		return
+	fi
+	raw_value=$((16#$raw_mode))
+	permissions=$((raw_value & 07777))
+	if (( (raw_value & 0170000) != 0100000 || owner != 0 || links != 1 || (permissions & 0022) != 0 )); then
+		trusted_input_error "$label must be a root-owned, single-link regular file that is not group/world-writable"
+		return
+	fi
+	if [[ $owner_only == true ]] && (( (permissions & 07077) != 0 )); then
+		trusted_input_error "$label contains a credential or token and must be accessible only by root"
+		return
+	fi
+	if (( size > max_bytes )); then
+		trusted_input_error "$label exceeds the $max_bytes-byte limit"
+		return
+	fi
+	rm -f -- "$destination"
+	if ! ( umask 077; set -o noclobber; : >"$destination" ) 2>/dev/null; then
+		trusted_input_error "$label snapshot could not be created exclusively"
+		return
+	fi
+	if ! (
+		ulimit -c 0
+		ulimit -f $((max_bytes / 512))
+		ulimit -t 5
+		timeout --signal=KILL 10 dd if="$source" of="$destination" bs=4096 \
+			iflag=nofollow,nonblock,fullblock oflag=nofollow,nonblock conv=notrunc status=none
+	) 2>/dev/null; then
+		rm -f -- "$destination"
+		trusted_input_error "$label could not be snapshotted within its size and time limits"
+		return
+	fi
+	# Access time is intentionally excluded because this read may update it.
+	if ! after=$(stat -c '%d|%i|%f|%u|%g|%h|%s|%b|%B|%y|%z|%w' -- "$source" 2>/dev/null) || \
+		[[ $after != "$before" ]]; then
+		rm -f -- "$destination"
+		trusted_input_error "$label changed while it was being snapshotted"
+		return
+	fi
+	chown root:root "$destination"
+	chmod 0600 "$destination"
+	if [[ -L $destination ]] || \
+		! after=$(stat -c '%f|%u|%g|%h|%s' -- "$destination" 2>/dev/null); then
+		rm -f -- "$destination"
+		trusted_input_error "$label snapshot could not be secured"
+		return
+	fi
+	IFS='|' read -r raw_mode owner group links rest <<<"$after"
+	raw_value=$((16#$raw_mode))
+	permissions=$((raw_value & 07777))
+	if (( (raw_value & 0170000) != 0100000 || owner != 0 || group != 0 || \
+		links != 1 || permissions != 0600 || rest != size )); then
+		rm -f -- "$destination"
+		trusted_input_error "$label snapshot did not retain the validated file exactly"
+		return
+	fi
+}
+
+create_trusted_input_stage() {
+	trusted_input_validate_directory / "input staging" || return
+	trusted_input_validate_directory /run "input staging" || return
+	input_stage=$(mktemp -d -- "${input_stage_prefix}XXXXXX") || {
+		trusted_input_error "could not create the private input staging directory"
+		return
+	}
+	chown root:root "$input_stage"
+	chmod 0700 "$input_stage"
+	local metadata raw_mode owner group raw_value permissions
+	metadata=$(stat -c '%f|%u|%g' -- "$input_stage") || return
+	IFS='|' read -r raw_mode owner group <<<"$metadata"
+	raw_value=$((16#$raw_mode))
+	permissions=$((raw_value & 07777))
+	if (( (raw_value & 0170000) != 0040000 || owner != 0 || group != 0 || permissions != 0700 )); then
+		trusted_input_error "private input staging directory could not be secured"
+		return
+	fi
+}
+
+stage_node_input_sources() {
+	if [[ $local_only == false ]]; then
+		if [[ -n $steward_credential ]]; then
+			trusted_input_snapshot "$steward_credential" "$input_stage/steward-credential.json" \
+				"supervisor credential" 65536 true || return
+			steward_credential=$input_stage/steward-credential.json
+		fi
+		trusted_input_snapshot "$executor_credential" "$input_stage/executor-credential.json" \
+			"Executor credential" 65536 true || return
+		executor_credential=$input_stage/executor-credential.json
+		trusted_input_snapshot "$ca_file" "$input_stage/control-plane-ca.pem" \
+			"control-plane CA" 1048576 false || return
+		ca_file=$input_stage/control-plane-ca.pem
+	fi
+	if [[ -n $executor_token ]]; then
+		trusted_input_snapshot "$executor_token" "$input_stage/executor-token" \
+			"Executor token" 4096 true || return
+		executor_token=$input_stage/executor-token
+	fi
+	if (( admission_required == 3 )); then
+		trusted_input_snapshot "$admission_policy" "$input_stage/site-policy.dsse.json" \
+			"admission policy" 1048576 false || return
+		admission_policy=$input_stage/site-policy.dsse.json
+		trusted_input_snapshot "$site_root" "$input_stage/site-root.public" \
+			"site-root public key" 4096 false || return
+		site_root=$input_stage/site-root.public
+	fi
+}
+
+cleanup_trusted_input_stage() {
+	local status=$?
+	trap - EXIT
+	if [[ -n ${input_stage:-} && $input_stage == "$input_stage_prefix"* ]]; then
+		rm -rf -- "$input_stage"
+	fi
+	exit "$status"
+}
+# END TRUSTED_INPUT_BOUNDARY
+
+# BEGIN NODE_LOCK_BOUNDARY
+readonly node_lock_directory=/run/steward-node
+readonly node_lock_file=$node_lock_directory/activation.lock
+readonly node_lock_error_prefix=configure-node
+
+prepare_node_lock() {
+	local metadata uid mode
+	if [[ -L /run || ! -d /run ]]; then
+		echo "$node_lock_error_prefix: refusing an unsafe /run directory" >&2
 		return 2
 	fi
-	exec 9>"$lock_file"
+	metadata=$(stat -c '%u:%a' -- /run) || return 2
+	uid=${metadata%%:*}; mode=${metadata#*:}
+	if [[ $uid != 0 ]] || (( (8#$mode & 022) != 0 )); then
+		echo "$node_lock_error_prefix: /run must be root-owned and not group- or world-writable" >&2
+		return 2
+	fi
+	if [[ ! -e $node_lock_directory && ! -L $node_lock_directory ]]; then
+		install -d -o root -g root -m 0700 -- "$node_lock_directory"
+	fi
+	if [[ -L $node_lock_directory || ! -d $node_lock_directory ||
+		$(readlink -e -- "$node_lock_directory" 2>/dev/null) != "$node_lock_directory" ||
+		$(stat -c '%u:%g:%a' -- "$node_lock_directory" 2>/dev/null) != 0:0:700 ]]; then
+		echo "$node_lock_error_prefix: refusing an unsafe node lock directory" >&2
+		return 2
+	fi
+	if [[ ! -e $node_lock_file && ! -L $node_lock_file ]]; then
+		(umask 077; set -o noclobber; : >"$node_lock_file") 2>/dev/null || true
+	fi
+	if [[ -L $node_lock_file || ! -f $node_lock_file ||
+		$(stat -c '%u:%g:%a:%h' -- "$node_lock_file" 2>/dev/null) != 0:0:600:1 ]]; then
+		echo "$node_lock_error_prefix: refusing an unsafe node activation lock" >&2
+		return 2
+	fi
+}
+
+node_lock_fd_matches() {
+	local fd=$1 path_metadata fd_metadata process_id=${BASHPID:-$$}
+	[[ $fd == 9 && -e /proc/$process_id/fd/$fd ]] || return 1
+	path_metadata=$(stat -c '%d:%i:%u:%g:%a:%h' -- "$node_lock_file") || return 1
+	fd_metadata=$(stat -Lc '%d:%i:%u:%g:%a:%h' -- "/proc/$process_id/fd/$fd") || return 1
+	[[ $path_metadata == "$fd_metadata" && $path_metadata == *:0:0:600:1 ]]
+}
+
+acquire_node_lock() {
+	local wait_seconds=${1:-60}
+	[[ $wait_seconds =~ ^[0-9]+$ ]] || return 2
+	command -v flock >/dev/null 2>&1 || {
+		echo "$node_lock_error_prefix: flock is required to serialize node configuration" >&2
+		return 2
+	}
+	prepare_node_lock || return
+	exec 9<>"$node_lock_file"
+	if ! node_lock_fd_matches 9; then
+		echo "$node_lock_error_prefix: node activation lock changed while it was opened" >&2
+		exec 9>&-
+		return 2
+	fi
 	if ! flock -w "$wait_seconds" 9; then
-		echo "configure-node: another node configuration or activation did not finish within $wait_seconds seconds" >&2
+		echo "$node_lock_error_prefix: another node configuration or activation did not finish within $wait_seconds seconds" >&2
+		exec 9>&-
 		return 1
 	fi
 }
 
-install -d -o root -g root -m 0755 /run/lock
-acquire_node_lock
+use_inherited_node_lock() {
+	local fd=${1:-}
+	prepare_node_lock || return
+	if ! node_lock_fd_matches "$fd" || ! flock -n "$fd"; then
+		echo "$node_lock_error_prefix: inherited node lock descriptor is missing, unlocked, or does not match $node_lock_file" >&2
+		return 2
+	fi
+}
+# END NODE_LOCK_BOUNDARY
+
+acquire_node_lock 60
+
+input_stage_prefix=/run/steward-node-inputs.
+input_stage=
+trap cleanup_trusted_input_stage EXIT
+create_trusted_input_stage
+stage_node_input_sources
 
 install -d -o root -g root -m 0755 /etc/steward
 backup_dir=$(mktemp -d /etc/steward/.configure-backup.XXXXXX)
@@ -392,6 +647,7 @@ if (( admission_required == 3 )); then
 		--policy "$admission_policy"
 		--site-root-public-key "$site_root"
 		--site-root-key-id "$site_root_key_id"
+		--node-lock-fd 9
 		--no-restart
 	)
 	[[ -z $node_id ]] || admission_args+=(--node-id "$node_id")
