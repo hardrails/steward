@@ -108,26 +108,33 @@ type NodeCredential struct {
 }
 
 type Command struct {
-	CommandID          string         `json:"command_id"`
-	DeliveryID         string         `json:"delivery_id,omitempty"`
-	TenantID           string         `json:"tenant_id"`
-	NodeID             string         `json:"node_id"`
-	CommandDigest      string         `json:"command_digest"`
-	State              string         `json:"state"`
-	DeliveryGeneration uint64         `json:"delivery_generation,omitempty"`
-	LeaseExpiresAt     string         `json:"lease_expires_at,omitempty"`
-	TerminalStatus     string         `json:"terminal_status,omitempty"`
-	ReportedStatus     string         `json:"reported_status,omitempty"`
-	ErrorCode          string         `json:"error_code,omitempty"`
-	ClaimGeneration    *uint64        `json:"claim_generation,omitempty"`
-	Result             *CommandResult `json:"result,omitempty"`
+	CommandID                string         `json:"command_id"`
+	DeliveryID               string         `json:"delivery_id,omitempty"`
+	TenantID                 string         `json:"tenant_id"`
+	NodeID                   string         `json:"node_id"`
+	CommandDigest            string         `json:"command_digest"`
+	CommandKind              string         `json:"command_kind,omitempty"`
+	SignedRuntimeRef         string         `json:"signed_runtime_ref,omitempty"`
+	SignedClaimGeneration    uint64         `json:"signed_claim_generation,omitempty"`
+	SignedInstanceGeneration uint64         `json:"signed_instance_generation,omitempty"`
+	State                    string         `json:"state"`
+	DeliveryProtocol         int            `json:"delivery_protocol,omitempty"`
+	DeliveryGeneration       uint64         `json:"delivery_generation,omitempty"`
+	LeaseExpiresAt           string         `json:"lease_expires_at,omitempty"`
+	TerminalStatus           string         `json:"terminal_status,omitempty"`
+	ReportedStatus           string         `json:"reported_status,omitempty"`
+	ErrorCode                string         `json:"error_code,omitempty"`
+	ClaimGeneration          *uint64        `json:"claim_generation,omitempty"`
+	AdmissionProjectionState string         `json:"admission_projection_state,omitempty"`
+	Result                   *CommandResult `json:"result,omitempty"`
 }
 
 type CommandResult struct {
-	RuntimeRef string `json:"runtime_ref,omitempty"`
-	Error      string `json:"error,omitempty"`
-	Replayed   bool   `json:"replayed,omitempty"`
-	Absent     bool   `json:"absent,omitempty"`
+	RuntimeRef string                                         `json:"runtime_ref,omitempty"`
+	Error      string                                         `json:"error,omitempty"`
+	Replayed   bool                                           `json:"replayed,omitempty"`
+	Absent     bool                                           `json:"absent,omitempty"`
+	Admission  *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
 }
 
 type Node struct {
@@ -322,6 +329,9 @@ func (c *Client) SubmitCommand(ctx context.Context, tenantID, nodeID string, com
 	err := c.do(ctx, http.MethodPost, path, struct {
 		CommandDSSEBase64 string `json:"command_dsse_base64"`
 	}{CommandDSSEBase64: base64.StdEncoding.EncodeToString(commandDSSE)}, &command, true)
+	if err == nil {
+		err = validateCommandAdmissionProjection(command)
+	}
 	return command, err
 }
 
@@ -330,7 +340,59 @@ func (c *Client) GetCommand(ctx context.Context, tenantID, nodeID, commandID str
 	path := "/v1/tenants/" + url.PathEscape(tenantID) + "/nodes/" + url.PathEscape(nodeID) +
 		"/commands/" + url.PathEscape(commandID)
 	err := c.do(ctx, http.MethodGet, path, nil, &command, true)
+	if err == nil {
+		err = validateCommandAdmissionProjection(command)
+	}
 	return command, err
+}
+
+func validateCommandAdmissionProjection(command Command) error {
+	var projection *controlprotocol.ExecutorAdmissionProjectionV1
+	if command.Result != nil {
+		projection = command.Result.Admission
+	}
+	switch command.AdmissionProjectionState {
+	case "":
+		if projection != nil {
+			return errors.New("control command returned an admission projection without its state")
+		}
+		if command.CommandKind == "admit" && command.TerminalStatus == controlprotocol.ExecutorStatusDone {
+			return errors.New("control command omitted the admission projection state for a successful admit")
+		}
+		return nil
+	case "missing":
+		if command.CommandKind != "admit" || command.TerminalStatus != controlprotocol.ExecutorStatusDone ||
+			command.Result == nil || projection != nil ||
+			(command.DeliveryProtocol != controlprotocol.ExecutorProtocolV3 &&
+				command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4) {
+			return errors.New("control command returned an inconsistent missing admission projection")
+		}
+		return nil
+	case "present":
+		if command.CommandKind != "admit" || command.TerminalStatus != controlprotocol.ExecutorStatusDone ||
+			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 || projection == nil ||
+			command.Result == nil || command.Result.RuntimeRef != projection.RuntimeRef ||
+			command.SignedRuntimeRef == "" || projection.RuntimeRef != command.SignedRuntimeRef ||
+			command.SignedClaimGeneration == 0 || command.ClaimGeneration == nil ||
+			*command.ClaimGeneration != command.SignedClaimGeneration ||
+			command.SignedInstanceGeneration == 0 ||
+			projection.Generation != command.SignedInstanceGeneration {
+			return errors.New("control command returned an inconsistent admission projection")
+		}
+		if err := projection.Validate(); err != nil {
+			return fmt.Errorf("validate control command admission projection: %w", err)
+		}
+		expectedStatus := "stopped"
+		if projection.Status == "running" {
+			expectedStatus = "running"
+		}
+		if command.ReportedStatus != expectedStatus {
+			return errors.New("control command admission projection conflicts with reported status")
+		}
+		return nil
+	default:
+		return errors.New("control command returned an unknown admission projection state")
+	}
 }
 
 func (c *Client) GetOperationsSummary(ctx context.Context, tenantID string) (controlstore.OperationsSummary, error) {

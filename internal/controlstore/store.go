@@ -289,7 +289,7 @@ func (store *Store) applyMutationsLocked(mutations ...mutation) error {
 	if err != nil {
 		return err
 	}
-	next, err := applyTransaction(store.current, transaction{Version: transactionFormatVersion, Mutations: mutations})
+	next, err := applyTransaction(store.current, transaction{Version: transactionFormatWriteVersion, Mutations: mutations})
 	if err != nil {
 		return err
 	}

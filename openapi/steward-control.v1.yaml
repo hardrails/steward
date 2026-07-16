@@ -917,6 +917,10 @@ paths:
         of the UTF-8 bytes `steward-control-delivery-v1\0<tenant_id>\0<node_id>\0<command_id>`.
         The node recomputes it after verifying the signed command. The complete
         encoded response is capped at 1 MiB before any lease is published.
+        Protocol 3 retains only the bounded lifecycle result. Protocol 4 is an
+        explicit opt-in that can also return the complete bounded admission
+        projection; a lease is durably pinned to the requested protocol so a
+        report from another protocol cannot close it.
       requestBody:
         required: true
         content:
@@ -954,7 +958,10 @@ paths:
       description: |
         The delivery ID, generation, command ID, and digest fence the report.
         `applied=false` acknowledges a stale or byte-identical duplicate report;
-        it does not ask the node to execute the command again.
+        it does not ask the node to execute the command again. A protocol-4
+        admission projection is retained only for an unambiguous successful
+        `admit` report and must match the exact signed runtime, claim
+        generation, and instance generation stored with the command.
       requestBody:
         required: true
         content:
@@ -1980,9 +1987,34 @@ components:
           $ref: "#/components/schemas/Identifier128"
         command_digest:
           $ref: "#/components/schemas/SHA256Digest"
+        command_kind:
+          type: string
+          maxLength: 64
+          description: |
+            Operation copied from the exact DSSE command payload for
+            correlation. The controller transports but does not authenticate
+            the tenant signature; the node remains the command verifier.
+        signed_runtime_ref:
+          type: string
+          maxLength: 1024
+          description: Runtime reference copied from the exact DSSE command payload.
+        signed_claim_generation:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Claim generation copied from the exact DSSE command payload.
+        signed_instance_generation:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Instance generation copied from the exact DSSE command payload.
         state:
           type: string
           enum: [pending, leased, terminal]
+        delivery_protocol:
+          type: integer
+          enum: [3, 4]
+          description: Protocol selected by the node for the active or terminal delivery lease.
         delivery_generation:
           type: integer
           format: int64
@@ -2011,11 +2043,23 @@ components:
           format: int64
           minimum: 0
           description: Signed lifecycle fence observed by the node. Present only after the command becomes terminal.
+        admission_projection_state:
+          type: string
+          enum: [missing, present]
+          description: |
+            Present only for a successful terminal `admit`. `present` means a
+            protocol-4 node returned the correlated projection. `missing`
+            means the delivery completed without one; callers must not infer
+            admission details from another field.
         result:
           allOf:
-            - $ref: "#/components/schemas/ExecutorReportResult"
+            - $ref: "#/components/schemas/ControlCommandResult"
           description: Bounded node result details. Present only after the command becomes terminal.
     ExecutorPollRequest:
+      oneOf:
+        - $ref: "#/components/schemas/ExecutorPollRequestV3"
+        - $ref: "#/components/schemas/ExecutorPollRequestV4"
+    ExecutorPollRequestV3:
       type: object
       additionalProperties: false
       required: [protocol_version, node_id, credential_scope, capabilities]
@@ -2034,7 +2078,30 @@ components:
           uniqueItems: true
           items:
             $ref: "#/components/schemas/Identifier128"
+    ExecutorPollRequestV4:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, node_id, credential_scope, capabilities]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [4]
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        credential_scope:
+          type: string
+          enum: [node]
+        capabilities:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
     ExecutorPollResponse:
+      oneOf:
+        - $ref: "#/components/schemas/ExecutorPollResponseV3"
+        - $ref: "#/components/schemas/ExecutorPollResponseV4"
+    ExecutorPollResponseV3:
       type: object
       additionalProperties: false
       required: [protocol_version, deliveries]
@@ -2042,6 +2109,19 @@ components:
         protocol_version:
           type: integer
           enum: [3]
+        deliveries:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/ExecutorDelivery"
+    ExecutorPollResponseV4:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, deliveries]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [4]
         deliveries:
           type: array
           maxItems: 128
@@ -2070,6 +2150,10 @@ components:
           type: string
           format: byte
     ExecutorReport:
+      oneOf:
+        - $ref: "#/components/schemas/ExecutorReportV3"
+        - $ref: "#/components/schemas/ExecutorReportV4"
+    ExecutorReportV3:
       type: object
       additionalProperties: false
       required:
@@ -2117,6 +2201,48 @@ components:
           maxLength: 128
         result:
           $ref: "#/components/schemas/ExecutorReportResult"
+    ExecutorReportV4:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol_version
+        - delivery_id
+        - delivery_generation
+        - command_id
+        - command_digest
+        - status
+        - reported_status
+        - claim_generation
+        - result
+      properties:
+        protocol_version:
+          type: integer
+          enum: [4]
+        delivery_id:
+          $ref: "#/components/schemas/Identifier256"
+        delivery_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        command_id:
+          $ref: "#/components/schemas/Identifier256"
+        command_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        status:
+          type: string
+          enum: [done, failed, rejected, outcome_unknown]
+        reported_status:
+          type: string
+          maxLength: 64
+        claim_generation:
+          type: integer
+          format: int64
+          minimum: 0
+        error_code:
+          type: string
+          maxLength: 128
+        result:
+          $ref: "#/components/schemas/ExecutorReportResultV4"
     ExecutorReportResult:
       type: object
       additionalProperties: false
@@ -2131,7 +2257,127 @@ components:
           type: boolean
         absent:
           type: boolean
+    ExecutorReportResultV4:
+      type: object
+      additionalProperties: false
+      properties:
+        runtime_ref:
+          type: string
+          maxLength: 1024
+        error:
+          type: string
+          maxLength: 4096
+        replayed:
+          type: boolean
+        absent:
+          type: boolean
+        admission:
+          $ref: "#/components/schemas/ExecutorAdmissionProjectionV1"
+    ControlCommandResult:
+      type: object
+      additionalProperties: false
+      properties:
+        runtime_ref:
+          type: string
+          maxLength: 1024
+        error:
+          type: string
+          maxLength: 4096
+        replayed:
+          type: boolean
+        absent:
+          type: boolean
+        admission:
+          $ref: "#/components/schemas/ExecutorAdmissionProjectionV1"
+    ExecutorAdmissionProjectionV1:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - runtime_ref
+        - status
+        - capsule_digest
+        - policy_digest
+        - generation
+        - evidence_key_id
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.executor-admission-projection.v1]
+        runtime_ref:
+          type: string
+          pattern: '^executor-[a-f0-9]{64}$'
+        status:
+          type: string
+          enum: [created, running, exited]
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        evidence_key_id:
+          type: string
+          pattern: '^[a-f0-9]{32}$'
+        grant_id:
+          type: string
+          pattern: '^grant-[a-f0-9]{64}$'
+        service_path:
+          type: string
+          maxLength: 256
+        service_id:
+          $ref: "#/components/schemas/Identifier128"
+        task_authorities:
+          type: array
+          minItems: 1
+          maxItems: 8
+          items:
+            $ref: "#/components/schemas/ExecutorTaskAuthorityV1"
+        egress_proxy:
+          type: string
+          enum: [http://steward-relay:8082]
+        egress_route_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        connector_url:
+          type: string
+          enum: [http://steward-relay:8081]
+        connector_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        route_policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        activation_id:
+          $ref: "#/components/schemas/Identifier128"
+        activation_begin_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+    ExecutorTaskAuthorityV1:
+      type: object
+      additionalProperties: false
+      required: [key_id, public_key]
+      properties:
+        key_id:
+          $ref: "#/components/schemas/Identifier128"
+        public_key:
+          type: string
+          minLength: 44
+          maxLength: 44
+          pattern: '^[A-Za-z0-9+/]{43}=$'
     ExecutorReportResponse:
+      oneOf:
+        - $ref: "#/components/schemas/ExecutorReportResponseV3"
+        - $ref: "#/components/schemas/ExecutorReportResponseV4"
+    ExecutorReportResponseV3:
       type: object
       additionalProperties: false
       required: [protocol_version, applied]
@@ -2139,6 +2385,16 @@ components:
         protocol_version:
           type: integer
           enum: [3]
+        applied:
+          type: boolean
+    ExecutorReportResponseV4:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, applied]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [4]
         applied:
           type: boolean
     ExecutorEvidencePollRequest:

@@ -22,6 +22,13 @@ import (
 
 func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 	commandRaw := []byte(`{"payloadType":"x"}`)
+	projection := controlprotocol.ExecutorAdmissionProjectionV1{
+		SchemaVersion: controlprotocol.ExecutorAdmissionProjectionSchemaV1,
+		RuntimeRef:    "executor-" + strings.Repeat("a", 64), Status: "created",
+		CapsuleDigest: "sha256:" + strings.Repeat("b", 64),
+		PolicyDigest:  "sha256:" + strings.Repeat("c", 64),
+		Generation:    1, EvidenceKeyID: strings.Repeat("d", 32),
+	}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +97,17 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"command_id":"c1","delivery_id":"d1","tenant_id":"tenant-a","node_id":"node-1","command_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"pending"}`))
 		case "/v1/tenants/tenant-a/nodes/node-1/commands/c1":
-			_, _ = w.Write([]byte(`{"command_id":"c1","tenant_id":"tenant-a","node_id":"node-1","command_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"terminal","terminal_status":"done","reported_status":"running","claim_generation":1,"result":{"runtime_ref":"runtime-1"}}`))
+			claimGeneration := uint64(1)
+			_ = json.NewEncoder(w).Encode(Command{
+				CommandID: "c1", TenantID: "tenant-a", NodeID: "node-1",
+				CommandDigest: "sha256:" + strings.Repeat("a", 64),
+				CommandKind:   "admit", SignedRuntimeRef: projection.RuntimeRef,
+				SignedClaimGeneration: 1, SignedInstanceGeneration: projection.Generation,
+				State: "terminal", DeliveryProtocol: controlprotocol.ExecutorProtocolV4,
+				TerminalStatus: "done", ReportedStatus: "stopped",
+				ClaimGeneration: &claimGeneration, AdmissionProjectionState: "present",
+				Result: &CommandResult{RuntimeRef: projection.RuntimeRef, Admission: &projection},
+			})
 		case "/v1/tenants/tenant-a/nodes":
 			_, _ = w.Write([]byte(`{"nodes":[{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z"}]}`))
 		case "/v1/tenants/tenant-a/nodes/node-1":
@@ -146,8 +163,13 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 		t.Fatalf("command=%#v error=%v", command, err)
 	}
 	if command, err := client.GetCommand(ctx, "tenant-a", "node-1", "c1"); err != nil || command.TerminalStatus != "done" ||
-		command.ReportedStatus != "running" || command.ClaimGeneration == nil || *command.ClaimGeneration != 1 ||
-		command.Result == nil || command.Result.RuntimeRef != "runtime-1" {
+		command.ReportedStatus != "stopped" || command.CommandKind != "admit" ||
+		command.SignedRuntimeRef != projection.RuntimeRef || command.SignedInstanceGeneration != projection.Generation ||
+		command.SignedClaimGeneration != 1 || command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 ||
+		command.AdmissionProjectionState != "present" ||
+		command.ClaimGeneration == nil || *command.ClaimGeneration != 1 ||
+		command.Result == nil || command.Result.Admission == nil ||
+		command.Result.Admission.RuntimeRef != projection.RuntimeRef {
 		t.Fatalf("command=%#v error=%v", command, err)
 	}
 }
@@ -175,6 +197,72 @@ func TestClientRejectsUnsafeTransportAndErrors(t *testing.T) {
 		!strings.Contains(api.Error(), "command_conflict") ||
 		!strings.Contains(api.Error(), "retry after 3s") {
 		t.Fatalf("error=%T %v", err, err)
+	}
+}
+
+func TestClientRejectsInconsistentAdmissionProjectionViews(t *testing.T) {
+	valid := func() Command {
+		projection := controlprotocol.ExecutorAdmissionProjectionV1{
+			SchemaVersion: controlprotocol.ExecutorAdmissionProjectionSchemaV1,
+			RuntimeRef:    "executor-" + strings.Repeat("a", 64), Status: "created",
+			CapsuleDigest: "sha256:" + strings.Repeat("b", 64),
+			PolicyDigest:  "sha256:" + strings.Repeat("c", 64),
+			Generation:    1, EvidenceKeyID: strings.Repeat("d", 32),
+		}
+		claim := uint64(7)
+		return Command{
+			CommandKind: "admit", SignedRuntimeRef: projection.RuntimeRef,
+			SignedClaimGeneration: claim, SignedInstanceGeneration: projection.Generation,
+			State: "terminal", DeliveryProtocol: controlprotocol.ExecutorProtocolV4,
+			TerminalStatus: controlprotocol.ExecutorStatusDone, ReportedStatus: "stopped",
+			ClaimGeneration: &claim, AdmissionProjectionState: "present",
+			Result: &CommandResult{RuntimeRef: projection.RuntimeRef, Admission: &projection},
+		}
+	}
+	if err := validateCommandAdmissionProjection(valid()); err != nil {
+		t.Fatalf("valid projection view: %v", err)
+	}
+	missing := valid()
+	missing.AdmissionProjectionState = "missing"
+	missing.Result.Admission = nil
+	if err := validateCommandAdmissionProjection(missing); err != nil {
+		t.Fatalf("detectable missing projection view: %v", err)
+	}
+
+	tests := map[string]func(*Command){
+		"projection without state": func(value *Command) { value.AdmissionProjectionState = "" },
+		"omitted missing state": func(value *Command) {
+			value.AdmissionProjectionState = ""
+			value.Result.Admission = nil
+		},
+		"unknown state":      func(value *Command) { value.AdmissionProjectionState = "unknown" },
+		"wrong command kind": func(value *Command) { value.CommandKind = "start" },
+		"wrong delivery protocol": func(value *Command) {
+			value.DeliveryProtocol = controlprotocol.ExecutorProtocolV3
+		},
+		"claim mismatch": func(value *Command) { *value.ClaimGeneration++ },
+		"runtime mismatch": func(value *Command) {
+			value.Result.RuntimeRef = "executor-" + strings.Repeat("e", 64)
+		},
+		"signed runtime mismatch": func(value *Command) {
+			value.SignedRuntimeRef = "executor-" + strings.Repeat("e", 64)
+		},
+		"signed generation mismatch": func(value *Command) { value.SignedInstanceGeneration++ },
+		"invalid projection":         func(value *Command) { value.Result.Admission.PolicyDigest = "invalid" },
+		"reported status":            func(value *Command) { value.ReportedStatus = "running" },
+		"missing payload":            func(value *Command) { value.Result.Admission = nil },
+		"missing state with payload": func(value *Command) {
+			value.AdmissionProjectionState = "missing"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid()
+			mutate(&candidate)
+			if err := validateCommandAdmissionProjection(candidate); err == nil {
+				t.Fatal("inconsistent admission projection view was accepted")
+			}
+		})
 	}
 }
 

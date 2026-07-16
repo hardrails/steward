@@ -22,11 +22,17 @@ import (
 )
 
 const (
-	stateFormatVersion       = 2
-	legacyStateFormatVersion = 1
-	transactionFormatVersion = 2
-	legacyTransactionVersion = 1
-	maxMutationsPerRecord    = 128
+	stateFormatMinReadVersion       = 1
+	stateFormatWriteVersion         = 3
+	stateFormatMaxReadVersion       = stateFormatWriteVersion
+	stateFormatEvidenceVersion      = 2
+	stateFormatExecutorV4Version    = 3
+	transactionFormatMinReadVersion = 1
+	transactionFormatWriteVersion   = 3
+	transactionFormatMaxReadVersion = transactionFormatWriteVersion
+	transactionEvidenceVersion      = 2
+	transactionExecutorV4Version    = 3
+	maxMutationsPerRecord           = 128
 )
 
 var (
@@ -164,23 +170,29 @@ const (
 )
 
 type TerminalReport struct {
-	Report      controlprotocol.ExecutorReportV3 `json:"report"`
-	Digest      string                           `json:"digest"`
-	CompletedAt string                           `json:"completed_at"`
+	Report      controlprotocol.ExecutorReportV3               `json:"report"`
+	Admission   *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
+	Digest      string                                         `json:"digest"`
+	CompletedAt string                                         `json:"completed_at"`
 }
 
 type Command struct {
-	TenantID           string          `json:"tenant_id"`
-	NodeID             string          `json:"node_id"`
-	ID                 string          `json:"id"`
-	DeliveryID         string          `json:"delivery_id"`
-	Digest             string          `json:"digest"`
-	CommandDSSE        []byte          `json:"command_dsse"`
-	State              CommandState    `json:"state"`
-	DeliveryGeneration uint64          `json:"delivery_generation"`
-	LeaseUntil         string          `json:"lease_until,omitempty"`
-	CreatedAt          string          `json:"created_at"`
-	Terminal           *TerminalReport `json:"terminal,omitempty"`
+	TenantID                 string          `json:"tenant_id"`
+	NodeID                   string          `json:"node_id"`
+	ID                       string          `json:"id"`
+	DeliveryID               string          `json:"delivery_id"`
+	Digest                   string          `json:"digest"`
+	CommandDSSE              []byte          `json:"command_dsse"`
+	CommandKind              string          `json:"-"`
+	SignedRuntimeRef         string          `json:"-"`
+	SignedClaimGeneration    uint64          `json:"-"`
+	SignedInstanceGeneration uint64          `json:"-"`
+	State                    CommandState    `json:"state"`
+	DeliveryProtocol         int             `json:"delivery_protocol,omitempty"`
+	DeliveryGeneration       uint64          `json:"delivery_generation"`
+	LeaseUntil               string          `json:"lease_until,omitempty"`
+	CreatedAt                string          `json:"created_at"`
+	Terminal                 *TerminalReport `json:"terminal,omitempty"`
 }
 
 type snapshotState struct {
@@ -234,6 +246,7 @@ type storedCommand struct {
 	Digest             string          `json:"digest"`
 	CommandDSSEBase64  string          `json:"command_dsse_base64"`
 	State              CommandState    `json:"state"`
+	DeliveryProtocol   int             `json:"delivery_protocol,omitempty"`
 	DeliveryGeneration uint64          `json:"delivery_generation"`
 	LeaseUntil         string          `json:"lease_until,omitempty"`
 	CreatedAt          string          `json:"created_at"`
@@ -338,9 +351,21 @@ func cloneCommand(command Command) Command {
 	command.CommandDSSE = append([]byte(nil), command.CommandDSSE...)
 	if command.Terminal != nil {
 		terminal := *command.Terminal
+		terminal.Admission = cloneAdmissionProjection(terminal.Admission)
 		command.Terminal = &terminal
 	}
 	return command
+}
+
+func cloneAdmissionProjection(projection *controlprotocol.ExecutorAdmissionProjectionV1) *controlprotocol.ExecutorAdmissionProjectionV1 {
+	if projection == nil {
+		return nil
+	}
+	cloned := *projection
+	cloned.TaskAuthorities = append([]controlprotocol.ExecutorTaskAuthorityV1(nil), projection.TaskAuthorities...)
+	cloned.EgressRouteIDs = copyStringSlice(projection.EgressRouteIDs)
+	cloned.ConnectorIDs = copyStringSlice(projection.ConnectorIDs)
+	return &cloned
 }
 
 func credentialToStored(credential controlauth.Credential) storedCredential {
@@ -397,28 +422,51 @@ func commandToStored(command Command) storedCommand {
 	stored := storedCommand{
 		TenantID: command.TenantID, NodeID: command.NodeID, ID: command.ID, DeliveryID: command.DeliveryID,
 		Digest: command.Digest, CommandDSSEBase64: base64.StdEncoding.EncodeToString(command.CommandDSSE),
-		State: command.State, DeliveryGeneration: command.DeliveryGeneration, LeaseUntil: command.LeaseUntil,
+		State: command.State, DeliveryProtocol: command.DeliveryProtocol,
+		DeliveryGeneration: command.DeliveryGeneration, LeaseUntil: command.LeaseUntil,
 		CreatedAt: command.CreatedAt,
 	}
 	if command.Terminal != nil {
 		terminal := *command.Terminal
+		terminal.Admission = cloneAdmissionProjection(terminal.Admission)
 		stored.Terminal = &terminal
 	}
 	return stored
 }
 
-func commandFromStored(stored storedCommand) (Command, error) {
+func commandFromStored(stored storedCommand, supportsExecutorV4 bool) (Command, error) {
 	raw, err := decodeCanonicalBase64(stored.CommandDSSEBase64)
 	if err != nil {
 		return Command{}, err
 	}
+	binding, err := parseCommandBinding(raw)
+	if err != nil {
+		return Command{}, fmt.Errorf("parse signed command binding: %w", err)
+	}
+	binding = retainedCommandBinding(binding)
+	deliveryProtocol := stored.DeliveryProtocol
+	if !supportsExecutorV4 {
+		if stored.DeliveryProtocol != 0 ||
+			stored.Terminal != nil && (stored.Terminal.Report.ProtocolVersion != controlprotocol.ExecutorProtocolV3 ||
+				stored.Terminal.Admission != nil) {
+			return Command{}, errors.New("legacy command contains protocol-4 delivery state")
+		}
+		if stored.State == CommandLeased || stored.State == CommandTerminal {
+			deliveryProtocol = controlprotocol.ExecutorProtocolV3
+		}
+	}
 	command := Command{
 		TenantID: stored.TenantID, NodeID: stored.NodeID, ID: stored.ID, DeliveryID: stored.DeliveryID,
-		Digest: stored.Digest, CommandDSSE: raw, State: stored.State,
+		Digest: stored.Digest, CommandDSSE: raw,
+		CommandKind: binding.Kind, SignedRuntimeRef: binding.RuntimeRef,
+		SignedClaimGeneration:    binding.ClaimGeneration,
+		SignedInstanceGeneration: binding.InstanceGeneration,
+		State:                    stored.State, DeliveryProtocol: deliveryProtocol,
 		DeliveryGeneration: stored.DeliveryGeneration, LeaseUntil: stored.LeaseUntil, CreatedAt: stored.CreatedAt,
 	}
 	if stored.Terminal != nil {
 		terminal := *stored.Terminal
+		terminal.Admission = cloneAdmissionProjection(stored.Terminal.Admission)
 		command.Terminal = &terminal
 	}
 	return command, nil
@@ -437,7 +485,7 @@ func decodeCanonicalBase64(value string) ([]byte, error) {
 
 func encodeState(current state, limit int) ([]byte, error) {
 	snapshot := snapshotState{
-		Version: stateFormatVersion, Tenants: []Tenant{}, Nodes: []Node{}, Credentials: []storedCredential{},
+		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Nodes: []Node{}, Credentials: []storedCredential{},
 		Enrollments: []storedEnrollment{}, Commands: []storedCommand{},
 	}
 	for _, tenant := range current.tenants {
@@ -487,7 +535,8 @@ func decodeState(raw []byte, limit int) (state, error) {
 	if err := dsse.DecodeStrictInto(raw, limit, &snapshot); err != nil {
 		return state{}, err
 	}
-	if snapshot.Version != stateFormatVersion && snapshot.Version != legacyStateFormatVersion || snapshot.Tenants == nil || snapshot.Nodes == nil ||
+	if snapshot.Version < stateFormatMinReadVersion || snapshot.Version > stateFormatMaxReadVersion ||
+		snapshot.Tenants == nil || snapshot.Nodes == nil ||
 		snapshot.Credentials == nil || snapshot.Enrollments == nil || snapshot.Commands == nil {
 		return state{}, errors.New("control snapshot has an invalid version or missing collection")
 	}
@@ -504,7 +553,7 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
 		node.Capabilities = copyStringSlice(node.Capabilities)
-		if snapshot.Version == legacyStateFormatVersion && node.Evidence != nil {
+		if snapshot.Version < stateFormatEvidenceVersion && node.Evidence != nil {
 			return state{}, errors.New("legacy control snapshot contains evidence witness state")
 		}
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
@@ -531,7 +580,7 @@ func decodeState(raw []byte, limit int) (state, error) {
 		current.enrollments[enrollment.ID] = enrollment
 	}
 	for _, stored := range snapshot.Commands {
-		command, err := commandFromStored(stored)
+		command, err := commandFromStored(stored, snapshot.Version >= stateFormatExecutorV4Version)
 		if err != nil {
 			return state{}, fmt.Errorf("control snapshot command encoding: %w", err)
 		}
@@ -548,7 +597,7 @@ func encodeTransaction(mutations ...mutation) ([]byte, error) {
 	if len(mutations) == 0 || len(mutations) > maxMutationsPerRecord {
 		return nil, errors.New("control transaction mutation count is invalid")
 	}
-	return json.Marshal(transaction{Version: transactionFormatVersion, Mutations: mutations})
+	return json.Marshal(transaction{Version: transactionFormatWriteVersion, Mutations: mutations})
 }
 
 func decodeTransaction(raw []byte, limit int) (transaction, error) {
@@ -556,7 +605,7 @@ func decodeTransaction(raw []byte, limit int) (transaction, error) {
 	if err := dsse.DecodeStrictInto(raw, limit, &value); err != nil {
 		return transaction{}, err
 	}
-	if value.Version != transactionFormatVersion && value.Version != legacyTransactionVersion ||
+	if value.Version < transactionFormatMinReadVersion || value.Version > transactionFormatMaxReadVersion ||
 		len(value.Mutations) == 0 || len(value.Mutations) > maxMutationsPerRecord {
 		return transaction{}, errors.New("control transaction has invalid version or mutation count")
 	}
@@ -605,7 +654,7 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("node mutation is missing node")
 			}
 			node := *change.Node
-			if value.Version == legacyTransactionVersion && node.Evidence != nil {
+			if value.Version < transactionEvidenceVersion && node.Evidence != nil {
 				return state{}, errors.New("legacy control transaction contains evidence witness state")
 			}
 			node.TenantIDs = append([]string(nil), change.Node.TenantIDs...)
@@ -634,7 +683,7 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if change.Command == nil {
 				return state{}, errors.New("command mutation is missing command")
 			}
-			command, err := commandFromStored(*change.Command)
+			command, err := commandFromStored(*change.Command, value.Version >= transactionExecutorV4Version)
 			if err != nil {
 				return state{}, fmt.Errorf("command mutation encoding: %w", err)
 			}
@@ -940,21 +989,30 @@ func validSHA256Digest(value string) bool {
 
 func validateCommand(command Command, limits Limits) error {
 	expectedDeliveryID, deliveryIDError := controlprotocol.ExecutorDeliveryID(command.TenantID, command.NodeID, command.ID)
+	binding, bindingError := parseCommandBinding(command.CommandDSSE)
+	binding = retainedCommandBinding(binding)
 	if !validRecordID(command.TenantID, 128) || !validRecordID(command.NodeID, 128) ||
 		!validRecordID(command.ID, 256) || !validRecordID(command.DeliveryID, 256) ||
 		deliveryIDError != nil || command.DeliveryID != expectedDeliveryID ||
 		len(command.CommandDSSE) == 0 || len(command.CommandDSSE) > limits.MaxCommandBytes ||
-		command.Digest != digestBytes(command.CommandDSSE) || !validTimestamp(command.CreatedAt) {
+		command.Digest != digestBytes(command.CommandDSSE) || !validTimestamp(command.CreatedAt) ||
+		bindingError != nil || binding.CommandID != command.ID ||
+		binding.TenantID != command.TenantID || binding.NodeID != command.NodeID ||
+		binding.Kind != command.CommandKind || binding.RuntimeRef != command.SignedRuntimeRef ||
+		binding.ClaimGeneration != command.SignedClaimGeneration ||
+		binding.InstanceGeneration != command.SignedInstanceGeneration {
 		return errors.New("invalid command identity or bytes")
 	}
 	created, _ := parseTimestamp(command.CreatedAt)
 	switch command.State {
 	case CommandPending:
-		if command.DeliveryGeneration != 0 || command.LeaseUntil != "" || command.Terminal != nil {
+		if command.DeliveryProtocol != 0 || command.DeliveryGeneration != 0 ||
+			command.LeaseUntil != "" || command.Terminal != nil {
 			return errors.New("pending command contains delivery state")
 		}
 	case CommandLeased:
-		if command.DeliveryGeneration == 0 || !validTimestamp(command.LeaseUntil) || command.Terminal != nil {
+		if !validExecutorDeliveryProtocol(command.DeliveryProtocol) ||
+			command.DeliveryGeneration == 0 || !validTimestamp(command.LeaseUntil) || command.Terminal != nil {
 			return errors.New("leased command has invalid delivery state")
 		}
 		leaseUntil, _ := parseTimestamp(command.LeaseUntil)
@@ -962,19 +1020,26 @@ func validateCommand(command Command, limits Limits) error {
 			return errors.New("command lease does not follow submission")
 		}
 	case CommandTerminal:
-		if command.DeliveryGeneration == 0 || command.LeaseUntil != "" || command.Terminal == nil {
+		if !validExecutorDeliveryProtocol(command.DeliveryProtocol) ||
+			command.DeliveryGeneration == 0 || command.LeaseUntil != "" || command.Terminal == nil {
 			return errors.New("terminal command has invalid delivery state")
 		}
-		if err := command.Terminal.Report.Validate(); err != nil ||
+		if command.Terminal.Report.ProtocolVersion != command.DeliveryProtocol ||
 			command.Terminal.Report.DeliveryID != command.DeliveryID ||
 			command.Terminal.Report.DeliveryGeneration != command.DeliveryGeneration ||
 			command.Terminal.Report.CommandID != command.ID ||
 			command.Terminal.Report.CommandDigest != command.Digest || !validTimestamp(command.Terminal.CompletedAt) {
 			return errors.New("terminal report does not bind the command")
 		}
-		raw, err := json.Marshal(command.Terminal.Report)
+		raw, err := terminalReportBytes(*command.Terminal)
 		if err != nil || len(raw) > limits.MaxReportBytes || command.Terminal.Digest != digestBytes(raw) {
 			return errors.New("terminal report digest or size is invalid")
+		}
+		if command.DeliveryProtocol == controlprotocol.ExecutorProtocolV4 {
+			report := executorReportV4FromTerminal(*command.Terminal)
+			if err := validateExecutorReportV4Binding(command, report); err != nil {
+				return errors.New("terminal protocol-4 report contradicts its signed command")
+			}
 		}
 		completed, _ := parseTimestamp(command.Terminal.CompletedAt)
 		if completed.Before(created) {
@@ -982,6 +1047,72 @@ func validateCommand(command Command, limits Limits) error {
 		}
 	default:
 		return errors.New("command state is invalid")
+	}
+	return nil
+}
+
+func validExecutorDeliveryProtocol(version int) bool {
+	return version == controlprotocol.ExecutorProtocolV3 || version == controlprotocol.ExecutorProtocolV4
+}
+
+func terminalReportBytes(terminal TerminalReport) ([]byte, error) {
+	switch terminal.Report.ProtocolVersion {
+	case controlprotocol.ExecutorProtocolV3:
+		if terminal.Admission != nil {
+			return nil, errors.New("protocol-3 terminal report contains an admission projection")
+		}
+		if err := terminal.Report.Validate(); err != nil {
+			return nil, err
+		}
+		return json.Marshal(terminal.Report)
+	case controlprotocol.ExecutorProtocolV4:
+		report := executorReportV4FromTerminal(terminal)
+		if err := report.Validate(); err != nil {
+			return nil, err
+		}
+		return json.Marshal(report)
+	default:
+		return nil, errors.New("terminal report protocol is unsupported")
+	}
+}
+
+func executorReportV4FromTerminal(terminal TerminalReport) controlprotocol.ExecutorReportV4 {
+	report := terminal.Report
+	return controlprotocol.ExecutorReportV4{
+		ProtocolVersion:    controlprotocol.ExecutorProtocolV4,
+		DeliveryID:         report.DeliveryID,
+		DeliveryGeneration: report.DeliveryGeneration,
+		CommandID:          report.CommandID,
+		CommandDigest:      report.CommandDigest,
+		Status:             report.Status,
+		ReportedStatus:     report.ReportedStatus,
+		ClaimGeneration:    report.ClaimGeneration,
+		ErrorCode:          report.ErrorCode,
+		Result: controlprotocol.ExecutorReportResultV4{
+			RuntimeRef: report.Result.RuntimeRef,
+			Error:      report.Result.Error,
+			Replayed:   report.Result.Replayed,
+			Absent:     report.Result.Absent,
+			Admission:  cloneAdmissionProjection(terminal.Admission),
+		},
+	}
+}
+
+func validateExecutorReportV4Binding(command Command, report controlprotocol.ExecutorReportV4) error {
+	if report.ClaimGeneration != 0 && report.ClaimGeneration != command.SignedClaimGeneration {
+		return errors.New("report claim generation differs from signed command")
+	}
+	if report.Result.Admission != nil {
+		if command.CommandKind != "admit" ||
+			report.ClaimGeneration != command.SignedClaimGeneration ||
+			report.Result.Admission.RuntimeRef != command.SignedRuntimeRef ||
+			report.Result.Admission.Generation != command.SignedInstanceGeneration {
+			return errors.New("admission projection differs from signed admit command")
+		}
+	}
+	if command.CommandKind == "admit" && report.Status == controlprotocol.ExecutorStatusDone &&
+		report.Result.RuntimeRef != "" && report.Result.RuntimeRef != command.SignedRuntimeRef {
+		return errors.New("successful admit runtime differs from signed command")
 	}
 	return nil
 }
@@ -1087,6 +1218,10 @@ func validRecordID(value string, limit int) bool {
 	return true
 }
 
+func boundedRetainedText(value string, limit int) bool {
+	return len(value) <= limit && utf8.ValidString(value) && !strings.ContainsAny(value, "\r\n\x00")
+}
+
 func canonicalTimestamp(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
 
 func validTimestamp(value string) bool {
@@ -1102,6 +1237,14 @@ func parseTimestamp(value string) (time.Time, error) {
 }
 
 func reportDigest(report controlprotocol.ExecutorReportV3) (string, []byte, error) {
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return "", nil, err
+	}
+	return digestBytes(raw), raw, nil
+}
+
+func reportDigestV4(report controlprotocol.ExecutorReportV4) (string, []byte, error) {
 	raw, err := json.Marshal(report)
 	if err != nil {
 		return "", nil, err

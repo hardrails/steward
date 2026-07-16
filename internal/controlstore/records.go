@@ -706,13 +706,14 @@ func (store *Store) SubmitCommand(actor controlauth.Identity, tenantID, nodeID s
 	if now.IsZero() || len(commandDSSE) == 0 || len(commandDSSE) > store.limits.MaxCommandBytes {
 		return Command{}, false, invalid("command bytes or submission time are invalid")
 	}
-	commandID, signedTenant, signedNode, err := parseCommandIdentity(commandDSSE)
+	binding, err := parseCommandBindingForSubmission(commandDSSE)
 	if err != nil {
 		return Command{}, false, invalidError("parse command DSSE", err)
 	}
-	if signedTenant != tenantID || signedNode != nodeID {
+	if binding.TenantID != tenantID || binding.NodeID != nodeID {
 		return Command{}, false, invalid("signed command identity does not match its route")
 	}
+	commandID := binding.CommandID
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
@@ -740,7 +741,10 @@ func (store *Store) SubmitCommand(actor controlauth.Identity, tenantID, nodeID s
 	command := Command{
 		TenantID: tenantID, NodeID: nodeID, ID: commandID, DeliveryID: deliveryID(tenantID, nodeID, commandID),
 		Digest: digestBytes(commandDSSE), CommandDSSE: append([]byte(nil), commandDSSE...),
-		State: CommandPending, CreatedAt: canonicalTimestamp(now),
+		CommandKind: binding.Kind, SignedRuntimeRef: binding.RuntimeRef,
+		SignedClaimGeneration:    binding.ClaimGeneration,
+		SignedInstanceGeneration: binding.InstanceGeneration,
+		State:                    CommandPending, CreatedAt: canonicalTimestamp(now),
 	}
 	if _, err := deliveryFor(command, 1); err != nil {
 		return Command{}, false, invalidError("command cannot fit one Executor delivery", err)
@@ -793,11 +797,35 @@ func (store *Store) GetCommand(actor controlauth.Identity, tenantID, nodeID, com
 // Poll claims pending or expired-leased commands in deterministic order. The
 // exact encoded response is capped before any lease is persisted.
 func (store *Store) Poll(identity controlauth.NodeIdentity, capabilities []string, now time.Time, lease time.Duration, max int) ([]controlprotocol.ExecutorDeliveryV3, error) {
+	return store.poll(identity, capabilities, now, lease, max, controlprotocol.ExecutorProtocolV3)
+}
+
+// PollV4 claims the same signed command records as Poll while durably fencing
+// the lease to protocol 4 and returning the distinct immutable v4 delivery
+// type. A later report from another protocol cannot close this generation.
+func (store *Store) PollV4(identity controlauth.NodeIdentity, capabilities []string, now time.Time, lease time.Duration, max int) ([]controlprotocol.ExecutorDeliveryV4, error) {
+	deliveries, err := store.poll(identity, capabilities, now, lease, max, controlprotocol.ExecutorProtocolV4)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]controlprotocol.ExecutorDeliveryV4, 0, len(deliveries))
+	for _, delivery := range deliveries {
+		result = append(result, controlprotocol.ExecutorDeliveryV4{
+			DeliveryID: delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
+			CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
+			CommandDSSEBase64: delivery.CommandDSSEBase64,
+		})
+	}
+	return result, nil
+}
+
+func (store *Store) poll(identity controlauth.NodeIdentity, capabilities []string, now time.Time, lease time.Duration, max, protocolVersion int) ([]controlprotocol.ExecutorDeliveryV3, error) {
 	if store == nil {
 		return nil, ErrUnavailable
 	}
 	canonical, err := canonicalCapabilities(capabilities)
 	if err != nil || now.IsZero() || lease <= 0 || lease > MaxDeliveryLease || max <= 0 || max > controlprotocol.MaxExecutorDeliveries ||
+		!validExecutorDeliveryProtocol(protocolVersion) ||
 		identity.Audience != "executor" || !validRecordID(identity.NodeID, 128) || !validTenantSet(identity.TenantIDs) {
 		return nil, invalid("poll identity, capabilities, lease, or batch size is invalid")
 	}
@@ -858,6 +886,7 @@ func (store *Store) Poll(identity controlauth.NodeIdentity, capabilities []strin
 			return nil, invalid("poll time precedes command submission")
 		}
 		candidate.State = CommandLeased
+		candidate.DeliveryProtocol = protocolVersion
 		candidate.DeliveryGeneration++
 		candidate.LeaseUntil = canonicalTimestamp(now.Add(lease))
 		delivery, err := deliveryFor(candidate, candidate.DeliveryGeneration)
@@ -868,7 +897,7 @@ func (store *Store) Poll(identity controlauth.NodeIdentity, capabilities []strin
 			break
 		}
 		tentativeDeliveries := append(append([]controlprotocol.ExecutorDeliveryV3(nil), deliveries...), delivery)
-		if !pollResponseFits(tentativeDeliveries) {
+		if !pollResponseFits(tentativeDeliveries, protocolVersion) {
 			if len(deliveries) == 0 && len(mutations) == 0 {
 				return nil, ErrCapacityExceeded
 			}
@@ -889,10 +918,9 @@ func (store *Store) Poll(identity controlauth.NodeIdentity, capabilities []strin
 			return nil, err
 		}
 	}
-	// deliveries is initialized as a non-nil empty slice because the v3 wire
-	// contract requires `deliveries:[]` on an idle poll. Returning an append to a
-	// nil slice would collapse that distinction and encode JSON null, which the
-	// node correctly rejects as a malformed poll response.
+	// deliveries is initialized as a non-nil empty slice because both wire
+	// versions require `deliveries:[]` on an idle poll. Returning an append to a
+	// nil slice would collapse that distinction and encode JSON null.
 	return deliveries, nil
 }
 
@@ -948,6 +976,9 @@ func (store *Store) ApplyReport(identity controlauth.NodeIdentity, report contro
 	if report.DeliveryGeneration > command.DeliveryGeneration {
 		return false, ErrConflict
 	}
+	if command.DeliveryProtocol != controlprotocol.ExecutorProtocolV3 {
+		return false, ErrConflict
+	}
 	if command.State == CommandTerminal {
 		if command.Terminal != nil && command.Terminal.Digest == digest {
 			return false, nil
@@ -964,6 +995,112 @@ func (store *Store) ApplyReport(identity controlauth.NodeIdentity, report contro
 		return false, err
 	}
 	return true, nil
+}
+
+// ApplyReportV4 closes only a protocol-4 lease generation. The controller
+// retains the complete bounded admission projection, but treats it as a node
+// observation: it must correlate to the exact stored signed admit command and
+// never creates authority that was absent from the report.
+func (store *Store) ApplyReportV4(identity controlauth.NodeIdentity, report controlprotocol.ExecutorReportV4, now time.Time) (bool, error) {
+	if store == nil {
+		return false, ErrUnavailable
+	}
+	if now.IsZero() || report.Validate() != nil || identity.Audience != "executor" ||
+		!validRecordID(identity.NodeID, 128) || !validTenantSet(identity.TenantIDs) {
+		return false, invalid("report or node identity is invalid")
+	}
+	digest, raw, err := reportDigestV4(report)
+	if err != nil {
+		return false, err
+	}
+	if len(raw) > controlprotocol.MaxExecutorReportBytes || len(raw) > store.limits.MaxReportBytes {
+		return false, invalid("report exceeds the configured size limit")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return false, err
+	}
+	if err := store.revalidateNodeLocked(identity); err != nil {
+		return false, err
+	}
+	node, ok := store.current.nodes[identity.NodeID]
+	if !ok || !node.Active || !tenantSubset(identity.TenantIDs, node.TenantIDs) {
+		return false, ErrNotFound
+	}
+	key := ""
+	var command Command
+	for candidateKey, candidate := range store.current.commands {
+		if candidate.NodeID == identity.NodeID && candidate.ID == report.CommandID &&
+			candidate.DeliveryID == report.DeliveryID &&
+			controlauth.NodeAuthorizedTenant(identity, candidate.TenantID) {
+			key, command = candidateKey, cloneCommand(candidate)
+			break
+		}
+	}
+	if key == "" {
+		return false, ErrNotFound
+	}
+	if report.CommandDigest != command.Digest {
+		return false, ErrConflict
+	}
+	created, _ := parseTimestamp(command.CreatedAt)
+	if now.Before(created) {
+		return false, invalid("report time precedes command submission")
+	}
+	if report.DeliveryGeneration < command.DeliveryGeneration {
+		return false, nil
+	}
+	if report.DeliveryGeneration > command.DeliveryGeneration {
+		return false, ErrConflict
+	}
+	if command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 {
+		return false, ErrConflict
+	}
+	if err := validateExecutorReportV4Binding(command, report); err != nil {
+		return false, ErrConflict
+	}
+	if command.State == CommandTerminal {
+		if command.Terminal != nil && command.Terminal.Digest == digest {
+			return false, nil
+		}
+		return false, ErrConflict
+	}
+	if command.State != CommandLeased {
+		return false, ErrConflict
+	}
+	command.State = CommandTerminal
+	command.LeaseUntil = ""
+	command.Terminal = terminalReportFromV4(report, digest, now)
+	if err := store.applyMutationsLocked(commandMutation(command)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func terminalReportFromV4(report controlprotocol.ExecutorReportV4, digest string, completedAt time.Time) *TerminalReport {
+	return &TerminalReport{
+		Report: controlprotocol.ExecutorReportV3{
+			ProtocolVersion:    controlprotocol.ExecutorProtocolV4,
+			DeliveryID:         report.DeliveryID,
+			DeliveryGeneration: report.DeliveryGeneration,
+			CommandID:          report.CommandID,
+			CommandDigest:      report.CommandDigest,
+			Status:             report.Status,
+			ReportedStatus:     report.ReportedStatus,
+			ClaimGeneration:    report.ClaimGeneration,
+			ErrorCode:          report.ErrorCode,
+			Result: controlprotocol.ExecutorReportResultV3{
+				RuntimeRef: report.Result.RuntimeRef,
+				Error:      report.Result.Error,
+				Replayed:   report.Result.Replayed,
+				Absent:     report.Result.Absent,
+			},
+		},
+		Admission:   cloneAdmissionProjection(report.Result.Admission),
+		Digest:      digest,
+		CompletedAt: canonicalTimestamp(completedAt),
+	}
 }
 
 func (store *Store) reclaimExpiredEnrollmentsLocked(now time.Time, reserve int) error {
@@ -1034,27 +1171,76 @@ func prunePriority(command Command, tenantID, nodeID string) int {
 	return 2
 }
 
-func parseCommandIdentity(raw []byte) (string, string, string, error) {
+type commandBinding struct {
+	CommandID          string
+	TenantID           string
+	NodeID             string
+	RuntimeRef         string
+	Kind               string
+	ClaimGeneration    uint64
+	InstanceGeneration uint64
+}
+
+func parseCommandBinding(raw []byte) (commandBinding, error) {
 	envelope, err := dsse.Parse(raw)
 	if err != nil {
-		return "", "", "", err
+		return commandBinding{}, err
 	}
 	if envelope.PayloadType != admission.CommandPayloadType {
-		return "", "", "", errors.New("DSSE payload type is not an Executor command")
+		return commandBinding{}, errors.New("DSSE payload type is not an Executor command")
 	}
 	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
 	if err != nil || len(payload) == 0 || len(payload) > dsse.MaxPayloadBytes || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
-		return "", "", "", errors.New("DSSE payload encoding is invalid")
+		return commandBinding{}, errors.New("DSSE payload encoding is invalid")
 	}
 	var statement admission.CommandStatement
 	if err := dsse.DecodeStrictInto(payload, dsse.MaxPayloadBytes, &statement); err != nil {
-		return "", "", "", err
+		return commandBinding{}, err
 	}
 	if statement.SchemaVersion != admission.CommandSchemaV2 || !validRecordID(statement.CommandID, 256) ||
 		!validRecordID(statement.TenantID, 128) || !validRecordID(statement.NodeID, 128) {
-		return "", "", "", errors.New("signed command identity is invalid")
+		return commandBinding{}, errors.New("signed command identity is invalid")
 	}
-	return statement.CommandID, statement.TenantID, statement.NodeID, nil
+	return commandBinding{
+		CommandID: statement.CommandID, TenantID: statement.TenantID, NodeID: statement.NodeID,
+		RuntimeRef: statement.RuntimeRef, Kind: statement.Kind,
+		ClaimGeneration: statement.ClaimGeneration, InstanceGeneration: statement.InstanceGeneration,
+	}, nil
+}
+
+func parseCommandBindingForSubmission(raw []byte) (commandBinding, error) {
+	binding, err := parseCommandBinding(raw)
+	if err != nil {
+		return commandBinding{}, err
+	}
+	if !boundedRetainedText(binding.RuntimeRef, 1024) ||
+		!boundedRetainedText(binding.Kind, 64) {
+		return commandBinding{}, errors.New("signed command metadata is invalid")
+	}
+	return binding, nil
+}
+
+// retainedCommandBinding projects only bounded metadata into controller state.
+// Releases before format 3 accepted signed commands without bounding these two
+// fields. Recovery must keep those commands available for protocol-3 delivery,
+// but unsafe legacy metadata is deliberately not promoted into the controller's
+// protocol-4 correlation surface.
+func retainedCommandBinding(binding commandBinding) commandBinding {
+	if !boundedRetainedText(binding.RuntimeRef, 1024) {
+		binding.RuntimeRef = ""
+	}
+	if !boundedRetainedText(binding.Kind, 64) {
+		binding.Kind = ""
+	}
+	return binding
+}
+
+func parseCommandIdentity(raw []byte) (string, string, string, error) {
+	binding, err := parseCommandBinding(raw)
+	if err != nil {
+		return "", "", "", err
+	}
+	return binding.CommandID, binding.TenantID, binding.NodeID, nil
 }
 
 func deliveryFor(command Command, generation uint64) (controlprotocol.ExecutorDeliveryV3, error) {
@@ -1065,13 +1251,13 @@ func deliveryFor(command Command, generation uint64) (controlprotocol.ExecutorDe
 	if err := delivery.Validate(); err != nil {
 		return controlprotocol.ExecutorDeliveryV3{}, err
 	}
-	if !pollResponseFits([]controlprotocol.ExecutorDeliveryV3{delivery}) {
+	if !pollResponseFits([]controlprotocol.ExecutorDeliveryV3{delivery}, controlprotocol.ExecutorProtocolV3) {
 		return controlprotocol.ExecutorDeliveryV3{}, errors.New("single delivery exceeds the poll response cap")
 	}
 	return delivery, nil
 }
 
-func pollResponseFits(deliveries []controlprotocol.ExecutorDeliveryV3) bool {
+func pollResponseFits(deliveries []controlprotocol.ExecutorDeliveryV3, protocolVersion int) bool {
 	rawDeliveries := make([]json.RawMessage, 0, len(deliveries))
 	for _, delivery := range deliveries {
 		raw, err := json.Marshal(delivery)
@@ -1080,9 +1266,20 @@ func pollResponseFits(deliveries []controlprotocol.ExecutorDeliveryV3) bool {
 		}
 		rawDeliveries = append(rawDeliveries, raw)
 	}
-	raw, err := json.Marshal(controlprotocol.ExecutorPollResponseV3{
-		ProtocolVersion: controlprotocol.ExecutorProtocolV3, Deliveries: rawDeliveries,
-	})
+	var raw []byte
+	var err error
+	switch protocolVersion {
+	case controlprotocol.ExecutorProtocolV3:
+		raw, err = json.Marshal(controlprotocol.ExecutorPollResponseV3{
+			ProtocolVersion: controlprotocol.ExecutorProtocolV3, Deliveries: rawDeliveries,
+		})
+	case controlprotocol.ExecutorProtocolV4:
+		raw, err = json.Marshal(controlprotocol.ExecutorPollResponseV4{
+			ProtocolVersion: controlprotocol.ExecutorProtocolV4, Deliveries: rawDeliveries,
+		})
+	default:
+		return false
+	}
 	// controlplane.writeJSON uses Encoder.Encode, which appends one newline.
 	return err == nil && len(raw)+1 <= maxPollResponseBytes
 }

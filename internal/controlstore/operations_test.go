@@ -530,6 +530,7 @@ func operationsSetCommandState(
 	switch state {
 	case CommandLeased:
 		command.State = CommandLeased
+		command.DeliveryProtocol = controlprotocol.ExecutorProtocolV3
 		command.DeliveryGeneration = 1
 		command.LeaseUntil = canonicalTimestamp(at)
 	case CommandTerminal:
@@ -544,6 +545,7 @@ func operationsSetCommandState(
 			t.Fatal(err)
 		}
 		command.State = CommandTerminal
+		command.DeliveryProtocol = controlprotocol.ExecutorProtocolV3
 		command.DeliveryGeneration = 1
 		command.LeaseUntil = ""
 		command.Terminal = &TerminalReport{
