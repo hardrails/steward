@@ -64,6 +64,12 @@ type EvidencePublisher struct {
 	public               ed25519.PublicKey
 	epoch                uint64
 	security             stewarduplink.CredentialSecurity
+	wait                 func(context.Context, time.Duration) bool
+}
+
+type evidencePublishResult struct {
+	applied  bool
+	caughtUp bool
 }
 
 func NewEvidencePublisher(cfg EvidencePublisherConfig) (*EvidencePublisher, error) {
@@ -132,6 +138,7 @@ func NewEvidencePublisher(cfg EvidencePublisherConfig) (*EvidencePublisher, erro
 		interval: cfg.PollInterval, client: client, logger: logger, log: cfg.Log,
 		private: append(ed25519.PrivateKey(nil), cfg.PrivateKey...),
 		public:  append(ed25519.PublicKey(nil), public...), epoch: local.Epoch, security: security,
+		wait: waitForEvidencePublish,
 	}, nil
 }
 
@@ -141,7 +148,7 @@ func NewEvidencePublisher(cfg EvidencePublisherConfig) (*EvidencePublisher, erro
 func (publisher *EvidencePublisher) Run(ctx context.Context) {
 	failures := 0
 	for {
-		applied, err := publisher.publishOnce(ctx)
+		result, err := publisher.publishOnceState(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -149,10 +156,13 @@ func (publisher *EvidencePublisher) Run(ctx context.Context) {
 			failures++
 			publisher.logger.Warn("executor evidence publish failed", "error", err, "failures", failures)
 		} else {
-			if applied {
+			if result.applied {
 				publisher.logger.Info("executor evidence checkpoint advanced")
 			}
 			failures = 0
+			if !result.caughtUp {
+				continue
+			}
 		}
 		wait := publisher.interval
 		for index := 0; index < failures && wait < maxBackoff; index++ {
@@ -161,24 +171,36 @@ func (publisher *EvidencePublisher) Run(ctx context.Context) {
 				wait = maxBackoff
 			}
 		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !publisher.wait(ctx, wait) {
 			return
-		case <-timer.C:
 		}
 	}
 }
 
+func waitForEvidencePublish(ctx context.Context, wait time.Duration) bool {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func (publisher *EvidencePublisher) publishOnce(ctx context.Context) (bool, error) {
+	result, err := publisher.publishOnceState(ctx)
+	return result.applied, err
+}
+
+func (publisher *EvidencePublisher) publishOnceState(ctx context.Context) (evidencePublishResult, error) {
 	credential, err := stewarduplink.LoadCredentialWithSecurity(publisher.credentialPath, publisher.security)
 	if err != nil {
-		return false, err
+		return evidencePublishResult{}, err
 	}
 	if credential.Version != publisher.expectedVersion || credential.Scope != publisher.expectedScope ||
 		credential.TenantID != publisher.expectedTenantID || credential.NodeID != publisher.expectedNodeID {
-		return false, errors.New("rotated evidence credential changed version, scope, tenant_id, or node_id")
+		return evidencePublishResult{}, errors.New("rotated evidence credential changed version, scope, tenant_id, or node_id")
 	}
 	poll := controlprotocol.ExecutorEvidencePollRequestV1{
 		ProtocolVersion:      controlprotocol.ExecutorEvidenceProtocolV1,
@@ -193,38 +215,40 @@ func (publisher *EvidencePublisher) publishOnce(ctx context.Context) (bool, erro
 		pollResponse = decoded
 		return err
 	}); err != nil {
-		return false, fmt.Errorf("poll evidence checkpoint: %w", err)
+		return evidencePublishResult{}, fmt.Errorf("poll evidence checkpoint: %w", err)
 	}
 	if err := publisher.validateStatusIdentity(pollResponse.Status); err != nil {
-		return false, err
+		return evidencePublishResult{}, err
 	}
 	if pollResponse.Status.Finding != nil {
-		return false, ErrEvidenceDivergence
+		return evidencePublishResult{}, ErrEvidenceDivergence
 	}
 	if pollResponse.Status.Head == nil {
-		return false, errors.New("controller has not enrolled this Executor evidence identity")
+		return evidencePublishResult{}, errors.New("controller has not enrolled this Executor evidence identity")
 	}
 	controllerCoordinate, err := evidenceCoordinate(*pollResponse.Status.Head)
 	if err != nil {
-		return false, err
+		return evidencePublishResult{}, err
 	}
 	var reportedHead evidence.Head
 	var frames [][]byte
+	more := false
 	delta, err := publisher.log.ExportDelta(controllerCoordinate)
 	switch {
 	case err == nil:
 		frames = delta.Frames
 		reportedHead = delta.Head
+		more = delta.More
 	case errors.Is(err, evidence.ErrDeltaCoordinate):
 		// The signed empty report below authenticates the actual local head. It
 		// cannot advance controller state but can durably expose rollback/fork.
 		frames = nil
 		reportedHead, err = publisher.log.CurrentHead()
 		if err != nil {
-			return false, err
+			return evidencePublishResult{}, err
 		}
 	default:
-		return false, fmt.Errorf("export Executor evidence delta: %w", err)
+		return evidencePublishResult{}, fmt.Errorf("export Executor evidence delta: %w", err)
 	}
 	reported := executorEvidenceProtocolHead(reportedHead, publisher.public)
 	claim, err := controlprotocol.NewExecutorEvidenceHeadClaimV1(
@@ -232,11 +256,11 @@ func (publisher *EvidencePublisher) publishOnce(ctx context.Context) (bool, erro
 		*pollResponse.Status.Head, reported, pollResponse.Challenge, frames, publisher.public,
 	)
 	if err != nil {
-		return false, err
+		return evidencePublishResult{}, err
 	}
 	proof, err := controlprotocol.SignExecutorEvidenceHeadClaimV1(claim, publisher.private)
 	if err != nil {
-		return false, err
+		return evidencePublishResult{}, err
 	}
 	report := controlprotocol.ExecutorEvidenceReportV1{
 		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1, HeadProof: proof,
@@ -248,12 +272,19 @@ func (publisher *EvidencePublisher) publishOnce(ctx context.Context) (bool, erro
 		reportResponse = decoded
 		return err
 	}); err != nil {
-		return false, fmt.Errorf("report evidence checkpoint: %w", err)
+		return evidencePublishResult{}, fmt.Errorf("report evidence checkpoint: %w", err)
 	}
 	if err := publisher.validateReportResponse(reportResponse, reported, len(frames)); err != nil {
-		return false, err
+		return evidencePublishResult{}, err
 	}
-	return reportResponse.Applied, nil
+	if !more {
+		current, err := publisher.log.CurrentHead()
+		if err != nil {
+			return evidencePublishResult{}, err
+		}
+		more = current.Sequence != reportedHead.Sequence || current.ChainHash != reportedHead.ChainHash
+	}
+	return evidencePublishResult{applied: reportResponse.Applied, caughtUp: !more}, nil
 }
 
 func (publisher *EvidencePublisher) exchange(

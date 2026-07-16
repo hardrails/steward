@@ -35,6 +35,15 @@ trusted execution environment (TEE), or external checkpoint, a hostile host root
 user can replace the key, log, and software together. Receipts are tamper-evident
 only within the documented node trust boundary.
 
+Steward fully verifies the receipt chain when it opens the log. While that handle
+remains open, it holds an exclusive writer lock, checks that the configured path
+still names the same owner-only file, and authenticates the final sparse segment
+before reading the head or appending. It does not reread every cold segment for
+each operation. A process with the same host identity can bypass advisory locks,
+rewrite old bytes, restore file metadata, and read the receipt key; protecting
+against that actor requires a separate host identity, immutable storage, a TPM or
+TEE, or an external checkpoint.
+
 Executor holds Docker authority and its lifecycle receipt key. Gateway has a
 separate Unix identity and connector receipt key but also performs the connector
 network effect it records. A compromise of either service can forge that service's

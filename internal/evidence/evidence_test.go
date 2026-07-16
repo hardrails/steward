@@ -216,6 +216,120 @@ func TestOpenForValidationIsStrictlyReadOnly(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsConcurrentWriterThroughHardLink(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	path := filepath.Join(directory, "evidence.bin")
+	alias := filepath.Join(directory, "evidence-alias.bin")
+	first, err := Open(path, private, "node-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, alias); err != nil {
+		_ = first.Close()
+		t.Fatal(err)
+	}
+	if second, err := Open(alias, private, "node-a", 1); err == nil ||
+		!strings.Contains(err.Error(), "already open by another writer") {
+		if second != nil {
+			_ = second.Close()
+		}
+		_ = first.Close()
+		t.Fatalf("concurrent hard-link writer err=%v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(alias, private, "node-a", 1)
+	if err != nil {
+		t.Fatalf("open after writer close: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExclusiveCreateRejectsSymlinkInsertedAfterMissingCheck(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "evidence.bin")
+	target := filepath.Join(directory, "target")
+	if err := os.WriteFile(target, []byte("sentinel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var hookErr error
+	file, _, err := openEvidenceForAppendAfterMissing(path, func() {
+		hookErr = os.Symlink(target, path)
+	})
+	if file != nil {
+		_ = file.Close()
+	}
+	if hookErr != nil {
+		t.Fatal(hookErr)
+	}
+	if err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("symlink insertion error=%v", err)
+	}
+	raw, readErr := os.ReadFile(target)
+	info, statErr := os.Stat(target)
+	if readErr != nil || statErr != nil {
+		t.Fatalf("inspect symlink target read_err=%v stat_err=%v", readErr, statErr)
+	}
+	if string(raw) != "sentinel" || info.Mode().Perm() != 0o644 {
+		t.Fatalf("symlink target raw=%q mode=%v", raw, info.Mode())
+	}
+}
+
+func TestLogFailsClosedWhenConfiguredPathIsUnlinkedOrReplaced(t *testing.T) {
+	t.Run("unlinked", func(t *testing.T) {
+		log, path, _ := newLog(t)
+		if _, err := log.Append(event(AdmissionAllow)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := log.Append(event(JournalCommit)); err == nil ||
+			!strings.Contains(err.Error(), "evidence path") {
+			t.Fatalf("append after unlink error=%v", err)
+		}
+		if _, err := log.Append(event(JournalCommit)); err == nil ||
+			!strings.Contains(err.Error(), "closed") {
+			t.Fatalf("second append after unlink error=%v", err)
+		}
+	})
+
+	t.Run("replaced", func(t *testing.T) {
+		log, path, _ := newLog(t)
+		if _, err := log.Append(event(AdmissionAllow)); err != nil {
+			t.Fatal(err)
+		}
+		private := append(ed25519.PrivateKey(nil), log.private...)
+		moved := path + ".moved"
+		if err := os.Rename(path, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := log.Append(event(JournalCommit)); err == nil ||
+			!strings.Contains(err.Error(), "no longer names") {
+			t.Fatalf("append after path replacement error=%v", err)
+		}
+		reopened, err := Open(moved, private, "node-a", 1)
+		if err != nil {
+			t.Fatalf("reopen original inode after fail-close: %v", err)
+		}
+		defer reopened.Close()
+		head, err := reopened.CurrentHead()
+		if err != nil || head.Sequence != 1 {
+			t.Fatalf("reopened head=%#v err=%v", head, err)
+		}
+	})
+}
+
 func TestEvidenceRejectsUnsafeFilesMalformedFramesAndBounds(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/dsse"
@@ -34,6 +35,10 @@ const (
 	maxExportLine    = 128 << 10
 	receiptVersion   = 1
 	envelopeVersion  = 1
+	checkpointStride = MaxDeltaRecords
+	// A valid frame is at least five bytes. This cap is therefore looser than
+	// the number of sparse checkpoints that can fit in a bounded valid log.
+	maxCheckpointCount = maxLogBytes/(5*checkpointStride) + 2
 )
 
 var chainDomain = []byte("steward-evidence-chain-v1\x00")
@@ -135,10 +140,12 @@ type Coordinate struct {
 // Delta carries an exact bounded prefix after a requested coordinate. Frames
 // retain the native four-byte length prefix and signed envelope bytes. Head is
 // the coordinate derived after the last returned frame, or the supplied
-// coordinate when no newer receipt exists.
+// coordinate when no newer receipt exists. More reports whether the verified
+// local head still has receipts after Head.
 type Delta struct {
 	Frames [][]byte
 	Head   Head
+	More   bool
 }
 
 // FormatSummary reports the receipt version physically observed in an
@@ -166,17 +173,29 @@ type Envelope struct {
 // Log owns a private signing key for one node receipt chain. Callers should
 // append authorization receipts before an externally visible side effect.
 type Log struct {
-	mu       sync.Mutex
-	path     string
-	file     *os.File
-	private  ed25519.PrivateKey
-	public   ed25519.PublicKey
-	readOnly bool
-	nodeID   string
-	epoch    uint64
-	keyID    string
-	next     uint64
-	lastHash [sha256.Size]byte
+	mu          sync.Mutex
+	path        string
+	file        *os.File
+	private     ed25519.PrivateKey
+	public      ed25519.PublicKey
+	readOnly    bool
+	nodeID      string
+	epoch       uint64
+	keyID       string
+	next        uint64
+	lastHash    [sha256.Size]byte
+	logBytes    int64
+	modTimeNano int64
+	checkpoints []logCheckpoint
+}
+
+// logCheckpoint is created only from a fully verified receipt or a successful
+// fsynced append. Offset is the byte immediately after Sequence, so an export
+// can verify forward from ChainHash without replaying the complete prefix.
+type logCheckpoint struct {
+	Sequence  uint64
+	ChainHash [sha256.Size]byte
+	Offset    int64
 }
 
 // Open verifies the entire existing chain with the supplied private key's
@@ -191,22 +210,16 @@ func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) 
 	if len(private) != ed25519.PrivateKeySize {
 		return nil, errors.New("evidence private key has invalid length")
 	}
-	created := false
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		created = true
-	} else if err != nil {
-		return nil, fmt.Errorf("stat evidence %q: %w", path, err)
-	} else if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("evidence %q must be a regular file with mode 0600 or stricter", path)
-	} else if info.Size() > maxLogBytes {
-		return nil, fmt.Errorf("evidence %q exceeds %d bytes", path, maxLogBytes)
-	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
+	f, created, err := openEvidenceForAppend(path)
 	if err != nil {
-		return nil, fmt.Errorf("open evidence %q: %w", path, err)
+		return nil, err
 	}
 	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	openedInfo, err := validateEvidencePathFile(path, f)
+	if err != nil {
 		_ = f.Close()
 		return nil, err
 	}
@@ -217,13 +230,131 @@ func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) 
 		}
 	}
 	public := private.Public().(ed25519.PublicKey)
-	next, last, err := verifyFile(f, public, nodeID, epoch)
+	next, last, checkpoints, logBytes, err := verifyFileWithIndex(f, public, nodeID, epoch)
 	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("verify evidence %q: %w", path, err)
 	}
+	verifiedInfo, err := validateEvidencePathFile(path, f)
+	if err != nil || verifiedInfo.Size() != logBytes ||
+		verifiedInfo.Size() != openedInfo.Size() || !verifiedInfo.ModTime().Equal(openedInfo.ModTime()) {
+		_ = f.Close()
+		return nil, fmt.Errorf("evidence %q changed while its verified index was built", path)
+	}
 	return &Log{path: path, file: f, private: private, public: append(ed25519.PublicKey(nil), public...), nodeID: nodeID, epoch: epoch,
-		keyID: KeyID(public), next: next, lastHash: last}, nil
+		keyID: KeyID(public), next: next, lastHash: last, logBytes: logBytes,
+		modTimeNano: verifiedInfo.ModTime().UnixNano(), checkpoints: checkpoints}, nil
+}
+
+func openEvidenceForAppend(path string) (*os.File, bool, error) {
+	return openEvidenceForAppendAfterMissing(path, nil)
+}
+
+func openEvidenceForAppendAfterMissing(path string, afterMissing func()) (*os.File, bool, error) {
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		before, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			if afterMissing != nil {
+				afterMissing()
+				afterMissing = nil
+			}
+			file, openErr := openEvidenceDescriptor(path,
+				syscall.O_RDWR|syscall.O_APPEND|syscall.O_CREAT|syscall.O_EXCL, 0o600)
+			if errors.Is(openErr, syscall.EEXIST) {
+				continue
+			}
+			if openErr != nil {
+				return nil, false, fmt.Errorf("create evidence %q exclusively: %w", path, openErr)
+			}
+			if lockErr := lockEvidenceWriter(file); lockErr != nil {
+				_ = file.Close()
+				return nil, false, lockErr
+			}
+			if _, validateErr := validateEvidencePathFile(path, file); validateErr != nil {
+				_ = file.Close()
+				return nil, false, validateErr
+			}
+			return file, true, nil
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("stat evidence %q: %w", path, err)
+		}
+		if !before.Mode().IsRegular() || before.Mode().Perm()&0o077 != 0 {
+			return nil, false, fmt.Errorf("evidence %q must be a regular file with mode 0600 or stricter", path)
+		}
+		if before.Size() > maxLogBytes {
+			return nil, false, fmt.Errorf("evidence %q exceeds %d bytes", path, maxLogBytes)
+		}
+		file, openErr := openEvidenceDescriptor(path, syscall.O_RDWR|syscall.O_APPEND, 0)
+		if errors.Is(openErr, syscall.ENOENT) {
+			continue
+		}
+		if openErr != nil {
+			return nil, false, fmt.Errorf("open evidence %q: %w", path, openErr)
+		}
+		if lockErr := lockEvidenceWriter(file); lockErr != nil {
+			_ = file.Close()
+			return nil, false, lockErr
+		}
+		opened, validateErr := validateEvidencePathFile(path, file)
+		if validateErr != nil || !os.SameFile(before, opened) {
+			_ = file.Close()
+			if validateErr != nil {
+				return nil, false, validateErr
+			}
+			return nil, false, fmt.Errorf("evidence %q changed while it was opened", path)
+		}
+		return file, false, nil
+	}
+	return nil, false, fmt.Errorf("evidence %q changed repeatedly while it was opened", path)
+}
+
+func openEvidenceDescriptor(path string, flags int, mode uint32) (*os.File, error) {
+	fd, err := syscall.Open(path, flags|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, mode)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = syscall.Close(fd)
+		return nil, errors.New("open evidence returned an invalid descriptor")
+	}
+	return file, nil
+}
+
+func lockEvidenceWriter(file *os.File) error {
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return errors.New("evidence log is already open by another writer")
+		}
+		return fmt.Errorf("lock evidence log: %w", err)
+	}
+	return nil
+}
+
+func validateEvidencePathFile(path string, file *os.File) (os.FileInfo, error) {
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat evidence path %q: %w", path, err)
+	}
+	if !opened.Mode().IsRegular() || !pathInfo.Mode().IsRegular() ||
+		opened.Mode().Perm()&0o077 != 0 || pathInfo.Mode().Perm()&0o077 != 0 ||
+		opened.Size() > maxLogBytes || pathInfo.Size() > maxLogBytes {
+		return nil, fmt.Errorf("evidence %q must remain a bounded regular file with mode 0600 or stricter", path)
+	}
+	if !os.SameFile(pathInfo, opened) {
+		return nil, fmt.Errorf("evidence path %q no longer names the opened log", path)
+	}
+	if pathInfo.Mode() != opened.Mode() || pathInfo.Size() != opened.Size() ||
+		!pathInfo.ModTime().Equal(opened.ModTime()) {
+		return nil, fmt.Errorf("evidence path %q changed while its descriptor was inspected", path)
+	}
+	return opened, nil
 }
 
 // OpenForValidation verifies an existing evidence chain through a read-only
@@ -247,26 +378,33 @@ func OpenForValidation(path string, public ed25519.PublicKey, nodeID string, epo
 	if info.Size() > maxLogBytes {
 		return nil, fmt.Errorf("evidence %q exceeds %d bytes", path, maxLogBytes)
 	}
-	f, err := os.Open(path)
+	f, err := openEvidenceDescriptor(path, syscall.O_RDONLY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open evidence %q for validation: %w", path, err)
 	}
-	openedInfo, err := f.Stat()
+	openedInfo, err := validateEvidencePathFile(path, f)
 	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("stat opened evidence %q: %w", path, err)
 	}
-	if !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm()&0o077 != 0 || openedInfo.Size() > maxLogBytes {
+	if !os.SameFile(info, openedInfo) {
 		_ = f.Close()
 		return nil, fmt.Errorf("evidence %q changed while it was opened for validation", path)
 	}
-	next, last, err := verifyFile(f, public, nodeID, epoch)
+	next, last, checkpoints, logBytes, err := verifyFileWithIndex(f, public, nodeID, epoch)
 	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("verify evidence %q: %w", path, err)
 	}
+	verifiedInfo, err := validateEvidencePathFile(path, f)
+	if err != nil || verifiedInfo.Size() != logBytes ||
+		verifiedInfo.Size() != openedInfo.Size() || !verifiedInfo.ModTime().Equal(openedInfo.ModTime()) {
+		_ = f.Close()
+		return nil, fmt.Errorf("evidence %q changed while its verified index was built", path)
+	}
 	return &Log{path: path, file: f, public: append(ed25519.PublicKey(nil), public...), readOnly: true,
-		nodeID: nodeID, epoch: epoch, keyID: KeyID(public), next: next, lastHash: last}, nil
+		nodeID: nodeID, epoch: epoch, keyID: KeyID(public), next: next, lastHash: last,
+		logBytes: logBytes, modTimeNano: verifiedInfo.ModTime().UnixNano(), checkpoints: checkpoints}, nil
 }
 
 // InspectFormat validates every frame and receipt structurally through a
@@ -525,6 +663,12 @@ func (l *Log) Append(event Event) (Receipt, error) {
 	if l.readOnly {
 		return Receipt{}, errors.New("evidence log is open for validation only")
 	}
+	if err := l.validateFileStateLocked(); err != nil {
+		return Receipt{}, l.failClosedLocked(err)
+	}
+	if _, err := l.verifyTailLocked(); err != nil {
+		return Receipt{}, l.failClosedLocked(err)
+	}
 	receipt := Receipt{Version: receiptVersion, NodeID: l.nodeID, Epoch: l.epoch,
 		Sequence: l.next, PreviousHash: l.lastHash, Event: event}
 	payload, err := marshalReceipt(receipt)
@@ -541,26 +685,42 @@ func (l *Log) Append(event Event) (Receipt, error) {
 	if len(raw) > MaxEnvelopeBytes {
 		return Receipt{}, errors.New("evidence envelope exceeds size limit")
 	}
-	info, err := l.file.Stat()
-	if err != nil {
-		return Receipt{}, err
-	}
-	if info.Size()+int64(4+len(raw)) > maxLogBytes {
+	frameSize := int64(4 + len(raw))
+	if l.logBytes > maxLogBytes-frameSize {
 		return Receipt{}, errors.New("evidence log would exceed size limit")
 	}
+	if receipt.Sequence%checkpointStride == 0 && len(l.checkpoints) >= maxCheckpointCount {
+		return Receipt{}, errors.New("evidence checkpoint index would exceed its bound")
+	}
+	expectedBytes := l.logBytes + frameSize
+	current := chainHash(receipt.PreviousHash, pae)
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(raw)))
 	if err := writeAll(l.file, header[:]); err != nil {
-		return Receipt{}, err
+		return Receipt{}, l.failClosedLocked(err)
 	}
 	if err := writeAll(l.file, raw); err != nil {
-		return Receipt{}, err
+		return Receipt{}, l.failClosedLocked(err)
 	}
 	if err := l.file.Sync(); err != nil {
-		return Receipt{}, err
+		return Receipt{}, l.failClosedLocked(err)
 	}
-	l.lastHash = chainHash(receipt.PreviousHash, pae)
+	info, err := validateEvidencePathFile(l.path, l.file)
+	if err != nil {
+		return Receipt{}, l.failClosedLocked(err)
+	}
+	if info.Size() != expectedBytes {
+		return Receipt{}, l.failClosedLocked(errors.New("evidence log changed during append"))
+	}
+	l.lastHash = current
 	l.next++
+	l.logBytes = expectedBytes
+	l.modTimeNano = info.ModTime().UnixNano()
+	if receipt.Sequence%checkpointStride == 0 {
+		l.checkpoints = append(l.checkpoints, logCheckpoint{
+			Sequence: receipt.Sequence, ChainHash: current, Offset: expectedBytes,
+		})
+	}
 	return receipt, nil
 }
 
@@ -588,11 +748,14 @@ func (l *Log) NextSequence() uint64 {
 	return l.next
 }
 
-// CurrentHead returns the exact compact head already authenticated when the
-// log was opened and updated after each fsynced append. Unlike ExportDelta, it
-// describes the whole local chain rather than the end of one bounded batch.
-// An evidence publisher uses this snapshot to prove rollback when a retained
-// controller checkpoint is no longer present in the local log.
+// CurrentHead returns the exact compact head authenticated by the full scan at
+// open, each fsynced append, and a bounded replay of the final sparse segment.
+// Older segments are fully reverified on reopen; a live handle relies on its
+// exclusive writer lock and path/metadata continuity within the documented
+// node trust boundary. Unlike ExportDelta, the head describes the whole local
+// chain rather than the end of one bounded batch. An evidence publisher uses
+// this snapshot to prove rollback when a retained controller checkpoint is no
+// longer present in the local log.
 func (l *Log) CurrentHead() (Head, error) {
 	if l == nil {
 		return Head{}, errors.New("evidence log is unavailable")
@@ -605,6 +768,12 @@ func (l *Log) CurrentHead() (Head, error) {
 	if l.next == 0 {
 		return Head{}, errors.New("evidence log has an invalid in-memory coordinate")
 	}
+	if err := l.validateFileStateLocked(); err != nil {
+		return Head{}, l.failClosedLocked(err)
+	}
+	if _, err := l.verifyTailLocked(); err != nil {
+		return Head{}, l.failClosedLocked(err)
+	}
 	return Head{
 		NodeID: l.nodeID, Epoch: l.epoch, Sequence: l.next - 1,
 		ChainHash: l.lastHash, KeyID: l.keyID,
@@ -615,42 +784,88 @@ func (l *Log) CurrentHead() (Head, error) {
 // externally retained chain coordinate. The coordinate must match this log
 // exactly; a caller cannot skip a missing or changed receipt.
 func (l *Log) ExportDelta(after Coordinate) (Delta, error) {
+	result, _, err := l.exportDelta(after)
+	return result, err
+}
+
+// exportDelta also returns how many frames were authenticated from the nearest
+// sparse checkpoint. Tests use this count to hold the bounded-scan invariant;
+// callers use ExportDelta.
+func (l *Log) exportDelta(after Coordinate) (Delta, int, error) {
 	if err := validateCoordinate(after); err != nil {
-		return Delta{}, err
+		return Delta{}, 0, err
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.file == nil {
-		return Delta{}, errors.New("evidence log is closed")
+		return Delta{}, 0, errors.New("evidence log is closed")
 	}
-	if _, err := l.file.Seek(0, io.SeekStart); err != nil {
-		return Delta{}, err
+	if err := l.validateFileStateLocked(); err != nil {
+		return Delta{}, 0, l.failClosedLocked(err)
 	}
 
 	result := Delta{Head: Head{
 		NodeID: l.nodeID, Epoch: l.epoch, Sequence: after.Sequence,
 		ChainHash: after.ChainHash, KeyID: l.keyID,
 	}}
-	found := after.Sequence == 0
-	var previous [sha256.Size]byte
-	var expected uint64 = 1
-	var scanned int64
+	localSequence := l.next - 1
+	if after.Sequence > localSequence {
+		return Delta{}, 0, ErrDeltaCoordinate
+	}
+	if after.Sequence == localSequence {
+		if after.ChainHash != l.lastHash {
+			return Delta{}, 0, ErrDeltaCoordinate
+		}
+		scannedRecords, err := l.verifyTailLocked()
+		if err != nil {
+			return Delta{}, scannedRecords, l.failClosedLocked(err)
+		}
+		result.Head.ChainHash = l.lastHash
+		return result, scannedRecords, nil
+	}
+
+	checkpointIndex := after.Sequence / checkpointStride
+	if checkpointIndex >= uint64(len(l.checkpoints)) {
+		return Delta{}, 0, l.failClosedLocked(errors.New("evidence checkpoint index is inconsistent with the verified log"))
+	}
+	checkpoint := l.checkpoints[int(checkpointIndex)]
+	if checkpoint.Sequence != checkpointIndex*checkpointStride || checkpoint.Sequence > after.Sequence ||
+		checkpoint.Offset < 0 || checkpoint.Offset > l.logBytes {
+		return Delta{}, 0, l.failClosedLocked(errors.New("evidence checkpoint index contains an invalid entry"))
+	}
+	if checkpoint.Sequence == after.Sequence && checkpoint.ChainHash != after.ChainHash {
+		return Delta{}, 0, ErrDeltaCoordinate
+	}
+	if _, err := l.file.Seek(checkpoint.Offset, io.SeekStart); err != nil {
+		return Delta{}, 0, l.failClosedLocked(err)
+	}
+
+	found := checkpoint.Sequence == after.Sequence
+	previous := checkpoint.ChainHash
+	expected := checkpoint.Sequence + 1
+	scannedRecords := 0
+	scannedBytes := checkpoint.Offset
 	total := 0
-	for {
-		raw, err := readFrame(l.file)
-		if errors.Is(err, io.EOF) {
+	for expected <= localSequence {
+		if found && len(result.Frames) == MaxDeltaRecords {
 			break
 		}
+		raw, err := readFrame(l.file)
 		if err != nil {
-			return Delta{}, err
+			if errors.Is(err, io.EOF) {
+				err = errors.New("evidence log ended before its verified head")
+			}
+			return Delta{}, scannedRecords, l.failClosedLocked(err)
 		}
-		scanned += int64(4 + len(raw))
-		if scanned > maxLogBytes {
-			return Delta{}, fmt.Errorf("evidence log exceeds %d bytes", maxLogBytes)
+		scannedRecords++
+		scannedBytes += int64(4 + len(raw))
+		if scannedBytes > l.logBytes || scannedBytes > maxLogBytes {
+			err := fmt.Errorf("evidence log exceeds its verified %d-byte boundary", l.logBytes)
+			return Delta{}, scannedRecords, l.failClosedLocked(err)
 		}
 		receipt, current, err := verifyEnvelope(raw, l.public, l.nodeID, l.epoch, expected, previous)
 		if err != nil {
-			return Delta{}, err
+			return Delta{}, scannedRecords, l.failClosedLocked(err)
 		}
 		previous = current
 		expected++
@@ -658,17 +873,17 @@ func (l *Log) ExportDelta(after Coordinate) (Delta, error) {
 		if receipt.Sequence <= after.Sequence {
 			if receipt.Sequence == after.Sequence {
 				if current != after.ChainHash {
-					return Delta{}, ErrDeltaCoordinate
+					return Delta{}, scannedRecords, ErrDeltaCoordinate
 				}
 				found = true
 			}
 			continue
 		}
 		if !found {
-			return Delta{}, ErrDeltaCoordinate
+			return Delta{}, scannedRecords, ErrDeltaCoordinate
 		}
 		frame := frameBytes(raw)
-		if len(result.Frames) == MaxDeltaRecords || total > MaxDeltaBytes-len(frame) {
+		if total > MaxDeltaBytes-len(frame) {
 			break
 		}
 		result.Frames = append(result.Frames, frame)
@@ -677,9 +892,80 @@ func (l *Log) ExportDelta(after Coordinate) (Delta, error) {
 		result.Head.ChainHash = current
 	}
 	if !found {
-		return Delta{}, ErrDeltaCoordinate
+		return Delta{}, scannedRecords, l.failClosedLocked(errors.New("evidence checkpoint replay did not reach the requested coordinate"))
 	}
-	return result, nil
+	result.More = result.Head.Sequence < localSequence
+	return result, scannedRecords, nil
+}
+
+func (l *Log) verifyTailLocked() (int, error) {
+	localSequence := l.next - 1
+	if localSequence == 0 {
+		if l.logBytes != 0 || len(l.checkpoints) != 1 {
+			return 0, errors.New("empty evidence log has inconsistent verified state")
+		}
+		return 0, nil
+	}
+	checkpointIndex := (localSequence - 1) / checkpointStride
+	if checkpointIndex >= uint64(len(l.checkpoints)) {
+		return 0, errors.New("evidence tail checkpoint is missing")
+	}
+	checkpoint := l.checkpoints[int(checkpointIndex)]
+	if checkpoint.Sequence != checkpointIndex*checkpointStride ||
+		checkpoint.Offset < 0 || checkpoint.Offset > l.logBytes {
+		return 0, errors.New("evidence tail checkpoint is invalid")
+	}
+	if _, err := l.file.Seek(checkpoint.Offset, io.SeekStart); err != nil {
+		return 0, err
+	}
+	previous := checkpoint.ChainHash
+	expected := checkpoint.Sequence + 1
+	offset := checkpoint.Offset
+	scannedRecords := 0
+	for expected <= localSequence {
+		raw, err := readFrame(l.file)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return scannedRecords, errors.New("evidence tail ended before its verified head")
+			}
+			return scannedRecords, err
+		}
+		scannedRecords++
+		offset += int64(4 + len(raw))
+		if offset > l.logBytes || offset > maxLogBytes {
+			return scannedRecords, errors.New("evidence tail exceeds its verified byte boundary")
+		}
+		_, current, err := verifyEnvelope(raw, l.public, l.nodeID, l.epoch, expected, previous)
+		if err != nil {
+			return scannedRecords, err
+		}
+		previous = current
+		expected++
+	}
+	if offset != l.logBytes || previous != l.lastHash {
+		return scannedRecords, errors.New("evidence tail does not match its verified head")
+	}
+	return scannedRecords, nil
+}
+
+func (l *Log) validateFileStateLocked() error {
+	info, err := validateEvidencePathFile(l.path, l.file)
+	if err != nil {
+		return err
+	}
+	if info.Size() != l.logBytes || info.ModTime().UnixNano() != l.modTimeNano {
+		return errors.New("evidence log changed outside its append lock")
+	}
+	return nil
+}
+
+func (l *Log) failClosedLocked(cause error) error {
+	if l.file == nil {
+		return cause
+	}
+	closeErr := l.file.Close()
+	l.file = nil
+	return errors.Join(cause, closeErr)
 }
 
 // KeyID is a stable non-secret identifier for a receipt public key.
@@ -694,9 +980,14 @@ func PreAuthEncoding(payloadType string, payload []byte) []byte {
 	return []byte(fmt.Sprintf("DSSEv1 %d %s %d %s", len(payloadType), payloadType, len(payload), payload))
 }
 
-func verifyFile(f *os.File, public ed25519.PublicKey, nodeID string, epoch uint64) (uint64, [sha256.Size]byte, error) {
-	next, last, _, err := verifyFileWithLast(f, public, nodeID, epoch)
-	return next, last, err
+func verifyFileWithIndex(
+	f *os.File,
+	public ed25519.PublicKey,
+	nodeID string,
+	epoch uint64,
+) (uint64, [sha256.Size]byte, []logCheckpoint, int64, error) {
+	next, last, _, checkpoints, total, err := verifyFileState(f, public, nodeID, epoch, nil, true)
+	return next, last, checkpoints, total, err
 }
 
 func verifyFileWithLast(f *os.File, public ed25519.PublicKey, nodeID string, epoch uint64) (uint64, [sha256.Size]byte, *Receipt, error) {
@@ -704,33 +995,57 @@ func verifyFileWithLast(f *os.File, public ed25519.PublicKey, nodeID string, epo
 }
 
 func verifyFileWithVisitor(f *os.File, public ed25519.PublicKey, nodeID string, epoch uint64, visit func(VerifiedReceipt) error) (uint64, [sha256.Size]byte, *Receipt, error) {
+	next, previous, last, _, _, err := verifyFileState(f, public, nodeID, epoch, visit, false)
+	return next, previous, last, err
+}
+
+func verifyFileState(
+	f *os.File,
+	public ed25519.PublicKey,
+	nodeID string,
+	epoch uint64,
+	visit func(VerifiedReceipt) error,
+	buildIndex bool,
+) (uint64, [sha256.Size]byte, *Receipt, []logCheckpoint, int64, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return 0, [sha256.Size]byte{}, nil, err
+		return 0, [sha256.Size]byte{}, nil, nil, 0, err
 	}
 	var previous [sha256.Size]byte
 	var expected uint64 = 1
 	var last *Receipt
 	var total int64
+	var checkpoints []logCheckpoint
+	if buildIndex {
+		checkpoints = append(checkpoints, logCheckpoint{})
+	}
 	for {
 		raw, err := readFrame(f)
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return 0, [sha256.Size]byte{}, nil, err
+			return 0, [sha256.Size]byte{}, nil, nil, 0, err
 		}
 		total += int64(4 + len(raw))
 		if total > maxLogBytes {
-			return 0, [sha256.Size]byte{}, nil, fmt.Errorf("evidence log exceeds %d bytes", maxLogBytes)
+			return 0, [sha256.Size]byte{}, nil, nil, 0, fmt.Errorf("evidence log exceeds %d bytes", maxLogBytes)
 		}
 		receipt, current, err := verifyEnvelope(raw, public, nodeID, epoch, expected, previous)
 		if err != nil {
-			return 0, [sha256.Size]byte{}, nil, err
+			return 0, [sha256.Size]byte{}, nil, nil, 0, err
 		}
 		previous = current
+		if buildIndex && receipt.Sequence%checkpointStride == 0 {
+			if len(checkpoints) >= maxCheckpointCount {
+				return 0, [sha256.Size]byte{}, nil, nil, 0, errors.New("evidence checkpoint index exceeds its bound")
+			}
+			checkpoints = append(checkpoints, logCheckpoint{
+				Sequence: receipt.Sequence, ChainHash: current, Offset: total,
+			})
+		}
 		if visit != nil {
 			if err := visit(VerifiedReceipt{Receipt: receipt, ChainHash: previous, Frame: frameBytes(raw)}); err != nil {
-				return 0, [sha256.Size]byte{}, nil, err
+				return 0, [sha256.Size]byte{}, nil, nil, 0, err
 			}
 		}
 		copyReceipt := receipt
@@ -738,9 +1053,9 @@ func verifyFileWithVisitor(f *os.File, public ed25519.PublicKey, nodeID string, 
 		expected++
 	}
 	if _, err := f.Seek(0, io.SeekEnd); err != nil {
-		return 0, [sha256.Size]byte{}, nil, err
+		return 0, [sha256.Size]byte{}, nil, nil, 0, err
 	}
-	return expected, previous, last, nil
+	return expected, previous, last, checkpoints, total, nil
 }
 
 func verifyEnvelope(raw []byte, public ed25519.PublicKey, nodeID string, epoch, expected uint64, previous [sha256.Size]byte) (Receipt, [sha256.Size]byte, error) {

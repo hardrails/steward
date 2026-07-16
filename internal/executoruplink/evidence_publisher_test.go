@@ -35,6 +35,7 @@ type evidenceWitnessServer struct {
 	head        controlprotocol.ExecutorEvidenceHeadV1
 	reportHeads []controlprotocol.ExecutorEvidenceHeadV1
 	frameCounts []int
+	onReport    func(int) error
 }
 
 func newEvidenceWitnessServer(t *testing.T, public ed25519.PublicKey, initial evidence.Head) *evidenceWitnessServer {
@@ -156,6 +157,13 @@ func (server *evidenceWitnessServer) ServeHTTP(writer http.ResponseWriter, reque
 				},
 			}
 		}
+		if server.onReport != nil {
+			if err := server.onReport(len(server.frameCounts)); err != nil {
+				server.t.Error(err)
+				writer.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
 		_ = json.NewEncoder(writer).Encode(response)
 	default:
 		writer.WriteHeader(http.StatusNotFound)
@@ -192,6 +200,59 @@ func TestEvidencePublisherUploadsBoundedBatches(t *testing.T) {
 		controller.reportHeads[1].Sequence != controlprotocol.MaxExecutorEvidenceFrames+1 ||
 		controller.frameCounts[0] != controlprotocol.MaxExecutorEvidenceFrames || controller.frameCounts[1] != 1 {
 		t.Fatalf("reported heads=%+v frame counts=%v", controller.reportHeads, controller.frameCounts)
+	}
+}
+
+func TestEvidencePublisherRunDrainsAllPendingBatchesBeforeWaiting(t *testing.T) {
+	log, private, public := newPublisherLog(t, 2*controlprotocol.MaxExecutorEvidenceFrames+1)
+	controller := newEvidenceWitnessServer(t, public, evidence.Head{NodeID: "node-a", Epoch: 1})
+	server := httptest.NewTLSServer(controller)
+	defer server.Close()
+	publisher := newTestEvidencePublisher(t, server, controller.auth.InstanceID(), log, private)
+	waitCalls := 0
+	publisher.wait = func(context.Context, time.Duration) bool {
+		waitCalls++
+		return false
+	}
+	publisher.Run(context.Background())
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if waitCalls != 1 || len(controller.frameCounts) != 3 ||
+		controller.frameCounts[0] != controlprotocol.MaxExecutorEvidenceFrames ||
+		controller.frameCounts[1] != controlprotocol.MaxExecutorEvidenceFrames ||
+		controller.frameCounts[2] != 1 ||
+		controller.head.Sequence != 2*controlprotocol.MaxExecutorEvidenceFrames+1 {
+		t.Fatalf("waits=%d frame counts=%v head=%+v", waitCalls, controller.frameCounts, controller.head)
+	}
+}
+
+func TestEvidencePublisherRunRechecksHeadBeforeSleeping(t *testing.T) {
+	log, private, public := newPublisherLog(t, 1)
+	controller := newEvidenceWitnessServer(t, public, evidence.Head{NodeID: "node-a", Epoch: 1})
+	controller.onReport = func(reportNumber int) error {
+		if reportNumber != 1 {
+			return nil
+		}
+		_, err := log.Append(publisherEvent(2))
+		return err
+	}
+	server := httptest.NewTLSServer(controller)
+	defer server.Close()
+	publisher := newTestEvidencePublisher(t, server, controller.auth.InstanceID(), log, private)
+	waitCalls := 0
+	publisher.wait = func(context.Context, time.Duration) bool {
+		waitCalls++
+		return false
+	}
+	publisher.Run(context.Background())
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if waitCalls != 1 || len(controller.frameCounts) != 2 ||
+		controller.frameCounts[0] != 1 || controller.frameCounts[1] != 1 ||
+		controller.head.Sequence != 2 {
+		t.Fatalf("waits=%d frame counts=%v head=%+v", waitCalls, controller.frameCounts, controller.head)
 	}
 }
 

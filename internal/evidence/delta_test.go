@@ -7,6 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -185,7 +187,7 @@ func TestExportDeltaIsRecordBoundedAndResumable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Frames) != MaxDeltaRecords || first.Head.Sequence != MaxDeltaRecords {
+	if len(first.Frames) != MaxDeltaRecords || first.Head.Sequence != MaxDeltaRecords || !first.More {
 		t.Fatalf("first delta frames=%d head=%#v", len(first.Frames), first.Head)
 	}
 	total := 0
@@ -203,8 +205,259 @@ func TestExportDeltaIsRecordBoundedAndResumable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second.Frames) != 1 || second.Head.Sequence != MaxDeltaRecords+1 {
+	if len(second.Frames) != 1 || second.Head.Sequence != MaxDeltaRecords+1 || second.More {
 		t.Fatalf("second delta frames=%d head=%#v", len(second.Frames), second.Head)
+	}
+}
+
+func TestExportDeltaSparseIndexAvoidsQuadraticCatchUpAcrossReopen(t *testing.T) {
+	log, path, public := newLog(t)
+	records := 4*MaxDeltaRecords + 17
+	for index := 0; index < records; index++ {
+		value := event(AdmissionAllow)
+		value.Generation = uint64(index + 1)
+		if _, err := log.Append(value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	private := append(ed25519.PrivateKey(nil), log.private...)
+	assertIndexedCatchUp := func(t *testing.T, opened *Log) {
+		t.Helper()
+		coordinate := Coordinate{}
+		totalScanned := 0
+		batches := 0
+		for {
+			delta, scanned, err := opened.exportDelta(coordinate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scanned > MaxDeltaRecords {
+				t.Fatalf("aligned batch replayed %d records, want at most %d", scanned, MaxDeltaRecords)
+			}
+			totalScanned += scanned
+			batches++
+			verified, err := VerifyDelta(delta.Frames, public, "node-a", 1, coordinate, func(string) bool { return true })
+			if err != nil || verified != delta.Head {
+				t.Fatalf("verified batch head=%#v want %#v err=%v", verified, delta.Head, err)
+			}
+			coordinate = Coordinate{Sequence: delta.Head.Sequence, ChainHash: delta.Head.ChainHash}
+			if !delta.More {
+				break
+			}
+		}
+		if totalScanned != records || batches != 5 {
+			t.Fatalf("catch-up scanned=%d batches=%d, want records=%d batches=5", totalScanned, batches, records)
+		}
+		atHead, scanned, err := opened.exportDelta(coordinate)
+		if err != nil || scanned != records%MaxDeltaRecords || len(atHead.Frames) != 0 || atHead.More {
+			t.Fatalf("equal-coordinate delta=%#v scanned=%d err=%v", atHead, scanned, err)
+		}
+		if len(opened.checkpoints) != records/MaxDeltaRecords+1 {
+			t.Fatalf("checkpoint count=%d want=%d", len(opened.checkpoints), records/MaxDeltaRecords+1)
+		}
+	}
+
+	assertIndexedCatchUp(t, log)
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, private, "node-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	assertIndexedCatchUp(t, reopened)
+}
+
+func TestExportDeltaSparseIndexBoundsUnalignedCoordinateReplay(t *testing.T) {
+	log, path, public := newLog(t)
+	defer log.Close()
+	records := 4*MaxDeltaRecords + 40
+	for index := 0; index < records; index++ {
+		value := event(AdmissionAllow)
+		value.Generation = uint64(index + 1)
+		if _, err := log.Append(value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := uint64(2*MaxDeltaRecords + 17)
+	var coordinate Coordinate
+	if _, err := VerifyRecords(path, public, "node-a", 1, func(record VerifiedReceipt) error {
+		if record.Receipt.Sequence == target {
+			coordinate = Coordinate{Sequence: target, ChainHash: record.ChainHash}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	delta, scanned, err := log.exportDelta(coordinate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(delta.Frames) != MaxDeltaRecords || scanned != 17+MaxDeltaRecords || !delta.More {
+		t.Fatalf("unaligned export frames=%d scanned=%d more=%v", len(delta.Frames), scanned, delta.More)
+	}
+}
+
+func TestExportDeltaEqualCoordinateFailsClosedAfterOutOfBandTamper(t *testing.T) {
+	log, path, _ := newLog(t)
+	if _, err := log.Append(event(AdmissionAllow)); err != nil {
+		t.Fatal(err)
+	}
+	head, err := log.CurrentHead()
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := append(ed25519.PrivateKey(nil), log.private...)
+	tamperEvidenceTailPreservingMetadata(t, path)
+	if _, scanned, err := log.exportDelta(Coordinate{
+		Sequence: head.Sequence, ChainHash: head.ChainHash,
+	}); err == nil || scanned != 1 {
+		t.Fatalf("tampered equal-coordinate export scanned=%d err=%v", scanned, err)
+	}
+	if _, err := log.Append(event(JournalCommit)); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("append after detected replay corruption error=%v", err)
+	}
+	if _, err := Open(path, private, "node-a", 1); err == nil {
+		t.Fatal("reopen accepted the tampered evidence log")
+	}
+}
+
+func TestAppendFailsClosedAfterOutOfBandTailTamper(t *testing.T) {
+	log, path, _ := newLog(t)
+	if _, err := log.Append(event(AdmissionAllow)); err != nil {
+		t.Fatal(err)
+	}
+	tamperEvidenceTailPreservingMetadata(t, path)
+	if _, err := log.Append(event(JournalCommit)); err == nil {
+		t.Fatal("append extended a corrupted evidence tail")
+	}
+	if _, err := log.Append(event(JournalCommit)); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("second append after tail corruption error=%v", err)
+	}
+}
+
+func tamperEvidenceTailPreservingMetadata(t *testing.T, path string) {
+	t.Helper()
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-1] ^= 1
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteAt(raw[len(raw)-1:], int64(len(raw)-1)); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, beforeInfo.ModTime(), beforeInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExportDeltaReplayVerificationFailureClosesTheWriter(t *testing.T) {
+	log, path, _ := newLog(t)
+	for _, kind := range []EventType{AdmissionAllow, JournalCommit} {
+		if _, err := log.Append(event(kind)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := int64(len(raw) - 1)
+	if _, err := file.WriteAt([]byte{raw[last] ^ 1}, last); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, beforeInfo.ModTime(), beforeInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.ExportDelta(Coordinate{}); err == nil {
+		t.Fatal("indexed replay accepted a tampered signed frame")
+	}
+	if _, err := log.Append(event(JournalCommit)); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("append after replay verification failure error=%v", err)
+	}
+}
+
+func TestExportDeltaConcurrentAppendMaintainsVerifiedCheckpointState(t *testing.T) {
+	log, _, public := newLog(t)
+	defer log.Close()
+	const records = MaxDeltaRecords + 17
+	notify := make(chan struct{}, 1)
+	completed := make(chan error, 1)
+	go func() {
+		for index := 0; index < records; index++ {
+			value := event(AdmissionAllow)
+			value.Generation = uint64(index + 1)
+			if _, err := log.Append(value); err != nil {
+				completed <- err
+				return
+			}
+			select {
+			case notify <- struct{}{}:
+			default:
+			}
+			runtime.Gosched()
+		}
+		completed <- nil
+	}()
+
+	coordinate := Coordinate{}
+	done := false
+	for {
+		delta, err := log.ExportDelta(coordinate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(delta.Frames) > 0 {
+			verified, err := VerifyDelta(delta.Frames, public, "node-a", 1, coordinate, func(string) bool { return true })
+			if err != nil || verified != delta.Head {
+				t.Fatalf("concurrent delta head=%#v want %#v err=%v", verified, delta.Head, err)
+			}
+			coordinate = Coordinate{Sequence: delta.Head.Sequence, ChainHash: delta.Head.ChainHash}
+			continue
+		}
+		if done {
+			head, err := log.CurrentHead()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if coordinate.Sequence != head.Sequence || coordinate.ChainHash != head.ChainHash {
+				t.Fatalf("final exported coordinate=%#v head=%#v", coordinate, head)
+			}
+			break
+		}
+		select {
+		case <-notify:
+		case err := <-completed:
+			if err != nil {
+				t.Fatal(err)
+			}
+			done = true
+		}
 	}
 }
 
