@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Cross-compile Steward for every published target, package each build as a
 # self-contained .tar.gz (the target's usable process binaries + LICENSE + README;
 # Linux also carries the offline node-appliance assets), and write a SHA-256 checksums
@@ -25,6 +25,11 @@
 #                           remains the complete public matrix. CI narrows this to
 #                           one architecture per native package-building runner.
 set -euo pipefail
+if ! shopt -qo privileged; then
+	echo "release: invoke this script with /bin/bash -p so caller-controlled shell startup files and exported functions are ignored" >&2
+	exit 2
+fi
+unset BASH_ENV ENV TAR_OPTIONS GZIP POSIXLY_CORRECT
 
 cd "$(dirname "$0")/.."
 
@@ -59,6 +64,7 @@ VERSION="${STEWARD_RELEASE_VERSION:-${GITHUB_REF_NAME:-$(git describe --tags --a
 
 valid_release_version() {
 	local candidate=$1 core prerelease identifier
+	(( ${#candidate} <= 128 )) || return 1
 	[[ $candidate =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]] || return 1
 	core=${candidate#v}
 	if [[ $core == *-* ]]; then
@@ -73,9 +79,17 @@ valid_release_version() {
 	return 0
 }
 
+if [[ ${STEWARD_RELEASE_VERSION+x} == x ]] && ! valid_release_version "$VERSION"; then
+	echo "release: explicit STEWARD_RELEASE_VERSION must be a release tag of at most 128 bytes" >&2
+	exit 2
+fi
+
 if [[ ${GITHUB_REF_TYPE:-} != tag ]] && ! valid_release_version "$VERSION"; then
 	dev_identity=${VERSION//[^0-9A-Za-z-]/-}
-	VERSION="v0.0.0-dev.source-${dev_identity:-local}"
+	dev_prefix=v0.0.0-dev.source-
+	dev_identity=${dev_identity:-local}
+	VERSION="${dev_prefix}${dev_identity:0:$((128 - ${#dev_prefix}))}"
+	valid_release_version "$VERSION" || { echo "release: could not derive a bounded development release identity" >&2; exit 2; }
 fi
 release_ldflags="-s -w -X github.com/hardrails/steward/internal/buildinfo.releaseVersion=${VERSION}"
 
@@ -131,9 +145,31 @@ for target in "${targets[@]}"; do
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-gateway" ./cmd/steward-gateway
 		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-relay" ./cmd/steward-relay
+		# The controller is deployed independently from the Docker-bearing node
+		# appliance. Publish a small, closed-inventory archive for install-control.sh
+		# instead of allowing controller authority to ride inside a node package.
+		control_stage="$(mktemp -d)"
+		install -m 0755 "${stage}/steward-control" "${control_stage}/steward-control"
+		install -m 0755 scripts/control-doctor.sh "${control_stage}/control-doctor.sh"
+		install -m 0644 deploy/systemd/steward-control.service "${control_stage}/steward-control.service"
+		install -m 0644 deploy/config/control.env "${control_stage}/control.env"
+		install -m 0644 LICENSE "${control_stage}/LICENSE"
+		control_archive="${dist}/steward-control_${VERSION}_linux_${goarch}.tar.gz"
+		control_files=(LICENSE control.env control-doctor.sh steward-control steward-control.service)
+		if tar --no-xattrs -cf /dev/null -T /dev/null >/dev/null 2>&1; then
+			COPYFILE_DISABLE=1 tar --no-xattrs -C "$control_stage" -czf "$control_archive" "${control_files[@]}"
+		else
+			COPYFILE_DISABLE=1 tar -C "$control_stage" -czf "$control_archive" "${control_files[@]}"
+		fi
+		rm -rf "$control_stage"
 		mkdir -p "${stage}/adapters" "${stage}/deploy" "${stage}/scripts"
 		cp -R adapters/hermes-agent "${stage}/adapters/"
 		cp -R deploy/config deploy/systemd "${stage}/deploy/"
+		# Controller deployment assets belong only to the dedicated archive. The
+		# node archive and native packages retain the binary for operator tooling,
+		# but never install or activate a controller service.
+		rm -f "${stage}/deploy/config/control.env" \
+			"${stage}/deploy/systemd/steward-control.service"
 		cp scripts/install-node.sh scripts/activate-node-release.sh \
 			scripts/node-preflight.sh scripts/node-doctor.sh scripts/configure-node.sh scripts/configure-admission.sh \
 			scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
@@ -144,7 +180,7 @@ for target in "${targets[@]}"; do
 		# Bind the exact node payload before wrapping it in an archive or native
 		# package. The canonical manifest records the target and SHA-256 of all seven
 		# binaries plus every integration file installed with that release.
-		bash scripts/write-release-manifest.sh "$stage" "$VERSION" "$goos" "$goarch"
+		/bin/bash -p scripts/write-release-manifest.sh "$stage" "$VERSION" "$goos" "$goarch"
 		files=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay release.json LICENSE README.md adapters deploy scripts)
 	fi
 	# Ship the license and readme alongside all seven binaries so the download is
@@ -163,13 +199,13 @@ for target in "${targets[@]}"; do
 			"${files[@]}"
 	fi
 	if [ "$goos" = "linux" ] && command -v dpkg-deb >/dev/null 2>&1; then
-		bash scripts/build-deb.sh "$stage" "$VERSION" "$goarch" \
+		/bin/bash -p scripts/build-deb.sh "$stage" "$VERSION" "$goarch" \
 			"${dist}/steward-node_${VERSION}_${goarch}.deb"
 	elif [ "$goos" = "linux" ]; then
 		echo "release: dpkg-deb unavailable; skipping Debian package for ${goarch}"
 	fi
 	if [ "$goos" = "linux" ] && command -v rpmbuild >/dev/null 2>&1; then
-		bash scripts/build-rpm.sh "$stage" "$VERSION" "$goarch" \
+		/bin/bash -p scripts/build-rpm.sh "$stage" "$VERSION" "$goarch" \
 			"${dist}/steward-node_${VERSION}_${goarch}.rpm"
 	elif [ "$goos" = "linux" ]; then
 		echo "release: rpmbuild unavailable; skipping RPM package for ${goarch}"
@@ -180,6 +216,7 @@ done
 # The reviewed installer is itself a release asset so users can download one
 # immutable script beside the packages, or carry it into an air-gapped site.
 install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
+install -m 0755 scripts/install-control.sh "${dist}/install-control.sh"
 
 # SHA-256 over every archive, in one checksums.txt (the conventional shape a
 # consumer verifies with `sha256sum -c`). Prefer sha256sum (Linux/CI); fall back
@@ -187,7 +224,7 @@ install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
 (
 	cd "$dist"
 	shopt -s nullglob
-	artifacts=(./*.tar.gz ./*.deb ./*.rpm ./install-steward.sh)
+	artifacts=(./*.tar.gz ./*.deb ./*.rpm ./install-steward.sh ./install-control.sh)
 	if (( ${#artifacts[@]} == 0 )); then
 		echo "release: no artifacts were built" >&2
 		exit 1

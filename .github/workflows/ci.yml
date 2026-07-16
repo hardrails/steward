@@ -18,6 +18,10 @@ jobs:
         with:
           go-version: "1.24"
           check-latest: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.5.7"
+          terraform_wrapper: false
       - name: go build
         run: go build ./...
       - name: go vet
@@ -33,58 +37,88 @@ jobs:
           bash -n scripts/install-node.sh scripts/activate-node-release.sh
           scripts/node-preflight.sh scripts/node-doctor.sh scripts/node-doctor-test.sh
           scripts/configure-node.sh scripts/configure-admission.sh
-          scripts/install-steward.sh scripts/uninstall-node.sh scripts/node-removal-guard.sh
+          scripts/install-steward.sh scripts/install-control.sh scripts/control-doctor.sh
+          scripts/control-install-smoke.sh scripts/bundled-control-node-test.sh
+          scripts/control-acceptance.sh scripts/uninstall-node.sh scripts/node-removal-guard.sh
           scripts/build-deb.sh scripts/build-rpm.sh scripts/build-hermes-adapter.sh
           scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh
           scripts/write-release-manifest.sh
-          scripts/node-upgrade-smoke.sh
+          scripts/node-upgrade-smoke.sh scripts/privileged-shell-test.sh
+          scripts/node-installer-security-test.sh scripts/configure-input-boundary-test.sh
+          scripts/node-control-plane-conflict-test.sh
           scripts/check-docs-consistency.sh
           scripts/signed-admission-acceptance.sh
           scripts/egress-acceptance.sh scripts/positive-capabilities-acceptance.sh
-          packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm
+          packaging/debian/preinst packaging/debian/postinst
+          packaging/debian/prerm packaging/debian/postrm
       - name: Node upgrade transaction smoke
         run: STEWARD_REQUIRE_ROOT_SMOKE=1 bash scripts/node-upgrade-smoke.sh
+      - name: Node privileged shell boundary
+        run: bash scripts/privileged-shell-test.sh
+      - name: Node installer hostile inputs
+        run: bash scripts/node-installer-security-test.sh
+      - name: Node configuration input boundary
+        run: STEWARD_REQUIRE_ROOT_SMOKE=1 bash scripts/configure-input-boundary-test.sh
+      - name: Node and control-plane host separation
+        run: bash scripts/node-control-plane-conflict-test.sh
       - name: Node doctor hermetic checks
         run: bash scripts/node-doctor-test.sh
+      - name: Bundled controller node enrollment checks
+        run: bash scripts/bundled-control-node-test.sh
+      - name: Steward Control black-box acceptance
+        run: bash scripts/control-acceptance.sh
+      - name: Steward Control Terraform module
+        run: bash integrations/terraform/modules/steward-control/tests/test.sh
+      - name: Steward node Terraform module
+        run: bash integrations/terraform/modules/steward-node/tests/test.sh
       - name: Documentation consistency
         run: bash scripts/check-docs-consistency.sh
       - name: Installer plan smoke
         run: |
-          bash scripts/install-steward.sh --non-interactive --dry-run \
+          /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \
             --stage-only --version v0.0.0 --package deb | grep -q 'package:      deb'
-          bash scripts/install-steward.sh --non-interactive --dry-run \
+          /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \
             --stage-only --version v0.0.0 --package rpm | grep -q 'package:      rpm'
-          bash scripts/install-steward.sh --non-interactive --dry-run \
+          /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \
             --stage-only --version v0.0.0 --package tar | grep -q 'package:      tar'
-          if bash scripts/install-steward.sh --non-interactive --dry-run \
+          if /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \
             --version v0.0.0 2>/dev/null; then
             echo 'full unattended install accepted missing enrollment inputs' >&2
             exit 1
           fi
-          bash scripts/install-steward.sh --non-interactive --dry-run \
+          /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \
             --local-only --version v0.0.0 --package tar \
             --admission-policy /trust/policy.dsse.json \
             --site-root-public-key /trust/site-root.public \
             --site-root-key-id site-root --node-id node-1 | grep -q 'admission:    signed'
-          if bash scripts/install-steward.sh --non-interactive --dry-run \
+          if /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \
             --stage-only --version v0.0.0 --install-gvisor 2>/dev/null; then
             echo 'staged install accepted an impossible gVisor request' >&2
             exit 1
           fi
-          if bash scripts/install-steward.sh --non-interactive --dry-run \
+          if /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \
             --local-only --version v0.0.0 --admission-policy /trust/policy.dsse.json 2>/dev/null; then
             echo 'installer accepted partial signed-admission trust' >&2
             exit 1
           fi
-          if bash scripts/install-steward.sh --non-interactive --dry-run \
+          if /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \
             --stage-only --version v0.0.0-01 2>/dev/null; then
             echo 'installer accepted a leading-zero numeric prerelease identifier' >&2
             exit 1
           fi
-          bash scripts/install-steward.sh --non-interactive --dry-run \
+          /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \
             --stage-only --version v0.0.0-rc.1 --package tar | grep -q 'version:      v0.0.0-rc.1'
       - name: Native package smoke
         run: |
+          unset TAR_OPTIONS GZIP POSIXLY_CORRECT
+          long_release="v1.2.3-$(printf 'a%.0s' {1..122})"
+          if STEWARD_RELEASE_VERSION="$long_release" STEWARD_RELEASE_TARGETS=linux/amd64 \
+            /bin/bash -p scripts/release.sh >/tmp/steward-overlong-release.out 2>&1; then
+            echo 'release accepted an explicit version longer than 128 bytes' >&2
+            exit 1
+          fi
+          grep -Fq 'explicit STEWARD_RELEASE_VERSION must be a release tag of at most 128 bytes' \
+            /tmp/steward-overlong-release.out
           stage=$(mktemp -d)
           smoke=$(mktemp -d)
           trap 'rm -rf "$stage" "$smoke" /tmp/steward-node-test.deb /tmp/steward-node-test.rpm \
@@ -99,6 +133,8 @@ jobs:
           go build -o "$stage/steward-relay" ./cmd/steward-relay
           cp -R adapters/hermes-agent "$stage/adapters/"
           cp -R deploy/config deploy/systemd "$stage/deploy/"
+          rm -f "$stage/deploy/config/control.env" \
+            "$stage/deploy/systemd/steward-control.service"
           cp scripts/install-node.sh scripts/activate-node-release.sh \
             scripts/node-preflight.sh scripts/node-doctor.sh scripts/configure-node.sh scripts/configure-admission.sh \
             scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
@@ -169,10 +205,6 @@ jobs:
           dpkg-deb --info /tmp/steward-node-test.deb
           dpkg-deb --contents /tmp/steward-node-test.deb > /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/steward-control' /tmp/steward-node-test.deb.contents
-          if grep -q 'steward-control.service' /tmp/steward-node-test.deb.contents; then
-            echo 'node DEB unexpectedly installs a control-plane service' >&2
-            exit 1
-          fi
           grep -q './usr/lib/steward-node/release/steward-executor' /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/stewardctl' /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/steward-mcp' /tmp/steward-node-test.deb.contents
@@ -190,15 +222,18 @@ jobs:
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/scripts/node-doctor.sh' \
             /tmp/steward-node-test.deb.contents
+          if grep -Eq 'control\.env|steward-control\.service|install-control\.sh|control-doctor\.sh' \
+            /tmp/steward-node-test.deb.contents; then
+            echo 'node DEB unexpectedly contains controller deployment assets' >&2
+            exit 1
+          fi
           dpkg-deb --ctrl-tarfile /tmp/steward-node-test.deb | \
             tar -xOf - ./postinst | grep -q -- "--expected-version 'v0.0.0-test'"
+          dpkg-deb --ctrl-tarfile /tmp/steward-node-test.deb | \
+            tar -xOf - ./preinst | grep -Fq 'steward.node-role-claim.v1'
           rpm -qpi /tmp/steward-node-test.rpm
           rpm -qpl /tmp/steward-node-test.rpm > /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/steward-control' /tmp/steward-node-test.rpm.contents
-          if grep -q 'steward-control.service' /tmp/steward-node-test.rpm.contents; then
-            echo 'node RPM unexpectedly installs a control-plane service' >&2
-            exit 1
-          fi
           grep -q '/usr/lib/steward-node/release/steward-executor' /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/stewardctl' /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/steward-mcp' /tmp/steward-node-test.rpm.contents
@@ -215,8 +250,18 @@ jobs:
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/scripts/node-doctor.sh' \
             /tmp/steward-node-test.rpm.contents
+          if grep -Eq 'control\.env|steward-control\.service|install-control\.sh|control-doctor\.sh' \
+            /tmp/steward-node-test.rpm.contents; then
+            echo 'node RPM unexpectedly contains controller deployment assets' >&2
+            exit 1
+          fi
           rpm -qp --scripts /tmp/steward-node-test.rpm | \
             grep -q -- "--expected-version 'v0.0.0-test'"
+          rpm -qp --scripts /tmp/steward-node-test.rpm | \
+            grep -Fq 'steward.node-role-claim.v1'
+
+      - name: Controller installer transaction smoke
+        run: bash scripts/control-install-smoke.sh
 
   lint:
     name: golangci-lint
