@@ -26,6 +26,7 @@ const (
 	PlanSchemaV1 = "steward.activation-plan.v1"
 
 	TransportNodeLocal                  = "node_local"
+	TransportControlUplink              = "control_uplink"
 	CanaryHermesWorkspaceAuditV1        = "hermes_workspace_audit_v1"
 	MaxPlanBytes                        = 64 << 10
 	MaxActivationArchiveBytes    int64  = ocibundle.DefaultMaxArchiveBytes
@@ -128,8 +129,12 @@ func (plan PlanV1) Validate() error {
 	if err := validateArchive(plan.Archive); err != nil {
 		return invalidPlan("archive: %v", err)
 	}
-	if plan.Transport != TransportNodeLocal {
-		return invalidPlan("transport must be %q", TransportNodeLocal)
+	if plan.Transport != TransportNodeLocal && plan.Transport != TransportControlUplink {
+		return invalidPlan(
+			"transport must be %q or %q",
+			TransportNodeLocal,
+			TransportControlUplink,
+		)
 	}
 	if plan.Canary.Kind != CanaryHermesWorkspaceAuditV1 {
 		return invalidPlan("canary kind must be %q", CanaryHermesWorkspaceAuditV1)
