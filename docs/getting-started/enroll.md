@@ -33,17 +33,24 @@ Signed multi-tenant admission also requires:
 | --- | --- | --- |
 | `/etc/steward/site-policy.dsse.json` | `root:steward-executor`, `0640` | Site-root-signed tenant, publisher, and command-key policy |
 | `/etc/steward/site-root.public` | `root:root`, `0644` | Base64 Ed25519 site-root public key |
+| `/etc/steward/node-receipts.private.pem` | `steward-executor:steward-executor`, `0600` | Receipt private key used to prove possession during node enrollment |
+| `/etc/steward/node-receipts.public` | `root:root`, `0644` | Matching receipt public key |
 
-The installer generates the host-local Executor API token when it is omitted. For
-signed admission, it also generates the node receipt key. These are node-local
-secrets, not control-plane enrollment inputs.
+The enrollment exchange also emits an owner-only evidence config. The installer
+validates its controller ID, node ID, epoch, and public key, then stores the
+controller identity and enablement in `/etc/steward/executor.env`; it does not keep
+the handoff file. The installer generates the host-local Executor API token when it
+is omitted. It generates a receipt key only for flows that did not prove a receipt
+identity during control-plane enrollment.
 
 Before invoking either configurator, copy every supplied input into a protected
 root-owned directory. Each source must be a root-owned, single-link regular file
 under a complete root-owned directory chain that is not group- or world-writable.
-Credentials and an explicit Executor token must be owner-only. Steward snapshots
-each source before changing `/etc`; limits are 64 KiB per uplink credential, 1 MiB
-for the CA or policy, and 4 KiB for the site-root key or Executor token. Paths in
+Credentials, the evidence config, receipt private key, and an explicit Executor
+token must be owner-only. Steward snapshots each source before changing `/etc`;
+limits are 64 KiB per uplink credential, 1 MiB for the CA or policy, 16 KiB for the
+receipt private key, and 4 KiB for the evidence config, public keys, or Executor
+token. Paths in
 `/tmp`, user home directories, writable mounts, and removable media are rejected
 even when the file itself has restrictive permissions.
 
@@ -61,7 +68,10 @@ sudo /bin/bash -p /root/steward-install/install-steward.sh \
   --admission-policy /secure/enrollment/site-policy.dsse.json \
   --site-root-public-key /secure/enrollment/site-root.public \
   --site-root-key-id site-root-1 \
-  --node-id node-a
+  --node-id node-a \
+  --executor-evidence-config /secure/enrollment/executor-evidence.env \
+  --executor-evidence-private-key /secure/enrollment/node-receipts.private.pem \
+  --executor-evidence-public-key /secure/enrollment/node-receipts.public
 ```
 
 With no `--steward-credential`, the installer selects bundled-controller mode:
@@ -69,12 +79,14 @@ Executor polls remotely through protocol version 3, while the generic supervisor
 remains loopback-only with process execution disabled. Supplying a supervisor
 credential retains the compatible external-controller path.
 
-The script generates an omitted host-local Executor token or receipt key. It
-initializes both anti-replay stores once, validates policy before configuring the
-Gateway and relay, checks all seven binaries and three node service identities, then starts
-the services. Executor creates per-workload networks later during admission. Failure
-restores prior configuration and removes only state created by this transaction;
-existing generation fences, the operation journal, and evidence remain intact.
+The script generates an omitted host-local Executor token. For control-plane
+enrollment it imports the exact receipt key that signed the enrollment proof;
+changing that key is rejected. It initializes both anti-replay stores once,
+validates policy before configuring the Gateway and relay, checks all seven
+binaries and three node service identities, then starts the services. Executor
+creates per-workload networks later during admission. Failure restores prior
+configuration and removes only state created by this transaction; existing
+generation fences, the operation journal, and evidence remain intact.
 
 That rollback covers handled process errors. `SIGKILL` or power loss can interrupt
 the node configurator between filesystem changes because this path has no durable
@@ -103,9 +115,13 @@ which wrap a typed JSON statement and its signature. A site cleanup key may
 authorize only stop, destroy, or purge. Each statement binds tenant, node, instance,
 runtime, generations, sequence, and a short validity window.
 
-Pass the node-scoped credential and all signed-admission inputs to one installer or
-`configure-node` command. Tenant and cleanup authority must be valid before the
-remote credential becomes active, and `node_id` must match it. A legacy
+Pass the node-scoped credential, evidence config, receipt key pair, and all
+signed-admission inputs to one installer or `configure-node` command. Tenant and
+cleanup authority must be valid before the remote credential becomes active, and
+the credential, evidence config, and admitted `node_id` must match. Executor then
+publishes authenticated evidence checkpoints independently from command polling.
+A controller outage does not stop local enforcement; the signed local chain remains
+the durable outbox until delivery resumes. A legacy
 tenant-scoped credential may omit signed admission but can act only for its tenant.
 
 ## Verify the active node

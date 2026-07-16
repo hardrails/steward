@@ -175,7 +175,10 @@ sudo /bin/bash -p /root/steward-install/install-steward.sh \
   --admission-policy /secure/enrollment/site-policy.dsse.json \
   --site-root-public-key /secure/enrollment/site-root.public \
   --site-root-key-id site-root-1 \
-  --node-id node-a
+  --node-id node-a \
+  --executor-evidence-config /secure/enrollment/executor-evidence.env \
+  --executor-evidence-private-key /secure/enrollment/node-receipts.private.pem \
+  --executor-evidence-public-key /secure/enrollment/node-receipts.public
 ```
 
 When `--steward-credential` is omitted, Executor uses Steward Control's signed

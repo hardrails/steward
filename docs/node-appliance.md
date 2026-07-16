@@ -133,7 +133,10 @@ sudo /bin/bash -p /root/steward-install/install-steward.sh \
   --admission-policy /secure/enrollment/site-policy.dsse.json \
   --site-root-public-key /secure/enrollment/site-root.public \
   --site-root-key-id site-root-1 \
-  --node-id node-a
+  --node-id node-a \
+  --executor-evidence-config /secure/enrollment/executor-evidence.env \
+  --executor-evidence-private-key /secure/enrollment/node-receipts.private.pem \
+  --executor-evidence-public-key /secure/enrollment/node-receipts.public
 ```
 
 Related modes:
@@ -168,7 +171,10 @@ sudo /bin/bash -p "/root/steward-$RELEASE_TAG/install-steward.sh" \
   --admission-policy /root/steward-enrollment/site-policy.dsse.json \
   --site-root-public-key /root/steward-enrollment/site-root.public \
   --site-root-key-id site-root-1 \
-  --node-id node-a
+  --node-id node-a \
+  --executor-evidence-config /root/steward-enrollment/executor-evidence.env \
+  --executor-evidence-private-key /root/steward-enrollment/node-receipts.private.pem \
+  --executor-evidence-public-key /root/steward-enrollment/node-receipts.public
 ```
 
 The installer makes no artifact-download request in this mode. Once it starts an
@@ -265,7 +271,10 @@ sudo /usr/local/libexec/steward/configure-node \
   --admission-policy /secure/enrollment/site-policy.dsse.json \
   --site-root-public-key /secure/enrollment/site-root.public \
   --site-root-key-id site-root-1 \
-  --node-id node-a
+  --node-id node-a \
+  --executor-evidence-config /secure/enrollment/executor-evidence.env \
+  --executor-evidence-private-key /secure/enrollment/node-receipts.private.pem \
+  --executor-evidence-public-key /secure/enrollment/node-receipts.public
 ```
 
 The transaction verifies trust before deriving relay topology or activating the
@@ -277,10 +286,11 @@ tenant-scoped Executor credential remains available for a single-tenant node but
 does not enable multi-tenant commands. See [Signed admission]({{ '/guides/signed-admission/' | relative_url }})
 and [Executor uplink]({{ '/executor/' | relative_url }}#outbound-executor-uplink).
 
-`configure-node` initializes the durable command and signed-admission fences, plus
-the empty operation journal and evidence chain. A fence is durable high-water state
-that rejects replayed commands or policies. For a manual configuration, initialize
-the uplink fence exactly once as the service user:
+`configure-node` validates the enrollment evidence sidecar, imports the exact
+receipt key used during enrollment, and initializes the durable command and
+signed-admission fences, plus the empty operation journal and evidence chain. A
+fence is durable high-water state that rejects replayed commands or policies. For a
+manual configuration, initialize the uplink fence exactly once as the service user:
 
 ```console
 sudo -u steward-executor /usr/local/bin/steward-executor \
