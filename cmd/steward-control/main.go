@@ -90,12 +90,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		_, err := fmt.Fprintln(stdout, "steward-control configuration is valid")
 		return err
 	}
-	// The control-plane export route receives this already-validated key through
-	// controlplane.Config. Keep the load here so normal serving and
-	// -check-config share one secure lifecycle boundary.
-	_ = witnessPrivateKey
 	handler, err := controlplane.New(controlplane.Config{
-		Store: store, Auth: manager, LeaseDuration: parsed.leaseDuration,
+		Store: store, Auth: manager, WitnessPrivateKey: witnessPrivateKey, LeaseDuration: parsed.leaseDuration,
 		MaxPoll: parsed.maxPoll, Logger: logger,
 	})
 	if err != nil {

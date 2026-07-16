@@ -24,11 +24,12 @@ import (
 )
 
 type serverFixture struct {
-	server       *Server
-	store        *controlstore.Store
-	now          time.Time
-	adminToken   string
-	evidenceKeys map[string]ed25519.PrivateKey
+	server         *Server
+	store          *controlstore.Store
+	now            time.Time
+	adminToken     string
+	witnessPrivate ed25519.PrivateKey
+	evidenceKeys   map[string]ed25519.PrivateKey
 }
 
 func newServerFixture(t *testing.T) *serverFixture {
@@ -52,17 +53,22 @@ func newServerFixture(t *testing.T) *serverFixture {
 		t.Fatal(err)
 	}
 	fixture := &serverFixture{
-		store: store, now: now, adminToken: adminToken,
+		store: store, now: now, adminToken: adminToken, witnessPrivate: testWitnessPrivate(),
 		evidenceKeys: make(map[string]ed25519.PrivateKey),
 	}
 	fixture.server, err = New(Config{
-		Store: store, Auth: manager, LeaseDuration: 2 * time.Minute, MaxPoll: 32,
+		Store: store, Auth: manager, WitnessPrivateKey: fixture.witnessPrivate,
+		LeaseDuration: 2 * time.Minute, MaxPoll: 32,
 		Now: func() time.Time { return fixture.now },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return fixture
+}
+
+func testWitnessPrivate() ed25519.PrivateKey {
+	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x7a}, ed25519.SeedSize))
 }
 
 type testEnrollmentCapability struct {
@@ -229,6 +235,26 @@ func TestControlPlaneEndToEndSignedCommandLifecycle(t *testing.T) {
 	if err := evidenceReportResponse.Validate(); err != nil || evidenceReportResponse.Applied ||
 		evidenceReportResponse.Status.Head == nil || *evidenceReportResponse.Status.Head != evidenceHead {
 		t.Fatalf("unexpected evidence acknowledgement: response=%+v err=%v", evidenceReportResponse, err)
+	}
+
+	response = fixture.request(t, http.MethodGet, "/v1/nodes/"+enrollment.NodeID+"/evidence", fixture.adminToken, "")
+	requireStatus(t, response, http.StatusOK)
+	var inspection controlprotocol.ExecutorEvidenceInspectionV1
+	decodeResponse(t, response, &inspection)
+	if err := inspection.Validate(); err != nil || inspection.IdentityProof == nil ||
+		inspection.ControllerInstanceID != enrollment.ControllerInstanceID || inspection.ControlNodeID != enrollment.NodeID ||
+		inspection.Status.Head == nil || *inspection.Status.Head != evidenceHead {
+		t.Fatalf("unexpected online evidence inspection: inspection=%+v err=%v", inspection, err)
+	}
+
+	response = fixture.request(t, http.MethodGet, "/v1/nodes/"+enrollment.NodeID+"/evidence/export", fixture.adminToken, "")
+	requireStatus(t, response, http.StatusOK)
+	var evidenceExport controlprotocol.ExecutorEvidenceExportV1
+	decodeResponse(t, response, &evidenceExport)
+	if err := controlprotocol.VerifyExecutorEvidenceExportV1(
+		evidenceExport, fixture.witnessPrivate.Public().(ed25519.PublicKey),
+	); err != nil || evidenceExport.Statement.Status.Head == nil || *evidenceExport.Statement.Status.Head != evidenceHead {
+		t.Fatalf("unexpected offline evidence export: export=%+v err=%v", evidenceExport, err)
 	}
 
 	commandRaw := signedCommand(t, fixture.now, "command-1", "tenant-a", "node-1")
@@ -412,16 +438,23 @@ func TestNodePaginationHonorsEncodedResponseBound(t *testing.T) {
 func TestControlServerLeaseLimitMatchesStore(t *testing.T) {
 	fixture := newServerFixture(t)
 	if _, err := New(Config{
-		Store: fixture.store, Auth: fixture.server.auth, LeaseDuration: controlstore.MaxDeliveryLease,
-		MaxPoll: 1,
+		Store: fixture.store, Auth: fixture.server.auth, WitnessPrivateKey: fixture.witnessPrivate,
+		LeaseDuration: controlstore.MaxDeliveryLease,
+		MaxPoll:       1,
 	}); err != nil {
 		t.Fatalf("maximum store lease rejected: %v", err)
 	}
 	if _, err := New(Config{
-		Store: fixture.store, Auth: fixture.server.auth, LeaseDuration: controlstore.MaxDeliveryLease + time.Nanosecond,
-		MaxPoll: 1,
+		Store: fixture.store, Auth: fixture.server.auth, WitnessPrivateKey: fixture.witnessPrivate,
+		LeaseDuration: controlstore.MaxDeliveryLease + time.Nanosecond,
+		MaxPoll:       1,
 	}); err == nil {
 		t.Fatal("lease above the store maximum was accepted")
+	}
+	if _, err := New(Config{
+		Store: fixture.store, Auth: fixture.server.auth, LeaseDuration: time.Minute, MaxPoll: 1,
+	}); err == nil {
+		t.Fatal("missing evidence witness key was accepted")
 	}
 }
 

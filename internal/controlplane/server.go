@@ -4,6 +4,7 @@
 package controlplane
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -34,28 +35,31 @@ const (
 var errBodyTooLarge = errors.New("request body exceeds 1 MiB")
 
 type Config struct {
-	Store         *controlstore.Store
-	Auth          *controlauth.Manager
-	LeaseDuration time.Duration
-	MaxPoll       int
-	Now           func() time.Time
-	Logger        *slog.Logger
+	Store             *controlstore.Store
+	Auth              *controlauth.Manager
+	WitnessPrivateKey ed25519.PrivateKey
+	LeaseDuration     time.Duration
+	MaxPoll           int
+	Now               func() time.Time
+	Logger            *slog.Logger
 }
 
 type Server struct {
-	store   *controlstore.Store
-	auth    *controlauth.Manager
-	lease   time.Duration
-	maxPoll int
-	now     func() time.Time
-	logger  *slog.Logger
-	mux     *http.ServeMux
+	store      *controlstore.Store
+	auth       *controlauth.Manager
+	witnessKey ed25519.PrivateKey
+	lease      time.Duration
+	maxPoll    int
+	now        func() time.Time
+	logger     *slog.Logger
+	mux        *http.ServeMux
 }
 
 func New(config Config) (*Server, error) {
 	if config.Store == nil || config.Auth == nil || config.LeaseDuration <= 0 ||
-		config.LeaseDuration > controlstore.MaxDeliveryLease || config.MaxPoll <= 0 || config.MaxPoll > controlprotocol.MaxExecutorDeliveries {
-		return nil, errors.New("control server requires store, auth, a lease no greater than 10 minutes, and a bounded poll batch")
+		config.LeaseDuration > controlstore.MaxDeliveryLease || config.MaxPoll <= 0 ||
+		config.MaxPoll > controlprotocol.MaxExecutorDeliveries || len(config.WitnessPrivateKey) != ed25519.PrivateKeySize {
+		return nil, errors.New("control server requires store, auth, an Ed25519 witness key, a lease no greater than 10 minutes, and a bounded poll batch")
 	}
 	now := config.Now
 	if now == nil {
@@ -66,7 +70,7 @@ func New(config Config) (*Server, error) {
 		logger = slog.Default()
 	}
 	server := &Server{
-		store: config.Store, auth: config.Auth, lease: config.LeaseDuration,
+		store: config.Store, auth: config.Auth, witnessKey: append(ed25519.PrivateKey(nil), config.WitnessPrivateKey...), lease: config.LeaseDuration,
 		maxPoll: config.MaxPoll, now: now, logger: logger, mux: http.NewServeMux(),
 	}
 	server.routes()
@@ -94,6 +98,8 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/enroll", server.enroll)
 	server.mux.HandleFunc("/v1/node-credentials/{credential_id}", server.nodeCredential)
 	server.mux.HandleFunc("/v1/nodes/{node_id}", server.nodeAdministration)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence", server.evidenceAdministration)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/export", server.evidenceExport)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes", server.nodes)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}", server.node)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands", server.commands)
@@ -358,6 +364,67 @@ func (server *Server) nodeAdministration(writer http.ResponseWriter, request *ht
 		NodeID             string `json:"node_id"`
 		RevokedCredentials int    `json:"revoked_credentials"`
 	}{request.PathValue("node_id"), revoked})
+}
+
+func (server *Server) evidenceAdministration(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	inspection, err := server.store.InspectExecutorEvidence(identity, request.PathValue("node_id"))
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	response := server.evidenceInspection(request.PathValue("node_id"), inspection)
+	if err := response.Validate(); err != nil {
+		server.logger.Error("retained Executor evidence inspection is invalid", "error", err, "node_id", request.PathValue("node_id"))
+		writeError(writer, http.StatusInternalServerError, "internal_error", "the control plane could not encode valid evidence state")
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) evidenceExport(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	nodeID := request.PathValue("node_id")
+	inspection, err := server.store.InspectExecutorEvidence(identity, nodeID)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	if inspection.IdentityProof == nil {
+		server.storeError(writer, controlstore.ErrConflict, false)
+		return
+	}
+	statement := controlprotocol.ExecutorEvidenceExportStatementV1{
+		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1, ControllerInstanceID: server.auth.InstanceID(),
+		ControlNodeID: nodeID, IdentityProof: *inspection.IdentityProof, Status: inspection.Status,
+		ExportedAt: server.now().UTC().Format(time.RFC3339Nano),
+	}
+	export, err := controlprotocol.SignExecutorEvidenceExportV1(statement, server.witnessKey)
+	if err != nil {
+		server.logger.Error("sign Executor evidence export", "error", err, "node_id", nodeID)
+		writeError(writer, http.StatusInternalServerError, "internal_error", "the control plane could not sign a valid evidence export")
+		return
+	}
+	writeJSON(writer, http.StatusOK, export)
+}
+
+func (server *Server) evidenceInspection(nodeID string, inspection controlstore.ExecutorEvidenceInspection) controlprotocol.ExecutorEvidenceInspectionV1 {
+	return controlprotocol.ExecutorEvidenceInspectionV1{
+		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1, ControllerInstanceID: server.auth.InstanceID(),
+		ControlNodeID: nodeID, IdentityProof: inspection.IdentityProof, Status: inspection.Status,
+	}
 }
 
 func (server *Server) nodes(writer http.ResponseWriter, request *http.Request) {

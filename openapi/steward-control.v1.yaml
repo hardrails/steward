@@ -41,6 +41,8 @@ tags:
     description: One-time node enrollment capabilities.
   - name: nodes
     description: Tenant-projected node inventory and site-wide revocation.
+  - name: evidence
+    description: Site-admin inspection and portable verification of independently witnessed Executor evidence.
   - name: commands
     description: Exact tenant-signed Executor command submission and status.
   - name: executor-uplink
@@ -424,6 +426,79 @@ paths:
           $ref: "#/components/responses/NotFound"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/nodes/{node_id}/evidence:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    get:
+      tags: [evidence]
+      operationId: inspectExecutorEvidence
+      summary: Inspect one node's witnessed evidence state
+      description: |
+        Requires a site-administrator credential because the retained witness
+        is a site-wide forensic view, not tenant-projected inventory. Returns
+        the last-good checkpoint and any sticky rollback or equivocation
+        finding. Revoked nodes remain inspectable. A legacy node that predates
+        receipt-key enrollment is returned as `unwitnessed` without an identity
+        proof.
+      responses:
+        "200":
+          description: Bounded online evidence inspection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutorEvidenceInspection"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/nodes/{node_id}/evidence/export:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    get:
+      tags: [evidence]
+      operationId: exportExecutorEvidence
+      summary: Export a portable signed evidence checkpoint
+      description: |
+        Requires a site-administrator credential. Signs the enrolled receipt
+        identity, last-good checkpoint, any sticky finding, and export time
+        with the controller's dedicated evidence-witness key. The embedded
+        public key is descriptive only; an offline verifier must use a witness
+        public key obtained through an independent trusted channel. Legacy
+        unwitnessed nodes return 409 because they have no receipt identity to
+        bind into a verifiable export.
+      responses:
+        "200":
+          description: Portable controller-witness-signed evidence export.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutorEvidenceExport"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1394,6 +1469,78 @@ components:
           description: True when the controller durably advanced the checkpoint or recorded a new finding.
         status:
           $ref: "#/components/schemas/ExecutorEvidenceStatus"
+    ExecutorEvidenceInspection:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, controller_instance_id, control_node_id, status]
+      description: |
+        `identity_proof` is required for every witnessed state and absent only
+        when `status.state` is `unwitnessed` for a legacy node.
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        control_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        identity_proof:
+          $ref: "#/components/schemas/ExecutorEvidenceIdentityProofV1"
+        status:
+          $ref: "#/components/schemas/ExecutorEvidenceStatus"
+    ExecutorEvidenceExport:
+      type: object
+      additionalProperties: false
+      required:
+        - payload_type
+        - statement
+        - witness_public_key_base64
+        - witness_public_key_sha256
+        - signature_base64
+      properties:
+        payload_type:
+          type: string
+          enum: [application/vnd.steward.executor-evidence-witness.v1+binary]
+        statement:
+          $ref: "#/components/schemas/ExecutorEvidenceExportStatement"
+        witness_public_key_base64:
+          type: string
+          minLength: 44
+          maxLength: 44
+          pattern: '^[A-Za-z0-9+/]{43}=$'
+          description: Self-describing Ed25519 public key; not a trust anchor.
+        witness_public_key_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
+        signature_base64:
+          type: string
+          minLength: 88
+          maxLength: 88
+          pattern: '^[A-Za-z0-9+/]{86}==$'
+    ExecutorEvidenceExportStatement:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol_version
+        - controller_instance_id
+        - control_node_id
+        - identity_proof
+        - status
+        - exported_at
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        control_node_id:
+          $ref: "#/components/schemas/Identifier128"
+        identity_proof:
+          $ref: "#/components/schemas/ExecutorEvidenceIdentityProofV1"
+        status:
+          $ref: "#/components/schemas/ExecutorEvidenceStatus"
+        exported_at:
+          type: string
+          format: date-time
     ExecutorEvidenceHeadProof:
       type: object
       additionalProperties: false
