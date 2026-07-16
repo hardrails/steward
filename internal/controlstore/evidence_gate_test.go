@@ -176,3 +176,109 @@ func TestExecutorEvidenceReportGateAllowsOneRestartFallbackChallenge(t *testing.
 		t.Fatalf("staggered restart fallback admission=(%#v, %v, %t)", attempt, err, leader)
 	}
 }
+
+func TestExecutorEvidenceReportGateRejectsInvalidAndCapacityBoundAdmissions(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	for name, test := range map[string]struct {
+		store        *Store
+		credentialID string
+		challenge    string
+		expiresAt    time.Time
+		now          time.Time
+	}{
+		"nil store":        {credentialID: "credential-a", challenge: "challenge-a", expiresAt: now.Add(time.Minute), now: now},
+		"empty credential": {store: &Store{limits: DefaultLimits()}, challenge: "challenge-a", expiresAt: now.Add(time.Minute), now: now},
+		"empty challenge":  {store: &Store{limits: DefaultLimits()}, credentialID: "credential-a", expiresAt: now.Add(time.Minute), now: now},
+		"zero now":         {store: &Store{limits: DefaultLimits()}, credentialID: "credential-a", challenge: "challenge-a", expiresAt: now.Add(time.Minute)},
+		"expired":          {store: &Store{limits: DefaultLimits()}, credentialID: "credential-a", challenge: "challenge-a", expiresAt: now, now: now},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := test.store.rememberExecutorEvidenceChallenge(
+				test.credentialID, test.challenge, test.expiresAt, test.now,
+			); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("invalid gate input error=%v", err)
+			}
+		})
+	}
+
+	limits := DefaultLimits()
+	limits.MaxCredentials = 1
+	store := &Store{limits: limits}
+	if err := store.rememberExecutorEvidenceChallenge(
+		"credential-a", "challenge-a", now.Add(time.Minute), now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if attempt, _, err, leader := store.beginExecutorEvidenceReport(
+		"credential-b", "challenge-b", sha256.Sum256([]byte("report")),
+		now.Add(time.Minute), now,
+	); attempt != nil || !errors.Is(err, ErrCapacityExceeded) || leader {
+		t.Fatalf("capacity-bound admission=(%#v, %v, %t)", attempt, err, leader)
+	}
+}
+
+func TestExecutorEvidenceReportGateBindsPendingChallengeAndIgnoresForeignCompletion(t *testing.T) {
+	store := &Store{limits: DefaultLimits()}
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(5 * time.Minute)
+	const credentialID = "credential-a"
+	const challenge = "challenge-a"
+	if err := store.rememberExecutorEvidenceChallenge(credentialID, challenge, expiresAt, now); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("report"))
+	for name, candidate := range map[string]struct {
+		challenge string
+		expiresAt time.Time
+	}{
+		"challenge": {"substituted", expiresAt},
+		"expiry":    {challenge, expiresAt.Add(time.Second)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if attempt, _, err, leader := store.beginExecutorEvidenceReport(
+				credentialID, candidate.challenge, digest, candidate.expiresAt, now,
+			); attempt != nil || !errors.Is(err, ErrConflict) || leader {
+				t.Fatalf("substituted pending claim=(%#v, %v, %t)", attempt, err, leader)
+			}
+		})
+	}
+
+	attempt, _, err, leader := store.beginExecutorEvidenceReport(
+		credentialID, challenge, digest, expiresAt, now,
+	)
+	if err != nil || !leader || attempt == nil {
+		t.Fatalf("valid admission=(%#v, %v, %t)", attempt, err, leader)
+	}
+	store.finishExecutorEvidenceReport(
+		credentialID, &executorEvidenceReportAttempt{}, controlprotocol.ExecutorEvidenceReportResponseV1{}, nil,
+	)
+	if other, _, err, leader := store.beginExecutorEvidenceReport(
+		credentialID, challenge, digest, expiresAt, now,
+	); other != nil || !errors.Is(err, ErrConflict) || leader {
+		t.Fatalf("foreign completion cleared active attempt=(%#v, %v, %t)", other, err, leader)
+	}
+	store.finishExecutorEvidenceReport(
+		credentialID, attempt, controlprotocol.ExecutorEvidenceReportResponseV1{}, nil,
+	)
+
+	laterExpiry := expiresAt.Add(time.Minute)
+	secondDigest := sha256.Sum256([]byte("equivocation variant"))
+	second, _, err, leader := store.beginExecutorEvidenceReport(
+		credentialID, challenge, secondDigest, laterExpiry, now,
+	)
+	if err != nil || !leader || second == nil {
+		t.Fatalf("secondary admission=(%#v, %v, %t)", second, err, leader)
+	}
+	store.finishExecutorEvidenceReport(
+		credentialID, second, controlprotocol.ExecutorEvidenceReportResponseV1{}, nil,
+	)
+	if got := store.evidenceReports[credentialID].issuedUntil; !got.Equal(laterExpiry) {
+		t.Fatalf("secondary report expiry tombstone=%v want=%v", got, laterExpiry)
+	}
+}
+
+func TestExecutorEvidenceReportFingerprintRejectsMalformedClaim(t *testing.T) {
+	if _, err := executorEvidenceReportFingerprint(controlprotocol.ExecutorEvidenceReportV1{}); err == nil {
+		t.Fatal("malformed evidence report produced a replay fingerprint")
+	}
+}

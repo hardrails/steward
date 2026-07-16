@@ -130,3 +130,92 @@ func TestInspectExecutorEvidenceRejectsUnavailableStore(t *testing.T) {
 		t.Fatalf("nil store inspection error=%v", err)
 	}
 }
+
+func TestExecutorEvidenceSnapshotCurrentFencesAuthorityAndStateChanges(t *testing.T) {
+	var unavailable *Store
+	admin := controlauth.Identity{Role: controlauth.RoleSiteAdmin}
+	if _, err := unavailable.ExecutorEvidenceSnapshotCurrent(
+		admin, "node-a", ExecutorEvidenceSnapshot{nodeID: "node-a"},
+	); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil store snapshot-current error=%v", err)
+	}
+
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, identity := fixture.createNode(t, "tenant-a")
+	snapshot, err := fixture.store.SnapshotExecutorEvidence(fixture.admin, identity.NodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenantActor := controlauth.Identity{Role: controlauth.RoleTenantOperator, TenantID: "tenant-a"}
+	if _, err := fixture.store.ExecutorEvidenceSnapshotCurrent(
+		tenantActor, identity.NodeID, snapshot,
+	); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant actor snapshot-current error=%v", err)
+	}
+	if _, err := fixture.store.SnapshotExecutorEvidence(fixture.admin, "bad id"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("invalid node snapshot error=%v", err)
+	}
+	if _, err := fixture.store.ExecutorEvidenceSnapshotCurrent(
+		fixture.admin, "bad id", snapshot,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("invalid node snapshot-current error=%v", err)
+	}
+	if _, err := fixture.store.ExecutorEvidenceSnapshotCurrent(
+		fixture.admin, "other-node", snapshot,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cross-node snapshot-current error=%v", err)
+	}
+
+	staleAdmin := fixture.admin
+	staleAdmin.CredentialID = "missing-credential"
+	if _, err := fixture.store.SnapshotExecutorEvidence(staleAdmin, identity.NodeID); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("stale actor snapshot error=%v", err)
+	}
+	if _, err := fixture.store.ExecutorEvidenceSnapshotCurrent(
+		staleAdmin, identity.NodeID, snapshot,
+	); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("stale actor snapshot-current error=%v", err)
+	}
+	if _, err := fixture.store.ExecutorEvidenceSnapshotCurrent(
+		fixture.admin, "missing-node", ExecutorEvidenceSnapshot{nodeID: "missing-node"},
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing node snapshot-current error=%v", err)
+	}
+
+	fixture.store.mu.Lock()
+	node := cloneNode(fixture.store.current.nodes[identity.NodeID])
+	witness := cloneEvidenceWitness(node.Evidence)
+	node.Evidence = nil
+	fixture.store.current.nodes[identity.NodeID] = node
+	fixture.store.mu.Unlock()
+	legacy, err := fixture.store.SnapshotExecutorEvidence(fixture.admin, identity.NodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := fixture.store.ExecutorEvidenceSnapshotCurrent(fixture.admin, identity.NodeID, legacy)
+	if err != nil || !current {
+		t.Fatalf("unchanged legacy snapshot current=%v err=%v", current, err)
+	}
+	fixture.store.mu.Lock()
+	node = cloneNode(fixture.store.current.nodes[identity.NodeID])
+	node.Evidence = witness
+	fixture.store.current.nodes[identity.NodeID] = node
+	fixture.store.mu.Unlock()
+	current, err = fixture.store.ExecutorEvidenceSnapshotCurrent(fixture.admin, identity.NodeID, legacy)
+	if err != nil || current {
+		t.Fatalf("new witness accepted legacy snapshot: current=%v err=%v", current, err)
+	}
+
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.SnapshotExecutorEvidence(fixture.admin, identity.NodeID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed store snapshot error=%v", err)
+	}
+	if _, err := fixture.store.ExecutorEvidenceSnapshotCurrent(
+		fixture.admin, identity.NodeID, snapshot,
+	); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("closed store snapshot-current error=%v", err)
+	}
+}
