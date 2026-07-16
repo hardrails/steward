@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -115,14 +116,22 @@ func TestExportDeltaRequiresAnExactPresentCoordinate(t *testing.T) {
 	}
 	wrong := valid.Head.ChainHash
 	wrong[0] ^= 1
-	for name, coordinate := range map[string]Coordinate{
-		"nonzero genesis hash": {ChainHash: wrong},
-		"wrong retained hash":  {Sequence: valid.Head.Sequence, ChainHash: wrong},
-		"sequence beyond head": {Sequence: valid.Head.Sequence + 1, ChainHash: valid.Head.ChainHash},
+	for name, test := range map[string]struct {
+		coordinate Coordinate
+		mismatch   bool
+	}{
+		"nonzero genesis hash": {coordinate: Coordinate{ChainHash: wrong}},
+		"wrong retained hash": {
+			coordinate: Coordinate{Sequence: valid.Head.Sequence, ChainHash: wrong}, mismatch: true,
+		},
+		"sequence beyond head": {
+			coordinate: Coordinate{Sequence: valid.Head.Sequence + 1, ChainHash: valid.Head.ChainHash}, mismatch: true,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := log.ExportDelta(coordinate); err == nil {
-				t.Fatal("ExportDelta accepted an invalid coordinate")
+			_, err := log.ExportDelta(test.coordinate)
+			if err == nil || errors.Is(err, ErrDeltaCoordinate) != test.mismatch {
+				t.Fatalf("ExportDelta coordinate error = %v, mismatch=%v", err, test.mismatch)
 			}
 		})
 	}

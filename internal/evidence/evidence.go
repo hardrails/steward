@@ -38,6 +38,12 @@ const (
 
 var chainDomain = []byte("steward-evidence-chain-v1\x00")
 
+// ErrDeltaCoordinate means an externally retained coordinate is valid in
+// shape but is not the same coordinate in this local log. Callers may use a
+// separately authenticated local head to report rollback or a fork. Other
+// export errors, especially I/O failures, must not be treated as divergence.
+var ErrDeltaCoordinate = errors.New("evidence delta coordinate does not match the local log")
+
 // EventType is deliberately a closed receipt vocabulary. New decisions require
 // an explicit format version/change rather than arbitrary event strings.
 type EventType byte
@@ -652,14 +658,14 @@ func (l *Log) ExportDelta(after Coordinate) (Delta, error) {
 		if receipt.Sequence <= after.Sequence {
 			if receipt.Sequence == after.Sequence {
 				if current != after.ChainHash {
-					return Delta{}, errors.New("evidence delta coordinate does not match the log")
+					return Delta{}, ErrDeltaCoordinate
 				}
 				found = true
 			}
 			continue
 		}
 		if !found {
-			return Delta{}, errors.New("evidence delta coordinate is not present in the log")
+			return Delta{}, ErrDeltaCoordinate
 		}
 		frame := frameBytes(raw)
 		if len(result.Frames) == MaxDeltaRecords || total > MaxDeltaBytes-len(frame) {
@@ -671,7 +677,7 @@ func (l *Log) ExportDelta(after Coordinate) (Delta, error) {
 		result.Head.ChainHash = current
 	}
 	if !found {
-		return Delta{}, errors.New("evidence delta coordinate is not present in the log")
+		return Delta{}, ErrDeltaCoordinate
 	}
 	return result, nil
 }
