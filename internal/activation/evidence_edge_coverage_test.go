@@ -411,6 +411,7 @@ func TestEvidenceContextCancellationAtEveryCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	//nolint:staticcheck // This adversarial case verifies the explicit nil-context guard.
 	if _, err := CollectExecutorEvidenceV1Context(
 		nil, executorFixture.request, executorFixture.path,
 	); err == nil || !strings.Contains(err.Error(), "context is required") {

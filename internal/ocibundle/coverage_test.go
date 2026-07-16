@@ -130,6 +130,7 @@ func TestJSONHelpersRejectMalformedDuplicateAndCanceledInput(t *testing.T) {
 }
 
 func TestContextAdaptersAndSmallHelpers(t *testing.T) {
+	//nolint:staticcheck // This adversarial case verifies the explicit nil-context guard.
 	if err := contextError(nil); err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("nil context err=%v", err)
 	}
@@ -605,6 +606,7 @@ func TestOpenArchiveContextRejectsShortAndInvalidGzip(t *testing.T) {
 
 func TestInspectAndVerifyRejectAdditionalContractDrift(t *testing.T) {
 	archive, identity := testArchive(t, archiveOptions{})
+	//nolint:staticcheck // This adversarial case verifies the explicit nil-context guard.
 	if _, err := InspectContext(nil, archive, DefaultLimits()); err == nil ||
 		!strings.Contains(err.Error(), "context is required") {
 		t.Fatalf("nil inspect context err=%v", err)

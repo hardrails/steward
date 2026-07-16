@@ -86,6 +86,7 @@ func TestAdditionalPublicBoundaries(t *testing.T) {
 
 	directory := testWorkspace(t)
 	store := mustOpenStore(t, directory)
+	//nolint:staticcheck // This adversarial case verifies the explicit nil-context guard.
 	if err := store.ImportArchiveContext(nil, "/missing"); err == nil {
 		t.Fatal("ImportArchiveContext(nil) succeeded")
 	}
