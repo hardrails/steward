@@ -6,10 +6,11 @@ section: Explanation
 
 # Steward architecture
 
-Steward is the open-source node layer of an agent orchestration system. It splits
-node authority among three long-running services with separate Unix identities.
-A fixed relay runs for each instance that receives a network capability; the relay
-has no host authority.
+Steward is an open-source agent orchestration system with an optional fleet
+controller and independently installable node services. It splits node authority
+among three long-running services with separate Unix identities. A fixed relay
+runs for each instance that receives a network capability; the relay has no host
+authority.
 
 Docker and gVisor answer where untrusted code executes. They do not identify the
 tenant that authorized a workload or constrain a manipulated agent to one approved
@@ -17,12 +18,18 @@ external effect. Steward keeps those decisions outside the agent and connects th
 to durable node state and offline-verifiable evidence.
 
 ```text
-Independent control plane or host operator
-  owns users, desired state, approvals, rollout; submits tenant-bound intent
-  optional off-node action authority signs one exact connector request
-  optional off-node tenant task authority signs one exact service request
+Operator and tenant-controlled signers
+  keep tenant and site private keys outside the controller
+  sign exact Executor commands, connector requests, and service tasks
        |
-       | outbound HTTPS command channels
+       | submit exact signed command bytes
+       v
+steward-control on a management host
+  tenants + node enrollment + bounded inventory
+  opaque command queue + delivery leases + terminal outcomes
+  no tenant private keys, Docker socket, shell, or agent execution
+       ^
+       | node-initiated HTTPS poll and report
        v
 Linux node
   steward                 steward-executor             steward-gateway
@@ -37,7 +44,7 @@ Outbound data: agent -> relay -> Gateway -> approved inference or HTTP(S)
 Service ingress: authenticated host caller -> Gateway -> relay -> agent
 Signed task: owner-only bundle -> loopback Gateway -> exact service POST
 
-Host-local steward-mcp: bounded stdio adapter for Executor and optional task tools
+Management/node steward-mcp: bounded stdio adapter for Control, Executor, and optional task tools
 Mostly offline stewardctl: keys, signed capsule/policy, task permits, receipts;
                          image import uses Docker; task lifecycle uses loopback Gateway
 Inference system: separately selected and operated
@@ -70,10 +77,13 @@ hatches.
 
 ## Direct and outbound control
 
-The supervisor and Executor use different packaged defaults. The supervisor package
-disables its listener and requires the outbound uplink. Executor keeps its
-bearer-protected API on `127.0.0.1:8090` for `stewardctl` and MCP clients and may
-also poll its own uplink. Neither service binds a non-loopback management listener.
+The supervisor and Executor use different management contracts. With bundled
+Steward Control, Executor polls remotely while the generic supervisor stays on
+`127.0.0.1:8080` with durable local state and process execution disabled. A
+compatible external controller may instead supply the supervisor's separate
+tenant-scoped uplink credential. Executor keeps its bearer-protected API on
+`127.0.0.1:8090` for `stewardctl` and MCP clients while also polling its uplink.
+Neither service binds a non-loopback management listener.
 Executor uplink commands invoke the same HTTP handlers as direct requests. The
 generic supervisor uplink has a bounded dispatcher, but it calls the same tracker
 methods and applies the same instance-spec validation as the direct API.
@@ -166,14 +176,16 @@ local Docker daemon after offline verification. Generic `task submit`, `status`,
 literal-loopback Gateway origin; remote operators use an authenticated SSH path
 rather than exposing Gateway.
 
-## Control-plane neutrality
+## Controller replaceability and authority separation
 
-The dependency points from an independently operated control plane to Steward's
-public contracts. Any system may implement the documented API and uplink protocols.
+`steward-control` implements Steward's public control and uplink contracts. Any
+compatible system may implement the same contracts, and nodes do not import a
+controller SDK or require a hosted endpoint.
 
-This boundary lets an operator audit and build the node software without access to
-a control plane's source. It also keeps SSO, approvals, organization hierarchy,
-fleet scheduling, and rollout policy out of the process that holds Docker authority.
+This boundary lets an operator audit and build the controller and node software
+from the same public repository while deploying them as separate trust domains. It
+also keeps SSO, approvals, fleet scheduling, rollout policy, tenant private keys,
+and Docker authority out of the controller process.
 
 ## Inference, connector, and egress separation
 

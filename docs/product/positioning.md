@@ -25,16 +25,20 @@ contacting a vendor.
 After preparing a Docker and gVisor host and importing the required artifacts, an
 operator can:
 
-1. admit a signed, immutable agent profile for one tenant, node, and instance;
-2. require that profile to comply with site-root-signed policy, per-workload
+1. self-host the bundled controller, create tenants and scoped operators, enroll
+   nodes once, and inspect bounded fleet inventory without a vendor service;
+2. deliver an exact tenant-signed command while keeping the signing key outside
+   the controller and node;
+3. admit a signed, immutable agent profile for one tenant, node, and instance;
+4. require that profile to comply with site-root-signed policy, per-workload
    resource limits, and host/tenant aggregate memory, CPU, PID, and
    workload-count caps;
-3. run the agent in a tenant-labelled, gVisor-sandboxed Docker workload with
+5. run the agent in a tenant-labelled, gVisor-sandboxed Docker workload with
    no default network access, while granting only approved state, inference,
    service, exact connector operations, or named HTTP(S) routes, and optionally
    require an off-node tenant authority to sign the exact request for selected
    agent-service or connector operations; and
-4. export a node-local, tamper-evident receipt of the accepted inputs and recorded
+6. export a node-local, tamper-evident receipt of the accepted inputs and recorded
    enforcement decisions. Tamper-evident means changes within the supplied chain
    can be detected; detecting removal of a complete suffix requires an independently
    retained exact head. It does not mean the host cannot replace the entire chain.
@@ -53,6 +57,9 @@ site-root-signed local policy
 authenticated tenant instance intent
               |
               v
+trusted signer -> exact signed command -> Steward Control -> node outbound poll
+                                                    |
+                                                    v
        Steward admission and generation fence
               |
               v
@@ -186,9 +193,11 @@ reviewable.
 ## What Steward is not trying to replace
 
 Steward is not an agent framework, workflow designer, model router, browser
-service, generic sandbox API, or hosted control plane. It does not host models,
-inspect prompts, calculate token costs, design multi-agent workflows, or make
-semantic claims about agent behavior.
+service, generic sandbox API, or hosted control-plane service. The bundled
+self-hosted controller is deliberately not an enterprise identity provider,
+approval system, placement scheduler, desired-state reconciler, or fleet user
+interface. Steward does not host models, inspect prompts, calculate token costs,
+design multi-agent workflows, or make semantic claims about agent behavior.
 
 Existing sandboxes and agent platforms can complement Steward. Steward addresses a
 specific question: can a customer-operated node enforce a locally authorized
@@ -197,9 +206,15 @@ independently signed request, prevent a second node-local dispatch within the
 retained ledger epoch, and produce portable evidence of that enforcement while
 disconnected?
 
+An open-source or self-hosted fleet controller is not unique to Steward. The
+differentiator under evaluation is the complete authorization-to-enforcement path:
+controller-blind tenant keys, node-local signed admission, durable replay fences,
+and evidence that remains verifiable offline.
+
 Among the systems in the dated comparison, no reviewed product documents the same
-combination of customer-operated air-gapped nodes, site-signed artifact and tenant
-admission, service-scoped off-node task keys, exact-request dispatch, durable
+combination of a customer-operated air-gapped fleet controller and nodes,
+site-signed artifact and tenant admission, controller-blind tenant signing keys,
+service-scoped off-node task keys, exact-request dispatch, durable delivery and
 node-local replay control, and offline-verifiable authorization-to-outcome receipts.
 This is a limited statement about linked public documentation, not a claim that
 Steward is first, unique, certified, or immune to defects.

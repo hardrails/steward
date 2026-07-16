@@ -1,23 +1,30 @@
 # Architecture
 
-Steward is node-side software for managing agent instances. The `steward`
-supervisor provides a small lifecycle API. Separate Steward services handle
-untrusted containers and restricted network access. This document defines those
-boundaries, the features that require explicit configuration, and the risks that
-remain outside Steward's control.
+Steward is open-source software for coordinating and running isolated agent
+instances. The optional `steward-control` service coordinates a fleet. Independently
+installable node services enforce lifecycle, untrusted-container, and restricted
+network boundaries. This document defines those boundaries, the features that
+require explicit configuration, and the risks that remain outside Steward's
+control.
 
 ## Separation of concerns
 
-Steward is independently buildable and does not depend on a particular control
-plane. A control plane may use Steward's public HTTP and uplink contracts, but
-Steward never calls a private control-plane API or imports a private package. It
-contains no tenant database, user identity system, approval workflow, rollout
+Steward is independently buildable and ships a replaceable open-source control
+plane. Nodes use only Steward's public HTTP and uplink contracts; they never call a
+private API or import a private package. The bundled controller contains a bounded
+tenant registry, node enrollment, inventory, and signed-command delivery state. It
+does not contain an enterprise identity system, approval workflow, rollout
 scheduler, private client SDK, or vendor-specific API.
 
 Five runtime boundaries separate authority:
 
-1. The **control plane** owns enterprise identity, tenant authorization, desired
-   state, artifact and skill approval, fleet rollout, and evidence aggregation.
+1. The optional **Steward Control** service owns tenant records, scoped operator
+   and node transport credentials, one-time enrollment, bounded inventory, opaque
+   signed-command retention, delivery leases, and reported outcomes. It has no
+   Docker socket, tenant private signing key, shell runner, or agent runtime. An
+   organization may place enterprise identity, approvals, desired state, artifact
+   and skill approval, scheduling, rollout, and evidence aggregation above its
+   public API.
 2. The **Steward supervisor** owns the generic lifecycle and status contract, plus
    its control-plane uplink. It has no Docker authority.
 3. The open-source **Steward Executor** is a separate process that owns the Docker
@@ -42,10 +49,11 @@ signed profile capsules, site policies, exact-request action permits, OCI archiv
 and receipt chains.
 `sudo stewardctl image import` is the deliberate exception; after verification and
 sanitization, that one-shot command connects directly to Docker to load the image.
-`steward-mcp` is a host-local stdio adapter over the bounded Executor API and,
-when explicitly configured, the loopback Gateway task-lifecycle API. It has no
-Docker authority. Its task tools accept only pre-signed exact requests and write
-verified terminal bytes to a fixed owner-only result store rather than MCP output.
+`steward-mcp` is a stdio adapter over the bounded Steward Control API, the
+host-local Executor API, or both. When explicitly configured, it also exposes the
+loopback Gateway task-lifecycle API. It has no Docker authority. Its task tools
+accept only pre-signed exact requests and write verified terminal bytes to a fixed
+owner-only result store rather than MCP output.
 
 The built-in `os/exec` supervisor is for trusted, operator-authored processes. Root
 and non-loopback startup acknowledgements reduce accidental exposure, but they do
@@ -69,6 +77,11 @@ The following supervisor features are off by default:
 - the uplink command audit log: `-audit-log-file`; and
 - the outbound control-plane uplink: `-uplink-url`.
 
+Bundled-controller node enrollment enables only Executor's signed uplink. It keeps
+the generic supervisor on literal loopback with durable local state and process
+execution disabled. A separately compatible controller can supply the optional
+generic supervisor credential and uplink.
+
 Without process execution, lifecycle operations only change tracked status. The
 supervisor does not sandbox workloads, perform computer-use, authenticate inbound
 requests, terminate TLS, emit distributed traces, expose metrics, write an audit
@@ -80,11 +93,14 @@ listener or uplink, and Docker-socket access. Gateway has a third identity and i
 own configuration. `steward-relay` runs only inside an admitted workload's private
 network as a fixed-destination companion.
 
-Linux release artifacts package three service identities and six binaries: `steward`,
-`steward-executor`, `steward-gateway`, `steward-relay`, `stewardctl`, and
-`steward-mcp`. Each release contains those binaries, its systemd units, helper
-scripts, configuration templates, and a manifest that binds every binary and
-host-integration asset by SHA-256.
+Linux release artifacts contain seven binaries:
+`steward-control`, `steward`, `steward-executor`, `steward-gateway`,
+`steward-relay`, `stewardctl`, and `steward-mcp`. Each release contains those
+binaries, helper scripts, configuration templates, and a manifest that binds every
+binary and host-integration asset by SHA-256. A node installation creates three
+service identities for supervisor, Executor, and Gateway. The separate controller
+installer creates a fourth identity only on a controller host; the node package
+never installs or enables a controller service.
 Installation stages the complete release without changing active files. Activation
 validates the target, then selects its binaries and host integration together
 through `/opt/steward/current`. When Gateway and relay support is configured,
@@ -92,8 +108,9 @@ activation also verifies a relay image built from the target release and selects
 binding. A release transition requires a drained node and stops and restarts only
 services that were active. Durable state and credentials remain outside the release
 directory. The installer does not install Docker. It installs verified gVisor
-artifacts only with explicit operator approval. Control-plane deployment, tenant
-policy, approved OCI images, and inference remain operator responsibilities. See
+artifacts only with explicit operator approval. Controller placement, tenant
+signing keys and policy, approved OCI images, and inference remain operator
+responsibilities. See
 [`docs/node-appliance.md`](docs/node-appliance.md).
 
 ### Signed Executor admission
@@ -227,10 +244,10 @@ recovery requires a restart.
 
 TLS uses the Go standard library. Operators can provide a private CA with
 `-uplink-tls-ca-file` and mutual TLS (mTLS) credentials with
-`-uplink-tls-client-cert` and `-uplink-tls-client-key`. The private key must be
-owner-only. Invalid TLS inputs stop startup and `-check-config`; Steward never
-silently falls back. `-uplink-tls-skip-verify` is an explicit, logged compatibility
-exception.
+`-uplink-tls-client-cert` and `-uplink-tls-client-key`. An explicit CA replaces
+the system root set for that connection. The private key must be owner-only.
+Invalid TLS inputs stop startup and `-check-config`; Steward never silently falls
+back. `-uplink-tls-skip-verify` is an explicit, logged compatibility exception.
 
 Poll and report bodies are limited to 1 MiB. An oversized poll response is rejected
 and retried in a later cycle. An oversized report is rejected before transmission,

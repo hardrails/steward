@@ -40,6 +40,53 @@ separate Unix identity and connector receipt key but also performs the connector
 network effect it records. A compromise of either service can forge that service's
 node-local receipts; neither key is isolated in a separate signer.
 
+## Steward Control is a bounded single-writer service
+
+The bundled controller stores tenant records, operator and node credential
+verifiers, one-time enrollment state, node inventory, exact signed command bytes,
+delivery leases, and terminal reports. It has no tenant private signing key and no
+Docker socket. Executor still verifies each signature, node identity, tenant
+policy, generation, sequence, and validity window.
+
+This separation limits authority but does not make the controller untrusted. A
+compromised site administrator can create tenants and operators, enroll or revoke
+nodes, read fleet metadata, deny service, and submit or repeatedly offer any valid
+signed command it possesses. Node replay fences prevent a stale accepted command
+from becoming new authority, but a controller can delay a still-valid command. A
+tenant operator can do the corresponding operations only inside its tenant scope.
+
+The built-in durable store supports one active process. It uses an exclusive file
+lock, bounded hash-chained write-ahead log and snapshot, but has no multi-replica
+consensus, automatic failover, external database adapter, point-in-time online
+backup, or cross-site replication. Stop the service and copy the whole owner-only
+state directory as one unit. Health and readiness report local process and store
+state; they are not a high-availability guarantee.
+
+Default ceilings retain 256 tenants, 4,096 nodes, 16,384 credentials, 4,096
+enrollments, and 16,384 commands, with smaller per-tenant and per-node caps.
+Expired enrollments are reclaimed when another enrollment needs capacity. A
+command with a known terminal outcome may be reclaimed only after its configured
+minimum retention period, and only when another command needs capacity. Pending or
+leased commands and commands reported as `outcome_unknown` are never reclaimed
+automatically.
+
+Tenant, node, and credential records have no delete or compaction operation.
+Revoking a node or credential disables its authority but retains its record, so it
+continues to count toward the configured ceiling. An unresolved
+`outcome_unknown` command also continues to consume command capacity. These choices
+preserve audit and replay state, but a long-lived site must monitor record counts
+and raise its configured ceilings before exhaustion. The controller does not yet
+expose aggregate retained-record counts as metrics, so operators must plan from
+expected lifecycle volume and alert on `capacity_exceeded` API responses. There is
+currently no supported purge path for these records. Exceeding a cap fails the
+affected request; it does not evict live or ambiguous authority silently.
+
+Operator and node bearer credentials have no automatic expiry. Enrollment
+capabilities expire and permit one logical exchange, with exact retries returning
+the same node credential. Long-lived bearers must be rotated and revoked
+explicitly. A site administrator can revoke one node credential during a staged
+rotation without disabling the node or its replacement credential.
+
 ## Signed admission is opt-in
 
 The host-control `/v1/workloads` endpoint is available only without signed
