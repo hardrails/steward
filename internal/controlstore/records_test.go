@@ -65,11 +65,13 @@ func (fixture recordsFixture) createTenant(t *testing.T, tenantID string) {
 
 func (fixture recordsFixture) createNode(t *testing.T, tenants ...string) (string, controlauth.NodeIdentity) {
 	t.Helper()
-	raw, _, _, err := fixture.store.CreateEnrollment(fixture.admin, fixture.auth, "node-1", tenants, fixture.now.Add(time.Hour), fixture.now)
+	raw, enrollment, _, err := fixture.store.CreateEnrollment(fixture.admin, fixture.auth, "node-1", tenants, fixture.now.Add(time.Hour), fixture.now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	credential, err := fixture.store.ExchangeEnrollment(fixture.auth, raw, "request-1", fixture.now.Add(time.Minute))
+	private := newEvidencePrivateKey(t)
+	proof := evidenceIdentityProof(t, fixture.auth, enrollment, private)
+	credential, err := fixture.store.ExchangeEnrollmentWithEvidence(fixture.auth, raw, "request-1", proof, fixture.now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +80,37 @@ func (fixture recordsFixture) createNode(t *testing.T, tenants ...string) (strin
 		t.Fatal(err)
 	}
 	return credential.Credential, identity
+}
+
+func newEvidencePrivateKey(t *testing.T) ed25519.PrivateKey {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return private
+}
+
+func evidenceIdentityProof(t *testing.T, auth *controlauth.Manager, enrollment controlauth.Enrollment, private ed25519.PrivateKey) controlprotocol.ExecutorEvidenceIdentityProofV1 {
+	t.Helper()
+	return signedEvidenceIdentityProof(
+		t, auth.InstanceID(), enrollment.ID, enrollment.NodeID, enrollment.NodeID, 1, private,
+	)
+}
+
+func signedEvidenceIdentityProof(t *testing.T, controllerID, enrollmentID, controlNodeID, receiptNodeID string, epoch uint64, private ed25519.PrivateKey) controlprotocol.ExecutorEvidenceIdentityProofV1 {
+	t.Helper()
+	claim, err := controlprotocol.NewExecutorEvidenceIdentityClaimV1(
+		controllerID, enrollmentID, controlNodeID, receiptNodeID, epoch, private.Public().(ed25519.PublicKey),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := controlprotocol.SignExecutorEvidenceIdentityClaimV1(claim, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proof
 }
 
 func TestBootstrapSiteAdminRetrySurvivesReopenOnlyWhilePristine(t *testing.T) {
@@ -389,6 +422,236 @@ func TestEnrollmentIssuanceRetrySurvivesReopenAndBindsIssuer(t *testing.T) {
 	}
 }
 
+func TestEnrollmentExchangePinsEvidenceAtomicallyAndSurvivesReopen(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	raw, enrollment, _, err := fixture.store.CreateEnrollment(
+		fixture.admin, fixture.auth, "node-1", []string{"tenant-a"}, fixture.now.Add(time.Hour), fixture.now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := newEvidencePrivateKey(t)
+	proof := evidenceIdentityProof(t, fixture.auth, enrollment, private)
+	before, err := fixture.store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := fixture.store.ExchangeEnrollmentWithEvidence(
+		fixture.auth, raw, "exchange-1", proof, fixture.now.Add(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := fixture.store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Sequence != before.Sequence+1 || after.Credentials != before.Credentials+1 {
+		t.Fatalf("exchange was not one atomic WAL transaction: before=%+v after=%+v", before, after)
+	}
+	node, found, err := fixture.store.GetNode(fixture.admin, "tenant-a", "node-1")
+	if err != nil || !found || node.Evidence == nil {
+		t.Fatalf("pinned node = (%+v, %v, %v)", node, found, err)
+	}
+	if node.Evidence.IdentityProof != proof || node.Evidence.Sequence != 0 ||
+		node.Evidence.ChainHash != evidenceGenesisHash || node.Evidence.RecordsAccepted != 0 {
+		t.Fatalf("pinned evidence witness = %+v", node.Evidence)
+	}
+	assertBearerNotPersisted(t, fixture.dir, credential.Credential)
+
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.store, err = Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fixture.store.Close() })
+	node, found, err = fixture.store.GetNode(fixture.admin, "tenant-a", "node-1")
+	if err != nil || !found || node.Evidence == nil || node.Evidence.IdentityProof != proof {
+		t.Fatalf("reopened witness = (%+v, %v, %v)", node.Evidence, found, err)
+	}
+	if _, err := fixture.store.AuthenticateNode(fixture.auth, credential.Credential); err != nil {
+		t.Fatalf("reopened credential: %v", err)
+	}
+	retried, err := fixture.store.ExchangeEnrollmentWithEvidence(
+		fixture.auth, raw, "exchange-1", proof, fixture.now.Add(3*time.Minute),
+	)
+	if err != nil || retried != credential {
+		t.Fatalf("reopened exact retry = (%+v, %v)", retried, err)
+	}
+	retriedStatus, err := fixture.store.Status()
+	if err != nil || retriedStatus.Sequence != after.Sequence {
+		t.Fatalf("exact retry appended a WAL record: status=%+v error=%v", retriedStatus, err)
+	}
+}
+
+func TestEnrollmentEvidenceIdentityAllowsSameKeyCredentialRotation(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	private := newEvidencePrivateKey(t)
+	firstRaw, firstEnrollment, _, err := fixture.store.CreateEnrollment(
+		fixture.admin, fixture.auth, "node-1", []string{"tenant-a"}, fixture.now.Add(time.Hour), fixture.now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstProof := evidenceIdentityProof(t, fixture.auth, firstEnrollment, private)
+	firstCredential, err := fixture.store.ExchangeEnrollmentWithEvidence(
+		fixture.auth, firstRaw, "exchange-1", firstProof, fixture.now.Add(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rotatedRaw, rotatedEnrollment, _, err := fixture.store.CreateEnrollment(
+		fixture.admin, fixture.auth, "node-1", []string{"tenant-a"}, fixture.now.Add(2*time.Hour), fixture.now.Add(3*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedProof := evidenceIdentityProof(t, fixture.auth, rotatedEnrollment, private)
+	rotatedCredential, err := fixture.store.ExchangeEnrollmentWithEvidence(
+		fixture.auth, rotatedRaw, "exchange-2", rotatedProof, fixture.now.Add(4*time.Minute),
+	)
+	if err != nil || rotatedCredential == firstCredential {
+		t.Fatalf("same-key credential rotation = (%+v, %v)", rotatedCredential, err)
+	}
+	retried, err := fixture.store.ExchangeEnrollmentWithEvidence(
+		fixture.auth, rotatedRaw, "exchange-2", rotatedProof, fixture.now.Add(5*time.Minute),
+	)
+	if err != nil || retried != rotatedCredential {
+		t.Fatalf("rotated credential retry = (%+v, %v)", retried, err)
+	}
+	node, found, err := fixture.store.GetNode(fixture.admin, "tenant-a", "node-1")
+	if err != nil || !found || node.Evidence == nil || node.Evidence.IdentityProof != firstProof {
+		t.Fatalf("rotation replaced original enrollment provenance: node=%+v found=%v error=%v", node, found, err)
+	}
+
+	conflictingRaw, conflictingEnrollment, _, err := fixture.store.CreateEnrollment(
+		fixture.admin, fixture.auth, "node-1", []string{"tenant-a"}, fixture.now.Add(3*time.Hour), fixture.now.Add(6*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRejected, err := fixture.store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPrivate := newEvidencePrivateKey(t)
+	conflicts := []controlprotocol.ExecutorEvidenceIdentityProofV1{
+		evidenceIdentityProof(t, fixture.auth, conflictingEnrollment, otherPrivate),
+		signedEvidenceIdentityProof(t, fixture.auth.InstanceID(), conflictingEnrollment.ID, "node-other", "node-other", 1, private),
+		signedEvidenceIdentityProof(t, fixture.auth.InstanceID(), conflictingEnrollment.ID, "node-1", "node-1", 2, private),
+		signedEvidenceIdentityProof(t, "control-other", conflictingEnrollment.ID, "node-1", "node-1", 1, private),
+	}
+	for index, conflict := range conflicts {
+		if _, err := fixture.store.ExchangeEnrollmentWithEvidence(
+			fixture.auth, conflictingRaw, "exchange-3", conflict, fixture.now.Add(7*time.Minute),
+		); !errors.Is(err, ErrConflict) {
+			t.Fatalf("changed evidence identity %d error = %v", index, err)
+		}
+	}
+	forged := evidenceIdentityProof(t, fixture.auth, conflictingEnrollment, private)
+	forged.SignatureBase64 = strings.Repeat("A", len(forged.SignatureBase64))
+	if _, err := fixture.store.ExchangeEnrollmentWithEvidence(
+		fixture.auth, conflictingRaw, "exchange-3", forged, fixture.now.Add(7*time.Minute),
+	); !errors.Is(err, controlauth.ErrUnauthorized) {
+		t.Fatalf("forged evidence proof error = %v", err)
+	}
+	afterRejected, err := fixture.store.Status()
+	if err != nil || afterRejected != beforeRejected {
+		t.Fatalf("rejected evidence identities mutated state: before=%+v after=%+v error=%v", beforeRejected, afterRejected, err)
+	}
+
+	reusedRaw, reusedEnrollment, _, err := fixture.store.CreateEnrollment(
+		fixture.admin, fixture.auth, "node-2", []string{"tenant-a"}, fixture.now.Add(4*time.Hour), fixture.now.Add(8*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reusedProof := evidenceIdentityProof(t, fixture.auth, reusedEnrollment, private)
+	beforeReuse, err := fixture.store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.ExchangeEnrollmentWithEvidence(
+		fixture.auth, reusedRaw, "exchange-4", reusedProof, fixture.now.Add(9*time.Minute),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cross-node receipt key reuse error = %v", err)
+	}
+	afterReuse, err := fixture.store.Status()
+	if err != nil || afterReuse != beforeReuse {
+		t.Fatalf("cross-node key rejection mutated state: before=%+v after=%+v error=%v", beforeReuse, afterReuse, err)
+	}
+}
+
+func TestConcurrentEnrollmentExchangePinsOnlyOneReceiptKey(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	firstRaw, firstEnrollment, _, err := fixture.store.CreateEnrollment(
+		fixture.admin, fixture.auth, "node-1", []string{"tenant-a"}, fixture.now.Add(time.Hour), fixture.now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRaw, secondEnrollment, _, err := fixture.store.CreateEnrollment(
+		fixture.admin, fixture.auth, "node-1", []string{"tenant-a"}, fixture.now.Add(2*time.Hour), fixture.now.Add(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstProof := evidenceIdentityProof(t, fixture.auth, firstEnrollment, newEvidencePrivateKey(t))
+	secondProof := evidenceIdentityProof(t, fixture.auth, secondEnrollment, newEvidencePrivateKey(t))
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, input := range []struct {
+		raw       string
+		requestID string
+		proof     controlprotocol.ExecutorEvidenceIdentityProofV1
+	}{
+		{firstRaw, "exchange-1", firstProof},
+		{secondRaw, "exchange-2", secondProof},
+	} {
+		input := input
+		go func() {
+			<-start
+			_, err := fixture.store.ExchangeEnrollmentWithEvidence(
+				fixture.auth, input.raw, input.requestID, input.proof, fixture.now.Add(3*time.Minute),
+			)
+			results <- err
+		}()
+	}
+	close(start)
+	successes, conflicts := 0, 0
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("concurrent exchange error = %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("concurrent exchange outcomes = successes %d conflicts %d", successes, conflicts)
+	}
+	status, err := fixture.store.Status()
+	if err != nil || status.Credentials != 2 {
+		t.Fatalf("concurrent exchange credential count = (%+v, %v)", status, err)
+	}
+	node, found, err := fixture.store.GetNode(fixture.admin, "tenant-a", "node-1")
+	if err != nil || !found || node.Evidence == nil {
+		t.Fatalf("concurrent exchange witness = (%+v, %v, %v)", node, found, err)
+	}
+	if node.Evidence.PublicKeyDigest != firstProof.Claim.PublicKeySHA256 &&
+		node.Evidence.PublicKeyDigest != secondProof.Claim.PublicKeySHA256 {
+		t.Fatalf("concurrent exchange pinned an unknown receipt key: %+v", node.Evidence)
+	}
+}
+
 func TestNodeCredentialRevocationIsNarrowAndIdempotent(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")
@@ -445,11 +708,13 @@ func TestMultiTenantWorkflowFencesReportsAndRevokesCredentials(t *testing.T) {
 	if !equalStrings(node.TenantIDs, []string{"tenant-a", "tenant-b"}) || !equalStrings(enrollment.TenantIDs, []string{"tenant-a", "tenant-b"}) {
 		t.Fatalf("canonical bindings node=%v enrollment=%v", node.TenantIDs, enrollment.TenantIDs)
 	}
-	credentialFile, err := fixture.store.ExchangeEnrollment(fixture.auth, enrollmentRaw, "exchange-1", fixture.now.Add(2*time.Minute))
+	evidencePrivate := newEvidencePrivateKey(t)
+	proof := evidenceIdentityProof(t, fixture.auth, enrollment, evidencePrivate)
+	credentialFile, err := fixture.store.ExchangeEnrollmentWithEvidence(fixture.auth, enrollmentRaw, "exchange-1", proof, fixture.now.Add(2*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	retry, err := fixture.store.ExchangeEnrollment(fixture.auth, enrollmentRaw, "exchange-1", fixture.now.Add(3*time.Minute))
+	retry, err := fixture.store.ExchangeEnrollmentWithEvidence(fixture.auth, enrollmentRaw, "exchange-1", proof, fixture.now.Add(3*time.Minute))
 	if err != nil || retry != credentialFile {
 		t.Fatalf("deterministic exchange retry = (%+v, %v)", retry, err)
 	}

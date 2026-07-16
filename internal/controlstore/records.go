@@ -14,6 +14,7 @@ import (
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/evidence"
 )
 
 const (
@@ -22,6 +23,7 @@ const (
 	MaxDeliveryLease     = 10 * time.Minute
 	observationInterval  = time.Minute
 	maxPollResponseBytes = 1 << 20
+	evidenceGenesisHash  = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 )
 
 // BootstrapSiteAdmin creates or reproduces the sole reserved bootstrap
@@ -548,6 +550,10 @@ func (store *Store) createEnrollment(actor controlauth.Identity, auth *controlau
 	return raw, cloneEnrollment(enrollment), projectNode(node, actor, canonical[0]), true, nil
 }
 
+// ExchangeEnrollment retains the pre-witness exchange contract while callers
+// migrate to ExchangeEnrollmentWithEvidence in the same unreleased branch.
+// It is removed once every control-plane entry point supplies proof of
+// possession for the Executor receipt key.
 func (store *Store) ExchangeEnrollment(auth *controlauth.Manager, raw, requestID string, now time.Time) (controlauth.NodeCredentialFile, error) {
 	if store == nil {
 		return controlauth.NodeCredentialFile{}, ErrUnavailable
@@ -590,6 +596,94 @@ func (store *Store) ExchangeEnrollment(auth *controlauth.Manager, raw, requestID
 		return controlauth.NodeCredentialFile{}, err
 	}
 	return file, nil
+}
+
+func (store *Store) ExchangeEnrollmentWithEvidence(auth *controlauth.Manager, raw, requestID string, proof controlprotocol.ExecutorEvidenceIdentityProofV1, now time.Time) (controlauth.NodeCredentialFile, error) {
+	if store == nil {
+		return controlauth.NodeCredentialFile{}, ErrUnavailable
+	}
+	if auth == nil {
+		return controlauth.NodeCredentialFile{}, controlauth.ErrUnauthorized
+	}
+	if !validRecordID(requestID, 128) || now.IsZero() {
+		return controlauth.NodeCredentialFile{}, invalid("enrollment request identity and time are required")
+	}
+	id, err := auth.EnrollmentID(raw)
+	if err != nil {
+		return controlauth.NodeCredentialFile{}, controlauth.ErrUnauthorized
+	}
+	public, err := controlprotocol.VerifyExecutorEvidenceIdentityProofV1(proof)
+	if err != nil {
+		return controlauth.NodeCredentialFile{}, controlauth.ErrUnauthorized
+	}
+	if proof.Claim.ControllerInstanceID != auth.InstanceID() || proof.Claim.EnrollmentID != id ||
+		proof.Claim.ReceiptEpoch != 1 {
+		return controlauth.NodeCredentialFile{}, ErrConflict
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return controlauth.NodeCredentialFile{}, err
+	}
+	enrollment, ok := store.current.enrollments[id]
+	if !ok {
+		return controlauth.NodeCredentialFile{}, controlauth.ErrUnauthorized
+	}
+	node, ok := store.current.nodes[enrollment.NodeID]
+	if !ok || !node.Active || !tenantSubset(enrollment.TenantIDs, node.TenantIDs) {
+		return controlauth.NodeCredentialFile{}, controlauth.ErrUnauthorized
+	}
+	if proof.Claim.ControlNodeID != node.ID || proof.Claim.ReceiptNodeID != node.ID {
+		return controlauth.NodeCredentialFile{}, ErrConflict
+	}
+	if node.Evidence != nil && !evidenceReceiptIdentityMatches(*node.Evidence, proof) {
+		return controlauth.NodeCredentialFile{}, ErrConflict
+	}
+	for otherNodeID, otherNode := range store.current.nodes {
+		if otherNodeID != node.ID && otherNode.Evidence != nil &&
+			otherNode.Evidence.PublicKeyDigest == proof.Claim.PublicKeySHA256 {
+			return controlauth.NodeCredentialFile{}, ErrConflict
+		}
+	}
+	file, credential, updated, err := auth.Exchange(raw, requestID, now, cloneEnrollment(enrollment))
+	if err != nil {
+		return controlauth.NodeCredentialFile{}, err
+	}
+	if existing, exists := store.current.credentials[credential.ID]; exists {
+		if !credentialsEqual(existing, credential) || !enrollmentsEqual(enrollment, updated) ||
+			node.Evidence == nil || !evidenceReceiptIdentityMatches(*node.Evidence, proof) {
+			return controlauth.NodeCredentialFile{}, ErrConflict
+		}
+		return file, nil
+	}
+	mutations := []mutation{credentialMutation(credential), enrollmentMutation(updated)}
+	if node.Evidence == nil {
+		node.Evidence = &EvidenceWitness{
+			IdentityProof: proof, ReceiptNodeID: node.ID, Epoch: proof.Claim.ReceiptEpoch,
+			PublicKeyBase64: proof.Claim.PublicKeyBase64, KeyID: evidence.KeyID(public),
+			PublicKeyDigest: proof.Claim.PublicKeySHA256, PinnedAt: credential.CreatedAt,
+			ChainHash: evidenceGenesisHash,
+		}
+		mutations = append(mutations, mutation{Kind: mutationNode, Node: &node})
+	}
+	if err := store.applyMutationsLocked(mutations...); err != nil {
+		return controlauth.NodeCredentialFile{}, err
+	}
+	return file, nil
+}
+
+func evidenceReceiptIdentityMatches(witness EvidenceWitness, proof controlprotocol.ExecutorEvidenceIdentityProofV1) bool {
+	pinned := witness.IdentityProof.Claim
+	return pinned.ControllerInstanceID == proof.Claim.ControllerInstanceID &&
+		pinned.ControlNodeID == proof.Claim.ControlNodeID &&
+		pinned.Stream == proof.Claim.Stream &&
+		pinned.ReceiptNodeID == proof.Claim.ReceiptNodeID &&
+		pinned.ReceiptEpoch == proof.Claim.ReceiptEpoch &&
+		pinned.PublicKeyBase64 == proof.Claim.PublicKeyBase64 &&
+		pinned.PublicKeySHA256 == proof.Claim.PublicKeySHA256 &&
+		witness.ReceiptNodeID == proof.Claim.ReceiptNodeID &&
+		witness.Epoch == proof.Claim.ReceiptEpoch && witness.PublicKeyBase64 == proof.Claim.PublicKeyBase64 &&
+		witness.PublicKeyDigest == proof.Claim.PublicKeySHA256
 }
 
 func (store *Store) ListNodes(actor controlauth.Identity, tenantID string) ([]Node, error) {

@@ -38,7 +38,10 @@ func TestRecordAPIsFailClosedForUnavailableAndInvalidCallers(t *testing.T) {
 		_, _, _, _, err := unavailable.CreateEnrollmentForRequest(operator, nil, "request", "node-1", []string{"tenant-a"}, now.Add(time.Hour), now)
 		return err
 	}(), ErrUnavailable)
-	assertErrorIs(t, func() error { _, err := unavailable.ExchangeEnrollment(nil, "token", "request", now); return err }(), ErrUnavailable)
+	assertErrorIs(t, func() error {
+		_, err := unavailable.ExchangeEnrollmentWithEvidence(nil, "token", "request", controlprotocol.ExecutorEvidenceIdentityProofV1{}, now)
+		return err
+	}(), ErrUnavailable)
 	assertErrorIs(t, func() error { _, err := unavailable.ListNodes(operator, "tenant-a"); return err }(), ErrUnavailable)
 	assertErrorIs(t, func() error { _, _, err := unavailable.GetNode(operator, "tenant-a", "node-1"); return err }(), ErrUnavailable)
 	assertErrorIs(t, func() error {
@@ -159,15 +162,15 @@ func TestRecordAPIsRejectBoundaryViolationsWithoutMutation(t *testing.T) {
 	assertErrorIs(t, err, ErrNotFound)
 
 	assertErrorIs(t, func() error {
-		_, err := fixture.store.ExchangeEnrollment(nil, "token", "request", fixture.now)
+		_, err := fixture.store.ExchangeEnrollmentWithEvidence(nil, "token", "request", controlprotocol.ExecutorEvidenceIdentityProofV1{}, fixture.now)
 		return err
 	}(), controlauth.ErrUnauthorized)
 	assertErrorIs(t, func() error {
-		_, err := fixture.store.ExchangeEnrollment(fixture.auth, "token", "bad id", fixture.now)
+		_, err := fixture.store.ExchangeEnrollmentWithEvidence(fixture.auth, "token", "bad id", controlprotocol.ExecutorEvidenceIdentityProofV1{}, fixture.now)
 		return err
 	}(), ErrInvalid)
 	assertErrorIs(t, func() error {
-		_, err := fixture.store.ExchangeEnrollment(fixture.auth, "not-a-token", "request", fixture.now)
+		_, err := fixture.store.ExchangeEnrollmentWithEvidence(fixture.auth, "not-a-token", "request", controlprotocol.ExecutorEvidenceIdentityProofV1{}, fixture.now)
 		return err
 	}(), controlauth.ErrUnauthorized)
 	assertErrorIs(t, func() error { _, err := fixture.store.ListNodes(nonAdmin, "tenant-b"); return err }(), ErrNotFound)
