@@ -486,14 +486,23 @@ cmp -s "$enrollment" "$enrollment_retry" || {
 }
 assert_secret_absent enrollment_token "$enrollment" "$work/enrollment.stdout" "$work/enrollment.stderr"
 
+evidence_private=$work/executor-evidence.private
+evidence_public=$work/executor-evidence.public
+run_bounded 30 "$work" "$work/evidence-keygen.stdout" "$work/evidence-keygen.stderr" \
+	"$ctl_bin" keygen -key-id acceptance-executor-evidence -private-out "$evidence_private" \
+	-public-out "$evidence_public"
+assert_owner_file "$evidence_private"
+
 node_credential=$work/node-credential.json
 node_credential_retry=$work/node-credential-retry.json
 run_bounded 30 "$work" "$work/exchange.stdout" "$work/exchange.stderr" \
 	"$ctl_bin" control enrollment exchange -control-url "$control_url" -enrollment "$enrollment" \
-	-request-id acceptance-node-exchange -credential-out "$node_credential"
+	-request-id acceptance-node-exchange -executor-evidence-private-key "$evidence_private" \
+	-credential-out "$node_credential"
 run_bounded 30 "$work" "$work/exchange-retry.stdout" "$work/exchange-retry.stderr" \
 	"$ctl_bin" control enrollment exchange -control-url "$control_url" -enrollment "$enrollment" \
-	-request-id acceptance-node-exchange -credential-out "$node_credential_retry"
+	-request-id acceptance-node-exchange -executor-evidence-private-key "$evidence_private" \
+	-credential-out "$node_credential_retry"
 assert_owner_file "$node_credential"
 assert_owner_file "$node_credential_retry"
 cmp -s "$node_credential" "$node_credential_retry" || {
@@ -529,7 +538,8 @@ assert_secret_absent credential "$node_credential" "$work/exchange.stdout" "$wor
 set +e
 run_bounded 30 "$work" "$work/exchange-replay.stdout" "$work/exchange-replay.stderr" \
 	"$ctl_bin" control enrollment exchange -control-url "$control_url" -enrollment "$enrollment" \
-	-request-id acceptance-different-exchange -credential-out "$work/replayed-node-credential.json"
+	-request-id acceptance-different-exchange -executor-evidence-private-key "$evidence_private" \
+	-credential-out "$work/replayed-node-credential.json"
 replay_status=$?
 set -e
 if (( replay_status == 0 )) || [[ -e $work/replayed-node-credential.json ]]; then
