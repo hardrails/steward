@@ -59,15 +59,17 @@ type WitnessCoordinateV1 struct {
 // separately verified signed companions and externally pinned receipt and witness
 // keys; parsing or correlating this file alone proves no execution or authority.
 type ProofV1 struct {
-	SchemaVersion    string              `json:"schema_version"`
-	Binding          BindingV1           `json:"binding"`
-	StateDigest      string              `json:"state_digest"`
-	RuntimeRef       string              `json:"runtime_ref"`
-	Canary           CanaryProofV1       `json:"canary"`
-	ExecutorEvidence ReceiptCoordinateV1 `json:"executor_evidence"`
-	GatewayEvidence  ReceiptCoordinateV1 `json:"gateway_evidence"`
-	Witness          WitnessCoordinateV1 `json:"witness"`
-	CompletedAt      string              `json:"completed_at"`
+	SchemaVersion            string              `json:"schema_version"`
+	Binding                  BindingV1           `json:"binding"`
+	StateDigest              string              `json:"state_digest"`
+	RuntimeRef               string              `json:"runtime_ref"`
+	Canary                   CanaryProofV1       `json:"canary"`
+	ExecutorBeginDigest      string              `json:"executor_begin_digest"`
+	ExecutorCheckpointDigest string              `json:"executor_checkpoint_digest"`
+	ExecutorEvidence         ReceiptCoordinateV1 `json:"executor_evidence"`
+	GatewayEvidence          ReceiptCoordinateV1 `json:"gateway_evidence"`
+	Witness                  WitnessCoordinateV1 `json:"witness"`
+	CompletedAt              string              `json:"completed_at"`
 }
 
 // ParseProofV1 strictly decodes one bounded proof manifest.
@@ -123,6 +125,10 @@ func (proof ProofV1) Validate() error {
 	}
 	if err := proof.Canary.validate(); err != nil {
 		return invalidProof("canary: %v", err)
+	}
+	if !sha256Digest(proof.ExecutorBeginDigest) ||
+		!sha256Digest(proof.ExecutorCheckpointDigest) {
+		return invalidProof("executor begin and checkpoint digests must be canonical SHA-256")
 	}
 	if err := proof.ExecutorEvidence.validate(); err != nil {
 		return invalidProof("executor_evidence: %v", err)

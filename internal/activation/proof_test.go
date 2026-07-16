@@ -51,7 +51,9 @@ func validProofFixture(t *testing.T) proofFixture {
 			ResultDigest: testSHA256('e'),
 			ResultBytes:  42,
 		},
-		ExecutorEvidence: executor,
+		ExecutorBeginDigest:      testSHA256('1'),
+		ExecutorCheckpointDigest: testSHA256('2'),
+		ExecutorEvidence:         executor,
 		GatewayEvidence: ReceiptCoordinateV1{
 			ReceiptNodeID:   state.Binding.NodeID + "/gateway",
 			ReceiptEpoch:    8,
