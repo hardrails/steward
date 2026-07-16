@@ -122,15 +122,24 @@ validates the site signature, generates a missing receipt key, initializes missi
 fence, journal, and evidence stores with their service ownership, ensures that the
 active release has a verified relay-image binding, runs preflight, and restarts
 Executor if active. A failed transaction removes only stores and keys that it
-created:
+created. Authenticate and root-stage the trust inputs before invoking the helper:
 
 ```console
+sudo install -d -o root -g root -m 0700 /root/steward-admission
+sudo install -o root -g root -m 0644 site-policy.dsse.json \
+  /root/steward-admission/site-policy.dsse.json
+sudo install -o root -g root -m 0644 site-root.public \
+  /root/steward-admission/site-root.public
 sudo /usr/local/libexec/steward/configure-admission \
-  --policy site-policy.dsse.json \
-  --site-root-public-key site-root.public \
+  --policy /root/steward-admission/site-policy.dsse.json \
+  --site-root-public-key /root/steward-admission/site-root.public \
   --site-root-key-id site-root-1 \
   --node-id node-a
 ```
+
+Rollback covers handled errors only. After `SIGKILL` or power loss, keep node
+services stopped and use the whole-configuration recovery described in the signed
+admission guide; do not remove fence, journal, or evidence files.
 
 For local evaluation only, `--allow-host-admin-intent` lets the host-wide loopback
 token select a tenant. Production remote admission should use authenticated outbound

@@ -1,10 +1,71 @@
 ---
 title: Configuration reference
-description: Steward and Steward Executor configuration sources, precedence, packaged defaults, validation commands, security-sensitive flags, paths, and service behavior.
+description: Steward Control, supervisor, Executor, Gateway, and MCP configuration, packaged defaults, validation commands, security-sensitive flags, paths, and service behavior.
 section: Reference
 ---
 
 # Configuration reference
+
+## Steward Control configuration
+
+`steward-control` uses flags. The dedicated installer writes a root-owned
+`/etc/steward-control/control.env`, while the systemd unit runs the process as the
+unprivileged `steward-control` account. The service is not a member of the Docker
+group.
+
+The packaged unit sets `TasksMax=256`, `LimitNOFILE=4096`, and `MemoryMax=1G` in
+addition to its privilege and filesystem restrictions. The store independently
+caps the encoded snapshot and write-ahead log at 64 MiB each. The 1 GiB process
+limit leaves headroom for decoding, validation, in-memory indexes, and a bounded
+compaction while preventing an unexpected allocation from consuming the host. If
+measured, legitimate higher capacity requires more memory, use a reviewed systemd
+drop-in rather than editing the packaged unit, and qualify startup, compaction,
+backup, and restore under the new limit before production use.
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-addr` | `127.0.0.1:8443` | Control API listener; a non-loopback address requires TLS |
+| `-state-dir` | `/var/lib/steward-control` | Owner-only durable snapshot, write-ahead log, manifest, authentication key, and lock |
+| `-auth-key-file` | `<state-dir>/auth.key` | Owner-only key used to authenticate opaque bearer credentials |
+| `-tls-cert-file` | empty | PEM server certificate; must be paired with the key |
+| `-tls-key-file` | empty | Owner-only PEM server private key |
+| `-delivery-lease` | `2m` | Time-limited node ownership of a delivery; positive and at most `10m` |
+| `-max-poll-deliveries` | `32` | Deliveries considered in one poll; 1 through 128 |
+| `-max-tenants` | `256` | Retained tenant records |
+| `-max-nodes` | `4096` | Retained node records |
+| `-max-nodes-per-tenant` | `512` | Node bindings retained for one tenant |
+| `-max-credentials` | `16384` | Retained operator and node credential verifiers |
+| `-max-credentials-per-tenant` | `2048` | Credential records bound to one tenant |
+| `-max-enrollments` | `4096` | Retained one-time enrollment records |
+| `-max-enrollments-per-tenant` | `512` | Enrollment records bound to one tenant |
+| `-max-commands` | `16384` | Retained exact signed commands |
+| `-max-commands-per-tenant` | `1024` | Retained commands for one tenant |
+| `-max-commands-per-node` | `256` | Retained commands for one node |
+| `-terminal-retention` | `24h` | Minimum retention before a known terminal outcome may be reclaimed for command capacity |
+
+`-initialize` creates a store or recovers initial bootstrap state containing no
+tenant, node, enrollment, or command records and at most one bootstrap credential.
+It publishes the first site-administrator token through `-admin-token-file`. That
+output must be an absent clean absolute path distinct from the authentication key.
+It is created without following a symlink and never written to standard output.
+The recovered credential is identical to the first one; initialization does not
+mint a second administrator. `-check-config` opens and validates the complete
+durable store and TLS inputs without serving.
+
+All request bodies, responses, pages, identifiers, and retained collections are
+bounded. Capacity options are startup invariants: restarting with values smaller
+than the retained state fails rather than deleting records. The store permits one
+active writer and has no live multi-replica mode. Expired enrollments and old
+commands with known terminal outcomes are reclaimed only when their capacity is
+needed. Pending, leased, and `outcome_unknown` commands are not automatically
+reclaimed. Revoked credentials and nodes remain retained and count toward their
+ceilings; there is no supported purge operation for them.
+
+The packaged `control-doctor` accepts `--json`, `--probe-url URL`, and
+`--ca-file PEM`. On a TLS wildcard listener, the default check can prove only that
+the local port accepts a TCP connection. Pass the certificate's real HTTPS origin
+through `--probe-url` and its private CA through `--ca-file` to verify certificate
+identity and readiness. The doctor never reads an operator or node bearer.
 
 ## Steward configuration precedence
 
@@ -40,7 +101,7 @@ execution, and verified TLS.
 | `-uplink-credential-file` | empty | Owner-only node credential; required with uplink |
 | `-uplink-poll-interval` | `10s` | Base poll cadence with jitter/backoff |
 | `-uplink-command-queue-depth` | `256` | Bounded received-command queue |
-| `-uplink-tls-ca-file` | system roots | Private CA bundle |
+| `-uplink-tls-ca-file` | system roots | Private CA bundle; when set, replaces the system root set |
 | `-uplink-tls-client-cert` | empty | Optional mutual TLS (mTLS) certificate |
 | `-uplink-tls-client-key` | empty | Owner-only mTLS key |
 | `-uplink-tls-skip-verify` | `false` | Disable server certificate verification for diagnostics (dangerous) |
@@ -79,7 +140,7 @@ outbound-only deployment.
 | `-migrate-uplink-state-v1-tenant` | empty | Explicitly bind every legacy state entry to one tenant, migrate, retain `.v1.bak`, and exit |
 | `-uplink-poll-interval` | `10s` | Base outbound poll cadence |
 | `-uplink-allow-insecure-http` | `false` | Allow HTTP uplink (dangerous; forbidden with node-scoped credentials) |
-| `-uplink-tls-ca-file` | system roots | Private CA bundle |
+| `-uplink-tls-ca-file` | system roots | Private CA bundle; when set, replaces the system root set |
 | `-uplink-tls-client-cert`, `-uplink-tls-client-key` | empty | Optional mTLS identity |
 | `-uplink-tls-skip-verify` | `false` | Disable server certificate verification (dangerous; forbidden with node-scoped credentials) |
 | `-max-memory-bytes` | `536870912` | Per-workload admission ceiling |
@@ -396,8 +457,12 @@ public tenant task authorities for task-enabled grants. Keep the ledger, Gateway
 state, and declared release-format compatibility together during backup, upgrade,
 and rollback; do not downgrade either file independently.
 
-`steward-mcp` accepts `-node-url` (default `http://127.0.0.1:8090`) and requires
-`-token-file`, an owner-only Executor bearer token. Optional task tools require all three of
+`steward-mcp` can configure fleet tools with `-control-url` and the owner-only
+`-control-token-file`; `-control-ca-file` optionally supplies a private controller
+CA and replaces system roots for that controller connection. It can separately
+configure node tools with `-node-url` (default
+`http://127.0.0.1:8090`) and `-token-file`, an owner-only Executor bearer token.
+At least one control or node client is required. Optional task tools require all three of
 `-gateway-url`, `-gateway-token-file`, and `-task-result-dir`. The result directory
 must already exist as a process-owned mode-`0700` directory under trusted,
 non-replaceable ancestors. It is capped at 1,024 result files and 256 MiB. The MCP

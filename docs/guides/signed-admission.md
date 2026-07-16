@@ -25,10 +25,11 @@ stewardctl keygen -key-id site-cleanup \
 ```
 
 `keygen` will not overwrite files. Keep site-root and publisher private keys off the
-node, tenant command keys in the tenant's control-plane signer, and the independent
-cleanup key in a site incident-response system. Site policy gives the node only
-public keys. Never put receipt or command private keys in Terraform, cloud-init,
-tags, or enrollment archives. The node generates its receipt key.
+node, tenant command keys on a separate tenant signing station or service outside
+Steward Control, and the independent cleanup key in a site incident-response
+system. Site policy gives the node only public keys. Never put receipt or command
+private keys in Terraform, cloud-init, tags, or enrollment archives. The node
+generates its receipt key.
 
 ## 2. Sign the local site policy
 
@@ -211,15 +212,27 @@ The command verifies policy, installs public trust, generates the receipt key,
 initializes missing fence, journal, and evidence stores with their service ownership,
 ensures that the active release has a verified relay-image binding, runs preflight,
 and restarts an active Executor. A failed transaction removes only stores and keys
-that it created. Changes activate only after all checks pass:
+that it created. Authenticate the two files, then copy them into a protected
+root-owned directory before configuration. Changes activate only after all checks
+pass:
 
 ```console
+sudo install -d -o root -g root -m 0700 /root/steward-admission
+sudo install -o root -g root -m 0644 site-policy.dsse.json \
+  /root/steward-admission/site-policy.dsse.json
+sudo install -o root -g root -m 0644 site-root.public \
+  /root/steward-admission/site-root.public
 sudo /usr/local/libexec/steward/configure-admission \
-  --policy site-policy.dsse.json \
-  --site-root-public-key site-root.public \
+  --policy /root/steward-admission/site-policy.dsse.json \
+  --site-root-public-key /root/steward-admission/site-root.public \
   --site-root-key-id site-root-1 \
   --node-id node-a
 ```
+
+Rollback here covers handled process errors only. After `SIGKILL` or power loss,
+keep the node services stopped and follow an approved whole-configuration recovery;
+rerunning does not automatically restore the pre-change files. Preserve every
+fence, journal, and evidence file during recovery.
 
 Retain `/etc/steward/node-receipts.public` and the expected chain head outside the
 node. The head is the last sequence and hash needed to detect suffix removal. The

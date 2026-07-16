@@ -1,14 +1,15 @@
 ---
 title: Operate Steward through MCP
-description: Configure Steward's local MCP server for bounded node operations and optional pre-signed task lifecycle tools.
+description: Configure Steward's local MCP server for bounded fleet, node, and optional pre-signed task lifecycle operations.
 section: How-to
 ---
 
 # Operate Steward through MCP
 
-`steward-mcp` lets a Model Context Protocol (MCP) client operate one local Steward
-node. It communicates through standard input and output; it does not open a network
-listener. Node tools call the same loopback Executor API as `stewardctl node`.
+`steward-mcp` lets a Model Context Protocol (MCP) client operate Steward Control, a
+local Steward node, or both. It communicates through standard input and output; it
+does not open a network listener. Fleet tools call the authenticated Steward
+Control API. Node tools call the same loopback Executor API as `stewardctl node`.
 Optional task tools call the loopback Gateway API and accept only an exact request
 with a tenant-signed permit.
 
@@ -19,7 +20,11 @@ those controls.
 
 ## Security boundary
 
-The Executor and Gateway bearer tokens are **host-administrator credentials**. A
+The control operator, Executor, and Gateway bearer tokens are privileged
+credentials. A control operator token can read or change the tenants and nodes in
+its scope and submit any already valid signed command it possesses. Controller MCP
+does not issue operator or enrollment secrets. The Executor and Gateway tokens are
+**host-administrator credentials**. A
 client that can invoke node tools can admit, start, stop, destroy, and purge state
 within Executor's configured authority. A client with task tools can spend a valid
 pre-signed permit and cause its exact external effect. Do not expose either token,
@@ -30,6 +35,37 @@ account.
 not evidence of human approval and does not grant authority. The tenant signature,
 the exact permit scope, and Gateway's current policy are the authorization boundary.
 Tool annotations likewise help clients present risk; they do not enforce approval.
+
+## Configure fleet tools
+
+Copy a least-privilege control operator token and the public controller CA
+certificate into owner-only operator paths. Then configure a controller-only MCP
+server:
+
+```json
+{
+  "mcpServers": {
+    "steward-control": {
+      "command": "/usr/local/bin/steward-mcp",
+      "args": [
+        "-control-url", "https://control.customer.example:8443",
+        "-control-token-file", "/home/alice/.config/steward/tenant-a-operator.token",
+        "-control-ca-file", "/home/alice/.config/steward/control-ca.crt"
+      ]
+    }
+  }
+}
+```
+
+The token file must be owner-only. The CA is a public trust file and may be mode
+`0644`. Steward Control accepts HTTP only for a literal loopback origin, uses TLS
+1.2 or newer remotely, ignores ambient proxy variables, and never follows a
+redirect with the bearer. When `-control-ca-file` is set, that CA bundle replaces
+the host's system root set for this controller connection.
+
+To expose fleet and local node tools from one process, add `-node-url` and
+`-token-file` to the same argument list. Gateway task tools still require local
+node configuration.
 
 The packaged Executor and Gateway listen on literal loopback addresses. The MCP
 server accepts only loopback origins and owner-only token files. Task results never
@@ -129,6 +165,11 @@ lineage is one workload's persistent state history.
 
 | Tool | Effect |
 | --- | --- |
+| `steward_control_tenant_list` / `steward_control_tenant_create` | Page through visible tenants or create one after `acknowledge_tenant_creation=true`. |
+| `steward_control_node_list` / `steward_control_node_status` | Read bounded tenant-scoped fleet inventory and last-contact metadata. |
+| `steward_control_node_revoke` | Site-wide node and credential revocation after `acknowledge_node_revocation=true`; unavailable to a tenant operator without site authority. |
+| `steward_control_command_submit` | Retain one canonical-base64 signed Executor command after `acknowledge_command_submission=true`; the node still verifies signature and policy. |
+| `steward_control_command_status` | Read durable delivery lease and terminal-report metadata for one signed command. |
 | `steward_admit` | Submit a base64 DSSE capsule and strict instance-intent JSON. |
 | `steward_status` | Read current hardened workload state. |
 | `steward_logs` | Read bounded container logs. |

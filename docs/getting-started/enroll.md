@@ -6,20 +6,26 @@ section: Getting started
 
 # Enroll and activate a Steward node
 
-Enrollment connects a staged node to your control plane. Your control plane or
-public key infrastructure (PKI) must issue the identities, trust roots, and
-certificate authority (CA) bundle; Steward does not create them.
+Enrollment connects a staged node to Steward Control or a compatible controller.
+The bundled controller issues the one-time enrollment and node transport
+credential. `stewardctl control pki create` can create a private certificate
+authority (CA) and server certificate, or the site can use its existing PKI.
+Tenant and site private signing keys remain separate.
 
 ## Enrollment inputs and generated files
 
-Supply these files for every remote enrollment. The installer copies them to the
-paths shown with the listed ownership:
+Supply the Executor credential and CA for every remote enrollment. The generic
+supervisor credential is optional and is not used with bundled Steward Control:
 
 | Installed path | Owner and mode | Supplied input |
 | --- | --- | --- |
-| `/etc/steward/uplink-credential.json` | `steward:steward`, `0600` | Supervisor uplink identity |
+| `/etc/steward/uplink-credential.json` | `steward:steward`, `0600` | Optional compatible-controller supervisor uplink identity |
 | `/etc/steward/executor-uplink.json` | `steward-executor:steward-executor`, `0600` | Executor tenant- or node-scoped uplink identity |
 | `/etc/steward/control-plane-ca.pem` | `root:root`, `0644` | Control-plane CA bundle |
+
+The installed CA bundle replaces the host's system root set for Steward uplink
+connections. Use the private controller CA or the intended public root bundle; it
+is not appended to the public Web PKI roots.
 
 Signed multi-tenant admission also requires:
 
@@ -32,16 +38,24 @@ The installer generates the host-local Executor API token when it is omitted. Fo
 signed admission, it also generates the node receipt key. These are node-local
 secrets, not control-plane enrollment inputs.
 
+Before invoking either configurator, copy every supplied input into a protected
+root-owned directory. Each source must be a root-owned, single-link regular file
+under a complete root-owned directory chain that is not group- or world-writable.
+Credentials and an explicit Executor token must be owner-only. Steward snapshots
+each source before changing `/etc`; limits are 64 KiB per uplink credential, 1 MiB
+for the CA or policy, and 4 KiB for the site-root key or Executor token. Paths in
+`/tmp`, user home directories, writable mounts, and removable media are rejected
+even when the file itself has restrictive permissions.
+
 ## Preferred enrollment path
 
 Run the installer again with the enrollment files. It applies the changes as one
 transaction and restores the previous `/etc/steward` state if validation fails:
 
 ```console
-sudo bash install-steward.sh \
+sudo /bin/bash -p /root/steward-install/install-steward.sh \
   --non-interactive \
-  --control-plane-url https://control.customer.example \
-  --steward-credential /secure/enrollment/steward.json \
+  --control-plane-url https://control.customer.example:8443 \
   --executor-credential /secure/enrollment/executor-node.json \
   --ca-file /secure/enrollment/control-plane-ca.pem \
   --admission-policy /secure/enrollment/site-policy.dsse.json \
@@ -50,12 +64,29 @@ sudo bash install-steward.sh \
   --node-id node-a
 ```
 
+With no `--steward-credential`, the installer selects bundled-controller mode:
+Executor polls remotely through protocol version 3, while the generic supervisor
+remains loopback-only with process execution disabled. Supplying a supervisor
+credential retains the compatible external-controller path.
+
 The script generates an omitted host-local Executor token or receipt key. It
 initializes both anti-replay stores once, validates policy before configuring the
-Gateway and relay, checks all six binaries and three service identities, then starts
+Gateway and relay, checks all seven binaries and three node service identities, then starts
 the services. Executor creates per-workload networks later during admission. Failure
 restores prior configuration and removes only state created by this transaction;
 existing generation fences, the operation journal, and evidence remain intact.
+
+That rollback covers handled process errors. `SIGKILL` or power loss can interrupt
+the node configurator between filesystem changes because this path has no durable
+installer journal. Keep all three node services stopped and use an approved
+whole-configuration recovery before retrying; rerunning does not automatically
+restore the pre-change files. Never delete or recreate fencing, journal, or
+evidence state to make preflight pass.
+
+The path above is the protected copy created by the
+[getting-started install flow]({{ '/getting-started/' | relative_url }}). If a
+different system delivered the installer, authenticate it and copy it into an
+equivalent root-owned `0700` directory before root executes it.
 
 ## Multi-tenant Executor enrollment
 

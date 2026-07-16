@@ -47,9 +47,10 @@ The workflow uses four job executions:
    referenced by the tag is reachable from `origin/main`; a tag created from an
    unmerged branch cannot publish. `scripts/release.sh` cross-compiles Linux and Darwin,
    creates `.tar.gz` archives with `LICENSE` and `README.md`, builds DEB and RPM
-   packages, includes `install-steward.sh`, and checks that all six host-native
-   binaries report the tag. Each Linux artifact contains a deterministic
-   `release.json` that binds the tag, target, six binaries, units, templates, and
+   packages, creates a closed-inventory Linux controller archive, includes both
+   installers, and checks that all seven host-native binaries report the tag. Each
+   Linux node artifact contains a deterministic
+   `release.json` that binds the tag, target, seven binaries, units, templates, and
    helper scripts by SHA-256 and declares durable-state reader/writer ranges. Native
    package hosts are required because RPM validates build architecture;
    cross-compiled payloads alone do not safely
@@ -59,7 +60,8 @@ The workflow uses four job executions:
    manifest over exactly those files.
 3. **`publish`:** only on a tag push, with the workflow's only `contents: write`
    token and no source checkout, runs `gh release create` against the combined
-   artifacts. It adds generated notes, archives, packages, the installer, and
+   artifacts. It adds generated notes, node and controller archives, packages,
+   both installers, and
    `checksums.txt`.
 
 Code from the tagged commit runs only in read-only jobs. The job allowed to
@@ -71,20 +73,25 @@ authority.
 
 | GOOS | GOARCH | Archive | Binaries |
 | --- | --- | --- | --- |
-| linux | amd64 | `steward_vX.Y.Z_linux_amd64.tar.gz` | All six Steward binaries |
-| linux | arm64 | `steward_vX.Y.Z_linux_arm64.tar.gz` | All six Steward binaries |
-| darwin | amd64 | `steward_vX.Y.Z_darwin_amd64.tar.gz` | `steward`, `stewardctl`, `steward-mcp` |
-| darwin | arm64 | `steward_vX.Y.Z_darwin_arm64.tar.gz` | `steward`, `stewardctl`, `steward-mcp` |
+| linux | amd64 | `steward_vX.Y.Z_linux_amd64.tar.gz` | All seven Steward binaries |
+| linux | arm64 | `steward_vX.Y.Z_linux_arm64.tar.gz` | All seven Steward binaries |
+| darwin | amd64 | `steward_vX.Y.Z_darwin_amd64.tar.gz` | `steward`, `steward-control`, `stewardctl`, `steward-mcp` |
+| darwin | arm64 | `steward_vX.Y.Z_darwin_arm64.tar.gz` | `steward`, `steward-control`, `stewardctl`, `steward-mcp` |
 
 Each Linux target also produces `steward-node_vX.Y.Z_<arch>.deb` and
-`steward-node_vX.Y.Z_<arch>.rpm`. The architecture-independent
-`install-steward.sh` selects a native package or archive at install time.
+`steward-node_vX.Y.Z_<arch>.rpm` plus
+`steward-control_vX.Y.Z_linux_<arch>.tar.gz`. The architecture-independent
+`install-steward.sh` selects a native node package or archive at install time;
+`install-control.sh` selects only the dedicated controller archive.
 
 Steward uses only the Go standard library. Linux archives include Executor,
 Gateway, Relay, systemd units, configuration, and installation, preflight, and
 activation assets. The node installer requires the expected version and rejects a
 manifest whose version, operating system, architecture, file set, or digest differs.
-Darwin archives contain `steward`, `stewardctl`, and
+Node packages never install the controller service, configuration, doctor, or
+installer. The dedicated controller archive contains exactly the controller
+binary, unit, template, doctor, license, and no node service assets.
+Darwin archives contain `steward`, `steward-control`, `stewardctl`, and
 `steward-mcp`; they do not claim support for Executor or the Linux service
 installer because macOS cannot satisfy the Docker `runsc` host contract. Add a
 target only after deciding whether it can meet that contract.
@@ -113,7 +120,7 @@ go build -trimpath \
   ./cmd/steward
 ```
 
-The script also builds host-native copies through this path, runs all six with
+The script also builds host-native copies through this path, runs all seven with
 `-version`, and fails unless each result equals the `VERSION` stamped into the
 artifacts. On a tag build, that value is `GITHUB_REF_NAME`. This checks the linker
 symbol, import path, and every entry point.
@@ -171,7 +178,7 @@ Steward adopts a public signing and key-rotation policy.
 ```console
 # Builds every target and any native packages whose platform tools are installed,
 # then writes checksums into ./dist. Publishes nothing. dist/ is git-ignored.
-bash scripts/release.sh
+/bin/bash -p scripts/release.sh
 ls dist/
 (cd dist && sha256sum -c checksums.txt)   # use `shasum -a 256 -c` on macOS
 ```
@@ -184,12 +191,12 @@ To exercise tag validation and version assertions locally:
 
 ```console
 RELEASE_TAG="<release-tag>"
-GITHUB_REF_TYPE=tag GITHUB_REF_NAME="$RELEASE_TAG" bash scripts/release.sh
+GITHUB_REF_TYPE=tag GITHUB_REF_NAME="$RELEASE_TAG" /bin/bash -p scripts/release.sh
 ```
 
 ### GitHub dry-run
 
-A `workflow_dispatch` run performs the same builds, checksums, and six-binary
+A `workflow_dispatch` run performs the same builds, checksums, and seven-binary
 version assertion, then uploads `dist/` to the workflow run. It checks the
 immutable development `VERSION` used for those artifacts because a dispatch has
 no release tag. Its publish job is gated to a `v*` tag push, so manual dispatch
@@ -215,7 +222,7 @@ gh release download "$RELEASE_TAG" --repo hardrails/steward
 sha256sum -c checksums.txt      # macOS: shasum -a 256 -c checksums.txt
 tar -xzf "steward_${RELEASE_TAG}_linux_amd64.tar.gz"
 ./steward -version              # must report "$RELEASE_TAG"
-# On Linux, the other five binaries are in the same verified archive.
+# On Linux, every remaining binary is in the same verified archive.
 ```
 
 ## Preflight checklist

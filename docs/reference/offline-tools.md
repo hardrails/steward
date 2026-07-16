@@ -1,6 +1,6 @@
 ---
 title: Local operator tools
-description: Inspect OCI archives, verify evidence, and check release drain and durable-state compatibility with stewardctl.
+description: Create control TLS material, inspect OCI archives, verify evidence, and check release drain and durable-state compatibility with stewardctl.
 section: Reference
 ---
 
@@ -15,6 +15,36 @@ local files; `image import` contacts Docker after offline verification. Commands
 under `stewardctl node` contact the local Executor API. `stewardctl task submit`,
 `status`, `observe`, and `wait` contact an explicit literal-loopback Gateway origin;
 task issue, verify, and audit remain offline.
+
+## Controller TLS material
+
+`stewardctl control pki create` generates an ECDSA P-256 local certificate
+authority and one server certificate without contacting a network service. Supply
+one comma-separated, canonical set of DNS names and IP addresses through
+`-server-names` plus four distinct new output paths:
+
+```console
+stewardctl control pki create \
+  -server-names control.customer.example,10.20.0.10 \
+  -ca-cert-out ca.crt \
+  -ca-key-out ca.key \
+  -server-cert-out control.crt \
+  -server-key-out control.key
+```
+
+The CA has a path-length-zero constraint and certificate-signing use only. The
+server certificate has server-authentication use only. Private keys are PKCS#8 PEM
+files created mode `0600`; certificates are mode `0644`. No output may already
+exist or be a symbolic link. The command reserves all four names before writing,
+syncs each file and parent directory, and removes the set if a write or summary
+fails. Standard output contains only certificate fingerprints, canonical names,
+and expiry times as JSON.
+
+The default CA lifetime is five years and the default server lifetime is one year.
+`-ca-valid-for` accepts 30 days through 10 years;
+`-server-valid-for` accepts one hour through 398 days and cannot exceed the CA.
+This tool creates files, not an online CA or rotation service. Protect the CA key
+offline when practical and issue a new bounded server certificate before expiry.
 
 ## Upgrade inspection
 

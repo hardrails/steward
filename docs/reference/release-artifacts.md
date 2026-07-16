@@ -13,25 +13,33 @@ installer, and a SHA-256 manifest.
 
 | Filename pattern | Contents |
 | --- | --- |
-| `steward_<version>_linux_amd64.tar.gz` | Six binaries plus universal node appliance |
-| `steward_<version>_linux_arm64.tar.gz` | Six binaries plus universal node appliance |
+| `steward_<version>_linux_amd64.tar.gz` | Seven binaries plus universal node appliance |
+| `steward_<version>_linux_arm64.tar.gz` | Seven binaries plus universal node appliance |
+| `steward-control_<version>_linux_amd64.tar.gz` | Controller binary, hardened systemd unit, configuration template, doctor, and license |
+| `steward-control_<version>_linux_arm64.tar.gz` | Controller binary, hardened systemd unit, configuration template, doctor, and license |
 | `steward-node_<version>_amd64.deb` | Debian-family node package |
 | `steward-node_<version>_arm64.deb` | Debian-family node package |
 | `steward-node_<version>_amd64.rpm` | RPM-family node package (`x86_64` metadata) |
 | `steward-node_<version>_arm64.rpm` | RPM-family node package (`aarch64` metadata) |
-| `steward_<version>_darwin_amd64.tar.gz` | macOS development supervisor, CLI, and MCP adapter |
-| `steward_<version>_darwin_arm64.tar.gz` | macOS development supervisor, CLI, and MCP adapter |
+| `steward_<version>_darwin_amd64.tar.gz` | macOS development supervisor, controller, CLI, and MCP adapter |
+| `steward_<version>_darwin_arm64.tar.gz` | macOS development supervisor, controller, CLI, and MCP adapter |
 | `install-steward.sh` | Interactive and unattended top-level installer |
+| `install-control.sh` | Interactive and unattended controller installer for systemd Linux |
 | `checksums.txt` | SHA-256 values for every other release asset |
 
 Linux archives and packages include hardened systemd units, configuration templates,
 enrollment, preflight, and node-doctor helpers, and whole-release activation and
 removal tools.
+The node archives and packages contain the `steward-control` binary for tooling and
+version parity, but they do not contain or install its service unit, configuration,
+doctor, or installer. Those deployment assets exist only in the dedicated
+controller archive and `install-control.sh` path.
 They also include the exact-pinned Hermes Agent adapter definition, builder, signed
 workspace-audit and connector-work skills, and qualification test harness. They do
 not include a built Hermes image.
-macOS archives contain `steward`, `stewardctl`, `steward-mcp`, the license, and
-README.
+macOS archives contain `steward`, `steward-control`, `stewardctl`, `steward-mcp`,
+the license, and README. `steward-control` is a development binary there; the
+service installer supports systemd Linux only.
 
 ## Hermes adapter build outputs
 
@@ -98,11 +106,12 @@ an independently authenticated release bundle.
 ## Version identity
 
 Published binaries are linker-stamped. For each Linux target, the release build
-executes all six host-native binaries and requires each to report the exact tag.
+executes all seven host-native binaries and requires each to report the exact tag.
 Verify after installation:
 
 ```console
 steward -version
+steward-control -version
 steward-executor -version
 stewardctl -version
 steward-gateway -version
@@ -110,8 +119,10 @@ steward-relay -version
 steward-mcp -version
 ```
 
-All six must match the active `/opt/steward/releases/<version>` directory. Release
-tags use `vX.Y.Z` semantic versioning, with optional prerelease suffixes and no build
+All seven node-payload binaries must match the active
+`/opt/steward/releases/<version>` directory. A controller installed through the
+dedicated path must match `/opt/steward-control/releases/<version>`. Release tags
+use `vX.Y.Z` semantic versioning, with optional prerelease suffixes and no build
 metadata.
 
 Linux releases also contain `release.json`. Its canonical file map binds every

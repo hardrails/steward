@@ -24,18 +24,26 @@ and egress networks require Docker Engine 28 or newer. Steward uses Docker's
 isolated bridge gateway mode so containers cannot reach host services through the
 bridge gateway. A `network=none` workload does not need this Docker feature.
 
-Remote activation needs the control plane's HTTPS URL, two credential files, and
-certificate authority (CA) certificate. Choose **stage only** to install without
-them. Multi-tenant enrollment also needs a signed site policy, site-root public key
-and key ID, and the stable node ID in the node-scoped credential.
+Remote activation through bundled Steward Control needs its HTTPS URL, one
+node-scoped Executor credential, and certificate authority (CA) certificate.
+Multi-tenant enrollment also needs a signed site policy, site-root public key and
+key ID, and the stable node ID in the credential. A compatible external controller
+may additionally supply a generic supervisor credential. Choose **stage only** to
+install without enrollment inputs.
 
 ## Run the guided installer
 
 Paste this command in the server's terminal:
 
 ```bash
-curl -fsSL https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | sudo bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | sudo /bin/bash -p
 ```
+
+Keep `/bin/bash -p` in this command. Privileged Bash mode prevents the root
+installer from loading user-controlled startup files or imported shell functions
+before its own checks run. The installer refuses an explicit non-privileged Bash
+invocation.
 
 The script reads prompts from the terminal even through a pipe. It selects a DEB,
 RPM, or universal systemd archive for the host. If Docker lacks `runsc`, it offers
@@ -56,6 +64,7 @@ multi-tenant admission is a separate remote-enrollment option.
 
 ```console
 steward -version
+steward-control -version
 steward-executor -version
 steward-gateway -version
 steward-relay -version
@@ -63,7 +72,7 @@ stewardctl -version
 steward-mcp -version
 ```
 
-All six binaries must report the same release. Then verify the mode you selected.
+All seven binaries must report the same release. Then verify the mode you selected.
 For a staged, unenrolled install, all services must remain inactive:
 
 ```console
@@ -129,10 +138,13 @@ The single command trusts the fetched script before inspection. For higher
 assurance, download and review it first:
 
 ```console
-curl -fsSLo install-steward.sh \
+curl --proto '=https' --tlsv1.2 -fsSLo install-steward.sh \
   https://github.com/hardrails/steward/releases/latest/download/install-steward.sh
 less install-steward.sh
-sudo bash install-steward.sh
+sudo install -d -o root -g root -m 0700 /root/steward-install
+sudo install -o root -g root -m 0700 install-steward.sh \
+  /root/steward-install/install-steward.sh
+sudo /bin/bash -p /root/steward-install/install-steward.sh
 ```
 
 The installer verifies its selected package against the release SHA-256 manifest.
@@ -145,19 +157,19 @@ This prompt-free command installs without requiring a running Docker daemon. It
 does not install gVisor, enroll the node, or start services:
 
 ```bash
-curl -fsSL https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | \
-  sudo bash -s -- --non-interactive --stage-only
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | \
+  sudo /bin/bash -p -s -- --non-interactive --stage-only
 ```
 
 For a complete unattended enrollment, pass file paths rather than secret values:
 
 ```console
-sudo bash install-steward.sh \
+sudo /bin/bash -p /root/steward-install/install-steward.sh \
   --non-interactive \
   --install-gvisor \
   --gvisor-version "<YYYYMMDD-or-YYYYMMDD.N>" \
-  --control-plane-url https://control.customer.example \
-  --steward-credential /secure/enrollment/steward.json \
+  --control-plane-url https://control.customer.example:8443 \
   --executor-credential /secure/enrollment/executor-node.json \
   --ca-file /secure/enrollment/control-plane-ca.pem \
   --admission-policy /secure/enrollment/site-policy.dsse.json \
@@ -166,7 +178,12 @@ sudo bash install-steward.sh \
   --node-id node-a
 ```
 
-Run `bash install-steward.sh --help` for all automation options and environment
+When `--steward-credential` is omitted, Executor uses Steward Control's signed
+delivery protocol. The generic supervisor stays on `127.0.0.1`, keeps durable local
+state, and has process execution disabled. Supply `--steward-credential` only for a
+compatible controller that also implements the separate generic supervisor uplink.
+
+Run `./install-steward.sh --help` for all automation options and environment
 variable equivalents. Continue with
 [node enrollment]({{ '/getting-started/enroll/' | relative_url }}) or check the
 [platform support matrix]({{ '/reference/platform-support/' | relative_url }}).
@@ -178,10 +195,11 @@ credentials in Terraform state. See
 ## What the installer changes
 
 - Adds dedicated supervisor, Executor, Gateway, and relay-group identities.
-- Gives only Executor membership in the Docker group.
+- Requires a dedicated host with no existing Docker-group users, then makes
+  Executor the group's only member because Docker socket access is root-equivalent.
 - Installs each root-owned release under `/opt/steward/releases/`; its
   `release.json` binds every binary and integration file by SHA-256.
-- Selects all six binaries, helper scripts, and systemd units through one
+- Selects all seven binaries, helper scripts, and systemd units through one
   `/opt/steward/current` symlink.
 - Installs hardened vendor units and configuration templates with the release.
 - Preserves operator-owned configuration and systemd drop-ins.

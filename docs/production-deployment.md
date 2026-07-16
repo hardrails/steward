@@ -409,7 +409,9 @@ For an outbound-uplink node:
    `node_id`, `tenant_id`, and URL. If the listener exists,
    `curl localhost:8080/v1/healthz` must return `200 {"status":"ok"}`.
 8. Confirm at the control plane that the node polls and claims lifecycle
-   commands. Control-plane implementation is outside Steward's scope.
+   commands. The bundled `steward-control` service implements Executor's signed
+   multi-tenant delivery protocol, not this generic supervisor protocol; use a
+   compatible external controller for this path.
 
 ## Release-build evidence
 
@@ -418,8 +420,8 @@ to `main`:
 
 - **build / vet / test:** `go build`, `go vet`, and `go test -race ./...`.
 - **golangci-lint**.
-- **openapi lint:** Spectral checks `openapi/*.yaml`, covering the supervisor and
-  Executor contracts.
+- **openapi lint:** Spectral checks `openapi/*.yaml`, covering Steward Control,
+  supervisor, Executor, and Gateway contracts.
 - **coverage:** `scripts/coverage.sh` requires 85% aggregate unit and
   instrumented-`main()` coverage.
 - **mutation:** Gremlins and `.gremlins.yaml` require tests to reject at least 70%

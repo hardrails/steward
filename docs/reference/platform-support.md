@@ -6,6 +6,19 @@ section: Reference
 
 # Platform support matrix
 
+## Production controller hosts
+
+The dedicated `steward-control_<version>_linux_<arch>.tar.gz` and
+`install-control.sh` path supports systemd Linux on `amd64` and `arm64`. A
+controller host needs a supported systemd version, local durable storage, and TLS
+material for a non-loopback listener. It does not need Docker, gVisor, an agent
+image, model service, database server, or message broker. The installer creates a
+dedicated non-root identity with no Docker-group membership.
+
+Distribution-specific controller boot tests are not run across every Linux family.
+Validate the installed hardening directives, service readiness, backup/restore,
+and private-CA behavior on the exact production image.
+
 ## Production Executor nodes
 
 | Host family | Architectures | Preferred package | Status |
@@ -24,7 +37,8 @@ Each production node requires:
 - Docker Engine installed by the operator;
 - Docker Engine 28 or newer for positive-capability networks, which use native
   isolated bridge gateway mode;
-- a local Docker group and Unix socket;
+- a local Docker group and Unix socket, with no human or unrelated service
+  membership and no account using the Docker group as its primary group;
 - gVisor registered with Docker as runtime `runsc`; and
 - a Linux kernel/runtime combination supported by the selected Docker and gVisor releases.
 
@@ -40,16 +54,17 @@ gVisor runtime. It never installs Docker.
 
 ## Published release artifacts
 
-| Target | `steward` | `steward-executor` | Node appliance |
-| --- | --- | --- | --- |
-| Linux `amd64` | Yes | Yes | DEB, RPM, archive |
-| Linux `arm64` | Yes | Yes | DEB, RPM, archive |
-| macOS Intel | Yes | No | No |
-| macOS Apple Silicon | Yes | No | No |
-| Windows | No artifact | No | No |
+| Target | `steward-control` | `steward` | `steward-executor` | Service packaging |
+| --- | --- | --- | --- | --- |
+| Linux `amd64` | Yes | Yes | Yes | Controller archive; node DEB, RPM, and archive |
+| Linux `arm64` | Yes | Yes | Yes | Controller archive; node DEB, RPM, and archive |
+| macOS Intel | Development binary | Yes | No | No service installer |
+| macOS Apple Silicon | Development binary | Yes | No | No service installer |
+| Windows | No artifact | No artifact | No | No |
 
-macOS archives support development and API integration. Executor runs only on Linux
-because it requires a Docker Unix socket, systemd, and gVisor runtime enforcement.
+macOS archives support development and API integration. Production controller and
+Executor services run only on Linux; Executor additionally requires a Docker Unix
+socket, systemd, and gVisor runtime enforcement.
 
 ## Build requirements
 
