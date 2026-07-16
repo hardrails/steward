@@ -74,6 +74,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return imageCommand(arguments[1:], stdout)
 	case "agent-release":
 		return agentReleaseCommand(arguments[1:], stdout)
+	case "activation":
+		return activationCommand(arguments[1:], stdout)
 	case "upgrade":
 		return upgradeCommand(arguments[1:], stdout)
 	default:
@@ -95,6 +97,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector|service ...")
 	fmt.Fprintln(writer, "       stewardctl image inspect|import -archive FILE ...")
 	fmt.Fprintln(writer, "       stewardctl agent-release issue|verify ...")
+	fmt.Fprintln(writer, "       stewardctl activation create|attach|run|status|verify ...")
 	fmt.Fprintln(writer, "       stewardctl upgrade check-drained|inspect-formats -signed-admission configured|unconfigured ...")
 	return errors.New("invalid command")
 }
