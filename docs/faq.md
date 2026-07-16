@@ -8,8 +8,9 @@ section: Reference
 
 ## What is Steward?
 
-Steward is open-source node software for remotely managing and isolating AI agent
-workloads on operator-controlled Linux servers. It tracks workload lifecycle and
+Steward is open-source fleet and node software for managing and isolating AI agent
+workloads on operator-controlled Linux servers. Its optional controller enrolls
+nodes and delivers exact signed commands. Each node tracks workload lifecycle and
 runs hardened Docker/gVisor workloads through a separate Executor.
 
 ## Is Steward an agent framework?
@@ -22,9 +23,18 @@ contract that requires a separately qualified adapter.
 ## Does Steward require a particular control plane?
 
 No. Any compatible control plane can use Steward's public OpenAPI and outbound
-uplink contracts. Steward is an independent Apache-2.0 project that requires no
-Hardrails SDK, account, hosted endpoint, private package, or other private build or
+uplink contracts. Steward also ships the optional self-hosted `steward-control`
+implementation, so a site does not need to build one. The project requires no
+vendor SDK, account, hosted endpoint, private package, or other private build or
 runtime dependency.
+
+## Does Steward Control hold tenant signing keys?
+
+No. It stores tenant bindings, credential verifiers, inventory, exact signed
+command bytes, delivery leases, and terminal reports. A separate trusted signing
+station or signing service holds tenant and site private keys. Executor verifies
+the resulting signature and local site policy on the node. The controller cannot
+turn its bearer credential into a tenant signature.
 
 ## Why both Docker and gVisor?
 
@@ -108,14 +118,19 @@ adapter archive.
 
 ## Can Terraform manage Steward?
 
-The shipped module renders cloud-init designed for non-secret bootstrap. The Amazon
-Web Services (AWS) example creates one Elastic Compute Cloud (EC2) instance and its
-root disk while accepting existing security-group IDs. After enrollment, the node
-stores credentials and keys outside Terraform state. Steward's generation fence
-still rejects stale instance commands. A future provider needs a remote API protected
-by mutual TLS (mTLS) or by identity bound to node attestation, which is cryptographic
-evidence of node state. Steward will not expose its loopback host token for this
-purpose. See
+Steward ships provider-neutral cloud-init modules for node staging and controller
+bootstrap. The controller module pins the installer and exact release, starts only
+on loopback, keeps the generated site-administrator bearer out of Terraform state
+and process arguments, authenticates that on-host bearer before recording
+completion, and safely re-enters installer recovery after an interrupted first
+boot. The node module stages software without putting enrollment credentials in
+user data. The Amazon Web Services (AWS) example creates one Elastic Compute Cloud
+(EC2) instance and its root disk while accepting existing security-group IDs.
+
+Steward does not ship a Terraform provider for dynamic fleet or workload
+resources. A future provider needs a remote API protected by mutual TLS (mTLS) or
+by identity bound to node attestation, which is cryptographic evidence of node
+state. Steward will not expose its loopback host token for this purpose. See
 [Terraform bootstrap]({{ '/guides/terraform/' | relative_url }}).
 
 ## Where do models run?
