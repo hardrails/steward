@@ -56,11 +56,15 @@ operator can:
    agent-service operations, or require Authorized Effects for selected connectors
    with no generic egress, durable one-use spend before DNS, and credentials kept
    outside the workload;
-9. publish bounded signed receipt deltas to the customer-owned controller on an
+9. optionally compile a non-secret OpenBao KV v2 plan into exact read policy,
+   fail-closed Agent templates, expected-version readiness, and a systemd sandbox,
+   while keeping storage, bootstrap authentication, recovery, provider tokens, and
+   rendered values outside the controller, MCP, evidence, and React surfaces;
+10. publish bounded signed receipt deltas to the customer-owned controller on an
    independent loop, so the controller can retain one exact checkpoint and make an
    authenticated rollback or equivocation finding sticky without becoming a
    receipt warehouse; and
-10. inspect or export the controller's witnessed state under a separate stable
+11. inspect or export the controller's witnessed state under a separate stable
    witness key, while retaining the full node-local receipt chain for detailed
    offline verification.
 

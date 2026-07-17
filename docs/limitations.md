@@ -134,6 +134,28 @@ controller host safe. The committed bundle removes npm and Node.js from normal a
 air-gapped Go builds, but maintainers who rebuild it still trust the lockfile-pinned
 React, Vite, Node.js, and package-registry supply chain.
 
+## Secret materialization composes with OpenBao; it is not a native vault
+
+Steward does not store encrypted secrets, operate OpenBao, unseal it, manage its
+high availability, deliver AppRole bootstrap material, configure production audit,
+or recover its data. The optional compiler supports exact OpenBao KV v2 paths,
+AppRole file auto-auth, Linux systemd, and owner-only Gateway value files. Other
+engines, auth methods, init systems, and providers must implement the same
+filesystem handoff independently.
+
+Rendered values are plaintext in the protected destination and Gateway memory. The
+materializer, Gateway, host root, node filesystem, and OpenBao transport remain
+trusted. A single node materializer can read every exact path in its generated
+policy; use narrower node or tenant service boundaries when compromise separation
+requires them.
+
+The value and version marker are separate Agent templates. Readiness verifies each
+stable file and detects an unexpected marker, but it does not prove atomic render or
+cryptographically bind value bytes to a KV version. Rotation requires an operator
+to drain grants, use provider check-and-set, compile and review the new expected
+version, wait for convergence, validate Gateway, and reload. Steward Control, MCP,
+and the React console do not receive or mutate materializer state or secret values.
+
 ## Signed admission is opt-in
 
 The host-control `/v1/workloads` endpoint is available only without signed
