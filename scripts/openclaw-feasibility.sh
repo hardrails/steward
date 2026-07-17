@@ -525,7 +525,13 @@ wait_run() {
 		state=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("body",{}).get("state",""))' <<<"$response")
 		case $state in
 		succeeded) printf '%s' "$response"; return 0 ;;
-		failed) return 1 ;;
+		failed)
+			if [[ $keep_failed == true ]]; then
+				printf '%s\n' "$response" >"$work/$reference-terminal.json"
+				chmod 0600 "$work/$reference-terminal.json"
+			fi
+			return 1
+			;;
 		esac
 		sleep 1
 	done

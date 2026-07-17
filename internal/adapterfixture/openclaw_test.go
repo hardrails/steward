@@ -347,6 +347,49 @@ func TestOpenClawFixtureModelRequiresTheExecResult(t *testing.T) {
 	}
 }
 
+func TestOpenClawResultSanitizerAcceptsQualifiedUpstreamShape(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not available")
+	}
+	modulePath := "file://" + filepath.Join(openClawAdapterRoot(t), "result.mjs")
+	script := fmt.Sprintf(`
+import { sanitizeOpenClawResult } from %q;
+const result = sanitizeOpenClawResult({
+  payloads: [{text: "STEWARD_OPENCLAW_WORKSPACE_AUDIT_OK", mediaUrl: null}],
+  meta: {
+    durationMs: 7701,
+    agentMeta: {provider: "steward", model: "steward-openclaw-fixture"},
+    toolSummary: {calls: 1, failures: 0, tools: ["exec"]},
+  },
+}, "steward-openclaw-fixture");
+process.stdout.write(JSON.stringify(result));
+`, modulePath)
+	command := exec.Command(node, "--input-type=module", "-e", script)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Payloads []struct {
+			Text     string `json:"text"`
+			MediaURL any    `json:"media_url"`
+		} `json:"payloads"`
+		Meta struct {
+			ToolCalls int      `json:"tool_calls"`
+			Tools     []string `json:"tools"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Payloads) != 1 || result.Payloads[0].Text != "STEWARD_OPENCLAW_WORKSPACE_AUDIT_OK" ||
+		result.Payloads[0].MediaURL != nil || result.Meta.ToolCalls != 1 ||
+		len(result.Meta.Tools) != 1 || result.Meta.Tools[0] != "exec" {
+		t.Fatalf("unexpected sanitized result: %#v", result)
+	}
+}
+
 func postOpenClawFixture(t *testing.T, client *http.Client, baseURL string, document map[string]any) map[string]any {
 	t.Helper()
 	encoded, err := json.Marshal(document)

@@ -8,6 +8,7 @@ LABEL io.hardrails.steward.openclaw.source-revision=${OPENCLAW_SOURCE_REVISION} 
 USER root
 
 COPY --chown=0:0 --chmod=0555 entrypoint.mjs /opt/steward/entrypoint.mjs
+COPY --chown=0:0 --chmod=0444 result.mjs /opt/steward/result.mjs
 COPY --chown=0:0 --chmod=0555 fixture_model.mjs /opt/steward/fixture_model.mjs
 COPY --chown=0:0 --chmod=0444 fixtures/skill/SKILL.md /opt/steward/skills/steward-workspace-audit/SKILL.md
 COPY --chown=0:0 --chmod=0555 fixtures/skill/workspace_audit.mjs /opt/steward/skills/steward-workspace-audit/workspace_audit.mjs
