@@ -51,14 +51,23 @@ nodes without any separately operated secret manager, and a reviewed per-node
 envelope protocol can define key recovery, rotation, anti-rollback, quotas, and
 offline audit before code is shipped.
 
-Steward adds a bounded, provider-neutral materialization check. A strict non-secret
-preflight manifest maps each `(tenant_id, secret_id)` to the deterministic path
-`<root>/<tenant_id>/<secret_id>`. The check requires caller-owned mode-`0700` root
-and tenant directories; stable, caller-owned, single-link mode-`0600` regular
-files; bounded visible-ASCII values; and no path, inode, or filesystem aliasing. Its
-JSON report contains identity and purpose only. It does not return, hash, measure,
-authorize, or durably bind secret values. This is point-in-time readiness preflight;
-Gateway independently performs the authoritative stable file load.
+Steward adds a bounded, provider-neutral materialization check and an optional
+OpenBao configuration compiler. A strict non-secret manifest maps each
+`(tenant_id, secret_id)` to the deterministic value path
+`<secret-root>/<tenant_id>/<secret_id>` and, for automated materialization, a
+provider-version marker at `<status-root>/<tenant_id>/<secret_id>.epoch`. The check
+requires caller-owned mode-`0700` roots and tenant directories; stable,
+caller-owned, single-link mode-`0600` regular files; bounded visible-ASCII values;
+canonical positive version markers; and no path, inode, or filesystem aliasing.
+Its JSON report contains identity, purpose, and expected and observed versions. It
+does not return, hash, measure, authorize, or durably bind secret values.
+
+The compiler turns a bounded non-secret plan into exact OpenBao KV v2 read policy,
+AppRole Agent templates, the materialization manifest, and a sandboxed systemd
+unit. It rejects wildcards, source reuse across tenant targets, plaintext HTTP,
+path traversal, and overlapping writable and trusted paths. Generated templates
+override permissive file defaults, omit listeners and token sinks, and render only
+to Gateway-owned roots. OpenBao remains optional and independently installed.
 
 Agents never receive this directory, the materializer identity, an OpenBao token,
 or the rendered values. One trusted Gateway process necessarily holds the values
@@ -77,7 +86,7 @@ Gateway, or the materializer.
 
 OpenBao is the preferred documented implementation because it is an independent,
 [MPL-2.0 open-source secrets manager](https://github.com/openbao/openbao). Its
-[KV version 2 engine](https://openbao.org/docs/2.3.x/secrets/kv/kv-v2/) supports
+[KV version 2 engine](https://openbao.org/docs/secrets/kv/kv-v2/) supports
 versioned storage and separate ACL paths, and
 [Agent templates](https://openbao.org/docs/agent-and-proxy/agent/template/) support
 automatic renewal or retrieval and file rendering. OpenBao is not downloaded,
@@ -85,15 +94,13 @@ linked, called, or required by Steward.
 
 ## Phased implementation
 
-1. **Validated materialization:** keep credentials in Gateway-only files; document
-   a hardened OpenBao Agent template; validate deterministic tenant paths and file
-   metadata with `stewardctl secret materialization check`; then run Gateway's
-   complete configuration validation.
-2. **Automated lifecycle:** package an opt-in materializer unit and installer
-   profile, add secret-free readiness/rotation status to the operator surface, and
-   coordinate drain, provider rotation, connector epoch increment where applicable,
-   validation, and Gateway reload. Keep secret values and provider tokens out of
-   Steward APIs and evidence.
+1. **Validated materialization, implemented:** keep credentials in Gateway-only
+   files and validate deterministic tenant paths, file metadata, and bounded values
+   with `stewardctl secret materialization check` before Gateway validation.
+2. **Compiled OpenBao lifecycle, implemented:** compile an opt-in materializer unit,
+   exact policy, fail-closed templates, expected-version manifest, and secret-free
+   readiness report. Operators still own OpenBao bootstrap, rotation, recovery,
+   monitoring, and Gateway reload.
 3. **Provider-neutral references:** allow signed policy and node configuration to
    name non-secret references and expected epochs while a local trusted
    materializer resolves them. Specify failure and stale-value behavior before
@@ -106,18 +113,26 @@ linked, called, or required by Steward.
 
 ## Consequences
 
-The first phase gives operators real secret storage and distribution by composing
-with a mature service, but Steward does not install or operate that service. A node
-must initially materialize every required value before Gateway becomes ready.
+The implemented phases give operators real secret storage and distribution by
+composing with a mature service, but Steward does not install or operate that
+service. A node must initially materialize every required value before Gateway
+becomes ready.
 OpenBao unavailability after that point leaves the last rendered value on disk;
 operators must choose persistent storage for disconnected availability or tmpfs
 for less plaintext persistence and boot-time fail-closed behavior.
 
 Rotation remains an authority change, not a background file edit. Drain affected
-grants, update the provider value, wait for materialization, increment the connector
-credential epoch where applicable, validate, and reload Gateway.
+grants, update the provider value with check-and-set, compile and install the new
+expected version, wait for materialization, increment the connector credential
+epoch where applicable, validate, and reload Gateway.
 Gateway's retained grant bindings reject a silent credential change beneath an
 active workload.
+
+The value and version are separate OpenBao templates. Steward validates stable
+files and detects whether the observed marker equals the operator's expected
+version, but it does not prove an atomic render or cryptographically bind a value to
+that marker. The report is a convergence preflight; Gateway's later stable value
+load is authoritative.
 
 Provider storage does not make host compromise safe. Use encrypted disks, verified
 TLS, exact node/tenant read policies, OpenBao audit devices, protected bootstrap

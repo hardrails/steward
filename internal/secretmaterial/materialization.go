@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -20,13 +21,18 @@ import (
 const (
 	// ManifestSchemaV1 identifies the first non-secret materialization manifest.
 	ManifestSchemaV1 = "steward.secret-materialization.v1"
+	// ManifestSchemaV2 requires an expected provider-version marker for every materialization.
+	ManifestSchemaV2 = "steward.secret-materialization.v2"
 	// ReportSchemaV1 identifies the corresponding secret-free readiness report.
 	ReportSchemaV1 = "steward.secret-materialization-report.v1"
+	// ReportSchemaV2 identifies epoch-aware secret-free readiness.
+	ReportSchemaV2 = "steward.secret-materialization-report.v2"
 
 	maxManifestBytes = 1 << 20
 	maxBindings      = 512
 	minSecretBytes   = 12
 	maxSecretBytes   = int64(16 << 10)
+	maxEpochBytes    = int64(20)
 )
 
 // Purpose is the complete initial vocabulary of secrets consumed by Gateway.
@@ -48,9 +54,10 @@ type Manifest struct {
 // Binding names one Gateway-only secret without containing its value, source,
 // provider token, provider-specific path, or an unenforced rotation claim.
 type Binding struct {
-	TenantID string  `json:"tenant_id"`
-	SecretID string  `json:"secret_id"`
-	Purpose  Purpose `json:"purpose"`
+	TenantID      string  `json:"tenant_id"`
+	SecretID      string  `json:"secret_id"`
+	Purpose       Purpose `json:"purpose"`
+	ExpectedEpoch uint64  `json:"expected_epoch,omitempty"`
 }
 
 // Report intentionally excludes secret bytes, hashes, provider references, and
@@ -64,9 +71,11 @@ type Report struct {
 
 // BindingReport identifies a point-in-time validated materialization.
 type BindingReport struct {
-	TenantID string  `json:"tenant_id"`
-	SecretID string  `json:"secret_id"`
-	Purpose  Purpose `json:"purpose"`
+	TenantID      string  `json:"tenant_id"`
+	SecretID      string  `json:"secret_id"`
+	Purpose       Purpose `json:"purpose"`
+	ExpectedEpoch uint64  `json:"expected_epoch,omitempty"`
+	ObservedEpoch uint64  `json:"observed_epoch,omitempty"`
 }
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -90,14 +99,18 @@ func LoadManifest(path string) (Manifest, error) {
 
 // Validate checks the complete non-secret manifest contract.
 func (m Manifest) Validate() error {
-	if m.SchemaVersion != ManifestSchemaV1 || len(m.Bindings) == 0 || len(m.Bindings) > maxBindings {
-		return fmt.Errorf("secret materialization manifest requires schema %q and 1 through %d bindings", ManifestSchemaV1, maxBindings)
+	if (m.SchemaVersion != ManifestSchemaV1 && m.SchemaVersion != ManifestSchemaV2) || len(m.Bindings) == 0 || len(m.Bindings) > maxBindings {
+		return fmt.Errorf("secret materialization manifest requires schema %q or %q and 1 through %d bindings", ManifestSchemaV1, ManifestSchemaV2, maxBindings)
 	}
 	seen := make(map[string]struct{}, len(m.Bindings))
 	for index, binding := range m.Bindings {
 		if !identifierPattern.MatchString(binding.TenantID) || !identifierPattern.MatchString(binding.SecretID) ||
 			(binding.Purpose != PurposeInference && binding.Purpose != PurposeConnector) {
 			return fmt.Errorf("secret materialization binding %d has an invalid tenant, secret, or purpose", index)
+		}
+		if (m.SchemaVersion == ManifestSchemaV1 && binding.ExpectedEpoch != 0) ||
+			(m.SchemaVersion == ManifestSchemaV2 && binding.ExpectedEpoch == 0) {
+			return fmt.Errorf("secret materialization binding %d has an invalid expected epoch for schema %q", index, m.SchemaVersion)
 		}
 		identity := binding.TenantID + "\x00" + binding.SecretID
 		if _, duplicate := seen[identity]; duplicate {
@@ -113,6 +126,36 @@ func (m Manifest) Validate() error {
 // stable, single-link, exact mode 0600 regular file containing one bounded
 // visible-ASCII value. The returned report contains no secret-derived value.
 func Check(rootPath string, manifest Manifest) (Report, error) {
+	if manifest.SchemaVersion == ManifestSchemaV2 {
+		return Report{}, errors.New("epoch-aware materialization requires a status root")
+	}
+	return checkSecrets(rootPath, manifest)
+}
+
+// CheckWithStatus validates secret values and stable provider-version markers.
+// Epochs are non-secret rotation metadata; secret bytes remain excluded from
+// the report and are cleared immediately after validation.
+func CheckWithStatus(rootPath, statusRootPath string, manifest Manifest) (Report, error) {
+	if manifest.SchemaVersion != ManifestSchemaV2 {
+		return Report{}, fmt.Errorf("status checking requires schema %q", ManifestSchemaV2)
+	}
+	if rootPath == statusRootPath {
+		return Report{}, errors.New("secret and status roots must be distinct")
+	}
+	secretRoot, secretErr := os.Lstat(rootPath)
+	statusRoot, statusErr := os.Lstat(statusRootPath)
+	if secretErr == nil && statusErr == nil && os.SameFile(secretRoot, statusRoot) {
+		return Report{}, errors.New("secret and status roots must not alias the same directory")
+	}
+	report, err := checkSecrets(rootPath, manifest)
+	if err != nil {
+		return Report{}, err
+	}
+	report.SchemaVersion = ReportSchemaV2
+	return checkEpochs(statusRootPath, manifest, report)
+}
+
+func checkSecrets(rootPath string, manifest Manifest) (Report, error) {
 	if err := manifest.Validate(); err != nil {
 		return Report{}, err
 	}
@@ -200,7 +243,9 @@ func Check(rootPath string, manifest Manifest) (Report, error) {
 			return Report{}, fmt.Errorf("materialized secret %q/%q changed while checking", binding.TenantID, binding.SecretID)
 		}
 		materializedFiles = append(materializedFiles, fileAfter)
-		report.Bindings = append(report.Bindings, BindingReport(binding))
+		report.Bindings = append(report.Bindings, BindingReport{
+			TenantID: binding.TenantID, SecretID: binding.SecretID, Purpose: binding.Purpose,
+		})
 	}
 
 	for tenantID, before := range tenantDirectories {
@@ -212,6 +257,167 @@ func Check(rootPath string, manifest Manifest) (Report, error) {
 	rootCurrent, err := os.Lstat(rootPath)
 	if err != nil || !sameOwnedDirectory(rootBefore, rootCurrent, owner) {
 		return Report{}, errors.New("secret materialization root changed while checking")
+	}
+	return report, nil
+}
+
+// Prepare creates only deterministic tenant directories below already-existing,
+// caller-owned mode-0700 roots. It never creates or changes a secret, epoch, or
+// root directory and refuses an existing unsafe tenant boundary.
+func Prepare(rootPath, statusRootPath string, manifest Manifest) error {
+	if err := manifest.Validate(); err != nil {
+		return err
+	}
+	if manifest.SchemaVersion != ManifestSchemaV2 || rootPath == statusRootPath {
+		return errors.New("materialization preparation requires schema v2 and distinct roots")
+	}
+	owner := uint32(os.Geteuid())
+	type rootBoundary struct {
+		path   string
+		before os.FileInfo
+		device uint64
+	}
+	boundaries := make([]rootBoundary, 0, 2)
+	for _, rootPath := range []string{rootPath, statusRootPath} {
+		if !filepath.IsAbs(rootPath) || filepath.Clean(rootPath) != rootPath || strings.ContainsRune(rootPath, '\x00') {
+			return errors.New("materialization roots must be clean absolute paths")
+		}
+		before, err := os.Lstat(rootPath)
+		if err != nil || !validOwnedDirectory(before, owner) {
+			return fmt.Errorf("materialization root %q must already be caller-owned, non-symlink, and mode 0700", rootPath)
+		}
+		device, ok := filesystemDevice(before)
+		if !ok {
+			return fmt.Errorf("materialization root %q has unsupported filesystem metadata", rootPath)
+		}
+		boundaries = append(boundaries, rootBoundary{path: rootPath, before: before, device: device})
+	}
+	if os.SameFile(boundaries[0].before, boundaries[1].before) {
+		return errors.New("materialization roots must not alias the same directory")
+	}
+	for _, boundary := range boundaries {
+		root, err := os.OpenRoot(boundary.path)
+		if err != nil {
+			return fmt.Errorf("open materialization root %q: %w", boundary.path, err)
+		}
+		opened, err := root.Stat(".")
+		if err != nil || !sameOwnedDirectoryIdentity(boundary.before, opened, owner) {
+			root.Close()
+			return fmt.Errorf("materialization root %q changed while opening", boundary.path)
+		}
+		seen := make(map[string]struct{})
+		for _, binding := range manifest.Bindings {
+			if _, exists := seen[binding.TenantID]; exists {
+				continue
+			}
+			seen[binding.TenantID] = struct{}{}
+			if err := root.Mkdir(binding.TenantID, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+				root.Close()
+				return fmt.Errorf("create tenant materialization directory %q: %w", binding.TenantID, err)
+			}
+			info, err := root.Lstat(binding.TenantID)
+			if err != nil || !validOwnedDirectory(info, owner) || !sameFilesystem(info, boundary.device) {
+				root.Close()
+				return fmt.Errorf("tenant materialization directory %q is unsafe", binding.TenantID)
+			}
+		}
+		root.Close()
+		after, err := os.Lstat(boundary.path)
+		if err != nil || !sameOwnedDirectoryIdentity(boundary.before, after, owner) {
+			return fmt.Errorf("materialization root %q changed while preparing", boundary.path)
+		}
+	}
+	return nil
+}
+
+func checkEpochs(statusRootPath string, manifest Manifest, report Report) (Report, error) {
+	if !filepath.IsAbs(statusRootPath) || filepath.Clean(statusRootPath) != statusRootPath || strings.ContainsRune(statusRootPath, '\x00') {
+		return Report{}, errors.New("secret materialization status root must be a clean absolute path")
+	}
+	owner := uint32(os.Geteuid())
+	rootBefore, err := os.Lstat(statusRootPath)
+	if err != nil || !validOwnedDirectory(rootBefore, owner) {
+		return Report{}, errors.New("secret materialization status root must be caller-owned, non-symlink, and mode 0700")
+	}
+	rootDevice, ok := filesystemDevice(rootBefore)
+	if !ok {
+		return Report{}, errors.New("secret materialization status root has unsupported filesystem metadata")
+	}
+	root, err := os.OpenRoot(statusRootPath)
+	if err != nil {
+		return Report{}, fmt.Errorf("open secret materialization status root: %w", err)
+	}
+	defer root.Close()
+	rootOpened, err := root.Stat(".")
+	if err != nil || !sameOwnedDirectory(rootBefore, rootOpened, owner) {
+		return Report{}, errors.New("secret materialization status root changed while opening")
+	}
+	tenantDirectories := make(map[string]os.FileInfo)
+	markerFiles := make([]os.FileInfo, 0, len(manifest.Bindings))
+	for index, binding := range manifest.Bindings {
+		tenantBefore, exists := tenantDirectories[binding.TenantID]
+		if !exists {
+			tenantBefore, err = root.Lstat(binding.TenantID)
+			if err != nil || !validOwnedDirectory(tenantBefore, owner) || !sameFilesystem(tenantBefore, rootDevice) {
+				return Report{}, fmt.Errorf("tenant status directory %q must be caller-owned, non-symlink, mode 0700, and on the status filesystem", binding.TenantID)
+			}
+			tenantDirectories[binding.TenantID] = tenantBefore
+		}
+		tenantRoot, err := root.OpenRoot(binding.TenantID)
+		if err != nil {
+			return Report{}, fmt.Errorf("open tenant status directory %q: %w", binding.TenantID, err)
+		}
+		tenantOpened, statErr := tenantRoot.Stat(".")
+		if statErr != nil || !sameOwnedDirectory(tenantBefore, tenantOpened, owner) {
+			tenantRoot.Close()
+			return Report{}, fmt.Errorf("tenant status directory %q changed while opening", binding.TenantID)
+		}
+		name := binding.SecretID + ".epoch"
+		before, err := tenantRoot.Lstat(name)
+		if err != nil || !validOwnedEpoch(before, owner) || !sameFilesystem(before, rootDevice) {
+			tenantRoot.Close()
+			return Report{}, fmt.Errorf("materialization epoch %q/%q must be caller-owned, single-link, regular, mode 0600, and canonical decimal", binding.TenantID, name)
+		}
+		for _, prior := range markerFiles {
+			if os.SameFile(prior, before) {
+				tenantRoot.Close()
+				return Report{}, fmt.Errorf("materialization epoch %q/%q aliases another binding", binding.TenantID, name)
+			}
+		}
+		raw, err := securefile.ReadRoot(tenantRoot, name, maxEpochBytes, securefile.OwnerOnly)
+		if err != nil {
+			tenantRoot.Close()
+			return Report{}, fmt.Errorf("read materialization epoch %q/%q: %w", binding.TenantID, name, err)
+		}
+		epochText := string(raw)
+		observed, parseErr := strconv.ParseUint(epochText, 10, 64)
+		for rawIndex := range raw {
+			raw[rawIndex] = 0
+		}
+		after, statErr := tenantRoot.Lstat(name)
+		tenantRoot.Close()
+		if parseErr != nil || observed == 0 || strconv.FormatUint(observed, 10) != epochText {
+			return Report{}, fmt.Errorf("materialization epoch %q/%q is not canonical positive decimal", binding.TenantID, name)
+		}
+		if statErr != nil || !sameOwnedEpoch(before, after, owner) {
+			return Report{}, fmt.Errorf("materialization epoch %q/%q changed while checking", binding.TenantID, name)
+		}
+		markerFiles = append(markerFiles, after)
+		report.Bindings[index].ExpectedEpoch = binding.ExpectedEpoch
+		report.Bindings[index].ObservedEpoch = observed
+		if observed != binding.ExpectedEpoch {
+			report.Ready = false
+		}
+	}
+	for tenantID, before := range tenantDirectories {
+		after, err := root.Lstat(tenantID)
+		if err != nil || !sameOwnedDirectory(before, after, owner) {
+			return Report{}, fmt.Errorf("tenant status directory %q changed while checking", tenantID)
+		}
+	}
+	rootCurrent, err := os.Lstat(statusRootPath)
+	if err != nil || !sameOwnedDirectory(rootBefore, rootCurrent, owner) {
+		return Report{}, errors.New("secret materialization status root changed while checking")
 	}
 	return report, nil
 }
@@ -238,6 +444,11 @@ func sameOwnedDirectory(before, after os.FileInfo, owner uint32) bool {
 		os.SameFile(before, after) && before.Mode() == after.Mode() && before.ModTime().Equal(after.ModTime())
 }
 
+func sameOwnedDirectoryIdentity(before, after os.FileInfo, owner uint32) bool {
+	return validOwnedDirectory(before, owner) && validOwnedDirectory(after, owner) &&
+		os.SameFile(before, after) && before.Mode() == after.Mode()
+}
+
 func validOwnedSecret(info os.FileInfo, owner uint32) bool {
 	uid, links, ok := unixMetadata(info)
 	return ok && info.Mode().IsRegular() && info.Mode().Perm() == 0o600 && uid == owner && links == 1 &&
@@ -248,6 +459,17 @@ func sameOwnedSecret(before, after os.FileInfo, owner uint32) bool {
 	return validOwnedSecret(before, owner) && validOwnedSecret(after, owner) &&
 		os.SameFile(before, after) && before.Mode() == after.Mode() && before.Size() == after.Size() &&
 		before.ModTime().Equal(after.ModTime())
+}
+
+func validOwnedEpoch(info os.FileInfo, owner uint32) bool {
+	uid, links, ok := unixMetadata(info)
+	return ok && info.Mode().IsRegular() && info.Mode().Perm() == 0o600 && uid == owner && links == 1 &&
+		info.Size() >= 1 && info.Size() <= maxEpochBytes
+}
+
+func sameOwnedEpoch(before, after os.FileInfo, owner uint32) bool {
+	return validOwnedEpoch(before, owner) && validOwnedEpoch(after, owner) && os.SameFile(before, after) &&
+		before.Mode() == after.Mode() && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
 }
 
 func unixMetadata(info os.FileInfo) (uint32, uint64, bool) {

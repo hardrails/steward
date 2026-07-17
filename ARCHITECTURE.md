@@ -47,7 +47,11 @@ Five runtime boundaries separate authority:
    tasks record task-local authorization, dispatch, and terminal lifecycle evidence.
    Gateway can read credentials that OpenBao Agent or another trusted materializer
    places in owner-only files; agents receive only the mediated capability, never
-   the materialization directory or reusable value.
+   the materialization directory or reusable value. `stewardctl` can compile a
+   bounded OpenBao KV v2 plan into exact read policy, fail-closed templates, an
+   expected-version manifest, and a systemd sandbox. This is deployment
+   configuration, not an OpenBao client or embedded vault; secret storage,
+   bootstrap authentication, recovery, and audit remain outside Steward.
 5. An operator-managed **OpenAI-compatible inference system** owns model routing
    and inference policy. It is outside Steward's lifecycle contract.
 

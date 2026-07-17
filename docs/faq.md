@@ -180,6 +180,21 @@ Outside Steward. An operator provides local models through a separately managed,
 OpenAI-compatible service. Steward brokers site-configured routes and credentials;
 it does not schedule or serve models.
 
+## Does Steward store inference keys and connector tokens?
+
+Gateway reads reusable credentials from owner-only files and adds them only at an
+admitted upstream hop. Agents and the React console never receive those values.
+Steward is not a general-purpose vault: operators may install the files manually or
+run OpenBao Agent as a separate trusted service.
+
+`stewardctl secret openbao compile` converts a strict non-secret plan into exact KV
+v2 read policy, fail-closed templates, expected-version readiness metadata, and a
+sandboxed systemd unit. It does not contact OpenBao, accept a token, or manage
+storage, unseal keys, backup, recovery, or audit. The reported provider version is
+a convergence check over separate value and marker files, not cryptographic proof
+that they were rendered atomically. See the
+[Gateway credential guide]({{ '/guides/secrets/' | relative_url }}).
+
 ## How can an agent call an authenticated API without Steward directly giving it the secret?
 
 Use a named connector. The publisher capsule permits the connector capability,

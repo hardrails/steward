@@ -164,6 +164,134 @@ func TestCheckRejectsUnsafeMaterializationShapes(t *testing.T) {
 	})
 }
 
+func TestCheckWithStatusReportsOnlyExpectedAndObservedEpoch(t *testing.T) {
+	root := materializationRoot(t)
+	statusRoot := materializationRoot(t)
+	secretPath := installSecret(t, root, "tenant-a", "inference", "inference-key-123456")
+	epochPath := installEpoch(t, statusRoot, "tenant-a", "inference", "7")
+	manifest := Manifest{SchemaVersion: ManifestSchemaV2, Bindings: []Binding{{
+		TenantID: "tenant-a", SecretID: "inference", Purpose: PurposeInference, ExpectedEpoch: 7,
+	}}}
+
+	report, err := CheckWithStatus(root, statusRoot, manifest)
+	if err != nil {
+		t.Fatalf("CheckWithStatus: %v", err)
+	}
+	if !report.Ready || report.SchemaVersion != ReportSchemaV2 || len(report.Bindings) != 1 ||
+		report.Bindings[0].ExpectedEpoch != 7 || report.Bindings[0].ObservedEpoch != 7 {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"inference-key-123456", root, statusRoot, secretPath, epochPath, `"bytes"`, "digest", "hash"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("report contains forbidden value %q: %s", forbidden, raw)
+		}
+	}
+
+	manifest.Bindings[0].ExpectedEpoch = 8
+	report, err = CheckWithStatus(root, statusRoot, manifest)
+	if err != nil {
+		t.Fatalf("CheckWithStatus mismatch: %v", err)
+	}
+	if report.Ready || report.Bindings[0].ExpectedEpoch != 8 || report.Bindings[0].ObservedEpoch != 7 {
+		t.Fatalf("mismatch report: %#v", report)
+	}
+}
+
+func TestCheckWithStatusRejectsUnsafeEpochShapes(t *testing.T) {
+	manifest := Manifest{SchemaVersion: ManifestSchemaV2, Bindings: []Binding{{
+		TenantID: "tenant-a", SecretID: "inference", Purpose: PurposeInference, ExpectedEpoch: 7,
+	}}}
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{"newline", "7\n"},
+		{"leading zero", "07"},
+		{"zero", "0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := materializationRoot(t)
+			statusRoot := materializationRoot(t)
+			installSecret(t, root, "tenant-a", "inference", "inference-key-123456")
+			installEpoch(t, statusRoot, "tenant-a", "inference", test.value)
+			if _, err := CheckWithStatus(root, statusRoot, manifest); err == nil {
+				t.Fatal("CheckWithStatus accepted a non-canonical epoch")
+			}
+		})
+	}
+	t.Run("symlink", func(t *testing.T) {
+		root := materializationRoot(t)
+		statusRoot := materializationRoot(t)
+		installSecret(t, root, "tenant-a", "inference", "inference-key-123456")
+		original := installEpoch(t, statusRoot, "tenant-a", "original", "7")
+		if err := os.Symlink(filepath.Base(original), filepath.Join(statusRoot, "tenant-a", "inference.epoch")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := CheckWithStatus(root, statusRoot, manifest); err == nil {
+			t.Fatal("CheckWithStatus accepted an epoch symlink")
+		}
+	})
+	t.Run("hard link", func(t *testing.T) {
+		root := materializationRoot(t)
+		statusRoot := materializationRoot(t)
+		installSecret(t, root, "tenant-a", "inference", "inference-key-123456")
+		original := installEpoch(t, statusRoot, "tenant-a", "original", "7")
+		if err := os.Link(original, filepath.Join(statusRoot, "tenant-a", "inference.epoch")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := CheckWithStatus(root, statusRoot, manifest); err == nil {
+			t.Fatal("CheckWithStatus accepted a multiply linked epoch")
+		}
+	})
+}
+
+func TestPrepareCreatesOnlySafeTenantDirectories(t *testing.T) {
+	root := materializationRoot(t)
+	statusRoot := materializationRoot(t)
+	manifest := Manifest{SchemaVersion: ManifestSchemaV2, Bindings: []Binding{
+		{TenantID: "tenant-a", SecretID: "inference", Purpose: PurposeInference, ExpectedEpoch: 7},
+		{TenantID: "tenant-a", SecretID: "tickets", Purpose: PurposeConnector, ExpectedEpoch: 3},
+	}}
+	if err := Prepare(root, statusRoot, manifest); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	for _, path := range []string{filepath.Join(root, "tenant-a"), filepath.Join(statusRoot, "tenant-a")} {
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Fatalf("unsafe prepared directory %q: info=%v err=%v", path, info, err)
+		}
+	}
+	if err := Prepare(root, statusRoot, manifest); err != nil {
+		t.Fatalf("idempotent Prepare: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "tenant-a", "inference")); !os.IsNotExist(err) {
+		t.Fatalf("Prepare created secret content: %v", err)
+	}
+
+	unsafeRoot := materializationRoot(t)
+	if err := os.Mkdir(filepath.Join(unsafeRoot, "tenant-a"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := Prepare(unsafeRoot, materializationRoot(t), manifest); err == nil {
+		t.Fatal("Prepare accepted an unsafe tenant boundary")
+	}
+	cleanRoot := materializationRoot(t)
+	unsafeStatusRoot := materializationRoot(t)
+	if err := os.Chmod(unsafeStatusRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := Prepare(cleanRoot, unsafeStatusRoot, manifest); err == nil {
+		t.Fatal("Prepare accepted an unsafe status root")
+	}
+	if _, err := os.Lstat(filepath.Join(cleanRoot, "tenant-a")); !os.IsNotExist(err) {
+		t.Fatalf("Prepare mutated the secret root before rejecting the status root: %v", err)
+	}
+}
+
 func materializationRoot(t *testing.T) string {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "materialized")
@@ -180,6 +308,19 @@ func installSecret(t *testing.T, root, tenant, secret, value string) string {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, secret)
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func installEpoch(t *testing.T, root, tenant, secret, value string) string {
+	t.Helper()
+	directory := filepath.Join(root, tenant)
+	if err := os.Mkdir(directory, 0o700); err != nil && !os.IsExist(err) {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, secret+".epoch")
 	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
 		t.Fatal(err)
 	}
