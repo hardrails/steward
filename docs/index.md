@@ -7,7 +7,7 @@ home: true
 <section class="hero">
   <p class="eyebrow">Open-source, operator-controlled agent infrastructure</p>
   <h1>A sandbox is only the beginning.</h1>
-  <p class="hero-lede">A sandbox limits untrusted code, but does not establish who authorized it, which tenant it represents, or whether hostile calendar, email, web, or tool content drove a sensitive request. Steward adds a self-hosted fleet controller, verifies local artifact and tenant policy, runs the agent with Docker + gVisor, can require an off-node key to sign one exact connector effect, and records enforcement receipts that remain verifiable offline.</p>
+  <p class="hero-lede">A sandbox limits untrusted code, but does not establish who authorized it, which tenant it represents, or whether hostile calendar, email, web, or tool content drove a sensitive request. Steward adds a self-hosted fleet controller, verifies local artifact and tenant policy, runs the agent with Docker + gVisor, can require separate off-node keys to approve one exact connector effect, and records enforcement receipts that remain verifiable offline.</p>
   <div class="status-line"><span>Self-hosted fleet control</span><span>Signed local admission</span><span>Authorized exact effects</span><span>Durable replay control</span><span>Offline-verifiable receipts</span><span>Apache-2.0</span></div>
   <div class="install-box">
     <header><span>Interactive Linux install</span><button class="copy-button" type="button">Copy</button></header>
@@ -64,8 +64,9 @@ policy can authorize one exact request. Gateway records and spends that permit
 before dispatch. The private key stays off-node. A successful replay returns the
 recorded run ID without dispatching again; an ambiguous outcome fails closed.
 For sensitive connectors, Authorized Effects binds connector-scoped public keys in
-signed tenant policy, requires explicit intent and a version-2 permit for the exact
-request, prohibits generic egress, and spends the permit before DNS. It covers only
+signed tenant policy, can require distinct approvers, requires explicit intent and
+an exact-request permit, prohibits generic egress, and spends the permit before
+DNS. It covers only
 Steward-mediated connectors, not unmanaged credentials, browser sessions, local
 filesystem or computer use, inference confidentiality, or host root.
 

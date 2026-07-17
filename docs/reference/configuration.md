@@ -340,13 +340,16 @@ private task key stays off-node. A service with no matching task key keeps the
 ordinary host-authenticated service behavior.
 
 A tenant policy may also contain one `authorized_effects` object. `mode` is
-`optional` or `required`; `keys` contains one through eight unique Ed25519 action
-public keys, each scoped to one through 32 sorted connector IDs already allowed by
-that tenant. Key material cannot be assigned to another tenant. An authenticated
+`optional` or `required`; `min_approvals` is from 1 through 8 and defaults to 1
+when omitted; `keys` contains one through eight unique Ed25519 action public keys,
+each scoped to one through 32 sorted connector IDs already allowed by that tenant.
+The threshold cannot exceed the number of distinct keys available to any selected
+connector. Key material cannot be assigned to another tenant. An authenticated
 instance intent must explicitly set `effect_mode` when this policy exists.
 `optional` accepts `standard` or `authorized`; `required` accepts only `authorized`.
 Authorized mode requires connector capability and selected connector IDs, forbids
-generic egress, and projects only the selected signed key scopes to Gateway.
+generic egress, and projects only the selected signed key scopes and approval
+threshold to Gateway.
 
 The installer, `configure-node`, and `configure-admission` accept
 `--allow-unquotaed-state-on-dedicated-host`. The non-interactive installer also
@@ -475,7 +478,8 @@ bounded stable node identity; without authorities it must be absent. A connector
 sorted `action_authority_ids` contains one through eight configured keys, and
 `max_action_permit_seconds` is one through 86,400. Gateway then requires exactly
 one canonical `X-Steward-Action-Permit` header for that connector and verifies the
-key's tenant scope, node, instance, generation, admission digests, connector,
+signers' tenant and connector scopes, signed approval threshold, node, instance,
+generation, admission digests, connector,
 operation, `operation_policy_digest`, task, exact request digest and length, content
 type, and validity window against live state. The operation-policy digest commits
 to the canonical base URL, credential injection mode, credential epoch, connector
@@ -593,16 +597,18 @@ decision for the old chain, drain retained grants, preserve the old ledger and
 verification material, configure the new file and table, and restart Gateway.
 There is no CLI operation that removes a budget or compacts an existing ledger.
 
-The same signed ledger may contain receipt formats 1 through 5. Format 1 is an
+The same signed ledger may contain receipt formats 1 through 6. Format 1 is an
 ordinary connector event, format 2 adds a connector action permit, and format 3 is
 the historical two-record service-task contract. Current lifecycle tasks use format
 4 and add task-local sequence and hash links across authorization, dispatch, and
 terminal records. Format 5 records authorized connector calls with explicit effect
 mode and exact operation-policy digest; a stable pre-effect denial marker binds the
 first observed, attacker-selectable request digest without claiming a permit or
-authority key. It does not enumerate later denials. Gateway state format 4
+authority key. It does not enumerate later denials. Format 6 records a multi-party
+authorized call's canonical signer set and signed approval threshold. Gateway state format 4
 retains service ID and public tenant task authorities. State format 5 additionally
-retains authorized mode and policy-derived connector/action-key scopes. Keep the
+retains authorized mode and policy-derived connector/action-key scopes. State
+format 6 binds a multi-party threshold into the retained grant. Keep the
 ledger, Gateway state, and declared release-format compatibility together during
 backup, upgrade, and rollback; do not downgrade either file independently.
 

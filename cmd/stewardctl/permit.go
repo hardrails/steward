@@ -128,7 +128,8 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 	if intent.EffectMode == admission.EffectModeAuthorized && approvalThreshold == 0 {
 		approvalThreshold = 1
 	}
-	if intent.EffectMode == admission.EffectModeAuthorized && (approvalThreshold < 1 || approvalThreshold > len(admitted.ActionAuthorities) && approvalThreshold > 1) {
+	if intent.EffectMode == admission.EffectModeAuthorized &&
+		(approvalThreshold < 1 || approvalThreshold > 1 && approvalThreshold > len(admitted.ActionAuthorities)) {
 		return errors.New("admission response contains an invalid action approval threshold")
 	}
 	if admitted.Generation != intent.Generation || admitted.CapsuleDigest != intent.CapsuleDigest ||
@@ -363,7 +364,8 @@ func approvePermit(arguments []string, stdout, stderr io.Writer) error {
 	if !exists || !configuredPublic.Equal(newPublic) {
 		return errors.New("new approval key does not match the admitted connector authority")
 	}
-	before, err := actionpermit.VerifyPartial(raw, trusted, timeNow().UTC().Truncate(time.Second), validFor)
+	approvalTime := timeNow().UTC().Truncate(time.Second)
+	before, err := actionpermit.VerifyPartial(raw, trusted, approvalTime, validFor)
 	if err != nil {
 		return err
 	}
@@ -387,12 +389,12 @@ func approvePermit(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	next, err := actionpermit.VerifyPartial(nextRaw, trusted, timeNow().UTC().Truncate(time.Second), validFor)
+	next, err := actionpermit.VerifyPartial(nextRaw, trusted, approvalTime, validFor)
 	if err != nil {
 		return err
 	}
 	if next.Complete {
-		if _, err := actionpermit.Verify(nextRaw, trusted, timeNow().UTC().Truncate(time.Second), validFor); err != nil {
+		if _, err := actionpermit.Verify(nextRaw, trusted, approvalTime, validFor); err != nil {
 			return fmt.Errorf("verify complete multi-party permit: %w", err)
 		}
 	}

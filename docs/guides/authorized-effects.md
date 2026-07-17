@@ -25,11 +25,12 @@ therefore assumes the agent is fully compromised when it decides whether a manag
 external effect may begin.
 
 **Authorized Effects** moves that decision outside the workload. Signed tenant
-policy pins action-authority public keys to connector IDs. The instance intent
-explicitly selects `"effect_mode":"authorized"`. Gateway then accepts only a
-version-2 permit signed for the exact operation and exact request bytes. It records
-the one-use spend on durable storage before DNS resolution or any upstream
-connection, while the upstream credential remains outside the workload.
+policy pins action-authority public keys and an approval threshold to connector
+IDs. The instance intent explicitly selects `"effect_mode":"authorized"`.
+Gateway then accepts only a complete permit signed for the exact operation and
+exact request bytes. It records the one-use spend on durable storage before DNS
+resolution or any upstream connection, while the upstream credential remains
+outside the workload.
 
 This boundary is opt-in. Use it for account changes, secret-management operations,
 messages, financial instructions, infrastructure mutations, or any connector call
@@ -45,7 +46,7 @@ connector. For those calls, it binds all of the following:
 - the selected connector, exact configured operation, credential epoch, and
   effective route policy;
 - the exact request bytes, byte length, content type, one-use task ID, validity
-  window, and action-authority key; and
+  window, required approval count, and exact set of action-authority keys; and
 - a durable signed authorization record written before DNS, followed by a signed
   terminal record when Gateway can observe one.
 
@@ -56,7 +57,7 @@ It does **not** cover:
 - inference confidentiality or what a model provider retains;
 - local filesystem changes, computer use, or side effects inside the agent;
 - a compromised host root, kernel, Docker daemon, Gateway process, receipt key, or
-  action-signing key;
+  action-signing keys;
 - whether an approver understood the request or whether the request matches a
   user's natural-language intent; or
 - exactly-once behavior at the upstream service. A timeout after authorization can
@@ -74,14 +75,19 @@ has been imported. Replace the repository and digest placeholders with the value
 from that signed capsule. Keep the site-root, publisher, and action private keys off
 the node.
 
-On the signing workstation, create a dedicated action-authority key:
+On two separate signing workstations or operator profiles, create two dedicated
+action-authority keys. Keep each private key under a different operator's control:
 
 ```console
 mkdir -m 0700 authorized-effects
 stewardctl keygen \
-  -private-out authorized-effects/effects-approver.private.pem \
-  -public-out authorized-effects/effects-approver.public \
-  -key-id effects-approver
+  -private-out authorized-effects/effects-approver-a.private.pem \
+  -public-out authorized-effects/effects-approver-a.public \
+  -key-id effects-approver-a
+stewardctl keygen \
+  -private-out authorized-effects/effects-approver-b.private.pem \
+  -public-out authorized-effects/effects-approver-b.public \
+  -key-id effects-approver-b
 ```
 
 Create a complete site policy. This example requires Authorized Effects for the
@@ -90,7 +96,8 @@ tenant's `connector_ids` list.
 
 ```console
 PUBLISHER_PUBLIC="$(tr -d '\n' < publisher.public)"
-EFFECTS_PUBLIC="$(tr -d '\n' < authorized-effects/effects-approver.public)"
+EFFECTS_PUBLIC_A="$(tr -d '\n' < authorized-effects/effects-approver-a.public)"
+EFFECTS_PUBLIC_B="$(tr -d '\n' < authorized-effects/effects-approver-b.public)"
 MANIFEST_DIGEST='sha256:PASTE_64_LOWERCASE_HEX'
 
 cat > site-policy.json <<EOF
@@ -122,9 +129,14 @@ cat > site-policy.json <<EOF
     "connector_ids": ["secrets-admin"],
     "authorized_effects": {
       "mode": "required",
+      "min_approvals": 2,
       "keys": [{
-        "key_id": "effects-approver",
-        "public_key": "$EFFECTS_PUBLIC",
+        "key_id": "effects-approver-a",
+        "public_key": "$EFFECTS_PUBLIC_A",
+        "connector_ids": ["secrets-admin"]
+      }, {
+        "key_id": "effects-approver-b",
+        "public_key": "$EFFECTS_PUBLIC_B",
         "connector_ids": ["secrets-admin"]
       }]
     }
@@ -132,7 +144,7 @@ cat > site-policy.json <<EOF
 }
 EOF
 
-unset PUBLISHER_PUBLIC EFFECTS_PUBLIC MANIFEST_DIGEST
+unset PUBLISHER_PUBLIC EFFECTS_PUBLIC_A EFFECTS_PUBLIC_B MANIFEST_DIGEST
 
 stewardctl policy sign \
   -in site-policy.json \
@@ -149,7 +161,9 @@ The example assumes the node has retained policy epoch 1. Use an epoch greater
 than the node's retained high-water mark; never lower or reuse an epoch to make the
 example pass.
 
-`"mode":"optional"` also pins the keys, but requires each instance intent to
+`min_approvals` may be from 1 through 8 and cannot exceed the number of keys
+available to every selected connector. Omitting it preserves the one-approver
+policy. `"mode":"optional"` also pins the keys, but requires each instance intent to
 choose either `"standard"` or `"authorized"`. `"mode":"required"` accepts only
 `"authorized"`; omitting `effect_mode` or selecting `"standard"` is a signed-policy
 downgrade and admission fails. An intent cannot select `"authorized"` when its
@@ -157,7 +171,7 @@ tenant has no `authorized_effects` policy.
 
 ## Configure Gateway without giving the agent a credential
 
-Transfer only `effects-approver.public`, the signed policy, and the site-root public
+Transfer only both action public keys, the signed policy, and the site-root public
 key to the node through an authenticated process. Create the connector credential
 as a Gateway-readable owner-controlled file. An external secret manager may
 materialize this file; Steward does not require one. See
@@ -166,8 +180,10 @@ for the OpenBao handoff and provider-neutral readiness check.
 
 ```console
 sudo install -d -o root -g root -m 0700 /root/steward-authorized-effects
-sudo install -o root -g root -m 0644 authorized-effects/effects-approver.public \
-  /root/steward-authorized-effects/effects-approver.public
+sudo install -o root -g root -m 0644 authorized-effects/effects-approver-a.public \
+  /root/steward-authorized-effects/effects-approver-a.public
+sudo install -o root -g root -m 0644 authorized-effects/effects-approver-b.public \
+  /root/steward-authorized-effects/effects-approver-b.public
 sudo install -o root -g root -m 0644 site-policy.dsse.json \
   /root/steward-authorized-effects/site-policy.dsse.json
 sudo install -o root -g root -m 0644 site-root.public \
@@ -196,8 +212,10 @@ sudo stewardctl gateway connector set \
   -tenant-budget tenant-a=4194304 \
   -operation rotate-recovery=POST:/v1/recovery/rotate \
   -action-node-id node-a \
-  -action-authority effects-approver=/root/steward-authorized-effects/effects-approver.public \
-  -action-authority-tenant effects-approver=tenant-a \
+  -action-authority effects-approver-a=/root/steward-authorized-effects/effects-approver-a.public \
+  -action-authority-tenant effects-approver-a=tenant-a \
+  -action-authority effects-approver-b=/root/steward-authorized-effects/effects-approver-b.public \
+  -action-authority-tenant effects-approver-b=tenant-a \
   -max-action-permit-seconds 300
 
 sudo stewardctl gateway validate -config /etc/steward/gateway.json
@@ -212,9 +230,13 @@ Gateway sockets, identities, receipt paths, and limits:
 {
   "action_permit_node_id": "node-a",
   "action_authorities": [{
-    "key_id": "effects-approver",
+    "key_id": "effects-approver-a",
     "tenant_id": "tenant-a",
-    "public_key": "BASE64_ED25519_PUBLIC_KEY"
+    "public_key": "BASE64_ED25519_PUBLIC_KEY_A"
+  }, {
+    "key_id": "effects-approver-b",
+    "tenant_id": "tenant-a",
+    "public_key": "BASE64_ED25519_PUBLIC_KEY_B"
   }],
   "connector_receipt_tenant_budgets": [{
     "tenant_id": "tenant-a",
@@ -231,7 +253,7 @@ Gateway sockets, identities, receipt paths, and limits:
     "max_response_bytes": 1048576,
     "max_seconds": 30,
     "max_calls_per_grant": 8,
-    "action_authority_ids": ["effects-approver"],
+    "action_authority_ids": ["effects-approver-a", "effects-approver-b"],
     "max_action_permit_seconds": 300,
     "operations": [{
       "id": "rotate-recovery",
@@ -292,7 +314,8 @@ sudo stewardctl gateway effects check \
 
 The command verifies the site-policy signature and checks that the intent explicitly
 selects authorized mode, has no generic egress, and selects only connectors whose
-Gateway action keys exactly match signed tenant policy. It also checks node identity
+Gateway action keys and approval threshold exactly match signed tenant policy. It
+also checks that every selected connector has enough distinct approvers, node identity,
 and the tenant's durable receipt budget. It prints only a bounded, non-secret
 readiness summary and does not admit a workload or contact an upstream service.
 
@@ -336,7 +359,7 @@ transferring them to the signing workstation. The inventory is mismatch prefligh
 not authority; Gateway's active signed grant and validated configuration remain the
 enforcement source.
 
-## Issue one version-2 permit
+## Collect two exact approvals
 
 On the signing workstation, review the exact request bytes. Do not approve a
 summary while signing different bytes.
@@ -357,24 +380,44 @@ stewardctl permit issue \
   -task-id task-7f67c52a25d84f178a6b447f6d7a1091 \
   -valid-for 5m \
   -clock-skew 5s \
-  -key authorized-effects/effects-approver.private.pem \
-  -key-id effects-approver \
-  -out action-permit.dsse.json \
-  -header-out action-permit.header
+  -key authorized-effects/effects-approver-a.private.pem \
+  -key-id effects-approver-a \
+  -out action-permit.partial.dsse.json
 ```
 
 Standard output contains only the exact permit digest. Standard error contains one
 canonical JSON approval summary with tenant, instance generation, connector,
 operation, method, path, request digest and byte count, validity window, authority
-key, and final permit digest. Keep those streams separate in automation. The
+keys, approval count, threshold, completion state, and permit digest. Keep those streams separate in automation. The
 summary deliberately excludes request content and hostile context; compare it with
 the independently reviewed request bytes before releasing the permit. It cannot
 prove that an approver understood the external effect.
 
-Because the admitted intent selects authorized mode, `permit issue` emits
-`steward.action-permit.v2` with `"effect_mode":"authorized"`. Gateway rejects a
-version-1 permit for this grant; removing the field or changing the envelope type
-cannot downgrade enforcement.
+Because the signed policy requires two approvals, `permit issue` emits an
+incomplete `steward.action-permit.v3` artifact. It cannot emit an HTTP header and
+Gateway will not accept it. Transfer that artifact, the exact request, admission,
+intent, and authenticated trust inventory to the second signer. The second signer
+reviews the same concrete action and adds a signature without changing the signed
+payload:
+
+```console
+stewardctl permit approve \
+  -in action-permit.partial.dsse.json \
+  -admission admission.json \
+  -intent instance-intent.json \
+  -trust action-trust.json \
+  -request exact-request.json \
+  -key authorized-effects/effects-approver-b.private.pem \
+  -key-id effects-approver-b \
+  -out action-permit.dsse.json \
+  -header-out action-permit.header
+```
+
+The command rejects an already used key, a changed payload or request, an
+unadmitted signer, inconsistent operation trust, and an existing output path.
+Signatures are stored in canonical key-ID order. Gateway requires exactly the
+signed threshold of distinct valid signatures. A one-approver policy continues to
+emit version 2 directly; version 1 is rejected for every authorized-effects grant.
 
 Deliver the exact request and permit header to the workload through the agent's
 approved task path. Inside the workload, the connector call is:
@@ -410,14 +453,14 @@ audit workstation. Use the configured Gateway receipt node ID and key epoch:
 ```console
 stewardctl permit verify \
   -in action-permit.dsse.json \
-  -public-key authorized-effects/effects-approver.public \
-  -key-id effects-approver \
+  -authority effects-approver-a=authorized-effects/effects-approver-a.public \
+  -authority effects-approver-b=authorized-effects/effects-approver-b.public \
   -request exact-request.json
 
 stewardctl permit audit \
   -in action-permit.dsse.json \
-  -public-key authorized-effects/effects-approver.public \
-  -key-id effects-approver \
+  -authority effects-approver-a=authorized-effects/effects-approver-a.public \
+  -authority effects-approver-b=authorized-effects/effects-approver-b.public \
   -request exact-request.json \
   -receipts connector-receipts.ndjson \
   -receipt-public-key connector-receipts.public \
@@ -427,11 +470,13 @@ stewardctl permit audit \
   -expected-chain-hash 'sha256:<retained-chain-hash>'
 ```
 
-Authorized connector authorization and terminal events use receipt format 5. The
-records bind `effect_mode`, the exact operation-policy digest, authority key,
-permit digest, request digest, and durable call identity without storing request or
-response bodies, credentials, or raw task IDs. A missing terminal record means the
-outcome is unknown; it is not evidence that the upstream did nothing.
+Multi-party connector authorization and terminal events use receipt format 6. The
+records bind `effect_mode`, the exact operation-policy digest, canonical signer
+set, approval threshold, permit digest, request digest, and durable call identity
+without storing request or response bodies, credentials, or raw task IDs. A
+one-approver authorized call remains format 5 for compatibility. A missing terminal
+record means the outcome is unknown; it is not evidence that the upstream did
+nothing.
 
 ## How this differs from related defenses
 
@@ -445,18 +490,23 @@ These approaches are complementary:
   information-flow rules in an integrated agent planner.
 - [NVIDIA OpenShell](https://docs.nvidia.com/openshell/reference/policy-schema)
   provides sandbox, filesystem, process, network, application-protocol, and
-  credential-routing policy.
+  credential-routing policy. NemoClaw can ask an operator to approve a blocked
+  network destination for the current session; that is broader than one exact
+  request and does not provide separation of duties.
 - [Open Agent Passport](https://arxiv.org/abs/2603.20953) proposes deterministic
   pre-tool authorization and signed audit records.
 
 Steward's narrower difference is complete mediation of selected Steward connector
 calls for unmodified, containerized agents: signed tenant policy pins
-connector-specific action keys; one exact version-2 request permit is durably
-consumed before DNS; credentials stay outside the workload; and the
-permit-to-terminal evidence can be verified offline. It does not require a
+connector-specific action keys and, when configured, a minimum number of distinct
+approvers; one exact version-3 request permit is durably consumed before DNS;
+credentials stay outside the workload; and the permit-to-terminal evidence can be
+verified offline. It does not require a
 particular browser, planner, agent framework, hosted authorization service, or
 public network. Use planner-level information-flow controls, browser origin
 isolation, model screening, and human review as additional layers where available.
 
 The architectural rationale is recorded in
 [ADR 0018]({{ '/decisions/0018-native-authorized-effects/' | relative_url }}).
+The separation-of-duties extension is recorded in
+[ADR 0021]({{ '/decisions/0021-enforce-multi-party-authorized-effects/' | relative_url }}).

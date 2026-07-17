@@ -84,8 +84,9 @@ page, document, tool response, or memory, and no model-level detector is a compl
 security boundary. Authorized Effects instead assumes the agent is compromised and
 limits what it can do through Steward-managed connectors. Signed tenant policy
 pins action keys to connector IDs, intent explicitly selects the mode, generic
-egress is prohibited, and Gateway spends one version-2 exact-request permit before
-DNS while keeping the upstream credential outside the workload.
+egress is prohibited, and Gateway spends one complete exact-request permit before
+DNS while keeping the upstream credential outside the workload. Signed policy can
+require distinct approvers over that same artifact.
 
 This does not cover unmanaged credentials or channels, inference confidentiality,
 local filesystem or computer use, host root, a mistaken approver, or upstream

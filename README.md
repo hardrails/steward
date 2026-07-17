@@ -28,9 +28,10 @@ chain that can be verified without a network connection.
 
 For sensitive external actions, Authorized Effects assumes the agent is already
 compromised by hostile calendar, email, web, document, memory, or tool content.
-Signed tenant policy pins an off-node action key to named connectors; each exact
-request needs a version-2 one-use permit, which Gateway spends durably before DNS
-while keeping the upstream credential outside the workload. This protects only
+Signed tenant policy pins off-node action keys to named connectors and can require
+separate operators to sign the same immutable request. Gateway spends the complete
+one-use permit durably before DNS while keeping the upstream credential outside the
+workload. This protects only
 Steward-mediated connector calls, not unmanaged credentials, browser sessions,
 local filesystem or computer-use effects, inference confidentiality, or host root.
 
@@ -306,9 +307,9 @@ Steward separates those capabilities:
 | Deployment authority | A publisher-signed workload profile, site policy, and tenant/node-bound instance request must all permit the workload. |
 | Stale commands | Durable policy and generation records reject policy rollback and commands for replaced instances. Read-only commands do not change lifecycle ordering. |
 | Multiple tenants on one host | Each workload has its own gVisor sandbox, per-workload resource limits, host and tenant aggregate memory/CPU/PID reservations, workload-count caps, command authority, and, when needed, private Docker network. Durable admission, command-fence, journal, and receipt records bind the tenant ID. Persistent Docker volumes are disabled on shared hosts because the local volume driver does not provide portable hard byte or inode quotas. |
-| Model, service, and API access | Site policy grants named inference routes, model aliases, service IDs, credential-brokered connector IDs, and HTTP(S) egress routes. A tenant task key can be scoped to one service and sign a short-lived permit for one exact service request; Gateway records authorization before dispatch. The private key is not a Steward node input and is never given to the agent. For a stronger connector boundary, signed tenant policy can require Authorized Effects: explicit instance intent, no generic egress, connector-scoped action keys, a version-2 one-use permit over the exact request, durable spend before DNS, and format-5 signed evidence. Non-borrowing receipt budgets prevent one tenant from consuming another tenant's evidence allocation. |
+| Model, service, and API access | Site policy grants named inference routes, model aliases, service IDs, credential-brokered connector IDs, and HTTP(S) egress routes. A tenant task key can be scoped to one service and sign a short-lived permit for one exact service request; Gateway records authorization before dispatch. The private key is not a Steward node input and is never given to the agent. For a stronger connector boundary, signed tenant policy can require Authorized Effects: explicit instance intent, no generic egress, connector-scoped action keys, an optional multi-party threshold over one exact request, durable spend before DNS, and format-5 or format-6 signed evidence. Non-borrowing receipt budgets prevent one tenant from consuming another tenant's evidence allocation. |
 | Remote nodes | Authenticated outbound polling works behind network address translation (NAT) and inbound firewalls. Tenant-signed commands include a short validity window, instance generation, and sequence number so Executor can reject replay. |
-| Audit evidence | Executor writes signed, hash-linked lifecycle receipts. It can publish bounded signed deltas to the customer-owned controller, which retains a last-good checkpoint or sticky rollback/equivocation finding and signs portable exports with a separate witness key. Gateway writes a separate signed chain for connector calls and tenant-signed service-task authorization, dispatch, and terminal observation. Permit-backed records bind the authority key, permit, operation policy, and exact request digest. Receipts omit raw prompts, request bodies, and response or result bodies. `stewardctl` verifies node chains and controller exports offline. |
+| Audit evidence | Executor writes signed, hash-linked lifecycle receipts. It can publish bounded signed deltas to the customer-owned controller, which retains a last-good checkpoint or sticky rollback/equivocation finding and signs portable exports with a separate witness key. Gateway writes a separate signed chain for connector calls and tenant-signed service-task authorization, dispatch, and terminal observation. Permit-backed records bind the authority key or canonical signer set, approval threshold, permit, operation policy, and exact request digest. Receipts omit raw prompts, request bodies, and response or result bodies. `stewardctl` verifies node chains and controller exports offline. |
 | Disconnected operation | Static binaries, local public-key infrastructure (PKI), offline image import, and local model gateways do not require a public network service after transfer. |
 | Vendor independence | Public OpenAPI and uplink contracts have no private runtime dependency. |
 
@@ -419,8 +420,8 @@ Sandboxes, lifecycle APIs, self-hosted fleet controllers, egress allowlists, and
 credential injection are necessary but widely available. Steward connects them into a portable
 authorization-to-enforcement record. Local keys and policy identify the artifact,
 tenant, instance, and capability. An off-node tenant key can authorize one exact
-service request, while a separate optional action key can authorize one exact
-connector request. Gateway spends either authority durably before the external
+service request, while separate optional action keys can jointly authorize one
+exact connector request. Gateway spends either authority durably before the external
 effect. Signed receipts retain the permit, request digest, policy, task identity,
 and observed outcome linkage for offline audit.
 

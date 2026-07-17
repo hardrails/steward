@@ -437,13 +437,16 @@ digests in receipt format 2 before the network effect.
 
 Authorized Effects adds signed-policy continuity to this connector mechanism.
 Site-root-signed tenant policy sets `authorized_effects` to `optional` or `required`
-and pins each action public key to connector IDs. Authenticated intent explicitly
+and pins each action public key and a one-through-eight approval threshold to
+connector IDs. Authenticated intent explicitly
 selects `effect_mode`; required policy rejects a standard or omitted mode. Authorized
-mode rejects generic egress and requires every selected connector to have an exact
-policy-pinned key match in Gateway. It accepts only a version-2 action permit and
-records accepted events in receipt format 5, including the explicit mode and exact
-operation-policy digest. Gateway state format 5 preserves the mode and narrowed key
-scopes across restart.
+mode rejects generic egress and requires every selected connector to have enough
+exact policy-pinned key matches in Gateway. A one-approver policy accepts only a
+version-2 action permit and records accepted events in receipt format 5. A
+multi-party policy accepts only a version-3 permit with the exact number of
+distinct valid signatures and records the canonical signer set and threshold in
+receipt format 6. Gateway state format 5 preserves the mode and narrowed key scopes
+across restart; format 6 also preserves a multi-party threshold.
 
 An invalid permit in authorized mode may create one stable
 `action_permit_denied` record per retained grant. The denial binds the request
@@ -469,8 +472,8 @@ not available.
 Without an action authority, the workload can mint task IDs until it exhausts its
 admitted connector and node-configured call budget. A task ID is a replay and
 correlation fence, not proof that a human or separate service approved the action.
-With an action authority, an accepted permit proves only that the configured key
-signed those exact bytes and metadata within the validity window; it does not prove
+With action authority, an accepted permit proves only that the required configured
+keys signed those exact bytes and metadata within the validity window; it does not prove
 the natural-language task's meaning or the signer's decision process. Connector
 receipts omit credentials, headers, origins, paths, queries, and bodies. The signed
 effective route-policy digest commits to those operator-controlled details without
