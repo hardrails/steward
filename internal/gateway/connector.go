@@ -145,7 +145,7 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		}
 
 		permit, permitErr := verifyConnectorActionPermit(
-			request.Header, connector, grant, routePolicyDigest, connectorID, operationID, taskID, body, s.now().UTC(),
+			request.Header, connector, s.connectors, grant, routePolicyDigest, connectorID, operationID, taskID, body, s.now().UTC(),
 		)
 		if permitErr != nil {
 			slog.Warn("connector action permit denied", "grant_id", grantID, "connector_id", connectorID,
@@ -238,6 +238,7 @@ type connectorActionPermit struct {
 func verifyConnectorActionPermit(
 	header http.Header,
 	connector loadedConnector,
+	connectors map[string]loadedConnector,
 	grant Grant,
 	routePolicyDigest, connectorID, operationID, taskID string,
 	body []byte,
@@ -266,6 +267,11 @@ func verifyConnectorActionPermit(
 	)
 	if err != nil {
 		return connectorActionPermit{}, err
+	}
+	if verified.PayloadType == actionpermit.PayloadTypeV4 {
+		return verifyConnectorActionBundle(
+			verified, connectors, grant, routePolicyDigest, connectorID, operationID, taskID, body,
+		)
 	}
 	statement := verified.Statement
 	requestDigest := actionpermit.RequestDigest(body)
@@ -319,6 +325,89 @@ func verifyConnectorActionPermit(
 		approvalThreshold: statement.ApprovalThreshold, permitDigest: verified.EnvelopeDigest,
 		requestDigest: requestDigest, operationDigest: operationDigest, expiresAt: expiresAt,
 	}, nil
+}
+
+func verifyConnectorActionBundle(
+	verified actionpermit.Verified,
+	connectors map[string]loadedConnector,
+	grant Grant,
+	routePolicyDigest, connectorID, operationID, taskID string,
+	body []byte,
+) (connectorActionPermit, error) {
+	bundle := verified.Bundle
+	if grant.EffectMode != EffectModeAuthorized || bundle == nil || bundle.ApprovalThreshold != grant.ActionApprovalThreshold ||
+		bundle.NodeID == "" || bundle.TenantID != grant.TenantID || bundle.InstanceID != grant.InstanceID ||
+		bundle.Generation != grant.Generation || bundle.CapsuleDigest != grant.CapsuleDigest ||
+		bundle.PolicyDigest != grant.PolicyDigest || bundle.RoutePolicyDigest != routePolicyDigest {
+		return connectorActionPermit{}, errors.New("effect bundle does not match the active tenant and grant")
+	}
+	notBefore, err := time.Parse(time.RFC3339, bundle.NotBefore)
+	if err != nil {
+		return connectorActionPermit{}, errors.New("effect bundle validity is invalid")
+	}
+	expiresAt, err := time.Parse(time.RFC3339, bundle.ExpiresAt)
+	if err != nil {
+		return connectorActionPermit{}, errors.New("effect bundle expiry is invalid")
+	}
+	requestDigest := actionpermit.RequestDigest(body)
+	selected := false
+	selectedOperationDigest := ""
+	for _, step := range bundle.Steps {
+		stepConnector, configured := connectors[step.ConnectorID]
+		if !configured || !slicesContainsSorted(grant.ConnectorIDs, step.ConnectorID) ||
+			stepConnector.permitNodeID != bundle.NodeID || stepConnector.MaxActionPermitSeconds < 1 ||
+			expiresAt.Sub(notBefore) > time.Duration(stepConnector.MaxActionPermitSeconds)*time.Second {
+			return connectorActionPermit{}, errors.New("effect bundle contains a connector outside the active grant or its permit lifetime")
+		}
+		operation, exists := stepConnector.operations[step.OperationID]
+		if !exists {
+			return connectorActionPermit{}, errors.New("effect bundle operation is not configured")
+		}
+		operationDigest, digestErr := ConnectorOperationPolicyDigest(
+			stepConnector.BaseURL, stepConnector.CredentialMode, stepConnector.CredentialEpoch, step.ConnectorID, operation,
+		)
+		contentType, contentTypeErr := ConnectorOperationContentType(operation.Method)
+		if digestErr != nil || contentTypeErr != nil || step.OperationDigest != operationDigest || step.ContentType != contentType {
+			return connectorActionPermit{}, errors.New("effect bundle operation does not match trusted connector policy")
+		}
+		for _, keyID := range verified.KeyIDs {
+			if !grantAuthorityMatchesConnector(grant, stepConnector, keyID, step.ConnectorID) {
+				return connectorActionPermit{}, errors.New("effect bundle signer is not authorized for every connector")
+			}
+		}
+		if step.TaskID != taskID {
+			continue
+		}
+		if step.ConnectorID != connectorID || step.OperationID != operationID || step.RequestDigest != requestDigest ||
+			step.RequestBytes != int64(len(body)) || step.ContentType != contentType {
+			return connectorActionPermit{}, errors.New("effect bundle step does not match the requested connector effect")
+		}
+		selected = true
+		selectedOperationDigest = operationDigest
+	}
+	if !selected {
+		return connectorActionPermit{}, errors.New("effect bundle does not contain the requested task")
+	}
+	return connectorActionPermit{
+		authorityKeyID: verified.KeyID, authorityKeyIDs: append([]string(nil), verified.KeyIDs...),
+		approvalThreshold: bundle.ApprovalThreshold, permitDigest: verified.EnvelopeDigest,
+		requestDigest: requestDigest, operationDigest: selectedOperationDigest, expiresAt: expiresAt,
+	}, nil
+}
+
+func grantAuthorityMatchesConnector(grant Grant, connector loadedConnector, keyID, connectorID string) bool {
+	configured, ok := connector.authorities[keyID]
+	if !ok || connector.authorityTenants[keyID] != grant.TenantID {
+		return false
+	}
+	for _, authority := range grant.ActionAuthorities {
+		if authority.KeyID != keyID || !slicesContainsSorted(authority.ConnectorIDs, connectorID) {
+			continue
+		}
+		public, err := base64.StdEncoding.DecodeString(authority.PublicKey)
+		return err == nil && len(public) == ed25519.PublicKeySize && bytes.Equal(public, configured)
+	}
+	return false
 }
 
 func grantActionAuthorityKeys(grant Grant, connectorID string) map[string]ed25519.PublicKey {
