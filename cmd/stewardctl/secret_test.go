@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -115,6 +116,19 @@ func TestOpenBaoCompileWritesNewDeterministicBundle(t *testing.T) {
 	if err := secretCommand([]string{"openbao", "compile", "-plan", planPath, "-out", output}, io.Discard); err == nil {
 		t.Fatal("compile overwrote an existing bundle")
 	}
+	failedOutput := filepath.Join(t.TempDir(), "failed-bundle")
+	if err := secretCommand([]string{"openbao", "compile", "-plan", planPath, "-out", failedOutput}, failingSecretWriter{}); err == nil {
+		t.Fatal("compile accepted a failed summary write")
+	}
+	if _, err := os.Lstat(failedOutput); !os.IsNotExist(err) {
+		t.Fatalf("compile retained a bundle after summary failure: %v", err)
+	}
+}
+
+type failingSecretWriter struct{}
+
+func (failingSecretWriter) Write([]byte) (int, error) {
+	return 0, errors.New("injected summary failure")
 }
 
 func writeSecretJSON(t *testing.T, name string, value any) string {

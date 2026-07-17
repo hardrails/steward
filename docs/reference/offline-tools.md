@@ -1302,8 +1302,9 @@ stewardctl secret openbao compile \
 ```
 
 Both flags are required. `-out` must be a clean absolute path that does not exist.
-The command creates a mode-`0700` directory and four new mode-`0640` files; it
-never overwrites a bundle. The plan accepts one through 512 exact KV v2 bindings
+The command creates a mode-`0700` directory and four new files requested at mode
+`0640`; the caller's `umask` may narrow file access. It never overwrites a bundle.
+The plan accepts one through 512 exact KV v2 bindings
 and contains provider paths and expected versions, but no secret value, RoleID,
 SecretID, or OpenBao token. The compiler does not contact or install OpenBao.
 

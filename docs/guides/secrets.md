@@ -110,7 +110,7 @@ The compiler strictly decodes a bounded plan and rejects HTTP origins, credentia
 in URLs, wildcards, path traversal, missing KV v2 `/data/` paths, zero versions,
 shared KV paths, overlapping tenant targets, and writable paths that overlap
 configuration, trust, or executable paths. It creates a mode-`0700` directory with
-four mode-`0640` files:
+four files requested at mode `0640`; the caller's `umask` may narrow file access:
 
 - `openbao-read-policy.hcl`: exact `read` access to each listed data path, without
   list, write, wildcard, or metadata authority;

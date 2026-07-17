@@ -120,9 +120,9 @@ func compileOpenBaoMaterializer(arguments []string, stdout io.Writer) (returnErr
 			return
 		}
 		for _, path := range created {
-			_ = os.Remove(path)
+			returnErr = errors.Join(returnErr, os.Remove(path))
 		}
-		_ = os.Remove(*outputPath)
+		returnErr = errors.Join(returnErr, os.Remove(*outputPath), syncOutputDirectory(*outputPath))
 	}()
 	for _, file := range files {
 		path := filepath.Join(*outputPath, file.Name)
@@ -130,6 +130,9 @@ func compileOpenBaoMaterializer(arguments []string, stdout io.Writer) (returnErr
 			return fmt.Errorf("write OpenBao bundle file %q: %w", file.Name, err)
 		}
 		created = append(created, path)
+	}
+	if err := syncOutputDirectory(*outputPath); err != nil {
+		return fmt.Errorf("sync OpenBao bundle parent directory: %w", err)
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
