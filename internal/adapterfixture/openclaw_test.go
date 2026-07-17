@@ -3,15 +3,15 @@ package adapterfixture
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"net"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -206,8 +206,21 @@ func TestOpenClawFixtureInputsHaveStableAuditIdentity(t *testing.T) {
 		string(nested) != "{\"action\":\"audit\",\"expected\":\"deterministic\",\"schema_version\":\"steward.openclaw-fixture.v1\"}\n" {
 		t.Fatal("OpenClaw qualification input drifted")
 	}
-	if openClawAuditResultSHA != "8a88036085cd27e3e0a85ab10f3fbfed492633fa76fd18a85bb478747c4d56d5" {
-		t.Fatal("qualification result digest constant drifted")
+	type auditEntry struct {
+		Bytes  int    `json:"bytes"`
+		Path   string `json:"path"`
+		SHA256 string `json:"sha256"`
+	}
+	entries := []auditEntry{
+		{Bytes: len(alpha), Path: "alpha.txt", SHA256: fmt.Sprintf("%x", sha256.Sum256(alpha))},
+		{Bytes: len(nested), Path: "nested.json", SHA256: fmt.Sprintf("%x", sha256.Sum256(nested))},
+	}
+	encoded, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed := fmt.Sprintf("%x", sha256.Sum256(encoded)); observed != openClawAuditResultSHA {
+		t.Fatalf("qualification audit digest = %s, want %s", observed, openClawAuditResultSHA)
 	}
 }
 
@@ -354,23 +367,20 @@ func TestOpenClawFixtureModelRequiresTheExecResult(t *testing.T) {
 	if err != nil {
 		t.Skip("node is not available")
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, node, filepath.Join(openClawAdapterRoot(t), "fixture_model.mjs"))
-	command.Env = append(os.Environ(), "STEWARD_FIXTURE_MODEL_PORT="+strconv.Itoa(port))
+	command.Env = append(os.Environ(), "STEWARD_FIXTURE_MODEL_PORT=0")
 	discard, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer discard.Close()
-	command.Stdout = discard
 	command.Stderr = discard
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -379,9 +389,17 @@ func TestOpenClawFixtureModelRequiresTheExecResult(t *testing.T) {
 		_ = command.Process.Kill()
 		_ = command.Wait()
 	}()
+	var ready struct {
+		Port int `json:"port"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(stdout, 1<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&ready); err != nil || ready.Port < 1 || ready.Port > 65535 {
+		t.Fatalf("fixture model readiness: port=%d error=%v", ready.Port, err)
+	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", ready.Port)
 	for {
 		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/health", nil)
 		response, requestErr := client.Do(request)

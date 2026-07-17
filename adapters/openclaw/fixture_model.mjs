@@ -3,7 +3,7 @@
 import { createServer } from "node:http";
 
 const portText = process.env.STEWARD_FIXTURE_MODEL_PORT ?? "8080";
-if (!/^[1-9][0-9]{0,4}$/.test(portText) || Number(portText) > 65535) {
+if (!(portText === "0" || /^[1-9][0-9]{0,4}$/.test(portText)) || Number(portText) > 65535) {
   throw new Error("STEWARD_FIXTURE_MODEL_PORT is invalid");
 }
 const PORT = Number(portText);
@@ -117,4 +117,9 @@ const server = createServer(async (request, response) => {
 server.requestTimeout = 15_000;
 server.headersTimeout = 10_000;
 server.keepAliveTimeout = 5_000;
-server.listen(PORT, "0.0.0.0");
+server.listen(PORT, "0.0.0.0", () => {
+  if (PORT !== 0) return;
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("fixture model did not bind TCP");
+  process.stdout.write(`${JSON.stringify({ port: address.port })}\n`);
+});
