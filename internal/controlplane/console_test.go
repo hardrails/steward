@@ -123,9 +123,9 @@ func TestConsoleHeadErrorsAndSecurityBoundary(t *testing.T) {
 	}
 }
 
-func TestConsoleSourceDoesNotPersistCredentialsMutateStateOrUseUnsafeDOMSinks(t *testing.T) {
+func TestConsoleSourceRestrictsSignedCommandMutationAndUnsafeBrowserCapabilities(t *testing.T) {
 	var source strings.Builder
-	for _, name := range []string{"console/src/App.jsx", "console/src/session.js", "console/src/main.jsx"} {
+	for _, name := range []string{"console/src/App.jsx", "console/src/command-courier.js", "console/src/session.js", "console/src/main.jsx"} {
 		content, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
@@ -144,19 +144,24 @@ func TestConsoleSourceDoesNotPersistCredentialsMutateStateOrUseUnsafeDOMSinks(t 
 		"eval" + "(",
 		"new " + "Function",
 		"window." + "open",
-		`method: "POST"`,
 		`method: "PUT"`,
 		`method: "PATCH"`,
 		`method: "DELETE"`,
 		"/v1/enrollments",
 		"/v1/operators",
+		"crypto.subtle.sign",
+		"crypto.subtle.generateKey",
+		"crypto.subtle.importKey",
 	} {
 		if strings.Contains(script, forbidden) {
 			t.Fatalf("console JavaScript contains forbidden persistence or code sink %q", forbidden)
 		}
 	}
+	if count := strings.Count(script, `method: "POST"`); count != 1 {
+		t.Fatalf("console JavaScript contains %d explicit POST call sites, want exactly one", count)
+	}
 	for _, required := range []string{
-		`headers.set("Authorization", "Bearer " + credentialRef.current)`,
+		`headers.set("Authorization", "Bearer " + (options.credential || credentialRef.current))`,
 		`credentials: "omit"`,
 		`redirect: "error"`,
 		`referrerPolicy: "no-referrer"`,
@@ -167,7 +172,11 @@ func TestConsoleSourceDoesNotPersistCredentialsMutateStateOrUseUnsafeDOMSinks(t 
 		`More nodes exist.`,
 		`tenantPage.next_after`,
 		`Load 500 more`,
-		`OBSERVE HERE. AUTHORIZE ELSEWHERE.`,
+		`REVIEW HERE. SIGN ELSEWHERE.`,
+		`method !== "GET" && !commandSubmission`,
+		`reenteredCredential !== credentialRef.current`,
+		`command_dsse_base64: preview.envelopeBase64`,
+		`crypto.subtle.digest("SHA-256", bytes)`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("console JavaScript missing boundary %q", required)

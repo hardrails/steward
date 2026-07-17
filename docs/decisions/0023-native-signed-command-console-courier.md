@@ -31,9 +31,10 @@ it does not authorize one immutable command.
 
 The existing controller already accepts one exact, signed Executor command at
 `POST /v1/tenants/{tenant_id}/nodes/{node_id}/commands`. It authenticates the
-operator transport, verifies the DSSE envelope against signed site policy,
-checks tenant and node scope, enforces bounded input and command validity, stores
-an audit record, and gives the node the same bytes for independent verification.
+operator transport, strictly parses the envelope's signed route binding, checks
+tenant and node scope, enforces bounded input, stores an audit record, and gives
+the node the same bytes. The controller deliberately holds no command verification
+key; the node verifies signature authority and command validity before execution.
 
 ## Decision
 
@@ -50,8 +51,8 @@ controller remains the authority for acceptance.
 
 Submission requires all of the following:
 
-- one canonical DSSE envelope no larger than the controller's one-mebibyte body
-  boundary;
+- one bounded DSSE envelope with canonical standard-Base64 fields that fits the
+  controller's one-mebibyte request-body boundary;
 - the expected Executor command payload type and schema in the local preview;
 - a tenant and node that match the command's signed statement and the active
   console projection;
@@ -61,8 +62,8 @@ Submission requires all of the following:
 
 The re-entered credential is used for that request and cleared from the input
 immediately. Requests omit cookies and referrers, reject redirects, and remain on
-the controller's origin. Existing controller authorization, DSSE verification,
-idempotency, audit retention, and node-side verification still apply.
+the controller's origin. Existing controller authorization, strict route parsing,
+idempotency, audit retention, and node-side DSSE verification still apply.
 
 **Tradeoff:** this closes a meaningful operator workflow without making browser
 state a source of execution authority. It does not protect against a browser or

@@ -1,6 +1,11 @@
 import React, {useCallback, useEffect, useRef, useState} from "react";
 
 import {
+  commandConfirmation,
+  commandReviewCurrent,
+  decodeSignedCommand,
+} from "./command-courier.js";
+import {
   SessionFence,
   SnapshotFence,
   StaleSessionError,
@@ -146,18 +151,28 @@ export default function App() {
     };
   }, [clearAuthority, lock]);
 
-  const api = useCallback(async (path, epoch) => {
+  const api = useCallback(async (path, epoch, options = {}) => {
     const fence = fenceRef.current;
     const signal = fence.signal(epoch);
     const url = new URL(path, window.location.origin);
     if (url.origin !== window.location.origin || !url.pathname.startsWith("/v1/")) {
       throw new Error("Console API path escaped the local control origin.");
     }
+    const method = options.method || "GET";
+    const commandSubmission = method === "POST" && url.search === "" &&
+      /^\/v1\/tenants\/[^/]+\/nodes\/[^/]+\/commands$/u.test(url.pathname);
+    if (method !== "GET" && !commandSubmission) {
+      throw new Error("The console attempted an unsupported mutation.");
+    }
     const headers = new Headers();
-    headers.set("Authorization", "Bearer " + credentialRef.current);
+    headers.set("Authorization", "Bearer " + (options.credential || credentialRef.current));
+    if (commandSubmission) {
+      headers.set("Content-Type", "application/json");
+    }
     const response = await fetch(url, {
-      method: "GET",
+      method,
       headers,
+      body: commandSubmission ? options.body : undefined,
       cache: "no-store",
       credentials: "omit",
       redirect: "error",
@@ -381,6 +396,30 @@ export default function App() {
     refresh(tenantID);
   }, [refresh]);
 
+  const submitSignedCommand = useCallback(async (preview, reenteredCredential) => {
+    if (!session || !selectedTenant) {
+      throw new Error("Select one tenant before submitting a signed command.");
+    }
+    if (preview.statement.tenant_id !== selectedTenant) {
+      throw new Error("The signed tenant does not match the active tenant projection.");
+    }
+    if (!reenteredCredential || reenteredCredential !== credentialRef.current) {
+      throw new Error("The re-entered operator credential does not match this session.");
+    }
+    if (!commandReviewCurrent(preview)) {
+      throw new Error("The signed command or its five-minute review window has expired. Load it again.");
+    }
+    const path = "/v1/tenants/" + encodeURIComponent(preview.statement.tenant_id) +
+      "/nodes/" + encodeURIComponent(preview.statement.node_id) + "/commands";
+    const command = await api(path, session.epoch, {
+      method: "POST",
+      credential: reenteredCredential,
+      body: JSON.stringify({command_dsse_base64: preview.envelopeBase64}),
+    });
+    await refresh(selectedTenant);
+    return command;
+  }, [api, refresh, selectedTenant, session]);
+
   return (
     <>
       <a className="skip-link" href="#main-content">Skip to control room</a>
@@ -410,6 +449,7 @@ export default function App() {
               onProjection={changeProjection}
               onLoadMoreTenants={loadMoreTenants}
               onRefresh={() => refresh()}
+              onSubmitSignedCommand={submitSignedCommand}
               onLock={() => lock("")}
             />
           )}
@@ -593,8 +633,8 @@ function ControlRoom(props) {
           </div>
         </div>
         <div className="read-only-boundary">
-          <strong>OBSERVE HERE. AUTHORIZE ELSEWHERE.</strong>
-          <span>Mutations and private signing material remain in stewardctl and offline operator workflows.</span>
+          <strong>REVIEW HERE. SIGN ELSEWHERE.</strong>
+          <span>The console can courier exact offline-signed commands. Signing material and every other mutation remain outside the browser.</span>
         </div>
         {tenantError ? <div className="flash-message is-error" role="alert">{tenantError}</div> : null}
         {refreshError ? <div className="flash-message is-error" role="alert">{refreshError}</div> : null}
@@ -608,7 +648,13 @@ function ControlRoom(props) {
             {view === "overview" ? <Overview snapshot={snapshot} onAttention={() => props.onView("attention")} /> : null}
             {view === "attention" ? <AttentionView page={snapshot.attention} /> : null}
             {view === "nodes" ? <NodesView page={snapshot.nodes} tenantID={selectedTenant} /> : null}
-            {view === "commands" ? <CommandsView page={snapshot.commands} /> : null}
+            {view === "commands" ? (
+              <CommandsView
+                page={snapshot.commands}
+                tenantID={selectedTenant}
+                onSubmit={props.onSubmitSignedCommand}
+              />
+            ) : null}
             {view === "credentials" ? <CredentialsView page={snapshot.credentials} /> : null}
           </>
         )}
@@ -789,11 +835,180 @@ function NodesView({page, tenantID}) {
   );
 }
 
-function CommandsView({page}) {
+function CommandsView({page, tenantID, onSubmit}) {
+  const fileInputRef = useRef(null);
+  const credentialInputRef = useRef(null);
+  const reviewGenerationRef = useRef(0);
+  const [preview, setPreview] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState("");
+  const [result, setResult] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const clearReview = useCallback(() => {
+    reviewGenerationRef.current += 1;
+    setPreview(null);
+    setFileName("");
+    setConfirmation("");
+    setError("");
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+    if (credentialInputRef.current) {
+      credentialInputRef.current.value = "";
+    }
+  }, []);
+
+  useEffect(() => {
+    clearReview();
+    setResult("");
+  }, [clearReview, tenantID]);
+
+  const loadFile = async (event) => {
+    const file = event.target.files?.[0];
+    const generation = reviewGenerationRef.current + 1;
+    reviewGenerationRef.current = generation;
+    setPreview(null);
+    setFileName("");
+    setConfirmation("");
+    setError("");
+    setResult("");
+    if (!file) {
+      return;
+    }
+    try {
+      const loaded = await decodeSignedCommand(await file.arrayBuffer());
+      if (reviewGenerationRef.current !== generation) {
+        return;
+      }
+      if (!tenantID) {
+        throw new Error("Select one tenant before reviewing a signed command.");
+      }
+      if (loaded.statement.tenant_id !== tenantID) {
+        throw new Error("The signed tenant does not match the active tenant projection.");
+      }
+      setPreview(loaded);
+      setFileName(file.name);
+    } catch (loadError) {
+      if (reviewGenerationRef.current !== generation) {
+        return;
+      }
+      setError(loadError instanceof Error ? loadError.message : "The signed command could not be read.");
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  };
+
+  const submit = async () => {
+    setError("");
+    setResult("");
+    if (!preview || !commandReviewCurrent(preview)) {
+      setError("The signed command or its five-minute review window has expired. Load it again.");
+      return;
+    }
+    if (confirmation !== commandConfirmation(preview.statement.command_id)) {
+      setError("Type the exact confirmation phrase before submission.");
+      return;
+    }
+    const credential = credentialInputRef.current?.value || "";
+    if (credentialInputRef.current) {
+      credentialInputRef.current.value = "";
+    }
+    setSubmitting(true);
+    try {
+      const accepted = await onSubmit(preview, credential);
+      setResult("Controller queued " + accepted.id + " in state " + accepted.state + ". Executor verification is still pending.");
+      clearReview();
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "The command submission failed closed.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <section className="view" aria-labelledby="commands-title">
-      <ViewHeading eyebrow="METADATA ONLY" title="Command inventory">
-        Signed command bytes and terminal result text stay out of this view.
+      <ViewHeading eyebrow="SIGNED BYTE COURIER" title="Command authority transfer">
+        Load a command signed outside this browser, compare its exact digest, and submit the unchanged envelope.
+      </ViewHeading>
+      <div className="command-courier">
+        <div className="courier-intake">
+          <span className="panel-index">01 / LOAD</span>
+          <label htmlFor="signed-command-file">Signed Executor command</label>
+          <input
+            ref={fileInputRef}
+            id="signed-command-file"
+            type="file"
+            accept=".json,application/json"
+            disabled={!tenantID || submitting}
+            onChange={loadFile}
+          />
+          <p className="microcopy">
+            One DSSE JSON file, at most 750 KiB. The browser does not verify its signature.
+            The controller and node remain authoritative.
+          </p>
+          {!tenantID ? <p className="error-message">Select one tenant to enable command transfer.</p> : null}
+        </div>
+        {preview ? (
+          <div className="courier-review">
+            <div className="courier-verification">
+              <span>UNVERIFIED LOCAL PREVIEW</span>
+              <strong>Compare this digest with the offline signing station.</strong>
+            </div>
+            <dl className="courier-facts">
+              <div className="courier-digest"><dt>Exact file SHA-256</dt><dd>{preview.digest}</dd></div>
+              <div><dt>File</dt><dd>{fileName} · {preview.byteLength.toLocaleString()} bytes</dd></div>
+              <div><dt>Command</dt><dd>{preview.statement.command_id}</dd></div>
+              <div><dt>Operation</dt><dd>{preview.statement.kind}</dd></div>
+              <div><dt>Tenant / node</dt><dd>{preview.statement.tenant_id} / {preview.statement.node_id}</dd></div>
+              <div><dt>Instance</dt><dd>{preview.statement.instance_id}</dd></div>
+              <div><dt>Runtime</dt><dd>{preview.statement.runtime_ref}</dd></div>
+              <div><dt>Fences</dt><dd>claim {preview.statement.claim_generation} · instance {preview.statement.instance_generation} · sequence {preview.statement.command_sequence}</dd></div>
+              <div><dt>Issued</dt><dd>{formatTime(preview.statement.issued_at)}</dd></div>
+              <div><dt>Expires</dt><dd>{formatTime(preview.statement.expires_at)}</dd></div>
+              <div><dt>Signature key IDs</dt><dd>{preview.keyIDs.join(", ")}</dd></div>
+            </dl>
+            <div className="courier-confirmation">
+              <span className="panel-index">02 / REAUTHENTICATE</span>
+              <label htmlFor="command-confirmation">
+                Type <code>{commandConfirmation(preview.statement.command_id)}</code>
+              </label>
+              <input
+                id="command-confirmation"
+                value={confirmation}
+                maxLength={preview.statement.command_id.length + 7}
+                autoComplete="off"
+                spellCheck="false"
+                disabled={submitting}
+                onChange={(event) => setConfirmation(event.target.value)}
+              />
+              <label htmlFor="command-credential">Re-enter the current operator bearer</label>
+              <input
+                ref={credentialInputRef}
+                id="command-credential"
+                type="password"
+                maxLength="4096"
+                autoComplete="off"
+                autoCapitalize="off"
+                spellCheck="false"
+                disabled={submitting}
+              />
+              <div className="courier-actions">
+                <button className="button button-primary" type="button" disabled={submitting} onClick={submit}>
+                  {submitting ? "Submitting exact bytes…" : "Submit signed command"}
+                </button>
+                <button className="button button-quiet" type="button" disabled={submitting} onClick={clearReview}>Clear</button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+        {error ? <p className="flash-message is-error" role="alert">{error}</p> : null}
+        {result ? <p className="flash-message is-success" role="status">{result}</p> : null}
+      </div>
+      <ViewHeading eyebrow="RETAINED METADATA" title="Command inventory">
+        Signed command bytes and terminal result text are not returned by this view.
       </ViewHeading>
       <TableFrame empty="No commands in this projection." hasRows={page.commands.length > 0}>
         <table>
