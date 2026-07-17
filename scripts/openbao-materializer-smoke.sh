@@ -18,6 +18,13 @@ cleanup() {
 	fi
 	rm -rf -- "$work"
 }
+
+server_diagnostics() {
+	docker inspect "$container" --format \
+		'openbao-materializer-smoke: container status={{.State.Status}} error={{.State.Error}} exit={{.State.ExitCode}}' >&2 || true
+	docker logs "$container" 2>&1 |
+		sed -E 's/^(Unseal Key|Root Token):.*/\1: [redacted]/' >&2 || true
+}
 trap cleanup EXIT INT TERM
 cd "$repository"
 
@@ -48,7 +55,7 @@ go run ./cmd/stewardctl secret openbao compile \
 CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go build -o "$work/stewardctl" ./cmd/stewardctl
 chmod 0755 "$work/stewardctl"
 
-docker run -d --name "$container" --user 0 -v "$work:/work" "$image" \
+docker run -d --name "$container" --user 0 --cap-add=IPC_LOCK -v "$work:/work" "$image" \
 	server -dev -dev-tls -dev-tls-cert-dir=/work/tls \
 	-dev-listen-address=127.0.0.1:8200 \
 	-dev-root-token-id=steward-smoke-root -dev-no-store-token >/dev/null
@@ -58,11 +65,19 @@ bao=(docker exec -e BAO_ADDR=https://127.0.0.1:8200 \
 	"$container" bao)
 for _ in $(seq 1 30); do
 	if "${bao[@]}" status -format=json >/dev/null 2>&1; then
+		server_ready=true
 		break
+	fi
+	if [[ $(docker inspect "$container" --format '{{.State.Running}}') != true ]]; then
+		server_diagnostics
+		exit 1
 	fi
 	sleep 1
 done
-"${bao[@]}" status -format=json >/dev/null
+if [[ ${server_ready:-false} != true ]]; then
+	server_diagnostics
+	exit 1
+fi
 
 docker exec "$container" chown -R 0:0 \
 	/work/bundle /work/role /work/secretid /work/secrets /work/status /work/stewardctl
