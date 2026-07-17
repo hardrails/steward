@@ -199,3 +199,50 @@ func TestWorkloadValidatesTaskAuthorityRuntimeGrant(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkloadValidatesAuthorizedEffectsRuntimeGrant(t *testing.T) {
+	network := NetworkSpecFor("tenant", "agent", 1)
+	runtime := RuntimeGrant{
+		NetworkName: network.Name, GrantID: "grant-" + strings.Repeat("b", 64),
+		NodeID: "node-a", Generation: 1, ConnectorIDs: []string{"issues"},
+		EffectMode: gateway.EffectModeAuthorized,
+		ActionAuthorities: []gateway.GrantActionAuthority{{
+			KeyID: "effects-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+			ConnectorIDs: []string{"issues"},
+		}},
+		CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
+	}
+	workload := Workload{
+		InstanceID: "agent", TenantID: "tenant", ProfileID: "hermes-v1@v1",
+		Image: "registry.local/agent@sha256:" + strings.Repeat("e", 64), Command: []string{"agent"},
+		Resources: Resources{MemoryBytes: 1, CPUMillis: 1, PIDs: 1}, Runtime: &runtime,
+	}
+	if err := workload.Validate(); err != nil {
+		t.Fatalf("valid authorized-effects runtime rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*RuntimeGrant)
+	}{
+		{"mode removed", func(value *RuntimeGrant) { value.EffectMode = "" }},
+		{"mode changed", func(value *RuntimeGrant) { value.EffectMode = gateway.EffectModeStandard }},
+		{"node removed", func(value *RuntimeGrant) { value.NodeID = "" }},
+		{"generic egress added", func(value *RuntimeGrant) { value.EgressRouteIDs = []string{"public-web"} }},
+		{"authority removed", func(value *RuntimeGrant) { value.ActionAuthorities = nil }},
+		{"authority malformed", func(value *RuntimeGrant) { value.ActionAuthorities[0].PublicKey = "not-base64" }},
+		{"scope removed", func(value *RuntimeGrant) { value.ActionAuthorities[0].ConnectorIDs = nil }},
+		{"bindings removed", func(value *RuntimeGrant) { value.CapsuleDigest, value.PolicyDigest = "", "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := workload
+			candidateRuntime := runtime
+			candidateRuntime.ConnectorIDs = append([]string(nil), runtime.ConnectorIDs...)
+			candidateRuntime.ActionAuthorities = cloneGrantActionAuthorities(runtime.ActionAuthorities)
+			candidate.Runtime = &candidateRuntime
+			test.mutate(candidate.Runtime)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("invalid authorized-effects runtime accepted")
+			}
+		})
+	}
+}

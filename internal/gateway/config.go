@@ -25,6 +25,7 @@ import (
 
 const (
 	maxConfigBytes              = 1 << 20
+	maxStateBytes               = 64 << 20
 	maxConnectors               = 128
 	maxConnectorOperations      = 64
 	maxConnectorAllowedCIDRs    = 64

@@ -19,6 +19,7 @@ type connectorSpendOwner struct {
 type connectorReceiptIndex struct {
 	spends  map[string]connectorSpendOwner
 	counts  map[string]map[string]int
+	denials map[string]struct{}
 	pending map[string]connectorledger.Event
 	tasks   map[string]serviceTaskReceipt
 	permits map[string]string
@@ -77,8 +78,12 @@ func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary
 		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch,
 		func(record connectorledger.VerifiedReceipt) error {
 			switch record.Receipt.SchemaVersion {
+			case connectorledger.SchemaV5:
+				formatVersion = 5
 			case connectorledger.SchemaV4:
-				formatVersion = 4
+				if formatVersion < 4 {
+					formatVersion = 4
+				}
 			case connectorledger.SchemaV3:
 				if formatVersion < 3 {
 					formatVersion = 3
@@ -99,12 +104,18 @@ func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary
 func newConnectorReceiptIndex() *connectorReceiptIndex {
 	return &connectorReceiptIndex{
 		spends: make(map[string]connectorSpendOwner), counts: make(map[string]map[string]int),
-		pending: make(map[string]connectorledger.Event), tasks: make(map[string]serviceTaskReceipt), permits: make(map[string]string),
+		denials: make(map[string]struct{}), pending: make(map[string]connectorledger.Event),
+		tasks: make(map[string]serviceTaskReceipt), permits: make(map[string]string),
 	}
 }
 
 func (index *connectorReceiptIndex) visit(record connectorledger.VerifiedReceipt) error {
 	event := record.Receipt.Event
+	if event.Kind == connectorledger.ConnectorCall && event.EffectMode == connectorledger.EffectModeAuthorized &&
+		event.Phase == connectorledger.Deny {
+		index.denials[connectorDenialKey(event.GrantID, event.ErrorCode)] = struct{}{}
+		return nil
+	}
 	if event.Kind == connectorledger.ServiceTask {
 		state := index.tasks[event.TaskDigest]
 		switch event.Phase {
@@ -209,14 +220,93 @@ func connectorReceiptEvent(
 	grant Grant,
 	routePolicyDigest, connectorID, operationID, callDigest, authorityKeyID, permitDigest, requestDigest string,
 	requestBytes int64,
+	operationPolicyDigests ...string,
 ) connectorledger.Event {
-	return connectorledger.Event{
+	event := connectorledger.Event{
 		Phase: connectorledger.Authorize, Outcome: connectorledger.Allowed,
 		TenantID: grant.TenantID, RuntimeRef: grant.RuntimeRef, CapsuleDigest: grant.CapsuleDigest,
 		PolicyDigest: grant.PolicyDigest, RoutePolicyDigest: routePolicyDigest, Generation: grant.Generation,
 		GrantID: grant.GrantID, ConnectorID: connectorID, OperationID: operationID,
 		TaskDigest: callDigest, AuthorityKeyID: authorityKeyID, PermitDigest: permitDigest,
 		RequestDigest: requestDigest, RequestBytes: requestBytes,
+	}
+	if grant.EffectMode == EffectModeAuthorized {
+		event.Kind = connectorledger.ConnectorCall
+		event.EffectMode = connectorledger.EffectModeAuthorized
+		if len(operationPolicyDigests) == 1 {
+			event.OperationPolicyDigest = operationPolicyDigests[0]
+		}
+	}
+	return event
+}
+
+func connectorDenialEvent(
+	grant Grant,
+	routePolicyDigest, connectorID, operationID, operationPolicyDigest, callDigest, requestDigest string,
+	requestBytes int64,
+) connectorledger.Event {
+	return connectorledger.Event{
+		Phase: connectorledger.Deny, Outcome: connectorledger.Denied, Kind: connectorledger.ConnectorCall,
+		EffectMode: connectorledger.EffectModeAuthorized,
+		TenantID:   grant.TenantID, RuntimeRef: grant.RuntimeRef, CapsuleDigest: grant.CapsuleDigest,
+		PolicyDigest: grant.PolicyDigest, RoutePolicyDigest: routePolicyDigest, Generation: grant.Generation,
+		GrantID: grant.GrantID, ConnectorID: connectorID, OperationID: operationID,
+		OperationPolicyDigest: operationPolicyDigest, TaskDigest: callDigest,
+		RequestDigest: requestDigest, RequestBytes: requestBytes, ErrorCode: "action_permit_denied",
+	}
+}
+
+func connectorDenialKey(grantID, errorCode string) string {
+	return grantID + "\x00" + errorCode
+}
+
+type connectorDenialAppender interface {
+	Append(connectorledger.Event) (connectorledger.Head, error)
+}
+
+// recordActionPermitDenial writes at most one signed record for each stable
+// denial code in a retained grant. The cap prevents an untrusted workload from
+// converting invalid permits into unbounded evidence writes.
+func (s *Server) recordActionPermitDenial(event connectorledger.Event) error {
+	key := connectorDenialKey(event.GrantID, event.ErrorCode)
+	for {
+		s.mu.Lock()
+		if s.connectorDenials == nil {
+			s.connectorDenials = make(map[string]struct{})
+		}
+		if _, recorded := s.connectorDenials[key]; recorded {
+			s.mu.Unlock()
+			return nil
+		}
+		if s.connectorDenialPending == nil {
+			s.connectorDenialPending = make(map[string]chan struct{})
+		}
+		if pending := s.connectorDenialPending[key]; pending != nil {
+			s.mu.Unlock()
+			<-pending
+			continue
+		}
+		appender, ok := s.connectorLedger.(connectorDenialAppender)
+		if !ok {
+			s.mu.Unlock()
+			return errors.New("connector denial receipt ledger is unavailable")
+		}
+		pending := make(chan struct{})
+		s.connectorDenialPending[key] = pending
+		s.mu.Unlock()
+
+		_, err := appender.Append(event)
+		s.mu.Lock()
+		if err == nil {
+			s.connectorDenials[key] = struct{}{}
+		}
+		delete(s.connectorDenialPending, key)
+		close(pending)
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		return nil
 	}
 }
 

@@ -10,12 +10,20 @@ import (
 )
 
 type routePolicyDocument struct {
-	Version                     int                     `json:"version"`
-	Inference                   *inferenceRoutePolicy   `json:"inference,omitempty"`
-	Egress                      []egressRoutePolicy     `json:"egress,omitempty"`
-	Connectors                  []connectorRoutePolicy  `json:"connectors,omitempty"`
-	ServiceTask                 *serviceTaskRoutePolicy `json:"service_task,omitempty"`
-	ConnectorReceiptBudgetBytes int64                   `json:"connector_receipt_budget_bytes,omitempty"`
+	Version                     int                          `json:"version"`
+	EffectMode                  string                       `json:"effect_mode,omitempty"`
+	AuthorizedActionAuthorities []grantActionAuthorityPolicy `json:"authorized_action_authorities,omitempty"`
+	Inference                   *inferenceRoutePolicy        `json:"inference,omitempty"`
+	Egress                      []egressRoutePolicy          `json:"egress,omitempty"`
+	Connectors                  []connectorRoutePolicy       `json:"connectors,omitempty"`
+	ServiceTask                 *serviceTaskRoutePolicy      `json:"service_task,omitempty"`
+	ConnectorReceiptBudgetBytes int64                        `json:"connector_receipt_budget_bytes,omitempty"`
+}
+
+type grantActionAuthorityPolicy struct {
+	KeyID           string   `json:"key_id"`
+	PublicKeyDigest string   `json:"public_key_digest"`
+	ConnectorIDs    []string `json:"connector_ids"`
 }
 
 type serviceTaskRoutePolicy struct {
@@ -168,12 +176,27 @@ func routeBaseURL(value *url.URL) string {
 // are deliberately excluded so the inspection API cannot become an offline
 // oracle for weak operator-provided bearer tokens.
 func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes map[string]loadedEgressRoute, connectors map[string]loadedConnector, serviceOperations map[string]map[string]ServiceOperation, connectorReceiptBudget int64) string {
-	if grant.RouteID == "" && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0 && len(grant.TaskAuthorities) == 0 {
+	if grant.RouteID == "" && len(grant.EgressRouteIDs) == 0 && len(grant.ConnectorIDs) == 0 &&
+		len(grant.TaskAuthorities) == 0 && grant.EffectMode == "" {
 		return ""
 	}
 	document := routePolicyDocument{Version: 1}
+	if grant.EffectMode != "" {
+		document.Version = 7
+		document.EffectMode = grant.EffectMode
+		for _, authority := range grant.ActionAuthorities {
+			public, _ := base64.StdEncoding.DecodeString(authority.PublicKey)
+			sum := sha256.Sum256(public)
+			document.AuthorizedActionAuthorities = append(document.AuthorizedActionAuthorities, grantActionAuthorityPolicy{
+				KeyID: authority.KeyID, PublicKeyDigest: "sha256:" + fmt.Sprintf("%x", sum[:]),
+				ConnectorIDs: append([]string(nil), authority.ConnectorIDs...),
+			})
+		}
+	}
 	if len(grant.TaskAuthorities) > 0 {
-		document.Version = 6
+		if document.Version < 6 {
+			document.Version = 6
+		}
 		document.ConnectorReceiptBudgetBytes = connectorReceiptBudget
 		service := &serviceTaskRoutePolicy{ServiceID: grant.ServiceID}
 		for _, authority := range grant.TaskAuthorities {

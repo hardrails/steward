@@ -110,26 +110,28 @@ type StateMount struct {
 }
 
 type RuntimeGrant struct {
-	NetworkName           string                  `json:"network_name"`
-	Subnet                string                  `json:"subnet"`
-	Gateway               string                  `json:"gateway"`
-	GrantID               string                  `json:"grant_id"`
-	NodeID                string                  `json:"node_id,omitempty"`
-	Generation            uint64                  `json:"generation"`
-	Inference             bool                    `json:"inference"`
-	RouteID               string                  `json:"route_id,omitempty"`
-	RelayIP               string                  `json:"relay_ip"`
-	AgentIP               string                  `json:"agent_ip"`
-	ModelAlias            string                  `json:"model_alias,omitempty"`
-	ServicePort           int                     `json:"service_port,omitempty"`
-	ServiceID             string                  `json:"service_id,omitempty"`
-	TaskAuthorities       []gateway.TaskAuthority `json:"task_authorities,omitempty"`
-	EgressRouteIDs        []string                `json:"egress_route_ids,omitempty"`
-	ConnectorIDs          []string                `json:"connector_ids,omitempty"`
-	CapsuleDigest         string                  `json:"capsule_digest,omitempty"`
-	PolicyDigest          string                  `json:"policy_digest,omitempty"`
-	ActivationID          string                  `json:"activation_id,omitempty"`
-	ActivationBeginDigest string                  `json:"activation_begin_digest,omitempty"`
+	NetworkName           string                         `json:"network_name"`
+	Subnet                string                         `json:"subnet"`
+	Gateway               string                         `json:"gateway"`
+	GrantID               string                         `json:"grant_id"`
+	NodeID                string                         `json:"node_id,omitempty"`
+	Generation            uint64                         `json:"generation"`
+	Inference             bool                           `json:"inference"`
+	RouteID               string                         `json:"route_id,omitempty"`
+	RelayIP               string                         `json:"relay_ip"`
+	AgentIP               string                         `json:"agent_ip"`
+	ModelAlias            string                         `json:"model_alias,omitempty"`
+	ServicePort           int                            `json:"service_port,omitempty"`
+	ServiceID             string                         `json:"service_id,omitempty"`
+	TaskAuthorities       []gateway.TaskAuthority        `json:"task_authorities,omitempty"`
+	EgressRouteIDs        []string                       `json:"egress_route_ids,omitempty"`
+	ConnectorIDs          []string                       `json:"connector_ids,omitempty"`
+	EffectMode            string                         `json:"effect_mode,omitempty"`
+	ActionAuthorities     []gateway.GrantActionAuthority `json:"action_authorities,omitempty"`
+	CapsuleDigest         string                         `json:"capsule_digest,omitempty"`
+	PolicyDigest          string                         `json:"policy_digest,omitempty"`
+	ActivationID          string                         `json:"activation_id,omitempty"`
+	ActivationBeginDigest string                         `json:"activation_begin_digest,omitempty"`
 }
 
 // Resources are mandatory cgroup limits. Docker has no resource limits by default,
@@ -269,13 +271,22 @@ func (w Workload) Validate() error {
 		}
 	}
 	if w.Runtime != nil {
+		authorizedEffects := w.Runtime.EffectMode == gateway.EffectModeAuthorized
 		if !strings.HasPrefix(w.Runtime.NetworkName, "steward-net-") || len(w.Runtime.NetworkName) != len("steward-net-")+64 ||
 			!strings.HasPrefix(w.Runtime.GrantID, "grant-") || len(w.Runtime.GrantID) != len("grant-")+64 ||
 			w.Runtime.Generation == 0 ||
 			w.Runtime.ServicePort < 0 || w.Runtime.ServicePort > 65535 ||
 			(w.Runtime.ServicePort == 0 && (w.Runtime.ServiceID != "" || len(w.Runtime.TaskAuthorities) != 0)) ||
 			(len(w.Runtime.TaskAuthorities) > 0 && (!boundedText(w.Runtime.NodeID, 128) || !egressRouteID.MatchString(w.Runtime.ServiceID) || !gateway.TaskAuthoritiesValid(w.Runtime.TaskAuthorities))) ||
-			(len(w.Runtime.TaskAuthorities) == 0 && (w.Runtime.NodeID != "" || w.Runtime.ServiceID != "")) ||
+			(len(w.Runtime.TaskAuthorities) == 0 && w.Runtime.ServiceID != "") ||
+			((len(w.Runtime.TaskAuthorities) > 0 || authorizedEffects) && !boundedText(w.Runtime.NodeID, 128)) ||
+			(len(w.Runtime.TaskAuthorities) == 0 && !authorizedEffects && w.Runtime.NodeID != "") ||
+			(w.Runtime.EffectMode != "" && w.Runtime.EffectMode != gateway.EffectModeStandard && !authorizedEffects) ||
+			(authorizedEffects && len(w.Runtime.EgressRouteIDs) != 0) ||
+			(!authorizedEffects && len(w.Runtime.ActionAuthorities) != 0) ||
+			(authorizedEffects && len(w.Runtime.ConnectorIDs) > 0 &&
+				!gateway.GrantActionAuthoritiesValid(w.Runtime.ActionAuthorities, w.Runtime.ConnectorIDs)) ||
+			(authorizedEffects && len(w.Runtime.ConnectorIDs) == 0 && len(w.Runtime.ActionAuthorities) != 0) ||
 			(w.Runtime.Inference && !boundedText(w.Runtime.ModelAlias, 256)) ||
 			(w.Runtime.Inference && !boundedText(w.Runtime.RouteID, 128)) ||
 			(!w.Runtime.Inference && (w.Runtime.ModelAlias != "" || w.Runtime.RouteID != "")) ||
@@ -300,7 +311,8 @@ func (w Workload) Validate() error {
 		}
 		bindingsAbsent := w.Runtime.CapsuleDigest == "" && w.Runtime.PolicyDigest == ""
 		bindingsValid := imageConfigDigest.MatchString(w.Runtime.CapsuleDigest) && imageConfigDigest.MatchString(w.Runtime.PolicyDigest)
-		if !bindingsValid && (!bindingsAbsent || len(w.Runtime.ConnectorIDs) > 0 || len(w.Runtime.TaskAuthorities) > 0) {
+		if !bindingsValid && (!bindingsAbsent || len(w.Runtime.ConnectorIDs) > 0 || len(w.Runtime.TaskAuthorities) > 0 ||
+			w.Runtime.EffectMode != "" || len(w.Runtime.ActionAuthorities) > 0) {
 			return &PolicyError{"internal signed admission bindings are invalid"}
 		}
 		identity := NetworkSpecFor(w.TenantID, w.InstanceID, w.Runtime.Generation)

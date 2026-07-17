@@ -294,13 +294,18 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 			requestBody, err = json.Marshal(controlprotocol.ExecutorPollRequestV3{
 				ProtocolVersion: controlprotocol.ExecutorProtocolV3,
 				NodeID:          credential.NodeID, CredentialScope: "node",
-				Capabilities: []string{"signed-commands-v2", "delivery-leases-v3", "multi-tenant", "read", "state-purge"},
+				Capabilities: []string{
+					"signed-commands-v2", "delivery-leases-v3",
+					controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
+					"multi-tenant", "read", "state-purge",
+				},
 			})
 		case controlprotocol.ExecutorProtocolV4:
 			capabilities := []string{
 				"signed-commands-v2",
 				"delivery-leases-v3",
 				controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
+				controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
 				controlprotocol.ExecutorCapabilityRolloutAuthorizationContextV1,
 				"multi-tenant",
 				"read",
@@ -320,7 +325,11 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 		default:
 			requestBody, err = json.Marshal(pollRequest{
 				ProtocolVersion: 2, NodeID: credential.NodeID, CredentialScope: "node",
-				Capabilities: []string{"signed-commands-v2", "multi-tenant", "read", "state-purge"},
+				Capabilities: []string{
+					"signed-commands-v2",
+					controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
+					"multi-tenant", "read", "state-purge",
+				},
 			})
 		}
 		if err != nil {

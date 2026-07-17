@@ -68,14 +68,18 @@ func TestV4AdmissionProjectionFailsClosedAfterMalformedOrMismatchedResponse(t *t
 	activationMismatch := valid
 	activationMismatch.ActivationID = "activation-other"
 	activationMismatchRaw, _ := json.Marshal(activationMismatch)
+	effectModeMismatch := valid
+	effectModeMismatch.EffectMode = "authorized"
+	effectModeMismatchRaw, _ := json.Marshal(effectModeMismatch)
 	schemaInjected := append(append([]byte(nil), validRaw[:len(validRaw)-1]...), []byte(`,"schema_version":"controller-supplied"}`)...)
 
 	for name, response := range map[string][]byte{
-		"unknown field":       unknown,
-		"runtime mismatch":    runtimeMismatchRaw,
-		"activation mismatch": activationMismatchRaw,
-		"schema injection":    schemaInjected,
-		"oversized":           []byte(`{"padding":"` + strings.Repeat("x", controlprotocol.MaxExecutorReportBytes) + `"}`),
+		"unknown field":        unknown,
+		"runtime mismatch":     runtimeMismatchRaw,
+		"activation mismatch":  activationMismatchRaw,
+		"effect mode mismatch": effectModeMismatchRaw,
+		"schema injection":     schemaInjected,
+		"oversized":            []byte(`{"padding":"` + strings.Repeat("x", controlprotocol.MaxExecutorReportBytes) + `"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			report, _, store := runV4Admission(t, response)
@@ -393,6 +397,10 @@ func runV4Admission(
 				!slices.Contains(
 					poll.Capabilities,
 					controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
+				) ||
+				!slices.Contains(
+					poll.Capabilities,
+					controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
 				) ||
 				!slices.Contains(
 					poll.Capabilities,

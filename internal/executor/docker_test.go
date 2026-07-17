@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -323,12 +324,17 @@ func TestCreateWithSignedConnectorInjectsOnlyFixedRelayURLAndAdmissionBindings(t
 		w.WriteHeader(http.StatusCreated)
 	})
 	addresses := testNetworkSpec("tenant-a", "agent-a", 4)
+	actionAuthorities := []gateway.GrantActionAuthority{{
+		KeyID: "effects-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		ConnectorIDs: []string{"git.read", "issues.create"},
+	}}
 	workload := Workload{InstanceID: "agent-a", TenantID: "tenant-a", ProfileID: "generic-v1@v1",
 		Image: "registry.local/agent@sha256:" + strings.Repeat("a", 64), Command: []string{"agent"},
 		Resources: Resources{MemoryBytes: 1 << 20, CPUMillis: 100, PIDs: 16}, Runtime: &RuntimeGrant{
-			NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), Generation: 4,
+			NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), NodeID: "node-a", Generation: 4,
 			Subnet: addresses.Subnet, Gateway: addresses.Gateway, RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
-			ConnectorIDs:  []string{"git.read", "issues.create"},
+			ConnectorIDs: []string{"git.read", "issues.create"},
+			EffectMode:   gateway.EffectModeAuthorized, ActionAuthorities: actionAuthorities,
 			CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
 			ActivationID:          "activation-test",
 			ActivationBeginDigest: "sha256:" + strings.Repeat("e", 64),
@@ -342,7 +348,10 @@ func TestCreateWithSignedConnectorInjectsOnlyFixedRelayURLAndAdmissionBindings(t
 		t.Fatalf("environment=%#v want=%#v", environment, wantEnvironment)
 	}
 	labels := payload["Labels"].(map[string]any)
+	actionAuthorityRaw, _ := json.Marshal(dockerActionAuthorityLabel{Authorities: actionAuthorities})
 	if labels[runtimeConnectorsLabel] != "git.read,issues.create" ||
+		labels[runtimeEffectModeLabel] != gateway.EffectModeAuthorized ||
+		labels[runtimeActionAuthoritiesLabel] != string(actionAuthorityRaw) ||
 		labels[runtimeCapsuleDigestLabel] != workload.Runtime.CapsuleDigest ||
 		labels[runtimePolicyDigestLabel] != workload.Runtime.PolicyDigest ||
 		labels[runtimeActivationIDLabel] != workload.Runtime.ActivationID ||
@@ -1278,12 +1287,17 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 	taskAuthorities := []gateway.TaskAuthority{{
 		KeyID: "task-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
 	}}
+	actionAuthorities := []gateway.GrantActionAuthority{{
+		KeyID: "effects-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		ConnectorIDs: []string{"git.read", "issues.create"},
+	}}
 	runtime := &RuntimeGrant{
 		NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), NodeID: "node-a", Generation: 3,
 		Inference: true, RouteID: "local", ModelAlias: "private-model", ServicePort: 8080, ServiceID: "hermes-api",
 		TaskAuthorities: taskAuthorities,
 		Subnet:          addresses.Subnet, Gateway: addresses.Gateway,
 		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP, ConnectorIDs: []string{"git.read", "issues.create"},
+		EffectMode: gateway.EffectModeAuthorized, ActionAuthorities: actionAuthorities,
 		CapsuleDigest: "sha256:" + strings.Repeat("d", 64), PolicyDigest: "sha256:" + strings.Repeat("e", 64),
 		ActivationID:          "activation-test",
 		ActivationBeginDigest: "sha256:" + strings.Repeat("f", 64),
@@ -1295,6 +1309,10 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 	}
 	fingerprint := workloadFingerprint(workload)
 	authorityLabel, err := json.Marshal(dockerTaskAuthorityLabel{Authorities: taskAuthorities})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionAuthorityLabel, err := json.Marshal(dockerActionAuthorityLabel{Authorities: actionAuthorities})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1318,6 +1336,7 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 					runtimeNodeIDLabel:    "node-a",
 					runtimeInferenceLabel: "true", runtimeModelLabel: "private-model", runtimeRouteLabel: "local",
 					runtimeServiceIDLabel: "hermes-api", runtimeTaskAuthoritiesLabel: string(authorityLabel),
+					runtimeEffectModeLabel: gateway.EffectModeAuthorized, runtimeActionAuthoritiesLabel: string(actionAuthorityLabel),
 					runtimeSubnetLabel: addresses.Subnet, runtimeGatewayLabel: addresses.Gateway,
 					runtimeServicePortLabel: "8080", runtimeRelayIPLabel: addresses.RelayIP, runtimeAgentIPLabel: addresses.AgentIP,
 					runtimeConnectorsLabel: "git.read,issues.create", runtimeCapsuleDigestLabel: runtime.CapsuleDigest,
@@ -1347,6 +1366,37 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 	}
 	if *observed.Workload.State != *state || !reflect.DeepEqual(*observed.Workload.Runtime, *runtime) || observed.Fingerprint != fingerprint {
 		t.Fatalf("projected workload=%#v", observed.Workload)
+	}
+}
+
+func TestActionAuthorityDockerLabelSupportsMaximumAdmittedScope(t *testing.T) {
+	connectors := make([]string, 32)
+	for index := range connectors {
+		connectors[index] = fmt.Sprintf("connector-%02d-%s", index, strings.Repeat("x", 115))
+	}
+	authorities := make([]gateway.GrantActionAuthority, 8)
+	for index := range authorities {
+		public := make([]byte, ed25519.PublicKeySize)
+		public[0] = byte(index + 1)
+		authorities[index] = gateway.GrantActionAuthority{
+			KeyID:        fmt.Sprintf("effects-%02d", index),
+			PublicKey:    base64.StdEncoding.EncodeToString(public),
+			ConnectorIDs: append([]string(nil), connectors...),
+		}
+	}
+	raw, err := json.Marshal(dockerActionAuthorityLabel{Authorities: authorities})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) <= 16<<10 || len(raw) > maxRuntimeActionAuthorityLabelBytes {
+		t.Fatalf("maximum admitted authority label has unexpected size %d", len(raw))
+	}
+	decoded, err := decodeActionAuthorityLabel(string(raw), connectors)
+	if err != nil || !reflect.DeepEqual(decoded, authorities) {
+		t.Fatalf("decoded=%#v err=%v", decoded, err)
+	}
+	if _, err := decodeActionAuthorityLabel(strings.Repeat("x", maxRuntimeActionAuthorityLabelBytes+1), connectors); err == nil {
+		t.Fatal("oversized action authority label accepted")
 	}
 }
 

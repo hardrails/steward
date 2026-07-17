@@ -748,7 +748,7 @@ func TestSignedServiceTaskReplaySurvivesGatewayRestart(t *testing.T) {
 	}
 }
 
-func TestTaskAuthorizedGatewayStateRequiresFormatFour(t *testing.T) {
+func TestTaskAuthorizedGatewayStateWritesCurrentFormatAndRejectsFormatThree(t *testing.T) {
 	rig := newServiceTaskRig(t, "http://127.0.0.1:1")
 	rig.server.closeGrantListeners()
 	_ = rig.server.audit.Close()
@@ -763,7 +763,7 @@ func TestTaskAuthorizedGatewayStateRequiresFormatFour(t *testing.T) {
 		t.Fatal(err)
 	}
 	grants, ok := state["grants"].([]any)
-	if !ok || state["version"] != float64(4) || len(grants) != 1 {
+	if !ok || state["version"] != float64(5) || len(grants) != 1 {
 		t.Fatalf("task state=%s", raw)
 	}
 	retained, ok := grants[0].(map[string]any)
