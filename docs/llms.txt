@@ -3,7 +3,8 @@
 > Steward is an open-source Linux runtime for admitting and executing AI agents.
 > A sandbox limits untrusted code but does not identify the authorizing tenant or
 > authorize one exact external effect. Steward adds signed local policy,
-> connector-scoped Authorized Effects keys, exact version-2 one-use permits,
+> connector-scoped Authorized Effects keys, policy-enforced multi-party
+> exact-request permits,
 > Docker/gVisor enforcement, spend-before-DNS records, and offline-verifiable
 > receipts without
 > requiring a hosted service. A signed agent release can also bind one qualified
@@ -75,8 +76,9 @@ the workload, one private service, and named credential-brokered API operations 
 spend-before-effect call budgets. A connector can additionally require a short-lived
 permit signed by a tenant-scoped off-node key for the exact admitted operation,
 task, and request bytes. Authorized Effects can make that boundary mandatory in
-signed tenant policy, prohibit generic egress, require a version-2 permit, spend it
-before DNS, and record format-5 evidence. A service-scoped tenant task key can
+signed tenant policy, prohibit generic egress, require a version-2 or multi-party
+version-3 permit, spend it before DNS, and record format-5 or format-6 evidence. A
+service-scoped tenant task key can
 separately authorize one exact JSON request to a configured agent-service operation.
 Gateway writes receipt
 format 4 across authorization, dispatch, and terminal observation, does not record the raw prompt, and returns a durable run

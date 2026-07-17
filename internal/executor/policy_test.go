@@ -205,7 +205,7 @@ func TestWorkloadValidatesAuthorizedEffectsRuntimeGrant(t *testing.T) {
 	runtime := RuntimeGrant{
 		NetworkName: network.Name, GrantID: "grant-" + strings.Repeat("b", 64),
 		NodeID: "node-a", Generation: 1, ConnectorIDs: []string{"issues"},
-		EffectMode: gateway.EffectModeAuthorized,
+		EffectMode: gateway.EffectModeAuthorized, ActionApprovalThreshold: 1,
 		ActionAuthorities: []gateway.GrantActionAuthority{{
 			KeyID: "effects-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
 			ConnectorIDs: []string{"issues"},
@@ -229,6 +229,7 @@ func TestWorkloadValidatesAuthorizedEffectsRuntimeGrant(t *testing.T) {
 		{"node removed", func(value *RuntimeGrant) { value.NodeID = "" }},
 		{"generic egress added", func(value *RuntimeGrant) { value.EgressRouteIDs = []string{"public-web"} }},
 		{"authority removed", func(value *RuntimeGrant) { value.ActionAuthorities = nil }},
+		{"threshold removed", func(value *RuntimeGrant) { value.ActionApprovalThreshold = 0 }},
 		{"connectors and authority removed", func(value *RuntimeGrant) {
 			value.ConnectorIDs, value.ActionAuthorities = nil, nil
 		}},
@@ -259,13 +260,14 @@ func TestRuntimeEffectAuthorityRequiresAnEffectBearingAuthorizedGrant(t *testing
 	for _, test := range []struct {
 		name        string
 		mode        string
+		threshold   int
 		egress      []string
 		connectors  []string
 		authorities []gateway.GrantActionAuthority
 		want        bool
 	}{
 		{name: "standard", mode: gateway.EffectModeStandard, connectors: []string{"issues"}, want: true},
-		{name: "authorized", mode: gateway.EffectModeAuthorized, connectors: []string{"issues"}, authorities: []gateway.GrantActionAuthority{authority}, want: true},
+		{name: "authorized", mode: gateway.EffectModeAuthorized, threshold: 1, connectors: []string{"issues"}, authorities: []gateway.GrantActionAuthority{authority}, want: true},
 		{name: "effectless authorized", mode: gateway.EffectModeAuthorized},
 		{name: "authorized without authority", mode: gateway.EffectModeAuthorized, connectors: []string{"issues"}},
 		{name: "authorized with generic egress", mode: gateway.EffectModeAuthorized, egress: []string{"public-web"}, connectors: []string{"issues"}, authorities: []gateway.GrantActionAuthority{authority}},
@@ -273,7 +275,7 @@ func TestRuntimeEffectAuthorityRequiresAnEffectBearingAuthorizedGrant(t *testing
 		{name: "unknown mode", mode: "unknown", connectors: []string{"issues"}, authorities: []gateway.GrantActionAuthority{authority}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := validRuntimeEffectAuthority(test.mode, test.egress, test.connectors, test.authorities); got != test.want {
+			if got := validRuntimeEffectAuthority(test.mode, test.threshold, test.egress, test.connectors, test.authorities); got != test.want {
 				t.Fatalf("validRuntimeEffectAuthority()=%t want %t", got, test.want)
 			}
 		})

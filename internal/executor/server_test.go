@@ -1476,8 +1476,9 @@ func TestSecureAdmissionProjectsAuthorizedEffectsIntoImmutableRuntimeGrant(t *te
 		runtime.EffectMode != admission.EffectModeAuthorized || grant.EffectMode != gateway.EffectModeAuthorized ||
 		runtime.NodeID != intent.NodeID || grant.NodeID != intent.NodeID ||
 		len(runtime.EgressRouteIDs) != 0 || len(grant.EgressRouteIDs) != 0 ||
-		len(runtime.ActionAuthorities) != 1 || len(grant.ActionAuthorities) != 1 ||
-		runtime.ActionAuthorities[0].KeyID != "effects-approver" ||
+		admitted.ActionApprovalThreshold != 2 || runtime.ActionApprovalThreshold != 2 || grant.ActionApprovalThreshold != 2 ||
+		len(admitted.ActionAuthorities) != 2 || len(runtime.ActionAuthorities) != 2 || len(grant.ActionAuthorities) != 2 ||
+		runtime.ActionAuthorities[0].KeyID != "effects-approver-a" ||
 		!slices.Equal(runtime.ActionAuthorities[0].ConnectorIDs, []string{"git.read", "issues.create"}) ||
 		!slices.Equal(grant.ActionAuthorities[0].ConnectorIDs, []string{"git.read", "issues.create"}) {
 		t.Fatalf("admitted=%#v runtime=%#v grant=%#v", admitted, runtime, grant)
@@ -2849,6 +2850,7 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 	publisherPublic, publisherPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	taskPublic, _, _ := ed25519.GenerateKey(rand.Reader)
 	actionPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	secondActionPublic, _, _ := ed25519.GenerateKey(rand.Reader)
 	policy := admission.SitePolicy{
 		SchemaVersion: admission.SchemaV1, PolicyID: "site-a", PolicyEpoch: 1,
 		Publishers: []admission.PublisherRule{{
@@ -2873,9 +2875,12 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 	}
 	if len(authorizedEffects) > 0 && authorizedEffects[0] {
 		policy.Tenants[0].AuthorizedEffects = &admission.AuthorizedEffectsPolicy{
-			Mode: admission.AuthorizedEffectsRequired,
+			Mode: admission.AuthorizedEffectsRequired, MinApprovals: 2,
 			Keys: []admission.ActionKey{{
-				KeyID: "effects-approver", PublicKey: base64.StdEncoding.EncodeToString(actionPublic),
+				KeyID: "effects-approver-a", PublicKey: base64.StdEncoding.EncodeToString(actionPublic),
+				ConnectorIDs: []string{"git.read", "issues.create"},
+			}, {
+				KeyID: "effects-approver-b", PublicKey: base64.StdEncoding.EncodeToString(secondActionPublic),
 				ConnectorIDs: []string{"git.read", "issues.create"},
 			}},
 		}

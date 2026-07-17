@@ -39,9 +39,9 @@ Five runtime boundaries separate authority:
    service, exact credential-brokered connector, and named HTTP(S) egress grants.
    They do not give an agent a raw host or Internet route. Gateway has its own
    service identity and no Docker authority. In Authorized Effects mode, signed
-   tenant policy pins off-node action keys to selected connectors, generic egress
-   is unavailable, and Gateway accepts only a version-2 permit for one exact
-   request. It durably spends the permit before DNS while the upstream credential
+   tenant policy pins off-node action keys and an approval threshold to selected
+   connectors, generic egress is unavailable, and Gateway accepts only a complete
+   version-2 or multi-party version-3 permit for one exact request. It durably spends the permit before DNS while the upstream credential
    remains outside the workload. A separate service-scoped
    tenant task authority can sign one exact agent-service request. Current service
    tasks record task-local authorization, dispatch, and terminal lifecycle evidence.
@@ -219,18 +219,19 @@ workload is fully compromised.
 Authorized Effects is an explicit intersection:
 
 1. the site-root-signed tenant rule contains `authorized_effects`, selects
-   `optional` or `required`, and assigns each action public key to exact connector
-   IDs;
+   `optional` or `required`, assigns each action public key to exact connector IDs,
+   and sets the number of distinct approvals required;
 2. authenticated instance intent explicitly selects `effect_mode`; required policy
    rejects `standard`, while authorized mode rejects generic egress;
 3. Executor projects only the selected, policy-pinned connector/key scopes through
    immutable runtime state to Gateway;
 4. Gateway requires those scopes to exactly match its validated connector keys and
    operations; and
-5. every effect needs a canonical version-2 DSSE permit over the exact request,
-   which Gateway records as spent before resolution or connection.
+5. every effect needs a complete canonical version-2 or version-3 DSSE permit over
+   the exact request, which Gateway records as spent before resolution or
+   connection.
 
-The action private key stays off-node and outside the workload. Gateway keeps the
+Action private keys stay off-node and outside the workload. Gateway keeps the
 upstream credential in an owner-only file and injects it only at the fixed
 connector operation. The signed connector chain lets an offline auditor correlate
 the exact permit, request digest, operation policy, authorization, and terminal

@@ -22,14 +22,15 @@ Do not rely on prompt-injection detection, model self-review, or the agent's sta
 reason as the only control for a sensitive action. Steward's Authorized Effects
 mode assumes the agent is fully compromised and moves authorization into Gateway:
 
-- site-root-signed tenant policy pins action public keys to connector IDs and can
-  make the mode `required`;
+- site-root-signed tenant policy pins action public keys and an approval threshold
+  to connector IDs and can make the mode `required`;
 - authenticated instance intent explicitly selects `effect_mode`, and authorized
   mode prohibits generic egress;
-- Gateway requires a version-2 permit signed over the exact operation and request
-  bytes, keeps the upstream credential outside the workload, and durably consumes
-  the permit before DNS; and
-- format-5 signed evidence binds the authorized mode and operation policy. Repeated
+- Gateway requires a complete version-2 or multi-party version-3 permit signed over
+  the exact operation and request bytes, keeps the upstream credential outside the
+  workload, and durably consumes the permit before DNS; and
+- format-5 or format-6 signed evidence binds the authorized mode, operation policy,
+  and any multi-party signer threshold. Repeated
   invalid permits can create only one stable denial marker per retained grant, and
   that marker does not claim a verified permit or authority key.
 

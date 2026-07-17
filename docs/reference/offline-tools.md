@@ -905,14 +905,17 @@ connector action permits. Format 3 is the historical two-record service-task
 contract. Current lifecycle service tasks use format 4, with task-local sequence
 and hash links across authorization, dispatch, and terminal records. Format 5
 records authorized connector calls with explicit effect mode and the exact
-operation-policy digest. One verified chain may contain all five formats. The
+operation-policy digest. Format 6 adds the canonical signer set and threshold for
+a multi-party authorized call. One verified chain may contain all six formats. The
 observed format is the highest schema present. It is at least 2 when Gateway
 configures an action authority and 4 when it
 configures a current service-task operation, even before the receipt file exists or
 that operation is used, because live configuration can write that format. An
 authorized-effects denial, authorization, or terminal event raises the observed
 receipt format to 5 when its first record is written. The retained authorized grant
-separately requires Gateway state format 5 before that first call. A target whose
+separately requires Gateway state format 5 before that first call. A multi-party
+call raises the receipt boundary to 6, and its retained grant requires Gateway
+state format 6 as soon as it is stored. A target whose
 manifest cannot read and preserve either observed boundary is incompatible.
 
 Executor evidence format 1 contains the original closed event vocabulary. Format 2
@@ -925,7 +928,8 @@ target whose evidence reader stops at format 1 is incompatible with that log.
 
 Gateway state format 4 retains the service ID and public tenant task authorities of
 task-enabled grants. Format 5 additionally retains authorized effect mode and
-signed-policy-derived connector/action-key scopes. A target release must read and
+signed-policy-derived connector/action-key scopes. Format 6 binds a multi-party
+approval threshold. A target release must read and
 preserve those bindings even if the receipt ledger has not yet recorded the related
 operation. Keep state and receipt-format compatibility checks together; neither
 file can be downgraded safely in isolation.
@@ -943,9 +947,11 @@ Keep the action private key on an operator-controlled signing station, not on th
 Steward node.
 
 When the supplied admission and intent select Authorized Effects, `permit issue`
-emits `steward.action-permit.v2` with `effect_mode` fixed to `authorized`. Gateway
-rejects the legacy version-1 envelope for that grant. Standard permit-enabled
-connectors continue to use version 1.
+emits `steward.action-permit.v2` for a one-approver policy or an incomplete
+`steward.action-permit.v3` for a multi-party policy. Both fix `effect_mode` to
+`authorized`. Gateway rejects version 1 for that grant and accepts version 3 only
+after the exact signed threshold is present. Standard permit-enabled connectors
+continue to use version 1.
 
 Before issuance, export Gateway's non-secret view:
 
@@ -963,7 +969,8 @@ limits. It is unsigned. Authenticate the transfer from the intended node. `permi
 issue` uses it to catch mismatches before signing; Gateway's current validated
 configuration is still the final authority.
 
-Issue a canonical single-signature DSSE permit:
+For an admission whose signed policy requires two approvals, issue the first
+approval without `-header-out` because the partial artifact is not usable:
 
 ```console
 stewardctl permit issue \
@@ -978,9 +985,34 @@ stewardctl permit issue \
   -clock-skew 5s \
   -key approver-a.private.pem \
   -key-id approver-a \
+  -out action-permit.partial.dsse.json
+```
+
+For a one-approver admission, use `-out action-permit.dsse.json -header-out
+action-permit.header`; `permit issue` produces the complete version-2 artifact and
+no approval handoff is needed.
+
+Add each remaining approval from a separately controlled key. Every signer uses
+the same admission, intent, trust inventory, and exact request bytes:
+
+```console
+stewardctl permit approve \
+  -in action-permit.partial.dsse.json \
+  -admission admission.json \
+  -intent instance-intent.json \
+  -trust action-trust.json \
+  -request exact-request.json \
+  -key approver-b.private.pem \
+  -key-id approver-b \
   -out action-permit.dsse.json \
   -header-out action-permit.header
 ```
+
+`permit approve` accepts only canonical version-3 partial artifacts. It refuses to
+overwrite or update the input, rejects a duplicate or unadmitted signer, verifies
+every existing signature and exact external binding, and adds a signature over the
+unchanged DSSE payload. Key IDs are canonically sorted. A final artifact contains
+exactly the policy threshold; extra signatures are not accepted.
 
 Required inputs bind the admitted node, tenant, instance, generation, capsule,
 policy, route policy, connector, operation, operation-policy digest, task, request
@@ -1011,7 +1043,8 @@ fails, the command attempts to remove previously written outputs and reports any
 rollback failure; an operator may then need to remove a leftover file. Standard
 output is the exact permit-envelope SHA-256 digest. Standard error is a canonical
 single-line JSON approval summary that identifies the exact target, request digest
-and byte count, validity window, authority, and resulting permit digest without
+and byte count, validity window, collected authorities, threshold, completion
+state, and resulting permit digest without
 printing request content. Keep the streams separate and compare the summary with
 independently reviewed request bytes. `-header-out` contains the canonical
 unpadded base64url value for `X-Steward-Action-Permit`.
@@ -1021,22 +1054,25 @@ Verify the signature, statement, current time, and optional request bytes:
 ```console
 stewardctl permit verify \
   -in action-permit.dsse.json \
-  -public-key approver-a.public \
-  -key-id approver-a \
+  -authority approver-a=approver-a.public \
+  -authority approver-b=approver-b.public \
   -request exact-request.json
 ```
 
-The JSON output contains `valid`, `evaluated_at`, `key_id`, `envelope_digest`, and
-the complete `statement`. `-at` accepts canonical UTC RFC 3339 whole seconds for a
-historical evaluation. `-max-validity` applies a stricter local ceiling.
+Repeat `-authority KEY_ID=PUBLIC_KEY_FILE` for a multi-party permit. The legacy
+`-public-key` and `-key-id` pair remains available for a single signer and cannot be
+combined with `-authority`. The JSON output contains `valid`, `evaluated_at`,
+`key_id`, the canonical `key_ids` set, `envelope_digest`, and the complete
+`statement`. `-at` accepts canonical UTC RFC 3339 whole seconds for a historical
+evaluation. `-max-validity` applies a stricter local ceiling.
 
 Audit the permit against a copied Gateway connector chain:
 
 ```console
 stewardctl permit audit \
   -in action-permit.dsse.json \
-  -public-key approver-a.public \
-  -key-id approver-a \
+  -authority approver-a=approver-a.public \
+  -authority approver-b=approver-b.public \
   -request exact-request.json \
   -receipts connector-receipts.ndjson \
   -receipt-public-key connector-receipts.public \
@@ -1049,9 +1085,10 @@ stewardctl permit audit \
 The command verifies the whole signed chain, correlates the exact authority key,
 permit, request, grant, policy, connector operation, and stable task-based call
 digest, and re-evaluates the permit at the authorization receipt's signed
-observation time. For a version-2 permit it also requires format-5 receipt bindings
-for `effect_mode` and the exact operation-policy digest. Output contains `valid`,
-`permit_digest`, `request_digest`, `permit_key_id`, the signed `statement`,
+observation time. A version-2 permit requires format-5 receipt bindings for
+`effect_mode` and the exact operation-policy digest. A version-3 permit requires
+format 6 and also binds the canonical signer set and approval threshold. Output contains `valid`,
+`permit_digest`, `request_digest`, `permit_key_id`, `permit_key_ids`, the signed `statement`,
 matching `authorization`, optional `terminal`, and final `head`. Supply both
 expected-head fields to compare with an
 independently retained checkpoint. An absent terminal means the outcome is still
@@ -1234,7 +1271,7 @@ stewardctl task audit \
   -expected-chain-hash 'sha256:<retained-chain-hash>'
 ```
 
-The command verifies formats 1 through 5 in one chain, finds the exact service-task
+The command verifies formats 1 through 6 in one chain, finds the exact service-task
 permit, re-evaluates it at the signed authorization time, and checks every available
 tenant, runtime, grant, policy, service, operation, task, authority, permit, and
 request binding. For a format-4 task it also verifies the task-local sequence and

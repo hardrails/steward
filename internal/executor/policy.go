@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/hardrails/steward/internal/gateway"
@@ -110,28 +111,29 @@ type StateMount struct {
 }
 
 type RuntimeGrant struct {
-	NetworkName           string                         `json:"network_name"`
-	Subnet                string                         `json:"subnet"`
-	Gateway               string                         `json:"gateway"`
-	GrantID               string                         `json:"grant_id"`
-	NodeID                string                         `json:"node_id,omitempty"`
-	Generation            uint64                         `json:"generation"`
-	Inference             bool                           `json:"inference"`
-	RouteID               string                         `json:"route_id,omitempty"`
-	RelayIP               string                         `json:"relay_ip"`
-	AgentIP               string                         `json:"agent_ip"`
-	ModelAlias            string                         `json:"model_alias,omitempty"`
-	ServicePort           int                            `json:"service_port,omitempty"`
-	ServiceID             string                         `json:"service_id,omitempty"`
-	TaskAuthorities       []gateway.TaskAuthority        `json:"task_authorities,omitempty"`
-	EgressRouteIDs        []string                       `json:"egress_route_ids,omitempty"`
-	ConnectorIDs          []string                       `json:"connector_ids,omitempty"`
-	EffectMode            string                         `json:"effect_mode,omitempty"`
-	ActionAuthorities     []gateway.GrantActionAuthority `json:"action_authorities,omitempty"`
-	CapsuleDigest         string                         `json:"capsule_digest,omitempty"`
-	PolicyDigest          string                         `json:"policy_digest,omitempty"`
-	ActivationID          string                         `json:"activation_id,omitempty"`
-	ActivationBeginDigest string                         `json:"activation_begin_digest,omitempty"`
+	NetworkName             string                         `json:"network_name"`
+	Subnet                  string                         `json:"subnet"`
+	Gateway                 string                         `json:"gateway"`
+	GrantID                 string                         `json:"grant_id"`
+	NodeID                  string                         `json:"node_id,omitempty"`
+	Generation              uint64                         `json:"generation"`
+	Inference               bool                           `json:"inference"`
+	RouteID                 string                         `json:"route_id,omitempty"`
+	RelayIP                 string                         `json:"relay_ip"`
+	AgentIP                 string                         `json:"agent_ip"`
+	ModelAlias              string                         `json:"model_alias,omitempty"`
+	ServicePort             int                            `json:"service_port,omitempty"`
+	ServiceID               string                         `json:"service_id,omitempty"`
+	TaskAuthorities         []gateway.TaskAuthority        `json:"task_authorities,omitempty"`
+	EgressRouteIDs          []string                       `json:"egress_route_ids,omitempty"`
+	ConnectorIDs            []string                       `json:"connector_ids,omitempty"`
+	EffectMode              string                         `json:"effect_mode,omitempty"`
+	ActionApprovalThreshold int                            `json:"action_approval_threshold,omitempty"`
+	ActionAuthorities       []gateway.GrantActionAuthority `json:"action_authorities,omitempty"`
+	CapsuleDigest           string                         `json:"capsule_digest,omitempty"`
+	PolicyDigest            string                         `json:"policy_digest,omitempty"`
+	ActivationID            string                         `json:"activation_id,omitempty"`
+	ActivationBeginDigest   string                         `json:"activation_begin_digest,omitempty"`
 }
 
 // Resources are mandatory cgroup limits. Docker has no resource limits by default,
@@ -281,7 +283,7 @@ func (w Workload) Validate() error {
 			(len(w.Runtime.TaskAuthorities) == 0 && w.Runtime.ServiceID != "") ||
 			((len(w.Runtime.TaskAuthorities) > 0 || authorizedEffects) && !boundedText(w.Runtime.NodeID, 128)) ||
 			(len(w.Runtime.TaskAuthorities) == 0 && !authorizedEffects && w.Runtime.NodeID != "") ||
-			!validRuntimeEffectAuthority(w.Runtime.EffectMode, w.Runtime.EgressRouteIDs, w.Runtime.ConnectorIDs, w.Runtime.ActionAuthorities) ||
+			!validRuntimeEffectAuthority(w.Runtime.EffectMode, w.Runtime.ActionApprovalThreshold, w.Runtime.EgressRouteIDs, w.Runtime.ConnectorIDs, w.Runtime.ActionAuthorities) ||
 			(w.Runtime.Inference && !boundedText(w.Runtime.ModelAlias, 256)) ||
 			(w.Runtime.Inference && !boundedText(w.Runtime.RouteID, 128)) ||
 			(!w.Runtime.Inference && (w.Runtime.ModelAlias != "" || w.Runtime.RouteID != "")) ||
@@ -322,15 +324,30 @@ func (w Workload) Validate() error {
 
 func validRuntimeEffectAuthority(
 	effectMode string,
+	approvalThreshold int,
 	egressRouteIDs, connectorIDs []string,
 	actionAuthorities []gateway.GrantActionAuthority,
 ) bool {
 	switch effectMode {
 	case "", gateway.EffectModeStandard:
-		return len(actionAuthorities) == 0
+		return approvalThreshold == 0 && len(actionAuthorities) == 0
 	case gateway.EffectModeAuthorized:
-		return len(egressRouteIDs) == 0 && len(connectorIDs) > 0 && len(actionAuthorities) > 0 &&
-			gateway.GrantActionAuthoritiesValid(actionAuthorities, connectorIDs)
+		if len(egressRouteIDs) != 0 || len(connectorIDs) == 0 || approvalThreshold < 1 ||
+			approvalThreshold > len(actionAuthorities) || !gateway.GrantActionAuthoritiesValid(actionAuthorities, connectorIDs) {
+			return false
+		}
+		for _, connectorID := range connectorIDs {
+			approvers := 0
+			for _, authority := range actionAuthorities {
+				if slices.Contains(authority.ConnectorIDs, connectorID) {
+					approvers++
+				}
+			}
+			if approvers < approvalThreshold {
+				return false
+			}
+		}
+		return true
 	default:
 		return false
 	}

@@ -26,9 +26,10 @@ events. Format 3 is the historical two-record service-task contract. Format 4 is
 the current lifecycle contract: it records task-local authorization, dispatch, and
 terminal outcomes, including the service, operation-policy, permit, request, run,
 task sequence, and prior-task hash bindings. Format 5 records authorized connector
-calls with the explicit effect mode and exact operation-policy digest. A single
-ledger may contain all five schemas in one signed hash chain. Current release manifests declare
-`connector_receipt_log` readers 1 through 5 and writer 5. The inspector reports the
+calls with the explicit effect mode and exact operation-policy digest. Format 6
+adds the canonical signer set and threshold for a multi-party authorized call. A single
+ledger may contain all six schemas in one signed hash chain. Current release manifests declare
+`connector_receipt_log` readers 1 through 6 and writer 6. The inspector reports the
 highest format present. It reports format 2 when action authorities are configured
 and format 4 when service-task operations are configured, even before the receipt
 file exists or contains that schema, because the running configuration can write the
@@ -36,13 +37,16 @@ required format immediately. An authorized grant alone does not make the receipt
 inspector report format 5. Its first format-5 denial, authorization, or terminal
 record raises that observed boundary; before then, action-authority configuration
 makes the receipt path prospectively format 2. The retained authorized grant
-independently requires Gateway state format 5 as soon as it is stored.
+independently requires Gateway state format 5 as soon as it is stored. A
+multi-party authorization raises the receipt boundary to 6, and its retained
+grant requires Gateway state format 6 before any call.
 
-Current release manifests declare `gateway_state` readers 1 through 5 and writer 5.
+Current release manifests declare `gateway_state` readers 1 through 6 and writer 6.
 Format 4 retains the service identity and tenant task authorities of task-authorized
 grants. Format 5 additionally retains authorized effect mode and the
-signed-policy-derived connector/action-key scopes. Activation therefore blocks a
-rollback that cannot preserve those bindings.
+signed-policy-derived connector/action-key scopes. Format 6 additionally retains
+the multi-party approval threshold. Activation therefore blocks a rollback that
+cannot preserve those bindings.
 
 Gateway treats every configured inference-route or connector credential file as
 the exact credential bytes and does not trim whitespace. The supported secret
@@ -254,7 +258,9 @@ format 5. Removing corresponding configuration can lower a prospective receipt
 requirement only before a record of that format has been written; it does not
 rewrite or downgrade existing evidence. A retained authorized grant separately
 requires Gateway state format 5 even before its first connector event. Do not
-split, edit, or reserialize a mixed ledger or Gateway state to regain rollback
+install a reader below format 6 after a multi-party receipt, or a Gateway-state
+reader below format 6 while a multi-party grant remains. Do not split, edit, or
+reserialize a mixed ledger or Gateway state to regain rollback
 eligibility.
 
 The same rule applies to Executor evidence: after read-only admission preflights,

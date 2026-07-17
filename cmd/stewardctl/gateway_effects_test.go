@@ -43,6 +43,7 @@ func TestGatewayEffectsCheckProvesExactReadinessWithoutDisclosingSecrets(t *test
 		summary.TenantID != fixture.intent.TenantID || summary.NodeID != fixture.intent.NodeID ||
 		!slices.Equal(summary.ConnectorIDs, []string{"mail", "vault"}) ||
 		!slices.Equal(summary.KeyIDs, []string{"approver-a", "approver-b"}) ||
+		summary.MinApprovals != 1 ||
 		summary.ReceiptBudgetBytes != 1<<20 {
 		t.Fatalf("readiness summary = %#v", summary)
 	}
@@ -50,7 +51,7 @@ func TestGatewayEffectsCheckProvesExactReadinessWithoutDisclosingSecrets(t *test
 	if err := json.Unmarshal(output.Bytes(), &members); err != nil {
 		t.Fatal(err)
 	}
-	if len(members) != 7 {
+	if len(members) != 8 {
 		t.Fatalf("readiness summary exposed unexpected members: %s", output.String())
 	}
 	for _, forbidden := range append([]string{

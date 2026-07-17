@@ -170,6 +170,7 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		callDigest := ConnectorCallDigest(grant.TenantID, grant.InstanceID, taskID, connectorID, operationID)
 		receipt := connectorReceiptEvent(
 			grant, routePolicyDigest, connectorID, operationID, callDigest, permit.authorityKeyID,
+			permit.authorityKeyIDs, permit.approvalThreshold,
 			permit.permitDigest, permit.requestDigest, int64(len(body)),
 			permit.operationDigest,
 		)
@@ -225,11 +226,13 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 }
 
 type connectorActionPermit struct {
-	authorityKeyID  string
-	permitDigest    string
-	requestDigest   string
-	operationDigest string
-	expiresAt       time.Time
+	authorityKeyID    string
+	authorityKeyIDs   []string
+	approvalThreshold int
+	permitDigest      string
+	requestDigest     string
+	operationDigest   string
+	expiresAt         time.Time
 }
 
 func verifyConnectorActionPermit(
@@ -282,12 +285,17 @@ func verifyConnectorActionPermit(
 	}
 	requiredPayloadType := actionpermit.PayloadTypeV1
 	requiredEffectMode := ""
+	requiredApprovalThreshold := 0
 	if grant.EffectMode == EffectModeAuthorized {
 		requiredPayloadType = actionpermit.PayloadTypeV2
+		if grant.ActionApprovalThreshold > 1 {
+			requiredPayloadType = actionpermit.PayloadTypeV3
+			requiredApprovalThreshold = grant.ActionApprovalThreshold
+		}
 		requiredEffectMode = actionpermit.EffectModeAuthorized
 	}
 	if verified.PayloadType != requiredPayloadType || statement.EffectMode != requiredEffectMode ||
-		connector.authorityTenants[verified.KeyID] != grant.TenantID ||
+		statement.ApprovalThreshold != requiredApprovalThreshold ||
 		statement.NodeID != connector.permitNodeID || statement.TenantID != grant.TenantID ||
 		statement.InstanceID != grant.InstanceID || statement.Generation != grant.Generation ||
 		statement.CapsuleDigest != grant.CapsuleDigest || statement.PolicyDigest != grant.PolicyDigest ||
@@ -297,12 +305,18 @@ func verifyConnectorActionPermit(
 		statement.ContentType != contentType {
 		return connectorActionPermit{}, errors.New("permit does not match the active tenant, grant, operation, task, and request")
 	}
+	for _, keyID := range verified.KeyIDs {
+		if connector.authorityTenants[keyID] != grant.TenantID {
+			return connectorActionPermit{}, errors.New("permit signer does not match the active tenant")
+		}
+	}
 	expiresAt, err := time.Parse(time.RFC3339, statement.ExpiresAt)
 	if err != nil {
 		return connectorActionPermit{}, errors.New("permit expiry is invalid")
 	}
 	return connectorActionPermit{
-		authorityKeyID: verified.KeyID, permitDigest: verified.EnvelopeDigest,
+		authorityKeyID: verified.KeyID, authorityKeyIDs: append([]string(nil), verified.KeyIDs...),
+		approvalThreshold: statement.ApprovalThreshold, permitDigest: verified.EnvelopeDigest,
 		requestDigest: requestDigest, operationDigest: operationDigest, expiresAt: expiresAt,
 	}, nil
 }

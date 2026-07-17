@@ -229,7 +229,9 @@ For a securely admitted workload, `GET /v1/workloads/{runtime_ref}` returns the
 capsule and policy digests, generation, evidence key ID, grant and route-policy
 identity, service and public task authorities, configured egress or connector
 projection, and—when activation metadata was used—`activation_id` and
-`activation_begin_digest`. This lets a caller recover an exact admission response
+`activation_begin_digest`. Authorized-effects admission also returns the public
+action authorities and approval threshold narrowed by signed tenant policy. This
+lets a caller recover an exact admission response
 after an ambiguous transport failure without treating a different live workload
 as the same activation.
 
@@ -329,10 +331,14 @@ operation-policy digest fixes the canonical upstream origin, credential injectio
 mode, credential epoch, connector and operation IDs, method, and exact path.
 Bodyless GET, HEAD, and DELETE bind an empty request and content type.
 
-For an authorized-effects grant, Gateway accepts only
-`steward.action-permit.v2` with `effect_mode` fixed to `authorized`. It rejects a
-legacy version-1 permit, and receipt format 5 binds the mode and operation-policy
-digest. Standard permit-enabled connectors continue to use version 1.
+For an authorized-effects grant, Gateway accepts
+`steward.action-permit.v2` for a one-approver policy or
+`steward.action-permit.v3` for a multi-party policy, with `effect_mode` fixed to
+`authorized`. Version 3 requires the exact signed number of distinct admitted
+authorities over one unchanged payload. Gateway rejects a legacy version-1 permit.
+Receipt format 5 binds a one-approver call's mode and operation-policy digest;
+format 6 additionally binds a multi-party signer set and threshold. Standard
+permit-enabled connectors continue to use version 1.
 
 The task claim and call budget are spent in the signed connector ledger before DNS.
 A clean relayed response ends with `X-Steward-Connector-Receipt: recorded`.

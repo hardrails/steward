@@ -107,7 +107,7 @@ gVisor workload + optional dedicated-host state + per-instance trusted relay
               |
               v
 optional service-scoped task permit -> Gateway durable authorization -> agent
-authorized connector v2 permit      -> Gateway durable spend before DNS -> upstream
+authorized connector v2/v3 permit   -> Gateway durable spend before DNS -> upstream
               |
               v
 node-local signed, hash-linked enforcement receipt
@@ -130,7 +130,7 @@ Each input has a separate purpose:
 - A **site policy** is signed by the operator's site root key. It limits publishers,
   tenants, profiles, repositories or exact image digests, resources, inference
   routes, services, connector IDs, egress routes, publisher revocation state, and
-  optional or required connector-scoped Authorized Effects keys.
+  optional or required connector-scoped Authorized Effects keys and approval threshold.
 - An **instance intent** is a separately authenticated command to run a profile for
   a tenant, node, and instance. A generation fence—an increasing counter keyed by
   `(tenant_id, instance_id)`—prevents an older command from replacing newer state.
@@ -141,10 +141,12 @@ Each input has a separate purpose:
   configured service request. Signed site policy scopes that public key to explicit
   service IDs; the private key remains off-node. The permit cannot add a capability
   that the profile, site policy, intent, and active grant did not already allow.
-- An **authorized-effects permit** is a version-2 tenant-key-signed statement for
-  one exact connector request. Signed policy pins that key to connector IDs;
-  explicit intent selects the mode; Gateway forbids generic egress, spends the
-  permit before DNS, and records format-5 evidence.
+- An **authorized-effects permit** is a tenant-key-signed statement for one exact
+  connector request. Signed policy pins each key and the required approval count
+  to connector IDs. A one-approver policy uses version 2; a multi-party policy
+  uses version 3 and requires distinct signatures over the unchanged payload.
+  Explicit intent selects the mode; Gateway forbids generic egress, spends the
+  permit before DNS, and records format-5 or format-6 evidence.
 
 Steward grants a workload only the intersection of the profile capsule, site
 policy, and instance intent. A trusted publisher can authorize a profile and its
@@ -167,7 +169,7 @@ key ID, exact signed envelope, and request digests to the stable task call and
 terminal outcome. Service-task records may retain the run ID observed from the
 agent, but that value is untrusted application output. Authorized connector
 records additionally bind the explicit mode and exact operation policy in format
-5. Both receipt chains exclude prompts, model
+5. Format 6 also binds a multi-party threshold and canonical signer set. Both receipt chains exclude prompts, model
 responses, agent logs, the meaning of agent actions, credentials, and bodies.
 
 When evidence uplink is enabled, Executor publishes receipt checkpoints on a loop
@@ -237,8 +239,9 @@ missing, admission fails closed:
   logical operation endpoint, not the configured upstream credential, private
   origin, or a general authenticated proxy. A durable task claim and call budget
   are spent before Gateway opens the upstream request. Per connector, the operator
-  can additionally require a short-lived permit signed by a tenant-scoped off-node
-  action key for the exact admitted instance, operation, task, and request bytes.
+  can additionally require a short-lived permit signed by one or more
+  tenant-scoped off-node action keys for the exact admitted instance, operation,
+  task, and request bytes.
 - **Egress**: named HTTP(S) routes allowed by the publisher capsule, tenant policy,
   and instance intent, then mapped by the host operator to hostnames, ports,
   verified IP addresses, concurrency limits, byte limits, and time limits. The

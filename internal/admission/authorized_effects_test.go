@@ -146,6 +146,36 @@ func TestAuthorizedActionKeysAreNarrowedCanonicalAndDetached(t *testing.T) {
 	}
 }
 
+func TestAuthorizedEffectsApprovalThresholdIsSignedAchievableAndBackwardCompatible(t *testing.T) {
+	_, policy, _, _ := authorizedEffectsFixture(t)
+	threshold, err := policy.AuthorizedActionApprovalThreshold("tenant-a", []string{"vault.read"})
+	if err != nil || threshold != 1 {
+		t.Fatalf("omitted threshold = (%d, %v), want backward-compatible one", threshold, err)
+	}
+
+	policy.Tenants[0].AuthorizedEffects.MinApprovals = 2
+	if err := policy.Validate(); err == nil || !strings.Contains(err.Error(), "lacks enough distinct approval keys: calendar.write") {
+		t.Fatalf("unachievable connector threshold error = %v", err)
+	}
+	policy.Tenants[0].AuthorizedEffects.Keys[1].ConnectorIDs = []string{"calendar.write", "vault.read"}
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("two-approver policy rejected: %v", err)
+	}
+	threshold, err = policy.AuthorizedActionApprovalThreshold("tenant-a", []string{"calendar.write", "vault.read"})
+	if err != nil || threshold != 2 {
+		t.Fatalf("two-approver threshold = (%d, %v)", threshold, err)
+	}
+
+	policy.Tenants[0].AuthorizedEffects.MinApprovals = 3
+	if err := policy.Validate(); err == nil || !strings.Contains(err.Error(), "must be achievable") {
+		t.Fatalf("threshold above key count error = %v", err)
+	}
+	policy.Tenants[0].AuthorizedEffects.MinApprovals = -1
+	if err := policy.Validate(); err == nil || !strings.Contains(err.Error(), "must be achievable") {
+		t.Fatalf("negative threshold error = %v", err)
+	}
+}
+
 func TestAuthorizedEffectsPolicyRejectsAmbiguousKeyIdentityAndScope(t *testing.T) {
 	publisher, _, _ := ed25519.GenerateKey(rand.Reader)
 	public, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -158,6 +188,7 @@ func TestAuthorizedEffectsPolicyRejectsAmbiguousKeyIdentityAndScope(t *testing.T
 	}{
 		{"invalid mode", func(p *AuthorizedEffectsPolicy) { p.Mode = "best-effort" }},
 		{"empty keys", func(p *AuthorizedEffectsPolicy) { p.Keys = nil }},
+		{"threshold above key count", func(p *AuthorizedEffectsPolicy) { p.MinApprovals = 2 }},
 		{"invalid key ID", func(p *AuthorizedEffectsPolicy) { p.Keys[0].KeyID = "bad key" }},
 		{"invalid public key", func(p *AuthorizedEffectsPolicy) { p.Keys[0].PublicKey = "not-base64" }},
 		{"noncanonical public key", func(p *AuthorizedEffectsPolicy) { p.Keys[0].PublicKey = encoded + "\n" }},

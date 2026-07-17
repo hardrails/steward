@@ -33,10 +33,11 @@ four-layer, budgeted behavior.
 
 For sensitive operations, use
 [Authorized Effects]({{ '/guides/authorized-effects/' | relative_url }}). It adds
-signed-policy continuity to the fifth layer: tenant policy pins each action key to
-connector IDs, intent explicitly selects the mode, generic egress is prohibited,
-Gateway accepts only version-2 permits, and format-5 evidence records the enforced
-mode and exact operation policy. Steward assumes the agent is compromised for this
+signed-policy continuity to the fifth layer: tenant policy pins each action key and
+an approval threshold to connector IDs; intent explicitly selects the mode;
+generic egress is prohibited; Gateway accepts only the policy's version-2 or
+version-3 permit; and format-5 or format-6 evidence records the enforced mode,
+exact operation policy, and any signer threshold. Steward assumes the agent is compromised for this
 decision; it does not ask the agent to detect prompt injection.
 
 ## Define one exact operation
@@ -568,12 +569,15 @@ receipt schema `steward.connector-receipt.v1`; permit-backed events use
 `steward.connector-receipt.v4` and add task-local sequence and hash links across
 authorization, dispatch, and terminal records. Authorized connector calls use
 `steward.connector-receipt.v5`; they add the explicit effect mode and exact
-operation-policy digest. A stable pre-effect permit denial may add one format-5
-marker per retained grant without claiming a verified permit or authority key. One
-chain may contain all five schemas, and the verifier checks them as one sequence.
+operation-policy digest. Multi-party authorized calls use
+`steward.connector-receipt.v6` and add the canonical signer set and threshold. A
+stable pre-effect permit denial may add one format-5 marker per retained grant
+without claiming a verified permit or authority key. One chain may contain all six
+schemas, and the verifier checks them as one sequence.
 Configuring any action authority requires a reader for format 2, configuring any
-current service-task operation requires a reader for format 4, and an authorized
-grant requires format 5, even before its first accepted call.
+current service-task operation requires a reader for format 4, an authorized grant
+requires state format 5, and a multi-party grant requires state format 6 before its
+first call. A multi-party receipt requires reader 6 after it is written.
 Service-task records carry exact permit and request digests, service and
 operation-policy bindings, bounded status, and an observed run ID, but no raw
 prompt or request body. See the

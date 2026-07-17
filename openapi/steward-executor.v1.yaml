@@ -831,7 +831,8 @@ components:
           description: |
             Explicit external-effect policy selected under signed tenant policy.
             `authorized` forbids generic egress and requires every selected
-            connector call to carry a version-2 permit for the exact request.
+            connector call to carry an exact-request permit. A one-approver
+            policy uses permit version 2; a multi-party policy uses version 3.
     Capabilities:
       type: object
       additionalProperties: false
@@ -937,6 +938,19 @@ components:
           description: |
             Effective signed-admission effect mode. The field is absent for
             policies created before explicit effect modes.
+        action_approval_threshold:
+          type: integer
+          minimum: 1
+          maximum: 8
+          description: Number of distinct admitted action-authority signatures Gateway requires for each authorized connector effect. Present only with authorized effect mode.
+        action_authorities:
+          type: array
+          minItems: 1
+          maxItems: 8
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ActionAuthority"
+          description: Canonically sorted public tenant action keys narrowed by signed site policy to this admission's selected connectors. Private signing keys are never returned to or stored on the node.
         route_policy_digest:
           type: string
           pattern: "^sha256:[a-f0-9]{64}$"
@@ -961,6 +975,27 @@ components:
           type: string
           format: byte
           description: Canonical standard-base64 Ed25519 public key.
+    ActionAuthority:
+      type: object
+      additionalProperties: false
+      required: [key_id, public_key, connector_ids]
+      properties:
+        key_id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        public_key:
+          type: string
+          format: byte
+          description: Canonical standard-base64 Ed25519 public key.
+        connector_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          description: Sorted connector IDs this action key may approve in this admission.
     Resources:
       type: object
       additionalProperties: false

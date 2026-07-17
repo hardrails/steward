@@ -24,8 +24,10 @@ import (
 const (
 	PayloadTypeV1 = "application/vnd.steward.action-permit.v1+json"
 	PayloadTypeV2 = "application/vnd.steward.action-permit.v2+json"
+	PayloadTypeV3 = "application/vnd.steward.action-permit.v3+json"
 	SchemaV1      = "steward.action-permit.v1"
 	SchemaV2      = "steward.action-permit.v2"
+	SchemaV3      = "steward.action-permit.v3"
 
 	// PayloadType remains the original format identifier for source
 	// compatibility with callers that construct legacy permit fixtures.
@@ -60,6 +62,7 @@ var (
 type Statement struct {
 	SchemaVersion     string `json:"schema_version"`
 	EffectMode        string `json:"effect_mode,omitempty"`
+	ApprovalThreshold int    `json:"approval_threshold,omitempty"`
 	NodeID            string `json:"node_id"`
 	TenantID          string `json:"tenant_id"`
 	InstanceID        string `json:"instance_id"`
@@ -85,6 +88,7 @@ type Statement struct {
 type wireStatement struct {
 	SchemaVersion     *string         `json:"schema_version"`
 	EffectMode        json.RawMessage `json:"effect_mode"`
+	ApprovalThreshold json.RawMessage `json:"approval_threshold"`
 	NodeID            *string         `json:"node_id"`
 	TenantID          *string         `json:"tenant_id"`
 	InstanceID        *string         `json:"instance_id"`
@@ -108,6 +112,8 @@ type wireStatement struct {
 type Verified struct {
 	Statement      Statement
 	KeyID          string
+	KeyIDs         []string
+	Complete       bool
 	EnvelopeDigest string
 	PayloadType    string
 }
@@ -123,6 +129,17 @@ func RequestDigest(raw []byte) string {
 // an explicit local-policy ceiling and must itself be within the 24-hour hard
 // limit. now is required: a missing clock cannot safely establish validity.
 func Verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.Time, maxValidity time.Duration) (Verified, error) {
+	return verify(rawEnvelope, trusted, now, maxValidity, false)
+}
+
+// VerifyPartial authenticates a canonical multi-party approval artifact before
+// it has reached its signed threshold. It is for offline approval handoff only;
+// Gateway must always use Verify.
+func VerifyPartial(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.Time, maxValidity time.Duration) (Verified, error) {
+	return verify(rawEnvelope, trusted, now, maxValidity, true)
+}
+
+func verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.Time, maxValidity time.Duration, allowPartial bool) (Verified, error) {
 	if len(rawEnvelope) == 0 || len(rawEnvelope) > MaxEnvelopeBytes {
 		return Verified{}, invalid("envelope is empty or exceeds %d bytes", MaxEnvelopeBytes)
 	}
@@ -133,42 +150,35 @@ func Verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.T
 		return Verified{}, invalid("maximum validity must be positive and at most %s", MaxValidity)
 	}
 
-	// Action permits intentionally have one canonical envelope spelling and one
-	// signature. DSSE signatures cover the payload, not the surrounding JSON or
-	// other signatures; accepting alternate envelope spellings would let an
-	// intermediary change the receipt's permit digest without changing authority.
+	// Action permits intentionally have one canonical envelope spelling. DSSE
+	// signatures cover the payload, not the surrounding JSON or other
+	// signatures; canonical ordering makes the complete approval artifact and
+	// its receipt digest unambiguous.
 	envelope, err := dsse.Parse(rawEnvelope)
 	if err != nil {
-		return Verified{}, invalid("parse canonical single-signature envelope: %v", err)
-	}
-	if len(envelope.Signatures) != 1 {
-		return Verified{}, invalid("permit envelope must contain exactly one signature")
+		return Verified{}, invalid("parse canonical permit envelope: %v", err)
 	}
 	payloadBytes, err := base64.StdEncoding.DecodeString(envelope.Payload)
 	if err != nil || base64.StdEncoding.EncodeToString(payloadBytes) != envelope.Payload {
 		return Verified{}, invalid("permit payload is not canonical base64")
 	}
-	signatureBytes, err := base64.StdEncoding.DecodeString(envelope.Signatures[0].Sig)
-	if err != nil || len(signatureBytes) != ed25519.SignatureSize ||
-		base64.StdEncoding.EncodeToString(signatureBytes) != envelope.Signatures[0].Sig {
-		return Verified{}, invalid("permit signature is not canonical base64")
+	for _, signature := range envelope.Signatures {
+		signatureBytes, decodeErr := base64.StdEncoding.DecodeString(signature.Sig)
+		if decodeErr != nil || len(signatureBytes) != ed25519.SignatureSize ||
+			base64.StdEncoding.EncodeToString(signatureBytes) != signature.Sig {
+			return Verified{}, invalid("permit signature is not canonical base64")
+		}
 	}
 	canonical, err := dsse.Marshal(envelope)
 	if err != nil || !bytes.Equal(canonical, rawEnvelope) {
 		return Verified{}, invalid("permit envelope is not canonical")
 	}
-	if envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 {
+	if envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 && envelope.PayloadType != PayloadTypeV3 {
 		return Verified{}, invalid("unsupported permit payload type")
 	}
-	payload, keyID, err := dsse.Verify(rawEnvelope, envelope.PayloadType, trusted)
-	if err != nil {
-		return Verified{}, invalid("verify DSSE envelope: %v", err)
-	}
+	payload := payloadBytes
 	if !utf8.Valid(payload) {
 		return Verified{}, invalid("signed statement is not valid UTF-8")
-	}
-	if !routeID(keyID) {
-		return Verified{}, invalid("signature key ID is not a bounded identifier")
 	}
 	var wire wireStatement
 	if err := dsse.DecodeStrictInto(payload, MaxEnvelopeBytes, &wire); err != nil {
@@ -181,8 +191,34 @@ func Verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.T
 	if err := validateStatement(statement, envelope.PayloadType, now, maxValidity); err != nil {
 		return Verified{}, err
 	}
+	_, keyIDs, err := dsse.VerifyAll(rawEnvelope, envelope.PayloadType, trusted)
+	if err != nil {
+		return Verified{}, invalid("verify every DSSE signature: %v", err)
+	}
+	for _, keyID := range keyIDs {
+		if !routeID(keyID) {
+			return Verified{}, invalid("signature key ID is not a bounded identifier")
+		}
+	}
+	complete := true
+	switch envelope.PayloadType {
+	case PayloadTypeV1, PayloadTypeV2:
+		if len(keyIDs) != 1 {
+			return Verified{}, invalid("version 1 and 2 permits require exactly one signature")
+		}
+	case PayloadTypeV3:
+		if len(keyIDs) > statement.ApprovalThreshold || !allowPartial && len(keyIDs) != statement.ApprovalThreshold {
+			return Verified{}, invalid("permit signature count does not match approval threshold")
+		}
+		complete = len(keyIDs) == statement.ApprovalThreshold
+	}
+	keyID := ""
+	if len(keyIDs) > 0 {
+		keyID = keyIDs[0]
+	}
 	return Verified{
-		Statement: statement, KeyID: keyID, EnvelopeDigest: dsse.Digest(rawEnvelope), PayloadType: envelope.PayloadType,
+		Statement: statement, KeyID: keyID, KeyIDs: append([]string(nil), keyIDs...), Complete: complete,
+		EnvelopeDigest: dsse.Digest(rawEnvelope), PayloadType: envelope.PayloadType,
 	}, nil
 }
 
@@ -193,8 +229,9 @@ func (wire wireStatement) statement(payloadType string) (Statement, bool) {
 		wire.RequestBytes == nil || wire.ContentType == nil || wire.NotBefore == nil || wire.ExpiresAt == nil {
 		return Statement{}, false
 	}
-	if payloadType == PayloadTypeV1 && len(wire.EffectMode) != 0 ||
-		payloadType == PayloadTypeV2 && len(wire.EffectMode) == 0 {
+	if payloadType == PayloadTypeV1 && (len(wire.EffectMode) != 0 || len(wire.ApprovalThreshold) != 0) ||
+		payloadType == PayloadTypeV2 && (len(wire.EffectMode) == 0 || len(wire.ApprovalThreshold) != 0) ||
+		payloadType == PayloadTypeV3 && (len(wire.EffectMode) == 0 || len(wire.ApprovalThreshold) == 0) {
 		return Statement{}, false
 	}
 	effectMode := ""
@@ -203,8 +240,15 @@ func (wire wireStatement) statement(payloadType string) (Statement, bool) {
 			return Statement{}, false
 		}
 	}
+	approvalThreshold := 0
+	if len(wire.ApprovalThreshold) != 0 {
+		if bytes.Equal(wire.ApprovalThreshold, []byte("null")) || json.Unmarshal(wire.ApprovalThreshold, &approvalThreshold) != nil {
+			return Statement{}, false
+		}
+	}
 	return Statement{
-		SchemaVersion: *wire.SchemaVersion, EffectMode: effectMode, NodeID: *wire.NodeID, TenantID: *wire.TenantID,
+		SchemaVersion: *wire.SchemaVersion, EffectMode: effectMode, ApprovalThreshold: approvalThreshold,
+		NodeID: *wire.NodeID, TenantID: *wire.TenantID,
 		InstanceID: *wire.InstanceID, Generation: *wire.Generation, CapsuleDigest: *wire.CapsuleDigest,
 		PolicyDigest: *wire.PolicyDigest, RoutePolicyDigest: *wire.RoutePolicyDigest,
 		ConnectorID: *wire.ConnectorID, OperationID: *wire.OperationID, OperationDigest: *wire.OperationDigest, TaskID: *wire.TaskID,
@@ -245,7 +289,12 @@ func validateStatement(statement Statement, payloadType string, now time.Time, m
 			return invalid("payload type, schema version, and effect mode do not form a supported permit version")
 		}
 	case PayloadTypeV2:
-		if statement.SchemaVersion != SchemaV2 || statement.EffectMode != EffectModeAuthorized {
+		if statement.SchemaVersion != SchemaV2 || statement.EffectMode != EffectModeAuthorized || statement.ApprovalThreshold != 0 {
+			return invalid("payload type, schema version, effect mode, and approval threshold do not form a supported permit version")
+		}
+	case PayloadTypeV3:
+		if statement.SchemaVersion != SchemaV3 || statement.EffectMode != EffectModeAuthorized ||
+			statement.ApprovalThreshold < 2 || statement.ApprovalThreshold > 8 {
 			return invalid("payload type, schema version, and effect mode do not form a supported permit version")
 		}
 	default:

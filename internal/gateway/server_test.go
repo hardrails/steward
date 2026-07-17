@@ -709,8 +709,9 @@ func TestGatewayStateFitsDefaultFleetOfMaximumAuthorizedEffectGrants(t *testing.
 			GrantID: GrantID(tenantID, instanceID, 1), TenantID: tenantID, NodeID: strings.Repeat("n", 128),
 			InstanceID: instanceID, Generation: 1, RuntimeRef: "runtime-" + strings.Repeat("r", 121),
 			CapsuleDigest: "sha256:" + strings.Repeat("a", 64), PolicyDigest: "sha256:" + strings.Repeat("b", 64),
-			EffectMode: EffectModeAuthorized, ActionAuthorities: cloneGrantActionAuthorities(authorities),
-			ConnectorIDs: append([]string(nil), connectorIDs...),
+			EffectMode: EffectModeAuthorized, ActionApprovalThreshold: 1,
+			ActionAuthorities: cloneGrantActionAuthorities(authorities),
+			ConnectorIDs:      append([]string(nil), connectorIDs...),
 		}
 		server.grants[grant.GrantID] = grant
 		server.policyDigests[grant.GrantID] = "sha256:" + strings.Repeat("c", 64)

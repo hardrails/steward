@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -66,6 +67,40 @@ func Sign(payloadType string, payload []byte, keyID string, privateKey ed25519.P
 	}, nil
 }
 
+// AddSignature returns a detached envelope with one additional Ed25519
+// signature over the unchanged DSSE payload. Signatures are sorted by key ID so
+// a complete multi-party artifact has one canonical ordering.
+func AddSignature(envelope Envelope, keyID string, privateKey ed25519.PrivateKey) (Envelope, error) {
+	if err := validateEnvelope(envelope); err != nil {
+		return Envelope{}, err
+	}
+	if strings.TrimSpace(keyID) == "" || len(keyID) > 256 || strings.ContainsRune(keyID, '\x00') ||
+		len(privateKey) != ed25519.PrivateKeySize {
+		return Envelope{}, fmt.Errorf("%w: invalid signing identity", ErrMalformedEnvelope)
+	}
+	if len(envelope.Signatures) >= 16 {
+		return Envelope{}, fmt.Errorf("%w: invalid signature count", ErrMalformedEnvelope)
+	}
+	for _, signature := range envelope.Signatures {
+		if signature.KeyID == keyID {
+			return Envelope{}, fmt.Errorf("%w: duplicate signature key ID", ErrMalformedEnvelope)
+		}
+	}
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
+		return Envelope{}, fmt.Errorf("%w: invalid payload encoding", ErrMalformedEnvelope)
+	}
+	result := Envelope{
+		PayloadType: envelope.PayloadType,
+		Payload:     envelope.Payload,
+		Signatures:  append([]Signature(nil), envelope.Signatures...),
+	}
+	signature := ed25519.Sign(privateKey, PAE(result.PayloadType, payload))
+	result.Signatures = append(result.Signatures, Signature{KeyID: keyID, Sig: base64.StdEncoding.EncodeToString(signature)})
+	slices.SortFunc(result.Signatures, func(left, right Signature) int { return strings.Compare(left.KeyID, right.KeyID) })
+	return result, nil
+}
+
 func Marshal(envelope Envelope) ([]byte, error) {
 	if err := validateEnvelope(envelope); err != nil {
 		return nil, err
@@ -112,6 +147,38 @@ func Verify(raw []byte, expectedPayloadType string, trusted map[string]ed25519.P
 		}
 	}
 	return nil, "", ErrNoTrustedSignature
+}
+
+// VerifyAll requires every supplied signature to name a distinct trusted key
+// and authenticate the exact payload. It returns key IDs in their canonical
+// envelope order. Callers enforce their own threshold and authority scope.
+func VerifyAll(raw []byte, expectedPayloadType string, trusted map[string]ed25519.PublicKey) ([]byte, []string, error) {
+	envelope, err := Parse(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if envelope.PayloadType != expectedPayloadType {
+		return nil, nil, fmt.Errorf("%w: expected payload type %q, got %q", ErrMalformedEnvelope, expectedPayloadType, envelope.PayloadType)
+	}
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil || len(payload) > MaxPayloadBytes || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
+		return nil, nil, fmt.Errorf("%w: invalid payload encoding", ErrMalformedEnvelope)
+	}
+	message := PAE(envelope.PayloadType, payload)
+	keyIDs := make([]string, 0, len(envelope.Signatures))
+	for index, signature := range envelope.Signatures {
+		if index > 0 && envelope.Signatures[index-1].KeyID >= signature.KeyID {
+			return nil, nil, fmt.Errorf("%w: signatures are not in canonical key ID order", ErrMalformedEnvelope)
+		}
+		key, ok := trusted[signature.KeyID]
+		sig, decodeErr := base64.StdEncoding.DecodeString(signature.Sig)
+		if !ok || len(key) != ed25519.PublicKeySize || decodeErr != nil || len(sig) != ed25519.SignatureSize ||
+			base64.StdEncoding.EncodeToString(sig) != signature.Sig || !ed25519.Verify(key, message, sig) {
+			return nil, nil, ErrNoTrustedSignature
+		}
+		keyIDs = append(keyIDs, signature.KeyID)
+	}
+	return payload, keyIDs, nil
 }
 
 // Digest identifies the exact serialized admission artifact, not its decoded
