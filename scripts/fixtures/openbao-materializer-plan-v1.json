@@ -1,0 +1,23 @@
+{
+  "schema_version": "steward.openbao-materializer-plan.v1",
+  "openbao_address": "https://127.0.0.1:8200",
+  "auth_mount": "auth/approle",
+  "ca_file": "/work/tls/vault-ca.pem",
+  "role_id_file": "/work/role/role-id",
+  "secret_id_file": "/work/secretid/secret-id",
+  "bao_path": "/bin/bao",
+  "stewardctl_path": "/work/stewardctl",
+  "install_root": "/work/bundle",
+  "secret_root": "/work/secrets",
+  "status_root": "/work/status",
+  "bindings": [
+    {
+      "tenant_id": "tenant-a",
+      "secret_id": "inference-primary",
+      "purpose": "inference",
+      "kv_path": "steward-kv/data/tenant-a/inference-primary",
+      "field": "value",
+      "expected_version": 1
+    }
+  ]
+}

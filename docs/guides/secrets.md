@@ -256,6 +256,25 @@ or the operator drains the route. Monitor OpenBao Agent authentication and templ
 errors, and test seal recovery, backups, revocation, and rotation before production
 rollout.
 
+## Reproduce the OpenBao compatibility check
+
+Maintainers can exercise the compiler and runtime handoff end to end:
+
+```console
+bash scripts/openbao-materializer-smoke.sh
+```
+
+The script uses Docker and the digest-pinned official OpenBao 2.5.4 multi-platform
+image. It starts an isolated TLS development server, enables AppRole and KV v2,
+installs the generated exact policy, renders a credential and version, verifies
+one-use SecretID removal, checks secret-free readiness with the Linux
+`stewardctl`, rotates the value with check-and-set, and verifies convergence on the
+new version. It removes the container and temporary files on exit.
+
+This is a compatibility test, not a production OpenBao deployment test. Development
+mode uses in-memory storage and does not exercise unseal procedures, high
+availability, declarative audit, systemd, backup, recovery, or node firewall rules.
+
 ## Why not send encrypted values into the container?
 
 An agent able to decrypt a value can usually exfiltrate it. Encrypting delivery to
