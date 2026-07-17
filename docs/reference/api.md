@@ -43,6 +43,10 @@ report routes for their bound node.
 | `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
 | `GET /v1/nodes/{node_id}/evidence` | Read the site-admin-only last-good Executor receipt checkpoint and any sticky divergence finding |
 | `GET /v1/nodes/{node_id}/evidence/export` | Sign a portable evidence checkpoint with the controller's dedicated witness key |
+| `POST /v1/nodes/{node_id}/evidence/captures` | Arm one site-admin-only bounded activation evidence capture from the current witnessed head |
+| `GET or DELETE /v1/nodes/{node_id}/evidence/captures/{capture_id}` | Inspect the frame-free capture state or irreversibly delete the retained capture |
+| `POST /v1/nodes/{node_id}/evidence/captures/{capture_id}/seal` | Bind one observed checkpoint range to a matching successful activation-canary command |
+| `GET /v1/nodes/{node_id}/evidence/captures/{capture_id}/export` | Export exact signed frames and the controller's purpose-separated witness signature |
 | `POST /v1/tenants/{tenant_id}/nodes/{node_id}/commands` | Retain one exact signed Executor command |
 | `GET .../commands/{command_id}` | Read durable delivery and terminal status |
 | `GET /v1/operations/summary` | Read tenant-projected capacity, command, evidence, and attention totals |
@@ -81,6 +85,34 @@ checkpoint used to classify the observed conflicting head. It does not retain
 the full node receipt archive. Evidence export uses optimistic linearization:
 three consecutive witness updates return `409 Conflict` with `Retry-After: 1`;
 a 409 without that header is a retained-state conflict rather than a retry hint.
+
+Activation evidence captures are also site-admin-only. Arming fixes a baseline at
+the node's current finding-free witnessed head and a one-second-to-one-hour
+absolute observation deadline. Operators arm before submitting activation, but
+the resulting proof establishes controller observation after that baseline, not
+receipt generation time. The controller permits one `armed` capture per
+node, 16 active captures and 256 retained captures site-wide, with 128 frames and
+512 KiB of decoded frame data per capture and 16 MiB of aggregate reserved or
+captured frame data. A portable export is limited to 1 MiB of JSON. Exact arm and
+seal retries are idempotent and do not extend the original deadline.
+
+The capture state progresses from `armed` to `observed` only after one matching,
+allowed, error-free activation begin is followed by one matching committed,
+error-free checkpoint, then to `sealed` only after
+the named protocol-4 activation-canary command has a matching successful terminal
+result. Only `sealed` can be exported. `expired` and `failed` are terminal;
+`failure` is one of `capture_overflow`, `coordinate_changed`, `evidence_finding`,
+`target_contradiction`, or `storage_capacity`. Expiry is persisted lazily on the next evidence report
+or capture operation after the deadline, not by a background timer.
+
+An export contains the exact native frames required to replay the receipt chain.
+Those frames can include unrelated tenants because removing an interleaved frame
+would break chain continuity. The controller signs with its dedicated evidence
+witness key, which must be distinct from the node's receipt key. Offline clients
+must pin that witness public key independently; the key embedded in the response
+is not a trust anchor. Capture failure never blocks ordinary evidence witnessing,
+and no capture endpoint retries, rolls back, stops, destroys, or otherwise changes
+a workload. Deletion changes only retained capture state.
 
 Operations findings are derived observations, not mutable tickets. The API cannot
 acknowledge, dismiss, retry, or clear them. A tenant operator is always projected
@@ -131,6 +163,7 @@ Every endpoint except `GET /v1/healthz` requires
 | Method and path | Purpose |
 | --- | --- |
 | `POST /v1/admissions` | Verify a publisher-signed profile, local policy, and tenant-bound instance request; optionally bind an activation begin digest; journal the mutation; and create a receipt-bound workload |
+| `POST /v1/workloads/{runtime_ref}/activation-canary-preflight` | Recheck current policy, tenant authority, activation identity, reconciliation, lifecycle, and complete runtime topology immediately before the uplink contacts Gateway |
 | `POST /v1/workloads/{runtime_ref}/activation-checkpoints` | Append an idempotent, content-free signed checkpoint after a running activation has verified terminal Gateway evidence |
 | `POST /v1/state/purge` | Permanently purge an inactive, authorized state lineage with a receipt |
 | `POST /v1/workloads` | Validate and create a stopped gVisor container |
@@ -167,8 +200,22 @@ activation ID must match the live runtime, the persisted begin digest must match
 the earlier signed marker, reconciliation must be ready, and the exact topology
 must be running. An exact retry does not add another receipt. A missing begin
 marker, conflicting digest, runtime drift, degraded reconciliation, or unavailable
-evidence log fails closed. The response and every error use the schemas in the
-Executor OpenAPI contract.
+evidence log fails closed. A signed stop, destroy, revocation, drift, closed
+state purge, or workload compensation after the proven start invalidates the
+checkpoint even if the same workload is running again. This causal check also
+applies to an exact retry of a previously retained checkpoint. The response and
+every error use the schemas in the Executor OpenAPI contract.
+
+The activation-canary preflight endpoint is the read-only authorization boundary
+immediately before Gateway use. It accepts one strict JSON object capped at 1
+MiB with schema `steward.executor-activation-canary-preflight.v1`, the retained
+activation ID, and the retained activation-begin digest. Executor serializes the
+check with signed lifecycle mutations. It requires ready reconciliation, the
+current site policy, the authenticated tenant principal or explicitly enabled
+host-administrator authority, and the complete admitted runtime topology in its
+running state. A successful response returns the exact committed admission
+projection and writes no receipt. A failed preflight prevents the uplink from
+contacting Gateway.
 
 For a securely admitted workload, `GET /v1/workloads/{runtime_ref}` returns the
 capsule and policy digests, generation, evidence key ID, grant and route-policy

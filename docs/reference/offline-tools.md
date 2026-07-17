@@ -19,7 +19,9 @@ verification. Commands under `stewardctl node` contact the local Executor API.
 literal-loopback Gateway origin; task issue, verify, and audit remain offline.
 `stewardctl control evidence export` contacts the customer-owned controller,
 while `stewardctl control evidence verify` checks that portable export entirely
-offline against a separately pinned witness public key.
+offline against a separately pinned witness public key. The corresponding
+`stewardctl control evidence-capture` commands retain, seal, export, and replay a
+bounded activation-specific range; only its `verify` operation is offline.
 
 ## Signed agent releases
 
@@ -580,6 +582,115 @@ embedded in the export is not trusted by itself. Copy the controller's
 SHA-256 digest when establishing the audit identity. A wrong key, changed signed
 field, duplicate or unknown JSON field, or inconsistent node identity fails
 verification. Reformatting equivalent JSON does not change the signed statement.
+
+## Controller activation evidence captures
+
+Evidence capture is a site-administrator operation. It preserves a bounded range
+of exact Executor receipt frames for one activation target, then lets the
+controller attest that the range was paired with a matching successful
+activation-canary command. Arm the capture before submitting the activation.
+That procedure fixes the controller's baseline; the proof establishes
+controller observation order, not when the node generated each receipt:
+
+```console
+stewardctl control evidence-capture arm \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001 \
+  -request-id activation-a-evidence-arm-0001 \
+  -tenant-id tenant-a \
+  -runtime-ref executor-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  -generation 7 \
+  -activation-id activation-a \
+  -activation-begin-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  -ttl 10m
+```
+
+The TTL must be a whole number of seconds from `1s` through `1h` and limits the
+time to observe the checkpoint. Inspect the frame-free state with:
+
+```console
+stewardctl control evidence-capture status \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001
+```
+
+After `state` becomes `observed`, seal it against the successful canary retained
+by the controller, then export it to a new mode-`0600` file:
+
+```console
+stewardctl control evidence-capture seal \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001 \
+  -canary-command-id activation-a-canary-0001
+
+stewardctl control evidence-capture export \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001 \
+  -out activation-a.evidence-capture.json
+```
+
+Copy the capture and the controller witness public key through separate trusted
+handling as appropriate for the site, then verify on a disconnected system:
+
+```console
+stewardctl control evidence-capture verify \
+  -in activation-a.evidence-capture.json \
+  -witness-public-key steward-control-witness.public.pem
+```
+
+The verifier makes no network request. It authenticates the controller's
+purpose-separated signature against the supplied pinned key, verifies the
+enrollment receipt identity, replays every native frame from the signed baseline,
+requires the exact final head, and finds exactly one matching allowed,
+error-free activation begin followed by exactly one matching committed,
+error-free checkpoint. It rejects target lifecycle invalidation and mutation,
+removal, insertion, reordering, or substitution of a frame. The controller key embedded in the
+capture is descriptive and is never accepted as its own trust anchor.
+
+The range can include chain-critical frames for unrelated tenants. It is therefore
+site-wide sensitive evidence even though the target is one tenant. The complete
+file is capped at 1 MiB and contains at most 128 frames or 512 KiB of decoded
+frame data. The offline result verifies the evidence chain and controller
+attestation; it does not independently replay the canary result or prove semantic
+agent success.
+
+`expired` means no matching checkpoint was observed before the fixed deadline.
+`failed` means a coordinate change, evidence finding, target contradiction,
+storage-capacity limit, or frame/byte limit prevented a coherent capture. A
+storage-capacity failure can drop the optional capture if even its small failure
+record cannot fit, so absence alone is not proof of success or failure. Neither state proves the activation
+did not run or that retry is safe. Treat either as `action_required` when portable
+proof is mandatory: an operator must investigate and choose recovery. That is
+workflow guidance, not another capture state. Steward performs no automatic retry,
+rollback, remediation, or workload change.
+
+After preserving required audit material, remove a retained capture explicitly:
+
+```console
+stewardctl control evidence-capture delete \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001
+```
+
+Delete is irreversible and affects only controller capture state. The controller
+retains at most 16 active and 256 total captures, with a 16 MiB aggregate frame
+reservation. Expiry is durable but lazy: it is recorded on the next evidence
+report or capture operation after the deadline rather than by a background timer.
 
 ## Upgrade inspection
 

@@ -514,6 +514,203 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/nodes/{node_id}/evidence/captures:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    post:
+      tags: [evidence]
+      operationId: armExecutorEvidenceCapture
+      summary: Arm a bounded activation evidence capture
+      description: |
+        Requires a site-administrator credential. Reserves one bounded capture
+        from the node's current witnessed head. Operators arm it before
+        submitting the activation command; the capture proves controller
+        observation after that baseline, not when the node generated a frame.
+        One node can have only one active capture. The absolute
+        expiry is derived once from `ttl_seconds`; an exact retry returns the
+        retained capture without extending it. Capture failure never blocks
+        ordinary evidence witnessing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EvidenceCaptureArmRequest"
+      responses:
+        "201":
+          description: The capture was armed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceCapture"
+        "200":
+          description: An exact arm request already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceCapture"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/nodes/{node_id}/evidence/captures/{capture_id}:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+      - $ref: "#/components/parameters/CaptureID"
+    get:
+      tags: [evidence]
+      operationId: getExecutorEvidenceCapture
+      summary: Inspect one bounded evidence capture
+      description: Requires a site-administrator credential. Exact signed frames are never returned by this status route.
+      responses:
+        "200":
+          description: Current frame-free capture state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceCapture"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      tags: [evidence]
+      operationId: deleteExecutorEvidenceCapture
+      summary: Delete one retained evidence capture
+      description: |
+        Requires a site-administrator credential. Deletion is explicit and
+        irreversible. It does not change node evidence, command state, or a
+        running workload.
+      responses:
+        "204":
+          description: The capture was deleted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/nodes/{node_id}/evidence/captures/{capture_id}/seal:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+      - $ref: "#/components/parameters/CaptureID"
+    post:
+      tags: [evidence]
+      operationId: sealExecutorEvidenceCapture
+      summary: Bind an observed capture to a successful canary
+      description: |
+        Requires a site-administrator credential. Sealing succeeds only after
+        the capture observed exactly one matching activation checkpoint and
+        the named protocol-4 activation-canary command retained a successful,
+        fully matching typed result. It performs no node or workload action.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EvidenceCaptureSealRequest"
+      responses:
+        "200":
+          description: Sealed capture, or the same capture on an exact retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceCapture"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/nodes/{node_id}/evidence/captures/{capture_id}/export:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+      - $ref: "#/components/parameters/CaptureID"
+    get:
+      tags: [evidence]
+      operationId: exportExecutorEvidenceCapture
+      summary: Export a sealed activation evidence range
+      description: |
+        Requires a site-administrator credential. Returns exact native
+        Executor evidence frames for the complete witnessed report suffix. The
+        suffix contains the matching activation begin followed by its checkpoint
+        and can contain later unrelated frames before the signed final head. A
+        purpose-separated controller-witness signature binds the complete suffix.
+        Offline verification must use a witness public key obtained
+        through an independent trusted channel. If three consecutive state
+        changes prevent a linearized export, the controller returns 409 with
+        `Retry-After`.
+      responses:
+        "200":
+          description: Portable, controller-witness-signed activation evidence capture.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ControllerEvidenceCapture"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/tenants/{tenant_id}/nodes:
     parameters:
       - $ref: "#/components/parameters/TenantID"
@@ -1106,6 +1303,12 @@ components:
       required: true
       schema:
         $ref: "#/components/schemas/Identifier256"
+    CaptureID:
+      name: capture_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier128"
     After:
       name: after
       in: query
@@ -2642,6 +2845,278 @@ components:
           $ref: "#/components/schemas/ExecutorEvidenceIdentityProofV1"
         status:
           $ref: "#/components/schemas/ExecutorEvidenceWitnessedStatus"
+        exported_at:
+          type: string
+          format: date-time
+    EvidenceCaptureArmRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - capture_id
+        - request_id
+        - tenant_id
+        - runtime_ref
+        - generation
+        - activation_id
+        - activation_begin_digest
+        - ttl_seconds
+      properties:
+        capture_id:
+          $ref: "#/components/schemas/Identifier128"
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        runtime_ref:
+          type: string
+          minLength: 73
+          maxLength: 73
+          pattern: '^executor-[a-f0-9]{64}$'
+        generation:
+          type: integer
+          minimum: 1
+        activation_id:
+          $ref: "#/components/schemas/Identifier128"
+        activation_begin_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        ttl_seconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          description: Absolute capture expiry is fixed from this value on the first successful request.
+    EvidenceCaptureSealRequest:
+      type: object
+      additionalProperties: false
+      required: [canary_command_id]
+      properties:
+        canary_command_id:
+          $ref: "#/components/schemas/Identifier256"
+    EvidenceCapture:
+      type: object
+      additionalProperties: false
+      required:
+        - capture_id
+        - request_id
+        - node_id
+        - tenant_id
+        - runtime_ref
+        - generation
+        - activation_id
+        - activation_begin_digest
+        - state
+        - baseline_head
+        - final_head
+        - frame_count
+        - captured_bytes
+        - armed_at
+        - expires_at
+      properties:
+        capture_id:
+          $ref: "#/components/schemas/Identifier128"
+        request_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        runtime_ref:
+          type: string
+          minLength: 73
+          maxLength: 73
+          pattern: '^executor-[a-f0-9]{64}$'
+        generation:
+          type: integer
+          minimum: 1
+        activation_id:
+          $ref: "#/components/schemas/Identifier128"
+        activation_begin_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        activation_begin_sequence:
+          type: integer
+          minimum: 1
+        state:
+          type: string
+          enum: [armed, observed, sealed, expired, failed]
+        baseline_head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+        final_head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+        frame_count:
+          type: integer
+          minimum: 0
+          maximum: 128
+        captured_bytes:
+          type: integer
+          minimum: 0
+          maximum: 524288
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        activation_checkpoint_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        canary_command_id:
+          $ref: "#/components/schemas/Identifier256"
+        armed_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        observed_at:
+          type: string
+          format: date-time
+        sealed_at:
+          type: string
+          format: date-time
+        expired_at:
+          type: string
+          format: date-time
+        failed_at:
+          type: string
+          format: date-time
+        failure:
+          type: string
+          enum:
+            - capture_overflow
+            - coordinate_changed
+            - evidence_finding
+            - target_contradiction
+            - storage_capacity
+      description: |
+        Frame-free site-administrator view. Every state binds the expected
+        activation-begin digest. After the matching begin is witnessed,
+        `armed` also carries its sequence plus capsule and policy digests.
+        `observed` and `sealed` bind exactly one begin followed by exactly one
+        activation checkpoint; only `sealed` names a canary command. `expired`
+        and `failed` are terminal and cannot be exported.
+    ControllerEvidenceCapture:
+      type: object
+      additionalProperties: false
+      required:
+        - payload_type
+        - statement
+        - signed_frames_base64
+        - witness_public_key_base64
+        - witness_public_key_sha256
+        - signature_base64
+      properties:
+        payload_type:
+          type: string
+          enum: [application/vnd.steward.controller-evidence-capture.v1+binary]
+        statement:
+          $ref: "#/components/schemas/ControllerEvidenceCaptureStatement"
+        signed_frames_base64:
+          type: array
+          nullable: false
+          minItems: 1
+          maxItems: 128
+          x-steward-max-decoded-bytes: 524288
+          description: |
+            Canonical standard-base64 encodings of exact native,
+            length-prefixed Executor evidence frames. The decoded collection
+            is limited to 512 KiB and the complete JSON response to 1 MiB.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 87388
+            pattern: '^[A-Za-z0-9+/]+={0,2}$'
+        witness_public_key_base64:
+          type: string
+          minLength: 44
+          maxLength: 44
+          pattern: '^[A-Za-z0-9+/]{43}=$'
+          description: Self-describing Ed25519 public key; not a trust anchor.
+        witness_public_key_sha256:
+          $ref: "#/components/schemas/SHA256Digest"
+        signature_base64:
+          type: string
+          minLength: 88
+          maxLength: 88
+          pattern: '^[A-Za-z0-9+/]{86}==$'
+    ControllerEvidenceCaptureStatement:
+      type: object
+      additionalProperties: false
+      required:
+        - protocol_version
+        - controller_instance_id
+        - capture_id
+        - node_id
+        - tenant_id
+        - runtime_ref
+        - generation
+        - activation_id
+        - canary_command_id
+        - activation_begin_digest
+        - activation_begin_sequence
+        - activation_checkpoint_digest
+        - capsule_digest
+        - policy_digest
+        - identity_proof
+        - baseline_head
+        - final_head
+        - frame_count
+        - frames_digest
+        - armed_at
+        - observed_at
+        - sealed_at
+        - exported_at
+      properties:
+        protocol_version:
+          type: integer
+          enum: [1]
+        controller_instance_id:
+          $ref: "#/components/schemas/Identifier128"
+        capture_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        runtime_ref:
+          type: string
+          minLength: 73
+          maxLength: 73
+          pattern: '^executor-[a-f0-9]{64}$'
+        generation:
+          type: integer
+          minimum: 1
+        activation_id:
+          $ref: "#/components/schemas/Identifier128"
+        canary_command_id:
+          $ref: "#/components/schemas/Identifier256"
+        activation_begin_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        activation_begin_sequence:
+          type: integer
+          minimum: 1
+        activation_checkpoint_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        identity_proof:
+          $ref: "#/components/schemas/ExecutorEvidenceIdentityProofV1"
+        baseline_head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+        final_head:
+          $ref: "#/components/schemas/ExecutorEvidenceHead"
+        frame_count:
+          type: integer
+          minimum: 1
+          maximum: 128
+        frames_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        armed_at:
+          type: string
+          format: date-time
+        observed_at:
+          type: string
+          format: date-time
+        sealed_at:
+          type: string
+          format: date-time
         exported_at:
           type: string
           format: date-time
