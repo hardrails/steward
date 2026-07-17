@@ -27,7 +27,8 @@ If any layer is missing, admission fails closed.
 
 For a connector that requires independent approval of each effect, enable a fifth
 layer: a tenant-scoped action authority signs a short-lived **action permit** for
-one exact request. Gateway then requires the workload grant and the permit. This
+one exact request, or a bounded bundle of exact requests. Gateway then requires
+the workload grant and the permit. This
 mode is opt-in per connector; a connector without action authorities keeps the
 four-layer, budgeted behavior.
 
@@ -36,8 +37,9 @@ For sensitive operations, use
 signed-policy continuity to the fifth layer: tenant policy pins each action key and
 an approval threshold to connector IDs; intent explicitly selects the mode;
 generic egress is prohibited; Gateway accepts only the policy's version-2 or
-version-3 permit; and format-5 or format-6 evidence records the enforced mode,
-exact operation policy, and any signer threshold. Steward assumes the agent is compromised for this
+version-3 single-request permit or version-4 bundle; and format-5 or format-6
+evidence records the enforced mode, exact operation policy, and any signer
+threshold. Steward assumes the agent is compromised for this
 decision; it does not ask the agent to detect prompt injection.
 
 ## Define one exact operation

@@ -110,8 +110,8 @@ trusted signer -> exact signed command -> Steward Control -> node outbound poll
 gVisor workload + optional dedicated-host state + per-instance trusted relay
               |
               v
-optional service-scoped task permit -> Gateway durable authorization -> agent
-authorized connector v2/v3 permit   -> Gateway durable spend before DNS -> upstream
+optional service-scoped task permit   -> Gateway durable authorization -> agent
+authorized connector exact authority -> Gateway durable spend before DNS -> upstream
               |
               v
 node-local signed, hash-linked enforcement receipt
@@ -146,11 +146,12 @@ Each input has a separate purpose:
   service IDs; the private key remains off-node. The permit cannot add a capability
   that the profile, site policy, intent, and active grant did not already allow.
 - An **authorized-effects permit** is a tenant-key-signed statement for one exact
-  connector request. Signed policy pins each key and the required approval count
-  to connector IDs. A one-approver policy uses version 2; a multi-party policy
-  uses version 3 and requires distinct signatures over the unchanged payload.
-  Explicit intent selects the mode; Gateway forbids generic egress, spends the
-  permit before DNS, and records format-5 or format-6 evidence.
+  connector request, or a bounded bundle of up to eight exact requests. Signed
+  policy pins each key and the required approval count to connector IDs. Bundle
+  signers must cover every named connector. Explicit intent selects the mode;
+  Gateway forbids generic egress and spends each selected task before DNS. The
+  bundle is an unordered set, not a workflow: the agent may use any subset in any
+  order, but cannot invent or alter an effect.
 
 Steward grants a workload only the intersection of the profile capsule, site
 policy, and instance intent. A trusted publisher can authorize a profile and its

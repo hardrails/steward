@@ -1094,6 +1094,75 @@ expected-head fields to compare with an
 independently retained checkpoint. An absent terminal means the outcome is still
 unknown; it is not evidence that no upstream effect occurred.
 
+### Exact-effect bundles
+
+`stewardctl permit bundle` applies the same admitted Authorized Effects policy to
+an unordered set of one through eight exact requests. It reduces repeated signing
+without creating a session grant: Gateway still selects one listed step by
+`X-Steward-Task-ID` and spends that task independently before DNS.
+
+The owner-only plan uses `steward.effect-bundle-input.v1` and contains one stable
+`bundle_id` plus `step_id`, `connector_id`, `operation_id`, `task_id`, and optional
+absolute `request_path` for each step. The path itself is not authority. Issuance
+reads each protected file and signs the request digest, byte count, and trusted
+operation binding. Steps are sorted by `step_id`; duplicate step or task IDs fail.
+
+```console
+stewardctl permit bundle issue \
+  -admission admission.json \
+  -intent instance-intent.json \
+  -trust action-trust.json \
+  -plan exact-effects.json \
+  -key approver-a.private.pem \
+  -key-id approver-a \
+  -out effect-bundle.partial.dsse.json
+
+stewardctl permit bundle approve \
+  -in effect-bundle.partial.dsse.json \
+  -admission admission.json \
+  -intent instance-intent.json \
+  -trust action-trust.json \
+  -plan exact-effects.json \
+  -key approver-b.private.pem \
+  -key-id approver-b \
+  -out effect-bundle.dsse.json \
+  -header-out effect-bundle.header
+```
+
+Each approver must be admitted and trusted for every connector in the plan. The
+approval command rereads every request and reconstructs the complete statement
+before adding a signature. Version 4 binds the common tenant, runtime generation,
+artifact and policy identities, threshold, validity, and bundle ID once, then
+binds each exact connector, operation policy, task, request, size, and content
+type. Gateway validates every step and signer scope before accepting any step, and
+applies the shortest connector lifetime to the whole set.
+
+```console
+stewardctl permit bundle verify \
+  -in effect-bundle.dsse.json \
+  -plan exact-effects.json \
+  -authority approver-a=approver-a.public \
+  -authority approver-b=approver-b.public
+
+stewardctl permit bundle audit \
+  -in effect-bundle.dsse.json \
+  -plan exact-effects.json \
+  -authority approver-a=approver-a.public \
+  -authority approver-b=approver-b.public \
+  -receipts connector-receipts.ndjson \
+  -receipt-public-key connector-receipts.public \
+  -receipt-node-id steward-0123456789abcdef0123456789abcdef/gateway \
+  -receipt-epoch 1 \
+  -expected-sequence '<retained-sequence>' \
+  -expected-chain-hash 'sha256:<retained-chain-hash>'
+```
+
+Verification optionally rereads the plan's request files. Audit reports each step
+as `unspent`, `authorized`, or `terminal` and verifies any authorization at its
+signed receipt time. A bundle is deliberately not an ordered or data-dependent
+workflow. The agent may execute any subset in any order, so operators must approve
+only sets where every subset and order is acceptable.
+
 ## Exact tenant-signed service tasks
 
 `stewardctl task` signs one exact JSON request to one configured agent-service

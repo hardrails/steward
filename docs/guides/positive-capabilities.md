@@ -34,7 +34,8 @@ digests before the effect. See
 [Broker authenticated API operations]({{ '/guides/connectors/' | relative_url }}).
 For sensitive effects, signed tenant policy can require this boundary, pin action
 keys and an approval threshold to connector IDs, prohibit generic egress, and
-require version-2 or version-3 permits with format-5 or format-6 evidence. See
+require exact single-request or bounded-bundle authority with format-5 or format-6
+evidence. See
 [Authorize exact external effects]({{ '/guides/authorized-effects/' | relative_url }}).
 
 Gateway rejects the exact configured connector credential in upstream response

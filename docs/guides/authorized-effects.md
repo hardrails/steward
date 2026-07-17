@@ -46,7 +46,9 @@ connector. For those calls, it binds all of the following:
 - the selected connector, exact configured operation, credential epoch, and
   effective route policy;
 - the exact request bytes, byte length, content type, one-use task ID, validity
-  window, required approval count, and exact set of action-authority keys; and
+  window, required approval count, and exact set of action-authority keys. One
+  permit may bind one request, or an exact-effect bundle may bind up to eight
+  independently one-use requests; and
 - a durable signed authorization record written before DNS, followed by a signed
   terminal record when Gateway can observe one.
 
@@ -444,6 +446,102 @@ first. Later denials are not enumerated. Treat it as evidence that at least one
 denial occurred, not as an exhaustive denial log. If that bounded evidence cannot
 be persisted, the request fails closed with HTTP 503.
 
+## Approve several exact effects together
+
+Use an exact-effect bundle when an operator has reviewed a small set of concrete
+requests and every subset and ordering is acceptable. A bundle reduces repeated
+signing; it does not create a connector session or a workflow. The compromised
+agent may use any unspent step in any order, omit a step, or stop. It cannot add a
+step, change bytes, substitute a connector operation, reuse a task ID, cross the
+admitted generation, or exceed the signed expiry.
+
+Create each exact request as an owner-only file. Then create an owner-only plan.
+`request_path` is local review metadata and must be an absolute, clean path. It is
+not signed; `stewardctl` reads that file and signs its exact digest and byte count.
+Omit `request_path` for GET, HEAD, and DELETE operations.
+
+```json
+{
+  "schema_version": "steward.effect-bundle-input.v1",
+  "bundle_id": "recovery-rotation-2026-07",
+  "steps": [{
+    "step_id": "01-primary",
+    "connector_id": "secrets-admin",
+    "operation_id": "rotate-recovery",
+    "task_id": "task-rotate-primary-7f67c52a",
+    "request_path": "/secure/review/rotate-primary.json"
+  }, {
+    "step_id": "02-secondary",
+    "connector_id": "secrets-admin",
+    "operation_id": "rotate-recovery",
+    "task_id": "task-rotate-secondary-91ec883b",
+    "request_path": "/secure/review/rotate-secondary.json"
+  }]
+}
+```
+
+The issuer sorts steps by `step_id`, checks the one-through-eight limit and unique
+step and task IDs, and proves that the first key is admitted and trusted for every
+connector. The shortest connector permit lifetime applies to the whole bundle.
+
+```console
+stewardctl permit bundle issue \
+  -admission admission.json \
+  -intent instance-intent.json \
+  -trust action-trust.json \
+  -plan exact-effects.json \
+  -valid-for 5m \
+  -key authorized-effects/effects-approver-a.private.pem \
+  -key-id effects-approver-a \
+  -out effect-bundle.partial.dsse.json
+
+stewardctl permit bundle approve \
+  -in effect-bundle.partial.dsse.json \
+  -admission admission.json \
+  -intent instance-intent.json \
+  -trust action-trust.json \
+  -plan exact-effects.json \
+  -key authorized-effects/effects-approver-b.private.pem \
+  -key-id effects-approver-b \
+  -out effect-bundle.dsse.json \
+  -header-out effect-bundle.header
+```
+
+Every approver rereads every request file, reconstructs every trusted operation,
+and refuses to sign if the resulting statement differs from the existing bundle.
+Every signer must be admitted and trusted for every connector in the set. Gateway
+validates all steps and all signer scopes before accepting even one selected step.
+The workload uses the same header for a listed call and selects that step with its
+existing `X-Steward-Task-ID`. Gateway's durable task spend remains per step.
+
+Verify the complete bundle and the request files, then correlate every spent or
+unspent step with a copied receipt chain:
+
+```console
+stewardctl permit bundle verify \
+  -in effect-bundle.dsse.json \
+  -plan exact-effects.json \
+  -authority effects-approver-a=authorized-effects/effects-approver-a.public \
+  -authority effects-approver-b=authorized-effects/effects-approver-b.public
+
+stewardctl permit bundle audit \
+  -in effect-bundle.dsse.json \
+  -plan exact-effects.json \
+  -authority effects-approver-a=authorized-effects/effects-approver-a.public \
+  -authority effects-approver-b=authorized-effects/effects-approver-b.public \
+  -receipts connector-receipts.ndjson \
+  -receipt-public-key connector-receipts.public \
+  -receipt-node-id '<configured-connector-receipt-node-id>' \
+  -receipt-epoch 1 \
+  -expected-sequence '<retained-sequence>' \
+  -expected-chain-hash 'sha256:<retained-chain-hash>'
+```
+
+Audit reports each step as `unspent`, `authorized`, or `terminal`. `authorized`
+without a terminal record is an unknown external outcome, not proof that nothing
+happened. The rationale and explicit unordered-set limitation are recorded in
+[ADR 0022]({{ '/decisions/0022-native-exact-effect-bundles/' | relative_url }}).
+
 ## Verify the effect offline
 
 Copy `action-permit.dsse.json`, `exact-request.json`, the Gateway connector receipt
@@ -499,7 +597,8 @@ These approaches are complementary:
 Steward's narrower difference is complete mediation of selected Steward connector
 calls for unmodified, containerized agents: signed tenant policy pins
 connector-specific action keys and, when configured, a minimum number of distinct
-approvers; one exact version-3 request permit is durably consumed before DNS;
+approvers; one exact request or a bounded set of up to eight exact requests is
+signed outside the agent, with each selected task durably consumed before DNS;
 credentials stay outside the workload; and the permit-to-terminal evidence can be
 verified offline. It does not require a
 particular browser, planner, agent framework, hosted authorization service, or
@@ -510,3 +609,5 @@ The architectural rationale is recorded in
 [ADR 0018]({{ '/decisions/0018-native-authorized-effects/' | relative_url }}).
 The separation-of-duties extension is recorded in
 [ADR 0021]({{ '/decisions/0021-enforce-multi-party-authorized-effects/' | relative_url }}).
+Bounded exact-effect sets are recorded in
+[ADR 0022]({{ '/decisions/0022-native-exact-effect-bundles/' | relative_url }}).
