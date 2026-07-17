@@ -4,7 +4,7 @@
 > A sandbox limits untrusted code but does not identify the authorizing tenant or
 > authorize one exact external effect. Steward adds signed local policy,
 > connector-scoped Authorized Effects keys, policy-enforced multi-party
-> exact-request permits,
+> exact-request permits and bounded exact-effect bundles,
 > Docker/gVisor enforcement, spend-before-DNS records, and offline-verifiable
 > receipts without
 > requiring a hosted service. A signed agent release can also bind one qualified
@@ -40,7 +40,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
 - [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
 - [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure optional state, inference, service, connector, and HTTP(S) egress grants
-- [Authorized Effects](https://hardrails.github.io/steward/guides/authorized-effects/): Assume the agent is compromised and require a signed, exact, one-use permit before a Steward-mediated connector effect
+- [Authorized Effects](https://hardrails.github.io/steward/guides/authorized-effects/): Assume the agent is compromised and require signed authority for one exact connector request or an unordered set of up to eight exact, independently one-use requests
 - [Gateway credentials](https://hardrails.github.io/steward/guides/secrets/): Compile exact OpenBao KV v2 policy, fail-closed Agent templates, expected-version readiness, and a systemd sandbox while keeping rendered inference keys and connector tokens in owner-only Gateway files and outside agents and the React console
 - [Tenant-signed service tasks](https://hardrails.github.io/steward/guides/hermes-agent/#authorize-and-run-one-exact-hermes-task): Scope a tenant key to Hermes, issue one exact task bundle, dispatch it through loopback Gateway, and audit its receipts
 - [Authenticated connectors](https://hardrails.github.io/steward/guides/connectors/): Broker exact API operations without directly configuring the workload with upstream credentials or origins; optionally require a tenant-scoped signature over one exact request; verify permit-to-receipt linkage offline
@@ -76,8 +76,9 @@ the workload, one private service, and named credential-brokered API operations 
 spend-before-effect call budgets. A connector can additionally require a short-lived
 permit signed by a tenant-scoped off-node key for the exact admitted operation,
 task, and request bytes. Authorized Effects can make that boundary mandatory in
-signed tenant policy, prohibit generic egress, require a version-2 or multi-party
-version-3 permit, spend it before DNS, and record format-5 or format-6 evidence. A
+signed tenant policy, prohibit generic egress, require one or more approvers over
+one exact request or a bounded set of up to eight exact requests, spend each task
+before DNS, and record format-5 or format-6 evidence. A
 service-scoped tenant task key can
 separately authorize one exact JSON request to a configured agent-service operation.
 Gateway writes receipt

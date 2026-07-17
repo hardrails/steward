@@ -163,10 +163,11 @@ The policy pins each off-node action public key to exact connector IDs; authenti
 intent explicitly selects the mode; Executor projects the narrowed keys; and
 Gateway rejects generic egress or any key/configuration mismatch. Each required
 authority signs one unchanged canonical DSSE statement for one exact connector
-request. A one-approver policy uses version 2; a multi-party policy uses version 3.
-Gateway checks its node, tenant, instance, generation, admitted artifact, policies,
-connector operation-policy digest, task, body digest and length, method-derived
-content type, and validity window against live state. The operation digest fixes
+request or an unordered set of up to eight exact requests. Gateway checks every
+signer against every connector, then checks its node, tenant, instance, generation,
+admitted artifact, policies, connector operation-policy digest, task, body digest
+and length, method-derived content type, and validity window against live state.
+The operation digest fixes
 the canonical origin, credential injection mode and epoch, method, and path.
 Gateway records the permit and stable task-based call digest together in receipt
 format 5 or 6 before DNS. Signers never need the upstream credential, and their
@@ -302,8 +303,8 @@ secret-delivery mechanism. An optional action permit narrows that outer connecto
 grant to one authority-signed request; it cannot add an operation or tenant that
 the admitted grant lacks. Authorized Effects additionally makes that requirement
 continuous from signed tenant policy through intent, immutable runtime state,
-Gateway grant, version-2 or version-3 permit, durable one-use spend, and format-5
-or format-6 evidence. It assumes the agent is compromised and applies only to fully mediated connector
+Gateway grant, exact signed authority, durable per-task spend, and format-5 or
+format-6 evidence. It assumes the agent is compromised and applies only to fully mediated connector
 calls; it is not prompt-injection detection or control over unmanaged channels.
 
 For HTTP(S) egress, the agent receives standard proxy variables that point to its

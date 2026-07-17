@@ -476,6 +476,16 @@ distinct valid signatures and records the canonical signer set and threshold in
 receipt format 6. Gateway state format 5 preserves the mode and narrowed key scopes
 across restart; format 6 also preserves a multi-party threshold.
 
+The same policy can authorize a version-4 exact-effect bundle containing one
+through eight requests. Every signer must be admitted and configured for every
+connector in the bundle. Gateway validates every listed connector, operation
+policy, content type, signer scope, and the shortest connector lifetime before it
+accepts any selected step. Each task remains independently one-use. The bundle is
+an unordered set, not a workflow: a compromised agent may execute any subset in
+any order, omit steps, or stop. Steward does not provide dependencies, conditional
+branches, compensation, rollback, or data flow from one step into another. Use a
+bundle only when every subset and ordering is acceptable.
+
 An invalid permit in authorized mode may create one stable
 `action_permit_denied` record per retained grant. The denial binds the request
 digest and operation policy without claiming a verified permit or authority key.

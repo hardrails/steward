@@ -361,6 +361,78 @@ func actionPermitForPayload(
 	return header, dsse.Digest(raw)
 }
 
+func effectBundleFor(
+	t *testing.T,
+	rig *connectorRig,
+	steps []actionpermit.BundleStep,
+	mutate func(*actionpermit.BundleStatement),
+) (string, string) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	bundle := actionpermit.BundleStatement{
+		SchemaVersion: actionpermit.SchemaV4, EffectMode: actionpermit.EffectModeAuthorized,
+		ApprovalThreshold: rig.grant.ActionApprovalThreshold,
+		NodeID:            rig.config.ActionPermitNodeID, TenantID: rig.grant.TenantID, InstanceID: rig.grant.InstanceID,
+		Generation: rig.grant.Generation, CapsuleDigest: rig.grant.CapsuleDigest, PolicyDigest: rig.grant.PolicyDigest,
+		RoutePolicyDigest: rig.server.policyDigests[rig.grant.GrantID], BundleID: "bundle.release",
+		Steps:     append([]actionpermit.BundleStep(nil), steps...),
+		NotBefore: now.Add(-time.Minute).Format(time.RFC3339), ExpiresAt: now.Add(4 * time.Minute).Format(time.RFC3339),
+	}
+	if mutate != nil {
+		mutate(&bundle)
+	}
+	payload, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := dsse.Sign(actionpermit.PayloadTypeV4, payload, "approver-a", rig.actionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.ApprovalThreshold > 1 {
+		envelope, err = dsse.AddSignature(envelope, "approver-b", rig.secondActionKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := dsse.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, err := actionpermit.EncodeHeader(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return header, dsse.Digest(raw)
+}
+
+func effectBundleStep(
+	t *testing.T,
+	connector loadedConnector,
+	stepID, operationID, taskID string,
+	body []byte,
+) actionpermit.BundleStep {
+	t.Helper()
+	operation, ok := connector.operations[operationID]
+	if !ok {
+		t.Fatalf("test connector has no operation %q", operationID)
+	}
+	operationDigest, err := ConnectorOperationPolicyDigest(
+		connector.BaseURL, connector.CredentialMode, connector.CredentialEpoch, connector.ID, operation,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentType, err := ConnectorOperationContentType(operation.Method)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return actionpermit.BundleStep{
+		StepID: stepID, ConnectorID: connector.ID, OperationID: operationID, OperationDigest: operationDigest,
+		TaskID: taskID, RequestDigest: actionpermit.RequestDigest(body), RequestBytes: int64(len(body)), ContentType: contentType,
+	}
+}
+
 func TestConnectorRequiresAndSpendsExactSignedActionPermit(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -508,6 +580,136 @@ func TestAuthorizedEffectsRequiresEveryPolicyApprovalBeforeNetwork(t *testing.T)
 	}
 	if !found {
 		t.Fatal("complete multi-party permit was not bound into receipts")
+	}
+}
+
+func TestExactEffectBundleSpendsEachListedTaskOnceInAnyOrder(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, authorizedEffects: true, approvalThreshold: 2,
+	})
+	createBody := []byte(`{"change":true}`)
+	steps := []actionpermit.BundleStep{
+		effectBundleStep(t, rig.connector, "01.create", "create", "task.bundle.create", createBody),
+		effectBundleStep(t, rig.connector, "02.read", "read", "task.bundle.read", nil),
+	}
+	header, permitDigest := effectBundleFor(t, rig, steps, nil)
+
+	read := connectorRequest(http.MethodGet, "issues", "read", "task.bundle.read", nil)
+	read.Header.Set(actionPermitHeader, header)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, read); response.Code != http.StatusNoContent || calls.Load() != 1 {
+		t.Fatalf("out-of-order read status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
+	}
+	create := connectorRequest(http.MethodPost, "issues", "create", "task.bundle.create", bytes.NewReader(createBody))
+	create.Header.Set(actionPermitHeader, header)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, create); response.Code != http.StatusNoContent || calls.Load() != 2 {
+		t.Fatalf("create status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
+	}
+
+	replay := connectorRequest(http.MethodGet, "issues", "read", "task.bundle.read", nil)
+	replay.Header.Set(actionPermitHeader, header)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, replay); response.Code != http.StatusConflict || calls.Load() != 2 {
+		t.Fatalf("per-step replay status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
+	}
+	unlisted := connectorRequest(http.MethodGet, "issues", "read", "task.bundle.unlisted", nil)
+	unlisted.Header.Set(actionPermitHeader, header)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, unlisted); response.Code != http.StatusForbidden || calls.Load() != 2 {
+		t.Fatalf("unlisted task status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
+	}
+	changed := connectorRequest(http.MethodPost, "issues", "create", "task.bundle.create", strings.NewReader(`{"change":false}`))
+	changed.Header.Set(actionPermitHeader, header)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, changed); response.Code != http.StatusForbidden || calls.Load() != 2 {
+		t.Fatalf("changed request status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
+	}
+
+	var authorizations int
+	_, err := connectorledger.VerifyRecords(
+		rig.config.ConnectorReceiptFile, rig.config.connectorReceiptKey.Public().(ed25519.PublicKey),
+		rig.config.ConnectorReceiptNodeID, rig.config.ConnectorReceiptEpoch,
+		func(record connectorledger.VerifiedReceipt) error {
+			if record.Receipt.Event.Phase == connectorledger.Authorize && record.Receipt.Event.PermitDigest == permitDigest {
+				authorizations++
+			}
+			return nil
+		},
+	)
+	if err != nil || authorizations != 2 {
+		t.Fatalf("bundle authorization receipts=%d err=%v", authorizations, err)
+	}
+}
+
+func TestExactEffectBundleRequiresEverySignerOnEveryConnector(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, authorizedEffects: true, approvalThreshold: 2,
+	})
+	notify := rig.connector
+	notify.Connector.ID = "notify"
+	notify.Connector.Operations = []ConnectorOperation{{ID: "send", Method: http.MethodPost, Path: "/v1/notify"}}
+	notify.operations = map[string]ConnectorOperation{"send": notify.Operations[0]}
+	connectors := map[string]loadedConnector{"issues": rig.connector, "notify": notify}
+	grant := rig.grant
+	grant.ConnectorIDs = []string{"issues", "notify"}
+	body := []byte(`{"change":true}`)
+	steps := []actionpermit.BundleStep{
+		effectBundleStep(t, rig.connector, "01.create", "create", "task.bundle.scope", body),
+		effectBundleStep(t, notify, "02.notify", "send", "task.bundle.notify", []byte(`{"done":true}`)),
+	}
+	wrongNodeHeader, _ := effectBundleFor(t, rig, steps, func(bundle *actionpermit.BundleStatement) {
+		bundle.NodeID = "node-other"
+	})
+	wrongNodeHeaders := make(http.Header)
+	wrongNodeHeaders.Set(actionPermitHeader, wrongNodeHeader)
+	if _, err := verifyConnectorActionPermit(
+		wrongNodeHeaders, rig.connector, connectors, grant, rig.server.policyDigests[rig.grant.GrantID],
+		"issues", "create", "task.bundle.scope", body, time.Now().UTC(),
+	); err == nil || !strings.Contains(err.Error(), "active tenant and grant") {
+		t.Fatalf("wrong-node bundle diagnostic = %v", err)
+	}
+	headerValue, _ := effectBundleFor(t, rig, steps, nil)
+	header := make(http.Header)
+	header.Set(actionPermitHeader, headerValue)
+	verify := func() error {
+		_, err := verifyConnectorActionPermit(
+			header, rig.connector, connectors, grant, rig.server.policyDigests[rig.grant.GrantID],
+			"issues", "create", "task.bundle.scope", body, time.Now().UTC(),
+		)
+		return err
+	}
+
+	if err := verify(); err == nil || !strings.Contains(err.Error(), "every connector") {
+		t.Fatalf("grant-scoped signer accepted for mixed-scope bundle: %v", err)
+	}
+	grant.ActionAuthorities = cloneGrantActionAuthorities(grant.ActionAuthorities)
+	grant.ActionAuthorities[0].ConnectorIDs = []string{"issues", "notify"}
+	if err := verify(); err == nil || !strings.Contains(err.Error(), "every connector") {
+		t.Fatalf("one of two mixed-scope signers accepted for bundle: %v", err)
+	}
+	grant.ActionAuthorities[1].ConnectorIDs = []string{"issues", "notify"}
+	notify.authorities = nil
+	notify.authorityTenants = nil
+	connectors["notify"] = notify
+	if err := verify(); err == nil || !strings.Contains(err.Error(), "every connector") {
+		t.Fatalf("config-untrusted signer accepted for mixed-scope bundle: %v", err)
+	}
+	notify.authorities = rig.connector.authorities
+	notify.authorityTenants = rig.connector.authorityTenants
+	connectors["notify"] = notify
+	if err := verify(); err != nil {
+		t.Fatalf("shared signer rejected for exact mixed-connector bundle: %v", err)
+	}
+	notify.MaxActionPermitSeconds = 60
+	connectors["notify"] = notify
+	if err := verify(); err == nil || !strings.Contains(err.Error(), "permit lifetime") {
+		t.Fatalf("unselected connector lifetime ceiling was ignored: %v", err)
 	}
 }
 

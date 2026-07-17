@@ -41,7 +41,8 @@ Five runtime boundaries separate authority:
    service identity and no Docker authority. In Authorized Effects mode, signed
    tenant policy pins off-node action keys and an approval threshold to selected
    connectors, generic egress is unavailable, and Gateway accepts only a complete
-   version-2 or multi-party version-3 permit for one exact request. It durably spends the permit before DNS while the upstream credential
+   permit for one exact request or a bounded exact-effect bundle. It validates the
+   full authority and durably spends each selected task before DNS while the upstream credential
    remains outside the workload. A separate service-scoped
    tenant task authority can sign one exact agent-service request. Current service
    tasks record task-local authorization, dispatch, and terminal lifecycle evidence.
@@ -231,9 +232,9 @@ Authorized Effects is an explicit intersection:
    immutable runtime state to Gateway;
 4. Gateway requires those scopes to exactly match its validated connector keys and
    operations; and
-5. every effect needs a complete canonical version-2 or version-3 DSSE permit over
-   the exact request, which Gateway records as spent before resolution or
-   connection.
+5. every effect needs complete canonical DSSE authority over the exact request,
+   either alone or inside a bounded bundle, which Gateway records as spent before
+   resolution or connection.
 
 Action private keys stay off-node and outside the workload. Gateway keeps the
 upstream credential in an owner-only file and injects it only at the fixed

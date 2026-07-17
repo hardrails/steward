@@ -65,8 +65,8 @@ before dispatch. The private key stays off-node. A successful replay returns the
 recorded run ID without dispatching again; an ambiguous outcome fails closed.
 For sensitive connectors, Authorized Effects binds connector-scoped public keys in
 signed tenant policy, can require distinct approvers, requires explicit intent and
-an exact-request permit, prohibits generic egress, and spends the permit before
-DNS. It covers only
+signed authority for one exact request or an unordered set of up to eight exact
+requests, prohibits generic egress, and spends each selected task before DNS. It covers only
 Steward-mediated connectors, not unmanaged credentials, browser sessions, local
 filesystem or computer use, inference confidentiality, or host root.
 

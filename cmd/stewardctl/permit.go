@@ -50,9 +50,11 @@ type permitAdmission struct {
 
 func permitCommand(arguments []string, stdout, stderr io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("permit command requires issue, approve, verify, or audit")
+		return errors.New("permit command requires bundle, issue, approve, verify, or audit")
 	}
 	switch arguments[0] {
+	case "bundle":
+		return permitBundleCommand(arguments[1:], stdout, stderr)
 	case "issue":
 		return issuePermit(arguments[1:], stdout, stderr)
 	case "approve":
@@ -62,7 +64,7 @@ func permitCommand(arguments []string, stdout, stderr io.Writer) error {
 	case "audit":
 		return auditPermit(arguments[1:], stdout)
 	default:
-		return errors.New("permit command requires issue, approve, verify, or audit")
+		return errors.New("permit command requires bundle, issue, approve, verify, or audit")
 	}
 }
 
