@@ -467,12 +467,16 @@ func (s *Server) allowEgressDeniedAttempt(grantID string, now time.Time) bool {
 }
 
 func (s *Server) reserveEgressDeniedAttemptNow(grantID string) egressDenialDecision {
+	return s.reserveEgressDeniedAttemptWithClock(grantID, time.Now)
+}
+
+func (s *Server) reserveEgressDeniedAttemptWithClock(grantID string, clock func() time.Time) egressDenialDecision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Sample the clock after serializing limiter updates. Otherwise concurrent
 	// requests can commit a later timestamp first and make an earlier sample
 	// look like a wall-clock rollback.
-	return s.reserveEgressDeniedAttemptLocked(grantID, time.Now())
+	return s.reserveEgressDeniedAttemptLocked(grantID, clock())
 }
 
 func (s *Server) reserveEgressDeniedAttempt(grantID string, now time.Time) egressDenialDecision {

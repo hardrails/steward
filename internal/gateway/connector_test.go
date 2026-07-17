@@ -601,6 +601,7 @@ func TestAuthorizedEffectsGrantRejectsAuthorityAndModeSubstitution(t *testing.T)
 		{name: "standard mode", mutate: func(grant *Grant) { grant.EffectMode = EffectModeStandard }},
 		{name: "generic egress", mutate: func(grant *Grant) { grant.EgressRouteIDs = []string{"public-web"} }},
 		{name: "node changed", mutate: func(grant *Grant) { grant.NodeID = "other-node" }},
+		{name: "connectors removed", mutate: func(grant *Grant) { grant.ConnectorIDs = nil }},
 		{name: "authority removed", mutate: func(grant *Grant) { grant.ActionAuthorities = nil }},
 		{name: "public key substituted", mutate: func(grant *Grant) {
 			grant.ActionAuthorities[0].PublicKey = base64.StdEncoding.EncodeToString(substitutePublic)
@@ -1431,6 +1432,26 @@ func TestConnectorAttemptBudgetLimitsInvalidWorkAndRecovers(t *testing.T) {
 	server.mu.Unlock()
 	if recreated {
 		t.Fatal("late request recreated connector limiter state for an unregistered grant")
+	}
+}
+
+func TestConnectorAttemptProductionClockReadIsSerialized(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	server := &Server{grants: map[string]Grant{"grant-a": {GrantID: "grant-a"}}}
+	var sampledOutsideLock atomic.Bool
+	clock := func() time.Time {
+		if server.mu.TryLock() {
+			sampledOutsideLock.Store(true)
+			server.mu.Unlock()
+		}
+		return now
+	}
+
+	if !server.allowConnectorAttemptWithClock("grant-a", clock) {
+		t.Fatal("first connector attempt was denied")
+	}
+	if sampledOutsideLock.Load() {
+		t.Fatal("production connector limiter sampled its clock before taking the state lock")
 	}
 }
 

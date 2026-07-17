@@ -323,12 +323,16 @@ func grantActionAuthorityKeys(grant Grant, connectorID string) map[string]ed2551
 }
 
 func (s *Server) allowConnectorAttemptNow(grantID string) bool {
+	return s.allowConnectorAttemptWithClock(grantID, time.Now)
+}
+
+func (s *Server) allowConnectorAttemptWithClock(grantID string, clock func() time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Read the clock only after taking the limiter lock. If concurrent callers
 	// capture time before locking, the request with the later timestamp can
 	// commit first and make the other look like a clock rollback.
-	return s.allowConnectorAttemptLocked(grantID, time.Now())
+	return s.allowConnectorAttemptLocked(grantID, clock())
 }
 
 func (s *Server) allowConnectorAttempt(grantID string, now time.Time) bool {
