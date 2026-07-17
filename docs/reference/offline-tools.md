@@ -1141,12 +1141,14 @@ applies the shortest connector lifetime to the whole set.
 stewardctl permit bundle verify \
   -in effect-bundle.dsse.json \
   -plan exact-effects.json \
+  -trust action-trust.json \
   -authority approver-a=approver-a.public \
   -authority approver-b=approver-b.public
 
 stewardctl permit bundle audit \
   -in effect-bundle.dsse.json \
   -plan exact-effects.json \
+  -trust action-trust.json \
   -authority approver-a=approver-a.public \
   -authority approver-b=approver-b.public \
   -receipts connector-receipts.ndjson \
@@ -1157,11 +1159,15 @@ stewardctl permit bundle audit \
   -expected-chain-hash 'sha256:<retained-chain-hash>'
 ```
 
-Verification optionally rereads the plan's request files. Audit reports each step
-as `unspent`, `authorized`, or `terminal` and verifies any authorization at its
-signed receipt time. A bundle is deliberately not an ordered or data-dependent
-workflow. The agent may execute any subset in any order, so operators must approve
-only sets where every subset and order is acceptable.
+Verification accepts `-plan` and `-trust` together, rereads the request files, and
+compares every signed operation digest, inferred content type, and signer scope
+with the exported Gateway trust inventory. Audit reports aggregate counts,
+`all_terminal`, and each step as `unspent`, `authorized`, or `terminal`, then
+verifies any authorization at its signed receipt time. Add `-require-all-terminal`
+when automation should fail unless every step has terminal evidence. A bundle is
+deliberately not an ordered or data-dependent workflow. The agent may execute any
+subset in any order, so operators must approve only sets where every subset and
+order is acceptable.
 
 ## Exact tenant-signed service tasks
 

@@ -300,6 +300,7 @@ func verifyEffectBundle(arguments []string, stdout io.Writer) error {
 	var authorityFlags repeatedFlag
 	flags.Var(&authorityFlags, "authority", "trusted KEY_ID=PUBLIC_KEY_FILE; repeat for multi-party bundles")
 	planPath := flags.String("plan", "", "optional exact effect plan and request files to compare")
+	trustPath := flags.String("trust", "", "Gateway action-trust inventory required with -plan")
 	maxValidity := flags.Duration("max-validity", actionpermit.MaxValidity, "local maximum bundle validity")
 	evaluatedAtText := flags.String("at", "", "canonical UTC RFC3339-seconds evaluation time")
 	if err := flags.Parse(arguments); err != nil {
@@ -307,6 +308,9 @@ func verifyEffectBundle(arguments []string, stdout io.Writer) error {
 	}
 	if *input == "" || flags.NArg() != 0 {
 		return errors.New("permit bundle verify requires -in and approval authorities")
+	}
+	if (*planPath == "") != (*trustPath == "") {
+		return errors.New("permit bundle verify requires -plan and -trust together")
 	}
 	raw, err := readBounded(*input)
 	if err != nil {
@@ -332,7 +336,7 @@ func verifyEffectBundle(arguments []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := compareEffectBundlePlan(plan, *verified.Bundle); err != nil {
+		if err := compareEffectBundlePlan(plan, *verified.Bundle, *trustPath, trusted, verified.KeyIDs); err != nil {
 			return err
 		}
 	}
@@ -636,18 +640,50 @@ func writeEffectBundleApprovalSummary(writer io.Writer, verified actionpermit.Ve
 	})
 }
 
-func compareEffectBundlePlan(plan effectBundlePlan, bundle actionpermit.BundleStatement) error {
+func compareEffectBundlePlan(
+	plan effectBundlePlan,
+	bundle actionpermit.BundleStatement,
+	trustPath string,
+	trusted map[string]ed25519.PublicKey,
+	keyIDs []string,
+) error {
 	if plan.BundleID != bundle.BundleID || len(plan.Steps) != len(bundle.Steps) {
 		return errors.New("exact effect bundle does not match the supplied plan")
 	}
+	trustRaw, err := securefile.Read(trustPath, maxActionTrustBytes, securefile.TrustFile)
+	if err != nil {
+		return fmt.Errorf("read action trust inventory: %w", err)
+	}
+	var inventory actionTrustInventory
+	if err := dsse.DecodeStrictInto(trustRaw, maxActionTrustBytes, &inventory); err != nil {
+		return fmt.Errorf("decode action trust inventory: %w", err)
+	}
+	if inventory.SchemaVersion != actionTrustSchemaV1 || inventory.NodeID != bundle.NodeID || inventory.TenantID != bundle.TenantID {
+		return errors.New("action trust inventory does not match the bundle node and tenant")
+	}
+	notBefore, err := parsePermitTime(bundle.NotBefore)
+	if err != nil {
+		return fmt.Errorf("bundle not_before: %w", err)
+	}
+	expiresAt, err := parsePermitTime(bundle.ExpiresAt)
+	if err != nil || !expiresAt.After(notBefore) {
+		return errors.New("bundle expiry is invalid")
+	}
+	validFor := expiresAt.Sub(notBefore)
 	for index, planned := range plan.Steps {
 		signed := bundle.Steps[index]
 		if planned.StepID != signed.StepID || planned.ConnectorID != signed.ConnectorID ||
 			planned.OperationID != signed.OperationID || planned.TaskID != signed.TaskID {
 			return fmt.Errorf("exact effect bundle step %d does not match the supplied plan", index)
 		}
+		operation, err := trustedEffectBundleOperation(inventory, signed, trusted, keyIDs, validFor)
+		if err != nil {
+			return fmt.Errorf("exact effect bundle step %q: %w", planned.StepID, err)
+		}
+		if signed.OperationDigest != operation.PolicyDigest || signed.ContentType != operation.ContentType {
+			return fmt.Errorf("exact effect bundle step %q does not match the current trusted operation", planned.StepID)
+		}
 		var request []byte
-		var err error
 		if planned.RequestPath != "" {
 			request, err = securefile.Read(planned.RequestPath, maxPermitRequestBytes, securefile.TrustFile)
 			if err != nil {
@@ -662,6 +698,75 @@ func compareEffectBundlePlan(plan effectBundlePlan, bundle actionpermit.BundleSt
 		}
 	}
 	return nil
+}
+
+func trustedEffectBundleOperation(
+	inventory actionTrustInventory,
+	step actionpermit.BundleStep,
+	trusted map[string]ed25519.PublicKey,
+	keyIDs []string,
+	validFor time.Duration,
+) (validatedActionTrust, error) {
+	var connector *actionTrustConnector
+	for index := range inventory.Connectors {
+		if inventory.Connectors[index].ConnectorID != step.ConnectorID {
+			continue
+		}
+		if connector != nil {
+			return validatedActionTrust{}, fmt.Errorf("action trust inventory duplicates connector %q", step.ConnectorID)
+		}
+		connector = &inventory.Connectors[index]
+	}
+	if connector == nil || connector.CredentialEpoch == 0 || connector.MaxPermitSeconds < 1 ||
+		connector.MaxPermitSeconds > int(actionpermit.MaxValidity/time.Second) ||
+		validFor > time.Duration(connector.MaxPermitSeconds)*time.Second {
+		return validatedActionTrust{}, errors.New("action trust inventory does not bind a valid connector lifetime")
+	}
+	for _, keyID := range keyIDs {
+		public, exists := trusted[keyID]
+		if !exists {
+			return validatedActionTrust{}, fmt.Errorf("trusted authority %q is unavailable", keyID)
+		}
+		var authority *actionTrustAuthority
+		for index := range inventory.Authorities {
+			if inventory.Authorities[index].KeyID != keyID {
+				continue
+			}
+			if authority != nil {
+				return validatedActionTrust{}, fmt.Errorf("action trust inventory duplicates authority %q", keyID)
+			}
+			authority = &inventory.Authorities[index]
+		}
+		if authority == nil || authority.TenantID != inventory.TenantID || authority.PublicKeyDigest != dsse.Digest(public) ||
+			!slices.Contains(authority.ConnectorIDs, step.ConnectorID) || !slices.Contains(connector.AuthorityKeyIDs, keyID) {
+			return validatedActionTrust{}, fmt.Errorf("action trust inventory does not bind authority %q to connector %q", keyID, step.ConnectorID)
+		}
+	}
+	var operation *actionTrustOperation
+	for index := range connector.Operations {
+		if connector.Operations[index].ID != step.OperationID {
+			continue
+		}
+		if operation != nil {
+			return validatedActionTrust{}, fmt.Errorf("action trust inventory duplicates operation %q", step.OperationID)
+		}
+		operation = &connector.Operations[index]
+	}
+	if operation == nil {
+		return validatedActionTrust{}, errors.New("action trust inventory does not contain the bundled operation")
+	}
+	policyDigest, err := gateway.ConnectorOperationPolicyDigest(
+		connector.BaseURL, connector.CredentialMode, connector.CredentialEpoch, connector.ConnectorID,
+		gateway.ConnectorOperation{ID: operation.ID, Method: operation.Method, Path: operation.Path},
+	)
+	if err != nil || policyDigest != operation.PolicyDigest {
+		return validatedActionTrust{}, errors.New("action trust inventory contains inconsistent connector operation policy")
+	}
+	contentType, err := gateway.ConnectorOperationContentType(operation.Method)
+	if err != nil {
+		return validatedActionTrust{}, errors.New("action trust inventory contains an unsupported connector operation method")
+	}
+	return validatedActionTrust{PolicyDigest: policyDigest, ContentType: contentType, Method: operation.Method, Path: operation.Path}, nil
 }
 
 // auditEffectBundle is implemented with receipt correlation below the issuance

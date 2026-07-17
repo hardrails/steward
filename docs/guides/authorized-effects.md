@@ -521,12 +521,14 @@ unspent step with a copied receipt chain:
 stewardctl permit bundle verify \
   -in effect-bundle.dsse.json \
   -plan exact-effects.json \
+  -trust action-trust.json \
   -authority effects-approver-a=authorized-effects/effects-approver-a.public \
   -authority effects-approver-b=authorized-effects/effects-approver-b.public
 
 stewardctl permit bundle audit \
   -in effect-bundle.dsse.json \
   -plan exact-effects.json \
+  -trust action-trust.json \
   -authority effects-approver-a=authorized-effects/effects-approver-a.public \
   -authority effects-approver-b=authorized-effects/effects-approver-b.public \
   -receipts connector-receipts.ndjson \
@@ -537,9 +539,12 @@ stewardctl permit bundle audit \
   -expected-chain-hash 'sha256:<retained-chain-hash>'
 ```
 
-Audit reports each step as `unspent`, `authorized`, or `terminal`. `authorized`
-without a terminal record is an unknown external outcome, not proof that nothing
-happened. The rationale and explicit unordered-set limitation are recorded in
+Audit reports aggregate counts, `all_terminal`, and each step as `unspent`,
+`authorized`, or `terminal`. `authorized` without a terminal record is an unknown
+external outcome, not proof that nothing happened. Automation that requires a
+fully terminal bundle can add `-require-all-terminal` for a nonzero exit when any
+step lacks terminal evidence. The rationale and explicit unordered-set limitation
+are recorded in
 [ADR 0022]({{ '/decisions/0022-native-exact-effect-bundles/' | relative_url }}).
 
 ## Verify the effect offline

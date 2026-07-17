@@ -663,6 +663,17 @@ func TestExactEffectBundleRequiresEverySignerOnEveryConnector(t *testing.T) {
 		effectBundleStep(t, rig.connector, "01.create", "create", "task.bundle.scope", body),
 		effectBundleStep(t, notify, "02.notify", "send", "task.bundle.notify", []byte(`{"done":true}`)),
 	}
+	wrongNodeHeader, _ := effectBundleFor(t, rig, steps, func(bundle *actionpermit.BundleStatement) {
+		bundle.NodeID = "node-other"
+	})
+	wrongNodeHeaders := make(http.Header)
+	wrongNodeHeaders.Set(actionPermitHeader, wrongNodeHeader)
+	if _, err := verifyConnectorActionPermit(
+		wrongNodeHeaders, rig.connector, connectors, grant, rig.server.policyDigests[rig.grant.GrantID],
+		"issues", "create", "task.bundle.scope", body, time.Now().UTC(),
+	); err == nil || !strings.Contains(err.Error(), "active tenant and grant") {
+		t.Fatalf("wrong-node bundle diagnostic = %v", err)
+	}
 	headerValue, _ := effectBundleFor(t, rig, steps, nil)
 	header := make(http.Header)
 	header.Set(actionPermitHeader, headerValue)

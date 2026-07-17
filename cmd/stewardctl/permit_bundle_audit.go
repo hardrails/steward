@@ -33,6 +33,7 @@ func auditExactEffectBundle(arguments []string, stdout io.Writer) error {
 	var authorityFlags repeatedFlag
 	flags.Var(&authorityFlags, "authority", "trusted KEY_ID=PUBLIC_KEY_FILE; repeat for multi-party bundles")
 	planPath := flags.String("plan", "", "optional exact effect plan and request files to compare")
+	trustPath := flags.String("trust", "", "Gateway action-trust inventory required with -plan")
 	receiptsPath := flags.String("receipts", "", "signed connector receipt ledger")
 	receiptPublicKeyPath := flags.String("receipt-public-key", "", "base64 Ed25519 connector receipt public key")
 	receiptNodeID := flags.String("receipt-node-id", "", "expected connector receipt node ID")
@@ -40,11 +41,15 @@ func auditExactEffectBundle(arguments []string, stdout io.Writer) error {
 	maxValidity := flags.Duration("max-validity", actionpermit.MaxValidity, "local maximum bundle validity")
 	expectedSequence := flags.String("expected-sequence", "", "externally retained final receipt sequence")
 	expectedChainHash := flags.String("expected-chain-hash", "", "externally retained sha256 receipt chain hash")
+	requireAllTerminal := flags.Bool("require-all-terminal", false, "fail after valid output unless every step has terminal evidence")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
 	if *input == "" || *receiptsPath == "" || *receiptPublicKeyPath == "" || *receiptNodeID == "" || flags.NArg() != 0 {
 		return errors.New("permit bundle audit requires -in, approval authorities, -receipts, -receipt-public-key, and -receipt-node-id")
+	}
+	if (*planPath == "") != (*trustPath == "") {
+		return errors.New("permit bundle audit requires -plan and -trust together")
 	}
 	raw, err := readBounded(*input)
 	if err != nil {
@@ -64,7 +69,7 @@ func auditExactEffectBundle(arguments []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := compareEffectBundlePlan(plan, bundle); err != nil {
+		if err := compareEffectBundlePlan(plan, bundle, *trustPath, trusted, verified.KeyIDs); err != nil {
 			return err
 		}
 	}
@@ -133,17 +138,48 @@ func auditExactEffectBundle(arguments []string, stdout io.Writer) error {
 	if err := checkExpectedConnectorHead(head, *expectedSequence, *expectedChainHash); err != nil {
 		return err
 	}
+	unspent, authorized, terminal := 0, 0, 0
+	for _, step := range steps {
+		switch step.Status {
+		case "unspent":
+			unspent++
+		case "authorized":
+			authorized++
+		case "terminal":
+			terminal++
+		}
+	}
+	executionStatus := "incomplete"
+	if unspent == len(steps) {
+		executionStatus = "unspent"
+	} else if terminal == len(steps) {
+		executionStatus = "terminal"
+	}
+	allTerminal := terminal == len(steps)
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
-	return encoder.Encode(struct {
+	if err := encoder.Encode(struct {
 		Valid           bool                         `json:"valid"`
+		ExecutionStatus string                       `json:"execution_status"`
+		AllTerminal     bool                         `json:"all_terminal"`
+		UnspentSteps    int                          `json:"unspent_steps"`
+		AuthorizedSteps int                          `json:"authorized_steps"`
+		TerminalSteps   int                          `json:"terminal_steps"`
 		PermitDigest    string                       `json:"permit_digest"`
 		AuthorityKeyIDs []string                     `json:"authority_key_ids"`
 		Bundle          actionpermit.BundleStatement `json:"bundle"`
 		Steps           []effectBundleAuditStep      `json:"steps"`
 		Head            connectorledger.Head         `json:"head"`
-	}{Valid: true, PermitDigest: verified.EnvelopeDigest, AuthorityKeyIDs: verified.KeyIDs,
-		Bundle: bundle, Steps: steps, Head: head})
+	}{Valid: true, ExecutionStatus: executionStatus, AllTerminal: allTerminal,
+		UnspentSteps: unspent, AuthorizedSteps: authorized, TerminalSteps: terminal,
+		PermitDigest: verified.EnvelopeDigest, AuthorityKeyIDs: verified.KeyIDs,
+		Bundle: bundle, Steps: steps, Head: head}); err != nil {
+		return err
+	}
+	if *requireAllTerminal && !allTerminal {
+		return errors.New("exact effect bundle does not have terminal evidence for every step")
+	}
+	return nil
 }
 
 func verifyEffectBundleForAudit(

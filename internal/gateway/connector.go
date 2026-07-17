@@ -270,7 +270,7 @@ func verifyConnectorActionPermit(
 	}
 	if verified.PayloadType == actionpermit.PayloadTypeV4 {
 		return verifyConnectorActionBundle(
-			verified, connectors, grant, routePolicyDigest, connectorID, operationID, taskID, body,
+			verified, connector, connectors, grant, routePolicyDigest, connectorID, operationID, taskID, body,
 		)
 	}
 	statement := verified.Statement
@@ -329,6 +329,7 @@ func verifyConnectorActionPermit(
 
 func verifyConnectorActionBundle(
 	verified actionpermit.Verified,
+	selectedConnector loadedConnector,
 	connectors map[string]loadedConnector,
 	grant Grant,
 	routePolicyDigest, connectorID, operationID, taskID string,
@@ -336,7 +337,7 @@ func verifyConnectorActionBundle(
 ) (connectorActionPermit, error) {
 	bundle := verified.Bundle
 	if grant.EffectMode != EffectModeAuthorized || bundle == nil || bundle.ApprovalThreshold != grant.ActionApprovalThreshold ||
-		bundle.NodeID == "" || bundle.TenantID != grant.TenantID || bundle.InstanceID != grant.InstanceID ||
+		bundle.NodeID != selectedConnector.permitNodeID || bundle.TenantID != grant.TenantID || bundle.InstanceID != grant.InstanceID ||
 		bundle.Generation != grant.Generation || bundle.CapsuleDigest != grant.CapsuleDigest ||
 		bundle.PolicyDigest != grant.PolicyDigest || bundle.RoutePolicyDigest != routePolicyDigest {
 		return connectorActionPermit{}, errors.New("effect bundle does not match the active tenant and grant")

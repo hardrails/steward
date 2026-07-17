@@ -60,7 +60,7 @@ func TestEffectBundleIssueApproveVerifyAndPartialAudit(t *testing.T) {
 	})
 	mailDigest := mustOperationPolicyDigest(t, "https://mail.example.test", 2, "mail", "send", "POST", "/v1/messages")
 	ticketDigest := mustOperationPolicyDigest(t, "https://tickets.example.test", 7, "ticketing", "read", "GET", "/v1/tickets/current")
-	trustPath := writePermitJSON(t, directory, "bundle-trust.json", actionTrustInventory{
+	trustInventory := actionTrustInventory{
 		SchemaVersion: actionTrustSchemaV1, NodeID: intent.NodeID, TenantID: intent.TenantID,
 		Authorities: []actionTrustAuthority{
 			{KeyID: "approver-a", TenantID: intent.TenantID, PublicKeyDigest: dsse.Digest(publicA), ConnectorIDs: connectorIDs},
@@ -74,7 +74,8 @@ func TestEffectBundleIssueApproveVerifyAndPartialAudit(t *testing.T) {
 				CredentialEpoch: 7, MaxPermitSeconds: 300, AuthorityKeyIDs: []string{"approver-a", "approver-b"},
 				Operations: []actionTrustOperation{{ID: "read", Method: "GET", Path: "/v1/tickets/current", PolicyDigest: ticketDigest}}},
 		},
-	})
+	}
+	trustPath := writePermitJSON(t, directory, "bundle-trust.json", trustInventory)
 	plan := effectBundlePlan{
 		SchemaVersion: effectBundleInputSchemaV1, BundleID: "release.42",
 		Steps: []effectBundlePlanStep{
@@ -136,9 +137,15 @@ func TestEffectBundleIssueApproveVerifyAndPartialAudit(t *testing.T) {
 	if header, err := os.ReadFile(headerPath); err != nil || len(bytes.TrimSpace(header)) == 0 {
 		t.Fatalf("complete bundle header = %q, %v", header, err)
 	}
-	var verifyOutput bytes.Buffer
 	if err := run([]string{
 		"permit", "bundle", "verify", "-in", completePath, "-plan", planPath,
+		"-authority", "approver-a=" + publicAPath, "-authority", "approver-b=" + publicBPath,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "requires -plan and -trust together") {
+		t.Fatalf("plan without trust verification error = %v", err)
+	}
+	var verifyOutput bytes.Buffer
+	if err := run([]string{
+		"permit", "bundle", "verify", "-in", completePath, "-plan", planPath, "-trust", trustPath,
 		"-authority", "approver-a=" + publicAPath, "-authority", "approver-b=" + publicBPath,
 	}, &verifyOutput, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
@@ -156,11 +163,25 @@ func TestEffectBundleIssueApproveVerifyAndPartialAudit(t *testing.T) {
 		verified.Bundle.Steps[1].RequestDigest != actionpermit.RequestDigest(nil) {
 		t.Fatalf("verified bundle = %+v", verified)
 	}
+	staleTrust := trustInventory
+	staleTrust.Connectors = append([]actionTrustConnector(nil), trustInventory.Connectors...)
+	staleTrust.Connectors[0].CredentialEpoch = 3
+	staleTrust.Connectors[0].Operations = append([]actionTrustOperation(nil), trustInventory.Connectors[0].Operations...)
+	staleTrust.Connectors[0].Operations[0].PolicyDigest = mustOperationPolicyDigest(
+		t, "https://mail.example.test", 3, "mail", "send", "POST", "/v1/messages",
+	)
+	staleTrustPath := writePermitJSON(t, directory, "bundle-stale-trust.json", staleTrust)
+	if err := run([]string{
+		"permit", "bundle", "verify", "-in", completePath, "-plan", planPath, "-trust", staleTrustPath,
+		"-authority", "approver-a=" + publicAPath, "-authority", "approver-b=" + publicBPath,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "current trusted operation") {
+		t.Fatalf("stale operation trust verification error = %v", err)
+	}
 	if err := os.WriteFile(requestPath, []byte(`{"recipient":"attacker@example.test"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{
-		"permit", "bundle", "verify", "-in", completePath, "-plan", planPath,
+		"permit", "bundle", "verify", "-in", completePath, "-plan", planPath, "-trust", trustPath,
 		"-authority", "approver-a=" + publicAPath, "-authority", "approver-b=" + publicBPath,
 	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "does not bind") {
 		t.Fatalf("changed bundle request verification error = %v", err)
@@ -212,7 +233,7 @@ func TestEffectBundleIssueApproveVerifyAndPartialAudit(t *testing.T) {
 	timeNow = func() time.Time { return fixedNow.Add(48 * time.Hour) }
 	var auditOutput bytes.Buffer
 	if err := run([]string{
-		"permit", "bundle", "audit", "-in", completePath, "-plan", planPath,
+		"permit", "bundle", "audit", "-in", completePath, "-plan", planPath, "-trust", trustPath,
 		"-authority", "approver-a=" + publicAPath, "-authority", "approver-b=" + publicBPath,
 		"-receipts", receiptsPath, "-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/gateway",
 		"-receipt-epoch", "3", "-expected-sequence", "2", "-expected-chain-hash", head.ChainHash,
@@ -220,17 +241,33 @@ func TestEffectBundleIssueApproveVerifyAndPartialAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	var audited struct {
-		Valid bool                    `json:"valid"`
-		Steps []effectBundleAuditStep `json:"steps"`
-		Head  connectorledger.Head    `json:"head"`
+		Valid           bool                    `json:"valid"`
+		ExecutionStatus string                  `json:"execution_status"`
+		AllTerminal     bool                    `json:"all_terminal"`
+		UnspentSteps    int                     `json:"unspent_steps"`
+		AuthorizedSteps int                     `json:"authorized_steps"`
+		TerminalSteps   int                     `json:"terminal_steps"`
+		Steps           []effectBundleAuditStep `json:"steps"`
+		Head            connectorledger.Head    `json:"head"`
 	}
 	if err := json.Unmarshal(auditOutput.Bytes(), &audited); err != nil {
 		t.Fatal(err)
 	}
-	if !audited.Valid || len(audited.Steps) != 2 || audited.Steps[0].Status != "terminal" ||
+	if !audited.Valid || audited.ExecutionStatus != "incomplete" || audited.AllTerminal ||
+		audited.UnspentSteps != 1 || audited.AuthorizedSteps != 0 || audited.TerminalSteps != 1 ||
+		len(audited.Steps) != 2 || audited.Steps[0].Status != "terminal" ||
 		audited.Steps[0].Authorization == nil || audited.Steps[0].Terminal == nil ||
 		audited.Steps[1].Status != "unspent" || audited.Head != head {
 		t.Fatalf("bundle audit = %+v", audited)
+	}
+	if err := run([]string{
+		"permit", "bundle", "audit", "-in", completePath, "-plan", planPath, "-trust", trustPath,
+		"-authority", "approver-a=" + publicAPath, "-authority", "approver-b=" + publicBPath,
+		"-receipts", receiptsPath, "-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/gateway",
+		"-receipt-epoch", "3", "-expected-sequence", "2", "-expected-chain-hash", head.ChainHash,
+		"-require-all-terminal",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "terminal evidence for every step") {
+		t.Fatalf("require-all-terminal audit error = %v", err)
 	}
 }
 
