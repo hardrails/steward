@@ -49,7 +49,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Terraform](https://hardrails.github.io/steward/guides/terraform/): Non-secret cloud bootstrap and AWS hardening
 - [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate the fleet controller, a local node, or both with Model Context Protocol 2025-11-25 stdio tools
 - [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Build the exact-pinned qualified adapter; review its gVisor qualification evidence, signed workspace and connector skills, service API, and limits
-- [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): Review the layout contract, bounded WebSocket path, and adapter acceptance gate
+- [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): Build and qualify the exact official release, run a real custom skill through the bounded one-shot API under gVisor, inspect the offline bundle, and review excluded authority
 - [Air-gapped installation](https://hardrails.github.io/steward/guides/air-gapped/): Offline import and verification
 - [Upgrade and rollback](https://hardrails.github.io/steward/guides/upgrades/): Manifest-bound activation, drained-node requirements, durable-format checks, and rollback limits
 
@@ -123,4 +123,7 @@ Gateway receipt chain. The tenant-signed run path exercises a service-scoped key
 an owner-only exact-request bundle, generic task lifecycle commands, and offline task audit.
 Steward ships the builder and disposable-host
 acceptance harness but no prebuilt Hermes OCI archive because dependency and
-base-image notices are incomplete. OpenClaw remains an unqualified layout contract.
+base-image notices are incomplete. Steward separately qualifies a closed OpenClaw
+one-shot surface for exact official release `2026.7.1` on `linux/amd64`; the full
+Gateway, UI, channels, browser, cron, plugins, nodes, discovery, arbitrary skills,
+and nested sandboxes remain excluded.

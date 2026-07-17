@@ -104,8 +104,14 @@ off-node task key still authorize it.
 
 The official Hermes image remains inadmissible. Steward ships the pinned builder,
 not a prebuilt Hermes OCI archive, because dependency and base-image notices are
-incomplete. Operators build, inspect, and sign their exact output. OpenClaw remains
-a layout contract and has not completed qualification.
+incomplete. Operators build, inspect, and sign their exact output.
+
+Steward's OpenClaw adapter derives from the exact official `2026.7.1` OCI release
+and has a separate `linux/amd64` gVisor qualification. Its closed one-shot API runs
+the real `steward-workspace-audit` custom skill with only `read` and `exec`, fixed
+inference through Steward, bounded results, restart reuse, and fail-closed skill
+tamper detection. It deliberately excludes OpenClaw Gateway, UI, channels, browser,
+cron, plugins, nodes, discovery, arbitrary skills, and nested sandboxes.
 
 Persistent Docker state requires the explicit dedicated single-tenant host setting
 because the portable local volume driver cannot enforce hard byte or inode quotas.
@@ -125,7 +131,7 @@ secrets, host mounts, privileged mode, or undeclared ports.
 [Roll it out through canary and batch gates]({{ '/guides/fleet-rollout/' | relative_url }}) ·
 [Inspect a fleet and submit an offline-signed command]({{ '/guides/operator-console/' | relative_url }}) ·
 [Shorten CLI commands and enable completion]({{ '/guides/cli/' | relative_url }}) ·
-[Review the OpenClaw adapter contract]({{ '/guides/openclaw/' | relative_url }}) ·
+[Build and run the OpenClaw adapter]({{ '/guides/openclaw/' | relative_url }}) ·
 [Configure positive capabilities]({{ '/guides/positive-capabilities/' | relative_url }}) ·
 [Authorize exact external effects]({{ '/guides/authorized-effects/' | relative_url }}) ·
 [Store and distribute Gateway credentials]({{ '/guides/secrets/' | relative_url }}) ·

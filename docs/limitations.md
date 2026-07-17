@@ -726,7 +726,9 @@ execution boundary beneath a retained workload.
 - Interactive terminal/exec sessions
 - Image pulling or registry authentication
 - A prebuilt, Steward-redistributed Hermes adapter image
-- A qualified OpenClaw adapter; OpenClaw remains a layout contract
+- OpenClaw Gateway, Control UI, channels, browser control, cron, plugins, nodes,
+  discovery, arbitrary skills, or nested Docker sandboxes. The qualified OpenClaw
+  adapter exposes only its documented one-shot run surface.
 - Hermes run event streams or unqualified Hermes plugins, channels, skills, or MCP
   servers
 - Multi-image archive selection, remote OCI descriptors, or mutable-tag admission

@@ -287,6 +287,63 @@ func TestOpenClawAdapterShipsInTheLinuxNodePayload(t *testing.T) {
 	}
 }
 
+func TestOpenClawRetainedFeasibilityEvidenceMatchesTheHarness(t *testing.T) {
+	root := filepath.Clean(filepath.Join(openClawAdapterRoot(t), "..", ".."))
+	var evidence struct {
+		SchemaVersion        string `json:"schema_version"`
+		Agent                string `json:"agent"`
+		Overall              string `json:"overall"`
+		ContainsAgentContent bool   `json:"contains_agent_content"`
+		Runtime              string `json:"runtime"`
+		Platform             string `json:"platform"`
+		HarnessSHA256        string `json:"harness_sha256"`
+		UpstreamRevision     string `json:"upstream_revision"`
+		AdapterStewardCommit string `json:"adapter_steward_commit"`
+		AdapterTree          string `json:"adapter_git_tree"`
+		ArchiveSHA256        string `json:"archive_sha256"`
+		ImageManifestDigest  string `json:"image_manifest_digest"`
+		ImageConfigDigest    string `json:"image_config_digest"`
+		RuntimeImageID       string `json:"runtime_image_id"`
+		Checks               []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"checks"`
+	}
+	decodeEvidence(t, filepath.Join(root, "docs", "reference", "evidence", "openclaw-feasibility.json"), &evidence)
+	if evidence.SchemaVersion != "steward.agent-feasibility.v1" || evidence.Agent != "openclaw" ||
+		evidence.Overall != "passed" || evidence.ContainsAgentContent || evidence.Runtime != "runsc" ||
+		evidence.Platform != "linux/amd64" || evidence.UpstreamRevision != openClawRevision {
+		t.Fatalf("invalid OpenClaw feasibility authority: %#v", evidence)
+	}
+	if evidence.HarnessSHA256 != sha256File(t, filepath.Join(root, "scripts", "openclaw-feasibility.sh")) ||
+		!validHexObjectID(evidence.AdapterStewardCommit) || !validHexObjectID(evidence.AdapterTree) ||
+		!validSHA256Hex(evidence.ArchiveSHA256) || !validSHA256Digest(evidence.ImageManifestDigest) ||
+		!validSHA256Digest(evidence.ImageConfigDigest) || !validSHA256Digest(evidence.RuntimeImageID) ||
+		(evidence.RuntimeImageID != evidence.ImageManifestDigest && evidence.RuntimeImageID != evidence.ImageConfigDigest) {
+		t.Fatalf("invalid OpenClaw feasibility identity: %#v", evidence)
+	}
+	git := exec.Command("git", "-C", root, "rev-parse", evidence.AdapterStewardCommit+":adapters/openclaw")
+	observedTree, err := git.Output()
+	if err != nil || strings.TrimSpace(string(observedTree)) != evidence.AdapterTree {
+		t.Fatalf("retained OpenClaw adapter tree is unavailable or mismatched: %v %q", err, observedTree)
+	}
+	required := []string{
+		"bundle.contract", "image.load", "image.contract", "network.internal", "fixture.model",
+		"agent.readiness", "runtime.policy", "adapter.negotiation", "service.boundary",
+		"runtime.identity", "runtime.filesystem", "runtime.network", "task.skill",
+		"restart.readiness", "restart.skill", "tamper.fail_closed", "feasibility.complete",
+		"evidence.coverage",
+	}
+	if len(evidence.Checks) != len(required) {
+		t.Fatalf("OpenClaw feasibility check count = %d, want %d", len(evidence.Checks), len(required))
+	}
+	for index, id := range required {
+		if evidence.Checks[index].ID != id || evidence.Checks[index].Status != "passed" {
+			t.Fatalf("OpenClaw feasibility check %d = %#v, want passed %s", index, evidence.Checks[index], id)
+		}
+	}
+}
+
 func TestOpenClawFixtureModelRequiresTheExecResult(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {

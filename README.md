@@ -495,11 +495,18 @@ volumes without enforced byte or inode quotas. Raw TCP/UDP, host mounts, arbitra
 secret injection, privileged mode, Docker access, and undeclared ports remain
 unavailable.
 
-[OpenClaw](https://github.com/openclaw/openclaw) remains a layout contract only. Its
-official image is not a qualified, directly runnable Steward adapter.
+Steward also includes a qualified, closed-surface
+[OpenClaw](https://github.com/openclaw/openclaw) adapter for the exact official
+`2026.7.1` OCI release on `linux/amd64`. It exposes one-shot health, negotiation,
+run submission, and run-status operations on port `18789`; allows only OpenClaw's
+`read` and `exec` tools inside the outer gVisor capsule; and fixes inference through
+Steward's relay. Qualification ran the real `steward-workspace-audit` custom skill,
+verified its deterministic result, restarted and reused it, and required persisted
+skill tamper to fail closed. OpenClaw Gateway, Control UI, channels, browser, cron,
+plugins, nodes, discovery, arbitrary skills, and nested sandboxes remain excluded.
 
 - [Build and run the Hermes Agent adapter](https://hardrails.github.io/steward/guides/hermes-agent/)
-- [OpenClaw adapter contract](https://hardrails.github.io/steward/guides/openclaw/)
+- [Build and run the OpenClaw adapter](https://hardrails.github.io/steward/guides/openclaw/)
 - [Current limitations](https://hardrails.github.io/steward/limitations/)
 
 ## Platforms and independence

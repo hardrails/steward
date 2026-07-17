@@ -66,6 +66,10 @@ commits.
 
 ## Current qualified application
 
+> Historical note: OpenClaw was unqualified when this decision was accepted. The
+> later closed-surface qualification is recorded in
+> [ADR 0025]({{ '/decisions/0025-qualify-a-closed-openclaw-agent-surface/' | relative_url }}).
+
 The Hermes Agent adapter applies this decision to upstream commit
 `095b9eed3801c251796df93f48a8f2a527ff6e70` on the qualified `linux/amd64` platform.
 Other platforms require a separate qualification run. Steward builds it from source rather
@@ -83,8 +87,9 @@ Inference is fixed through `http://steward-relay:8080/v1`.
 
 Steward does not redistribute the resulting Hermes image because dependency and
 base-image notices are incomplete. This legal and supply-chain gate remains separate
-from the runtime qualification. OpenClaw has not passed this qualification and
-remains a layout contract.
+from the runtime qualification. The later OpenClaw decision qualifies a different,
+closed one-shot surface by deriving from an exact official OCI release; it does not
+retroactively broaden this Hermes decision.
 
 ## Rejected alternatives
 
