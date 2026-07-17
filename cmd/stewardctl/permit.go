@@ -41,6 +41,7 @@ type permitAdmission struct {
 	ConnectorURL      string                  `json:"connector_url,omitempty"`
 	ConnectorIDs      []string                `json:"connector_ids,omitempty"`
 	RoutePolicyDigest string                  `json:"route_policy_digest,omitempty"`
+	EffectMode        string                  `json:"effect_mode,omitempty"`
 }
 
 func permitCommand(arguments []string, stdout io.Writer) error {
@@ -114,6 +115,9 @@ func issuePermit(arguments []string, stdout io.Writer) error {
 	if err := intent.Validate(admission.AuthenticatedIdentity{TenantID: intent.TenantID, NodeID: intent.NodeID}); err != nil {
 		return err
 	}
+	if admitted.EffectMode != "" && admitted.EffectMode != intent.EffectMode {
+		return errors.New("admission response effect mode does not match the instance intent")
+	}
 	if admitted.Generation != intent.Generation || admitted.CapsuleDigest != intent.CapsuleDigest ||
 		admitted.PolicyDigest == "" || admitted.RoutePolicyDigest == "" || admitted.GrantID == "" ||
 		admitted.GrantID != gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation) ||
@@ -150,8 +154,12 @@ func issuePermit(arguments []string, stdout io.Writer) error {
 	}
 	now := timeNow().UTC().Truncate(time.Second)
 	notBefore := now.Add(-*clockSkew)
+	payloadType, schemaVersion, effectMode := actionpermit.PayloadTypeV1, actionpermit.SchemaV1, ""
+	if intent.EffectMode == admission.EffectModeAuthorized {
+		payloadType, schemaVersion, effectMode = actionpermit.PayloadTypeV2, actionpermit.SchemaV2, actionpermit.EffectModeAuthorized
+	}
 	statement := actionpermit.Statement{
-		SchemaVersion: actionpermit.SchemaV1, NodeID: intent.NodeID, TenantID: intent.TenantID,
+		SchemaVersion: schemaVersion, EffectMode: effectMode, NodeID: intent.NodeID, TenantID: intent.TenantID,
 		InstanceID: intent.InstanceID, Generation: intent.Generation, CapsuleDigest: admitted.CapsuleDigest,
 		PolicyDigest: admitted.PolicyDigest, RoutePolicyDigest: admitted.RoutePolicyDigest,
 		ConnectorID: *connectorID, OperationID: *operationID, OperationDigest: trustedOperation.PolicyDigest, TaskID: *taskID,
@@ -162,7 +170,7 @@ func issuePermit(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	envelope, err := dsse.Sign(actionpermit.PayloadType, payload, *keyID, privateKey)
+	envelope, err := dsse.Sign(payloadType, payload, *keyID, privateKey)
 	if err != nil {
 		return err
 	}
@@ -361,7 +369,14 @@ func auditPermit(arguments []string, stdout io.Writer) error {
 }
 
 func verifyPermitForAudit(raw []byte, trusted map[string]ed25519.PublicKey, maxValidity time.Duration) (actionpermit.Verified, error) {
-	payload, _, err := dsse.Verify(raw, actionpermit.PayloadType, trusted)
+	envelope, err := dsse.Parse(raw)
+	if err != nil {
+		return actionpermit.Verified{}, err
+	}
+	if envelope.PayloadType != actionpermit.PayloadTypeV1 && envelope.PayloadType != actionpermit.PayloadTypeV2 {
+		return actionpermit.Verified{}, errors.New("unsupported action permit payload type")
+	}
+	payload, _, err := dsse.Verify(raw, envelope.PayloadType, trusted)
 	if err != nil {
 		return actionpermit.Verified{}, err
 	}
@@ -384,7 +399,8 @@ func checkPermitReceiptBindings(statement actionpermit.Statement, authorityKeyID
 		event.Generation != statement.Generation || event.GrantID != gateway.GrantID(statement.TenantID, statement.InstanceID, statement.Generation) ||
 		event.ConnectorID != statement.ConnectorID || event.OperationID != statement.OperationID ||
 		event.TaskDigest != taskDigest || event.AuthorityKeyID != authorityKeyID || event.RequestDigest != statement.RequestDigest ||
-		event.RequestBytes != statement.RequestBytes {
+		event.RequestBytes != statement.RequestBytes || event.EffectMode != statement.EffectMode ||
+		(statement.EffectMode != "" && event.OperationPolicyDigest != statement.OperationDigest) {
 		return errors.New("connector receipt does not match every available action-permit binding")
 	}
 	return nil

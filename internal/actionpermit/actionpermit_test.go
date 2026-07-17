@@ -16,7 +16,7 @@ import (
 
 var testNow = time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 
-func TestVerifyReturnsAllAuthenticatedBindings(t *testing.T) {
+func TestVerifyReturnsAllAuthenticatedV1Bindings(t *testing.T) {
 	public, private := testKey(t)
 	statement := validStatement()
 	raw := signStatement(t, statement, "authority-a", private)
@@ -33,6 +33,137 @@ func TestVerifyReturnsAllAuthenticatedBindings(t *testing.T) {
 	}
 	if verified.EnvelopeDigest != dsse.Digest(raw) {
 		t.Fatalf("EnvelopeDigest = %q, want %q", verified.EnvelopeDigest, dsse.Digest(raw))
+	}
+	if verified.PayloadType != PayloadTypeV1 {
+		t.Fatalf("PayloadType = %q, want %q", verified.PayloadType, PayloadTypeV1)
+	}
+}
+
+func TestVerifyReturnsAllAuthenticatedV2Bindings(t *testing.T) {
+	public, private := testKey(t)
+	statement := validAuthorizedStatement()
+	raw := signStatementV2(t, statement, "authority-a", private)
+
+	verified, err := Verify(raw, map[string]ed25519.PublicKey{"authority-a": public}, testNow, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if verified.Statement != statement {
+		t.Fatalf("statement mismatch:\n got: %#v\nwant: %#v", verified.Statement, statement)
+	}
+	if verified.PayloadType != PayloadTypeV2 {
+		t.Fatalf("PayloadType = %q, want %q", verified.PayloadType, PayloadTypeV2)
+	}
+}
+
+func TestVerifyRejectsVersionAndEffectModeAmbiguity(t *testing.T) {
+	public, private := testKey(t)
+	trusted := map[string]ed25519.PublicKey{"authority-a": public}
+	v1 := validStatement()
+	v2 := validAuthorizedStatement()
+
+	v1Payload := mustJSON(t, v1)
+	if bytes.Contains(v1Payload, []byte(`"effect_mode"`)) {
+		t.Fatalf("legacy statement unexpectedly serialized effect_mode: %s", v1Payload)
+	}
+	v2Payload := mustJSON(t, v2)
+	if !bytes.Contains(v2Payload, []byte(`"effect_mode":"authorized"`)) {
+		t.Fatalf("authorized statement omitted exact effect_mode: %s", v2Payload)
+	}
+
+	presentEmptyV1 := []byte(strings.Replace(string(v1Payload), `"schema_version":"`+SchemaV1+`"`,
+		`"schema_version":"`+SchemaV1+`","effect_mode":""`, 1))
+	presentNullV1 := []byte(strings.Replace(string(v1Payload), `"schema_version":"`+SchemaV1+`"`,
+		`"schema_version":"`+SchemaV1+`","effect_mode":null`, 1))
+	omittedModeV2 := []byte(strings.Replace(string(v2Payload), `,"effect_mode":"authorized"`, "", 1))
+	nullModeV2 := []byte(strings.Replace(string(v2Payload), `"effect_mode":"authorized"`, `"effect_mode":null`, 1))
+	duplicateModeV2 := []byte(strings.Replace(string(v2Payload), `"effect_mode":"authorized"`,
+		`"effect_mode":"authorized","effect_mode":"authorized"`, 1))
+
+	tests := []struct {
+		name        string
+		payloadType string
+		payload     []byte
+	}{
+		{"v1 payload with v2 schema and authorized mode", PayloadTypeV1, v2Payload},
+		{"v1 payload with v2 schema and mode omitted", PayloadTypeV1, omittedModeV2},
+		{"v1 payload with present empty mode", PayloadTypeV1, presentEmptyV1},
+		{"v1 payload with present null mode", PayloadTypeV1, presentNullV1},
+		{"v2 payload with v1 schema and omitted mode", PayloadTypeV2, v1Payload},
+		{"v2 payload with v1 schema and authorized mode", PayloadTypeV2,
+			bytes.Replace(v2Payload, []byte(SchemaV2), []byte(SchemaV1), 1)},
+		{"v2 payload with omitted mode", PayloadTypeV2, omittedModeV2},
+		{"v2 payload with null mode", PayloadTypeV2, nullModeV2},
+		{"v2 payload with empty mode", PayloadTypeV2,
+			bytes.Replace(v2Payload, []byte(`"effect_mode":"authorized"`), []byte(`"effect_mode":""`), 1)},
+		{"v2 payload with optional mode", PayloadTypeV2,
+			bytes.Replace(v2Payload, []byte(`"effect_mode":"authorized"`), []byte(`"effect_mode":"optional"`), 1)},
+		{"v2 payload with capitalized mode", PayloadTypeV2,
+			bytes.Replace(v2Payload, []byte(`"effect_mode":"authorized"`), []byte(`"effect_mode":"Authorized"`), 1)},
+		{"v2 payload with padded mode", PayloadTypeV2,
+			bytes.Replace(v2Payload, []byte(`"effect_mode":"authorized"`), []byte(`"effect_mode":" authorized "`), 1)},
+		{"v2 payload with duplicate mode", PayloadTypeV2, duplicateModeV2},
+		{"unknown future payload type", "application/vnd.steward.action-permit.v3+json", v2Payload},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := signPayload(t, test.payloadType, test.payload, "authority-a", private)
+			if _, err := Verify(raw, trusted, testNow, 5*time.Minute); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Verify error = %v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
+func TestVerifyV2KeepsCanonicalEnvelopeAndStrictJSONBoundaries(t *testing.T) {
+	public, private := testKey(t)
+	trusted := map[string]ed25519.PublicKey{"authority-a": public}
+	statement := validAuthorizedStatement()
+	payload := mustJSON(t, statement)
+	valid := signStatementV2(t, statement, "authority-a", private)
+
+	unknownField := append(append([]byte(nil), payload[:len(payload)-1]...), []byte(`,"extra":true}`)...)
+	duplicateSchema := []byte(strings.Replace(string(payload),
+		`"schema_version":"`+SchemaV2+`"`,
+		`"schema_version":"`+SchemaV2+`","schema_version":"`+SchemaV2+`"`, 1))
+	parsed, err := dsse.Parse(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downgraded := parsed
+	downgraded.PayloadType = PayloadTypeV1
+	downgradedRaw, err := dsse.Marshal(downgraded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	multiple := parsed
+	multiple.Signatures = append(append([]dsse.Signature(nil), parsed.Signatures...),
+		dsse.Signature{KeyID: "authority-b", Sig: parsed.Signatures[0].Sig})
+	multipleRaw, err := dsse.Marshal(multiple)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"unknown signed field", signPayload(t, PayloadTypeV2, unknownField, "authority-a", private)},
+		{"duplicate signed schema", signPayload(t, PayloadTypeV2, duplicateSchema, "authority-a", private)},
+		{"payload-type downgrade without resigning", downgradedRaw},
+		{"multiple signatures", multipleRaw},
+		{"non-canonical envelope", append([]byte(" "), valid...)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Verify(test.raw, trusted, testNow, 5*time.Minute); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Verify error = %v, want ErrInvalid", err)
+			}
+		})
+	}
+
+	wrongPublic, _ := testKey(t)
+	if _, err := Verify(valid, map[string]ed25519.PublicKey{"authority-a": wrongPublic}, testNow, 5*time.Minute); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Verify with untrusted v2 signature error = %v, want ErrInvalid", err)
 	}
 }
 
@@ -323,6 +454,13 @@ func validStatement() Statement {
 	}
 }
 
+func validAuthorizedStatement() Statement {
+	statement := validStatement()
+	statement.SchemaVersion = SchemaV2
+	statement.EffectMode = EffectModeAuthorized
+	return statement
+}
+
 func testKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -334,7 +472,12 @@ func testKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 
 func signStatement(t *testing.T, statement Statement, keyID string, private ed25519.PrivateKey) []byte {
 	t.Helper()
-	return signPayload(t, PayloadType, mustJSON(t, statement), keyID, private)
+	return signPayload(t, PayloadTypeV1, mustJSON(t, statement), keyID, private)
+}
+
+func signStatementV2(t *testing.T, statement Statement, keyID string, private ed25519.PrivateKey) []byte {
+	t.Helper()
+	return signPayload(t, PayloadTypeV2, mustJSON(t, statement), keyID, private)
 }
 
 func signPayload(t *testing.T, payloadType string, payload []byte, keyID string, private ed25519.PrivateKey) []byte {

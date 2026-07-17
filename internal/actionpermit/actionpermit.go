@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -21,8 +22,19 @@ import (
 )
 
 const (
-	PayloadType = "application/vnd.steward.action-permit.v1+json"
-	SchemaV1    = "steward.action-permit.v1"
+	PayloadTypeV1 = "application/vnd.steward.action-permit.v1+json"
+	PayloadTypeV2 = "application/vnd.steward.action-permit.v2+json"
+	SchemaV1      = "steward.action-permit.v1"
+	SchemaV2      = "steward.action-permit.v2"
+
+	// PayloadType remains the original format identifier for source
+	// compatibility with callers that construct legacy permit fixtures.
+	PayloadType = PayloadTypeV1
+
+	// EffectModeAuthorized marks a permit as authority for one exact managed
+	// external effect. The value is intentionally finite and exact: accepting
+	// aliases would create downgrade ambiguity at the enforcement boundary.
+	EffectModeAuthorized = "authorized"
 
 	// MaxEnvelopeBytes is the decoded transport limit for one permit envelope.
 	MaxEnvelopeBytes = 16 << 10
@@ -47,6 +59,7 @@ var (
 // operation_id.
 type Statement struct {
 	SchemaVersion     string `json:"schema_version"`
+	EffectMode        string `json:"effect_mode,omitempty"`
 	NodeID            string `json:"node_id"`
 	TenantID          string `json:"tenant_id"`
 	InstanceID        string `json:"instance_id"`
@@ -66,26 +79,28 @@ type Statement struct {
 }
 
 // wireStatement uses pointers solely to distinguish an omitted member from a
-// present zero value. Every member of a signed Statement is required, including
-// request_bytes, whose valid value may be zero.
+// present zero value. Every v1 member is required, including request_bytes,
+// whose valid value may be zero. EffectMode uses RawMessage because it must be
+// absent in v1 and present as a non-null string in v2.
 type wireStatement struct {
-	SchemaVersion     *string `json:"schema_version"`
-	NodeID            *string `json:"node_id"`
-	TenantID          *string `json:"tenant_id"`
-	InstanceID        *string `json:"instance_id"`
-	Generation        *uint64 `json:"generation"`
-	CapsuleDigest     *string `json:"capsule_digest"`
-	PolicyDigest      *string `json:"policy_digest"`
-	RoutePolicyDigest *string `json:"route_policy_digest"`
-	ConnectorID       *string `json:"connector_id"`
-	OperationID       *string `json:"operation_id"`
-	OperationDigest   *string `json:"operation_policy_digest"`
-	TaskID            *string `json:"task_id"`
-	RequestDigest     *string `json:"request_digest"`
-	RequestBytes      *int64  `json:"request_bytes"`
-	ContentType       *string `json:"content_type"`
-	NotBefore         *string `json:"not_before"`
-	ExpiresAt         *string `json:"expires_at"`
+	SchemaVersion     *string         `json:"schema_version"`
+	EffectMode        json.RawMessage `json:"effect_mode"`
+	NodeID            *string         `json:"node_id"`
+	TenantID          *string         `json:"tenant_id"`
+	InstanceID        *string         `json:"instance_id"`
+	Generation        *uint64         `json:"generation"`
+	CapsuleDigest     *string         `json:"capsule_digest"`
+	PolicyDigest      *string         `json:"policy_digest"`
+	RoutePolicyDigest *string         `json:"route_policy_digest"`
+	ConnectorID       *string         `json:"connector_id"`
+	OperationID       *string         `json:"operation_id"`
+	OperationDigest   *string         `json:"operation_policy_digest"`
+	TaskID            *string         `json:"task_id"`
+	RequestDigest     *string         `json:"request_digest"`
+	RequestBytes      *int64          `json:"request_bytes"`
+	ContentType       *string         `json:"content_type"`
+	NotBefore         *string         `json:"not_before"`
+	ExpiresAt         *string         `json:"expires_at"`
 }
 
 // Verified is returned only after signature, schema, bounds, and time checks
@@ -94,6 +109,7 @@ type Verified struct {
 	Statement      Statement
 	KeyID          string
 	EnvelopeDigest string
+	PayloadType    string
 }
 
 // RequestDigest binds a permit to the exact request-body bytes. Callers must
@@ -141,7 +157,10 @@ func Verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.T
 	if err != nil || !bytes.Equal(canonical, rawEnvelope) {
 		return Verified{}, invalid("permit envelope is not canonical")
 	}
-	payload, keyID, err := dsse.Verify(rawEnvelope, PayloadType, trusted)
+	if envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 {
+		return Verified{}, invalid("unsupported permit payload type")
+	}
+	payload, keyID, err := dsse.Verify(rawEnvelope, envelope.PayloadType, trusted)
 	if err != nil {
 		return Verified{}, invalid("verify DSSE envelope: %v", err)
 	}
@@ -155,27 +174,37 @@ func Verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.T
 	if err := dsse.DecodeStrictInto(payload, MaxEnvelopeBytes, &wire); err != nil {
 		return Verified{}, invalid("decode signed statement: %v", err)
 	}
-	statement, ok := wire.statement()
+	statement, ok := wire.statement(envelope.PayloadType)
 	if !ok {
 		return Verified{}, invalid("signed statement omits a required field")
 	}
-	if err := validateStatement(statement, now, maxValidity); err != nil {
+	if err := validateStatement(statement, envelope.PayloadType, now, maxValidity); err != nil {
 		return Verified{}, err
 	}
 	return Verified{
-		Statement: statement, KeyID: keyID, EnvelopeDigest: dsse.Digest(rawEnvelope),
+		Statement: statement, KeyID: keyID, EnvelopeDigest: dsse.Digest(rawEnvelope), PayloadType: envelope.PayloadType,
 	}, nil
 }
 
-func (wire wireStatement) statement() (Statement, bool) {
+func (wire wireStatement) statement(payloadType string) (Statement, bool) {
 	if wire.SchemaVersion == nil || wire.NodeID == nil || wire.TenantID == nil || wire.InstanceID == nil ||
 		wire.Generation == nil || wire.CapsuleDigest == nil || wire.PolicyDigest == nil || wire.RoutePolicyDigest == nil ||
 		wire.ConnectorID == nil || wire.OperationID == nil || wire.OperationDigest == nil || wire.TaskID == nil || wire.RequestDigest == nil ||
 		wire.RequestBytes == nil || wire.ContentType == nil || wire.NotBefore == nil || wire.ExpiresAt == nil {
 		return Statement{}, false
 	}
+	if payloadType == PayloadTypeV1 && len(wire.EffectMode) != 0 ||
+		payloadType == PayloadTypeV2 && len(wire.EffectMode) == 0 {
+		return Statement{}, false
+	}
+	effectMode := ""
+	if len(wire.EffectMode) != 0 {
+		if bytes.Equal(wire.EffectMode, []byte("null")) || json.Unmarshal(wire.EffectMode, &effectMode) != nil {
+			return Statement{}, false
+		}
+	}
 	return Statement{
-		SchemaVersion: *wire.SchemaVersion, NodeID: *wire.NodeID, TenantID: *wire.TenantID,
+		SchemaVersion: *wire.SchemaVersion, EffectMode: effectMode, NodeID: *wire.NodeID, TenantID: *wire.TenantID,
 		InstanceID: *wire.InstanceID, Generation: *wire.Generation, CapsuleDigest: *wire.CapsuleDigest,
 		PolicyDigest: *wire.PolicyDigest, RoutePolicyDigest: *wire.RoutePolicyDigest,
 		ConnectorID: *wire.ConnectorID, OperationID: *wire.OperationID, OperationDigest: *wire.OperationDigest, TaskID: *wire.TaskID,
@@ -209,9 +238,18 @@ func DecodeHeader(value string) ([]byte, error) {
 	return raw, nil
 }
 
-func validateStatement(statement Statement, now time.Time, maxValidity time.Duration) error {
-	if statement.SchemaVersion != SchemaV1 {
-		return invalid("unsupported schema version")
+func validateStatement(statement Statement, payloadType string, now time.Time, maxValidity time.Duration) error {
+	switch payloadType {
+	case PayloadTypeV1:
+		if statement.SchemaVersion != SchemaV1 || statement.EffectMode != "" {
+			return invalid("payload type, schema version, and effect mode do not form a supported permit version")
+		}
+	case PayloadTypeV2:
+		if statement.SchemaVersion != SchemaV2 || statement.EffectMode != EffectModeAuthorized {
+			return invalid("payload type, schema version, and effect mode do not form a supported permit version")
+		}
+	default:
+		return invalid("unsupported permit payload type")
 	}
 	if !publicIdentity(statement.NodeID, 128) || !publicIdentity(statement.TenantID, 128) ||
 		!publicIdentity(statement.InstanceID, 256) || !routeID(statement.ConnectorID) ||
