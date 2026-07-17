@@ -220,7 +220,7 @@ func connectorReceiptEvent(
 	grant Grant,
 	routePolicyDigest, connectorID, operationID, callDigest, authorityKeyID, permitDigest, requestDigest string,
 	requestBytes int64,
-	operationPolicyDigests ...string,
+	operationPolicyDigest string,
 ) connectorledger.Event {
 	event := connectorledger.Event{
 		Phase: connectorledger.Authorize, Outcome: connectorledger.Allowed,
@@ -233,9 +233,7 @@ func connectorReceiptEvent(
 	if grant.EffectMode == EffectModeAuthorized {
 		event.Kind = connectorledger.ConnectorCall
 		event.EffectMode = connectorledger.EffectModeAuthorized
-		if len(operationPolicyDigests) == 1 {
-			event.OperationPolicyDigest = operationPolicyDigests[0]
-		}
+		event.OperationPolicyDigest = operationPolicyDigest
 	}
 	return event
 }
@@ -271,15 +269,9 @@ func (s *Server) recordActionPermitDenial(event connectorledger.Event) error {
 	key := connectorDenialKey(event.GrantID, event.ErrorCode)
 	for {
 		s.mu.Lock()
-		if s.connectorDenials == nil {
-			s.connectorDenials = make(map[string]struct{})
-		}
 		if _, recorded := s.connectorDenials[key]; recorded {
 			s.mu.Unlock()
 			return nil
-		}
-		if s.connectorDenialPending == nil {
-			s.connectorDenialPending = make(map[string]chan struct{})
 		}
 		if pending := s.connectorDenialPending[key]; pending != nil {
 			s.mu.Unlock()

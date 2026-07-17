@@ -967,6 +967,7 @@ func TestBlockedConnectorReceiptDoesNotBlockOtherGrantControl(t *testing.T) {
 	digest := ConnectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "blocked-task", "issues", "create")
 	receipt := connectorReceiptEvent(
 		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, "", "", "", 2,
+		"",
 	)
 	spendDone := make(chan error, 1)
 	go func() { spendDone <- rig.server.spendConnectorCall(rig.grant.GrantID, "issues", digest, receipt) }()
@@ -1025,6 +1026,7 @@ func TestAmbiguousConnectorReceiptFailureRetainsSpend(t *testing.T) {
 	digest := ConnectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "ambiguous-task", "issues", "create")
 	receipt := connectorReceiptEvent(
 		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, "", "", "", 2,
+		"",
 	)
 	if err := rig.server.spendConnectorCall(rig.grant.GrantID, "issues", digest, receipt); err == nil {
 		t.Fatal("ambiguous fixture append unexpectedly succeeded")
