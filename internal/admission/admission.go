@@ -19,12 +19,17 @@ import (
 )
 
 const (
-	CapsulePayloadType  = "application/vnd.steward.capsule.v1+json"
-	PolicyPayloadType   = "application/vnd.steward.site-policy.v1+json"
-	CommandPayloadType  = "application/vnd.steward.executor-command.v2+json"
-	SchemaV1            = "steward.admission.v1"
-	CommandSchemaV2     = "steward.executor-command.v2"
-	maxAllowedArtifacts = 128
+	CapsulePayloadType        = "application/vnd.steward.capsule.v1+json"
+	PolicyPayloadType         = "application/vnd.steward.site-policy.v1+json"
+	CommandPayloadType        = "application/vnd.steward.executor-command.v2+json"
+	SchemaV1                  = "steward.admission.v1"
+	CommandSchemaV2           = "steward.executor-command.v2"
+	EffectModeStandard        = "standard"
+	EffectModeAuthorized      = "authorized"
+	AuthorizedEffectsOptional = "optional"
+	AuthorizedEffectsRequired = "required"
+	maxAllowedArtifacts       = 128
+	maxAuthorizedEffectKeys   = 8
 )
 
 var (
@@ -117,6 +122,7 @@ type InstanceIntent struct {
 	ServiceID        string         `json:"service_id,omitempty"`
 	EgressRouteIDs   []string       `json:"egress_route_ids,omitempty"`
 	ConnectorIDs     []string       `json:"connector_ids,omitempty"`
+	EffectMode       string         `json:"effect_mode,omitempty"`
 }
 
 type AuthenticatedIdentity struct {
@@ -148,17 +154,37 @@ type PublisherRule struct {
 }
 
 type TenantRule struct {
-	TenantID              string           `json:"tenant_id"`
-	PublisherKeyIDs       []string         `json:"publisher_key_ids"`
-	ResourceCeiling       ResourceLimits   `json:"resource_ceiling"`
-	AllowedArtifacts      []ArtifactDigest `json:"allowed_artifacts,omitempty"`
-	InferenceRouteIDs     []string         `json:"inference_route_ids,omitempty"`
-	InferenceModelAliases []string         `json:"inference_model_aliases,omitempty"`
-	ServiceIDs            []string         `json:"service_ids,omitempty"`
-	EgressRouteIDs        []string         `json:"egress_route_ids,omitempty"`
-	ConnectorIDs          []string         `json:"connector_ids,omitempty"`
-	CommandKeys           []CommandKey     `json:"command_keys,omitempty"`
-	TaskKeys              []TaskKey        `json:"task_keys,omitempty"`
+	TenantID              string                   `json:"tenant_id"`
+	PublisherKeyIDs       []string                 `json:"publisher_key_ids"`
+	ResourceCeiling       ResourceLimits           `json:"resource_ceiling"`
+	AllowedArtifacts      []ArtifactDigest         `json:"allowed_artifacts,omitempty"`
+	InferenceRouteIDs     []string                 `json:"inference_route_ids,omitempty"`
+	InferenceModelAliases []string                 `json:"inference_model_aliases,omitempty"`
+	ServiceIDs            []string                 `json:"service_ids,omitempty"`
+	EgressRouteIDs        []string                 `json:"egress_route_ids,omitempty"`
+	ConnectorIDs          []string                 `json:"connector_ids,omitempty"`
+	CommandKeys           []CommandKey             `json:"command_keys,omitempty"`
+	TaskKeys              []TaskKey                `json:"task_keys,omitempty"`
+	AuthorizedEffects     *AuthorizedEffectsPolicy `json:"authorized_effects,omitempty"`
+}
+
+// AuthorizedEffectsPolicy makes request-bound action authority an explicit
+// tenant choice. Optional policies let each instance select standard or
+// authorized effects; required policies reject every downgrade to standard
+// effects.
+type AuthorizedEffectsPolicy struct {
+	Mode string      `json:"mode"`
+	Keys []ActionKey `json:"keys"`
+}
+
+// ActionKey grants one tenant-owned Ed25519 key authority over action permits
+// for only the named connectors. The private key remains outside the workload.
+// ConnectorIDs are strictly sorted in signed policy so equivalent scopes have
+// one representation.
+type ActionKey struct {
+	KeyID        string   `json:"key_id"`
+	PublicKey    string   `json:"public_key"`
+	ConnectorIDs []string `json:"connector_ids"`
 }
 
 // TaskKey grants one tenant-owned Ed25519 key authority to submit exact,
@@ -460,7 +486,40 @@ func validateRequestedCapabilities(intent InstanceIntent, capsule ProfileCapsule
 	} else if len(intent.ConnectorIDs) != 0 {
 		return deny("connector IDs require connector capability")
 	}
+	if err := validateEffectMode(intent, tenant); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateEffectMode(intent InstanceIntent, tenant TenantRule) error {
+	policy := tenant.AuthorizedEffects
+	if policy == nil {
+		if intent.EffectMode != "" {
+			return deny("effect mode requires an authorized effects policy")
+		}
+		return nil
+	}
+	switch policy.Mode {
+	case AuthorizedEffectsOptional:
+		if intent.EffectMode != EffectModeStandard && intent.EffectMode != EffectModeAuthorized {
+			return deny("optional authorized effects policy requires explicit standard or authorized effect mode")
+		}
+	case AuthorizedEffectsRequired:
+		if intent.EffectMode != EffectModeAuthorized {
+			return deny("required authorized effects policy forbids effect mode downgrade")
+		}
+	default:
+		return deny("invalid authorized effects policy mode")
+	}
+	if intent.EffectMode != EffectModeAuthorized {
+		return nil
+	}
+	if intent.Capabilities.Egress || len(intent.EgressRouteIDs) != 0 {
+		return deny("authorized effect mode forbids generic egress")
+	}
+	_, err := authorizedActionKeys(tenant, intent.ConnectorIDs)
+	return err
 }
 
 func (c Capabilities) SubsetOf(maximum Capabilities) bool {
@@ -484,6 +543,79 @@ func CanonicalConnectorIDs(connectors []string) []string {
 	result := append([]string(nil), connectors...)
 	slices.Sort(result)
 	return slices.Compact(result)
+}
+
+// AuthorizedActionKeys returns detached action authorities narrowed to the
+// selected connector set. It validates the signed policy before extracting
+// authority, sorts keys by ID, and preserves only connector scopes selected by
+// this instance. Every selected connector must have at least one policy-pinned
+// key.
+func (p SitePolicy) AuthorizedActionKeys(tenantID string, selectedConnectorIDs []string) ([]ActionKey, error) {
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	tenant, ok := p.tenant(tenantID)
+	if !ok || tenant.AuthorizedEffects == nil {
+		return nil, deny("tenant has no authorized effects policy")
+	}
+	return authorizedActionKeys(tenant, selectedConnectorIDs)
+}
+
+// AuthorizedActionKeys returns the narrowed authorities for an admitted
+// authorized-effects instance. Calling it for standard or legacy admission is
+// rejected so callers cannot silently upgrade a workload after admission.
+func (e EffectiveAdmission) AuthorizedActionKeys() ([]ActionKey, error) {
+	if e.Intent.EffectMode != EffectModeAuthorized {
+		return nil, deny("instance was not admitted for authorized effects")
+	}
+	return e.SitePolicy.AuthorizedActionKeys(e.Intent.TenantID, e.Intent.ConnectorIDs)
+}
+
+func authorizedActionKeys(tenant TenantRule, selectedConnectorIDs []string) ([]ActionKey, error) {
+	if tenant.AuthorizedEffects == nil {
+		return nil, deny("tenant has no authorized effects policy")
+	}
+	if len(selectedConnectorIDs) > 32 {
+		return nil, deny("too many selected connectors for authorized effects")
+	}
+	selected := make(map[string]struct{}, len(selectedConnectorIDs))
+	for _, connectorID := range selectedConnectorIDs {
+		if !routeID(connectorID) || !contains(tenant.ConnectorIDs, connectorID) {
+			return nil, deny("authorized effects connector is not tenant-authorized")
+		}
+		if _, duplicate := selected[connectorID]; duplicate {
+			return nil, deny("duplicate selected authorized effects connector")
+		}
+		selected[connectorID] = struct{}{}
+	}
+
+	covered := make(map[string]struct{}, len(selected))
+	keys := make([]ActionKey, 0, len(tenant.AuthorizedEffects.Keys))
+	for _, policyKey := range tenant.AuthorizedEffects.Keys {
+		scope := make([]string, 0, len(policyKey.ConnectorIDs))
+		for _, connectorID := range policyKey.ConnectorIDs {
+			if _, wanted := selected[connectorID]; !wanted {
+				continue
+			}
+			scope = append(scope, connectorID)
+			covered[connectorID] = struct{}{}
+		}
+		if len(scope) == 0 {
+			continue
+		}
+		keys = append(keys, ActionKey{
+			KeyID:        policyKey.KeyID,
+			PublicKey:    policyKey.PublicKey,
+			ConnectorIDs: append([]string(nil), scope...),
+		})
+	}
+	if len(covered) != len(selected) {
+		return nil, deny("selected connector lacks an authorized action key")
+	}
+	slices.SortFunc(keys, func(left, right ActionKey) int {
+		return strings.Compare(left.KeyID, right.KeyID)
+	})
+	return keys, nil
 }
 
 func (c ProfileCapsule) Validate(now time.Time) error {
@@ -631,6 +763,7 @@ func (p SitePolicy) Validate() error {
 	}
 	seenTenants := map[string]struct{}{}
 	taskPublicKeyOwners := make(map[string]string)
+	actionPublicKeyOwners := make(map[string]string)
 	for _, tenant := range p.Tenants {
 		if !bounded(tenant.TenantID, 128) || len(tenant.PublisherKeyIDs) == 0 || len(tenant.PublisherKeyIDs) > 64 {
 			return deny("invalid tenant policy")
@@ -704,6 +837,46 @@ func (p SitePolicy) Validate() error {
 				return deny("duplicate tenant connector ID")
 			}
 			seenConnectors[connector] = struct{}{}
+		}
+		if tenant.AuthorizedEffects != nil {
+			if tenant.AuthorizedEffects.Mode != AuthorizedEffectsOptional &&
+				tenant.AuthorizedEffects.Mode != AuthorizedEffectsRequired {
+				return deny("invalid authorized effects policy mode")
+			}
+			if len(tenant.AuthorizedEffects.Keys) == 0 || len(tenant.AuthorizedEffects.Keys) > maxAuthorizedEffectKeys {
+				return deny("tenant authorized effects policy must contain 1 to 8 keys")
+			}
+			seenActionKeyIDs := make(map[string]struct{}, len(tenant.AuthorizedEffects.Keys))
+			seenActionPublicKeys := make(map[string]struct{}, len(tenant.AuthorizedEffects.Keys))
+			for _, actionKey := range tenant.AuthorizedEffects.Keys {
+				if !routeID(actionKey.KeyID) || !bounded(actionKey.PublicKey, 1024) ||
+					len(actionKey.ConnectorIDs) == 0 || len(actionKey.ConnectorIDs) > 32 {
+					return deny("invalid tenant authorized effects key")
+				}
+				if _, duplicate := seenActionKeyIDs[actionKey.KeyID]; duplicate {
+					return deny("duplicate tenant authorized effects key ID")
+				}
+				seenActionKeyIDs[actionKey.KeyID] = struct{}{}
+				public, err := decodePublicKey(actionKey.PublicKey)
+				if err != nil || base64.StdEncoding.EncodeToString(public) != actionKey.PublicKey {
+					return deny("invalid tenant authorized effects public key")
+				}
+				publicIdentity := string(public)
+				if _, duplicate := seenActionPublicKeys[publicIdentity]; duplicate {
+					return deny("tenant authorized effects public key is assigned more than once")
+				}
+				seenActionPublicKeys[publicIdentity] = struct{}{}
+				if owner, exists := actionPublicKeyOwners[publicIdentity]; exists && owner != tenant.TenantID {
+					return deny("authorized effects public key is assigned to multiple tenants")
+				}
+				actionPublicKeyOwners[publicIdentity] = tenant.TenantID
+				for index, connectorID := range actionKey.ConnectorIDs {
+					if !routeID(connectorID) || !contains(tenant.ConnectorIDs, connectorID) ||
+						index > 0 && actionKey.ConnectorIDs[index-1] >= connectorID {
+						return deny("authorized effects key connector IDs must be tenant-authorized, unique, and sorted")
+					}
+				}
+			}
 		}
 		if len(tenant.CommandKeys) > 32 {
 			return deny("tenant has too many command keys")
