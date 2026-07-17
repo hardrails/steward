@@ -337,7 +337,7 @@ func TestStoreRejectsOutOfBandInventoryChanges(t *testing.T) {
 	})
 }
 
-func TestAmbiguousWritePoisonsAndPreservesPartialFile(t *testing.T) {
+func TestAmbiguousWritePoisonsUntilOpenRemovesPartialStaging(t *testing.T) {
 	directory := testWorkspace(t)
 	store := mustOpenStore(t, directory)
 	injected := errors.New("injected post-create failure")
@@ -350,12 +350,19 @@ func TestAmbiguousWritePoisonsAndPreservesPartialFile(t *testing.T) {
 	if !errors.Is(err, injected) || !errors.Is(err, ErrPoisoned) || !store.poisoned {
 		t.Fatalf("writeOnce() error = %v, poisoned=%v", err, store.poisoned)
 	}
-	info, statErr := os.Lstat(filepath.Join(directory, PlanFileName))
+	stageName, nameErr := stagingName(PlanFileName)
+	if nameErr != nil {
+		t.Fatal(nameErr)
+	}
+	info, statErr := os.Lstat(filepath.Join(directory, stageName))
 	if statErr != nil {
-		t.Fatalf("partial artifact missing: %v", statErr)
+		t.Fatalf("partial staging entry missing: %v", statErr)
 	}
 	if info.Size() != int64(len("partial")) || info.Mode().Perm() != 0o200 {
-		t.Fatalf("partial artifact size=%d mode=%v", info.Size(), info.Mode())
+		t.Fatalf("partial staging entry size=%d mode=%v", info.Size(), info.Mode())
+	}
+	if _, err := os.Lstat(filepath.Join(directory, PlanFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final artifact was published before recovery: %v", err)
 	}
 	if err := store.WriteOnce(ProofFileName, nil); !errors.Is(err, ErrPoisoned) {
 		t.Fatalf("write after ambiguity error = %v, want ErrPoisoned", err)
@@ -366,11 +373,19 @@ func TestAmbiguousWritePoisonsAndPreservesPartialFile(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if reopened, err := Open(directory); reopened != nil || !errors.Is(err, ErrUnsafeWorkspace) {
-		if reopened != nil {
-			_ = reopened.Close()
-		}
-		t.Fatalf("Open(partial) = (%v, %v), want ErrUnsafeWorkspace", reopened, err)
+	reopened, err := Open(directory)
+	if err != nil {
+		t.Fatalf("Open(partial staging) error = %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	if _, err := os.Lstat(filepath.Join(directory, stageName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial staging entry survived recovery: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(directory, PlanFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery published a partial artifact: %v", err)
+	}
+	if err := reopened.WriteOnce(PlanFileName, []byte("complete")); err != nil {
+		t.Fatalf("workspace was not usable after staging recovery: %v", err)
 	}
 }
 

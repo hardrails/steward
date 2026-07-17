@@ -361,6 +361,10 @@ func finishOpen(directory string, identity os.FileInfo, root *os.Root) (*Store, 
 		return nil, err
 	}
 	store.lock = lock
+	if err := store.recoverStagingLocked(); err != nil {
+		_ = store.closeLocked()
+		return nil, err
+	}
 	snapshot, err := store.auditLocked()
 	if err != nil {
 		_ = store.closeLocked()
@@ -622,126 +626,6 @@ func (store *Store) createLocked(name string, raw []byte, afterCreate func(*os.F
 		return err
 	}
 	return store.createWithSnapshotLocked(name, raw, snapshot, afterCreate)
-}
-
-func (store *Store) createWithSnapshotLocked(
-	name string,
-	raw []byte,
-	snapshot workspaceSnapshot,
-	afterCreate func(*os.File) error,
-) error {
-	maximum := artifactByteLimit(name)
-	if maximum <= 0 {
-		return fmt.Errorf("%w: artifact has no byte limit", ErrInvalidName)
-	}
-	if int64(len(raw)) > maximum {
-		return fmt.Errorf("%w: artifact exceeds %d bytes", ErrCapacityExceeded, maximum)
-	}
-	if _, err := store.root.Lstat(name); err == nil {
-		return ErrAlreadyExists
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if snapshot.entries >= MaxWorkspaceEntries ||
-		snapshot.bytes > MaxWorkspaceBytes-int64(len(raw)) {
-		return ErrCapacityExceeded
-	}
-
-	file, err := store.root.OpenFile(
-		name,
-		os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_CLOEXEC|syscall.O_NONBLOCK|syscall.O_NOFOLLOW,
-		0o200,
-	)
-	if errors.Is(err, os.ErrExist) {
-		return ErrAlreadyExists
-	}
-	if err != nil {
-		return fmt.Errorf("create rollout artifact %q: %w", name, err)
-	}
-	fail := func(cause error) error {
-		store.poisoned = true
-		return errors.Join(cause, file.Close(), ErrPoisoned)
-	}
-	if err := file.Chmod(0o200); err != nil {
-		return fail(err)
-	}
-	opened, err := file.Stat()
-	if err != nil {
-		return fail(err)
-	}
-	named, err := store.root.Lstat(name)
-	if err != nil || !validIncompleteOutput(opened, maximum) || !validIncompleteOutput(named, maximum) ||
-		opened.Size() != 0 || !sameSnapshot(opened, named) {
-		return fail(errors.Join(
-			fmt.Errorf("%w: artifact %q changed while creating", ErrUnsafeWorkspace, name),
-			err,
-		))
-	}
-	if afterCreate != nil {
-		if err := afterCreate(file); err != nil {
-			return fail(err)
-		}
-	}
-	if err := writeAll(file, raw); err != nil {
-		return fail(err)
-	}
-	if err := file.Sync(); err != nil {
-		return fail(err)
-	}
-	written, statErr := file.Stat()
-	current, namedErr := store.root.Lstat(name)
-	if statErr != nil || namedErr != nil || !validIncompleteOutput(written, maximum) ||
-		!validIncompleteOutput(current, maximum) || written.Size() != int64(len(raw)) ||
-		current.Size() != int64(len(raw)) || !sameIdentity(opened, written) ||
-		!sameIdentity(opened, current) {
-		return fail(errors.Join(
-			fmt.Errorf("%w: artifact %q changed while writing", ErrUnsafeWorkspace, name),
-			statErr,
-			namedErr,
-		))
-	}
-	if err := file.Chmod(0o600); err != nil {
-		return fail(err)
-	}
-	if err := file.Sync(); err != nil {
-		return fail(err)
-	}
-	published, statErr := file.Stat()
-	current, namedErr = store.root.Lstat(name)
-	if statErr != nil || namedErr != nil || validateArtifact(name, published) != nil ||
-		validateArtifact(name, current) != nil || published.Size() != int64(len(raw)) ||
-		current.Size() != int64(len(raw)) || !sameInode(written, published) ||
-		!sameInode(written, current) || !sameSnapshot(published, current) {
-		return fail(errors.Join(
-			fmt.Errorf("%w: artifact %q changed while publishing", ErrUnsafeWorkspace, name),
-			statErr,
-			namedErr,
-		))
-	}
-	if err := file.Close(); err != nil {
-		store.poisoned = true
-		return errors.Join(err, ErrPoisoned)
-	}
-	current, err = store.root.Lstat(name)
-	if err != nil || validateArtifact(name, current) != nil ||
-		current.Size() != int64(len(raw)) || !sameSnapshot(published, current) {
-		store.poisoned = true
-		return errors.Join(
-			fmt.Errorf("%w: artifact %q changed after closing", ErrUnsafeWorkspace, name),
-			err,
-			ErrPoisoned,
-		)
-	}
-	if err := store.syncDirectoryLocked(); err != nil {
-		store.poisoned = true
-		return errors.Join(err, ErrPoisoned)
-	}
-	store.digests[name] = sha256.Sum256(raw)
-	if _, err := store.auditLocked(); err != nil {
-		store.poisoned = true
-		return errors.Join(err, ErrPoisoned)
-	}
-	return nil
 }
 
 // Close releases the lifetime locks and rooted directory descriptor. It is
@@ -1137,14 +1021,6 @@ func validateArtifact(name string, info os.FileInfo) error {
 	return nil
 }
 
-func validIncompleteOutput(info os.FileInfo, maximum int64) bool {
-	uid, links, ok := ownerAndLinks(info)
-	return info != nil && ok && uid == os.Geteuid() && links == 1 &&
-		info.Mode().IsRegular() &&
-		info.Mode()&(os.ModeSymlink|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) == 0 &&
-		info.Mode().Perm() == 0o200 && info.Size() >= 0 && info.Size() <= maximum
-}
-
 func artifactByteLimit(name string) int64 {
 	switch name {
 	case PlanFileName:
@@ -1159,6 +1035,9 @@ func artifactByteLimit(name string) int64 {
 		return maxRolloutProofBytes
 	case LockFileName:
 		return 0
+	}
+	if maximum, ok := authorizationArtifactByteLimit(name); ok {
+		return maximum
 	}
 	if _, _, ok := parseTargetStateName(name); ok {
 		return maxTargetStateBytes
@@ -1193,6 +1072,9 @@ func classifyName(name string) artifactKind {
 		ControllerWitnessPublicKeyFileName, ProofFileName:
 		return artifactFixed
 	default:
+		if isAuthorizationArtifactName(name) {
+			return artifactFixed
+		}
 		if _, _, ok := parseTargetStateName(name); ok {
 			return artifactTargetState
 		}
