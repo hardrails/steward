@@ -22,6 +22,9 @@ Five runtime boundaries separate authority:
    and node transport credentials, one-time enrollment, bounded inventory, opaque
    signed-command retention, delivery leases, and reported outcomes. It has no
    Docker socket, tenant private signing key, shell runner, or agent runtime. An
+   embedded React console projects read-only summary, attention, node, command,
+   and credential metadata through the same operator-authenticated API. It adds no
+   mutation, approval, secret-retrieval, or signing path. An
    organization may place enterprise identity, approvals, desired state, artifact
    and skill approval, scheduling, rollout, and evidence aggregation above its
    public API.
@@ -35,11 +38,16 @@ Five runtime boundaries separate authority:
 4. **Steward Gateway and the per-instance relay** enforce finite inference,
    service, exact credential-brokered connector, and named HTTP(S) egress grants.
    They do not give an agent a raw host or Internet route. Gateway has its own
-   service identity and no Docker authority. For selected connector operations, an
-   off-node tenant action authority can sign one exact request; Gateway verifies
-   and durably spends that permit before the effect. A separate service-scoped
+   service identity and no Docker authority. In Authorized Effects mode, signed
+   tenant policy pins off-node action keys to selected connectors, generic egress
+   is unavailable, and Gateway accepts only a version-2 permit for one exact
+   request. It durably spends the permit before DNS while the upstream credential
+   remains outside the workload. A separate service-scoped
    tenant task authority can sign one exact agent-service request. Current service
    tasks record task-local authorization, dispatch, and terminal lifecycle evidence.
+   Gateway can read credentials that OpenBao Agent or another trusted materializer
+   places in owner-only files; agents receive only the mediated capability, never
+   the materialization directory or reusable value.
 5. An operator-managed **OpenAI-compatible inference system** owns model routing
    and inference policy. It is outside Steward's lifecycle contract.
 
@@ -58,6 +66,37 @@ owner-only result store rather than MCP output.
 The built-in `os/exec` supervisor is for trusted, operator-authored processes. Root
 and non-loopback startup acknowledgements reduce accidental exposure, but they do
 not provide isolation. Run untrusted workloads through Executor.
+
+### Embedded operator console
+
+`steward-control` embeds its committed `/console/` distribution and serves it on
+the existing control listener. Static console assets introduce no second web
+server or authentication database. Data requests use the same Bearer operator
+identity and tenant projection as the operations API. The React source issues only
+same-origin reads for summary, derived attention, nodes, command metadata, and
+credential metadata. Controller mutations and private signing remain CLI, API, or
+offline operator workflows.
+
+The browser credential exists only in a JavaScript memory reference. Explicit
+lock, `pagehide`, 15 minutes of inactivity, or an eight-hour absolute interval
+aborts the session and clears application state. These browser timers do not
+expire or revoke the server-side bearer. Browser extensions remain trusted enough
+to read the page or memory, so the intended operator endpoint is a dedicated
+hardened profile without unapproved extensions.
+
+The control server derives its exact Host gate without an additional setting. A
+literal-loopback HTTP listener accepts only its actual bound IP and port. A TLS
+listener accepts exact non-wildcard DNS or IP Subject Alternative Names from the
+loaded leaf certificate at the bound port; only port `443` may be omitted. A
+malformed or mismatched Host fails before API or console dispatch.
+
+The production HTML, JavaScript, CSS, and icon files are committed and embedded
+with `go:embed`. They load no CDN or telemetry service, and the running controller
+has no Node.js dependency. React and Vite are lockfile-pinned inputs to a separate
+maintainer rebuild. CI uses Node.js 24 LTS, installs with lifecycle scripts
+disabled, audits and tests the source, rebuilds the distribution, and rejects any
+diff from the committed assets. A normal or air-gapped Go build consumes those
+assets directly and does not invoke npm.
 
 ## Runtime layers
 
@@ -148,7 +187,13 @@ a separate Gateway key and one signed DSSE JSON record per newline. Permit-backe
 records bind the action-authority key ID, exact permit digest, and exact request
 digest beside the stable task-based call digest. Current lifecycle service tasks use
 receipt format 4 and add a task-local sequence and hash link across authorization,
-dispatch, and terminal records. Both are
+dispatch, and terminal records. Authorized connector events use receipt format 5
+and add the explicit effect mode plus the exact operation-policy digest. A stable
+pre-effect `action_permit_denied` condition may create at most one denial marker
+per retained grant; it binds the request digest without claiming a verified permit
+or authority key. This first-observed sample is attacker-selectable and does not
+enumerate later denials. Gateway state format 5 preserves the authorized mode and
+signed-policy-derived connector/key scopes across restart. Both receipt systems are
 node-local enforcement evidence, not proof against a hostile host. Host root, the
 host kernel, Docker, gVisor, and node-key protection remain trusted. Receipts
 exclude prompts, model responses, agent logs, semantic tool actions, and agent
@@ -162,6 +207,40 @@ volumes without enforced byte or inode quotas. Inference, service, connector, an
 require the complete Gateway/relay path. Executor grants a capability only when its
 required enforcement path is configured and verified. A signed field alone never
 grants a capability.
+
+### Authorized Effects enforcement path
+
+Stored or indirect prompt injection is attacker-controlled content that reaches an
+agent through a calendar invitation, email, web page, document, tool response, or
+memory and is interpreted as instructions. Steward does not ask that same agent or
+model to establish whether the content is safe. For this boundary it assumes the
+workload is fully compromised.
+
+Authorized Effects is an explicit intersection:
+
+1. the site-root-signed tenant rule contains `authorized_effects`, selects
+   `optional` or `required`, and assigns each action public key to exact connector
+   IDs;
+2. authenticated instance intent explicitly selects `effect_mode`; required policy
+   rejects `standard`, while authorized mode rejects generic egress;
+3. Executor projects only the selected, policy-pinned connector/key scopes through
+   immutable runtime state to Gateway;
+4. Gateway requires those scopes to exactly match its validated connector keys and
+   operations; and
+5. every effect needs a canonical version-2 DSSE permit over the exact request,
+   which Gateway records as spent before resolution or connection.
+
+The action private key stays off-node and outside the workload. Gateway keeps the
+upstream credential in an owner-only file and injects it only at the fixed
+connector operation. The signed connector chain lets an offline auditor correlate
+the exact permit, request digest, operation policy, authorization, and terminal
+observation.
+
+This is complete mediation only for Steward connectors. Unmanaged credentials or
+channels, inference confidentiality, local filesystem changes, computer use, host
+root, signing-key compromise, approver misunderstanding, and upstream exactly-once
+semantics remain outside the claim. See
+[`docs/guides/authorized-effects.md`](docs/guides/authorized-effects.md).
 
 Detailed Executor behavior is in [`docs/executor.md`](docs/executor.md).
 

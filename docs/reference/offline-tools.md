@@ -903,12 +903,17 @@ or missing when required, or the target reader/writer range is unsafe.
 Connector receipt format 1 contains ordinary connector records. Format 2 adds
 connector action permits. Format 3 is the historical two-record service-task
 contract. Current lifecycle service tasks use format 4, with task-local sequence
-and hash links across authorization, dispatch, and terminal records. One verified
-chain may contain all four formats. The observed format is the highest schema
-present. It is at least 2 when Gateway configures an action authority and 4 when it
+and hash links across authorization, dispatch, and terminal records. Format 5
+records authorized connector calls with explicit effect mode and the exact
+operation-policy digest. One verified chain may contain all five formats. The
+observed format is the highest schema present. It is at least 2 when Gateway
+configures an action authority and 4 when it
 configures a current service-task operation, even before the receipt file exists or
-that operation is used, because live configuration can write that format. A target
-whose manifest cannot read and preserve the observed format is incompatible.
+that operation is used, because live configuration can write that format. An
+authorized-effects denial, authorization, or terminal event raises the observed
+receipt format to 5 when its first record is written. The retained authorized grant
+separately requires Gateway state format 5 before that first call. A target whose
+manifest cannot read and preserve either observed boundary is incompatible.
 
 Executor evidence format 1 contains the original closed event vocabulary. Format 2
 adds `activation_begin` and `activation_checkpoint`. A signed evidence chain may
@@ -919,9 +924,11 @@ therefore remains an upgrade boundary even after the workload is destroyed. A
 target whose evidence reader stops at format 1 is incompatible with that log.
 
 Gateway state format 4 retains the service ID and public tenant task authorities of
-task-enabled grants. A target release must read and preserve that state even if the
-receipt ledger has not yet recorded a service task. Keep state and receipt-format
-compatibility checks together; neither file can be downgraded safely in isolation.
+task-enabled grants. Format 5 additionally retains authorized effect mode and
+signed-policy-derived connector/action-key scopes. A target release must read and
+preserve those bindings even if the receipt ledger has not yet recorded the related
+operation. Keep state and receipt-format compatibility checks together; neither
+file can be downgraded safely in isolation.
 
 `upgrade inspect-formats` returns the same eight format observations without
 requiring a drained node. Activation uses it after a failed target start to decide
@@ -934,6 +941,11 @@ active-release symlink and relay binding.
 connector request. It does not contact Gateway, a control plane, or a hosted signer.
 Keep the action private key on an operator-controlled signing station, not on the
 Steward node.
+
+When the supplied admission and intent select Authorized Effects, `permit issue`
+emits `steward.action-permit.v2` with `effect_mode` fixed to `authorized`. Gateway
+rejects the legacy version-1 envelope for that grant. Standard permit-enabled
+connectors continue to use version 1.
 
 Before issuance, export Gateway's non-secret view:
 
@@ -984,14 +996,25 @@ envelope is limited to 16 KiB and the request to 4 MiB, while the connector may 
 a smaller body ceiling. Validity is whole seconds from one second through 24 hours
 and may not exceed the connector's exported maximum.
 
+Admission, intent, action-trust, and request inputs must be bounded regular files
+that are not writable by group or other users. Reads do not follow a final symlink
+and reject a changed file snapshot. Permit verification and audit apply the same
+trust rule to optional request bytes. This prevents a locally writable file from
+changing between operator review and signing or verification; authenticate the
+unsigned action-trust file separately.
+
 `-clock-skew` defaults to five seconds, is limited to five minutes, and must be
 shorter than `-valid-for`. It shifts the start earlier but does not lengthen the
 signed interval. The private key must be an owner-only PKCS#8 Ed25519 PEM file.
 Outputs are owner-only and must be different new paths. If multi-output publication
 fails, the command attempts to remove previously written outputs and reports any
 rollback failure; an operator may then need to remove a leftover file. Standard
-output is the exact permit-envelope SHA-256 digest. `-header-out` contains the
-canonical unpadded base64url value for `X-Steward-Action-Permit`.
+output is the exact permit-envelope SHA-256 digest. Standard error is a canonical
+single-line JSON approval summary that identifies the exact target, request digest
+and byte count, validity window, authority, and resulting permit digest without
+printing request content. Keep the streams separate and compare the summary with
+independently reviewed request bytes. `-header-out` contains the canonical
+unpadded base64url value for `X-Steward-Action-Permit`.
 
 Verify the signature, statement, current time, and optional request bytes:
 
@@ -1026,9 +1049,11 @@ stewardctl permit audit \
 The command verifies the whole signed chain, correlates the exact authority key,
 permit, request, grant, policy, connector operation, and stable task-based call
 digest, and re-evaluates the permit at the authorization receipt's signed
-observation time. Output contains `valid`, `permit_digest`, `request_digest`,
-`permit_key_id`, the signed `statement`, matching `authorization`, optional
-`terminal`, and final `head`. Supply both expected-head fields to compare with an
+observation time. For a version-2 permit it also requires format-5 receipt bindings
+for `effect_mode` and the exact operation-policy digest. Output contains `valid`,
+`permit_digest`, `request_digest`, `permit_key_id`, the signed `statement`,
+matching `authorization`, optional `terminal`, and final `head`. Supply both
+expected-head fields to compare with an
 independently retained checkpoint. An absent terminal means the outcome is still
 unknown; it is not evidence that no upstream effect occurred.
 
@@ -1209,7 +1234,7 @@ stewardctl task audit \
   -expected-chain-hash 'sha256:<retained-chain-hash>'
 ```
 
-The command verifies formats 1 through 4 in one chain, finds the exact service-task
+The command verifies formats 1 through 5 in one chain, finds the exact service-task
 permit, re-evaluates it at the signed authorization time, and checks every available
 tenant, runtime, grant, policy, service, operation, task, authority, permit, and
 request binding. For a format-4 task it also verifies the task-local sequence and
@@ -1227,6 +1252,39 @@ The chain lets an auditor verify what Gateway signed within the host trust bound
 it does not establish useful work, semantic correctness, upstream exactly-once
 behavior, or an uncompromised host. Replay prevention is node-local within one
 retained ledger epoch.
+
+## Gateway secret materialization preflight
+
+Check a provider-neutral tree of owner-only inference and connector credentials
+before Gateway loads it:
+
+```console
+stewardctl secret materialization check \
+  -manifest /etc/steward/secret-materialization/manifest.json \
+  -root /var/lib/steward-gateway/secrets
+```
+
+`-manifest` is required. `-root` defaults to
+`/var/lib/steward-gateway/secrets`. The bounded strict manifest uses schema
+`steward.secret-materialization.v1` and contains one through 512
+`(tenant_id, secret_id, purpose)` bindings. `purpose` is `inference` or
+`connector`; each value is read from `<root>/<tenant_id>/<secret_id>`.
+
+Run the command as the same service identity that owns and reads the materialized
+files. It requires mode-`0700` root and tenant directories and stable,
+single-link, mode-`0600` regular files on the same filesystem. Values must contain
+12 through 16,384 visible ASCII bytes without whitespace. The check rejects
+unsafe ownership, links, aliases, changed metadata, unknown JSON members, and
+duplicate bindings.
+
+Successful output uses schema
+`steward.secret-materialization-report.v1` and contains only `ready`, tenant ID,
+secret ID, and purpose. It does not expose a value, hash, length, provider path,
+filesystem path, or credential epoch. The result is a point-in-time preflight,
+not authorization or anti-rollback evidence; Gateway's later stable owner-only
+file read is authoritative. See
+[Store and distribute Gateway credentials]({{ '/guides/secrets/' | relative_url }})
+for the OpenBao handoff, rotation procedure, and trust boundary.
 
 ## Image archives
 

@@ -55,6 +55,42 @@ The Steward Control client used by `stewardctl control` and `steward-mcp` likewi
 requires TLS 1.3 for HTTPS. Plain HTTP remains limited to a literal loopback
 listener.
 
+### Embedded operator console
+
+`steward-control` always serves its committed read-only assets at `/console/` on
+the existing `-addr`. There is no console enable flag, separate port, web server,
+user database, cookie, or runtime Node.js process. `GET` and `HEAD` can retrieve
+only the embedded index, icon, third-party notice text, and hashed JavaScript or
+CSS assets. The static page does not require a bearer and reveals no fleet state.
+Its same-origin `/v1/`
+summary, attention, node, command-metadata, and credential-metadata reads require
+the normal operator Bearer credential and retain its site or tenant scope.
+
+The server derives an exact Host-header allowlist automatically. A loopback HTTP
+listener accepts only its actual bound literal IP and port; the default URL is
+`http://127.0.0.1:8443/console/`, not `http://localhost:8443/console/`. A TLS
+listener accepts exact non-wildcard DNS and IP Subject Alternative Names from the
+loaded leaf certificate at the bound port. Only port `443` may be omitted. A
+wildcard-only certificate supplies no accepted Host name. A malformed or
+mismatched Host is rejected before routing, including for API requests. There is
+no separate Host-gate flag to maintain. `-check-config` validates the
+certificate-derived policy and rejects a SAN-less or wildcard-only certificate
+before the service binds.
+
+The browser keeps the entered bearer only in JavaScript memory. Explicit lock,
+`pagehide`, 15 minutes without trusted activity, or eight hours from sign-in aborts
+in-flight requests and clears the local session. These client-side deadlines do
+not expire or revoke the server credential. Browser extensions remain part of the
+trusted computing base; use a hardened profile without unapproved extensions.
+
+The distribution is committed under `internal/controlplane/console/dist` and
+embedded into the Go binary. Normal and disconnected `go build` runs do not invoke
+npm. Frontend maintainers use Node.js 24 LTS and the lockfile-pinned React and Vite
+tree to run `npm ci --ignore-scripts`, `npm audit`, source checks, and the production
+build. CI rejects any generated distribution that differs from the committed
+assets. See
+[Inspect a fleet with the embedded operator console]({{ '/guides/operator-console/' | relative_url }}).
+
 The operations thresholds must be positive and no greater than 365 days; the
 capacity percentage must be 1 through 100. Threshold equality is actionable.
 Evidence-report recency is intentionally process-local: after a controller
@@ -303,6 +339,15 @@ keys whose scope includes the admitted `service_id` into the runtime grant; the
 private task key stays off-node. A service with no matching task key keeps the
 ordinary host-authenticated service behavior.
 
+A tenant policy may also contain one `authorized_effects` object. `mode` is
+`optional` or `required`; `keys` contains one through eight unique Ed25519 action
+public keys, each scoped to one through 32 sorted connector IDs already allowed by
+that tenant. Key material cannot be assigned to another tenant. An authenticated
+instance intent must explicitly set `effect_mode` when this policy exists.
+`optional` accepts `standard` or `authorized`; `required` accepts only `authorized`.
+Authorized mode requires connector capability and selected connector IDs, forbids
+generic egress, and projects only the selected signed key scopes to Gateway.
+
 The installer, `configure-node`, and `configure-admission` accept
 `--allow-unquotaed-state-on-dedicated-host`. The non-interactive installer also
 accepts `STEWARD_ALLOW_UNQUOTAED_STATE_ON_DEDICATED_HOST=true`. These interfaces
@@ -348,15 +393,15 @@ satisfy egress policy continue normally. An inactive or revoked grant keeps its
 record is suppressed. These limits are fixed and have no configuration fields.
 
 `connectors` contains at most 128 credential-brokered API policies. Each connector
-defines one exact HTTPS origin, one owner-only credential file containing one line
-of 12 to 16,384 visible ASCII bytes, `bearer` or
-`x-api-key` injection, optional canonical address CIDRs, concurrency, request,
-response, duration, and per-grant call limits, plus at most 64 operations. Each
-operation is one ID, uppercase HTTP method, and canonical exact path without a
-query, fragment, wildcard, or percent-encoded spelling. Connector grants also pin
-the loaded credential digest. `credential_epoch` is an operator-managed counter
-used only by a permit-enabled connector. It must be positive there and should be
-incremented for every credential-authority rotation. It is included in the
+defines one exact HTTPS origin, one owner-only credential file containing 12 to
+16,384 ASCII bytes in the range `0x21` through `0x7e` with no whitespace,
+`bearer` or `x-api-key` injection, optional canonical address CIDRs, concurrency,
+request, response, duration, and per-grant call limits, plus at most 64 operations.
+Each operation is one ID, uppercase HTTP method, and canonical exact path without
+a query, fragment, wildcard, or percent-encoded spelling. Connector grants also
+pin the loaded credential digest. `credential_epoch` is an operator-managed
+counter used only by a permit-enabled connector. It must be positive there and
+should be incremented for every credential-authority rotation. It is included in the
 effective route-policy digest and omitted when action permits are disabled. See
 [authenticated API operations]({{ '/guides/connectors/' | relative_url }}) for the
 complete boundary.
@@ -468,6 +513,24 @@ metadata. The inventory is non-secret and unsigned. Authenticate it before using
 it on a signing station. It is only an issuance preflight; Gateway's live
 configuration remains authoritative.
 
+Use the read-only readiness check to verify signed-policy continuity before
+admission:
+
+```console
+sudo stewardctl gateway effects check \
+  -config /etc/steward/gateway.json \
+  -intent instance-intent.json \
+  -policy site-policy.dsse.json \
+  -site-root-public-key site-root.public \
+  -site-root-key-id site-root-1
+```
+
+It verifies the site-policy signature, explicit authorized intent, generic-egress
+prohibition, exact signed-policy-to-Gateway action key and connector scopes, node
+identity, and tenant receipt budget. Output is a bounded non-secret readiness
+summary. The command does not admit a workload, mutate state, resolve DNS, or
+contact an upstream service.
+
 `connector_receipt_file`, `connector_receipt_key_file`,
 `connector_receipt_node_id`, and `connector_receipt_epoch` form one required group
 when any connector or service-task operation exists. The key is an owner-only
@@ -530,14 +593,18 @@ decision for the old chain, drain retained grants, preserve the old ledger and
 verification material, configure the new file and table, and restart Gateway.
 There is no CLI operation that removes a budget or compacts an existing ledger.
 
-The same signed ledger may contain receipt formats 1 through 4. Format 1 is an
+The same signed ledger may contain receipt formats 1 through 5. Format 1 is an
 ordinary connector event, format 2 adds a connector action permit, and format 3 is
 the historical two-record service-task contract. Current lifecycle tasks use format
 4 and add task-local sequence and hash links across authorization, dispatch, and
-terminal records. Gateway state format 4 separately retains the service ID and
-public tenant task authorities for task-enabled grants. Keep the ledger, Gateway
-state, and declared release-format compatibility together during backup, upgrade,
-and rollback; do not downgrade either file independently.
+terminal records. Format 5 records authorized connector calls with explicit effect
+mode and exact operation-policy digest; a stable pre-effect denial marker binds the
+first observed, attacker-selectable request digest without claiming a permit or
+authority key. It does not enumerate later denials. Gateway state format 4
+retains service ID and public tenant task authorities. State format 5 additionally
+retains authorized mode and policy-derived connector/action-key scopes. Keep the
+ledger, Gateway state, and declared release-format compatibility together during
+backup, upgrade, and rollback; do not downgrade either file independently.
 
 `steward-mcp` can configure fleet tools with `-control-url` and the owner-only
 `-control-token-file`; `-control-ca-file` optionally supplies a private controller

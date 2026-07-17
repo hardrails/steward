@@ -30,6 +30,13 @@ that a tenant authorized a particular task or stop a manipulated agent from chan
 request content inside a reusable service grant. Tenant-signed service tasks address
 that separate authorization problem; they do not strengthen the gVisor boundary.
 
+Steward treats stored and indirect prompt injection as a full agent compromise.
+Hostile instructions can arrive in calendar invitations, email, web pages,
+documents, tool results, or retained memory and can drive legitimate tools toward
+account mutation or secret exfiltration. Detection and model self-review are useful
+additional signals, not enforcement authority. Authorized Effects places a
+deterministic check outside the workload for managed connector calls.
+
 ## Isolation controls
 
 Every admitted agent container receives one fixed policy:
@@ -48,14 +55,14 @@ Every admitted agent container receives one fixed policy:
 | Inference | Site policy selects one route and model alias. Gateway injects the upstream credential, rejects any other model, and synthesizes `/v1/models` from the allowed alias. |
 | Agent service | Gateway exposes a bearer-protected loopback endpoint. It reaches only the declared port through the grant's Unix socket and fixed relay; Docker publishes no container port. The bearer is host-administrator transport authority, not a tenant approval. |
 | Tenant-signed service task | Signed site policy scopes each tenant Ed25519 public key to exact service IDs. The private key stays off-node. Gateway accepts only configured exact JSON `POST` operations, verifies one short-lived permit against the active tenant, instance, generation, artifact, policies, task, operation, and request bytes, fsyncs authorization before dispatch, and never automatically retries an ambiguous outcome. |
-| Authenticated connector | The signed capsule, tenant policy, and intent select connector IDs. Node configuration maps each connector operation to one exact method, path, origin, address policy, and owner-only credential. Gateway strips agent credentials, spends a durable task claim and call budget, pins the resolved address, injects only the configured Bearer or API-key value, denies redirects, and bounds concurrency, bodies, response, and time. An opt-in tenant-scoped action authority can additionally require one short-lived signed permit that matches the live grant, exact origin, method, path, credential injection mode and epoch, task, and request bytes. |
+| Authenticated connector | The signed capsule, tenant policy, and intent select connector IDs. Node configuration maps each connector operation to one exact method, path, origin, address policy, and owner-only credential. Gateway strips agent credentials, spends a durable task claim and call budget, pins the resolved address, injects only the configured Bearer or API-key value, denies redirects, and bounds concurrency, bodies, response, and time. In Authorized Effects mode, site-root-signed tenant policy pins action keys to connector IDs, intent explicitly selects `authorized`, generic egress is prohibited, and Gateway requires a version-2 one-use permit that matches the live grant and exact request. It spends that permit before DNS. |
 | HTTP(S) egress | Executor intersects the publisher profile, tenant route IDs, and instance request. Gateway enforces host and port, a pinned resolved IP, explicit private Classless Inter-Domain Routing (CIDR) ranges, concurrency, byte and time limits, lifecycle, and bounded audit output. Synchronous denial work is limited to 30 per grant, 120 per tenant, and 480 per host per minute; exhaustion suppresses further denial writes while allowed traffic continues. |
 | Resources | Per-workload memory, swap, CPU, PID, and shared-memory limits are mandatory. Docker's bounded `local` log rotation is fixed and the out-of-memory (OOM) killer remains enabled. Executor reconstructs host and tenant aggregate memory, CPU, PID, and workload reservations from Docker, including stopped containers and fixed relay overhead. Disk, inode, and I/O quotas remain outside this portable contract. |
 | Lifecycle | Docker restart and automatic-removal policies are disabled. Executor, not Docker, owns lifecycle. It inspects restart, log, port, device, mount, network, namespace, and image settings after creation. |
 | Integrity and recovery | A SHA-256 fingerprint covers the admitted definition. Reconciliation—comparison of durable signed state with actual runtime objects—runs before normal mutations are accepted and every 30 seconds. It may repair limited lifecycle drift, but never recreates or adopts missing or structurally changed objects. A degraded scan can only narrow authority. |
 | Route integrity | Gateway persists a non-secret digest of each retained route policy and a private credential-content binding. Executor stores the route-policy digest in the admission fence and receipt. Reload, restart, start, and reconciliation refuse a mismatch while the grant remains retained. |
 | Interface | Request bodies and log output are bounded, and every error has the same JSON shape. Executor mutation and both uplinks require authentication. Signed envelopes and payloads reject duplicate and unknown JSON members. The generic supervisor REST API has no built-in authentication and must stay on loopback or behind operator authentication. |
-| Receipts (opt-in) | Executor writes length-framed, Ed25519-signed lifecycle records. Gateway writes a separate signed newline-delimited JSON chain for connector and service-task authorizations and terminal outcomes. Permit-backed records include the authority key ID, exact permit-envelope digest, and exact request digest. Service-task records add the service, operation-policy digest, bounded status, and observed run ID but never the raw prompt. Both chains are hash-linked and flushed with `fsync`; an auditor can verify a copied chain and an independently retained exact head without network access. |
+| Receipts (opt-in) | Executor writes length-framed, Ed25519-signed lifecycle records. Gateway writes a separate signed newline-delimited JSON chain for connector and service-task authorizations and terminal outcomes. Authorized connector records use format 5 and include the effect mode, operation-policy digest, authority key ID, exact permit-envelope digest, and exact request digest. A stable invalid-permit condition can add only one denial marker per retained grant, without claiming a verified permit or key. Service-task records use format 4 and add the service, bounded status, and observed run ID but never the raw prompt. Both chains are hash-linked and flushed with `fsync`; an auditor can verify a copied chain and an independently retained exact head without network access. |
 
 The trusted per-instance relay uses `runc`, not gVisor, because it mounts one
 host-owned, per-grant socket directory. It connects to Gateway's inference,
@@ -136,6 +143,16 @@ expired, malformed, or mismatched task permit is rejected before dispatch. Recei
 quota exhaustion is also pre-dispatch. If authorization is durable but the service
 result is ambiguous, Gateway writes `outcome_unknown` and refuses automatic retry.
 
+An authorized-effects grant also fails closed when intent omits the explicit mode,
+policy does not cover every selected connector, signed key scope differs from
+Gateway configuration, generic egress is present, a version-2 exact-request permit
+is absent, or the tenant lacks receipt capacity. Gateway records at most one stable
+`action_permit_denied` marker per retained grant. Failure to persist that bounded
+marker returns HTTP 503 rather than allowing the connector request. The compromised
+workload chooses the task ID and request bytes accompanying the first invalid
+permit; later denials are not enumerated, so the marker is not an exhaustive audit
+log.
+
 Policy rotation revokes the ability to start an instance admitted under stale
 policy while preserving cleanup authorization. While Executor is serving, the bound
 tenant principal or an authorized site cleanup key may stop, destroy, or purge it
@@ -206,6 +223,12 @@ an optional exact externally retained head. An expected sequence and chain hash
 identify one exact final head; they are not lower bounds. This detects a truncated
 or advanced copy relative to that checkpoint.
 
+For an authorized connector, format-5 authorization and terminal records also bind
+the explicit authorized mode and exact operation-policy digest. They show that
+Gateway accepted and durably spent one exact version-2 permit before attempting the
+network call. They do not show that the approver understood the request or that the
+upstream applied it exactly once.
+
 For service tasks, verification can establish that the configured node key signed
 an authorization before dispatch and later signed a status and run ID. It does not
 establish that the agent performed useful work, that its output was true, or that an
@@ -259,6 +282,12 @@ matters.
   not inside the Steward process.
 - Model serving and semantic inference-data policy remain outside Steward. Steward
   enforces only the approved transport route, model alias, and credential boundary.
+- Authorized Effects covers only Steward-mediated connectors. Unmanaged
+  credentials, browser sessions, plugins, application channels, local filesystem
+  effects, and external computer-use systems remain outside its mediation.
+- Host root, the kernel, Docker, Gateway, receipt keys, and action-signing keys stay
+  trusted. An approver can authorize harmful exact bytes, and an ambiguous upstream
+  result cannot be converted into exactly-once execution by retrying.
 
 ## Operator responsibilities
 

@@ -124,6 +124,13 @@ policy. Steward rejects a policy that assigns the same public key to two tenants
 even under different key IDs. This prevents possession of one tenant's private key
 from becoming cryptographic authority for another tenant through a policy mistake.
 
+Action keys are separate again. For a tenant whose connector effects must remain
+authorized even when the agent is fully manipulated, add `authorized_effects` to
+the tenant rule, pin each public key to connector IDs, and require explicit
+`"effect_mode":"authorized"` in the instance intent. Authorized mode prohibits
+generic egress and requires a version-2 exact-request permit. Follow the complete
+[Authorized Effects procedure]({{ '/guides/authorized-effects/' | relative_url }}).
+
 ## 3. Sign a reusable profile capsule
 
 The manifest digest identifies an Open Container Initiative (OCI) manifest; the

@@ -31,24 +31,35 @@ one exact request. Gateway then requires the workload grant and the permit. This
 mode is opt-in per connector; a connector without action authorities keeps the
 four-layer, budgeted behavior.
 
+For sensitive operations, use
+[Authorized Effects]({{ '/guides/authorized-effects/' | relative_url }}). It adds
+signed-policy continuity to the fifth layer: tenant policy pins each action key to
+connector IDs, intent explicitly selects the mode, generic egress is prohibited,
+Gateway accepts only version-2 permits, and format-5 evidence records the enforced
+mode and exact operation policy. Steward assumes the agent is compromised for this
+decision; it does not ask the agent to detect prompt injection.
+
 ## Define one exact operation
 
 Create the credential as an owner-only file. An external secret manager may
-materialize this file; Steward does not implement or require a vault.
+materialize this file; Steward does not implement or require a vault. For a
+hardened OpenBao template and provider-neutral readiness check, see
+[Store and distribute Gateway credentials]({{ '/guides/secrets/' | relative_url }}).
 
 ```console
 sudo install -d -o root -g steward-gateway -m 0750 /etc/steward/credentials
-sudo install -o steward-gateway -g steward-gateway -m 0600 /dev/null \
+sudo install -d -o root -g root -m 0700 /root/steward-staged-credentials
+# First stage the value at this path as a root-owned mode-0600 regular file.
+sudo install -o steward-gateway -g steward-gateway -m 0600 \
+  /root/steward-staged-credentials/ticket-api \
   /etc/steward/credentials/ticket-api
-printf %s "$TICKET_API_TOKEN" | sudo -u steward-gateway tee \
-  /etc/steward/credentials/ticket-api >/dev/null
-unset TICKET_API_TOKEN
+sudo rm -- /root/steward-staged-credentials/ticket-api
 ```
 
-The file must contain one line of 12 to 16,384 visible ASCII bytes. The minimum
-reduces false matches when Gateway filters routine response content. Do not put the
-value in
-`gateway.json`, shell history, a capsule, site policy, or instance intent.
+The file must contain 12 to 16,384 ASCII bytes in the range `0x21` through `0x7e`,
+with no whitespace. The minimum reduces false matches when Gateway filters routine
+response content. Do not put the value in `gateway.json`, shell history, a capsule,
+site policy, or instance intent.
 
 The packaged installer creates a separate Gateway receipt key and configures its
 owner-only receipt ledger. Add the connector atomically:
@@ -298,9 +309,21 @@ Permit the connector ID in the tenant rule:
 ```json
 {
   "tenant_id": "tenant-a",
-  "connector_ids": ["ticketing"]
+  "connector_ids": ["ticketing"],
+  "authorized_effects": {
+    "mode": "required",
+    "keys": [{
+      "key_id": "approver-a",
+      "public_key": "<canonical-base64-Ed25519-public-key>",
+      "connector_ids": ["ticketing"]
+    }]
+  }
 }
 ```
+
+The action public key appears once in Gateway configuration and once in signed
+tenant policy by design. Those two values must be identical. Each JSON object has
+only one `public_key` member; repeating a member inside one object is invalid.
 
 Request the same subset in the instance intent:
 
@@ -312,8 +335,14 @@ Request the same subset in the instance intent:
   "egress": false,
   "connector": true
 },
-"connector_ids": ["ticketing"]
+"connector_ids": ["ticketing"],
+"effect_mode": "authorized"
 ```
+
+The policy block and `effect_mode` are required only for Authorized Effects. A
+standard permit-enabled connector can omit both, but then node configuration—not
+signed tenant policy—selects the permit requirement. Do not use generic egress in
+authorized mode.
 
 Sign and install the artifacts as described in
 [signed admission]({{ '/guides/signed-admission/' | relative_url }}). A connector
@@ -416,6 +445,18 @@ POST, PUT, and PATCH, the request must
 contain one strict JSON value. Steward hashes those exact bytes without
 reformatting and binds `application/json`. For GET, HEAD, and DELETE, omit
 `-request`; the permit binds an empty request and empty content type.
+
+When admission and intent select Authorized Effects, the command emits
+`steward.action-permit.v2` with `effect_mode` fixed to `authorized`. Gateway rejects
+a version-1 permit for that grant. A standard permit-enabled connector emits and
+requires version 1.
+
+Standard output contains only the exact permit digest. Standard error contains one
+canonical JSON approval summary with the exact target, request digest and byte
+count, validity window, authority, and resulting permit digest. Keep the streams
+separate in automation and compare the summary with independently reviewed request
+bytes before releasing the permit. It excludes request content and cannot prove
+that the approver understood hostile context or the external effect.
 
 `-clock-skew` moves `not_before` earlier without extending the `-valid-for`
 interval. The default allowance is five seconds, the maximum is five minutes, and
@@ -525,10 +566,14 @@ receipt schema `steward.connector-receipt.v1`; permit-backed events use
 `steward.connector-receipt.v2`. Historical two-record agent-service tasks use
 `steward.connector-receipt.v3`; current lifecycle tasks use
 `steward.connector-receipt.v4` and add task-local sequence and hash links across
-authorization, dispatch, and terminal records. One chain may contain all four
-schemas, and the verifier checks them as one sequence. Configuring any action
-authority requires a reader for format 2; configuring any current service-task
-operation requires a reader for format 4, even before the first corresponding call.
+authorization, dispatch, and terminal records. Authorized connector calls use
+`steward.connector-receipt.v5`; they add the explicit effect mode and exact
+operation-policy digest. A stable pre-effect permit denial may add one format-5
+marker per retained grant without claiming a verified permit or authority key. One
+chain may contain all five schemas, and the verifier checks them as one sequence.
+Configuring any action authority requires a reader for format 2, configuring any
+current service-task operation requires a reader for format 4, and an authorized
+grant requires format 5, even before its first accepted call.
 Service-task records carry exact permit and request digests, service and
 operation-policy bindings, bounded status, and an observed run ID, but no raw
 prompt or request body. See the
@@ -568,7 +613,7 @@ host-root attacker preserved the complete record set.
 | `connector_call_limit` | The generation-bound grant spent its maximum connector calls. |
 | `connector_busy` | The connector concurrency ceiling is in use. |
 | `connector_rate_limited` | The grant exceeded the fixed attempt budget for the current minute. |
-| `action_permit_denied` | HTTP 403. A permit is missing, duplicated, malformed, outside its validity window, signed by the wrong tenant key, or mismatched with the live grant, route policy, task, operation, or exact request. The workload receives this generic message; Gateway writes the specific reason to its host service log. The connector's fixed per-grant attempt limit bounds repeated failures. |
+| `action_permit_denied` | HTTP 403. A permit is missing, duplicated, malformed, outside its validity window, signed by the wrong tenant key, uses the wrong schema/effect mode, or mismatches the live grant, route policy, task, operation, or exact request. The workload receives this generic message; Gateway writes the specific reason to its host service log. Authorized mode writes at most one stable denial marker per retained grant; it is the first observed attacker-selected invalid request, not an exhaustive denial log. If that marker cannot be persisted, the call fails closed with HTTP 503. The connector's fixed per-grant attempt limit also bounds repeated failures. |
 | `address_denied` | The origin resolved only to prohibited or unpinned addresses. |
 | `resolution_failed` | Gateway could not resolve the configured origin. The task remains spent and the terminal receipt records the failure. |
 | `grant_revoked` | The grant was deactivated while Gateway was resolving the origin. The task remains spent and the terminal receipt records the revocation. |

@@ -114,9 +114,9 @@ option, or bypass Executor's durable replay checks. Host root, controller TLS ke
 the controller authentication key, tenant private keys, site policy, node host
 integrity, Docker, and gVisor remain trusted according to their documented roles.
 
-This decision does not add a web interface, SSO or OIDC, approval workflows,
-automatic placement, desired-state reconciliation, active-active failover, model
-hosting, or a general workflow engine. Those are separate capabilities. The
-controller must first make enrollment and signed command delivery reliable,
-observable, recoverable, and easy to install before expanding its authority or
-operational surface.
+At adoption, this decision did not add a web interface, SSO or OIDC, approval
+workflows, automatic placement, desired-state reconciliation, active-active
+failover, model hosting, or a general workflow engine. A later decision added a
+bounded read-only operator console without adding mutation or signing authority;
+see [Embed a read-only React operator console]({{ '/decisions/0020-embedded-react-operator-console/' | relative_url }}).
+The other capabilities remain separate.

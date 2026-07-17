@@ -32,6 +32,10 @@ tenant-scoped action permit that signs the exact request bytes. The signing key
 stays off-node; Gateway spends the authorization and records the permit and request
 digests before the effect. See
 [Broker authenticated API operations]({{ '/guides/connectors/' | relative_url }}).
+For sensitive effects, signed tenant policy can require this boundary, pin action
+keys to connector IDs, prohibit generic egress, and require version-2 permits and
+format-5 evidence. See
+[Authorize exact external effects]({{ '/guides/authorized-effects/' | relative_url }}).
 
 Gateway rejects the exact configured connector credential in upstream response
 headers and the decoded body stream. It does not detect transformed credentials,

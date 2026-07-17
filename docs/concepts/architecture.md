@@ -158,16 +158,18 @@ at-most-once dispatch, not fleet-wide or upstream exactly-once execution. The
 service supplies the run ID, so the receipt records an observation rather than
 proving completed or correct agent work.
 
-A connector may also require a tenant-scoped action permit. The off-node authority
-signs a canonical, short-lived DSSE statement for one exact connector request.
+Authorized Effects makes the action-permit boundary part of signed tenant policy.
+The policy pins each off-node action public key to exact connector IDs; authenticated
+intent explicitly selects the mode; Executor projects the narrowed keys; and
+Gateway rejects generic egress or any key/configuration mismatch. The authority
+signs a canonical version-2 DSSE statement for one exact connector request.
 Gateway checks its node, tenant, instance, generation, admitted artifact, policies,
 connector operation-policy digest, task, body digest and length, method-derived
 content type, and validity window against live state. The operation digest fixes
 the canonical origin, credential injection mode and epoch, method, and path.
-Gateway then records the
-permit and stable task-based call digest together in the signed connector ledger
-before DNS. The signer never needs the upstream credential, and its private key
-does not belong on the node.
+Gateway records the permit and stable task-based call digest together in receipt
+format 5 before DNS. The signer never needs the upstream credential, and its
+private key does not belong on the node.
 
 `stewardctl` is a CLI, not a daemon. Its key, capsule, policy, task-issuance,
 archive-inspection, and evidence commands run offline without contacting a node,
@@ -297,7 +299,11 @@ the owner-provided credential at the last hop. Spend-before-effect task claims a
 per-grant call budgets survive restart. The connector is not an arbitrary proxy or
 secret-delivery mechanism. An optional action permit narrows that outer connector
 grant to one authority-signed request; it cannot add an operation or tenant that
-the admitted grant lacks.
+the admitted grant lacks. Authorized Effects additionally makes that requirement
+continuous from signed tenant policy through intent, immutable runtime state,
+Gateway grant, version-2 permit, durable one-use spend, and format-5 evidence. It
+assumes the agent is compromised and applies only to fully mediated connector
+calls; it is not prompt-injection detection or control over unmanaged channels.
 
 For HTTP(S) egress, the agent receives standard proxy variables that point to its
 relay. The relay has no Internet route; it forwards bytes to one grant-owned Unix

@@ -20,7 +20,11 @@ info:
     The built-in store is a bounded, single-writer durable store intended for
     one active controller process. A second process cannot open the same state
     directory. Remote listeners require TLS; plaintext is allowed only on a
-    literal loopback address. Every JSON body and response is limited to 1 MiB.
+    literal loopback address. Every request Host must match the literal loopback
+    listener authority or an exact, non-wildcard DNS or IP SAN from the TLS leaf
+    certificate at the listener port. A malformed or mismatched Host is rejected
+    with 400 before route dispatch. Every JSON body and response is limited to
+    1 MiB.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

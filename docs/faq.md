@@ -77,12 +77,29 @@ intent bound to a tenant, node, instance, and generation. Executor journals host
 changes and emits receipts that `stewardctl` can verify offline. This path is opt-in; see
 [the how-to]({{ '/guides/signed-admission/' | relative_url }}).
 
+## Does Steward prevent prompt injection?
+
+No. Hostile instructions can arrive through a calendar invitation, email, web
+page, document, tool response, or memory, and no model-level detector is a complete
+security boundary. Authorized Effects instead assumes the agent is compromised and
+limits what it can do through Steward-managed connectors. Signed tenant policy
+pins action keys to connector IDs, intent explicitly selects the mode, generic
+egress is prohibited, and Gateway spends one version-2 exact-request permit before
+DNS while keeping the upstream credential outside the workload.
+
+This does not cover unmanaged credentials or channels, inference confidentiality,
+local filesystem or computer use, host root, a mistaken approver, or upstream
+exactly-once behavior. See
+[Authorize exact external effects]({{ '/guides/authorized-effects/' | relative_url }}).
+
 ## Do receipts prove everything an agent did?
 
 No. Executor receipts bind Steward's admission and host-mutation records. Gateway
 receipts can bind an exact tenant task permit, request digest, dispatch result,
 agent-reported terminal status, result digest and length, and the run ID observed
-from an agent service. They exclude raw prompts, request bodies,
+from an agent service. Format-5 authorized connector records additionally bind the
+explicit effect mode, operation policy, action key, permit, and exact request
+digest. They exclude raw prompts, request bodies,
 model responses, agent logs, workspace content, and tool meaning. The service
 supplies its run ID, so the ID is not independent proof that useful work completed.
 Compromised host root is outside the node-local receipt trust boundary.
