@@ -37,6 +37,8 @@ servers:
 security:
   - bearerAuth: []
 tags:
+  - name: console
+    description: Unauthenticated, embedded, read-only React console assets. Fleet data still requires an operator bearer through the operations API.
   - name: health
     description: Unauthenticated process and durable-state probes.
   - name: tenants
@@ -60,6 +62,180 @@ tags:
   - name: evidence-uplink
     description: Node-authenticated publication of signed, append-only Executor evidence checkpoints.
 paths:
+  /console:
+    get:
+      tags: [console]
+      operationId: getControlConsoleIndex
+      summary: Read the embedded operator console entry point
+      description: |
+        Returns the committed React entry point without redirecting. The request
+        must not contain a query string. The page contains no fleet data or
+        credential; its same-origin API reads require an operator bearer.
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsoleIndex"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    head:
+      tags: [console]
+      operationId: headControlConsoleIndex
+      summary: Read embedded operator console entry-point metadata
+      description: Returns the same headers as `GET /console` with no response body. Query strings are rejected.
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsoleHead"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /console/:
+    get:
+      tags: [console]
+      operationId: getControlConsoleIndexSlash
+      summary: Read the embedded operator console entry point
+      description: |
+        Returns the same committed entry point as `GET /console`, without a
+        redirect. The request must not contain a query string.
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsoleIndex"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    head:
+      tags: [console]
+      operationId: headControlConsoleIndexSlash
+      summary: Read embedded operator console entry-point metadata
+      description: Returns the same headers as `GET /console/` with no response body. Query strings are rejected.
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsoleHead"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /console/icon.svg:
+    get:
+      tags: [console]
+      operationId: getControlConsoleIcon
+      summary: Read the embedded operator console icon
+      description: Returns the committed SVG icon. Query strings are rejected.
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsoleIcon"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    head:
+      tags: [console]
+      operationId: headControlConsoleIcon
+      summary: Read embedded operator console icon metadata
+      description: Returns the same headers as `GET /console/icon.svg` with no response body. Query strings are rejected.
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsoleHead"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /console/THIRD_PARTY_NOTICES.txt:
+    get:
+      tags: [console]
+      operationId: getControlConsoleThirdPartyNotices
+      summary: Read embedded operator console third-party notices
+      description: Returns the committed dependency notice text. Query strings are rejected.
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsoleNotices"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    head:
+      tags: [console]
+      operationId: headControlConsoleThirdPartyNotices
+      summary: Read embedded operator console notice metadata
+      description: Returns the same headers as the notice `GET` with no response body. Query strings are rejected.
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsoleHead"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /console/assets/{asset}:
+    get:
+      tags: [console]
+      operationId: getControlConsoleAsset
+      summary: Read one committed operator console script or stylesheet
+      description: |
+        Returns only an exact committed JavaScript or CSS basename. Source
+        files, source maps, nested paths, dot-prefixed names, unknown assets,
+        and other extensions return `404`. Query strings return `400`.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ConsoleAsset"
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsoleScriptOrStyle"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    head:
+      tags: [console]
+      operationId: headControlConsoleAsset
+      summary: Read committed operator console asset metadata
+      description: |
+        Returns the same headers as the matching asset `GET` with no response
+        body. Invalid or unknown asset names return `404`; query strings return
+        `400`.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/ConsoleAsset"
+      responses:
+        "200":
+          $ref: "#/components/responses/ConsoleHead"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/healthz:
     get:
       tags: [health]
@@ -1283,6 +1459,19 @@ components:
       scheme: bearer
       bearerFormat: Steward control credential
   parameters:
+    ConsoleAsset:
+      name: asset
+      in: path
+      required: true
+      description: |
+        Exact committed JavaScript or CSS basename. It is at most 128
+        characters, has no path delimiter, does not begin with `.`, and uses
+        only ASCII letters, digits, `.`, `_`, and `-`.
+      schema:
+        type: string
+        minLength: 5
+        maxLength: 128
+        pattern: '^[A-Za-z0-9_-][A-Za-z0-9._-]*[.](css|js)$'
     TenantID:
       name: tenant_id
       in: path
@@ -1437,6 +1626,117 @@ components:
       schema:
         type: boolean
   responses:
+    ConsoleIndex:
+      description: |
+        The embedded console HTML. The response is `no-store` and includes the
+        console Content Security Policy, same-origin resource and opener
+        policies, frame denial, restricted browser permissions, no-referrer,
+        no-sniff, and no-index headers.
+      headers:
+        Content-Length:
+          description: Exact byte length of the committed response body.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 1048576
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        text/html:
+          schema:
+            type: string
+            maxLength: 1048576
+    ConsoleIcon:
+      description: |
+        The embedded console SVG icon with the same restrictive security and
+        `no-store` headers as the console entry point.
+      headers:
+        Content-Length:
+          description: Exact byte length of the committed response body.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 1048576
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        image/svg+xml:
+          schema:
+            type: string
+            maxLength: 1048576
+    ConsoleNotices:
+      description: |
+        The embedded console third-party notice text with the same restrictive
+        security and `no-store` headers as the console entry point.
+      headers:
+        Content-Length:
+          description: Exact byte length of the committed response body.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 1048576
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        text/plain:
+          schema:
+            type: string
+            maxLength: 1048576
+    ConsoleScriptOrStyle:
+      description: |
+        One exact embedded production script or stylesheet with the same
+        restrictive security and `no-store` headers as the console entry point.
+      headers:
+        Content-Length:
+          description: Exact byte length of the committed response body.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 1048576
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
+      content:
+        text/javascript:
+          schema:
+            type: string
+            maxLength: 1048576
+        text/css:
+          schema:
+            type: string
+            maxLength: 1048576
+    ConsoleHead:
+      description: |
+        Metadata for one embedded console asset. The response has no body and
+        carries the matching GET response's Content-Type, exact Content-Length,
+        restrictive security headers, and `Cache-Control: no-store`.
+      headers:
+        Content-Length:
+          description: Exact byte length the matching GET would return.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 1048576
+        Content-Type:
+          schema:
+            type: string
+            enum:
+              - text/html; charset=utf-8
+              - image/svg+xml
+              - text/plain; charset=utf-8
+              - text/javascript; charset=utf-8
+              - text/css; charset=utf-8
+        Cache-Control:
+          schema:
+            type: string
+            enum: [no-store]
     BadRequest:
       description: The path, query, strict JSON body, or requested record violates the control contract.
       content:

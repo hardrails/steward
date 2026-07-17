@@ -88,16 +88,17 @@ response cannot retain pre-session authority indefinitely.
 | View | What it shows | What it omits |
 | --- | --- | --- |
 | Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, and retained-state capacity | Mutation controls and raw evidence frames |
-| Attention | Stable findings derived from retained control state | Acknowledgement, dismissal, retry, remediation, or incident workflow |
+| Attention | Deterministic findings derived from retained facts and current process observations; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, remediation, or incident workflow |
 | Nodes | Node state, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
 | Commands | Command ID and digest, tenant, node, lifecycle state, and creation time | Signed command bytes, terminal result text, prompts, and task bodies |
 | Credentials | Credential ID, kind, role or node, scope, creation time, and revoked state | Bearer values, token message-authentication codes, and private keys |
 
 The console refreshes a visible page every 30 seconds and also provides a manual
 refresh. Operations pages request at most 100 records and the selected tenant's
-node view requests at most 500. When a view says more records exist, use the
-bounded API cursor through an authenticated client; the console does not silently
-claim that its first page is complete.
+node view requests at most 500. The tenant selector loads at most 500 records at
+a time and offers the next page when more tenants exist. When another view says
+more records exist, use the bounded API cursor through an authenticated client;
+the console does not silently claim that its first page is complete.
 
 ## Understand the session boundary
 

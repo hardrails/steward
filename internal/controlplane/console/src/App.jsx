@@ -101,6 +101,9 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [snapshot, setSnapshot] = useState(null);
   const [tenants, setTenants] = useState([]);
+  const [tenantCursor, setTenantCursor] = useState("");
+  const [loadingTenants, setLoadingTenants] = useState(false);
+  const [tenantError, setTenantError] = useState("");
   const [selectedTenant, setSelectedTenant] = useState("");
   const [view, setView] = useState("overview");
   const [authenticating, setAuthenticating] = useState(false);
@@ -122,6 +125,9 @@ export default function App() {
     setSession(null);
     setSnapshot(null);
     setTenants([]);
+    setTenantCursor("");
+    setLoadingTenants(false);
+    setTenantError("");
     setSelectedTenant("");
     setView("overview");
     setRefreshing(false);
@@ -224,6 +230,7 @@ export default function App() {
       startedAtRef.current = now;
       lastActivityRef.current = now;
       setTenants(tenantPage.tenants);
+      setTenantCursor(tenantPage.next_after || "");
       setSelectedTenant(projection);
       setSnapshot(initialSnapshot);
       setLastRefresh(new Date().toISOString());
@@ -242,6 +249,40 @@ export default function App() {
       cancelAuthenticationDeadline();
     }
   }, [api, loadSnapshot, lock]);
+
+  const loadMoreTenants = useCallback(async () => {
+    if (!session?.siteAdmin || !tenantCursor || loadingTenants) {
+      return;
+    }
+    const epoch = session.epoch;
+    setLoadingTenants(true);
+    setTenantError("");
+    try {
+      const tenantPage = await api(projectedPath("/v1/tenants", "", {
+        after: tenantCursor,
+        limit: 500,
+      }), epoch);
+      fenceRef.current.assertCurrent(epoch);
+      setTenants((current) => {
+        const known = new Set(current.map((tenant) => tenant.tenant_id));
+        return current.concat(tenantPage.tenants.filter((tenant) => !known.has(tenant.tenant_id)));
+      });
+      setTenantCursor(tenantPage.next_after || "");
+    } catch (error) {
+      if (error instanceof StaleSessionError || error?.name === "AbortError") {
+        return;
+      }
+      if (error instanceof ControlError && error.status === 401) {
+        lock("The operator credential was rejected, expired, or revoked.");
+        return;
+      }
+      setTenantError(error instanceof Error ? error.message : "The next tenant page could not be loaded.");
+    } finally {
+      if (fenceRef.current.current(epoch)) {
+        setLoadingTenants(false);
+      }
+    }
+  }, [api, loadingTenants, lock, session, tenantCursor]);
 
   const refresh = useCallback(async (projection = selectedTenant, quiet = false) => {
     if (!session || refreshing) {
@@ -357,6 +398,9 @@ export default function App() {
               session={session}
               snapshot={snapshot}
               tenants={tenants}
+              tenantCursor={tenantCursor}
+              loadingTenants={loadingTenants}
+              tenantError={tenantError}
               selectedTenant={selectedTenant}
               view={view}
               refreshing={refreshing}
@@ -364,6 +408,7 @@ export default function App() {
               lastRefresh={lastRefresh}
               onView={setView}
               onProjection={changeProjection}
+              onLoadMoreTenants={loadMoreTenants}
               onRefresh={() => refresh()}
               onLock={() => lock("")}
             />
@@ -464,7 +509,19 @@ const views = [
 ];
 
 function ControlRoom(props) {
-  const {session, snapshot, tenants, selectedTenant, view, refreshing, refreshError, lastRefresh} = props;
+  const {
+    session,
+    snapshot,
+    tenants,
+    tenantCursor,
+    loadingTenants,
+    tenantError,
+    selectedTenant,
+    view,
+    refreshing,
+    refreshError,
+    lastRefresh,
+  } = props;
   const attentionCount = snapshot?.summary.attention.total || 0;
   return (
     <section className="control-room">
@@ -514,6 +571,16 @@ function ControlRoom(props) {
                 <option key={tenant.tenant_id} value={tenant.tenant_id}>{tenant.tenant_id}</option>
               ))}
             </select>
+            {session.siteAdmin && tenantCursor ? (
+              <button
+                className="button button-quiet tenant-page-button"
+                type="button"
+                disabled={loadingTenants}
+                onClick={props.onLoadMoreTenants}
+              >
+                {loadingTenants ? "Loading…" : "Load 500 more"}
+              </button>
+            ) : null}
           </div>
           <div className="toolbar-actions">
             <span className="refresh-time">
@@ -529,6 +596,7 @@ function ControlRoom(props) {
           <strong>OBSERVE HERE. AUTHORIZE ELSEWHERE.</strong>
           <span>Mutations and private signing material remain in stewardctl and offline operator workflows.</span>
         </div>
+        {tenantError ? <div className="flash-message is-error" role="alert">{tenantError}</div> : null}
         {refreshError ? <div className="flash-message is-error" role="alert">{refreshError}</div> : null}
         {!snapshot ? (
           <div className="loading-state" aria-live="polite">
@@ -675,7 +743,7 @@ function AttentionView({page}) {
   return (
     <section className="view" aria-labelledby="attention-title">
       <ViewHeading eyebrow="DERIVED, NOT MUTABLE" title="Operator attention">
-        Stable findings calculated from durable state.
+        Deterministic findings from retained facts and current process observations.
       </ViewHeading>
       <AttentionList items={page.items} />
       {page.next_cursor ? <p className="truncation-note">More findings exist. Narrow the tenant projection or use the API cursor.</p> : null}
@@ -716,6 +784,7 @@ function NodesView({page, tenantID}) {
           </tbody>
         </table>
       </TableFrame>
+      {page.next_after ? <p className="truncation-note">More nodes exist. Use the API continuation cursor for the next page.</p> : null}
     </section>
   );
 }

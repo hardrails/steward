@@ -48,6 +48,9 @@ func TestConsoleServesOnlyEmbeddedSameOriginAssets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if len(body) > maxConsoleAssetBytes {
+				t.Fatalf("embedded console asset %q is %d bytes; limit is %d", test.asset, len(body), maxConsoleAssetBytes)
+			}
 			request := httptest.NewRequest(http.MethodGet, test.path, nil)
 			response := httptest.NewRecorder()
 			server.console(response, request)
@@ -160,6 +163,10 @@ func TestConsoleSourceDoesNotPersistCredentialsMutateStateOrUseUnsafeDOMSinks(t 
 		`url.origin !== window.location.origin`,
 		`credentialRef.current = ""`,
 		`inputRef.current.value = ""`,
+		`page.next_after`,
+		`More nodes exist.`,
+		`tenantPage.next_after`,
+		`Load 500 more`,
 		`OBSERVE HERE. AUTHORIZE ELSEWHERE.`,
 	} {
 		if !strings.Contains(script, required) {

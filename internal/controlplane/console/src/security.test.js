@@ -33,6 +33,10 @@ test("the React source keeps credentials ephemeral and the console read-only", a
     'window.removeEventListener("pagehide", onPageHide)',
     "clearAuthority();",
     "displayStringList(node.capabilities)",
+    "page.next_after",
+    "More nodes exist.",
+    "tenantPage.next_after",
+    "Load 500 more",
     "OBSERVE HERE. AUTHORIZE ELSEWHERE.",
   ]) {
     assert.equal(source.includes(required), true, `missing browser boundary: ${required}`);

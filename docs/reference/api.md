@@ -30,14 +30,16 @@ TLS, the host must be an exact, non-wildcard DNS or IP Subject Alternative Name
 (SAN) from the leaf certificate at the listener port. Steward rejects malformed
 or mismatched authorities with `400 Bad Request` before API or console routing.
 
-Every route except health, readiness, and one-time enrollment exchange requires an
-appropriate Bearer credential. Enrollment exchange uses the one-time enrollment
-bearer in its request. Operator credentials are either site-wide or scoped to one
-tenant. Node credentials can call only the command and evidence uplink poll and
-report routes for their bound node.
+The embedded console assets, health, readiness, and one-time enrollment exchange
+do not use an operator bearer. Console assets contain no fleet data; their
+same-origin API reads still require an appropriate operator bearer. Enrollment
+exchange uses the one-time enrollment bearer in its request. Operator credentials
+are either site-wide or scoped to one tenant. Node credentials can call only the
+command and evidence uplink poll and report routes for their bound node.
 
 | Method and path | Purpose |
 | --- | --- |
+| `GET or HEAD /console`, `/console/`, and committed `/console/*` assets | Serve the embedded read-only React console without a CDN or separate web server |
 | `GET /v1/healthz`, `GET /v1/readiness` | Process liveness and durable-store readiness |
 | `POST /v1/tenants`, `GET /v1/tenants` | Create and page through tenants |
 | `GET /v1/tenants/{tenant_id}` | Read one visible tenant |

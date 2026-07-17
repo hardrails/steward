@@ -19,7 +19,10 @@ import (
 //go:embed console/dist
 var consoleDistribution embed.FS
 
-const consoleContentSecurityPolicy = "default-src 'none'; base-uri 'none'; child-src 'none'; connect-src 'self'; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self'; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; worker-src 'none'"
+const (
+	consoleContentSecurityPolicy = "default-src 'none'; base-uri 'none'; child-src 'none'; connect-src 'self'; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self'; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self'; style-src-attr 'none'; worker-src 'none'"
+	maxConsoleAssetBytes         = 1 << 20
+)
 
 func (server *Server) console(writer http.ResponseWriter, request *http.Request) {
 	setConsoleSecurityHeaders(writer.Header())
@@ -43,6 +46,11 @@ func (server *Server) console(writer http.ResponseWriter, request *http.Request)
 			return
 		}
 		server.logger.Error("embedded console asset missing", "asset", asset, "error", err)
+		writeError(writer, http.StatusInternalServerError, "internal_error", "the embedded console asset is unavailable")
+		return
+	}
+	if len(body) > maxConsoleAssetBytes {
+		server.logger.Error("embedded console asset exceeds response limit", "asset", asset, "bytes", len(body))
 		writeError(writer, http.StatusInternalServerError, "internal_error", "the embedded console asset is unavailable")
 		return
 	}

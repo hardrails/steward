@@ -560,7 +560,7 @@ select:focus {
   display: grid;
   min-width: min(280px, 38vw);
   align-items: center;
-  grid-template-columns: auto minmax(130px, 1fr);
+  grid-template-columns: auto minmax(130px, 1fr) auto;
   gap: 12px;
 }
 
@@ -576,6 +576,12 @@ select:focus {
 .toolbar select {
   min-height: 38px;
   padding: 6px 10px;
+}
+
+.tenant-page-button {
+  min-height: 38px;
+  padding: 6px 10px;
+  white-space: nowrap;
 }
 
 .toolbar-actions {
