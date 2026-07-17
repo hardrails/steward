@@ -117,6 +117,8 @@ integrity, Docker, and gVisor remain trusted according to their documented roles
 At adoption, this decision did not add a web interface, SSO or OIDC, approval
 workflows, automatic placement, desired-state reconciliation, active-active
 failover, model hosting, or a general workflow engine. A later decision added a
-bounded read-only operator console without adding mutation or signing authority;
-see [Embed a read-only React operator console]({{ '/decisions/0020-embedded-react-operator-console/' | relative_url }}).
+bounded observation-first operator console, and a subsequent decision allowed it
+to courier one exact command signed outside the browser without adding signing or
+general mutation authority; see [Embed an observation-first React operator console]({{ '/decisions/0020-embedded-react-operator-console/' | relative_url }})
+and [Use the browser as a signed-command courier]({{ '/decisions/0023-native-signed-command-console-courier/' | relative_url }}).
 The other capabilities remain separate.

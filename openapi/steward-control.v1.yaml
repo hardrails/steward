@@ -7,8 +7,11 @@ info:
     controller manages tenant scopes, operator credentials, one-time node
     enrollment, node inventory, reclaimable delivery of exact tenant-signed
     Executor commands, independently witnessed Executor evidence heads, and
-    authenticated read-only fleet operations views. An optional authenticated
-    Prometheus endpoint exposes only bounded aggregate metrics.
+    authenticated read-only fleet operations views. The embedded React console
+    can also courier one exact offline-signed command through the existing command
+    endpoint; it does not create, edit, approve, or sign command authority. An
+    optional authenticated Prometheus endpoint exposes only bounded aggregate
+    metrics.
 
     `steward-control` is a transport and state authority, not an execution
     authority. Tenant and site private signing keys stay outside this service.
@@ -38,7 +41,7 @@ security:
   - bearerAuth: []
 tags:
   - name: console
-    description: Unauthenticated, embedded, read-only React console assets. Fleet data still requires an operator bearer through the operations API.
+    description: Unauthenticated, embedded React console assets. Fleet reads and exact signed-command submission still require an operator bearer through the existing operations and command APIs.
   - name: health
     description: Unauthenticated process and durable-state probes.
   - name: tenants

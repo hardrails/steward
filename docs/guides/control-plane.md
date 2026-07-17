@@ -711,6 +711,13 @@ stewardctl control command submit \
   -command start-agent-1-0001.dsse.json
 ```
 
+The embedded React console can courier the same exact file. Select `tenant-a`,
+open **Commands**, load the DSSE JSON, compare its SHA-256 digest with the signing
+station, type the exact confirmation phrase, and re-enter the current operator
+bearer. The browser does not sign or verify the command. The controller strictly
+binds its signed route and retains the original bytes; Executor verifies command
+authority before acting. See [Operate a fleet with the embedded React console]({{ '/guides/operator-console/' | relative_url }}).
+
 Inspect delivery without creating a replacement command:
 
 ```console

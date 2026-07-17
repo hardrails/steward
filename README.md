@@ -117,13 +117,14 @@ opt-in authenticated metrics, backup, and MCP. The
 shows how to promote one exact qualified Hermes release through a canary and
 operator-approved batches without giving the controller either signing key.
 
-Steward Control also embeds a read-only operator console at `/console/`. It shows
-the scoped operations summary, attention findings, nodes, command metadata, and
-credential metadata through the same authenticated API. The browser holds the
-bearer only in JavaScript memory. The console exposes no mutation or signing
-controls and no secret plaintext; use `stewardctl`, another authenticated API
-client, or a documented offline workflow for changes. For the default listener,
-open exactly `http://127.0.0.1:8443/console/`. See the
+Steward Control also embeds an observation-first React console at `/console/`. It
+shows the scoped operations summary, attention findings, nodes, command metadata,
+and credential metadata through the same authenticated API. Its one mutation is a
+signed-command courier: load an exact DSSE envelope created on an offline signing
+station, compare its SHA-256 digest and signed route, re-enter the current operator
+bearer, and submit the unchanged bytes. The browser never signs commands or holds
+private keys or secret plaintext. For the default listener, open exactly
+`http://127.0.0.1:8443/console/`. See the
 [operator console guide](https://hardrails.github.io/steward/guides/operator-console/)
 before exposing it remotely or entering an administrator bearer.
 
@@ -356,8 +357,9 @@ A Linux release contains seven static binaries:
 - `steward-control` provides the optional self-hosted tenant, enrollment,
   inventory, signed-command delivery, and separately keyed evidence-witness
   plane without holding tenant private keys or Docker authority. Its embedded
-  `/console/` is a read-only view of bounded control API metadata, not a mutation
-  or signing surface.
+  `/console/` is an observation-first view of bounded control API metadata and a
+  narrow courier for exact offline-signed commands, not a signing surface or a
+  general controller client.
 - `steward` tracks lifecycle state and provides the generic outbound uplink.
 - `steward-executor` verifies admission and is the only long-running Steward
   service with Docker-group membership.
@@ -541,7 +543,7 @@ without access to private source or infrastructure.
 - [Operate a workload](https://hardrails.github.io/steward/guides/workload-lifecycle/)
 - [Install without public network access](https://hardrails.github.io/steward/guides/air-gapped/)
 - [Configure signed admission](https://hardrails.github.io/steward/guides/signed-admission/)
-- [Inspect a fleet in the read-only console](https://hardrails.github.io/steward/guides/operator-console/)
+- [Inspect a fleet and submit an offline-signed command](https://hardrails.github.io/steward/guides/operator-console/)
 - [Authorize exact external effects](https://hardrails.github.io/steward/guides/authorized-effects/)
 - [Store and distribute Gateway credentials](https://hardrails.github.io/steward/guides/secrets/)
 - [Broker authenticated API operations](https://hardrails.github.io/steward/guides/connectors/)

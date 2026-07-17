@@ -281,8 +281,10 @@ Steward is not an agent framework, workflow designer, model router, browser
 service, generic sandbox API, or hosted control-plane service. The bundled
 self-hosted controller is deliberately not an enterprise identity provider,
 approval system, placement scheduler, desired-state reconciler, or general
-fleet-management interface. Its embedded console is a bounded read-only projection
-of the control API, not an approval or remediation workflow. Steward does not host
+fleet-management interface. Its embedded console is a bounded observation-first
+projection of the control API with one exact signed-byte courier. It can transport
+an already authorized command but cannot create, edit, sign, approve, or widen
+authority, and it is not a remediation workflow. Steward does not host
 models, inspect prompts, calculate token costs, design multi-agent workflows, or
 make semantic claims about agent behavior.
 

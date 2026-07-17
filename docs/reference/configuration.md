@@ -57,14 +57,17 @@ listener.
 
 ### Embedded operator console
 
-`steward-control` always serves its committed read-only assets at `/console/` on
+`steward-control` always serves its committed React assets at `/console/` on
 the existing `-addr`. There is no console enable flag, separate port, web server,
 user database, cookie, or runtime Node.js process. `GET` and `HEAD` can retrieve
 only the embedded index, icon, third-party notice text, and hashed JavaScript or
 CSS assets. The static page does not require a bearer and reveals no fleet state.
 Its same-origin `/v1/`
 summary, attention, node, command-metadata, and credential-metadata reads require
-the normal operator Bearer credential and retain its site or tenant scope.
+the normal operator Bearer credential and retain its site or tenant scope. The
+console can also send one exact offline-signed Executor command to the existing
+bounded command endpoint after local digest review, exact confirmation, and
+re-entry of the current bearer. It cannot sign, edit, or create that authority.
 
 The server derives an exact Host-header allowlist automatically. A loopback HTTP
 listener accepts only its actual bound literal IP and port; the default URL is
@@ -89,7 +92,7 @@ npm. Frontend maintainers use Node.js 24 LTS and the lockfile-pinned React and V
 tree to run `npm ci --ignore-scripts`, `npm audit`, source checks, and the production
 build. CI rejects any generated distribution that differs from the committed
 assets. See
-[Inspect a fleet with the embedded operator console]({{ '/guides/operator-console/' | relative_url }}).
+[Operate a fleet with the embedded React console]({{ '/guides/operator-console/' | relative_url }}).
 
 The operations thresholds must be positive and no greater than 365 days; the
 capacity percentage must be 1 through 100. Threshold equality is actionable.

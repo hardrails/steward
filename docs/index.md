@@ -34,7 +34,7 @@ home: true
   </div>
   <div>
     <h3>I operate a fleet</h3>
-    <p>Install the bundled controller, inspect its read-only local control room, enroll nodes once, deliver exact signed commands without placing tenant command, task, or action keys in the controller, and promote one qualified Hermes release through a signed plan and evidence-bound batch gates.</p>
+    <p>Install the bundled controller, inspect its local control room, courier exact offline-signed commands without placing tenant command, task, or action keys in the browser or controller, enroll nodes once, and promote one qualified Hermes release through a signed plan and evidence-bound batch gates.</p>
     <p><a href="{{ '/guides/control-plane/' | relative_url }}">Operate Steward Control →</a> · <a href="{{ '/guides/operator-console/' | relative_url }}">Open the operator console →</a> · <a href="{{ '/guides/fleet-rollout/' | relative_url }}">Run a proof-carrying rollout →</a></p>
   </div>
 </div>
@@ -44,7 +44,7 @@ home: true
 <div class="architecture-strip">
   <div><small>Authorization inputs</small><strong>Workload profile + site policy + signed command</strong><p>Artifact limits, local trust, tenant and instance identity</p></div>
   <span class="arrow">→</span>
-  <div><small>Management host</small><strong>Steward Control</strong><p>Read-only embedded console, enrollment, bounded inventory, exact command delivery; dedicated evidence-witness key, but no tenant command, task, or action keys and no Docker authority</p></div>
+  <div><small>Management host</small><strong>Steward Control</strong><p>Observation-first React console with an exact signed-command courier, enrollment, bounded inventory, and command delivery; dedicated evidence-witness key, but no tenant command, task, or action keys and no Docker authority</p></div>
   <span class="arrow">→</span>
   <div><small>Linux node</small><strong>Steward node services</strong><p>Admission, capability gateway, durable anti-replay state, signed receipts</p></div>
   <span class="arrow">→</span>
@@ -72,10 +72,12 @@ filesystem or computer use, inference confidentiality, or host root.
 
 Steward Control's `/console/` provides a separate operator experience without a
 separate authority boundary. It reads bounded summary, attention, node, command,
-and credential metadata through the same scoped API bearer. It has no mutation or
-signing controls, stores the bearer only in page memory, and loads no CDN or
-telemetry assets. Browser extensions remain trusted; use a hardened operator
-profile.
+and credential metadata through the same scoped API bearer. Its one mutation is a
+courier for an exact offline-signed Executor command: the browser previews and
+hashes the unchanged file, requires confirmation and bearer re-entry, then uses the
+existing command endpoint. It has no signing or general mutation controls, stores
+the bearer only in page memory, and loads no CDN or telemetry assets. Browser
+extensions remain trusted; use a hardened operator profile.
 
 ## Agent adapters
 
@@ -121,7 +123,7 @@ secrets, host mounts, privileged mode, or undeclared ports.
 [Browse an offline agent catalog]({{ '/guides/agent-catalog/' | relative_url }}) ·
 [Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }}) ·
 [Roll it out through canary and batch gates]({{ '/guides/fleet-rollout/' | relative_url }}) ·
-[Inspect the read-only operator console]({{ '/guides/operator-console/' | relative_url }}) ·
+[Inspect a fleet and courier an offline-signed command]({{ '/guides/operator-console/' | relative_url }}) ·
 [Review the OpenClaw adapter contract]({{ '/guides/openclaw/' | relative_url }}) ·
 [Configure positive capabilities]({{ '/guides/positive-capabilities/' | relative_url }}) ·
 [Authorize exact external effects]({{ '/guides/authorized-effects/' | relative_url }}) ·
