@@ -13,7 +13,9 @@ creates signed, hash-linked receipts for offline verification. Optional capabili
 include inference, a private service, credential-brokered connector operations,
 tenant-signed exact service tasks, deny-by-default HTTP(S) egress, command-line and Model Context Protocol (MCP)
 operations, Terraform bootstrap, and a fixed proof-carrying activation path for
-one qualified Hermes canary. Persistent
+one qualified Hermes canary. An operator-side coordinator can apply that same
+closed activation contract to an explicit remote node list with a first-node canary
+and operator-approved later batches. Persistent
 state is available only through the dedicated-host compatibility mode described
 below.
 
@@ -121,10 +123,9 @@ authority, not tenant authentication.
 
 ## Proof-carrying activation is deliberately narrow
 
-The signed agent release and activation flow currently supports one closed,
-node-local Hermes fresh-state workspace-audit canary. It is not a hosted catalog,
-general workflow engine, remote rollout system, arbitrary command runner, or proof
-framework for user-defined prompts and hooks.
+The signed agent release and activation flow supports one closed, fresh-state
+Hermes workspace-audit canary. It is not a hosted catalog, general workflow engine,
+arbitrary command runner, or proof framework for user-defined prompts and hooks.
 
 The offline agent catalog is a curator-signed descriptive index. It re-verifies
 the exact embedded releases and exposes signed capsule metadata for local search
@@ -206,11 +207,87 @@ Executor receipt frames exclude prompts, request bodies, result bodies, and
 workspace content. The activation workspace separately retains the bounded canary
 result and should still be handled as sensitive operational evidence.
 
-Controller-driven end-to-end activation remains unavailable because the control
-uplink does not carry the full admission projection needed for exact
-post-admission task authorization. See
+The controller does not own end-to-end activation. The implemented remote fleet
+path uses an operator-side coordinator, protocol-4 bounded admission and canary
+projections, exact signed commands, and site-admin evidence capture. Steward
+Control still does not select targets, hold either private signing key, mint
+replacement authority, or choose promotion and rollback. See
 [agent activation]({{ '/guides/agent-activation/' | relative_url }}) for the
 implemented `create`, `run`, `attach`, `status`, and offline `verify` procedure.
+
+## Proof-carrying fleet rollout is deliberately narrow
+
+One rollout binds one verified release, one signed policy, one tenant, and from 1
+through 64 explicitly ordered unique nodes. Target 0 is the canary. Later batches
+contain from 1 through 16 targets, are processed sequentially, and require a new
+operator invocation before each batch. The complete rollout window is at most 24
+hours and cannot exceed the capsule expiry.
+
+The operator-side coordinator holds the command and Hermes task private keys in
+memory while running. It retains exact generated artifacts and append-only state in
+an owner-only workspace; it does not put either private key in the workspace or
+controller. One common policy-authorized command key signs the exact plan and a
+contiguous promotion chain. Each promotion binds the preceding batch's ordered
+passed state, activation proofs, controller captures, and the next batch boundary;
+the new batch's commands bind that promotion digest. Deterministic command IDs bind
+each command kind to the rollout, target position, and node.
+
+The plan file, target state, status, and aggregate proof are still unsigned
+correlation records. Offline `rollout verify` must authenticate their signed
+authorization and evidence companions, the complete copied workspace,
+independently pinned publisher, site-root, and controller witness keys, and the
+separately transferred exact OCI archive. The unsigned aggregate proof binds the
+signed envelopes through `plan_authorization_digest` and ordered
+`batch_promotion_digests`. Each target entry additionally binds the exact raw signed
+admit, start, and canary command envelopes through `admit_command_digest`,
+`start_command_digest`, and `canary_command_digest`. Its digest therefore commits
+the exact retained plan, promotion, and outer-command authorization envelopes. The
+signed chain attests the command signer's authorization sequence. It is not an
+independently witnessed clock or host timeline and does not record human reasoning,
+a change ticket, or an external approval quorum.
+
+The workspace's file modes and advisory locks prevent ordinary compliant
+overwrite, not hostile root. Its crash-recoverable publication requires
+same-filesystem POSIX hard links, reliable file and directory `fsync`, reliable
+`flock`, and stable Unix ownership and link counts. An unsupported or ambiguous
+filesystem fails closed; Steward does not use a weaker fallback. Verify an
+authenticated copy on a separate trusted system when coordinator compromise is in
+scope.
+
+Every target must already have the exact image imported. The coordinator does not
+perform remote image transfer, registry pulls, placement, labels or selectors,
+parallel target execution, maintenance scheduling, desired-state reconciliation,
+arbitrary canaries, model scoring, A/B selection, or automatic rollback. The
+current Hermes recipe also requires a dedicated host, exactly one policy tenant,
+host-administrator admission, and explicitly enabled unquotaed persistent state.
+It is not the shared-host multi-tenant execution path.
+
+The coordinator exports but does not delete sealed controller captures. Completed
+rollouts therefore consume the controller's finite 256-capture inventory until a
+site administrator preserves and verifies the proof set, manually inventories each
+retained node and capture ID, and deletes those controller recovery copies.
+
+The first target must pass before any later target starts, and every target in the
+current batch must pass before the next operator boundary. A rejection, terminal
+canary failure, expired authority, revoked node, `outcome_unknown`, evidence
+overflow, rollback or equivocation finding, or invalid retained evidence becomes
+sticky `action_required`. Steward does not clear it, skip the target, stop or
+destroy a workload, or roll back passed targets. Recovery requires an explicit
+operator decision, new authority, a new rollout workspace, and for a replaced
+activation a new activation ID with a higher instance generation.
+
+The aggregate proof is an unsigned correlation record. Its digest commits the exact
+retained plan authorization, ordered batch promotions, and per-target signed outer
+Executor command envelopes (`admit`, `start`, and `activation-canary`), but does not
+make the aggregate a signature. Authenticity comes
+from the plan authorization, batch promotions, release, capsule, commands, task permit,
+Gateway and Executor receipt chains, controller capture, and externally pinned
+public keys. The proof establishes only the fixed workspace-audit fixture within
+the documented host trust boundary. It is not evidence of arbitrary prompt or skill
+safety, semantic correctness, an uncompromised host, or hardware attestation. See
+the
+[fleet rollout guide]({{ '/guides/fleet-rollout/' | relative_url }}) for the exact
+workflow and air-gap verification procedure.
 
 ## Durable control stores have fixed lifetime limits
 

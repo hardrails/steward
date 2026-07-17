@@ -347,7 +347,7 @@ the bounded admission projection capability:
   "protocol_version": 4,
   "node_id": "executor-1",
   "credential_scope": "node",
-  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "admission-projection-v1", "multi-tenant", "read", "state-purge"]
+  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "admission-projection-v1", "rollout-authorization-context-v1", "multi-tenant", "read", "state-purge"]
 }
 ```
 
@@ -397,6 +397,15 @@ The signature covers the tenant, node, instance, tenant-aware byte-length-prefix
 runtime reference, operation, payload, claim and instance generations, command
 sequence, and a validity window no longer than 15 minutes. Commands issued more
 than two minutes in the future are rejected.
+
+The optional signed `authorization_context_digest` is a canonical SHA-256 digest
+used by the fleet rollout coordinator. A rollout node must advertise
+`rollout-authorization-context-v1`; its strict command decoder then retains the
+plan-authorization envelope digest for batch zero or the applicable signed
+batch-promotion envelope digest for a later batch. Generic signed commands may omit
+the field. Executor validates the digest as part of the signed command but does not
+fetch or verify the referenced rollout envelope; `stewardctl rollout` performs that
+correlation before submission and during offline verification.
 
 `admit` carries the OpenAPI `SignedAdmissionRequest`. `start`, `stop`, `destroy`,
 and `read` require an empty payload. `purge` carries one bounded `lineage_id`. The
@@ -474,8 +483,10 @@ node. Protocols 3 and 4 share the same durable delivery ledger but never share a
 retained record: startup blocks a protocol switch until every unsettled record for
 the other protocol is reconciled.
 
-Protocol 4 also enables the fixed Hermes activation canary when signed admission
-has a complete Gateway topology. Executor advertises `activation-canary-v1` only
+Protocol 4 always advertises `rollout-authorization-context-v1`, showing that its
+strict signed-command decoder accepts the optional rollout authorization digest.
+It also enables the fixed Hermes activation canary when signed admission has a
+complete Gateway topology. Executor advertises `activation-canary-v1` only
 while no other canary is active and a host-local Gateway control client is
 configured. The controller leases at most one canary per poll; ordinary lifecycle
 commands can still share that poll. Before Gateway receives the tenant-signed

@@ -292,11 +292,13 @@ supports only the durable lease protocol, add
 `--executor-uplink-protocol-version 3`. Local and tenant-scoped configurations use
 the safe compatibility value `0` and cannot select 3 or 4.
 
-With protocol 4 and the packaged Gateway topology, Executor also advertises the
-closed `activation-canary-v1` capability. It accepts only Steward's fixed,
-tenant-signed Hermes workspace-audit task—not a URL, shell command, free-form
-prompt, or generic workflow step. The capability disappears while a canary is
-active, but containment commands continue through the normal poller.
+With protocol 4, Executor advertises `rollout-authorization-context-v1`, showing
+that its strict signed-command decoder accepts a rollout authorization digest. With
+the packaged Gateway topology it also advertises the closed
+`activation-canary-v1` capability. It accepts only Steward's fixed, tenant-signed
+Hermes workspace-audit task—not a URL, shell command, free-form prompt, or generic
+workflow step. The canary capability disappears while a canary is active, but the
+authorization-context capability and containment commands remain available.
 
 `configure-node` validates the enrollment evidence sidecar, imports the exact
 receipt key used during enrollment, and initializes the durable command and

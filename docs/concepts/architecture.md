@@ -1,6 +1,6 @@
 ---
 title: Steward architecture
-description: Understand Steward's service separation, proof-carrying agent activation, signed local admission, Docker and gVisor isolation, and offline receipts.
+description: Understand Steward's service separation, proof-carrying agent activation and fleet rollout, signed local admission, Docker and gVisor isolation, and offline receipts.
 section: Explanation
 ---
 
@@ -47,6 +47,7 @@ Signed task: owner-only bundle -> loopback Gateway -> exact service POST
 Management/node steward-mcp: bounded stdio adapter for Control, Executor, and optional task tools
 Mostly offline stewardctl: keys, signed releases/capsules/policy, task permits, receipts;
                          image import uses Docker; task lifecycle uses loopback Gateway
+Operator-side rollout: signed exact plan + evidence-bound promotions + append-only proof workspace
 Inference system: separately selected and operated
 ```
 
@@ -213,6 +214,57 @@ without comparing Gateway and controller clocks. Authenticity comes from
 separately verified signed companions and externally pinned public keys. The
 activation workspace prevents a compliant retry from rewriting generated history,
 but does not provide hostile-host attestation.
+
+## Proof-carrying fleet rollout
+
+The operator-side rollout coordinator applies the same closed Hermes activation
+contract to an explicit ordered node list through Steward Control. It authenticates
+all retained inputs before contacting the controller, signs exact commands on the
+trusted coordinator, and stores each command before submission. The controller
+delivers those bytes and retains bounded evidence; it does not receive the command
+or task private keys and does not choose targets.
+
+The rollout plan is a bounded unsigned manifest, but it is not accepted as
+authority by itself. Before the first controller request, the common tenant command
+key authorized by site policy for `admit`, `start`, and `activation-canary` signs
+the exact plan digest. Before any later batch starts, the same key signs a chained
+promotion that binds the previous authorization, the completed batch boundary and
+ordered passed evidence, and the exact next boundary. The admit, start, and canary
+commands for each batch carry the applicable authorization-envelope digest. A
+protocol-4 node must advertise `rollout-authorization-context-v1` so the strict
+command decoder can accept and retain that signed command field. The node does not
+fetch or verify the referenced plan or promotion envelope; the coordinator and
+offline verifier perform that correlation.
+
+Target 0 is the canary. One `rollout run` invocation advances only the current
+deterministic batch, processes its targets sequentially, and stops before the next
+operator promotion decision. A target must pass its admission, fixed task, Gateway
+receipt, Executor marker, controller capture, and activation-proof checks before a
+later target can advance. Transient transport failure can resume from immutable
+artifacts; an ambiguous outcome or evidence conflict becomes sticky
+`action_required` instead of creating replacement authority.
+
+The owner-side workspace publishes each artifact without replacement through a
+same-directory hard-link transaction, syncing the file and directory at the
+durable boundaries. Reopening reconciles only two bounded crash shapes: remove an
+unpublished staging inode, or remove the staging name after a linked final artifact
+was durably published. Any other shape fails closed. This requires a filesystem
+with reliable POSIX hard links, `fsync`, `flock`, Unix ownership, and link counts;
+there is no weaker fallback.
+
+The aggregate `proof.json` is unsigned. It correlates the plan and ordered target
+activation proofs. Its `plan_authorization_digest` and ordered
+`batch_promotion_digests` bind the signed plan and promotion envelopes. Each target
+entry binds the exact admit, start, and canary DSSE command envelopes through their
+three command digests. The aggregate's own digest therefore commits the exact
+retained plan, promotion, and outer-command authorization envelopes. Offline
+verification still authenticates every signed companion and the separately
+transferred OCI archive. The current runner does not transfer or import images,
+select nodes, reconcile desired state, run arbitrary canaries, or roll back
+workloads. Signed promotions attest what the common command signer authorized from
+the retained evidence; they are not an independent clock, hostile-host attestation,
+or record of human reasoning. See the
+[fleet rollout guide]({{ '/guides/fleet-rollout/' | relative_url }}).
 
 ## Controller replaceability and authority separation
 

@@ -165,6 +165,37 @@ grants a capability.
 
 Detailed Executor behavior is in [`docs/executor.md`](docs/executor.md).
 
+### Operator-side fleet rollout
+
+`stewardctl rollout` is a bounded operator-side coordinator, not a controller
+resource or scheduler. Its unsigned plan fixes one release, tenant, explicit target
+order, first-node canary, and deterministic later batches. Before any controller
+request, one tenant command key authorized for `admit`, `start`, and
+`activation-canary` signs the exact plan. Before entering each later batch, the
+same key signs a chained promotion that binds the preceding batch's passed target
+state, activation proofs, controller captures, and the next boundary. Every
+rollout command signs the applicable plan-authorization or promotion-envelope
+digest as `authorization_context_digest`; protocol-4 nodes advertise
+`rollout-authorization-context-v1` when they accept that field.
+
+The owner-only rollout workspace publishes generated artifacts without replacement
+through same-directory hard-link transactions and reconciles only bounded staging
+states after interruption. It requires same-filesystem POSIX hard links, reliable
+file and directory `fsync`, reliable `flock`, and stable Unix ownership and link
+counts. It fails closed instead of using a weaker fallback.
+
+The aggregate proof remains unsigned. Its `plan_authorization_digest` and ordered
+`batch_promotion_digests` bind the signed envelopes, so its digest commits the
+complete promotion chain. Each target entry also binds the exact signed outer
+command envelopes through `admit_command_digest`, `start_command_digest`, and
+`canary_command_digest`. The aggregate digest therefore commits the exact retained
+plan, promotion, and outer-command authorization envelopes without becoming a
+signature. This is a signer-attested
+authorization sequence, not an independent wall-clock or host attestation and not
+a record of the human reasoning or external approval behind promotion. The exact
+workflow and limits are in
+[`docs/guides/fleet-rollout.md`](docs/guides/fleet-rollout.md).
+
 ## Supervisor state and control
 
 ### Durable state

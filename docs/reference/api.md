@@ -403,11 +403,27 @@ for response and failure schemas.
 ## Offline operator tools
 
 `stewardctl image`, `stewardctl evidence`, `stewardctl permit`, `stewardctl task`,
-and `stewardctl upgrade` are CLIs, not HTTP endpoints. They provide bounded,
+`stewardctl activation`, `stewardctl rollout`, and `stewardctl upgrade` are CLIs,
+not HTTP endpoints. They provide bounded,
 policy-bound Open Container Initiative (OCI) inspection and import; offline evidence
 verification and export; exact connector- and service-request permit issuance,
-verification, dispatch, and receipt correlation; and read-only release drain and
-durable-format inspection. Permit issuance consumes an authenticated but unsigned
+verification, dispatch, and receipt correlation; one-node and ordered-fleet
+composition of the fixed Hermes activation contract; and read-only release drain
+and durable-format inspection. The rollout coordinator uses existing controller
+node, command, and evidence-capture APIs; there is no controller `/rollouts`
+resource and the controller does not hold rollout signing keys. The coordinator
+retains its signed plan authorization and chained batch promotions in the local
+workspace, then includes the applicable envelope digest in each rollout command's
+signed `authorization_context_digest`. A compatible protocol-4 Executor must
+advertise `admission-projection-v1`, `activation-canary-v1`, and
+`rollout-authorization-context-v1`. Executor verifies that digest as signed command
+data; the coordinator and offline verifier authenticate the referenced envelope.
+The final CLI-generated `proof.json` is not an HTTP resource or a signature. Its
+plan-authorization and ordered promotion digests bind those exact signed envelopes.
+Each target's `admit_command_digest`, `start_command_digest`, and
+`canary_command_digest` binds the exact signed outer Executor command envelopes
+(`admit`, `start`, and `activation-canary`) into the aggregate proof digest.
+Permit issuance consumes an authenticated but unsigned
 trust inventory as mismatch preflight; live Gateway configuration remains
 authoritative. `task submit`, `status`, `observe`, and `wait` are the online task
 operations and contact only an explicit literal-loopback Gateway origin. See
