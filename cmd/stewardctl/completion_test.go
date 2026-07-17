@@ -60,3 +60,16 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 		t.Fatalf("context candidates=%v", candidates)
 	}
 }
+
+func TestCompletionDispatchWritesCandidatesForExecutablePaths(t *testing.T) {
+	var output bytes.Buffer
+	if err := run([]string{"__complete", "/usr/local/bin/stewardctl", "control", "tenant", ""}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "create\nlist\n" {
+		t.Fatalf("completion output=%q", output.String())
+	}
+	if err := completionCommand(nil, &bytes.Buffer{}); err == nil {
+		t.Fatal("completion without a shell succeeded")
+	}
+}
