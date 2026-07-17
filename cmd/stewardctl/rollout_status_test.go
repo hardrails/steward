@@ -446,10 +446,12 @@ func rolloutStatusTestPlan(targets int) rollout.PlanV1 {
 			OperationPolicyDigest: rolloutStatusTestDigest(160 + index),
 			ClaimGeneration:       uint64(index + 1),
 			InstanceGeneration:    uint64(index + 2),
-			AdmitCommandID:        fmt.Sprintf("command-%d-admit", index),
-			StartCommandID:        fmt.Sprintf("command-%d-start", index),
-			CanaryCommandID:       fmt.Sprintf("command-%d-canary", index),
 		}
+		plan.Targets[index].AdmitCommandID,
+			plan.Targets[index].StartCommandID,
+			plan.Targets[index].CanaryCommandID = rollout.TargetCommandIDsV1(
+			plan.RolloutID, index, plan.Targets[index].NodeID,
+		)
 	}
 	return plan
 }

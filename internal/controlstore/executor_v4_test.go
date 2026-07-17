@@ -15,7 +15,40 @@ import (
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/executor"
 )
+
+func TestExecutorV4UplinkRoutingRefBindsDistinctLocalRuntime(t *testing.T) {
+	statement := baseV4CommandStatement(
+		"command-uplink", "tenant-a", "node-1", "admit", 7, 11,
+	)
+	statement.RuntimeRef = "uplink:v2:8:tenant-a:6:node-1:agent-1"
+	raw := signV4CommandStatement(t, statement)
+	localRuntime := executor.RuntimeRef(statement.TenantID, statement.InstanceID)
+	projection := minimalStoreAdmissionProjection(localRuntime, statement.InstanceGeneration)
+	command := Command{
+		TenantID: statement.TenantID, NodeID: statement.NodeID, ID: statement.CommandID,
+		CommandDSSE: raw, CommandKind: statement.Kind, SignedRuntimeRef: statement.RuntimeRef,
+		SignedClaimGeneration:    statement.ClaimGeneration,
+		SignedInstanceGeneration: statement.InstanceGeneration,
+		DeliveryProtocol:         controlprotocol.ExecutorProtocolV4,
+	}
+	report := controlprotocol.ExecutorReportV4{
+		Status: controlprotocol.ExecutorStatusDone, ReportedStatus: "stopped",
+		ClaimGeneration: statement.ClaimGeneration,
+		Result: controlprotocol.ExecutorReportResultV4{
+			RuntimeRef: localRuntime, Admission: &projection,
+		},
+	}
+	if err := validateRetainedExecutorReportV4Binding(command, report); err != nil {
+		t.Fatalf("uplink routing ref rejected distinct deterministic Executor runtime: %v", err)
+	}
+	report.Result.RuntimeRef = statement.RuntimeRef
+	report.Result.Admission.RuntimeRef = statement.RuntimeRef
+	if err := validateRetainedExecutorReportV4Binding(command, report); err == nil {
+		t.Fatal("uplink routing ref was accepted as an Executor runtime")
+	}
+}
 
 func TestExecutorV4PollReportPersistsExactAdmissionProjection(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())

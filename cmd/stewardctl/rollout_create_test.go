@@ -270,17 +270,25 @@ func TestRolloutEvidenceCaptureTTLIsDeterministicAndBounded(t *testing.T) {
 	}
 }
 
-func TestRolloutCommandDispatchesCreateAndStatus(t *testing.T) {
+func TestRolloutCommandDispatchesAllSubcommands(t *testing.T) {
 	if err := rolloutCommand(nil, &bytes.Buffer{}); err == nil ||
-		!strings.Contains(err.Error(), "create or status") {
+		!strings.Contains(err.Error(), "create, run, status, or verify") {
 		t.Fatalf("empty rollout command error=%v", err)
 	}
 	if err := rolloutCommand([]string{"create"}, &bytes.Buffer{}); err == nil ||
 		!strings.Contains(err.Error(), "rollout create requires") {
 		t.Fatalf("create dispatch error=%v", err)
 	}
+	if err := rolloutCommand([]string{"run"}, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "rollout run requires") {
+		t.Fatalf("run dispatch error=%v", err)
+	}
 	if err := rolloutCommand([]string{"status"}, &bytes.Buffer{}); err == nil ||
 		!strings.Contains(err.Error(), "rollout status requires") {
 		t.Fatalf("status dispatch error=%v", err)
+	}
+	if err := rolloutCommand([]string{"verify"}, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "rollout verify requires") {
+		t.Fatalf("verify dispatch error=%v", err)
 	}
 }

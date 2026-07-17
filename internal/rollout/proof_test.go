@@ -13,6 +13,11 @@ func TestCorrelateProofManifestV1AcceptsCompleteOrderedProof(t *testing.T) {
 	fixture := rolloutProofFixture(t)
 	manifest, err := CorrelateProofManifestV1(
 		fixture.planRaw,
+		fixture.planAuthorizationRaw,
+		fixture.batchPromotionRaws,
+		[][]byte{fixture.admitCommandRaw},
+		[][]byte{fixture.startCommandRaw},
+		[][]byte{fixture.canaryCommandRaw},
 		[][]byte{fixture.targetStateRaw},
 		[][]byte{fixture.activationPlanRaw},
 		[][]byte{fixture.activationStateRaw},
@@ -36,6 +41,13 @@ func TestCorrelateProofManifestV1RejectsSubstitutionAndIncompleteTargets(t *test
 		fixture.manifestRaw, _ = MarshalProofManifestV1(fixture.manifest)
 		if _, err := correlateProofFixture(fixture); err == nil {
 			t.Fatal("substituted proof digest accepted")
+		}
+	})
+	t.Run("exact outer command envelope", func(t *testing.T) {
+		fixture := rolloutProofFixture(t)
+		fixture.canaryCommandRaw = []byte("alternate-valid-canary-envelope")
+		if _, err := correlateProofFixture(fixture); err == nil {
+			t.Fatal("substituted outer command envelope accepted")
 		}
 	})
 	t.Run("node-local activation plan", func(t *testing.T) {
@@ -67,6 +79,11 @@ func TestCorrelateProofManifestV1RejectsSubstitutionAndIncompleteTargets(t *test
 		fixture := rolloutProofFixture(t)
 		if _, err := CorrelateProofManifestV1(
 			fixture.planRaw,
+			fixture.planAuthorizationRaw,
+			fixture.batchPromotionRaws,
+			[][]byte{fixture.admitCommandRaw},
+			[][]byte{fixture.startCommandRaw},
+			[][]byte{fixture.canaryCommandRaw},
 			nil,
 			[][]byte{fixture.activationPlanRaw},
 			[][]byte{fixture.activationStateRaw},
@@ -81,14 +98,19 @@ func TestCorrelateProofManifestV1RejectsSubstitutionAndIncompleteTargets(t *test
 func TestProofManifestV1RejectsAmbiguousAndInvalidShape(t *testing.T) {
 	fixture := rolloutProofFixture(t)
 	for name, mutate := range map[string]func(*ProofManifestV1){
-		"schema":  func(value *ProofManifestV1) { value.SchemaVersion = "other" },
-		"rollout": func(value *ProofManifestV1) { value.RolloutID = "-bad" },
-		"plan":    func(value *ProofManifestV1) { value.PlanDigest = "" },
-		"empty":   func(value *ProofManifestV1) { value.Targets = nil },
-		"index":   func(value *ProofManifestV1) { value.Targets[0].TargetIndex = 1 },
-		"node":    func(value *ProofManifestV1) { value.Targets[0].NodeID = "" },
+		"schema":             func(value *ProofManifestV1) { value.SchemaVersion = "other" },
+		"rollout":            func(value *ProofManifestV1) { value.RolloutID = "-bad" },
+		"plan":               func(value *ProofManifestV1) { value.PlanDigest = "" },
+		"plan authorization": func(value *ProofManifestV1) { value.PlanAuthorizationDigest = "" },
+		"nil promotions":     func(value *ProofManifestV1) { value.BatchPromotionDigests = nil },
+		"empty":              func(value *ProofManifestV1) { value.Targets = nil },
+		"index":              func(value *ProofManifestV1) { value.Targets[0].TargetIndex = 1 },
+		"node":               func(value *ProofManifestV1) { value.Targets[0].NodeID = "" },
 		"proof digest": func(value *ProofManifestV1) {
 			value.Targets[0].ActivationProofDigest = "bad"
+		},
+		"admit command digest": func(value *ProofManifestV1) {
+			value.Targets[0].AdmitCommandDigest = "bad"
 		},
 		"completed": func(value *ProofManifestV1) { value.CompletedAt = "bad" },
 	} {
@@ -121,16 +143,21 @@ func TestProofManifestV1RejectsAmbiguousAndInvalidShape(t *testing.T) {
 }
 
 type proofFixture struct {
-	plan               PlanV1
-	planRaw            []byte
-	targetState        TargetStateV1
-	targetStateRaw     []byte
-	activationPlan     activation.PlanV1
-	activationPlanRaw  []byte
-	activationStateRaw []byte
-	activationProofRaw []byte
-	manifest           ProofManifestV1
-	manifestRaw        []byte
+	plan                 PlanV1
+	planRaw              []byte
+	planAuthorizationRaw []byte
+	batchPromotionRaws   [][]byte
+	admitCommandRaw      []byte
+	startCommandRaw      []byte
+	canaryCommandRaw     []byte
+	targetState          TargetStateV1
+	targetStateRaw       []byte
+	activationPlan       activation.PlanV1
+	activationPlanRaw    []byte
+	activationStateRaw   []byte
+	activationProofRaw   []byte
+	manifest             ProofManifestV1
+	manifestRaw          []byte
 }
 
 func rolloutProofFixture(t *testing.T) proofFixture {
@@ -242,15 +269,23 @@ func rolloutProofFixture(t *testing.T) proofFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	admitCommandRaw := []byte("signed-admit-command")
+	startCommandRaw := []byte("signed-start-command")
+	canaryCommandRaw := []byte("signed-canary-command")
 	manifest := ProofManifestV1{
-		SchemaVersion: ProofManifestSchemaV1,
-		RolloutID:     plan.RolloutID,
-		PlanDigest:    dsse.Digest(planRaw),
+		SchemaVersion:           ProofManifestSchemaV1,
+		RolloutID:               plan.RolloutID,
+		PlanDigest:              dsse.Digest(planRaw),
+		PlanAuthorizationDigest: dsse.Digest([]byte("signed-plan-authorization")),
+		BatchPromotionDigests:   []string{},
 		Targets: []TargetProofV1{{
 			TargetIndex:           0,
 			NodeID:                target.NodeID,
 			ActivationID:          target.ActivationID,
 			ActivationPlanDigest:  target.ActivationPlanDigest,
+			AdmitCommandDigest:    dsse.Digest(admitCommandRaw),
+			StartCommandDigest:    dsse.Digest(startCommandRaw),
+			CanaryCommandDigest:   dsse.Digest(canaryCommandRaw),
 			TargetStateDigest:     dsse.Digest(targetStateRaw),
 			ActivationProofDigest: dsse.Digest(activationProofRaw),
 		}},
@@ -261,22 +296,32 @@ func rolloutProofFixture(t *testing.T) proofFixture {
 		t.Fatal(err)
 	}
 	return proofFixture{
-		plan:               plan,
-		planRaw:            planRaw,
-		targetState:        targetState,
-		targetStateRaw:     targetStateRaw,
-		activationPlan:     activationPlan,
-		activationPlanRaw:  activationPlanRaw,
-		activationStateRaw: activationStateRaw,
-		activationProofRaw: activationProofRaw,
-		manifest:           manifest,
-		manifestRaw:        manifestRaw,
+		plan:                 plan,
+		planRaw:              planRaw,
+		planAuthorizationRaw: []byte("signed-plan-authorization"),
+		batchPromotionRaws:   [][]byte{},
+		admitCommandRaw:      admitCommandRaw,
+		startCommandRaw:      startCommandRaw,
+		canaryCommandRaw:     canaryCommandRaw,
+		targetState:          targetState,
+		targetStateRaw:       targetStateRaw,
+		activationPlan:       activationPlan,
+		activationPlanRaw:    activationPlanRaw,
+		activationStateRaw:   activationStateRaw,
+		activationProofRaw:   activationProofRaw,
+		manifest:             manifest,
+		manifestRaw:          manifestRaw,
 	}
 }
 
 func correlateProofFixture(fixture proofFixture) (ProofManifestV1, error) {
 	return CorrelateProofManifestV1(
 		fixture.planRaw,
+		fixture.planAuthorizationRaw,
+		fixture.batchPromotionRaws,
+		[][]byte{fixture.admitCommandRaw},
+		[][]byte{fixture.startCommandRaw},
+		[][]byte{fixture.canaryCommandRaw},
 		[][]byte{fixture.targetStateRaw},
 		[][]byte{fixture.activationPlanRaw},
 		[][]byte{fixture.activationStateRaw},

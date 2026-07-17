@@ -169,7 +169,8 @@ func TestCommandStatementValidationBindsFiniteValidityWindow(t *testing.T) {
 		SchemaVersion: CommandSchemaV2, CommandID: "command-1",
 		TenantID: "tenant-a", NodeID: "node-a", InstanceID: "agent-a",
 		RuntimeRef: "uplink:v2:8:tenant-a:6:node-a:agent-a", Kind: "start",
-		ClaimGeneration: 1, InstanceGeneration: 2, CommandSequence: 3,
+		AuthorizationContextDigest: testDigest('a'),
+		ClaimGeneration:            1, InstanceGeneration: 2, CommandSequence: 3,
 		IssuedAt:  now.Add(-time.Minute).Format(time.RFC3339Nano),
 		ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano), Payload: json.RawMessage(`{}`),
 	}
@@ -188,6 +189,7 @@ func TestCommandStatementValidationBindsFiniteValidityWindow(t *testing.T) {
 			command.ExpiresAt = now.Add(maxCommandLifetime + time.Minute).Format(time.RFC3339Nano)
 		},
 		func(command *CommandStatement) { command.RuntimeRef = strings.Repeat("x", 1025) },
+		func(command *CommandStatement) { command.AuthorizationContextDigest = "sha256:invalid" },
 	} {
 		candidate := valid
 		mutate(&candidate)

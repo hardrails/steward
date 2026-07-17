@@ -301,6 +301,7 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 				"signed-commands-v2",
 				"delivery-leases-v3",
 				controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
+				controlprotocol.ExecutorCapabilityRolloutAuthorizationContextV1,
 				"multi-tenant",
 				"read",
 				"state-purge",

@@ -1634,6 +1634,18 @@ func executorReportV4FromTerminal(terminal TerminalReport) controlprotocol.Execu
 // no public-key work: validateState calls it after every mutation, including
 // mutations unrelated to the retained command.
 func validateRetainedExecutorReportV4Binding(command Command, report controlprotocol.ExecutorReportV4) error {
+	var executorRuntimeRef string
+	needsRuntimeBinding := report.Result.Admission != nil ||
+		report.Result.ActivationCanary != nil ||
+		command.CommandKind == "activation-canary" && report.Status == controlprotocol.ExecutorStatusDone ||
+		report.Result.RuntimeRef != ""
+	if needsRuntimeBinding {
+		var err error
+		executorRuntimeRef, err = commandExecutorRuntimeRef(command)
+		if err != nil {
+			return errors.New("stored command runtime identity is invalid")
+		}
+	}
 	if report.ClaimGeneration != 0 && report.ClaimGeneration != command.SignedClaimGeneration {
 		return errors.New("report claim generation differs from signed command")
 	}
@@ -1651,7 +1663,7 @@ func validateRetainedExecutorReportV4Binding(command Command, report controlprot
 	if report.Result.Admission != nil {
 		if command.CommandKind != "admit" ||
 			report.ClaimGeneration != command.SignedClaimGeneration ||
-			report.Result.Admission.RuntimeRef != command.SignedRuntimeRef ||
+			report.Result.Admission.RuntimeRef != executorRuntimeRef ||
 			report.Result.Admission.Generation != command.SignedInstanceGeneration {
 			return errors.New("admission projection differs from signed admit command")
 		}
@@ -1661,7 +1673,7 @@ func validateRetainedExecutorReportV4Binding(command Command, report controlprot
 			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 ||
 			report.ClaimGeneration != command.SignedClaimGeneration ||
 			command.SignedInstanceGeneration == 0 ||
-			report.Result.RuntimeRef != command.SignedRuntimeRef {
+			report.Result.RuntimeRef != executorRuntimeRef {
 			return errors.New("activation canary projection differs from its signed command")
 		}
 	}
@@ -1671,14 +1683,14 @@ func validateRetainedExecutorReportV4Binding(command Command, report controlprot
 			report.ClaimGeneration != command.SignedClaimGeneration ||
 			command.SignedInstanceGeneration == 0 ||
 			report.ReportedStatus != "running" ||
-			report.Result.RuntimeRef != command.SignedRuntimeRef ||
+			report.Result.RuntimeRef != executorRuntimeRef ||
 			report.Result.ActivationCanary == nil) {
 		return errors.New(
 			"successful activation canary report omits its exact running proof",
 		)
 	}
 	if command.CommandKind == "admit" && report.Status == controlprotocol.ExecutorStatusDone &&
-		report.Result.RuntimeRef != "" && report.Result.RuntimeRef != command.SignedRuntimeRef {
+		report.Result.RuntimeRef != "" && report.Result.RuntimeRef != executorRuntimeRef {
 		return errors.New("successful admit runtime differs from signed command")
 	}
 	return nil
@@ -1703,7 +1715,8 @@ func validateExecutorReportV4Binding(command Command, report controlprotocol.Exe
 		if err != nil {
 			return errors.New("stored activation canary payload is invalid")
 		}
-		if parsed.Admission.RuntimeRef != command.SignedRuntimeRef ||
+		executorRuntimeRef, runtimeErr := commandExecutorRuntimeRef(command)
+		if runtimeErr != nil || parsed.Admission.RuntimeRef != executorRuntimeRef ||
 			parsed.Admission.Generation != command.SignedInstanceGeneration {
 			return errors.New(
 				"activation canary admission differs from its signed outer command",
@@ -1739,6 +1752,26 @@ func validateExecutorReportV4Binding(command Command, report controlprotocol.Exe
 		}
 	}
 	return nil
+}
+
+// commandExecutorRuntimeRef derives the opaque host-local Executor identity
+// from the signed tenant and instance identity. SignedRuntimeRef remains the
+// uplink routing reference (uplink:v2:...); it is deliberately not the local
+// runtime returned by the Executor and retained in admission/canary evidence.
+func commandExecutorRuntimeRef(command Command) (string, error) {
+	// Direct/local protocol-4 tests and older signed commands already carry the
+	// opaque Executor identity. Uplink v2 commands instead carry a routable
+	// tenant/node/instance tuple and must be projected to the same local value.
+	if validExecutorRuntimeRef(command.SignedRuntimeRef) {
+		return command.SignedRuntimeRef, nil
+	}
+	statement, err := parseCommandStatement(command.CommandDSSE)
+	if err != nil || statement.TenantID != command.TenantID ||
+		statement.NodeID != command.NodeID || statement.RuntimeRef != command.SignedRuntimeRef {
+		return "", errors.New("stored command does not match its signed identity")
+	}
+	digest := sha256.Sum256([]byte(statement.TenantID + "\x00" + statement.InstanceID))
+	return "executor-" + hex.EncodeToString(digest[:]), nil
 }
 
 func activationCanaryTerminalErrorCode(value string) bool {

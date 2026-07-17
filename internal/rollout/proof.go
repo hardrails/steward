@@ -17,13 +17,17 @@ const (
 
 var ErrInvalidProofManifest = errors.New("invalid rollout proof manifest")
 
-// TargetProofV1 binds one ordered target to its exact local target state and
-// existing activation proof. The signed companions remain authoritative.
+// TargetProofV1 binds one ordered target to its exact outer command envelopes,
+// local target state, and existing activation proof. The signed companions
+// remain authoritative.
 type TargetProofV1 struct {
 	TargetIndex           uint16 `json:"target_index"`
 	NodeID                string `json:"node_id"`
 	ActivationID          string `json:"activation_id"`
 	ActivationPlanDigest  string `json:"activation_plan_digest"`
+	AdmitCommandDigest    string `json:"admit_command_digest"`
+	StartCommandDigest    string `json:"start_command_digest"`
+	CanaryCommandDigest   string `json:"canary_command_digest"`
 	TargetStateDigest     string `json:"target_state_digest"`
 	ActivationProofDigest string `json:"activation_proof_digest"`
 }
@@ -32,11 +36,13 @@ type TargetProofV1 struct {
 // replace any publisher, command, task, Executor, Gateway, or witness
 // signature authenticated by each target's activation proof.
 type ProofManifestV1 struct {
-	SchemaVersion string          `json:"schema_version"`
-	RolloutID     string          `json:"rollout_id"`
-	PlanDigest    string          `json:"plan_digest"`
-	Targets       []TargetProofV1 `json:"targets"`
-	CompletedAt   string          `json:"completed_at"`
+	SchemaVersion           string          `json:"schema_version"`
+	RolloutID               string          `json:"rollout_id"`
+	PlanDigest              string          `json:"plan_digest"`
+	PlanAuthorizationDigest string          `json:"plan_authorization_digest"`
+	BatchPromotionDigests   []string        `json:"batch_promotion_digests"`
+	Targets                 []TargetProofV1 `json:"targets"`
+	CompletedAt             string          `json:"completed_at"`
 }
 
 // ParseProofManifestV1 strictly decodes one bounded aggregate manifest.
@@ -83,8 +89,17 @@ func (manifest ProofManifestV1) Validate() error {
 		return invalidProofManifest("unsupported schema version")
 	}
 	if !identifier(manifest.RolloutID) ||
-		!controlprotocol.ValidSHA256Digest(manifest.PlanDigest) {
+		!controlprotocol.ValidSHA256Digest(manifest.PlanDigest) ||
+		!controlprotocol.ValidSHA256Digest(manifest.PlanAuthorizationDigest) {
 		return invalidProofManifest("rollout identity or plan digest is invalid")
+	}
+	if manifest.BatchPromotionDigests == nil || len(manifest.BatchPromotionDigests) >= MaxTargets {
+		return invalidProofManifest("batch promotion digest inventory is missing or excessive")
+	}
+	for index, digest := range manifest.BatchPromotionDigests {
+		if !controlprotocol.ValidSHA256Digest(digest) {
+			return invalidProofManifest("batch promotion digest %d is invalid", index)
+		}
 	}
 	if len(manifest.Targets) == 0 || len(manifest.Targets) > MaxTargets {
 		return invalidProofManifest(
@@ -97,6 +112,9 @@ func (manifest ProofManifestV1) Validate() error {
 			!publicIdentity(target.NodeID, 128) ||
 			!identifier(target.ActivationID) ||
 			!controlprotocol.ValidSHA256Digest(target.ActivationPlanDigest) ||
+			!controlprotocol.ValidSHA256Digest(target.AdmitCommandDigest) ||
+			!controlprotocol.ValidSHA256Digest(target.StartCommandDigest) ||
+			!controlprotocol.ValidSHA256Digest(target.CanaryCommandDigest) ||
 			!controlprotocol.ValidSHA256Digest(target.TargetStateDigest) ||
 			!controlprotocol.ValidSHA256Digest(target.ActivationProofDigest) {
 			return invalidProofManifest("target %d is invalid or out of order", index)
@@ -108,12 +126,18 @@ func (manifest ProofManifestV1) Validate() error {
 	return nil
 }
 
-// CorrelateProofManifestV1 checks the exact rollout plan, latest target states,
-// per-target activation plans, final activation states, activation proofs, and
-// aggregate manifest. It correlates bytes and identities but does not itself
-// verify the signatures and receipt chains inside the activation companions.
+// CorrelateProofManifestV1 checks the exact rollout plan, outer admit/start/
+// canary command envelopes, latest target states, per-target activation plans,
+// final activation states, activation proofs, and aggregate manifest. It
+// correlates bytes and identities but does not itself verify the signatures
+// and receipt chains inside the signed companions.
 func CorrelateProofManifestV1(
 	planRaw []byte,
+	planAuthorizationRaw []byte,
+	batchPromotionRaws [][]byte,
+	admitCommandRaws [][]byte,
+	startCommandRaws [][]byte,
+	canaryCommandRaws [][]byte,
 	targetStateRaws [][]byte,
 	activationPlanRaws [][]byte,
 	activationStateRaws [][]byte,
@@ -129,24 +153,53 @@ func CorrelateProofManifestV1(
 		return ProofManifestV1{}, err
 	}
 	count := len(plan.Targets)
-	if len(targetStateRaws) != count ||
+	batches, err := plan.Batches()
+	if err != nil {
+		return ProofManifestV1{}, invalidProofManifest("plan batches: %v", err)
+	}
+	if len(planAuthorizationRaw) == 0 ||
+		len(batchPromotionRaws) != len(batches)-1 ||
+		len(manifest.BatchPromotionDigests) != len(batchPromotionRaws) {
+		return ProofManifestV1{}, invalidProofManifest(
+			"authorization companions must contain one plan authorization and every ordered batch promotion",
+		)
+	}
+	if len(admitCommandRaws) != count ||
+		len(startCommandRaws) != count ||
+		len(canaryCommandRaws) != count ||
+		len(targetStateRaws) != count ||
 		len(activationPlanRaws) != count ||
 		len(activationStateRaws) != count ||
 		len(activationProofRaws) != count ||
 		len(manifest.Targets) != count {
 		return ProofManifestV1{}, invalidProofManifest(
-			"every target requires one state, activation plan, activation state, and activation proof",
+			"every target requires exact admit, start, and canary commands, state, activation plan, activation state, and activation proof",
 		)
 	}
 	if manifest.RolloutID != plan.RolloutID ||
-		manifest.PlanDigest != dsse.Digest(planRaw) {
+		manifest.PlanDigest != dsse.Digest(planRaw) ||
+		manifest.PlanAuthorizationDigest != dsse.Digest(planAuthorizationRaw) {
 		return ProofManifestV1{}, proofManifestBindingMismatch(
-			"manifest does not match the rollout plan",
+			"manifest does not match the rollout plan authorization",
 		)
+	}
+	for index, raw := range batchPromotionRaws {
+		if len(raw) == 0 || manifest.BatchPromotionDigests[index] != dsse.Digest(raw) {
+			return ProofManifestV1{}, proofManifestBindingMismatch(
+				"manifest batch promotion %d does not match its exact companion", index+1,
+			)
+		}
 	}
 	completed, _ := canonicalTimestamp(manifest.CompletedAt)
 	targetStates := make([]TargetStateV1, count)
 	for index, target := range plan.Targets {
+		if len(admitCommandRaws[index]) == 0 ||
+			len(startCommandRaws[index]) == 0 ||
+			len(canaryCommandRaws[index]) == 0 {
+			return ProofManifestV1{}, invalidProofManifest(
+				"target %d command companion is empty", index,
+			)
+		}
 		state, err := ParseTargetStateV1(targetStateRaws[index])
 		if err != nil {
 			return ProofManifestV1{}, invalidProofManifest(
@@ -220,6 +273,9 @@ func CorrelateProofManifestV1(
 			entry.NodeID != target.NodeID ||
 			entry.ActivationID != target.ActivationID ||
 			entry.ActivationPlanDigest != target.ActivationPlanDigest ||
+			entry.AdmitCommandDigest != dsse.Digest(admitCommandRaws[index]) ||
+			entry.StartCommandDigest != dsse.Digest(startCommandRaws[index]) ||
+			entry.CanaryCommandDigest != dsse.Digest(canaryCommandRaws[index]) ||
 			entry.TargetStateDigest != dsse.Digest(targetStateRaws[index]) ||
 			entry.ActivationProofDigest != dsse.Digest(activationProofRaws[index]) {
 			return ProofManifestV1{}, proofManifestBindingMismatch(

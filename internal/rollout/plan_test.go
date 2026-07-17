@@ -156,10 +156,12 @@ func rolloutPlanFixture(targets int) PlanV1 {
 			OperationPolicyDigest:         digest("e"),
 			ClaimGeneration:               uint64(index + 1),
 			InstanceGeneration:            uint64(index + 2),
-			AdmitCommandID:                "command-" + suffix + "-admit",
-			StartCommandID:                "command-" + suffix + "-start",
-			CanaryCommandID:               "command-" + suffix + "-canary",
 		}
+		plan.Targets[index].AdmitCommandID,
+			plan.Targets[index].StartCommandID,
+			plan.Targets[index].CanaryCommandID = TargetCommandIDsV1(
+			plan.RolloutID, index, plan.Targets[index].NodeID,
+		)
 	}
 	return plan
 }

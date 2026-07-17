@@ -15,6 +15,10 @@ const (
 	// ExecutorCapabilityActivationCanaryV1 is advertised only by protocol-4
 	// nodes that can execute and durably retain the closed activation canary.
 	ExecutorCapabilityActivationCanaryV1 = "activation-canary-v1"
+	// ExecutorCapabilityRolloutAuthorizationContextV1 is advertised by
+	// protocol-4 nodes whose strict signed-command decoder accepts the rollout
+	// authorization_context_digest field.
+	ExecutorCapabilityRolloutAuthorizationContextV1 = "rollout-authorization-context-v1"
 
 	ExecutorActivationCanaryResultSchemaV1 = "steward.activation-canary-result.v1"
 	MaxExecutorActivationCanaryResultBytes = 12 << 10

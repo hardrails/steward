@@ -394,6 +394,10 @@ func runV4Admission(
 					poll.Capabilities,
 					controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
 				) ||
+				!slices.Contains(
+					poll.Capabilities,
+					controlprotocol.ExecutorCapabilityRolloutAuthorizationContextV1,
+				) ||
 				slices.Contains(
 					poll.Capabilities,
 					controlprotocol.ExecutorCapabilityActivationCanaryV1,

@@ -127,6 +127,11 @@ func TestPrepareTargetV1RejectsBindingMutations(t *testing.T) {
 			plan := fixture.plan
 			plan.Targets = append([]rollout.TargetV1(nil), plan.Targets...)
 			plan.Targets[0].NodeID = "node-b"
+			plan.Targets[0].AdmitCommandID,
+				plan.Targets[0].StartCommandID,
+				plan.Targets[0].CanaryCommandID = rollout.TargetCommandIDsV1(
+				plan.RolloutID, 0, plan.Targets[0].NodeID,
+			)
 			input.PlanRaw = mustRolloutPlan(t, plan)
 		},
 		"target generation": func(input *PrepareInputV1) {
@@ -565,11 +570,13 @@ func newDriverFixture(t *testing.T) driverFixture {
 			OperationPolicyDigest:         testDigest("operation-policy"),
 			ClaimGeneration:               11,
 			InstanceGeneration:            intent.Generation,
-			AdmitCommandID:                "rollout-a-admit",
-			StartCommandID:                "rollout-a-start",
-			CanaryCommandID:               "rollout-a-canary",
 		}},
 	}
+	plan.Targets[0].AdmitCommandID,
+		plan.Targets[0].StartCommandID,
+		plan.Targets[0].CanaryCommandID = rollout.TargetCommandIDsV1(
+		plan.RolloutID, 0, plan.Targets[0].NodeID,
+	)
 	return driverFixture{
 		now: now, timeouts: timeouts, capsuleRaw: capsuleRaw, verified: verified,
 		intent: intent, intentRaw: intentRaw, plan: plan, planRaw: mustRolloutPlan(t, plan),
@@ -600,11 +607,12 @@ func (fixture driverFixture) prepare(t *testing.T) PreparedTargetV1 {
 
 func (fixture driverFixture) commandWindow(validFor time.Duration) SigningWindowV1 {
 	return SigningWindowV1{
-		KeyID:      fixture.commandKeyID,
-		PrivateKey: fixture.commandPrivate,
-		PublicKey:  fixture.commandPublic,
-		IssuedAt:   fixture.now,
-		ValidFor:   validFor,
+		KeyID:                      fixture.commandKeyID,
+		PrivateKey:                 fixture.commandPrivate,
+		PublicKey:                  fixture.commandPublic,
+		AuthorizationContextDigest: testDigest("authorization"),
+		IssuedAt:                   fixture.now,
+		ValidFor:                   validFor,
 	}
 }
 

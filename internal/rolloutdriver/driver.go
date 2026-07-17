@@ -345,11 +345,12 @@ func (prepared PreparedTargetV1) CapsuleDigest() string   { return prepared.caps
 // SigningWindowV1 supplies one policy-authorized command key and a bounded
 // validity window. IssuedAt is the coordinator's trusted current time.
 type SigningWindowV1 struct {
-	KeyID      string
-	PrivateKey ed25519.PrivateKey
-	PublicKey  ed25519.PublicKey
-	IssuedAt   time.Time
-	ValidFor   time.Duration
+	KeyID                      string
+	PrivateKey                 ed25519.PrivateKey
+	PublicKey                  ed25519.PublicKey
+	AuthorizationContextDigest string
+	IssuedAt                   time.Time
+	ValidFor                   time.Duration
 }
 
 // SignedCommandV1 retains the exact canonical DSSE bytes and their self-verified
@@ -390,19 +391,20 @@ func signCommand(
 		return SignedCommandV1{}, err
 	}
 	statement := admission.CommandStatement{
-		SchemaVersion:      admission.CommandSchemaV2,
-		CommandID:          commandID,
-		TenantID:           prepared.plan.TenantID,
-		NodeID:             prepared.target.NodeID,
-		InstanceID:         prepared.target.InstanceID,
-		RuntimeRef:         prepared.outerRuntimeRef,
-		Kind:               kind,
-		ClaimGeneration:    prepared.target.ClaimGeneration,
-		InstanceGeneration: prepared.target.InstanceGeneration,
-		CommandSequence:    sequence,
-		IssuedAt:           issued.Format(time.RFC3339Nano),
-		ExpiresAt:          expires.Format(time.RFC3339Nano),
-		Payload:            append(json.RawMessage(nil), payload...),
+		SchemaVersion:              admission.CommandSchemaV2,
+		CommandID:                  commandID,
+		AuthorizationContextDigest: window.AuthorizationContextDigest,
+		TenantID:                   prepared.plan.TenantID,
+		NodeID:                     prepared.target.NodeID,
+		InstanceID:                 prepared.target.InstanceID,
+		RuntimeRef:                 prepared.outerRuntimeRef,
+		Kind:                       kind,
+		ClaimGeneration:            prepared.target.ClaimGeneration,
+		InstanceGeneration:         prepared.target.InstanceGeneration,
+		CommandSequence:            sequence,
+		IssuedAt:                   issued.Format(time.RFC3339Nano),
+		ExpiresAt:                  expires.Format(time.RFC3339Nano),
+		Payload:                    append(json.RawMessage(nil), payload...),
 	}
 	if err := statement.Validate(issued); err != nil {
 		return SignedCommandV1{}, invalid("validate %s command: %v", kind, err)
@@ -446,6 +448,9 @@ func validateSigningWindow(
 	if len(window.PrivateKey) != ed25519.PrivateKeySize || len(window.PublicKey) != ed25519.PublicKeySize ||
 		window.IssuedAt.IsZero() || window.ValidFor <= 0 {
 		return time.Time{}, time.Time{}, invalid("%s signing key or validity window is unavailable", kind)
+	}
+	if !controlprotocol.ValidSHA256Digest(window.AuthorizationContextDigest) {
+		return time.Time{}, time.Time{}, invalid("%s authorization context digest is unavailable", kind)
 	}
 	derived, ok := window.PrivateKey.Public().(ed25519.PublicKey)
 	if !ok || !bytes.Equal(derived, window.PublicKey) {

@@ -1317,7 +1317,7 @@ func evidenceCapturePruningCanaries(
 		}
 		target := captureTarget{
 			tenantID: command.TenantID, nodeID: command.NodeID,
-			runtimeRef:            command.SignedRuntimeRef,
+			runtimeRef:            canary.Admission.RuntimeRef,
 			generation:            command.SignedInstanceGeneration,
 			activationID:          canary.ActivationID,
 			activationBeginDigest: canary.Admission.ActivationBeginDigest,

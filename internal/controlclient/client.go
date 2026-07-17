@@ -394,7 +394,7 @@ func validateCommandAdmissionProjection(command Command) error {
 		if command.CommandKind != "admit" || command.TerminalStatus != controlprotocol.ExecutorStatusDone ||
 			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 || projection == nil ||
 			command.Result == nil || command.Result.RuntimeRef != projection.RuntimeRef ||
-			command.SignedRuntimeRef == "" || projection.RuntimeRef != command.SignedRuntimeRef ||
+			!commandProjectionRuntimeMatches(command.SignedRuntimeRef, projection.RuntimeRef) ||
 			command.SignedClaimGeneration == 0 || command.ClaimGeneration == nil ||
 			*command.ClaimGeneration != command.SignedClaimGeneration ||
 			command.SignedInstanceGeneration == 0 ||
@@ -445,8 +445,8 @@ func validateCommandActivationCanaryProjection(command Command) error {
 			command.TerminalStatus != controlprotocol.ExecutorStatusDone ||
 			command.ReportedStatus != "running" ||
 			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 || projection == nil ||
-			command.Result == nil || command.Result.RuntimeRef == "" ||
-			command.Result.RuntimeRef != command.SignedRuntimeRef ||
+			command.Result == nil ||
+			!commandProjectionRuntimeMatches(command.SignedRuntimeRef, command.Result.RuntimeRef) ||
 			command.SignedClaimGeneration == 0 || command.ClaimGeneration == nil ||
 			*command.ClaimGeneration != command.SignedClaimGeneration ||
 			command.SignedInstanceGeneration == 0 {
@@ -459,6 +459,20 @@ func validateCommandActivationCanaryProjection(command Command) error {
 	default:
 		return errors.New("control command returned an unknown activation canary projection state")
 	}
+}
+
+func commandProjectionRuntimeMatches(signedRuntimeRef, executorRuntimeRef string) bool {
+	if !validExecutorRuntimeRef(executorRuntimeRef) {
+		return false
+	}
+	if validExecutorRuntimeRef(signedRuntimeRef) {
+		return signedRuntimeRef == executorRuntimeRef
+	}
+	// A protocol-4 uplink command signs a routable uplink:v2 tuple. The
+	// controller validates the tuple against the node report and exposes the
+	// distinct opaque Executor runtime here; callers that need stronger binding
+	// (such as rollout) reconstruct and verify the exact prepared activation.
+	return strings.HasPrefix(signedRuntimeRef, "uplink:v2:")
 }
 
 func (c *Client) GetOperationsSummary(ctx context.Context, tenantID string) (controlstore.OperationsSummary, error) {

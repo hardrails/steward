@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -36,15 +37,19 @@ type rolloutStatusOutput struct {
 
 func rolloutCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("rollout command requires create or status")
+		return errors.New("rollout command requires create, run, status, or verify")
 	}
 	switch arguments[0] {
 	case "create":
 		return createRollout(arguments[1:], stdout)
+	case "run":
+		return runRollout(arguments[1:], stdout)
 	case "status":
 		return statusRollout(arguments[1:], stdout)
+	case "verify":
+		return verifyRollout(arguments[1:], stdout)
 	default:
-		return errors.New("rollout command requires create or status")
+		return errors.New("rollout command requires create, run, status, or verify")
 	}
 }
 
@@ -140,6 +145,10 @@ func loadUnverifiedRolloutStates(
 			if parseErr != nil {
 				return nil, nil, fmt.Errorf("parse rollout state %q: %w", name, parseErr)
 			}
+			canonical, marshalErr := rollout.MarshalTargetStateV1(state)
+			if marshalErr != nil || !bytes.Equal(canonical, raw) {
+				return nil, nil, fmt.Errorf("rollout state %q is not canonical JSON", name)
+			}
 			if correlateErr := rollout.CorrelateTargetStateV1(planRaw, state); correlateErr != nil {
 				return nil, nil, fmt.Errorf("correlate rollout state %q: %w", name, correlateErr)
 			}
@@ -191,7 +200,16 @@ func writeHumanRolloutStatus(stdout io.Writer, output rolloutStatusOutput) error
 	if _, err := fmt.Fprintf(stdout, "rollout: %s\n", output.RolloutID); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "status: %s (unverified workspace)\n", output.Phase); err != nil {
+	verification := "unverified workspace"
+	if output.Verified {
+		switch output.Verification {
+		case "authenticated_retained_progress":
+			verification = "authenticated retained progress"
+		default:
+			verification = "verified: " + output.Verification
+		}
+	}
+	if _, err := fmt.Fprintf(stdout, "status: %s (%s)\n", output.Phase, verification); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(stdout, "journey: %s\n", output.Journey); err != nil {

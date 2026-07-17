@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -580,16 +577,5 @@ func derivedRolloutIdentifier(
 	targetIndex int,
 	nodeID string,
 ) string {
-	hash := sha256.New()
-	for _, value := range []string{
-		"steward-rollout-identifier-v1",
-		prefix,
-		rolloutID,
-		strconv.Itoa(targetIndex),
-		nodeID,
-	} {
-		_, _ = hash.Write([]byte{byte(len(value) >> 8), byte(len(value))})
-		_, _ = hash.Write([]byte(value))
-	}
-	return prefix + "-" + hex.EncodeToString(hash.Sum(nil)[:16])
+	return rollout.DerivedIdentifierV1(prefix, rolloutID, targetIndex, nodeID)
 }

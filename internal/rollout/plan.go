@@ -158,6 +158,14 @@ func (plan PlanV1) Validate() error {
 		if err := target.validate(); err != nil {
 			return invalidPlan("target %d: %v", index, err)
 		}
+		expectedAdmit, expectedStart, expectedCanary := TargetCommandIDsV1(
+			plan.RolloutID, index, target.NodeID,
+		)
+		if target.AdmitCommandID != expectedAdmit ||
+			target.StartCommandID != expectedStart ||
+			target.CanaryCommandID != expectedCanary {
+			return invalidPlan("target %d command identities are not deterministically derived", index)
+		}
 		if _, duplicate := nodes[target.NodeID]; duplicate {
 			return invalidPlan("target %d repeats node_id", index)
 		}

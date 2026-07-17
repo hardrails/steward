@@ -289,12 +289,14 @@ func (store *Store) SealEvidenceCapture(
 		return EvidenceCapture{}, false, invalid("evidence capture seal predates observation")
 	}
 	command, ok := store.current.commands[commandKey(capture.TenantID, capture.NodeID, canaryCommandID)]
+	executorRuntimeRef, runtimeErr := commandExecutorRuntimeRef(command)
 	if !ok || command.CommandKind != "activation-canary" ||
+		runtimeErr != nil ||
 		command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 ||
 		command.State != CommandTerminal || command.Terminal == nil ||
 		command.Terminal.Report.Status != controlprotocol.ExecutorStatusDone ||
 		command.Terminal.ActivationCanary == nil ||
-		command.SignedRuntimeRef != capture.RuntimeRef ||
+		executorRuntimeRef != capture.RuntimeRef ||
 		command.SignedInstanceGeneration != capture.Generation {
 		return EvidenceCapture{}, false, ErrConflict
 	}
@@ -309,7 +311,7 @@ func (store *Store) SealEvidenceCapture(
 	}
 	canary, err := activationcanary.ParseCommandV1(statement.Payload)
 	if err != nil || statement.TenantID != capture.TenantID || statement.NodeID != capture.NodeID ||
-		statement.RuntimeRef != capture.RuntimeRef || statement.InstanceGeneration != capture.Generation ||
+		statement.RuntimeRef != command.SignedRuntimeRef || statement.InstanceGeneration != capture.Generation ||
 		canary.ActivationID != capture.ActivationID || canary.Admission.RuntimeRef != capture.RuntimeRef ||
 		canary.Admission.Generation != capture.Generation ||
 		canary.Admission.ActivationBeginDigest != capture.ActivationBeginDigest ||
