@@ -273,24 +273,26 @@ type activationAdmissionRequest struct {
 }
 
 type secureProvisionResponse struct {
-	RuntimeRef            string                  `json:"runtime_ref"`
-	Status                string                  `json:"status"`
-	CapsuleDigest         string                  `json:"capsule_digest"`
-	PolicyDigest          string                  `json:"policy_digest"`
-	Generation            uint64                  `json:"generation"`
-	EvidenceKeyID         string                  `json:"evidence_key_id"`
-	GrantID               string                  `json:"grant_id,omitempty"`
-	ServicePath           string                  `json:"service_path,omitempty"`
-	ServiceID             string                  `json:"service_id,omitempty"`
-	TaskAuthorities       []gateway.TaskAuthority `json:"task_authorities,omitempty"`
-	EgressProxy           string                  `json:"egress_proxy,omitempty"`
-	EgressRouteIDs        []string                `json:"egress_route_ids,omitempty"`
-	ConnectorURL          string                  `json:"connector_url,omitempty"`
-	ConnectorIDs          []string                `json:"connector_ids,omitempty"`
-	EffectMode            string                  `json:"effect_mode,omitempty"`
-	RoutePolicyDigest     string                  `json:"route_policy_digest,omitempty"`
-	ActivationID          string                  `json:"activation_id,omitempty"`
-	ActivationBeginDigest string                  `json:"activation_begin_digest,omitempty"`
+	RuntimeRef              string                         `json:"runtime_ref"`
+	Status                  string                         `json:"status"`
+	CapsuleDigest           string                         `json:"capsule_digest"`
+	PolicyDigest            string                         `json:"policy_digest"`
+	Generation              uint64                         `json:"generation"`
+	EvidenceKeyID           string                         `json:"evidence_key_id"`
+	GrantID                 string                         `json:"grant_id,omitempty"`
+	ServicePath             string                         `json:"service_path,omitempty"`
+	ServiceID               string                         `json:"service_id,omitempty"`
+	TaskAuthorities         []gateway.TaskAuthority        `json:"task_authorities,omitempty"`
+	EgressProxy             string                         `json:"egress_proxy,omitempty"`
+	EgressRouteIDs          []string                       `json:"egress_route_ids,omitempty"`
+	ConnectorURL            string                         `json:"connector_url,omitempty"`
+	ConnectorIDs            []string                       `json:"connector_ids,omitempty"`
+	EffectMode              string                         `json:"effect_mode,omitempty"`
+	ActionApprovalThreshold int                            `json:"action_approval_threshold,omitempty"`
+	ActionAuthorities       []gateway.GrantActionAuthority `json:"action_authorities,omitempty"`
+	RoutePolicyDigest       string                         `json:"route_policy_digest,omitempty"`
+	ActivationID            string                         `json:"activation_id,omitempty"`
+	ActivationBeginDigest   string                         `json:"activation_begin_digest,omitempty"`
 }
 
 type purgeStateRequest struct {
@@ -430,6 +432,12 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 		}
 		if effective.Intent.EffectMode == admission.EffectModeAuthorized {
 			workload.Runtime.NodeID = effective.Intent.NodeID
+			approvalThreshold, err := effective.AuthorizedActionApprovalThreshold()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "enforcement_failed", "signed action approval threshold could not be projected into the runtime grant")
+				return
+			}
+			workload.Runtime.ActionApprovalThreshold = approvalThreshold
 			actionAuthorities, err := admittedActionAuthorities(effective)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "enforcement_failed", "signed action authority could not be projected into the runtime grant")
@@ -1093,6 +1101,7 @@ func legacyRuntimeReplay(desired, observed Workload) (Workload, bool) {
 	if desired.Runtime == nil || observed.Runtime == nil || len(desired.Runtime.ConnectorIDs) != 0 || len(observed.Runtime.ConnectorIDs) != 0 ||
 		len(desired.Runtime.TaskAuthorities) != 0 || len(observed.Runtime.TaskAuthorities) != 0 ||
 		desired.Runtime.EffectMode != "" || observed.Runtime.EffectMode != "" ||
+		desired.Runtime.ActionApprovalThreshold != 0 || observed.Runtime.ActionApprovalThreshold != 0 ||
 		len(desired.Runtime.ActionAuthorities) != 0 || len(observed.Runtime.ActionAuthorities) != 0 ||
 		!imageConfigDigest.MatchString(desired.Runtime.CapsuleDigest) || !imageConfigDigest.MatchString(desired.Runtime.PolicyDigest) ||
 		observed.Runtime.CapsuleDigest != "" || observed.Runtime.PolicyDigest != "" ||
@@ -1111,7 +1120,7 @@ func runtimeGrantEqualExceptAdmissionBindings(left, right *RuntimeGrant) bool {
 		left.RouteID == right.RouteID && left.RelayIP == right.RelayIP && left.AgentIP == right.AgentIP &&
 		left.ModelAlias == right.ModelAlias && left.ServicePort == right.ServicePort && left.ServiceID == right.ServiceID &&
 		left.ActivationID == right.ActivationID && left.ActivationBeginDigest == right.ActivationBeginDigest &&
-		left.EffectMode == right.EffectMode &&
+		left.EffectMode == right.EffectMode && left.ActionApprovalThreshold == right.ActionApprovalThreshold &&
 		slices.Equal(left.TaskAuthorities, right.TaskAuthorities) &&
 		slices.EqualFunc(left.ActionAuthorities, right.ActionAuthorities, func(left, right gateway.GrantActionAuthority) bool {
 			return left.KeyID == right.KeyID && left.PublicKey == right.PublicKey && slices.Equal(left.ConnectorIDs, right.ConnectorIDs)
@@ -1277,6 +1286,8 @@ func (s *Server) secureResponse(
 		response.ConnectorIDs = append([]string(nil), runtime.ConnectorIDs...)
 	}
 	response.EffectMode = runtime.EffectMode
+	response.ActionApprovalThreshold = runtime.ActionApprovalThreshold
+	response.ActionAuthorities = cloneGrantActionAuthorities(runtime.ActionAuthorities)
 	response.ActivationID = runtime.ActivationID
 	response.ActivationBeginDigest = runtime.ActivationBeginDigest
 	return response

@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -284,7 +286,7 @@ func TestPermitIssueSelectsAuthorizedEffectsV2AndChecksAdmissionMode(t *testing.
 			statement.ConnectorID, statement.OperationID),
 		AuthorityKeyID: "approver-a", RequestDigest: statement.RequestDigest, RequestBytes: statement.RequestBytes,
 	}
-	if err := checkPermitReceiptBindings(statement, "approver-a", receiptEvent); err != nil {
+	if err := checkPermitReceiptBindings(statement, []string{"approver-a"}, receiptEvent); err != nil {
 		t.Fatalf("authorized receipt bindings: %v", err)
 	}
 	for _, mutate := range []func(*connectorledger.Event){
@@ -293,7 +295,7 @@ func TestPermitIssueSelectsAuthorizedEffectsV2AndChecksAdmissionMode(t *testing.
 	} {
 		changed := receiptEvent
 		mutate(&changed)
-		if err := checkPermitReceiptBindings(statement, "approver-a", changed); err == nil {
+		if err := checkPermitReceiptBindings(statement, []string{"approver-a"}, changed); err == nil {
 			t.Fatalf("receipt mutation was not rejected: %#v", changed)
 		}
 	}
@@ -341,6 +343,135 @@ func TestPermitIssueSelectsAuthorizedEffectsV2AndChecksAdmissionMode(t *testing.
 	}
 	if standardVerified.Statement.SchemaVersion != actionpermit.SchemaV1 || standardVerified.Statement.EffectMode != "" {
 		t.Fatalf("standard mode leaked into legacy permit statement: %#v", standardVerified.Statement)
+	}
+}
+
+func TestPermitMultiPartyApprovalHandoffIsExactAndNonOverwriting(t *testing.T) {
+	directory := t.TempDir()
+	privateA, publicAPath := generateTestKeyPair(t, directory, "approver-a")
+	privateB, publicBPath := generateTestKeyPair(t, directory, "approver-b")
+	publicA, err := readPublicKey(publicAPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, err := readPublicKey(publicBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := []byte(`{"account_id":"acct-42","rotate":true}`)
+	requestPath := filepath.Join(directory, "request.json")
+	if err := os.WriteFile(requestPath, request, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	intent := admission.InstanceIntent{
+		TenantID: "tenant-a", NodeID: "node-a", InstanceID: "agent-a", LineageID: "lineage-a", Generation: 3,
+		CapsuleDigest: digest, Resources: admission.ResourceLimits{MemoryBytes: 1, CPUMillis: 1, PIDs: 1},
+		Capabilities: admission.Capabilities{Connector: true}, StateDisposition: "none",
+		ConnectorIDs: []string{"secrets-admin"}, EffectMode: admission.EffectModeAuthorized,
+	}
+	intentPath := writePermitJSON(t, directory, "intent.json", intent)
+	authorities := []gateway.GrantActionAuthority{
+		{KeyID: "approver-a", PublicKey: base64.StdEncoding.EncodeToString(publicA), ConnectorIDs: []string{"secrets-admin"}},
+		{KeyID: "approver-b", PublicKey: base64.StdEncoding.EncodeToString(publicB), ConnectorIDs: []string{"secrets-admin"}},
+	}
+	admitted := permitAdmission{
+		RuntimeRef: "executor-" + strings.Repeat("b", 64), Status: "created", CapsuleDigest: digest,
+		PolicyDigest: "sha256:" + strings.Repeat("c", 64), Generation: intent.Generation,
+		GrantID: gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation), ConnectorIDs: intent.ConnectorIDs,
+		RoutePolicyDigest: "sha256:" + strings.Repeat("d", 64), EffectMode: admission.EffectModeAuthorized,
+		ActionApprovalThreshold: 2, ActionAuthorities: authorities,
+	}
+	admissionPath := writePermitJSON(t, directory, "admission.json", admitted)
+	operationDigest := mustOperationPolicyDigest(
+		t, "https://accounts.example.test", 1, "secrets-admin", "rotate", "POST", "/v1/recovery/rotate",
+	)
+	trustPath := writePermitJSON(t, directory, "trust.json", actionTrustInventory{
+		SchemaVersion: actionTrustSchemaV1, NodeID: intent.NodeID, TenantID: intent.TenantID,
+		Authorities: []actionTrustAuthority{
+			{KeyID: "approver-a", TenantID: intent.TenantID, PublicKeyDigest: dsse.Digest(publicA), ConnectorIDs: intent.ConnectorIDs},
+			{KeyID: "approver-b", TenantID: intent.TenantID, PublicKeyDigest: dsse.Digest(publicB), ConnectorIDs: intent.ConnectorIDs},
+		},
+		Connectors: []actionTrustConnector{{
+			ConnectorID: "secrets-admin", BaseURL: "https://accounts.example.test", CredentialMode: gateway.CredentialModeBearer,
+			CredentialEpoch: 1, MaxPermitSeconds: 300, AuthorityKeyIDs: []string{"approver-a", "approver-b"},
+			Operations: []actionTrustOperation{{ID: "rotate", Method: "POST", Path: "/v1/recovery/rotate", PolicyDigest: operationDigest}},
+		}},
+	})
+	fixedNow := time.Date(2026, time.July, 17, 8, 0, 0, 0, time.UTC)
+	priorNow := timeNow
+	timeNow = func() time.Time { return fixedNow }
+	t.Cleanup(func() { timeNow = priorNow })
+
+	partialPath := filepath.Join(directory, "partial.dsse.json")
+	var issueSummary bytes.Buffer
+	if err := run([]string{
+		"permit", "issue", "-admission", admissionPath, "-intent", intentPath, "-trust", trustPath,
+		"-request", requestPath, "-connector-id", "secrets-admin", "-operation-id", "rotate", "-task-id", "rotate-1",
+		"-key", privateA, "-key-id", "approver-a", "-out", partialPath,
+	}, &bytes.Buffer{}, &issueSummary); err != nil {
+		t.Fatal(err)
+	}
+	var partialSummary permitApprovalSummary
+	if err := json.Unmarshal(issueSummary.Bytes(), &partialSummary); err != nil {
+		t.Fatal(err)
+	}
+	if partialSummary.Complete || partialSummary.ApprovalThreshold != 2 || partialSummary.ApprovalsCollected != 1 {
+		t.Fatalf("partial summary = %+v", partialSummary)
+	}
+	if err := run([]string{
+		"permit", "verify", "-in", partialPath,
+		"-authority", "approver-a=" + publicAPath, "-authority", "approver-b=" + publicBPath,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "signature count") {
+		t.Fatalf("incomplete verification error = %v", err)
+	}
+
+	completePath := filepath.Join(directory, "complete.dsse.json")
+	headerPath := filepath.Join(directory, "complete.header")
+	var approveSummary bytes.Buffer
+	if err := run([]string{
+		"permit", "approve", "-in", partialPath, "-admission", admissionPath, "-intent", intentPath,
+		"-trust", trustPath, "-request", requestPath, "-key", privateB, "-key-id", "approver-b",
+		"-out", completePath, "-header-out", headerPath,
+	}, &bytes.Buffer{}, &approveSummary); err != nil {
+		t.Fatal(err)
+	}
+	var completeSummary permitApprovalSummary
+	if err := json.Unmarshal(approveSummary.Bytes(), &completeSummary); err != nil {
+		t.Fatal(err)
+	}
+	if !completeSummary.Complete || !slices.Equal(completeSummary.AuthorityKeys, []string{"approver-a", "approver-b"}) {
+		t.Fatalf("complete summary = %+v", completeSummary)
+	}
+	var verifiedOutput bytes.Buffer
+	if err := run([]string{
+		"permit", "verify", "-in", completePath, "-request", requestPath,
+		"-authority", "approver-a=" + publicAPath, "-authority", "approver-b=" + publicBPath,
+	}, &verifiedOutput, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(partialPath); err != nil || info.Size() == 0 {
+		t.Fatalf("partial approval was overwritten: info=%v err=%v", info, err)
+	}
+	if header, err := os.ReadFile(headerPath); err != nil || len(bytes.TrimSpace(header)) == 0 {
+		t.Fatalf("complete header = %q, %v", header, err)
+	}
+	if err := run([]string{
+		"permit", "approve", "-in", partialPath, "-admission", admissionPath, "-intent", intentPath,
+		"-trust", trustPath, "-request", requestPath, "-key", privateA, "-key-id", "approver-a",
+		"-out", filepath.Join(directory, "duplicate.dsse.json"),
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "already approved") {
+		t.Fatalf("duplicate approval error = %v", err)
+	}
+	if err := os.WriteFile(requestPath, []byte(`{"account_id":"attacker","rotate":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"permit", "approve", "-in", partialPath, "-admission", admissionPath, "-intent", intentPath,
+		"-trust", trustPath, "-request", requestPath, "-key", privateB, "-key-id", "approver-b",
+		"-out", filepath.Join(directory, "tampered.dsse.json"),
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "exact request bytes") {
+		t.Fatalf("tampered request approval error = %v", err)
 	}
 }
 

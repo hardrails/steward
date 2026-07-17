@@ -42,25 +42,26 @@ const maxEgressDeniedAttemptsPerTenantMinute = 120
 const maxEgressDeniedAttemptsHostMinute = 480
 
 type Grant struct {
-	GrantID           string                 `json:"grant_id"`
-	TenantID          string                 `json:"tenant_id"`
-	NodeID            string                 `json:"node_id,omitempty"`
-	InstanceID        string                 `json:"instance_id"`
-	Generation        uint64                 `json:"generation"`
-	RuntimeRef        string                 `json:"runtime_ref,omitempty"`
-	CapsuleDigest     string                 `json:"capsule_digest,omitempty"`
-	PolicyDigest      string                 `json:"policy_digest,omitempty"`
-	EffectMode        string                 `json:"effect_mode,omitempty"`
-	ActionAuthorities []GrantActionAuthority `json:"action_authorities,omitempty"`
-	RouteID           string                 `json:"route_id,omitempty"`
-	ModelAlias        string                 `json:"model_alias,omitempty"`
-	Service           bool                   `json:"service"`
-	ServiceID         string                 `json:"service_id,omitempty"`
-	ServiceURL        string                 `json:"service_url,omitempty"`
-	TaskAuthorities   []TaskAuthority        `json:"task_authorities,omitempty"`
-	EgressRouteIDs    []string               `json:"egress_route_ids,omitempty"`
-	ConnectorIDs      []string               `json:"connector_ids,omitempty"`
-	Active            bool                   `json:"active"`
+	GrantID                 string                 `json:"grant_id"`
+	TenantID                string                 `json:"tenant_id"`
+	NodeID                  string                 `json:"node_id,omitempty"`
+	InstanceID              string                 `json:"instance_id"`
+	Generation              uint64                 `json:"generation"`
+	RuntimeRef              string                 `json:"runtime_ref,omitempty"`
+	CapsuleDigest           string                 `json:"capsule_digest,omitempty"`
+	PolicyDigest            string                 `json:"policy_digest,omitempty"`
+	EffectMode              string                 `json:"effect_mode,omitempty"`
+	ActionApprovalThreshold int                    `json:"action_approval_threshold,omitempty"`
+	ActionAuthorities       []GrantActionAuthority `json:"action_authorities,omitempty"`
+	RouteID                 string                 `json:"route_id,omitempty"`
+	ModelAlias              string                 `json:"model_alias,omitempty"`
+	Service                 bool                   `json:"service"`
+	ServiceID               string                 `json:"service_id,omitempty"`
+	ServiceURL              string                 `json:"service_url,omitempty"`
+	TaskAuthorities         []TaskAuthority        `json:"task_authorities,omitempty"`
+	EgressRouteIDs          []string               `json:"egress_route_ids,omitempty"`
+	ConnectorIDs            []string               `json:"connector_ids,omitempty"`
+	Active                  bool                   `json:"active"`
 }
 
 const (
@@ -115,6 +116,7 @@ type retainedGrant struct {
 	CapsuleDigest           string                  `json:"capsule_digest,omitempty"`
 	PolicyDigest            string                  `json:"policy_digest,omitempty"`
 	EffectMode              string                  `json:"effect_mode,omitempty"`
+	ActionApprovalThreshold int                     `json:"action_approval_threshold,omitempty"`
 	ActionAuthorities       []GrantActionAuthority  `json:"action_authorities,omitempty"`
 	RouteID                 string                  `json:"route_id,omitempty"`
 	ModelAlias              string                  `json:"model_alias,omitempty"`
@@ -140,8 +142,9 @@ func retainGrant(grant Grant, policyDigest, credentialDigest string, callMaps ..
 	retained := retainedGrant{
 		GrantID: grant.GrantID, TenantID: grant.TenantID, NodeID: grant.NodeID, InstanceID: grant.InstanceID, Generation: grant.Generation,
 		RuntimeRef: grant.RuntimeRef, CapsuleDigest: grant.CapsuleDigest, PolicyDigest: grant.PolicyDigest,
-		EffectMode: grant.EffectMode, ActionAuthorities: cloneGrantActionAuthorities(grant.ActionAuthorities),
-		RouteID: grant.RouteID, ModelAlias: grant.ModelAlias, Service: grant.Service, ServiceID: grant.ServiceID, ServiceURL: grant.ServiceURL,
+		EffectMode: grant.EffectMode, ActionApprovalThreshold: grant.ActionApprovalThreshold,
+		ActionAuthorities: cloneGrantActionAuthorities(grant.ActionAuthorities),
+		RouteID:           grant.RouteID, ModelAlias: grant.ModelAlias, Service: grant.Service, ServiceID: grant.ServiceID, ServiceURL: grant.ServiceURL,
 		TaskAuthorities: append([]TaskAuthority(nil), grant.TaskAuthorities...),
 		EgressRouteIDs:  append([]string(nil), grant.EgressRouteIDs...), Active: grant.Active,
 		ConnectorIDs:      append([]string(nil), grant.ConnectorIDs...),
@@ -165,15 +168,22 @@ func retainGrant(grant Grant, policyDigest, credentialDigest string, callMaps ..
 }
 
 func (retained retainedGrant) grant() Grant {
-	return Grant{
+	grant := Grant{
 		GrantID: retained.GrantID, TenantID: retained.TenantID, NodeID: retained.NodeID, InstanceID: retained.InstanceID, Generation: retained.Generation,
 		RuntimeRef: retained.RuntimeRef, CapsuleDigest: retained.CapsuleDigest, PolicyDigest: retained.PolicyDigest,
-		EffectMode: retained.EffectMode, ActionAuthorities: cloneGrantActionAuthorities(retained.ActionAuthorities),
-		RouteID: retained.RouteID, ModelAlias: retained.ModelAlias, Service: retained.Service, ServiceID: retained.ServiceID, ServiceURL: retained.ServiceURL,
+		EffectMode: retained.EffectMode, ActionApprovalThreshold: retained.ActionApprovalThreshold,
+		ActionAuthorities: cloneGrantActionAuthorities(retained.ActionAuthorities),
+		RouteID:           retained.RouteID, ModelAlias: retained.ModelAlias, Service: retained.Service, ServiceID: retained.ServiceID, ServiceURL: retained.ServiceURL,
 		TaskAuthorities: append([]TaskAuthority(nil), retained.TaskAuthorities...),
 		EgressRouteIDs:  append([]string(nil), retained.EgressRouteIDs...),
 		ConnectorIDs:    append([]string(nil), retained.ConnectorIDs...), Active: retained.Active,
 	}
+	if grant.EffectMode == EffectModeAuthorized && grant.ActionApprovalThreshold == 0 {
+		// Gateway state format 5 predates explicit thresholds and accepted one
+		// action signature. Preserve that exact meaning during upgrade.
+		grant.ActionApprovalThreshold = 1
+	}
+	return grant
 }
 
 type snapshot struct {
@@ -827,7 +837,8 @@ func validServiceEnrichment(current, next Grant) bool {
 		current.NodeID == next.NodeID &&
 		current.InstanceID == next.InstanceID && current.Generation == next.Generation &&
 		current.RuntimeRef == next.RuntimeRef && current.CapsuleDigest == next.CapsuleDigest && current.PolicyDigest == next.PolicyDigest &&
-		current.EffectMode == next.EffectMode && slices.EqualFunc(current.ActionAuthorities, next.ActionAuthorities, grantActionAuthoritiesEqual) &&
+		current.EffectMode == next.EffectMode && current.ActionApprovalThreshold == next.ActionApprovalThreshold &&
+		slices.EqualFunc(current.ActionAuthorities, next.ActionAuthorities, grantActionAuthoritiesEqual) &&
 		current.RouteID == next.RouteID && current.ModelAlias == next.ModelAlias && current.Service == next.Service &&
 		current.ServiceID == next.ServiceID && slices.Equal(current.TaskAuthorities, next.TaskAuthorities) &&
 		slices.Equal(current.EgressRouteIDs, next.EgressRouteIDs) && slices.Equal(current.ConnectorIDs, next.ConnectorIDs)
@@ -838,7 +849,8 @@ func grantsEqual(left, right Grant) bool {
 		left.NodeID == right.NodeID &&
 		left.InstanceID == right.InstanceID && left.Generation == right.Generation &&
 		left.RuntimeRef == right.RuntimeRef && left.CapsuleDigest == right.CapsuleDigest && left.PolicyDigest == right.PolicyDigest &&
-		left.EffectMode == right.EffectMode && slices.EqualFunc(left.ActionAuthorities, right.ActionAuthorities, grantActionAuthoritiesEqual) &&
+		left.EffectMode == right.EffectMode && left.ActionApprovalThreshold == right.ActionApprovalThreshold &&
+		slices.EqualFunc(left.ActionAuthorities, right.ActionAuthorities, grantActionAuthoritiesEqual) &&
 		left.RouteID == right.RouteID && left.ModelAlias == right.ModelAlias &&
 		left.Service == right.Service && left.ServiceID == right.ServiceID && left.ServiceURL == right.ServiceURL &&
 		slices.Equal(left.TaskAuthorities, right.TaskAuthorities) &&
@@ -950,7 +962,7 @@ func (s *Server) validGrant(grant Grant) bool {
 		(!grant.Service && (grant.ServiceID != "" || len(grant.TaskAuthorities) != 0)) ||
 		(grant.EffectMode != "" && grant.EffectMode != EffectModeStandard && grant.EffectMode != EffectModeAuthorized) ||
 		(grant.EffectMode == EffectModeAuthorized && len(grant.EgressRouteIDs) != 0) ||
-		(grant.EffectMode != EffectModeAuthorized && len(grant.ActionAuthorities) != 0) ||
+		(grant.EffectMode != EffectModeAuthorized && (len(grant.ActionAuthorities) != 0 || grant.ActionApprovalThreshold != 0)) ||
 		!validGrantEvidenceContext(grant) {
 		return false
 	}
@@ -1083,7 +1095,8 @@ func validGrantActionAuthorities(authorities []GrantActionAuthority, connectorID
 }
 
 func (s *Server) validAuthorizedEffectsGrant(grant Grant) bool {
-	if len(grant.ConnectorIDs) == 0 || len(grant.ActionAuthorities) == 0 {
+	if len(grant.ConnectorIDs) == 0 || len(grant.ActionAuthorities) == 0 ||
+		grant.ActionApprovalThreshold < 1 || grant.ActionApprovalThreshold > len(grant.ActionAuthorities) {
 		return false
 	}
 	if !validGrantActionAuthorities(grant.ActionAuthorities, grant.ConnectorIDs) ||
@@ -1121,6 +1134,17 @@ func (s *Server) validAuthorizedEffectsGrant(grant Grant) bool {
 	for _, authority := range grant.ActionAuthorities {
 		entry, ok := expected[authority.KeyID]
 		if !ok || entry.publicKey != authority.PublicKey || !slices.Equal(entry.connectorIDs, authority.ConnectorIDs) {
+			return false
+		}
+	}
+	for _, connectorID := range grant.ConnectorIDs {
+		approvers := 0
+		for _, authority := range grant.ActionAuthorities {
+			if slicesContainsSorted(authority.ConnectorIDs, connectorID) {
+				approvers++
+			}
+		}
+		if approvers < grant.ActionApprovalThreshold {
 			return false
 		}
 	}
@@ -1584,7 +1608,7 @@ func (s *Server) loadExisting() (StateSummary, error) {
 	}
 	var state snapshot
 	if err := dsse.DecodeStrictInto(raw, maxStateBytes, &state); err != nil ||
-		(state.Version != 1 && state.Version != 2 && state.Version != 3 && state.Version != 4 && state.Version != 5) || len(state.Grants) > 4096 {
+		(state.Version != 1 && state.Version != 2 && state.Version != 3 && state.Version != 4 && state.Version != 5 && state.Version != 6) || len(state.Grants) > 4096 {
 		return StateSummary{}, errors.New("gateway state is invalid")
 	}
 	for _, retained := range state.Grants {
@@ -1605,15 +1629,18 @@ func (s *Server) loadExisting() (StateSummary, error) {
 			return StateSummary{}, errors.New("gateway state contains a retained grant without a durable route policy binding")
 		}
 		if len(grant.ConnectorIDs) > 0 && state.Version != 3 {
-			if state.Version != 4 && state.Version != 5 {
+			if state.Version != 4 && state.Version != 5 && state.Version != 6 {
 				return StateSummary{}, errors.New("gateway state contains a connector grant without durable call accounting")
 			}
 		}
 		if len(grant.TaskAuthorities) > 0 && state.Version < 4 {
 			return StateSummary{}, errors.New("gateway state contains task authority without its durable state format")
 		}
-		if (grant.EffectMode != "" || len(grant.ActionAuthorities) > 0) && state.Version != 5 {
+		if (grant.EffectMode != "" || len(grant.ActionAuthorities) > 0) && state.Version < 5 {
 			return StateSummary{}, errors.New("gateway state contains authorized-effects authority without its durable state format")
+		}
+		if grant.ActionApprovalThreshold > 1 && state.Version < 6 {
+			return StateSummary{}, errors.New("gateway state contains multi-party approval authority without its durable state format")
 		}
 		if retained.RoutePolicyDigest != effectivePolicyDigest || retained.CredentialBindingDigest != effectiveCredentialDigest {
 			return StateSummary{}, errors.New("gateway state route policy does not match current configuration")
@@ -1640,7 +1667,7 @@ func (s *Server) persistLocked() error {
 		))
 	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i].GrantID < grants[j].GrantID })
-	raw, err := json.Marshal(snapshot{Version: 5, Grants: grants})
+	raw, err := json.Marshal(snapshot{Version: 6, Grants: grants})
 	if err != nil {
 		return err
 	}

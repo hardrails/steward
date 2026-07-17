@@ -36,14 +36,16 @@ type connectorRigOptions struct {
 	requirePermit     bool
 	actionTenant      string
 	authorizedEffects bool
+	approvalThreshold int
 }
 
 type connectorRig struct {
-	server    *Server
-	config    Config
-	grant     Grant
-	connector loadedConnector
-	actionKey ed25519.PrivateKey
+	server          *Server
+	config          Config
+	grant           Grant
+	connector       loadedConnector
+	actionKey       ed25519.PrivateKey
+	secondActionKey ed25519.PrivateKey
 }
 
 type blockingConnectorReceiptLog struct {
@@ -116,6 +118,9 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 	if options.authorizedEffects && !options.requirePermit {
 		t.Fatal("authorized-effects fixture requires an action permit authority")
 	}
+	if options.authorizedEffects && options.approvalThreshold == 0 {
+		options.approvalThreshold = 1
+	}
 	directory, err := os.MkdirTemp("/tmp", "gc-")
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +154,7 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 			{TenantID: "tenant-b", Bytes: 2 << 20},
 		},
 	}
-	var actionKey ed25519.PrivateKey
+	var actionKey, secondActionKey ed25519.PrivateKey
 	if options.requirePermit {
 		actionPublic, private, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
@@ -161,6 +166,18 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 		config.Connectors[0].ActionAuthorityIDs = []string{"approver-a"}
 		config.Connectors[0].MaxActionPermitSeconds = 300
 		config.Connectors[0].CredentialEpoch = 1
+		if options.approvalThreshold > 1 {
+			secondPublic, secondPrivate, generateErr := ed25519.GenerateKey(rand.Reader)
+			if generateErr != nil {
+				t.Fatal(generateErr)
+			}
+			config.ActionAuthorities = append(config.ActionAuthorities, ActionAuthority{
+				KeyID: "approver-b", TenantID: options.actionTenant,
+				PublicKey: base64.StdEncoding.EncodeToString(secondPublic),
+			})
+			config.Connectors[0].ActionAuthorityIDs = []string{"approver-a", "approver-b"}
+			secondActionKey = secondPrivate
+		}
 	}
 	_, receiptKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -185,14 +202,19 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 	if options.authorizedEffects {
 		grant.NodeID = config.ActionPermitNodeID
 		grant.EffectMode = EffectModeAuthorized
-		grant.ActionAuthorities = []GrantActionAuthority{{
-			KeyID: "approver-a", PublicKey: config.ActionAuthorities[0].PublicKey,
-			ConnectorIDs: []string{"issues"},
-		}}
+		grant.ActionApprovalThreshold = options.approvalThreshold
+		for _, authority := range config.ActionAuthorities {
+			grant.ActionAuthorities = append(grant.ActionAuthorities, GrantActionAuthority{
+				KeyID: authority.KeyID, PublicKey: authority.PublicKey, ConnectorIDs: []string{"issues"},
+			})
+		}
 	}
 	registerConnectorGrant(t, server, grant)
 	activateConnectorGrant(t, server, grant.GrantID)
-	return &connectorRig{server: server, config: config, grant: grant, connector: connectors["issues"], actionKey: actionKey}
+	return &connectorRig{
+		server: server, config: config, grant: grant, connector: connectors["issues"],
+		actionKey: actionKey, secondActionKey: secondActionKey,
+	}
 }
 
 func connectorGrant(tenant, instance string, generation uint64, connectors ...string) Grant {
@@ -282,10 +304,16 @@ func actionPermitForPayload(
 	schemaVersion, effectMode := actionpermit.SchemaV1, ""
 	if rig.grant.EffectMode == EffectModeAuthorized {
 		schemaVersion, effectMode = actionpermit.SchemaV2, actionpermit.EffectModeAuthorized
+		if rig.grant.ActionApprovalThreshold > 1 {
+			schemaVersion = actionpermit.SchemaV3
+		}
 	}
 	if payloadType == "" {
 		if effectMode == actionpermit.EffectModeAuthorized {
 			payloadType = actionpermit.PayloadTypeV2
+			if rig.grant.ActionApprovalThreshold > 1 {
+				payloadType = actionpermit.PayloadTypeV3
+			}
 		} else {
 			payloadType = actionpermit.PayloadTypeV1
 		}
@@ -302,6 +330,9 @@ func actionPermitForPayload(
 		ContentType: contentType, NotBefore: now.Add(-time.Minute).Format(time.RFC3339),
 		ExpiresAt: now.Add(4 * time.Minute).Format(time.RFC3339),
 	}
+	if rig.grant.ActionApprovalThreshold > 1 {
+		statement.ApprovalThreshold = rig.grant.ActionApprovalThreshold
+	}
 	if mutate != nil {
 		mutate(&statement)
 	}
@@ -312,6 +343,12 @@ func actionPermitForPayload(
 	envelope, err := dsse.Sign(payloadType, payload, "approver-a", rig.actionKey)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if payloadType == actionpermit.PayloadTypeV3 {
+		envelope, err = dsse.AddSignature(envelope, "approver-b", rig.secondActionKey)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	raw, err := dsse.Marshal(envelope)
 	if err != nil {
@@ -406,6 +443,71 @@ func TestConnectorRequiresAndSpendsExactSignedActionPermit(t *testing.T) {
 	summary, err := InspectConnectorReceiptFormat(rig.config)
 	if err != nil || summary.FormatVersion != 2 {
 		t.Fatalf("format summary=%#v err=%v", summary, err)
+	}
+}
+
+func TestAuthorizedEffectsRequiresEveryPolicyApprovalBeforeNetwork(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true,
+		authorizedEffects: true, approvalThreshold: 2,
+	})
+	body := []byte(`{"change":true}`)
+	completeHeader, _ := actionPermitFor(t, rig, "dual-control", "create", body, nil)
+	completeRaw, err := actionpermit.DecodeHeader(completeHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := dsse.Parse(completeRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Signatures = envelope.Signatures[:1]
+	incompleteRaw, err := dsse.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incompleteHeader, err := actionpermit.EncodeHeader(incompleteRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incomplete := connectorRequest(http.MethodPost, "issues", "create", "dual-control", bytes.NewReader(body))
+	incomplete.Header.Set(actionPermitHeader, incompleteHeader)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, incomplete); response.Code != http.StatusForbidden || calls.Load() != 0 {
+		t.Fatalf("incomplete approval status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
+	}
+
+	complete := connectorRequest(http.MethodPost, "issues", "create", "dual-control", bytes.NewReader(body))
+	complete.Header.Set(actionPermitHeader, completeHeader)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, complete); response.Code != http.StatusNoContent || calls.Load() != 1 {
+		t.Fatalf("complete approval status=%d calls=%d body=%s", response.Code, calls.Load(), response.Body.String())
+	}
+	var records []connectorledger.VerifiedReceipt
+	public := rig.config.connectorReceiptKey.Public().(ed25519.PublicKey)
+	if _, err := connectorledger.VerifyRecords(
+		rig.config.ConnectorReceiptFile, public, rig.config.ConnectorReceiptNodeID, rig.config.ConnectorReceiptEpoch,
+		func(record connectorledger.VerifiedReceipt) error { records = append(records, record); return nil },
+	); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, record := range records {
+		if record.Receipt.Event.PermitDigest == dsse.Digest(completeRaw) {
+			found = true
+			if record.Receipt.SchemaVersion != connectorledger.SchemaV6 ||
+				record.Receipt.Event.AuthorityKeySet != "approver-a,approver-b" ||
+				record.Receipt.Event.ApprovalThreshold != 2 {
+				t.Fatalf("multi-party receipt = %+v", record.Receipt)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("complete multi-party permit was not bound into receipts")
 	}
 }
 
@@ -530,7 +632,7 @@ func TestAuthorizedEffectsDenyDowngradeAndRecordOneBoundedDenial(t *testing.T) {
 		t.Fatalf("format summary=%#v err=%v", summary, err)
 	}
 	stateRaw, err := os.ReadFile(rig.config.StateFile)
-	if err != nil || !bytes.Contains(stateRaw, []byte(`"version":5`)) ||
+	if err != nil || !bytes.Contains(stateRaw, []byte(`"version":6`)) ||
 		!bytes.Contains(stateRaw, []byte(`"effect_mode":"authorized"`)) ||
 		!bytes.Contains(stateRaw, []byte(`"action_authorities"`)) {
 		t.Fatalf("authorized state=%s err=%v", stateRaw, err)
@@ -603,6 +705,7 @@ func TestAuthorizedEffectsGrantRejectsAuthorityAndModeSubstitution(t *testing.T)
 		{name: "node changed", mutate: func(grant *Grant) { grant.NodeID = "other-node" }},
 		{name: "connectors removed", mutate: func(grant *Grant) { grant.ConnectorIDs = nil }},
 		{name: "authority removed", mutate: func(grant *Grant) { grant.ActionAuthorities = nil }},
+		{name: "approval threshold removed", mutate: func(grant *Grant) { grant.ActionApprovalThreshold = 0 }},
 		{name: "public key substituted", mutate: func(grant *Grant) {
 			grant.ActionAuthorities[0].PublicKey = base64.StdEncoding.EncodeToString(substitutePublic)
 		}},
@@ -747,6 +850,49 @@ func TestAuthorizedEffectsRetainedGrantRequiresStateFormatFive(t *testing.T) {
 		_ = reopened.audit.Close()
 		_ = reopened.connectorLedger.Close()
 		t.Fatal("authorized-effects authority loaded from pre-v5 Gateway state")
+	}
+}
+
+func TestMultiPartyAuthorizedEffectsRetainedGrantRequiresStateFormatSix(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true,
+		authorizedEffects: true, approvalThreshold: 2,
+	})
+	baselineDigest := rig.server.routePolicyDigestLocked(rig.grant)
+	lowered := rig.grant
+	lowered.ActionApprovalThreshold = 1
+	if baselineDigest == rig.server.routePolicyDigestLocked(lowered) {
+		t.Fatal("route-policy digest does not bind the multi-party approval threshold")
+	}
+	rig.server.closeGrantListeners()
+	_ = rig.server.audit.Close()
+	_ = rig.server.connectorLedger.Close()
+
+	raw, err := os.ReadFile(rig.config.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["version"] = float64(5)
+	raw, err = json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rig.config.StateFile, raw, 0o600); err != nil {
+		t.Fatalf("rewrite state: %v", err)
+	}
+	if reopened, err := Open(rig.config, nil, nil, "service-token"); err == nil {
+		reopened.closeGrantListeners()
+		_ = reopened.audit.Close()
+		_ = reopened.connectorLedger.Close()
+		t.Fatal("multi-party approval authority loaded from pre-v6 Gateway state")
 	}
 }
 
@@ -966,7 +1112,7 @@ func TestBlockedConnectorReceiptDoesNotBlockOtherGrantControl(t *testing.T) {
 	rig.server.connectorLedger = blocked
 	digest := ConnectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "blocked-task", "issues", "create")
 	receipt := connectorReceiptEvent(
-		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, "", "", "", 2,
+		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, "", nil, 0, "", "", 2,
 		"",
 	)
 	spendDone := make(chan error, 1)
@@ -1025,7 +1171,7 @@ func TestAmbiguousConnectorReceiptFailureRetainsSpend(t *testing.T) {
 	}
 	digest := ConnectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "ambiguous-task", "issues", "create")
 	receipt := connectorReceiptEvent(
-		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, "", "", "", 2,
+		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, "", nil, 0, "", "", 2,
 		"",
 	)
 	if err := rig.server.spendConnectorCall(rig.grant.GrantID, "issues", digest, receipt); err == nil {

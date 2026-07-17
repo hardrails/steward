@@ -26,6 +26,7 @@ type gatewayEffectsCheckSummary struct {
 	NodeID             string   `json:"node_id"`
 	ConnectorIDs       []string `json:"connector_ids"`
 	KeyIDs             []string `json:"key_ids"`
+	MinApprovals       int      `json:"min_approvals"`
 	ReceiptBudgetBytes int64    `json:"receipt_budget_bytes"`
 }
 
@@ -105,6 +106,10 @@ func gatewayEffectsCommand(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	minApprovals, err := verifiedPolicy.Policy.AuthorizedActionApprovalThreshold(intent.TenantID, intent.ConnectorIDs)
+	if err != nil {
+		return err
+	}
 	keyIDs, receiptBudget, err := checkGatewayEffectsBindings(config, intent, actionKeys)
 	if err != nil {
 		return err
@@ -114,7 +119,7 @@ func gatewayEffectsCommand(arguments []string, stdout io.Writer) error {
 	return writeGatewayEffectsCheckSummary(stdout, gatewayEffectsCheckSummary{
 		Status: "ready", EffectMode: admission.EffectModeAuthorized,
 		TenantID: intent.TenantID, NodeID: intent.NodeID,
-		ConnectorIDs: connectorIDs, KeyIDs: keyIDs, ReceiptBudgetBytes: receiptBudget,
+		ConnectorIDs: connectorIDs, KeyIDs: keyIDs, MinApprovals: minApprovals, ReceiptBudgetBytes: receiptBudget,
 	})
 }
 

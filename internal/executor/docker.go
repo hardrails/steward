@@ -173,6 +173,7 @@ const runtimeAgentIPLabel = "io.hardrails.runtime.agent-ip"
 const runtimeEgressRoutesLabel = "io.hardrails.runtime.egress-routes"
 const runtimeConnectorsLabel = "io.hardrails.runtime.connectors"
 const runtimeEffectModeLabel = "io.hardrails.runtime.effect-mode"
+const runtimeActionApprovalThresholdLabel = "io.hardrails.runtime.action-approval-threshold"
 const runtimeActionAuthoritiesLabel = "io.hardrails.runtime.action-authorities"
 const maxRuntimeActionAuthorityLabelBytes = 64 << 10
 const runtimeCapsuleDigestLabel = "io.hardrails.runtime.capsule-digest"
@@ -452,6 +453,7 @@ func reservationFromLabels(labels map[string]string) (CapacityReservation, strin
 	runtimeLabels := []string{runtimeGrantLabel, runtimeNodeIDLabel, runtimeInferenceLabel, runtimeModelLabel, runtimeRouteLabel,
 		runtimeServicePortLabel, runtimeServiceIDLabel, runtimeTaskAuthoritiesLabel, runtimeGenerationLabel, runtimeSubnetLabel, runtimeGatewayLabel,
 		runtimeRelayIPLabel, runtimeAgentIPLabel, runtimeEgressRoutesLabel, runtimeConnectorsLabel, runtimeEffectModeLabel, runtimeActionAuthoritiesLabel,
+		runtimeActionApprovalThresholdLabel,
 		runtimeCapsuleDigestLabel, runtimePolicyDigestLabel, runtimeActivationIDLabel, runtimeActivationBeginDigestLabel}
 	hasRuntimeMetadata := labels[runtimeNetworkLabel] != ""
 	for _, key := range runtimeLabels {
@@ -665,6 +667,9 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		labels[runtimeEgressRoutesLabel] = strings.Join(w.Runtime.EgressRouteIDs, ",")
 		labels[runtimeConnectorsLabel] = strings.Join(w.Runtime.ConnectorIDs, ",")
 		labels[runtimeEffectModeLabel] = w.Runtime.EffectMode
+		if w.Runtime.ActionApprovalThreshold > 0 {
+			labels[runtimeActionApprovalThresholdLabel] = strconv.Itoa(w.Runtime.ActionApprovalThreshold)
+		}
 		if len(w.Runtime.ActionAuthorities) > 0 {
 			raw, _ := json.Marshal(dockerActionAuthorityLabel{Authorities: w.Runtime.ActionAuthorities})
 			labels[runtimeActionAuthoritiesLabel] = string(raw)
@@ -830,7 +835,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 	var runtimeGrant *RuntimeGrant
 	runtimeHardened := payload.HostConfig.NetworkMode == "none" && labels[runtimeNetworkLabel] == "" && labels[runtimeGrantLabel] == "" &&
 		labels[runtimeNodeIDLabel] == "" && labels[runtimeConnectorsLabel] == "" && labels[runtimeServiceIDLabel] == "" && labels[runtimeTaskAuthoritiesLabel] == "" &&
-		labels[runtimeEffectModeLabel] == "" && labels[runtimeActionAuthoritiesLabel] == "" &&
+		labels[runtimeEffectModeLabel] == "" && labels[runtimeActionApprovalThresholdLabel] == "" && labels[runtimeActionAuthoritiesLabel] == "" &&
 		labels[runtimeCapsuleDigestLabel] == "" && labels[runtimePolicyDigestLabel] == "" &&
 		labels[runtimeActivationIDLabel] == "" && labels[runtimeActivationBeginDigestLabel] == "" &&
 		hasExactNetwork(payload.NetworkSettings.Networks, "none", "", false) && len(payload.HostConfig.ExtraHosts) == 0 && len(payload.HostConfig.DNS) == 0
@@ -838,6 +843,14 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 		servicePort, serviceErr := strconv.Atoi(labels[runtimeServicePortLabel])
 		inference, inferenceErr := strconv.ParseBool(labels[runtimeInferenceLabel])
 		generation, generationErr := strconv.ParseUint(labels[runtimeGenerationLabel], 10, 64)
+		approvalThreshold, approvalThresholdErr := 0, error(nil)
+		if labels[runtimeActionApprovalThresholdLabel] != "" {
+			approvalThreshold, approvalThresholdErr = strconv.Atoi(labels[runtimeActionApprovalThresholdLabel])
+		} else if labels[runtimeEffectModeLabel] == gateway.EffectModeAuthorized {
+			// Containers admitted before the threshold label existed used exactly
+			// one action authority per permit.
+			approvalThreshold = 1
+		}
 		taskAuthorities, taskAuthorityErr := decodeTaskAuthorityLabel(labels[runtimeTaskAuthoritiesLabel])
 		actionAuthorities, actionAuthorityErr := decodeActionAuthorityLabel(
 			labels[runtimeActionAuthoritiesLabel], splitRouteIDs(labels[runtimeConnectorsLabel]),
@@ -849,23 +862,25 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			ServiceID: labels[runtimeServiceIDLabel], TaskAuthorities: taskAuthorities,
 			Subnet: labels[runtimeSubnetLabel], Gateway: labels[runtimeGatewayLabel],
 			RelayIP: labels[runtimeRelayIPLabel], AgentIP: labels[runtimeAgentIPLabel],
-			EgressRouteIDs:    splitRouteIDs(labels[runtimeEgressRoutesLabel]),
-			ConnectorIDs:      splitRouteIDs(labels[runtimeConnectorsLabel]),
-			EffectMode:        labels[runtimeEffectModeLabel],
-			ActionAuthorities: actionAuthorities,
-			CapsuleDigest:     labels[runtimeCapsuleDigestLabel], PolicyDigest: labels[runtimePolicyDigestLabel],
+			EgressRouteIDs:          splitRouteIDs(labels[runtimeEgressRoutesLabel]),
+			ConnectorIDs:            splitRouteIDs(labels[runtimeConnectorsLabel]),
+			EffectMode:              labels[runtimeEffectModeLabel],
+			ActionApprovalThreshold: approvalThreshold,
+			ActionAuthorities:       actionAuthorities,
+			CapsuleDigest:           labels[runtimeCapsuleDigestLabel], PolicyDigest: labels[runtimePolicyDigestLabel],
 			ActivationID:          labels[runtimeActivationIDLabel],
 			ActivationBeginDigest: labels[runtimeActivationBeginDigestLabel],
 		}
 		authorizedEffects := runtimeGrant.EffectMode == gateway.EffectModeAuthorized
-		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil &&
+		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil && approvalThresholdErr == nil &&
 			taskAuthorityErr == nil && actionAuthorityErr == nil && generation > 0 &&
 			(len(taskAuthorities) == 0 && runtimeGrant.ServiceID == "" ||
 				len(taskAuthorities) > 0 && egressRouteID.MatchString(runtimeGrant.ServiceID) && servicePort > 0) &&
 			((len(taskAuthorities) > 0 || authorizedEffects) && boundedText(runtimeGrant.NodeID, 128) ||
 				len(taskAuthorities) == 0 && !authorizedEffects && runtimeGrant.NodeID == "") &&
 			validRuntimeEffectAuthority(
-				runtimeGrant.EffectMode, runtimeGrant.EgressRouteIDs, runtimeGrant.ConnectorIDs, actionAuthorities,
+				runtimeGrant.EffectMode, runtimeGrant.ActionApprovalThreshold,
+				runtimeGrant.EgressRouteIDs, runtimeGrant.ConnectorIDs, actionAuthorities,
 			) &&
 			validEgressRouteIDs(runtimeGrant.EgressRouteIDs) && validConnectorIDs(runtimeGrant.ConnectorIDs) &&
 			validRuntimeAdmissionBindings(runtimeGrant) &&

@@ -324,8 +324,13 @@ func TestCreateWithSignedConnectorInjectsOnlyFixedRelayURLAndAdmissionBindings(t
 		w.WriteHeader(http.StatusCreated)
 	})
 	addresses := testNetworkSpec("tenant-a", "agent-a", 4)
+	secondActionKey := make([]byte, ed25519.PublicKeySize)
+	secondActionKey[0] = 1
 	actionAuthorities := []gateway.GrantActionAuthority{{
-		KeyID: "effects-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		KeyID: "effects-approver-a", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+		ConnectorIDs: []string{"git.read", "issues.create"},
+	}, {
+		KeyID: "effects-approver-b", PublicKey: base64.StdEncoding.EncodeToString(secondActionKey),
 		ConnectorIDs: []string{"git.read", "issues.create"},
 	}}
 	workload := Workload{InstanceID: "agent-a", TenantID: "tenant-a", ProfileID: "generic-v1@v1",
@@ -334,7 +339,7 @@ func TestCreateWithSignedConnectorInjectsOnlyFixedRelayURLAndAdmissionBindings(t
 			NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), NodeID: "node-a", Generation: 4,
 			Subnet: addresses.Subnet, Gateway: addresses.Gateway, RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
 			ConnectorIDs: []string{"git.read", "issues.create"},
-			EffectMode:   gateway.EffectModeAuthorized, ActionAuthorities: actionAuthorities,
+			EffectMode:   gateway.EffectModeAuthorized, ActionApprovalThreshold: 2, ActionAuthorities: actionAuthorities,
 			CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
 			ActivationID:          "activation-test",
 			ActivationBeginDigest: "sha256:" + strings.Repeat("e", 64),
@@ -351,6 +356,7 @@ func TestCreateWithSignedConnectorInjectsOnlyFixedRelayURLAndAdmissionBindings(t
 	actionAuthorityRaw, _ := json.Marshal(dockerActionAuthorityLabel{Authorities: actionAuthorities})
 	if labels[runtimeConnectorsLabel] != "git.read,issues.create" ||
 		labels[runtimeEffectModeLabel] != gateway.EffectModeAuthorized ||
+		labels[runtimeActionApprovalThresholdLabel] != "2" ||
 		labels[runtimeActionAuthoritiesLabel] != string(actionAuthorityRaw) ||
 		labels[runtimeCapsuleDigestLabel] != workload.Runtime.CapsuleDigest ||
 		labels[runtimePolicyDigestLabel] != workload.Runtime.PolicyDigest ||
@@ -1287,8 +1293,13 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 	taskAuthorities := []gateway.TaskAuthority{{
 		KeyID: "task-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
 	}}
+	secondActionKey := make([]byte, ed25519.PublicKeySize)
+	secondActionKey[0] = 1
 	actionAuthorities := []gateway.GrantActionAuthority{{
-		KeyID: "effects-approver", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		KeyID: "effects-approver-a", PublicKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+		ConnectorIDs: []string{"git.read", "issues.create"},
+	}, {
+		KeyID: "effects-approver-b", PublicKey: base64.StdEncoding.EncodeToString(secondActionKey),
 		ConnectorIDs: []string{"git.read", "issues.create"},
 	}}
 	runtime := &RuntimeGrant{
@@ -1297,7 +1308,7 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 		TaskAuthorities: taskAuthorities,
 		Subnet:          addresses.Subnet, Gateway: addresses.Gateway,
 		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP, ConnectorIDs: []string{"git.read", "issues.create"},
-		EffectMode: gateway.EffectModeAuthorized, ActionAuthorities: actionAuthorities,
+		EffectMode: gateway.EffectModeAuthorized, ActionApprovalThreshold: 2, ActionAuthorities: actionAuthorities,
 		CapsuleDigest: "sha256:" + strings.Repeat("d", 64), PolicyDigest: "sha256:" + strings.Repeat("e", 64),
 		ActivationID:          "activation-test",
 		ActivationBeginDigest: "sha256:" + strings.Repeat("f", 64),
@@ -1336,8 +1347,9 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 					runtimeNodeIDLabel:    "node-a",
 					runtimeInferenceLabel: "true", runtimeModelLabel: "private-model", runtimeRouteLabel: "local",
 					runtimeServiceIDLabel: "hermes-api", runtimeTaskAuthoritiesLabel: string(authorityLabel),
-					runtimeEffectModeLabel: gateway.EffectModeAuthorized, runtimeActionAuthoritiesLabel: string(actionAuthorityLabel),
-					runtimeSubnetLabel: addresses.Subnet, runtimeGatewayLabel: addresses.Gateway,
+					runtimeEffectModeLabel: gateway.EffectModeAuthorized, runtimeActionApprovalThresholdLabel: "2",
+					runtimeActionAuthoritiesLabel: string(actionAuthorityLabel),
+					runtimeSubnetLabel:            addresses.Subnet, runtimeGatewayLabel: addresses.Gateway,
 					runtimeServicePortLabel: "8080", runtimeRelayIPLabel: addresses.RelayIP, runtimeAgentIPLabel: addresses.AgentIP,
 					runtimeConnectorsLabel: "git.read,issues.create", runtimeCapsuleDigestLabel: runtime.CapsuleDigest,
 					runtimePolicyDigestLabel:          runtime.PolicyDigest,

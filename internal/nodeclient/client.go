@@ -34,25 +34,27 @@ type Client struct {
 }
 
 type State struct {
-	RuntimeRef            string          `json:"runtime_ref"`
-	Status                string          `json:"status"`
-	CapsuleDigest         string          `json:"capsule_digest,omitempty"`
-	PolicyDigest          string          `json:"policy_digest,omitempty"`
-	Generation            uint64          `json:"generation,omitempty"`
-	EvidenceKeyID         string          `json:"evidence_key_id,omitempty"`
-	GrantID               string          `json:"grant_id,omitempty"`
-	ServicePath           string          `json:"service_path,omitempty"`
-	ServiceID             string          `json:"service_id,omitempty"`
-	TaskAuthorities       []TaskAuthority `json:"task_authorities,omitempty"`
-	Logs                  string          `json:"logs,omitempty"`
-	EgressProxy           string          `json:"egress_proxy,omitempty"`
-	EgressRouteIDs        []string        `json:"egress_route_ids,omitempty"`
-	ConnectorURL          string          `json:"connector_url,omitempty"`
-	ConnectorIDs          []string        `json:"connector_ids,omitempty"`
-	EffectMode            string          `json:"effect_mode,omitempty"`
-	RoutePolicyDigest     string          `json:"route_policy_digest,omitempty"`
-	ActivationID          string          `json:"activation_id,omitempty"`
-	ActivationBeginDigest string          `json:"activation_begin_digest,omitempty"`
+	RuntimeRef              string            `json:"runtime_ref"`
+	Status                  string            `json:"status"`
+	CapsuleDigest           string            `json:"capsule_digest,omitempty"`
+	PolicyDigest            string            `json:"policy_digest,omitempty"`
+	Generation              uint64            `json:"generation,omitempty"`
+	EvidenceKeyID           string            `json:"evidence_key_id,omitempty"`
+	GrantID                 string            `json:"grant_id,omitempty"`
+	ServicePath             string            `json:"service_path,omitempty"`
+	ServiceID               string            `json:"service_id,omitempty"`
+	TaskAuthorities         []TaskAuthority   `json:"task_authorities,omitempty"`
+	Logs                    string            `json:"logs,omitempty"`
+	EgressProxy             string            `json:"egress_proxy,omitempty"`
+	EgressRouteIDs          []string          `json:"egress_route_ids,omitempty"`
+	ConnectorURL            string            `json:"connector_url,omitempty"`
+	ConnectorIDs            []string          `json:"connector_ids,omitempty"`
+	EffectMode              string            `json:"effect_mode,omitempty"`
+	ActionApprovalThreshold int               `json:"action_approval_threshold,omitempty"`
+	ActionAuthorities       []ActionAuthority `json:"action_authorities,omitempty"`
+	RoutePolicyDigest       string            `json:"route_policy_digest,omitempty"`
+	ActivationID            string            `json:"activation_id,omitempty"`
+	ActivationBeginDigest   string            `json:"activation_begin_digest,omitempty"`
 }
 
 // TaskAuthority is the public half of a tenant task-signing key returned by
@@ -62,6 +64,12 @@ type State struct {
 type TaskAuthority struct {
 	KeyID     string `json:"key_id"`
 	PublicKey string `json:"public_key"`
+}
+
+type ActionAuthority struct {
+	KeyID        string   `json:"key_id"`
+	PublicKey    string   `json:"public_key"`
+	ConnectorIDs []string `json:"connector_ids"`
 }
 
 type EgressStats struct {

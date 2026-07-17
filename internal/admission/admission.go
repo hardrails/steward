@@ -173,8 +173,9 @@ type TenantRule struct {
 // authorized effects; required policies reject every downgrade to standard
 // effects.
 type AuthorizedEffectsPolicy struct {
-	Mode string      `json:"mode"`
-	Keys []ActionKey `json:"keys"`
+	Mode         string      `json:"mode"`
+	MinApprovals int         `json:"min_approvals,omitempty"`
+	Keys         []ActionKey `json:"keys"`
 }
 
 // ActionKey grants one tenant-owned Ed25519 key authority over action permits
@@ -564,6 +565,39 @@ func (p SitePolicy) AuthorizedActionKeys(tenantID string, selectedConnectorIDs [
 	return authorizedActionKeys(tenant, selectedConnectorIDs)
 }
 
+// AuthorizedActionApprovalThreshold returns the site-root-signed number of
+// distinct action keys required for every selected connector. Omission is the
+// backward-compatible one-approver policy.
+func (p SitePolicy) AuthorizedActionApprovalThreshold(tenantID string, selectedConnectorIDs []string) (int, error) {
+	if err := p.Validate(); err != nil {
+		return 0, err
+	}
+	tenant, ok := p.tenant(tenantID)
+	if !ok || tenant.AuthorizedEffects == nil {
+		return 0, deny("tenant has no authorized effects policy")
+	}
+	if _, err := authorizedActionKeys(tenant, selectedConnectorIDs); err != nil {
+		return 0, err
+	}
+	return actionApprovalThreshold(*tenant.AuthorizedEffects), nil
+}
+
+// AuthorizedActionApprovalThreshold returns the threshold for an admitted
+// authorized-effects instance.
+func (e EffectiveAdmission) AuthorizedActionApprovalThreshold() (int, error) {
+	if e.Intent.EffectMode != EffectModeAuthorized {
+		return 0, deny("instance was not admitted for authorized effects")
+	}
+	return e.SitePolicy.AuthorizedActionApprovalThreshold(e.Intent.TenantID, e.Intent.ConnectorIDs)
+}
+
+func actionApprovalThreshold(policy AuthorizedEffectsPolicy) int {
+	if policy.MinApprovals == 0 {
+		return 1
+	}
+	return policy.MinApprovals
+}
+
 // AuthorizedActionKeys returns the narrowed authorities for an admitted
 // authorized-effects instance. Calling it for standard or legacy admission is
 // rejected so callers cannot silently upgrade a workload after admission.
@@ -849,6 +883,11 @@ func (p SitePolicy) Validate() error {
 			if len(tenant.AuthorizedEffects.Keys) == 0 || len(tenant.AuthorizedEffects.Keys) > maxAuthorizedEffectKeys {
 				return deny("tenant authorized effects policy must contain 1 to 8 keys")
 			}
+			threshold := actionApprovalThreshold(*tenant.AuthorizedEffects)
+			if threshold < 1 || threshold > len(tenant.AuthorizedEffects.Keys) {
+				return deny("tenant authorized effects approval threshold must be achievable")
+			}
+			connectorApprovers := make(map[string]int, len(tenant.ConnectorIDs))
 			seenActionKeyIDs := make(map[string]struct{}, len(tenant.AuthorizedEffects.Keys))
 			seenActionPublicKeys := make(map[string]struct{}, len(tenant.AuthorizedEffects.Keys))
 			for _, actionKey := range tenant.AuthorizedEffects.Keys {
@@ -878,6 +917,12 @@ func (p SitePolicy) Validate() error {
 						index > 0 && actionKey.ConnectorIDs[index-1] >= connectorID {
 						return deny("authorized effects key connector IDs must be tenant-authorized, unique, and sorted")
 					}
+					connectorApprovers[connectorID]++
+				}
+			}
+			for connectorID, count := range connectorApprovers {
+				if count < threshold {
+					return deny("authorized effects connector lacks enough distinct approval keys: " + connectorID)
 				}
 			}
 		}

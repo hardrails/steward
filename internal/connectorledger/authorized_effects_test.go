@@ -12,12 +12,12 @@ import (
 	"github.com/hardrails/steward/internal/dsse"
 )
 
-func TestConnectorLedgerReadsMixedV1ThroughV5ReceiptFormats(t *testing.T) {
+func TestConnectorLedgerReadsMixedV1ThroughV6ReceiptFormats(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "mixed-v1-v5.ndjson")
+	path := filepath.Join(t.TempDir(), "mixed-v1-v6.ndjson")
 	log, err := Open(path, private, "node-a/gateway", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +78,20 @@ func TestConnectorLedgerReadsMixedV1ThroughV5ReceiptFormats(t *testing.T) {
 	if _, err := log.Finish(authorizedTerminal); err != nil {
 		t.Fatal(err)
 	}
+
+	multiParty := validAuthorizedEffectEvent(Authorize, Allowed)
+	multiParty.TaskDigest = "sha256:" + strings.Repeat("a", 64)
+	multiParty.AuthorityKeyID = ""
+	multiParty.AuthorityKeySet = "approver-a,approver-b"
+	multiParty.ApprovalThreshold = 2
+	if _, err := log.Begin(multiParty); err != nil {
+		t.Fatal(err)
+	}
+	multiPartyTerminal := multiParty
+	multiPartyTerminal.Phase, multiPartyTerminal.Outcome, multiPartyTerminal.HTTPStatus = Terminal, Responded, 202
+	if _, err := log.Finish(multiPartyTerminal); err != nil {
+		t.Fatal(err)
+	}
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +102,7 @@ func TestConnectorLedgerReadsMixedV1ThroughV5ReceiptFormats(t *testing.T) {
 		SchemaV3, SchemaV3,
 		SchemaV4, SchemaV4, SchemaV4,
 		SchemaV5, SchemaV5,
+		SchemaV6, SchemaV6,
 	}
 	var gotSchemas []string
 	if _, err := VerifyRecords(path, public, "node-a/gateway", 1, func(record VerifiedReceipt) error {
@@ -116,6 +131,7 @@ func TestConnectorLedgerReadsMixedV1ThroughV5ReceiptFormats(t *testing.T) {
 		PayloadTypeV3, PayloadTypeV3,
 		PayloadTypeV4, PayloadTypeV4, PayloadTypeV4,
 		PayloadTypeV5, PayloadTypeV5,
+		PayloadTypeV6, PayloadTypeV6,
 	}
 	for index, line := range lines {
 		envelope, err := dsse.Parse([]byte(line))
@@ -159,7 +175,11 @@ func TestAuthorizedEffectV5DenialBindsRequestWithoutPermitClaim(t *testing.T) {
 		"missing request digest": func(event *Event) { event.RequestDigest = "" },
 		"invalid request digest": func(event *Event) { event.RequestDigest = "sha256:invalid" },
 		"authority claim":        func(event *Event) { event.AuthorityKeyID = "unverified-approver" },
-		"permit claim":           func(event *Event) { event.PermitDigest = "sha256:" + strings.Repeat("9", 64) },
+		"authority set claim":    func(event *Event) { event.AuthorityKeySet = "approver-a,approver-b" },
+		"approval threshold claim": func(event *Event) {
+			event.ApprovalThreshold = 2
+		},
+		"permit claim": func(event *Event) { event.PermitDigest = "sha256:" + strings.Repeat("9", 64) },
 		"authority and permit claim": func(event *Event) {
 			event.AuthorityKeyID = "unverified-approver"
 			event.PermitDigest = "sha256:" + strings.Repeat("9", 64)
@@ -194,6 +214,73 @@ func TestAuthorizedEffectV5DenialBindsRequestWithoutPermitClaim(t *testing.T) {
 		records[0].Receipt.Event.AuthorityKeyID != "" || records[0].Receipt.Event.PermitDigest != "" ||
 		records[0].Receipt.Event.RequestDigest != denial.RequestDigest || records[0].Receipt.Event.OperationPolicyDigest != denial.OperationPolicyDigest {
 		t.Fatalf("authorized denial record=%#v", records)
+	}
+}
+
+func TestVerifyRecordsRejectsMultiPartyReceiptDowngradeAndSetTampering(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, test := range map[string]struct {
+		payloadType string
+		schema      string
+		mutate      func(*Event)
+	}{
+		"legacy envelope downgrade": {payloadType: PayloadTypeV5, schema: SchemaV5},
+		"missing authority set": {
+			payloadType: PayloadTypeV6, schema: SchemaV6,
+			mutate: func(event *Event) { event.AuthorityKeySet = "" },
+		},
+		"unsorted authority set": {
+			payloadType: PayloadTypeV6, schema: SchemaV6,
+			mutate: func(event *Event) { event.AuthorityKeySet = "approver-b,approver-a" },
+		},
+		"duplicate authority": {
+			payloadType: PayloadTypeV6, schema: SchemaV6,
+			mutate: func(event *Event) { event.AuthorityKeySet = "approver-a,approver-a" },
+		},
+		"threshold mismatch": {
+			payloadType: PayloadTypeV6, schema: SchemaV6,
+			mutate: func(event *Event) { event.ApprovalThreshold = 3 },
+		},
+		"single authority claim": {
+			payloadType: PayloadTypeV6, schema: SchemaV6,
+			mutate: func(event *Event) { event.AuthorityKeyID = "approver-a" },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			event := validAuthorizedEffectEvent(Authorize, Allowed)
+			event.AuthorityKeyID = ""
+			event.AuthorityKeySet = "approver-a,approver-b"
+			event.ApprovalThreshold = 2
+			if test.mutate != nil {
+				test.mutate(&event)
+			}
+			receipt := Receipt{
+				SchemaVersion: test.schema, NodeID: "node-a/gateway", Epoch: 1, Sequence: 1,
+				PreviousHash: zeroHash(), ObservedAt: "2026-07-17T12:00:00Z", Event: event,
+			}
+			payload, err := json.Marshal(receipt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope, err := dsse.Sign(test.payloadType, payload, KeyID(public), private)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := dsse.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "multi-party-tamper.ndjson")
+			if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyRecords(path, public, "node-a/gateway", 1, nil); err == nil {
+				t.Fatal("signed malformed multi-party receipt verified")
+			}
+		})
 	}
 }
 

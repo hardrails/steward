@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,61 @@ func TestVerifyReturnsAllAuthenticatedV2Bindings(t *testing.T) {
 	}
 	if verified.PayloadType != PayloadTypeV2 {
 		t.Fatalf("PayloadType = %q, want %q", verified.PayloadType, PayloadTypeV2)
+	}
+}
+
+func TestVerifyV3RequiresCanonicalDistinctApprovalThreshold(t *testing.T) {
+	publicA, privateA := testKey(t)
+	publicB, privateB := testKey(t)
+	statement := validAuthorizedStatement()
+	statement.SchemaVersion = SchemaV3
+	statement.ApprovalThreshold = 2
+	payload := mustJSON(t, statement)
+	first, err := dsse.Sign(PayloadTypeV3, payload, "authority-b", privateB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialRaw, err := dsse.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := map[string]ed25519.PublicKey{"authority-a": publicA, "authority-b": publicB}
+	partial, err := VerifyPartial(partialRaw, trusted, testNow, 5*time.Minute)
+	if err != nil || partial.Complete || len(partial.KeyIDs) != 1 || partial.KeyIDs[0] != "authority-b" {
+		t.Fatalf("partial verification = (%+v, %v)", partial, err)
+	}
+	if _, err := Verify(partialRaw, trusted, testNow, 5*time.Minute); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("incomplete permit error = %v", err)
+	}
+
+	completeEnvelope, err := dsse.AddSignature(first, "authority-a", privateA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeRaw, err := dsse.Marshal(completeEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete, err := Verify(completeRaw, trusted, testNow, 5*time.Minute)
+	if err != nil || !complete.Complete || !slices.Equal(complete.KeyIDs, []string{"authority-a", "authority-b"}) {
+		t.Fatalf("complete verification = (%+v, %v)", complete, err)
+	}
+
+	unsorted := completeEnvelope
+	unsorted.Signatures[0], unsorted.Signatures[1] = unsorted.Signatures[1], unsorted.Signatures[0]
+	unsortedRaw, err := dsse.Marshal(unsorted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(unsortedRaw, trusted, testNow, 5*time.Minute); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unsorted signatures error = %v", err)
+	}
+	if _, err := dsse.AddSignature(completeEnvelope, "authority-a", privateA); err == nil {
+		t.Fatal("duplicate signer was accepted")
+	}
+	wrongTrusted := map[string]ed25519.PublicKey{"authority-a": publicA, "authority-b": publicA}
+	if _, err := Verify(completeRaw, wrongTrusted, testNow, 5*time.Minute); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("substituted signer error = %v", err)
 	}
 }
 

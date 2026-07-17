@@ -31,11 +31,13 @@ const (
 	PayloadTypeV3 = "application/vnd.steward.connector-receipt.v3+json"
 	PayloadTypeV4 = "application/vnd.steward.connector-receipt.v4+json"
 	PayloadTypeV5 = "application/vnd.steward.connector-receipt.v5+json"
+	PayloadTypeV6 = "application/vnd.steward.connector-receipt.v6+json"
 	SchemaV1      = "steward.connector-receipt.v1"
 	SchemaV2      = "steward.connector-receipt.v2"
 	SchemaV3      = "steward.connector-receipt.v3"
 	SchemaV4      = "steward.connector-receipt.v4"
 	SchemaV5      = "steward.connector-receipt.v5"
+	SchemaV6      = "steward.connector-receipt.v6"
 	// PayloadType remains the original format identifier for source compatibility
 	// with callers that construct legacy, non-permit receipt fixtures.
 	PayloadType              = PayloadTypeV1
@@ -209,6 +211,8 @@ type Event struct {
 	OperationPolicyDigest string     `json:"operation_policy_digest,omitempty"`
 	TaskDigest            string     `json:"task_digest"`
 	AuthorityKeyID        string     `json:"authority_key_id,omitempty"`
+	AuthorityKeySet       string     `json:"authority_key_set,omitempty"`
+	ApprovalThreshold     int        `json:"approval_threshold,omitempty"`
 	PermitDigest          string     `json:"permit_digest,omitempty"`
 	RequestDigest         string     `json:"request_digest,omitempty"`
 	HTTPStatus            int        `json:"http_status,omitempty"`
@@ -505,7 +509,9 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 		return Head{}, errors.New("connector ledger requires reopen after an ambiguous write")
 	}
 	payloadType, schemaVersion := PayloadTypeV1, SchemaV1
-	if event.EffectMode != "" {
+	if event.ApprovalThreshold > 1 || event.AuthorityKeySet != "" {
+		payloadType, schemaVersion = PayloadTypeV6, SchemaV6
+	} else if event.EffectMode != "" {
 		payloadType, schemaVersion = PayloadTypeV5, SchemaV5
 	} else if event.TaskProtocol != "" {
 		payloadType, schemaVersion = PayloadTypeV4, SchemaV4
@@ -750,7 +756,7 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 		envelope, err := dsse.Parse(raw)
 		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 &&
 			envelope.PayloadType != PayloadTypeV3 && envelope.PayloadType != PayloadTypeV4 &&
-			envelope.PayloadType != PayloadTypeV5 {
+			envelope.PayloadType != PayloadTypeV5 && envelope.PayloadType != PayloadTypeV6 {
 			return Head{}, fmt.Errorf("verify connector ledger line %d: unsupported receipt envelope", lineNumber)
 		}
 		payload, keyID, err := dsse.Verify(raw, envelope.PayloadType, trusted)
@@ -792,6 +798,8 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 		expectedSchema = SchemaV4
 	case PayloadTypeV5:
 		expectedSchema = SchemaV5
+	case PayloadTypeV6:
+		expectedSchema = SchemaV6
 	}
 	if receipt.SchemaVersion != expectedSchema || receipt.NodeID != nodeID || receipt.Epoch != epoch ||
 		receipt.Sequence != sequence || receipt.PreviousHash != previous {
@@ -806,7 +814,12 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 		payloadType == PayloadTypeV3 && (receipt.Event.Kind == "" || receipt.Event.TaskProtocol != "" || receipt.Event.EffectMode != "") ||
 		payloadType == PayloadTypeV4 && (receipt.Event.Kind != ServiceTask || receipt.Event.TaskProtocol == "" || receipt.Event.EffectMode != "") ||
 		payloadType == PayloadTypeV5 && (receipt.Event.Kind != ConnectorCall || receipt.Event.EffectMode != EffectModeAuthorized ||
-			!digest(receipt.Event.OperationPolicyDigest) || receipt.Event.TaskProtocol != "") {
+			!digest(receipt.Event.OperationPolicyDigest) || receipt.Event.TaskProtocol != "" ||
+			receipt.Event.ApprovalThreshold != 0 || receipt.Event.AuthorityKeySet != "") ||
+		payloadType == PayloadTypeV6 && (receipt.Event.Kind != ConnectorCall || receipt.Event.EffectMode != EffectModeAuthorized ||
+			!digest(receipt.Event.OperationPolicyDigest) || receipt.Event.TaskProtocol != "" ||
+			receipt.Event.ApprovalThreshold < 2 || len(strings.Split(receipt.Event.AuthorityKeySet, ",")) != receipt.Event.ApprovalThreshold ||
+			receipt.Event.AuthorityKeyID != "") {
 		return errors.New("connector receipt schema does not match its permit fields")
 	}
 	if payloadType == PayloadTypeV4 {
@@ -919,7 +932,8 @@ func sameCall(left, right Event) bool {
 		left.GrantID == right.GrantID && left.ConnectorID == right.ConnectorID &&
 		left.ServiceID == right.ServiceID && left.OperationID == right.OperationID &&
 		left.OperationPolicyDigest == right.OperationPolicyDigest && left.TaskDigest == right.TaskDigest &&
-		left.AuthorityKeyID == right.AuthorityKeyID &&
+		left.AuthorityKeyID == right.AuthorityKeyID && left.AuthorityKeySet == right.AuthorityKeySet &&
+		left.ApprovalThreshold == right.ApprovalThreshold &&
 		left.PermitDigest == right.PermitDigest && left.RequestDigest == right.RequestDigest &&
 		left.RequestBytes == right.RequestBytes && left.TaskProtocol == right.TaskProtocol
 }
@@ -935,16 +949,30 @@ func validateEvent(event Event) error {
 	}
 	authorizedDenial := event.Kind == ConnectorCall && event.EffectMode == EffectModeAuthorized && event.Phase == Deny
 	if authorizedDenial {
-		if event.AuthorityKeyID != "" || event.PermitDigest != "" || !digest(event.RequestDigest) {
+		if event.AuthorityKeyID != "" || event.AuthorityKeySet != "" || event.ApprovalThreshold != 0 ||
+			event.PermitDigest != "" || !digest(event.RequestDigest) {
 			return errors.New("authorized connector denial must bind the request without claiming a permit authority")
 		}
 	} else if (event.PermitDigest == "") != (event.RequestDigest == "") ||
-		(event.PermitDigest == "") != (event.AuthorityKeyID == "") ||
+		(event.PermitDigest == "") != (event.AuthorityKeyID == "" && event.AuthorityKeySet == "") ||
 		event.PermitDigest != "" && (!digest(event.PermitDigest) || !digest(event.RequestDigest)) {
 		return errors.New("connector permit and request digests must be valid and present together")
 	}
 	if event.AuthorityKeyID != "" && !identifier(event.AuthorityKeyID) {
 		return errors.New("connector action authority key ID is invalid")
+	}
+	if event.AuthorityKeySet != "" {
+		keyIDs := strings.Split(event.AuthorityKeySet, ",")
+		if event.AuthorityKeyID != "" || event.ApprovalThreshold < 2 || event.ApprovalThreshold != len(keyIDs) || len(keyIDs) > 8 {
+			return errors.New("connector multi-party approval authority set is invalid")
+		}
+		for index, keyID := range keyIDs {
+			if !identifier(keyID) || index > 0 && keyIDs[index-1] >= keyID {
+				return errors.New("connector multi-party approval key IDs are not canonical")
+			}
+		}
+	} else if event.ApprovalThreshold != 0 {
+		return errors.New("connector approval threshold has no authority set")
 	}
 	switch event.Kind {
 	case "":
@@ -967,7 +995,7 @@ func validateEvent(event Event) error {
 				return errors.New("authorized connector call requires an operation policy digest")
 			}
 			if event.Phase == Authorize || event.Phase == Terminal {
-				if event.AuthorityKeyID == "" || event.PermitDigest == "" || event.RequestDigest == "" {
+				if event.AuthorityKeyID == "" && event.AuthorityKeySet == "" || event.PermitDigest == "" || event.RequestDigest == "" {
 					return errors.New("authorized connector call requires permit and request bindings")
 				}
 			}

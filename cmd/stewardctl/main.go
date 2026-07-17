@@ -94,7 +94,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl key match -private-key FILE -public-key FILE")
 	fmt.Fprintln(writer, "       stewardctl capsule sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")
-	fmt.Fprintln(writer, "       stewardctl permit issue|verify|audit ...")
+	fmt.Fprintln(writer, "       stewardctl permit issue|approve|verify|audit ...")
 	fmt.Fprintln(writer, "       stewardctl task issue|verify|audit|submit|status|observe|wait ...")
 	fmt.Fprintln(writer, "       stewardctl executor-command issue|verify ...")
 	fmt.Fprintln(writer, "       stewardctl control pki|tenant|operator|enrollment|node|node-credential|operations|attention|command|credential|evidence|evidence-capture ...")

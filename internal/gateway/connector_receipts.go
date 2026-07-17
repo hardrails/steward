@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/hardrails/steward/internal/connectorledger"
@@ -78,8 +79,12 @@ func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary
 		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch,
 		func(record connectorledger.VerifiedReceipt) error {
 			switch record.Receipt.SchemaVersion {
+			case connectorledger.SchemaV6:
+				formatVersion = 6
 			case connectorledger.SchemaV5:
-				formatVersion = 5
+				if formatVersion < 5 {
+					formatVersion = 5
+				}
 			case connectorledger.SchemaV4:
 				if formatVersion < 4 {
 					formatVersion = 4
@@ -218,7 +223,9 @@ func (s *Server) mergeRetainedConnectorSpends() error {
 
 func connectorReceiptEvent(
 	grant Grant,
-	routePolicyDigest, connectorID, operationID, callDigest, authorityKeyID, permitDigest, requestDigest string,
+	routePolicyDigest, connectorID, operationID, callDigest, authorityKeyID string,
+	authorityKeyIDs []string, approvalThreshold int,
+	permitDigest, requestDigest string,
 	requestBytes int64,
 	operationPolicyDigest string,
 ) connectorledger.Event {
@@ -234,6 +241,11 @@ func connectorReceiptEvent(
 		event.Kind = connectorledger.ConnectorCall
 		event.EffectMode = connectorledger.EffectModeAuthorized
 		event.OperationPolicyDigest = operationPolicyDigest
+		if approvalThreshold > 1 {
+			event.AuthorityKeyID = ""
+			event.AuthorityKeySet = strings.Join(authorityKeyIDs, ",")
+			event.ApprovalThreshold = approvalThreshold
+		}
 	}
 	return event
 }

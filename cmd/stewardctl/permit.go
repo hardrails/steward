@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/hardrails/steward/internal/actionpermit"
@@ -26,37 +28,41 @@ const (
 )
 
 type permitAdmission struct {
-	RuntimeRef        string                  `json:"runtime_ref"`
-	Status            string                  `json:"status"`
-	CapsuleDigest     string                  `json:"capsule_digest"`
-	PolicyDigest      string                  `json:"policy_digest"`
-	Generation        uint64                  `json:"generation"`
-	EvidenceKeyID     string                  `json:"evidence_key_id"`
-	GrantID           string                  `json:"grant_id,omitempty"`
-	ServicePath       string                  `json:"service_path,omitempty"`
-	ServiceID         string                  `json:"service_id,omitempty"`
-	TaskAuthorities   []gateway.TaskAuthority `json:"task_authorities,omitempty"`
-	EgressProxy       string                  `json:"egress_proxy,omitempty"`
-	EgressRouteIDs    []string                `json:"egress_route_ids,omitempty"`
-	ConnectorURL      string                  `json:"connector_url,omitempty"`
-	ConnectorIDs      []string                `json:"connector_ids,omitempty"`
-	RoutePolicyDigest string                  `json:"route_policy_digest,omitempty"`
-	EffectMode        string                  `json:"effect_mode,omitempty"`
+	RuntimeRef              string                         `json:"runtime_ref"`
+	Status                  string                         `json:"status"`
+	CapsuleDigest           string                         `json:"capsule_digest"`
+	PolicyDigest            string                         `json:"policy_digest"`
+	Generation              uint64                         `json:"generation"`
+	EvidenceKeyID           string                         `json:"evidence_key_id"`
+	GrantID                 string                         `json:"grant_id,omitempty"`
+	ServicePath             string                         `json:"service_path,omitempty"`
+	ServiceID               string                         `json:"service_id,omitempty"`
+	TaskAuthorities         []gateway.TaskAuthority        `json:"task_authorities,omitempty"`
+	EgressProxy             string                         `json:"egress_proxy,omitempty"`
+	EgressRouteIDs          []string                       `json:"egress_route_ids,omitempty"`
+	ConnectorURL            string                         `json:"connector_url,omitempty"`
+	ConnectorIDs            []string                       `json:"connector_ids,omitempty"`
+	RoutePolicyDigest       string                         `json:"route_policy_digest,omitempty"`
+	EffectMode              string                         `json:"effect_mode,omitempty"`
+	ActionApprovalThreshold int                            `json:"action_approval_threshold,omitempty"`
+	ActionAuthorities       []gateway.GrantActionAuthority `json:"action_authorities,omitempty"`
 }
 
 func permitCommand(arguments []string, stdout, stderr io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("permit command requires issue, verify, or audit")
+		return errors.New("permit command requires issue, approve, verify, or audit")
 	}
 	switch arguments[0] {
 	case "issue":
 		return issuePermit(arguments[1:], stdout, stderr)
+	case "approve":
+		return approvePermit(arguments[1:], stdout, stderr)
 	case "verify":
 		return verifyPermit(arguments[1:], stdout)
 	case "audit":
 		return auditPermit(arguments[1:], stdout)
 	default:
-		return errors.New("permit command requires issue, verify, or audit")
+		return errors.New("permit command requires issue, approve, verify, or audit")
 	}
 }
 
@@ -118,6 +124,13 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 	if admitted.EffectMode != intent.EffectMode {
 		return errors.New("admission response effect mode does not match the instance intent")
 	}
+	approvalThreshold := admitted.ActionApprovalThreshold
+	if intent.EffectMode == admission.EffectModeAuthorized && approvalThreshold == 0 {
+		approvalThreshold = 1
+	}
+	if intent.EffectMode == admission.EffectModeAuthorized && (approvalThreshold < 1 || approvalThreshold > len(admitted.ActionAuthorities) && approvalThreshold > 1) {
+		return errors.New("admission response contains an invalid action approval threshold")
+	}
 	if admitted.Generation != intent.Generation || admitted.CapsuleDigest != intent.CapsuleDigest ||
 		admitted.PolicyDigest == "" || admitted.RoutePolicyDigest == "" || admitted.GrantID == "" ||
 		admitted.GrantID != gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation) ||
@@ -131,6 +144,20 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 	public, ok := privateKey.Public().(ed25519.PublicKey)
 	if !ok {
 		return errors.New("action-authority private key does not contain an Ed25519 public key")
+	}
+	if approvalThreshold > 1 {
+		admittedSigner := false
+		for _, authority := range admitted.ActionAuthorities {
+			decoded, decodeErr := base64.StdEncoding.DecodeString(authority.PublicKey)
+			if authority.KeyID == *keyID && decodeErr == nil && ed25519.PublicKey(decoded).Equal(public) &&
+				slices.Contains(authority.ConnectorIDs, *connectorID) {
+				admittedSigner = true
+				break
+			}
+		}
+		if !admittedSigner {
+			return errors.New("first approval key does not match the admitted connector authority")
+		}
 	}
 	trustedOperation, err := validateActionTrust(*trustPath, intent, *connectorID, *operationID, *keyID, public, *validFor)
 	if err != nil {
@@ -157,6 +184,9 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 	payloadType, schemaVersion, effectMode := actionpermit.PayloadTypeV1, actionpermit.SchemaV1, ""
 	if intent.EffectMode == admission.EffectModeAuthorized {
 		payloadType, schemaVersion, effectMode = actionpermit.PayloadTypeV2, actionpermit.SchemaV2, actionpermit.EffectModeAuthorized
+		if approvalThreshold > 1 {
+			payloadType, schemaVersion = actionpermit.PayloadTypeV3, actionpermit.SchemaV3
+		}
 	}
 	statement := actionpermit.Statement{
 		SchemaVersion: schemaVersion, EffectMode: effectMode, NodeID: intent.NodeID, TenantID: intent.TenantID,
@@ -165,6 +195,9 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 		ConnectorID: *connectorID, OperationID: *operationID, OperationDigest: trustedOperation.PolicyDigest, TaskID: *taskID,
 		RequestDigest: actionpermit.RequestDigest(request), RequestBytes: int64(len(request)), ContentType: trustedOperation.ContentType,
 		NotBefore: notBefore.Format(time.RFC3339), ExpiresAt: notBefore.Add(*validFor).Format(time.RFC3339),
+	}
+	if approvalThreshold > 1 {
+		statement.ApprovalThreshold = approvalThreshold
 	}
 	payload, err := json.Marshal(statement)
 	if err != nil {
@@ -178,12 +211,15 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	verified, err := actionpermit.Verify(raw, map[string]ed25519.PublicKey{*keyID: public}, now, *validFor)
+	verified, err := actionpermit.VerifyPartial(raw, map[string]ed25519.PublicKey{*keyID: public}, now, *validFor)
 	if err != nil {
 		return fmt.Errorf("self-verify action permit: %w", err)
 	}
 	outputs := []permitOutput{{path: *output, contents: raw}}
 	if *headerOutput != "" {
+		if !verified.Complete {
+			return errors.New("header output requires a complete multi-party permit; add the remaining approvals first")
+		}
 		header, err := actionpermit.EncodeHeader(raw)
 		if err != nil {
 			return err
@@ -200,24 +236,209 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 	return err
 }
 
+func approvePermit(arguments []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("permit approve", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	input := flags.String("in", "", "existing partial multi-party permit")
+	admissionPath := flags.String("admission", "", "Executor admission response JSON")
+	intentPath := flags.String("intent", "", "instance intent JSON used for admission")
+	trustPath := flags.String("trust", "", "exported Gateway action-trust inventory")
+	requestPath := flags.String("request", "", "exact connector request body; omit only for an empty body")
+	privateKeyPath := flags.String("key", "", "PEM Ed25519 action-authority private key")
+	keyID := flags.String("key-id", "", "configured action-authority key ID")
+	output := flags.String("out", "", "new approval artifact output")
+	headerOutput := flags.String("header-out", "", "optional complete HTTP header value output")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *input == "" || *admissionPath == "" || *intentPath == "" || *trustPath == "" ||
+		*privateKeyPath == "" || *keyID == "" || *output == "" || flags.NArg() != 0 {
+		return errors.New("permit approve requires -in, -admission, -intent, -trust, -key, -key-id, and -out")
+	}
+	if *output == *input || *headerOutput != "" && (*headerOutput == *input || *headerOutput == *output) {
+		return errors.New("approval input, output, and header output must name different files")
+	}
+
+	raw, err := readBounded(*input)
+	if err != nil {
+		return err
+	}
+	envelope, err := dsse.Parse(raw)
+	if err != nil || envelope.PayloadType != actionpermit.PayloadTypeV3 {
+		return errors.New("permit approve requires a canonical version-3 multi-party approval artifact")
+	}
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
+		return errors.New("multi-party approval payload is not canonical base64")
+	}
+	var statement actionpermit.Statement
+	if err := dsse.DecodeStrictInto(payload, actionpermit.MaxEnvelopeBytes, &statement); err != nil {
+		return fmt.Errorf("decode multi-party approval statement: %w", err)
+	}
+	notBefore, err := parsePermitTime(statement.NotBefore)
+	if err != nil {
+		return fmt.Errorf("approval not_before: %w", err)
+	}
+	expiresAt, err := parsePermitTime(statement.ExpiresAt)
+	if err != nil || !expiresAt.After(notBefore) {
+		return errors.New("approval expiry is invalid")
+	}
+	validFor := expiresAt.Sub(notBefore)
+
+	admissionRaw, err := securefile.Read(*admissionPath, maxArtifactBytes, securefile.TrustFile)
+	if err != nil {
+		return fmt.Errorf("read admission response: %w", err)
+	}
+	var admitted permitAdmission
+	if err := dsse.DecodeStrictInto(admissionRaw, maxArtifactBytes, &admitted); err != nil {
+		return fmt.Errorf("decode admission response: %w", err)
+	}
+	intentRaw, err := securefile.Read(*intentPath, maxArtifactBytes, securefile.TrustFile)
+	if err != nil {
+		return fmt.Errorf("read instance intent: %w", err)
+	}
+	var intent admission.InstanceIntent
+	if err := dsse.DecodeStrictInto(intentRaw, maxArtifactBytes, &intent); err != nil {
+		return fmt.Errorf("decode instance intent: %w", err)
+	}
+	if err := intent.Validate(admission.AuthenticatedIdentity{TenantID: intent.TenantID, NodeID: intent.NodeID}); err != nil {
+		return err
+	}
+	if intent.EffectMode != admission.EffectModeAuthorized || admitted.EffectMode != intent.EffectMode ||
+		admitted.ActionApprovalThreshold != statement.ApprovalThreshold || statement.ApprovalThreshold < 2 ||
+		admitted.Generation != intent.Generation || statement.Generation != intent.Generation ||
+		admitted.CapsuleDigest != intent.CapsuleDigest || statement.CapsuleDigest != admitted.CapsuleDigest ||
+		statement.PolicyDigest != admitted.PolicyDigest || statement.RoutePolicyDigest != admitted.RoutePolicyDigest ||
+		statement.NodeID != intent.NodeID || statement.TenantID != intent.TenantID || statement.InstanceID != intent.InstanceID ||
+		!slices.Contains(intent.ConnectorIDs, statement.ConnectorID) || !slices.Contains(admitted.ConnectorIDs, statement.ConnectorID) {
+		return errors.New("approval artifact does not match the admitted authorized-effects instance")
+	}
+
+	var request []byte
+	if *requestPath != "" {
+		request, err = securefile.Read(*requestPath, maxPermitRequestBytes, securefile.TrustFile)
+		if err != nil {
+			return fmt.Errorf("read exact connector request: %w", err)
+		}
+		if err := validatePermitRequest(request); err != nil {
+			return err
+		}
+	}
+	if statement.RequestDigest != actionpermit.RequestDigest(request) || statement.RequestBytes != int64(len(request)) {
+		return errors.New("approval artifact does not bind the supplied exact request bytes")
+	}
+
+	privateKey, err := readPrivateKey(*privateKeyPath)
+	if err != nil {
+		return err
+	}
+	newPublic, ok := privateKey.Public().(ed25519.PublicKey)
+	if !ok {
+		return errors.New("action-authority private key does not contain an Ed25519 public key")
+	}
+	trusted := make(map[string]ed25519.PublicKey, len(admitted.ActionAuthorities))
+	var operation validatedActionTrust
+	for _, authority := range admitted.ActionAuthorities {
+		if !slices.Contains(authority.ConnectorIDs, statement.ConnectorID) {
+			continue
+		}
+		public, decodeErr := base64.StdEncoding.DecodeString(authority.PublicKey)
+		if decodeErr != nil || len(public) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(public) != authority.PublicKey {
+			return errors.New("admission response contains an invalid action authority")
+		}
+		validated, validateErr := validateActionTrust(
+			*trustPath, intent, statement.ConnectorID, statement.OperationID, authority.KeyID,
+			ed25519.PublicKey(public), validFor,
+		)
+		if validateErr != nil {
+			return validateErr
+		}
+		if operation.PolicyDigest != "" && operation != validated {
+			return errors.New("action authorities do not agree on one trusted connector operation")
+		}
+		operation = validated
+		trusted[authority.KeyID] = ed25519.PublicKey(append([]byte(nil), public...))
+	}
+	configuredPublic, exists := trusted[*keyID]
+	if !exists || !configuredPublic.Equal(newPublic) {
+		return errors.New("new approval key does not match the admitted connector authority")
+	}
+	before, err := actionpermit.VerifyPartial(raw, trusted, timeNow().UTC().Truncate(time.Second), validFor)
+	if err != nil {
+		return err
+	}
+	if before.Complete {
+		return errors.New("multi-party permit is already complete")
+	}
+	for _, existing := range before.KeyIDs {
+		if existing == *keyID {
+			return errors.New("the selected action authority has already approved this permit")
+		}
+	}
+	if statement.OperationDigest != operation.PolicyDigest || statement.ContentType != operation.ContentType {
+		return errors.New("approval artifact does not match the trusted connector operation")
+	}
+
+	nextEnvelope, err := dsse.AddSignature(envelope, *keyID, privateKey)
+	if err != nil {
+		return err
+	}
+	nextRaw, err := dsse.Marshal(nextEnvelope)
+	if err != nil {
+		return err
+	}
+	next, err := actionpermit.VerifyPartial(nextRaw, trusted, timeNow().UTC().Truncate(time.Second), validFor)
+	if err != nil {
+		return err
+	}
+	if next.Complete {
+		if _, err := actionpermit.Verify(nextRaw, trusted, timeNow().UTC().Truncate(time.Second), validFor); err != nil {
+			return fmt.Errorf("verify complete multi-party permit: %w", err)
+		}
+	}
+	outputs := []permitOutput{{path: *output, contents: nextRaw}}
+	if *headerOutput != "" {
+		if !next.Complete {
+			return errors.New("header output requires a complete multi-party permit")
+		}
+		header, err := actionpermit.EncodeHeader(nextRaw)
+		if err != nil {
+			return err
+		}
+		outputs = append(outputs, permitOutput{path: *headerOutput, contents: []byte(header + "\n")})
+	}
+	if err := writePermitApprovalSummary(stderr, next, operation); err != nil {
+		return fmt.Errorf("write action-permit approval summary: %w", err)
+	}
+	if err := writePermitOutputs(outputs); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, next.EnvelopeDigest)
+	return err
+}
+
 type permitApprovalSummary struct {
-	SchemaVersion string `json:"schema_version"`
-	PermitDigest  string `json:"permit_digest"`
-	EffectMode    string `json:"effect_mode"`
-	TenantID      string `json:"tenant_id"`
-	NodeID        string `json:"node_id"`
-	InstanceID    string `json:"instance_id"`
-	Generation    uint64 `json:"generation"`
-	ConnectorID   string `json:"connector_id"`
-	OperationID   string `json:"operation_id"`
-	Method        string `json:"method"`
-	Path          string `json:"path"`
-	TaskID        string `json:"task_id"`
-	RequestDigest string `json:"request_digest"`
-	RequestBytes  int64  `json:"request_bytes"`
-	NotBefore     string `json:"not_before"`
-	ExpiresAt     string `json:"expires_at"`
-	AuthorityKey  string `json:"authority_key_id"`
+	SchemaVersion      string   `json:"schema_version"`
+	PermitDigest       string   `json:"permit_digest"`
+	EffectMode         string   `json:"effect_mode"`
+	TenantID           string   `json:"tenant_id"`
+	NodeID             string   `json:"node_id"`
+	InstanceID         string   `json:"instance_id"`
+	Generation         uint64   `json:"generation"`
+	ConnectorID        string   `json:"connector_id"`
+	OperationID        string   `json:"operation_id"`
+	Method             string   `json:"method"`
+	Path               string   `json:"path"`
+	TaskID             string   `json:"task_id"`
+	RequestDigest      string   `json:"request_digest"`
+	RequestBytes       int64    `json:"request_bytes"`
+	NotBefore          string   `json:"not_before"`
+	ExpiresAt          string   `json:"expires_at"`
+	AuthorityKey       string   `json:"authority_key_id"`
+	AuthorityKeys      []string `json:"authority_key_ids"`
+	ApprovalThreshold  int      `json:"approval_threshold"`
+	ApprovalsCollected int      `json:"approvals_collected"`
+	Complete           bool     `json:"complete"`
 }
 
 func writePermitApprovalSummary(writer io.Writer, verified actionpermit.Verified, operation validatedActionTrust) error {
@@ -235,7 +456,9 @@ func writePermitApprovalSummary(writer io.Writer, verified actionpermit.Verified
 		Method: operation.Method, Path: operation.Path, TaskID: verified.Statement.TaskID,
 		RequestDigest: verified.Statement.RequestDigest, RequestBytes: verified.Statement.RequestBytes,
 		NotBefore: verified.Statement.NotBefore, ExpiresAt: verified.Statement.ExpiresAt,
-		AuthorityKey: verified.KeyID,
+		AuthorityKey: verified.KeyID, AuthorityKeys: append([]string(nil), verified.KeyIDs...),
+		ApprovalThreshold:  max(1, verified.Statement.ApprovalThreshold),
+		ApprovalsCollected: len(verified.KeyIDs), Complete: verified.Complete,
 	})
 }
 
@@ -245,20 +468,22 @@ func verifyPermit(arguments []string, stdout io.Writer) error {
 	input := flags.String("in", "", "signed action permit DSSE envelope")
 	publicKeyPath := flags.String("public-key", "", "base64 Ed25519 action-authority public key")
 	keyID := flags.String("key-id", "", "trusted action-authority key ID")
+	var authorityFlags repeatedFlag
+	flags.Var(&authorityFlags, "authority", "trusted KEY_ID=PUBLIC_KEY_FILE; repeat for multi-party permits")
 	requestPath := flags.String("request", "", "optional exact request body to compare")
 	maxValidity := flags.Duration("max-validity", actionpermit.MaxValidity, "local maximum permit validity")
 	evaluatedAtText := flags.String("at", "", "canonical UTC RFC3339-seconds evaluation time")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if *input == "" || *publicKeyPath == "" || *keyID == "" || flags.NArg() != 0 {
-		return errors.New("permit verify requires -in, -public-key, and -key-id")
+	if *input == "" || flags.NArg() != 0 {
+		return errors.New("permit verify requires -in and either -public-key with -key-id or repeated -authority")
 	}
 	raw, err := readBounded(*input)
 	if err != nil {
 		return err
 	}
-	public, err := readPublicKey(*publicKeyPath)
+	trusted, err := readPermitAuthorities(*publicKeyPath, *keyID, authorityFlags)
 	if err != nil {
 		return err
 	}
@@ -266,7 +491,7 @@ func verifyPermit(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	verified, err := actionpermit.Verify(raw, map[string]ed25519.PublicKey{*keyID: public}, evaluatedAt, *maxValidity)
+	verified, err := actionpermit.Verify(raw, trusted, evaluatedAt, *maxValidity)
 	if err != nil {
 		return err
 	}
@@ -285,9 +510,10 @@ func verifyPermit(arguments []string, stdout io.Writer) error {
 		Valid          bool                   `json:"valid"`
 		EvaluatedAt    string                 `json:"evaluated_at"`
 		KeyID          string                 `json:"key_id"`
+		KeyIDs         []string               `json:"key_ids"`
 		EnvelopeDigest string                 `json:"envelope_digest"`
 		Statement      actionpermit.Statement `json:"statement"`
-	}{Valid: true, EvaluatedAt: evaluatedAt.Format(time.RFC3339), KeyID: verified.KeyID,
+	}{Valid: true, EvaluatedAt: evaluatedAt.Format(time.RFC3339), KeyID: verified.KeyID, KeyIDs: verified.KeyIDs,
 		EnvelopeDigest: verified.EnvelopeDigest, Statement: verified.Statement})
 }
 
@@ -304,6 +530,8 @@ func auditPermit(arguments []string, stdout io.Writer) error {
 	input := flags.String("in", "", "signed action permit DSSE envelope")
 	publicKeyPath := flags.String("public-key", "", "base64 Ed25519 action-authority public key")
 	keyID := flags.String("key-id", "", "trusted action-authority key ID")
+	var authorityFlags repeatedFlag
+	flags.Var(&authorityFlags, "authority", "trusted KEY_ID=PUBLIC_KEY_FILE; repeat for multi-party permits")
 	receiptsPath := flags.String("receipts", "", "signed connector receipt ledger")
 	receiptPublicKeyPath := flags.String("receipt-public-key", "", "base64 Ed25519 connector receipt public key")
 	receiptNodeID := flags.String("receipt-node-id", "", "expected connector receipt node ID")
@@ -315,20 +543,19 @@ func auditPermit(arguments []string, stdout io.Writer) error {
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if *input == "" || *publicKeyPath == "" || *keyID == "" || *receiptsPath == "" ||
+	if *input == "" || *receiptsPath == "" ||
 		*receiptPublicKeyPath == "" || *receiptNodeID == "" || flags.NArg() != 0 {
-		return errors.New("permit audit requires -in, -public-key, -key-id, -receipts, -receipt-public-key, and -receipt-node-id")
+		return errors.New("permit audit requires -in, approval authorities, -receipts, -receipt-public-key, and -receipt-node-id")
 	}
 
 	raw, err := readBounded(*input)
 	if err != nil {
 		return err
 	}
-	public, err := readPublicKey(*publicKeyPath)
+	trusted, err := readPermitAuthorities(*publicKeyPath, *keyID, authorityFlags)
 	if err != nil {
 		return err
 	}
-	trusted := map[string]ed25519.PublicKey{*keyID: public}
 	verified, err := verifyPermitForAudit(raw, trusted, *maxValidity)
 	if err != nil {
 		return err
@@ -356,7 +583,7 @@ func auditPermit(arguments []string, stdout io.Writer) error {
 			if event.PermitDigest != verified.EnvelopeDigest {
 				return nil
 			}
-			if err := checkPermitReceiptBindings(verified.Statement, verified.KeyID, event); err != nil {
+			if err := checkPermitReceiptBindings(verified.Statement, verified.KeyIDs, event); err != nil {
 				return fmt.Errorf("connector receipt sequence %d: %w", record.Receipt.Sequence, err)
 			}
 			matched := &permitAuditRecord{Sequence: record.Receipt.Sequence, ChainHash: record.Hash,
@@ -401,12 +628,13 @@ func auditPermit(arguments []string, stdout io.Writer) error {
 		PermitDigest  string                 `json:"permit_digest"`
 		RequestDigest string                 `json:"request_digest"`
 		PermitKeyID   string                 `json:"permit_key_id"`
+		PermitKeyIDs  []string               `json:"permit_key_ids"`
 		Statement     actionpermit.Statement `json:"statement"`
 		Authorization *permitAuditRecord     `json:"authorization"`
 		Terminal      *permitAuditRecord     `json:"terminal"`
 		Head          connectorledger.Head   `json:"head"`
 	}{Valid: true, PermitDigest: verified.EnvelopeDigest, RequestDigest: verified.Statement.RequestDigest,
-		PermitKeyID: verified.KeyID, Statement: verified.Statement,
+		PermitKeyID: verified.KeyID, PermitKeyIDs: verified.KeyIDs, Statement: verified.Statement,
 		Authorization: authorization, Terminal: terminal, Head: head})
 }
 
@@ -415,12 +643,13 @@ func verifyPermitForAudit(raw []byte, trusted map[string]ed25519.PublicKey, maxV
 	if err != nil {
 		return actionpermit.Verified{}, err
 	}
-	if envelope.PayloadType != actionpermit.PayloadTypeV1 && envelope.PayloadType != actionpermit.PayloadTypeV2 {
+	if envelope.PayloadType != actionpermit.PayloadTypeV1 && envelope.PayloadType != actionpermit.PayloadTypeV2 &&
+		envelope.PayloadType != actionpermit.PayloadTypeV3 {
 		return actionpermit.Verified{}, errors.New("unsupported action permit payload type")
 	}
-	payload, _, err := dsse.Verify(raw, envelope.PayloadType, trusted)
-	if err != nil {
-		return actionpermit.Verified{}, err
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
+		return actionpermit.Verified{}, errors.New("action permit payload is not canonical base64")
 	}
 	var statement actionpermit.Statement
 	if err := dsse.DecodeStrictInto(payload, actionpermit.MaxEnvelopeBytes, &statement); err != nil {
@@ -433,14 +662,22 @@ func verifyPermitForAudit(raw []byte, trusted map[string]ed25519.PublicKey, maxV
 	return actionpermit.Verify(raw, trusted, notBefore, maxValidity)
 }
 
-func checkPermitReceiptBindings(statement actionpermit.Statement, authorityKeyID string, event connectorledger.Event) error {
+func checkPermitReceiptBindings(statement actionpermit.Statement, authorityKeyIDs []string, event connectorledger.Event) error {
 	taskDigest := gateway.ConnectorCallDigest(statement.TenantID, statement.InstanceID, statement.TaskID,
 		statement.ConnectorID, statement.OperationID)
+	authorityKeyID, authorityKeySet, approvalThreshold := "", "", 0
+	if statement.ApprovalThreshold > 1 {
+		authorityKeySet = strings.Join(authorityKeyIDs, ",")
+		approvalThreshold = statement.ApprovalThreshold
+	} else if len(authorityKeyIDs) == 1 {
+		authorityKeyID = authorityKeyIDs[0]
+	}
 	if event.TenantID != statement.TenantID || event.CapsuleDigest != statement.CapsuleDigest ||
 		event.PolicyDigest != statement.PolicyDigest || event.RoutePolicyDigest != statement.RoutePolicyDigest ||
 		event.Generation != statement.Generation || event.GrantID != gateway.GrantID(statement.TenantID, statement.InstanceID, statement.Generation) ||
 		event.ConnectorID != statement.ConnectorID || event.OperationID != statement.OperationID ||
-		event.TaskDigest != taskDigest || event.AuthorityKeyID != authorityKeyID || event.RequestDigest != statement.RequestDigest ||
+		event.TaskDigest != taskDigest || event.AuthorityKeyID != authorityKeyID || event.AuthorityKeySet != authorityKeySet ||
+		event.ApprovalThreshold != approvalThreshold || event.RequestDigest != statement.RequestDigest ||
 		event.RequestBytes != statement.RequestBytes || event.EffectMode != statement.EffectMode ||
 		(statement.EffectMode != "" && event.OperationPolicyDigest != statement.OperationDigest) {
 		return errors.New("connector receipt does not match every available action-permit binding")
@@ -544,6 +781,41 @@ func parsePermitTime(value string) (time.Time, error) {
 		return time.Time{}, errors.New("time must be canonical UTC RFC3339 seconds")
 	}
 	return parsed, nil
+}
+
+func readPermitAuthorities(publicKeyPath, keyID string, authorityFlags []string) (map[string]ed25519.PublicKey, error) {
+	if len(authorityFlags) == 0 {
+		if publicKeyPath == "" || keyID == "" {
+			return nil, errors.New("one -public-key and -key-id pair or repeated -authority KEY_ID=PUBLIC_KEY_FILE values are required")
+		}
+		public, err := readPublicKey(publicKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]ed25519.PublicKey{keyID: public}, nil
+	}
+	if publicKeyPath != "" || keyID != "" {
+		return nil, errors.New("legacy -public-key/-key-id and repeated -authority values cannot be combined")
+	}
+	if len(authorityFlags) > 8 {
+		return nil, errors.New("at most eight approval authorities are supported")
+	}
+	trusted := make(map[string]ed25519.PublicKey, len(authorityFlags))
+	for _, value := range authorityFlags {
+		id, path, ok := strings.Cut(value, "=")
+		if !ok || id == "" || path == "" {
+			return nil, errors.New("approval authority must be KEY_ID=PUBLIC_KEY_FILE")
+		}
+		if _, duplicate := trusted[id]; duplicate {
+			return nil, fmt.Errorf("approval authority %q is repeated", id)
+		}
+		public, err := readPublicKey(path)
+		if err != nil {
+			return nil, fmt.Errorf("read approval authority %q: %w", id, err)
+		}
+		trusted[id] = public
+	}
+	return trusted, nil
 }
 
 func validatePermitRequest(raw []byte) error {
