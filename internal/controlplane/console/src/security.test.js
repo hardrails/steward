@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import test from "node:test";
 
-test("the React source keeps credentials ephemeral and the console read-only", async () => {
+test("the React source keeps credentials ephemeral and limits mutation to signed command couriering", async () => {
   const source = await readFile(new URL("./App.jsx", import.meta.url), "utf8");
   for (const forbidden of [
     "localStorage",
@@ -13,7 +13,6 @@ test("the React source keeps credentials ephemeral and the console read-only", a
     "outerHTML",
     "insertAdjacentHTML",
     "window.open",
-    'method: "POST"',
     'method: "PUT"',
     'method: "PATCH"',
     'method: "DELETE"',
@@ -37,10 +36,38 @@ test("the React source keeps credentials ephemeral and the console read-only", a
     "More nodes exist.",
     "tenantPage.next_after",
     "Load 500 more",
-    "OBSERVE HERE. AUTHORIZE ELSEWHERE.",
+    "REVIEW HERE. SIGN ELSEWHERE.",
+    'method !== "GET" && !commandSubmission',
+    "The console attempted an unsupported mutation.",
+    'method: "POST"',
+    "reenteredCredential !== credentialRef.current",
+    "commandReviewCurrent(preview)",
+    "command_dsse_base64: preview.envelopeBase64",
+    "credentialInputRef.current.value = \"\"",
   ]) {
     assert.equal(source.includes(required), true, `missing browser boundary: ${required}`);
   }
+  const explicitMutations = Array.from(source.matchAll(/method:\s*"(POST|PUT|PATCH|DELETE)"/gu), (match) => match[1]);
+  assert.deepEqual(explicitMutations, ["POST"]);
+});
+
+test("the command courier has no signing, key import, persistence, or network authority", async () => {
+  const source = await readFile(new URL("./command-courier.js", import.meta.url), "utf8");
+  for (const forbidden of [
+    "fetch(",
+    "XMLHttpRequest",
+    "WebSocket",
+    "localStorage",
+    "sessionStorage",
+    "document.cookie",
+    "crypto.subtle.sign",
+    "crypto.subtle.generateKey",
+    "crypto.subtle.importKey",
+    "privateKey",
+  ]) {
+    assert.equal(source.includes(forbidden), false, `forbidden courier authority: ${forbidden}`);
+  }
+  assert.equal(source.includes('crypto.subtle.digest("SHA-256", bytes)'), true);
 });
 
 test("source assets do not depend on a network-served asset", async () => {
@@ -48,6 +75,7 @@ test("source assets do not depend on a network-served asset", async () => {
     readFile(new URL("../index.html", import.meta.url), "utf8"),
     readFile(new URL("./app.css", import.meta.url), "utf8"),
     readFile(new URL("./App.jsx", import.meta.url), "utf8"),
+    readFile(new URL("./command-courier.js", import.meta.url), "utf8"),
   ]);
   const source = files.join("\n");
   assert.equal(/https?:\/\//u.test(source), false);

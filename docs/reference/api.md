@@ -39,7 +39,7 @@ command and evidence uplink poll and report routes for their bound node.
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET or HEAD /console`, `/console/`, and committed `/console/*` assets | Serve the embedded read-only React console without a CDN or separate web server |
+| `GET or HEAD /console`, `/console/`, and committed `/console/*` assets | Serve the embedded React console without a CDN or separate web server; the loaded SPA uses the existing operations reads and exact signed-command endpoint |
 | `GET /v1/healthz`, `GET /v1/readiness` | Process liveness and durable-store readiness |
 | `POST /v1/tenants`, `GET /v1/tenants` | Create and page through tenants |
 | `GET /v1/tenants/{tenant_id}` | Read one visible tenant |

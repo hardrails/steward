@@ -25,7 +25,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Overview](https://hardrails.github.io/steward/): Purpose, enforced boundary, and documentation map
 - [Install](https://hardrails.github.io/steward/getting-started/): Interactive and unattended Linux installation
 - [Operate Steward Control](https://hardrails.github.io/steward/guides/control-plane/): Install the bundled controller, create tenants and operators, enroll nodes, deliver signed commands, and protect durable state
-- [Embedded operator console](https://hardrails.github.io/steward/guides/operator-console/): Inspect summary, attention, nodes, command metadata, and credential metadata through the read-only `/console/` surface
+- [Embedded operator console](https://hardrails.github.io/steward/guides/operator-console/): Inspect scoped fleet metadata and courier one exact offline-signed Executor command through the React `/console/` surface without browser-side signing
 - [Why Steward exists](https://hardrails.github.io/steward/product/positioning/): Operator problem, authorization path, and receipt limits
 - [Market analysis](https://hardrails.github.io/steward/product/market-analysis/): Dated competitive matrix and research signals
 - [Limitations](https://hardrails.github.io/steward/limitations/): Current capabilities, exclusions, and trusted components
@@ -36,7 +36,8 @@ Documentation: https://hardrails.github.io/steward/
 - [Offline agent catalog](https://hardrails.github.io/steward/guides/agent-catalog/): Issue and verify a curator-signed descriptive catalog, search and compare exact signed capsule metadata, transfer it across an air gap, and pin accepted revisions
 - [Proof-carrying agent activation](https://hardrails.github.io/steward/guides/agent-activation/): Verify a signed outcome-led Hermes release and exact archive, keep task signing off-node, run the deterministic canary, and retain an offline-verifiable evidence set
 - [Proof-carrying fleet rollout](https://hardrails.github.io/steward/guides/fleet-rollout/): Authorize one exact plan, promote a qualified Hermes release through an explicit canary and signed evidence-bound batches, resume from crash-recoverable immutable artifacts, and verify an offline proof digest that commits the exact plan, promotions, and signed outer command envelopes
-- [Operator console](https://hardrails.github.io/steward/guides/operator-console/): Use the same scoped control API bearer in an embedded, air-gapped, read-only React interface; keep browser extensions inside the documented trust boundary
+- [Operator console](https://hardrails.github.io/steward/guides/operator-console/): Use the same scoped control API bearer in an embedded, air-gapped React interface; review and submit exact offline-signed bytes while keeping signing keys outside the browser
+- [CLI contexts and completion](https://hardrails.github.io/steward/guides/cli/): Save repeated controller, CA, token-file, tenant, and node defaults without storing bearer values; generate Bash, Zsh, or Fish completion
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
 - [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
 - [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure optional state, inference, service, connector, and HTTP(S) egress grants
@@ -95,10 +96,12 @@ proxying, raw secrets, host mounts, Docker access, privileged mode, and undeclar
 ports. The Executor HTTP API, `stewardctl node`, and `steward-mcp` call the same
 Executor handlers.
 
-Steward Control serves an embedded read-only React console at `/console/` on its
-existing listener. It uses the same operator Bearer scope and exposes only the
-operations summary, derived attention, nodes, command metadata, and credential
-metadata. It has no mutation, private-signing, or secret-plaintext path. The
+Steward Control serves an embedded observation-first React console at `/console/`
+on its existing listener. It uses the same operator Bearer scope for operations
+summary, derived attention, nodes, command metadata, and credential metadata. Its
+only mutation is to courier one exact offline-signed Executor command after digest
+review, typed confirmation, and bearer re-entry. It has no command creation,
+private-signing, general mutation, or secret-plaintext path. The
 credential remains only in JavaScript memory and is cleared on lock, `pagehide`,
 15 minutes idle, or an eight-hour absolute session; those browser timers do not
 revoke the server-side bearer. Browser extensions remain trusted. The committed

@@ -234,14 +234,25 @@ ADMIN_TOKEN=/secure/steward-control/site-admin.token
 CONTROL_CA=/secure/steward-control-pki/ca.crt
 ```
 
+Save those repeated connection settings in a CLI context:
+
+```console
+stewardctl context set site-admin \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA"
+```
+
+The context stores file paths, not the bearer value. Commands in this section can
+now omit `-control-url`, `-token-file`, and `-ca-file`. The longer forms remain in
+later recovery and automation examples when showing every input is useful. See
+[Make stewardctl easier to use]({{ '/guides/cli/' | relative_url }}) for multiple
+environments, explicit overrides, and shell completion.
+
 Create a tenant:
 
 ```console
-stewardctl control tenant create \
-  -control-url "$CONTROL_URL" \
-  -token-file "$ADMIN_TOKEN" \
-  -ca-file "$CONTROL_CA" \
-  -tenant-id tenant-a
+stewardctl control tenant create -tenant-id tenant-a
 ```
 
 Use the site administrator only for site-wide changes. Issue a tenant-scoped
@@ -251,9 +262,6 @@ The output path must not already exist.
 
 ```console
 stewardctl control operator issue \
-  -control-url "$CONTROL_URL" \
-  -token-file "$ADMIN_TOKEN" \
-  -ca-file "$CONTROL_CA" \
   -request-id tenant-a-operator-20260713 \
   -role tenant_operator \
   -tenant-id tenant-a \
@@ -268,10 +276,18 @@ populated store cannot recreate the bootstrap credential safely.
 
 ```console
 stewardctl control operator revoke \
-  -control-url "$CONTROL_URL" \
-  -token-file "$ADMIN_TOKEN" \
-  -ca-file "$CONTROL_CA" \
   -credential-id cred-EXAMPLE
+```
+
+After issuing the tenant operator, create a daily-use context. Add a default node
+when it is enrolled:
+
+```console
+stewardctl context set tenant-a \
+  -control-url "$CONTROL_URL" \
+  -token-file /secure/steward-control/tenant-a-operator.token \
+  -ca-file "$CONTROL_CA" \
+  -tenant-id tenant-a
 ```
 
 ## Enroll a node once
@@ -710,6 +726,13 @@ stewardctl control command submit \
   -node-id node-a \
   -command start-agent-1-0001.dsse.json
 ```
+
+The embedded React console can courier the same exact file. Select `tenant-a`,
+open **Commands**, load the DSSE JSON, compare its SHA-256 digest with the signing
+station, type the exact confirmation phrase, and re-enter the current operator
+bearer. The browser does not sign or verify the command. The controller strictly
+binds its signed route and retains the original bytes; Executor verifies command
+authority before acting. See [Operate a fleet with the embedded React console]({{ '/guides/operator-console/' | relative_url }}).
 
 Inspect delivery without creating a replacement command:
 

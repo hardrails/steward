@@ -106,20 +106,27 @@ the same node credential. Long-lived bearers must be rotated and revoked
 explicitly. A site administrator can revoke one node credential during a staged
 rotation without disabling the node or its replacement credential.
 
-## The embedded console is observation only
+## The embedded console has one narrow mutation
 
-`/console/` reads the existing control operations API. It can show summary,
-attention, node, command, and credential metadata, but it cannot create, enroll,
-revoke, submit, approve, sign, retry, acknowledge, dismiss, export, or delete. It
-is not an incident tracker, approval workflow, secret manager, or replacement for
-offline evidence verification. Page limits also mean the visible table may be only
-the first bounded page; the interface says when an API cursor has more records.
+`/console/` reads the existing control operations API and can submit one exact
+offline-signed Executor command. The browser previews the envelope without
+verifying its signature, calculates the exact file digest, requires a typed
+confirmation and re-entry of the current bearer, and sends the unchanged bytes to
+the existing bounded command endpoint. It cannot create or edit a command, sign,
+hold a private key, create or widen policy, enroll, revoke, retry, acknowledge,
+dismiss, export, or delete. It is not an incident tracker, approval workflow,
+secret manager, or replacement for Executor verification or offline evidence
+verification. Page limits also mean a visible table may be only the first bounded
+page; the interface says when an API cursor has more records.
 
 The static assets are available to anyone who can reach the control listener;
 fleet data still requires the existing scoped operator bearer. The interface being
-read-only does not narrow that bearer's authority outside the interface. A browser
+observation-first does not narrow that bearer's authority outside the interface. A browser
 extension or compromised browser that steals a site-administrator credential may
 use the control API directly for every operation that credential authorizes.
+It may also replace a loaded file with another valid signed command it possesses.
+Comparing the displayed digest with the signing station helps with accidental
+substitution, but cannot make a compromised display trustworthy.
 
 The bearer stays out of cookies and browser storage and is cleared from application
 memory on lock, `pagehide`, 15 minutes idle, or the eight-hour absolute deadline.

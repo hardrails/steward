@@ -47,7 +47,14 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		_, err := fmt.Fprintln(stdout, "stewardctl "+buildinfo.Resolve())
 		return err
 	}
+	if arguments[0] == "__complete" {
+		return writeCompletionCandidates(arguments[1:], stdout)
+	}
 	switch arguments[0] {
+	case "context":
+		return contextCommand(arguments[1:], stdout)
+	case "completion":
+		return completionCommand(arguments[1:], stdout)
 	case "keygen":
 		return keygen(arguments[1:], stdout)
 	case "key":
@@ -90,7 +97,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 }
 
 func usage(writer io.Writer) error {
-	fmt.Fprintln(writer, "usage: stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]")
+	fmt.Fprintln(writer, "usage: stewardctl context set|use|show|list|delete ...")
+	fmt.Fprintln(writer, "       stewardctl completion bash|zsh|fish")
+	fmt.Fprintln(writer, "       stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]")
 	fmt.Fprintln(writer, "       stewardctl key match -private-key FILE -public-key FILE")
 	fmt.Fprintln(writer, "       stewardctl capsule sign|verify ...")
 	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")

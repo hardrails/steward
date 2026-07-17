@@ -1,20 +1,21 @@
 ---
-title: Inspect a fleet with the embedded operator console
-description: Open Steward Control's read-only console, use a scoped operator credential safely, understand its five views, and reproduce its committed air-gapped assets.
+title: Operate a fleet with the embedded React console
+description: Inspect a scoped fleet and submit one exact offline-signed Executor command without placing signing keys or general mutation authority in the browser.
 section: How-to guide
 ---
 
-# Inspect a fleet with the embedded operator console
+# Operate a fleet with the embedded React console
 
-Steward Control serves a read-only operator control room at `/console/`. It shows
-the operations summary, derived attention findings, enrolled nodes, command
-metadata, and credential metadata already available through the bounded control
-API. It does not create, revoke, enroll, submit, approve, sign, retry, or delete
-anything.
+Steward Control serves an observation-first operator control room at `/console/`.
+It shows the operations summary, derived attention findings, enrolled nodes,
+command metadata, and credential metadata already available through the bounded
+control API.
 
-Use the console to decide what needs investigation. Use `stewardctl`, an approved
-offline signing workflow, or another authenticated API client for changes. Private
-signing keys and secret plaintext never belong in the console.
+The console has one deliberately narrow mutation: it can submit the exact bytes
+of an Executor command that was already signed outside the browser. It cannot
+create, edit, approve, sign, retry, revoke, enroll, acknowledge, dismiss, export,
+or delete anything. Private signing keys and secret plaintext never belong in the
+console.
 
 ## Open the correct origin
 
@@ -90,7 +91,7 @@ response cannot retain pre-session authority indefinitely.
 | Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, and retained-state capacity | Mutation controls and raw evidence frames |
 | Attention | Deterministic findings derived from retained facts and current process observations; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, remediation, or incident workflow |
 | Nodes | Node state, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
-| Commands | Command ID and digest, tenant, node, lifecycle state, and creation time | Signed command bytes, terminal result text, prompts, and task bodies |
+| Commands | A local, unverified preview and exact SHA-256 digest for one offline-signed command; submission after confirmation and bearer re-entry; retained command ID, digest, tenant, node, lifecycle state, and creation time | Command creation or editing, signature verification, private keys, terminal result text, prompts, and task bodies |
 | Credentials | Credential ID, kind, role or node, scope, creation time, and revoked state | Bearer values, token message-authentication codes, and private keys |
 
 The console refreshes a visible page every 30 seconds and also provides a manual
@@ -99,6 +100,56 @@ node view requests at most 500. The tenant selector loads at most 500 records at
 a time and offers the next page when more tenants exist. When another view says
 more records exist, use the bounded API cursor through an authenticated client;
 the console does not silently claim that its first page is complete.
+
+## Submit one offline-signed command
+
+Create and sign the command on a trusted signing station. The station should not
+be the browser host. Follow [Sign, submit, and observe one command]({{ '/guides/control-plane/' | relative_url }}#sign-submit-and-observe-one-command)
+through the `stewardctl executor-command issue` step, but do not run the CLI
+submission command.
+
+Calculate the digest on the signing station before transferring the file:
+
+```console
+sha256sum start-agent-1-0001.dsse.json
+```
+
+Then use the console:
+
+1. Sign in with the least-privilege tenant operator. A site administrator must
+   select one tenant; command transfer is disabled for the site-wide projection.
+2. Open **Commands** and choose the DSSE JSON file. The file must be no larger
+   than 750 KiB so its Base64-wrapped API request remains inside the controller's
+   one-mebibyte body limit.
+3. Compare the displayed `sha256:` digest with the digest calculated on the
+   signing station. Also review the signed command ID, operation, tenant, node,
+   instance, runtime reference, lifecycle fences, validity window, and signature
+   key identifiers.
+4. Type the exact `SUBMIT <command_id>` phrase and re-enter the same operator
+   bearer used for the current console session.
+5. Submit. The password input is cleared immediately. The controller authenticates
+   the operator, strictly parses the signed tenant and node route, and queues the
+   unchanged envelope. It does not verify the command signature. The Executor
+   verifies the original bytes against signed site policy before acting.
+
+The local preview is not proof that a signature is valid or authorized. It rejects
+common malformed files and labels the result **UNVERIFIED LOCAL PREVIEW**, but the
+Executor remains the signature authority. The preview expires after five minutes
+or when the signed command expires. Changing tenants, locking, navigating away, or
+a successful submission clears the loaded command from React state.
+
+The controller submission is idempotent for the same command ID and exact bytes.
+An accepted response means the command is queued or already retained; it does not
+mean the Executor verified or executed it. Watch the command inventory or use
+`stewardctl control command status` to distinguish `pending`, `leased`, and
+terminal outcomes.
+
+Digest comparison catches accidental file substitution only when the signing
+station and display are trustworthy. A compromised browser or extension can show
+one value while submitting another valid signed command it possesses. It still
+cannot forge an authorized command signature, but it can misuse any valid command
+and operator bearer it can read. Use a dedicated browser profile and keep signed
+command files short-lived.
 
 ## Understand the session boundary
 
@@ -162,4 +213,5 @@ For controller installation, scoped operator issuance, command delivery, evidenc
 exports, and backup, continue with
 [Operate the bundled Steward control plane]({{ '/guides/control-plane/' | relative_url }}).
 The frontend dependency and embedding rationale is recorded in
-[Embed a read-only React operator console]({{ '/decisions/0020-embedded-react-operator-console/' | relative_url }}).
+[Embed an observation-first React operator console]({{ '/decisions/0020-embedded-react-operator-console/' | relative_url }})
+and [Use the browser as a signed-command courier]({{ '/decisions/0023-native-signed-command-console-courier/' | relative_url }}).
