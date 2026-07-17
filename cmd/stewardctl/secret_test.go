@@ -42,6 +42,9 @@ func TestSecretMaterializationCheck(t *testing.T) {
 	if strings.Contains(stdout.String(), secret) || strings.Contains(stdout.String(), root) || !strings.Contains(stdout.String(), `"ready":true`) {
 		t.Fatalf("unsafe or incomplete report: %s", stdout.String())
 	}
+	if err := secretCommand([]string{"materialization", "check", "-manifest", manifestPath, "-root", root, "-status-root", filepath.Join(t.TempDir(), "status")}, io.Discard); err == nil || !strings.Contains(err.Error(), "schema v1 does not support -status-root") {
+		t.Fatalf("V1 check did not reject explicit status root: %v", err)
+	}
 }
 
 func TestSecretCommandRejectsIncompleteInvocation(t *testing.T) {
@@ -112,6 +115,24 @@ func TestOpenBaoCompileWritesNewDeterministicBundle(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "token") || !strings.Contains(stdout.String(), `"schema_version":"steward.openbao-materializer-plan.v1"`) {
 		t.Fatalf("unsafe or incomplete compile output: %s", stdout.String())
+	}
+	var summary struct {
+		Files []string `json:"files"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &summary); err != nil {
+		t.Fatalf("decode compile output: %v", err)
+	}
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Files) != len(entries) {
+		t.Fatalf("summary files %q do not match output entries %q", summary.Files, entries)
+	}
+	for index, entry := range entries {
+		if summary.Files[index] != entry.Name() {
+			t.Fatalf("summary files %q do not match output entries %q", summary.Files, entries)
+		}
 	}
 	if err := secretCommand([]string{"openbao", "compile", "-plan", planPath, "-out", output}, io.Discard); err == nil {
 		t.Fatal("compile overwrote an existing bundle")

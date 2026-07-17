@@ -38,9 +38,18 @@ func checkSecretMaterialization(arguments []string, stdout io.Writer) error {
 	if *manifestPath == "" || flags.NArg() != 0 {
 		return errors.New("secret materialization check requires -manifest and no positional arguments")
 	}
+	statusRootSet := false
+	flags.Visit(func(flag *flag.Flag) {
+		if flag.Name == "status-root" {
+			statusRootSet = true
+		}
+	})
 	manifest, err := secretmaterial.LoadManifest(*manifestPath)
 	if err != nil {
 		return err
+	}
+	if manifest.SchemaVersion == secretmaterial.ManifestSchemaV1 && statusRootSet {
+		return errors.New("secret materialization schema v1 does not support -status-root; migrate the manifest to schema v2")
 	}
 	var report secretmaterial.Report
 	if manifest.SchemaVersion == secretmaterial.ManifestSchemaV2 {
@@ -136,12 +145,15 @@ func compileOpenBaoMaterializer(arguments []string, stdout io.Writer) (returnErr
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
+	fileNames := make([]string, len(files))
+	for index, file := range files {
+		fileNames[index] = file.Name
+	}
 	if err := encoder.Encode(struct {
 		SchemaVersion string   `json:"schema_version"`
 		OutputPath    string   `json:"output_path"`
 		Files         []string `json:"files"`
-	}{SchemaVersion: openbaobundle.PlanSchemaV1, OutputPath: *outputPath,
-		Files: []string{"agent.hcl", "materialization.json", "openbao-read-policy.hcl", "steward-openbao-agent.service"}}); err != nil {
+	}{SchemaVersion: openbaobundle.PlanSchemaV1, OutputPath: *outputPath, Files: fileNames}); err != nil {
 		return fmt.Errorf("encode OpenBao bundle summary: %w", err)
 	}
 	return nil
