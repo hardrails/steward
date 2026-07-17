@@ -323,10 +323,6 @@ func loadCLIContextConfig() (cliContextConfig, string, error) {
 	if err != nil {
 		return cliContextConfig{}, path, fmt.Errorf("CLI context file must be a bounded owner-only regular file: %w", err)
 	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || len(raw) == 0 || len(raw) > maxCLIContextFileBytes {
-		return cliContextConfig{}, path, errors.New("CLI context file must be a bounded owner-only regular file")
-	}
 	var config cliContextConfig
 	if err := dsse.DecodeStrictInto(raw, maxCLIContextFileBytes, &config); err != nil {
 		return cliContextConfig{}, path, fmt.Errorf("decode CLI context file: %w", err)

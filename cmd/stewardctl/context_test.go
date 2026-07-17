@@ -167,6 +167,14 @@ func TestCLIContextExplicitFlagsOverrideAndDestructiveIdentityStaysExplicit(t *t
 	}
 }
 
+func TestControlContextBypassCannotRemoveARequiredSubcommand(t *testing.T) {
+	for _, arguments := range [][]string{{"-no-context", "tenant"}, {"tenant", "--no-context"}} {
+		if err := controlCommand(arguments, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "control requires") {
+			t.Fatalf("control arguments=%v error=%v", arguments, err)
+		}
+	}
+}
+
 func TestCLIContextSelectionLifecycleAndEnvironmentOverride(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0o700); err != nil {

@@ -31,6 +31,9 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if len(arguments) < 2 {
+		return controlUsageError()
+	}
 	switch arguments[0] + " " + arguments[1] {
 	case "pki create":
 		return controlPKICreate(arguments[2:], stdout)
