@@ -343,6 +343,30 @@ func TestTransportConfigLoadsOnlyMatchedOwnerOnlyTLSMaterial(t *testing.T) {
 	}
 }
 
+func TestCheckConfigRejectsTLSWithoutAnExactHostSAN(t *testing.T) {
+	stateDirectory := filepath.Join(t.TempDir(), "control")
+	if err := run([]string{
+		"-initialize", "-state-dir", stateDirectory, "-addr", "127.0.0.1:0",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	for name, dnsNames := range map[string][]string{
+		"missing":  nil,
+		"wildcard": {"*.customer.example"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			certFile, keyFile := writeControlCertificateWithDNSNames(t, dnsNames)
+			err := run([]string{
+				"-check-config", "-addr", "0.0.0.0:8443", "-state-dir", stateDirectory,
+				"-tls-cert-file", certFile, "-tls-key-file", keyFile,
+			}, &bytes.Buffer{}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), "Host policy") {
+				t.Fatalf("unsafe TLS Host policy error = %v", err)
+			}
+		})
+	}
+}
+
 func TestCheckConfigRejectsTLSKeyReusedAsWitnessIdentity(t *testing.T) {
 	for _, mode := range []string{"copied", "hard-linked"} {
 		t.Run(mode, func(t *testing.T) {
@@ -534,19 +558,35 @@ func TestControlAcceptanceWithInstrumentedBinary(t *testing.T) {
 
 func writeControlCertificate(t *testing.T) (string, string) {
 	t.Helper()
+	return writeControlCertificateWithDNSNames(t, []string{"control.test"})
+}
+
+func writeControlCertificateWithDNSNames(t *testing.T, dnsNames []string) (string, string) {
+	t.Helper()
 	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return writeControlCertificateWithKey(t, t.TempDir(), private)
+	return writeControlCertificateWithKeyAndDNSNames(t, t.TempDir(), private, dnsNames)
 }
 
 func writeControlCertificateWithKey(t *testing.T, directory string, private crypto.Signer) (string, string) {
+	t.Helper()
+	return writeControlCertificateWithKeyAndDNSNames(t, directory, private, []string{"control.test"})
+}
+
+func writeControlCertificateWithKeyAndDNSNames(
+	t *testing.T,
+	directory string,
+	private crypto.Signer,
+	dnsNames []string,
+) (string, string) {
 	t.Helper()
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "steward-control-test"},
 		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames: append([]string(nil), dnsNames...),
 	}
 	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, private.Public(), private)
 	if err != nil {

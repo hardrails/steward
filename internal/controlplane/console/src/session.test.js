@@ -6,6 +6,8 @@ import {
   SnapshotFence,
   StaleSessionError,
   StaleSnapshotError,
+  armDeadline,
+  displayStringList,
   sessionExpired,
 } from "./session.js";
 
@@ -61,4 +63,41 @@ test("activity after a suspended idle window cannot revive a session", () => {
   assert.equal(sessionExpired(116 * minute, startedAt, lastActivity, 15 * minute, 8 * 60 * minute), true);
   assert.equal(sessionExpired(115 * minute - 1, startedAt, lastActivity, 15 * minute, 8 * 60 * minute), false);
   assert.equal(sessionExpired(startedAt - 1, startedAt, lastActivity, 15 * minute, 8 * 60 * minute), true);
+});
+
+test("authentication deadline expires once or can be cancelled", () => {
+  let scheduled;
+  let cleared = 0;
+  let expired = 0;
+  const setTimer = (callback, milliseconds) => {
+    scheduled = {callback, milliseconds, id: 41};
+    return scheduled.id;
+  };
+  const clearTimer = (id) => {
+    assert.equal(id, 41);
+    cleared += 1;
+  };
+
+  const cancel = armDeadline(120_000, () => { expired += 1; }, setTimer, clearTimer);
+  assert.equal(scheduled.milliseconds, 120_000);
+  scheduled.callback();
+  scheduled.callback();
+  cancel();
+  assert.equal(expired, 1);
+  assert.equal(cleared, 0);
+
+  const cancelBeforeExpiry = armDeadline(1, () => { expired += 1; }, setTimer, clearTimer);
+  cancelBeforeExpiry();
+  scheduled.callback();
+  assert.equal(expired, 1);
+  assert.equal(cleared, 1);
+});
+
+test("nullable or malformed display collections cannot crash a view", () => {
+  assert.deepEqual(displayStringList(null), []);
+  assert.deepEqual(displayStringList(undefined), []);
+  assert.deepEqual(displayStringList(["authorized-effects-v1", null, {value: "unsafe"}, "delivery-leases-v3"]), [
+    "authorized-effects-v1",
+    "delivery-leases-v3",
+  ]);
 });

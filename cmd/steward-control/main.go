@@ -92,6 +92,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err := validateWitnessTLSKeySeparation(tlsConfig, witnessPrivateKey); err != nil {
 		return err
 	}
+	if err := controlplane.ValidateTLSHostPolicy(tlsConfig); err != nil {
+		return err
+	}
 	if parsed.checkConfig {
 		_, err := fmt.Fprintln(stdout, "steward-control configuration is valid")
 		return err

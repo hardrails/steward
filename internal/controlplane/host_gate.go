@@ -69,6 +69,17 @@ type hostPolicy struct {
 	allowPortOmission bool
 }
 
+// ValidateTLSHostPolicy checks the certificate-derived Host boundary without
+// opening a listener. It keeps steward-control -check-config aligned with the
+// policy that NewHostGate enforces at startup.
+func ValidateTLSHostPolicy(config *tls.Config) error {
+	if config == nil {
+		return nil
+	}
+	_, err := exactCertificateHosts(config)
+	return err
+}
+
 func (policy hostPolicy) allows(authority string) bool {
 	host, port, hasPort, err := parseRequestAuthority(authority)
 	if err != nil {

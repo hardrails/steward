@@ -20,6 +20,46 @@ export function sessionExpired(now, startedAt, lastActivity, idleTimeout, absolu
   return now - lastActivity >= idleTimeout || now - startedAt >= absoluteTimeout;
 }
 
+// armDeadline uses the platform timer but keeps cancellation and the one-shot
+// property explicit and testable. Authentication is not yet a session, so its
+// credential lifetime needs an independent hard bound.
+export function armDeadline(
+  milliseconds,
+  onExpire,
+  setTimer = (callback, delay) => globalThis.setTimeout(callback, delay),
+  clearTimer = (timer) => globalThis.clearTimeout(timer),
+) {
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0 ||
+      typeof onExpire !== "function" || typeof setTimer !== "function" || typeof clearTimer !== "function") {
+    throw new TypeError("A deadline requires a positive duration, callback, and timer functions.");
+  }
+  let active = true;
+  const timer = setTimer(() => {
+    if (!active) {
+      return;
+    }
+    active = false;
+    onExpire();
+  }, milliseconds);
+  return () => {
+    if (!active) {
+      return;
+    }
+    active = false;
+    clearTimer(timer);
+  };
+}
+
+// displayStringList prevents one nullable collection in an otherwise valid API
+// response from taking down the entire control room. React still escapes every
+// retained string when it renders the returned values.
+export function displayStringList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item) => typeof item === "string");
+}
+
 // SnapshotFence is independent from the credential epoch. An administrator
 // can switch tenant projections while an auto-refresh is still in flight; only
 // the newest request may enter React state.

@@ -1121,7 +1121,7 @@ func nodeView(node controlstore.Node) nodeResponse {
 	}
 	return nodeResponse{
 		NodeID: node.ID, TenantIDs: append([]string(nil), node.TenantIDs...),
-		Capabilities: append([]string(nil), node.Capabilities...), State: state,
+		Capabilities: append([]string{}, node.Capabilities...), State: state,
 		CreatedAt: node.CreatedAt, LastSeenAt: node.LastSeenAt, RevokedAt: node.RevokedAt,
 	}
 }

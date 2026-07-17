@@ -101,6 +101,8 @@ func TestConsoleHeadErrorsAndSecurityBoundary(t *testing.T) {
 		{http.MethodGet, "/console?token=must-not-be-accepted", http.StatusBadRequest},
 		{http.MethodGet, "/console/unknown", http.StatusNotFound},
 		{http.MethodGet, "/console/assets/", http.StatusNotFound},
+		{http.MethodGet, "/console/assets/missing.js", http.StatusNotFound},
+		{http.MethodGet, "/console/assets/missing.css", http.StatusNotFound},
 		{http.MethodGet, "/console/assets/../index.html", http.StatusNotFound},
 		{http.MethodGet, "/console/assets/%2e%2e%2findex.html", http.StatusNotFound},
 		{http.MethodGet, "/console/package.json", http.StatusNotFound},

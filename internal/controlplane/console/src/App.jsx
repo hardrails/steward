@@ -5,11 +5,14 @@ import {
   SnapshotFence,
   StaleSessionError,
   StaleSnapshotError,
+  armDeadline,
+  displayStringList,
   sessionExpired,
 } from "./session.js";
 
 const idleTimeoutMilliseconds = 15 * 60 * 1000;
 const absoluteTimeoutMilliseconds = 8 * 60 * 60 * 1000;
+const authenticationTimeoutMilliseconds = 2 * 60 * 1000;
 const refreshMilliseconds = 30 * 1000;
 
 class ControlError extends Error {
@@ -106,12 +109,16 @@ export default function App() {
   const [refreshError, setRefreshError] = useState("");
   const [lastRefresh, setLastRefresh] = useState("");
 
-  const lock = useCallback((message = "") => {
+  const clearAuthority = useCallback(() => {
     fenceRef.current.lock();
     snapshotFenceRef.current.invalidate();
     credentialRef.current = "";
     startedAtRef.current = 0;
     lastActivityRef.current = 0;
+  }, []);
+
+  const lock = useCallback((message = "") => {
+    clearAuthority();
     setSession(null);
     setSnapshot(null);
     setTenants([]);
@@ -122,7 +129,16 @@ export default function App() {
     setLastRefresh("");
     setAuthenticating(false);
     setLoginError(message);
-  }, []);
+  }, [clearAuthority]);
+
+  useEffect(() => {
+    const onPageHide = () => lock("");
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      clearAuthority();
+    };
+  }, [clearAuthority, lock]);
 
   const api = useCallback(async (path, epoch) => {
     const fence = fenceRef.current;
@@ -184,6 +200,11 @@ export default function App() {
       return;
     }
     const activation = fenceRef.current.begin();
+    const cancelAuthenticationDeadline = armDeadline(authenticationTimeoutMilliseconds, () => {
+      if (fenceRef.current.current(activation.epoch)) {
+        lock("Authentication took too long, so the operator credential was cleared.");
+      }
+    });
     credentialRef.current = rawCredential;
     setAuthenticating(true);
     try {
@@ -216,12 +237,11 @@ export default function App() {
       if (error instanceof StaleSessionError || error?.name === "AbortError") {
         return;
       }
-      fenceRef.current.lock();
-      credentialRef.current = "";
-      setAuthenticating(false);
-      setLoginError(error instanceof Error ? error.message : "Authentication failed.");
+      lock(error instanceof Error ? error.message : "Authentication failed.");
+    } finally {
+      cancelAuthenticationDeadline();
     }
-  }, [api, loadSnapshot]);
+  }, [api, loadSnapshot, lock]);
 
   const refresh = useCallback(async (projection = selectedTenant, quiet = false) => {
     if (!session || refreshing) {
@@ -284,12 +304,10 @@ export default function App() {
         securityTimeout();
       }
     };
-    const onPageHide = () => lock("");
     window.addEventListener("pointerdown", onActivity, {passive: true});
     window.addEventListener("keydown", onActivity);
     window.addEventListener("focus", onResume);
     document.addEventListener("visibilitychange", onResume);
-    window.addEventListener("pagehide", onPageHide);
     const timeout = window.setInterval(() => {
       if (expired(Date.now())) {
         securityTimeout();
@@ -300,7 +318,6 @@ export default function App() {
       window.removeEventListener("keydown", onActivity);
       window.removeEventListener("focus", onResume);
       document.removeEventListener("visibilitychange", onResume);
-      window.removeEventListener("pagehide", onPageHide);
       window.clearInterval(timeout);
     };
   }, [lock, session]);
@@ -687,7 +704,7 @@ function NodesView({page, tenantID}) {
                 <td>{formatTime(node.last_seen_at || node.created_at)}</td>
                 <td>
                   <div className="badge-row">
-                    {node.capabilities.map((capability) => (
+                    {displayStringList(node.capabilities).map((capability) => (
                       <Badge key={capability} kind={capability === "authorized-effects-v1" ? "is-ok" : ""}>
                         {capability}
                       </Badge>

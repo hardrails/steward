@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"embed"
+	"errors"
 	"io/fs"
 	"net/http"
 	"path"
@@ -37,6 +38,10 @@ func (server *Server) console(writer http.ResponseWriter, request *http.Request)
 	}
 	body, err := fs.ReadFile(consoleDistribution, asset)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			writeError(writer, http.StatusNotFound, "not_found", "the requested console asset does not exist")
+			return
+		}
 		server.logger.Error("embedded console asset missing", "asset", asset, "error", err)
 		writeError(writer, http.StatusInternalServerError, "internal_error", "the embedded console asset is unavailable")
 		return
