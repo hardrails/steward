@@ -100,6 +100,8 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 }
 
 func (server *Server) routes() {
+	server.mux.HandleFunc("/console", server.console)
+	server.mux.HandleFunc("/console/", server.console)
 	server.mux.HandleFunc("/v1/healthz", server.health)
 	server.mux.HandleFunc("/v1/readiness", server.readiness)
 	server.mux.HandleFunc("/v1/tenants", server.tenants)

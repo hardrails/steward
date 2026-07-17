@@ -469,6 +469,11 @@ func serve(address string, handler http.Handler, tlsConfig *tls.Config, logger *
 	if err != nil {
 		return err
 	}
+	handler, err = controlplane.NewHostGate(listener.Addr().String(), tlsConfig, handler)
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
 	server := &http.Server{
 		Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10,
