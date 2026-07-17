@@ -515,6 +515,9 @@ func validateEffectMode(intent InstanceIntent, tenant TenantRule) error {
 	if intent.EffectMode != EffectModeAuthorized {
 		return nil
 	}
+	if !intent.Capabilities.Connector || len(intent.ConnectorIDs) == 0 {
+		return deny("authorized effect mode requires connector capability and at least one selected connector")
+	}
 	if intent.Capabilities.Egress || len(intent.EgressRouteIDs) != 0 {
 		return deny("authorized effect mode forbids generic egress")
 	}

@@ -74,6 +74,14 @@ func TestAuthorizedEffectsPreservesLegacyAndRejectsDowngrades(t *testing.T) {
 
 func TestAuthorizedEffectsForbidsGenericEgressAndRequiresConnectorCoverage(t *testing.T) {
 	capsule, policy, intent, caller := authorizedEffectsFixture(t)
+	intent.Capabilities.Connector = false
+	intent.ConnectorIDs = nil
+	if _, err := Intersect(capsule, testDigest('d'), policy, testDigest('e'), "publisher-1", "site-root", intent, caller, PersistedFences{}, DefaultProfiles()); err == nil || !strings.Contains(err.Error(), "requires connector capability") {
+		t.Fatalf("authorized mode accepted no connector capability: %v", err)
+	}
+
+	intent.Capabilities.Connector = true
+	intent.ConnectorIDs = []string{"vault.read", "calendar.write"}
 	capsule.Capabilities.Egress = true
 	policy.Tenants[0].EgressRouteIDs = []string{"public-web"}
 	intent.Capabilities.Egress = true

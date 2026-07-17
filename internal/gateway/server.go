@@ -1083,8 +1083,8 @@ func validGrantActionAuthorities(authorities []GrantActionAuthority, connectorID
 }
 
 func (s *Server) validAuthorizedEffectsGrant(grant Grant) bool {
-	if len(grant.ConnectorIDs) == 0 {
-		return len(grant.ActionAuthorities) == 0
+	if len(grant.ConnectorIDs) == 0 || len(grant.ActionAuthorities) == 0 {
+		return false
 	}
 	if !validGrantActionAuthorities(grant.ActionAuthorities, grant.ConnectorIDs) ||
 		grant.NodeID != s.config.ActionPermitNodeID {
