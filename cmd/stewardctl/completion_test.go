@@ -40,6 +40,9 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 			t.Fatalf("command flags %v missing %s", flags, expected)
 		}
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"control", "tenant", "list", "-token-file", ""}); len(candidates) != 0 {
+		t.Fatalf("file argument candidates=%v; shell file completion should handle the value", candidates)
+	}
 
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0o700); err != nil {

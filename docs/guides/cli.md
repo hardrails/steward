@@ -72,7 +72,8 @@ stewardctl context delete staging
 The default file is the operating system's user configuration directory under
 `steward/contexts.json`. `STEWARD_CONTEXT_FILE` can select another absolute path
 for isolated automation. Steward requires the file and its final directory to be
-owner-only, writes updates atomically, bounds the file to 64 KiB, accepts at most
+owner-only, serializes concurrent writers through an owner-only lock, writes
+updates atomically, bounds the file to 64 KiB, accepts at most
 32 contexts, and rejects unknown or duplicate fields.
 
 Contexts affect `stewardctl control` commands only. They do not supply signing

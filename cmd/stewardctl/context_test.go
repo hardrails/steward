@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -213,6 +215,54 @@ func TestCLIContextRejectsUnsafeFilesAndNames(t *testing.T) {
 	}
 	if _, _, err := loadCLIContextConfig(); err == nil || !strings.Contains(err.Error(), "owner-only") {
 		t.Fatalf("unsafe context permissions error=%v", err)
+	}
+}
+
+func TestCLIContextConcurrentWritersRetainEveryContext(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(directory, "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STEWARD_CONTEXT_FILE", filepath.Join(directory, "contexts.json"))
+
+	const writers = 12
+	start := make(chan struct{})
+	errorsByWriter := make(chan error, writers)
+	var group sync.WaitGroup
+	for index := 0; index < writers; index++ {
+		name := "context-" + strconv.Itoa(index)
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			errorsByWriter <- contextCommand([]string{"set", name, "-token-file", tokenPath}, &bytes.Buffer{})
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(errorsByWriter)
+	for err := range errorsByWriter {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	config, _, err := loadCLIContextConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Contexts) != writers {
+		t.Fatalf("concurrent context count=%d want=%d", len(config.Contexts), writers)
+	}
+	lockInfo, err := os.Stat(filepath.Join(directory, "contexts.json.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lockInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("context lock mode=%v", lockInfo.Mode().Perm())
 	}
 }
 

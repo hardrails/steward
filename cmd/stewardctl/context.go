@@ -95,76 +95,74 @@ func contextSet(arguments []string, stdout io.Writer) error {
 		return errors.New("context set requires a context name before its flags")
 	}
 	name := arguments[0]
-	config, path, err := loadCLIContextConfig()
-	if err != nil {
-		return err
+	if !validCLIContextName(name) {
+		return errors.New("context name is invalid")
 	}
-	existing, _ := findCLIContext(config, name)
-	if existing.Name == "" {
-		existing = cliContext{Name: name, ControlURL: "http://127.0.0.1:8443"}
-	}
-	flags := flag.NewFlagSet("context set", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	controlURL := flags.String("control-url", existing.ControlURL, "Steward Control origin")
-	tokenFile := flags.String("token-file", existing.TokenFile, "operator token file path")
-	caFile := flags.String("ca-file", existing.CAFile, "private CA PEM bundle path")
-	tenantID := flags.String("tenant-id", existing.TenantID, "default tenant for scoped operations")
-	nodeID := flags.String("node-id", existing.NodeID, "default node for scoped operations")
-	if err := flags.Parse(arguments[1:]); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("context set accepts one name followed by named flags")
-	}
-	if !validCLIContextName(name) || !validOptionalControlIdentifier(*tenantID, 128) ||
-		!validOptionalControlIdentifier(*nodeID, 128) {
-		return errors.New("context name, tenant, or node is invalid")
-	}
-	resolvedToken, err := absoluteContextPath(*tokenFile, true)
-	if err != nil {
-		return fmt.Errorf("resolve context token file: %w", err)
-	}
-	resolvedCA, err := absoluteContextPath(*caFile, false)
-	if err != nil {
-		return fmt.Errorf("resolve context CA file: %w", err)
-	}
-	if _, err := controlclient.NewFromFiles(*controlURL, resolvedToken, resolvedCA); err != nil {
-		return fmt.Errorf("validate context connection files: %w", err)
-	}
-	next := cliContext{
-		Name: name, ControlURL: *controlURL, TokenFile: resolvedToken, CAFile: resolvedCA,
-		TenantID: *tenantID, NodeID: *nodeID,
-	}
-	upsertCLIContext(&config, next)
-	config.Current = name
-	if err := writeCLIContextConfig(path, config); err != nil {
-		return err
-	}
-	return writeContextJSON(stdout, struct {
-		Current bool       `json:"current"`
-		Context cliContext `json:"context"`
-	}{Current: true, Context: next})
+	return withCLIContextConfigMutation(func(config *cliContextConfig, path string) error {
+		existing, _ := findCLIContext(*config, name)
+		if existing.Name == "" {
+			existing = cliContext{Name: name, ControlURL: "http://127.0.0.1:8443"}
+		}
+		flags := flag.NewFlagSet("context set", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		controlURL := flags.String("control-url", existing.ControlURL, "Steward Control origin")
+		tokenFile := flags.String("token-file", existing.TokenFile, "operator token file path")
+		caFile := flags.String("ca-file", existing.CAFile, "private CA PEM bundle path")
+		tenantID := flags.String("tenant-id", existing.TenantID, "default tenant for scoped operations")
+		nodeID := flags.String("node-id", existing.NodeID, "default node for scoped operations")
+		if err := flags.Parse(arguments[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return errors.New("context set accepts one name followed by named flags")
+		}
+		if !validOptionalControlIdentifier(*tenantID, 128) || !validOptionalControlIdentifier(*nodeID, 128) {
+			return errors.New("context tenant or node is invalid")
+		}
+		resolvedToken, err := absoluteContextPath(*tokenFile, true)
+		if err != nil {
+			return fmt.Errorf("resolve context token file: %w", err)
+		}
+		resolvedCA, err := absoluteContextPath(*caFile, false)
+		if err != nil {
+			return fmt.Errorf("resolve context CA file: %w", err)
+		}
+		if _, err := controlclient.NewFromFiles(*controlURL, resolvedToken, resolvedCA); err != nil {
+			return fmt.Errorf("validate context connection files: %w", err)
+		}
+		next := cliContext{
+			Name: name, ControlURL: *controlURL, TokenFile: resolvedToken, CAFile: resolvedCA,
+			TenantID: *tenantID, NodeID: *nodeID,
+		}
+		upsertCLIContext(config, next)
+		config.Current = name
+		if err := writeCLIContextConfig(path, *config); err != nil {
+			return err
+		}
+		return writeContextJSON(stdout, struct {
+			Current bool       `json:"current"`
+			Context cliContext `json:"context"`
+		}{Current: true, Context: next})
+	})
 }
 
 func contextUse(arguments []string, stdout io.Writer) error {
 	if len(arguments) != 1 || !validCLIContextName(arguments[0]) {
 		return errors.New("context use requires one context name")
 	}
-	config, path, err := loadCLIContextConfig()
-	if err != nil {
-		return err
-	}
-	selected, found := findCLIContext(config, arguments[0])
-	if !found {
-		return fmt.Errorf("context %q does not exist", arguments[0])
-	}
-	config.Current = selected.Name
-	if err := writeCLIContextConfig(path, config); err != nil {
-		return err
-	}
-	return writeContextJSON(stdout, struct {
-		Current string `json:"current"`
-	}{Current: selected.Name})
+	return withCLIContextConfigMutation(func(config *cliContextConfig, path string) error {
+		selected, found := findCLIContext(*config, arguments[0])
+		if !found {
+			return fmt.Errorf("context %q does not exist", arguments[0])
+		}
+		config.Current = selected.Name
+		if err := writeCLIContextConfig(path, *config); err != nil {
+			return err
+		}
+		return writeContextJSON(stdout, struct {
+			Current string `json:"current"`
+		}{Current: selected.Name})
+	})
 }
 
 func contextShow(arguments []string, stdout io.Writer) error {
@@ -203,24 +201,42 @@ func contextDelete(arguments []string, stdout io.Writer) error {
 	if len(arguments) != 1 || !validCLIContextName(arguments[0]) {
 		return errors.New("context delete requires one context name")
 	}
-	config, path, err := loadCLIContextConfig()
+	return withCLIContextConfigMutation(func(config *cliContextConfig, path string) error {
+		index := slices.IndexFunc(config.Contexts, func(context cliContext) bool { return context.Name == arguments[0] })
+		if index < 0 {
+			return fmt.Errorf("context %q does not exist", arguments[0])
+		}
+		config.Contexts = slices.Delete(config.Contexts, index, index+1)
+		if config.Current == arguments[0] {
+			config.Current = ""
+		}
+		if err := writeCLIContextConfig(path, *config); err != nil {
+			return err
+		}
+		return writeContextJSON(stdout, struct {
+			Deleted string `json:"deleted"`
+		}{Deleted: arguments[0]})
+	})
+}
+
+func withCLIContextConfigMutation(update func(*cliContextConfig, string) error) (err error) {
+	path, err := cliContextFilePath()
 	if err != nil {
 		return err
 	}
-	index := slices.IndexFunc(config.Contexts, func(context cliContext) bool { return context.Name == arguments[0] })
-	if index < 0 {
-		return fmt.Errorf("context %q does not exist", arguments[0])
-	}
-	config.Contexts = slices.Delete(config.Contexts, index, index+1)
-	if config.Current == arguments[0] {
-		config.Current = ""
-	}
-	if err := writeCLIContextConfig(path, config); err != nil {
+	unlock, err := lockCLIContextConfig(path)
+	if err != nil {
 		return err
 	}
-	return writeContextJSON(stdout, struct {
-		Deleted string `json:"deleted"`
-	}{Deleted: arguments[0]})
+	defer func() { err = errors.Join(err, unlock()) }()
+	config, loadedPath, err := loadCLIContextConfig()
+	if err != nil {
+		return err
+	}
+	if loadedPath != path {
+		return errors.New("CLI context file changed while acquiring its write lock")
+	}
+	return update(&config, path)
 }
 
 func applyCLIContext(arguments []string) ([]string, error) {

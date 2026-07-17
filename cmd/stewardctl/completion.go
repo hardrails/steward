@@ -110,6 +110,9 @@ func stewardctlCompletionCandidates(arguments []string) []string {
 	if strings.HasPrefix(current, "-") {
 		return matchingCandidates(completionFlagsFor(arguments[:len(arguments)-1]), current)
 	}
+	if len(arguments) > 1 && current == "" && strings.HasPrefix(arguments[len(arguments)-2], "-") {
+		return nil
+	}
 	words := arguments
 	if current == "" && len(words) > 0 {
 		words = words[:len(words)-1]

@@ -41,7 +41,8 @@ from a damaged context file.
 The configuration is a bounded, strict JSON file in the user's configuration
 directory. Steward requires an owner-only final directory and file, permits at
 most 32 named contexts, writes changes through an owner-only temporary file and
-atomic rename, and rejects unknown fields, duplicate names, symlinks, unsafe
+an owner-only advisory lock plus atomic rename, and rejects unknown fields,
+duplicate names, symlinks, unsafe
 permissions, and relative credential paths. `STEWARD_CONTEXT` selects one profile
 for a process without changing the saved current profile.
 
