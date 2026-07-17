@@ -191,7 +191,7 @@ func verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.T
 	if err := validateStatement(statement, envelope.PayloadType, now, maxValidity); err != nil {
 		return Verified{}, err
 	}
-	payload, keyIDs, err := dsse.VerifyAll(rawEnvelope, envelope.PayloadType, trusted)
+	_, keyIDs, err := dsse.VerifyAll(rawEnvelope, envelope.PayloadType, trusted)
 	if err != nil {
 		return Verified{}, invalid("verify every DSSE signature: %v", err)
 	}
