@@ -439,21 +439,19 @@ Use `stewardctl gateway service` to update and inspect the policy atomically:
 ```console
 sudo stewardctl gateway service set \
   -config /etc/steward/gateway.json \
-  -service-id hermes-api \
-  -operation hermes.run=POST:/v1/runs \
-  -lifecycle hermes.run=/v1/runs/ \
-  -max-request-bytes 65536 \
-  -max-response-bytes 1048576 \
-  -max-seconds 120 \
-  -max-permit-seconds 300 \
-  -status-max-seconds 15 \
-  -poll-interval 1s \
+  -agent openclaw \
   -tenant-budget tenant-a=4194304
 sudo stewardctl gateway service list -config /etc/steward/gateway.json
 sudo stewardctl gateway service trust \
   -config /etc/steward/gateway.json -node-id node-a -tenant-id tenant-a \
   > hermes-service-trust.json
 ```
+
+Use `-agent hermes` for the built-in Hermes contract. These presets select only
+the compiled-in service ID, operation, `POST /v1/runs` path, lifecycle status
+prefix, and hardened limits. They cannot be combined with `-service-id`,
+`-operation`, or `-lifecycle`. Use the explicit flags below for another finite
+service or when an operator has deliberately chosen different limits.
 
 `set` replaces every operation for the named service and preserves other service,
 connector, route, and action-authority configuration. Repeat `-operation` and add

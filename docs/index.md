@@ -34,7 +34,7 @@ home: true
   </div>
   <div>
     <h3>I operate a fleet</h3>
-    <p>Install the bundled controller, inspect its local control room, submit exact offline-signed commands without placing tenant command, task, or action keys in the browser or controller, enroll nodes once, and promote one qualified Hermes release through a signed plan and evidence-bound batch gates.</p>
+    <p>Install the bundled controller, inspect its local control room, submit exact offline-signed commands without placing tenant command, task, or action keys in the browser or controller, enroll nodes once, and promote one qualified Hermes or OpenClaw release through a signed plan and evidence-bound batch gates.</p>
     <p><a href="{{ '/guides/control-plane/' | relative_url }}">Operate Steward Control →</a> · <a href="{{ '/guides/operator-console/' | relative_url }}">Open the operator console →</a> · <a href="{{ '/guides/fleet-rollout/' | relative_url }}">Run a proof-carrying rollout →</a></p>
   </div>
 </div>
@@ -127,7 +127,7 @@ secrets, host mounts, privileged mode, or undeclared ports.
 
 [Build and run the Hermes Agent adapter]({{ '/guides/hermes-agent/' | relative_url }}) ·
 [Browse an offline agent catalog]({{ '/guides/agent-catalog/' | relative_url }}) ·
-[Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }}) ·
+[Activate a qualified agent release]({{ '/guides/agent-activation/' | relative_url }}) ·
 [Roll it out through canary and batch gates]({{ '/guides/fleet-rollout/' | relative_url }}) ·
 [Inspect a fleet and submit an offline-signed command]({{ '/guides/operator-console/' | relative_url }}) ·
 [Shorten CLI commands and enable completion]({{ '/guides/cli/' | relative_url }}) ·

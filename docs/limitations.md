@@ -321,7 +321,7 @@ Every target must already have the exact image imported. The coordinator does no
 perform remote image transfer, registry pulls, placement, labels or selectors,
 parallel target execution, maintenance scheduling, desired-state reconciliation,
 arbitrary canaries, model scoring, A/B selection, or automatic rollback. The
-current Hermes recipe also requires a dedicated host, exactly one policy tenant,
+current qualified agent recipes also require a dedicated host, exactly one policy tenant,
 host-administrator admission, and explicitly enabled unquotaed persistent state.
 It is not the shared-host multi-tenant execution path.
 

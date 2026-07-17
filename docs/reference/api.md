@@ -431,7 +431,7 @@ not HTTP endpoints. They provide bounded,
 policy-bound Open Container Initiative (OCI) inspection and import; offline evidence
 verification and export; exact connector- and service-request permit issuance,
 verification, dispatch, and receipt correlation; one-node and ordered-fleet
-composition of the fixed Hermes activation contract; and read-only release drain
+composition of a fixed qualified agent activation contract; and read-only release drain
 and durable-format inspection. The rollout coordinator uses existing controller
 node, command, and evidence-capture APIs; there is no controller `/rollouts`
 resource and the controller does not hold rollout signing keys. The coordinator

@@ -46,7 +46,7 @@ Steward includes a replaceable open-source control plane, while nodes remain
 independently operable through public contracts. Nothing has a build-time or
 runtime dependency on a private package, API, account, or hosted service.
 
-For a qualified Hermes release, the operator-side rollout coordinator can require
+For a qualified Hermes or OpenClaw release, the operator-side rollout coordinator can require
 one verified canary before advancing explicit later batches across remote nodes.
 The same policy-authorized command key signs the exact rollout plan, each
 evidence-bound promotion into a later batch, and commands that name the applicable
@@ -58,7 +58,7 @@ aggregate binds the signed plan authorization, ordered promotion envelopes, and
 each target's exact signed admit, start, and canary command envelopes, so its digest
 commits those retained authorization bytes. It does not select nodes, transfer
 images, run arbitrary canaries, or roll back workloads automatically. The current
-Hermes recipe requires the exact image to be
+recipes require the exact image to be
 pre-imported on each dedicated target host.
 
 ## Install on Linux
@@ -114,7 +114,7 @@ command delivery, separately keyed Executor evidence witnessing, offline export,
 secret-free command and credential inventory, derived action-required findings,
 opt-in authenticated metrics, backup, and MCP. The
 [fleet rollout guide](https://hardrails.github.io/steward/guides/fleet-rollout/)
-shows how to promote one exact qualified Hermes release through a canary and
+shows how to promote one exact qualified agent release through a canary and
 operator-approved batches without giving the controller either signing key.
 
 Steward Control also embeds an observation-first React console at `/console/`. It
@@ -238,7 +238,7 @@ link that does not depend on comparing service clocks. A proof manifest is a
 correlation record; its signed companions and pinned public keys still require
 independent verification.
 
-The built-in Hermes recipe currently requires a dedicated host whose signed site
+The built-in qualified agent recipes currently require a dedicated host whose signed site
 policy contains exactly one tenant. It uses persistent Docker state, which has no
 portable hard byte or inode quota, and it uses the explicitly enabled host-local
 administrator path for node-local admission. Steward still supports stateless
@@ -252,7 +252,7 @@ The concrete workflow is:
    admits, starts, and pauses for a tenant-signed canary task derived from the
    real admission.
 3. `stewardctl activation attach -kind canary-task` adds that owner-only bundle;
-   rerunning advances through the deterministic Hermes result, verifies Gateway
+   rerunning advances through the deterministic release-selected result, verifies Gateway
    receipts, and records an Executor activation checkpoint.
 4. `stewardctl activation attach -kind final-witness` adds a controller evidence
    export that covers that checkpoint; rerunning writes the proof.
@@ -268,7 +268,7 @@ invalid or conflicting retained evidence are also sticky. Recovery requires
 stopping and destroying the failed workload, then using a new activation ID and
 an instance generation greater than the failed activation.
 
-Read [Activate a qualified Hermes release](https://hardrails.github.io/steward/guides/agent-activation/)
+Read [Activate a qualified agent release](https://hardrails.github.io/steward/guides/agent-activation/)
 for the exact commands, handoff files, runtime overrides, threat boundaries,
 failure handling, and proof limits.
 
@@ -546,7 +546,7 @@ without access to private source or infrastructure.
 ## Documentation
 
 - [Install and enroll](https://hardrails.github.io/steward/getting-started/)
-- [Activate a qualified Hermes release](https://hardrails.github.io/steward/guides/agent-activation/)
+- [Activate a qualified agent release](https://hardrails.github.io/steward/guides/agent-activation/)
 - [Operate a workload](https://hardrails.github.io/steward/guides/workload-lifecycle/)
 - [Install without public network access](https://hardrails.github.io/steward/guides/air-gapped/)
 - [Configure signed admission](https://hardrails.github.io/steward/guides/signed-admission/)

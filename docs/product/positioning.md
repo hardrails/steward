@@ -87,7 +87,7 @@ retries from rewriting generated history; it does not attest a hostile host.
 The catalog adds local discovery and comparison, not another authority: its
 curator signature authenticates descriptive inventory, while exact artifact
 allowlists, site policy, tenant intent, and live admission decide what can run.
-The current Hermes activation recipe requires a dedicated host with exactly one
+The current qualified Hermes and OpenClaw activation recipes require a dedicated host with exactly one
 policy tenant because its persistent Docker volume has no hard byte or inode
 quota. It does not weaken Steward's separate stateless shared-host boundary.
 

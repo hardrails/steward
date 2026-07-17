@@ -92,3 +92,7 @@ Steward does not independently reproduce the upstream image from source. Operato
 therefore trust the authenticated official OCI release as a build input. Sites that
 require source-reproducible OpenClaw images must add and qualify a separate build
 recipe before admission.
+
+The later [finite agent contract decision]({{ '/decisions/0026-use-proof-carrying-finite-agent-contracts/' | relative_url }})
+defines how this qualified surface enters proof-carrying activation and fleet
+rollout without exposing a generic verifier or release-supplied hook.

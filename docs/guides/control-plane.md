@@ -661,7 +661,7 @@ the site approaches a fixed limit.
 ## Coordinate a proof-carrying fleet rollout
 
 `stewardctl rollout` composes command delivery and evidence capture into one
-operator-controlled, canary-first Hermes rollout. The coordinator runs on a trusted
+operator-controlled, canary-first qualified-agent rollout. The coordinator runs on a trusted
 operator workstation, not inside Steward Control. It fixes an explicit target
 order, holds the command and task private keys, signs the exact plan and each
 evidence-bound promotion into a later batch, stores each exact signed command before

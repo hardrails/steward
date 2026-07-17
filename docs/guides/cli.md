@@ -95,8 +95,10 @@ stewardctl control operations status -no-context \
 
 ## Enable shell completion
 
-Completion covers commands, nested subcommands, common flags, and saved context
-names. It runs the local `stewardctl` binary and makes no network request.
+Completion covers commands, nested subcommands, common flags, saved context names,
+and the built-in `hermes` and `openclaw` Gateway service presets. It runs the local
+`stewardctl` binary and makes no network request. For example, after
+`stewardctl gateway service set -agent ` it offers only those two closed presets.
 
 For Bash:
 

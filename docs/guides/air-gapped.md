@@ -1,6 +1,6 @@
 ---
 title: Install Steward without public network access
-description: Import, verify, install, enroll, and activate Steward and a qualified Hermes release without contacting a public service from the target Linux server.
+description: Import, verify, install, enroll, and activate Steward and a qualified Hermes or OpenClaw release without contacting a public service from the target Linux server.
 section: How-to guide
 ---
 
@@ -257,7 +257,7 @@ accepted archive boundary.
 
 ## Activate a signed agent release without public Internet
 
-For proof-carrying Hermes activation, add these authenticated files to the
+For proof-carrying qualified-agent activation, add these authenticated files to the
 facility's workload import set:
 
 - the signed agent release and exact archive;
@@ -278,7 +278,7 @@ stewardctl agent-release verify \
   -archive hermes-agent-adapter.tar
 ```
 
-The current Hermes activation recipe requires a dedicated host and a signed site
+The current qualified agent recipes require a dedicated host and a signed site
 policy containing exactly one tenant. Configure Executor with
 `--allow-host-admin-intent` and
 `--allow-unquotaed-state-on-dedicated-host` before activation. The first flag

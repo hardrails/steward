@@ -135,7 +135,7 @@ task authority; changing the bundle or task ID does.
 The node-doctor canary verifies the general signed-task path. To select an
 outcome-led release, verify its exact offline archive, activate a newly admitted
 Hermes instance, keep canary signing off-node, and retain a portable evidence set,
-follow [Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }}).
+follow [Activate a qualified agent release]({{ '/guides/agent-activation/' | relative_url }}).
 
 ## Inspect before piping to root
 
