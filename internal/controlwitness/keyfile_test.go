@@ -44,6 +44,37 @@ func TestInitializeAndLoadPair(t *testing.T) {
 	}
 }
 
+func TestParsePublicUsesExactCanonicalSnapshot(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := marshalPublic(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParsePublic(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(parsed, public) {
+		t.Fatal("parsed controller witness public key changed bytes")
+	}
+	parsed[0] ^= 0xff
+	parsedAgain, err := ParsePublic(raw)
+	if err != nil || !bytes.Equal(parsedAgain, public) {
+		t.Fatalf("parsed controller witness key aliases caller bytes: %v", err)
+	}
+	for _, invalid := range [][]byte{
+		append(append([]byte(nil), raw...), '\n'),
+		[]byte("not a PEM key"),
+	} {
+		if _, err := ParsePublic(invalid); err == nil {
+			t.Fatal("non-canonical controller witness public key bytes were accepted")
+		}
+	}
+}
+
 func TestInitializeRefusesExistingPartialOrUnsafeState(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "witness")
 	if err := os.Mkdir(directory, 0o700); err != nil {

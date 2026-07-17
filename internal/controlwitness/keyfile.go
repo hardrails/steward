@@ -140,6 +140,13 @@ func LoadPublic(path string) (ed25519.PublicKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read controller witness public key: %w", err)
 	}
+	return ParsePublic(raw)
+}
+
+// ParsePublic validates the exact bytes of one canonical SubjectPublicKeyInfo
+// PEM Ed25519 key. It is useful when a caller must parse and retain the same
+// secure file snapshot instead of reopening a mutable pathname.
+func ParsePublic(raw []byte) (ed25519.PublicKey, error) {
 	block, rest := pem.Decode(raw)
 	if block == nil || block.Type != "PUBLIC KEY" || len(rest) != 0 || !bytes.Equal(raw, pem.EncodeToMemory(block)) {
 		return nil, errors.New("controller witness public key must contain one canonical PEM block")

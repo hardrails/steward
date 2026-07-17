@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
@@ -610,7 +612,7 @@ func newOfflineActivationFixture(t *testing.T) offlineActivationFixture {
 		witnessPublic, witnessPrivate,
 		baselineWitnessAt, finalWitnessAt,
 	)
-	witnessPublicPath := offlineWritePublicKey(
+	witnessPublicPath := offlineWriteWitnessPublicKey(
 		t, releaseFixture.directory, "controller-witness.public",
 		executorEvidence.witnessPublic,
 	)
@@ -1192,6 +1194,24 @@ func offlineWritePublicKey(
 	t.Helper()
 	path := filepath.Join(directory, name)
 	raw := []byte(base64.StdEncoding.EncodeToString(public) + "\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func offlineWriteWitnessPublicKey(
+	t *testing.T,
+	directory, name string,
+	public ed25519.PublicKey,
+) string {
+	t.Helper()
+	encoded, err := x509.MarshalPKIXPublicKey(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, name)
+	raw := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: encoded})
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}

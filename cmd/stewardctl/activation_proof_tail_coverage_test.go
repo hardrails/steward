@@ -16,6 +16,7 @@ import (
 
 	"github.com/hardrails/steward/internal/activation"
 	"github.com/hardrails/steward/internal/activationstore"
+	"github.com/hardrails/steward/internal/controlwitness"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -304,7 +305,7 @@ func newStoredProofTailFixture(t *testing.T) storedProofTailFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	witness, err := readPublicKey(offline.witnessPublicPath)
+	witness, err := controlwitness.LoadPublic(offline.witnessPublicPath)
 	if err != nil {
 		t.Fatal(err)
 	}

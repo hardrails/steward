@@ -18,6 +18,7 @@ import (
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/controlwitness"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -105,7 +106,7 @@ func loadActivationTrust(
 	}
 	var witness ed25519.PublicKey
 	if witnessPublicPath != "" {
-		witness, err = readPublicKey(witnessPublicPath)
+		witness, err = controlwitness.LoadPublic(witnessPublicPath)
 		if err != nil {
 			return activationTrust{}, fmt.Errorf("read activation controller witness key: %w", err)
 		}
