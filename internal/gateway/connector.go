@@ -55,7 +55,7 @@ func (s *Server) listenConnectorGrantLocked(id string) error {
 
 func (s *Server) connectorHandler(grantID string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if !s.allowConnectorAttempt(grantID, time.Now()) {
+		if !s.allowConnectorAttemptNow(grantID) {
 			writeGatewayError(w, http.StatusTooManyRequests, "connector_rate_limited", "connector attempt rate limit reached")
 			return
 		}
@@ -322,9 +322,22 @@ func grantActionAuthorityKeys(grant Grant, connectorID string) map[string]ed2551
 	return keys
 }
 
+func (s *Server) allowConnectorAttemptNow(grantID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Read the clock only after taking the limiter lock. If concurrent callers
+	// capture time before locking, the request with the later timestamp can
+	// commit first and make the other look like a clock rollback.
+	return s.allowConnectorAttemptLocked(grantID, time.Now())
+}
+
 func (s *Server) allowConnectorAttempt(grantID string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.allowConnectorAttemptLocked(grantID, now)
+}
+
+func (s *Server) allowConnectorAttemptLocked(grantID string, now time.Time) bool {
 	// A request already accepted by the Unix listener can outlive unregister.
 	// Do not let that late request recreate limiter state for a deleted grant.
 	if _, ok := s.grants[grantID]; !ok {
