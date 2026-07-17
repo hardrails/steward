@@ -252,6 +252,460 @@ func TestActivationCheckpointRequiresMatchingBegin(t *testing.T) {
 	}
 }
 
+func TestActivationCheckpointRejectsInterveningLifecycleInvalidation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		invalidate Event
+	}{
+		{
+			name: "lifecycle stop",
+			invalidate: func() Event {
+				event := activationMarkerEvent(LifecycleStop)
+				event.Outcome = Committed
+				return event
+			}(),
+		},
+		{
+			name: "lifecycle destroy",
+			invalidate: func() Event {
+				event := activationMarkerEvent(LifecycleDestroy)
+				event.Outcome = Compensated
+				return event
+			}(),
+		},
+		{
+			name: "drift",
+			invalidate: func() Event {
+				event := activationMarkerEvent(Drift)
+				event.Outcome = Committed
+				return event
+			}(),
+		},
+		{
+			name: "revocation",
+			invalidate: func() Event {
+				event := activationMarkerEvent(Revocation)
+				event.Outcome = Committed
+				return event
+			}(),
+		},
+		{
+			name: "state purge",
+			invalidate: func() Event {
+				event := activationMarkerEvent(StatePurge)
+				event.RuntimeRef = "state-runtime-a"
+				event.GrantID = "state"
+				event.Outcome = Committed
+				return event
+			}(),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log, path, _ := newLog(t)
+			defer log.Close()
+			if _, err := log.AppendActivationBegin(
+				activationMarkerEvent(ActivationBegin),
+			); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := log.Append(test.invalidate); err != nil {
+				t.Fatal(err)
+			}
+			if test.invalidate.Type == LifecycleStop {
+				started := test.invalidate
+				started.Type = LifecycleStart
+				if _, err := log.Append(started); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := readEvidenceBytes(t, path)
+			next := log.NextSequence()
+			if _, err := log.AppendActivationCheckpoint(
+				activationMarkerEvent(ActivationCheckpoint),
+			); !errors.Is(err, ErrActivationInvalidated) {
+				t.Fatalf("invalidated checkpoint error=%v", err)
+			}
+			if log.NextSequence() != next ||
+				!bytes.Equal(readEvidenceBytes(t, path), before) {
+				t.Fatal("invalidated checkpoint grew or changed the evidence log")
+			}
+		})
+	}
+}
+
+func TestActivationCheckpointRejectsWorkloadCompensationAfterStart(t *testing.T) {
+	for _, grantID := range []string{"workload", "unexpected-workload-scope"} {
+		t.Run(grantID, func(t *testing.T) {
+			log, path, _ := newLog(t)
+			defer log.Close()
+			if _, err := log.AppendActivationBegin(
+				activationMarkerEvent(ActivationBegin),
+			); err != nil {
+				t.Fatal(err)
+			}
+			started := activationMarkerEvent(LifecycleStart)
+			started.GrantID = "workload"
+			started.Outcome = Committed
+			if _, err := log.Append(started); err != nil {
+				t.Fatal(err)
+			}
+			compensated := activationMarkerEvent(JournalCompensate)
+			compensated.GrantID = grantID
+			compensated.Outcome = Compensated
+			compensated.ErrorCode = "failed_operation_contained"
+			if _, err := log.Append(compensated); err != nil {
+				t.Fatal(err)
+			}
+
+			before := readEvidenceBytes(t, path)
+			next := log.NextSequence()
+			if _, err := log.AppendActivationCheckpoint(
+				activationMarkerEvent(ActivationCheckpoint),
+			); !errors.Is(err, ErrActivationInvalidated) {
+				t.Fatalf("post-start compensation checkpoint error=%v", err)
+			}
+			if log.NextSequence() != next ||
+				!bytes.Equal(readEvidenceBytes(t, path), before) {
+				t.Fatal("post-start compensation rejection grew or changed the evidence log")
+			}
+		})
+	}
+}
+
+func TestActivationCheckpointAllowsStatePurgeCompensationAfterStart(t *testing.T) {
+	log, _, _ := newLog(t)
+	defer log.Close()
+	if _, err := log.AppendActivationBegin(
+		activationMarkerEvent(ActivationBegin),
+	); err != nil {
+		t.Fatal(err)
+	}
+	started := activationMarkerEvent(LifecycleStart)
+	started.GrantID = "workload"
+	started.Outcome = Committed
+	if _, err := log.Append(started); err != nil {
+		t.Fatal(err)
+	}
+	statePrepared := activationMarkerEvent(JournalPrepare)
+	statePrepared.RuntimeRef = "state-runtime-a"
+	statePrepared.GrantID = "state"
+	statePrepared.Outcome = Allowed
+	if _, err := log.Append(statePrepared); err != nil {
+		t.Fatal(err)
+	}
+	stateCompensated := statePrepared
+	stateCompensated.Type = JournalCompensate
+	stateCompensated.Outcome = Compensated
+	stateCompensated.ErrorCode = "state_purge_contained"
+	if _, err := log.Append(stateCompensated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.AppendActivationCheckpoint(
+		activationMarkerEvent(ActivationCheckpoint),
+	); err != nil {
+		t.Fatalf("state-purge compensation rejected checkpoint: %v", err)
+	}
+}
+
+func TestActivationCheckpointAllowsWorkloadCompensationBeforeStart(t *testing.T) {
+	log, _, _ := newLog(t)
+	defer log.Close()
+	if _, err := log.AppendActivationBegin(
+		activationMarkerEvent(ActivationBegin),
+	); err != nil {
+		t.Fatal(err)
+	}
+	startPrepared := activationMarkerEvent(JournalPrepare)
+	startPrepared.GrantID = "workload"
+	startPrepared.Outcome = Allowed
+	startPrepared.ErrorCode = "start"
+	if _, err := log.Append(startPrepared); err != nil {
+		t.Fatal(err)
+	}
+	compensated := startPrepared
+	compensated.Type = JournalCompensate
+	compensated.Outcome = Compensated
+	compensated.ErrorCode = "failed_start_contained"
+	if _, err := log.Append(compensated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(startPrepared); err != nil {
+		t.Fatal(err)
+	}
+	started := activationMarkerEvent(LifecycleStart)
+	started.GrantID = "workload"
+	started.Outcome = Committed
+	if _, err := log.Append(started); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.AppendActivationCheckpoint(
+		activationMarkerEvent(ActivationCheckpoint),
+	); err != nil {
+		t.Fatalf("contained pre-start compensation rejected checkpoint: %v", err)
+	}
+}
+
+func TestActivationCheckpointRechecksCausalityBeforeExactRetry(t *testing.T) {
+	log, path, _ := newLog(t)
+	defer log.Close()
+	begin := activationMarkerEvent(ActivationBegin)
+	checkpoint := activationMarkerEvent(ActivationCheckpoint)
+	if _, err := log.AppendActivationBegin(begin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.AppendActivationCheckpoint(checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	stopped := activationMarkerEvent(LifecycleStop)
+	stopped.Outcome = Committed
+	if _, err := log.Append(stopped); err != nil {
+		t.Fatal(err)
+	}
+	started := stopped
+	started.Type = LifecycleStart
+	if _, err := log.Append(started); err != nil {
+		t.Fatal(err)
+	}
+
+	before := readEvidenceBytes(t, path)
+	next := log.NextSequence()
+	if _, err := log.AppendActivationCheckpoint(checkpoint); !errors.Is(
+		err, ErrActivationInvalidated,
+	) {
+		t.Fatalf("exact checkpoint retry after invalidation error=%v", err)
+	}
+	if log.NextSequence() != next ||
+		!bytes.Equal(readEvidenceBytes(t, path), before) {
+		t.Fatal("invalidated exact retry grew or changed the evidence log")
+	}
+}
+
+func TestActivationInvalidationIndexSurvivesReopen(t *testing.T) {
+	log, path, _ := newLog(t)
+	private := append(ed25519.PrivateKey(nil), log.private...)
+	if _, err := log.AppendActivationBegin(
+		activationMarkerEvent(ActivationBegin),
+	); err != nil {
+		t.Fatal(err)
+	}
+	started := activationMarkerEvent(LifecycleStart)
+	started.GrantID = "workload"
+	started.Outcome = Committed
+	if _, err := log.Append(started); err != nil {
+		t.Fatal(err)
+	}
+	compensated := activationMarkerEvent(JournalCompensate)
+	compensated.GrantID = "workload"
+	compensated.Outcome = Compensated
+	if _, err := log.Append(compensated); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, private, "node-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.AppendActivationCheckpoint(
+		activationMarkerEvent(ActivationCheckpoint),
+	); !errors.Is(err, ErrActivationInvalidated) {
+		t.Fatalf("reopened invalidation index checkpoint error=%v", err)
+	}
+}
+
+func TestActivationCheckpointRejectsMatchingInvalidationBeforeBegin(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		append func(*testing.T, *Log)
+	}{
+		{
+			name: "runtime invalidation",
+			append: func(t *testing.T, log *Log) {
+				stopped := activationMarkerEvent(LifecycleStop)
+				stopped.Outcome = Committed
+				if _, err := log.Append(stopped); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "state purge",
+			append: func(t *testing.T, log *Log) {
+				purged := activationMarkerEvent(StatePurge)
+				purged.RuntimeRef = "state-runtime-a"
+				purged.GrantID = "state"
+				purged.Outcome = Committed
+				if _, err := log.Append(purged); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "start then workload compensation",
+			append: func(t *testing.T, log *Log) {
+				started := activationMarkerEvent(LifecycleStart)
+				started.GrantID = "workload"
+				started.Outcome = Committed
+				if _, err := log.Append(started); err != nil {
+					t.Fatal(err)
+				}
+				compensated := activationMarkerEvent(JournalCompensate)
+				compensated.GrantID = "workload"
+				compensated.Outcome = Compensated
+				if _, err := log.Append(compensated); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log, path, _ := newLog(t)
+			defer log.Close()
+			test.append(t, log)
+			if _, err := log.AppendActivationBegin(
+				activationMarkerEvent(ActivationBegin),
+			); err != nil {
+				t.Fatal(err)
+			}
+			before := readEvidenceBytes(t, path)
+			next := log.NextSequence()
+			if _, err := log.AppendActivationCheckpoint(
+				activationMarkerEvent(ActivationCheckpoint),
+			); !errors.Is(err, ErrActivationInvalidated) {
+				t.Fatalf("pre-begin invalidation checkpoint error=%v", err)
+			}
+			if log.NextSequence() != next ||
+				!bytes.Equal(readEvidenceBytes(t, path), before) {
+				t.Fatal("pre-begin invalidation rejection grew or changed the evidence log")
+			}
+		})
+	}
+}
+
+func TestActivationCheckpointRequiresExactInvalidationScope(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*Event)
+	}{
+		{name: "tenant", mutate: func(event *Event) { event.TenantID = "tenant-b" }},
+		{name: "runtime", mutate: func(event *Event) { event.RuntimeRef = "runtime-b" }},
+		{name: "generation", mutate: func(event *Event) { event.Generation++ }},
+		{name: "capsule", mutate: func(event *Event) { event.CapsuleDigest = "sha256:other-capsule" }},
+		{name: "policy", mutate: func(event *Event) { event.PolicyDigest = "sha256:other-policy" }},
+		{name: "outcome", mutate: func(event *Event) { event.Outcome = Failed }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log, _, _ := newLog(t)
+			defer log.Close()
+			if _, err := log.AppendActivationBegin(
+				activationMarkerEvent(ActivationBegin),
+			); err != nil {
+				t.Fatal(err)
+			}
+			unrelated := activationMarkerEvent(LifecycleStop)
+			unrelated.Outcome = Committed
+			test.mutate(&unrelated)
+			if _, err := log.Append(unrelated); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := log.AppendActivationCheckpoint(
+				activationMarkerEvent(ActivationCheckpoint),
+			); err != nil {
+				t.Fatalf("unrelated invalidation rejected checkpoint: %v", err)
+			}
+		})
+	}
+}
+
+func TestActivationCheckpointRequiresClosedStatePurgeScope(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*Event)
+	}{
+		{name: "tenant", mutate: func(event *Event) { event.TenantID = "tenant-b" }},
+		{name: "generation", mutate: func(event *Event) { event.Generation++ }},
+		{name: "capsule", mutate: func(event *Event) { event.CapsuleDigest = "sha256:other-capsule" }},
+		{name: "policy", mutate: func(event *Event) { event.PolicyDigest = "sha256:other-policy" }},
+		{name: "grant", mutate: func(event *Event) { event.GrantID = "not-state" }},
+		{name: "outcome", mutate: func(event *Event) { event.Outcome = Failed }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log, _, _ := newLog(t)
+			defer log.Close()
+			if _, err := log.AppendActivationBegin(
+				activationMarkerEvent(ActivationBegin),
+			); err != nil {
+				t.Fatal(err)
+			}
+			unrelated := activationMarkerEvent(StatePurge)
+			unrelated.RuntimeRef = "state-runtime-a"
+			unrelated.GrantID = "state"
+			unrelated.Outcome = Committed
+			test.mutate(&unrelated)
+			if _, err := log.Append(unrelated); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := log.AppendActivationCheckpoint(
+				activationMarkerEvent(ActivationCheckpoint),
+			); err != nil {
+				t.Fatalf("unrelated state purge rejected checkpoint: %v", err)
+			}
+		})
+	}
+}
+
+func TestActivationCheckpointRequiresExactPostStartCompensationScope(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		mutateStart func(*Event)
+		mutate      func(*Event)
+	}{
+		{name: "start grant", mutateStart: func(event *Event) { event.GrantID = "not-workload" }},
+		{name: "tenant", mutate: func(event *Event) { event.TenantID = "tenant-b" }},
+		{name: "runtime", mutate: func(event *Event) { event.RuntimeRef = "runtime-b" }},
+		{name: "generation", mutate: func(event *Event) { event.Generation++ }},
+		{name: "capsule", mutate: func(event *Event) { event.CapsuleDigest = "sha256:other-capsule" }},
+		{name: "policy", mutate: func(event *Event) { event.PolicyDigest = "sha256:other-policy" }},
+		{name: "outcome", mutate: func(event *Event) { event.Outcome = Failed }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log, _, _ := newLog(t)
+			defer log.Close()
+			if _, err := log.AppendActivationBegin(
+				activationMarkerEvent(ActivationBegin),
+			); err != nil {
+				t.Fatal(err)
+			}
+			started := activationMarkerEvent(LifecycleStart)
+			started.GrantID = "workload"
+			started.Outcome = Committed
+			if test.mutateStart != nil {
+				test.mutateStart(&started)
+			}
+			if _, err := log.Append(started); err != nil {
+				t.Fatal(err)
+			}
+			unrelated := activationMarkerEvent(JournalCompensate)
+			unrelated.GrantID = "workload"
+			unrelated.Outcome = Compensated
+			if test.mutate != nil {
+				test.mutate(&unrelated)
+			}
+			if _, err := log.Append(unrelated); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := log.AppendActivationCheckpoint(
+				activationMarkerEvent(ActivationCheckpoint),
+			); err != nil {
+				t.Fatalf("unrelated compensation rejected checkpoint: %v", err)
+			}
+		})
+	}
+}
+
 func TestActivationMarkerIndexesSurviveReopen(t *testing.T) {
 	log, path, _ := newLog(t)
 	private := append(ed25519.PrivateKey(nil), log.private...)
