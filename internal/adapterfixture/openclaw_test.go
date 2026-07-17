@@ -135,7 +135,9 @@ func TestOpenClawAdapterRecipeKeepsTheClosedRuntimeBoundary(t *testing.T) {
 		`process.env.OPENAI_BASE_URL !== "http://steward-relay:8080/v1"`,
 		`process.env.OPENAI_API_KEY !== "steward-local"`,
 		`allow: ["exec", "read"]`,
-		`activeRuns >= 1`,
+		`activeRuns + pendingRuns >= 1`,
+		`pendingRuns += 1`,
+		`pendingRuns -= 1`,
 		`server.maxConnections = 32`,
 		`sanitizeOpenClawResult`,
 	} {

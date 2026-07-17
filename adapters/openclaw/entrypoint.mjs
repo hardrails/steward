@@ -37,6 +37,7 @@ const FIXTURE_SOURCE = "/opt/steward/skills/steward-workspace-audit";
 const FIXTURE_TARGET = `${WORKSPACE}/skills/steward-workspace-audit`;
 const runs = new Map();
 let activeRuns = 0;
+let pendingRuns = 0;
 
 function fail(message) {
   process.stderr.write(`openclaw-adapter: ${message}\n`);
@@ -321,7 +322,7 @@ async function handle(request, response, model) {
     return;
   }
   if (request.method === "POST" && url.pathname === "/v1/runs") {
-    if (activeRuns >= 1) {
+    if (activeRuns + pendingRuns >= 1) {
       sendJSON(response, 429, { error: "capacity_exceeded", message: "one OpenClaw run is already active" });
       request.resume();
       return;
@@ -333,6 +334,7 @@ async function handle(request, response, model) {
       return;
     }
     let document;
+    pendingRuns += 1;
     try {
       document = JSON.parse((await readBody(request)).toString("utf8"));
     } catch (error) {
@@ -342,6 +344,8 @@ async function handle(request, response, model) {
         message: error instanceof Error ? error.message : "invalid JSON",
       });
       return;
+    } finally {
+      pendingRuns -= 1;
     }
     const keys = document && typeof document === "object" && !Array.isArray(document) ? Object.keys(document).sort() : [];
     if (!(keys.length === 1 && keys[0] === "message" || keys.length === 2 && keys[0] === "message" && keys[1] === "session_id") ||

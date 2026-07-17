@@ -498,7 +498,22 @@ const body = JSON.stringify({message: "x".repeat(65536)});
 const response = await fetch("http://127.0.0.1:18789/v1/runs", {method:"POST", headers:{"content-type":"application/json"}, body});
 if (response.status !== 413) process.exit(1);
 NODE
-record service.boundary passed allowlist_and_body_limit
+timeout 20 docker exec -i -u 65532:65532 "$agent_container" node --input-type=module - <<'NODE' || stop_gate service.boundary pending_run_not_reserved
+import net from "node:net";
+import { once } from "node:events";
+const slow = net.createConnection({ host: "127.0.0.1", port: 18789 });
+await once(slow, "connect");
+slow.write("POST /v1/runs HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{");
+await new Promise((resolve) => setTimeout(resolve, 100));
+const response = await fetch("http://127.0.0.1:18789/v1/runs", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ message: "This request must not pass the pending reservation." }),
+});
+slow.destroy();
+if (response.status !== 429) process.exit(1);
+NODE
+record service.boundary passed allowlist_body_and_pending_capacity
 
 docker exec -i -u 65532:65532 "$agent_container" node - <<'NODE' || stop_gate runtime.identity process_identity_drift
 const fs = require("fs");
