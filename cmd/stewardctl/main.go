@@ -78,6 +78,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return agentCatalogCommand(arguments[1:], stdout)
 	case "activation":
 		return activationCommand(arguments[1:], stdout)
+	case "rollout":
+		return rolloutCommand(arguments[1:], stdout)
 	case "upgrade":
 		return upgradeCommand(arguments[1:], stdout)
 	default:
@@ -101,6 +103,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl agent-release issue|verify ...")
 	fmt.Fprintln(writer, "       stewardctl agent-catalog issue|verify|list|search|show|compare ...")
 	fmt.Fprintln(writer, "       stewardctl activation create|attach|run|status|verify ...")
+	fmt.Fprintln(writer, "       stewardctl rollout create|status ...")
 	fmt.Fprintln(writer, "       stewardctl upgrade check-drained|inspect-formats -signed-admission configured|unconfigured ...")
 	return errors.New("invalid command")
 }
