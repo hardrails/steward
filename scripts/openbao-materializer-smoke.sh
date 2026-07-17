@@ -55,7 +55,8 @@ go run ./cmd/stewardctl secret openbao compile \
 CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go build -o "$work/stewardctl" ./cmd/stewardctl
 chmod 0755 "$work/stewardctl"
 
-docker run -d --name "$container" --user 0 --cap-add=IPC_LOCK -v "$work:/work" "$image" \
+docker run -d --name "$container" --user 0 --cap-add=IPC_LOCK \
+	-e BAO_SKIP_DROP_ROOT=1 -v "$work:/work" "$image" \
 	server -dev -dev-tls -dev-tls-cert-dir=/work/tls \
 	-dev-listen-address=127.0.0.1:8200 \
 	-dev-root-token-id=steward-smoke-root -dev-no-store-token >/dev/null
