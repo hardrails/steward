@@ -159,7 +159,7 @@ func TestVerifyRejectsVersionAndEffectModeAmbiguity(t *testing.T) {
 		{"v2 payload with padded mode", PayloadTypeV2,
 			bytes.Replace(v2Payload, []byte(`"effect_mode":"authorized"`), []byte(`"effect_mode":" authorized "`), 1)},
 		{"v2 payload with duplicate mode", PayloadTypeV2, duplicateModeV2},
-		{"unknown future payload type", "application/vnd.steward.action-permit.v3+json", v2Payload},
+		{"unknown future payload type", "application/vnd.steward.action-permit.v5+json", v2Payload},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
