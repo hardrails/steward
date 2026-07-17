@@ -634,7 +634,7 @@ function ControlRoom(props) {
         </div>
         <div className="read-only-boundary">
           <strong>REVIEW HERE. SIGN ELSEWHERE.</strong>
-          <span>The console can courier exact offline-signed commands. Signing material and every other mutation remain outside the browser.</span>
+          <span>The console can submit a command signed outside the browser. Signing keys and every other change stay outside.</span>
         </div>
         {tenantError ? <div className="flash-message is-error" role="alert">{tenantError}</div> : null}
         {refreshError ? <div className="flash-message is-error" role="alert">{refreshError}</div> : null}
@@ -930,8 +930,8 @@ function CommandsView({page, tenantID, onSubmit}) {
 
   return (
     <section className="view" aria-labelledby="commands-title">
-      <ViewHeading eyebrow="SIGNED BYTE COURIER" title="Command authority transfer">
-        Load a command signed outside this browser, compare its exact digest, and submit the unchanged envelope.
+      <ViewHeading eyebrow="OFFLINE-SIGNED COMMAND" title="Submit a signed command">
+        Load a command signed outside this browser, compare its exact digest, and submit the unchanged file.
       </ViewHeading>
       <div className="command-courier">
         <div className="courier-intake">
@@ -946,8 +946,8 @@ function CommandsView({page, tenantID, onSubmit}) {
             onChange={loadFile}
           />
           <p className="microcopy">
-            One DSSE JSON file, at most 750 KiB. The browser does not verify its signature.
-            The controller and node remain authoritative.
+            One signed command JSON file, at most 750 KiB. This preview does not verify the signature.
+            The controller checks scope and route; Executor verifies signature authority.
           </p>
           {!tenantID ? <p className="error-message">Select one tenant to enable command transfer.</p> : null}
         </div>
@@ -965,7 +965,7 @@ function CommandsView({page, tenantID, onSubmit}) {
               <div><dt>Tenant / node</dt><dd>{preview.statement.tenant_id} / {preview.statement.node_id}</dd></div>
               <div><dt>Instance</dt><dd>{preview.statement.instance_id}</dd></div>
               <div><dt>Runtime</dt><dd>{preview.statement.runtime_ref}</dd></div>
-              <div><dt>Fences</dt><dd>claim {preview.statement.claim_generation} · instance {preview.statement.instance_generation} · sequence {preview.statement.command_sequence}</dd></div>
+              <div><dt>Replay protections</dt><dd>claim generation {preview.statement.claim_generation} · instance generation {preview.statement.instance_generation} · command sequence {preview.statement.command_sequence}</dd></div>
               <div><dt>Issued</dt><dd>{formatTime(preview.statement.issued_at)}</dd></div>
               <div><dt>Expires</dt><dd>{formatTime(preview.statement.expires_at)}</dd></div>
               <div><dt>Signature key IDs</dt><dd>{preview.keyIDs.join(", ")}</dd></div>

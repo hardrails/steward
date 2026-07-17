@@ -1,6 +1,6 @@
 ---
 title: Operate a fleet with the embedded React console
-description: Inspect a scoped fleet and courier one exact offline-signed Executor command without placing signing keys or general mutation authority in the browser.
+description: Inspect a scoped fleet and submit one exact offline-signed Executor command without placing signing keys or general mutation authority in the browser.
 section: How-to guide
 ---
 
@@ -11,7 +11,7 @@ It shows the operations summary, derived attention findings, enrolled nodes,
 command metadata, and credential metadata already available through the bounded
 control API.
 
-The console has one deliberately narrow mutation: it can courier the exact bytes
+The console has one deliberately narrow mutation: it can submit the exact bytes
 of an Executor command that was already signed outside the browser. It cannot
 create, edit, approve, sign, retry, revoke, enroll, acknowledge, dismiss, export,
 or delete anything. Private signing keys and secret plaintext never belong in the
