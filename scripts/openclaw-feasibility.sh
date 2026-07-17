@@ -487,7 +487,7 @@ assert p.get("status") == 200
 assert b.get("schema_version") == "steward.adapter-negotiation.v1"
 assert b.get("adapter") == "openclaw" and b.get("adapter_contract") == "steward.openclaw.v1"
 assert b.get("upstream_revision") == sys.argv[1] and b.get("model_alias") == sys.argv[2]
-assert b.get("native_protocols") == ["http"] and b.get("task_protocol") == "openclaw.runs.v1"
+assert b.get("native_protocols") == ["http"] and b.get("task_protocol") == "lifecycle-v1"
 PY
 record adapter.negotiation passed exact_model_and_revision
 
@@ -550,9 +550,9 @@ wait_run() {
 	local reference=$1 terminal= response state
 	for _ in $(seq 1 "$run_timeout"); do
 		response=$(agent_http GET "/v1/runs/$reference") || return 1
-		state=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("body",{}).get("state",""))' <<<"$response")
+		state=$(python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("body",{}).get("status",""))' <<<"$response")
 		case $state in
-		succeeded) printf '%s' "$response"; return 0 ;;
+		completed) printf '%s' "$response"; return 0 ;;
 		failed)
 			if [[ $keep_failed == true ]]; then
 				printf '%s\n' "$response" >"$work/$reference-terminal.json"
@@ -575,10 +575,11 @@ import sys
 p = json.loads(sys.argv[2])
 b = p.get("body", {})
 r = b.get("result", {})
-assert p.get("status") == 200 and b.get("state") == "succeeded"
+assert p.get("status") == 200 and b.get("status") == "completed"
 assert r.get("payloads") == [{"media_url": None, "text": "STEWARD_OPENCLAW_WORKSPACE_AUDIT_OK"}]
 assert r.get("meta") == {"duration_ms": r["meta"]["duration_ms"], "model": sys.argv[1], "provider": "steward", "tool_calls": 1, "tool_failures": 0, "tools": ["exec"]}
 assert isinstance(r["meta"]["duration_ms"], int) and r["meta"]["duration_ms"] >= 0
+assert b.get("qualification") == {"fixture_id": "steward.workspace-audit.qualification.v1", "workspace_manifest_digest": "sha256:8a88036085cd27e3e0a85ab10f3fbfed492633fa76fd18a85bb478747c4d56d5"}
 canonical = json.dumps(r, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()
 digest = hashlib.sha256(canonical).hexdigest()
 assert b.get("result_sha256") == digest

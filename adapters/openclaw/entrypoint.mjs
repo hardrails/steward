@@ -9,6 +9,7 @@ import {
   constants,
   existsSync,
   fsyncSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -35,6 +36,12 @@ const SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const RUN_PATTERN = /^run_[a-f0-9]{32}$/;
 const FIXTURE_SOURCE = "/opt/steward/skills/steward-workspace-audit";
 const FIXTURE_TARGET = `${WORKSPACE}/skills/steward-workspace-audit`;
+const AUDIT_RESULT = `${WORKSPACE}/qualification/result.json`;
+const AUDIT_MANIFEST = "8a88036085cd27e3e0a85ab10f3fbfed492633fa76fd18a85bb478747c4d56d5";
+const AUDIT_FILES = [
+  { bytes: 40, path: "alpha.txt", sha256: "3e056c4704264fdc5b636bc7cfb9c9aece659721fe5327ded69d02bf8e56c5d9" },
+  { bytes: 93, path: "nested.json", sha256: "9bb742b5f09ef2c81ffcc169c649ac2821e8c51f56c9f2b7a19ee1099568e7ea" },
+];
 const runs = new Map();
 let activeRuns = 0;
 let pendingRuns = 0;
@@ -220,11 +227,43 @@ function boundedCapture(stream, child, onComplete) {
   stream.on("end", () => onComplete(Buffer.concat(chunks), size > MAX_RESULT_BYTES));
 }
 
+function readQualifiedAudit() {
+  const descriptor = openSync(AUDIT_RESULT, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let raw;
+  try {
+    const info = fstatSync(descriptor);
+    if (!info.isFile() || info.nlink !== 1 || info.uid !== 65532 || info.gid !== 65532 ||
+        (info.mode & 0o777) !== 0o600 || info.size < 1 || info.size > (64 << 10)) {
+      throw new Error("workspace audit result has an unsafe file identity");
+    }
+    raw = readFileSync(descriptor);
+    if (raw.length !== info.size) throw new Error("workspace audit result changed while reading");
+  } finally {
+    closeSync(descriptor);
+  }
+  const audit = JSON.parse(raw.toString("utf8"));
+  const keys = audit && typeof audit === "object" && !Array.isArray(audit) ? Object.keys(audit).sort() : [];
+  if (keys.join(",") !== "digest,file_count,files,schema_version,total_bytes" ||
+      audit.digest !== AUDIT_MANIFEST || audit.file_count !== AUDIT_FILES.length ||
+      audit.schema_version !== "steward.workspace-audit.result.v1" || audit.total_bytes !== 133 ||
+      JSON.stringify(audit.files) !== JSON.stringify(AUDIT_FILES) ||
+      !raw.equals(Buffer.from(`${JSON.stringify(audit)}\n`))) {
+    throw new Error("workspace audit result is not the qualified fixture result");
+  }
+  return {
+    fixture_id: "steward.workspace-audit.qualification.v1",
+    workspace_manifest_digest: `sha256:${audit.digest}`,
+  };
+}
+
 async function executeRun(record, message, sessionID, model) {
   activeRuns += 1;
-  record.state = "running";
+  record.status = "running";
   const messagePath = `/tmp/${record.run_id}.message`;
   try {
+    try { unlinkSync(AUDIT_RESULT); } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
     const descriptor = openSync(messagePath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try {
       writeFileSync(descriptor, message, "utf8");
@@ -280,10 +319,11 @@ async function executeRun(record, message, sessionID, model) {
     if (canonical.length > MAX_RESULT_BYTES) throw new Error("OpenClaw result exceeded 1 MiB");
     record.result = result;
     record.result_sha256 = createHash("sha256").update(canonical).digest("hex");
-    record.state = "succeeded";
+    record.qualification = readQualifiedAudit();
+    record.status = "completed";
   } catch (error) {
     record.error = error instanceof Error ? error.message.slice(0, 1024) : "OpenClaw run failed";
-    record.state = "failed";
+    record.status = "failed";
   } finally {
     activeRuns -= 1;
     try { unlinkSync(messagePath); } catch (error) {
@@ -295,7 +335,7 @@ async function executeRun(record, message, sessionID, model) {
 function pruneRuns() {
   if (runs.size < MAX_RETAINED_RUNS) return;
   for (const [id, record] of runs) {
-    if (record.state === "succeeded" || record.state === "failed") {
+    if (record.status === "completed" || record.status === "failed") {
       runs.delete(id);
       return;
     }
@@ -315,7 +355,7 @@ async function handle(request, response, model) {
       capabilities: [{ fixture_id: "steward-workspace-audit", id: "skill" }, { fixture_id: "agent-turn", id: "task" }],
       native_protocols: ["http"],
       schema_version: "steward.adapter-negotiation.v1",
-      task_protocol: "openclaw.runs.v1",
+      task_protocol: "lifecycle-v1",
       upstream_revision: REVISION,
       model_alias: model,
     });
@@ -356,7 +396,7 @@ async function handle(request, response, model) {
     }
     const runID = `run_${randomBytes(16).toString("hex")}`;
     const sessionID = document.session_id ?? runID.slice(4);
-    const record = { run_id: runID, state: "accepted" };
+    const record = { run_id: runID, status: "queued" };
     runs.set(runID, record);
     void executeRun(record, document.message, sessionID, model);
     sendJSON(response, 202, record);

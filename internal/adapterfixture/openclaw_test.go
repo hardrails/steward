@@ -138,6 +138,10 @@ func TestOpenClawAdapterRecipeKeepsTheClosedRuntimeBoundary(t *testing.T) {
 		`activeRuns + pendingRuns >= 1`,
 		`pendingRuns += 1`,
 		`pendingRuns -= 1`,
+		`record.status = "completed"`,
+		`workspace_manifest_digest: `,
+		`task_protocol: "lifecycle-v1"`,
+		`unlinkSync(AUDIT_RESULT)`,
 		`server.maxConnections = 32`,
 		`sanitizeOpenClawResult`,
 	} {
