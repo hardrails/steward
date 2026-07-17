@@ -392,7 +392,7 @@ func validateControllerEvidenceCaptureFrames(frames [][]byte) error {
 func decodeControllerEvidenceCaptureFrames(
 	encoded ControllerEvidenceCaptureFrameEncodingsBase64V1,
 ) ([][]byte, error) {
-	if encoded == nil || len(encoded) == 0 || len(encoded) > MaxControllerEvidenceCaptureFrames {
+	if len(encoded) == 0 || len(encoded) > MaxControllerEvidenceCaptureFrames {
 		return nil, fmt.Errorf(
 			"controller evidence capture must contain 1 through %d encoded frames",
 			MaxControllerEvidenceCaptureFrames,

@@ -320,11 +320,8 @@ func createRollout(arguments []string, stdout io.Writer) (resultErr error) {
 			ReleaseDigest: verifiedRelease.EnvelopeDigest,
 			PolicyDigest:  verifiedImport.PolicyDigest,
 			IntentDigest:  dsse.Digest(intentRaw),
-			Archive: activation.ArchiveV1{
-				Digest: archiveIdentity.Digest,
-				Bytes:  archiveIdentity.Bytes,
-			},
-			Transport: activation.TransportControlUplink,
+			Archive:       archiveIdentity,
+			Transport:     activation.TransportControlUplink,
 			Canary: activation.CanaryV1{
 				Kind: verifiedRelease.Release.Canary.Kind,
 			},

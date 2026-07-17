@@ -1056,11 +1056,7 @@ func deliveryTerminalReserveExtra(record deliveryRecord) int {
 }
 
 func executorDeliveryV3(delivery controlprotocol.ExecutorDeliveryV4) controlprotocol.ExecutorDeliveryV3 {
-	return controlprotocol.ExecutorDeliveryV3{
-		DeliveryID: delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
-		CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
-		CommandDSSEBase64: delivery.CommandDSSEBase64,
-	}
+	return controlprotocol.ExecutorDeliveryV3(delivery)
 }
 
 func executorReportV4Record(

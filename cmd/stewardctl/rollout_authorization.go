@@ -50,7 +50,7 @@ func authorizeRolloutRun(
 		return errors.New("rollout command key is not the same policy-authorized common command key")
 	}
 
-	authorizationRaw, present, err := optionalRolloutAuthorizationArtifact(
+	_, present, err := optionalRolloutAuthorizationArtifact(
 		store, rolloutstore.PlanAuthorizationFileName,
 		rollout.MaxPlanAuthorizationEnvelopeBytes,
 	)
@@ -71,7 +71,7 @@ func authorizeRolloutRun(
 		if err != nil {
 			return err
 		}
-		authorizationRaw, err = rollout.SignPlanAuthorizationV1(
+		authorizationRaw, err := rollout.SignPlanAuthorizationV1(
 			statement,
 			keys.commandID,
 			keys.commandPrivate,

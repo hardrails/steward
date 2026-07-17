@@ -811,11 +811,7 @@ func (store *Store) PollV4(identity controlauth.NodeIdentity, capabilities []str
 	}
 	result := make([]controlprotocol.ExecutorDeliveryV4, 0, len(deliveries))
 	for _, delivery := range deliveries {
-		result = append(result, controlprotocol.ExecutorDeliveryV4{
-			DeliveryID: delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
-			CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
-			CommandDSSEBase64: delivery.CommandDSSEBase64,
-		})
+		result = append(result, controlprotocol.ExecutorDeliveryV4(delivery))
 	}
 	return result, nil
 }

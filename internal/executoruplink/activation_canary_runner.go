@@ -54,10 +54,7 @@ func (runner *activationCanaryRunner) owns(
 	}
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
-	if sameActivationCanaryJob(runner.active, delivery) {
-		return true
-	}
-	return false
+	return sameActivationCanaryJob(runner.active, delivery)
 }
 
 // schedule returns true only when this caller must start the worker. A false

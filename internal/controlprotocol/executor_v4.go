@@ -194,13 +194,7 @@ func DecodeExecutorDeliveryV4(raw []byte) (ExecutorDeliveryV4, error) {
 }
 
 func (delivery ExecutorDeliveryV4) Validate() error {
-	return ExecutorDeliveryV3{
-		DeliveryID:         delivery.DeliveryID,
-		DeliveryGeneration: delivery.DeliveryGeneration,
-		CommandID:          delivery.CommandID,
-		CommandDigest:      delivery.CommandDigest,
-		CommandDSSEBase64:  delivery.CommandDSSEBase64,
-	}.Validate()
+	return ExecutorDeliveryV3(delivery).Validate()
 }
 
 func (projection ExecutorAdmissionProjectionV1) Validate() error {
