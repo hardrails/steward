@@ -75,7 +75,7 @@ printf '{"data":[{"id":"approved-model","object":"model"}]}\n' >"$work/model/v1/
 python3 -m http.server 18080 --bind 127.0.0.1 --directory "$work/model" >"$work/model.log" 2>&1 &
 model_pid=$!
 printf '%s\n' service-secret >"$work/service-token"
-printf '%s\n' upstream-secret >"$work/upstream-token"
+printf %s upstream-secret >"$work/upstream-token"
 chmod 0600 "$work/service-token" "$work/upstream-token"
 gid=$(id -g nobody 2>/dev/null || getent group nogroup | cut -d: -f3)
 printf '%s\n' "{

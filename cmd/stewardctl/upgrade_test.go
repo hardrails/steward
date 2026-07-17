@@ -575,7 +575,7 @@ func TestUpgradeBlocksLegacyTargetForProspectiveActionPermitConfig(t *testing.T)
 		t.Fatal(err)
 	}
 	credential := filepath.Join(fixture.directory, "ticketing.token")
-	if err := os.WriteFile(credential, []byte("ticketing-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("ticketing-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	public, _, err := ed25519.GenerateKey(rand.Reader)

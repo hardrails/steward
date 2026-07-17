@@ -122,7 +122,7 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	credential := filepath.Join(directory, "connector.token")
-	if err := os.WriteFile(credential, []byte("operator-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("operator-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	connectorConfig := Connector{

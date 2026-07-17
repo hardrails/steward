@@ -864,11 +864,9 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 				len(taskAuthorities) > 0 && egressRouteID.MatchString(runtimeGrant.ServiceID) && servicePort > 0) &&
 			((len(taskAuthorities) > 0 || authorizedEffects) && boundedText(runtimeGrant.NodeID, 128) ||
 				len(taskAuthorities) == 0 && !authorizedEffects && runtimeGrant.NodeID == "") &&
-			(runtimeGrant.EffectMode == "" || runtimeGrant.EffectMode == gateway.EffectModeStandard || authorizedEffects) &&
-			(!authorizedEffects && len(actionAuthorities) == 0 ||
-				authorizedEffects && len(runtimeGrant.EgressRouteIDs) == 0 &&
-					(len(runtimeGrant.ConnectorIDs) == 0 && len(actionAuthorities) == 0 ||
-						len(runtimeGrant.ConnectorIDs) > 0 && gateway.GrantActionAuthoritiesValid(actionAuthorities, runtimeGrant.ConnectorIDs))) &&
+			validRuntimeEffectAuthority(
+				runtimeGrant.EffectMode, runtimeGrant.EgressRouteIDs, runtimeGrant.ConnectorIDs, actionAuthorities,
+			) &&
 			validEgressRouteIDs(runtimeGrant.EgressRouteIDs) && validConnectorIDs(runtimeGrant.ConnectorIDs) &&
 			validRuntimeAdmissionBindings(runtimeGrant) &&
 			runtimeAllocationMatches(NetworkSpecFor(labels["io.hardrails.tenant"], labels["io.hardrails.instance"], generation),

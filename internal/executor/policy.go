@@ -281,12 +281,7 @@ func (w Workload) Validate() error {
 			(len(w.Runtime.TaskAuthorities) == 0 && w.Runtime.ServiceID != "") ||
 			((len(w.Runtime.TaskAuthorities) > 0 || authorizedEffects) && !boundedText(w.Runtime.NodeID, 128)) ||
 			(len(w.Runtime.TaskAuthorities) == 0 && !authorizedEffects && w.Runtime.NodeID != "") ||
-			(w.Runtime.EffectMode != "" && w.Runtime.EffectMode != gateway.EffectModeStandard && !authorizedEffects) ||
-			(authorizedEffects && len(w.Runtime.EgressRouteIDs) != 0) ||
-			(!authorizedEffects && len(w.Runtime.ActionAuthorities) != 0) ||
-			(authorizedEffects && len(w.Runtime.ConnectorIDs) > 0 &&
-				!gateway.GrantActionAuthoritiesValid(w.Runtime.ActionAuthorities, w.Runtime.ConnectorIDs)) ||
-			(authorizedEffects && len(w.Runtime.ConnectorIDs) == 0 && len(w.Runtime.ActionAuthorities) != 0) ||
+			!validRuntimeEffectAuthority(w.Runtime.EffectMode, w.Runtime.EgressRouteIDs, w.Runtime.ConnectorIDs, w.Runtime.ActionAuthorities) ||
 			(w.Runtime.Inference && !boundedText(w.Runtime.ModelAlias, 256)) ||
 			(w.Runtime.Inference && !boundedText(w.Runtime.RouteID, 128)) ||
 			(!w.Runtime.Inference && (w.Runtime.ModelAlias != "" || w.Runtime.RouteID != "")) ||
@@ -323,6 +318,22 @@ func (w Workload) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validRuntimeEffectAuthority(
+	effectMode string,
+	egressRouteIDs, connectorIDs []string,
+	actionAuthorities []gateway.GrantActionAuthority,
+) bool {
+	switch effectMode {
+	case "", gateway.EffectModeStandard:
+		return len(actionAuthorities) == 0
+	case gateway.EffectModeAuthorized:
+		return len(egressRouteIDs) == 0 && len(connectorIDs) > 0 && len(actionAuthorities) > 0 &&
+			gateway.GrantActionAuthoritiesValid(actionAuthorities, connectorIDs)
+	default:
+		return false
+	}
 }
 
 func signedRuntimeDigestMatches(imageReference, configDigest, runtimeDigest string) bool {

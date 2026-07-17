@@ -44,6 +44,17 @@ grants. Format 5 additionally retains authorized effect mode and the
 signed-policy-derived connector/action-key scopes. Activation therefore blocks a
 rollback that cannot preserve those bindings.
 
+Gateway treats every configured inference-route or connector credential file as
+the exact credential bytes and does not trim whitespace. The supported secret
+materialization contract requires 12 to 16,384 bytes in the visible ASCII range
+`0x21` through `0x7e`; Gateway itself also enforces that lower bound for connector
+credentials. A file ending in the line feed commonly added by `echo` therefore
+fails closed. Before activation, run the
+[secret materialization preflight]({{ '/guides/secrets/' | relative_url }})
+against every binding and re-materialize any older credential file that contains
+leading or trailing whitespace. Gateway service and uplink bearer files use
+separate formats and are not covered by this credential-file rule.
+
 Executor evidence format 1 contains the original admission, mutation, lifecycle,
 policy, drift, and revocation vocabulary. Format 2 adds the closed
 `activation_begin` and `activation_checkpoint` marker types. One signed evidence

@@ -346,11 +346,14 @@ func newGatewayEffectsFixture(t *testing.T) *gatewayEffectsFixture {
 	tokenPath := filepath.Join(directory, "gateway.token")
 	mailCredentialPath := filepath.Join(directory, "mail.credential")
 	vaultCredentialPath := filepath.Join(directory, "vault.credential")
+	if err := os.WriteFile(tokenPath, []byte("gateway-service-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for path, value := range map[string]string{
-		tokenPath: "gateway-service-token", mailCredentialPath: "mail-upstream-secret",
+		mailCredentialPath:  "mail-upstream-secret",
 		vaultCredentialPath: "vault-upstream-secret",
 	} {
-		if err := os.WriteFile(path, []byte(value+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

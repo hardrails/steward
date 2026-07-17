@@ -229,6 +229,9 @@ func TestWorkloadValidatesAuthorizedEffectsRuntimeGrant(t *testing.T) {
 		{"node removed", func(value *RuntimeGrant) { value.NodeID = "" }},
 		{"generic egress added", func(value *RuntimeGrant) { value.EgressRouteIDs = []string{"public-web"} }},
 		{"authority removed", func(value *RuntimeGrant) { value.ActionAuthorities = nil }},
+		{"connectors and authority removed", func(value *RuntimeGrant) {
+			value.ConnectorIDs, value.ActionAuthorities = nil, nil
+		}},
 		{"authority malformed", func(value *RuntimeGrant) { value.ActionAuthorities[0].PublicKey = "not-base64" }},
 		{"scope removed", func(value *RuntimeGrant) { value.ActionAuthorities[0].ConnectorIDs = nil }},
 		{"bindings removed", func(value *RuntimeGrant) { value.CapsuleDigest, value.PolicyDigest = "", "" }},
@@ -242,6 +245,36 @@ func TestWorkloadValidatesAuthorizedEffectsRuntimeGrant(t *testing.T) {
 			test.mutate(candidate.Runtime)
 			if err := candidate.Validate(); err == nil {
 				t.Fatal("invalid authorized-effects runtime accepted")
+			}
+		})
+	}
+}
+
+func TestRuntimeEffectAuthorityRequiresAnEffectBearingAuthorizedGrant(t *testing.T) {
+	authority := gateway.GrantActionAuthority{
+		KeyID:        "effects-approver",
+		PublicKey:    base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+		ConnectorIDs: []string{"issues"},
+	}
+	for _, test := range []struct {
+		name        string
+		mode        string
+		egress      []string
+		connectors  []string
+		authorities []gateway.GrantActionAuthority
+		want        bool
+	}{
+		{name: "standard", mode: gateway.EffectModeStandard, connectors: []string{"issues"}, want: true},
+		{name: "authorized", mode: gateway.EffectModeAuthorized, connectors: []string{"issues"}, authorities: []gateway.GrantActionAuthority{authority}, want: true},
+		{name: "effectless authorized", mode: gateway.EffectModeAuthorized},
+		{name: "authorized without authority", mode: gateway.EffectModeAuthorized, connectors: []string{"issues"}},
+		{name: "authorized with generic egress", mode: gateway.EffectModeAuthorized, egress: []string{"public-web"}, connectors: []string{"issues"}, authorities: []gateway.GrantActionAuthority{authority}},
+		{name: "standard with authority", mode: gateway.EffectModeStandard, connectors: []string{"issues"}, authorities: []gateway.GrantActionAuthority{authority}},
+		{name: "unknown mode", mode: "unknown", connectors: []string{"issues"}, authorities: []gateway.GrantActionAuthority{authority}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validRuntimeEffectAuthority(test.mode, test.egress, test.connectors, test.authorities); got != test.want {
+				t.Fatalf("validRuntimeEffectAuthority()=%t want %t", got, test.want)
 			}
 		})
 	}
