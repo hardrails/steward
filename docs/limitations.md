@@ -156,6 +156,12 @@ to drain grants, use provider check-and-set, compile and review the new expected
 version, wait for convergence, validate Gateway, and reload. Steward Control, MCP,
 and the React console do not receive or mutate materializer state or secret values.
 
+The hardened AppRole handoff removes a one-use SecretID after authentication.
+Consequently, an Agent crash or planned restart needs a freshly issued SecretID;
+the generated unit rate-limits failed restart attempts but cannot retrieve bootstrap
+authority for itself. Persistent rendered values can keep Gateway available while
+the materializer is down, but rotation stops until authentication is restored.
+
 ## Signed admission is opt-in
 
 The host-control `/v1/workloads` endpoint is available only without signed

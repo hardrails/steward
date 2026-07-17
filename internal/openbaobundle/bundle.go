@@ -240,6 +240,8 @@ Description=Steward OpenBao secret materializer
 After=network-online.target
 Wants=network-online.target
 Before=steward-gateway.service
+StartLimitIntervalSec=5min
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -249,7 +251,7 @@ UMask=0077
 ExecStartPre=%s secret materialization prepare -manifest %s -root %s -status-root %s
 ExecStart=%s agent -config=%s -log-format=json -log-level=info
 Restart=on-failure
-RestartSec=5s
+RestartSec=10s
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateTmp=true

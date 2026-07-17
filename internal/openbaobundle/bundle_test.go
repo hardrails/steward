@@ -47,7 +47,7 @@ func TestCompileProducesClosedSecretFreeHardenedBundle(t *testing.T) {
 		t.Fatalf("policy is not exact read-only:\n%s", policy)
 	}
 	unit := string(byName["steward-openbao-agent.service"].Data)
-	for _, required := range []string{"NoNewPrivileges=true", "ProtectSystem=strict", "CapabilityBoundingSet=", "MemoryDenyWriteExecute=true", "secret materialization prepare"} {
+	for _, required := range []string{"StartLimitIntervalSec=5min", "StartLimitBurst=3", "RestartSec=10s", "NoNewPrivileges=true", "ProtectSystem=strict", "CapabilityBoundingSet=", "MemoryDenyWriteExecute=true", "secret materialization prepare"} {
 		if !strings.Contains(unit, required) {
 			t.Fatalf("unit omits %q", required)
 		}
