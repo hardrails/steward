@@ -243,10 +243,14 @@ func verifyRetainedRolloutTarget(
 		if target.admission == nil || len(target.canaryCommandRaw) == 0 {
 			return errors.New("retained canary result has incomplete authenticated command companions")
 		}
+		canaryRaw, err := canaryOuterPayload(target.canaryCommandRaw, keys)
+		if err != nil {
+			return fmt.Errorf("retained canary command payload: %w", err)
+		}
 		verifiedCanary, err := rolloutdriver.VerifyCanaryV1(rolloutdriver.VerifyCanaryInputV1{
 			Prepared: target.prepared, Admission: *target.admission,
-			CommandRaw: canaryOuterPayload(target.canaryCommandRaw, keys),
-			ResultRaw:  resultRaw, ReceiptPublicKey: target.gatewayPublic,
+			CommandRaw: canaryRaw, ResultRaw: resultRaw,
+			ReceiptPublicKey: target.gatewayPublic,
 		})
 		if err != nil {
 			return fmt.Errorf("retained canary result: %w", err)
@@ -426,12 +430,12 @@ func parseCanonicalRolloutAdmission(
 	return projection, nil
 }
 
-func canaryOuterPayload(raw []byte, keys rolloutRunKeys) []byte {
+func canaryOuterPayload(raw []byte, keys rolloutRunKeys) ([]byte, error) {
 	_, statement, err := historicalRolloutCommand(raw, keys.commandID, keys.commandPublic)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("extract canary outer payload: %w", err)
 	}
-	return append([]byte(nil), statement.Payload...)
+	return append([]byte(nil), statement.Payload...), nil
 }
 
 func correlateRolloutCapture(

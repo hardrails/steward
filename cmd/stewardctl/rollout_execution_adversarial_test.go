@@ -269,6 +269,10 @@ func TestRolloutExecutionValidationUtilitiesFailClosed(t *testing.T) {
 	if _, err := rolloutStoredCommandDeadline([]byte("not dsse"), false); err == nil {
 		t.Fatal("malformed retained command accepted")
 	}
+	if _, err := canaryOuterPayload([]byte("not dsse"), rolloutRunKeys{}); err == nil ||
+		!strings.Contains(err.Error(), "extract canary outer payload") {
+		t.Fatalf("malformed canary outer command error=%v", err)
+	}
 	if _, err := rolloutBatchContaining(run.plan, len(run.plan.Targets)); err == nil {
 		t.Fatal("out-of-range target acquired a deterministic batch")
 	}

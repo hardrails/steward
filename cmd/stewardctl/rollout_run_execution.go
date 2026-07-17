@@ -530,11 +530,17 @@ func executeRolloutTarget(
 			if err != nil {
 				return err
 			}
+			canaryRaw, err := canaryOuterPayload(target.canaryCommandRaw, keys)
+			if err != nil {
+				return markRolloutActionRequired(
+					store, run, index, stdout, jsonOutput, reasonCanaryInvalid, err,
+				)
+			}
 			verifiedCanary, err := rolloutdriver.VerifyCanaryV1(
 				rolloutdriver.VerifyCanaryInputV1{
 					Prepared: target.prepared, Admission: *target.admission,
-					CommandRaw: canaryOuterPayload(target.canaryCommandRaw, keys),
-					ResultRaw:  resultRaw, ReceiptPublicKey: target.gatewayPublic,
+					CommandRaw: canaryRaw, ResultRaw: resultRaw,
+					ReceiptPublicKey: target.gatewayPublic,
 				},
 			)
 			if err != nil {
@@ -1030,8 +1036,11 @@ func rolloutTargetPhaseDeadline(
 	seconds uint32,
 ) (time.Time, error) {
 	started, err := time.Parse(time.RFC3339Nano, state.UpdatedAt)
-	if err != nil || seconds <= 0 {
+	if err != nil {
 		return time.Time{}, errors.New("rollout phase has no valid fixed deadline")
+	}
+	if seconds == 0 {
+		return time.Time{}, errors.New("rollout phase has no timeout")
 	}
 	deadline := started.Add(time.Duration(seconds) * time.Second)
 	global, _ := time.Parse(time.RFC3339Nano, plan.Deadline)
