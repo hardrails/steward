@@ -279,6 +279,17 @@ func TestPrepareCreatesOnlySafeTenantDirectories(t *testing.T) {
 	if err := Prepare(unsafeRoot, materializationRoot(t), manifest); err == nil {
 		t.Fatal("Prepare accepted an unsafe tenant boundary")
 	}
+	cleanRoot := materializationRoot(t)
+	unsafeStatusRoot := materializationRoot(t)
+	if err := os.Chmod(unsafeStatusRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := Prepare(cleanRoot, unsafeStatusRoot, manifest); err == nil {
+		t.Fatal("Prepare accepted an unsafe status root")
+	}
+	if _, err := os.Lstat(filepath.Join(cleanRoot, "tenant-a")); !os.IsNotExist(err) {
+		t.Fatalf("Prepare mutated the secret root before rejecting the status root: %v", err)
+	}
 }
 
 func materializationRoot(t *testing.T) string {

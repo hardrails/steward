@@ -172,9 +172,9 @@ func validate(plan Plan) ([]Binding, error) {
 		identities[identity] = struct{}{}
 		// A provider field has one tenant-scoped destination. Reuse would couple
 		// independent tenant lifecycles and make revocation ambiguous.
-		source := binding.KVPath + "\x00" + binding.Field
+		source := binding.KVPath
 		if _, exists := sources[source]; exists {
-			return nil, errors.New("one OpenBao field cannot be shared across materialization targets")
+			return nil, errors.New("one OpenBao KV path cannot be shared across materialization targets")
 		}
 		sources[source] = struct{}{}
 	}

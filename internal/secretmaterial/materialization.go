@@ -142,6 +142,11 @@ func CheckWithStatus(rootPath, statusRootPath string, manifest Manifest) (Report
 	if rootPath == statusRootPath {
 		return Report{}, errors.New("secret and status roots must be distinct")
 	}
+	secretRoot, secretErr := os.Lstat(rootPath)
+	statusRoot, statusErr := os.Lstat(statusRootPath)
+	if secretErr == nil && statusErr == nil && os.SameFile(secretRoot, statusRoot) {
+		return Report{}, errors.New("secret and status roots must not alias the same directory")
+	}
 	report, err := checkSecrets(rootPath, manifest)
 	if err != nil {
 		return Report{}, err
@@ -266,11 +271,17 @@ func Prepare(rootPath, statusRootPath string, manifest Manifest) error {
 	if manifest.SchemaVersion != ManifestSchemaV2 || rootPath == statusRootPath {
 		return errors.New("materialization preparation requires schema v2 and distinct roots")
 	}
+	owner := uint32(os.Geteuid())
+	type rootBoundary struct {
+		path   string
+		before os.FileInfo
+		device uint64
+	}
+	boundaries := make([]rootBoundary, 0, 2)
 	for _, rootPath := range []string{rootPath, statusRootPath} {
 		if !filepath.IsAbs(rootPath) || filepath.Clean(rootPath) != rootPath || strings.ContainsRune(rootPath, '\x00') {
 			return errors.New("materialization roots must be clean absolute paths")
 		}
-		owner := uint32(os.Geteuid())
 		before, err := os.Lstat(rootPath)
 		if err != nil || !validOwnedDirectory(before, owner) {
 			return fmt.Errorf("materialization root %q must already be caller-owned, non-symlink, and mode 0700", rootPath)
@@ -279,9 +290,20 @@ func Prepare(rootPath, statusRootPath string, manifest Manifest) error {
 		if !ok {
 			return fmt.Errorf("materialization root %q has unsupported filesystem metadata", rootPath)
 		}
-		root, err := os.OpenRoot(rootPath)
+		boundaries = append(boundaries, rootBoundary{path: rootPath, before: before, device: device})
+	}
+	if os.SameFile(boundaries[0].before, boundaries[1].before) {
+		return errors.New("materialization roots must not alias the same directory")
+	}
+	for _, boundary := range boundaries {
+		root, err := os.OpenRoot(boundary.path)
 		if err != nil {
-			return fmt.Errorf("open materialization root %q: %w", rootPath, err)
+			return fmt.Errorf("open materialization root %q: %w", boundary.path, err)
+		}
+		opened, err := root.Stat(".")
+		if err != nil || !sameOwnedDirectoryIdentity(boundary.before, opened, owner) {
+			root.Close()
+			return fmt.Errorf("materialization root %q changed while opening", boundary.path)
 		}
 		seen := make(map[string]struct{})
 		for _, binding := range manifest.Bindings {
@@ -294,15 +316,15 @@ func Prepare(rootPath, statusRootPath string, manifest Manifest) error {
 				return fmt.Errorf("create tenant materialization directory %q: %w", binding.TenantID, err)
 			}
 			info, err := root.Lstat(binding.TenantID)
-			if err != nil || !validOwnedDirectory(info, owner) || !sameFilesystem(info, device) {
+			if err != nil || !validOwnedDirectory(info, owner) || !sameFilesystem(info, boundary.device) {
 				root.Close()
 				return fmt.Errorf("tenant materialization directory %q is unsafe", binding.TenantID)
 			}
 		}
 		root.Close()
-		after, err := os.Lstat(rootPath)
-		if err != nil || !sameOwnedDirectoryIdentity(before, after, owner) {
-			return fmt.Errorf("materialization root %q changed while preparing", rootPath)
+		after, err := os.Lstat(boundary.path)
+		if err != nil || !sameOwnedDirectoryIdentity(boundary.before, after, owner) {
+			return fmt.Errorf("materialization root %q changed while preparing", boundary.path)
 		}
 	}
 	return nil

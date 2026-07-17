@@ -108,7 +108,7 @@ sudo stewardctl secret openbao compile \
 
 The compiler strictly decodes a bounded plan and rejects HTTP origins, credentials
 in URLs, wildcards, path traversal, missing KV v2 `/data/` paths, zero versions,
-shared provider fields, overlapping tenant targets, and writable paths that overlap
+shared KV paths, overlapping tenant targets, and writable paths that overlap
 configuration, trust, or executable paths. It creates a mode-`0700` directory with
 four mode-`0640` files:
 
@@ -145,7 +145,10 @@ makes revocation local to one machine.
 OpenBao's [KV v2 engine](https://openbao.org/docs/secrets/kv/kv-v2/) exposes data
 reads under `/data/` and returns a monotonic version in response metadata. Use
 check-and-set (`-cas`) for operator writes so concurrent rotation cannot silently
-replace a newer value. Configure a
+replace a newer value. Store one credential field per KV path. A KV v2 read returns
+the whole document, so splitting tenant credentials into different fields at one
+path does not create an access boundary; the compiler rejects reuse of a path
+across targets. Configure a
 [declarative audit device](https://openbao.org/docs/configuration/audit/) on every
 OpenBao server and protect the audit output as sensitive data.
 

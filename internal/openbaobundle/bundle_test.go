@@ -95,6 +95,9 @@ func TestCompileRejectsBroadOrAliasedAuthority(t *testing.T) {
 		{"shared source", func(p *Plan) {
 			p.Bindings = append(p.Bindings, Binding{TenantID: "tenant-b", SecretID: "key", Purpose: secretmaterial.PurposeConnector, KVPath: p.Bindings[0].KVPath, Field: p.Bindings[0].Field, ExpectedVersion: 1})
 		}},
+		{"shared KV document", func(p *Plan) {
+			p.Bindings = append(p.Bindings, Binding{TenantID: "tenant-b", SecretID: "key", Purpose: secretmaterial.PurposeConnector, KVPath: p.Bindings[0].KVPath, Field: "other", ExpectedVersion: 1})
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
