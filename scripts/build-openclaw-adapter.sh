@@ -6,7 +6,8 @@ unset CDPATH NODE_OPTIONS OPENCLAW_IMAGE OPENCLAW_SOURCE_REVISION
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-readonly root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+root=
+script_path=
 readonly expected_repository=https://github.com/openclaw/openclaw.git
 readonly expected_release=v2026.7.1
 readonly expected_revision=2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4
@@ -139,7 +140,9 @@ integer_range --save-timeout "$save_timeout" 30 1800
 integer_range --max-archive-bytes "$max_archive_bytes" $((1024 * 1024 * 1024)) $((16 * 1024 * 1024 * 1024))
 integer_range --min-free-bytes "$min_free_bytes" $((2 * 1024 * 1024 * 1024)) $((1024 * 1024 * 1024 * 1024))
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || die "the qualified build platform is Linux on amd64"
-for command in docker git python3 sha256sum timeout; do require_command "$command"; done
+for command in docker python3 sha256sum timeout tar readlink; do require_command "$command"; done
+script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+root=$(cd "$(dirname "$script_path")/.." && pwd -P)
 
 output_parent=$(dirname "$output")
 output_name=$(basename "$output")
@@ -165,17 +168,88 @@ else:
     raise SystemExit(1)
 PY
 
-checkout=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)
-[[ $checkout == "$root" ]] || die "run this builder from a committed Steward checkout"
-adapter_commit=$(git -C "$root" rev-parse HEAD)
-adapter_tree=$(git -C "$root" rev-parse "HEAD:adapters/openclaw" 2>/dev/null || true)
-[[ $adapter_commit =~ ^[a-f0-9]{40,64}$ && $adapter_tree =~ ^[a-f0-9]{40,64}$ ]] || die "committed adapter identity is unavailable"
-git -C "$root" diff --quiet -- adapters/openclaw || die "adapters/openclaw has uncommitted changes"
-git -C "$root" diff --cached --quiet -- adapters/openclaw || die "adapters/openclaw has staged changes"
+adapter_source=
+adapter_path=$root/adapters/openclaw
+adapter_commit=unavailable
+adapter_tree=unavailable
+release_version=unavailable
+release_manifest_sha256=unavailable
+checkout=
+if command -v git >/dev/null 2>&1; then
+	checkout=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)
+fi
+if [[ $checkout == "$root" ]]; then
+	adapter_source=git-checkout
+	adapter_commit=$(git -C "$root" rev-parse HEAD)
+	adapter_tree=$(git -C "$root" rev-parse "HEAD:adapters/openclaw" 2>/dev/null || true)
+	[[ $adapter_commit =~ ^[a-f0-9]{40,64}$ && $adapter_tree =~ ^[a-f0-9]{40,64}$ ]] || die "committed adapter identity is unavailable"
+	git -C "$root" diff --quiet -- adapters/openclaw || die "adapters/openclaw has uncommitted changes"
+	git -C "$root" diff --cached --quiet -- adapters/openclaw || die "adapters/openclaw has staged changes"
+	git -C "$root" diff --quiet -- scripts/build-openclaw-adapter.sh || die "builder has uncommitted changes"
+	git -C "$root" diff --cached --quiet -- scripts/build-openclaw-adapter.sh || die "builder has staged changes"
+elif [[ -f $(dirname "$root")/release.json && -d $adapter_path ]]; then
+	adapter_source=release-payload
+	release_manifest=$(dirname "$root")/release.json
+	release_values=$(python3 -I - "$adapter_path" "$script_path" "$release_manifest" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import re
+import stat
+import sys
+
+adapter, script, manifest_path = map(pathlib.Path, sys.argv[1:])
+if manifest_path.stat().st_size > 1 << 20:
+    raise SystemExit(1)
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+files = manifest.get("files") if isinstance(manifest, dict) else None
+version = manifest.get("version") if isinstance(manifest, dict) else None
+if (
+    manifest.get("schema") != "steward.release.v2"
+    or manifest.get("os") != "linux"
+    or not isinstance(files, dict)
+    or not isinstance(version, str)
+    or re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", version) is None
+):
+    raise SystemExit(1)
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+actual = set()
+for path in sorted(adapter.rglob("*")):
+    info = os.lstat(path)
+    if stat.S_ISDIR(info.st_mode):
+        continue
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise SystemExit(1)
+    actual.add("integration/adapters/openclaw/" + path.relative_to(adapter).as_posix())
+expected = {name for name in files if name.startswith("integration/adapters/openclaw/")}
+if actual != expected:
+    raise SystemExit(1)
+for name in actual:
+    path = adapter / name.removeprefix("integration/adapters/openclaw/")
+    if digest(path) != files.get(name):
+        raise SystemExit(1)
+builder_name = "integration/scripts/build-openclaw-adapter.sh"
+if digest(script) != files.get(builder_name):
+    raise SystemExit(1)
+print(version)
+print(digest(manifest_path))
+PY
+	) || die "packaged OpenClaw adapter differs from release.json"
+	mapfile -t release_fields <<<$release_values
+	(( ${#release_fields[@]} == 2 )) || die "packaged release identity is incomplete"
+	release_version=${release_fields[0]}
+	release_manifest_sha256=${release_fields[1]}
+else
+	die "OpenClaw adapter is absent from a committed checkout or verified release payload"
+fi
 
 work=$(mktemp -d /tmp/steward-openclaw-build.XXXXXX)
 staging=$output_parent/.${output_name}.steward-build-$$
-image_tag=steward-openclaw-adapter:source-${adapter_tree:0:12}
+image_tag=unavailable
 cleanup() {
 	rm -rf "$work" "$staging"
 	if [[ $keep_image != true ]]; then
@@ -189,12 +263,19 @@ available_kib=$(df -Pk -- "$output_parent" | awk 'NR == 2 { print $4 }')
 (( available_kib * 1024 >= min_free_bytes )) || die "output filesystem has less than $min_free_bytes free bytes"
 
 mkdir -m 0700 "$work/context"
-git -C "$root" archive "$adapter_commit:adapters/openclaw" | tar -xf - -C "$work/context"
+if [[ $adapter_source == git-checkout ]]; then
+	git -C "$root" archive "$adapter_commit:adapters/openclaw" | tar -xf - -C "$work/context"
+else
+	(cd "$adapter_path" && tar -cf - .) | tar -xf - -C "$work/context"
+fi
 (
 	cd "$work/context"
 	sha256sum -c source-inputs.sha256
 ) >/dev/null || die "committed adapter source inventory is invalid"
 source_manifest_sha256=$(sha256sum "$work/context/source-inputs.sha256" | awk '{print $1}')
+adapter_identity=$adapter_tree
+[[ $adapter_identity == unavailable ]] && adapter_identity=$source_manifest_sha256
+image_tag=steward-openclaw-adapter:source-${adapter_identity:0:12}
 
 progress "Pulling the exact upstream image"
 timeout "$pull_timeout" docker pull "$base_image" >/dev/null || die "pinned base-image pull failed"
@@ -252,7 +333,7 @@ image_config_digest=${archive_image_fields[1]}
 
 python3 -I - "$staging/attestation.json" "$archive_bytes" "$archive_sha256" \
 	"$image_tag" "$image_manifest_digest" "$image_config_digest" "$runtime_image_id" \
-	"$adapter_commit" "$adapter_tree" \
+	"$adapter_source" "$adapter_commit" "$adapter_tree" "$release_version" "$release_manifest_sha256" \
 	"$source_manifest_sha256" "$builder_sha256" "$expected_repository" \
 	"$expected_release" "$expected_revision" "$base_image" "$base_amd64_manifest" <<'PY'
 import json
@@ -262,17 +343,21 @@ import sys
 
 (
     output, archive_bytes, archive_sha256, image_tag, image_manifest, image_config,
-    runtime_image_id,
-    adapter_commit, adapter_tree, source_manifest, builder_sha256,
+    runtime_image_id, adapter_source, adapter_commit, adapter_tree, release_version,
+    release_manifest_sha256, source_manifest, builder_sha256,
     repository, release, revision, base_image, base_amd64_manifest,
 ) = sys.argv[1:]
+adapter = {
+    "contract": "steward.openclaw.v1",
+    "source": adapter_source,
+    "source_inventory_sha256": source_manifest,
+}
+if adapter_source == "git-checkout":
+    adapter.update({"git_tree": adapter_tree, "steward_commit": adapter_commit})
+else:
+    adapter.update({"release_manifest_sha256": release_manifest_sha256, "release_version": release_version})
 payload = {
-    "adapter": {
-        "contract": "steward.openclaw.v1",
-        "source_inventory_sha256": source_manifest,
-        "steward_commit": adapter_commit,
-        "git_tree": adapter_tree,
-    },
+    "adapter": adapter,
     "archive": {
         "bytes": int(archive_bytes),
         "file": "image.tar",

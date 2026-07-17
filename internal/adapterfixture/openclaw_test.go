@@ -230,6 +230,8 @@ func TestOpenClawBuildAndQualificationHarnessesAreFailClosed(t *testing.T) {
 		"--network=none --pull=false --platform=linux/amd64 --provenance=false",
 		"pinned-base-pull;docker-build-network-none",
 		"stewardctl image inspect -archive",
+		"release-payload",
+		"release_manifest_sha256",
 		"\"manifest_digest\": image_manifest",
 		"\"runtime_image_id\": runtime_image_id",
 		"os.rename(source, destination)",
@@ -266,6 +268,21 @@ func TestOpenClawBuildAndQualificationHarnessesAreFailClosed(t *testing.T) {
 		command := exec.Command(bash, "-n", builderPath, gatePath)
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("shell syntax: %v\n%s", err, output)
+		}
+	}
+}
+
+func TestOpenClawAdapterShipsInTheLinuxNodePayload(t *testing.T) {
+	root := filepath.Clean(filepath.Join(openClawAdapterRoot(t), "..", ".."))
+	for _, name := range []string{
+		"release.sh", "build-deb.sh", "build-rpm.sh", "write-release-manifest.sh",
+		"install-node.sh", "activate-node-release.sh",
+	} {
+		content := string(readBounded(t, filepath.Join(root, "scripts", name), 2<<20))
+		for _, required := range []string{"adapters/openclaw", "build-openclaw-adapter", "openclaw-feasibility"} {
+			if !strings.Contains(content, required) {
+				t.Fatalf("%s does not package %s", name, required)
+			}
 		}
 	}
 }

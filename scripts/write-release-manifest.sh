@@ -79,6 +79,16 @@ release_files=(
 	integration/adapters/hermes-agent/fixtures/skill/workspace_audit.py
 	integration/adapters/hermes-agent/license-inventory.json
 	integration/adapters/hermes-agent/source-inputs.sha256
+	integration/adapters/openclaw/Dockerfile
+	integration/adapters/openclaw/adapter.json
+	integration/adapters/openclaw/entrypoint.mjs
+	integration/adapters/openclaw/fixture_model.mjs
+	integration/adapters/openclaw/fixtures/skill/SKILL.md
+	integration/adapters/openclaw/fixtures/skill/workspace_audit.mjs
+	integration/adapters/openclaw/fixtures/workspace/qualification/input/alpha.txt
+	integration/adapters/openclaw/fixtures/workspace/qualification/input/nested.json
+	integration/adapters/openclaw/result.mjs
+	integration/adapters/openclaw/source-inputs.sha256
 	integration/deploy/config/executor-gateway.env
 	integration/deploy/config/executor.env
 	integration/deploy/config/gateway.json.in
@@ -89,12 +99,14 @@ release_files=(
 	integration/deploy/systemd/steward.service
 	integration/scripts/activate-node-release.sh
 	integration/scripts/build-hermes-adapter.sh
+	integration/scripts/build-openclaw-adapter.sh
 	integration/scripts/build-relay-image.sh
 	integration/scripts/configure-admission.sh
 	integration/scripts/configure-node.sh
 	integration/scripts/install-node.sh
 	integration/scripts/hermes-feasibility.sh
 	integration/scripts/hermes-steward-acceptance.sh
+	integration/scripts/openclaw-feasibility.sh
 	integration/scripts/node-doctor.sh
 	integration/scripts/node-preflight.sh
 	integration/scripts/node-removal-guard.sh
@@ -155,6 +167,33 @@ adapter_file_count=$(find "$adapter_root" -type f | wc -l)
 adapter_directory_count=$(find "$adapter_root" -type d | wc -l)
 if [[ $adapter_file_count -ne $expected_adapter_file_count || $adapter_directory_count -ne 4 ]]; then
 	echo "write-release-manifest: adapter contains an unexpected file or directory" >&2
+	exit 2
+fi
+
+openclaw_root=$stage/adapters/openclaw
+for directory in "$openclaw_root" "$openclaw_root/fixtures" "$openclaw_root/fixtures/skill" \
+	"$openclaw_root/fixtures/workspace" "$openclaw_root/fixtures/workspace/qualification" \
+	"$openclaw_root/fixtures/workspace/qualification/input"; do
+	if [[ ! -d $directory || -L $directory ]]; then
+		echo "write-release-manifest: OpenClaw adapter directory is missing or invalid: $directory" >&2
+		exit 2
+	fi
+done
+if find "$openclaw_root" -mindepth 1 -type l -print -quit | grep -q . ||
+	find "$openclaw_root" -mindepth 1 ! -type f ! -type d -print -quit | grep -q .; then
+	echo "write-release-manifest: OpenClaw adapter contains a symlink or special file" >&2
+	exit 2
+fi
+expected_openclaw_file_count=0
+for logical in "${release_files[@]}"; do
+	case "$logical" in
+	integration/adapters/openclaw/*) ((expected_openclaw_file_count += 1)) ;;
+	esac
+done
+openclaw_file_count=$(find "$openclaw_root" -type f | wc -l)
+openclaw_directory_count=$(find "$openclaw_root" -type d | wc -l)
+if [[ $openclaw_file_count -ne $expected_openclaw_file_count || $openclaw_directory_count -ne 6 ]]; then
+	echo "write-release-manifest: OpenClaw adapter contains an unexpected file or directory" >&2
 	exit 2
 fi
 

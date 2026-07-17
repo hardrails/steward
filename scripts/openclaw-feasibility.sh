@@ -6,7 +6,8 @@ unset CDPATH NODE_OPTIONS
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-readonly root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+readonly script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+readonly root=$(cd "$(dirname "$script_path")/.." && pwd -P)
 readonly expected_revision=2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4
 readonly expected_model=steward-openclaw-fixture
 readonly expected_audit_digest=8a88036085cd27e3e0a85ab10f3fbfed492633fa76fd18a85bb478747c4d56d5
@@ -103,7 +104,7 @@ done
 [[ $run_timeout =~ ^[1-9][0-9]{1,2}$ ]] || usage_error "--run-timeout must be 30..600"
 (( run_timeout >= 30 && run_timeout <= 600 )) || usage_error "--run-timeout must be 30..600"
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || die "the qualified runtime platform is Linux on amd64"
-for command in docker python3 sha256sum timeout; do
+for command in docker python3 sha256sum timeout readlink; do
 	command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || die "Docker runtime runsc is required"
@@ -329,23 +330,35 @@ if digest.hexdigest() != archive_record.get("sha256"):
     raise SystemExit(1)
 digest_re = re.compile(r"sha256:[a-f0-9]{64}")
 commit_re = re.compile(r"[a-f0-9]{40,64}")
+version_re = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?")
 manifest = image.get("manifest_digest", "")
 config = image.get("config_digest", "")
 runtime = image.get("runtime_image_id", "")
+adapter_source = adapter.get("source")
 if (
     any(digest_re.fullmatch(value) is None for value in (manifest, config, runtime))
     or runtime not in {manifest, config}
-    or commit_re.fullmatch(adapter.get("steward_commit", "")) is None
-    or commit_re.fullmatch(adapter.get("git_tree", "")) is None
 ):
+    raise SystemExit(1)
+if adapter_source == "git-checkout":
+    if commit_re.fullmatch(adapter.get("steward_commit", "")) is None or commit_re.fullmatch(adapter.get("git_tree", "")) is None:
+        raise SystemExit(1)
+    steward_commit = adapter["steward_commit"]
+    git_tree = adapter["git_tree"]
+elif adapter_source == "release-payload":
+    if version_re.fullmatch(adapter.get("release_version", "")) is None or re.fullmatch(r"[a-f0-9]{64}", adapter.get("release_manifest_sha256", "")) is None:
+        raise SystemExit(1)
+    steward_commit = "unavailable"
+    git_tree = "unavailable"
+else:
     raise SystemExit(1)
 print(archive_record["sha256"])
 print(image["tag"])
 print(manifest)
 print(config)
 print(runtime)
-print(adapter["steward_commit"])
-print(adapter["git_tree"])
+print(steward_commit)
+print(git_tree)
 PY
 ) || stop_gate bundle.contract invalid_bundle_contract
 mapfile -t attestation_fields <<<"$attestation_values"

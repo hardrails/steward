@@ -32,6 +32,7 @@ for path in steward steward-control stewardctl steward-mcp steward-executor stew
 	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh \
 	scripts/node-removal-guard.sh scripts/build-hermes-adapter.sh scripts/build-relay-image.sh \
 	scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh \
+	scripts/build-openclaw-adapter.sh scripts/openclaw-feasibility.sh \
 	adapters/hermes-agent/Dockerfile adapters/hermes-agent/README.md \
 	adapters/hermes-agent/adapter.json adapters/hermes-agent/entrypoint.py \
 	adapters/hermes-agent/fixture_connector.py adapters/hermes-agent/fixture_mcp.py \
@@ -49,6 +50,13 @@ for path in steward steward-control stewardctl steward-mcp steward-executor stew
 	adapters/hermes-agent/fixtures/skill/workspace-fixture-contract.json \
 	adapters/hermes-agent/fixtures/skill/workspace_audit.py \
 	adapters/hermes-agent/license-inventory.json adapters/hermes-agent/source-inputs.sha256 \
+	adapters/openclaw/Dockerfile adapters/openclaw/adapter.json \
+	adapters/openclaw/entrypoint.mjs adapters/openclaw/fixture_model.mjs \
+	adapters/openclaw/result.mjs adapters/openclaw/source-inputs.sha256 \
+	adapters/openclaw/fixtures/skill/SKILL.md \
+	adapters/openclaw/fixtures/skill/workspace_audit.mjs \
+	adapters/openclaw/fixtures/workspace/qualification/input/alpha.txt \
+	adapters/openclaw/fixtures/workspace/qualification/input/nested.json \
 	release.json LICENSE README.md; do
 	if [[ ! -f "$stage/$path" ]]; then
 		echo "build-rpm: stage is missing $path" >&2
