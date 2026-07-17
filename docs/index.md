@@ -124,6 +124,7 @@ secrets, host mounts, privileged mode, or undeclared ports.
 [Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }}) ·
 [Roll it out through canary and batch gates]({{ '/guides/fleet-rollout/' | relative_url }}) ·
 [Inspect a fleet and courier an offline-signed command]({{ '/guides/operator-console/' | relative_url }}) ·
+[Shorten CLI commands and enable completion]({{ '/guides/cli/' | relative_url }}) ·
 [Review the OpenClaw adapter contract]({{ '/guides/openclaw/' | relative_url }}) ·
 [Configure positive capabilities]({{ '/guides/positive-capabilities/' | relative_url }}) ·
 [Authorize exact external effects]({{ '/guides/authorized-effects/' | relative_url }}) ·

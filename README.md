@@ -544,6 +544,7 @@ without access to private source or infrastructure.
 - [Install without public network access](https://hardrails.github.io/steward/guides/air-gapped/)
 - [Configure signed admission](https://hardrails.github.io/steward/guides/signed-admission/)
 - [Inspect a fleet and submit an offline-signed command](https://hardrails.github.io/steward/guides/operator-console/)
+- [Shorten CLI commands and enable completion](https://hardrails.github.io/steward/guides/cli/)
 - [Authorize exact external effects](https://hardrails.github.io/steward/guides/authorized-effects/)
 - [Store and distribute Gateway credentials](https://hardrails.github.io/steward/guides/secrets/)
 - [Broker authenticated API operations](https://hardrails.github.io/steward/guides/connectors/)
