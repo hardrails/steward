@@ -1,10 +1,10 @@
 ---
-title: Embed a read-only React operator console
+title: Embed an observation-first React operator console
 description: Why Steward commits and embeds a React SPA while keeping frontend dependencies outside its runtime and ordinary air-gapped build.
 section: Architecture decision
 ---
 
-# Embed a read-only React operator console
+# Embed an observation-first React operator console
 
 - Status: Accepted
 - Date: 2026-07-16
@@ -64,7 +64,10 @@ profile, and browser-side timeouts do not revoke the server credential.
 
 Keep the application read-only unless a later threat model defines trusted
 semantic approval, cross-site request protections, reauthentication, audit, and
-server-side authority constraints for a specific mutation. Revisit React if
+server-side authority constraints for a specific mutation. [The signed-command
+courier](0023-native-signed-command-console-courier.md) satisfies those conditions
+for one exact command that was already authorized and signed outside the browser;
+it does not permit other mutations. Revisit React if
 reproducible builds become unreliable, the dependency audit cannot be kept clean,
 or a substantially smaller maintained option can satisfy the same tested session
 and accessibility boundary.
