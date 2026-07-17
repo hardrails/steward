@@ -79,8 +79,17 @@ func TestPlanV1RejectsInvalidShapeAndAmbiguity(t *testing.T) {
 		"zero generation": func(value *PlanV1) {
 			value.Targets[0].InstanceGeneration = 0
 		},
+		"zero Gateway receipt epoch": func(value *PlanV1) {
+			value.Targets[0].GatewayReceiptEpoch = 0
+		},
 		"target digest": func(value *PlanV1) {
 			value.Targets[0].ActivationPlanDigest = ""
+		},
+		"Gateway receipt key digest": func(value *PlanV1) {
+			value.Targets[0].GatewayReceiptPublicKeySHA256 = "sha256:invalid"
+		},
+		"operation policy digest": func(value *PlanV1) {
+			value.Targets[0].OperationPolicyDigest = "sha256:invalid"
 		},
 		"same target commands": func(value *PlanV1) {
 			value.Targets[0].StartCommandID = value.Targets[0].AdmitCommandID
@@ -137,16 +146,19 @@ func rolloutPlanFixture(targets int) PlanV1 {
 	for index := range plan.Targets {
 		suffix := string(rune('a' + index))
 		plan.Targets[index] = TargetV1{
-			NodeID:               "node-" + suffix,
-			InstanceID:           "agent-" + suffix,
-			ActivationID:         "activation-" + suffix,
-			IntentDigest:         digest(suffix),
-			ActivationPlanDigest: digest(string(rune('f' - index))),
-			ClaimGeneration:      uint64(index + 1),
-			InstanceGeneration:   uint64(index + 2),
-			AdmitCommandID:       "command-" + suffix + "-admit",
-			StartCommandID:       "command-" + suffix + "-start",
-			CanaryCommandID:      "command-" + suffix + "-canary",
+			NodeID:                        "node-" + suffix,
+			InstanceID:                    "agent-" + suffix,
+			ActivationID:                  "activation-" + suffix,
+			IntentDigest:                  digest(suffix),
+			ActivationPlanDigest:          digest(string(rune('f' - index))),
+			GatewayReceiptEpoch:           uint64(index + 1),
+			GatewayReceiptPublicKeySHA256: digest("d"),
+			OperationPolicyDigest:         digest("e"),
+			ClaimGeneration:               uint64(index + 1),
+			InstanceGeneration:            uint64(index + 2),
+			AdmitCommandID:                "command-" + suffix + "-admit",
+			StartCommandID:                "command-" + suffix + "-start",
+			CanaryCommandID:               "command-" + suffix + "-canary",
 		}
 	}
 	return plan

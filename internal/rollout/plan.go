@@ -34,20 +34,24 @@ var (
 	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 )
 
-// TargetV1 binds one ordered node activation and the exact command identities
-// that the trusted coordinator will sign. Array order is rollout order; no
+// TargetV1 binds one ordered node activation, the exact command identities the
+// trusted coordinator will sign, and the Gateway receipt and operation-policy
+// authority that must qualify its canary. Array order is rollout order; no
 // selector, label, or controller-side placement rule is implied.
 type TargetV1 struct {
-	NodeID               string `json:"node_id"`
-	InstanceID           string `json:"instance_id"`
-	ActivationID         string `json:"activation_id"`
-	IntentDigest         string `json:"intent_digest"`
-	ActivationPlanDigest string `json:"activation_plan_digest"`
-	ClaimGeneration      uint64 `json:"claim_generation"`
-	InstanceGeneration   uint64 `json:"instance_generation"`
-	AdmitCommandID       string `json:"admit_command_id"`
-	StartCommandID       string `json:"start_command_id"`
-	CanaryCommandID      string `json:"canary_command_id"`
+	NodeID                        string `json:"node_id"`
+	InstanceID                    string `json:"instance_id"`
+	ActivationID                  string `json:"activation_id"`
+	IntentDigest                  string `json:"intent_digest"`
+	ActivationPlanDigest          string `json:"activation_plan_digest"`
+	GatewayReceiptEpoch           uint64 `json:"gateway_receipt_epoch"`
+	GatewayReceiptPublicKeySHA256 string `json:"gateway_receipt_public_key_sha256"`
+	OperationPolicyDigest         string `json:"operation_policy_digest"`
+	ClaimGeneration               uint64 `json:"claim_generation"`
+	InstanceGeneration            uint64 `json:"instance_generation"`
+	AdmitCommandID                string `json:"admit_command_id"`
+	StartCommandID                string `json:"start_command_id"`
+	CanaryCommandID               string `json:"canary_command_id"`
 }
 
 // PlanV1 is an unsigned, non-authoritative rollout manifest. The first target
@@ -183,11 +187,13 @@ func (target TargetV1) validate() error {
 		return errors.New("node, instance, or activation identity is invalid")
 	}
 	if !controlprotocol.ValidSHA256Digest(target.IntentDigest) ||
-		!controlprotocol.ValidSHA256Digest(target.ActivationPlanDigest) {
-		return errors.New("intent and activation plan digests must be canonical SHA-256 values")
+		!controlprotocol.ValidSHA256Digest(target.ActivationPlanDigest) ||
+		!controlprotocol.ValidSHA256Digest(target.GatewayReceiptPublicKeySHA256) ||
+		!controlprotocol.ValidSHA256Digest(target.OperationPolicyDigest) {
+		return errors.New("intent, activation plan, Gateway receipt key, and operation policy digests must be canonical SHA-256 values")
 	}
-	if target.ClaimGeneration == 0 || target.InstanceGeneration == 0 {
-		return errors.New("claim and instance generations must be positive")
+	if target.GatewayReceiptEpoch == 0 || target.ClaimGeneration == 0 || target.InstanceGeneration == 0 {
+		return errors.New("Gateway receipt epoch, claim generation, and instance generation must be positive")
 	}
 	if !identifier(target.AdmitCommandID) ||
 		!identifier(target.StartCommandID) ||
