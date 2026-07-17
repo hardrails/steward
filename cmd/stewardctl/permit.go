@@ -129,7 +129,7 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 		approvalThreshold = 1
 	}
 	if intent.EffectMode == admission.EffectModeAuthorized &&
-		(approvalThreshold < 1 || approvalThreshold > 1 && approvalThreshold > len(admitted.ActionAuthorities)) {
+		(approvalThreshold < 1 || (approvalThreshold > 1 && approvalThreshold > len(admitted.ActionAuthorities))) {
 		return errors.New("admission response contains an invalid action approval threshold")
 	}
 	if admitted.Generation != intent.Generation || admitted.CapsuleDigest != intent.CapsuleDigest ||
@@ -150,7 +150,8 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 		admittedSigner := false
 		for _, authority := range admitted.ActionAuthorities {
 			decoded, decodeErr := base64.StdEncoding.DecodeString(authority.PublicKey)
-			if authority.KeyID == *keyID && decodeErr == nil && ed25519.PublicKey(decoded).Equal(public) &&
+			if authority.KeyID == *keyID && decodeErr == nil &&
+				base64.StdEncoding.EncodeToString(decoded) == authority.PublicKey && ed25519.PublicKey(decoded).Equal(public) &&
 				slices.Contains(authority.ConnectorIDs, *connectorID) {
 				admittedSigner = true
 				break
@@ -641,6 +642,13 @@ func auditPermit(arguments []string, stdout io.Writer) error {
 }
 
 func verifyPermitForAudit(raw []byte, trusted map[string]ed25519.PublicKey, maxValidity time.Duration) (actionpermit.Verified, error) {
+	// Historical audit cannot use the current wall clock: an authentic permit
+	// may have expired long before its receipt is inspected. Decode the bounded,
+	// untrusted payload only to select its signed not_before as a provisional
+	// verification time. actionpermit.Verify then authenticates the complete
+	// statement and every signature before any decoded field is returned. The
+	// caller separately re-verifies the permit at the signed receipt's observed_at,
+	// which is the authoritative proof that execution occurred inside the window.
 	envelope, err := dsse.Parse(raw)
 	if err != nil {
 		return actionpermit.Verified{}, err

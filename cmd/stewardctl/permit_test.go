@@ -404,6 +404,19 @@ func TestPermitMultiPartyApprovalHandoffIsExactAndNonOverwriting(t *testing.T) {
 	t.Cleanup(func() { timeNow = priorNow })
 
 	partialPath := filepath.Join(directory, "partial.dsse.json")
+	noncanonical := admitted
+	noncanonical.ActionAuthorities = append([]gateway.GrantActionAuthority(nil), admitted.ActionAuthorities...)
+	noncanonical.ActionAuthorities[0].PublicKey = noncanonical.ActionAuthorities[0].PublicKey[:4] + "\n" +
+		noncanonical.ActionAuthorities[0].PublicKey[4:]
+	writePermitJSONReplace(t, admissionPath, noncanonical)
+	if err := run([]string{
+		"permit", "issue", "-admission", admissionPath, "-intent", intentPath, "-trust", trustPath,
+		"-request", requestPath, "-connector-id", "secrets-admin", "-operation-id", "rotate", "-task-id", "rotate-1",
+		"-key", privateA, "-key-id", "approver-a", "-out", filepath.Join(directory, "noncanonical.dsse.json"),
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "first approval key") {
+		t.Fatalf("noncanonical admitted key error = %v", err)
+	}
+	writePermitJSONReplace(t, admissionPath, admitted)
 	var issueSummary bytes.Buffer
 	if err := run([]string{
 		"permit", "issue", "-admission", admissionPath, "-intent", intentPath, "-trust", trustPath,
