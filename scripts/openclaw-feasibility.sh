@@ -44,6 +44,25 @@ die() {
 	exit 1
 }
 
+inspect_image_archive() {
+	local archive=$1
+	if command -v stewardctl >/dev/null 2>&1; then
+		stewardctl image inspect -archive "$archive"
+		return
+	fi
+	local go_binary=
+	if command -v go >/dev/null 2>&1; then
+		go_binary=$(command -v go)
+	elif [[ -x /usr/local/go/bin/go ]]; then
+		go_binary=/usr/local/go/bin/go
+	fi
+	[[ -n $go_binary ]] || die "stewardctl or Go 1.24+ is required to verify the OCI archive"
+	(
+		cd "$root"
+		env GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off "$go_binary" run ./cmd/stewardctl image inspect -archive "$archive"
+	)
+}
+
 usage_error() {
 	echo "openclaw-feasibility: $*" >&2
 	usage >&2
@@ -127,7 +146,9 @@ failure_code=unhandled_failure
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 harness_sha256=$(sha256sum "$root/scripts/openclaw-feasibility.sh" | awk '{print $1}')
 image_tag=unavailable
+image_manifest_digest=unavailable
 image_config_digest=unavailable
+runtime_image_id=unavailable
 archive_sha256=unavailable
 adapter_commit=unavailable
 adapter_tree=unavailable
@@ -175,7 +196,8 @@ write_report() {
 	fi
 	python3 -I - "$checks" "$output" "$overall" "$failure_code" "$started_at" \
 		"$expected_revision" "$archive_sha256" "$adapter_commit" "$adapter_tree" \
-		"$image_tag" "$image_config_digest" "$result_sha256" "$harness_sha256" <<'PY'
+		"$image_tag" "$image_manifest_digest" "$image_config_digest" "$runtime_image_id" \
+		"$result_sha256" "$harness_sha256" <<'PY'
 import json
 import os
 import pathlib
@@ -183,7 +205,8 @@ import sys
 
 (
     checks_path, output, overall, failure, started_at, revision, archive_sha,
-    adapter_commit, adapter_tree, image_tag, image_config, result_sha, harness_sha,
+    adapter_commit, adapter_tree, image_tag, image_manifest, image_config,
+    runtime_image_id, result_sha, harness_sha,
 ) = sys.argv[1:]
 checks = []
 path = pathlib.Path(checks_path)
@@ -203,11 +226,13 @@ payload = {
     "failure_code": failure,
     "harness_sha256": harness_sha,
     "image_config_digest": None if image_config == "unavailable" else image_config,
+    "image_manifest_digest": None if image_manifest == "unavailable" else image_manifest,
     "image_tag": None if image_tag == "unavailable" else image_tag,
     "overall": overall,
     "platform": "linux/amd64",
     "result_sha256": None if result_sha == "unavailable" else result_sha,
     "runtime": "runsc",
+    "runtime_image_id": None if runtime_image_id == "unavailable" else runtime_image_id,
     "schema_version": "steward.agent-feasibility.v1",
     "started_at": started_at,
     "upstream_revision": revision,
@@ -304,28 +329,52 @@ if digest.hexdigest() != archive_record.get("sha256"):
     raise SystemExit(1)
 digest_re = re.compile(r"sha256:[a-f0-9]{64}")
 commit_re = re.compile(r"[a-f0-9]{40,64}")
-if digest_re.fullmatch(image.get("config_digest", "")) is None or commit_re.fullmatch(adapter.get("steward_commit", "")) is None or commit_re.fullmatch(adapter.get("git_tree", "")) is None:
+manifest = image.get("manifest_digest", "")
+config = image.get("config_digest", "")
+runtime = image.get("runtime_image_id", "")
+if (
+    any(digest_re.fullmatch(value) is None for value in (manifest, config, runtime))
+    or runtime not in {manifest, config}
+    or commit_re.fullmatch(adapter.get("steward_commit", "")) is None
+    or commit_re.fullmatch(adapter.get("git_tree", "")) is None
+):
     raise SystemExit(1)
 print(archive_record["sha256"])
 print(image["tag"])
-print(image["config_digest"])
+print(manifest)
+print(config)
+print(runtime)
 print(adapter["steward_commit"])
 print(adapter["git_tree"])
 PY
 ) || stop_gate bundle.contract invalid_bundle_contract
 mapfile -t attestation_fields <<<"$attestation_values"
-(( ${#attestation_fields[@]} == 5 )) || stop_gate bundle.contract incomplete_bundle_contract
+(( ${#attestation_fields[@]} == 7 )) || stop_gate bundle.contract incomplete_bundle_contract
 archive_sha256=${attestation_fields[0]}
 image_tag=${attestation_fields[1]}
-image_config_digest=${attestation_fields[2]}
-adapter_commit=${attestation_fields[3]}
-adapter_tree=${attestation_fields[4]}
+image_manifest_digest=${attestation_fields[2]}
+image_config_digest=${attestation_fields[3]}
+runtime_image_id=${attestation_fields[4]}
+adapter_commit=${attestation_fields[5]}
+adapter_tree=${attestation_fields[6]}
+archive_image_json=$(inspect_image_archive "$bundle/image.tar") || stop_gate bundle.contract archive_inspection_failed
+python3 -I - "$archive_image_json" "$image_tag" "$image_manifest_digest" "$image_config_digest" <<'PY' \
+	|| stop_gate bundle.contract archive_identity_mismatch
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+assert payload.get("manifest_digest") == sys.argv[3]
+assert payload.get("config_digest") == sys.argv[4]
+assert payload.get("repo_tags") == [sys.argv[2]]
+assert payload.get("platform") == {"architecture": "amd64", "os": "linux"}
+PY
 record bundle.contract passed exact_atomic_bundle
 
 timeout 900 docker load --input "$bundle/image.tar" >"$work/docker-load.log" 2>&1 || stop_gate image.load docker_load_failed
-actual_config=$(docker image inspect --format '{{.Id}}' "$image_tag" 2>/dev/null || true)
-[[ $actual_config == "$image_config_digest" ]] || stop_gate image.load image_config_mismatch
-record image.load passed exact_config_loaded
+actual_runtime_id=$(docker image inspect --format '{{.Id}}' "$image_tag" 2>/dev/null || true)
+[[ $actual_runtime_id == "$runtime_image_id" ]] || stop_gate image.load runtime_image_id_mismatch
+record image.load passed exact_bound_image_loaded
 image_user=$(docker image inspect --format '{{.Config.User}}' "$image_tag")
 image_platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_tag")
 image_volumes=$(docker image inspect --format '{{json .Config.Volumes}}' "$image_tag")

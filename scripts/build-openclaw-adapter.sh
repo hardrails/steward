@@ -72,6 +72,25 @@ require_command() {
 	command -v "$1" >/dev/null 2>&1 || die "$1 is required"
 }
 
+inspect_image_archive() {
+	local archive=$1
+	if command -v stewardctl >/dev/null 2>&1; then
+		stewardctl image inspect -archive "$archive"
+		return
+	fi
+	local go_binary=
+	if command -v go >/dev/null 2>&1; then
+		go_binary=$(command -v go)
+	elif [[ -x /usr/local/go/bin/go ]]; then
+		go_binary=/usr/local/go/bin/go
+	fi
+	[[ -n $go_binary ]] || die "stewardctl or Go 1.24+ is required to verify the saved OCI archive"
+	(
+		cd "$root"
+		env GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off "$go_binary" run ./cmd/stewardctl image inspect -archive "$archive"
+	)
+}
+
 integer_range() {
 	local name=$1 value=$2 minimum=$3 maximum=$4
 	[[ $value =~ ^[1-9][0-9]{0,15}$ ]] || usage_error "$name must be a canonical positive integer"
@@ -186,11 +205,11 @@ DOCKER_BUILDKIT=1 timeout "$build_timeout" docker build \
 	--build-arg "OPENCLAW_SOURCE_REVISION=$expected_revision" \
 	-t "$image_tag" "$work/context" >/dev/null || die "adapter image build failed"
 
-image_config_digest=$(docker image inspect --format '{{.Id}}' "$image_tag")
+runtime_image_id=$(docker image inspect --format '{{.Id}}' "$image_tag")
 image_platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_tag")
 image_user=$(docker image inspect --format '{{.Config.User}}' "$image_tag")
 image_volumes=$(docker image inspect --format '{{json .Config.Volumes}}' "$image_tag")
-[[ $image_config_digest =~ ^sha256:[a-f0-9]{64}$ && $image_platform == linux/amd64 ]] || die "built image identity is invalid"
+[[ $runtime_image_id =~ ^sha256:[a-f0-9]{64}$ && $image_platform == linux/amd64 ]] || die "built image identity is invalid"
 [[ $image_user == 65532:65532 ]] || die "built image is not configured for 65532:65532"
 [[ $image_volumes == null || $image_volumes == '{}' ]] || die "built image declares an unmanaged volume"
 
@@ -203,9 +222,37 @@ archive_bytes=$(stat -c %s "$staging/image.tar")
 (( archive_bytes <= max_archive_bytes )) || die "archive exceeds $max_archive_bytes bytes"
 archive_sha256=$(sha256sum "$staging/image.tar" | awk '{print $1}')
 builder_sha256=$(sha256sum "$root/scripts/build-openclaw-adapter.sh" | awk '{print $1}')
+archive_image_json=$(inspect_image_archive "$staging/image.tar") || die "saved OCI archive failed Steward inspection"
+archive_image_values=$(python3 -I - "$archive_image_json" "$image_tag" "$runtime_image_id" <<'PY'
+import json
+import re
+import sys
+
+payload = json.loads(sys.argv[1])
+digest = re.compile(r"sha256:[a-f0-9]{64}")
+manifest = payload.get("manifest_digest")
+config = payload.get("config_digest")
+platform = payload.get("platform", {})
+if (
+    digest.fullmatch(manifest or "") is None
+    or digest.fullmatch(config or "") is None
+    or sys.argv[3] not in {manifest, config}
+    or payload.get("repo_tags") != [sys.argv[2]]
+    or platform != {"architecture": "amd64", "os": "linux"}
+):
+    raise SystemExit(1)
+print(manifest)
+print(config)
+PY
+) || die "saved OCI archive identity is invalid"
+mapfile -t archive_image_fields <<<$archive_image_values
+(( ${#archive_image_fields[@]} == 2 )) || die "saved OCI archive identity is incomplete"
+image_manifest_digest=${archive_image_fields[0]}
+image_config_digest=${archive_image_fields[1]}
 
 python3 -I - "$staging/attestation.json" "$archive_bytes" "$archive_sha256" \
-	"$image_tag" "$image_config_digest" "$adapter_commit" "$adapter_tree" \
+	"$image_tag" "$image_manifest_digest" "$image_config_digest" "$runtime_image_id" \
+	"$adapter_commit" "$adapter_tree" \
 	"$source_manifest_sha256" "$builder_sha256" "$expected_repository" \
 	"$expected_release" "$expected_revision" "$base_image" "$base_amd64_manifest" <<'PY'
 import json
@@ -214,7 +261,8 @@ import pathlib
 import sys
 
 (
-    output, archive_bytes, archive_sha256, image_tag, image_config,
+    output, archive_bytes, archive_sha256, image_tag, image_manifest, image_config,
+    runtime_image_id,
     adapter_commit, adapter_tree, source_manifest, builder_sha256,
     repository, release, revision, base_image, base_amd64_manifest,
 ) = sys.argv[1:]
@@ -239,6 +287,8 @@ payload = {
     "contains_agent_content": False,
     "image": {
         "config_digest": image_config,
+        "manifest_digest": image_manifest,
+        "runtime_image_id": runtime_image_id,
         "tag": image_tag,
         "user": "65532:65532",
     },

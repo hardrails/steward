@@ -229,6 +229,9 @@ func TestOpenClawBuildAndQualificationHarnessesAreFailClosed(t *testing.T) {
 		"sha256sum -c source-inputs.sha256",
 		"--network=none --pull=false --platform=linux/amd64 --provenance=false",
 		"pinned-base-pull;docker-build-network-none",
+		"stewardctl image inspect -archive",
+		"\"manifest_digest\": image_manifest",
+		"\"runtime_image_id\": runtime_image_id",
 		"os.rename(source, destination)",
 		"contains_agent_content\": False",
 	} {
@@ -244,6 +247,8 @@ func TestOpenClawBuildAndQualificationHarnessesAreFailClosed(t *testing.T) {
 		"no-new-privileges:true",
 		"response.status !== 413",
 		"persisted skill drifted",
+		"archive_identity_mismatch",
+		"runtime_image_id_mismatch",
 		"contains_agent_content\": False",
 	} {
 		if !strings.Contains(gate, required) {
