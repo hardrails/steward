@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/hardrails/steward/internal/activationcanary"
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
@@ -866,21 +867,32 @@ func (store *Store) poll(identity controlauth.NodeIdentity, capabilities []strin
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].CreatedAt != candidates[j].CreatedAt {
-			return candidates[i].CreatedAt < candidates[j].CreatedAt
+			return retainedTimestampLess(
+				candidates[i].CreatedAt,
+				candidates[j].CreatedAt,
+			)
 		}
 		if candidates[i].TenantID != candidates[j].TenantID {
 			return candidates[i].TenantID < candidates[j].TenantID
 		}
 		return candidates[i].ID < candidates[j].ID
 	})
+	nextActivationTenant := activationCanaryTenantForPoll(
+		store.current.commands,
+		identity.NodeID,
+		candidates,
+	)
 	deliveries := make([]controlprotocol.ExecutorDeliveryV3, 0, minInt(max, len(candidates)))
+	leasedActivationCanary := false
 	for _, candidate := range candidates {
 		if len(deliveries) >= max || len(mutations) >= maxMutationsPerRecord {
 			break
 		}
 		if candidate.CommandKind == "activation-canary" &&
 			(protocolVersion != controlprotocol.ExecutorProtocolV4 ||
-				!hasCapability(canonical, controlprotocol.ExecutorCapabilityActivationCanaryV1)) {
+				!hasCapability(canonical, controlprotocol.ExecutorCapabilityActivationCanaryV1) ||
+				leasedActivationCanary ||
+				candidate.TenantID != nextActivationTenant) {
 			continue
 		}
 		if candidate.DeliveryGeneration == math.MaxUint64 {
@@ -917,6 +929,9 @@ func (store *Store) poll(identity controlauth.NodeIdentity, capabilities []strin
 		}
 		mutations = tentativeMutations
 		deliveries = tentativeDeliveries
+		if candidate.CommandKind == "activation-canary" {
+			leasedActivationCanary = true
+		}
 	}
 	if len(mutations) > 0 {
 		if err := store.applyMutationsLocked(mutations...); err != nil {
@@ -927,6 +942,60 @@ func (store *Store) poll(identity controlauth.NodeIdentity, capabilities []strin
 	// versions require `deliveries:[]` on an idle poll. Returning an append to a
 	// nil slice would collapse that distinction and encode JSON null.
 	return deliveries, nil
+}
+
+// activationCanaryTenantForPoll rotates the node's single canary worker across
+// tenants. The cursor is derived from durable lease/terminal history, so it
+// survives restart without adding mutable scheduler state. A tenant backlog
+// receives at most one turn before the next pending tenant in canonical order.
+func activationCanaryTenantForPoll(
+	commands map[string]Command,
+	nodeID string,
+	candidates []Command,
+) string {
+	pendingSet := make(map[string]struct{})
+	for _, candidate := range candidates {
+		if candidate.CommandKind == "activation-canary" {
+			pendingSet[candidate.TenantID] = struct{}{}
+		}
+	}
+	if len(pendingSet) == 0 {
+		return ""
+	}
+	pending := make([]string, 0, len(pendingSet))
+	for tenantID := range pendingSet {
+		pending = append(pending, tenantID)
+	}
+	sort.Strings(pending)
+
+	lastTenant, lastKey := "", ""
+	var lastAt time.Time
+	for key, command := range commands {
+		if command.NodeID != nodeID ||
+			command.CommandKind != "activation-canary" ||
+			command.DeliveryGeneration == 0 {
+			continue
+		}
+		activityAt, _ := parseTimestamp(command.LeaseUntil)
+		if command.Terminal != nil {
+			activityAt, _ = parseTimestamp(command.Terminal.CompletedAt)
+		} else if activityAt.IsZero() {
+			activityAt, _ = parseTimestamp(command.CreatedAt)
+		}
+		if activityAt.After(lastAt) || activityAt.Equal(lastAt) && key > lastKey {
+			lastTenant, lastAt, lastKey = command.TenantID, activityAt, key
+		}
+	}
+	if lastTenant != "" {
+		index := sort.SearchStrings(pending, lastTenant)
+		for index < len(pending) && pending[index] <= lastTenant {
+			index++
+		}
+		if index < len(pending) {
+			return pending[index]
+		}
+	}
+	return pending[0]
 }
 
 func hasCapability(capabilities []string, required string) bool {
@@ -1067,9 +1136,6 @@ func (store *Store) ApplyReportV4(identity controlauth.NodeIdentity, report cont
 	if command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 {
 		return false, ErrConflict
 	}
-	if err := validateExecutorReportV4Binding(command, report); err != nil {
-		return false, ErrConflict
-	}
 	if command.State == CommandTerminal {
 		if command.Terminal != nil && command.Terminal.Digest == digest {
 			return false, nil
@@ -1077,6 +1143,9 @@ func (store *Store) ApplyReportV4(identity controlauth.NodeIdentity, report cont
 		return false, ErrConflict
 	}
 	if command.State != CommandLeased {
+		return false, ErrConflict
+	}
+	if err := validateExecutorReportV4Binding(command, report); err != nil {
 		return false, ErrConflict
 	}
 	command.State = CommandTerminal
@@ -1127,7 +1196,10 @@ func (store *Store) reclaimExpiredEnrollmentsLocked(now time.Time, reserve int) 
 		}
 	}
 	sort.Slice(expired, func(i, j int) bool {
-		return expired[i].expires < expired[j].expires || expired[i].expires == expired[j].expires && expired[i].id < expired[j].id
+		return expired[i].expires != expired[j].expires &&
+			retainedTimestampLess(expired[i].expires, expired[j].expires) ||
+			expired[i].expires == expired[j].expires &&
+				expired[i].id < expired[j].id
 	})
 	batchLimit := maxMutationsPerRecord - reserve
 	for len(expired) > 0 {
@@ -1146,11 +1218,21 @@ func (store *Store) reclaimExpiredEnrollmentsLocked(now time.Time, reserve int) 
 
 func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Time) []Command {
 	cutoff := now.Add(-store.limits.TerminalRetention)
+	protectedCanaryCursors := activationCanaryPruningCursors(store.current.commands)
+	protectedCaptureCanaries := evidenceCapturePruningCanaries(
+		store.current.captures,
+		store.current.commands,
+		now,
+	)
 	result := make([]Command, 0)
-	for _, command := range store.current.commands {
-		if command.State != CommandTerminal || command.Terminal == nil ||
-			command.Terminal.Report.Status == controlprotocol.ExecutorStatusOutcomeUnknown ||
-			command.Terminal.Report.Status == controlprotocol.ExecutorStatusFailed {
+	for key, command := range store.current.commands {
+		if !terminalCommandSafeToPrune(command) {
+			continue
+		}
+		if _, protected := protectedCanaryCursors[key]; protected {
+			continue
+		}
+		if _, protected := protectedCaptureCanaries[key]; protected {
 			continue
 		}
 		completed, _ := parseTimestamp(command.Terminal.CompletedAt)
@@ -1165,11 +1247,233 @@ func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Tim
 			return leftPriority < rightPriority
 		}
 		if result[i].Terminal.CompletedAt != result[j].Terminal.CompletedAt {
-			return result[i].Terminal.CompletedAt < result[j].Terminal.CompletedAt
+			return retainedTimestampLess(
+				result[i].Terminal.CompletedAt,
+				result[j].Terminal.CompletedAt,
+			)
 		}
 		return commandKey(result[i].TenantID, result[i].NodeID, result[i].ID) < commandKey(result[j].TenantID, result[j].NodeID, result[j].ID)
 	})
 	return result
+}
+
+// evidenceCapturePruningCanaries retains one deterministic, fully successful
+// protocol-4 canary for every armed or observed capture. Seal needs the
+// command's signed admission and terminal result, so pruning every matching
+// command could make an otherwise complete capture impossible to seal.
+//
+// Protection is deliberately bounded to one command per capture. Selecting
+// the earliest completion (then command key) is stable when later commands
+// arrive and after store recovery. This retention rule preserves sealability;
+// it does not establish when the node generated a marker or when the command
+// ran. The capture proves only the controller-observed order after its retained
+// baseline; arm-before-submit remains an operator procedure.
+func evidenceCapturePruningCanaries(
+	captures map[string]storedEvidenceCapture,
+	commands map[string]Command,
+	now time.Time,
+) map[string]struct{} {
+	type captureTarget struct {
+		tenantID              string
+		nodeID                string
+		runtimeRef            string
+		generation            uint64
+		activationID          string
+		activationBeginDigest string
+	}
+	type selection struct {
+		key         string
+		completedAt string
+	}
+
+	active := make(map[captureTarget][]storedEvidenceCapture)
+	for _, capture := range captures {
+		if capture.State != EvidenceCaptureArmed && capture.State != EvidenceCaptureObserved {
+			continue
+		}
+		if capture.State == EvidenceCaptureArmed {
+			expiresAt, err := parseTimestamp(capture.ExpiresAt)
+			if err != nil || !now.Before(expiresAt) {
+				continue
+			}
+		}
+		target := captureTarget{
+			tenantID: capture.TenantID, nodeID: capture.NodeID,
+			runtimeRef: capture.RuntimeRef, generation: capture.Generation,
+			activationID:          capture.ActivationID,
+			activationBeginDigest: capture.ActivationBeginDigest,
+		}
+		active[target] = append(active[target], capture)
+	}
+	if len(active) == 0 {
+		return nil
+	}
+
+	selected := make(map[string]selection, len(captures))
+	for key, command := range commands {
+		canary, result, ok := retainedSuccessfulActivationCanary(command)
+		if !ok {
+			continue
+		}
+		target := captureTarget{
+			tenantID: command.TenantID, nodeID: command.NodeID,
+			runtimeRef:            command.SignedRuntimeRef,
+			generation:            command.SignedInstanceGeneration,
+			activationID:          canary.ActivationID,
+			activationBeginDigest: canary.Admission.ActivationBeginDigest,
+		}
+		for _, capture := range active[target] {
+			if !activationCanaryMatchesCapture(canary, result, capture) {
+				continue
+			}
+			current, exists := selected[capture.CaptureID]
+			completedAt := command.Terminal.CompletedAt
+			if !exists || retainedTimestampLess(completedAt, current.completedAt) ||
+				completedAt == current.completedAt && key < current.key {
+				selected[capture.CaptureID] = selection{key: key, completedAt: completedAt}
+			}
+		}
+	}
+
+	protected := make(map[string]struct{}, len(selected))
+	for _, command := range selected {
+		protected[command.key] = struct{}{}
+	}
+	return protected
+}
+
+func retainedSuccessfulActivationCanary(
+	command Command,
+) (activationcanary.CommandV1, *controlprotocol.ExecutorActivationCanaryResultV1, bool) {
+	if command.CommandKind != "activation-canary" ||
+		command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 ||
+		command.State != CommandTerminal || command.Terminal == nil ||
+		command.Terminal.Report.Status != controlprotocol.ExecutorStatusDone ||
+		command.Terminal.ActivationCanary == nil {
+		return activationcanary.CommandV1{}, nil, false
+	}
+	result := command.Terminal.ActivationCanary
+	if err := result.Validate(); err != nil ||
+		validateRetainedExecutorReportV4Binding(
+			command,
+			executorReportV4FromTerminal(*command.Terminal),
+		) != nil {
+		return activationcanary.CommandV1{}, nil, false
+	}
+	statement, err := parseCommandStatement(command.CommandDSSE)
+	if err != nil || statement.CommandID != command.ID ||
+		statement.TenantID != command.TenantID || statement.NodeID != command.NodeID ||
+		statement.RuntimeRef != command.SignedRuntimeRef ||
+		statement.InstanceGeneration != command.SignedInstanceGeneration {
+		return activationcanary.CommandV1{}, nil, false
+	}
+	canary, err := activationcanary.ParseCommandV1(statement.Payload)
+	if err != nil || result.ActivationID != canary.ActivationID ||
+		result.AdmissionDigest != canary.AdmissionDigest {
+		return activationcanary.CommandV1{}, nil, false
+	}
+	return canary, result, true
+}
+
+func activationCanaryMatchesCapture(
+	canary activationcanary.CommandV1,
+	result *controlprotocol.ExecutorActivationCanaryResultV1,
+	capture storedEvidenceCapture,
+) bool {
+	if result == nil || canary.ActivationID != capture.ActivationID ||
+		canary.Admission.RuntimeRef != capture.RuntimeRef ||
+		canary.Admission.Generation != capture.Generation ||
+		canary.Admission.ActivationBeginDigest != capture.ActivationBeginDigest {
+		return false
+	}
+	if capture.ActivationBeginSequence != 0 &&
+		(canary.Admission.CapsuleDigest != capture.CapsuleDigest ||
+			canary.Admission.PolicyDigest != capture.PolicyDigest) {
+		return false
+	}
+	return capture.State != EvidenceCaptureObserved ||
+		result.ActivationCheckpointDigest == capture.ActivationCheckpointDigest
+}
+
+func retainedTimestampLess(left, right string) bool {
+	leftTime, leftErr := parseTimestamp(left)
+	rightTime, rightErr := parseTimestamp(right)
+	if leftErr != nil || rightErr != nil {
+		// Persisted state is validated before these ordering paths run. Keep a
+		// deterministic fallback for tests or an internal caller that violates
+		// that invariant rather than making sort's comparator inconsistent.
+		return left < right
+	}
+	return leftTime.Before(rightTime)
+}
+
+// activationCanaryPruningCursors retains at most one otherwise-prunable
+// command per node while that node still has non-terminal canary work. The
+// scheduler derives its tenant cursor from command history, so deleting the
+// most recent terminal immediately before a capacity-driven submission would
+// reset rotation to the first tenant. Once a newer canary is leased, the older
+// cursor is no longer newest and becomes prunable; once the queue drains, no
+// cursor is protected.
+func activationCanaryPruningCursors(commands map[string]Command) map[string]struct{} {
+	type activity struct {
+		at  time.Time
+		key string
+	}
+	nonTerminal := make(map[string]bool)
+	latest := make(map[string]activity)
+	for key, command := range commands {
+		if command.CommandKind != "activation-canary" {
+			continue
+		}
+		if command.State != CommandTerminal {
+			nonTerminal[command.NodeID] = true
+		}
+		if command.DeliveryGeneration == 0 {
+			continue
+		}
+		activityAt, _ := parseTimestamp(command.LeaseUntil)
+		if command.Terminal != nil {
+			activityAt, _ = parseTimestamp(command.Terminal.CompletedAt)
+		} else if activityAt.IsZero() {
+			activityAt, _ = parseTimestamp(command.CreatedAt)
+		}
+		current := latest[command.NodeID]
+		if activityAt.After(current.at) ||
+			activityAt.Equal(current.at) && key > current.key {
+			latest[command.NodeID] = activity{at: activityAt, key: key}
+		}
+	}
+	protected := make(map[string]struct{})
+	for nodeID, current := range latest {
+		if nonTerminal[nodeID] && current.key != "" {
+			protected[current.key] = struct{}{}
+		}
+	}
+	return protected
+}
+
+// terminalCommandSafeToPrune mirrors the Executor's durable-delivery rule.
+// Generic failures remain evidence of a possibly incomplete effect. The two
+// closed activation-canary failures are different: the authenticated command
+// kind and reserved error code identify a completed Gateway run whose outcome
+// is final, even though it did not qualify the release.
+func terminalCommandSafeToPrune(command Command) bool {
+	if command.State != CommandTerminal || command.Terminal == nil {
+		return false
+	}
+	status := command.Terminal.Report.Status
+	if status == controlprotocol.ExecutorStatusDone ||
+		status == controlprotocol.ExecutorStatusRejected {
+		return true
+	}
+	return command.DeliveryProtocol == controlprotocol.ExecutorProtocolV4 &&
+		command.CommandKind == "activation-canary" &&
+		validActivationCanaryTerminalFailure(
+			status,
+			command.Terminal.Report.ReportedStatus,
+			command.Terminal.Report.ErrorCode,
+			command.Terminal.Report.Result.Error,
+		)
 }
 
 func prunePriority(command Command, tenantID, nodeID string) int {
@@ -1193,30 +1497,38 @@ type commandBinding struct {
 }
 
 func parseCommandBinding(raw []byte) (commandBinding, error) {
-	envelope, err := dsse.Parse(raw)
+	statement, err := parseCommandStatement(raw)
 	if err != nil {
 		return commandBinding{}, err
-	}
-	if envelope.PayloadType != admission.CommandPayloadType {
-		return commandBinding{}, errors.New("DSSE payload type is not an Executor command")
-	}
-	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
-	if err != nil || len(payload) == 0 || len(payload) > dsse.MaxPayloadBytes || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
-		return commandBinding{}, errors.New("DSSE payload encoding is invalid")
-	}
-	var statement admission.CommandStatement
-	if err := dsse.DecodeStrictInto(payload, dsse.MaxPayloadBytes, &statement); err != nil {
-		return commandBinding{}, err
-	}
-	if statement.SchemaVersion != admission.CommandSchemaV2 || !validRecordID(statement.CommandID, 256) ||
-		!validRecordID(statement.TenantID, 128) || !validRecordID(statement.NodeID, 128) {
-		return commandBinding{}, errors.New("signed command identity is invalid")
 	}
 	return commandBinding{
 		CommandID: statement.CommandID, TenantID: statement.TenantID, NodeID: statement.NodeID,
 		RuntimeRef: statement.RuntimeRef, Kind: statement.Kind,
 		ClaimGeneration: statement.ClaimGeneration, InstanceGeneration: statement.InstanceGeneration,
 	}, nil
+}
+
+func parseCommandStatement(raw []byte) (admission.CommandStatement, error) {
+	envelope, err := dsse.Parse(raw)
+	if err != nil {
+		return admission.CommandStatement{}, err
+	}
+	if envelope.PayloadType != admission.CommandPayloadType {
+		return admission.CommandStatement{}, errors.New("DSSE payload type is not an Executor command")
+	}
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil || len(payload) == 0 || len(payload) > dsse.MaxPayloadBytes || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
+		return admission.CommandStatement{}, errors.New("DSSE payload encoding is invalid")
+	}
+	var statement admission.CommandStatement
+	if err := dsse.DecodeStrictInto(payload, dsse.MaxPayloadBytes, &statement); err != nil {
+		return admission.CommandStatement{}, err
+	}
+	if statement.SchemaVersion != admission.CommandSchemaV2 || !validRecordID(statement.CommandID, 256) ||
+		!validRecordID(statement.TenantID, 128) || !validRecordID(statement.NodeID, 128) {
+		return admission.CommandStatement{}, errors.New("signed command identity is invalid")
+	}
+	return statement, nil
 }
 
 func parseCommandBindingForSubmission(raw []byte) (commandBinding, error) {

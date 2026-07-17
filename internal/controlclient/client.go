@@ -165,6 +165,19 @@ type NodeCredentialRevocation struct {
 	Revoked      bool   `json:"revoked"`
 }
 
+// EvidenceCaptureArmInput binds one short-lived controller capture to an exact
+// activation. The node identity is supplied separately as the API route.
+type EvidenceCaptureArmInput struct {
+	CaptureID             string
+	RequestID             string
+	TenantID              string
+	RuntimeRef            string
+	Generation            uint64
+	ActivationID          string
+	ActivationBeginDigest string
+	TTL                   time.Duration
+}
+
 func New(baseURL, token string, caPEM []byte) (*Client, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
@@ -543,6 +556,165 @@ func (c *Client) ExportExecutorEvidence(ctx context.Context, nodeID string) (con
 	return export, nil
 }
 
+// ArmExecutorEvidenceCapture reserves a bounded controller-side range before
+// an activation command is submitted. Exact retries return the same capture
+// without extending its absolute expiry.
+func (c *Client) ArmExecutorEvidenceCapture(
+	ctx context.Context,
+	nodeID string,
+	input EvidenceCaptureArmInput,
+) (controlstore.EvidenceCapture, error) {
+	path, err := evidenceCapturePath(nodeID, "", "")
+	if err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if input.TTL < controlstore.MinEvidenceCaptureTTL ||
+		input.TTL > controlstore.MaxEvidenceCaptureTTL ||
+		input.TTL%time.Second != 0 {
+		return controlstore.EvidenceCapture{},
+			errors.New("evidence capture lifetime must be whole seconds between 1 second and 1 hour")
+	}
+	if !validEvidenceRouteIdentity(input.CaptureID, 128) ||
+		!validEvidenceRouteIdentity(input.RequestID, 128) ||
+		!validEvidenceRouteIdentity(input.TenantID, 128) ||
+		!validEvidenceRouteIdentity(input.ActivationID, 128) ||
+		!controlprotocol.ValidSHA256Digest(input.ActivationBeginDigest) ||
+		!validExecutorRuntimeRef(input.RuntimeRef) ||
+		input.Generation == 0 {
+		return controlstore.EvidenceCapture{},
+			errors.New("evidence capture target identity is invalid")
+	}
+	var capture controlstore.EvidenceCapture
+	err = c.do(ctx, http.MethodPost, path, struct {
+		CaptureID             string `json:"capture_id"`
+		RequestID             string `json:"request_id"`
+		TenantID              string `json:"tenant_id"`
+		RuntimeRef            string `json:"runtime_ref"`
+		Generation            uint64 `json:"generation"`
+		ActivationID          string `json:"activation_id"`
+		ActivationBeginDigest string `json:"activation_begin_digest"`
+		TTLSeconds            int64  `json:"ttl_seconds"`
+	}{
+		CaptureID: input.CaptureID, RequestID: input.RequestID,
+		TenantID: input.TenantID, RuntimeRef: input.RuntimeRef,
+		Generation: input.Generation, ActivationID: input.ActivationID,
+		ActivationBeginDigest: input.ActivationBeginDigest,
+		TTLSeconds:            int64(input.TTL / time.Second),
+	}, &capture, true)
+	if err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if err := validateEvidenceCaptureResponse(capture, nodeID, input.CaptureID); err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	armedAt, armedErr := time.Parse(time.RFC3339Nano, capture.ArmedAt)
+	expiresAt, expiresErr := time.Parse(time.RFC3339Nano, capture.ExpiresAt)
+	if capture.RequestID != input.RequestID || capture.TenantID != input.TenantID ||
+		capture.RuntimeRef != input.RuntimeRef || capture.Generation != input.Generation ||
+		capture.ActivationID != input.ActivationID ||
+		capture.ActivationBeginDigest != input.ActivationBeginDigest ||
+		armedErr != nil || expiresErr != nil || expiresAt.Sub(armedAt) != input.TTL {
+		return controlstore.EvidenceCapture{},
+			errors.New("control evidence capture arm response changed the requested binding")
+	}
+	return capture, nil
+}
+
+func (c *Client) GetExecutorEvidenceCapture(
+	ctx context.Context,
+	nodeID, captureID string,
+) (controlstore.EvidenceCapture, error) {
+	path, err := evidenceCapturePath(nodeID, captureID, "")
+	if err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	var capture controlstore.EvidenceCapture
+	if err := c.do(ctx, http.MethodGet, path, nil, &capture, true); err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if err := validateEvidenceCaptureResponse(capture, nodeID, captureID); err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	return capture, nil
+}
+
+func (c *Client) DeleteExecutorEvidenceCapture(
+	ctx context.Context,
+	nodeID, captureID string,
+) error {
+	path, err := evidenceCapturePath(nodeID, captureID, "")
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodDelete, path, nil, nil, true)
+}
+
+func (c *Client) SealExecutorEvidenceCapture(
+	ctx context.Context,
+	nodeID, captureID, canaryCommandID string,
+) (controlstore.EvidenceCapture, error) {
+	path, err := evidenceCapturePath(nodeID, captureID, "/seal")
+	if err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if !validEvidenceRouteIdentity(canaryCommandID, 256) {
+		return controlstore.EvidenceCapture{},
+			errors.New("activation canary command identity is invalid")
+	}
+	var capture controlstore.EvidenceCapture
+	if err := c.do(ctx, http.MethodPost, path, struct {
+		CanaryCommandID string `json:"canary_command_id"`
+	}{CanaryCommandID: canaryCommandID}, &capture, true); err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if err := validateEvidenceCaptureResponse(capture, nodeID, captureID); err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if capture.State != controlstore.EvidenceCaptureSealed ||
+		capture.CanaryCommandID != canaryCommandID {
+		return controlstore.EvidenceCapture{},
+			errors.New("control evidence capture seal response changed the requested binding")
+	}
+	return capture, nil
+}
+
+func (c *Client) ExportExecutorEvidenceCapture(
+	ctx context.Context,
+	nodeID, captureID string,
+) (controlprotocol.ControllerEvidenceCaptureV1, error) {
+	path, err := evidenceCapturePath(nodeID, captureID, "/export")
+	if err != nil {
+		return controlprotocol.ControllerEvidenceCaptureV1{}, err
+	}
+	var export controlprotocol.ControllerEvidenceCaptureV1
+	if err := c.do(ctx, http.MethodGet, path, nil, &export, true); err != nil {
+		return controlprotocol.ControllerEvidenceCaptureV1{}, err
+	}
+	if err := export.Validate(); err != nil {
+		return controlprotocol.ControllerEvidenceCaptureV1{},
+			fmt.Errorf("validate control evidence capture export: %w", err)
+	}
+	if export.Statement.NodeID != nodeID ||
+		export.Statement.CaptureID != captureID {
+		return controlprotocol.ControllerEvidenceCaptureV1{},
+			errors.New("control evidence capture export changed route identity")
+	}
+	return export, nil
+}
+
+func validateEvidenceCaptureResponse(
+	capture controlstore.EvidenceCapture,
+	nodeID, captureID string,
+) error {
+	if capture.NodeID != nodeID || capture.CaptureID != captureID {
+		return errors.New("control evidence capture response changed route identity")
+	}
+	if err := capture.Validate(); err != nil {
+		return fmt.Errorf("validate control evidence capture response: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body, output any, authenticated bool) error {
 	if !strings.HasPrefix(path, "/v1/") || strings.Contains(path, "//") || strings.ContainsAny(path, "\r\n\x00") {
 		return errors.New("invalid control API path")
@@ -620,18 +792,60 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any, 
 }
 
 func executorEvidencePath(nodeID, suffix string) (string, error) {
-	if nodeID == "" || len(nodeID) > 128 || !utf8.ValidString(nodeID) ||
-		strings.TrimSpace(nodeID) != nodeID || strings.ContainsAny(nodeID, "\r\n\x00") {
-		return "", errors.New("control evidence node identity is invalid")
-	}
-	for index, character := range nodeID {
-		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' ||
-			character >= '0' && character <= '9' || index > 0 && (character == '.' || character == '_' || character == '-') {
-			continue
-		}
+	if !validEvidenceRouteIdentity(nodeID, 128) {
 		return "", errors.New("control evidence node identity is invalid")
 	}
 	return "/v1/nodes/" + url.PathEscape(nodeID) + "/evidence" + suffix, nil
+}
+
+func evidenceCapturePath(nodeID, captureID, suffix string) (string, error) {
+	path, err := executorEvidencePath(nodeID, "/captures")
+	if err != nil {
+		return "", err
+	}
+	if captureID == "" {
+		if suffix != "" {
+			return "", errors.New("control evidence capture identity is required")
+		}
+		return path, nil
+	}
+	if !validEvidenceRouteIdentity(captureID, 128) {
+		return "", errors.New("control evidence capture identity is invalid")
+	}
+	if suffix != "" && suffix != "/seal" && suffix != "/export" {
+		return "", errors.New("control evidence capture route suffix is invalid")
+	}
+	return path + "/" + url.PathEscape(captureID) + suffix, nil
+}
+
+func validEvidenceRouteIdentity(value string, maximum int) bool {
+	if value == "" || len(value) > maximum || !utf8.ValidString(value) ||
+		strings.TrimSpace(value) != value || strings.ContainsAny(value, "\r\n\x00") {
+		return false
+	}
+	for index, character := range value {
+		if character >= 'A' && character <= 'Z' ||
+			character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' ||
+			index > 0 && (character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validExecutorRuntimeRef(value string) bool {
+	const prefix = "executor-"
+	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
+		return false
+	}
+	for _, character := range strings.TrimPrefix(value, prefix) {
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func paginatedPath(path, after string, limit int) (string, error) {

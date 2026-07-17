@@ -1,16 +1,24 @@
 package controlstore
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/activation"
+	"github.com/hardrails/steward/internal/activationcanary"
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/gateway"
+	"github.com/hardrails/steward/internal/taskpermit"
 )
 
 func TestActivationCanaryLeaseRequiresProtocolV4Capability(t *testing.T) {
@@ -20,6 +28,7 @@ func TestActivationCanaryLeaseRequiresProtocolV4Capability(t *testing.T) {
 	statement := baseV4CommandStatement(
 		"canary-command", "tenant-a", "node-1", "activation-canary", 7, 11,
 	)
+	_ = controlStoreCanaryFixture(t, &statement, fixture.now)
 	raw := signV4CommandStatement(t, statement)
 	if _, created, err := fixture.store.SubmitCommand(
 		fixture.admin,
@@ -72,6 +81,100 @@ func TestActivationCanaryLeaseRequiresProtocolV4Capability(t *testing.T) {
 	}
 }
 
+func TestActivationCanaryPollLeasesOneCanaryWithoutBlockingOtherCommands(
+	t *testing.T,
+) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	for _, commandID := range []string{"canary-a", "canary-b", "canary-c"} {
+		statement := baseV4CommandStatement(
+			commandID,
+			"tenant-a",
+			"node-1",
+			"activation-canary",
+			7,
+			11,
+		)
+		_ = controlStoreCanaryFixture(t, &statement, fixture.now)
+		if _, created, err := fixture.store.SubmitCommand(
+			fixture.admin,
+			statement.TenantID,
+			statement.NodeID,
+			signV4CommandStatement(t, statement),
+			fixture.now.Add(2*time.Minute),
+		); err != nil || !created {
+			t.Fatalf("submit %s = (%v, %v)", commandID, created, err)
+		}
+	}
+	ordinary := baseV4CommandStatement(
+		"reconcile-read",
+		"tenant-a",
+		"node-1",
+		"read",
+		7,
+		11,
+	)
+	if _, created, err := fixture.store.SubmitCommand(
+		fixture.admin,
+		ordinary.TenantID,
+		ordinary.NodeID,
+		signV4CommandStatement(t, ordinary),
+		fixture.now.Add(2*time.Minute),
+	); err != nil || !created {
+		t.Fatalf("submit ordinary command = (%v, %v)", created, err)
+	}
+
+	deliveries, err := fixture.store.PollV4(
+		node,
+		[]string{
+			controlprotocol.ExecutorCapabilityActivationCanaryV1,
+			controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
+		},
+		fixture.now.Add(3*time.Minute),
+		time.Minute,
+		4,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var canaries, ordinaryCommands int
+	leasedCanaryID := ""
+	for _, delivery := range deliveries {
+		switch delivery.CommandID {
+		case "canary-a", "canary-b", "canary-c":
+			canaries++
+			leasedCanaryID = delivery.CommandID
+		case ordinary.CommandID:
+			ordinaryCommands++
+		}
+	}
+	if canaries != 1 || ordinaryCommands != 1 || len(deliveries) != 2 {
+		t.Fatalf(
+			"poll deliveries=%+v, want one canary and the ordinary command",
+			deliveries,
+		)
+	}
+	for _, commandID := range []string{"canary-a", "canary-b", "canary-c"} {
+		command, found, getErr := fixture.store.GetCommand(
+			fixture.admin,
+			"tenant-a",
+			"node-1",
+			commandID,
+		)
+		if getErr != nil || !found {
+			t.Fatalf("get %s = (%v, %v)", commandID, found, getErr)
+		}
+		if commandID == leasedCanaryID {
+			if command.State != CommandLeased {
+				t.Fatalf("%s state=%s, want leased", commandID, command.State)
+			}
+		} else if command.State != CommandPending {
+			t.Fatalf("%s state=%s, want pending", commandID, command.State)
+		}
+	}
+}
+
 func TestActivationCanaryProjectionPersistsAndDeepClonesAcrossRecovery(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")
@@ -79,8 +182,8 @@ func TestActivationCanaryProjectionPersistsAndDeepClonesAcrossRecovery(t *testin
 	statement := baseV4CommandStatement(
 		"canary-command", "tenant-a", "node-1", "activation-canary", 7, 11,
 	)
+	projection := controlStoreCanaryFixture(t, &statement, fixture.now)
 	delivery := submitAndPollActivationCanaryV4(t, fixture, node, statement)
-	projection := storeCanaryResultFixture()
 	report := activationCanaryReportV4(delivery, statement, projection)
 	if applied, err := fixture.store.ApplyReportV4(
 		node,
@@ -140,9 +243,23 @@ func TestActivationCanaryProjectionPersistsAndDeepClonesAcrossRecovery(t *testin
 }
 
 func TestActivationCanaryProjectionRequiresExactSignedCommandBinding(t *testing.T) {
-	projection := storeCanaryResultFixture()
 	runtimeRef := "executor-" + strings.Repeat("a", 64)
+	statement := baseV4CommandStatement(
+		"command-1",
+		"tenant-a",
+		"node-1",
+		"activation-canary",
+		7,
+		11,
+	)
+	projection := controlStoreCanaryFixture(
+		t,
+		&statement,
+		time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC),
+	)
+	commandRaw := signV4CommandStatement(t, statement)
 	base := Command{
+		CommandDSSE:              commandRaw,
 		CommandKind:              "activation-canary",
 		SignedRuntimeRef:         runtimeRef,
 		SignedClaimGeneration:    7,
@@ -220,15 +337,167 @@ func submitAndPollActivationCanaryV4(
 	return deliveries[0]
 }
 
-func storeCanaryResultFixture() controlprotocol.ExecutorActivationCanaryResultV1 {
+func controlStoreCanaryFixture(
+	t *testing.T,
+	outer *admission.CommandStatement,
+	now time.Time,
+) controlprotocol.ExecutorActivationCanaryResultV1 {
+	t.Helper()
+	activationID := "activation-1"
+	request, err := agentrelease.BuildCanaryRequest(
+		agentrelease.RequestRecipe{
+			Input:           agentrelease.HermesWorkspaceAuditInput,
+			SessionIDPrefix: agentrelease.HermesSessionIDPrefix,
+		},
+		activationID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskPublic, taskPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantID := gateway.GrantID(
+		outer.TenantID,
+		outer.InstanceID,
+		outer.InstanceGeneration,
+	)
+	permitStatement := taskpermit.Statement{
+		SchemaVersion:         taskpermit.SchemaV1,
+		NodeID:                outer.NodeID,
+		TenantID:              outer.TenantID,
+		InstanceID:            outer.InstanceID,
+		RuntimeRef:            outer.RuntimeRef,
+		GrantID:               grantID,
+		Generation:            outer.InstanceGeneration,
+		CapsuleDigest:         dsse.Digest([]byte("capsule")),
+		PolicyDigest:          dsse.Digest([]byte("policy")),
+		RoutePolicyDigest:     dsse.Digest([]byte("route-policy")),
+		ServiceID:             agentrelease.HermesServiceID,
+		OperationID:           agentrelease.HermesOperationID,
+		OperationPolicyDigest: dsse.Digest([]byte("operation-policy")),
+		TaskID:                "activation-task",
+		RequestDigest:         taskpermit.RequestDigest(request),
+		RequestBytes:          int64(len(request)),
+		ContentType:           "application/json",
+		NotBefore:             now.Add(-time.Minute).Format(time.RFC3339),
+		ExpiresAt:             now.Add(10 * time.Minute).Format(time.RFC3339),
+	}
+	permitEnvelope, err := dsse.Sign(
+		taskpermit.PayloadType,
+		mustControlStoreJSON(t, permitStatement),
+		"tenant-task",
+		taskPrivate,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permitRaw, err := dsse.Marshal(permitEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permitHeader, err := taskpermit.EncodeHeader(permitRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := activation.BindingV1{
+		ActivationID:  activationID,
+		PlanDigest:    dsse.Digest([]byte("plan")),
+		ReleaseDigest: dsse.Digest([]byte("release")),
+		PolicyDigest:  permitStatement.PolicyDigest,
+		IntentDigest:  dsse.Digest([]byte("intent")),
+		Archive: activation.ArchiveV1{
+			Digest: dsse.Digest([]byte("archive")),
+			Bytes:  1024,
+		},
+		TenantID:   outer.TenantID,
+		NodeID:     outer.NodeID,
+		InstanceID: outer.InstanceID,
+		Generation: outer.InstanceGeneration,
+	}
+	beginRaw, err := activation.MarshalExecutorBeginV1(
+		binding,
+		outer.RuntimeRef,
+		"steward-state-"+strings.Repeat("b", 64),
+		permitStatement.CapsuleDigest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionProjection := controlprotocol.ExecutorAdmissionProjectionV1{
+		SchemaVersion: controlprotocol.ExecutorAdmissionProjectionSchemaV1,
+		RuntimeRef:    outer.RuntimeRef,
+		Status:        "created",
+		CapsuleDigest: permitStatement.CapsuleDigest,
+		PolicyDigest:  permitStatement.PolicyDigest,
+		Generation:    outer.InstanceGeneration,
+		EvidenceKeyID: strings.Repeat("a", 32),
+		GrantID:       grantID,
+		ServicePath:   "/v1/services/" + grantID + "/",
+		ServiceID:     agentrelease.HermesServiceID,
+		TaskAuthorities: []controlprotocol.ExecutorTaskAuthorityV1{{
+			KeyID:     "tenant-task",
+			PublicKey: base64.StdEncoding.EncodeToString(taskPublic),
+		}},
+		RoutePolicyDigest:     permitStatement.RoutePolicyDigest,
+		ActivationID:          activationID,
+		ActivationBeginDigest: dsse.Digest(beginRaw),
+	}
+	if err := admissionProjection.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	command := activationcanary.CommandV1{
+		SchemaVersion:       activationcanary.CommandSchemaV1,
+		ActivationID:        activationID,
+		AdmissionDigest:     dsse.Digest(mustControlStoreJSON(t, admissionProjection)),
+		Admission:           admissionProjection,
+		ExecutorBeginBase64: base64.StdEncoding.EncodeToString(beginRaw),
+		GrantID:             grantID,
+		OperationID:         agentrelease.HermesOperationID,
+		TaskPermit:          permitHeader,
+		RequestBase64:       base64.StdEncoding.EncodeToString(request),
+		Deadline:            now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+		ReceiptAuthority: activationcanary.ReceiptAuthorityV1{
+			NodeID:          gateway.ServiceTaskReceiptNodeID(outer.NodeID),
+			Epoch:           1,
+			PublicKeySHA256: controlprotocol.ExecutorEvidencePublicKeySHA256(receiptPublic),
+		},
+	}
+	commandRaw, err := activationcanary.MarshalCommandV1(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := activationcanary.VerifyHistoricalCommandV1(
+		commandRaw,
+		activationcanary.AdmissionContextV1{
+			NodeID:     outer.NodeID,
+			TenantID:   outer.TenantID,
+			InstanceID: outer.InstanceID,
+			Projection: admissionProjection,
+		},
+		taskpermit.MaxValidity,
+	); err != nil {
+		t.Fatal(err)
+	}
+	outer.Payload = commandRaw
+
 	terminal := []byte(`{"ok":true}`)
 	receipts := []byte("authorize\nterminal\nexport\n")
 	return controlprotocol.ExecutorActivationCanaryResultV1{
-		SchemaVersion:        controlprotocol.ExecutorActivationCanaryResultSchemaV1,
-		ActivationID:         "activation-1",
-		AdmissionDigest:      "sha256:" + strings.Repeat("1", 64),
-		TaskDigest:           "sha256:" + strings.Repeat("2", 64),
-		PermitDigest:         "sha256:" + strings.Repeat("3", 64),
+		SchemaVersion:   controlprotocol.ExecutorActivationCanaryResultSchemaV1,
+		ActivationID:    activationID,
+		AdmissionDigest: command.AdmissionDigest,
+		TaskDigest: taskpermit.TaskDigest(
+			permitStatement.TenantID,
+			permitStatement.InstanceID,
+			permitStatement.TaskID,
+		),
+		PermitDigest:         dsse.Digest(permitRaw),
 		RunID:                "run_" + strings.Repeat("4", 32),
 		TerminalResultDigest: dsse.Digest(terminal), TerminalResultBytes: int64(len(terminal)),
 		TerminalResultBase64:       base64.StdEncoding.EncodeToString(terminal),
@@ -236,6 +505,15 @@ func storeCanaryResultFixture() controlprotocol.ExecutorActivationCanaryResultV1
 		ActivationCheckpointDigest: "sha256:" + strings.Repeat("5", 64),
 		Qualified:                  true,
 	}
+}
+
+func mustControlStoreJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func activationCanaryReportV4(

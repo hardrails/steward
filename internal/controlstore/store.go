@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/hardrails/steward/internal/controlprotocol"
 )
 
 const (
@@ -214,6 +216,12 @@ func Open(directory string, limits Limits) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateRecoveredExecutorReportV4Bindings(current); err != nil {
+		return nil, formatStateError(err)
+	}
+	if err := validateRecoveredEvidenceCaptures(current); err != nil {
+		return nil, formatStateError(err)
+	}
 	if _, err := wal.Seek(0, io.SeekEnd); err != nil {
 		return nil, fmt.Errorf("seek control WAL: %w", err)
 	}
@@ -224,6 +232,29 @@ func Open(directory string, limits Limits) (*Store, error) {
 		evidenceLastReports: make(map[string]time.Time),
 		syncFile:            func(file *os.File) error { return file.Sync() },
 	}, nil
+}
+
+// validateRecoveredExecutorReportV4Bindings authenticates each retained
+// successful canary exactly once after the snapshot and WAL have converged on
+// their final state. Hash-chain validation plus the cheap per-mutation binding
+// checks protect replay; repeating Ed25519 verification for every intermediate
+// state would make unrelated recovery work scale with retained canaries.
+func validateRecoveredExecutorReportV4Bindings(current state) error {
+	for _, command := range current.commands {
+		if command.CommandKind != "activation-canary" ||
+			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 ||
+			command.State != CommandTerminal || command.Terminal == nil ||
+			command.Terminal.Report.Status != controlprotocol.ExecutorStatusDone {
+			continue
+		}
+		if err := validateExecutorReportV4Binding(
+			command,
+			executorReportV4FromTerminal(*command.Terminal),
+		); err != nil {
+			return errors.New("recovered activation canary report contradicts its signed command")
+		}
+	}
+	return nil
 }
 
 func (store *Store) Close() error {

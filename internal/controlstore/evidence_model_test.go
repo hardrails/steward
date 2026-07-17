@@ -45,6 +45,7 @@ func TestEvidenceWitnessStateRoundTripAndLegacyMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.Version = stateFormatMinReadVersion
+	snapshot.Captures = nil
 	for index := range snapshot.Commands {
 		snapshot.Commands[index].DeliveryProtocol = 0
 	}

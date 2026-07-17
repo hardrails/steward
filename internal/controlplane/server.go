@@ -112,6 +112,10 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/nodes/{node_id}", server.nodeAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence", server.evidenceAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/export", server.evidenceExport)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures", server.evidenceCaptures)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures/{capture_id}", server.evidenceCapture)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures/{capture_id}/seal", server.evidenceCaptureSeal)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures/{capture_id}/export", server.evidenceCaptureExport)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes", server.nodes)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}", server.node)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands", server.commands)
@@ -454,6 +458,218 @@ func (server *Server) evidenceExport(writer http.ResponseWriter, request *http.R
 		http.StatusConflict,
 		"conflict",
 		"evidence changed while the export was being signed; retry after the indicated delay",
+	)
+}
+
+func (server *Server) evidenceCaptures(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		CaptureID             string `json:"capture_id"`
+		RequestID             string `json:"request_id"`
+		TenantID              string `json:"tenant_id"`
+		RuntimeRef            string `json:"runtime_ref"`
+		Generation            uint64 `json:"generation"`
+		ActivationID          string `json:"activation_id"`
+		ActivationBeginDigest string `json:"activation_begin_digest"`
+		TTLSeconds            int64  `json:"ttl_seconds"`
+	}
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	if input.TTLSeconds < int64(controlstore.MinEvidenceCaptureTTL/time.Second) ||
+		input.TTLSeconds > int64(controlstore.MaxEvidenceCaptureTTL/time.Second) {
+		writeError(
+			writer,
+			http.StatusBadRequest,
+			"invalid_request",
+			"ttl_seconds must be between 1 and 3600",
+		)
+		return
+	}
+	now := server.now().UTC()
+	capture, created, err := server.store.ArmEvidenceCapture(
+		identity,
+		controlstore.EvidenceCaptureArmRequest{
+			CaptureID: input.CaptureID, RequestID: input.RequestID,
+			NodeID: request.PathValue("node_id"), TenantID: input.TenantID,
+			RuntimeRef: input.RuntimeRef, Generation: input.Generation,
+			ActivationID: input.ActivationID, ActivationBeginDigest: input.ActivationBeginDigest,
+			TTL: time.Duration(input.TTLSeconds) * time.Second,
+		},
+		now,
+	)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(writer, status, capture)
+}
+
+func (server *Server) evidenceCapture(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet && request.Method != http.MethodDelete {
+		methodNotAllowed(writer, http.MethodGet, http.MethodDelete)
+		return
+	}
+	if !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method == http.MethodGet {
+		capture, found, err := server.store.GetEvidenceCapture(
+			identity,
+			request.PathValue("capture_id"),
+			server.now(),
+		)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		if !found || capture.NodeID != request.PathValue("node_id") {
+			writeError(writer, http.StatusNotFound, "not_found", "resource was not found")
+			return
+		}
+		writeJSON(writer, http.StatusOK, capture)
+		return
+	}
+	deleted, err := server.store.DeleteEvidenceCapture(
+		identity,
+		request.PathValue("node_id"),
+		request.PathValue("capture_id"),
+		server.now(),
+	)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	if !deleted {
+		writeError(writer, http.StatusNotFound, "not_found", "resource was not found")
+		return
+	}
+	writeNoContent(writer)
+}
+
+func (server *Server) evidenceCaptureSeal(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		CanaryCommandID string `json:"canary_command_id"`
+	}
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	capture, _, err := server.store.SealEvidenceCapture(
+		identity,
+		request.PathValue("node_id"),
+		request.PathValue("capture_id"),
+		input.CanaryCommandID,
+		server.now(),
+	)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, capture)
+}
+
+func (server *Server) evidenceCaptureExport(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	nodeID := request.PathValue("node_id")
+	captureID := request.PathValue("capture_id")
+	for attempt := 0; attempt < maxEvidenceExportAttempts; attempt++ {
+		now := server.now().UTC()
+		snapshot, found, err := server.store.SnapshotEvidenceCaptureExport(
+			identity,
+			captureID,
+			now,
+		)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		if !found || snapshot.Capture.NodeID != nodeID {
+			writeError(writer, http.StatusNotFound, "not_found", "resource was not found")
+			return
+		}
+		statement, err := snapshot.Statement(server.auth.InstanceID(), now)
+		if err != nil {
+			server.logger.Error(
+				"construct evidence capture export",
+				"error", err,
+				"node_id", nodeID,
+				"capture_id", captureID,
+			)
+			writeError(
+				writer,
+				http.StatusInternalServerError,
+				"internal_error",
+				"the control plane could not construct a valid evidence capture export",
+			)
+			return
+		}
+		export, err := controlprotocol.SignControllerEvidenceCaptureV1(
+			statement,
+			snapshot.Frames,
+			server.witnessKey,
+		)
+		if err != nil {
+			server.logger.Error(
+				"sign evidence capture export",
+				"error", err,
+				"node_id", nodeID,
+				"capture_id", captureID,
+			)
+			writeError(
+				writer,
+				http.StatusInternalServerError,
+				"internal_error",
+				"the control plane could not sign a valid evidence capture export",
+			)
+			return
+		}
+		current, err := server.store.EvidenceCaptureSnapshotCurrent(
+			identity,
+			snapshot,
+			server.now(),
+		)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		if current {
+			writeJSON(writer, http.StatusOK, export)
+			return
+		}
+	}
+	writer.Header().Set("Retry-After", strconv.Itoa(evidenceExportRetryAfter))
+	writeError(
+		writer,
+		http.StatusConflict,
+		"conflict",
+		"evidence capture changed while the export was being signed; retry after the indicated delay",
 	)
 }
 
