@@ -177,6 +177,14 @@ function sendJSON(response, status, value) {
   response.end(encoded);
 }
 
+function canonicalJSON(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function readBody(request) {
   return new Promise((resolve, reject) => {
     const declared = request.headers["content-length"];
@@ -308,7 +316,7 @@ async function executeRun(record, message, sessionID, model) {
       JSON.parse((stdout ?? Buffer.alloc(0)).toString("utf8")),
       model,
     );
-    const canonical = Buffer.from(JSON.stringify(result));
+    const canonical = Buffer.from(canonicalJSON(result));
     if (canonical.length > MAX_RESULT_BYTES) throw new Error("OpenClaw result exceeded 1 MiB");
     record.result = result;
     record.result_sha256 = createHash("sha256").update(canonical).digest("hex");
@@ -369,7 +377,11 @@ async function handle(request, response, model) {
     try {
       document = JSON.parse((await readBody(request)).toString("utf8"));
     } catch (error) {
-      sendJSON(response, 400, { error: "invalid_request", message: error instanceof Error ? error.message : "invalid JSON" });
+      const oversized = error instanceof Error && error.message === "request body exceeds 64 KiB";
+      sendJSON(response, oversized ? 413 : 400, {
+        error: oversized ? "request_too_large" : "invalid_request",
+        message: error instanceof Error ? error.message : "invalid JSON",
+      });
       return;
     }
     const keys = document && typeof document === "object" && !Array.isArray(document) ? Object.keys(document).sort() : [];

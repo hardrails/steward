@@ -209,6 +209,62 @@ func TestOpenClawFixtureInputsHaveStableAuditIdentity(t *testing.T) {
 	}
 }
 
+func TestOpenClawBuildAndQualificationHarnessesAreFailClosed(t *testing.T) {
+	root := filepath.Clean(filepath.Join(openClawAdapterRoot(t), "..", ".."))
+	builderPath := filepath.Join(root, "scripts", "build-openclaw-adapter.sh")
+	gatePath := filepath.Join(root, "scripts", "openclaw-feasibility.sh")
+	builder := string(readBounded(t, builderPath, 128<<10))
+	gate := string(readBounded(t, gatePath, 256<<10))
+	for _, path := range []string{builderPath, gatePath} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Fatalf("%s mode = %o", path, info.Mode().Perm())
+		}
+	}
+	for _, required := range []string{
+		"git -C \"$root\" archive",
+		"sha256sum -c source-inputs.sha256",
+		"--network=none --pull=false --platform=linux/amd64 --provenance=false",
+		"pinned-base-pull;docker-build-network-none",
+		"os.rename(source, destination)",
+		"contains_agent_content\": False",
+	} {
+		if !strings.Contains(builder, required) {
+			t.Fatalf("builder is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"STEWARD_ACCEPT_DISPOSABLE_HOST_RISK",
+		"docker network create --internal",
+		"--runtime runsc",
+		"--read-only --cap-drop ALL",
+		"no-new-privileges:true",
+		"response.status !== 413",
+		"persisted skill drifted",
+		"contains_agent_content\": False",
+	} {
+		if !strings.Contains(gate, required) {
+			t.Fatalf("qualification gate is missing %q", required)
+		}
+	}
+	for name, content := range map[string]string{"builder": builder, "gate": gate} {
+		for _, forbidden := range []string{"--privileged", "--network=host", "/var/run/docker.sock", "curl | sh"} {
+			if strings.Contains(content, forbidden) {
+				t.Fatalf("%s contains forbidden authority %q", name, forbidden)
+			}
+		}
+	}
+	if bash, err := exec.LookPath("bash"); err == nil {
+		command := exec.Command(bash, "-n", builderPath, gatePath)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("shell syntax: %v\n%s", err, output)
+		}
+	}
+}
+
 func TestOpenClawFixtureModelRequiresTheExecResult(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
