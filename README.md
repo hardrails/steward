@@ -427,7 +427,8 @@ and observed outcome linkage for offline audit.
 Among the products reviewed in the dated
 [market analysis](https://hardrails.github.io/steward/product/market-analysis/), none
 documents the same combination of customer-operated air-gapped nodes,
-site-signed artifact and tenant admission, service-scoped off-node task keys,
+publisher-signed artifacts, site-root-signed policy, authenticated tenant intent,
+service-scoped off-node task keys,
 exact-request dispatch, durable node-local replay control, and offline-verifiable
 authorization-to-outcome receipts. This is a comparison of public documentation,
 not a certification or a claim that another product cannot add these controls.

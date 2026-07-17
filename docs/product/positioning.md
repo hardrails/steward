@@ -293,7 +293,8 @@ evidence that remains verifiable offline.
 
 Among the systems in the linked comparison, no reviewed product documents the same
 combination of a customer-operated air-gapped fleet controller and nodes,
-receipt-key-bound enrollment, site-signed artifact and tenant admission,
+receipt-key-bound enrollment, publisher-signed artifacts, site-root-signed policy,
+authenticated tenant intent,
 controller-blind tenant signing keys, service-scoped off-node task keys,
 exact-request dispatch, durable delivery and node-local replay control,
 independently retained divergence findings, and offline-verifiable
