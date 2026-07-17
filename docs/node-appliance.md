@@ -286,6 +286,20 @@ tenant-scoped Executor credential remains available for a single-tenant node but
 does not enable multi-tenant commands. See [Signed admission]({{ '/guides/signed-admission/' | relative_url }})
 and [Executor uplink]({{ '/executor/' | relative_url }}#outbound-executor-uplink).
 
+For a node-scoped credential, `configure-node` selects Executor uplink protocol 4,
+which reports a bounded typed admission result to the controller. If the controller
+supports only the durable lease protocol, add
+`--executor-uplink-protocol-version 3`. Local and tenant-scoped configurations use
+the safe compatibility value `0` and cannot select 3 or 4.
+
+With protocol 4, Executor advertises `rollout-authorization-context-v1`, showing
+that its strict signed-command decoder accepts a rollout authorization digest. With
+the packaged Gateway topology it also advertises the closed
+`activation-canary-v1` capability. It accepts only Steward's fixed, tenant-signed
+Hermes workspace-audit task—not a URL, shell command, free-form prompt, or generic
+workflow step. The canary capability disappears while a canary is active, but the
+authorization-context capability and containment commands remain available.
+
 `configure-node` validates the enrollment evidence sidecar, imports the exact
 receipt key used during enrollment, and initializes the durable command and
 signed-admission fences, plus the empty operation journal and evidence chain. A
@@ -383,6 +397,12 @@ durable-format reader ranges is not eligible. Preserve `/var/lib/steward`,
 `/var/lib/steward-node`, `/var/log/steward`, and `/etc/steward`. Deleting or
 restoring them changes lifecycle, route commitments, audit, identity, or anti-replay
 state and needs a separate operator-approved recovery procedure.
+
+The delivery ledger has a specific one-way transition. Upgrade inspection leaves a
+format-2 or format-3 `uplink-delivery-state.json` unchanged, while normal Executor
+startup atomically migrates it to format 4 before polling. After that startup, a
+prior release limited to format 2 or 3 is not eligible for software rollback, even
+if the ledger is empty. Draining the node does not downgrade the file.
 
 The guided upgrade is:
 

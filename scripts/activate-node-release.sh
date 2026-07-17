@@ -168,7 +168,7 @@ write_canonical_manifest() {
 		printf '    "gateway_state": {"read_min": 1, "read_max": 4, "write": 4},\n'
 		printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 		printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
-		printf '    "uplink_delivery_state": {"read_min": 2, "read_max": 2, "write": 2},\n'
+		printf '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},\n'
 		printf '    "uplink_state": {"read_min": 2, "read_max": 2, "write": 2}\n'
 		printf '  },\n'
 		printf '  "files": {\n'
@@ -556,11 +556,73 @@ read_executor_setting() {
 	' "$executor_env"
 }
 
+executor_setting_count() {
+	local key=$1
+	awk -F= -v key="$key" '
+		$1 == key { count++ }
+		END { print count + 0 }
+	' "$executor_env"
+}
+
+write_executor_uplink_setup() {
+	local protocol_version=$1 delivery_file=$2
+	executor_env_tmp=$(mktemp "${executor_env%/*}/.executor.env.XXXXXX")
+	awk -v protocol="$protocol_version" -v delivery="$delivery_file" '
+		/^EXECUTOR_UPLINK_PROTOCOL_VERSION=/ {
+			if (found_protocol++) exit 3
+			print "EXECUTOR_UPLINK_PROTOCOL_VERSION=" protocol
+			next
+		}
+		/^EXECUTOR_UPLINK_DELIVERY_STATE_FILE=/ {
+			if (found_delivery++) exit 3
+			print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=" delivery
+			next
+		}
+		{ print }
+		END {
+			if (!found_protocol) print "EXECUTOR_UPLINK_PROTOCOL_VERSION=" protocol
+			if (!found_delivery) print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=" delivery
+		}
+	' "$executor_env" >"$executor_env_tmp"
+	chown root:root "$executor_env_tmp"
+	chmod 0600 "$executor_env_tmp"
+	executor_setup_changed=true
+	mv -f "$executor_env_tmp" "$executor_env"
+	executor_env_tmp=
+}
+
 prepare_uplink_delivery_state() {
 	local credential_file metadata scope credential_node configured_node delivery_file
+	local protocol_count protocol_version write_setup=false
 	[[ -r $executor_env ]] || return 0
+	protocol_count=$(executor_setting_count EXECUTOR_UPLINK_PROTOCOL_VERSION)
+	case "$protocol_count" in
+		0)
+			# A node running an older package selected protocol 3 implicitly when a
+			# delivery ledger was present. Persisting 0 preserves that behavior and
+			# does not silently move an active node to protocol 4 during activation.
+			protocol_version=0
+			write_setup=true
+			;;
+		1) protocol_version=$(read_executor_setting EXECUTOR_UPLINK_PROTOCOL_VERSION) ;;
+		*) activation_error "Executor uplink protocol setting is duplicated" ;;
+	esac
+	case "$protocol_version" in
+		0 | 3 | 4) ;;
+		*) activation_error "EXECUTOR_UPLINK_PROTOCOL_VERSION must be 0, 3, or 4" ;;
+	esac
+	delivery_file=$(read_executor_setting EXECUTOR_UPLINK_DELIVERY_STATE_FILE)
 	credential_file=$(read_executor_setting EXECUTOR_UPLINK_CREDENTIAL_FILE)
-	[[ -n $credential_file ]] || return 0
+	if [[ -z $credential_file ]]; then
+		if [[ $protocol_version != 0 ]]; then
+			activation_error "Executor uplink protocol $protocol_version requires an uplink credential"
+		fi
+		if [[ -n $delivery_file ]]; then
+			activation_error "Executor delivery state requires an uplink credential"
+		fi
+		[[ $write_setup == false ]] || write_executor_uplink_setup 0 ""
+		return 0
+	fi
 	metadata=$(runuser -u steward-executor -- "$release_dir/steward-executor" \
 		-inspect-uplink-credential -uplink-credential-file "$credential_file")
 	if [[ $metadata != *$'\n'* ]]; then
@@ -571,7 +633,16 @@ prepare_uplink_delivery_state() {
 	if [[ $credential_node == *$'\n'* || ( $scope != tenant && $scope != node ) ]]; then
 		activation_error "Executor credential inspection returned invalid metadata"
 	fi
-	[[ $scope == node ]] || return 0
+	if [[ $scope == tenant ]]; then
+		if [[ $protocol_version != 0 ]]; then
+			activation_error "tenant-scoped Executor credentials require uplink protocol setting 0"
+		fi
+		if [[ -n $delivery_file ]]; then
+			activation_error "tenant-scoped Executor credentials cannot use delivery state"
+		fi
+		[[ $write_setup == false ]] || write_executor_uplink_setup 0 ""
+		return 0
+	fi
 	if [[ $admission_mode != configured ]]; then
 		activation_error "a node-scoped Executor credential requires complete signed admission"
 	fi
@@ -579,8 +650,10 @@ prepare_uplink_delivery_state() {
 	if [[ -z $configured_node || $configured_node != "$credential_node" ]]; then
 		activation_error "node-scoped Executor credential node ID does not match signed admission"
 	fi
-	delivery_file=$(read_executor_setting EXECUTOR_UPLINK_DELIVERY_STATE_FILE)
-	[[ -z $delivery_file ]] || return 0
+	if [[ -n $delivery_file ]]; then
+		[[ $write_setup == false ]] || write_executor_uplink_setup "$protocol_version" "$delivery_file"
+		return 0
+	fi
 	if [[ ! -f $executor_env || -L $executor_env ]]; then
 		activation_error "Executor environment must be a regular non-symlink file before delivery setup"
 	fi
@@ -592,21 +665,7 @@ prepare_uplink_delivery_state() {
 		uplink_delivery_state_created=true
 		executor_setup_changed=true
 	fi
-	executor_env_tmp=$(mktemp "${executor_env%/*}/.executor.env.XXXXXX")
-	awk -v path="$uplink_delivery_state" '
-		/^EXECUTOR_UPLINK_DELIVERY_STATE_FILE=/ {
-			if (found++) exit 3
-			print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=" path
-			next
-		}
-		{ print }
-		END { if (!found) print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=" path }
-	' "$executor_env" >"$executor_env_tmp"
-	chown root:root "$executor_env_tmp"
-	chmod 0600 "$executor_env_tmp"
-	executor_setup_changed=true
-	mv -f "$executor_env_tmp" "$executor_env"
-	executor_env_tmp=
+	write_executor_uplink_setup "$protocol_version" "$uplink_delivery_state"
 }
 
 if [[ $restart == true && ( $was_gateway == true || $was_steward == true || $was_executor == true ) ]]; then
@@ -647,9 +706,10 @@ if [[ $topology_enabled == true ]]; then
 	target_gateway_env="/var/lib/steward-node/relay-images/$version.env"
 fi
 
-# A node-scoped credential can reach the bundled control plane only through
-# protocol 3. Upgrade it after writers are stopped and compatibility is proven,
-# but before target preflight. Tenant-scoped credentials remain on protocol 1.
+# Preserve an existing explicit protocol selection. An older configuration with no
+# selection receives 0, which keeps its prior credential-driven behavior instead of
+# silently switching it to protocol 4. Prepare node delivery state after writers are
+# stopped and compatibility is proven, but before target preflight.
 prepare_uplink_delivery_state
 
 STEWARD_BIN="$release_dir/steward" \

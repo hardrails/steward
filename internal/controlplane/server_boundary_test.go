@@ -264,6 +264,10 @@ func TestControlPlaneRejectsProtocolAndPaginationAmbiguity(t *testing.T) {
 		http.StatusBadRequest, "invalid_request")
 	requireError(t, fixture.request(t, http.MethodPost, "/executor-uplink/report", node.Credential, `{}`),
 		http.StatusBadRequest, "invalid_request")
+	requireError(t, fixture.request(t, http.MethodPost, "/executor-uplink/report", node.Credential,
+		`{"protocol_version":5,"delivery_id":"delivery-v5","delivery_generation":1,"command_id":"command-v5","command_digest":"sha256:`+
+			strings.Repeat("a", 64)+`","status":"done","reported_status":"stopped","claim_generation":1,"result":{}}`),
+		http.StatusBadRequest, "invalid_request")
 	requireError(t, fixture.request(t, http.MethodPost, "/v1/tenants/tenant-a/nodes/node-1/commands", operator,
 		`{"command_dsse_base64":"not-base64"}`), http.StatusBadRequest, "invalid_request")
 	requireError(t, fixture.request(t, http.MethodGet, "/v1/tenants/tenant-a/nodes/node-1/commands/missing", operator, ""),

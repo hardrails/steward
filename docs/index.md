@@ -34,8 +34,8 @@ home: true
   </div>
   <div>
     <h3>I operate a fleet</h3>
-    <p>Install the bundled controller, create tenants and scoped operators, enroll nodes once, and deliver exact signed commands without placing signing keys in the controller.</p>
-    <p><a href="{{ '/guides/control-plane/' | relative_url }}">Operate Steward Control →</a></p>
+    <p>Install the bundled controller, enroll nodes once, deliver exact signed commands without placing signing keys in the controller, and promote one qualified Hermes release through a signed plan and evidence-bound batch gates.</p>
+    <p><a href="{{ '/guides/control-plane/' | relative_url }}">Operate Steward Control →</a> · <a href="{{ '/guides/fleet-rollout/' | relative_url }}">Run a proof-carrying rollout →</a></p>
   </div>
 </div>
 
@@ -107,6 +107,7 @@ secrets, host mounts, privileged mode, or undeclared ports.
 [Build and run the Hermes Agent adapter]({{ '/guides/hermes-agent/' | relative_url }}) ·
 [Browse an offline agent catalog]({{ '/guides/agent-catalog/' | relative_url }}) ·
 [Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }}) ·
+[Roll it out through canary and batch gates]({{ '/guides/fleet-rollout/' | relative_url }}) ·
 [Review the OpenClaw adapter contract]({{ '/guides/openclaw/' | relative_url }}) ·
 [Configure positive capabilities]({{ '/guides/positive-capabilities/' | relative_url }}) ·
 [Broker authenticated API operations]({{ '/guides/connectors/' | relative_url }}) ·

@@ -54,6 +54,11 @@ var ErrDeltaCoordinate = errors.New("evidence delta coordinate does not match th
 // disagrees with the activation identity already retained in the signed log.
 var ErrActivationMarkerConflict = errors.New("activation marker conflicts with retained evidence")
 
+// ErrActivationInvalidated means retained signed lifecycle evidence makes
+// checkpoint qualification causally false. Exact retries remain idempotent
+// only while no matching invalidating evidence exists.
+var ErrActivationInvalidated = errors.New("activation was invalidated before its checkpoint")
+
 // EventType is deliberately a closed receipt vocabulary. New decisions require
 // an explicit format version/change rather than arbitrary event strings.
 type EventType byte
@@ -181,22 +186,23 @@ type Envelope struct {
 // Log owns a private signing key for one node receipt chain. Callers should
 // append authorization receipts before an externally visible side effect.
 type Log struct {
-	mu                    sync.Mutex
-	path                  string
-	file                  *os.File
-	private               ed25519.PrivateKey
-	public                ed25519.PublicKey
-	readOnly              bool
-	nodeID                string
-	epoch                 uint64
-	keyID                 string
-	next                  uint64
-	lastHash              [sha256.Size]byte
-	logBytes              int64
-	modTimeNano           int64
-	checkpoints           []logCheckpoint
-	activationBegins      map[activationMarkerKey]activationMarker
-	activationCheckpoints map[activationMarkerKey]activationMarker
+	mu                      sync.Mutex
+	path                    string
+	file                    *os.File
+	private                 ed25519.PrivateKey
+	public                  ed25519.PublicKey
+	readOnly                bool
+	nodeID                  string
+	epoch                   uint64
+	keyID                   string
+	next                    uint64
+	lastHash                [sha256.Size]byte
+	logBytes                int64
+	modTimeNano             int64
+	checkpoints             []logCheckpoint
+	activationBegins        map[activationMarkerKey]activationMarker
+	activationCheckpoints   map[activationMarkerKey]activationMarker
+	activationInvalidations map[activationInvalidationKey]activationInvalidationState
 }
 
 type activationMarkerKey struct {
@@ -211,6 +217,41 @@ type activationMarker struct {
 	PolicyDigest  string
 	Digest        string
 	Receipt       Receipt
+}
+
+// activationInvalidationKey separates runtime-local invalidations from a
+// tenant's closed state-purge fence. The state retains signed sequence numbers
+// so it can prove start-before-compensation ordering while matching offline
+// activation verification without replaying the evidence file for each
+// checkpoint request.
+type activationInvalidationKey struct {
+	TenantID      string
+	RuntimeRef    string
+	Generation    uint64
+	CapsuleDigest string
+	PolicyDigest  string
+	StateScope    bool
+}
+
+type activationInvalidationState struct {
+	invalidatedAt              uint64
+	latestStart                uint64
+	postStartCompensationAt    uint64
+	postStartCompensationStart uint64
+}
+
+type activationIndexes struct {
+	begins        map[activationMarkerKey]activationMarker
+	checkpoints   map[activationMarkerKey]activationMarker
+	invalidations map[activationInvalidationKey]activationInvalidationState
+}
+
+func newActivationIndexes() activationIndexes {
+	return activationIndexes{
+		begins:        make(map[activationMarkerKey]activationMarker),
+		checkpoints:   make(map[activationMarkerKey]activationMarker),
+		invalidations: make(map[activationInvalidationKey]activationInvalidationState),
+	}
 }
 
 // logCheckpoint is created only from a fully verified receipt or a successful
@@ -254,17 +295,12 @@ func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) 
 		}
 	}
 	public := private.Public().(ed25519.PublicKey)
-	next, last, checkpoints, logBytes, err := verifyFileWithIndex(f, public, nodeID, epoch)
-	if err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("verify evidence %q: %w", path, err)
-	}
-	begins, activationCheckpoints, err := verifyActivationMarkers(
+	next, last, checkpoints, logBytes, activation, err := verifyFileWithActivationIndexes(
 		f, public, nodeID, epoch,
 	)
 	if err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("verify activation markers in evidence %q: %w", path, err)
+		return nil, fmt.Errorf("verify evidence %q: %w", path, err)
 	}
 	verifiedInfo, err := validateEvidencePathFile(path, f)
 	if err != nil || verifiedInfo.Size() != logBytes ||
@@ -275,7 +311,8 @@ func Open(path string, private ed25519.PrivateKey, nodeID string, epoch uint64) 
 	return &Log{path: path, file: f, private: private, public: append(ed25519.PublicKey(nil), public...), nodeID: nodeID, epoch: epoch,
 		keyID: KeyID(public), next: next, lastHash: last, logBytes: logBytes,
 		modTimeNano: verifiedInfo.ModTime().UnixNano(), checkpoints: checkpoints,
-		activationBegins: begins, activationCheckpoints: activationCheckpoints}, nil
+		activationBegins: activation.begins, activationCheckpoints: activation.checkpoints,
+		activationInvalidations: activation.invalidations}, nil
 }
 
 func openEvidenceForAppend(path string) (*os.File, bool, error) {
@@ -820,9 +857,21 @@ func (l *Log) appendActivationMarker(
 				existing.CapsuleDigest == candidate.CapsuleDigest &&
 				existing.PolicyDigest == candidate.PolicyDigest &&
 				existing.Digest == candidate.Digest {
+				if l.activationInvalidatedLocked(key, begin) {
+					return Receipt{}, fmt.Errorf(
+						"%w: signed lifecycle evidence changed after activation begin",
+						ErrActivationInvalidated,
+					)
+				}
 				return existing.Receipt, nil
 			}
 			return Receipt{}, fmt.Errorf("%w: activation checkpoint disagrees with the retained activation identity", ErrActivationMarkerConflict)
+		}
+		if l.activationInvalidatedLocked(key, begin) {
+			return Receipt{}, fmt.Errorf(
+				"%w: signed lifecycle evidence changed after activation begin",
+				ErrActivationInvalidated,
+			)
 		}
 	}
 	receipt, err := l.appendLocked(event)
@@ -836,6 +885,26 @@ func (l *Log) appendActivationMarker(
 		l.activationCheckpoints[key] = candidate
 	}
 	return receipt, nil
+}
+
+func (l *Log) activationInvalidatedLocked(
+	key activationMarkerKey,
+	begin activationMarker,
+) bool {
+	runtimeKey := activationInvalidationKey{
+		TenantID: key.TenantID, RuntimeRef: key.RuntimeRef,
+		Generation: key.Generation, CapsuleDigest: begin.CapsuleDigest,
+		PolicyDigest: begin.PolicyDigest,
+	}
+	stateKey := runtimeKey
+	stateKey.RuntimeRef = ""
+	stateKey.StateScope = true
+	runtimeState := l.activationInvalidations[runtimeKey]
+	stateState := l.activationInvalidations[stateKey]
+	return runtimeState.invalidatedAt != 0 ||
+		stateState.invalidatedAt != 0 ||
+		(runtimeState.postStartCompensationStart != 0 &&
+			runtimeState.postStartCompensationAt > runtimeState.postStartCompensationStart)
 }
 
 func (l *Log) appendLocked(event Event) (Receipt, error) {
@@ -903,6 +972,7 @@ func (l *Log) appendLocked(event Event) (Receipt, error) {
 			Sequence: receipt.Sequence, ChainHash: current, Offset: expectedBytes,
 		})
 	}
+	applyActivationInvalidation(l.activationInvalidations, receipt)
 	return receipt, nil
 }
 
@@ -1172,6 +1242,39 @@ func verifyFileWithIndex(
 	return next, last, checkpoints, total, err
 }
 
+// verifyFileWithActivationIndexes authenticates the chain once while building
+// every writer-side sparse and semantic index from the same verified records.
+// Live appends then advance the semantic indexes under Log.mu after fsync.
+func verifyFileWithActivationIndexes(
+	f *os.File,
+	public ed25519.PublicKey,
+	nodeID string,
+	epoch uint64,
+) (
+	uint64,
+	[sha256.Size]byte,
+	[]logCheckpoint,
+	int64,
+	activationIndexes,
+	error,
+) {
+	activation := newActivationIndexes()
+	next, last, _, checkpoints, total, err := verifyFileState(
+		f, public, nodeID, epoch,
+		func(record VerifiedReceipt) error {
+			if err := applyActivationMarker(
+				activation.begins, activation.checkpoints, record.Receipt,
+			); err != nil {
+				return err
+			}
+			applyActivationInvalidation(activation.invalidations, record.Receipt)
+			return nil
+		},
+		true,
+	)
+	return next, last, checkpoints, total, activation, err
+}
+
 func verifyFileWithLast(f *os.File, public ed25519.PublicKey, nodeID string, epoch uint64) (uint64, [sha256.Size]byte, *Receipt, error) {
 	return verifyFileWithVisitor(f, public, nodeID, epoch, nil)
 }
@@ -1179,32 +1282,6 @@ func verifyFileWithLast(f *os.File, public ed25519.PublicKey, nodeID string, epo
 func verifyFileWithVisitor(f *os.File, public ed25519.PublicKey, nodeID string, epoch uint64, visit func(VerifiedReceipt) error) (uint64, [sha256.Size]byte, *Receipt, error) {
 	next, previous, last, _, _, err := verifyFileState(f, public, nodeID, epoch, visit, false)
 	return next, previous, last, err
-}
-
-func verifyActivationMarkers(
-	f *os.File,
-	public ed25519.PublicKey,
-	nodeID string,
-	epoch uint64,
-) (
-	map[activationMarkerKey]activationMarker,
-	map[activationMarkerKey]activationMarker,
-	error,
-) {
-	begins := make(map[activationMarkerKey]activationMarker)
-	checkpoints := make(map[activationMarkerKey]activationMarker)
-	_, _, _, err := verifyFileWithVisitor(
-		f, public, nodeID, epoch,
-		func(record VerifiedReceipt) error {
-			return applyActivationMarker(
-				begins, checkpoints, record.Receipt,
-			)
-		},
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	return begins, checkpoints, nil
 }
 
 func applyActivationMarker(
@@ -1268,6 +1345,55 @@ func applyActivationMarker(
 	}
 	checkpoints[key] = marker
 	return nil
+}
+
+func applyActivationInvalidation(
+	invalidations map[activationInvalidationKey]activationInvalidationState,
+	receipt Receipt,
+) {
+	key := activationInvalidationKey{
+		TenantID: receipt.TenantID, RuntimeRef: receipt.RuntimeRef,
+		Generation: receipt.Generation, CapsuleDigest: receipt.CapsuleDigest,
+		PolicyDigest: receipt.PolicyDigest,
+	}
+	state := invalidations[key]
+	switch receipt.Type {
+	case LifecycleStart:
+		if receipt.Outcome != Committed || receipt.GrantID != "workload" {
+			return
+		}
+		state.latestStart = receipt.Sequence
+	case JournalCompensate:
+		if receipt.Outcome != Compensated || receipt.GrantID == "state" ||
+			state.latestStart == 0 {
+			return
+		}
+		state.postStartCompensationStart = state.latestStart
+		state.postStartCompensationAt = receipt.Sequence
+	case LifecycleStop, LifecycleDestroy, Drift, Revocation:
+		if receipt.Outcome != Committed && receipt.Outcome != Compensated {
+			return
+		}
+		state.invalidatedAt = receipt.Sequence
+	case StatePurge:
+		if receipt.Outcome != Committed && receipt.Outcome != Compensated ||
+			receipt.GrantID != "state" {
+			return
+		}
+		// Activation markers do not retain the separate opaque state runtime
+		// reference, so the index deliberately normalizes it away. Matching
+		// tenant, generation, capsule, policy, and the closed state grant may
+		// reject an unrelated state runtime, but that fail-closed false positive
+		// can never bless stale state. Tightening this scope requires an evidence
+		// format that binds the state runtime into the activation marker.
+		key.RuntimeRef = ""
+		key.StateScope = true
+		state = invalidations[key]
+		state.invalidatedAt = receipt.Sequence
+	default:
+		return
+	}
+	invalidations[key] = state
 }
 
 func verifyFileState(

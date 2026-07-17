@@ -36,6 +36,7 @@ type verifiedExecutorEvidenceReport struct {
 	batchEnd      uint64
 	batchDigest   string
 	reason        EvidenceFindingReason
+	receipts      []evidence.Receipt
 }
 
 // PollExecutorEvidence authenticates the node and pinned receipt identity
@@ -178,6 +179,9 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 	if err := store.revalidateNodeLocked(identity); err != nil {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
 	}
+	if err := store.expireEvidenceCapturesLocked(now.UTC()); err != nil {
+		return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
+	}
 	node, ok := store.current.nodes[identity.NodeID]
 	if !ok || node.Evidence == nil {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, ErrConflict
@@ -215,7 +219,11 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 				witness, verified.reason, historicalComparedHead, verified.head, historicalDetectedAt,
 			)
 			updated.Evidence = witness
-			if err := store.applyMutationsLocked(mutation{Kind: mutationNode, Node: &updated}); err != nil {
+			mutations := []mutation{{Kind: mutationNode, Node: &updated}}
+			capture := store.evidenceCaptureMutationForReportLocked(
+				identity.NodeID, verified, frames, now,
+			)
+			if err := store.applyExecutorEvidenceMutationsLocked(mutations, capture, now); err != nil {
 				return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
 			}
 			return executorEvidenceReportResponse(true, *witness), nil
@@ -242,7 +250,11 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 				witness, EvidenceFork, executorEvidenceHead(*node.Evidence), verified.head, now,
 			)
 			updated.Evidence = witness
-			if err := store.applyMutationsLocked(mutation{Kind: mutationNode, Node: &updated}); err != nil {
+			mutations := []mutation{{Kind: mutationNode, Node: &updated}}
+			capture := store.evidenceCaptureMutationForReportLocked(
+				identity.NodeID, verified, frames, now,
+			)
+			if err := store.applyExecutorEvidenceMutationsLocked(mutations, capture, now); err != nil {
 				return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
 			}
 			return executorEvidenceReportResponse(true, *witness), nil
@@ -278,7 +290,11 @@ func (store *Store) applyExecutorEvidenceReport(auth *controlauth.Manager, ident
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, ErrConflict
 	}
 	updated.Evidence = witness
-	if err := store.applyMutationsLocked(mutation{Kind: mutationNode, Node: &updated}); err != nil {
+	mutations := []mutation{{Kind: mutationNode, Node: &updated}}
+	capture := store.evidenceCaptureMutationForReportLocked(
+		identity.NodeID, verified, frames, now,
+	)
+	if err := store.applyExecutorEvidenceMutationsLocked(mutations, capture, now); err != nil {
 		return controlprotocol.ExecutorEvidenceReportResponseV1{}, err
 	}
 	return executorEvidenceReportResponse(true, *witness), nil
@@ -389,11 +405,16 @@ func verifyExecutorEvidenceReport(auth *controlauth.Manager, identity controlaut
 		batchDigest:   controlprotocol.ExecutorEvidenceFramesDigestV1(frames),
 	}
 	if len(frames) > 0 {
-		derived, err := evidence.VerifyDelta(
+		receipts := make([]evidence.Receipt, 0, len(frames))
+		derived, err := evidence.VerifyDeltaRecords(
 			frames, public, witness.ReceiptNodeID, witness.Epoch, signedCoordinate,
 			func(tenantID string) bool {
 				return tenantMember(snapshot.credentialTenantIDs, tenantID) &&
 					tenantMember(snapshot.nodeTenantIDs, tenantID)
+			},
+			func(record evidence.VerifiedReceipt) error {
+				receipts = append(receipts, record.Receipt)
+				return nil
 			},
 		)
 		if err != nil {
@@ -407,6 +428,7 @@ func verifyExecutorEvidenceReport(auth *controlauth.Manager, identity controlaut
 		verified.action = executorEvidenceAdvance
 		verified.batchStart = signedBase.Sequence + 1
 		verified.batchEnd = observed.Sequence
+		verified.receipts = receipts
 	}
 
 	if signedCoordinate != currentCoordinate {

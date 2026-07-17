@@ -44,6 +44,10 @@ Signed admission (all trust inputs are optional as one group):
 Optional:
   --local-only                 Configure loopback HTTP, CLI, and MCP without an uplink
   --executor-token FILE         Existing host-local bearer token; generated if omitted
+  --executor-uplink-protocol-version VERSION
+                                Use protocol 3 or 4 for a node-scoped credential.
+                                The default is 4; use 3 only for controller
+                                compatibility.
   --no-start                    Validate and configure, but leave services stopped
   -h, --help                    Show this help
 
@@ -63,6 +67,8 @@ steward_credential=
 executor_credential=
 ca_file=
 executor_token=
+executor_uplink_protocol=
+selected_uplink_protocol=0
 admission_policy=
 site_root=
 site_root_key_id=
@@ -81,6 +87,14 @@ while [[ $# -gt 0 ]]; do
 		--executor-credential) executor_credential=${2:-}; shift 2 ;;
 		--ca-file) ca_file=${2:-}; shift 2 ;;
 		--executor-token) executor_token=${2:-}; shift 2 ;;
+		--executor-uplink-protocol-version)
+			if (( $# < 2 )); then
+				echo "configure-node: --executor-uplink-protocol-version requires 3 or 4" >&2
+				exit 2
+			fi
+			executor_uplink_protocol=$2
+			shift 2
+			;;
 		--admission-policy) admission_policy=${2:-}; shift 2 ;;
 		--site-root-public-key) site_root=${2:-}; shift 2 ;;
 		--site-root-key-id) site_root_key_id=${2:-}; shift 2 ;;
@@ -105,6 +119,10 @@ if [[ $(uname -s) != Linux ]]; then
 	echo "configure-node: Linux is required" >&2
 	exit 2
 fi
+if [[ -n $executor_uplink_protocol && $executor_uplink_protocol != 3 && $executor_uplink_protocol != 4 ]]; then
+	echo "configure-node: --executor-uplink-protocol-version must be 3 or 4" >&2
+	exit 2
+fi
 if [[ $local_only == false && $control_plane_url != https://* ]]; then
 	echo "configure-node: --control-plane-url must use HTTPS" >&2
 	exit 2
@@ -118,6 +136,10 @@ esac
 if [[ $local_only == true ]]; then
 	if [[ -n $control_plane_url || -n $steward_credential || -n $executor_credential || -n $ca_file ]]; then
 		echo "configure-node: --local-only cannot be combined with remote enrollment inputs" >&2
+		exit 2
+	fi
+	if [[ -n $executor_uplink_protocol ]]; then
+		echo "configure-node: --executor-uplink-protocol-version requires remote node-scoped enrollment" >&2
 		exit 2
 	fi
 else
@@ -620,6 +642,24 @@ transaction_error() {
 	return 2
 }
 
+select_configured_uplink_protocol() {
+	local credential_scope=$1 requested=$2
+	case "$credential_scope" in
+		node)
+			case "$requested" in
+				"") printf '4\n' ;;
+				3 | 4) printf '%s\n' "$requested" ;;
+				*) return 2 ;;
+			esac
+		;;
+		tenant | local)
+			[[ -z $requested ]] || return 2
+			printf '0\n'
+			;;
+		*) return 2 ;;
+	esac
+}
+
 write_loopback_supervisor_config() {
 	cat <<'EOF'
 {
@@ -686,6 +726,12 @@ awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" -v loc
 		found_delivery = 1
 		next
 	}
+	/^EXECUTOR_UPLINK_PROTOCOL_VERSION=/ {
+		if (found_protocol) exit 3
+		print "EXECUTOR_UPLINK_PROTOCOL_VERSION=0"
+		found_protocol = 1
+		next
+	}
 	/^EXECUTOR_UPLINK_TLS_CA_FILE=/ {
 		print "EXECUTOR_UPLINK_TLS_CA_FILE=" (local_only == "true" ? "" : ca)
 		found_ca = 1
@@ -709,6 +755,7 @@ awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" -v loc
 	{ print }
 	END {
 		if (!found_delivery) print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE="
+		if (!found_protocol) print "EXECUTOR_UPLINK_PROTOCOL_VERSION=0"
 		if (!found_evidence_enabled) print "EXECUTOR_EVIDENCE_UPLINK_ENABLED=" evidence_enabled
 		if (!found_evidence_controller) print "EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID=" evidence_controller
 		if (!found_evidence_interval) print "EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL=30s"
@@ -754,6 +801,10 @@ if [[ $local_only == false ]]; then
 	if [[ $executor_credential_node_id == *$'\n'* ]] || \
 		[[ $executor_credential_scope != tenant && $executor_credential_scope != node ]]; then
 		transaction_error "Executor credential inspection returned invalid metadata"
+	fi
+	if ! selected_uplink_protocol=$(select_configured_uplink_protocol \
+		"$executor_credential_scope" "$executor_uplink_protocol"); then
+		transaction_error "--executor-uplink-protocol-version requires a node-scoped Executor credential and value 3 or 4"
 	fi
 	if [[ $executor_only == true && $executor_credential_scope != node ]]; then
 		transaction_error "steward-control requires a node-scoped Executor credential"
@@ -833,10 +884,12 @@ admission_env_complete() {
 	' /etc/steward/executor.env
 }
 
-# Node-scoped credentials select protocol 3 and therefore require the durable
-# delivery ledger. Tenant-scoped credentials retain protocol 1 with an empty
-# delivery-state setting. Initialization is create-only: an existing ledger is
-# never reset, and final preflight verifies its owner, format, and node binding.
+# Node-scoped credentials select protocol 4 by default. Protocol 3 remains an
+# explicit controller-compatibility option. Both require the delivery ledger,
+# while tenant-scoped credentials retain protocol 1 with an empty delivery-state
+# setting. Initialization is create-only: an existing ledger is never reset, and
+# final preflight verifies its
+# owner, format, and node binding.
 if [[ $executor_credential_scope == node ]]; then
 	if ! admission_env_complete; then
 		transaction_error "a node-scoped Executor credential requires complete signed admission"
@@ -861,14 +914,22 @@ if [[ $executor_credential_scope == node ]]; then
 			-admission-node-id "$configured_node_id"
 	fi
 	executor_tmp=$(mktemp /etc/steward/.executor.env.XXXXXX)
-	awk -v path="$uplink_delivery_state" '
+	awk -v path="$uplink_delivery_state" -v protocol="$selected_uplink_protocol" '
 		/^EXECUTOR_UPLINK_DELIVERY_STATE_FILE=/ {
 			if (found++) exit 3
 			print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=" path
 			next
 		}
+		/^EXECUTOR_UPLINK_PROTOCOL_VERSION=/ {
+			if (found_protocol++) exit 3
+			print "EXECUTOR_UPLINK_PROTOCOL_VERSION=" protocol
+			next
+		}
 		{ print }
-		END { if (!found) print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=" path }
+		END {
+			if (!found) print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=" path
+			if (!found_protocol) print "EXECUTOR_UPLINK_PROTOCOL_VERSION=" protocol
+		}
 	' /etc/steward/executor.env >"$executor_tmp"
 	chown root:root "$executor_tmp"
 	chmod 0600 "$executor_tmp"

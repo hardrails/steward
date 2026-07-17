@@ -479,6 +479,201 @@ add client-side jitter when many operators may retry together, and request a new
 export. A 409 without `Retry-After` is a retained-state conflict such as an
 unwitnessed legacy node; repeating the same request will not repair it.
 
+## Capture one activation evidence range
+
+A normal evidence export proves the controller's retained checkpoint. An
+activation evidence capture additionally preserves the exact signed Executor
+frames for a complete evidence-report suffix containing one matching activation
+begin followed by one matching checkpoint. The suffix can contain later
+unrelated frames before its signed final head. Steward then binds that range to a successful,
+retained activation-canary command. This produces a portable record that an
+auditor can replay without contacting the controller or node.
+
+Every capture operation requires a site-administrator credential. The controller
+will arm a capture only for an active, finding-free, witnessed node that belongs
+to the named tenant. Arm it before submitting the activation command. This is a
+required operating procedure; the proof establishes controller observation
+after the armed baseline, not when the node generated a receipt:
+
+```console
+stewardctl control evidence-capture arm \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001 \
+  -request-id activation-a-evidence-arm-0001 \
+  -tenant-id tenant-a \
+  -runtime-ref executor-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  -generation 7 \
+  -activation-id activation-a \
+  -activation-begin-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  -ttl 10m
+```
+
+The TTL is the window in which the matching activation checkpoint must be
+observed. It must be a whole number of seconds from `1s` through `1h`. The first
+successful request fixes an absolute expiry; an exact retry with the same IDs,
+target, and TTL returns the retained capture without extending that expiry. One
+node can have only one `armed` capture.
+
+Inspect progress without returning the captured frames:
+
+```console
+stewardctl control evidence-capture status \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001
+```
+
+The `state` field has these meanings:
+
+- `armed`: the controller is preserving valid contiguous frames after the
+  baseline, but has not observed the complete target pair. After it sees the
+  begin, status also reports that receipt's sequence, capsule digest, and policy
+  digest.
+- `observed`: the range contains exactly one allowed, error-free begin followed
+  by exactly one committed, error-free checkpoint for the named tenant, runtime,
+  generation, and activation.
+- `sealed`: the controller also verified that the named protocol-4
+  `activation-canary` command completed successfully and matches the checkpoint.
+  Only a sealed capture can be exported.
+- `expired`: the checkpoint was not observed before the fixed deadline. Expiry is
+  durable but lazy: there is no background timer, so the controller records the
+  transition on the next evidence report or capture operation after the deadline.
+- `failed`: the controller could not preserve a coherent bounded proof. The
+  `failure` field explains why.
+
+Failure reasons are precise evidence-collection results:
+
+- `capture_overflow`: reaching the checkpoint would exceed 128 frames or 512 KiB
+  of decoded native frames.
+- `coordinate_changed`: the next report did not continue from the exact retained
+  capture head.
+- `evidence_finding`: receipt verification produced or encountered a rollback,
+  equivocation, or other blocking evidence finding.
+- `target_contradiction`: a target checkpoint or its signed report contradicted
+  the requested activation binding or success requirements.
+- `storage_capacity`: retaining the captured frames would exceed controller
+  state or write-ahead-log capacity. Steward preserves ordinary evidence
+  witnessing and retains a small failed capture when capacity permits; otherwise
+  it drops that optional capture.
+
+After the status becomes `observed` and the matching canary command is terminal
+and successful, seal the capture:
+
+```console
+stewardctl control evidence-capture seal \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001 \
+  -canary-command-id activation-a-canary-0001
+```
+
+Sealing checks retained evidence and command state. A matching successful canary
+is protected from age-based capacity pruning while the capture is armed or
+observed. Sealing does not run the canary or change the workload. Export the
+sealed range to a new owner-only file:
+
+```console
+stewardctl control evidence-capture export \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001 \
+  -out activation-a.evidence-capture.json
+```
+
+The node evidence chain can interleave receipts from several tenants. Steward
+cannot remove those frames without breaking signature continuity, so a capture
+may contain tenant IDs and digests unrelated to its target. Treat the export as
+sensitive site-wide evidence. It contains at most 128 frames, 512 KiB of decoded
+frame data, and 1 MiB of JSON.
+
+Verify the copied file on a disconnected audit system:
+
+```console
+stewardctl control evidence-capture verify \
+  -in activation-a.evidence-capture.json \
+  -witness-public-key /secure/steward-control-witness.public.pem
+```
+
+Verification uses only local files. It checks the purpose-separated controller
+witness signature, enrollment-time Executor receipt identity, every native frame
+from the signed baseline to the final head, exactly one matching allowed begin,
+and exactly one later matching committed checkpoint. It also rejects matching
+lifecycle invalidation within the signed suffix. The embedded controller key is descriptive; pin the witness public
+key through an independent trusted channel. Steward requires this witness key to
+be distinct from the Executor receipt key.
+
+A valid capture proves the signed chain and what the controller attested when it
+sealed the range. It does not prove that the host or controller was uncompromised,
+that the agent's output was semantically correct, or that the canary result was
+independently replayed by the offline verifier.
+
+An `expired` or `failed` capture is not evidence that the activation did not run,
+and it does not establish that retry is safe. A workflow that requires portable
+proof should treat either state as `action_required`, meaning an operator must
+intervene: preserve the record and node evidence, investigate the cause, and make
+an explicit recovery decision. `action_required` is workflow guidance, not a
+sixth capture state. Steward does not automatically retry, roll back, stop,
+destroy, or remediate a workload; capture failure also does not block ordinary
+evidence witnessing.
+
+Delete a retained capture only after preserving everything required for audit:
+
+```console
+stewardctl control evidence-capture delete \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA" \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001
+```
+
+Deletion is irreversible. It changes neither node evidence nor command or
+workload state. The controller retains at most 16 active captures, 256 captures
+across all states, and 16 MiB of reserved or captured frame data. An armed capture
+reserves its full 512 KiB allowance, so delete obsolete records deliberately when
+the site approaches a fixed limit.
+
+## Coordinate a proof-carrying fleet rollout
+
+`stewardctl rollout` composes command delivery and evidence capture into one
+operator-controlled, canary-first Hermes rollout. The coordinator runs on a trusted
+operator workstation, not inside Steward Control. It fixes an explicit target
+order, holds the command and task private keys, signs the exact plan and each
+evidence-bound promotion into a later batch, stores each exact signed command before
+submission, and advances one batch per operator invocation. Commands bind the
+applicable plan-authorization or promotion digest.
+
+Steward Control remains a bounded transport and witness. It does not select nodes,
+receive either private key, mint a command or task, decide promotion, or roll back a
+workload. Because the coordinator arms and exports captures that can contain
+interleaved tenant metadata, its `-token-file` must hold a `site_admin` credential.
+A tenant-scoped operator token is insufficient.
+
+Before starting, ensure every target is active for the rollout tenant, reports
+`admission-projection-v1`, `activation-canary-v1`, and
+`rollout-authorization-context-v1`, has an existing finding-free evidence
+checkpoint, and already contains the exact imported image. Inspect checkpoint
+timestamps against your site's freshness requirement; capture arming itself does
+not enforce an
+evidence-age threshold. The later bounded capture must reach the rollout's exact
+activation markers or fail or expire. Evidence-capture capacity is shared with
+manually created captures; one already-armed capture on a target prevents the
+rollout capture from arming. See [Proof-carrying fleet rollout]({{ '/guides/fleet-rollout/' | relative_url }})
+for input preparation, exact `create`, `run`, `status`, and offline `verify`
+commands, crash recovery, promotion boundaries, and proof limits.
+The promotion signature attests the command signer's authorization sequence; it
+does not record the operator's human reason or independently attest wall-clock or
+host execution order.
+
 ## Sign, submit, and observe one command
 
 Create commands only on the trusted signing station. The public half of

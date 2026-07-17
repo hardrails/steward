@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,18 +16,36 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/hardrails/steward/internal/activationcanary"
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/evidence"
+	"github.com/hardrails/steward/internal/taskpermit"
 )
 
 const (
-	stateFormatVersion       = 2
-	legacyStateFormatVersion = 1
-	transactionFormatVersion = 2
-	legacyTransactionVersion = 1
-	maxMutationsPerRecord    = 128
+	stateFormatMinReadVersion       = 1
+	stateFormatWriteVersion         = 4
+	stateFormatMaxReadVersion       = stateFormatWriteVersion
+	stateFormatEvidenceVersion      = 2
+	stateFormatExecutorV4Version    = 3
+	stateFormatCaptureVersion       = 4
+	transactionFormatMinReadVersion = 1
+	transactionFormatWriteVersion   = 4
+	transactionFormatMaxReadVersion = transactionFormatWriteVersion
+	transactionEvidenceVersion      = 2
+	transactionExecutorV4Version    = 3
+	transactionCaptureVersion       = 4
+	maxMutationsPerRecord           = 128
+
+	MaxEvidenceCapturesActive        = 16
+	MaxEvidenceCapturesRetained      = 256
+	MaxEvidenceCaptureFrames         = controlprotocol.MaxControllerEvidenceCaptureFrames
+	MaxEvidenceCaptureDecodedBytes   = controlprotocol.MaxControllerEvidenceCaptureDecodedBytes
+	MaxEvidenceCaptureAggregateBytes = 16 << 20
+	MinEvidenceCaptureTTL            = time.Second
+	MaxEvidenceCaptureTTL            = time.Hour
 )
 
 var (
@@ -164,32 +183,123 @@ const (
 )
 
 type TerminalReport struct {
-	Report      controlprotocol.ExecutorReportV3 `json:"report"`
-	Digest      string                           `json:"digest"`
-	CompletedAt string                           `json:"completed_at"`
+	Report           controlprotocol.ExecutorReportV3                  `json:"report"`
+	Admission        *controlprotocol.ExecutorAdmissionProjectionV1    `json:"admission,omitempty"`
+	ActivationCanary *controlprotocol.ExecutorActivationCanaryResultV1 `json:"activation_canary,omitempty"`
+	Digest           string                                            `json:"digest"`
+	CompletedAt      string                                            `json:"completed_at"`
 }
 
 type Command struct {
-	TenantID           string          `json:"tenant_id"`
-	NodeID             string          `json:"node_id"`
-	ID                 string          `json:"id"`
-	DeliveryID         string          `json:"delivery_id"`
-	Digest             string          `json:"digest"`
-	CommandDSSE        []byte          `json:"command_dsse"`
-	State              CommandState    `json:"state"`
-	DeliveryGeneration uint64          `json:"delivery_generation"`
-	LeaseUntil         string          `json:"lease_until,omitempty"`
-	CreatedAt          string          `json:"created_at"`
-	Terminal           *TerminalReport `json:"terminal,omitempty"`
+	TenantID                 string          `json:"tenant_id"`
+	NodeID                   string          `json:"node_id"`
+	ID                       string          `json:"id"`
+	DeliveryID               string          `json:"delivery_id"`
+	Digest                   string          `json:"digest"`
+	CommandDSSE              []byte          `json:"command_dsse"`
+	CommandKind              string          `json:"-"`
+	SignedRuntimeRef         string          `json:"-"`
+	SignedClaimGeneration    uint64          `json:"-"`
+	SignedInstanceGeneration uint64          `json:"-"`
+	State                    CommandState    `json:"state"`
+	DeliveryProtocol         int             `json:"delivery_protocol,omitempty"`
+	DeliveryGeneration       uint64          `json:"delivery_generation"`
+	LeaseUntil               string          `json:"lease_until,omitempty"`
+	CreatedAt                string          `json:"created_at"`
+	Terminal                 *TerminalReport `json:"terminal,omitempty"`
+}
+
+type EvidenceCaptureState string
+
+const (
+	EvidenceCaptureArmed    EvidenceCaptureState = "armed"
+	EvidenceCaptureObserved EvidenceCaptureState = "observed"
+	EvidenceCaptureSealed   EvidenceCaptureState = "sealed"
+	EvidenceCaptureExpired  EvidenceCaptureState = "expired"
+	EvidenceCaptureFailed   EvidenceCaptureState = "failed"
+)
+
+type EvidenceCaptureFailure string
+
+const (
+	EvidenceCaptureFailureOverflow      EvidenceCaptureFailure = "capture_overflow"
+	EvidenceCaptureFailureCoordinate    EvidenceCaptureFailure = "coordinate_changed"
+	EvidenceCaptureFailureFinding       EvidenceCaptureFailure = "evidence_finding"
+	EvidenceCaptureFailureContradiction EvidenceCaptureFailure = "target_contradiction"
+	EvidenceCaptureFailureCapacity      EvidenceCaptureFailure = "storage_capacity"
+)
+
+// EvidenceCapture is the bounded, frame-free operator view of a controller
+// evidence capture. Exact signed frames are returned only by the sealed export
+// snapshot path.
+type EvidenceCapture struct {
+	CaptureID                  string                                 `json:"capture_id"`
+	RequestID                  string                                 `json:"request_id"`
+	NodeID                     string                                 `json:"node_id"`
+	TenantID                   string                                 `json:"tenant_id"`
+	RuntimeRef                 string                                 `json:"runtime_ref"`
+	Generation                 uint64                                 `json:"generation"`
+	ActivationID               string                                 `json:"activation_id"`
+	ActivationBeginDigest      string                                 `json:"activation_begin_digest"`
+	ActivationBeginSequence    uint64                                 `json:"activation_begin_sequence,omitempty"`
+	State                      EvidenceCaptureState                   `json:"state"`
+	BaselineHead               controlprotocol.ExecutorEvidenceHeadV1 `json:"baseline_head"`
+	FinalHead                  controlprotocol.ExecutorEvidenceHeadV1 `json:"final_head"`
+	FrameCount                 int                                    `json:"frame_count"`
+	CapturedBytes              int                                    `json:"captured_bytes"`
+	CapsuleDigest              string                                 `json:"capsule_digest,omitempty"`
+	PolicyDigest               string                                 `json:"policy_digest,omitempty"`
+	ActivationCheckpointDigest string                                 `json:"activation_checkpoint_digest,omitempty"`
+	CanaryCommandID            string                                 `json:"canary_command_id,omitempty"`
+	ArmedAt                    string                                 `json:"armed_at"`
+	ExpiresAt                  string                                 `json:"expires_at"`
+	ObservedAt                 string                                 `json:"observed_at,omitempty"`
+	SealedAt                   string                                 `json:"sealed_at,omitempty"`
+	ExpiredAt                  string                                 `json:"expired_at,omitempty"`
+	FailedAt                   string                                 `json:"failed_at,omitempty"`
+	Failure                    EvidenceCaptureFailure                 `json:"failure,omitempty"`
+}
+
+type storedEvidenceCapture struct {
+	CaptureID                     string                                          `json:"capture_id"`
+	RequestID                     string                                          `json:"request_id"`
+	NodeID                        string                                          `json:"node_id"`
+	TenantID                      string                                          `json:"tenant_id"`
+	RuntimeRef                    string                                          `json:"runtime_ref"`
+	Generation                    uint64                                          `json:"generation"`
+	ActivationID                  string                                          `json:"activation_id"`
+	ActivationBeginDigest         string                                          `json:"activation_begin_digest"`
+	ActivationBeginSequence       uint64                                          `json:"activation_begin_sequence,omitempty"`
+	ActivationLatestStartSequence uint64                                          `json:"activation_latest_start_sequence,omitempty"`
+	State                         EvidenceCaptureState                            `json:"state"`
+	BaselineHead                  controlprotocol.ExecutorEvidenceHeadV1          `json:"baseline_head"`
+	FinalHead                     controlprotocol.ExecutorEvidenceHeadV1          `json:"final_head"`
+	FrameCount                    int                                             `json:"frame_count"`
+	CapturedBytes                 int                                             `json:"captured_bytes"`
+	CapsuleDigest                 string                                          `json:"capsule_digest,omitempty"`
+	PolicyDigest                  string                                          `json:"policy_digest,omitempty"`
+	ActivationCheckpointDigest    string                                          `json:"activation_checkpoint_digest,omitempty"`
+	CanaryCommandID               string                                          `json:"canary_command_id,omitempty"`
+	ArmedAt                       string                                          `json:"armed_at"`
+	ExpiresAt                     string                                          `json:"expires_at"`
+	ObservedAt                    string                                          `json:"observed_at,omitempty"`
+	SealedAt                      string                                          `json:"sealed_at,omitempty"`
+	ExpiredAt                     string                                          `json:"expired_at,omitempty"`
+	FailedAt                      string                                          `json:"failed_at,omitempty"`
+	Failure                       EvidenceCaptureFailure                          `json:"failure,omitempty"`
+	IdentityProof                 controlprotocol.ExecutorEvidenceIdentityProofV1 `json:"identity_proof"`
+	FramesBase64                  []string                                        `json:"frames"`
+	Frames                        [][]byte                                        `json:"-"`
 }
 
 type snapshotState struct {
-	Version     int                `json:"version"`
-	Tenants     []Tenant           `json:"tenants"`
-	Nodes       []Node             `json:"nodes"`
-	Credentials []storedCredential `json:"credentials"`
-	Enrollments []storedEnrollment `json:"enrollments"`
-	Commands    []storedCommand    `json:"commands"`
+	Version     int                     `json:"version"`
+	Tenants     []Tenant                `json:"tenants"`
+	Nodes       []Node                  `json:"nodes"`
+	Credentials []storedCredential      `json:"credentials"`
+	Enrollments []storedEnrollment      `json:"enrollments"`
+	Commands    []storedCommand         `json:"commands"`
+	Captures    []storedEvidenceCapture `json:"captures"`
 }
 
 type storedCredential struct {
@@ -234,6 +344,7 @@ type storedCommand struct {
 	Digest             string          `json:"digest"`
 	CommandDSSEBase64  string          `json:"command_dsse_base64"`
 	State              CommandState    `json:"state"`
+	DeliveryProtocol   int             `json:"delivery_protocol,omitempty"`
 	DeliveryGeneration uint64          `json:"delivery_generation"`
 	LeaseUntil         string          `json:"lease_until,omitempty"`
 	CreatedAt          string          `json:"created_at"`
@@ -246,6 +357,7 @@ type state struct {
 	credentials map[string]controlauth.Credential
 	enrollments map[string]controlauth.Enrollment
 	commands    map[string]Command
+	captures    map[string]storedEvidenceCapture
 }
 
 type transaction struct {
@@ -254,15 +366,17 @@ type transaction struct {
 }
 
 type mutation struct {
-	Kind         string            `json:"kind"`
-	Tenant       *Tenant           `json:"tenant,omitempty"`
-	Node         *Node             `json:"node,omitempty"`
-	Credential   *storedCredential `json:"credential,omitempty"`
-	Enrollment   *storedEnrollment `json:"enrollment,omitempty"`
-	Command      *storedCommand    `json:"command,omitempty"`
-	EnrollmentID string            `json:"enrollment_id,omitempty"`
-	CommandRef   *commandReference `json:"command_ref,omitempty"`
-	NodeRevoke   *nodeRevocation   `json:"node_revoke,omitempty"`
+	Kind         string                 `json:"kind"`
+	Tenant       *Tenant                `json:"tenant,omitempty"`
+	Node         *Node                  `json:"node,omitempty"`
+	Credential   *storedCredential      `json:"credential,omitempty"`
+	Enrollment   *storedEnrollment      `json:"enrollment,omitempty"`
+	Command      *storedCommand         `json:"command,omitempty"`
+	EnrollmentID string                 `json:"enrollment_id,omitempty"`
+	CommandRef   *commandReference      `json:"command_ref,omitempty"`
+	NodeRevoke   *nodeRevocation        `json:"node_revoke,omitempty"`
+	Capture      *storedEvidenceCapture `json:"capture,omitempty"`
+	CaptureID    string                 `json:"capture_id,omitempty"`
 }
 
 type commandReference struct {
@@ -285,13 +399,15 @@ const (
 	mutationEnrollmentDelete = "enrollment_delete"
 	mutationCommandDelete    = "command_delete"
 	mutationNodeRevoke       = "node_revoke"
+	mutationCapture          = "evidence_capture_upsert"
+	mutationCaptureDelete    = "evidence_capture_delete"
 )
 
 func emptyState() state {
 	return state{
 		tenants: make(map[string]Tenant), nodes: make(map[string]Node),
 		credentials: make(map[string]controlauth.Credential), enrollments: make(map[string]controlauth.Enrollment),
-		commands: make(map[string]Command),
+		commands: make(map[string]Command), captures: make(map[string]storedEvidenceCapture),
 	}
 }
 
@@ -319,7 +435,47 @@ func (current state) clone() state {
 	for key, command := range current.commands {
 		next.commands[key] = cloneCommand(command)
 	}
+	for key, capture := range current.captures {
+		next.captures[key] = cloneStoredEvidenceCapture(capture)
+	}
 	return next
+}
+
+func cloneStoredEvidenceCapture(capture storedEvidenceCapture) storedEvidenceCapture {
+	if capture.FramesBase64 != nil {
+		encoded := make([]string, len(capture.FramesBase64))
+		copy(encoded, capture.FramesBase64)
+		capture.FramesBase64 = encoded
+	}
+	capture.Frames = cloneEvidenceCaptureFrames(capture.Frames)
+	return capture
+}
+
+func evidenceCaptureView(capture storedEvidenceCapture) EvidenceCapture {
+	return EvidenceCapture{
+		CaptureID: capture.CaptureID, RequestID: capture.RequestID,
+		NodeID: capture.NodeID, TenantID: capture.TenantID,
+		RuntimeRef: capture.RuntimeRef, Generation: capture.Generation,
+		ActivationID: capture.ActivationID, ActivationBeginDigest: capture.ActivationBeginDigest,
+		ActivationBeginSequence: capture.ActivationBeginSequence, State: capture.State,
+		BaselineHead: capture.BaselineHead, FinalHead: capture.FinalHead,
+		FrameCount: capture.FrameCount, CapturedBytes: capture.CapturedBytes,
+		CapsuleDigest: capture.CapsuleDigest, PolicyDigest: capture.PolicyDigest,
+		ActivationCheckpointDigest: capture.ActivationCheckpointDigest,
+		CanaryCommandID:            capture.CanaryCommandID,
+		ArmedAt:                    capture.ArmedAt, ExpiresAt: capture.ExpiresAt,
+		ObservedAt: capture.ObservedAt, SealedAt: capture.SealedAt,
+		ExpiredAt: capture.ExpiredAt, FailedAt: capture.FailedAt,
+		Failure: capture.Failure,
+	}
+}
+
+func cloneEvidenceCaptureFrames(frames [][]byte) [][]byte {
+	cloned := make([][]byte, len(frames))
+	for index := range frames {
+		cloned[index] = append([]byte(nil), frames[index]...)
+	}
+	return cloned
 }
 
 func cloneEvidenceWitness(witness *EvidenceWitness) *EvidenceWitness {
@@ -338,9 +494,32 @@ func cloneCommand(command Command) Command {
 	command.CommandDSSE = append([]byte(nil), command.CommandDSSE...)
 	if command.Terminal != nil {
 		terminal := *command.Terminal
+		terminal.Admission = cloneAdmissionProjection(terminal.Admission)
+		terminal.ActivationCanary = cloneActivationCanaryResult(terminal.ActivationCanary)
 		command.Terminal = &terminal
 	}
 	return command
+}
+
+func cloneAdmissionProjection(projection *controlprotocol.ExecutorAdmissionProjectionV1) *controlprotocol.ExecutorAdmissionProjectionV1 {
+	if projection == nil {
+		return nil
+	}
+	cloned := *projection
+	cloned.TaskAuthorities = append([]controlprotocol.ExecutorTaskAuthorityV1(nil), projection.TaskAuthorities...)
+	cloned.EgressRouteIDs = copyStringSlice(projection.EgressRouteIDs)
+	cloned.ConnectorIDs = copyStringSlice(projection.ConnectorIDs)
+	return &cloned
+}
+
+func cloneActivationCanaryResult(
+	result *controlprotocol.ExecutorActivationCanaryResultV1,
+) *controlprotocol.ExecutorActivationCanaryResultV1 {
+	if result == nil {
+		return nil
+	}
+	cloned := *result
+	return &cloned
 }
 
 func credentialToStored(credential controlauth.Credential) storedCredential {
@@ -397,28 +576,53 @@ func commandToStored(command Command) storedCommand {
 	stored := storedCommand{
 		TenantID: command.TenantID, NodeID: command.NodeID, ID: command.ID, DeliveryID: command.DeliveryID,
 		Digest: command.Digest, CommandDSSEBase64: base64.StdEncoding.EncodeToString(command.CommandDSSE),
-		State: command.State, DeliveryGeneration: command.DeliveryGeneration, LeaseUntil: command.LeaseUntil,
+		State: command.State, DeliveryProtocol: command.DeliveryProtocol,
+		DeliveryGeneration: command.DeliveryGeneration, LeaseUntil: command.LeaseUntil,
 		CreatedAt: command.CreatedAt,
 	}
 	if command.Terminal != nil {
 		terminal := *command.Terminal
+		terminal.Admission = cloneAdmissionProjection(terminal.Admission)
+		terminal.ActivationCanary = cloneActivationCanaryResult(terminal.ActivationCanary)
 		stored.Terminal = &terminal
 	}
 	return stored
 }
 
-func commandFromStored(stored storedCommand) (Command, error) {
+func commandFromStored(stored storedCommand, supportsExecutorV4 bool) (Command, error) {
 	raw, err := decodeCanonicalBase64(stored.CommandDSSEBase64)
 	if err != nil {
 		return Command{}, err
 	}
+	binding, err := parseCommandBinding(raw)
+	if err != nil {
+		return Command{}, fmt.Errorf("parse signed command binding: %w", err)
+	}
+	binding = retainedCommandBinding(binding)
+	deliveryProtocol := stored.DeliveryProtocol
+	if !supportsExecutorV4 {
+		if stored.DeliveryProtocol != 0 ||
+			stored.Terminal != nil && (stored.Terminal.Report.ProtocolVersion != controlprotocol.ExecutorProtocolV3 ||
+				stored.Terminal.Admission != nil) {
+			return Command{}, errors.New("legacy command contains protocol-4 delivery state")
+		}
+		if stored.State == CommandLeased || stored.State == CommandTerminal {
+			deliveryProtocol = controlprotocol.ExecutorProtocolV3
+		}
+	}
 	command := Command{
 		TenantID: stored.TenantID, NodeID: stored.NodeID, ID: stored.ID, DeliveryID: stored.DeliveryID,
-		Digest: stored.Digest, CommandDSSE: raw, State: stored.State,
+		Digest: stored.Digest, CommandDSSE: raw,
+		CommandKind: binding.Kind, SignedRuntimeRef: binding.RuntimeRef,
+		SignedClaimGeneration:    binding.ClaimGeneration,
+		SignedInstanceGeneration: binding.InstanceGeneration,
+		State:                    stored.State, DeliveryProtocol: deliveryProtocol,
 		DeliveryGeneration: stored.DeliveryGeneration, LeaseUntil: stored.LeaseUntil, CreatedAt: stored.CreatedAt,
 	}
 	if stored.Terminal != nil {
 		terminal := *stored.Terminal
+		terminal.Admission = cloneAdmissionProjection(stored.Terminal.Admission)
+		terminal.ActivationCanary = cloneActivationCanaryResult(stored.Terminal.ActivationCanary)
 		command.Terminal = &terminal
 	}
 	return command, nil
@@ -437,8 +641,8 @@ func decodeCanonicalBase64(value string) ([]byte, error) {
 
 func encodeState(current state, limit int) ([]byte, error) {
 	snapshot := snapshotState{
-		Version: stateFormatVersion, Tenants: []Tenant{}, Nodes: []Node{}, Credentials: []storedCredential{},
-		Enrollments: []storedEnrollment{}, Commands: []storedCommand{},
+		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Nodes: []Node{}, Credentials: []storedCredential{},
+		Enrollments: []storedEnrollment{}, Commands: []storedCommand{}, Captures: []storedEvidenceCapture{},
 	}
 	for _, tenant := range current.tenants {
 		snapshot.Tenants = append(snapshot.Tenants, tenant)
@@ -458,6 +662,9 @@ func encodeState(current state, limit int) ([]byte, error) {
 	for _, command := range current.commands {
 		snapshot.Commands = append(snapshot.Commands, commandToStored(command))
 	}
+	for _, capture := range current.captures {
+		snapshot.Captures = append(snapshot.Captures, cloneStoredEvidenceCapture(capture))
+	}
 	sort.Slice(snapshot.Tenants, func(i, j int) bool { return snapshot.Tenants[i].ID < snapshot.Tenants[j].ID })
 	sort.Slice(snapshot.Nodes, func(i, j int) bool { return snapshot.Nodes[i].ID < snapshot.Nodes[j].ID })
 	sort.Slice(snapshot.Credentials, func(i, j int) bool { return snapshot.Credentials[i].ID < snapshot.Credentials[j].ID })
@@ -471,6 +678,9 @@ func encodeState(current state, limit int) ([]byte, error) {
 			return left.NodeID < right.NodeID
 		}
 		return left.ID < right.ID
+	})
+	sort.Slice(snapshot.Captures, func(i, j int) bool {
+		return snapshot.Captures[i].CaptureID < snapshot.Captures[j].CaptureID
 	})
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
@@ -487,8 +697,11 @@ func decodeState(raw []byte, limit int) (state, error) {
 	if err := dsse.DecodeStrictInto(raw, limit, &snapshot); err != nil {
 		return state{}, err
 	}
-	if snapshot.Version != stateFormatVersion && snapshot.Version != legacyStateFormatVersion || snapshot.Tenants == nil || snapshot.Nodes == nil ||
-		snapshot.Credentials == nil || snapshot.Enrollments == nil || snapshot.Commands == nil {
+	if snapshot.Version < stateFormatMinReadVersion || snapshot.Version > stateFormatMaxReadVersion ||
+		snapshot.Tenants == nil || snapshot.Nodes == nil ||
+		snapshot.Credentials == nil || snapshot.Enrollments == nil || snapshot.Commands == nil ||
+		snapshot.Version >= stateFormatCaptureVersion && snapshot.Captures == nil ||
+		snapshot.Version < stateFormatCaptureVersion && snapshot.Captures != nil {
 		return state{}, errors.New("control snapshot has an invalid version or missing collection")
 	}
 	current := emptyState()
@@ -504,7 +717,7 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
 		node.Capabilities = copyStringSlice(node.Capabilities)
-		if snapshot.Version == legacyStateFormatVersion && node.Evidence != nil {
+		if snapshot.Version < stateFormatEvidenceVersion && node.Evidence != nil {
 			return state{}, errors.New("legacy control snapshot contains evidence witness state")
 		}
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
@@ -531,7 +744,7 @@ func decodeState(raw []byte, limit int) (state, error) {
 		current.enrollments[enrollment.ID] = enrollment
 	}
 	for _, stored := range snapshot.Commands {
-		command, err := commandFromStored(stored)
+		command, err := commandFromStored(stored, snapshot.Version >= stateFormatExecutorV4Version)
 		if err != nil {
 			return state{}, fmt.Errorf("control snapshot command encoding: %w", err)
 		}
@@ -541,6 +754,15 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		current.commands[key] = cloneCommand(command)
 	}
+	for _, capture := range snapshot.Captures {
+		if err := hydrateStoredEvidenceCapture(&capture); err != nil {
+			return state{}, fmt.Errorf("control snapshot evidence capture encoding: %w", err)
+		}
+		if _, exists := current.captures[capture.CaptureID]; exists {
+			return state{}, errors.New("control snapshot contains a duplicate evidence capture")
+		}
+		current.captures[capture.CaptureID] = cloneStoredEvidenceCapture(capture)
+	}
 	return current, nil
 }
 
@@ -548,7 +770,7 @@ func encodeTransaction(mutations ...mutation) ([]byte, error) {
 	if len(mutations) == 0 || len(mutations) > maxMutationsPerRecord {
 		return nil, errors.New("control transaction mutation count is invalid")
 	}
-	return json.Marshal(transaction{Version: transactionFormatVersion, Mutations: mutations})
+	return json.Marshal(transaction{Version: transactionFormatWriteVersion, Mutations: mutations})
 }
 
 func decodeTransaction(raw []byte, limit int) (transaction, error) {
@@ -556,7 +778,7 @@ func decodeTransaction(raw []byte, limit int) (transaction, error) {
 	if err := dsse.DecodeStrictInto(raw, limit, &value); err != nil {
 		return transaction{}, err
 	}
-	if value.Version != transactionFormatVersion && value.Version != legacyTransactionVersion ||
+	if value.Version < transactionFormatMinReadVersion || value.Version > transactionFormatMaxReadVersion ||
 		len(value.Mutations) == 0 || len(value.Mutations) > maxMutationsPerRecord {
 		return transaction{}, errors.New("control transaction has invalid version or mutation count")
 	}
@@ -591,6 +813,12 @@ func applyTransaction(current state, value transaction) (state, error) {
 		if change.NodeRevoke != nil {
 			present++
 		}
+		if change.Capture != nil {
+			present++
+		}
+		if change.CaptureID != "" {
+			present++
+		}
 		if present != 1 {
 			return state{}, errors.New("control mutation must carry exactly one record")
 		}
@@ -605,7 +833,7 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("node mutation is missing node")
 			}
 			node := *change.Node
-			if value.Version == legacyTransactionVersion && node.Evidence != nil {
+			if value.Version < transactionEvidenceVersion && node.Evidence != nil {
 				return state{}, errors.New("legacy control transaction contains evidence witness state")
 			}
 			node.TenantIDs = append([]string(nil), change.Node.TenantIDs...)
@@ -634,7 +862,7 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if change.Command == nil {
 				return state{}, errors.New("command mutation is missing command")
 			}
-			command, err := commandFromStored(*change.Command)
+			command, err := commandFromStored(*change.Command, value.Version >= transactionExecutorV4Version)
 			if err != nil {
 				return state{}, fmt.Errorf("command mutation encoding: %w", err)
 			}
@@ -683,6 +911,25 @@ func applyTransaction(current state, value transaction) (state, error) {
 					next.enrollments[id] = enrollment
 				}
 			}
+		case mutationCapture:
+			if value.Version < transactionCaptureVersion || change.Capture == nil {
+				return state{}, errors.New("evidence capture mutation is invalid for this transaction version")
+			}
+			capture := *change.Capture
+			if err := hydrateStoredEvidenceCapture(&capture); err != nil {
+				return state{}, fmt.Errorf("evidence capture mutation encoding: %w", err)
+			}
+			capture = cloneStoredEvidenceCapture(capture)
+			next.captures[capture.CaptureID] = capture
+		case mutationCaptureDelete:
+			if value.Version < transactionCaptureVersion || change.CaptureID == "" ||
+				!validRecordID(change.CaptureID, 128) {
+				return state{}, errors.New("evidence capture deletion is invalid for this transaction version")
+			}
+			if _, exists := next.captures[change.CaptureID]; !exists {
+				return state{}, errors.New("evidence capture deletion references missing state")
+			}
+			delete(next.captures, change.CaptureID)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
 		}
@@ -693,7 +940,7 @@ func applyTransaction(current state, value transaction) (state, error) {
 func validateState(current state, limits Limits) error {
 	if len(current.tenants) > limits.MaxTenants || len(current.nodes) > limits.MaxNodes ||
 		len(current.credentials) > limits.MaxCredentials || len(current.enrollments) > limits.MaxEnrollments ||
-		len(current.commands) > limits.MaxCommands {
+		len(current.commands) > limits.MaxCommands || len(current.captures) > MaxEvidenceCapturesRetained {
 		return ErrCapacityExceeded
 	}
 	for key, tenant := range current.tenants {
@@ -826,12 +1073,344 @@ func validateState(current state, limits Limits) error {
 			return ErrCapacityExceeded
 		}
 	}
+	activeCaptureNodes := make(map[string]string)
+	captureRequests := make(map[string]string)
+	for key, capture := range current.captures {
+		if key != capture.CaptureID || validateEvidenceCapture(capture) != nil {
+			return errors.New("control state contains an invalid evidence capture")
+		}
+		node, ok := current.nodes[capture.NodeID]
+		if !ok || !tenantMember(node.TenantIDs, capture.TenantID) || node.Evidence == nil ||
+			capture.IdentityProof != node.Evidence.IdentityProof {
+			return errors.New("control evidence capture references an unknown node or tenant binding")
+		}
+		if existingID, exists := captureRequests[capture.RequestID]; exists && existingID != capture.CaptureID {
+			return errors.New("control state contains a duplicate evidence capture request identity")
+		}
+		captureRequests[capture.RequestID] = capture.CaptureID
+		if capture.State == EvidenceCaptureArmed {
+			if existingID, exists := activeCaptureNodes[capture.NodeID]; exists && existingID != capture.CaptureID {
+				return errors.New("control state contains more than one armed evidence capture for a node")
+			}
+			activeCaptureNodes[capture.NodeID] = capture.CaptureID
+		}
+	}
+	activeCaptures, reservedCaptureBytes := evidenceCaptureUsage(current.captures)
+	if activeCaptures > MaxEvidenceCapturesActive {
+		return ErrCapacityExceeded
+	}
+	if reservedCaptureBytes > MaxEvidenceCaptureAggregateBytes {
+		return ErrCapacityExceeded
+	}
 	if raw, err := encodeState(current, limits.MaxStateBytes); err != nil {
 		return err
 	} else if len(raw) > limits.MaxStateBytes {
 		return ErrCapacityExceeded
 	}
 	return nil
+}
+
+func evidenceCaptureUsage(captures map[string]storedEvidenceCapture) (active, reservedBytes int) {
+	for _, capture := range captures {
+		if capture.State == EvidenceCaptureArmed {
+			active++
+			reservedBytes += MaxEvidenceCaptureDecodedBytes
+		} else {
+			reservedBytes += capture.CapturedBytes
+		}
+	}
+	return active, reservedBytes
+}
+
+func validateEvidenceCapture(capture storedEvidenceCapture) error {
+	if err := evidenceCaptureView(capture).Validate(); err != nil {
+		return err
+	}
+	if !validRecordID(capture.CaptureID, 128) || !validRecordID(capture.RequestID, 128) ||
+		!validRecordID(capture.NodeID, 128) || !validRecordID(capture.TenantID, 128) ||
+		!validExecutorRuntimeRef(capture.RuntimeRef) || capture.Generation == 0 ||
+		!validRecordID(capture.ActivationID, 128) || !validSHA256Digest(capture.ActivationBeginDigest) ||
+		!validTimestamp(capture.ArmedAt) ||
+		!validTimestamp(capture.ExpiresAt) || capture.BaselineHead.Validate() != nil ||
+		capture.FinalHead.Validate() != nil || !sameEvidenceHeadIdentity(capture.BaselineHead, capture.FinalHead) ||
+		capture.IdentityProof.Validate() != nil {
+		return errors.New("evidence capture identity is invalid")
+	}
+	claim := capture.IdentityProof.Claim
+	if claim.ControlNodeID != capture.NodeID || claim.Stream != capture.BaselineHead.Stream ||
+		claim.ReceiptNodeID != capture.BaselineHead.ReceiptNodeID ||
+		claim.ReceiptEpoch != capture.BaselineHead.ReceiptEpoch ||
+		claim.PublicKeySHA256 != capture.BaselineHead.PublicKeySHA256 {
+		return errors.New("evidence capture identity proof does not bind its heads")
+	}
+	armed, _ := parseTimestamp(capture.ArmedAt)
+	expires, _ := parseTimestamp(capture.ExpiresAt)
+	if expires.Sub(armed) < MinEvidenceCaptureTTL || expires.Sub(armed) > MaxEvidenceCaptureTTL {
+		return errors.New("evidence capture lifetime is invalid")
+	}
+	frameBytes := 0
+	if capture.Frames == nil || capture.FramesBase64 == nil ||
+		len(capture.Frames) != len(capture.FramesBase64) ||
+		len(capture.Frames) > MaxEvidenceCaptureFrames {
+		return errors.New("evidence capture frame count exceeds its limit")
+	}
+	for index, frame := range capture.Frames {
+		if !validNativeEvidenceFrame(frame) || frameBytes > MaxEvidenceCaptureDecodedBytes-len(frame) {
+			return errors.New("evidence capture contains invalid or oversized native frames")
+		}
+		if base64.StdEncoding.EncodeToString(frame) != capture.FramesBase64[index] {
+			return errors.New("evidence capture frame encoding is not canonical")
+		}
+		frameBytes += len(frame)
+	}
+	if capture.FrameCount != len(capture.Frames) || capture.CapturedBytes != frameBytes ||
+		capture.BaselineHead.Sequence > math.MaxUint64-uint64(len(capture.Frames)) ||
+		capture.FinalHead.Sequence != capture.BaselineHead.Sequence+uint64(len(capture.Frames)) {
+		return errors.New("evidence capture frame coordinates are inconsistent")
+	}
+	for _, value := range []string{
+		capture.ObservedAt, capture.SealedAt, capture.ExpiredAt, capture.FailedAt,
+	} {
+		if value != "" && !validTimestamp(value) {
+			return errors.New("evidence capture terminal timestamp is invalid")
+		}
+	}
+	switch capture.State {
+	case EvidenceCaptureArmed:
+		if capture.ObservedAt != "" || capture.SealedAt != "" || capture.ExpiredAt != "" ||
+			capture.FailedAt != "" || capture.Failure != "" ||
+			capture.ActivationCheckpointDigest != "" ||
+			capture.CanaryCommandID != "" {
+			return errors.New("armed evidence capture contains terminal state")
+		}
+		if capture.ActivationBeginSequence == 0 {
+			if capture.CapsuleDigest != "" || capture.PolicyDigest != "" ||
+				capture.ActivationLatestStartSequence != 0 {
+				return errors.New("armed evidence capture contains an incomplete activation begin")
+			}
+		} else if !validSHA256Digest(capture.CapsuleDigest) || !validSHA256Digest(capture.PolicyDigest) ||
+			capture.ActivationBeginSequence <= capture.BaselineHead.Sequence ||
+			capture.ActivationBeginSequence > capture.FinalHead.Sequence ||
+			(capture.ActivationLatestStartSequence != 0 &&
+				(capture.ActivationLatestStartSequence <= capture.ActivationBeginSequence ||
+					capture.ActivationLatestStartSequence > capture.FinalHead.Sequence)) {
+			return errors.New("armed evidence capture activation begin is invalid")
+		}
+	case EvidenceCaptureObserved, EvidenceCaptureSealed:
+		if !validTimestamp(capture.ObservedAt) || !validSHA256Digest(capture.CapsuleDigest) ||
+			!validSHA256Digest(capture.PolicyDigest) || !validSHA256Digest(capture.ActivationCheckpointDigest) ||
+			capture.ActivationBeginSequence <= capture.BaselineHead.Sequence ||
+			capture.ActivationBeginSequence >= capture.FinalHead.Sequence ||
+			(capture.ActivationLatestStartSequence != 0 &&
+				(capture.ActivationLatestStartSequence <= capture.ActivationBeginSequence ||
+					capture.ActivationLatestStartSequence > capture.FinalHead.Sequence)) ||
+			capture.FrameCount == 0 || capture.ExpiredAt != "" || capture.FailedAt != "" || capture.Failure != "" {
+			return errors.New("observed evidence capture is incomplete")
+		}
+		observed, _ := parseTimestamp(capture.ObservedAt)
+		if observed.Before(armed) || observed.After(expires) {
+			return errors.New("evidence capture observation is outside its armed interval")
+		}
+		if capture.State == EvidenceCaptureObserved {
+			if capture.SealedAt != "" || capture.CanaryCommandID != "" {
+				return errors.New("unsealed evidence capture contains seal state")
+			}
+		} else {
+			if !validTimestamp(capture.SealedAt) || !validRecordID(capture.CanaryCommandID, 256) {
+				return errors.New("sealed evidence capture is missing its command or timestamp")
+			}
+			sealed, _ := parseTimestamp(capture.SealedAt)
+			if sealed.Before(observed) {
+				return errors.New("evidence capture seal predates observation")
+			}
+		}
+	case EvidenceCaptureExpired:
+		if !validTimestamp(capture.ExpiredAt) || capture.ObservedAt != "" || capture.SealedAt != "" ||
+			capture.FailedAt != "" || capture.Failure != "" || capture.CapsuleDigest != "" ||
+			capture.PolicyDigest != "" || capture.ActivationBeginSequence != 0 ||
+			capture.ActivationLatestStartSequence != 0 ||
+			capture.ActivationCheckpointDigest != "" || capture.CanaryCommandID != "" {
+			return errors.New("expired evidence capture contains inconsistent state")
+		}
+		expired, _ := parseTimestamp(capture.ExpiredAt)
+		if expired.Before(expires) {
+			return errors.New("evidence capture expired before its deadline")
+		}
+	case EvidenceCaptureFailed:
+		if !validTimestamp(capture.FailedAt) || !validEvidenceCaptureFailure(capture.Failure) ||
+			capture.ObservedAt != "" || capture.SealedAt != "" || capture.ExpiredAt != "" ||
+			capture.CapsuleDigest != "" || capture.PolicyDigest != "" ||
+			capture.ActivationBeginSequence != 0 || capture.ActivationLatestStartSequence != 0 ||
+			capture.ActivationCheckpointDigest != "" ||
+			capture.CanaryCommandID != "" {
+			return errors.New("failed evidence capture contains inconsistent state")
+		}
+		failed, _ := parseTimestamp(capture.FailedAt)
+		if failed.Before(armed) {
+			return errors.New("evidence capture failure predates arming")
+		}
+	default:
+		return errors.New("evidence capture state is invalid")
+	}
+	return nil
+}
+
+func hydrateStoredEvidenceCapture(capture *storedEvidenceCapture) error {
+	if capture == nil || capture.FramesBase64 == nil {
+		return errors.New("evidence capture frame collection is missing")
+	}
+	if capture.Frames != nil {
+		if len(capture.Frames) != len(capture.FramesBase64) {
+			return errors.New("evidence capture frame collections disagree")
+		}
+		return nil
+	}
+	capture.Frames = make([][]byte, len(capture.FramesBase64))
+	for index, encoded := range capture.FramesBase64 {
+		raw, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil || base64.StdEncoding.EncodeToString(raw) != encoded {
+			return errors.New("evidence capture frame is not canonical base64")
+		}
+		capture.Frames[index] = raw
+	}
+	return nil
+}
+
+// Validate checks the complete frame-free public capture projection. Store
+// validation additionally authenticates the hidden identity proof and exact
+// native frames.
+func (capture EvidenceCapture) Validate() error {
+	if !validRecordID(capture.CaptureID, 128) || !validRecordID(capture.RequestID, 128) ||
+		!validRecordID(capture.NodeID, 128) || !validRecordID(capture.TenantID, 128) ||
+		!validExecutorRuntimeRef(capture.RuntimeRef) || capture.Generation == 0 ||
+		!validRecordID(capture.ActivationID, 128) || !validSHA256Digest(capture.ActivationBeginDigest) ||
+		!validTimestamp(capture.ArmedAt) ||
+		!validTimestamp(capture.ExpiresAt) || capture.BaselineHead.Validate() != nil ||
+		capture.FinalHead.Validate() != nil || !sameEvidenceHeadIdentity(capture.BaselineHead, capture.FinalHead) ||
+		capture.FrameCount < 0 || capture.FrameCount > MaxEvidenceCaptureFrames ||
+		capture.CapturedBytes < 0 || capture.CapturedBytes > MaxEvidenceCaptureDecodedBytes ||
+		capture.BaselineHead.Sequence > math.MaxUint64-uint64(capture.FrameCount) ||
+		capture.FinalHead.Sequence != capture.BaselineHead.Sequence+uint64(capture.FrameCount) {
+		return errors.New("evidence capture projection identity or coordinates are invalid")
+	}
+	armed, _ := parseTimestamp(capture.ArmedAt)
+	expires, _ := parseTimestamp(capture.ExpiresAt)
+	if expires.Sub(armed) < MinEvidenceCaptureTTL || expires.Sub(armed) > MaxEvidenceCaptureTTL {
+		return errors.New("evidence capture projection lifetime is invalid")
+	}
+	for _, value := range []string{
+		capture.ObservedAt, capture.SealedAt, capture.ExpiredAt, capture.FailedAt,
+	} {
+		if value != "" && !validTimestamp(value) {
+			return errors.New("evidence capture projection terminal timestamp is invalid")
+		}
+	}
+	switch capture.State {
+	case EvidenceCaptureArmed:
+		if capture.ObservedAt != "" || capture.SealedAt != "" || capture.ExpiredAt != "" ||
+			capture.FailedAt != "" || capture.Failure != "" ||
+			capture.ActivationCheckpointDigest != "" ||
+			capture.CanaryCommandID != "" {
+			return errors.New("armed evidence capture projection contains terminal state")
+		}
+		if capture.ActivationBeginSequence == 0 {
+			if capture.CapsuleDigest != "" || capture.PolicyDigest != "" {
+				return errors.New("armed evidence capture projection contains an incomplete activation begin")
+			}
+		} else if !validSHA256Digest(capture.CapsuleDigest) || !validSHA256Digest(capture.PolicyDigest) ||
+			capture.ActivationBeginSequence <= capture.BaselineHead.Sequence ||
+			capture.ActivationBeginSequence > capture.FinalHead.Sequence {
+			return errors.New("armed evidence capture projection activation begin is invalid")
+		}
+	case EvidenceCaptureObserved, EvidenceCaptureSealed:
+		if !validTimestamp(capture.ObservedAt) || !validSHA256Digest(capture.CapsuleDigest) ||
+			!validSHA256Digest(capture.PolicyDigest) || !validSHA256Digest(capture.ActivationCheckpointDigest) ||
+			capture.ActivationBeginSequence <= capture.BaselineHead.Sequence ||
+			capture.ActivationBeginSequence >= capture.FinalHead.Sequence ||
+			capture.FrameCount == 0 || capture.ExpiredAt != "" || capture.FailedAt != "" || capture.Failure != "" {
+			return errors.New("observed evidence capture projection is incomplete")
+		}
+		observed, _ := parseTimestamp(capture.ObservedAt)
+		if observed.Before(armed) || observed.After(expires) {
+			return errors.New("evidence capture projection observation is outside its armed interval")
+		}
+		if capture.State == EvidenceCaptureObserved {
+			if capture.SealedAt != "" || capture.CanaryCommandID != "" {
+				return errors.New("unsealed evidence capture projection contains seal state")
+			}
+		} else {
+			if !validTimestamp(capture.SealedAt) || !validRecordID(capture.CanaryCommandID, 256) {
+				return errors.New("sealed evidence capture projection is missing its command or timestamp")
+			}
+			sealed, _ := parseTimestamp(capture.SealedAt)
+			if sealed.Before(observed) {
+				return errors.New("evidence capture projection seal predates observation")
+			}
+		}
+	case EvidenceCaptureExpired:
+		if !validTimestamp(capture.ExpiredAt) || capture.ObservedAt != "" || capture.SealedAt != "" ||
+			capture.FailedAt != "" || capture.Failure != "" || capture.CapsuleDigest != "" ||
+			capture.PolicyDigest != "" || capture.ActivationBeginSequence != 0 ||
+			capture.ActivationCheckpointDigest != "" || capture.CanaryCommandID != "" {
+			return errors.New("expired evidence capture projection contains inconsistent state")
+		}
+		expired, _ := parseTimestamp(capture.ExpiredAt)
+		if expired.Before(expires) {
+			return errors.New("evidence capture projection expired before its deadline")
+		}
+	case EvidenceCaptureFailed:
+		if !validTimestamp(capture.FailedAt) || !validEvidenceCaptureFailure(capture.Failure) ||
+			capture.ObservedAt != "" || capture.SealedAt != "" || capture.ExpiredAt != "" ||
+			capture.CapsuleDigest != "" || capture.PolicyDigest != "" ||
+			capture.ActivationBeginSequence != 0 || capture.ActivationCheckpointDigest != "" ||
+			capture.CanaryCommandID != "" {
+			return errors.New("failed evidence capture projection contains inconsistent state")
+		}
+		failed, _ := parseTimestamp(capture.FailedAt)
+		if failed.Before(armed) {
+			return errors.New("evidence capture projection failure predates arming")
+		}
+	default:
+		return errors.New("evidence capture projection state is invalid")
+	}
+	return nil
+}
+
+func validEvidenceCaptureFailure(value EvidenceCaptureFailure) bool {
+	switch value {
+	case EvidenceCaptureFailureOverflow, EvidenceCaptureFailureCoordinate,
+		EvidenceCaptureFailureFinding, EvidenceCaptureFailureContradiction,
+		EvidenceCaptureFailureCapacity:
+		return true
+	default:
+		return false
+	}
+}
+
+func validNativeEvidenceFrame(frame []byte) bool {
+	if len(frame) < 5 || len(frame) > evidence.MaxEnvelopeBytes+4 {
+		return false
+	}
+	size := binary.BigEndian.Uint32(frame[:4])
+	return size > 0 && uint64(size) == uint64(len(frame)-4)
+}
+
+func sameEvidenceHeadIdentity(left, right controlprotocol.ExecutorEvidenceHeadV1) bool {
+	return left.Stream == right.Stream && left.ReceiptNodeID == right.ReceiptNodeID &&
+		left.ReceiptEpoch == right.ReceiptEpoch && left.PublicKeySHA256 == right.PublicKeySHA256
+}
+
+func validExecutorRuntimeRef(value string) bool {
+	const prefix = "executor-"
+	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
+		return false
+	}
+	for _, character := range strings.TrimPrefix(value, prefix) {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func validateEvidenceWitness(nodeID, nodeCreatedAt string, witness EvidenceWitness) error {
@@ -940,21 +1519,30 @@ func validSHA256Digest(value string) bool {
 
 func validateCommand(command Command, limits Limits) error {
 	expectedDeliveryID, deliveryIDError := controlprotocol.ExecutorDeliveryID(command.TenantID, command.NodeID, command.ID)
+	binding, bindingError := parseCommandBinding(command.CommandDSSE)
+	binding = retainedCommandBinding(binding)
 	if !validRecordID(command.TenantID, 128) || !validRecordID(command.NodeID, 128) ||
 		!validRecordID(command.ID, 256) || !validRecordID(command.DeliveryID, 256) ||
 		deliveryIDError != nil || command.DeliveryID != expectedDeliveryID ||
 		len(command.CommandDSSE) == 0 || len(command.CommandDSSE) > limits.MaxCommandBytes ||
-		command.Digest != digestBytes(command.CommandDSSE) || !validTimestamp(command.CreatedAt) {
+		command.Digest != digestBytes(command.CommandDSSE) || !validTimestamp(command.CreatedAt) ||
+		bindingError != nil || binding.CommandID != command.ID ||
+		binding.TenantID != command.TenantID || binding.NodeID != command.NodeID ||
+		binding.Kind != command.CommandKind || binding.RuntimeRef != command.SignedRuntimeRef ||
+		binding.ClaimGeneration != command.SignedClaimGeneration ||
+		binding.InstanceGeneration != command.SignedInstanceGeneration {
 		return errors.New("invalid command identity or bytes")
 	}
 	created, _ := parseTimestamp(command.CreatedAt)
 	switch command.State {
 	case CommandPending:
-		if command.DeliveryGeneration != 0 || command.LeaseUntil != "" || command.Terminal != nil {
+		if command.DeliveryProtocol != 0 || command.DeliveryGeneration != 0 ||
+			command.LeaseUntil != "" || command.Terminal != nil {
 			return errors.New("pending command contains delivery state")
 		}
 	case CommandLeased:
-		if command.DeliveryGeneration == 0 || !validTimestamp(command.LeaseUntil) || command.Terminal != nil {
+		if !validExecutorDeliveryProtocol(command.DeliveryProtocol) ||
+			command.DeliveryGeneration == 0 || !validTimestamp(command.LeaseUntil) || command.Terminal != nil {
 			return errors.New("leased command has invalid delivery state")
 		}
 		leaseUntil, _ := parseTimestamp(command.LeaseUntil)
@@ -962,19 +1550,26 @@ func validateCommand(command Command, limits Limits) error {
 			return errors.New("command lease does not follow submission")
 		}
 	case CommandTerminal:
-		if command.DeliveryGeneration == 0 || command.LeaseUntil != "" || command.Terminal == nil {
+		if !validExecutorDeliveryProtocol(command.DeliveryProtocol) ||
+			command.DeliveryGeneration == 0 || command.LeaseUntil != "" || command.Terminal == nil {
 			return errors.New("terminal command has invalid delivery state")
 		}
-		if err := command.Terminal.Report.Validate(); err != nil ||
+		if command.Terminal.Report.ProtocolVersion != command.DeliveryProtocol ||
 			command.Terminal.Report.DeliveryID != command.DeliveryID ||
 			command.Terminal.Report.DeliveryGeneration != command.DeliveryGeneration ||
 			command.Terminal.Report.CommandID != command.ID ||
 			command.Terminal.Report.CommandDigest != command.Digest || !validTimestamp(command.Terminal.CompletedAt) {
 			return errors.New("terminal report does not bind the command")
 		}
-		raw, err := json.Marshal(command.Terminal.Report)
+		raw, err := terminalReportBytes(*command.Terminal)
 		if err != nil || len(raw) > limits.MaxReportBytes || command.Terminal.Digest != digestBytes(raw) {
 			return errors.New("terminal report digest or size is invalid")
+		}
+		if command.DeliveryProtocol == controlprotocol.ExecutorProtocolV4 {
+			report := executorReportV4FromTerminal(*command.Terminal)
+			if err := validateRetainedExecutorReportV4Binding(command, report); err != nil {
+				return errors.New("terminal protocol-4 report contradicts its signed command")
+			}
 		}
 		completed, _ := parseTimestamp(command.Terminal.CompletedAt)
 		if completed.Before(created) {
@@ -984,6 +1579,217 @@ func validateCommand(command Command, limits Limits) error {
 		return errors.New("command state is invalid")
 	}
 	return nil
+}
+
+func validExecutorDeliveryProtocol(version int) bool {
+	return version == controlprotocol.ExecutorProtocolV3 || version == controlprotocol.ExecutorProtocolV4
+}
+
+func terminalReportBytes(terminal TerminalReport) ([]byte, error) {
+	switch terminal.Report.ProtocolVersion {
+	case controlprotocol.ExecutorProtocolV3:
+		if terminal.Admission != nil || terminal.ActivationCanary != nil {
+			return nil, errors.New("protocol-3 terminal report contains a protocol-4 projection")
+		}
+		if err := terminal.Report.Validate(); err != nil {
+			return nil, err
+		}
+		return json.Marshal(terminal.Report)
+	case controlprotocol.ExecutorProtocolV4:
+		report := executorReportV4FromTerminal(terminal)
+		if err := report.Validate(); err != nil {
+			return nil, err
+		}
+		return json.Marshal(report)
+	default:
+		return nil, errors.New("terminal report protocol is unsupported")
+	}
+}
+
+func executorReportV4FromTerminal(terminal TerminalReport) controlprotocol.ExecutorReportV4 {
+	report := terminal.Report
+	return controlprotocol.ExecutorReportV4{
+		ProtocolVersion:    controlprotocol.ExecutorProtocolV4,
+		DeliveryID:         report.DeliveryID,
+		DeliveryGeneration: report.DeliveryGeneration,
+		CommandID:          report.CommandID,
+		CommandDigest:      report.CommandDigest,
+		Status:             report.Status,
+		ReportedStatus:     report.ReportedStatus,
+		ClaimGeneration:    report.ClaimGeneration,
+		ErrorCode:          report.ErrorCode,
+		Result: controlprotocol.ExecutorReportResultV4{
+			RuntimeRef:       report.Result.RuntimeRef,
+			Error:            report.Result.Error,
+			Replayed:         report.Result.Replayed,
+			Absent:           report.Result.Absent,
+			Admission:        cloneAdmissionProjection(terminal.Admission),
+			ActivationCanary: cloneActivationCanaryResult(terminal.ActivationCanary),
+		},
+	}
+}
+
+// validateRetainedExecutorReportV4Binding checks only correlations that are
+// already projected into bounded controller state. It deliberately performs
+// no public-key work: validateState calls it after every mutation, including
+// mutations unrelated to the retained command.
+func validateRetainedExecutorReportV4Binding(command Command, report controlprotocol.ExecutorReportV4) error {
+	var executorRuntimeRef string
+	needsRuntimeBinding := report.Result.Admission != nil ||
+		report.Result.ActivationCanary != nil ||
+		command.CommandKind == "activation-canary" && report.Status == controlprotocol.ExecutorStatusDone ||
+		report.Result.RuntimeRef != ""
+	if needsRuntimeBinding {
+		var err error
+		executorRuntimeRef, err = commandExecutorRuntimeRef(command)
+		if err != nil {
+			return errors.New("stored command runtime identity is invalid")
+		}
+	}
+	if report.ClaimGeneration != 0 && report.ClaimGeneration != command.SignedClaimGeneration {
+		return errors.New("report claim generation differs from signed command")
+	}
+	if activationCanaryTerminalErrorCode(report.ErrorCode) &&
+		(command.CommandKind != "activation-canary" ||
+			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 ||
+			!validActivationCanaryTerminalFailure(
+				report.Status,
+				report.ReportedStatus,
+				report.ErrorCode,
+				report.Result.Error,
+			)) {
+		return errors.New("activation canary terminal error code is reserved for a failed canary")
+	}
+	if report.Result.Admission != nil {
+		if command.CommandKind != "admit" ||
+			report.ClaimGeneration != command.SignedClaimGeneration ||
+			report.Result.Admission.RuntimeRef != executorRuntimeRef ||
+			report.Result.Admission.Generation != command.SignedInstanceGeneration {
+			return errors.New("admission projection differs from signed admit command")
+		}
+	}
+	if report.Result.ActivationCanary != nil {
+		if command.CommandKind != "activation-canary" ||
+			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 ||
+			report.ClaimGeneration != command.SignedClaimGeneration ||
+			command.SignedInstanceGeneration == 0 ||
+			report.Result.RuntimeRef != executorRuntimeRef {
+			return errors.New("activation canary projection differs from its signed command")
+		}
+	}
+	if command.CommandKind == "activation-canary" &&
+		report.Status == controlprotocol.ExecutorStatusDone &&
+		(command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 ||
+			report.ClaimGeneration != command.SignedClaimGeneration ||
+			command.SignedInstanceGeneration == 0 ||
+			report.ReportedStatus != "running" ||
+			report.Result.RuntimeRef != executorRuntimeRef ||
+			report.Result.ActivationCanary == nil) {
+		return errors.New(
+			"successful activation canary report omits its exact running proof",
+		)
+	}
+	if command.CommandKind == "admit" && report.Status == controlprotocol.ExecutorStatusDone &&
+		report.Result.RuntimeRef != "" && report.Result.RuntimeRef != executorRuntimeRef {
+		return errors.New("successful admit runtime differs from signed command")
+	}
+	return nil
+}
+
+// validateExecutorReportV4Binding authenticates the immutable, nested canary
+// command and compares the report with the exact signed permit-derived
+// projection. ApplyReportV4 calls it before accepting a new terminal report;
+// Open calls it once for each recovered terminal canary. Routine state
+// validation uses validateRetainedExecutorReportV4Binding above.
+func validateExecutorReportV4Binding(command Command, report controlprotocol.ExecutorReportV4) error {
+	if err := validateRetainedExecutorReportV4Binding(command, report); err != nil {
+		return err
+	}
+	if command.CommandKind == "activation-canary" &&
+		report.Status == controlprotocol.ExecutorStatusDone {
+		statement, err := parseCommandStatement(command.CommandDSSE)
+		if err != nil {
+			return errors.New("stored activation canary command is invalid")
+		}
+		parsed, err := activationcanary.ParseCommandV1(statement.Payload)
+		if err != nil {
+			return errors.New("stored activation canary payload is invalid")
+		}
+		executorRuntimeRef, runtimeErr := commandExecutorRuntimeRef(command)
+		if runtimeErr != nil || parsed.Admission.RuntimeRef != executorRuntimeRef ||
+			parsed.Admission.Generation != command.SignedInstanceGeneration {
+			return errors.New(
+				"activation canary admission differs from its signed outer command",
+			)
+		}
+		verified, err := activationcanary.VerifyHistoricalCommandV1(
+			statement.Payload,
+			activationcanary.AdmissionContextV1{
+				NodeID:     statement.NodeID,
+				TenantID:   statement.TenantID,
+				InstanceID: statement.InstanceID,
+				Projection: parsed.Admission,
+			},
+			taskpermit.MaxValidity,
+		)
+		if err != nil {
+			return errors.New("stored activation canary payload is invalid")
+		}
+		commandValue := verified.Command()
+		permit := verified.Permit()
+		projection := report.Result.ActivationCanary
+		if projection.ActivationID != commandValue.ActivationID ||
+			projection.AdmissionDigest != commandValue.AdmissionDigest ||
+			projection.TaskDigest != taskpermit.TaskDigest(
+				permit.Statement.TenantID,
+				permit.Statement.InstanceID,
+				permit.Statement.TaskID,
+			) ||
+			projection.PermitDigest != permit.EnvelopeDigest {
+			return errors.New(
+				"activation canary proof differs from its signed command payload",
+			)
+		}
+	}
+	return nil
+}
+
+// commandExecutorRuntimeRef derives the opaque host-local Executor identity
+// from the signed tenant and instance identity. SignedRuntimeRef remains the
+// uplink routing reference (uplink:v2:...); it is deliberately not the local
+// runtime returned by the Executor and retained in admission/canary evidence.
+func commandExecutorRuntimeRef(command Command) (string, error) {
+	// Direct/local protocol-4 tests and older signed commands already carry the
+	// opaque Executor identity. Uplink v2 commands instead carry a routable
+	// tenant/node/instance tuple and must be projected to the same local value.
+	if validExecutorRuntimeRef(command.SignedRuntimeRef) {
+		return command.SignedRuntimeRef, nil
+	}
+	statement, err := parseCommandStatement(command.CommandDSSE)
+	if err != nil || statement.TenantID != command.TenantID ||
+		statement.NodeID != command.NodeID || statement.RuntimeRef != command.SignedRuntimeRef {
+		return "", errors.New("stored command does not match its signed identity")
+	}
+	digest := sha256.Sum256([]byte(statement.TenantID + "\x00" + statement.InstanceID))
+	return "executor-" + hex.EncodeToString(digest[:]), nil
+}
+
+func activationCanaryTerminalErrorCode(value string) bool {
+	return value == "activation_canary_failed" || value == "activation_canary_cancelled"
+}
+
+func validActivationCanaryTerminalFailure(status, reportedStatus, errorCode, detail string) bool {
+	if status != controlprotocol.ExecutorStatusFailed || detail == "" {
+		return false
+	}
+	switch errorCode {
+	case "activation_canary_failed":
+		return reportedStatus == "failed"
+	case "activation_canary_cancelled":
+		return reportedStatus == "cancelled"
+	default:
+		return false
+	}
 }
 
 func digestBytes(raw []byte) string {
@@ -1087,6 +1893,10 @@ func validRecordID(value string, limit int) bool {
 	return true
 }
 
+func boundedRetainedText(value string, limit int) bool {
+	return len(value) <= limit && utf8.ValidString(value) && !strings.ContainsAny(value, "\r\n\x00")
+}
+
 func canonicalTimestamp(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
 
 func validTimestamp(value string) bool {
@@ -1102,6 +1912,14 @@ func parseTimestamp(value string) (time.Time, error) {
 }
 
 func reportDigest(report controlprotocol.ExecutorReportV3) (string, []byte, error) {
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return "", nil, err
+	}
+	return digestBytes(raw), raw, nil
+}
+
+func reportDigestV4(report controlprotocol.ExecutorReportV4) (string, []byte, error) {
 	raw, err := json.Marshal(report)
 	if err != nil {
 		return "", nil, err

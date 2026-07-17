@@ -44,7 +44,11 @@ func TestEvidenceWitnessStateRoundTripAndLegacyMigration(t *testing.T) {
 	if err := json.Unmarshal(legacyRaw, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	snapshot.Version = legacyStateFormatVersion
+	snapshot.Version = stateFormatMinReadVersion
+	snapshot.Captures = nil
+	for index := range snapshot.Commands {
+		snapshot.Commands[index].DeliveryProtocol = 0
+	}
 	legacyRaw, err = json.Marshal(snapshot)
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +67,7 @@ func TestEvidenceWitnessStateRoundTripAndLegacyMigration(t *testing.T) {
 		t.Fatal("legacy snapshot smuggled in witness state")
 	}
 	legacyNode.Evidence = &witness
-	if _, err := applyTransaction(legacy, transaction{Version: legacyTransactionVersion, Mutations: []mutation{{Kind: mutationNode, Node: &legacyNode}}}); err == nil {
+	if _, err := applyTransaction(legacy, transaction{Version: transactionFormatMinReadVersion, Mutations: []mutation{{Kind: mutationNode, Node: &legacyNode}}}); err == nil {
 		t.Fatal("legacy WAL transaction smuggled in witness state")
 	}
 }

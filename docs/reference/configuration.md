@@ -109,6 +109,27 @@ needed. Pending, leased, `failed`, and `outcome_unknown` commands are not
 automatically reclaimed. Revoked credentials and nodes remain retained and count
 toward their ceilings; there is no supported purge operation for them.
 
+Activation evidence-capture limits are fixed security invariants rather than
+startup flags. The controller permits one `armed` capture per node, 16 active
+captures, 256 retained captures across all states, 128 native frames and 512 KiB
+of decoded frames per capture, and 16 MiB of aggregate reserved or captured frame
+data. A portable capture is capped at 1 MiB of JSON. The observation TTL is fixed
+when armed and must be from one second through one hour. An armed capture reserves
+its complete 512 KiB allowance. Reaching a limit fails closed; Steward does not
+evict another capture or alter a workload to make room. Ordinary node evidence
+witnessing has priority over this optional capture: if an added frame cannot fit
+the controller's state or write-ahead-log limit, Steward retains a compact
+`storage_capacity` failure when possible and otherwise drops that capture while
+still advancing the authenticated node witness.
+
+Capture expiry has no background scheduler. The first evidence report or capture
+API operation after an armed capture's deadline records its durable `expired`
+state. Observed, sealed, expired, and failed records remain until a site
+administrator deletes them. Exact native frames live in the controller snapshot
+and write-ahead log, and a range may include receipts from several tenants because
+receipt-chain continuity forbids removing interleaved frames. Protect controller
+state backups and exported captures as site-wide sensitive evidence.
+
 The packaged `control-doctor` accepts `--json`, `--probe-url URL`, and
 `--ca-file PEM`. On a TLS wildcard listener, the default check can prove only that
 the local port accepts a TCP connection. Pass the certificate's real HTTPS origin
@@ -212,12 +233,12 @@ outbound-only deployment.
 | `-admission-node-id` | empty | Stable node ID bound into intents and receipts |
 | `-admission-fence-file` | `/var/lib/steward-executor/admission-fences.bin` | Highest accepted policy/generation snapshot; capped at 4 MiB and 65,535 records |
 | `-initialize-admission-fence` | `false` | Exclusively create the empty fence and exit; normal startup never recreates it |
-| `-admission-allow-host-admin-intent` | `false` | Dedicated-host compatibility: let the host-wide local token select an intent tenant and authorize signed lifecycle and activation-checkpoint calls; the token is host-administrator authority, not tenant authentication |
+| `-admission-allow-host-admin-intent` | `false` | Dedicated-host compatibility: let the host-wide local token select an intent tenant and authorize signed lifecycle, activation-canary preflight, and activation-checkpoint calls; the token is host-administrator authority, not tenant authentication |
 | `-admission-journal-file` | `/var/lib/steward-executor/operation-journal.bin` | Append-only host-mutation journal; capped at 16 MiB |
 | `-admission-evidence-file` | `/var/lib/steward-executor/evidence.bin` | Append-only signed receipt chain; capped at 64 MiB |
 | `-admission-evidence-key-file` | empty | Owner-only PKCS#8 Ed25519 receipt private key |
 | `-admission-evidence-epoch` | `1` | Receipt-key epoch expected by offline verification |
-| `-gateway-control-socket` | empty | Gateway Unix socket; enables inference, service, connector, and egress grants with a complete Gateway/relay setup |
+| `-gateway-control-socket` | empty | Gateway Unix socket; enables inference, service, connector, and egress grants with a complete Gateway/relay setup, plus the closed activation canary when Executor uplink protocol 4 is active |
 | `-gateway-grant-root` | `/run/steward-gateway/grants` | Host directory containing per-grant capability sockets |
 | `-relay-image` | empty | Trusted relay image pinned by repository digest or local Docker image ID |
 | `-relay-gid` | `0` | Nonzero host GID used for per-grant relay socket access |

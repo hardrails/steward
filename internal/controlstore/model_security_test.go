@@ -75,7 +75,7 @@ func TestWALDecoderRejectsStructurallyAmbiguousMutations(t *testing.T) {
 		t.Fatal("oversized WAL transaction was accepted")
 	}
 	for _, raw := range [][]byte{
-		[]byte(`{"version":3,"mutations":[{"kind":"tenant_upsert","tenant":{"id":"tenant-a"}}]}`),
+		[]byte(`{"version":5,"mutations":[{"kind":"tenant_upsert","tenant":{"id":"tenant-a"}}]}`),
 		[]byte(`{"version":1,"mutations":[]}`),
 		[]byte(`{"version":1,"mutations":[{"kind":"unknown"}],"extra":true}`),
 	} {
@@ -105,7 +105,7 @@ func TestWALDecoderRejectsStructurallyAmbiguousMutations(t *testing.T) {
 		{Kind: "unknown", Tenant: &tenant},
 	}
 	for index, change := range tests {
-		if _, err := applyTransaction(current, transaction{Version: transactionFormatVersion, Mutations: []mutation{change}}); err == nil {
+		if _, err := applyTransaction(current, transaction{Version: transactionFormatWriteVersion, Mutations: []mutation{change}}); err == nil {
 			t.Fatalf("ambiguous WAL mutation %d was accepted: %+v", index, change)
 		}
 	}

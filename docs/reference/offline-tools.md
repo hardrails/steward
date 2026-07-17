@@ -1,6 +1,6 @@
 ---
 title: Local operator tools
-description: Curate and verify signed agent releases, inspect OCI archives, create control TLS material, verify evidence, and check durable-state compatibility with stewardctl.
+description: Curate signed agent releases, run proof-carrying activation and fleet rollout, inspect OCI archives, create control TLS material, verify evidence, and check durable-state compatibility with stewardctl.
 section: Reference
 ---
 
@@ -17,9 +17,14 @@ operations use only local files; `image import` contacts Docker after offline
 verification. Commands under `stewardctl node` contact the local Executor API.
 `stewardctl task submit`, `status`, `observe`, and `wait` contact an explicit
 literal-loopback Gateway origin; task issue, verify, and audit remain offline.
+`stewardctl activation` composes one node-local Hermes activation, while
+`stewardctl rollout` composes an ordered remote fleet through Steward Control and
+verifies the resulting proof set offline.
 `stewardctl control evidence export` contacts the customer-owned controller,
 while `stewardctl control evidence verify` checks that portable export entirely
-offline against a separately pinned witness public key.
+offline against a separately pinned witness public key. The corresponding
+`stewardctl control evidence-capture` commands retain, seal, export, and replay a
+bounded activation-specific range; only its `verify` operation is offline.
 
 ## Signed agent releases
 
@@ -513,6 +518,183 @@ See [Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relat
 for input preparation, the baseline-witness procedure, phase semantics, and proof
 limits.
 
+## Proof-carrying fleet rollout
+
+`stewardctl rollout` applies the fixed Hermes activation contract to one release,
+one tenant, and an explicit ordered list of remote nodes. It is an operator-side
+coordinator over Steward Control, not a controller API resource. The controller
+delivers exact signed commands and retains evidence captures; it does not select
+targets or hold the command or task private key. Pre-import each target from the
+exact capsule envelope whose digest matches `capsule_envelope_digest` in the
+verified release output; the rollout runner does not transport the image or
+capsule.
+
+Create an absent owner-only workspace after the exact image has already been
+imported on every target:
+
+```console
+stewardctl rollout create \
+  -dir "$ROLLOUT_DIR" \
+  -release hermes-workspace-audit.release.dsse.json \
+  -policy site-policy.dsse.json \
+  -archive hermes-agent-adapter.tar \
+  -targets targets.json \
+  -publisher-public-key publisher.public.pem \
+  -publisher-key-id publisher-key-id \
+  -site-root-public-key site-root.public \
+  -site-root-key-id site-root-1 \
+  -witness-public-key steward-control-witness.public.pem \
+  -batch-size 4 \
+  -valid-for 1h
+```
+
+`-rollout-id` is optional. The target manifest uses schema
+`steward.rollout-inputs.v1` and contains from 1 through 64 ordered targets. Each
+target names one clean relative intent filename, service-trust filename, Gateway
+receipt public-key filename, positive Gateway receipt epoch, positive claim
+generation, and optional activation ID. Target 0 is always the canary. Later
+batches contain at most `-batch-size` targets, from 1 through 16. Each target's
+three command IDs are deterministically derived from the rollout ID, target index,
+and node ID; plan validation rejects aliases or reordered targets whose retained
+IDs do not match.
+
+Create accepts these recorded timeout flags:
+
+| Flag | Default |
+| --- | ---: |
+| `-preflight-timeout` | `30s` |
+| `-image-import-timeout` | `30m` |
+| `-admission-timeout` | `2m` |
+| `-startup-timeout` | `5m` |
+| `-canary-timeout` | `5m` |
+| `-evidence-timeout` | `2m` |
+
+The rollout window is from one second through 24 hours and cannot exceed the
+capsule expiry. Admission, startup, canary, and evidence timeouts are summed into
+one fixed controller capture lifetime and must fit its one-second-to-one-hour
+limit. The image-import timeout is reserved plan metadata: create inspects the
+local archive, but run never transfers or imports it remotely.
+
+The preflight timeout bounds create's local archive and policy work and each live
+controller node-preflight attempt when a target's batch begins or a transport
+failure is retried. A target that remains `planned` while an operator considers
+promotion does not age out under that short timeout; only the global rollout
+deadline continues to advance.
+
+Inspect unsigned local progress with:
+
+```console
+stewardctl rollout status -dir "$ROLLOUT_DIR"
+```
+
+`-json` emits `steward.rollout-status.v1`. The output is explicitly
+`unverified_workspace`; status validates shape and ordering, not signatures or
+evidence.
+
+The workspace requires same-filesystem POSIX hard links, reliable file and
+directory `fsync`, reliable `flock`, and stable Unix ownership and link counts.
+Each artifact is published without replacement through a same-directory hard-link
+transaction. Open removes a valid unpublished staging inode or completes cleanup
+of a valid linked publication after a crash; any other staging shape fails closed.
+There is no weaker filesystem fallback.
+
+Advance exactly the current canary or later batch with:
+
+```console
+stewardctl rollout run \
+  -dir "$ROLLOUT_DIR" \
+  -publisher-public-key publisher.public.pem \
+  -publisher-key-id publisher-key-id \
+  -site-root-public-key site-root.public \
+  -site-root-key-id site-root-1 \
+  -witness-public-key steward-control-witness.public.pem \
+  -command-private-key tenant-a-commands.private.pem \
+  -command-key-id tenant-a-commands \
+  -task-private-key hermes-task-approver.private.pem \
+  -task-key-id hermes-task-approver \
+  -control-url "$CONTROL_URL" \
+  -token-file "$ADMIN_TOKEN" \
+  -ca-file "$CONTROL_CA"
+```
+
+The command key must be authorized for `admit`, `start`, and
+`activation-canary`; the task key must be authorized for `hermes-api`. The
+controller token must be a site administrator because evidence captures can
+contain unrelated tenant metadata. `-control-url` defaults to literal loopback;
+non-loopback origins require HTTPS. `-ca-file` is optional. `-json` emits stable
+authenticated retained progress with
+`verification: "authenticated_retained_progress"`. That online output is not the
+final proof verdict and does not replace offline `rollout verify` with the exact
+archive.
+
+Run authenticates every retained target before contacting the controller. While
+all targets remain planned, the common command key creates
+`plan-authorization.dsse.json`, a signed authorization of the exact plan. Before a
+later batch begins, that same key creates the next contiguous
+`batch-promotion-NNN.dsse.json`, which binds the preceding batch's ordered passed
+state, activation proofs, controller captures, the previous authorization, and the
+next boundary. Every command binds the applicable plan-authorization or promotion
+envelope digest in `authorization_context_digest`, and is stored before submission.
+The signed statements use schemas `steward.rollout-plan-authorization.v1` and
+`steward.rollout-batch-promotion.v1` with the corresponding DSSE payload types
+`application/vnd.steward.rollout-plan-authorization.v1+json` and
+`application/vnd.steward.rollout-batch-promotion.v1+json`.
+
+Rerun the same command after a crash or retryable transport failure. Retrying does
+not extend fixed deadlines. Each successful invocation stops after one
+deterministic batch, so advancing the next batch requires another explicit operator
+invocation. A rejection, ambiguous outcome, terminal canary failure, expiry,
+revoked node, or invalid evidence becomes sticky `action_required`; the coordinator
+does not clear it, skip a target, stop a workload, or roll back prior targets.
+
+After all targets pass, verify the complete copied workspace on a disconnected
+system:
+
+```console
+stewardctl rollout verify \
+  -dir "$ROLLOUT_DIR" \
+  -archive hermes-agent-adapter.tar \
+  -publisher-public-key publisher.public.pem \
+  -publisher-key-id publisher-key-id \
+  -site-root-public-key site-root.public \
+  -site-root-key-id site-root-1 \
+  -witness-public-key steward-control-witness.public.pem
+```
+
+Verification has no network, control, token, private-key, Docker, or node-socket
+flags. `-archive` is required because the workspace retains the archive identity,
+not its bytes. Gateway receipt public keys and epochs are retained per target in
+the workspace. The verifier authenticates the release and policy, exact archive,
+deterministic command IDs, signed plan authorization and chained batch promotions,
+each command's authorization context, ordered state history, admission projection,
+tenant task permit, Gateway receipts, Executor activation markers, controller
+captures, per-target activation proofs, and unsigned aggregate `proof.json`. The
+aggregate's `plan_authorization_digest` and ordered `batch_promotion_digests` bind
+the signed plan and promotion envelopes. Each target's `admit_command_digest`,
+`start_command_digest`, and `canary_command_digest` bind the exact retained outer
+command envelopes. Its proof digest therefore commits the exact retained plan,
+promotion, and outer-command authorization envelopes without becoming a signature.
+Human output identifies the
+verified rollout, target count, and proof digest; `-json` emits
+`steward.rollout-verification.v1` with `valid: true` and `verified: true`.
+
+The runner does not delete its sealed controller captures. After preserving and
+authenticating the complete workspace, manually inventory `statement.node_id` and
+`statement.capture_id` in each `target-NNN-capture-export.json`, then use
+`stewardctl control evidence-capture delete` with site-administrator credentials
+for each pair. There is no rollout cleanup or extraction command. Deleting the
+controller copy does not alter the copied proof, but it is irreversible and removes
+that recovery copy. Steward Control retains at most 256 captures across all states.
+
+The workspace lock and modes do not protect against root. The aggregate proof is
+not a signature, and the fixed canary is not proof of arbitrary agent correctness
+or host integrity. Signed promotions attest the common command signer's
+authorization sequence over retained evidence; they do not independently prove
+wall-clock order, host execution order, or a human approval reason. See
+[Roll out a qualified Hermes release across a fleet]({{ '/guides/fleet-rollout/' | relative_url }})
+for target preparation, operator gates, recovery, air-gap transfer, and evidence
+limits.
+
 ## Controller TLS material
 
 `stewardctl control pki create` generates an ECDSA P-256 local certificate
@@ -580,6 +762,115 @@ embedded in the export is not trusted by itself. Copy the controller's
 SHA-256 digest when establishing the audit identity. A wrong key, changed signed
 field, duplicate or unknown JSON field, or inconsistent node identity fails
 verification. Reformatting equivalent JSON does not change the signed statement.
+
+## Controller activation evidence captures
+
+Evidence capture is a site-administrator operation. It preserves a bounded range
+of exact Executor receipt frames for one activation target, then lets the
+controller attest that the range was paired with a matching successful
+activation-canary command. Arm the capture before submitting the activation.
+That procedure fixes the controller's baseline; the proof establishes
+controller observation order, not when the node generated each receipt:
+
+```console
+stewardctl control evidence-capture arm \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001 \
+  -request-id activation-a-evidence-arm-0001 \
+  -tenant-id tenant-a \
+  -runtime-ref executor-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  -generation 7 \
+  -activation-id activation-a \
+  -activation-begin-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  -ttl 10m
+```
+
+The TTL must be a whole number of seconds from `1s` through `1h` and limits the
+time to observe the checkpoint. Inspect the frame-free state with:
+
+```console
+stewardctl control evidence-capture status \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001
+```
+
+After `state` becomes `observed`, seal it against the successful canary retained
+by the controller, then export it to a new mode-`0600` file:
+
+```console
+stewardctl control evidence-capture seal \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001 \
+  -canary-command-id activation-a-canary-0001
+
+stewardctl control evidence-capture export \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001 \
+  -out activation-a.evidence-capture.json
+```
+
+Copy the capture and the controller witness public key through separate trusted
+handling as appropriate for the site, then verify on a disconnected system:
+
+```console
+stewardctl control evidence-capture verify \
+  -in activation-a.evidence-capture.json \
+  -witness-public-key steward-control-witness.public.pem
+```
+
+The verifier makes no network request. It authenticates the controller's
+purpose-separated signature against the supplied pinned key, verifies the
+enrollment receipt identity, replays every native frame from the signed baseline,
+requires the exact final head, and finds exactly one matching allowed,
+error-free activation begin followed by exactly one matching committed,
+error-free checkpoint. It rejects target lifecycle invalidation and mutation,
+removal, insertion, reordering, or substitution of a frame. The controller key embedded in the
+capture is descriptive and is never accepted as its own trust anchor.
+
+The range can include chain-critical frames for unrelated tenants. It is therefore
+site-wide sensitive evidence even though the target is one tenant. The complete
+file is capped at 1 MiB and contains at most 128 frames or 512 KiB of decoded
+frame data. The offline result verifies the evidence chain and controller
+attestation; it does not independently replay the canary result or prove semantic
+agent success.
+
+`expired` means no matching checkpoint was observed before the fixed deadline.
+`failed` means a coordinate change, evidence finding, target contradiction,
+storage-capacity limit, or frame/byte limit prevented a coherent capture. A
+storage-capacity failure can drop the optional capture if even its small failure
+record cannot fit, so absence alone is not proof of success or failure. Neither state proves the activation
+did not run or that retry is safe. Treat either as `action_required` when portable
+proof is mandatory: an operator must investigate and choose recovery. That is
+workflow guidance, not another capture state. Steward performs no automatic retry,
+rollback, remediation, or workload change.
+
+After preserving required audit material, remove a retained capture explicitly:
+
+```console
+stewardctl control evidence-capture delete \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/steward-control/site-admin.token \
+  -ca-file /secure/steward-control/ca.crt \
+  -node-id node-a \
+  -capture-id activation-a-evidence-0001
+```
+
+Delete is irreversible and affects only controller capture state. The controller
+retains at most 16 active and 256 total captures, with a 16 MiB aggregate frame
+reservation. Expiry is durable but lazy: it is recorded on the next evidence
+report or capture operation after the deadline rather than by a background timer.
 
 ## Upgrade inspection
 

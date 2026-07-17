@@ -253,6 +253,12 @@ does not restore configuration or durable data. A directory from an older instal
 without `release.json` is not an eligible rollback target. See
 [upgrade and rollback]({{ '/guides/upgrades/' | relative_url }}).
 
+Normal Executor startup may migrate `uplink-delivery-state.json` from format 2 or 3
+to format 4. After that migration, a prior release whose manifest stops at format 2
+or 3 is not eligible for software rollback, even when the ledger is empty. Do not
+restore that file independently; use a complete, matching backup only under an
+approved recovery procedure that accounts for later commands and external effects.
+
 ## What should I read first?
 
 Operators should start with [Install Steward]({{ '/getting-started/' | relative_url }}).

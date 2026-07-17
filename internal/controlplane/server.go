@@ -4,6 +4,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -111,6 +112,10 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/nodes/{node_id}", server.nodeAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence", server.evidenceAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/export", server.evidenceExport)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures", server.evidenceCaptures)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures/{capture_id}", server.evidenceCapture)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures/{capture_id}/seal", server.evidenceCaptureSeal)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures/{capture_id}/export", server.evidenceCaptureExport)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes", server.nodes)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}", server.node)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands", server.commands)
@@ -456,6 +461,218 @@ func (server *Server) evidenceExport(writer http.ResponseWriter, request *http.R
 	)
 }
 
+func (server *Server) evidenceCaptures(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		CaptureID             string `json:"capture_id"`
+		RequestID             string `json:"request_id"`
+		TenantID              string `json:"tenant_id"`
+		RuntimeRef            string `json:"runtime_ref"`
+		Generation            uint64 `json:"generation"`
+		ActivationID          string `json:"activation_id"`
+		ActivationBeginDigest string `json:"activation_begin_digest"`
+		TTLSeconds            int64  `json:"ttl_seconds"`
+	}
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	if input.TTLSeconds < int64(controlstore.MinEvidenceCaptureTTL/time.Second) ||
+		input.TTLSeconds > int64(controlstore.MaxEvidenceCaptureTTL/time.Second) {
+		writeError(
+			writer,
+			http.StatusBadRequest,
+			"invalid_request",
+			"ttl_seconds must be between 1 and 3600",
+		)
+		return
+	}
+	now := server.now().UTC()
+	capture, created, err := server.store.ArmEvidenceCapture(
+		identity,
+		controlstore.EvidenceCaptureArmRequest{
+			CaptureID: input.CaptureID, RequestID: input.RequestID,
+			NodeID: request.PathValue("node_id"), TenantID: input.TenantID,
+			RuntimeRef: input.RuntimeRef, Generation: input.Generation,
+			ActivationID: input.ActivationID, ActivationBeginDigest: input.ActivationBeginDigest,
+			TTL: time.Duration(input.TTLSeconds) * time.Second,
+		},
+		now,
+	)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(writer, status, capture)
+}
+
+func (server *Server) evidenceCapture(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet && request.Method != http.MethodDelete {
+		methodNotAllowed(writer, http.MethodGet, http.MethodDelete)
+		return
+	}
+	if !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method == http.MethodGet {
+		capture, found, err := server.store.GetEvidenceCapture(
+			identity,
+			request.PathValue("capture_id"),
+			server.now(),
+		)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		if !found || capture.NodeID != request.PathValue("node_id") {
+			writeError(writer, http.StatusNotFound, "not_found", "resource was not found")
+			return
+		}
+		writeJSON(writer, http.StatusOK, capture)
+		return
+	}
+	deleted, err := server.store.DeleteEvidenceCapture(
+		identity,
+		request.PathValue("node_id"),
+		request.PathValue("capture_id"),
+		server.now(),
+	)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	if !deleted {
+		writeError(writer, http.StatusNotFound, "not_found", "resource was not found")
+		return
+	}
+	writeNoContent(writer)
+}
+
+func (server *Server) evidenceCaptureSeal(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		CanaryCommandID string `json:"canary_command_id"`
+	}
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	capture, _, err := server.store.SealEvidenceCapture(
+		identity,
+		request.PathValue("node_id"),
+		request.PathValue("capture_id"),
+		input.CanaryCommandID,
+		server.now(),
+	)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, capture)
+}
+
+func (server *Server) evidenceCaptureExport(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	nodeID := request.PathValue("node_id")
+	captureID := request.PathValue("capture_id")
+	for attempt := 0; attempt < maxEvidenceExportAttempts; attempt++ {
+		now := server.now().UTC()
+		snapshot, found, err := server.store.SnapshotEvidenceCaptureExport(
+			identity,
+			captureID,
+			now,
+		)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		if !found || snapshot.Capture.NodeID != nodeID {
+			writeError(writer, http.StatusNotFound, "not_found", "resource was not found")
+			return
+		}
+		statement, err := snapshot.Statement(server.auth.InstanceID(), now)
+		if err != nil {
+			server.logger.Error(
+				"construct evidence capture export",
+				"error", err,
+				"node_id", nodeID,
+				"capture_id", captureID,
+			)
+			writeError(
+				writer,
+				http.StatusInternalServerError,
+				"internal_error",
+				"the control plane could not construct a valid evidence capture export",
+			)
+			return
+		}
+		export, err := controlprotocol.SignControllerEvidenceCaptureV1(
+			statement,
+			snapshot.Frames,
+			server.witnessKey,
+		)
+		if err != nil {
+			server.logger.Error(
+				"sign evidence capture export",
+				"error", err,
+				"node_id", nodeID,
+				"capture_id", captureID,
+			)
+			writeError(
+				writer,
+				http.StatusInternalServerError,
+				"internal_error",
+				"the control plane could not sign a valid evidence capture export",
+			)
+			return
+		}
+		current, err := server.store.EvidenceCaptureSnapshotCurrent(
+			identity,
+			snapshot,
+			server.now(),
+		)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		if current {
+			writeJSON(writer, http.StatusOK, export)
+			return
+		}
+	}
+	writer.Header().Set("Retry-After", strconv.Itoa(evidenceExportRetryAfter))
+	writeError(
+		writer,
+		http.StatusConflict,
+		"conflict",
+		"evidence capture changed while the export was being signed; retry after the indicated delay",
+	)
+}
+
 func (server *Server) evidenceInspection(nodeID string, inspection controlstore.ExecutorEvidenceInspection) controlprotocol.ExecutorEvidenceInspectionV1 {
 	return controlprotocol.ExecutorEvidenceInspectionV1{
 		ProtocolVersion: controlprotocol.ExecutorEvidenceProtocolV1, ControllerInstanceID: server.auth.InstanceID(),
@@ -571,23 +788,57 @@ func (server *Server) executorPoll(writer http.ResponseWriter, request *http.Req
 	if !ok {
 		return
 	}
-	var input controlprotocol.ExecutorPollRequestV3
-	if !server.decode(writer, request, &input) {
+	raw, ok := server.readBody(writer, request)
+	if !ok {
 		return
 	}
-	if input.ProtocolVersion != controlprotocol.ExecutorProtocolV3 || input.CredentialScope != "node" || input.NodeID != identity.NodeID {
-		writeError(writer, http.StatusBadRequest, "invalid_request", "poll identity or protocol does not match the authenticated node")
-		return
-	}
-	deliveries, err := server.store.Poll(identity, input.Capabilities, server.now(), server.lease, server.maxPoll)
+	version, err := executorProtocolVersion(raw)
 	if err != nil {
-		server.storeError(writer, err, false)
+		writeError(writer, http.StatusBadRequest, "invalid_request", "request body must contain one supported executor protocol version")
 		return
 	}
-	writeJSON(writer, http.StatusOK, struct {
-		ProtocolVersion int                                  `json:"protocol_version"`
-		Deliveries      []controlprotocol.ExecutorDeliveryV3 `json:"deliveries"`
-	}{ProtocolVersion: controlprotocol.ExecutorProtocolV3, Deliveries: deliveries})
+	switch version {
+	case controlprotocol.ExecutorProtocolV3:
+		var input controlprotocol.ExecutorPollRequestV3
+		if err := dsse.DecodeStrictInto(raw, maxRequestBytes, &input); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "request body must be one strict JSON object")
+			return
+		}
+		if input.CredentialScope != "node" || input.NodeID != identity.NodeID {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "poll identity or protocol does not match the authenticated node")
+			return
+		}
+		deliveries, err := server.store.Poll(identity, input.Capabilities, server.now(), server.lease, server.maxPoll)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		writeJSON(writer, http.StatusOK, struct {
+			ProtocolVersion int                                  `json:"protocol_version"`
+			Deliveries      []controlprotocol.ExecutorDeliveryV3 `json:"deliveries"`
+		}{ProtocolVersion: controlprotocol.ExecutorProtocolV3, Deliveries: deliveries})
+	case controlprotocol.ExecutorProtocolV4:
+		var input controlprotocol.ExecutorPollRequestV4
+		if err := dsse.DecodeStrictInto(raw, maxRequestBytes, &input); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "request body must be one strict JSON object")
+			return
+		}
+		if input.CredentialScope != "node" || input.NodeID != identity.NodeID {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "poll identity or protocol does not match the authenticated node")
+			return
+		}
+		deliveries, err := server.store.PollV4(identity, input.Capabilities, server.now(), server.lease, server.maxPoll)
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		writeJSON(writer, http.StatusOK, struct {
+			ProtocolVersion int                                  `json:"protocol_version"`
+			Deliveries      []controlprotocol.ExecutorDeliveryV4 `json:"deliveries"`
+		}{ProtocolVersion: controlprotocol.ExecutorProtocolV4, Deliveries: deliveries})
+	default:
+		writeError(writer, http.StatusBadRequest, "invalid_request", "poll identity or protocol does not match the authenticated node")
+	}
 }
 
 func (server *Server) executorReport(writer http.ResponseWriter, request *http.Request) {
@@ -598,22 +849,47 @@ func (server *Server) executorReport(writer http.ResponseWriter, request *http.R
 	if !ok {
 		return
 	}
-	var report controlprotocol.ExecutorReportV3
-	if !server.decode(writer, request, &report) {
+	raw, ok := server.readBody(writer, request)
+	if !ok {
 		return
 	}
-	if err := report.Validate(); err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_request", "executor report is invalid")
-		return
-	}
-	applied, err := server.store.ApplyReport(identity, report, server.now())
+	version, err := executorProtocolVersion(raw)
 	if err != nil {
-		server.storeError(writer, err, false)
+		writeError(writer, http.StatusBadRequest, "invalid_request", "request body must contain one supported executor protocol version")
 		return
 	}
-	writeJSON(writer, http.StatusOK, controlprotocol.ExecutorReportResponseV3{
-		ProtocolVersion: controlprotocol.ExecutorProtocolV3, Applied: applied,
-	})
+	switch version {
+	case controlprotocol.ExecutorProtocolV3:
+		var report controlprotocol.ExecutorReportV3
+		if err := dsse.DecodeStrictInto(raw, maxRequestBytes, &report); err != nil || report.Validate() != nil {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "executor report is invalid")
+			return
+		}
+		applied, err := server.store.ApplyReport(identity, report, server.now())
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		writeJSON(writer, http.StatusOK, controlprotocol.ExecutorReportResponseV3{
+			ProtocolVersion: controlprotocol.ExecutorProtocolV3, Applied: applied,
+		})
+	case controlprotocol.ExecutorProtocolV4:
+		report, err := controlprotocol.DecodeExecutorReportV4(raw)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid_request", "executor report is invalid")
+			return
+		}
+		applied, err := server.store.ApplyReportV4(identity, report, server.now())
+		if err != nil {
+			server.storeError(writer, err, false)
+			return
+		}
+		writeJSON(writer, http.StatusOK, controlprotocol.ExecutorReportResponseV4{
+			ProtocolVersion: controlprotocol.ExecutorProtocolV4, Applied: applied,
+		})
+	default:
+		writeError(writer, http.StatusBadRequest, "invalid_request", "executor report protocol is unsupported")
+	}
 }
 
 func (server *Server) evidencePoll(writer http.ResponseWriter, request *http.Request) {
@@ -702,10 +978,22 @@ func bearer(writer http.ResponseWriter, request *http.Request) (string, bool) {
 }
 
 func (server *Server) decode(writer http.ResponseWriter, request *http.Request, destination any) bool {
+	raw, ok := server.readBody(writer, request)
+	if !ok {
+		return false
+	}
+	if err := dsse.DecodeStrictInto(raw, maxRequestBytes, destination); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "request body must be one strict JSON object")
+		return false
+	}
+	return true
+}
+
+func (server *Server) readBody(writer http.ResponseWriter, request *http.Request) ([]byte, bool) {
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		writeError(writer, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
-		return false
+		return nil, false
 	}
 	reader := http.MaxBytesReader(writer, request.Body, maxRequestBytes)
 	defer reader.Close()
@@ -717,13 +1005,54 @@ func (server *Server) decode(writer http.ResponseWriter, request *http.Request, 
 		} else {
 			writeError(writer, http.StatusBadRequest, "invalid_request", "request body could not be read")
 		}
-		return false
+		return nil, false
 	}
-	if err := dsse.DecodeStrictInto(raw, maxRequestBytes, destination); err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_request", "request body must be one strict JSON object")
-		return false
+	return raw, true
+}
+
+func executorProtocolVersion(raw []byte) (int, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return 0, errors.New("executor request must be one JSON object")
 	}
-	return true
+	seen := make(map[string]struct{})
+	version := 0
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return 0, err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return 0, errors.New("executor request field name is invalid")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return 0, fmt.Errorf("executor request contains duplicate field %q", key)
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return 0, err
+		}
+		if key == "protocol_version" {
+			if err := json.Unmarshal(value, &version); err != nil || version <= 0 {
+				return 0, errors.New("executor protocol version is invalid")
+			}
+		}
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim('}') {
+		return 0, errors.New("executor request object is not terminated")
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return 0, errors.New("executor request contains trailing JSON")
+	}
+	if version == 0 {
+		return 0, errors.New("executor protocol version is missing")
+	}
+	return version, nil
 }
 
 func (server *Server) storeError(writer http.ResponseWriter, err error, hideForbidden bool) {
@@ -796,35 +1125,74 @@ func nodeView(node controlstore.Node) nodeResponse {
 }
 
 type commandResponse struct {
-	CommandID          string                                  `json:"command_id"`
-	DeliveryID         string                                  `json:"delivery_id"`
-	TenantID           string                                  `json:"tenant_id"`
-	NodeID             string                                  `json:"node_id"`
-	CommandDigest      string                                  `json:"command_digest"`
-	State              string                                  `json:"state"`
-	DeliveryGeneration uint64                                  `json:"delivery_generation,omitempty"`
-	LeaseExpiresAt     string                                  `json:"lease_expires_at,omitempty"`
-	TerminalStatus     string                                  `json:"terminal_status,omitempty"`
-	ReportedStatus     string                                  `json:"reported_status,omitempty"`
-	ErrorCode          string                                  `json:"error_code,omitempty"`
-	ClaimGeneration    *uint64                                 `json:"claim_generation,omitempty"`
-	Result             *controlprotocol.ExecutorReportResultV3 `json:"result,omitempty"`
+	CommandID                       string                 `json:"command_id"`
+	DeliveryID                      string                 `json:"delivery_id"`
+	TenantID                        string                 `json:"tenant_id"`
+	NodeID                          string                 `json:"node_id"`
+	CommandDigest                   string                 `json:"command_digest"`
+	CommandKind                     string                 `json:"command_kind,omitempty"`
+	SignedRuntimeRef                string                 `json:"signed_runtime_ref,omitempty"`
+	SignedClaimGeneration           uint64                 `json:"signed_claim_generation,omitempty"`
+	SignedInstanceGeneration        uint64                 `json:"signed_instance_generation,omitempty"`
+	State                           string                 `json:"state"`
+	DeliveryProtocol                int                    `json:"delivery_protocol,omitempty"`
+	DeliveryGeneration              uint64                 `json:"delivery_generation,omitempty"`
+	LeaseExpiresAt                  string                 `json:"lease_expires_at,omitempty"`
+	TerminalStatus                  string                 `json:"terminal_status,omitempty"`
+	ReportedStatus                  string                 `json:"reported_status,omitempty"`
+	ErrorCode                       string                 `json:"error_code,omitempty"`
+	ClaimGeneration                 *uint64                `json:"claim_generation,omitempty"`
+	AdmissionProjectionState        string                 `json:"admission_projection_state,omitempty"`
+	ActivationCanaryProjectionState string                 `json:"activation_canary_projection_state,omitempty"`
+	Result                          *commandResultResponse `json:"result,omitempty"`
+}
+
+type commandResultResponse struct {
+	RuntimeRef       string                                            `json:"runtime_ref,omitempty"`
+	Error            string                                            `json:"error,omitempty"`
+	Replayed         bool                                              `json:"replayed,omitempty"`
+	Absent           bool                                              `json:"absent,omitempty"`
+	Admission        *controlprotocol.ExecutorAdmissionProjectionV1    `json:"admission,omitempty"`
+	ActivationCanary *controlprotocol.ExecutorActivationCanaryResultV1 `json:"activation_canary,omitempty"`
 }
 
 func commandView(command controlstore.Command) commandResponse {
 	response := commandResponse{
 		CommandID: command.ID, DeliveryID: command.DeliveryID, TenantID: command.TenantID,
-		NodeID: command.NodeID, CommandDigest: command.Digest, State: string(command.State),
+		NodeID: command.NodeID, CommandDigest: command.Digest,
+		CommandKind: command.CommandKind, SignedRuntimeRef: command.SignedRuntimeRef,
+		SignedClaimGeneration:    command.SignedClaimGeneration,
+		SignedInstanceGeneration: command.SignedInstanceGeneration,
+		State:                    string(command.State), DeliveryProtocol: command.DeliveryProtocol,
 		DeliveryGeneration: command.DeliveryGeneration, LeaseExpiresAt: command.LeaseUntil,
 	}
 	if command.Terminal != nil {
 		claimGeneration := command.Terminal.Report.ClaimGeneration
-		result := command.Terminal.Report.Result
+		retained := command.Terminal.Report.Result
+		result := commandResultResponse{
+			RuntimeRef: retained.RuntimeRef, Error: retained.Error,
+			Replayed: retained.Replayed, Absent: retained.Absent,
+			Admission:        command.Terminal.Admission,
+			ActivationCanary: command.Terminal.ActivationCanary,
+		}
 		response.TerminalStatus = command.Terminal.Report.Status
 		response.ReportedStatus = command.Terminal.Report.ReportedStatus
 		response.ErrorCode = command.Terminal.Report.ErrorCode
 		response.ClaimGeneration = &claimGeneration
 		response.Result = &result
+		if command.CommandKind == "admit" && command.Terminal.Report.Status == controlprotocol.ExecutorStatusDone {
+			response.AdmissionProjectionState = "missing"
+			if command.Terminal.Admission != nil {
+				response.AdmissionProjectionState = "present"
+			}
+		}
+		if command.CommandKind == "activation-canary" &&
+			command.Terminal.Report.Status == controlprotocol.ExecutorStatusDone {
+			response.ActivationCanaryProjectionState = "missing"
+			if command.Terminal.ActivationCanary != nil {
+				response.ActivationCanaryProjectionState = "present"
+			}
+		}
 	}
 	return response
 }

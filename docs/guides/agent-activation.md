@@ -554,10 +554,12 @@ from silently rewriting history. It is not hardware-backed attestation or a
 host-compromise defense. Host root or another process with the same operating
 system authority can bypass an advisory lock or corrupt local bytes.
 
-Controller-driven end-to-end activation is deliberately deferred. The current
-flow is node-local because the control uplink does not yet carry the complete
-admission projection needed for a tenant signing station to authorize the exact
-post-admission task.
+The `stewardctl activation` flow documented here remains node-local. For remote
+nodes, the separate operator-side rollout coordinator uses protocol-4 bounded
+admission and canary projections, a signed exact plan, chained evidence-bound batch
+promotions, exact signed commands, and controller evidence capture without moving
+either private signing key into Steward Control. See
+[Proof-carrying fleet rollout]({{ '/guides/fleet-rollout/' | relative_url }}).
 
 ## Publisher-only: issue an agent release
 

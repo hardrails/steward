@@ -564,7 +564,8 @@ EOF
 	helper="$work/delivery/exercise.sh"
 	{
 		printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n'
-		for function_name in restore_executor_setup activation_error read_executor_setting prepare_uplink_delivery_state; do
+		for function_name in restore_executor_setup activation_error read_executor_setting \
+			executor_setting_count write_executor_uplink_setup prepare_uplink_delivery_state; do
 			awk -v signature="$function_name() {" '
 				$0 == signature { copying=1 }
 				copying { print }
@@ -581,10 +582,14 @@ admission_mode=configured
 executor_env_tmp=
 
 write_env() {
+	local protocol=${1:-missing}
 	printf '%s\n' \
 		'EXECUTOR_UPLINK_CREDENTIAL_FILE=/credential.json' \
 		'EXECUTOR_ADMISSION_NODE_ID=node-a' \
 		'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' >"$executor_env"
+	if [[ $protocol != missing ]]; then
+		printf 'EXECUTOR_UPLINK_PROTOCOL_VERSION=%s\n' "$protocol" >>"$executor_env"
+	fi
 	cp -a -- "$executor_env" "$gateway_env_backup/executor.env"
 	executor_setup_changed=false
 	uplink_delivery_state_created=false
@@ -594,6 +599,7 @@ write_env
 export FAKE_SCOPE=node FAKE_NODE_ID=node-a
 prepare_uplink_delivery_state
 grep -Fxq "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=$uplink_delivery_state" "$executor_env"
+grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$executor_env"
 [[ -f $uplink_delivery_state && $executor_setup_changed == true && $uplink_delivery_state_created == true ]]
 restore_executor_setup
 cmp "$executor_env" "$gateway_env_backup/executor.env"
@@ -602,18 +608,49 @@ cmp "$executor_env" "$gateway_env_backup/executor.env"
 write_env
 export FAKE_SCOPE=tenant FAKE_NODE_ID=node-a
 prepare_uplink_delivery_state
+grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$executor_env"
+[[ ! -e $uplink_delivery_state && $executor_setup_changed == true ]]
+restore_executor_setup
 cmp "$executor_env" "$gateway_env_backup/executor.env"
-[[ ! -e $uplink_delivery_state && $executor_setup_changed == false ]]
 
-write_env
+write_env 4
 : >"$uplink_delivery_state"
 chmod 0600 "$uplink_delivery_state"
 export FAKE_SCOPE=node FAKE_NODE_ID=node-a
 prepare_uplink_delivery_state
+grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=4' "$executor_env"
 [[ $executor_setup_changed == true && $uplink_delivery_state_created == false ]]
 restore_executor_setup
 [[ -f $uplink_delivery_state ]]
 rm -f "$uplink_delivery_state"
+
+write_env 3
+export FAKE_SCOPE=node FAKE_NODE_ID=node-a
+prepare_uplink_delivery_state
+grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=3' "$executor_env"
+grep -Fxq "EXECUTOR_UPLINK_DELIVERY_STATE_FILE=$uplink_delivery_state" "$executor_env"
+restore_executor_setup
+[[ ! -e $uplink_delivery_state ]]
+
+write_env 2
+export FAKE_SCOPE=node FAKE_NODE_ID=node-a
+set +e
+( set -e; prepare_uplink_delivery_state ) >/dev/null 2>&1
+status=$?
+set -e
+[[ $status -ne 0 ]]
+cmp "$executor_env" "$gateway_env_backup/executor.env"
+[[ ! -e $uplink_delivery_state ]]
+
+write_env 3
+export FAKE_SCOPE=tenant FAKE_NODE_ID=node-a
+set +e
+( set -e; prepare_uplink_delivery_state ) >/dev/null 2>&1
+status=$?
+set -e
+[[ $status -ne 0 ]]
+cmp "$executor_env" "$gateway_env_backup/executor.env"
+[[ ! -e $uplink_delivery_state ]]
 
 write_env
 export FAKE_SCOPE=node FAKE_NODE_ID=node-other
@@ -627,7 +664,8 @@ cmp "$executor_env" "$gateway_env_backup/executor.env"
 EOF
 	} >"$helper"
 	chmod 0755 "$helper"
-	for function_name in restore_executor_setup activation_error read_executor_setting prepare_uplink_delivery_state; do
+	for function_name in restore_executor_setup activation_error read_executor_setting \
+		executor_setting_count write_executor_uplink_setup prepare_uplink_delivery_state; do
 		grep -Fq "$function_name() {" "$helper" || {
 			echo "node-upgrade-smoke: could not extract $function_name" >&2
 			return 1
@@ -648,6 +686,85 @@ EOF
 	fi
 }
 
+exercise_packaged_protocol_wiring() {
+	local configure_helper error_file help_output protocol_helper
+	grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$root/deploy/config/executor.env"
+	grep -Fxq 'Environment=EXECUTOR_UPLINK_PROTOCOL_VERSION=0' \
+		"$root/deploy/systemd/steward-executor.service"
+	grep -Fq -- '-uplink-protocol-version=${EXECUTOR_UPLINK_PROTOCOL_VERSION}' \
+		"$root/deploy/systemd/steward-executor.service"
+	grep -Fq -- '-uplink-protocol-version "$uplink_protocol"' "$root/scripts/node-preflight.sh"
+	help_output=$(/bin/bash -p "$root/scripts/configure-node.sh" --help)
+	grep -Fq -- '--executor-uplink-protocol-version VERSION' <<<"$help_output"
+	configure_helper="$work/configure-protocol.sh"
+	{
+		printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+		awk '
+			$0 == "select_configured_uplink_protocol() {" { copying=1 }
+			copying { print }
+			copying && $0 == "}" { exit }
+		' "$root/scripts/configure-node.sh"
+		cat <<'EOF'
+[[ $(select_configured_uplink_protocol node "") == 4 ]]
+[[ $(select_configured_uplink_protocol node 3) == 3 ]]
+[[ $(select_configured_uplink_protocol node 4) == 4 ]]
+[[ $(select_configured_uplink_protocol tenant "") == 0 ]]
+[[ $(select_configured_uplink_protocol local "") == 0 ]]
+for invalid in 'node|0' 'node|2' 'tenant|3' 'local|4' 'unknown|'; do
+	IFS='|' read -r scope requested <<<"$invalid"
+	if select_configured_uplink_protocol "$scope" "$requested" >/dev/null 2>&1; then
+		echo "node-upgrade-smoke: configurator accepted invalid protocol selection $invalid" >&2
+		exit 1
+	fi
+done
+EOF
+	} >"$configure_helper"
+	grep -Fq 'select_configured_uplink_protocol() {' "$configure_helper"
+	bash "$configure_helper"
+
+	protocol_helper="$work/preflight-protocol.sh"
+	{
+		printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+		awk '
+			$0 == "validate_executor_uplink_protocol() {" { copying=1 }
+			copying { print }
+			copying && $0 == "}" { exit }
+		' "$root/scripts/node-preflight.sh"
+		cat <<'EOF'
+validate_executor_uplink_protocol 0 0 ""
+validate_executor_uplink_protocol 4 4 /delivery.json
+for invalid in "|0|" "2|4|/delivery.json" "3|0|/delivery.json" "4|4|"; do
+	IFS='|' read -r protocol uplink_count delivery_file <<<"$invalid"
+	if validate_executor_uplink_protocol "$protocol" "$uplink_count" "$delivery_file" \
+		>/dev/null 2>&1; then
+		echo "node-upgrade-smoke: preflight accepted invalid protocol tuple $invalid" >&2
+		exit 1
+	fi
+done
+EOF
+	} >"$protocol_helper"
+	grep -Fq 'validate_executor_uplink_protocol() {' "$protocol_helper"
+	bash "$protocol_helper"
+	if [[ $relay_test != true || $(uname -s) != Linux ]]; then
+		return 0
+	fi
+
+	error_file="$work/configure-protocol-invalid.err"
+	if "${as_root[@]}" /bin/bash -p "$root/scripts/configure-node.sh" \
+		--local-only --executor-uplink-protocol-version 2 2>"$error_file"; then
+		echo "node-upgrade-smoke: configure-node accepted invalid Executor uplink protocol 2" >&2
+		return 1
+	fi
+	grep -Fxq 'configure-node: --executor-uplink-protocol-version must be 3 or 4' "$error_file"
+	if "${as_root[@]}" /bin/bash -p "$root/scripts/configure-node.sh" \
+		--local-only --executor-uplink-protocol-version 3 2>"$error_file"; then
+		echo "node-upgrade-smoke: local-only configuration accepted a node protocol override" >&2
+		return 1
+	fi
+	grep -Fxq 'configure-node: --executor-uplink-protocol-version requires remote node-scoped enrollment' \
+		"$error_file"
+}
+
 if [[ $relay_test == true ]]; then
 	exercise_configuration_lock
 	exercise_uninstall_symlink_boundary
@@ -658,6 +775,7 @@ fi
 exercise_activation_service_boundaries
 exercise_uninstall_quiesce_boundary
 exercise_delivery_activation
+exercise_packaged_protocol_wiring
 if [[ $relay_test == true ]]; then
 	exercise_connector_keygen_boundary
 else

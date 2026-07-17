@@ -67,13 +67,25 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlEvidenceExport(arguments[2:], stdout)
 	case "evidence verify":
 		return controlEvidenceVerify(arguments[2:], stdout)
+	case "evidence-capture arm":
+		return controlEvidenceCaptureArm(arguments[2:], stdout)
+	case "evidence-capture status":
+		return controlEvidenceCaptureStatus(arguments[2:], stdout)
+	case "evidence-capture seal":
+		return controlEvidenceCaptureSeal(arguments[2:], stdout)
+	case "evidence-capture export":
+		return controlEvidenceCaptureExport(arguments[2:], stdout)
+	case "evidence-capture verify":
+		return controlEvidenceCaptureVerify(arguments[2:], stdout)
+	case "evidence-capture delete":
+		return controlEvidenceCaptureDelete(arguments[2:], stdout)
 	default:
 		return controlUsageError()
 	}
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, operations status, attention list, command submit|status|list, credential list, or evidence status|export|verify")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, operations status, attention list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
 }
 
 type controlFlags struct {

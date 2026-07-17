@@ -917,7 +917,7 @@ func TestNearLimitCommandFitsEncodedPollResponseIncludingNewline(t *testing.T) {
 	if len(response)+1 > maxPollResponseBytes || len(response) < 800_000 {
 		t.Fatalf("encoded response with HTTP newline = %d bytes", len(response)+1)
 	}
-	if !pollResponseFits(deliveries) {
+	if !pollResponseFits(deliveries, controlprotocol.ExecutorProtocolV3) {
 		t.Fatal("accepted delivery no longer fits the exact response encoder cap")
 	}
 }
@@ -942,11 +942,12 @@ func TestPollResponseFitCountsEncoderNewlineAtExactBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(exactRaw)+1 != maxPollResponseBytes || !pollResponseFits([]controlprotocol.ExecutorDeliveryV3{delivery}) {
+	if len(exactRaw)+1 != maxPollResponseBytes ||
+		!pollResponseFits([]controlprotocol.ExecutorDeliveryV3{delivery}, controlprotocol.ExecutorProtocolV3) {
 		t.Fatalf("exact boundary response = %d bytes including newline", len(exactRaw)+1)
 	}
 	delivery.CommandDSSEBase64 += "A"
-	if pollResponseFits([]controlprotocol.ExecutorDeliveryV3{delivery}) {
+	if pollResponseFits([]controlprotocol.ExecutorDeliveryV3{delivery}, controlprotocol.ExecutorProtocolV3) {
 		t.Fatal("response one byte beyond the encoder cap was accepted")
 	}
 }

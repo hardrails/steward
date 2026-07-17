@@ -108,26 +108,35 @@ type NodeCredential struct {
 }
 
 type Command struct {
-	CommandID          string         `json:"command_id"`
-	DeliveryID         string         `json:"delivery_id,omitempty"`
-	TenantID           string         `json:"tenant_id"`
-	NodeID             string         `json:"node_id"`
-	CommandDigest      string         `json:"command_digest"`
-	State              string         `json:"state"`
-	DeliveryGeneration uint64         `json:"delivery_generation,omitempty"`
-	LeaseExpiresAt     string         `json:"lease_expires_at,omitempty"`
-	TerminalStatus     string         `json:"terminal_status,omitempty"`
-	ReportedStatus     string         `json:"reported_status,omitempty"`
-	ErrorCode          string         `json:"error_code,omitempty"`
-	ClaimGeneration    *uint64        `json:"claim_generation,omitempty"`
-	Result             *CommandResult `json:"result,omitempty"`
+	CommandID                       string         `json:"command_id"`
+	DeliveryID                      string         `json:"delivery_id,omitempty"`
+	TenantID                        string         `json:"tenant_id"`
+	NodeID                          string         `json:"node_id"`
+	CommandDigest                   string         `json:"command_digest"`
+	CommandKind                     string         `json:"command_kind,omitempty"`
+	SignedRuntimeRef                string         `json:"signed_runtime_ref,omitempty"`
+	SignedClaimGeneration           uint64         `json:"signed_claim_generation,omitempty"`
+	SignedInstanceGeneration        uint64         `json:"signed_instance_generation,omitempty"`
+	State                           string         `json:"state"`
+	DeliveryProtocol                int            `json:"delivery_protocol,omitempty"`
+	DeliveryGeneration              uint64         `json:"delivery_generation,omitempty"`
+	LeaseExpiresAt                  string         `json:"lease_expires_at,omitempty"`
+	TerminalStatus                  string         `json:"terminal_status,omitempty"`
+	ReportedStatus                  string         `json:"reported_status,omitempty"`
+	ErrorCode                       string         `json:"error_code,omitempty"`
+	ClaimGeneration                 *uint64        `json:"claim_generation,omitempty"`
+	AdmissionProjectionState        string         `json:"admission_projection_state,omitempty"`
+	ActivationCanaryProjectionState string         `json:"activation_canary_projection_state,omitempty"`
+	Result                          *CommandResult `json:"result,omitempty"`
 }
 
 type CommandResult struct {
-	RuntimeRef string `json:"runtime_ref,omitempty"`
-	Error      string `json:"error,omitempty"`
-	Replayed   bool   `json:"replayed,omitempty"`
-	Absent     bool   `json:"absent,omitempty"`
+	RuntimeRef       string                                            `json:"runtime_ref,omitempty"`
+	Error            string                                            `json:"error,omitempty"`
+	Replayed         bool                                              `json:"replayed,omitempty"`
+	Absent           bool                                              `json:"absent,omitempty"`
+	Admission        *controlprotocol.ExecutorAdmissionProjectionV1    `json:"admission,omitempty"`
+	ActivationCanary *controlprotocol.ExecutorActivationCanaryResultV1 `json:"activation_canary,omitempty"`
 }
 
 type Node struct {
@@ -154,6 +163,19 @@ type NodeCredentialRevocation struct {
 	CredentialID string `json:"credential_id"`
 	NodeID       string `json:"node_id"`
 	Revoked      bool   `json:"revoked"`
+}
+
+// EvidenceCaptureArmInput binds one short-lived controller capture to an exact
+// activation. The node identity is supplied separately as the API route.
+type EvidenceCaptureArmInput struct {
+	CaptureID             string
+	RequestID             string
+	TenantID              string
+	RuntimeRef            string
+	Generation            uint64
+	ActivationID          string
+	ActivationBeginDigest string
+	TTL                   time.Duration
 }
 
 func New(baseURL, token string, caPEM []byte) (*Client, error) {
@@ -322,6 +344,9 @@ func (c *Client) SubmitCommand(ctx context.Context, tenantID, nodeID string, com
 	err := c.do(ctx, http.MethodPost, path, struct {
 		CommandDSSEBase64 string `json:"command_dsse_base64"`
 	}{CommandDSSEBase64: base64.StdEncoding.EncodeToString(commandDSSE)}, &command, true)
+	if err == nil {
+		err = validateCommandProjections(command)
+	}
 	return command, err
 }
 
@@ -330,7 +355,124 @@ func (c *Client) GetCommand(ctx context.Context, tenantID, nodeID, commandID str
 	path := "/v1/tenants/" + url.PathEscape(tenantID) + "/nodes/" + url.PathEscape(nodeID) +
 		"/commands/" + url.PathEscape(commandID)
 	err := c.do(ctx, http.MethodGet, path, nil, &command, true)
+	if err == nil {
+		err = validateCommandProjections(command)
+	}
 	return command, err
+}
+
+func validateCommandProjections(command Command) error {
+	if err := validateCommandAdmissionProjection(command); err != nil {
+		return err
+	}
+	return validateCommandActivationCanaryProjection(command)
+}
+
+func validateCommandAdmissionProjection(command Command) error {
+	var projection *controlprotocol.ExecutorAdmissionProjectionV1
+	if command.Result != nil {
+		projection = command.Result.Admission
+	}
+	switch command.AdmissionProjectionState {
+	case "":
+		if projection != nil {
+			return errors.New("control command returned an admission projection without its state")
+		}
+		if command.CommandKind == "admit" && command.TerminalStatus == controlprotocol.ExecutorStatusDone {
+			return errors.New("control command omitted the admission projection state for a successful admit")
+		}
+		return nil
+	case "missing":
+		if command.CommandKind != "admit" || command.TerminalStatus != controlprotocol.ExecutorStatusDone ||
+			command.Result == nil || projection != nil ||
+			(command.DeliveryProtocol != controlprotocol.ExecutorProtocolV3 &&
+				command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4) {
+			return errors.New("control command returned an inconsistent missing admission projection")
+		}
+		return nil
+	case "present":
+		if command.CommandKind != "admit" || command.TerminalStatus != controlprotocol.ExecutorStatusDone ||
+			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 || projection == nil ||
+			command.Result == nil || command.Result.RuntimeRef != projection.RuntimeRef ||
+			!commandProjectionRuntimeMatches(command.SignedRuntimeRef, projection.RuntimeRef) ||
+			command.SignedClaimGeneration == 0 || command.ClaimGeneration == nil ||
+			*command.ClaimGeneration != command.SignedClaimGeneration ||
+			command.SignedInstanceGeneration == 0 ||
+			projection.Generation != command.SignedInstanceGeneration {
+			return errors.New("control command returned an inconsistent admission projection")
+		}
+		if err := projection.Validate(); err != nil {
+			return fmt.Errorf("validate control command admission projection: %w", err)
+		}
+		expectedStatus := "stopped"
+		if projection.Status == "running" {
+			expectedStatus = "running"
+		}
+		if command.ReportedStatus != expectedStatus {
+			return errors.New("control command admission projection conflicts with reported status")
+		}
+		return nil
+	default:
+		return errors.New("control command returned an unknown admission projection state")
+	}
+}
+
+func validateCommandActivationCanaryProjection(command Command) error {
+	var projection *controlprotocol.ExecutorActivationCanaryResultV1
+	if command.Result != nil {
+		projection = command.Result.ActivationCanary
+	}
+	switch command.ActivationCanaryProjectionState {
+	case "":
+		if projection != nil {
+			return errors.New("control command returned an activation canary projection without its state")
+		}
+		if command.CommandKind == "activation-canary" &&
+			command.TerminalStatus == controlprotocol.ExecutorStatusDone {
+			return errors.New("control command omitted the activation canary projection state for a successful canary")
+		}
+		return nil
+	case "missing":
+		if command.CommandKind != "activation-canary" ||
+			command.TerminalStatus != controlprotocol.ExecutorStatusDone ||
+			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 ||
+			command.Result == nil || projection != nil {
+			return errors.New("control command returned an inconsistent missing activation canary projection")
+		}
+		return nil
+	case "present":
+		if command.CommandKind != "activation-canary" ||
+			command.TerminalStatus != controlprotocol.ExecutorStatusDone ||
+			command.ReportedStatus != "running" ||
+			command.DeliveryProtocol != controlprotocol.ExecutorProtocolV4 || projection == nil ||
+			command.Result == nil ||
+			!commandProjectionRuntimeMatches(command.SignedRuntimeRef, command.Result.RuntimeRef) ||
+			command.SignedClaimGeneration == 0 || command.ClaimGeneration == nil ||
+			*command.ClaimGeneration != command.SignedClaimGeneration ||
+			command.SignedInstanceGeneration == 0 {
+			return errors.New("control command returned an inconsistent activation canary projection")
+		}
+		if err := projection.Validate(); err != nil {
+			return fmt.Errorf("validate control command activation canary projection: %w", err)
+		}
+		return nil
+	default:
+		return errors.New("control command returned an unknown activation canary projection state")
+	}
+}
+
+func commandProjectionRuntimeMatches(signedRuntimeRef, executorRuntimeRef string) bool {
+	if !validExecutorRuntimeRef(executorRuntimeRef) {
+		return false
+	}
+	if validExecutorRuntimeRef(signedRuntimeRef) {
+		return signedRuntimeRef == executorRuntimeRef
+	}
+	// A protocol-4 uplink command signs a routable uplink:v2 tuple. The
+	// controller validates the tuple against the node report and exposes the
+	// distinct opaque Executor runtime here; callers that need stronger binding
+	// (such as rollout) reconstruct and verify the exact prepared activation.
+	return strings.HasPrefix(signedRuntimeRef, "uplink:v2:")
 }
 
 func (c *Client) GetOperationsSummary(ctx context.Context, tenantID string) (controlstore.OperationsSummary, error) {
@@ -428,6 +570,165 @@ func (c *Client) ExportExecutorEvidence(ctx context.Context, nodeID string) (con
 	return export, nil
 }
 
+// ArmExecutorEvidenceCapture reserves a bounded controller-side range before
+// an activation command is submitted. Exact retries return the same capture
+// without extending its absolute expiry.
+func (c *Client) ArmExecutorEvidenceCapture(
+	ctx context.Context,
+	nodeID string,
+	input EvidenceCaptureArmInput,
+) (controlstore.EvidenceCapture, error) {
+	path, err := evidenceCapturePath(nodeID, "", "")
+	if err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if input.TTL < controlstore.MinEvidenceCaptureTTL ||
+		input.TTL > controlstore.MaxEvidenceCaptureTTL ||
+		input.TTL%time.Second != 0 {
+		return controlstore.EvidenceCapture{},
+			errors.New("evidence capture lifetime must be whole seconds between 1 second and 1 hour")
+	}
+	if !validEvidenceRouteIdentity(input.CaptureID, 128) ||
+		!validEvidenceRouteIdentity(input.RequestID, 128) ||
+		!validEvidenceRouteIdentity(input.TenantID, 128) ||
+		!validEvidenceRouteIdentity(input.ActivationID, 128) ||
+		!controlprotocol.ValidSHA256Digest(input.ActivationBeginDigest) ||
+		!validExecutorRuntimeRef(input.RuntimeRef) ||
+		input.Generation == 0 {
+		return controlstore.EvidenceCapture{},
+			errors.New("evidence capture target identity is invalid")
+	}
+	var capture controlstore.EvidenceCapture
+	err = c.do(ctx, http.MethodPost, path, struct {
+		CaptureID             string `json:"capture_id"`
+		RequestID             string `json:"request_id"`
+		TenantID              string `json:"tenant_id"`
+		RuntimeRef            string `json:"runtime_ref"`
+		Generation            uint64 `json:"generation"`
+		ActivationID          string `json:"activation_id"`
+		ActivationBeginDigest string `json:"activation_begin_digest"`
+		TTLSeconds            int64  `json:"ttl_seconds"`
+	}{
+		CaptureID: input.CaptureID, RequestID: input.RequestID,
+		TenantID: input.TenantID, RuntimeRef: input.RuntimeRef,
+		Generation: input.Generation, ActivationID: input.ActivationID,
+		ActivationBeginDigest: input.ActivationBeginDigest,
+		TTLSeconds:            int64(input.TTL / time.Second),
+	}, &capture, true)
+	if err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if err := validateEvidenceCaptureResponse(capture, nodeID, input.CaptureID); err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	armedAt, armedErr := time.Parse(time.RFC3339Nano, capture.ArmedAt)
+	expiresAt, expiresErr := time.Parse(time.RFC3339Nano, capture.ExpiresAt)
+	if capture.RequestID != input.RequestID || capture.TenantID != input.TenantID ||
+		capture.RuntimeRef != input.RuntimeRef || capture.Generation != input.Generation ||
+		capture.ActivationID != input.ActivationID ||
+		capture.ActivationBeginDigest != input.ActivationBeginDigest ||
+		armedErr != nil || expiresErr != nil || expiresAt.Sub(armedAt) != input.TTL {
+		return controlstore.EvidenceCapture{},
+			errors.New("control evidence capture arm response changed the requested binding")
+	}
+	return capture, nil
+}
+
+func (c *Client) GetExecutorEvidenceCapture(
+	ctx context.Context,
+	nodeID, captureID string,
+) (controlstore.EvidenceCapture, error) {
+	path, err := evidenceCapturePath(nodeID, captureID, "")
+	if err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	var capture controlstore.EvidenceCapture
+	if err := c.do(ctx, http.MethodGet, path, nil, &capture, true); err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if err := validateEvidenceCaptureResponse(capture, nodeID, captureID); err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	return capture, nil
+}
+
+func (c *Client) DeleteExecutorEvidenceCapture(
+	ctx context.Context,
+	nodeID, captureID string,
+) error {
+	path, err := evidenceCapturePath(nodeID, captureID, "")
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodDelete, path, nil, nil, true)
+}
+
+func (c *Client) SealExecutorEvidenceCapture(
+	ctx context.Context,
+	nodeID, captureID, canaryCommandID string,
+) (controlstore.EvidenceCapture, error) {
+	path, err := evidenceCapturePath(nodeID, captureID, "/seal")
+	if err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if !validEvidenceRouteIdentity(canaryCommandID, 256) {
+		return controlstore.EvidenceCapture{},
+			errors.New("activation canary command identity is invalid")
+	}
+	var capture controlstore.EvidenceCapture
+	if err := c.do(ctx, http.MethodPost, path, struct {
+		CanaryCommandID string `json:"canary_command_id"`
+	}{CanaryCommandID: canaryCommandID}, &capture, true); err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if err := validateEvidenceCaptureResponse(capture, nodeID, captureID); err != nil {
+		return controlstore.EvidenceCapture{}, err
+	}
+	if capture.State != controlstore.EvidenceCaptureSealed ||
+		capture.CanaryCommandID != canaryCommandID {
+		return controlstore.EvidenceCapture{},
+			errors.New("control evidence capture seal response changed the requested binding")
+	}
+	return capture, nil
+}
+
+func (c *Client) ExportExecutorEvidenceCapture(
+	ctx context.Context,
+	nodeID, captureID string,
+) (controlprotocol.ControllerEvidenceCaptureV1, error) {
+	path, err := evidenceCapturePath(nodeID, captureID, "/export")
+	if err != nil {
+		return controlprotocol.ControllerEvidenceCaptureV1{}, err
+	}
+	var export controlprotocol.ControllerEvidenceCaptureV1
+	if err := c.do(ctx, http.MethodGet, path, nil, &export, true); err != nil {
+		return controlprotocol.ControllerEvidenceCaptureV1{}, err
+	}
+	if err := export.Validate(); err != nil {
+		return controlprotocol.ControllerEvidenceCaptureV1{},
+			fmt.Errorf("validate control evidence capture export: %w", err)
+	}
+	if export.Statement.NodeID != nodeID ||
+		export.Statement.CaptureID != captureID {
+		return controlprotocol.ControllerEvidenceCaptureV1{},
+			errors.New("control evidence capture export changed route identity")
+	}
+	return export, nil
+}
+
+func validateEvidenceCaptureResponse(
+	capture controlstore.EvidenceCapture,
+	nodeID, captureID string,
+) error {
+	if capture.NodeID != nodeID || capture.CaptureID != captureID {
+		return errors.New("control evidence capture response changed route identity")
+	}
+	if err := capture.Validate(); err != nil {
+		return fmt.Errorf("validate control evidence capture response: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body, output any, authenticated bool) error {
 	if !strings.HasPrefix(path, "/v1/") || strings.Contains(path, "//") || strings.ContainsAny(path, "\r\n\x00") {
 		return errors.New("invalid control API path")
@@ -505,18 +806,60 @@ func (c *Client) do(ctx context.Context, method, path string, body, output any, 
 }
 
 func executorEvidencePath(nodeID, suffix string) (string, error) {
-	if nodeID == "" || len(nodeID) > 128 || !utf8.ValidString(nodeID) ||
-		strings.TrimSpace(nodeID) != nodeID || strings.ContainsAny(nodeID, "\r\n\x00") {
-		return "", errors.New("control evidence node identity is invalid")
-	}
-	for index, character := range nodeID {
-		if character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z' ||
-			character >= '0' && character <= '9' || index > 0 && (character == '.' || character == '_' || character == '-') {
-			continue
-		}
+	if !validEvidenceRouteIdentity(nodeID, 128) {
 		return "", errors.New("control evidence node identity is invalid")
 	}
 	return "/v1/nodes/" + url.PathEscape(nodeID) + "/evidence" + suffix, nil
+}
+
+func evidenceCapturePath(nodeID, captureID, suffix string) (string, error) {
+	path, err := executorEvidencePath(nodeID, "/captures")
+	if err != nil {
+		return "", err
+	}
+	if captureID == "" {
+		if suffix != "" {
+			return "", errors.New("control evidence capture identity is required")
+		}
+		return path, nil
+	}
+	if !validEvidenceRouteIdentity(captureID, 128) {
+		return "", errors.New("control evidence capture identity is invalid")
+	}
+	if suffix != "" && suffix != "/seal" && suffix != "/export" {
+		return "", errors.New("control evidence capture route suffix is invalid")
+	}
+	return path + "/" + url.PathEscape(captureID) + suffix, nil
+}
+
+func validEvidenceRouteIdentity(value string, maximum int) bool {
+	if value == "" || len(value) > maximum || !utf8.ValidString(value) ||
+		strings.TrimSpace(value) != value || strings.ContainsAny(value, "\r\n\x00") {
+		return false
+	}
+	for index, character := range value {
+		if character >= 'A' && character <= 'Z' ||
+			character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' ||
+			index > 0 && (character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validExecutorRuntimeRef(value string) bool {
+	const prefix = "executor-"
+	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
+		return false
+	}
+	for _, character := range strings.TrimPrefix(value, prefix) {
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func paginatedPath(path, after string, limit int) (string, error) {

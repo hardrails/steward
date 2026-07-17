@@ -186,19 +186,20 @@ type CommandKey struct {
 // Identity, ordering, validity time, operation, and payload are signed as one
 // bounded statement; none may be supplied by an unsigned transport wrapper.
 type CommandStatement struct {
-	SchemaVersion      string          `json:"schema_version"`
-	CommandID          string          `json:"command_id"`
-	TenantID           string          `json:"tenant_id"`
-	NodeID             string          `json:"node_id"`
-	InstanceID         string          `json:"instance_id"`
-	RuntimeRef         string          `json:"runtime_ref"`
-	Kind               string          `json:"kind"`
-	ClaimGeneration    uint64          `json:"claim_generation"`
-	InstanceGeneration uint64          `json:"instance_generation"`
-	CommandSequence    uint64          `json:"command_sequence"`
-	IssuedAt           string          `json:"issued_at"`
-	ExpiresAt          string          `json:"expires_at"`
-	Payload            json.RawMessage `json:"payload"`
+	SchemaVersion              string          `json:"schema_version"`
+	CommandID                  string          `json:"command_id"`
+	AuthorizationContextDigest string          `json:"authorization_context_digest,omitempty"`
+	TenantID                   string          `json:"tenant_id"`
+	NodeID                     string          `json:"node_id"`
+	InstanceID                 string          `json:"instance_id"`
+	RuntimeRef                 string          `json:"runtime_ref"`
+	Kind                       string          `json:"kind"`
+	ClaimGeneration            uint64          `json:"claim_generation"`
+	InstanceGeneration         uint64          `json:"instance_generation"`
+	CommandSequence            uint64          `json:"command_sequence"`
+	IssuedAt                   string          `json:"issued_at"`
+	ExpiresAt                  string          `json:"expires_at"`
+	Payload                    json.RawMessage `json:"payload"`
 }
 
 // PersistedFences are supplied by the durable executor journal. Equality is
@@ -785,6 +786,7 @@ var routeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 var commandOperations = map[string]struct{}{
 	"admit": {}, "start": {}, "stop": {}, "destroy": {}, "read": {}, "purge": {},
+	"activation-canary": {},
 }
 
 var cleanupCommandOperations = map[string]struct{}{
@@ -928,6 +930,9 @@ func (c CommandStatement) Validate(now time.Time) error {
 		!bounded(c.TenantID, 128) || !bounded(c.NodeID, 128) ||
 		!bounded(c.InstanceID, 256) || !bounded(c.RuntimeRef, 1024) {
 		return deny("invalid command identity")
+	}
+	if c.AuthorizationContextDigest != "" && !digest(c.AuthorizationContextDigest) {
+		return deny("invalid command authorization context digest")
 	}
 	if _, ok := commandOperations[c.Kind]; !ok {
 		return deny("unsupported command operation")

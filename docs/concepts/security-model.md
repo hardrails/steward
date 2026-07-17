@@ -39,6 +39,7 @@ Every admitted agent container receives one fixed policy:
 | Supply chain | Offline import accepts one bounded Docker or Open Container Initiative (OCI) archive, verifies each descriptor and blob, and requires the signed manifest, config, and platform identity. Executor never pulls an image, runs the exact local config ID, and rejects image-declared volumes. |
 | Signed authority (opt-in) | Executor intersects a publisher-signed workload profile, operator-signed site policy, and tenant/node/instance request. Durable policy and generation records reject rollback. A generation record is a high-water mark that prevents older authority from acting on newer state. |
 | Proof-carrying activation | A publisher-signed agent release binds outcome text, the embedded capsule, exact archive, fixed Hermes canary, qualification-evidence digest, and limitations without granting runtime authority. A fixed node-local state machine derives its canary challenge from real admission, keeps the default task key off-node, retains generated artifacts and sequential checkpoints in an owner-only append-only workspace, and correlates the deterministic result with signed receipt and controller-witness evidence. The current recipe requires a dedicated host with exactly one policy tenant, host-administrator local admission, and explicitly enabled unquotaed persistent state. The plan, challenge, state, and proof are not signatures or hostile-host attestation. |
+| Proof-carrying fleet rollout | An operator-side coordinator fixes one release, tenant, explicit target order, first-node canary, and later batch boundaries. One common policy-authorized command key signs the exact plan, each evidence-bound promotion into a later batch, and commands that bind the applicable authorization-envelope digest. Deterministic command IDs prevent aliases across target positions. The final aggregate digest commits the exact plan authorization, ordered promotions, and each target's raw signed admit, start, and canary command envelopes. The plan file, checkpoints, status, and aggregate proof remain unsigned correlation records; their signed authorization and evidence companions provide authenticity. The coordinator keeps command and task private keys outside Steward Control, requires every target proof before promotion, and does not import images remotely, choose nodes, retry ambiguous effects, or roll back workloads. |
 | Sandbox | Docker must advertise `runsc`, the gVisor runtime. Every untrusted agent runs in its own gVisor sandbox. |
 | Identity | The container runs as fixed UID/GID `65532:65532`; the caller cannot select a user. |
 | Privilege and namespaces | Executor drops every Linux capability and sets `no-new-privileges`. Interprocess communication (IPC) and control-group (cgroup) namespaces are private; process ID (PID) and hostname/domain-name (UTS) namespaces use Docker's private modes. Host, peer-container, shareable namespace, and custom cgroup-parent settings are rejected. |
@@ -224,6 +225,22 @@ suffix receipts; and rejects later receipts for the same activation or
 lifecycle-invalidating events. The proof manifest is unsigned, and the canary
 does not establish the safety or correctness of arbitrary models, prompts,
 plugins, skills, workspaces, or later behavior.
+
+Fleet rollout preserves that same evidence boundary. The common command signer
+first authorizes the exact plan. Before entering each later batch, it signs a
+chained promotion that binds the immediately preceding batch's ordered passed
+state, activation proofs, controller captures, and the exact next boundary. Every
+rollout command binds the plan-authorization or current-promotion envelope digest,
+and its issue time cannot precede that authorization. Offline verification checks
+the complete chain.
+
+This proves a signer-attested authorization sequence over the retained evidence.
+It does not independently attest wall-clock or host execution order, capture a
+human reason or external approval workflow, turn the canary into general agent
+evaluation, or make execution exactly once across nodes. Controller captures can
+include interleaved metadata from unrelated tenants, so the coordinator requires
+site-administrator authority and the copied workspace must be handled as sensitive
+site-wide evidence.
 
 Node-local receipts are not hostile-host attestation. Host root can replace the
 binary, keys, and logs together. The chain does not include prompts, model output,

@@ -303,7 +303,7 @@ authority:
     "command_keys": [{
       "key_id": "tenant-a-commands",
       "public_key": "BASE64_ED25519_PUBLIC_KEY",
-      "operations": ["admit", "start", "stop", "destroy", "read", "purge"]
+      "operations": ["admit", "start", "stop", "destroy", "read", "purge", "activation-canary"]
     }]
   }]
 }
@@ -338,21 +338,25 @@ contract.
 
 With a tenant-scoped compatibility credential, Executor posts `{}` to
 `/executor-uplink/poll` and reports terminal outcomes to
-`/executor-uplink/report`. With node scope and a durable delivery-state file, the
-poll body advertises protocol version 3 and its capabilities:
+`/executor-uplink/report`. Packaged node enrollment writes protocol version 4
+explicitly and configures a durable delivery-state file. Its poll body advertises
+the bounded admission projection capability:
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 4,
   "node_id": "executor-1",
   "credential_scope": "node",
-  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "multi-tenant", "read", "state-purge"]
+  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "admission-projection-v1", "rollout-authorization-context-v1", "multi-tenant", "read", "state-purge"]
 }
 ```
 
-The version-3 response carries fenced delivery records around exact DSSE command
-bytes. Executor persists a delivery as accepted before applying it and reports a
-terminal result after the local command fence and handler settle. A crash after
+Protocols 3 and 4 carry fenced delivery records around exact DSSE command bytes.
+Executor persists a delivery as accepted before applying it and reports a terminal
+result after the local command fence and handler settle. Protocol 4 additionally
+returns the admission decision's exact runtime, claim generation, signed policy
+digest, routes, task authorities, and activation coordinates. The signed command
+retains the corresponding intent bytes. A crash after
 acceptance but before a provable terminal result becomes `outcome_unknown`; it is
 never silently retried as a fresh effect. The controller may reclaim an expired
 lease with a higher delivery generation, but cannot change the signed bytes.
@@ -393,6 +397,15 @@ The signature covers the tenant, node, instance, tenant-aware byte-length-prefix
 runtime reference, operation, payload, claim and instance generations, command
 sequence, and a validity window no longer than 15 minutes. Commands issued more
 than two minutes in the future are rejected.
+
+The optional signed `authorization_context_digest` is a canonical SHA-256 digest
+used by the fleet rollout coordinator. A rollout node must advertise
+`rollout-authorization-context-v1`; its strict command decoder then retains the
+plan-authorization envelope digest for batch zero or the applicable signed
+batch-promotion envelope digest for a later batch. Generic signed commands may omit
+the field. Executor validates the digest as part of the signed command but does not
+fetch or verify the referenced rollout envelope; `stewardctl rollout` performs that
+correlation before submission and during offline verification.
 
 `admit` carries the OpenAPI `SignedAdmissionRequest`. `start`, `stop`, `destroy`,
 and `read` require an empty payload. `purge` carries one bounded `lineage_id`. The
@@ -458,10 +471,31 @@ cannot change its version, scope, tenant, or node identity. The report endpoint
 must acknowledge `{"applied":true}`. A negative or malformed acknowledgement is
 an error, not proof that the control plane stored the outcome.
 
-Protocol version 2 remains available for compatible external controllers when no
-delivery-state file is configured. Tenant-scoped version-1 credentials retain the
-legacy protocol. The bundled controller enrolls node-scoped credentials and uses
-version 3.
+Protocol version 2 remains available to raw-binary deployments of compatible
+external controllers when a node credential has neither an explicit protocol nor a
+delivery-state file. Tenant-scoped version-1 credentials retain the legacy protocol.
+`configure-node` writes `EXECUTOR_UPLINK_PROTOCOL_VERSION=4` for a node-scoped
+credential. Use `--executor-uplink-protocol-version 3` only when the controller has
+not implemented protocol 4. Local and tenant-scoped configurations write `0`.
+During package activation, an older configuration with no setting receives `0`;
+this preserves its prior implicit selection instead of silently switching a running
+node. Protocols 3 and 4 share the same durable delivery ledger but never share a
+retained record: startup blocks a protocol switch until every unsettled record for
+the other protocol is reconciled.
+
+Protocol 4 always advertises `rollout-authorization-context-v1`, showing that its
+strict signed-command decoder accepts the optional rollout authorization digest.
+It also enables the fixed Hermes activation canary when signed admission has a
+complete Gateway topology. Executor advertises `activation-canary-v1` only
+while no other canary is active and a host-local Gateway control client is
+configured. The controller leases at most one canary per poll; ordinary lifecycle
+commands can still share that poll. Before Gateway receives the tenant-signed
+one-use task, Executor rechecks reconciliation, current policy, tenant authority,
+the retained activation identity, and the complete running topology under the
+same lifecycle lock used by signed mutations. Canary execution then runs outside
+the polling loop, so stop and destroy remain responsive. A known failed or
+cancelled Hermes result is terminal; an ambiguous post-dispatch result is retained
+as `outcome_unknown` and is never retried automatically.
 
 Remote plaintext HTTP is rejected by default. Private-CA and mutual TLS (mTLS)
 deployments use
@@ -479,13 +513,23 @@ and the delivery ledger at 8 MiB and 4,096 records. The delivery ledger also cap
 one verified tenant at 32 records and 1 MiB of worst-case terminal reservation.
 Before entering a mutating handler, Executor proves that every accepted or
 executing delivery can grow into the largest valid JSON terminal report. Settled
-`done` and `rejected` entries may be compacted; ambiguous entries remain. Destroyed
-identities remain as tombstones or positions because deleting them would permit
-replay. There is currently no supported manual compaction or rollover command.
+`done`, `rejected`, and acknowledged terminal canary-failure entries may be
+compacted. A canary failure is compactable only when the ledger retains the verified
+`activation-canary` command kind and the exact terminal error mapping. Ambiguous
+entries remain. Destroyed identities remain as tombstones or positions because
+deleting them would permit replay. There is currently no supported manual
+compaction or rollover command.
 Monitor these files and capacity-plan the node's retained identity count; a full
 store makes the affected mutation fail closed without consuming another tenant's
 reserved share. See
 [capability boundaries]({{ '/limitations/' | relative_url }}#durable-control-stores-have-fixed-lifetime-limits).
+
+The current delivery-ledger format is 4 and reads formats 2 and 3. Normal Executor
+startup atomically migrates either readable legacy format before polling; read-only
+configuration and upgrade checks do not. Format 4 retains the verified command kind
+needed to compact exact terminal canary failures safely. A migrated failure without
+that earlier binding remains noncompactable. The migration has no supported reverse
+operation, so a release limited to format 2 or 3 cannot be selected afterward.
 
 ## Deployment invariant
 

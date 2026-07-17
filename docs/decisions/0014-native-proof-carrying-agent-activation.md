@@ -104,3 +104,10 @@ uplink reports a runtime reference and status, but not the complete admission
 projection required to issue a task permit. Revisit remote activation only
 after that projection has a separately reviewed signed or independently
 verifiable transport contract.
+
+This deferred point was later resolved narrowly by
+[ADR 0017](0017-proof-carrying-fleet-rollout.md): an operator-side coordinator
+uses a bounded protocol-4 admission projection, a signed exact plan, chained
+evidence-bound batch promotions, and controller evidence capture for one fixed
+Hermes rollout. Steward Control still does not own activation or receive the tenant
+signing keys.

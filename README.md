@@ -36,6 +36,21 @@ Steward includes a replaceable open-source control plane, while nodes remain
 independently operable through public contracts. Nothing has a build-time or
 runtime dependency on a private package, API, account, or hosted service.
 
+For a qualified Hermes release, the operator-side rollout coordinator can require
+one verified canary before advancing explicit later batches across remote nodes.
+The same policy-authorized command key signs the exact rollout plan, each
+evidence-bound promotion into a later batch, and commands that name the applicable
+authorization digest. Deterministic command IDs and crash-recoverable write-once
+workspace transactions prevent a compliant retry from changing that history. The
+coordinator keeps command and task signing keys outside the controller and produces
+a proof set that can be verified on a disconnected system. The final unsigned
+aggregate binds the signed plan authorization, ordered promotion envelopes, and
+each target's exact signed admit, start, and canary command envelopes, so its digest
+commits those retained authorization bytes. It does not select nodes, transfer
+images, run arbitrary canaries, or roll back workloads automatically. The current
+Hermes recipe requires the exact image to be
+pre-imported on each dedicated target host.
+
 ## Install on Linux
 
 Docker must already be installed. The guided installer detects DEB, RPM, and other
@@ -87,7 +102,10 @@ described in the guide. See the
 for PKI, tenant creation, scoped operators, one-time node enrollment, signed
 command delivery, separately keyed Executor evidence witnessing, offline export,
 secret-free command and credential inventory, derived action-required findings,
-opt-in authenticated metrics, backup, and MCP.
+opt-in authenticated metrics, backup, and MCP. The
+[fleet rollout guide](https://hardrails.github.io/steward/guides/fleet-rollout/)
+shows how to promote one exact qualified Hermes release through a canary and
+operator-approved batches without giving the controller either signing key.
 
 The doctor checks the installed release, Docker and gVisor, systemd services,
 loopback health and readiness, Gateway, fixed evidence stores, and filesystem
@@ -219,6 +237,13 @@ an instance generation greater than the failed activation.
 Read [Activate a qualified Hermes release](https://hardrails.github.io/steward/guides/agent-activation/)
 for the exact commands, handoff files, runtime overrides, threat boundaries,
 failure handling, and proof limits.
+
+To apply the same closed activation contract to an ordered remote fleet, follow
+[Proof-carrying fleet rollout](https://hardrails.github.io/steward/guides/fleet-rollout/).
+The image must already be imported on every target. Each invocation advances only
+the current canary or later batch. The initial invocation signs the exact plan;
+each later invocation signs a chained promotion that binds the preceding batch's
+passed evidence before it signs any command for the next batch.
 
 `steward-mcp` exposes bounded Steward Control fleet operations, Executor lifecycle
 operations, or both to a local Model Context Protocol (MCP) client over standard

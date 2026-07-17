@@ -83,6 +83,19 @@ func TestPlanRoundTripAndExactByteDigest(t *testing.T) {
 	}
 }
 
+func TestPlanV1AcceptsExplicitControlUplinkTransport(t *testing.T) {
+	plan := validPlan()
+	plan.Transport = TransportControlUplink
+	raw := mustMarshalPlan(t, plan)
+	parsed, err := ParsePlanV1(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Transport != TransportControlUplink {
+		t.Fatalf("transport=%q", parsed.Transport)
+	}
+}
+
 func TestParsePlanV1RejectsNonExactJSON(t *testing.T) {
 	raw := string(mustMarshalPlan(t, validPlan()))
 	archiveDigest := testSHA256('4')

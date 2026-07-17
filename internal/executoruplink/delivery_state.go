@@ -18,7 +18,11 @@ import (
 )
 
 const (
-	deliveryStateVersion  = 2
+	deliveryStateReadMinVersion = 2
+	deliveryStateReadMaxVersion = 4
+	deliveryStateWriteVersion   = 4
+	// deliveryStateVersion remains the local shorthand used by focused tests.
+	deliveryStateVersion  = deliveryStateWriteVersion
 	maxDeliveryStateBytes = 8 << 20
 	maxDeliveryRecords    = 4096
 	// Ambiguous outcomes intentionally remain until reconciliation, so one
@@ -42,6 +46,61 @@ const (
 )
 
 type deliveryRecord struct {
+	ProtocolVersion    int                                               `json:"protocol_version"`
+	DeliveryID         string                                            `json:"delivery_id"`
+	DeliveryGeneration uint64                                            `json:"delivery_generation"`
+	SettledGeneration  uint64                                            `json:"settled_generation,omitempty"`
+	TenantID           string                                            `json:"tenant_id,omitempty"`
+	CommandID          string                                            `json:"command_id"`
+	CommandDigest      string                                            `json:"command_digest"`
+	CommandKind        string                                            `json:"command_kind,omitempty"`
+	ClaimGeneration    uint64                                            `json:"claim_generation,omitempty"`
+	Phase              string                                            `json:"phase"`
+	Terminal           *controlprotocol.ExecutorReportV3                 `json:"terminal,omitempty"`
+	Admission          *controlprotocol.ExecutorAdmissionProjectionV1    `json:"admission,omitempty"`
+	ActivationCanary   *controlprotocol.ExecutorActivationCanaryResultV1 `json:"activation_canary,omitempty"`
+}
+
+type deliveryStateFile struct {
+	Version int              `json:"version"`
+	NodeID  string           `json:"node_id"`
+	Records []deliveryRecord `json:"records"`
+}
+
+// deliveryStateFileV2 pins the original durable shape. The current reader
+// converts every record to an explicit protocol-3 record in memory and writes
+// only the current format on the next normal startup or state mutation.
+type deliveryStateFileV2 struct {
+	Version int                `json:"version"`
+	NodeID  string             `json:"node_id"`
+	Records []deliveryRecordV2 `json:"records"`
+}
+
+// deliveryStateFileV3 pins the protocol-4 durable shape before verified
+// command kind was retained. A format-3 record cannot authorize compaction of
+// a failed canary because its signed command kind is unavailable.
+type deliveryStateFileV3 struct {
+	Version int                `json:"version"`
+	NodeID  string             `json:"node_id"`
+	Records []deliveryRecordV3 `json:"records"`
+}
+
+type deliveryRecordV3 struct {
+	ProtocolVersion    int                                               `json:"protocol_version"`
+	DeliveryID         string                                            `json:"delivery_id"`
+	DeliveryGeneration uint64                                            `json:"delivery_generation"`
+	SettledGeneration  uint64                                            `json:"settled_generation,omitempty"`
+	TenantID           string                                            `json:"tenant_id,omitempty"`
+	CommandID          string                                            `json:"command_id"`
+	CommandDigest      string                                            `json:"command_digest"`
+	ClaimGeneration    uint64                                            `json:"claim_generation,omitempty"`
+	Phase              string                                            `json:"phase"`
+	Terminal           *controlprotocol.ExecutorReportV3                 `json:"terminal,omitempty"`
+	Admission          *controlprotocol.ExecutorAdmissionProjectionV1    `json:"admission,omitempty"`
+	ActivationCanary   *controlprotocol.ExecutorActivationCanaryResultV1 `json:"activation_canary,omitempty"`
+}
+
+type deliveryRecordV2 struct {
 	DeliveryID         string                            `json:"delivery_id"`
 	DeliveryGeneration uint64                            `json:"delivery_generation"`
 	SettledGeneration  uint64                            `json:"settled_generation,omitempty"`
@@ -52,21 +111,16 @@ type deliveryRecord struct {
 	Terminal           *controlprotocol.ExecutorReportV3 `json:"terminal,omitempty"`
 }
 
-type deliveryStateFile struct {
-	Version int              `json:"version"`
-	NodeID  string           `json:"node_id"`
-	Records []deliveryRecord `json:"records"`
-}
-
 // DeliveryStore records the transport side of at-least-once command delivery.
 // It is deliberately separate from the lifecycle fence: the tenant signature
 // authorizes an operation, while this store proves whether a particular leased
 // delivery may enter the local handler again.
 type DeliveryStore struct {
-	mu      sync.Mutex
-	path    string
-	nodeID  string
-	records map[string]deliveryRecord
+	mu            sync.Mutex
+	path          string
+	nodeID        string
+	formatVersion int
+	records       map[string]deliveryRecord
 }
 
 // DeliveryStateFormatSummary reports the validated durable delivery-state
@@ -109,7 +163,9 @@ func LoadDeliveryStore(path, nodeID string) (*DeliveryStore, error) {
 	if state.NodeID != nodeID {
 		return nil, fmt.Errorf("executor delivery state %q belongs to node %q, not %q", path, state.NodeID, nodeID)
 	}
-	return &DeliveryStore{path: path, nodeID: nodeID, records: records}, nil
+	return &DeliveryStore{
+		path: path, nodeID: nodeID, formatVersion: state.Version, records: records,
+	}, nil
 }
 
 // InspectDeliveryStateFormat validates the complete owner-only state file but
@@ -128,12 +184,71 @@ func decodeDeliveryState(path string) (deliveryStateFile, map[string]deliveryRec
 	if err != nil {
 		return deliveryStateFile{}, nil, err
 	}
-	var state deliveryStateFile
-	if err := dsse.DecodeStrictInto(raw, maxDeliveryStateBytes, &state); err != nil {
+	var envelope struct {
+		Version int             `json:"version"`
+		NodeID  string          `json:"node_id"`
+		Records json.RawMessage `json:"records"`
+	}
+	if err := dsse.DecodeStrictInto(raw, maxDeliveryStateBytes, &envelope); err != nil {
 		return deliveryStateFile{}, nil, fmt.Errorf("decode executor delivery state %q: %w", path, err)
 	}
-	if state.Version != deliveryStateVersion {
-		return deliveryStateFile{}, nil, fmt.Errorf("executor delivery state %q has unsupported format version %d", path, state.Version)
+	if envelope.Version < deliveryStateReadMinVersion || envelope.Version > deliveryStateReadMaxVersion {
+		return deliveryStateFile{}, nil, fmt.Errorf("executor delivery state %q has unsupported format version %d", path, envelope.Version)
+	}
+	var state deliveryStateFile
+	switch envelope.Version {
+	case 2:
+		var legacy deliveryStateFileV2
+		if err := dsse.DecodeStrictInto(raw, maxDeliveryStateBytes, &legacy); err != nil {
+			return deliveryStateFile{}, nil, fmt.Errorf("decode executor delivery state %q: %w", path, err)
+		}
+		state = deliveryStateFile{
+			Version: legacy.Version, NodeID: legacy.NodeID,
+			Records: make([]deliveryRecord, 0, len(legacy.Records)),
+		}
+		for _, record := range legacy.Records {
+			claimGeneration := uint64(0)
+			if record.Terminal != nil {
+				claimGeneration = record.Terminal.ClaimGeneration
+			}
+			state.Records = append(state.Records, deliveryRecord{
+				ProtocolVersion: controlprotocol.ExecutorProtocolV3,
+				DeliveryID:      record.DeliveryID, DeliveryGeneration: record.DeliveryGeneration,
+				SettledGeneration: record.SettledGeneration, TenantID: record.TenantID,
+				CommandID: record.CommandID, CommandDigest: record.CommandDigest,
+				ClaimGeneration: claimGeneration, Phase: record.Phase,
+				Terminal: cloneExecutorReport(record.Terminal),
+			})
+		}
+	case 3:
+		var legacy deliveryStateFileV3
+		if err := dsse.DecodeStrictInto(raw, maxDeliveryStateBytes, &legacy); err != nil {
+			return deliveryStateFile{}, nil, fmt.Errorf("decode executor delivery state %q: %w", path, err)
+		}
+		state = deliveryStateFile{
+			Version: legacy.Version, NodeID: legacy.NodeID,
+			Records: make([]deliveryRecord, 0, len(legacy.Records)),
+		}
+		for _, record := range legacy.Records {
+			state.Records = append(state.Records, deliveryRecord{
+				ProtocolVersion:    record.ProtocolVersion,
+				DeliveryID:         record.DeliveryID,
+				DeliveryGeneration: record.DeliveryGeneration,
+				SettledGeneration:  record.SettledGeneration,
+				TenantID:           record.TenantID,
+				CommandID:          record.CommandID,
+				CommandDigest:      record.CommandDigest,
+				ClaimGeneration:    record.ClaimGeneration,
+				Phase:              record.Phase,
+				Terminal:           cloneExecutorReport(record.Terminal),
+				Admission:          cloneAdmissionProjection(record.Admission),
+				ActivationCanary:   cloneActivationCanaryResult(record.ActivationCanary),
+			})
+		}
+	case deliveryStateWriteVersion:
+		if err := dsse.DecodeStrictInto(raw, maxDeliveryStateBytes, &state); err != nil {
+			return deliveryStateFile{}, nil, fmt.Errorf("decode executor delivery state %q: %w", path, err)
+		}
 	}
 	if !boundedDeliveryText(state.NodeID, 128) {
 		return deliveryStateFile{}, nil, fmt.Errorf("executor delivery state %q has an invalid node ID", path)
@@ -160,6 +275,55 @@ func decodeDeliveryState(path string) (deliveryStateFile, map[string]deliveryRec
 	return state, records, nil
 }
 
+// MigrateFormat atomically rewrites the current readable format to the only
+// format this release writes. Validation-only startup deliberately skips it.
+func (s *DeliveryStore) MigrateFormat() error {
+	if s == nil {
+		return errors.New("executor delivery state is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.formatVersion == deliveryStateWriteVersion {
+		return nil
+	}
+	return s.persistLocked(cloneDeliveryRecords(s.records))
+}
+
+// PrepareProtocol prevents an explicit protocol selection from silently
+// sending retained reports through another wire version. Acknowledged safe
+// terminal records may be removed during normal startup; all other
+// cross-version state blocks startup.
+func (s *DeliveryStore) PrepareProtocol(protocolVersion int, validateOnly bool) error {
+	if s == nil || protocolVersion != controlprotocol.ExecutorProtocolV3 &&
+		protocolVersion != controlprotocol.ExecutorProtocolV4 {
+		return errors.New("executor delivery protocol selection is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := cloneDeliveryRecords(s.records)
+	changed := false
+	for id, record := range next {
+		if record.ProtocolVersion == protocolVersion {
+			continue
+		}
+		if safeAcknowledgedDelivery(record) {
+			delete(next, id)
+			changed = true
+			continue
+		}
+		return fmt.Errorf(
+			"executor delivery state retains protocol %d record %q; drain or reconcile it before selecting protocol %d",
+			record.ProtocolVersion,
+			record.DeliveryID,
+			protocolVersion,
+		)
+	}
+	if !changed || validateOnly {
+		return nil
+	}
+	return s.persistLocked(next)
+}
+
 func (s *DeliveryStore) NodeID() string {
 	return s.nodeID
 }
@@ -178,7 +342,8 @@ func (s *DeliveryStore) UnacknowledgedReports(limit int) ([]controlprotocol.Exec
 
 	ids := make([]string, 0)
 	for id, record := range s.records {
-		if record.Phase == deliveryPhaseTerminal && record.Terminal != nil &&
+		if record.ProtocolVersion == controlprotocol.ExecutorProtocolV3 &&
+			record.Phase == deliveryPhaseTerminal && record.Terminal != nil &&
 			record.SettledGeneration != record.DeliveryGeneration {
 			ids = append(ids, id)
 		}
@@ -191,6 +356,40 @@ func (s *DeliveryStore) UnacknowledgedReports(limit int) ([]controlprotocol.Exec
 	reports := make([]controlprotocol.ExecutorReportV3, 0, len(ids))
 	for _, id := range ids {
 		reports = append(reports, *cloneExecutorReport(s.records[id].Terminal))
+	}
+	return reports, more, nil
+}
+
+// UnacknowledgedReportsV4 returns only retained protocol-4 records. Protocol
+// selection is prepared before polling, so finding another version here would
+// indicate an internal state transition error rather than a downgrade signal.
+func (s *DeliveryStore) UnacknowledgedReportsV4(limit int) ([]controlprotocol.ExecutorReportV4, bool, error) {
+	if s == nil || limit <= 0 || limit > controlprotocol.MaxExecutorDeliveries {
+		return nil, false, errors.New("unacknowledged delivery report limit is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ids := make([]string, 0)
+	for id, record := range s.records {
+		if record.ProtocolVersion == controlprotocol.ExecutorProtocolV4 &&
+			record.Phase == deliveryPhaseTerminal && record.Terminal != nil &&
+			record.SettledGeneration != record.DeliveryGeneration {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	more := len(ids) > limit
+	if more {
+		ids = ids[:limit]
+	}
+	reports := make([]controlprotocol.ExecutorReportV4, 0, len(ids))
+	for _, id := range ids {
+		report, err := executorReportV4FromRecord(s.records[id])
+		if err != nil {
+			return nil, false, err
+		}
+		reports = append(reports, report)
 	}
 	return reports, more, nil
 }
@@ -223,6 +422,58 @@ func (s *DeliveryStore) Accept(delivery controlprotocol.ExecutorDeliveryV3, tena
 	if err := delivery.Validate(); err != nil {
 		return 0, nil, err
 	}
+	decision, terminal, err := s.acceptDelivery(
+		delivery,
+		tenantID,
+		controlprotocol.ExecutorProtocolV3,
+		0,
+		"",
+	)
+	if terminal == nil {
+		return decision, nil, err
+	}
+	return decision, cloneExecutorReport(terminal.Terminal), err
+}
+
+func (s *DeliveryStore) AcceptV4(
+	delivery controlprotocol.ExecutorDeliveryV4,
+	tenantID string,
+	claimGeneration uint64,
+	commandKind string,
+) (deliveryDecision, *controlprotocol.ExecutorReportV4, error) {
+	if err := delivery.Validate(); err != nil {
+		return 0, nil, err
+	}
+	if claimGeneration == 0 {
+		return 0, nil, errors.New("verified protocol-4 delivery claim generation is required")
+	}
+	if !boundedDeliveryText(commandKind, 64) || len(commandKind) > 64 {
+		return 0, nil, errors.New("verified protocol-4 command kind is invalid")
+	}
+	decision, terminal, err := s.acceptDelivery(
+		executorDeliveryV3(delivery),
+		tenantID,
+		controlprotocol.ExecutorProtocolV4,
+		claimGeneration,
+		commandKind,
+	)
+	if terminal == nil {
+		return decision, nil, err
+	}
+	report, reportErr := executorReportV4FromRecord(*terminal)
+	if reportErr != nil {
+		return decision, nil, errors.Join(err, reportErr)
+	}
+	return decision, &report, err
+}
+
+func (s *DeliveryStore) acceptDelivery(
+	delivery controlprotocol.ExecutorDeliveryV3,
+	tenantID string,
+	protocolVersion int,
+	claimGeneration uint64,
+	commandKind string,
+) (deliveryDecision, *deliveryRecord, error) {
 	if !boundedDeliveryText(tenantID, 128) {
 		return 0, nil, errors.New("verified delivery tenant ID is invalid")
 	}
@@ -231,8 +482,14 @@ func (s *DeliveryStore) Accept(delivery controlprotocol.ExecutorDeliveryV3, tena
 	next := cloneDeliveryRecords(s.records)
 	record, exists := next[delivery.DeliveryID]
 	if exists {
+		if record.ProtocolVersion != protocolVersion {
+			return 0, nil, errors.New("delivery ID was reused across executor protocol versions")
+		}
 		if record.CommandID != delivery.CommandID || record.CommandDigest != delivery.CommandDigest {
 			return 0, nil, errors.New("delivery ID was reused for another command")
+		}
+		if record.CommandKind != "" && commandKind != "" && record.CommandKind != commandKind {
+			return 0, nil, errors.New("delivery ID was reused across verified command kinds")
 		}
 		if record.TenantID != "" && record.TenantID != tenantID {
 			return 0, nil, errors.New("delivery ID was reused across verified tenants")
@@ -240,9 +497,22 @@ func (s *DeliveryStore) Accept(delivery controlprotocol.ExecutorDeliveryV3, tena
 		if delivery.DeliveryGeneration < record.DeliveryGeneration {
 			return deliveryStale, nil, nil
 		}
+		if record.ClaimGeneration != 0 && claimGeneration != 0 &&
+			record.ClaimGeneration != claimGeneration {
+			return 0, nil, errors.New("delivery ID was reused across signed claim generations")
+		}
 		changed := false
 		if record.TenantID == "" {
 			record.TenantID = tenantID
+			changed = true
+		}
+		if record.CommandKind == "" && commandKind != "" {
+			record.CommandKind = commandKind
+			changed = true
+		}
+		if record.Phase != deliveryPhaseTerminal &&
+			record.ClaimGeneration == 0 && claimGeneration != 0 {
+			record.ClaimGeneration = claimGeneration
 			changed = true
 		}
 		if delivery.DeliveryGeneration > record.DeliveryGeneration {
@@ -272,9 +542,11 @@ func (s *DeliveryStore) Accept(delivery controlprotocol.ExecutorDeliveryV3, tena
 			if err := s.persistLocked(next); err != nil {
 				return 0, nil, err
 			}
-			return deliveryReport, cloneExecutorReport(record.Terminal), nil
+			retained := cloneDeliveryRecord(record)
+			return deliveryReport, &retained, nil
 		case deliveryPhaseTerminal:
-			return deliveryReport, cloneExecutorReport(record.Terminal), nil
+			retained := cloneDeliveryRecord(record)
+			return deliveryReport, &retained, nil
 		default:
 			return 0, nil, errors.New("delivery record has invalid phase")
 		}
@@ -287,9 +559,10 @@ func (s *DeliveryStore) Accept(delivery controlprotocol.ExecutorDeliveryV3, tena
 		return 0, nil, fmt.Errorf("executor delivery state reached its %d-record limit", maxDeliveryRecords)
 	}
 	record = deliveryRecord{
-		DeliveryID: delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
+		ProtocolVersion: protocolVersion,
+		DeliveryID:      delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
 		TenantID: tenantID, CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
-		Phase: deliveryPhaseAccepted,
+		CommandKind: commandKind, ClaimGeneration: claimGeneration, Phase: deliveryPhaseAccepted,
 	}
 	next[delivery.DeliveryID] = record
 	compactTenantReservedBytes(next, tenantID)
@@ -313,11 +586,63 @@ func (s *DeliveryStore) Reject(delivery controlprotocol.ExecutorDeliveryV3, reje
 	if err := rejected.Validate(); err != nil || rejected.Status != controlprotocol.ExecutorStatusRejected {
 		return nil, errors.New("invalid rejected delivery report")
 	}
+	terminal, err := s.rejectDelivery(
+		delivery,
+		controlprotocol.ExecutorProtocolV3,
+		rejected,
+		nil,
+		nil,
+	)
+	if terminal == nil {
+		return nil, err
+	}
+	return cloneExecutorReport(terminal.Terminal), err
+}
+
+func (s *DeliveryStore) RejectV4(
+	delivery controlprotocol.ExecutorDeliveryV4,
+	rejected controlprotocol.ExecutorReportV4,
+) (*controlprotocol.ExecutorReportV4, error) {
+	if err := delivery.Validate(); err != nil {
+		return nil, err
+	}
+	if err := rejected.Validate(); err != nil || rejected.Status != controlprotocol.ExecutorStatusRejected ||
+		rejected.Result.Admission != nil || rejected.Result.ActivationCanary != nil {
+		return nil, errors.New("invalid rejected delivery report")
+	}
+	common, admission, activationCanary := executorReportV4Record(rejected)
+	terminal, err := s.rejectDelivery(
+		executorDeliveryV3(delivery),
+		controlprotocol.ExecutorProtocolV4,
+		common,
+		admission,
+		activationCanary,
+	)
+	if terminal == nil {
+		return nil, err
+	}
+	report, reportErr := executorReportV4FromRecord(*terminal)
+	if reportErr != nil {
+		return nil, errors.Join(err, reportErr)
+	}
+	return &report, err
+}
+
+func (s *DeliveryStore) rejectDelivery(
+	delivery controlprotocol.ExecutorDeliveryV3,
+	protocolVersion int,
+	rejected controlprotocol.ExecutorReportV3,
+	admissionProjection *controlprotocol.ExecutorAdmissionProjectionV1,
+	activationCanary *controlprotocol.ExecutorActivationCanaryResultV1,
+) (*deliveryRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := cloneDeliveryRecords(s.records)
 	record, exists := next[delivery.DeliveryID]
 	if exists {
+		if record.ProtocolVersion != protocolVersion {
+			return nil, errors.New("delivery ID was reused across executor protocol versions")
+		}
 		if record.CommandID != delivery.CommandID || record.CommandDigest != delivery.CommandDigest {
 			return nil, errors.New("delivery ID was reused for another command")
 		}
@@ -336,10 +661,13 @@ func (s *DeliveryStore) Reject(delivery controlprotocol.ExecutorDeliveryV3, reje
 			if err := s.persistLocked(next); err != nil {
 				return nil, err
 			}
-			return cloneExecutorReport(record.Terminal), nil
+			retained := cloneDeliveryRecord(record)
+			return &retained, nil
 		}
 		if record.Phase == deliveryPhaseExecuting {
 			rejected = outcomeUnknownReport(record)
+			admissionProjection = nil
+			activationCanary = nil
 		}
 	} else {
 		compactAcknowledgedDeliveries(next, "")
@@ -349,16 +677,21 @@ func (s *DeliveryStore) Reject(delivery controlprotocol.ExecutorDeliveryV3, reje
 	}
 	rejected.DeliveryGeneration = delivery.DeliveryGeneration
 	record = deliveryRecord{
-		DeliveryID: delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
+		ProtocolVersion: protocolVersion,
+		DeliveryID:      delivery.DeliveryID, DeliveryGeneration: delivery.DeliveryGeneration,
 		TenantID: record.TenantID, CommandID: delivery.CommandID, CommandDigest: delivery.CommandDigest,
-		Phase: deliveryPhaseTerminal, Terminal: &rejected,
+		ClaimGeneration: rejected.ClaimGeneration,
+		Phase:           deliveryPhaseTerminal, Terminal: &rejected,
+		Admission:        cloneAdmissionProjection(admissionProjection),
+		ActivationCanary: cloneActivationCanaryResult(activationCanary),
 	}
 	next[delivery.DeliveryID] = record
 	compactGlobalReservedBytes(next, s.nodeID)
 	if err := s.persistLocked(next); err != nil {
 		return nil, err
 	}
-	return cloneExecutorReport(record.Terminal), nil
+	retained := cloneDeliveryRecord(record)
+	return &retained, nil
 }
 
 func (s *DeliveryStore) MarkExecuting(deliveryID string) error {
@@ -378,17 +711,62 @@ func (s *DeliveryStore) MarkTerminal(report controlprotocol.ExecutorReportV3) er
 	if err := report.Validate(); err != nil {
 		return err
 	}
+	return s.markTerminal(
+		report.DeliveryID,
+		report.DeliveryGeneration,
+		report.CommandID,
+		report.CommandDigest,
+		controlprotocol.ExecutorProtocolV3,
+		report,
+		nil,
+		nil,
+	)
+}
+
+func (s *DeliveryStore) MarkTerminalV4(report controlprotocol.ExecutorReportV4) error {
+	if err := report.Validate(); err != nil {
+		return err
+	}
+	common, admission, activationCanary := executorReportV4Record(report)
+	return s.markTerminal(
+		report.DeliveryID,
+		report.DeliveryGeneration,
+		report.CommandID,
+		report.CommandDigest,
+		controlprotocol.ExecutorProtocolV4,
+		common,
+		admission,
+		activationCanary,
+	)
+}
+
+func (s *DeliveryStore) markTerminal(
+	deliveryID string,
+	deliveryGeneration uint64,
+	commandID, commandDigest string,
+	protocolVersion int,
+	report controlprotocol.ExecutorReportV3,
+	admissionProjection *controlprotocol.ExecutorAdmissionProjectionV1,
+	activationCanary *controlprotocol.ExecutorActivationCanaryResultV1,
+) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	record, ok := s.records[report.DeliveryID]
-	if !ok || record.Phase != deliveryPhaseExecuting || record.DeliveryGeneration != report.DeliveryGeneration ||
-		record.CommandID != report.CommandID || record.CommandDigest != report.CommandDigest {
+	record, ok := s.records[deliveryID]
+	if !ok || record.ProtocolVersion != protocolVersion ||
+		record.Phase != deliveryPhaseExecuting || record.DeliveryGeneration != deliveryGeneration ||
+		record.CommandID != commandID || record.CommandDigest != commandDigest ||
+		record.ClaimGeneration != 0 && record.ClaimGeneration != report.ClaimGeneration {
 		return errors.New("terminal report does not match an executing delivery")
 	}
 	next := cloneDeliveryRecords(s.records)
 	record.Phase = deliveryPhaseTerminal
 	record.Terminal = cloneExecutorReport(&report)
-	next[report.DeliveryID] = record
+	record.Admission = cloneAdmissionProjection(admissionProjection)
+	record.ActivationCanary = cloneActivationCanaryResult(activationCanary)
+	if record.ClaimGeneration == 0 {
+		record.ClaimGeneration = report.ClaimGeneration
+	}
+	next[deliveryID] = record
 	return s.persistLocked(next)
 }
 
@@ -409,6 +787,7 @@ func (s *DeliveryStore) Settle(deliveryID string, generation uint64) error {
 }
 
 func (s *DeliveryStore) persistLocked(next map[string]deliveryRecord) error {
+	next = canonicalDeliveryRecords(next)
 	if err := ensureDeliveryTerminalCapacity(s.nodeID, next); err != nil {
 		return err
 	}
@@ -419,16 +798,30 @@ func (s *DeliveryStore) persistLocked(next map[string]deliveryRecord) error {
 	if err := replaceDeliveryState(s.path, raw); err != nil {
 		return err
 	}
+	s.formatVersion = deliveryStateWriteVersion
 	s.records = next
 	return nil
 }
 
-// compactAcknowledgedDeliveries makes room only by removing acknowledged done
-// and rejected generations. Done means the independent signed-command fence is
-// durable; rejected means the handler was never entered. Failed records from
-// older builds and outcome_unknown records remain fail-closed because either
-// may describe an effect whose fence did not advance. Accepted, executing, and
-// unacknowledged terminal records are never candidates.
+func canonicalDeliveryRecords(records map[string]deliveryRecord) map[string]deliveryRecord {
+	canonical := cloneDeliveryRecords(records)
+	for id, record := range canonical {
+		if record.ProtocolVersion == 0 {
+			record.ProtocolVersion = controlprotocol.ExecutorProtocolV3
+			canonical[id] = record
+		}
+	}
+	return canonical
+}
+
+// compactAcknowledgedDeliveries makes room only by removing acknowledged done,
+// rejected, or authenticated terminal activation-canary generations. Done
+// means the independent signed-command fence is durable; rejected means the
+// handler was never entered. The two closed canary failure codes describe a
+// completed Gateway run and are safe only when the verified command kind was
+// retained with the record. Other failed and outcome_unknown records remain
+// fail-closed. Accepted, executing, and unacknowledged terminal records are
+// never candidates.
 func compactAcknowledgedDeliveries(records map[string]deliveryRecord, tenantID string) {
 	if tenantID != "" {
 		count := deliveryRecordsForTenant(records, tenantID)
@@ -450,12 +843,7 @@ func removeAcknowledgedDeliveries(records map[string]deliveryRecord, tenantID st
 		if tenantID != "" && record.TenantID != tenantID {
 			continue
 		}
-		if record.Phase != deliveryPhaseTerminal || record.Terminal == nil ||
-			record.SettledGeneration != record.DeliveryGeneration {
-			continue
-		}
-		if record.Terminal.Status == controlprotocol.ExecutorStatusDone ||
-			record.Terminal.Status == controlprotocol.ExecutorStatusRejected {
+		if safeAcknowledgedDelivery(record) {
 			candidates = append(candidates, id)
 		}
 	}
@@ -484,10 +872,7 @@ func compactTenantReservedBytes(records map[string]deliveryRecord, tenantID stri
 	}
 	candidates := make([]string, 0)
 	for id, record := range records {
-		if record.TenantID == tenantID && record.Phase == deliveryPhaseTerminal && record.Terminal != nil &&
-			record.SettledGeneration == record.DeliveryGeneration &&
-			(record.Terminal.Status == controlprotocol.ExecutorStatusDone ||
-				record.Terminal.Status == controlprotocol.ExecutorStatusRejected) {
+		if record.TenantID == tenantID && safeAcknowledgedDelivery(record) {
 			candidates = append(candidates, id)
 		}
 	}
@@ -507,10 +892,7 @@ func compactGlobalReservedBytes(records map[string]deliveryRecord, nodeID string
 	}
 	candidates := make([]string, 0)
 	for id, record := range records {
-		if record.Phase == deliveryPhaseTerminal && record.Terminal != nil &&
-			record.SettledGeneration == record.DeliveryGeneration &&
-			(record.Terminal.Status == controlprotocol.ExecutorStatusDone ||
-				record.Terminal.Status == controlprotocol.ExecutorStatusRejected) {
+		if safeAcknowledgedDelivery(record) {
 			candidates = append(candidates, id)
 		}
 	}
@@ -529,31 +911,67 @@ func compactGlobalReservedBytes(records map[string]deliveryRecord, nodeID string
 	}
 }
 
+func safeAcknowledgedDelivery(record deliveryRecord) bool {
+	if record.Phase != deliveryPhaseTerminal || record.Terminal == nil ||
+		record.SettledGeneration != record.DeliveryGeneration {
+		return false
+	}
+	if record.Terminal.Status == controlprotocol.ExecutorStatusDone ||
+		record.Terminal.Status == controlprotocol.ExecutorStatusRejected {
+		return true
+	}
+	return record.ProtocolVersion == controlprotocol.ExecutorProtocolV4 &&
+		record.CommandKind == "activation-canary" &&
+		validActivationCanaryTerminalFailure(record.Terminal)
+}
+
+func activationCanaryTerminalErrorCode(value string) bool {
+	return value == "activation_canary_failed" || value == "activation_canary_cancelled"
+}
+
+func validActivationCanaryTerminalFailure(report *controlprotocol.ExecutorReportV3) bool {
+	if report == nil || report.Status != controlprotocol.ExecutorStatusFailed ||
+		report.Result.Error == "" {
+		return false
+	}
+	switch report.ErrorCode {
+	case "activation_canary_failed":
+		return report.ReportedStatus == "failed"
+	case "activation_canary_cancelled":
+		return report.ReportedStatus == "cancelled"
+	default:
+		return false
+	}
+}
+
 func reservedDeliveryBytesForTenant(records map[string]deliveryRecord, tenantID string) int {
 	total := 0
 	for _, record := range records {
 		if record.TenantID != tenantID {
 			continue
 		}
+		extra := deliveryTerminalReserveExtra(record)
 		raw, err := json.Marshal(reservedDeliveryRecord(record))
 		if err != nil {
 			return math.MaxInt
 		}
-		total += len(raw) + 1 // include the enclosing array comma
+		total += len(raw) + 1 + extra // include the enclosing array comma
 	}
 	return total
 }
 
 func reservedDeliveryStateSize(nodeID string, records map[string]deliveryRecord) (int, error) {
 	reserved := make(map[string]deliveryRecord, len(records))
+	extra := 0
 	for id, record := range records {
 		reserved[id] = reservedDeliveryRecord(record)
+		extra += deliveryTerminalReserveExtra(record)
 	}
 	raw, err := marshalDeliveryState(nodeID, reserved)
 	if err != nil {
 		return 0, err
 	}
-	return len(raw), nil
+	return len(raw) + extra, nil
 }
 
 // ensureDeliveryTerminalCapacity proves that every accepted or executing
@@ -563,9 +981,12 @@ func reservedDeliveryStateSize(nodeID string, records map[string]deliveryRecord)
 func ensureDeliveryTerminalCapacity(nodeID string, records map[string]deliveryRecord) error {
 	reserved := make(map[string]deliveryRecord, len(records))
 	tenantBytes := make(map[string]int)
+	extra := 0
 	for id, record := range records {
+		terminalExtra := deliveryTerminalReserveExtra(record)
 		candidate := reservedDeliveryRecord(record)
 		reserved[id] = candidate
+		extra += terminalExtra
 		if candidate.TenantID == "" {
 			continue
 		}
@@ -573,7 +994,7 @@ func ensureDeliveryTerminalCapacity(nodeID string, records map[string]deliveryRe
 		if err != nil {
 			return fmt.Errorf("encode reserved terminal delivery: %w", err)
 		}
-		tenantBytes[candidate.TenantID] += len(raw) + 1
+		tenantBytes[candidate.TenantID] += len(raw) + 1 + terminalExtra
 	}
 	for tenantID, size := range tenantBytes {
 		if size > maxDeliveryReservedBytesPerTenant {
@@ -584,7 +1005,7 @@ func ensureDeliveryTerminalCapacity(nodeID string, records map[string]deliveryRe
 	if err != nil {
 		return fmt.Errorf("reserve worst-case terminal delivery state: %w", err)
 	}
-	if len(raw) > maxDeliveryStateBytes {
+	if len(raw)+extra > maxDeliveryStateBytes {
 		return fmt.Errorf("reserve worst-case terminal delivery state: executor delivery state would exceed %d bytes", maxDeliveryStateBytes)
 	}
 	return nil
@@ -592,27 +1013,103 @@ func ensureDeliveryTerminalCapacity(nodeID string, records map[string]deliveryRe
 
 func reservedDeliveryRecord(record deliveryRecord) deliveryRecord {
 	if record.Phase == deliveryPhaseAccepted || record.Phase == deliveryPhaseExecuting {
-		report := controlprotocol.ExecutorReportV3{
-			ProtocolVersion: controlprotocol.ExecutorProtocolV3,
-			DeliveryID:      record.DeliveryID, DeliveryGeneration: record.DeliveryGeneration,
-			CommandID: record.CommandID, CommandDigest: record.CommandDigest,
-			Status: controlprotocol.ExecutorStatusOutcomeUnknown,
-			// '<' and NUL each receive the maximum six-byte JSON escape while
-			// staying within the corresponding public byte limit.
-			ReportedStatus: strings.Repeat("<", 64), ClaimGeneration: math.MaxUint64,
-			ErrorCode: strings.Repeat("\x00", 128),
-			Result: controlprotocol.ExecutorReportResultV3{
-				RuntimeRef: strings.Repeat("\x00", 1024), Error: strings.Repeat("\x00", 4096),
-				Replayed: true, Absent: true,
-			},
-		}
+		report := reservedExecutorReport(record)
 		record.Phase = deliveryPhaseTerminal
 		record.Terminal = &report
+		record.Admission = nil
+		record.ActivationCanary = nil
 	}
 	if record.Phase == deliveryPhaseTerminal && record.SettledGeneration != record.DeliveryGeneration {
 		record.SettledGeneration = record.DeliveryGeneration
 	}
 	return record
+}
+
+func reservedExecutorReport(record deliveryRecord) controlprotocol.ExecutorReportV3 {
+	if record.ProtocolVersion == controlprotocol.ExecutorProtocolV4 {
+		return outcomeUnknownReport(record)
+	}
+	return controlprotocol.ExecutorReportV3{
+		ProtocolVersion: controlprotocol.ExecutorProtocolV3,
+		DeliveryID:      record.DeliveryID, DeliveryGeneration: record.DeliveryGeneration,
+		CommandID: record.CommandID, CommandDigest: record.CommandDigest,
+		Status:         controlprotocol.ExecutorStatusOutcomeUnknown,
+		ReportedStatus: strings.Repeat("<", 64), ClaimGeneration: math.MaxUint64,
+		ErrorCode: strings.Repeat("\x00", 128),
+		Result: controlprotocol.ExecutorReportResultV3{
+			RuntimeRef: strings.Repeat("\x00", 1024), Error: strings.Repeat("\x00", 4096),
+			Replayed: true, Absent: true,
+		},
+	}
+}
+
+// deliveryTerminalReserveExtra adds the complete protocol-4 wire-report cap
+// on top of a small valid terminal placeholder. This deliberately
+// over-reserves the placeholder's common fields, but proves capacity without
+// repeatedly searching the JSON-size boundary for every retained record.
+func deliveryTerminalReserveExtra(record deliveryRecord) int {
+	if record.ProtocolVersion == controlprotocol.ExecutorProtocolV4 &&
+		(record.Phase == deliveryPhaseAccepted || record.Phase == deliveryPhaseExecuting) {
+		return controlprotocol.MaxExecutorReportBytes
+	}
+	return 0
+}
+
+func executorDeliveryV3(delivery controlprotocol.ExecutorDeliveryV4) controlprotocol.ExecutorDeliveryV3 {
+	return controlprotocol.ExecutorDeliveryV3(delivery)
+}
+
+func executorReportV4Record(
+	report controlprotocol.ExecutorReportV4,
+) (
+	controlprotocol.ExecutorReportV3,
+	*controlprotocol.ExecutorAdmissionProjectionV1,
+	*controlprotocol.ExecutorActivationCanaryResultV1,
+) {
+	common := controlprotocol.ExecutorReportV3{
+		ProtocolVersion: controlprotocol.ExecutorProtocolV3,
+		DeliveryID:      report.DeliveryID, DeliveryGeneration: report.DeliveryGeneration,
+		CommandID: report.CommandID, CommandDigest: report.CommandDigest,
+		Status: report.Status, ReportedStatus: report.ReportedStatus,
+		ClaimGeneration: report.ClaimGeneration, ErrorCode: report.ErrorCode,
+		Result: controlprotocol.ExecutorReportResultV3{
+			RuntimeRef: report.Result.RuntimeRef, Error: report.Result.Error,
+			Replayed: report.Result.Replayed, Absent: report.Result.Absent,
+		},
+	}
+	return common,
+		cloneAdmissionProjection(report.Result.Admission),
+		cloneActivationCanaryResult(report.Result.ActivationCanary)
+}
+
+func executorReportV4FromRecord(record deliveryRecord) (controlprotocol.ExecutorReportV4, error) {
+	if record.ProtocolVersion != controlprotocol.ExecutorProtocolV4 || record.Terminal == nil {
+		return controlprotocol.ExecutorReportV4{}, errors.New("delivery record does not contain a protocol-4 terminal report")
+	}
+	common := record.Terminal
+	if common.ProtocolVersion != controlprotocol.ExecutorProtocolV3 {
+		return controlprotocol.ExecutorReportV4{}, errors.New("protocol-4 terminal storage marker is invalid")
+	}
+	if record.ClaimGeneration != common.ClaimGeneration {
+		return controlprotocol.ExecutorReportV4{}, errors.New("protocol-4 terminal report changed its signed claim generation")
+	}
+	report := controlprotocol.ExecutorReportV4{
+		ProtocolVersion: controlprotocol.ExecutorProtocolV4,
+		DeliveryID:      common.DeliveryID, DeliveryGeneration: common.DeliveryGeneration,
+		CommandID: common.CommandID, CommandDigest: common.CommandDigest,
+		Status: common.Status, ReportedStatus: common.ReportedStatus,
+		ClaimGeneration: common.ClaimGeneration, ErrorCode: common.ErrorCode,
+		Result: controlprotocol.ExecutorReportResultV4{
+			RuntimeRef: common.Result.RuntimeRef, Error: common.Result.Error,
+			Replayed: common.Result.Replayed, Absent: common.Result.Absent,
+			Admission:        cloneAdmissionProjection(record.Admission),
+			ActivationCanary: cloneActivationCanaryResult(record.ActivationCanary),
+		},
+	}
+	if err := report.Validate(); err != nil {
+		return controlprotocol.ExecutorReportV4{}, fmt.Errorf("validate retained executor report v4: %w", err)
+	}
+	return report, nil
 }
 
 func encodeDeliveryState(nodeID string, records map[string]deliveryRecord) ([]byte, error) {
@@ -632,6 +1129,11 @@ func marshalDeliveryState(nodeID string, records map[string]deliveryRecord) ([]b
 	}
 	ordered := make([]deliveryRecord, 0, len(records))
 	for _, record := range records {
+		if record.ProtocolVersion == 0 {
+			// Direct in-package fixtures created before the format bump remain
+			// protocol 3; persisted version-3 records always write this field.
+			record.ProtocolVersion = controlprotocol.ExecutorProtocolV3
+		}
 		if err := validateDeliveryRecord(record); err != nil {
 			return nil, err
 		}
@@ -640,7 +1142,7 @@ func marshalDeliveryState(nodeID string, records map[string]deliveryRecord) ([]b
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].DeliveryID < ordered[j].DeliveryID })
 	var encoded bytes.Buffer
 	if err := json.NewEncoder(&encoded).Encode(deliveryStateFile{
-		Version: deliveryStateVersion, NodeID: nodeID, Records: ordered,
+		Version: deliveryStateWriteVersion, NodeID: nodeID, Records: ordered,
 	}); err != nil {
 		return nil, err
 	}
@@ -648,16 +1150,26 @@ func marshalDeliveryState(nodeID string, records map[string]deliveryRecord) ([]b
 }
 
 func validateDeliveryRecord(record deliveryRecord) error {
-	if !boundedDeliveryText(record.DeliveryID, 256) || record.DeliveryGeneration == 0 ||
+	if record.ProtocolVersion != controlprotocol.ExecutorProtocolV3 &&
+		record.ProtocolVersion != controlprotocol.ExecutorProtocolV4 ||
+		!boundedDeliveryText(record.DeliveryID, 256) || record.DeliveryGeneration == 0 ||
 		!boundedDeliveryText(record.CommandID, 256) || !controlprotocol.ValidSHA256Digest(record.CommandDigest) ||
 		record.SettledGeneration > record.DeliveryGeneration ||
 		(record.TenantID != "" && !boundedDeliveryText(record.TenantID, 128)) {
 		return errors.New("invalid delivery identity or generation")
 	}
+	if record.CommandKind != "" &&
+		(!boundedDeliveryText(record.CommandKind, 64) || len(record.CommandKind) > 64) {
+		return errors.New("invalid verified delivery command kind")
+	}
 	switch record.Phase {
 	case deliveryPhaseAccepted, deliveryPhaseExecuting:
-		if record.Terminal != nil || record.SettledGeneration != 0 {
+		if record.Terminal != nil || record.Admission != nil || record.ActivationCanary != nil ||
+			record.SettledGeneration != 0 {
 			return errors.New("non-terminal delivery contains terminal state")
+		}
+		if record.ProtocolVersion == controlprotocol.ExecutorProtocolV4 && record.ClaimGeneration == 0 {
+			return errors.New("protocol-4 non-terminal delivery is missing its verified claim generation")
 		}
 	case deliveryPhaseTerminal:
 		if record.Terminal == nil || record.Terminal.DeliveryID != record.DeliveryID ||
@@ -665,8 +1177,24 @@ func validateDeliveryRecord(record deliveryRecord) error {
 			record.Terminal.CommandID != record.CommandID || record.Terminal.CommandDigest != record.CommandDigest {
 			return errors.New("terminal delivery report does not match its record")
 		}
-		if err := record.Terminal.Validate(); err != nil {
-			return err
+		switch record.ProtocolVersion {
+		case controlprotocol.ExecutorProtocolV3:
+			if record.Admission != nil || record.ActivationCanary != nil {
+				return errors.New("protocol-3 terminal delivery contains a protocol-4 projection")
+			}
+			if err := record.Terminal.Validate(); err != nil {
+				return err
+			}
+		case controlprotocol.ExecutorProtocolV4:
+			if _, err := executorReportV4FromRecord(record); err != nil {
+				return err
+			}
+		}
+		if activationCanaryTerminalErrorCode(record.Terminal.ErrorCode) &&
+			(record.ProtocolVersion != controlprotocol.ExecutorProtocolV4 ||
+				record.CommandKind != "" && record.CommandKind != "activation-canary" ||
+				!validActivationCanaryTerminalFailure(record.Terminal)) {
+			return errors.New("activation canary terminal error code is not bound to a failed canary command")
 		}
 		if record.TenantID == "" && record.Terminal.Status != controlprotocol.ExecutorStatusRejected {
 			return errors.New("only a pre-verification rejected delivery may omit tenant identity")
@@ -686,7 +1214,8 @@ func outcomeUnknownReport(record deliveryRecord) controlprotocol.ExecutorReportV
 		DeliveryID:      record.DeliveryID, DeliveryGeneration: record.DeliveryGeneration,
 		CommandID: record.CommandID, CommandDigest: record.CommandDigest,
 		Status: controlprotocol.ExecutorStatusOutcomeUnknown, ReportedStatus: "failed",
-		ErrorCode: "outcome_unknown",
+		ClaimGeneration: record.ClaimGeneration,
+		ErrorCode:       "outcome_unknown",
 		Result: controlprotocol.ExecutorReportResultV3{
 			Error: "execution may have changed the node; reconcile before issuing another command",
 		},
@@ -703,6 +1232,8 @@ func cloneDeliveryRecords(source map[string]deliveryRecord) map[string]deliveryR
 
 func cloneDeliveryRecord(record deliveryRecord) deliveryRecord {
 	record.Terminal = cloneExecutorReport(record.Terminal)
+	record.Admission = cloneAdmissionProjection(record.Admission)
+	record.ActivationCanary = cloneActivationCanaryResult(record.ActivationCanary)
 	return record
 }
 
@@ -711,6 +1242,32 @@ func cloneExecutorReport(report *controlprotocol.ExecutorReportV3) *controlproto
 		return nil
 	}
 	clone := *report
+	return &clone
+}
+
+func cloneAdmissionProjection(
+	projection *controlprotocol.ExecutorAdmissionProjectionV1,
+) *controlprotocol.ExecutorAdmissionProjectionV1 {
+	if projection == nil {
+		return nil
+	}
+	clone := *projection
+	clone.TaskAuthorities = append(
+		[]controlprotocol.ExecutorTaskAuthorityV1(nil),
+		projection.TaskAuthorities...,
+	)
+	clone.EgressRouteIDs = append([]string(nil), projection.EgressRouteIDs...)
+	clone.ConnectorIDs = append([]string(nil), projection.ConnectorIDs...)
+	return &clone
+}
+
+func cloneActivationCanaryResult(
+	result *controlprotocol.ExecutorActivationCanaryResultV1,
+) *controlprotocol.ExecutorActivationCanaryResultV1 {
+	if result == nil {
+		return nil
+	}
+	clone := *result
 	return &clone
 }
 
