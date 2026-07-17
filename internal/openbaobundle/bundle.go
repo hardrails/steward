@@ -73,6 +73,7 @@ var (
 	identifierPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	fieldPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 	providerPathPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_./-]{0,511}$`)
+	systemPathPattern   = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 )
 
 func Compile(plan Plan) ([]File, error) {
@@ -130,6 +131,24 @@ func validate(plan Plan) ([]Binding, error) {
 			}
 		}
 	}
+	secretIDDirectory := filepath.Dir(plan.SecretIDFile)
+	writablePaths := []string{plan.SecretRoot, plan.StatusRoot, secretIDDirectory}
+	protectedPaths := []string{plan.CAFile, plan.RoleIDFile, plan.BaoPath, plan.StewardctlPath, plan.InstallRoot}
+	for index, writable := range writablePaths {
+		if writable == string(filepath.Separator) {
+			return nil, errors.New("OpenBao materializer writable paths cannot be the filesystem root")
+		}
+		for _, protected := range protectedPaths {
+			if pathsOverlap(writable, protected) {
+				return nil, errors.New("OpenBao materializer writable paths cannot overlap configuration, trust, or executable paths")
+			}
+		}
+		for _, other := range writablePaths[index+1:] {
+			if pathsOverlap(writable, other) {
+				return nil, errors.New("OpenBao materializer writable paths must be disjoint")
+			}
+		}
+	}
 	bindings := append([]Binding(nil), plan.Bindings...)
 	slices.SortFunc(bindings, func(left, right Binding) int {
 		if value := strings.Compare(left.TenantID, right.TenantID); value != 0 {
@@ -163,12 +182,21 @@ func validate(plan Plan) ([]Binding, error) {
 }
 
 func cleanAbsolute(value string) bool {
-	return value != "" && filepath.IsAbs(value) && filepath.Clean(value) == value && !strings.ContainsAny(value, "\x00\r\n")
+	return systemPathPattern.MatchString(value) && filepath.IsAbs(value) && filepath.Clean(value) == value && !strings.Contains(value, "//")
 }
 
 func providerPath(value string) bool {
 	return providerPathPattern.MatchString(value) && filepath.IsLocal(value) && filepath.ToSlash(filepath.Clean(value)) == value &&
 		!strings.Contains(value, "//")
+}
+
+func pathsOverlap(left, right string) bool {
+	return pathContains(left, right) || pathContains(right, left)
+}
+
+func pathContains(parent, child string) bool {
+	relative, err := filepath.Rel(parent, child)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func hclString(value string) string {

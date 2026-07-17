@@ -21,7 +21,7 @@ import (
 const (
 	// ManifestSchemaV1 identifies the first non-secret materialization manifest.
 	ManifestSchemaV1 = "steward.secret-materialization.v1"
-	// ManifestSchemaV2 binds every materialization to an expected provider epoch.
+	// ManifestSchemaV2 requires an expected provider-version marker for every materialization.
 	ManifestSchemaV2 = "steward.secret-materialization.v2"
 	// ReportSchemaV1 identifies the corresponding secret-free readiness report.
 	ReportSchemaV1 = "steward.secret-materialization-report.v1"

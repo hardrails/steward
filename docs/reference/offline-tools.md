@@ -1290,22 +1290,58 @@ it does not establish useful work, semantic correctness, upstream exactly-once
 behavior, or an uncompromised host. Replay prevention is node-local within one
 retained ledger epoch.
 
-## Gateway secret materialization preflight
+## Gateway secret materialization and OpenBao compiler
 
-Check a provider-neutral tree of owner-only inference and connector credentials
-before Gateway loads it:
+Compile a strict, non-secret OpenBao plan into an exact read policy, fail-closed
+Agent templates, an expected-version manifest, and a hardened systemd unit:
+
+```console
+stewardctl secret openbao compile \
+  -plan /etc/steward/openbao/plan.json \
+  -out /root/steward-openbao-bundle
+```
+
+Both flags are required. `-out` must be a clean absolute path that does not exist.
+The command creates a mode-`0700` directory and four new mode-`0640` files; it
+never overwrites a bundle. The plan accepts one through 512 exact KV v2 bindings
+and contains provider paths and expected versions, but no secret value, RoleID,
+SecretID, or OpenBao token. The compiler does not contact or install OpenBao.
+
+For an epoch-aware manifest, create only the tenant directories below existing
+owner-only roots:
+
+```console
+stewardctl secret materialization prepare \
+  -manifest /etc/steward/openbao-agent/materialization.json \
+  -root /var/lib/steward-gateway/secrets \
+  -status-root /var/lib/steward-gateway/secret-status
+```
+
+`prepare` requires schema `steward.secret-materialization.v2` and distinct clean
+absolute roots. It creates mode-`0700` tenant directories, is idempotent, and
+refuses unsafe existing directories. It does not create or modify a root, secret,
+or version marker.
+
+Check the provider-neutral tree before Gateway loads it:
 
 ```console
 stewardctl secret materialization check \
-  -manifest /etc/steward/secret-materialization/manifest.json \
-  -root /var/lib/steward-gateway/secrets
+  -manifest /etc/steward/openbao-agent/materialization.json \
+  -root /var/lib/steward-gateway/secrets \
+  -status-root /var/lib/steward-gateway/secret-status
 ```
 
 `-manifest` is required. `-root` defaults to
-`/var/lib/steward-gateway/secrets`. The bounded strict manifest uses schema
-`steward.secret-materialization.v1` and contains one through 512
-`(tenant_id, secret_id, purpose)` bindings. `purpose` is `inference` or
-`connector`; each value is read from `<root>/<tenant_id>/<secret_id>`.
+`/var/lib/steward-gateway/secrets`; `-status-root` defaults to
+`/var/lib/steward-gateway/secret-status`. The bounded strict manifest contains one
+through 512 `(tenant_id, secret_id, purpose)` bindings. `purpose` is `inference`
+or `connector`; each value is read from `<root>/<tenant_id>/<secret_id>`.
+
+Schema `steward.secret-materialization.v1` is the manual-file compatibility
+contract and rejects an `expected_epoch`. Schema
+`steward.secret-materialization.v2` requires a positive `expected_epoch` for every
+binding and reads its canonical decimal observed marker from
+`<status-root>/<tenant_id>/<secret_id>.epoch`.
 
 Run the command as the same service identity that owns and reads the materialized
 files. It requires mode-`0700` root and tenant directories and stable,
@@ -1314,12 +1350,13 @@ single-link, mode-`0600` regular files on the same filesystem. Values must conta
 unsafe ownership, links, aliases, changed metadata, unknown JSON members, and
 duplicate bindings.
 
-Successful output uses schema
-`steward.secret-materialization-report.v1` and contains only `ready`, tenant ID,
-secret ID, and purpose. It does not expose a value, hash, length, provider path,
-filesystem path, or credential epoch. The result is a point-in-time preflight,
-not authorization or anti-rollback evidence; Gateway's later stable owner-only
-file read is authoritative. See
+Successful output uses report schema `v1` for a manual manifest and `v2` for an
+epoch-aware manifest. The latter adds only `expected_epoch` and `observed_epoch`;
+`ready` is false if they differ. Neither report exposes a value, hash, length,
+provider path, or filesystem path. Value and marker files are validated separately,
+so `v2` is a convergence preflight, not proof of an atomic render, authorization,
+or anti-rollback evidence. Gateway's later stable owner-only value read is
+authoritative. See
 [Store and distribute Gateway credentials]({{ '/guides/secrets/' | relative_url }})
 for the OpenBao handoff, rotation procedure, and trust boundary.
 

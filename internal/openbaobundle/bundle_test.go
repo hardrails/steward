@@ -2,6 +2,9 @@ package openbaobundle
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -83,6 +86,12 @@ func TestCompileRejectsBroadOrAliasedAuthority(t *testing.T) {
 		{"not kv2", func(p *Plan) { p.Bindings[0].KVPath = "steward-kv/tenant-a/key" }},
 		{"zero version", func(p *Plan) { p.Bindings[0].ExpectedVersion = 0 }},
 		{"path alias", func(p *Plan) { p.StatusRoot = p.SecretRoot }},
+		{"systemd specifier path", func(p *Plan) { p.CAFile = "/etc/steward/%n/ca.pem" }},
+		{"whitespace path", func(p *Plan) { p.InstallRoot = "/etc/steward/openbao agent" }},
+		{"filesystem root writable", func(p *Plan) { p.SecretRoot = "/" }},
+		{"writable contains executable", func(p *Plan) { p.SecretRoot = "/usr" }},
+		{"nested writable roots", func(p *Plan) { p.StatusRoot = filepath.Join(p.SecretRoot, "status") }},
+		{"secret id directory contains config", func(p *Plan) { p.SecretIDFile = "/etc/steward/secret-id" }},
 		{"shared source", func(p *Plan) {
 			p.Bindings = append(p.Bindings, Binding{TenantID: "tenant-b", SecretID: "key", Purpose: secretmaterial.PurposeConnector, KVPath: p.Bindings[0].KVPath, Field: p.Bindings[0].Field, ExpectedVersion: 1})
 		}},
@@ -95,6 +104,54 @@ func TestCompileRejectsBroadOrAliasedAuthority(t *testing.T) {
 				t.Fatal("accepted unsafe plan")
 			}
 		})
+	}
+}
+
+func TestCompileIsIndependentOfBindingOrder(t *testing.T) {
+	plan := validPlan()
+	plan.Bindings = append(plan.Bindings, Binding{TenantID: "tenant-a", SecretID: "inference", Purpose: secretmaterial.PurposeInference,
+		KVPath: "steward-kv/data/tenant-a/inference", Field: "token", ExpectedVersion: 7})
+	first, err := Compile(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Bindings[0], plan.Bindings[1] = plan.Bindings[1], plan.Bindings[0]
+	second, err := Compile(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatal("bundle output depends on input binding order")
+	}
+}
+
+func TestLoadPlanIsStrictAndRejectsWritableInput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plan.json")
+	raw, err := json.Marshal(validPlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPlan(path); err != nil {
+		t.Fatalf("LoadPlan valid: %v", err)
+	}
+	unknown := append(append([]byte(nil), raw[:len(raw)-1]...), []byte(`,"unknown":true}`)...)
+	if err := os.WriteFile(path, unknown, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPlan(path); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("LoadPlan unknown field error = %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o620); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPlan(path); err == nil {
+		t.Fatal("LoadPlan accepted group-writable input")
 	}
 }
 

@@ -86,11 +86,20 @@ owner-only credential files and presents only admitted inference routes or named
 connector operations to a workload. OpenBao Agent or another trusted service may
 materialize those files without becoming a Steward dependency.
 
+`stewardctl secret openbao compile` can generate exact KV v2 read policy,
+fail-closed Agent templates, an expected-version manifest, and a systemd sandbox.
+The compiler neither contacts OpenBao nor accepts provider credentials. Review the
+generated policy and unit before installation; OpenBao, its AppRole bootstrap,
+audit, recovery, and transport remain operator-managed trust boundaries.
+
 Run `stewardctl secret materialization check` as the Gateway service identity
 before validation. It verifies deterministic tenant paths, ownership, modes,
-link and filesystem boundaries, stable reads, and bounded visible-ASCII values
-without printing a value, hash, length, or provider path. The result is only a
-point-in-time preflight; Gateway's later stable file read remains authoritative.
+link and filesystem boundaries, stable reads, bounded visible-ASCII values, and,
+for a compiled OpenBao handoff, an expected provider-version marker. It never
+prints a value, hash, length, provider path, or filesystem path. Value and marker
+templates are not atomic, so the result is a convergence preflight rather than a
+cryptographic version binding. Gateway's later stable value read remains
+authoritative.
 The materializer, Gateway, and host root are trusted components, and plaintext
 still exists in the protected destination file and Gateway memory. See
 [Store and distribute credentials without exposing them to agents](docs/guides/secrets.md).

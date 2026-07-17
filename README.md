@@ -143,7 +143,11 @@ to require one independently signed exact request before each managed effect.
 For inference keys and connector tokens, follow the
 [secret materialization guide](https://hardrails.github.io/steward/guides/secrets/)
 to keep reusable values in Gateway while OpenBao or another trusted service
-manages storage and distribution.
+manages storage and distribution. `stewardctl secret openbao compile` turns a
+strict non-secret plan into exact KV v2 read policy, fail-closed Agent templates,
+an expected-version manifest, and a sandboxed systemd service. OpenBao remains an
+optional, separately operated service; Steward never exposes its tokens or rendered
+values to the agent or React console.
 
 After admission, replace `executor-DIGEST` with the returned `runtime_ref` to query
 the workload through the bearer-protected loopback API:
