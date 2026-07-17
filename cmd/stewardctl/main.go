@@ -57,7 +57,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	case "policy":
 		return artifact(arguments[1:], stdout, admission.PolicyPayloadType)
 	case "permit":
-		return permitCommand(arguments[1:], stdout)
+		return permitCommand(arguments[1:], stdout, stderr)
 	case "task":
 		return taskCommand(arguments[1:], stdout)
 	case "executor-command":
@@ -70,6 +70,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return nodeCommand(arguments[1:], stdout)
 	case "gateway":
 		return gatewayCommand(arguments[1:], stdout)
+	case "secret":
+		return secretCommand(arguments[1:], stdout)
 	case "image":
 		return imageCommand(arguments[1:], stdout)
 	case "agent-release":
@@ -98,7 +100,9 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl control pki|tenant|operator|enrollment|node|node-credential|operations|attention|command|credential|evidence|evidence-capture ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
 	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state ...")
-	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector|service ...")
+	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector|service|effects ...")
+	fmt.Fprintln(writer, "       stewardctl gateway effects check -config FILE -intent FILE -policy FILE -site-root-public-key FILE -site-root-key-id ID")
+	fmt.Fprintln(writer, "       stewardctl secret materialization check -manifest FILE [-root DIRECTORY]")
 	fmt.Fprintln(writer, "       stewardctl image inspect|import -archive FILE ...")
 	fmt.Fprintln(writer, "       stewardctl agent-release issue|verify ...")
 	fmt.Fprintln(writer, "       stewardctl agent-catalog issue|verify|list|search|show|compare ...")

@@ -185,7 +185,11 @@ func executeRolloutTarget(
 				return fmt.Errorf("preflight rollout node: %w", callErr)
 			}
 			if node.NodeID != target.prepared.Target().NodeID ||
-				!nodeSupportsRollout(node, run.plan.TenantID) {
+				!nodeSupportsRollout(
+					node,
+					run.plan.TenantID,
+					target.prepared.Intent().EffectMode == admission.EffectModeAuthorized,
+				) {
 				return markRolloutActionRequired(
 					store, run, index, stdout, jsonOutput,
 					reasonNodePreflightFailed,

@@ -51,21 +51,37 @@ func TestPermitIssueAndVerifyExactRequest(t *testing.T) {
 	t.Cleanup(func() { timeNow = priorNow })
 
 	var output bytes.Buffer
+	var issueSummary bytes.Buffer
 	err := run([]string{
 		"permit", "issue", "-admission", admissionPath, "-intent", intentPath, "-trust", trustPath, "-request", requestPath,
 		"-connector-id", "ticketing", "-operation-id", "create-ticket", "-task-id", "task-123",
 		"-valid-for", "10m", "-key", privatePath, "-key-id", "approver-a", "-out", permitPath,
 		"-header-out", headerPath,
-	}, &output, &bytes.Buffer{})
+	}, &output, &issueSummary)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !strings.HasPrefix(output.String(), "sha256:") {
-		t.Fatalf("issue output=%q", output.String())
 	}
 	raw, err := os.ReadFile(permitPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	permitDigest := dsse.Digest(raw)
+	if output.String() != permitDigest+"\n" {
+		t.Fatalf("issue stdout=%q, want digest only", output.String())
+	}
+	var summary permitApprovalSummary
+	if err := json.Unmarshal(issueSummary.Bytes(), &summary); err != nil {
+		t.Fatalf("decode approval summary %q: %v", issueSummary.String(), err)
+	}
+	if summary.SchemaVersion != "steward.action-permit-approval-summary.v1" || summary.PermitDigest != permitDigest ||
+		summary.EffectMode != admission.EffectModeStandard || summary.TenantID != intent.TenantID ||
+		summary.NodeID != intent.NodeID || summary.InstanceID != intent.InstanceID || summary.Generation != intent.Generation ||
+		summary.ConnectorID != "ticketing" || summary.OperationID != "create-ticket" || summary.Method != "POST" ||
+		summary.Path != "/v1/tickets" || summary.TaskID != "task-123" ||
+		summary.RequestDigest != actionpermit.RequestDigest(request) || summary.RequestBytes != int64(len(request)) ||
+		summary.NotBefore != "2026-07-13T18:29:55Z" || summary.ExpiresAt != "2026-07-13T18:39:55Z" ||
+		summary.AuthorityKey != "approver-a" {
+		t.Fatalf("approval summary=%#v", summary)
 	}
 	envelope, err := dsse.Parse(raw)
 	if err != nil {
@@ -104,6 +120,17 @@ func TestPermitIssueAndVerifyExactRequest(t *testing.T) {
 		verified.EvaluatedAt != "2026-07-13T18:30:00Z" || verified.Statement.NotBefore != "2026-07-13T18:29:55Z" ||
 		verified.Statement.ExpiresAt != "2026-07-13T18:39:55Z" {
 		t.Fatalf("verified=%#v", verified)
+	}
+	if err := os.Chmod(requestPath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"permit", "verify", "-in", permitPath, "-public-key", publicPath, "-key-id", "approver-a", "-request", requestPath,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "permission policy") {
+		t.Fatalf("verify writable request error=%v", err)
+	}
+	if err := os.Chmod(requestPath, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	output.Reset()
@@ -277,6 +304,12 @@ func TestPermitIssueSelectsAuthorizedEffectsV2AndChecksAdmissionMode(t *testing.
 		!strings.Contains(err.Error(), "effect mode does not match") {
 		t.Fatalf("mismatched authorized admission error = %v", err)
 	}
+	admitted.EffectMode = ""
+	writePermitJSONReplace(t, admissionPath, admitted)
+	if err := issue(filepath.Join(directory, "missing-authorized-mode.dsse.json")); err == nil ||
+		!strings.Contains(err.Error(), "effect mode does not match") {
+		t.Fatalf("missing authorized admission mode error = %v", err)
+	}
 	intent.EffectMode = admission.EffectModeStandard
 	writePermitJSONReplace(t, intentPath, intent)
 	admitted.EffectMode = admission.EffectModeAuthorized
@@ -340,6 +373,30 @@ func TestPermitIssueRejectsAuthorityMismatchAndUnsafeValidity(t *testing.T) {
 	admitted.Generation = intent.Generation
 	admitted.GrantID = gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation)
 	writePermitJSONReplace(t, admissionPath, admitted)
+	validRequestPath := filepath.Join(directory, "valid-request.json")
+	if err := os.WriteFile(validRequestPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	baseWithRequest := append(append([]string(nil), base...), "-request", validRequestPath)
+	for _, input := range []struct {
+		name string
+		path string
+	}{
+		{name: "admission", path: admissionPath},
+		{name: "intent", path: intentPath},
+		{name: "request", path: validRequestPath},
+	} {
+		if err := os.Chmod(input.path, 0o666); err != nil {
+			t.Fatal(err)
+		}
+		err := run(baseWithRequest, &bytes.Buffer{}, &bytes.Buffer{})
+		if restoreErr := os.Chmod(input.path, 0o600); restoreErr != nil {
+			t.Fatal(restoreErr)
+		}
+		if err == nil || !strings.Contains(err.Error(), "permission policy") {
+			t.Fatalf("writable %s error=%v", input.name, err)
+		}
+	}
 	invalidLifetime := append(append([]string(nil), base...), "-valid-for", "1.5s")
 	if err := run(invalidLifetime, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "whole seconds") {
 		t.Fatalf("fractional validity error=%v", err)
@@ -465,10 +522,6 @@ func TestPermitIssueRejectsAuthorityMismatchAndUnsafeValidity(t *testing.T) {
 	if err := os.WriteFile(headerPath, []byte("keep\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	validRequestPath := filepath.Join(directory, "valid-request.json")
-	if err := os.WriteFile(validRequestPath, []byte(`{}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	transactional := append(append([]string(nil), base...), "-request", validRequestPath, "-header-out", headerPath)
 	if err := run(transactional, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("existing header output error=%v", err)
@@ -572,6 +625,15 @@ func TestPermitAuditCorrelatesExpiredPermitAndExactReceiptBindings(t *testing.T)
 		"permit", "audit", "-in", permitPath, "-public-key", actionPublicPath, "-key-id", "approver-a",
 		"-receipts", receiptsPath, "-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/gateway",
 		"-receipt-epoch", "3", "-request", requestPath, "-expected-sequence", "2", "-expected-chain-hash", head.ChainHash,
+	}
+	if err := os.Chmod(requestPath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(auditArguments, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "permission policy") {
+		t.Fatalf("audit writable request error=%v", err)
+	}
+	if err := os.Chmod(requestPath, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	var output bytes.Buffer
 	if err := run(auditArguments, &output, &bytes.Buffer{}); err != nil {

@@ -44,13 +44,13 @@ type permitAdmission struct {
 	EffectMode        string                  `json:"effect_mode,omitempty"`
 }
 
-func permitCommand(arguments []string, stdout io.Writer) error {
+func permitCommand(arguments []string, stdout, stderr io.Writer) error {
 	if len(arguments) == 0 {
 		return errors.New("permit command requires issue, verify, or audit")
 	}
 	switch arguments[0] {
 	case "issue":
-		return issuePermit(arguments[1:], stdout)
+		return issuePermit(arguments[1:], stdout, stderr)
 	case "verify":
 		return verifyPermit(arguments[1:], stdout)
 	case "audit":
@@ -60,7 +60,7 @@ func permitCommand(arguments []string, stdout io.Writer) error {
 	}
 }
 
-func issuePermit(arguments []string, stdout io.Writer) error {
+func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("permit issue", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	admissionPath := flags.String("admission", "", "Executor admission response JSON")
@@ -96,17 +96,17 @@ func issuePermit(arguments []string, stdout io.Writer) error {
 		return errors.New("permit and header outputs must be different files")
 	}
 
-	admissionRaw, err := readBounded(*admissionPath)
+	admissionRaw, err := securefile.Read(*admissionPath, maxArtifactBytes, securefile.TrustFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("read admission response: %w", err)
 	}
 	var admitted permitAdmission
 	if err := dsse.DecodeStrictInto(admissionRaw, maxArtifactBytes, &admitted); err != nil {
 		return fmt.Errorf("decode admission response: %w", err)
 	}
-	intentRaw, err := readBounded(*intentPath)
+	intentRaw, err := securefile.Read(*intentPath, maxArtifactBytes, securefile.TrustFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("read instance intent: %w", err)
 	}
 	var intent admission.InstanceIntent
 	if err := dsse.DecodeStrictInto(intentRaw, maxArtifactBytes, &intent); err != nil {
@@ -115,7 +115,7 @@ func issuePermit(arguments []string, stdout io.Writer) error {
 	if err := intent.Validate(admission.AuthenticatedIdentity{TenantID: intent.TenantID, NodeID: intent.NodeID}); err != nil {
 		return err
 	}
-	if admitted.EffectMode != "" && admitted.EffectMode != intent.EffectMode {
+	if admitted.EffectMode != intent.EffectMode {
 		return errors.New("admission response effect mode does not match the instance intent")
 	}
 	if admitted.Generation != intent.Generation || admitted.CapsuleDigest != intent.CapsuleDigest ||
@@ -142,7 +142,7 @@ func issuePermit(arguments []string, stdout io.Writer) error {
 		if trustedOperation.ContentType == "" {
 			return errors.New("the trusted connector operation does not accept a request body")
 		}
-		request, err = securefile.Read(*requestPath, maxPermitRequestBytes, securefile.Regular)
+		request, err = securefile.Read(*requestPath, maxPermitRequestBytes, securefile.TrustFile)
 		if err != nil {
 			return fmt.Errorf("read exact connector request: %w", err)
 		}
@@ -190,11 +190,53 @@ func issuePermit(arguments []string, stdout io.Writer) error {
 		}
 		outputs = append(outputs, permitOutput{path: *headerOutput, contents: []byte(header + "\n")})
 	}
+	if err := writePermitApprovalSummary(stderr, verified, trustedOperation); err != nil {
+		return fmt.Errorf("write action-permit approval summary: %w", err)
+	}
 	if err := writePermitOutputs(outputs); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintln(stdout, verified.EnvelopeDigest)
 	return err
+}
+
+type permitApprovalSummary struct {
+	SchemaVersion string `json:"schema_version"`
+	PermitDigest  string `json:"permit_digest"`
+	EffectMode    string `json:"effect_mode"`
+	TenantID      string `json:"tenant_id"`
+	NodeID        string `json:"node_id"`
+	InstanceID    string `json:"instance_id"`
+	Generation    uint64 `json:"generation"`
+	ConnectorID   string `json:"connector_id"`
+	OperationID   string `json:"operation_id"`
+	Method        string `json:"method"`
+	Path          string `json:"path"`
+	TaskID        string `json:"task_id"`
+	RequestDigest string `json:"request_digest"`
+	RequestBytes  int64  `json:"request_bytes"`
+	NotBefore     string `json:"not_before"`
+	ExpiresAt     string `json:"expires_at"`
+	AuthorityKey  string `json:"authority_key_id"`
+}
+
+func writePermitApprovalSummary(writer io.Writer, verified actionpermit.Verified, operation validatedActionTrust) error {
+	effectMode := verified.Statement.EffectMode
+	if effectMode == "" {
+		effectMode = admission.EffectModeStandard
+	}
+	encoder := json.NewEncoder(writer)
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(permitApprovalSummary{
+		SchemaVersion: "steward.action-permit-approval-summary.v1", PermitDigest: verified.EnvelopeDigest,
+		EffectMode: effectMode, TenantID: verified.Statement.TenantID, NodeID: verified.Statement.NodeID,
+		InstanceID: verified.Statement.InstanceID, Generation: verified.Statement.Generation,
+		ConnectorID: verified.Statement.ConnectorID, OperationID: verified.Statement.OperationID,
+		Method: operation.Method, Path: operation.Path, TaskID: verified.Statement.TaskID,
+		RequestDigest: verified.Statement.RequestDigest, RequestBytes: verified.Statement.RequestBytes,
+		NotBefore: verified.Statement.NotBefore, ExpiresAt: verified.Statement.ExpiresAt,
+		AuthorityKey: verified.KeyID,
+	})
 }
 
 func verifyPermit(arguments []string, stdout io.Writer) error {
@@ -229,9 +271,9 @@ func verifyPermit(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	if *requestPath != "" {
-		request, err := securefile.Read(*requestPath, maxPermitRequestBytes, securefile.Regular)
+		request, err := securefile.Read(*requestPath, maxPermitRequestBytes, securefile.TrustFile)
 		if err != nil {
-			return err
+			return fmt.Errorf("read exact connector request: %w", err)
 		}
 		if verified.Statement.RequestDigest != actionpermit.RequestDigest(request) || verified.Statement.RequestBytes != int64(len(request)) {
 			return errors.New("action permit does not bind the supplied request bytes")
@@ -292,9 +334,9 @@ func auditPermit(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	if *requestPath != "" {
-		request, err := securefile.Read(*requestPath, maxPermitRequestBytes, securefile.Regular)
+		request, err := securefile.Read(*requestPath, maxPermitRequestBytes, securefile.TrustFile)
 		if err != nil {
-			return err
+			return fmt.Errorf("read exact connector request: %w", err)
 		}
 		if verified.Statement.RequestDigest != actionpermit.RequestDigest(request) ||
 			verified.Statement.RequestBytes != int64(len(request)) {
@@ -409,6 +451,8 @@ func checkPermitReceiptBindings(statement actionpermit.Statement, authorityKeyID
 type validatedActionTrust struct {
 	PolicyDigest string
 	ContentType  string
+	Method       string
+	Path         string
 }
 
 func validateActionTrust(
@@ -484,7 +528,7 @@ func validateActionTrust(
 	if err != nil {
 		return validatedActionTrust{}, errors.New("action trust inventory contains an unsupported connector operation method")
 	}
-	return validatedActionTrust{PolicyDigest: policyDigest, ContentType: contentType}, nil
+	return validatedActionTrust{PolicyDigest: policyDigest, ContentType: contentType, Method: operation.Method, Path: operation.Path}, nil
 }
 
 func permitEvaluationTime(value string) (time.Time, error) {

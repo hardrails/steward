@@ -1001,6 +1001,7 @@ func permitAdmissionFromNodeState(state nodeclient.State) permitAdmission {
 		ConnectorURL:      state.ConnectorURL,
 		ConnectorIDs:      append([]string(nil), state.ConnectorIDs...),
 		RoutePolicyDigest: state.RoutePolicyDigest,
+		EffectMode:        state.EffectMode,
 	}
 }
 
@@ -1024,6 +1025,7 @@ func validateActivationAdmission(
 		) ||
 		admitted.ServicePath != "/v1/services/"+admitted.GrantID+"/" ||
 		admitted.ServiceID != agentrelease.HermesServiceID ||
+		admitted.EffectMode != inputs.intent.EffectMode ||
 		!canonicalActivationRunDigest(admitted.RoutePolicyDigest) {
 		return errors.New("Executor admission does not match the exact activation identity and service grant")
 	}

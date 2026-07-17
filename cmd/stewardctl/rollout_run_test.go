@@ -539,7 +539,7 @@ func TestNodeSupportsRolloutRequiresAllProtocolFourCapabilities(t *testing.T) {
 			controlprotocol.ExecutorCapabilityRolloutAuthorizationContextV1,
 		},
 	}
-	if !nodeSupportsRollout(base, "tenant-a") {
+	if !nodeSupportsRollout(base, "tenant-a", false) {
 		t.Fatal("fully capable active tenant node was rejected")
 	}
 	for _, missing := range []string{
@@ -552,9 +552,19 @@ func TestNodeSupportsRolloutRequiresAllProtocolFourCapabilities(t *testing.T) {
 			append([]string(nil), base.Capabilities...),
 			func(capability string) bool { return capability == missing },
 		)
-		if nodeSupportsRollout(node, "tenant-a") {
+		if nodeSupportsRollout(node, "tenant-a", false) {
 			t.Fatalf("node missing %q was accepted", missing)
 		}
+	}
+	if nodeSupportsRollout(base, "tenant-a", true) {
+		t.Fatal("authorized-effects rollout accepted a node without the capability")
+	}
+	base.Capabilities = append(
+		base.Capabilities,
+		controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
+	)
+	if !nodeSupportsRollout(base, "tenant-a", true) {
+		t.Fatal("authorized-effects capable node was rejected")
 	}
 }
 
