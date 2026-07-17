@@ -461,6 +461,9 @@ func effectBundleConnectorIDs(plan effectBundlePlan) []string {
 func requireAdmittedBundleAuthority(admitted permitAdmission, keyID string, public ed25519.PublicKey, connectorIDs []string) error {
 	matched := false
 	for _, authority := range admitted.ActionAuthorities {
+		if !effectBundleRouteID(authority.KeyID) {
+			return errors.New("admission response contains an invalid action authority ID")
+		}
 		decoded, err := base64.StdEncoding.DecodeString(authority.PublicKey)
 		if err != nil || len(decoded) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(decoded) != authority.PublicKey {
 			return errors.New("admission response contains an invalid action authority")
@@ -540,6 +543,9 @@ func trustedEffectBundleAuthorities(
 	trusted := make(map[string]ed25519.PublicKey)
 	var baseline []effectBundlePreparedStep
 	for _, authority := range context.admitted.ActionAuthorities {
+		if !effectBundleRouteID(authority.KeyID) {
+			return nil, nil, errors.New("admission response contains an invalid action authority ID")
+		}
 		public, err := base64.StdEncoding.DecodeString(authority.PublicKey)
 		if err != nil || len(public) != ed25519.PublicKeySize || base64.StdEncoding.EncodeToString(public) != authority.PublicKey {
 			return nil, nil, errors.New("admission response contains an invalid action authority")

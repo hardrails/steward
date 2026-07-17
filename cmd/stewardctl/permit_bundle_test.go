@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -259,5 +260,24 @@ func TestEffectBundlePlanRejectsAmbiguousAndUnsafeInputs(t *testing.T) {
 				t.Fatalf("load plan error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestEffectBundleRejectsMalformedAdmissionAuthorityIDEvenWhenUnused(t *testing.T) {
+	public := make(ed25519.PublicKey, ed25519.PublicKeySize)
+	admitted := permitAdmission{ActionAuthorities: []gateway.GrantActionAuthority{{
+		KeyID:     "unused/unsafe",
+		PublicKey: base64.StdEncoding.EncodeToString(public),
+	}}}
+	if err := requireAdmittedBundleAuthority(admitted, "approver-a", public, []string{"mail"}); err == nil || !strings.Contains(err.Error(), "invalid action authority ID") {
+		t.Fatalf("admitted authority error = %v", err)
+	}
+	_, _, err := trustedEffectBundleAuthorities(
+		effectBundleContext{admitted: admitted, threshold: 1},
+		effectBundlePlan{Steps: []effectBundlePlanStep{{ConnectorID: "mail"}}},
+		"unused", time.Minute,
+	)
+	if err == nil || !strings.Contains(err.Error(), "invalid action authority ID") {
+		t.Fatalf("trusted authority error = %v", err)
 	}
 }
