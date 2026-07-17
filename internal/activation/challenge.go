@@ -104,9 +104,8 @@ func (challenge CanaryChallengeV1) Validate() error {
 		challenge.Generation == 0 || !grantIDPattern.MatchString(challenge.GrantID) {
 		return errors.New("activation canary challenge contains an invalid runtime binding")
 	}
-	if challenge.ServiceID != agentrelease.HermesServiceID ||
-		challenge.OperationID != agentrelease.HermesOperationID {
-		return errors.New("activation canary challenge is not the closed Hermes operation")
+	if _, ok := agentrelease.CanaryContractForOperation(challenge.ServiceID, challenge.OperationID); !ok {
+		return errors.New("activation canary challenge is not a closed built-in operation")
 	}
 	if len(challenge.TaskAuthorities) == 0 || len(challenge.TaskAuthorities) > MaxTaskAuthorities {
 		return errors.New("activation canary challenge has an invalid task-authority count")

@@ -27,7 +27,7 @@ func createActivation(arguments []string, stdout io.Writer) error {
 	activationIDFlag := flags.String("activation-id", "", "stable activation ID; generated when omitted")
 	releasePath := flags.String("release", "", "publisher-signed agent release")
 	policyPath := flags.String("policy", "", "site-root-signed policy")
-	intentPath := flags.String("intent", "", "fresh-state Hermes instance intent")
+	intentPath := flags.String("intent", "", "fresh-state agent instance intent")
 	archiveFlag := flags.String("archive", "", "exact offline OCI archive")
 	publisherPublicPath := flags.String("publisher-public-key", "", "pinned publisher public key")
 	publisherKeyID := flags.String("publisher-key-id", "", "publisher DSSE key ID")
@@ -39,7 +39,7 @@ func createActivation(arguments []string, stdout io.Writer) error {
 	importTimeout := flags.Duration("image-import-timeout", 30*time.Minute, "archive copy and Docker image import ceiling")
 	admissionTimeout := flags.Duration("admission-timeout", time.Minute, "Executor admission ceiling")
 	startupTimeout := flags.Duration("startup-timeout", 2*time.Minute, "runtime startup ceiling")
-	canaryTimeout := flags.Duration("canary-timeout", 5*time.Minute, "Hermes canary ceiling")
+	canaryTimeout := flags.Duration("canary-timeout", 5*time.Minute, "agent canary ceiling")
 	evidenceTimeout := flags.Duration("evidence-timeout", time.Minute, "evidence collection ceiling")
 	if err := flags.Parse(arguments); err != nil {
 		return err

@@ -213,15 +213,14 @@ func verifyActivation(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read activation canary result: %w", err)
 	}
-	sessionID := agentrelease.HermesSessionIDPrefix + "-" + inputs.plan.ActivationID
-	hermes, err := activation.VerifyHermesWorkspaceAuditResultV1(resultRaw, sessionID)
+	canary, err := verifyActivationCanaryResult(inputs, resultRaw)
 	if err != nil {
 		return err
 	}
-	if hermes.RunID != submit.RunID ||
-		hermes.ManifestDigest !=
+	if canary.RunID != submit.RunID ||
+		canary.ManifestDigest !=
 			inputs.release.Release.Canary.ExpectedWorkspaceManifestDigest {
-		return errors.New("Hermes result does not match the dispatched run and signed release qualification")
+		return errors.New("agent result does not match the dispatched run and signed release qualification")
 	}
 
 	gatewayEvidence, err := verifyStoredActivationGatewayEvidence(
@@ -325,6 +324,10 @@ func verifyActivationChallenge(
 	chain activationStateChain,
 	proof activation.ProofV1,
 ) error {
+	contract, err := activationCanaryContract(inputs)
+	if err != nil {
+		return err
+	}
 	planDigest, err := activation.PlanDigestV1(inputs.planRaw)
 	if err != nil {
 		return err
@@ -347,8 +350,8 @@ func verifyActivationChallenge(
 		challenge.RuntimeRef != chain.latest().RuntimeRef ||
 		challenge.Generation != inputs.intent.Generation ||
 		challenge.GrantID != admitted.GrantID ||
-		challenge.ServiceID != agentrelease.HermesServiceID ||
-		challenge.OperationID != agentrelease.HermesOperationID ||
+		challenge.ServiceID != contract.ServiceID ||
+		challenge.OperationID != contract.OperationID ||
 		!slicesEqualTaskPins(challenge.TaskAuthorities, pins) {
 		return errors.New("activation canary challenge does not match every retained activation binding")
 	}

@@ -396,7 +396,7 @@ async function handle(request, response, model) {
     }
     const runID = `run_${randomBytes(16).toString("hex")}`;
     const sessionID = document.session_id ?? runID.slice(4);
-    const record = { run_id: runID, status: "queued" };
+    const record = { run_id: runID, session_id: sessionID, status: "queued" };
     runs.set(runID, record);
     void executeRun(record, document.message, sessionID, model);
     sendJSON(response, 202, record);

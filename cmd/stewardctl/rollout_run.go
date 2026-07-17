@@ -45,6 +45,7 @@ type verifiedRolloutRun struct {
 	policyRaw     []byte
 	witnessPublic ed25519.PublicKey
 	verified      admission.VerifiedCapsuleImport
+	contract      agentrelease.CanaryContract
 	targets       []verifiedRolloutRunTarget
 	states        []rollout.TargetStateV1
 	stateCounts   []uint64
@@ -93,8 +94,8 @@ func runRollout(arguments []string, stdout io.Writer) (resultErr error) {
 	witnessPublicPath := flags.String("witness-public-key", "", "pinned controller witness public key PEM")
 	commandPrivatePath := flags.String("command-private-key", "", "owner-only common command private key PEM")
 	commandKeyID := flags.String("command-key-id", "", "command key ID authorized for admit, start, and activation-canary")
-	taskPrivatePath := flags.String("task-private-key", "", "owner-only Hermes task private key PEM")
-	taskKeyID := flags.String("task-key-id", "", "Hermes task key ID")
+	taskPrivatePath := flags.String("task-private-key", "", "owner-only agent task private key PEM")
+	taskKeyID := flags.String("task-key-id", "", "agent task key ID")
 	jsonOutput := flags.Bool("json", false, "emit stable machine-readable status")
 	if err := flags.Parse(arguments); err != nil {
 		return err
@@ -103,7 +104,7 @@ func runRollout(arguments []string, stdout io.Writer) (resultErr error) {
 		*siteRootPublicPath == "" || *siteRootKeyID == "" || *witnessPublicPath == "" ||
 		*commandPrivatePath == "" || *commandKeyID == "" ||
 		*taskPrivatePath == "" || *taskKeyID == "" || flags.NArg() != 0 {
-		return errors.New("rollout run requires -dir, publisher/site-root/witness trust, one common command key, one Hermes task key, control credentials, and no positional arguments")
+		return errors.New("rollout run requires -dir, publisher/site-root/witness trust, one common command key, one agent task key, control credentials, and no positional arguments")
 	}
 	directory, err := filepath.Abs(*directoryFlag)
 	if err != nil {
@@ -236,8 +237,8 @@ func loadVerifiedRolloutRun(
 		plan.Archive.Bytes != verifiedRelease.Release.Archive.SizeBytes {
 		return verifiedRolloutRun{}, errors.New("rollout plan archive differs from the authenticated release")
 	}
-	if plan.Canary.Kind != activation.CanaryHermesWorkspaceAuditV1 ||
-		verifiedRelease.Release.Canary.Kind != agentrelease.CanaryKindHermesWorkspaceAuditV1 {
+	contract, ok := agentrelease.CanaryContractForKind(verifiedRelease.Release.Canary.Kind)
+	if !ok || plan.Canary.Kind != contract.Kind {
 		return verifiedRolloutRun{}, errors.New("rollout canary differs from the authenticated release recipe")
 	}
 	if err := requireDedicatedActivationPolicy(verified.SitePolicy); err != nil {
@@ -260,6 +261,7 @@ func loadVerifiedRolloutRun(
 		releaseRaw: releaseRaw, policyRaw: policyRaw,
 		witnessPublic: append(ed25519.PublicKey(nil), witnessPublic...),
 		verified:      verified,
+		contract:      contract,
 		targets:       make([]verifiedRolloutRunTarget, len(plan.Targets)),
 		states:        states,
 		stateCounts:   make([]uint64, len(plan.Targets)),
@@ -318,12 +320,12 @@ func loadVerifiedRolloutRun(
 			return verifiedRolloutRun{}, fmt.Errorf("rollout target %d deterministic activation companions changed", index)
 		}
 		intent := prepared.Intent()
-		operation, err := decodeServiceTrust(serviceTrustRaw, intent, agentrelease.HermesOperationID)
-		if err != nil || operation.ServiceID != agentrelease.HermesServiceID ||
+		operation, err := decodeServiceTrust(serviceTrustRaw, intent, contract.OperationID)
+		if err != nil || operation.ServiceID != contract.ServiceID ||
 			operation.TaskProtocol != connectorledger.TaskProtocolLifecycleV1 ||
 			operation.MaxRequestBytes < int64(agentrelease.MaxCanaryRequestBytes) ||
 			operation.PolicyDigest != plan.Targets[index].OperationPolicyDigest {
-			return verifiedRolloutRun{}, fmt.Errorf("rollout target %d retained Hermes service trust differs from the plan", index)
+			return verifiedRolloutRun{}, fmt.Errorf("rollout target %d retained agent service trust differs from the plan", index)
 		}
 		stateNames, err := store.ListTargetStates(targetIndex)
 		if err != nil {

@@ -576,6 +576,7 @@ p = json.loads(sys.argv[2])
 b = p.get("body", {})
 r = b.get("result", {})
 assert p.get("status") == 200 and b.get("status") == "completed"
+assert b.get("session_id") == "qualification"
 assert r.get("payloads") == [{"media_url": None, "text": "STEWARD_OPENCLAW_WORKSPACE_AUDIT_OK"}]
 assert r.get("meta") == {"duration_ms": r["meta"]["duration_ms"], "model": sys.argv[1], "provider": "steward", "tool_calls": 1, "tool_failures": 0, "tools": ["exec"]}
 assert isinstance(r["meta"]["duration_ms"], int) and r["meta"]["duration_ms"] >= 0

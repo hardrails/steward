@@ -29,6 +29,10 @@ func verifyActivationTask(
 	inputs verifiedActivationInputs,
 	serviceTrustRaw, requestRaw []byte,
 ) (verifiedTaskBundle, error) {
+	contract, err := activationCanaryContract(inputs)
+	if err != nil {
+		return verifiedTaskBundle{}, err
+	}
 	if err := challenge.Validate(); err != nil {
 		return verifiedTaskBundle{}, err
 	}
@@ -60,8 +64,8 @@ func verifyActivationTask(
 		challenge.RuntimeRef != admitted.RuntimeRef ||
 		challenge.Generation != inputs.intent.Generation ||
 		challenge.GrantID != admitted.GrantID ||
-		challenge.ServiceID != agentrelease.HermesServiceID ||
-		challenge.OperationID != agentrelease.HermesOperationID {
+		challenge.ServiceID != contract.ServiceID ||
+		challenge.OperationID != contract.OperationID {
 		return verifiedTaskBundle{}, errors.New("activation challenge does not match the verified release, intent, and admission")
 	}
 
@@ -120,9 +124,7 @@ func verifyActivationTask(
 		return verifiedTaskBundle{}, errors.New("activation task does not use the required lifecycle protocol")
 	}
 
-	operation, err := decodeServiceTrust(
-		serviceTrustRaw, inputs.intent, agentrelease.HermesOperationID,
-	)
+	operation, err := decodeServiceTrust(serviceTrustRaw, inputs.intent, contract.OperationID)
 	if err != nil {
 		return verifiedTaskBundle{}, err
 	}
@@ -149,8 +151,8 @@ func verifyActivationTask(
 		statement.CapsuleDigest != admitted.CapsuleDigest ||
 		statement.PolicyDigest != admitted.PolicyDigest ||
 		statement.RoutePolicyDigest != admitted.RoutePolicyDigest ||
-		statement.ServiceID != agentrelease.HermesServiceID ||
-		statement.OperationID != agentrelease.HermesOperationID ||
+		statement.ServiceID != contract.ServiceID ||
+		statement.OperationID != contract.OperationID ||
 		statement.OperationPolicyDigest != operation.PolicyDigest ||
 		statement.RequestDigest != challenge.RequestDigest ||
 		statement.RequestBytes != int64(len(requestRaw)) ||

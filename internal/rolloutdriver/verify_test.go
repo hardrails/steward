@@ -3,7 +3,9 @@ package rolloutdriver
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -59,6 +61,33 @@ func TestVerifyCanaryV1QualifiesSignedRemoteEvidenceAndDerivesCheckpoint(t *test
 		!bytes.Equal(verified.CheckpointRaw(), fixture.checkpointRaw) ||
 		verified.Command().Admission.TaskAuthorities[0].KeyID != fixture.driver.taskKeyID {
 		t.Fatal("verified artifact accessor leaked mutable storage")
+	}
+}
+
+func TestVerifyCanaryV1QualifiesOpenClawRemoteEvidence(t *testing.T) {
+	fixture := newVerifiedRolloutCanaryFixtureForKind(
+		t, agentrelease.CanaryKindOpenClawWorkspaceAuditV1,
+	)
+	verified, err := VerifyCanaryV1(fixture.input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := base64.StdEncoding.DecodeString(verified.Result().TerminalResultBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canary, err := activation.VerifyCanaryResultV1(
+		agentrelease.CanaryKindOpenClawWorkspaceAuditV1,
+		terminal,
+		fixture.prepared.Target().ActivationID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.Result().RunID != rolloutCanaryRunID ||
+		canary.ManifestDigest != agentrelease.OpenClawWorkspaceAuditManifestDigest ||
+		verified.Command().Admission.ServiceID != agentrelease.OpenClawServiceID {
+		t.Fatalf("unexpected verified OpenClaw rollout evidence: %#v", verified.Result())
 	}
 }
 
@@ -190,8 +219,17 @@ type verifiedRolloutCanaryFixture struct {
 }
 
 func newVerifiedRolloutCanaryFixture(t *testing.T) verifiedRolloutCanaryFixture {
+	return newVerifiedRolloutCanaryFixtureForKind(
+		t, agentrelease.CanaryKindHermesWorkspaceAuditV1,
+	)
+}
+
+func newVerifiedRolloutCanaryFixtureForKind(
+	t *testing.T,
+	kind string,
+) verifiedRolloutCanaryFixture {
 	t.Helper()
-	driver := newDriverFixture(t)
+	driver := newDriverFixtureForKind(t, kind)
 	driver.now = time.Now().UTC().Truncate(time.Second)
 	driver.plan.CreatedAt = driver.now.Add(-time.Minute).Format(time.RFC3339Nano)
 	driver.plan.Deadline = driver.now.Add(time.Hour).Format(time.RFC3339Nano)
@@ -222,7 +260,15 @@ func newVerifiedRolloutCanaryFixture(t *testing.T) verifiedRolloutCanaryFixture 
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal := rolloutHermesTerminal(t, prepared.Target().ActivationID)
+	var terminal []byte
+	switch kind {
+	case agentrelease.CanaryKindHermesWorkspaceAuditV1:
+		terminal = rolloutHermesTerminal(t, prepared.Target().ActivationID)
+	case agentrelease.CanaryKindOpenClawWorkspaceAuditV1:
+		terminal = rolloutOpenClawTerminal(t, prepared.Target().ActivationID)
+	default:
+		t.Fatal("unsupported fixture canary kind")
+	}
 	_, receiptPrivate := testKey(5)
 	receipts := rolloutGatewayReceipts(
 		t,
@@ -404,4 +450,56 @@ func rolloutHermesTerminal(t *testing.T, activationID string) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func rolloutOpenClawTerminal(t *testing.T, activationID string) []byte {
+	t.Helper()
+	result := struct {
+		Payloads []struct {
+			Text     string          `json:"text"`
+			MediaURL json.RawMessage `json:"media_url"`
+		} `json:"payloads"`
+		Meta struct {
+			DurationMS   int64    `json:"duration_ms"`
+			Model        string   `json:"model"`
+			Provider     string   `json:"provider"`
+			ToolCalls    int64    `json:"tool_calls"`
+			ToolFailures int64    `json:"tool_failures"`
+			Tools        []string `json:"tools"`
+		} `json:"meta"`
+	}{}
+	result.Payloads = append(result.Payloads, struct {
+		Text     string          `json:"text"`
+		MediaURL json.RawMessage `json:"media_url"`
+	}{Text: activation.OpenClawSuccessText, MediaURL: json.RawMessage("null")})
+	result.Meta.DurationMS = 7701
+	result.Meta.Model = "steward-openclaw-fixture"
+	result.Meta.Provider = "steward"
+	result.Meta.ToolCalls = 1
+	result.Meta.Tools = []string{"exec"}
+	resultRaw := mustJSON(t, result)
+	var canonicalResult any
+	if err := json.Unmarshal(resultRaw, &canonicalResult); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(mustJSON(t, canonicalResult))
+	terminal := struct {
+		RunID         string          `json:"run_id"`
+		SessionID     string          `json:"session_id"`
+		Status        string          `json:"status"`
+		Result        json.RawMessage `json:"result"`
+		ResultSHA256  string          `json:"result_sha256"`
+		Qualification struct {
+			FixtureID               string `json:"fixture_id"`
+			WorkspaceManifestDigest string `json:"workspace_manifest_digest"`
+		} `json:"qualification"`
+	}{
+		RunID:     rolloutCanaryRunID,
+		SessionID: agentrelease.OpenClawSessionIDPrefix + "-" + activationID,
+		Status:    activation.OpenClawCompletedStatus, Result: resultRaw,
+		ResultSHA256: hex.EncodeToString(sum[:]),
+	}
+	terminal.Qualification.FixtureID = agentrelease.OpenClawWorkspaceAuditFixtureID
+	terminal.Qualification.WorkspaceManifestDigest = agentrelease.OpenClawWorkspaceAuditManifestDigest
+	return append(mustJSON(t, terminal), '\n')
 }

@@ -273,6 +273,58 @@ func TestBuildCanaryRequestUsesOneActivationScopedSession(t *testing.T) {
 	}
 }
 
+func TestOpenClawReleaseAndRequestUseTheClosedQualifiedContract(t *testing.T) {
+	fixture := newReleaseFixture(t)
+	contract, ok := CanaryContractForKind(CanaryKindOpenClawWorkspaceAuditV1)
+	if !ok || contract.Profile != (admission.ProfileRef{ID: "openclaw-v1", Version: "v1"}) ||
+		contract.ServiceID != OpenClawServiceID || contract.OperationID != OpenClawOperationID ||
+		contract.ExpectedWorkspaceManifestDigest != OpenClawWorkspaceAuditManifestDigest {
+		t.Fatalf("unexpected OpenClaw contract: %#v", contract)
+	}
+	request, err := BuildCanaryRequest(contract.Request, "activation-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte(`{"message":"Run the Steward workspace audit.","session_id":"steward-activation-activation-001"}`)
+	if !bytes.Equal(request, want) {
+		t.Fatalf("request = %s, want %s", request, want)
+	}
+	if session, err := CanarySessionID(contract.Kind, "activation-001"); err != nil ||
+		session != "steward-activation-activation-001" {
+		t.Fatalf("session = %q, err = %v", session, err)
+	}
+	if observed, ok := CanaryContractForOperation(OpenClawServiceID, OpenClawOperationID); !ok || observed != contract {
+		t.Fatalf("operation contract = %#v, %t", observed, ok)
+	}
+
+	capsule := fixture.capsule
+	capsule.CapsuleID = "openclaw-workspace-audit"
+	capsule.Profile = contract.Profile
+	capsule.Image.Repository = "registry.example/steward/openclaw"
+	capsule.State = admission.StateShape{SchemaVersion: "v1", Path: "/home/node/.openclaw"}
+	capsule.Service = admission.ServiceShape{ID: contract.ServiceID, Port: 18789}
+	release := fixture.release
+	release.ReleaseID = "openclaw-workspace-audit"
+	release.Archive.Image = capsule.Image
+	release.Canary = Canary{
+		Kind: contract.Kind, ServiceID: contract.ServiceID, OperationID: contract.OperationID,
+		Request: contract.Request, RequiredStateDisposition: "new",
+		SkillManifestDigest:             fixture.release.Canary.SkillManifestDigest,
+		ExpectedWorkspaceManifestDigest: contract.ExpectedWorkspaceManifestDigest,
+		FixtureID:                       contract.FixtureID,
+	}
+	capsuleRaw := signCapsule(t, capsule, "publisher-a", fixture.private)
+	release.CapsuleDSSEBase64 = base64.StdEncoding.EncodeToString(capsuleRaw)
+	raw, err := Sign(release, "publisher-a", fixture.private, testNow)
+	if err != nil {
+		t.Fatalf("Sign OpenClaw release: %v", err)
+	}
+	verified, err := Verify(raw, map[string]ed25519.PublicKey{"publisher-a": fixture.public}, testNow)
+	if err != nil || verified.Capsule.Profile != contract.Profile || verified.Release.Canary != release.Canary {
+		t.Fatalf("Verify OpenClaw release = %#v, err = %v", verified, err)
+	}
+}
+
 func TestVerifyRejectsQualificationMutations(t *testing.T) {
 	fixture := newReleaseFixture(t)
 	tests := []struct {

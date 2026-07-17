@@ -346,6 +346,49 @@ func TestBuildCanaryCommandV1ClosesPermitPayloadAndOuterCommand(t *testing.T) {
 	}
 }
 
+func TestOpenClawRolloutBuildsTheQualifiedClosedTask(t *testing.T) {
+	fixture := newDriverFixtureForKind(t, agentrelease.CanaryKindOpenClawWorkspaceAuditV1)
+	prepared := fixture.prepare(t)
+	projection := fixture.projection(prepared)
+	artifacts, err := BuildCanaryCommandV1(CanaryInputV1{
+		Prepared:              prepared,
+		Admission:             projection,
+		TaskKeyID:             fixture.taskKeyID,
+		TaskPrivateKey:        fixture.taskPrivate,
+		TaskPublicKey:         fixture.taskPublic,
+		OperationPolicyDigest: testDigest("operation-policy"),
+		ReceiptAuthority:      fixture.receiptAuthority(),
+		Deadline:              fixture.now.Add(4 * time.Minute),
+		CommandWindow:         fixture.commandWindow(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRequest := []byte(`{"message":"Run the Steward workspace audit.","session_id":"steward-activation-activation-a"}`)
+	statement := artifacts.TaskStatement()
+	if statement.ServiceID != agentrelease.OpenClawServiceID ||
+		statement.OperationID != agentrelease.OpenClawOperationID ||
+		statement.RequestDigest != taskpermit.RequestDigest(wantRequest) ||
+		statement.RequestBytes != int64(len(wantRequest)) {
+		t.Fatalf("OpenClaw permit did not bind the qualified request: %#v", statement)
+	}
+	verified, err := activationcanary.VerifyHistoricalCommandV1(
+		artifacts.CanaryRaw(),
+		activationcanary.AdmissionContextV1{
+			NodeID: prepared.Target().NodeID, TenantID: prepared.Plan().TenantID,
+			InstanceID: prepared.Target().InstanceID, Projection: projection,
+		},
+		taskpermit.MaxValidity,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(verified.Request(), wantRequest) ||
+		verified.Permit().Statement != statement {
+		t.Fatal("verified OpenClaw command changed its closed request or permit")
+	}
+}
+
 func TestBuildCanaryCommandV1RejectsMutationsAndIncoherentExpiry(t *testing.T) {
 	fixture := newDriverFixture(t)
 	prepared := fixture.prepare(t)
@@ -443,20 +486,29 @@ type driverFixture struct {
 	taskPublic     ed25519.PublicKey
 	taskPrivate    ed25519.PrivateKey
 	receiptPublic  ed25519.PublicKey
+	contract       agentrelease.CanaryContract
 }
 
 func newDriverFixture(t *testing.T) driverFixture {
+	return newDriverFixtureForKind(t, agentrelease.CanaryKindHermesWorkspaceAuditV1)
+}
+
+func newDriverFixtureForKind(t *testing.T, kind string) driverFixture {
 	t.Helper()
+	contract, ok := agentrelease.CanaryContractForKind(kind)
+	if !ok {
+		t.Fatal("canary contract is unavailable")
+	}
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	publisherPublic, publisherPrivate := testKey(1)
 	sitePublic, sitePrivate := testKey(2)
 	commandPublic, commandPrivate := testKey(3)
 	taskPublic, taskPrivate := testKey(4)
 	receiptPublic, _ := testKey(5)
-	profileRef := admission.ProfileRef{ID: "hermes-v1", Version: "v1"}
+	profileRef := contract.Profile
 	profile, ok := admission.DefaultProfiles().Lookup(profileRef)
 	if !ok {
-		t.Fatal("Hermes profile is unavailable")
+		t.Fatal("agent profile is unavailable")
 	}
 	resources := admission.ResourceLimits{MemoryBytes: 1 << 30, CPUMillis: 2000, PIDs: 256}
 	capsule := admission.ProfileCapsule{
@@ -474,7 +526,7 @@ func newDriverFixture(t *testing.T) driverFixture {
 		Resources:    resources,
 		Capabilities: admission.Capabilities{State: true, Service: true},
 		State:        admission.StateShape{SchemaVersion: profile.StateSchemaVersion, Path: profile.StatePath},
-		Service:      admission.ServiceShape{ID: agentrelease.HermesServiceID, Port: 8766},
+		Service:      admission.ServiceShape{ID: contract.ServiceID, Port: 8766},
 	}
 	capsuleRaw := mustSignJSON(t, admission.CapsulePayloadType, capsule, "publisher-a", publisherPrivate)
 	commandKeyID := "tenant-command"
@@ -495,7 +547,7 @@ func newDriverFixture(t *testing.T) driverFixture {
 			TenantID:        "tenant-a",
 			PublisherKeyIDs: []string{"publisher-a"},
 			ResourceCeiling: resources,
-			ServiceIDs:      []string{agentrelease.HermesServiceID},
+			ServiceIDs:      []string{contract.ServiceID},
 			CommandKeys: []admission.CommandKey{{
 				KeyID:      commandKeyID,
 				PublicKey:  base64.StdEncoding.EncodeToString(commandPublic),
@@ -504,7 +556,7 @@ func newDriverFixture(t *testing.T) driverFixture {
 			TaskKeys: []admission.TaskKey{{
 				KeyID:      taskKeyID,
 				PublicKey:  base64.StdEncoding.EncodeToString(taskPublic),
-				ServiceIDs: []string{agentrelease.HermesServiceID},
+				ServiceIDs: []string{contract.ServiceID},
 			}},
 		}},
 	}
@@ -525,7 +577,7 @@ func newDriverFixture(t *testing.T) driverFixture {
 		Resources:        resources,
 		Capabilities:     admission.Capabilities{State: true, Service: true},
 		StateDisposition: "new",
-		ServiceID:        agentrelease.HermesServiceID,
+		ServiceID:        contract.ServiceID,
 	}
 	intentRaw := mustJSON(t, intent)
 	timeouts := activation.TimeoutsV1{
@@ -543,7 +595,7 @@ func newDriverFixture(t *testing.T) driverFixture {
 		IntentDigest:  dsse.Digest(intentRaw),
 		Archive:       archive,
 		Transport:     activation.TransportControlUplink,
-		Canary:        activation.CanaryV1{Kind: activation.CanaryHermesWorkspaceAuditV1},
+		Canary:        activation.CanaryV1{Kind: contract.Kind},
 		Timeouts:      timeouts,
 	}
 	activationPlanRaw, err := activation.MarshalPlanV1(activationPlan)
@@ -557,7 +609,7 @@ func newDriverFixture(t *testing.T) driverFixture {
 		ReleaseDigest: releaseDigest,
 		PolicyDigest:  verified.PolicyDigest,
 		Archive:       archive,
-		Canary:        activation.CanaryV1{Kind: activation.CanaryHermesWorkspaceAuditV1},
+		Canary:        activation.CanaryV1{Kind: contract.Kind},
 		BatchSize:     1,
 		CreatedAt:     now.Add(-time.Minute).Format(time.RFC3339Nano),
 		Deadline:      now.Add(time.Hour).Format(time.RFC3339Nano),
@@ -582,7 +634,7 @@ func newDriverFixture(t *testing.T) driverFixture {
 		intent: intent, intentRaw: intentRaw, plan: plan, planRaw: mustRolloutPlan(t, plan),
 		commandKeyID: commandKeyID, commandPublic: commandPublic, commandPrivate: commandPrivate,
 		taskKeyID: taskKeyID, taskPublic: taskPublic, taskPrivate: taskPrivate,
-		receiptPublic: receiptPublic,
+		receiptPublic: receiptPublic, contract: contract,
 	}
 }
 
@@ -624,7 +676,7 @@ func (fixture driverFixture) projection(prepared PreparedTargetV1) controlprotoc
 		CapsuleDigest: prepared.CapsuleDigest(), PolicyDigest: fixture.plan.PolicyDigest,
 		Generation: fixture.intent.Generation, EvidenceKeyID: strings.Repeat("a", 32),
 		GrantID: grantID, ServicePath: "/v1/services/" + grantID + "/",
-		ServiceID: agentrelease.HermesServiceID,
+		ServiceID: fixture.contract.ServiceID,
 		TaskAuthorities: []controlprotocol.ExecutorTaskAuthorityV1{{
 			KeyID:     fixture.taskKeyID,
 			PublicKey: base64.StdEncoding.EncodeToString(fixture.taskPublic),

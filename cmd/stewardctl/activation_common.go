@@ -183,11 +183,15 @@ func verifyActivationInputBytes(
 	if err := requireDedicatedActivationPolicy(verifiedImport.SitePolicy); err != nil {
 		return verifiedActivationInputs{}, err
 	}
+	contract, ok := agentrelease.CanaryContractForKind(release.Release.Canary.Kind)
+	if !ok {
+		return verifiedActivationInputs{}, errors.New("activation release does not select a supported canary contract")
+	}
 	if effective.Intent.StateDisposition != release.Release.Canary.RequiredStateDisposition ||
 		!effective.Intent.Capabilities.State ||
 		!effective.Intent.Capabilities.Service ||
-		effective.Intent.ServiceID != agentrelease.HermesServiceID {
-		return verifiedActivationInputs{}, errors.New("activation intent does not request the release's fresh-state Hermes service contract")
+		effective.Intent.ServiceID != contract.ServiceID {
+		return verifiedActivationInputs{}, errors.New("activation intent does not request the release's fresh-state agent service contract")
 	}
 	if archivePath == "" {
 		return verifiedActivationInputs{}, errors.New("activation archive path is unavailable")
@@ -203,10 +207,49 @@ func verifyActivationInputBytes(
 func requireDedicatedActivationPolicy(policy admission.SitePolicy) error {
 	if len(policy.Tenants) != 1 {
 		return errors.New(
-			"the Hermes activation recipe requires a one-tenant dedicated-host site policy because its persistent Docker volume has no hard byte or inode quota",
+			"the agent activation recipe requires a one-tenant dedicated-host site policy because its persistent Docker volume has no hard byte or inode quota",
 		)
 	}
 	return nil
+}
+
+func activationCanaryContract(inputs verifiedActivationInputs) (agentrelease.CanaryContract, error) {
+	kind := inputs.plan.Canary.Kind
+	if kind == "" {
+		kind = inputs.release.Release.Canary.Kind
+	}
+	if kind == "" {
+		if contract, ok := agentrelease.CanaryContractForOperation(
+			inputs.release.Release.Canary.ServiceID,
+			inputs.release.Release.Canary.OperationID,
+		); ok {
+			kind = contract.Kind
+		}
+	}
+	if kind == "" {
+		if contract, ok := agentrelease.CanaryContractForService(inputs.intent.ServiceID); ok {
+			kind = contract.Kind
+		}
+	}
+	contract, ok := agentrelease.CanaryContractForKind(kind)
+	if !ok || inputs.release.Release.Canary.Kind != "" &&
+		inputs.release.Release.Canary.Kind != contract.Kind {
+		return agentrelease.CanaryContract{}, errors.New("activation does not select a supported canary contract")
+	}
+	return contract, nil
+}
+
+func verifyActivationCanaryResult(
+	inputs verifiedActivationInputs,
+	raw []byte,
+) (activation.CanaryResultV1, error) {
+	contract, err := activationCanaryContract(inputs)
+	if err != nil {
+		return activation.CanaryResultV1{}, err
+	}
+	return activation.VerifyCanaryResultV1(
+		contract.Kind, raw, inputs.plan.ActivationID,
+	)
 }
 
 func loadVerifiedActivationInputs(

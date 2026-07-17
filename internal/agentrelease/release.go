@@ -33,12 +33,19 @@ const (
 	MaxArchiveBytes       = int64(20 << 30)
 
 	CanaryKindHermesWorkspaceAuditV1        = "hermes_workspace_audit_v1"
+	CanaryKindOpenClawWorkspaceAuditV1      = "openclaw_workspace_audit_v1"
 	HermesServiceID                         = "hermes-api"
 	HermesOperationID                       = "hermes.run"
 	HermesWorkspaceAuditInput               = "STEWARD_WORKSPACE_AUDIT"
 	HermesSessionIDPrefix                   = "steward-activation"
 	HermesWorkspaceAuditEmptyFixtureID      = "steward.workspace-audit.empty.v1"
 	HermesWorkspaceAuditEmptyManifestDigest = "sha256:44bb67d3ad826643e50057a69657757316fd25dcd700a918a6db0a38924acec6"
+	OpenClawServiceID                       = "openclaw-api"
+	OpenClawOperationID                     = "openclaw.run"
+	OpenClawWorkspaceAuditMessage           = "Run the Steward workspace audit."
+	OpenClawSessionIDPrefix                 = "steward-activation"
+	OpenClawWorkspaceAuditFixtureID         = "steward.workspace-audit.qualification.v1"
+	OpenClawWorkspaceAuditManifestDigest    = "sha256:8a88036085cd27e3e0a85ab10f3fbfed492633fa76fd18a85bb478747c4d56d5"
 	SkillManifestArtifactKind               = "skill-manifest"
 )
 
@@ -81,7 +88,7 @@ type Archive struct {
 
 // Canary is the only supported release qualification recipe. Request is a
 // closed recipe rather than concrete bytes because every activation needs a
-// distinct Hermes session ID.
+// distinct agent session ID.
 type Canary struct {
 	Kind                            string        `json:"kind"`
 	ServiceID                       string        `json:"service_id"`
@@ -94,10 +101,22 @@ type Canary struct {
 }
 
 // RequestRecipe contains no prompt or executable extension point. Verification
-// currently accepts only the exact built-in Hermes workspace-audit recipe.
+// accepts only an exact compiled-in workspace-audit recipe.
 type RequestRecipe struct {
 	Input           string `json:"input"`
 	SessionIDPrefix string `json:"session_id_prefix"`
+}
+
+// CanaryContract is one compiled-in agent recipe. It contains no executable
+// extension point; callers can select only an exact contract returned here.
+type CanaryContract struct {
+	Kind                            string
+	Profile                         admission.ProfileRef
+	ServiceID                       string
+	OperationID                     string
+	Request                         RequestRecipe
+	FixtureID                       string
+	ExpectedWorkspaceManifestDigest string
 }
 
 // Qualification binds a completed gVisor qualification evidence artifact and
@@ -125,6 +144,11 @@ type Verified struct {
 
 type hermesCanaryRequest struct {
 	Input     string `json:"input"`
+	SessionID string `json:"session_id"`
+}
+
+type openClawCanaryRequest struct {
+	Message   string `json:"message"`
 	SessionID string `json:"session_id"`
 }
 
@@ -222,24 +246,101 @@ func Verify(rawEnvelope []byte, trustedPublishers map[string]ed25519.PublicKey, 
 // activation. The activation ID is data, not authority; a later task permit
 // must sign the returned bytes before Gateway may dispatch them.
 func BuildCanaryRequest(recipe RequestRecipe, activationID string) ([]byte, error) {
-	if recipe.Input != HermesWorkspaceAuditInput ||
-		recipe.SessionIDPrefix != HermesSessionIDPrefix {
-		return nil, invalid("request recipe is not the supported Hermes workspace audit")
+	contract, ok := CanaryContractForRequest(recipe)
+	if !ok {
+		return nil, invalid("request recipe is not a supported workspace audit")
 	}
 	if !identifier(activationID, 128) {
 		return nil, invalid("activation ID is invalid")
 	}
 	sessionID := recipe.SessionIDPrefix + "-" + activationID
 	if !identifier(sessionID, 128) {
-		return nil, invalid("derived Hermes session ID exceeds its supported shape")
+		return nil, invalid("derived canary session ID exceeds its supported shape")
 	}
-	request, err := json.Marshal(hermesCanaryRequest{
-		Input: recipe.Input, SessionID: sessionID,
-	})
+	var request []byte
+	var err error
+	switch contract.Kind {
+	case CanaryKindHermesWorkspaceAuditV1:
+		request, err = json.Marshal(hermesCanaryRequest{Input: recipe.Input, SessionID: sessionID})
+	case CanaryKindOpenClawWorkspaceAuditV1:
+		request, err = json.Marshal(openClawCanaryRequest{Message: recipe.Input, SessionID: sessionID})
+	default:
+		return nil, invalid("request recipe contract is unavailable")
+	}
 	if err != nil || len(request) == 0 || len(request) > MaxCanaryRequestBytes {
-		return nil, invalid("marshal bounded Hermes canary request")
+		return nil, invalid("marshal bounded canary request")
 	}
 	return request, nil
+}
+
+// CanaryContractForKind returns one finite built-in canary contract.
+func CanaryContractForKind(kind string) (CanaryContract, bool) {
+	switch kind {
+	case CanaryKindHermesWorkspaceAuditV1:
+		return CanaryContract{
+			Kind: kind, Profile: admission.ProfileRef{ID: "hermes-v1", Version: "v1"},
+			ServiceID: HermesServiceID, OperationID: HermesOperationID,
+			Request:                         RequestRecipe{Input: HermesWorkspaceAuditInput, SessionIDPrefix: HermesSessionIDPrefix},
+			FixtureID:                       HermesWorkspaceAuditEmptyFixtureID,
+			ExpectedWorkspaceManifestDigest: HermesWorkspaceAuditEmptyManifestDigest,
+		}, true
+	case CanaryKindOpenClawWorkspaceAuditV1:
+		return CanaryContract{
+			Kind: kind, Profile: admission.ProfileRef{ID: "openclaw-v1", Version: "v1"},
+			ServiceID: OpenClawServiceID, OperationID: OpenClawOperationID,
+			Request:                         RequestRecipe{Input: OpenClawWorkspaceAuditMessage, SessionIDPrefix: OpenClawSessionIDPrefix},
+			FixtureID:                       OpenClawWorkspaceAuditFixtureID,
+			ExpectedWorkspaceManifestDigest: OpenClawWorkspaceAuditManifestDigest,
+		}, true
+	default:
+		return CanaryContract{}, false
+	}
+}
+
+// CanaryContractForRequest rejects every request recipe outside the compiled-in set.
+func CanaryContractForRequest(request RequestRecipe) (CanaryContract, bool) {
+	for _, kind := range []string{CanaryKindHermesWorkspaceAuditV1, CanaryKindOpenClawWorkspaceAuditV1} {
+		contract, _ := CanaryContractForKind(kind)
+		if contract.Request == request {
+			return contract, true
+		}
+	}
+	return CanaryContract{}, false
+}
+
+// CanaryContractForOperation rejects every service operation outside the compiled-in set.
+func CanaryContractForOperation(serviceID, operationID string) (CanaryContract, bool) {
+	for _, kind := range []string{CanaryKindHermesWorkspaceAuditV1, CanaryKindOpenClawWorkspaceAuditV1} {
+		contract, _ := CanaryContractForKind(kind)
+		if contract.ServiceID == serviceID && contract.OperationID == operationID {
+			return contract, true
+		}
+	}
+	return CanaryContract{}, false
+}
+
+// CanaryContractForService rejects every service outside the compiled-in set.
+func CanaryContractForService(serviceID string) (CanaryContract, bool) {
+	for _, kind := range []string{CanaryKindHermesWorkspaceAuditV1, CanaryKindOpenClawWorkspaceAuditV1} {
+		contract, _ := CanaryContractForKind(kind)
+		if contract.ServiceID == serviceID {
+			return contract, true
+		}
+	}
+	return CanaryContract{}, false
+}
+
+// CanarySessionID derives the only accepted activation-scoped session identity.
+func CanarySessionID(kind, activationID string) (string, error) {
+	contract, ok := CanaryContractForKind(kind)
+	if !ok || !identifier(activationID, 128) {
+		return "", invalid("canary contract or activation ID is invalid")
+	}
+	sessionID := contract.Request.SessionIDPrefix + "-" + activationID
+	if !identifier(sessionID, 128) {
+		return "", invalid("derived canary session ID exceeds its supported shape")
+	}
+	return sessionID, nil
 }
 
 func marshalAndValidate(release Release, now time.Time, publisherKey ed25519.PublicKey) ([]byte, validatedParts, error) {
@@ -318,14 +419,18 @@ func validateRelease(release Release, now time.Time, publisherKey ed25519.Public
 	if capsule.Image != release.Archive.Image {
 		return validatedParts{}, invalid("archive image tuple does not match embedded capsule")
 	}
-	if capsule.Profile != (admission.ProfileRef{ID: "hermes-v1", Version: "v1"}) ||
+	contract, ok := CanaryContractForKind(release.Canary.Kind)
+	if !ok {
+		return validatedParts{}, invalid("release canary contract is unavailable")
+	}
+	if capsule.Profile != contract.Profile ||
 		!capsule.Capabilities.State || !capsule.Capabilities.Service ||
-		capsule.Service.ID != HermesServiceID {
-		return validatedParts{}, invalid("workspace-audit canary requires the Hermes service profile")
+		capsule.Service.ID != contract.ServiceID {
+		return validatedParts{}, invalid("workspace-audit canary requires its exact service profile")
 	}
 	profile, ok := admission.DefaultProfiles().Lookup(capsule.Profile)
 	if !ok || capsule.State.Path != profile.StatePath || capsule.State.SchemaVersion != profile.StateSchemaVersion {
-		return validatedParts{}, invalid("capsule state shape differs from the built-in Hermes profile")
+		return validatedParts{}, invalid("capsule state shape differs from its built-in agent profile")
 	}
 	if err := validateArtifacts(capsule.Artifacts, release.Canary.SkillManifestDigest); err != nil {
 		return validatedParts{}, err
@@ -341,17 +446,16 @@ func validateRelease(release Release, now time.Time, publisherKey ed25519.Public
 }
 
 func validateCanary(canary Canary) error {
-	if canary.Kind != CanaryKindHermesWorkspaceAuditV1 ||
-		canary.ServiceID != HermesServiceID || canary.OperationID != HermesOperationID {
-		return invalid("release canary is not the supported Hermes workspace audit")
+	contract, ok := CanaryContractForKind(canary.Kind)
+	if !ok || canary.ServiceID != contract.ServiceID || canary.OperationID != contract.OperationID {
+		return invalid("release canary is not a supported workspace audit")
 	}
 	if !digestValue(canary.SkillManifestDigest) ||
-		canary.ExpectedWorkspaceManifestDigest != HermesWorkspaceAuditEmptyManifestDigest ||
-		canary.FixtureID != HermesWorkspaceAuditEmptyFixtureID {
+		canary.ExpectedWorkspaceManifestDigest != contract.ExpectedWorkspaceManifestDigest ||
+		canary.FixtureID != contract.FixtureID {
 		return invalid("release canary artifact bindings are invalid")
 	}
-	if canary.Request.Input != HermesWorkspaceAuditInput ||
-		canary.Request.SessionIDPrefix != HermesSessionIDPrefix ||
+	if canary.Request != contract.Request ||
 		canary.RequiredStateDisposition != "new" {
 		return invalid("release canary recipe is outside the closed workspace-audit contract")
 	}

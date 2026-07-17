@@ -742,6 +742,10 @@ func loadActivationGateway(
 	configPath string,
 	inputs verifiedActivationInputs,
 ) (activationGatewayLocal, error) {
+	contract, err := activationCanaryContract(inputs)
+	if err != nil {
+		return activationGatewayLocal{}, err
+	}
 	config, _, _, token, err := gateway.LoadConfig(configPath)
 	if err != nil {
 		return activationGatewayLocal{}, err
@@ -752,16 +756,14 @@ func loadActivationGateway(
 	); err != nil {
 		return activationGatewayLocal{}, err
 	}
-	operation, err := decodeServiceTrust(
-		trust.Bytes(), inputs.intent, agentrelease.HermesOperationID,
-	)
+	operation, err := decodeServiceTrust(trust.Bytes(), inputs.intent, contract.OperationID)
 	if err != nil {
 		return activationGatewayLocal{}, err
 	}
-	if operation.ServiceID != agentrelease.HermesServiceID ||
+	if operation.ServiceID != contract.ServiceID ||
 		operation.TaskProtocol != connectorledger.TaskProtocolLifecycleV1 ||
 		int64(agentrelease.MaxCanaryRequestBytes) > operation.MaxRequestBytes {
-		return activationGatewayLocal{}, errors.New("Gateway does not expose the bounded Hermes lifecycle canary operation")
+		return activationGatewayLocal{}, errors.New("Gateway does not expose the release's bounded lifecycle canary operation")
 	}
 	client, err := gatewayclient.New("http://"+config.ServiceAddress, token)
 	if err != nil {
@@ -931,7 +933,7 @@ func activationNodePrerequisiteError(cause error) error {
 	case apiErr.Code == "capability_unavailable" &&
 		strings.Contains(apiErr.Message, "persistent state"):
 		return fmt.Errorf(
-			"Hermes activation requires Executor -allow-unquotaed-state-on-dedicated-host; do not enable it on a shared host: %w",
+			"agent activation requires Executor -allow-unquotaed-state-on-dedicated-host; do not enable it on a shared host: %w",
 			cause,
 		)
 	default:
@@ -1011,6 +1013,10 @@ func validateActivationAdmission(
 	expectedEvidenceKeyID string,
 	requireRunning bool,
 ) error {
+	contract, err := activationCanaryContract(inputs)
+	if err != nil {
+		return err
+	}
 	statusOK := admitted.Status == "created" || admitted.Status == "running"
 	if requireRunning {
 		statusOK = admitted.Status == "running"
@@ -1024,7 +1030,7 @@ func validateActivationAdmission(
 			inputs.intent.TenantID, inputs.intent.InstanceID, inputs.intent.Generation,
 		) ||
 		admitted.ServicePath != "/v1/services/"+admitted.GrantID+"/" ||
-		admitted.ServiceID != agentrelease.HermesServiceID ||
+		admitted.ServiceID != contract.ServiceID ||
 		admitted.EffectMode != inputs.intent.EffectMode ||
 		!canonicalActivationRunDigest(admitted.RoutePolicyDigest) {
 		return errors.New("Executor admission does not match the exact activation identity and service grant")
@@ -1107,6 +1113,10 @@ func ensureActivationHandoff(
 	admitted permitAdmission,
 	admissionRaw, serviceTrustRaw []byte,
 ) ([]byte, []byte, activation.CanaryChallengeV1, error) {
+	contract, err := activationCanaryContract(inputs)
+	if err != nil {
+		return nil, nil, activation.CanaryChallengeV1{}, err
+	}
 	if err := writeActivationArtifact(
 		store, activationstore.ServiceTrustFileName, serviceTrustRaw, true,
 	); err != nil {
@@ -1139,8 +1149,8 @@ func ensureActivationHandoff(
 		TenantID:           inputs.intent.TenantID, NodeID: inputs.intent.NodeID,
 		InstanceID: inputs.intent.InstanceID, RuntimeRef: admitted.RuntimeRef,
 		Generation: inputs.intent.Generation, GrantID: admitted.GrantID,
-		ServiceID:       agentrelease.HermesServiceID,
-		OperationID:     agentrelease.HermesOperationID,
+		ServiceID:       contract.ServiceID,
+		OperationID:     contract.OperationID,
 		TaskAuthorities: authorities,
 	}
 	existing, present, err := readOptionalActivationArtifact(
@@ -1477,10 +1487,10 @@ type activationCanaryTerminalError struct {
 
 func (err *activationCanaryTerminalError) Error() string {
 	if err.code != "" {
-		return "Hermes canary ended in terminal state " + err.state +
+		return "agent canary ended in terminal state " + err.state +
 			" (" + err.code + ")"
 	}
-	return "Hermes canary ended in terminal state " + err.state
+	return "agent canary ended in terminal state " + err.state
 }
 
 type activationCanaryRetainedInvalidError struct {
@@ -1512,7 +1522,7 @@ type activationCanaryTimeoutError struct {
 }
 
 func (err *activationCanaryTimeoutError) Error() string {
-	return "Hermes canary exceeded its activation-wide deadline " +
+	return "agent canary exceeded its activation-wide deadline " +
 		err.deadline.UTC().Format(time.RFC3339Nano)
 }
 
@@ -1615,11 +1625,8 @@ func ensureActivationCanaryResult(
 		return nil, gatewayclient.TaskLifecycleStatus{}, err
 	}
 	if resultPresent {
-		hermes, err := activation.VerifyHermesWorkspaceAuditResultV1(
-			resultRaw,
-			agentrelease.HermesSessionIDPrefix+"-"+inputs.plan.ActivationID,
-		)
-		if err != nil || hermes.RunID != submit.RunID {
+		canary, err := verifyActivationCanaryResult(inputs, resultRaw)
+		if err != nil || canary.RunID != submit.RunID {
 			return nil, gatewayclient.TaskLifecycleStatus{},
 				&activationCanaryTerminalError{
 					state: "retained_result_invalid",
@@ -1721,11 +1728,8 @@ func ensureActivationCanaryResult(
 				store, observed, "terminal_observation_invalid",
 			)
 		}
-		hermes, err := activation.VerifyHermesWorkspaceAuditResultV1(
-			raw,
-			agentrelease.HermesSessionIDPrefix+"-"+inputs.plan.ActivationID,
-		)
-		if err != nil || hermes.RunID != submit.RunID {
+		canary, err := verifyActivationCanaryResult(inputs, raw)
+		if err != nil || canary.RunID != submit.RunID {
 			return nil, observed, activationTerminalStatusError(
 				store, observed, "closed_canary_invalid",
 			)
@@ -1755,11 +1759,8 @@ func readStoredActivationCanaryResult(
 		return nil, gatewayclient.TaskLifecycleStatus{}, false, err
 	}
 	if resultPresent {
-		hermes, verifyErr := activation.VerifyHermesWorkspaceAuditResultV1(
-			resultRaw,
-			agentrelease.HermesSessionIDPrefix+"-"+inputs.plan.ActivationID,
-		)
-		if verifyErr != nil || hermes.RunID != submit.RunID {
+		canary, verifyErr := verifyActivationCanaryResult(inputs, resultRaw)
+		if verifyErr != nil || canary.RunID != submit.RunID {
 			return nil, gatewayclient.TaskLifecycleStatus{}, false,
 				&activationCanaryTerminalError{
 					state: "retained_result_invalid",
