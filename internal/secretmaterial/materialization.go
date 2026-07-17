@@ -200,9 +200,7 @@ func Check(rootPath string, manifest Manifest) (Report, error) {
 			return Report{}, fmt.Errorf("materialized secret %q/%q changed while checking", binding.TenantID, binding.SecretID)
 		}
 		materializedFiles = append(materializedFiles, fileAfter)
-		report.Bindings = append(report.Bindings, BindingReport{
-			TenantID: binding.TenantID, SecretID: binding.SecretID, Purpose: binding.Purpose,
-		})
+		report.Bindings = append(report.Bindings, BindingReport(binding))
 	}
 
 	for tenantID, before := range tenantDirectories {
