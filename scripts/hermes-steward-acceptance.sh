@@ -577,7 +577,7 @@ curl -fsS http://127.0.0.1:18080/v1/models >/dev/null
 
 printf '%s\n' service-secret >"$work/service-token"
 connector_secret=hermes-connector-$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
-printf '%s\n' "$connector_secret" >"$work/connector-token"
+printf %s "$connector_secret" >"$work/connector-token"
 "$ctl_bin" keygen -key-id connector-receipts -private-out "$work/connectors.private" \
 	-public-out "$work/connectors.public" >/dev/null
 "$ctl_bin" keygen -key-id "$task_key_id" -private-out "$work/task.private" \
