@@ -287,6 +287,7 @@ type secureProvisionResponse struct {
 	EgressRouteIDs        []string                `json:"egress_route_ids,omitempty"`
 	ConnectorURL          string                  `json:"connector_url,omitempty"`
 	ConnectorIDs          []string                `json:"connector_ids,omitempty"`
+	EffectMode            string                  `json:"effect_mode,omitempty"`
 	RoutePolicyDigest     string                  `json:"route_policy_digest,omitempty"`
 	ActivationID          string                  `json:"activation_id,omitempty"`
 	ActivationBeginDigest string                  `json:"activation_begin_digest,omitempty"`
@@ -424,7 +425,17 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 			RouteID:        effective.Intent.InferenceRouteID,
 			EgressRouteIDs: admission.CanonicalRouteIDs(effective.Intent.EgressRouteIDs),
 			ConnectorIDs:   admission.CanonicalConnectorIDs(effective.Intent.ConnectorIDs),
+			EffectMode:     effective.Intent.EffectMode,
 			CapsuleDigest:  effective.CapsuleDigest, PolicyDigest: effective.PolicyDigest,
+		}
+		if effective.Intent.EffectMode == admission.EffectModeAuthorized {
+			workload.Runtime.NodeID = effective.Intent.NodeID
+			actionAuthorities, err := admittedActionAuthorities(effective)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "enforcement_failed", "signed action authority could not be projected into the runtime grant")
+				return
+			}
+			workload.Runtime.ActionAuthorities = actionAuthorities
 		}
 		if effective.Intent.Capabilities.Service {
 			workload.Runtime.ServicePort = effective.Capsule.Service.Port
@@ -1081,6 +1092,8 @@ func (s *Server) provisionSecureWorkload(
 func legacyRuntimeReplay(desired, observed Workload) (Workload, bool) {
 	if desired.Runtime == nil || observed.Runtime == nil || len(desired.Runtime.ConnectorIDs) != 0 || len(observed.Runtime.ConnectorIDs) != 0 ||
 		len(desired.Runtime.TaskAuthorities) != 0 || len(observed.Runtime.TaskAuthorities) != 0 ||
+		desired.Runtime.EffectMode != "" || observed.Runtime.EffectMode != "" ||
+		len(desired.Runtime.ActionAuthorities) != 0 || len(observed.Runtime.ActionAuthorities) != 0 ||
 		!imageConfigDigest.MatchString(desired.Runtime.CapsuleDigest) || !imageConfigDigest.MatchString(desired.Runtime.PolicyDigest) ||
 		observed.Runtime.CapsuleDigest != "" || observed.Runtime.PolicyDigest != "" ||
 		!runtimeGrantEqualExceptAdmissionBindings(desired.Runtime, observed.Runtime) {
@@ -1098,7 +1111,11 @@ func runtimeGrantEqualExceptAdmissionBindings(left, right *RuntimeGrant) bool {
 		left.RouteID == right.RouteID && left.RelayIP == right.RelayIP && left.AgentIP == right.AgentIP &&
 		left.ModelAlias == right.ModelAlias && left.ServicePort == right.ServicePort && left.ServiceID == right.ServiceID &&
 		left.ActivationID == right.ActivationID && left.ActivationBeginDigest == right.ActivationBeginDigest &&
+		left.EffectMode == right.EffectMode &&
 		slices.Equal(left.TaskAuthorities, right.TaskAuthorities) &&
+		slices.EqualFunc(left.ActionAuthorities, right.ActionAuthorities, func(left, right gateway.GrantActionAuthority) bool {
+			return left.KeyID == right.KeyID && left.PublicKey == right.PublicKey && slices.Equal(left.ConnectorIDs, right.ConnectorIDs)
+		}) &&
 		slices.Equal(left.EgressRouteIDs, right.EgressRouteIDs) && slices.Equal(left.ConnectorIDs, right.ConnectorIDs)
 }
 
@@ -1259,6 +1276,7 @@ func (s *Server) secureResponse(
 		response.ConnectorURL = "http://steward-relay:8081"
 		response.ConnectorIDs = append([]string(nil), runtime.ConnectorIDs...)
 	}
+	response.EffectMode = runtime.EffectMode
 	response.ActivationID = runtime.ActivationID
 	response.ActivationBeginDigest = runtime.ActivationBeginDigest
 	return response
@@ -1267,7 +1285,7 @@ func (s *Server) secureResponse(
 func runtimeNeedsGatewayPolicy(runtime *RuntimeGrant) bool {
 	return runtime != nil &&
 		(runtime.Inference || len(runtime.EgressRouteIDs) > 0 ||
-			len(runtime.ConnectorIDs) > 0 || len(runtime.TaskAuthorities) > 0)
+			len(runtime.ConnectorIDs) > 0 || len(runtime.TaskAuthorities) > 0 || runtime.EffectMode != "")
 }
 
 func admittedTaskAuthorities(effective admission.EffectiveAdmission) ([]gateway.TaskAuthority, error) {
@@ -1287,6 +1305,21 @@ func admittedTaskAuthorities(effective admission.EffectiveAdmission) ([]gateway.
 	for _, keyID := range keyIDs {
 		authorities = append(authorities, gateway.TaskAuthority{
 			KeyID: keyID, PublicKey: base64.StdEncoding.EncodeToString(keys[keyID]),
+		})
+	}
+	return authorities, nil
+}
+
+func admittedActionAuthorities(effective admission.EffectiveAdmission) ([]gateway.GrantActionAuthority, error) {
+	keys, err := effective.AuthorizedActionKeys()
+	if err != nil {
+		return nil, err
+	}
+	authorities := make([]gateway.GrantActionAuthority, 0, len(keys))
+	for _, key := range keys {
+		authorities = append(authorities, gateway.GrantActionAuthority{
+			KeyID: key.KeyID, PublicKey: key.PublicKey,
+			ConnectorIDs: append([]string(nil), key.ConnectorIDs...),
 		})
 	}
 	return authorities, nil

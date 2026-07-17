@@ -297,6 +297,13 @@ func TestControlPlaneRejectsProtocolAndPaginationAmbiguity(t *testing.T) {
 	}
 }
 
+func TestNodeViewKeepsEmptyCapabilitiesAnArray(t *testing.T) {
+	view := nodeView(controlstore.Node{ID: "node-1", Active: true})
+	if view.Capabilities == nil || len(view.Capabilities) != 0 {
+		t.Fatalf("empty capabilities must remain a JSON array: %#v", view.Capabilities)
+	}
+}
+
 func TestControlPlaneFailsClosedOnPanicsUnavailableStateAndEncodingBounds(t *testing.T) {
 	fixture := newServerFixture(t)
 	fixture.server.mux.HandleFunc("/panic", func(http.ResponseWriter, *http.Request) { panic("test panic") })

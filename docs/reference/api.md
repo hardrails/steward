@@ -24,14 +24,22 @@ is a defect, not an extension clients should use.
 Default base URL: `http://127.0.0.1:8443`. A non-loopback listener requires TLS,
 so its origin is `https://...`.
 
-Every route except health, readiness, and one-time enrollment exchange requires an
-appropriate Bearer credential. Enrollment exchange uses the one-time enrollment
-bearer in its request. Operator credentials are either site-wide or scoped to one
-tenant. Node credentials can call only the command and evidence uplink poll and
-report routes for their bound node.
+Every request must also use the controller's exact HTTP authority in its `Host`
+header. For loopback HTTP, that authority is the literal bound IP and port. For
+TLS, the host must be an exact, non-wildcard DNS or IP Subject Alternative Name
+(SAN) from the leaf certificate at the listener port. Steward rejects malformed
+or mismatched authorities with `400 Bad Request` before API or console routing.
+
+The embedded console assets, health, readiness, and one-time enrollment exchange
+do not use an operator bearer. Console assets contain no fleet data; their
+same-origin API reads still require an appropriate operator bearer. Enrollment
+exchange uses the one-time enrollment bearer in its request. Operator credentials
+are either site-wide or scoped to one tenant. Node credentials can call only the
+command and evidence uplink poll and report routes for their bound node.
 
 | Method and path | Purpose |
 | --- | --- |
+| `GET or HEAD /console`, `/console/`, and committed `/console/*` assets | Serve the embedded read-only React console without a CDN or separate web server |
 | `GET /v1/healthz`, `GET /v1/readiness` | Process liveness and durable-store readiness |
 | `POST /v1/tenants`, `GET /v1/tenants` | Create and page through tenants |
 | `GET /v1/tenants/{tenant_id}` | Read one visible tenant |
@@ -321,10 +329,19 @@ operation-policy digest fixes the canonical upstream origin, credential injectio
 mode, credential epoch, connector and operation IDs, method, and exact path.
 Bodyless GET, HEAD, and DELETE bind an empty request and content type.
 
+For an authorized-effects grant, Gateway accepts only
+`steward.action-permit.v2` with `effect_mode` fixed to `authorized`. It rejects a
+legacy version-1 permit, and receipt format 5 binds the mode and operation-policy
+digest. Standard permit-enabled connectors continue to use version 1.
+
 The task claim and call budget are spent in the signed connector ledger before DNS.
 A clean relayed response ends with `X-Steward-Connector-Receipt: recorded`.
 Connector errors use the common JSON shape; a permit failure is HTTP 403
-`action_permit_denied`. See
+`action_permit_denied`. In authorized mode, Gateway writes at most one stable
+format-5 denial marker per retained grant. If that bounded marker cannot be made
+durable, the request fails closed with HTTP 503 `evidence_unavailable`. The marker
+is the first observed attacker-selected invalid request, not an exhaustive record
+of later denials. See
 [authenticated API operations]({{ '/guides/connectors/' | relative_url }}) for the
 complete request, evidence, and failure contract.
 
@@ -467,6 +484,12 @@ Inference, task-authorized service, connector, or egress admission returns
 `route_policy_digest`, a deterministic non-secret digest of retained Gateway route
 settings and public task authority. Executor records and reconciles it; Gateway
 rejects semantic route changes while a retained grant references the route.
+
+An authorized-effects admission also returns `effect_mode: authorized`. Signed
+tenant policy pins action keys to selected connector IDs, authenticated intent must
+explicitly select the mode, and generic egress is unavailable. Executor projects
+those narrowed public authorities into immutable Gateway state; private action keys
+are never node inputs.
 
 Inference grants expose only the fixed OpenAI-compatible paths listed in the
 [positive-capability guide]({{ '/guides/positive-capabilities/' | relative_url }}).

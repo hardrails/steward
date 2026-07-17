@@ -26,6 +26,14 @@ instance. It prevents a delayed command for an older instance from acting on its
 replacement. Steward records each accepted host mutation in a signed receipt
 chain that can be verified without a network connection.
 
+For sensitive external actions, Authorized Effects assumes the agent is already
+compromised by hostile calendar, email, web, document, memory, or tool content.
+Signed tenant policy pins an off-node action key to named connectors; each exact
+request needs a version-2 one-use permit, which Gateway spends durably before DNS
+while keeping the upstream credential outside the workload. This protects only
+Steward-mediated connector calls, not unmanaged credentials, browser sessions,
+local filesystem or computer-use effects, inference confidentiality, or host root.
+
 For a qualified agent outcome, a publisher can also sign one release that binds
 operator-facing outcome text, the embedded workload profile, exact offline image
 archive, deterministic canary, qualification-evidence digest, and known limits.
@@ -107,6 +115,16 @@ opt-in authenticated metrics, backup, and MCP. The
 shows how to promote one exact qualified Hermes release through a canary and
 operator-approved batches without giving the controller either signing key.
 
+Steward Control also embeds a read-only operator console at `/console/`. It shows
+the scoped operations summary, attention findings, nodes, command metadata, and
+credential metadata through the same authenticated API. The browser holds the
+bearer only in JavaScript memory. The console exposes no mutation or signing
+controls and no secret plaintext; use `stewardctl`, another authenticated API
+client, or a documented offline workflow for changes. For the default listener,
+open exactly `http://127.0.0.1:8443/console/`. See the
+[operator console guide](https://hardrails.github.io/steward/guides/operator-console/)
+before exposing it remotely or entering an administrator bearer.
+
 The doctor checks the installed release, Docker and gVisor, systemd services,
 loopback health and readiness, Gateway, fixed evidence stores, and filesystem
 capacity without changing node state. Its optional canary submits a real signed
@@ -116,6 +134,15 @@ For a first workload, follow the
 [loopback evaluation lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/)
 or the [signed-admission procedure](https://hardrails.github.io/steward/guides/signed-admission/).
 Both return a `runtime_ref` that identifies the admitted workload.
+
+If the workload can change accounts, send messages, rotate secrets, or mutate
+infrastructure, follow the
+[Authorized Effects guide](https://hardrails.github.io/steward/guides/authorized-effects/)
+to require one independently signed exact request before each managed effect.
+For inference keys and connector tokens, follow the
+[secret materialization guide](https://hardrails.github.io/steward/guides/secrets/)
+to keep reusable values in Gateway while OpenBao or another trusted service
+manages storage and distribution.
 
 After admission, replace `executor-DIGEST` with the returned `runtime_ref` to query
 the workload through the bearer-protected loopback API:
@@ -279,7 +306,7 @@ Steward separates those capabilities:
 | Deployment authority | A publisher-signed workload profile, site policy, and tenant/node-bound instance request must all permit the workload. |
 | Stale commands | Durable policy and generation records reject policy rollback and commands for replaced instances. Read-only commands do not change lifecycle ordering. |
 | Multiple tenants on one host | Each workload has its own gVisor sandbox, per-workload resource limits, host and tenant aggregate memory/CPU/PID reservations, workload-count caps, command authority, and, when needed, private Docker network. Durable admission, command-fence, journal, and receipt records bind the tenant ID. Persistent Docker volumes are disabled on shared hosts because the local volume driver does not provide portable hard byte or inode quotas. |
-| Model, service, and API access | Site policy grants named inference routes, model aliases, service IDs, credential-brokered connector IDs, and HTTP(S) egress routes. A tenant task key can be scoped to one service and sign a short-lived permit for one exact service request; Gateway records authorization before dispatch. The private key is not a Steward node input and is never given to the agent. Connectors separately map logical operations to operator-owned origins and credentials and can require exact-request action permits. Non-borrowing receipt budgets prevent one tenant from consuming another tenant's evidence allocation. The agent gets no general network route. |
+| Model, service, and API access | Site policy grants named inference routes, model aliases, service IDs, credential-brokered connector IDs, and HTTP(S) egress routes. A tenant task key can be scoped to one service and sign a short-lived permit for one exact service request; Gateway records authorization before dispatch. The private key is not a Steward node input and is never given to the agent. For a stronger connector boundary, signed tenant policy can require Authorized Effects: explicit instance intent, no generic egress, connector-scoped action keys, a version-2 one-use permit over the exact request, durable spend before DNS, and format-5 signed evidence. Non-borrowing receipt budgets prevent one tenant from consuming another tenant's evidence allocation. |
 | Remote nodes | Authenticated outbound polling works behind network address translation (NAT) and inbound firewalls. Tenant-signed commands include a short validity window, instance generation, and sequence number so Executor can reject replay. |
 | Audit evidence | Executor writes signed, hash-linked lifecycle receipts. It can publish bounded signed deltas to the customer-owned controller, which retains a last-good checkpoint or sticky rollback/equivocation finding and signs portable exports with a separate witness key. Gateway writes a separate signed chain for connector calls and tenant-signed service-task authorization, dispatch, and terminal observation. Permit-backed records bind the authority key, permit, operation policy, and exact request digest. Receipts omit raw prompts, request bodies, and response or result bodies. `stewardctl` verifies node chains and controller exports offline. |
 | Disconnected operation | Static binaries, local public-key infrastructure (PKI), offline image import, and local model gateways do not require a public network service after transfer. |
@@ -292,6 +319,14 @@ small public fleet and node contract.
 Steward is not an agent framework, inference server, hosted control-plane service,
 or general-purpose container orchestrator. Model serving remains a separate
 operator responsibility behind an OpenAI-compatible endpoint.
+
+Steward's differentiator is not a claim that it can detect every prompt injection.
+Browser origin isolation, model screening, planner information-flow controls, and
+application-protocol firewalls are useful additional layers. Steward supplies a
+framework-independent enforcement path for unmodified containerized agents: local
+signed admission, tenant-pinned connector authority, exact one-use request permits,
+spend-before-network durability, credentials outside the workload, and offline
+permit-to-terminal verification without a required hosted service.
 
 ## Components and trust boundaries
 
@@ -314,7 +349,9 @@ A Linux release contains seven static binaries:
 
 - `steward-control` provides the optional self-hosted tenant, enrollment,
   inventory, signed-command delivery, and separately keyed evidence-witness
-  plane without holding tenant private keys or Docker authority.
+  plane without holding tenant private keys or Docker authority. Its embedded
+  `/console/` is a read-only view of bounded control API metadata, not a mutation
+  or signing surface.
 - `steward` tracks lifecycle state and provides the generic outbound uplink.
 - `steward-executor` verifies admission and is the only long-running Steward
   service with Docker-group membership.
@@ -390,7 +427,8 @@ and observed outcome linkage for offline audit.
 Among the products reviewed in the dated
 [market analysis](https://hardrails.github.io/steward/product/market-analysis/), none
 documents the same combination of customer-operated air-gapped nodes,
-site-signed artifact and tenant admission, service-scoped off-node task keys,
+publisher-signed artifacts, site-root-signed policy, authenticated tenant intent,
+service-scoped off-node task keys,
 exact-request dispatch, durable node-local replay control, and offline-verifiable
 authorization-to-outcome receipts. This is a comparison of public documentation,
 not a certification or a claim that another product cannot add these controls.
@@ -467,12 +505,19 @@ BSD, Alpine/OpenRC, and other non-systemd systems are not Executor node targets.
 
 See the [platform matrix](https://hardrails.github.io/steward/reference/platform-support/).
 
-Steward currently uses only the Go standard library:
+Steward's Go module uses only the Go standard library:
 
 ```console
 $ go list -m all
 github.com/hardrails/steward
 ```
+
+The source tree separately has frontend-maintenance dependencies: the embedded
+operator console's lockfile pins React and Vite, while its reviewed production
+assets are committed and embedded in `steward-control`. Normal and air-gapped Go
+builds do not run npm, and the installed service needs neither Node.js nor a CDN.
+CI uses Node.js 24 LTS to audit, check, rebuild, and compare the committed
+distribution byte for byte.
 
 Its public contracts are hand-written and CI-linted:
 
@@ -490,6 +535,9 @@ without access to private source or infrastructure.
 - [Operate a workload](https://hardrails.github.io/steward/guides/workload-lifecycle/)
 - [Install without public network access](https://hardrails.github.io/steward/guides/air-gapped/)
 - [Configure signed admission](https://hardrails.github.io/steward/guides/signed-admission/)
+- [Inspect a fleet in the read-only console](https://hardrails.github.io/steward/guides/operator-console/)
+- [Authorize exact external effects](https://hardrails.github.io/steward/guides/authorized-effects/)
+- [Store and distribute Gateway credentials](https://hardrails.github.io/steward/guides/secrets/)
 - [Broker authenticated API operations](https://hardrails.github.io/steward/guides/connectors/)
 - [Upgrade and roll back](https://hardrails.github.io/steward/guides/upgrades/)
 - [Configuration reference](https://hardrails.github.io/steward/reference/configuration/)

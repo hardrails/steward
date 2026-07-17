@@ -374,7 +374,7 @@ func TestGatewayConnectorSetIsValidatedSecretFreeAndAtomic(t *testing.T) {
 	if err := os.WriteFile(token, []byte("service-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(credential, []byte("upstream-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("upstream-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	privateKey := filepath.Join(directory, "connector-receipts.private.pem")

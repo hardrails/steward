@@ -40,9 +40,16 @@ an optional valid prerelease suffix and rejects malformed tags, leading zeros,
 and build-metadata suffixes. This fail-fast check prevents tags such as `vnext` or
 `v2` from reaching publication.
 
-The workflow uses four job executions:
+The workflow uses six job executions across five job definitions:
 
-1. **`build / amd64` and `build / arm64`:** each runs on a matching native host
+1. **`validate release source`:** checks out the selected commit without running
+   repository scripts. For a tag build, it proves that the tag commit is reachable
+   from `origin/main` before any later job runs repository code.
+2. **`React console / release gate`:** uses pinned Node.js and lockfile versions to
+   install without lifecycle scripts, audit the dependency graph, run the console
+   tests, rebuild the committed air-gapped assets, and require a byte-identical
+   distribution.
+3. **`build / amd64` and `build / arm64`:** each runs on a matching native host
    with a read-only token. For a tag build, each job first proves that the commit
    referenced by the tag is reachable from `origin/main`; a tag created from an
    unmerged branch cannot publish. `scripts/release.sh` cross-compiles Linux and Darwin,
@@ -55,10 +62,10 @@ The workflow uses four job executions:
    package hosts are required because RPM validates build architecture;
    cross-compiled payloads alone do not safely
    produce an `aarch64` package on `x86_64`.
-2. **`combine`:** with a read-only token and no source checkout, downloads both
+4. **`combine`:** with a read-only token and no source checkout, downloads both
    architecture sets, requires the complete matrix, and writes one SHA-256
    manifest over exactly those files.
-3. **`publish`:** only on a tag push, with the workflow's only `contents: write`
+5. **`publish`:** only on a tag push, with the workflow's only `contents: write`
    token and no source checkout, runs `gh release create` against the combined
    artifacts. It adds generated notes, node and controller archives, packages,
    both installers, and
@@ -84,10 +91,13 @@ Each Linux target also produces `steward-node_vX.Y.Z_<arch>.deb` and
 `install-steward.sh` selects a native node package or archive at install time;
 `install-control.sh` selects only the dedicated controller archive.
 
-Steward uses only the Go standard library. Linux archives include Executor,
-Gateway, Relay, systemd units, configuration, and installation, preflight, and
-activation assets. The node installer requires the expected version and rejects a
-manifest whose version, operating system, architecture, file set, or digest differs.
+Steward's Go module uses only the Go standard library. The source tree separately
+pins React and Vite for frontend maintenance; releases embed the committed console
+assets, so installed services and ordinary Go builds need neither npm nor Node.js.
+Linux archives include Executor, Gateway, Relay, systemd units, configuration, and
+installation, preflight, and activation assets. The node installer requires the
+expected version and rejects a manifest whose version, operating system,
+architecture, file set, or digest differs.
 Node packages never install the controller service, configuration, doctor, or
 installer. The dedicated controller archive contains exactly the controller
 binary, unit, template, doctor, license, and no node service assets.

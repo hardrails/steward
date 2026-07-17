@@ -27,14 +27,15 @@ import (
 )
 
 type connectorRigOptions struct {
-	credentialMode   CredentialMode
-	allowedCIDRs     []string
-	maxConcurrent    int
-	maxRequestBytes  int64
-	maxResponseBytes int64
-	maxCalls         int
-	requirePermit    bool
-	actionTenant     string
+	credentialMode    CredentialMode
+	allowedCIDRs      []string
+	maxConcurrent     int
+	maxRequestBytes   int64
+	maxResponseBytes  int64
+	maxCalls          int
+	requirePermit     bool
+	actionTenant      string
+	authorizedEffects bool
 }
 
 type connectorRig struct {
@@ -58,6 +59,12 @@ func (log *blockingConnectorReceiptLog) Begin(connectorledger.Event) (connectorl
 	return connectorledger.Head{}, errors.New("fixture append refused before write")
 }
 
+func (log *blockingConnectorReceiptLog) Append(connectorledger.Event) (connectorledger.Head, error) {
+	log.once.Do(func() { close(log.entered) })
+	<-log.release
+	return connectorledger.Head{}, errors.New("fixture append refused before write")
+}
+
 func (*blockingConnectorReceiptLog) Finish(connectorledger.Event) (connectorledger.Head, error) {
 	return connectorledger.Head{}, errors.New("unexpected fixture finish")
 }
@@ -72,6 +79,9 @@ func (*blockingConnectorReceiptLog) Close() error     { return nil }
 type refusingConnectorReceiptLog struct{ err error }
 
 func (log refusingConnectorReceiptLog) Begin(connectorledger.Event) (connectorledger.Head, error) {
+	return connectorledger.Head{}, log.err
+}
+func (log refusingConnectorReceiptLog) Append(connectorledger.Event) (connectorledger.Head, error) {
 	return connectorledger.Head{}, log.err
 }
 func (refusingConnectorReceiptLog) Finish(connectorledger.Event) (connectorledger.Head, error) {
@@ -103,13 +113,16 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 	if options.actionTenant == "" {
 		options.actionTenant = "tenant-a"
 	}
+	if options.authorizedEffects && !options.requirePermit {
+		t.Fatal("authorized-effects fixture requires an action permit authority")
+	}
 	directory, err := os.MkdirTemp("/tmp", "gc-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	credential := filepath.Join(directory, "connector.token")
-	if err := os.WriteFile(credential, []byte("operator-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("operator-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	connectorConfig := Connector{
@@ -169,6 +182,14 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 		_ = server.connectorLedger.Close()
 	})
 	grant := connectorGrant("tenant-a", "agent-a", 1, "issues")
+	if options.authorizedEffects {
+		grant.NodeID = config.ActionPermitNodeID
+		grant.EffectMode = EffectModeAuthorized
+		grant.ActionAuthorities = []GrantActionAuthority{{
+			KeyID: "approver-a", PublicKey: config.ActionAuthorities[0].PublicKey,
+			ConnectorIDs: []string{"issues"},
+		}}
+	}
 	registerConnectorGrant(t, server, grant)
 	activateConnectorGrant(t, server, grant.GrantID)
 	return &connectorRig{server: server, config: config, grant: grant, connector: connectors["issues"], actionKey: actionKey}
@@ -230,6 +251,17 @@ func actionPermitFor(
 	body []byte,
 	mutate func(*actionpermit.Statement),
 ) (string, string) {
+	return actionPermitForPayload(t, rig, taskID, operationID, body, "", mutate)
+}
+
+func actionPermitForPayload(
+	t *testing.T,
+	rig *connectorRig,
+	taskID, operationID string,
+	body []byte,
+	payloadType string,
+	mutate func(*actionpermit.Statement),
+) (string, string) {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
 	connector := rig.server.connectors["issues"]
@@ -247,8 +279,21 @@ func actionPermitFor(
 	if err != nil {
 		t.Fatal(err)
 	}
+	schemaVersion, effectMode := actionpermit.SchemaV1, ""
+	if rig.grant.EffectMode == EffectModeAuthorized {
+		schemaVersion, effectMode = actionpermit.SchemaV2, actionpermit.EffectModeAuthorized
+	}
+	if payloadType == "" {
+		if effectMode == actionpermit.EffectModeAuthorized {
+			payloadType = actionpermit.PayloadTypeV2
+		} else {
+			payloadType = actionpermit.PayloadTypeV1
+		}
+	} else if payloadType == actionpermit.PayloadTypeV1 {
+		schemaVersion, effectMode = actionpermit.SchemaV1, ""
+	}
 	statement := actionpermit.Statement{
-		SchemaVersion: actionpermit.SchemaV1, NodeID: rig.config.ActionPermitNodeID,
+		SchemaVersion: schemaVersion, EffectMode: effectMode, NodeID: rig.config.ActionPermitNodeID,
 		TenantID: rig.grant.TenantID, InstanceID: rig.grant.InstanceID, Generation: rig.grant.Generation,
 		CapsuleDigest: rig.grant.CapsuleDigest, PolicyDigest: rig.grant.PolicyDigest,
 		RoutePolicyDigest: rig.server.policyDigests[rig.grant.GrantID], ConnectorID: "issues",
@@ -264,7 +309,7 @@ func actionPermitFor(
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope, err := dsse.Sign(actionpermit.PayloadType, payload, "approver-a", rig.actionKey)
+	envelope, err := dsse.Sign(payloadType, payload, "approver-a", rig.actionKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,6 +406,347 @@ func TestConnectorRequiresAndSpendsExactSignedActionPermit(t *testing.T) {
 	summary, err := InspectConnectorReceiptFormat(rig.config)
 	if err != nil || summary.FormatVersion != 2 {
 		t.Fatalf("format summary=%#v err=%v", summary, err)
+	}
+}
+
+func TestAuthorizedEffectsDenyDowngradeAndRecordOneBoundedDenial(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"changed":true}`))
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, authorizedEffects: true,
+	})
+	body := []byte(`{"account":"fixture","operation":"rotate-recovery"}`)
+	taskID := "task-authorized-effect"
+
+	for _, attemptedBody := range [][]byte{body, []byte(`{"account":"attacker"}`)} {
+		request := connectorRequest(http.MethodPost, "issues", "create", taskID, bytes.NewReader(attemptedBody))
+		response := invokeConnector(rig.server, rig.grant.GrantID, request)
+		if response.Code != http.StatusForbidden ||
+			!strings.Contains(response.Body.String(), `"error":"action_permit_denied"`) || calls.Load() != 0 {
+			t.Fatalf("missing permit status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+		}
+	}
+	// Denial evidence is deliberately one bounded, first-observed sample per
+	// grant and error code. A compromised workload can choose that first sample,
+	// but cannot grow the durable ledger by probing distinct operations.
+	distinctOperation := connectorRequest(http.MethodGet, "issues", "read", "task-distinct-denial", nil)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, distinctOperation); response.Code != http.StatusForbidden ||
+		!strings.Contains(response.Body.String(), `"error":"action_permit_denied"`) || calls.Load() != 0 {
+		t.Fatalf("distinct missing permit status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+
+	legacy, _ := actionPermitForPayload(
+		t, rig, taskID, "create", body, actionpermit.PayloadTypeV1, nil,
+	)
+	downgrade := connectorRequest(http.MethodPost, "issues", "create", taskID, bytes.NewReader(body))
+	downgrade.Header.Set(actionPermitHeader, legacy)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, downgrade); response.Code != http.StatusForbidden || calls.Load() != 0 {
+		t.Fatalf("v1 downgrade status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+
+	validHeader, permitDigest := actionPermitFor(t, rig, taskID, "create", body, nil)
+	valid := connectorRequest(http.MethodPost, "issues", "create", taskID, bytes.NewReader(body))
+	valid.Header.Set(actionPermitHeader, validHeader)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, valid); response.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("authorized effect status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+	replay := connectorRequest(http.MethodPost, "issues", "create", taskID, bytes.NewReader(body))
+	replay.Header.Set(actionPermitHeader, validHeader)
+	if response := invokeConnector(rig.server, rig.grant.GrantID, replay); response.Code != http.StatusConflict || calls.Load() != 1 {
+		t.Fatalf("replay status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+
+	raceTaskID := "task-authorized-race"
+	raceHeader, _ := actionPermitFor(t, rig, raceTaskID, "create", body, nil)
+	start := make(chan struct{})
+	statuses := make(chan int, 2)
+	var wait sync.WaitGroup
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			request := connectorRequest(http.MethodPost, "issues", "create", raceTaskID, bytes.NewReader(body))
+			request.Header.Set(actionPermitHeader, raceHeader)
+			statuses <- invokeConnector(rig.server, rig.grant.GrantID, request).Code
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(statuses)
+	counts := make(map[int]int)
+	for status := range statuses {
+		counts[status]++
+	}
+	if counts[http.StatusOK] != 1 || counts[http.StatusConflict] != 1 || calls.Load() != 2 {
+		t.Fatalf("race statuses=%v calls=%d", counts, calls.Load())
+	}
+
+	operationDigest, err := ConnectorOperationPolicyDigest(
+		rig.connector.BaseURL, rig.connector.CredentialMode, rig.connector.CredentialEpoch,
+		rig.connector.ID, rig.connector.operations["create"],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []connectorledger.Receipt
+	_, err = connectorledger.VerifyRecords(
+		rig.config.ConnectorReceiptFile, rig.config.connectorReceiptKey.Public().(ed25519.PublicKey),
+		rig.config.ConnectorReceiptNodeID, rig.config.ConnectorReceiptEpoch,
+		func(record connectorledger.VerifiedReceipt) error {
+			records = append(records, record.Receipt)
+			return nil
+		},
+	)
+	if err != nil || len(records) != 5 {
+		t.Fatalf("authorized receipts=%#v err=%v", records, err)
+	}
+	denial, authorization, terminal := records[0], records[1], records[2]
+	if denial.SchemaVersion != connectorledger.SchemaV5 || denial.Event.Phase != connectorledger.Deny ||
+		denial.Event.ErrorCode != "action_permit_denied" || denial.Event.EffectMode != EffectModeAuthorized ||
+		denial.Event.OperationPolicyDigest != operationDigest || denial.Event.AuthorityKeyID != "" || denial.Event.PermitDigest != "" {
+		t.Fatalf("denial receipt=%#v", denial)
+	}
+	for _, record := range []connectorledger.Receipt{authorization, terminal} {
+		if record.SchemaVersion != connectorledger.SchemaV5 || record.Event.EffectMode != EffectModeAuthorized ||
+			record.Event.OperationPolicyDigest != operationDigest || record.Event.PermitDigest != permitDigest ||
+			record.Event.AuthorityKeyID != "approver-a" {
+			t.Fatalf("authorized receipt=%#v", record)
+		}
+	}
+	for _, record := range records[3:] {
+		if record.SchemaVersion != connectorledger.SchemaV5 || record.Event.EffectMode != EffectModeAuthorized ||
+			record.Event.OperationPolicyDigest != operationDigest {
+			t.Fatalf("raced authorized receipt=%#v", record)
+		}
+	}
+	summary, err := InspectConnectorReceiptFormat(rig.config)
+	if err != nil || summary.FormatVersion != 5 {
+		t.Fatalf("format summary=%#v err=%v", summary, err)
+	}
+	stateRaw, err := os.ReadFile(rig.config.StateFile)
+	if err != nil || !bytes.Contains(stateRaw, []byte(`"version":5`)) ||
+		!bytes.Contains(stateRaw, []byte(`"effect_mode":"authorized"`)) ||
+		!bytes.Contains(stateRaw, []byte(`"action_authorities"`)) {
+		t.Fatalf("authorized state=%s err=%v", stateRaw, err)
+	}
+
+	rig.server.closeGrantListeners()
+	_ = rig.server.audit.Close()
+	_ = rig.server.connectorLedger.Close()
+	reopened, err := Open(rig.config, nil, nil, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		reopened.closeGrantListeners()
+		_ = reopened.audit.Close()
+		_ = reopened.connectorLedger.Close()
+	}()
+	activateConnectorGrant(t, reopened, rig.grant.GrantID)
+	afterRestart := connectorRequest(
+		http.MethodPost, "issues", "create", "task-denied-after-restart", strings.NewReader(`{"attempt":true}`),
+	)
+	if response := invokeConnector(reopened, rig.grant.GrantID, afterRestart); response.Code != http.StatusForbidden || calls.Load() != 2 {
+		t.Fatalf("post-restart denial status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+	var count int
+	_, err = connectorledger.VerifyRecords(
+		rig.config.ConnectorReceiptFile, rig.config.connectorReceiptKey.Public().(ed25519.PublicKey),
+		rig.config.ConnectorReceiptNodeID, rig.config.ConnectorReceiptEpoch,
+		func(connectorledger.VerifiedReceipt) error {
+			count++
+			return nil
+		},
+	)
+	if err != nil || count != 5 {
+		t.Fatalf("post-restart denial records=%d err=%v", count, err)
+	}
+}
+
+func TestAuthorizedEffectsGrantRejectsAuthorityAndModeSubstitution(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, authorizedEffects: true,
+	})
+	baseline := rig.grant
+	if !rig.server.validGrant(baseline) {
+		t.Fatal("valid authorized-effects grant rejected")
+	}
+	_, substitutePrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	substitutePublic := substitutePrivate.Public().(ed25519.PublicKey)
+	baselineDigest := rig.server.routePolicyDigestLocked(baseline)
+	substituted := baseline
+	substituted.ActionAuthorities = cloneGrantActionAuthorities(baseline.ActionAuthorities)
+	substituted.ActionAuthorities[0].PublicKey = base64.StdEncoding.EncodeToString(substitutePublic)
+	if baselineDigest == rig.server.routePolicyDigestLocked(substituted) {
+		t.Fatal("route-policy digest does not bind the signed action-authority public key")
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Grant)
+	}{
+		{name: "mode removed", mutate: func(grant *Grant) { grant.EffectMode = "" }},
+		{name: "standard mode", mutate: func(grant *Grant) { grant.EffectMode = EffectModeStandard }},
+		{name: "generic egress", mutate: func(grant *Grant) { grant.EgressRouteIDs = []string{"public-web"} }},
+		{name: "node changed", mutate: func(grant *Grant) { grant.NodeID = "other-node" }},
+		{name: "connectors removed", mutate: func(grant *Grant) { grant.ConnectorIDs = nil }},
+		{name: "authority removed", mutate: func(grant *Grant) { grant.ActionAuthorities = nil }},
+		{name: "public key substituted", mutate: func(grant *Grant) {
+			grant.ActionAuthorities[0].PublicKey = base64.StdEncoding.EncodeToString(substitutePublic)
+		}},
+		{name: "connector scope removed", mutate: func(grant *Grant) {
+			grant.ActionAuthorities[0].ConnectorIDs = nil
+		}},
+		{name: "extra signed authority", mutate: func(grant *Grant) {
+			grant.ActionAuthorities = append(grant.ActionAuthorities, GrantActionAuthority{
+				KeyID: "zz-attacker", PublicKey: base64.StdEncoding.EncodeToString(substitutePublic),
+				ConnectorIDs: []string{"issues"},
+			})
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := baseline
+			candidate.ActionAuthorities = cloneGrantActionAuthorities(baseline.ActionAuthorities)
+			test.mutate(&candidate)
+			if rig.server.validGrant(candidate) {
+				t.Fatal("substituted authorized-effects grant accepted")
+			}
+		})
+	}
+
+	original := rig.server.connectors["issues"]
+	changed := original
+	changed.ActionAuthorityIDs = append([]string(nil), original.ActionAuthorityIDs...)
+	changed.authorities = make(map[string]ed25519.PublicKey, len(original.authorities)+1)
+	changed.authorityTenants = make(map[string]string, len(original.authorityTenants)+1)
+	for keyID, public := range original.authorities {
+		changed.authorities[keyID] = append(ed25519.PublicKey(nil), public...)
+		changed.authorityTenants[keyID] = original.authorityTenants[keyID]
+	}
+	changed.ActionAuthorityIDs = append(changed.ActionAuthorityIDs, "zz-attacker")
+	changed.authorities["zz-attacker"] = append(ed25519.PublicKey(nil), substitutePublic...)
+	changed.authorityTenants["zz-attacker"] = baseline.TenantID
+	rig.server.connectors["issues"] = changed
+	if rig.server.validGrant(baseline) {
+		t.Fatal("unsigned config added a same-tenant authority to an authorized grant")
+	}
+	changed.authorityTenants["zz-attacker"] = "tenant-b"
+	rig.server.connectors["issues"] = changed
+	if rig.server.validGrant(baseline) {
+		t.Fatal("unsigned config added a foreign-tenant authority to an authorized grant")
+	}
+	rig.server.connectors["issues"] = original
+}
+
+func TestAuthorizedEffectsDenialFailsClosedWhenEvidenceIsUnavailable(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, authorizedEffects: true,
+	})
+	ledger := rig.server.connectorLedger
+	rig.server.connectorLedger = refusingConnectorReceiptLog{err: errors.New("fixture evidence unavailable")}
+	t.Cleanup(func() { rig.server.connectorLedger = ledger })
+
+	request := connectorRequest(
+		http.MethodPost, "issues", "create", "task-evidence-unavailable", strings.NewReader(`{"change":true}`),
+	)
+	response := invokeConnector(rig.server, rig.grant.GrantID, request)
+	if response.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(response.Body.String(), `"error":"evidence_unavailable"`) || calls.Load() != 0 {
+		t.Fatalf("status=%d body=%s calls=%d", response.Code, response.Body.String(), calls.Load())
+	}
+	if len(rig.server.connectorDenials) != 0 {
+		t.Fatal("definite denial append failure retained an in-memory denial reservation")
+	}
+}
+
+func TestConcurrentAuthorizedEffectsDenialsWaitForDurableEvidence(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, authorizedEffects: true,
+	})
+	ledger := rig.server.connectorLedger
+	blocking := &blockingConnectorReceiptLog{entered: make(chan struct{}), release: make(chan struct{})}
+	rig.server.connectorLedger = blocking
+	t.Cleanup(func() { rig.server.connectorLedger = ledger })
+
+	statuses := make(chan int, 2)
+	for range 2 {
+		go func() {
+			request := connectorRequest(
+				http.MethodPost, "issues", "create", "task-concurrent-denial", strings.NewReader(`{"change":true}`),
+			)
+			statuses <- invokeConnector(rig.server, rig.grant.GrantID, request).Code
+		}()
+	}
+	<-blocking.entered
+	close(blocking.release)
+	for range 2 {
+		if status := <-statuses; status != http.StatusServiceUnavailable {
+			t.Fatalf("concurrent denial status=%d", status)
+		}
+	}
+	if calls.Load() != 0 || len(rig.server.connectorDenials) != 0 || len(rig.server.connectorDenialPending) != 0 {
+		t.Fatalf("calls=%d denials=%d pending=%d", calls.Load(), len(rig.server.connectorDenials), len(rig.server.connectorDenialPending))
+	}
+}
+
+func TestAuthorizedEffectsRetainedGrantRequiresStateFormatFive(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, authorizedEffects: true,
+	})
+	rig.server.closeGrantListeners()
+	_ = rig.server.audit.Close()
+	_ = rig.server.connectorLedger.Close()
+
+	raw, err := os.ReadFile(rig.config.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["version"] = float64(4)
+	raw, err = json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rig.config.StateFile, raw, 0o600); err != nil {
+		t.Fatalf("rewrite state: %v", err)
+	}
+	if reopened, err := Open(rig.config, nil, nil, "service-token"); err == nil {
+		reopened.closeGrantListeners()
+		_ = reopened.audit.Close()
+		_ = reopened.connectorLedger.Close()
+		t.Fatal("authorized-effects authority loaded from pre-v5 Gateway state")
 	}
 }
 
@@ -581,6 +967,7 @@ func TestBlockedConnectorReceiptDoesNotBlockOtherGrantControl(t *testing.T) {
 	digest := ConnectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "blocked-task", "issues", "create")
 	receipt := connectorReceiptEvent(
 		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, "", "", "", 2,
+		"",
 	)
 	spendDone := make(chan error, 1)
 	go func() { spendDone <- rig.server.spendConnectorCall(rig.grant.GrantID, "issues", digest, receipt) }()
@@ -639,6 +1026,7 @@ func TestAmbiguousConnectorReceiptFailureRetainsSpend(t *testing.T) {
 	digest := ConnectorCallDigest(rig.grant.TenantID, rig.grant.InstanceID, "ambiguous-task", "issues", "create")
 	receipt := connectorReceiptEvent(
 		rig.grant, rig.server.policyDigests[rig.grant.GrantID], "issues", "create", digest, "", "", "", 2,
+		"",
 	)
 	if err := rig.server.spendConnectorCall(rig.grant.GrantID, "issues", digest, receipt); err == nil {
 		t.Fatal("ambiguous fixture append unexpectedly succeeded")
@@ -1046,6 +1434,26 @@ func TestConnectorAttemptBudgetLimitsInvalidWorkAndRecovers(t *testing.T) {
 	server.mu.Unlock()
 	if recreated {
 		t.Fatal("late request recreated connector limiter state for an unregistered grant")
+	}
+}
+
+func TestConnectorAttemptProductionClockReadIsSerialized(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	server := &Server{grants: map[string]Grant{"grant-a": {GrantID: "grant-a"}}}
+	var sampledOutsideLock atomic.Bool
+	clock := func() time.Time {
+		if server.mu.TryLock() {
+			sampledOutsideLock.Store(true)
+			server.mu.Unlock()
+		}
+		return now
+	}
+
+	if !server.allowConnectorAttemptWithClock("grant-a", clock) {
+		t.Fatal("first connector attempt was denied")
+	}
+	if sampledOutsideLock.Load() {
+		t.Fatal("production connector limiter sampled its clock before taking the state lock")
 	}
 }
 

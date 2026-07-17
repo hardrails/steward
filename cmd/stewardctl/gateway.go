@@ -103,7 +103,7 @@ func (values *repeatedFlag) Set(value string) error {
 
 func gatewayCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("gateway command requires validate, route, connector, or service")
+		return errors.New("gateway command requires validate, route, connector, service, or effects")
 	}
 	switch arguments[0] {
 	case "validate":
@@ -131,6 +131,8 @@ func gatewayCommand(arguments []string, stdout io.Writer) error {
 		return gatewayConnectorCommand(arguments[1:], stdout)
 	case "service":
 		return gatewayServiceCommand(arguments[1:], stdout)
+	case "effects":
+		return gatewayEffectsCommand(arguments[1:], stdout)
 	default:
 		return fmt.Errorf("unsupported gateway command %q", arguments[0])
 	}

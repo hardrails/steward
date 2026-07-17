@@ -9,3 +9,7 @@
 # Test and coverage artifacts
 *.out
 *.test
+
+# React control-console build dependencies. The audited production bundle is
+# committed so normal and air-gapped Go builds never require Node or npm.
+/internal/controlplane/console/node_modules/

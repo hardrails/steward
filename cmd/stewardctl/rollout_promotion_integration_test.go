@@ -70,7 +70,10 @@ func TestRolloutPromotionPrecedesNextBatchAndSurvivesRetry(t *testing.T) {
 	err = runRollout(
 		rolloutRunTestArguments(t, fixture, server.URL), &bytes.Buffer{},
 	)
-	promotionNow := stateTime.Add(time.Second)
+	// Resume at the last durable state. Advancing the fixed coordinator clock
+	// by a whole second can make a fast runner's wall-clock Gateway receipt
+	// predate the permit's not_before.
+	promotionNow := stateTime
 	timeNow = func() time.Time { return promotionNow }
 	if err == nil || !strings.Contains(err.Error(), "clock precedes") {
 		t.Fatalf("clock rollback error=%v", err)

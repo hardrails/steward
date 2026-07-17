@@ -3,7 +3,9 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,7 +55,7 @@ func (s *Server) listenConnectorGrantLocked(id string) error {
 
 func (s *Server) connectorHandler(grantID string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if !s.allowConnectorAttempt(grantID, time.Now()) {
+		if !s.allowConnectorAttemptNow(grantID) {
 			writeGatewayError(w, http.StatusTooManyRequests, "connector_rate_limited", "connector attempt rate limit reached")
 			return
 		}
@@ -148,6 +150,20 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		if permitErr != nil {
 			slog.Warn("connector action permit denied", "grant_id", grantID, "connector_id", connectorID,
 				"operation_id", operationID, "reason", permitErr.Error())
+			if grant.EffectMode == EffectModeAuthorized {
+				requestDigest := actionpermit.RequestDigest(body)
+				operationDigest, digestErr := ConnectorOperationPolicyDigest(
+					connector.BaseURL, connector.CredentialMode, connector.CredentialEpoch, connectorID, operation,
+				)
+				callDigest := ConnectorCallDigest(grant.TenantID, grant.InstanceID, taskID, connectorID, operationID)
+				if digestErr != nil || s.recordActionPermitDenial(connectorDenialEvent(
+					grant, routePolicyDigest, connectorID, operationID, operationDigest, callDigest,
+					requestDigest, int64(len(body)),
+				)) != nil {
+					writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector denial could not be recorded")
+					return
+				}
+			}
 			writeGatewayError(w, http.StatusForbidden, "action_permit_denied", "a valid action permit for the exact connector request is required")
 			return
 		}
@@ -155,6 +171,7 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		receipt := connectorReceiptEvent(
 			grant, routePolicyDigest, connectorID, operationID, callDigest, permit.authorityKeyID,
 			permit.permitDigest, permit.requestDigest, int64(len(body)),
+			permit.operationDigest,
 		)
 		if err := s.spendConnectorCall(grantID, connectorID, callDigest, receipt); err != nil {
 			switch {
@@ -208,10 +225,11 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 }
 
 type connectorActionPermit struct {
-	authorityKeyID string
-	permitDigest   string
-	requestDigest  string
-	expiresAt      time.Time
+	authorityKeyID  string
+	permitDigest    string
+	requestDigest   string
+	operationDigest string
+	expiresAt       time.Time
 }
 
 func verifyConnectorActionPermit(
@@ -236,8 +254,12 @@ func verifyConnectorActionPermit(
 	if err != nil {
 		return connectorActionPermit{}, fmt.Errorf("decode permit header: %w", err)
 	}
+	trusted := connector.authorities
+	if grant.EffectMode == EffectModeAuthorized {
+		trusted = grantActionAuthorityKeys(grant, connectorID)
+	}
 	verified, err := actionpermit.Verify(
-		raw, connector.authorities, now, time.Duration(connector.MaxActionPermitSeconds)*time.Second,
+		raw, trusted, now, time.Duration(connector.MaxActionPermitSeconds)*time.Second,
 	)
 	if err != nil {
 		return connectorActionPermit{}, err
@@ -258,7 +280,14 @@ func verifyConnectorActionPermit(
 	if err != nil {
 		return connectorActionPermit{}, errors.New("connector operation content type is invalid")
 	}
-	if connector.authorityTenants[verified.KeyID] != grant.TenantID ||
+	requiredPayloadType := actionpermit.PayloadTypeV1
+	requiredEffectMode := ""
+	if grant.EffectMode == EffectModeAuthorized {
+		requiredPayloadType = actionpermit.PayloadTypeV2
+		requiredEffectMode = actionpermit.EffectModeAuthorized
+	}
+	if verified.PayloadType != requiredPayloadType || statement.EffectMode != requiredEffectMode ||
+		connector.authorityTenants[verified.KeyID] != grant.TenantID ||
 		statement.NodeID != connector.permitNodeID || statement.TenantID != grant.TenantID ||
 		statement.InstanceID != grant.InstanceID || statement.Generation != grant.Generation ||
 		statement.CapsuleDigest != grant.CapsuleDigest || statement.PolicyDigest != grant.PolicyDigest ||
@@ -274,13 +303,45 @@ func verifyConnectorActionPermit(
 	}
 	return connectorActionPermit{
 		authorityKeyID: verified.KeyID, permitDigest: verified.EnvelopeDigest,
-		requestDigest: requestDigest, expiresAt: expiresAt,
+		requestDigest: requestDigest, operationDigest: operationDigest, expiresAt: expiresAt,
 	}, nil
+}
+
+func grantActionAuthorityKeys(grant Grant, connectorID string) map[string]ed25519.PublicKey {
+	keys := make(map[string]ed25519.PublicKey)
+	for _, authority := range grant.ActionAuthorities {
+		if !slicesContainsSorted(authority.ConnectorIDs, connectorID) {
+			continue
+		}
+		public, err := base64.StdEncoding.DecodeString(authority.PublicKey)
+		if err != nil || len(public) != ed25519.PublicKeySize {
+			continue
+		}
+		keys[authority.KeyID] = ed25519.PublicKey(append([]byte(nil), public...))
+	}
+	return keys
+}
+
+func (s *Server) allowConnectorAttemptNow(grantID string) bool {
+	return s.allowConnectorAttemptWithClock(grantID, time.Now)
+}
+
+func (s *Server) allowConnectorAttemptWithClock(grantID string, clock func() time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Read the clock only after taking the limiter lock. If concurrent callers
+	// capture time before locking, the request with the later timestamp can
+	// commit first and make the other look like a clock rollback.
+	return s.allowConnectorAttemptLocked(grantID, clock())
 }
 
 func (s *Server) allowConnectorAttempt(grantID string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.allowConnectorAttemptLocked(grantID, now)
+}
+
+func (s *Server) allowConnectorAttemptLocked(grantID string, now time.Time) bool {
 	// A request already accepted by the Unix listener can outlive unregister.
 	// Do not let that late request recreate limiter state for a deleted grant.
 	if _, ok := s.grants[grantID]; !ok {

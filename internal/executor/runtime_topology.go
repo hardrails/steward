@@ -84,6 +84,8 @@ func (s *Server) desiredGatewayGrant(workload Workload, serviceURL string) gatew
 		GrantID: workload.Runtime.GrantID, TenantID: workload.TenantID, InstanceID: workload.InstanceID,
 		NodeID: workload.Runtime.NodeID, Generation: workload.Runtime.Generation, Service: workload.Runtime.ServicePort > 0, ServiceURL: serviceURL,
 		ServiceID: workload.Runtime.ServiceID, TaskAuthorities: append([]gateway.TaskAuthority(nil), workload.Runtime.TaskAuthorities...),
+		EffectMode:        workload.Runtime.EffectMode,
+		ActionAuthorities: cloneGrantActionAuthorities(workload.Runtime.ActionAuthorities),
 	}
 	if imageConfigDigest.MatchString(workload.Runtime.CapsuleDigest) && imageConfigDigest.MatchString(workload.Runtime.PolicyDigest) {
 		grant.RuntimeRef = RuntimeRef(workload.TenantID, workload.InstanceID)
@@ -97,6 +99,17 @@ func (s *Server) desiredGatewayGrant(workload Workload, serviceURL string) gatew
 		grant.ModelAlias = workload.Runtime.ModelAlias
 	}
 	return grant
+}
+
+func cloneGrantActionAuthorities(authorities []gateway.GrantActionAuthority) []gateway.GrantActionAuthority {
+	cloned := make([]gateway.GrantActionAuthority, len(authorities))
+	for index, authority := range authorities {
+		cloned[index] = gateway.GrantActionAuthority{
+			KeyID: authority.KeyID, PublicKey: authority.PublicKey,
+			ConnectorIDs: append([]string(nil), authority.ConnectorIDs...),
+		}
+	}
+	return cloned
 }
 
 func (s *Server) desiredRelay(workload Workload) RelaySpec {

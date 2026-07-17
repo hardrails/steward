@@ -451,7 +451,7 @@ const (
 // bounds total disk work. Callers that can still write an HTTP response
 // translate false into a 429 JSON error.
 func (s *Server) denyEgress(grant Grant, reason, method, host string, port int) egressDenialDecision {
-	decision := s.reserveEgressDeniedAttempt(grant.GrantID, time.Now())
+	decision := s.reserveEgressDeniedAttemptNow(grant.GrantID)
 	if decision != egressDenialAllowed {
 		return decision
 	}
@@ -466,9 +466,26 @@ func (s *Server) allowEgressDeniedAttempt(grantID string, now time.Time) bool {
 	return s.reserveEgressDeniedAttempt(grantID, now) == egressDenialAllowed
 }
 
+func (s *Server) reserveEgressDeniedAttemptNow(grantID string) egressDenialDecision {
+	return s.reserveEgressDeniedAttemptWithClock(grantID, time.Now)
+}
+
+func (s *Server) reserveEgressDeniedAttemptWithClock(grantID string, clock func() time.Time) egressDenialDecision {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Sample the clock after serializing limiter updates. Otherwise concurrent
+	// requests can commit a later timestamp first and make an earlier sample
+	// look like a wall-clock rollback.
+	return s.reserveEgressDeniedAttemptLocked(grantID, clock())
+}
+
 func (s *Server) reserveEgressDeniedAttempt(grantID string, now time.Time) egressDenialDecision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.reserveEgressDeniedAttemptLocked(grantID, now)
+}
+
+func (s *Server) reserveEgressDeniedAttemptLocked(grantID string, now time.Time) egressDenialDecision {
 	// An in-flight request can reach a late denial while unregister is revoking
 	// the grant. Do not recreate limiter state after unregister has deleted it.
 	grant, ok := s.grants[grantID]

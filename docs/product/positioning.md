@@ -20,6 +20,12 @@ was replayed. Steward connects local admission and exact task authority to a
 constrained workload and records receipts that the operator can verify without
 contacting a vendor.
 
+An agent can also receive attacker instructions through ordinary calendar, email,
+web, document, memory, or tool content. Asking the same model to detect or review
+the attack is not a complete authorization boundary. For managed connector calls,
+Authorized Effects assumes the agent is compromised and requires an independently
+signed exact request outside the workload.
+
 ## The operator outcome
 
 After preparing a Docker and gVisor host and importing the required artifacts, an
@@ -47,7 +53,9 @@ operator can:
    no default network access, while granting only approved state, inference,
    service, exact connector operations, or named HTTP(S) routes, and optionally
    require an off-node tenant authority to sign the exact request for selected
-   agent-service or connector operations;
+   agent-service operations, or require Authorized Effects for selected connectors
+   with no generic egress, durable one-use spend before DNS, and credentials kept
+   outside the workload;
 9. publish bounded signed receipt deltas to the customer-owned controller on an
    independent loop, so the controller can retain one exact checkpoint and make an
    authenticated rollback or equivocation finding sticky without becoming a
@@ -99,7 +107,7 @@ gVisor workload + optional dedicated-host state + per-instance trusted relay
               |
               v
 optional service-scoped task permit -> Gateway durable authorization -> agent
-optional connector action permit    -> Gateway durable authorization -> upstream
+authorized connector v2 permit      -> Gateway durable spend before DNS -> upstream
               |
               v
 node-local signed, hash-linked enforcement receipt
@@ -121,7 +129,8 @@ Each input has a separate purpose:
   privilege.
 - A **site policy** is signed by the operator's site root key. It limits publishers,
   tenants, profiles, repositories or exact image digests, resources, inference
-  routes, services, connector IDs, egress routes, and publisher revocation state.
+  routes, services, connector IDs, egress routes, publisher revocation state, and
+  optional or required connector-scoped Authorized Effects keys.
 - An **instance intent** is a separately authenticated command to run a profile for
   a tenant, node, and instance. A generation fence—an increasing counter keyed by
   `(tenant_id, instance_id)`—prevents an older command from replacing newer state.
@@ -132,6 +141,10 @@ Each input has a separate purpose:
   configured service request. Signed site policy scopes that public key to explicit
   service IDs; the private key remains off-node. The permit cannot add a capability
   that the profile, site policy, intent, and active grant did not already allow.
+- An **authorized-effects permit** is a version-2 tenant-key-signed statement for
+  one exact connector request. Signed policy pins that key to connector IDs;
+  explicit intent selects the mode; Gateway forbids generic egress, spends the
+  permit before DNS, and records format-5 evidence.
 
 Steward grants a workload only the intersection of the profile capsule, site
 policy, and instance intent. A trusted publisher can authorize a profile and its
@@ -152,7 +165,9 @@ audit log. Connector and service-task authorizations and terminal outcomes use a
 separate Gateway-signed, hash-linked chain. Permit-backed records bind the authority
 key ID, exact signed envelope, and request digests to the stable task call and
 terminal outcome. Service-task records may retain the run ID observed from the
-agent, but that value is untrusted application output. Both receipt chains exclude prompts, model
+agent, but that value is untrusted application output. Authorized connector
+records additionally bind the explicit mode and exact operation policy in format
+5. Both receipt chains exclude prompts, model
 responses, agent logs, the meaning of agent actions, credentials, and bodies.
 
 When evidence uplink is enabled, Executor publishes receipt checkpoints on a loop
@@ -257,9 +272,11 @@ reviewable.
 Steward is not an agent framework, workflow designer, model router, browser
 service, generic sandbox API, or hosted control-plane service. The bundled
 self-hosted controller is deliberately not an enterprise identity provider,
-approval system, placement scheduler, desired-state reconciler, or fleet user
-interface. Steward does not host models, inspect prompts, calculate token costs,
-design multi-agent workflows, or make semantic claims about agent behavior.
+approval system, placement scheduler, desired-state reconciler, or general
+fleet-management interface. Its embedded console is a bounded read-only projection
+of the control API, not an approval or remediation workflow. Steward does not host
+models, inspect prompts, calculate token costs, design multi-agent workflows, or
+make semantic claims about agent behavior.
 
 Existing sandboxes and agent platforms can complement Steward. Steward addresses a
 specific question: can a customer-operated node enforce a locally authorized
@@ -276,7 +293,8 @@ evidence that remains verifiable offline.
 
 Among the systems in the linked comparison, no reviewed product documents the same
 combination of a customer-operated air-gapped fleet controller and nodes,
-receipt-key-bound enrollment, site-signed artifact and tenant admission,
+receipt-key-bound enrollment, publisher-signed artifacts, site-root-signed policy,
+authenticated tenant intent,
 controller-blind tenant signing keys, service-scoped off-node task keys,
 exact-request dispatch, durable delivery and node-local replay control,
 independently retained divergence findings, and offline-verifiable

@@ -3,8 +3,10 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -645,7 +647,7 @@ func TestOpenRejectsUntrustedPersistedState(t *testing.T) {
 		{name: "duplicate", raw: duplicate, mode: 0o600},
 		{name: "invalid grant", raw: invalid, mode: 0o600},
 		{name: "permissive", raw: []byte(`{"version":1,"grants":[]}`), mode: 0o644},
-		{name: "oversized", raw: []byte(strings.Repeat("x", maxConfigBytes+1)), mode: 0o600},
+		{name: "oversized", raw: []byte(strings.Repeat("x", maxStateBytes+1)), mode: 0o600},
 		{name: "directory", mode: 0o700, dir: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -667,6 +669,62 @@ func TestOpenRejectsUntrustedPersistedState(t *testing.T) {
 				t.Fatal("untrusted state accepted")
 			}
 		})
+	}
+}
+
+func TestGatewayStateFitsDefaultFleetOfMaximumAuthorizedEffectGrants(t *testing.T) {
+	directory := t.TempDir()
+	server := &Server{
+		config:            Config{StateFile: filepath.Join(directory, "state.json")},
+		grants:            make(map[string]Grant),
+		policyDigests:     make(map[string]string),
+		credentialDigests: make(map[string]string),
+		connectorCalls:    make(map[string]map[string][]string),
+	}
+	connectorIDs := make([]string, 32)
+	for index := range connectorIDs {
+		prefix := fmt.Sprintf("connector-%02d-", index)
+		connectorIDs[index] = prefix + strings.Repeat("x", 128-len(prefix))
+	}
+	authorities := make([]GrantActionAuthority, maxActionAuthoritiesPerCall)
+	for index := range authorities {
+		prefix := fmt.Sprintf("authority-%02d-", index)
+		public := make([]byte, 32)
+		public[len(public)-1] = byte(index + 1)
+		authorities[index] = GrantActionAuthority{
+			KeyID:        prefix + strings.Repeat("x", 128-len(prefix)),
+			PublicKey:    base64.StdEncoding.EncodeToString(public),
+			ConnectorIDs: append([]string(nil), connectorIDs...),
+		}
+	}
+	if !GrantActionAuthoritiesValid(authorities, connectorIDs) {
+		t.Fatal("maximum authorized-effects authority shape is invalid")
+	}
+	for index := 0; index < 32; index++ {
+		tenantPrefix := fmt.Sprintf("tenant-%02d-", index)
+		instancePrefix := fmt.Sprintf("agent-%02d-", index)
+		tenantID := tenantPrefix + strings.Repeat("t", 128-len(tenantPrefix))
+		instanceID := instancePrefix + strings.Repeat("i", 256-len(instancePrefix))
+		grant := Grant{
+			GrantID: GrantID(tenantID, instanceID, 1), TenantID: tenantID, NodeID: strings.Repeat("n", 128),
+			InstanceID: instanceID, Generation: 1, RuntimeRef: "runtime-" + strings.Repeat("r", 121),
+			CapsuleDigest: "sha256:" + strings.Repeat("a", 64), PolicyDigest: "sha256:" + strings.Repeat("b", 64),
+			EffectMode: EffectModeAuthorized, ActionAuthorities: cloneGrantActionAuthorities(authorities),
+			ConnectorIDs: append([]string(nil), connectorIDs...),
+		}
+		server.grants[grant.GrantID] = grant
+		server.policyDigests[grant.GrantID] = "sha256:" + strings.Repeat("c", 64)
+		server.credentialDigests[grant.GrantID] = "sha256:" + strings.Repeat("d", 64)
+	}
+	if err := server.persistLocked(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(server.config.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) <= maxConfigBytes || len(raw) > maxStateBytes {
+		t.Fatalf("maximum default-fleet state bytes=%d config-limit=%d state-limit=%d", len(raw), maxConfigBytes, maxStateBytes)
 	}
 }
 

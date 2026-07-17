@@ -30,10 +30,12 @@ const (
 	PayloadTypeV2 = "application/vnd.steward.connector-receipt.v2+json"
 	PayloadTypeV3 = "application/vnd.steward.connector-receipt.v3+json"
 	PayloadTypeV4 = "application/vnd.steward.connector-receipt.v4+json"
+	PayloadTypeV5 = "application/vnd.steward.connector-receipt.v5+json"
 	SchemaV1      = "steward.connector-receipt.v1"
 	SchemaV2      = "steward.connector-receipt.v2"
 	SchemaV3      = "steward.connector-receipt.v3"
 	SchemaV4      = "steward.connector-receipt.v4"
+	SchemaV5      = "steward.connector-receipt.v5"
 	// PayloadType remains the original format identifier for source compatibility
 	// with callers that construct legacy, non-permit receipt fixtures.
 	PayloadType              = PayloadTypeV1
@@ -48,6 +50,9 @@ const (
 	// reserve authorization, dispatch, and terminal lifecycle receipts.
 	MinimumLifecycleTenantBytes = 3 * terminalReserveBytes
 	TaskProtocolLifecycleV1     = "steward.task-lifecycle.v1"
+	// EffectModeAuthorized identifies a connector effect that requires an exact
+	// action permit rather than relying only on the runtime's admission grant.
+	EffectModeAuthorized = "authorized"
 )
 
 var (
@@ -190,6 +195,7 @@ type Event struct {
 	Phase                 Phase      `json:"phase"`
 	Outcome               Outcome    `json:"outcome"`
 	Kind                  EventKind  `json:"kind,omitempty"`
+	EffectMode            string     `json:"effect_mode,omitempty"`
 	TenantID              string     `json:"tenant_id"`
 	RuntimeRef            string     `json:"runtime_ref"`
 	CapsuleDigest         string     `json:"capsule_digest"`
@@ -499,7 +505,9 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 		return Head{}, errors.New("connector ledger requires reopen after an ambiguous write")
 	}
 	payloadType, schemaVersion := PayloadTypeV1, SchemaV1
-	if event.TaskProtocol != "" {
+	if event.EffectMode != "" {
+		payloadType, schemaVersion = PayloadTypeV5, SchemaV5
+	} else if event.TaskProtocol != "" {
 		payloadType, schemaVersion = PayloadTypeV4, SchemaV4
 	} else if event.Kind != "" {
 		payloadType, schemaVersion = PayloadTypeV3, SchemaV3
@@ -741,7 +749,8 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 		}
 		envelope, err := dsse.Parse(raw)
 		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 &&
-			envelope.PayloadType != PayloadTypeV3 && envelope.PayloadType != PayloadTypeV4 {
+			envelope.PayloadType != PayloadTypeV3 && envelope.PayloadType != PayloadTypeV4 &&
+			envelope.PayloadType != PayloadTypeV5 {
 			return Head{}, fmt.Errorf("verify connector ledger line %d: unsupported receipt envelope", lineNumber)
 		}
 		payload, keyID, err := dsse.Verify(raw, envelope.PayloadType, trusted)
@@ -781,6 +790,8 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 		expectedSchema = SchemaV3
 	case PayloadTypeV4:
 		expectedSchema = SchemaV4
+	case PayloadTypeV5:
+		expectedSchema = SchemaV5
 	}
 	if receipt.SchemaVersion != expectedSchema || receipt.NodeID != nodeID || receipt.Epoch != epoch ||
 		receipt.Sequence != sequence || receipt.PreviousHash != previous {
@@ -790,10 +801,12 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 	if err != nil || observed.IsZero() || receipt.ObservedAt != observed.UTC().Format(time.RFC3339Nano) {
 		return errors.New("connector receipt has an invalid observation time")
 	}
-	if payloadType == PayloadTypeV1 && (receipt.Event.PermitDigest != "" || receipt.Event.Kind != "") ||
-		payloadType == PayloadTypeV2 && (receipt.Event.PermitDigest == "" || receipt.Event.Kind != "") ||
-		payloadType == PayloadTypeV3 && (receipt.Event.Kind == "" || receipt.Event.TaskProtocol != "") ||
-		payloadType == PayloadTypeV4 && (receipt.Event.Kind != ServiceTask || receipt.Event.TaskProtocol == "") {
+	if payloadType == PayloadTypeV1 && (receipt.Event.PermitDigest != "" || receipt.Event.Kind != "" || receipt.Event.EffectMode != "") ||
+		payloadType == PayloadTypeV2 && (receipt.Event.PermitDigest == "" || receipt.Event.Kind != "" || receipt.Event.EffectMode != "") ||
+		payloadType == PayloadTypeV3 && (receipt.Event.Kind == "" || receipt.Event.TaskProtocol != "" || receipt.Event.EffectMode != "") ||
+		payloadType == PayloadTypeV4 && (receipt.Event.Kind != ServiceTask || receipt.Event.TaskProtocol == "" || receipt.Event.EffectMode != "") ||
+		payloadType == PayloadTypeV5 && (receipt.Event.Kind != ConnectorCall || receipt.Event.EffectMode != EffectModeAuthorized ||
+			!digest(receipt.Event.OperationPolicyDigest) || receipt.Event.TaskProtocol != "") {
 		return errors.New("connector receipt schema does not match its permit fields")
 	}
 	if payloadType == PayloadTypeV4 {
@@ -899,7 +912,8 @@ func validateTaskCoordinate(record VerifiedReceipt, previous taskCoordinate, fir
 }
 
 func sameCall(left, right Event) bool {
-	return left.Kind == right.Kind && left.TenantID == right.TenantID && left.RuntimeRef == right.RuntimeRef &&
+	return left.Kind == right.Kind && left.EffectMode == right.EffectMode &&
+		left.TenantID == right.TenantID && left.RuntimeRef == right.RuntimeRef &&
 		left.CapsuleDigest == right.CapsuleDigest && left.PolicyDigest == right.PolicyDigest &&
 		left.RoutePolicyDigest == right.RoutePolicyDigest && left.Generation == right.Generation &&
 		left.GrantID == right.GrantID && left.ConnectorID == right.ConnectorID &&
@@ -919,7 +933,12 @@ func validateEvent(event Event) error {
 		(event.ErrorCode != "" && !identifier(event.ErrorCode)) {
 		return errors.New("invalid bounded connector event")
 	}
-	if (event.PermitDigest == "") != (event.RequestDigest == "") ||
+	authorizedDenial := event.Kind == ConnectorCall && event.EffectMode == EffectModeAuthorized && event.Phase == Deny
+	if authorizedDenial {
+		if event.AuthorityKeyID != "" || event.PermitDigest != "" || !digest(event.RequestDigest) {
+			return errors.New("authorized connector denial must bind the request without claiming a permit authority")
+		}
+	} else if (event.PermitDigest == "") != (event.RequestDigest == "") ||
 		(event.PermitDigest == "") != (event.AuthorityKeyID == "") ||
 		event.PermitDigest != "" && (!digest(event.PermitDigest) || !digest(event.RequestDigest)) {
 		return errors.New("connector permit and request digests must be valid and present together")
@@ -929,17 +948,34 @@ func validateEvent(event Event) error {
 	}
 	switch event.Kind {
 	case "":
-		if !identifier(event.ConnectorID) || event.ServiceID != "" || event.OperationPolicyDigest != "" || event.RunID != "" ||
+		if event.EffectMode != "" || !identifier(event.ConnectorID) || event.ServiceID != "" || event.OperationPolicyDigest != "" || event.RunID != "" ||
 			event.TaskProtocol != "" || event.TaskStatus != "" || event.ResultDigest != "" {
 			return errors.New("legacy connector event contains service task fields")
 		}
 	case ConnectorCall:
-		if !identifier(event.ConnectorID) || event.ServiceID != "" || event.OperationPolicyDigest != "" || event.RunID != "" ||
+		if !identifier(event.ConnectorID) || event.ServiceID != "" || event.RunID != "" ||
 			event.TaskProtocol != "" || event.TaskStatus != "" || event.ResultDigest != "" {
 			return errors.New("connector call event contains incoherent fields")
 		}
+		switch event.EffectMode {
+		case "":
+			if event.OperationPolicyDigest != "" {
+				return errors.New("legacy connector call contains an operation policy digest")
+			}
+		case EffectModeAuthorized:
+			if !digest(event.OperationPolicyDigest) {
+				return errors.New("authorized connector call requires an operation policy digest")
+			}
+			if event.Phase == Authorize || event.Phase == Terminal {
+				if event.AuthorityKeyID == "" || event.PermitDigest == "" || event.RequestDigest == "" {
+					return errors.New("authorized connector call requires permit and request bindings")
+				}
+			}
+		default:
+			return errors.New("connector call uses an unsupported effect mode")
+		}
 	case ServiceTask:
-		if event.ConnectorID != "" || !identifier(event.ServiceID) || !digest(event.OperationPolicyDigest) {
+		if event.EffectMode != "" || event.ConnectorID != "" || !identifier(event.ServiceID) || !digest(event.OperationPolicyDigest) {
 			return errors.New("service task event contains incoherent fields")
 		}
 		if event.Phase == Authorize || event.Phase == Dispatch || event.Phase == Terminal {

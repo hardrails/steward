@@ -222,7 +222,6 @@ func (projection ExecutorAdmissionProjectionV1) Validate() error {
 	if projection.RoutePolicyDigest != "" && !ValidSHA256Digest(projection.RoutePolicyDigest) {
 		return errors.New("admission projection route policy digest is invalid")
 	}
-
 	if err := projection.validateService(); err != nil {
 		return err
 	}

@@ -472,6 +472,28 @@ func TestEgressDeniedAttemptConcurrentHostBound(t *testing.T) {
 	}
 }
 
+func TestEgressDeniedAttemptProductionClockReadIsSerialized(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	server := &Server{
+		grants: map[string]Grant{"grant-a": {GrantID: "grant-a", TenantID: "tenant-a"}},
+	}
+	var sampledOutsideLock atomic.Bool
+	clock := func() time.Time {
+		if server.mu.TryLock() {
+			sampledOutsideLock.Store(true)
+			server.mu.Unlock()
+		}
+		return now
+	}
+
+	if decision := server.reserveEgressDeniedAttemptWithClock("grant-a", clock); decision != egressDenialAllowed {
+		t.Fatalf("first egress denial decision=%v", decision)
+	}
+	if sampledOutsideLock.Load() {
+		t.Fatal("production egress denial limiter sampled its clock before taking the state lock")
+	}
+}
+
 func TestEgressDeniedAttemptConcurrentUnregisterDoesNotResurrectState(t *testing.T) {
 	started := time.Unix(1_700_000_000, 0)
 	server := &Server{grants: map[string]Grant{"grant-a": {GrantID: "grant-a", TenantID: "tenant-a"}}}

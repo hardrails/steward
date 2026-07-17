@@ -376,12 +376,14 @@ func writeVerifiedRolloutRunStatus(
 	return writeHumanRolloutStatus(stdout, output)
 }
 
-func nodeSupportsRollout(node controlclient.Node, tenantID string) bool {
-	return node.State == "active" &&
+func nodeSupportsRollout(node controlclient.Node, tenantID string, authorizedEffects bool) bool {
+	base := node.State == "active" &&
 		slices.Contains(node.TenantIDs, tenantID) &&
 		slices.Contains(node.Capabilities, controlprotocol.ExecutorCapabilityAdmissionProjectionV1) &&
 		slices.Contains(node.Capabilities, controlprotocol.ExecutorCapabilityActivationCanaryV1) &&
 		slices.Contains(node.Capabilities, controlprotocol.ExecutorCapabilityRolloutAuthorizationContextV1)
+	return base && (!authorizedEffects ||
+		slices.Contains(node.Capabilities, controlprotocol.ExecutorCapabilityAuthorizedEffectsV1))
 }
 
 // These declarations live below the trust loader to keep the critical rule

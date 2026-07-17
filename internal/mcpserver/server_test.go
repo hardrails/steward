@@ -62,7 +62,7 @@ func (n *fakeNode) Admit(_ context.Context, _ []byte, intent admission.InstanceI
 }
 func (n *fakeNode) Status(context.Context, string) (nodeclient.State, error) {
 	n.calls = append(n.calls, "status")
-	return nodeclient.State{RuntimeRef: runtimeRef(), Status: "running"}, n.err
+	return nodeclient.State{RuntimeRef: runtimeRef(), Status: "running", EffectMode: admission.EffectModeAuthorized}, n.err
 }
 func (n *fakeNode) Logs(context.Context, string) (nodeclient.State, error) {
 	n.calls = append(n.calls, "logs")
@@ -129,7 +129,8 @@ func TestMCPInitializeListAndCallTools(t *testing.T) {
 	if result["protocolVersion"] != ProtocolVersion {
 		t.Fatalf("initialize=%#v", initialize)
 	}
-	if !strings.Contains(lines[1], "steward_admit") || !strings.Contains(lines[2], `\"status\":\"running\"`) {
+	if !strings.Contains(lines[1], "steward_admit") || !strings.Contains(lines[2], `\"status\":\"running\"`) ||
+		!strings.Contains(lines[2], `\"effect_mode\":\"authorized\"`) {
 		t.Fatalf("unexpected output: %s", output.String())
 	}
 	if node.destroyed != runtimeRef() {

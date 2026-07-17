@@ -296,7 +296,8 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 		!runtimeAllocationMatches(wantNetwork, runtime.Subnet, runtime.Gateway, runtime.RelayIP, runtime.AgentIP) {
 		return s.containReconciliation(ctx, plan, observed, "topology_identity_drift", "runtime topology is not derived from the signed tenant, instance, and generation")
 	}
-	hasAdmissionBinding := runtime.CapsuleDigest != "" || runtime.PolicyDigest != "" || len(runtime.ConnectorIDs) != 0
+	hasAdmissionBinding := runtime.CapsuleDigest != "" || runtime.PolicyDigest != "" || len(runtime.ConnectorIDs) != 0 ||
+		len(runtime.TaskAuthorities) != 0 || runtime.EffectMode != "" || len(runtime.ActionAuthorities) != 0
 	if hasAdmissionBinding && (runtime.CapsuleDigest != record.CapsuleDigest || runtime.PolicyDigest != record.PolicyDigest) {
 		return s.containReconciliation(ctx, plan, observed, "topology_identity_drift", "runtime topology is not bound to the committed signed admission")
 	}
@@ -313,7 +314,8 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 
 	inspection, grantErr := s.secure.gateway.InspectWithPolicy(ctx, runtime.GrantID)
 	grant := inspection.Grant
-	policyBearingGrant := runtime.Inference || len(runtime.EgressRouteIDs) != 0 || len(runtime.ConnectorIDs) != 0
+	policyBearingGrant := runtime.Inference || len(runtime.EgressRouteIDs) != 0 || len(runtime.ConnectorIDs) != 0 ||
+		len(runtime.TaskAuthorities) != 0 || runtime.EffectMode != ""
 	if !plan.revoked && policyBearingGrant && !imageConfigDigest.MatchString(record.RoutePolicyDigest) {
 		return s.containReconciliation(ctx, plan, observed, "gateway_drift", "committed admission fence has no valid gateway route policy binding")
 	}

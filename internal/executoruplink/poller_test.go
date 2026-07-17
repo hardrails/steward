@@ -12,12 +12,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/executor"
 	stewarduplink "github.com/hardrails/steward/internal/uplink"
@@ -223,7 +225,8 @@ func TestNodeScopedPollVerifiesTenantSignedCommandAndAdvertisesProtocol(t *testi
 			var request pollRequest
 			raw, _ := io.ReadAll(r.Body)
 			if err := dsse.DecodeStrictInto(raw, maxWireBytes, &request); err != nil ||
-				request.ProtocolVersion != 2 || request.NodeID != "node-1" || request.CredentialScope != "node" {
+				request.ProtocolVersion != 2 || request.NodeID != "node-1" || request.CredentialScope != "node" ||
+				!slices.Contains(request.Capabilities, controlprotocol.ExecutorCapabilityAuthorizedEffectsV1) {
 				t.Errorf("poll request=%#v raw=%s err=%v", request, raw, err)
 			}
 			_ = json.NewEncoder(w).Encode(pollResponse{ProtocolVersion: 2, Commands: []json.RawMessage{signed}})

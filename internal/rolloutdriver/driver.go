@@ -663,10 +663,13 @@ func BuildCanaryCommandV1(input CanaryInputV1) (CanaryArtifactsV1, error) {
 }
 
 // VerifyAdmissionV1 checks that a retained protocol-4 admission projection is
-// the exact runtime, policy, grant, service, task-authority, route, and
-// activation binding derived for prepared. It is intentionally side-effect
-// free so a coordinator can qualify a terminal admit report before issuing a
-// start command.
+// the exact runtime, policy, grant, service, task-authority, route selection,
+// and activation binding derived for prepared. The route-policy digest is a
+// node-produced commitment to validated local Gateway configuration; callers
+// bind all later permits and evidence to that exact digest. Effect mode remains
+// in the signed intent and is enforced before this compatibility projection is
+// produced. It is intentionally side-effect free so a coordinator can qualify
+// a terminal admit report before issuing a start command.
 func VerifyAdmissionV1(
 	prepared PreparedTargetV1,
 	projection controlprotocol.ExecutorAdmissionProjectionV1,

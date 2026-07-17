@@ -106,6 +106,34 @@ the same node credential. Long-lived bearers must be rotated and revoked
 explicitly. A site administrator can revoke one node credential during a staged
 rotation without disabling the node or its replacement credential.
 
+## The embedded console is observation only
+
+`/console/` reads the existing control operations API. It can show summary,
+attention, node, command, and credential metadata, but it cannot create, enroll,
+revoke, submit, approve, sign, retry, acknowledge, dismiss, export, or delete. It
+is not an incident tracker, approval workflow, secret manager, or replacement for
+offline evidence verification. Page limits also mean the visible table may be only
+the first bounded page; the interface says when an API cursor has more records.
+
+The static assets are available to anyone who can reach the control listener;
+fleet data still requires the existing scoped operator bearer. The interface being
+read-only does not narrow that bearer's authority outside the interface. A browser
+extension or compromised browser that steals a site-administrator credential may
+use the control API directly for every operation that credential authorizes.
+
+The bearer stays out of cookies and browser storage and is cleared from application
+memory on lock, `pagehide`, 15 minutes idle, or the eight-hour absolute deadline.
+Those client-side controls neither revoke the server credential nor protect it from
+the browser process, extensions, host inspection, or screen capture. A dedicated
+hardened operator profile remains required.
+
+Embedded same-origin assets, restrictive response headers, and the automatic exact
+Host gate reduce external asset, framing, and DNS-rebinding exposure. They do not
+provide a second network or identity boundary and do not make a compromised
+controller host safe. The committed bundle removes npm and Node.js from normal and
+air-gapped Go builds, but maintainers who rebuild it still trust the lockfile-pinned
+React, Vite, Node.js, and package-registry supply chain.
+
 ## Signed admission is opt-in
 
 The host-control `/v1/workloads` endpoint is available only without signed
@@ -404,9 +432,28 @@ operation-policy digest, task, exact body digest and length, method-derived cont
 type, and time window against live state. The operation-policy digest commits to
 the canonical origin, credential injection mode, credential epoch, connector and
 operation IDs, method, and exact path. The permit cannot expand the outer workload
-grant. Gateway
-records the authority key ID, exact permit digest, and exact request digest beside
-the stable task-based call digest in receipt format 2 before the network effect.
+grant. A standard permit-backed call records the authority key, permit, and request
+digests in receipt format 2 before the network effect.
+
+Authorized Effects adds signed-policy continuity to this connector mechanism.
+Site-root-signed tenant policy sets `authorized_effects` to `optional` or `required`
+and pins each action public key to connector IDs. Authenticated intent explicitly
+selects `effect_mode`; required policy rejects a standard or omitted mode. Authorized
+mode rejects generic egress and requires every selected connector to have an exact
+policy-pinned key match in Gateway. It accepts only a version-2 action permit and
+records accepted events in receipt format 5, including the explicit mode and exact
+operation-policy digest. Gateway state format 5 preserves the mode and narrowed key
+scopes across restart.
+
+An invalid permit in authorized mode may create one stable
+`action_permit_denied` record per retained grant. The denial binds the request
+digest and operation policy without claiming a verified permit or authority key.
+The cap prevents a compromised workload from converting unlimited bad permits into
+unlimited evidence; if the bounded record cannot be persisted, the request fails
+closed before the effect. This is first-observed, attacker-selectable evidence: the
+workload chooses the task ID and request bytes accompanying the first invalid
+permit, and later denials are not enumerated. The marker proves at least one denial,
+not a complete denial history.
 
 The connector ledger also has an explicit, non-borrowing byte budget for every
 tenant that may receive a connector grant. Gateway rejects an unbudgeted grant
@@ -468,6 +515,14 @@ current state; Gateway's live configuration is the final enforcement point.
 Gateway configuration requires an explicit loopback service address with a numeric
 port from 1 through 65535. Missing, zero, out-of-range, and named service ports fail
 both `-check-config` and startup.
+
+Authorized Effects assumes a fully compromised agent, but only for this completely
+mediated connector boundary. It does not constrain credentials, browser sessions,
+plugins, sockets, or other channels available outside Steward; inference
+confidentiality; local filesystem or computer-use effects; host root, Gateway, or
+signing-key compromise; an approver's misunderstanding; or the upstream service's
+exactly-once behavior. A lost response remains ambiguous and does not restore the
+spent permit.
 
 ## Tenant-signed service-task boundary
 

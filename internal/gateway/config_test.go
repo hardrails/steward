@@ -27,7 +27,7 @@ func TestLoadConfigValidatesRoutesAndSecretPermissions(t *testing.T) {
 	if err := os.WriteFile(token, []byte("service-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(credential, []byte("route-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("route-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	config := Config{
@@ -235,7 +235,7 @@ func TestConfigValidatesFixedTaskLifecyclePolicy(t *testing.T) {
 func TestConfigLoadsFiniteConnectorsAndOwnerOnlyCredentials(t *testing.T) {
 	directory := t.TempDir()
 	credential := filepath.Join(directory, "connector-token")
-	if err := os.WriteFile(credential, []byte("connector-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("connector-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	config := Config{Connectors: []Connector{connectorFixture(credential)}}
@@ -264,7 +264,7 @@ func TestConfigLoadsFiniteConnectorsAndOwnerOnlyCredentials(t *testing.T) {
 func TestConfigSeparatesConnectorCredentialsFromGatewayAuthority(t *testing.T) {
 	directory := t.TempDir()
 	credential := filepath.Join(directory, "connector-token")
-	if err := os.WriteFile(credential, []byte("connector-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("connector-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	base := Config{
@@ -309,7 +309,7 @@ func TestConfigSeparatesConnectorCredentialsFromGatewayAuthority(t *testing.T) {
 			{name: "inference token", path: base.Routes[0].CredentialFile},
 		} {
 			t.Run(fixture.name, func(t *testing.T) {
-				if err := os.WriteFile(fixture.path, []byte("protected-secret\n"), 0o600); err != nil {
+				if err := os.WriteFile(fixture.path, []byte("protected-secret"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				alias := filepath.Join(directory, strings.ReplaceAll(fixture.name, " ", "-")+"-alias")
@@ -351,8 +351,8 @@ func TestConfigSeparatesInferenceCredentialsFromAllAuthority(t *testing.T) {
 	serviceToken := filepath.Join(directory, "service-token")
 	receiptKey := filepath.Join(directory, "connector-receipts.private.pem")
 	for path, value := range map[string]string{
-		credential: "inference-secret\n", connectorCredential: "connector-secret\n",
-		serviceToken: "service-secret\n", receiptKey: "receipt-key-material\n",
+		credential: "inference-secret", connectorCredential: "connector-secret",
+		serviceToken: "service-secret", receiptKey: "receipt-key-material",
 	} {
 		if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
 			t.Fatal(err)
@@ -413,7 +413,7 @@ func TestConfigSeparatesInferenceCredentialsFromAllAuthority(t *testing.T) {
 func TestReadCredentialUsesOneBoundedVerifiedFile(t *testing.T) {
 	directory := t.TempDir()
 	credential := filepath.Join(directory, "credential")
-	if err := os.WriteFile(credential, []byte("expected-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("expected-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if value, err := readCredential(credential); err != nil || value != "expected-secret" {
@@ -422,7 +422,7 @@ func TestReadCredentialUsesOneBoundedVerifiedFile(t *testing.T) {
 
 	t.Run("inode replacement", func(t *testing.T) {
 		replacement := filepath.Join(directory, "replacement")
-		if err := os.WriteFile(replacement, []byte("attacker-secret\n"), 0o600); err != nil {
+		if err := os.WriteFile(replacement, []byte("attacker-secret"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		expected, err := os.Lstat(credential)
@@ -441,7 +441,7 @@ func TestReadCredentialUsesOneBoundedVerifiedFile(t *testing.T) {
 
 	t.Run("permission replacement", func(t *testing.T) {
 		path := filepath.Join(directory, "permission-change")
-		if err := os.WriteFile(path, []byte("secret\n"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		expected, err := os.Lstat(path)
@@ -482,7 +482,15 @@ func TestReadCredentialUsesOneBoundedVerifiedFile(t *testing.T) {
 	})
 
 	for name, value := range map[string]string{
-		"nul": "secret\x00suffix", "tab": "secret\tsuffix", "unicode": "secret-π",
+		"nul":             "secret\x00suffix",
+		"internal tab":    "secret\tsuffix",
+		"leading space":   " secret-value",
+		"trailing space":  "secret-value ",
+		"leading tab":     "\tsecret-value",
+		"trailing tab":    "secret-value\t",
+		"carriage return": "secret-value\r",
+		"line feed":       "secret-value\n",
+		"unicode":         "secret-π",
 	} {
 		t.Run(name+" control", func(t *testing.T) {
 			path := filepath.Join(directory, name+"-credential")
@@ -595,7 +603,7 @@ func TestConfigValidatesActionPermitAuthorities(t *testing.T) {
 		t.Fatal(err)
 	}
 	credential := filepath.Join(t.TempDir(), "credential")
-	if err := os.WriteFile(credential, []byte("connector-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("connector-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	connector := connectorFixture(credential)
@@ -659,10 +667,10 @@ func TestActionPermitConfigDoesNotDriftUnrelatedConnector(t *testing.T) {
 	directory := t.TempDir()
 	legacyCredential := filepath.Join(directory, "legacy.token")
 	permitCredential := filepath.Join(directory, "permit.token")
-	if err := os.WriteFile(legacyCredential, []byte("legacy-secret-value\n"), 0o600); err != nil {
+	if err := os.WriteFile(legacyCredential, []byte("legacy-secret-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(permitCredential, []byte("permit-secret-value\n"), 0o600); err != nil {
+	if err := os.WriteFile(permitCredential, []byte("permit-secret-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	legacy := connectorFixture(legacyCredential)
@@ -710,7 +718,7 @@ func TestActionPermitConfigDoesNotDriftUnrelatedConnector(t *testing.T) {
 func TestConfigRequiresAndValidatesConnectorReceiptIdentity(t *testing.T) {
 	directory := t.TempDir()
 	credential := filepath.Join(directory, "connector-token")
-	if err := os.WriteFile(credential, []byte("connector-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(credential, []byte("connector-secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, private, err := ed25519.GenerateKey(rand.Reader)

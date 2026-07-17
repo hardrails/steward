@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Executor API
-  version: "1.7.0"
+  version: "1.8.0"
   description: |
     Public host-local contract for Steward's separate Docker/gVisor executor
     process. The control plane supplies a fully resolved generic OCI workload;
@@ -825,6 +825,13 @@ components:
           items:
             type: string
             pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        effect_mode:
+          type: string
+          enum: [standard, authorized]
+          description: |
+            Explicit external-effect policy selected under signed tenant policy.
+            `authorized` forbids generic egress and requires every selected
+            connector call to carry a version-2 permit for the exact request.
     Capabilities:
       type: object
       additionalProperties: false
@@ -924,6 +931,12 @@ components:
           items:
             type: string
             pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        effect_mode:
+          type: string
+          enum: [standard, authorized]
+          description: |
+            Effective signed-admission effect mode. The field is absent for
+            policies created before explicit effect modes.
         route_policy_digest:
           type: string
           pattern: "^sha256:[a-f0-9]{64}$"

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -454,7 +455,8 @@ func assertPollV3(t *testing.T, request *http.Request) {
 		t.Fatal(err)
 	}
 	if err := dsse.DecodeStrictInto(raw, maxWireBytes, &poll); err != nil ||
-		poll.ProtocolVersion != controlprotocol.ExecutorProtocolV3 || poll.NodeID != "node-1" {
+		poll.ProtocolVersion != controlprotocol.ExecutorProtocolV3 || poll.NodeID != "node-1" ||
+		!slices.Contains(poll.Capabilities, controlprotocol.ExecutorCapabilityAuthorizedEffectsV1) {
 		t.Fatalf("poll=%#v raw=%s err=%v", poll, raw, err)
 	}
 }

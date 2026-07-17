@@ -92,6 +92,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err := validateWitnessTLSKeySeparation(tlsConfig, witnessPrivateKey); err != nil {
 		return err
 	}
+	if err := controlplane.ValidateTLSHostPolicy(tlsConfig); err != nil {
+		return err
+	}
 	if parsed.checkConfig {
 		_, err := fmt.Fprintln(stdout, "steward-control configuration is valid")
 		return err
@@ -467,6 +470,11 @@ func syncParent(path string) error {
 func serve(address string, handler http.Handler, tlsConfig *tls.Config, logger *slog.Logger) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
+		return err
+	}
+	handler, err = controlplane.NewHostGate(listener.Addr().String(), tlsConfig, handler)
+	if err != nil {
+		_ = listener.Close()
 		return err
 	}
 	server := &http.Server{

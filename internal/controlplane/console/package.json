@@ -1,0 +1,20 @@
+{
+  "name": "@steward/control-console",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "check": "node --check vite.config.js && node --test src/*.test.js"
+  },
+  "dependencies": {
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "vite": "8.1.5"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

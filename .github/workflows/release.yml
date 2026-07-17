@@ -6,11 +6,13 @@ name: Release
 # the artifacts are uploaded to the workflow run only, so the release automation
 # can be dry-fired safely without cutting a release. See docs/releasing.md.
 #
-# Four jobs by design, for native packaging and least privilege: the two `build`
-# matrix copies run the tagged commit's own code on matching x86/ARM hosts with a
-# read-only token; `combine` checks out no code and creates the complete checksum
-# manifest; `publish` holds the only contents:write token, checks out no code,
-# and only attaches the already-built artifacts to a GitHub Release.
+# Six jobs by design, for source ancestry, frontend provenance, native packaging,
+# and least privilege: `validate` checks tag ancestry before any repository script
+# runs; `console` reproduces the committed air-gapped browser bundle; the two
+# `build` matrix copies run the validated commit's code on matching x86/ARM hosts
+# with a read-only token; `combine` checks out no code and creates the complete
+# checksum manifest; `publish` holds the only contents:write token, checks out no
+# code, and only attaches already-built artifacts.
 #
 # scripts/release.sh stamps the release tag into all binaries with the standard Go
 # linker and independently executes all seven to assert the result before publishing.
@@ -43,8 +45,50 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: validate release source
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout release source without running repository code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - name: Require tag commit on origin/main
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          tagged_commit=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          if ! git merge-base --is-ancestor "$tagged_commit" refs/remotes/origin/main; then
+            echo "release: tagged commit $tagged_commit is not reachable from protected origin/main" >&2
+            exit 1
+          fi
+          echo "release: tagged commit $tagged_commit is reachable from protected origin/main"
+
+  console:
+    name: React console / release gate
+    needs: validate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24.18.0"
+          package-manager-cache: false
+      - name: Reproduce committed air-gapped console
+        run: |
+          npm ci --prefix internal/controlplane/console --ignore-scripts --no-audit --no-fund
+          npm audit --prefix internal/controlplane/console --audit-level=moderate
+          npm --prefix internal/controlplane/console run check
+          npm --prefix internal/controlplane/console run build
+          git diff --exit-code -- internal/controlplane/console/dist
+
   build:
     name: build / ${{ matrix.goarch }}
+    needs: console
     strategy:
       fail-fast: false
       matrix:
@@ -128,9 +172,9 @@ jobs:
           manifest=$(tar -xOf "$archive" release.json)
           grep -Fxq '  "schema": "steward.release.v2",' <<<"$manifest"
           grep -Fxq '    "admission_fence": {"read_min": 1, "read_max": 2, "write": 2},' <<<"$manifest"
-          grep -Fxq '    "connector_receipt_log": {"read_min": 1, "read_max": 4, "write": 4},' <<<"$manifest"
+          grep -Fxq '    "connector_receipt_log": {"read_min": 1, "read_max": 5, "write": 5},' <<<"$manifest"
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' <<<"$manifest"
-          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 4, "write": 4},' <<<"$manifest"
+          grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 5, "write": 5},' <<<"$manifest"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' <<<"$manifest"
           grep -Fxq "  \"version\": \"${STEWARD_RELEASE_VERSION}\"," <<<"$manifest"
           grep -Fxq '  "os": "linux",' <<<"$manifest"

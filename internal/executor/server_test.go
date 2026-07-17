@@ -1449,6 +1449,45 @@ func TestSecureAdmissionPreflightRejectionEmitsNoAllow(t *testing.T) {
 	})
 }
 
+func TestSecureAdmissionProjectsAuthorizedEffectsIntoImmutableRuntimeGrant(t *testing.T) {
+	docker := &secureDocker{}
+	server, _ := NewServer(docker, "secret", nil)
+	capsule, intent, config := secureAdmissionFixtureFor(
+		t, admission.Capabilities{Connector: true}, true,
+	)
+	grants := &gatewayFixture{grants: map[string]gateway.Grant{}}
+	config.Topology, config.Gateway = docker, grants
+	config.RelayImage = "sha256:" + strings.Repeat("d", 64)
+	config.GrantRoot, config.RelayGID = "/run/steward-gateway/grants", 1234
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	response := submitSecureAdmission(t, server, capsule, intent)
+	if response.Code != http.StatusCreated || docker.observed == nil {
+		t.Fatalf("status=%d body=%s workload=%#v", response.Code, response.Body.String(), docker.observed)
+	}
+	var admitted secureProvisionResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &admitted); err != nil {
+		t.Fatal(err)
+	}
+	runtime := docker.observed.Workload.Runtime
+	grant := grants.grants[admitted.GrantID]
+	if admitted.EffectMode != admission.EffectModeAuthorized ||
+		runtime.EffectMode != admission.EffectModeAuthorized || grant.EffectMode != gateway.EffectModeAuthorized ||
+		runtime.NodeID != intent.NodeID || grant.NodeID != intent.NodeID ||
+		len(runtime.EgressRouteIDs) != 0 || len(grant.EgressRouteIDs) != 0 ||
+		len(runtime.ActionAuthorities) != 1 || len(grant.ActionAuthorities) != 1 ||
+		runtime.ActionAuthorities[0].KeyID != "effects-approver" ||
+		!slices.Equal(runtime.ActionAuthorities[0].ConnectorIDs, []string{"git.read", "issues.create"}) ||
+		!slices.Equal(grant.ActionAuthorities[0].ConnectorIDs, []string{"git.read", "issues.create"}) {
+		t.Fatalf("admitted=%#v runtime=%#v grant=%#v", admitted, runtime, grant)
+	}
+	runtime.ActionAuthorities[0].ConnectorIDs[0] = "changed"
+	if grant.ActionAuthorities[0].ConnectorIDs[0] != "git.read" {
+		t.Fatal("Gateway grant aliases mutable Executor action-authority scope")
+	}
+}
+
 func TestSecureAdmissionRuntimeCapabilitiesDriveFullTopologyLifecycle(t *testing.T) {
 	docker := &secureDocker{}
 	server, _ := NewServer(docker, "secret", nil)
@@ -2804,11 +2843,12 @@ func secureAdmissionFixture(t *testing.T) ([]byte, admission.InstanceIntent, Sec
 	return secureAdmissionFixtureFor(t, admission.Capabilities{State: true})
 }
 
-func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities) ([]byte, admission.InstanceIntent, SecureAdmissionConfig) {
+func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities, authorizedEffects ...bool) ([]byte, admission.InstanceIntent, SecureAdmissionConfig) {
 	t.Helper()
 	_, sitePrivate, _ := ed25519.GenerateKey(rand.Reader)
 	publisherPublic, publisherPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	taskPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	actionPublic, _, _ := ed25519.GenerateKey(rand.Reader)
 	policy := admission.SitePolicy{
 		SchemaVersion: admission.SchemaV1, PolicyID: "site-a", PolicyEpoch: 1,
 		Publishers: []admission.PublisherRule{{
@@ -2830,6 +2870,15 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 		policy.Tenants[0].TaskKeys = []admission.TaskKey{{
 			KeyID: "task-approver", PublicKey: base64.StdEncoding.EncodeToString(taskPublic), ServiceIDs: []string{"agent-api"},
 		}}
+	}
+	if len(authorizedEffects) > 0 && authorizedEffects[0] {
+		policy.Tenants[0].AuthorizedEffects = &admission.AuthorizedEffectsPolicy{
+			Mode: admission.AuthorizedEffectsRequired,
+			Keys: []admission.ActionKey{{
+				KeyID: "effects-approver", PublicKey: base64.StdEncoding.EncodeToString(actionPublic),
+				ConnectorIDs: []string{"git.read", "issues.create"},
+			}},
+		}
 	}
 	policyPayload, _ := json.Marshal(policy)
 	policySigned, _ := dsse.Sign(admission.PolicyPayloadType, policyPayload, "site-root", sitePrivate)
@@ -2873,6 +2922,9 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 	}
 	if capabilities.Connector {
 		intent.ConnectorIDs = []string{"issues.create", "git.read"}
+	}
+	if len(authorizedEffects) > 0 && authorizedEffects[0] {
+		intent.EffectMode = admission.EffectModeAuthorized
 	}
 	dir := t.TempDir()
 	if err := admission.InitializeFenceStore(filepath.Join(dir, "fences.bin")); err != nil {

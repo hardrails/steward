@@ -25,6 +25,7 @@ import (
 
 const (
 	maxConfigBytes              = 1 << 20
+	maxStateBytes               = 64 << 20
 	maxConnectors               = 128
 	maxConnectorOperations      = 64
 	maxConnectorAllowedCIDRs    = 64
@@ -907,16 +908,12 @@ func readOpenedCredential(expected os.FileInfo, file *os.File) (string, error) {
 	if err != nil || !os.SameFile(opened, final) || !validCredentialFileInfo(final) || final.Size() != opened.Size() {
 		return "", errors.New("credential changed while reading")
 	}
-	value := strings.TrimSpace(string(raw))
-	if value == "" {
-		return "", errors.New("credential must contain one non-empty visible ASCII line")
-	}
-	for index := 0; index < len(value); index++ {
-		if value[index] < 0x21 || value[index] > 0x7e {
-			return "", errors.New("credential must contain one non-empty visible ASCII line")
+	for index := 0; index < len(raw); index++ {
+		if raw[index] < 0x21 || raw[index] > 0x7e {
+			return "", errors.New("credential must contain only visible ASCII bytes without whitespace")
 		}
 	}
-	return value, nil
+	return string(raw), nil
 }
 
 func validCredentialFileInfo(info os.FileInfo) bool {

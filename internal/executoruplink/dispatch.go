@@ -130,6 +130,7 @@ type executorAdmissionResponse struct {
 	EgressRouteIDs        []string                                  `json:"egress_route_ids,omitempty"`
 	ConnectorURL          string                                    `json:"connector_url,omitempty"`
 	ConnectorIDs          []string                                  `json:"connector_ids,omitempty"`
+	EffectMode            string                                    `json:"effect_mode,omitempty"`
 	RoutePolicyDigest     string                                    `json:"route_policy_digest,omitempty"`
 	ActivationID          string                                    `json:"activation_id,omitempty"`
 	ActivationBeginDigest string                                    `json:"activation_begin_digest,omitempty"`
@@ -448,6 +449,20 @@ func (d *dispatcher) callAdmissionV4(
 			fmt.Errorf("decode strict local executor admission response: %w", err),
 		)
 	}
+	expectedEffectMode := payload.Intent.EffectMode
+	needsGrant := payload.Intent.Capabilities.Inference ||
+		payload.Intent.Capabilities.Service ||
+		payload.Intent.Capabilities.Egress ||
+		payload.Intent.Capabilities.Connector
+	if !needsGrant {
+		expectedEffectMode = ""
+	}
+	if local.EffectMode != expectedEffectMode {
+		return "", nil, localCallError(
+			http.MethodPost,
+			errors.New("local executor admission response changed the signed effect mode"),
+		)
+	}
 	projection := executorAdmissionProjection(local)
 	if err := projection.Validate(); err != nil {
 		return "", nil, localCallError(
@@ -504,7 +519,8 @@ func correlateAdmissionProjection(
 	needsRoutePolicy := intent.Capabilities.Inference ||
 		len(projection.TaskAuthorities) > 0 ||
 		len(expectedEgress) > 0 ||
-		len(expectedConnectors) > 0
+		len(expectedConnectors) > 0 ||
+		(needsGrant && intent.EffectMode != "")
 	if needsRoutePolicy != (projection.RoutePolicyDigest != "") {
 		return errors.New("local executor admission response changed the effective route-policy binding")
 	}
