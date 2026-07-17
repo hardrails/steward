@@ -303,7 +303,7 @@ authority:
     "command_keys": [{
       "key_id": "tenant-a-commands",
       "public_key": "BASE64_ED25519_PUBLIC_KEY",
-      "operations": ["admit", "start", "stop", "destroy", "read", "purge"]
+      "operations": ["admit", "start", "stop", "destroy", "read", "purge", "activation-canary"]
     }]
   }]
 }
@@ -474,6 +474,18 @@ node. Protocols 3 and 4 share the same durable delivery ledger but never share a
 retained record: startup blocks a protocol switch until every unsettled record for
 the other protocol is reconciled.
 
+Protocol 4 also enables the fixed Hermes activation canary when signed admission
+has a complete Gateway topology. Executor advertises `activation-canary-v1` only
+while no other canary is active and a host-local Gateway control client is
+configured. The controller leases at most one canary per poll; ordinary lifecycle
+commands can still share that poll. Before Gateway receives the tenant-signed
+one-use task, Executor rechecks reconciliation, current policy, tenant authority,
+the retained activation identity, and the complete running topology under the
+same lifecycle lock used by signed mutations. Canary execution then runs outside
+the polling loop, so stop and destroy remain responsive. A known failed or
+cancelled Hermes result is terminal; an ambiguous post-dispatch result is retained
+as `outcome_unknown` and is never retried automatically.
+
 Remote plaintext HTTP is rejected by default. Private-CA and mutual TLS (mTLS)
 deployments use
 `-uplink-tls-ca-file`, `-uplink-tls-client-cert`, and
@@ -490,18 +502,23 @@ and the delivery ledger at 8 MiB and 4,096 records. The delivery ledger also cap
 one verified tenant at 32 records and 1 MiB of worst-case terminal reservation.
 Before entering a mutating handler, Executor proves that every accepted or
 executing delivery can grow into the largest valid JSON terminal report. Settled
-`done` and `rejected` entries may be compacted; ambiguous entries remain. Destroyed
-identities remain as tombstones or positions because deleting them would permit
-replay. There is currently no supported manual compaction or rollover command.
+`done`, `rejected`, and acknowledged terminal canary-failure entries may be
+compacted. A canary failure is compactable only when the ledger retains the verified
+`activation-canary` command kind and the exact terminal error mapping. Ambiguous
+entries remain. Destroyed identities remain as tombstones or positions because
+deleting them would permit replay. There is currently no supported manual
+compaction or rollover command.
 Monitor these files and capacity-plan the node's retained identity count; a full
 store makes the affected mutation fail closed without consuming another tenant's
 reserved share. See
 [capability boundaries]({{ '/limitations/' | relative_url }}#durable-control-stores-have-fixed-lifetime-limits).
 
-The current delivery-ledger format is 3 and remains able to read format 2. Normal
-Executor startup atomically migrates a readable format-2 ledger before polling;
-read-only configuration and upgrade checks do not. The migration has no supported
-reverse operation, so a release limited to format 2 cannot be selected afterward.
+The current delivery-ledger format is 4 and reads formats 2 and 3. Normal Executor
+startup atomically migrates either readable legacy format before polling; read-only
+configuration and upgrade checks do not. Format 4 retains the verified command kind
+needed to compact exact terminal canary failures safely. A migrated failure without
+that earlier binding remains noncompactable. The migration has no supported reverse
+operation, so a release limited to format 2 or 3 cannot be selected afterward.
 
 ## Deployment invariant
 

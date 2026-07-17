@@ -80,6 +80,22 @@ type CommandV1 struct {
 	ReceiptAuthority    ReceiptAuthorityV1                            `json:"receipt_authority"`
 }
 
+// CommandInputV1 contains the exact previously authenticated companions needed
+// to construct the one closed remote canary command. TaskPermitEnvelope is the
+// canonical tenant-signed DSSE envelope, not an HTTP header encoding.
+//
+// BuildCommandV1 validates the command's finite shape but does not establish
+// task authority. The node and an offline verifier must still call
+// VerifyCommandV1 or VerifyHistoricalCommandV1 with the admitted public keys.
+type CommandInputV1 struct {
+	ActivationID       string
+	Admission          controlprotocol.ExecutorAdmissionProjectionV1
+	ExecutorBegin      []byte
+	TaskPermitEnvelope []byte
+	Deadline           time.Time
+	ReceiptAuthority   ReceiptAuthorityV1
+}
+
 // AdmissionContextV1 is trusted local context, not wire data. Projection must
 // be the exact protocol-v4 admission projection retained for the successful
 // admission report. The workload identities come from the already verified
@@ -183,6 +199,72 @@ func MarshalCommandV1(command CommandV1) ([]byte, error) {
 		return nil, invalidCommand("encoded command exceeds %d bytes", MaxCommandBytes)
 	}
 	return raw, nil
+}
+
+// BuildCommandV1 constructs and self-validates the only accepted remote Hermes
+// workspace-audit payload. Callers cannot supply a prompt, URL, method, path,
+// arbitrary request, or operation identifier.
+func BuildCommandV1(input CommandInputV1) ([]byte, CommandV1, error) {
+	if input.Deadline.IsZero() {
+		return nil, CommandV1{}, invalidCommand("deadline is unavailable")
+	}
+	if err := input.Admission.Validate(); err != nil {
+		return nil, CommandV1{}, invalidCommand("admission projection: %v", err)
+	}
+	if input.Admission.ActivationID != input.ActivationID ||
+		input.Admission.ActivationBeginDigest == "" ||
+		input.Admission.GrantID == "" {
+		return nil, CommandV1{}, invalidCommand(
+			"admission projection does not bind the requested activation",
+		)
+	}
+	begin, err := activation.ParseExecutorBeginV1(input.ExecutorBegin)
+	if err != nil {
+		return nil, CommandV1{}, invalidCommand("Executor begin marker: %v", err)
+	}
+	if begin.Binding.ActivationID != input.ActivationID ||
+		dsse.Digest(input.ExecutorBegin) != input.Admission.ActivationBeginDigest {
+		return nil, CommandV1{}, invalidCommand(
+			"Executor begin marker does not match the admission projection",
+		)
+	}
+	permitHeader, err := taskpermit.EncodeHeader(input.TaskPermitEnvelope)
+	if err != nil {
+		return nil, CommandV1{}, invalidCommand("task permit envelope: %v", err)
+	}
+	request, err := fixedHermesRequest(input.ActivationID)
+	if err != nil {
+		return nil, CommandV1{}, invalidCommand("build fixed Hermes request: %v", err)
+	}
+	admissionRaw, err := json.Marshal(input.Admission)
+	if err != nil {
+		return nil, CommandV1{}, invalidCommand("marshal admission projection: %v", err)
+	}
+	command := CommandV1{
+		SchemaVersion:       CommandSchemaV1,
+		ActivationID:        input.ActivationID,
+		AdmissionDigest:     dsse.Digest(admissionRaw),
+		Admission:           input.Admission,
+		ExecutorBeginBase64: base64.StdEncoding.EncodeToString(input.ExecutorBegin),
+		GrantID:             input.Admission.GrantID,
+		OperationID:         agentrelease.HermesOperationID,
+		TaskPermit:          permitHeader,
+		RequestBase64:       base64.StdEncoding.EncodeToString(request),
+		Deadline:            input.Deadline.UTC().Format(time.RFC3339Nano),
+		ReceiptAuthority:    input.ReceiptAuthority,
+	}
+	raw, err := MarshalCommandV1(command)
+	if err != nil {
+		return nil, CommandV1{}, err
+	}
+	parsed, err := ParseCommandV1(raw)
+	if err != nil {
+		return nil, CommandV1{}, invalidCommand(
+			"self-verify constructed command: %v",
+			err,
+		)
+	}
+	return raw, parsed, nil
 }
 
 // Validate checks the closed command shape without asserting permit authority.

@@ -101,6 +101,71 @@ func TestActivationCanaryClosedContractRoundTrip(t *testing.T) {
 	)
 }
 
+func TestBuildCommandV1ConstructsOnlyClosedRequest(t *testing.T) {
+	fixture := newCanaryFixture(t)
+	beginRaw, err := base64.StdEncoding.DecodeString(fixture.command.ExecutorBeginBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permitRaw, err := taskpermit.DecodeHeader(fixture.command.TaskPermit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline, err := time.Parse(time.RFC3339Nano, fixture.command.Deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, command, err := BuildCommandV1(CommandInputV1{
+		ActivationID:       fixture.command.ActivationID,
+		Admission:          fixture.command.Admission,
+		ExecutorBegin:      beginRaw,
+		TaskPermitEnvelope: permitRaw,
+		Deadline:           deadline,
+		ReceiptAuthority:   fixture.command.ReceiptAuthority,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, fixture.commandRaw) ||
+		!reflect.DeepEqual(command, fixture.command) {
+		t.Fatalf("built command changed canonical bytes:\n%s\n%s", raw, fixture.commandRaw)
+	}
+
+	tests := map[string]func(*CommandInputV1){
+		"missing deadline": func(input *CommandInputV1) {
+			input.Deadline = time.Time{}
+		},
+		"other activation": func(input *CommandInputV1) {
+			input.ActivationID = "activation-other"
+		},
+		"other begin digest": func(input *CommandInputV1) {
+			input.Admission.ActivationBeginDigest = digestOf("other begin")
+		},
+		"invalid permit": func(input *CommandInputV1) {
+			input.TaskPermitEnvelope = []byte(`{}`)
+		},
+		"invalid receipt authority": func(input *CommandInputV1) {
+			input.ReceiptAuthority.Epoch = 0
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			input := CommandInputV1{
+				ActivationID:       fixture.command.ActivationID,
+				Admission:          fixture.command.Admission,
+				ExecutorBegin:      append([]byte(nil), beginRaw...),
+				TaskPermitEnvelope: append([]byte(nil), permitRaw...),
+				Deadline:           deadline,
+				ReceiptAuthority:   fixture.command.ReceiptAuthority,
+			}
+			mutate(&input)
+			if _, _, err := BuildCommandV1(input); !errors.Is(err, ErrInvalidCommand) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
 func TestParseCommandV1RejectsAmbiguousOrOpenEndedInput(t *testing.T) {
 	fixture := newCanaryFixture(t)
 	valid := fixture.command

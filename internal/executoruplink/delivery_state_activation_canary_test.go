@@ -16,7 +16,7 @@ func TestDeliveryStorePersistsAndDeepClonesActivationCanaryProjection(t *testing
 	path := filepath.Join(t.TempDir(), "deliveries.json")
 	store := newDeliveryStore(t, path)
 	delivery := deliveryFixtureV4("activation-canary-v4", 1)
-	if decision, terminal, err := store.AcceptV4(delivery, "tenant-a", 7); err != nil ||
+	if decision, terminal, err := store.AcceptV4(delivery, "tenant-a", 7, "activation-canary"); err != nil ||
 		decision != deliveryExecute || terminal != nil {
 		t.Fatalf("accept activation canary: decision=%v terminal=%+v err=%v", decision, terminal, err)
 	}

@@ -117,7 +117,7 @@ func TestV4ReportNeverAddsAdmissionToNonAdmitReplayOrAbsentOutcome(t *testing.T)
 	projection := projectionFixtureV4()
 	for name, fixture := range map[string]struct {
 		report report
-		admit  bool
+		kind   string
 	}{
 		"non-admit": {
 			report: report{
@@ -135,7 +135,7 @@ func TestV4ReportNeverAddsAdmissionToNonAdmitReplayOrAbsentOutcome(t *testing.T)
 				},
 				admission: &projection,
 			},
-			admit: true,
+			kind: "admit",
 		},
 		"absent admit": {
 			report: report{
@@ -146,11 +146,11 @@ func TestV4ReportNeverAddsAdmissionToNonAdmitReplayOrAbsentOutcome(t *testing.T)
 				},
 				admission: &projection,
 			},
-			admit: true,
+			kind: "admit",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			wire := makeReportV4(delivery, fixture.report, fixture.admit)
+			wire := makeReportV4(delivery, fixture.report, fixture.kind)
 			if wire.Result.Admission != nil {
 				t.Fatalf("projection escaped on %s: %#v", name, wire)
 			}
@@ -158,6 +158,71 @@ func TestV4ReportNeverAddsAdmissionToNonAdmitReplayOrAbsentOutcome(t *testing.T)
 				t.Fatalf("isolated report is invalid: %v", err)
 			}
 		})
+	}
+}
+
+func TestV4ReportIncludesCanaryOnlyForUnambiguousRunningCanary(t *testing.T) {
+	delivery := deliveryFixtureV4("canary-result-isolation", 1)
+	projection := deliveryCanaryResultFixture()
+	runtimeRef := "executor-" + strings.Repeat("a", 64)
+	local := report{
+		Status: "done", ReportedStatus: "running", ClaimGeneration: 1,
+		Result:           map[string]any{"runtime_ref": runtimeRef},
+		activationCanary: &projection,
+	}
+	wire := makeReportV4(delivery, local, "activation-canary")
+	if !reflect.DeepEqual(wire.Result.ActivationCanary, &projection) {
+		t.Fatalf("canary projection = %#v", wire.Result.ActivationCanary)
+	}
+	if err := wire.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	wire.Result.ActivationCanary.ActivationID = "mutated"
+	if local.activationCanary.ActivationID == "mutated" {
+		t.Fatal("wire report aliased the local canary result")
+	}
+
+	for name, mutate := range map[string]func(*report, *string){
+		"other kind": func(_ *report, kind *string) { *kind = "read" },
+		"replayed": func(value *report, _ *string) {
+			value.Result["replayed"] = true
+		},
+		"failed": func(value *report, _ *string) {
+			value.Status = "failed"
+			value.Result["error"] = "failed"
+		},
+		"not running": func(value *report, _ *string) {
+			value.ReportedStatus = "stopped"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := local
+			candidate.Result = map[string]any{"runtime_ref": runtimeRef}
+			kind := "activation-canary"
+			mutate(&candidate, &kind)
+			reported := makeReportV4(delivery, candidate, kind)
+			if reported.Result.ActivationCanary != nil {
+				t.Fatalf("canary projection escaped: %#v", reported)
+			}
+		})
+	}
+}
+
+func TestActivationGatewayIsEnabledOnlyForProtocolV4(t *testing.T) {
+	client, err := gateway.NewControlClient("/tmp/steward-gateway-control-test.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activationGatewayForProtocol(controlprotocol.ExecutorProtocolV4, client) == nil {
+		t.Fatal("protocol 4 lost its configured canary Gateway client")
+	}
+	for _, version := range []int{1, 2, controlprotocol.ExecutorProtocolV3} {
+		if activationGatewayForProtocol(version, client) != nil {
+			t.Fatalf("protocol %d unexpectedly enabled activation canaries", version)
+		}
+	}
+	if activationGatewayForProtocol(controlprotocol.ExecutorProtocolV4, nil) != nil {
+		t.Fatal("protocol 4 enabled activation canaries without Gateway")
 	}
 }
 
@@ -189,7 +254,7 @@ func TestV4SelectionIsExplicitAndDoesNotChangeV3Default(t *testing.T) {
 func TestV4AcknowledgementCannotDowngradeOrSettleWrongProtocol(t *testing.T) {
 	store := newDeliveryStore(t, filepath.Join(t.TempDir(), "deliveries.json"))
 	delivery := deliveryFixtureV4("ack-v4", 1)
-	if _, _, err := store.AcceptV4(delivery, "tenant-a", 3); err != nil {
+	if _, _, err := store.AcceptV4(delivery, "tenant-a", 3, "admit"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.MarkExecuting(delivery.DeliveryID); err != nil {
@@ -328,6 +393,10 @@ func runV4Admission(
 				!slices.Contains(
 					poll.Capabilities,
 					controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
+				) ||
+				slices.Contains(
+					poll.Capabilities,
+					controlprotocol.ExecutorCapabilityActivationCanaryV1,
 				) {
 				t.Errorf("protocol-4 poll=%#v err=%v", poll, decodeErr)
 				return

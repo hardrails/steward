@@ -198,6 +198,7 @@ func main() {
 	var receiptLog *evidence.Log
 	var receiptPrivate ed25519.PrivateKey
 	var commandPolicy *admission.SitePolicy
+	var gatewayControlClient *gateway.ControlClient
 	secureExecutor := false
 	secureNodeID := ""
 	admissionRequested := *admissionPolicyFile != "" || *admissionSiteRootFile != "" ||
@@ -275,6 +276,7 @@ func main() {
 				slog.Error("configure gateway control client", "err", err)
 				os.Exit(2)
 			}
+			gatewayControlClient = client
 			topology, gatewayControl = docker, client
 			configuredGrantRoot = *gatewayGrantRoot
 		}
@@ -351,7 +353,8 @@ func main() {
 			Logger: slog.Default(), SecureExecutor: secureExecutor, SecureNodeID: secureNodeID,
 			ProtectedTransport: parsedUplink.Scheme == "https" && !*uplinkTLSSkipVerify,
 			CommandPolicy:      commandPolicy, ProtocolVersion: *uplinkProtocolVersion,
-			DeliveryState: deliveryState, ValidateOnly: *checkConfig,
+			DeliveryState: deliveryState, GatewayControl: gatewayControlClient,
+			ValidateOnly: *checkConfig,
 		})
 		if err != nil {
 			slog.Error("configure executor uplink", "err", err)

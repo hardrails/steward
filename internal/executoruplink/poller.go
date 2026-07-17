@@ -19,6 +19,7 @@ import (
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/gateway"
 	stewarduplink "github.com/hardrails/steward/internal/uplink"
 )
 
@@ -70,6 +71,10 @@ type Config struct {
 	// 4 is never selected implicitly.
 	ProtocolVersion int
 	DeliveryState   *DeliveryStore
+	// GatewayControl enables only the finite activation-canary protocol. The
+	// node advertises that capability only for protocol 4 when this exact
+	// host-local client is configured.
+	GatewayControl *gateway.ControlClient
 	// ValidateOnly checks delivery state without converting pre-crash executing
 	// records into outcome_unknown. Normal startup leaves this false.
 	ValidateOnly bool
@@ -88,6 +93,7 @@ type Poller struct {
 	now                func() time.Time
 	protocolVersion    int
 	deliveryState      *DeliveryStore
+	canaryRunner       *activationCanaryRunner
 }
 
 func NewPoller(cfg Config) (*Poller, error) {
@@ -193,17 +199,36 @@ func NewPoller(cfg Config) (*Poller, error) {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
+	activationGateway := activationGatewayForProtocol(
+		protocolVersion,
+		cfg.GatewayControl,
+	)
 	return &Poller{
 		pollURL: pollURL, reportURL: reportURL, credentialPath: cfg.CredentialPath,
 		expected: credential, interval: cfg.PollInterval, client: client, logger: logger,
 		security: security, commandPolicy: cfg.CommandPolicy, now: now,
 		protocolVersion: protocolVersion, deliveryState: cfg.DeliveryState,
+		canaryRunner: newActivationCanaryRunner(
+			activationGateway != nil,
+		),
 		dispatcher: dispatcher{
 			handler: cfg.Handler, token: cfg.LocalToken, tenantID: credential.TenantID,
 			nodeID: credential.NodeID, nodeScoped: credential.NodeScoped(), state: cfg.State,
-			projectAdmission: protocolVersion == controlprotocol.ExecutorProtocolV4,
+			projectAdmission:  protocolVersion == controlprotocol.ExecutorProtocolV4,
+			activationGateway: activationGateway,
+			now:               now,
 		},
 	}, nil
+}
+
+func activationGatewayForProtocol(
+	protocolVersion int,
+	client *gateway.ControlClient,
+) activationCanaryGateway {
+	if protocolVersion != controlprotocol.ExecutorProtocolV4 || client == nil {
+		return nil
+	}
+	return client
 }
 
 func isLoopbackHost(host string) bool {
@@ -272,17 +297,24 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 				Capabilities: []string{"signed-commands-v2", "delivery-leases-v3", "multi-tenant", "read", "state-purge"},
 			})
 		case controlprotocol.ExecutorProtocolV4:
+			capabilities := []string{
+				"signed-commands-v2",
+				"delivery-leases-v3",
+				controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
+				"multi-tenant",
+				"read",
+				"state-purge",
+			}
+			if p.canaryRunner.available() {
+				capabilities = append(
+					capabilities,
+					controlprotocol.ExecutorCapabilityActivationCanaryV1,
+				)
+			}
 			requestBody, err = json.Marshal(controlprotocol.ExecutorPollRequestV4{
 				ProtocolVersion: controlprotocol.ExecutorProtocolV4,
 				NodeID:          credential.NodeID, CredentialScope: "node",
-				Capabilities: []string{
-					"signed-commands-v2",
-					"delivery-leases-v3",
-					controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
-					"multi-tenant",
-					"read",
-					"state-purge",
-				},
+				Capabilities: capabilities,
 			})
 		default:
 			requestBody, err = json.Marshal(pollRequest{
@@ -528,10 +560,14 @@ func (p *Poller) processDeliveryV4(ctx context.Context, credential *stewarduplin
 			err,
 		)
 	}
+	if cmd.Kind == "activation-canary" && p.canaryRunner.owns(delivery) {
+		return nil
+	}
 	decision, terminal, err := p.deliveryState.AcceptV4(
 		delivery,
 		cmd.TenantID,
 		cmd.ClaimGeneration,
+		cmd.Kind,
 	)
 	if err != nil {
 		return fmt.Errorf("persist accepted delivery: %w", err)
@@ -545,11 +581,19 @@ func (p *Poller) processDeliveryV4(ctx context.Context, credential *stewarduplin
 		}
 		return p.sendReportV4(ctx, credential.Credential, *terminal)
 	case deliveryExecute:
+		if cmd.Kind == "activation-canary" {
+			return p.startActivationCanary(
+				ctx,
+				credential.Credential,
+				delivery,
+				cmd,
+			)
+		}
 		if err := p.deliveryState.MarkExecuting(delivery.DeliveryID); err != nil {
 			return fmt.Errorf("persist executing delivery: %w", err)
 		}
 		localReport := p.dispatcher.execute(ctx, cmd)
-		report := makeReportV4(delivery, localReport, cmd.Kind == "admit")
+		report := makeReportV4(delivery, localReport, cmd.Kind)
 		if err := p.deliveryState.MarkTerminalV4(report); err != nil {
 			return fmt.Errorf("persist terminal delivery: %w", err)
 		}
@@ -661,7 +705,7 @@ func makeReportV3(delivery controlprotocol.ExecutorDeliveryV3, legacy report) co
 func makeReportV4(
 	delivery controlprotocol.ExecutorDeliveryV4,
 	legacy report,
-	admitCommand bool,
+	commandKind string,
 ) controlprotocol.ExecutorReportV4 {
 	result := controlprotocol.ExecutorReportResultV4{}
 	if value, ok := legacy.Result["runtime_ref"].(string); ok {
@@ -676,12 +720,22 @@ func makeReportV4(
 	if value, ok := legacy.Result["absent"].(bool); ok {
 		result.Absent = value
 	}
-	if admitCommand &&
+	if commandKind == "admit" &&
 		legacy.Status == controlprotocol.ExecutorStatusDone &&
 		!result.Replayed &&
 		!result.Absent &&
 		result.Error == "" {
 		result.Admission = cloneAdmissionProjection(legacy.admission)
+	}
+	if commandKind == "activation-canary" &&
+		legacy.Status == controlprotocol.ExecutorStatusDone &&
+		legacy.ReportedStatus == "running" &&
+		!result.Replayed &&
+		!result.Absent &&
+		result.Error == "" {
+		result.ActivationCanary = cloneActivationCanaryResult(
+			legacy.activationCanary,
+		)
 	}
 	report := controlprotocol.ExecutorReportV4{
 		ProtocolVersion: controlprotocol.ExecutorProtocolV4,
@@ -690,9 +744,24 @@ func makeReportV4(
 		Status: legacy.Status, ReportedStatus: boundedReportedStatus(legacy.ReportedStatus),
 		ClaimGeneration: legacy.ClaimGeneration, Result: result,
 	}
+	if commandKind == "activation-canary" &&
+		report.Status == controlprotocol.ExecutorStatusDone &&
+		report.Result.ActivationCanary == nil {
+		report.Status = controlprotocol.ExecutorStatusOutcomeUnknown
+		report.ReportedStatus = "failed"
+		report.ErrorCode = "outcome_unknown"
+		report.Result = controlprotocol.ExecutorReportResultV4{
+			Error: "activation canary completed without a qualified result; reconcile the node",
+		}
+	}
 	if legacy.Status == controlprotocol.ExecutorStatusFailed {
 		report.Result.Admission = nil
-		if legacy.effectUncertain {
+		report.Result.ActivationCanary = nil
+		if commandKind == "activation-canary" &&
+			legacy.canaryTerminalErrorCode != "" {
+			report.Status = controlprotocol.ExecutorStatusFailed
+			report.ErrorCode = legacy.canaryTerminalErrorCode
+		} else if legacy.effectUncertain {
 			report.Status = controlprotocol.ExecutorStatusOutcomeUnknown
 			report.ErrorCode = "outcome_unknown"
 		} else {
@@ -700,8 +769,10 @@ func makeReportV4(
 			report.ErrorCode = "executor_command_rejected"
 		}
 	}
-	if err := report.Validate(); err != nil && report.Result.Admission != nil {
-		// Executor has already returned success and the lifecycle fence is
+	if err := report.Validate(); err != nil &&
+		(report.Result.Admission != nil ||
+			report.Result.ActivationCanary != nil) {
+		// Executor has already returned success and its finite effects may be
 		// durable, but an invalid or oversized projection must never escape.
 		// Persist an explicit ambiguous outcome so an operator reconciles the
 		// node instead of trusting a partial admission observation.
@@ -709,7 +780,7 @@ func makeReportV4(
 		report.ReportedStatus = "failed"
 		report.ErrorCode = "outcome_unknown"
 		report.Result = controlprotocol.ExecutorReportResultV4{
-			Error: "successful admission projection was invalid or exceeded its protocol limit; reconcile the node",
+			Error: "successful protocol projection was invalid or exceeded its limit; reconcile the node",
 		}
 	}
 	return report

@@ -219,6 +219,68 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/workloads/{runtime_ref}/activation-canary-preflight:
+    parameters:
+      - $ref: "#/components/parameters/RuntimeRef"
+    post:
+      tags: [admission]
+      operationId: preflightActivationCanary
+      summary: Prove a running activation is authorized before Gateway use
+      description: |
+        Accepts one strict JSON object no larger than 1 MiB. This is the
+        read-only authorization boundary an Executor uplink calls immediately
+        before it contacts Gateway for an activation canary. Executor serializes
+        the check with signed lifecycle mutations and requires ready
+        reconciliation, the current site policy, the authenticated tenant
+        principal or explicitly enabled host-administrator authority, the exact
+        retained activation ID and begin digest, and the complete admitted
+        runtime topology in its running state. The response is the lifecycle
+        projection derived from the committed signed-admission fence. The
+        operation writes no receipt and grants no authority beyond this
+        immediate preflight.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivationCanaryPreflight"
+      responses:
+        "200":
+          description: The exact retained activation and its complete admitted topology are currently authorized and running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignedAdmissionState"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The workload is not bound to the current uplink tenant principal or explicitly enabled host-administrator authority and site policy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: The activation identity, running lifecycle, or required topology differs from the committed signed-admission fence.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/DockerError"
+        "503":
+          description: Signed admission is unavailable or reconciliation is degraded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/workloads/{runtime_ref}/activation-checkpoints:
     parameters:
       - $ref: "#/components/parameters/RuntimeRef"
@@ -271,7 +333,7 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "409":
-          description: The running workload or its required topology drifted, or the checkpoint conflicts with retained activation evidence.
+          description: The running workload or its required topology drifted, the checkpoint conflicts with retained activation evidence, or signed stop, destroy, revocation, drift, state-purge, or post-start compensation evidence invalidated the activation.
           content:
             application/json:
               schema:
@@ -674,6 +736,24 @@ components:
           type: string
           pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
         checkpoint_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+    ActivationCanaryPreflight:
+      type: object
+      additionalProperties: false
+      required: [schema_version, activation_id, activation_begin_digest]
+      description: |
+        Read-only request used immediately before an Executor uplink contacts
+        Gateway for one closed activation canary. The identity fields must
+        exactly match the retained signed admission.
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.executor-activation-canary-preflight.v1]
+        activation_id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        activation_begin_digest:
           type: string
           pattern: "^sha256:[a-f0-9]{64}$"
     InstanceIntent:

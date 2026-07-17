@@ -292,6 +292,12 @@ supports only the durable lease protocol, add
 `--executor-uplink-protocol-version 3`. Local and tenant-scoped configurations use
 the safe compatibility value `0` and cannot select 3 or 4.
 
+With protocol 4 and the packaged Gateway topology, Executor also advertises the
+closed `activation-canary-v1` capability. It accepts only Steward's fixed,
+tenant-signed Hermes workspace-audit task—not a URL, shell command, free-form
+prompt, or generic workflow step. The capability disappears while a canary is
+active, but containment commands continue through the normal poller.
+
 `configure-node` validates the enrollment evidence sidecar, imports the exact
 receipt key used during enrollment, and initializes the durable command and
 signed-admission fences, plus the empty operation journal and evidence chain. A
@@ -391,10 +397,10 @@ restoring them changes lifecycle, route commitments, audit, identity, or anti-re
 state and needs a separate operator-approved recovery procedure.
 
 The delivery ledger has a specific one-way transition. Upgrade inspection leaves a
-format-2 `uplink-delivery-state.json` unchanged, while normal Executor startup
-atomically migrates it to format 3 before polling. After that startup, a prior
-release limited to format 2 is not eligible for software rollback, even if the
-ledger is empty. Draining the node does not downgrade the file.
+format-2 or format-3 `uplink-delivery-state.json` unchanged, while normal Executor
+startup atomically migrates it to format 4 before polling. After that startup, a
+prior release limited to format 2 or 3 is not eligible for software rollback, even
+if the ledger is empty. Draining the node does not downgrade the file.
 
 The guided upgrade is:
 

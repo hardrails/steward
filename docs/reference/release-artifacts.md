@@ -158,14 +158,17 @@ the format 2 begin marker after read-only admission preflights and before the
 admission-allow receipt, mutation journal, or host mutation. An older reader is
 therefore rejected before rollback even if the workload was later destroyed.
 
-Current manifests declare `uplink_delivery_state` readers 2 through 3 and writer 3.
-Format 3 adds an explicit wire-protocol and claim-generation binding to retained
-delivery records and can store protocol 4's bounded admission projection. Upgrade
-inspection reads format 2 without changing it, but normal Executor startup
-atomically rewrites a readable format-2 ledger as format 3 before polling. A prior
-release whose reader stops at format 2 is not a safe rollback target after that
-startup, even when the ledger is empty. There is no supported downgrade or
-single-file restore procedure.
+Current manifests declare `uplink_delivery_state` readers 2 through 4 and writer 4.
+Format 3 adds the wire protocol, claim generation, and protocol 4 projections.
+Format 4 also retains the verified command kind. That binding lets Executor
+compact acknowledged `activation_canary_failed` and
+`activation_canary_cancelled` outcomes without treating another command's failure
+as a canary result. A migrated format-3 failure has no retained command kind and
+therefore remains noncompactable. Upgrade inspection reads formats 2 and 3 without
+changing them. Normal Executor startup atomically rewrites either format as format
+4 before polling. A release whose reader stops at format 2 or 3 is not a safe
+rollback target after that startup, even when the ledger is empty. There is no
+supported downgrade or single-file restore procedure.
 
 See [platform support]({{ '/reference/platform-support/' | relative_url }}) and
 [air-gapped installation]({{ '/guides/air-gapped/' | relative_url }}).

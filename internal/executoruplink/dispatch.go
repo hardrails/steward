@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/admission"
@@ -62,9 +63,16 @@ type report struct {
 	// effectUncertain is local protocol evidence, not part of legacy wire JSON.
 	// It distinguishes validation failures from an error after ServeHTTP began.
 	effectUncertain bool
+	// canaryTerminalErrorCode is set only after Gateway authenticated a
+	// terminal failed or cancelled agent result. It preserves a real attempted
+	// canary as failed instead of misclassifying it as a pre-effect rejection.
+	canaryTerminalErrorCode string
 	// admission is retained only for a protocol-4 successful signed admit. It
 	// is deliberately outside legacy report JSON.
 	admission *controlprotocol.ExecutorAdmissionProjectionV1
+	// activationCanary is retained only for one protocol-4 successful closed
+	// canary. It is deliberately outside legacy report JSON.
+	activationCanary *controlprotocol.ExecutorActivationCanaryResultV1
 }
 
 type uncertainEffectError struct{ cause error }
@@ -132,13 +140,16 @@ type purgePayload struct {
 }
 
 type dispatcher struct {
-	handler          http.Handler
-	token            string
-	tenantID         string
-	nodeID           string
-	nodeScoped       bool
-	projectAdmission bool
-	state            *StateStore
+	handler           http.Handler
+	token             string
+	tenantID          string
+	nodeID            string
+	nodeScoped        bool
+	projectAdmission  bool
+	activationGateway activationCanaryGateway
+	now               func() time.Time
+	wait              func(context.Context, time.Duration) error
+	state             *StateStore
 }
 
 func (d *dispatcher) execute(ctx context.Context, cmd command) report {
@@ -163,15 +174,26 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 	}
 	instanceID := identity.InstanceID
 	current, hasCurrent := d.state.position(cmd.TenantID, instanceID)
-	if cmd.Kind == "read" {
+	if cmd.Kind == "activation-canary" {
+		if !hasCurrent || current.LegacyClaimFence ||
+			cmd.InstanceGeneration != current.Generation ||
+			cmd.ClaimGeneration != current.ClaimGeneration {
+			rep.Result["error"] = "activation canary does not match a durable claim-aware lifecycle generation"
+			return rep
+		}
+	} else if cmd.Kind == "read" {
 		if !hasCurrent || cmd.InstanceGeneration != current.Generation ||
 			(!current.LegacyClaimFence && cmd.ClaimGeneration != current.ClaimGeneration) {
-			rep.Result["error"] = "read command does not match the durable lifecycle generation"
+			rep.Result["error"] = "read-only command does not match the durable lifecycle generation"
 			return rep
 		}
 	}
 	if hasCurrent {
 		if commandIsStale(cmd, current) {
+			if cmd.Kind == "activation-canary" {
+				rep.Result["error"] = "activation canary command is stale relative to the durable lifecycle fence"
+				return rep
+			}
 			// A stale or replayed command is a successful no-op. Returning the last
 			// durable outcome lets the control plane settle a redelivery without ever
 			// applying an older mutation to a newer workload lineage.
@@ -188,8 +210,17 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 	runtimeRef := executor.RuntimeRef(cmd.TenantID, instanceID)
 	var reported string
 	var projection *controlprotocol.ExecutorAdmissionProjectionV1
+	var canary *controlprotocol.ExecutorActivationCanaryResultV1
 	if d.projectAdmission && cmd.Kind == "admit" {
 		reported, projection, err = d.applyAdmissionV4(
+			ctx,
+			cmd,
+			cmd.TenantID,
+			instanceID,
+			runtimeRef,
+		)
+	} else if d.projectAdmission && cmd.Kind == "activation-canary" {
+		reported, canary, err = d.applyActivationCanary(
 			ctx,
 			cmd,
 			cmd.TenantID,
@@ -201,6 +232,18 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 	}
 	if err != nil {
 		rep.effectUncertain = effectMayHaveOccurred(err)
+		if cmd.Kind == "activation-canary" {
+			var terminal activationCanaryTerminalError
+			if errors.As(err, &terminal) {
+				switch terminal.status {
+				case "agent_reported_failed":
+					rep.canaryTerminalErrorCode = "activation_canary_failed"
+				case "agent_reported_cancelled":
+					rep.canaryTerminalErrorCode = "activation_canary_cancelled"
+					rep.ReportedStatus = "cancelled"
+				}
+			}
+		}
 		rep.Result["error"] = err.Error()
 		return rep
 	}
@@ -209,7 +252,7 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 	// position and fence out a later admit/stop/destroy. Reads are authorized
 	// against the exact durable generation above, but intentionally do not
 	// mutate the command fence.
-	if cmd.Kind != "read" {
+	if cmd.Kind != "read" && cmd.Kind != "activation-canary" {
 		if err := d.state.advance(cmd.TenantID, instanceID, position{
 			ClaimGeneration: cmd.ClaimGeneration,
 			Generation:      cmd.InstanceGeneration, Sequence: cmd.CommandSequence,
@@ -224,6 +267,7 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 	rep.ReportedStatus = reported
 	rep.Result["runtime_ref"] = runtimeRef
 	rep.admission = cloneAdmissionProjection(projection)
+	rep.activationCanary = cloneActivationCanaryResult(canary)
 	if absent {
 		rep.Result["absent"] = true
 	}
@@ -404,26 +448,7 @@ func (d *dispatcher) callAdmissionV4(
 			fmt.Errorf("decode strict local executor admission response: %w", err),
 		)
 	}
-	projection := controlprotocol.ExecutorAdmissionProjectionV1{
-		SchemaVersion:         controlprotocol.ExecutorAdmissionProjectionSchemaV1,
-		RuntimeRef:            local.RuntimeRef,
-		Status:                local.Status,
-		CapsuleDigest:         local.CapsuleDigest,
-		PolicyDigest:          local.PolicyDigest,
-		Generation:            local.Generation,
-		EvidenceKeyID:         local.EvidenceKeyID,
-		GrantID:               local.GrantID,
-		ServicePath:           local.ServicePath,
-		ServiceID:             local.ServiceID,
-		TaskAuthorities:       append([]controlprotocol.ExecutorTaskAuthorityV1(nil), local.TaskAuthorities...),
-		EgressProxy:           local.EgressProxy,
-		EgressRouteIDs:        append([]string(nil), local.EgressRouteIDs...),
-		ConnectorURL:          local.ConnectorURL,
-		ConnectorIDs:          append([]string(nil), local.ConnectorIDs...),
-		RoutePolicyDigest:     local.RoutePolicyDigest,
-		ActivationID:          local.ActivationID,
-		ActivationBeginDigest: local.ActivationBeginDigest,
-	}
+	projection := executorAdmissionProjection(local)
 	if err := projection.Validate(); err != nil {
 		return "", nil, localCallError(
 			http.MethodPost,

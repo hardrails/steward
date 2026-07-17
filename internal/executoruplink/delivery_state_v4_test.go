@@ -2,6 +2,7 @@ package executoruplink
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,7 @@ import (
 	"github.com/hardrails/steward/internal/controlprotocol"
 )
 
-func TestDeliveryStoreMigratesReadableV2ToWriteV3WithoutReset(t *testing.T) {
+func TestDeliveryStoreMigratesReadableV2ToCurrentFormatWithoutReset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "deliveries.json")
 	delivery := deliveryFixture("legacy-terminal", 1)
 	report := reportFixture(delivery, controlprotocol.ExecutorStatusDone)
@@ -72,6 +73,85 @@ func TestDeliveryStoreMigratesReadableV2ToWriteV3WithoutReset(t *testing.T) {
 	}
 }
 
+func TestDeliveryStoreMigratesV3CanaryFailureWithoutInventingCompactionAuthority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deliveries.json")
+	terminal := controlprotocol.ExecutorReportV3{
+		ProtocolVersion:    controlprotocol.ExecutorProtocolV3,
+		DeliveryID:         "legacy-canary-failure",
+		DeliveryGeneration: 1,
+		CommandID:          "legacy-canary-command",
+		CommandDigest:      "sha256:" + strings.Repeat("a", 64),
+		Status:             controlprotocol.ExecutorStatusFailed,
+		ReportedStatus:     "failed",
+		ClaimGeneration:    7,
+		ErrorCode:          "activation_canary_failed",
+		Result: controlprotocol.ExecutorReportResultV3{
+			Error: "agent reported a terminal failure",
+		},
+	}
+	legacy := deliveryStateFileV3{
+		Version: 3,
+		NodeID:  "node-1",
+		Records: []deliveryRecordV3{{
+			ProtocolVersion:    controlprotocol.ExecutorProtocolV4,
+			DeliveryID:         terminal.DeliveryID,
+			DeliveryGeneration: terminal.DeliveryGeneration,
+			SettledGeneration:  terminal.DeliveryGeneration,
+			TenantID:           "tenant-a",
+			CommandID:          terminal.CommandID,
+			CommandDigest:      terminal.CommandDigest,
+			ClaimGeneration:    terminal.ClaimGeneration,
+			Phase:              deliveryPhaseTerminal,
+			Terminal:           &terminal,
+		}},
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := LoadDeliveryStore(path, "node-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := store.records[terminal.DeliveryID]
+	if record.CommandKind != "" || safeAcknowledgedDelivery(record) {
+		t.Fatalf("legacy canary gained compaction authority: %#v", record)
+	}
+	removeAcknowledgedDeliveries(store.records, "tenant-a", 1)
+	if _, retained := store.records[terminal.DeliveryID]; !retained {
+		t.Fatal("legacy failed canary was compacted without a verified command kind")
+	}
+	if err := store.MigrateFormat(); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := InspectDeliveryStateFormat(path)
+	if err != nil || summary.FormatVersion != deliveryStateWriteVersion {
+		t.Fatalf("migrated format=%#v err=%v", summary, err)
+	}
+	reopened, err := LoadDeliveryStore(path, "node-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated := reopened.records[terminal.DeliveryID]; migrated.CommandKind != "" || safeAcknowledgedDelivery(migrated) {
+		t.Fatalf("migrated legacy canary gained authority: %#v", migrated)
+	}
+}
+
+func TestDeliveryStoreFormatV3StrictlyRejectsFormatV4CommandKind(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deliveries.json")
+	raw := []byte(`{"version":3,"node_id":"node-1","records":[{"protocol_version":4,"delivery_id":"delivery-1","delivery_generation":1,"tenant_id":"tenant-a","command_id":"command-1","command_digest":"sha256:` + strings.Repeat("a", 64) + `","command_kind":"activation-canary","claim_generation":7,"phase":"accepted"}]}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadDeliveryStore(path, "node-1"); err == nil ||
+		!strings.Contains(err.Error(), "unknown JSON field") {
+		t.Fatalf("format 3 silently widened to the format 4 shape: %v", err)
+	}
+}
+
 func TestDeliveryStoreProtocolSelectionNeverSilentlyDowngrades(t *testing.T) {
 	store := newDeliveryStore(t, filepath.Join(t.TempDir(), "deliveries.json"))
 	active := deliveryFixture("active-v3", 1)
@@ -124,7 +204,7 @@ func TestDeliveryStorePersistsAndRecoversProtocolV4Reports(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "deliveries.json")
 	store := newDeliveryStore(t, path)
 	delivery := deliveryFixtureV4("delivery-v4", 1)
-	if decision, terminal, err := store.AcceptV4(delivery, "tenant-a", 7); err != nil ||
+	if decision, terminal, err := store.AcceptV4(delivery, "tenant-a", 7, "admit"); err != nil ||
 		decision != deliveryExecute ||
 		terminal != nil {
 		t.Fatalf("accept protocol-4 delivery: decision=%v terminal=%#v err=%v", decision, terminal, err)
@@ -174,10 +254,10 @@ func TestDeliveryStorePersistsAndRecoversProtocolV4Reports(t *testing.T) {
 func TestDeliveryStoreV4RejectsClaimAndProtocolIdentityReuse(t *testing.T) {
 	store := newDeliveryStore(t, filepath.Join(t.TempDir(), "deliveries.json"))
 	delivery := deliveryFixtureV4("identity-v4", 1)
-	if _, _, err := store.AcceptV4(delivery, "tenant-a", 7); err != nil {
+	if _, _, err := store.AcceptV4(delivery, "tenant-a", 7, "start"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.AcceptV4(delivery, "tenant-a", 8); err == nil ||
+	if _, _, err := store.AcceptV4(delivery, "tenant-a", 8, "start"); err == nil ||
 		!strings.Contains(err.Error(), "claim generations") {
 		t.Fatalf("delivery identity was reused across claims: %v", err)
 	}
@@ -185,6 +265,111 @@ func TestDeliveryStoreV4RejectsClaimAndProtocolIdentityReuse(t *testing.T) {
 	if _, _, err := store.Accept(v3, "tenant-a"); err == nil ||
 		!strings.Contains(err.Error(), "protocol versions") {
 		t.Fatalf("delivery identity was reused across protocols: %v", err)
+	}
+}
+
+func TestDeliveryStoreCompactsSettledTerminalCanaryFailures(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deliveries.json")
+	store := newDeliveryStore(t, path)
+	for index := 0; index <= maxDeliveryRecordsPerTenant; index++ {
+		delivery := deliveryFixtureV4(fmt.Sprintf("canary-failed-%02d", index), 1)
+		delivery.CommandID = fmt.Sprintf("canary-command-%02d", index)
+		if decision, terminal, err := store.AcceptV4(
+			delivery,
+			"tenant-a",
+			7,
+			"activation-canary",
+		); err != nil || decision != deliveryExecute || terminal != nil {
+			t.Fatalf(
+				"accept canary %d: decision=%v terminal=%#v err=%v",
+				index,
+				decision,
+				terminal,
+				err,
+			)
+		}
+		if err := store.MarkExecuting(delivery.DeliveryID); err != nil {
+			t.Fatal(err)
+		}
+		errorCode := "activation_canary_failed"
+		reportedStatus := "failed"
+		if index%2 == 1 {
+			errorCode = "activation_canary_cancelled"
+			reportedStatus = "cancelled"
+		}
+		report := controlprotocol.ExecutorReportV4{
+			ProtocolVersion:    controlprotocol.ExecutorProtocolV4,
+			DeliveryID:         delivery.DeliveryID,
+			DeliveryGeneration: delivery.DeliveryGeneration,
+			CommandID:          delivery.CommandID,
+			CommandDigest:      delivery.CommandDigest,
+			Status:             controlprotocol.ExecutorStatusFailed,
+			ReportedStatus:     reportedStatus,
+			ClaimGeneration:    7,
+			ErrorCode:          errorCode,
+			Result: controlprotocol.ExecutorReportResultV4{
+				Error: "Gateway returned a known terminal agent outcome",
+			},
+		}
+		if err := store.MarkTerminalV4(report); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Settle(delivery.DeliveryID, delivery.DeliveryGeneration); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := deliveryRecordsForTenant(store.records, "tenant-a"); got != tenantDeliveryCompactionTarget+1 {
+		t.Fatalf("tenant records=%d, want %d after the 33rd canary", got, tenantDeliveryCompactionTarget+1)
+	}
+	if _, retained := store.records["canary-failed-00"]; retained {
+		t.Fatal("oldest settled terminal canary failure was not compacted")
+	}
+	if newest, retained := store.records["canary-failed-32"]; !retained ||
+		newest.CommandKind != "activation-canary" {
+		t.Fatalf("newest canary failure was not retained with its kind: %#v", newest)
+	}
+	reopened, err := LoadDeliveryStore(path, "node-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := deliveryRecordsForTenant(reopened.records, "tenant-a"); got != tenantDeliveryCompactionTarget+1 {
+		t.Fatalf("reopened tenant records=%d", got)
+	}
+}
+
+func TestDeliveryStoreRejectsCanaryTerminalCodeForAnotherCommandKind(t *testing.T) {
+	store := newDeliveryStore(t, filepath.Join(t.TempDir(), "deliveries.json"))
+	delivery := deliveryFixtureV4("not-a-canary", 1)
+	if decision, _, err := store.AcceptV4(
+		delivery,
+		"tenant-a",
+		7,
+		"start",
+	); err != nil || decision != deliveryExecute {
+		t.Fatalf("accept ordinary command: decision=%v err=%v", decision, err)
+	}
+	if err := store.MarkExecuting(delivery.DeliveryID); err != nil {
+		t.Fatal(err)
+	}
+	report := controlprotocol.ExecutorReportV4{
+		ProtocolVersion:    controlprotocol.ExecutorProtocolV4,
+		DeliveryID:         delivery.DeliveryID,
+		DeliveryGeneration: delivery.DeliveryGeneration,
+		CommandID:          delivery.CommandID,
+		CommandDigest:      delivery.CommandDigest,
+		Status:             controlprotocol.ExecutorStatusFailed,
+		ReportedStatus:     "failed",
+		ClaimGeneration:    7,
+		ErrorCode:          "activation_canary_failed",
+		Result:             controlprotocol.ExecutorReportResultV4{Error: "failed"},
+	}
+	if err := store.MarkTerminalV4(report); err == nil ||
+		!strings.Contains(err.Error(), "not bound to a failed canary") {
+		t.Fatalf("reserved canary error code reached an ordinary command: %v", err)
+	}
+	if record := store.records[delivery.DeliveryID]; record.Phase != deliveryPhaseExecuting ||
+		record.Terminal != nil {
+		t.Fatalf("rejected terminal mutation changed durable state: %#v", record)
 	}
 }
 
@@ -203,7 +388,7 @@ func TestDeliveryStoreV4PreverificationRejectionRemainsReplayable(t *testing.T) 
 		terminal == nil || terminal.ClaimGeneration != 0 {
 		t.Fatalf("initial rejection=%#v err=%v", terminal, err)
 	}
-	decision, terminal, err := store.AcceptV4(delivery, "tenant-a", 7)
+	decision, terminal, err := store.AcceptV4(delivery, "tenant-a", 7, "start")
 	if err != nil || decision != deliveryReport || terminal == nil ||
 		terminal.Status != controlprotocol.ExecutorStatusRejected ||
 		terminal.ClaimGeneration != 0 {
@@ -249,7 +434,7 @@ func TestDeliveryStoreV4CrashRecoveryCannotCarryAdmissionProjection(t *testing.T
 	path := filepath.Join(t.TempDir(), "deliveries.json")
 	store := newDeliveryStore(t, path)
 	delivery := deliveryFixtureV4("crashed-v4", 1)
-	if _, _, err := store.AcceptV4(delivery, "tenant-a", 9); err != nil {
+	if _, _, err := store.AcceptV4(delivery, "tenant-a", 9, "admit"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.MarkExecuting(delivery.DeliveryID); err != nil {

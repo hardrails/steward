@@ -174,7 +174,7 @@ trap cleanup EXIT HUP INT TERM
 	printf '    "gateway_state": {"read_min": 1, "read_max": 4, "write": 4},\n'
 	printf '    "operation_journal": {"read_min": 1, "read_max": 1, "write": 1},\n'
 	printf '    "supervisor_state": {"read_min": 1, "read_max": 1, "write": 1},\n'
-	printf '    "uplink_delivery_state": {"read_min": 2, "read_max": 3, "write": 3},\n'
+	printf '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},\n'
 	printf '    "uplink_state": {"read_min": 2, "read_max": 2, "write": 2}\n'
 	printf '  },\n'
 	printf '  "files": {\n'

@@ -51,13 +51,15 @@ start a workload or produce a checkpoint. Once a format 2 marker exists,
 destroying the workload does not downgrade the append-only log; a release whose
 evidence reader stops at format 1 is no longer a safe rollback target.
 
-Current release manifests declare `uplink_delivery_state` readers 2 through 3
-and writer 3. Format 2 is the earlier protocol-3 delivery ledger. Format 3 records
-the wire protocol and claim generation for each delivery and can retain the bounded,
-typed admission projection returned by protocol 4. Read-only preflight can inspect
-format 2 without changing it. Normal Executor startup atomically rewrites a readable
-format-2 ledger as format 3 before polling, including an empty ledger. Draining or
-compacting acknowledged deliveries does not change the file back to format 2.
+Current release manifests declare `uplink_delivery_state` readers 2 through 4
+and writer 4. Format 2 is the earlier protocol-3 delivery ledger. Format 3 records
+the wire protocol, claim generation, and bounded protocol 4 projections. Format 4
+also records the verified command kind used to distinguish compactable terminal
+canary failures from ambiguous failures. A format-3 failure without that binding
+remains noncompactable. Read-only preflight can inspect formats 2 and 3 without
+changing them. Normal Executor startup atomically rewrites either format as format
+4 before polling, including an empty ledger. Draining or compacting acknowledged
+deliveries does not downgrade the file.
 
 Staging verifies the manifest and writes only a new immutable release directory.
 It does not change active helpers or units and does not run `systemctl daemon-reload`.
@@ -238,14 +240,15 @@ admission-allow receipt or host mutation. The rollback inspection must run after
 target services stop and before an older release is restored, so it sees that
 durable marker and rejects an evidence reader limited to format 1.
 
-It also applies to the Executor delivery ledger. A prior release that reads only
-format 2 may remain eligible until the new Executor first starts. After normal
-startup migrates the ledger to format 3, that prior release is no longer a software
-rollback target, even if the ledger contains no active delivery. Steward provides
-no reverse migration because removing protocol identity or an admission projection
-could make a retained outcome ambiguous. If recovery requires older software,
-restore only a complete, matching pre-upgrade backup under an approved procedure
-that accounts for every command and external effect after the backup.
+It also applies to the Executor delivery ledger. A prior release that stops at
+format 2 or 3 may remain eligible until the new Executor first starts. Normal
+startup migrates either readable legacy format to format 4. That older release is
+then no longer a software rollback target, even if the ledger contains no active
+delivery. Steward provides no reverse migration because removing protocol identity,
+a protocol projection, or the verified command kind could make a retained outcome
+ambiguous. If recovery requires older software, restore only a complete, matching
+pre-upgrade backup under an approved procedure that accounts for every command and
+external effect after the backup.
 
 ## Roll back the release
 

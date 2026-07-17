@@ -689,6 +689,255 @@ func postActivationCheckpointWithContext(
 	return response
 }
 
+func postActivationCanaryPreflight(
+	t *testing.T,
+	server *Server,
+	ref, activationID, activationBeginDigest string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	return postActivationCanaryPreflightWithContext(
+		t, server, context.Background(),
+		ref, activationID, activationBeginDigest,
+	)
+}
+
+func postActivationCanaryPreflightWithContext(
+	t *testing.T,
+	server *Server,
+	ctx context.Context,
+	ref, activationID, activationBeginDigest string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(activationCanaryPreflightRequest{
+		SchemaVersion:         activationCanaryPreflightSchema,
+		ActivationID:          activationID,
+		ActivationBeginDigest: activationBeginDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/workloads/"+ref+"/activation-canary-preflight",
+		bytes.NewReader(body),
+	).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	return response
+}
+
+func TestActivationCanaryPreflightReturnsExactRunningAdmissionProjection(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, true)
+	fixture.start(t)
+	before := fixture.config.Evidence.NextSequence()
+
+	response := postActivationCanaryPreflight(
+		t, fixture.server, fixture.ref, fixture.activationID, fixture.beginDigest,
+	)
+	if response.Code != http.StatusOK ||
+		fixture.config.Evidence.NextSequence() != before {
+		t.Fatalf(
+			"preflight status=%d next=%d want=%d body=%s",
+			response.Code, fixture.config.Evidence.NextSequence(), before,
+			response.Body.String(),
+		)
+	}
+	var projection secureProvisionResponse
+	if err := json.NewDecoder(response.Body).Decode(&projection); err != nil {
+		t.Fatal(err)
+	}
+	record, ok := fixture.server.secure.fences.Record(
+		fixture.docker.observed.Workload.TenantID,
+		fixture.docker.observed.Workload.InstanceID,
+	)
+	if !ok {
+		t.Fatal("missing admission fence")
+	}
+	if projection.RuntimeRef != fixture.ref ||
+		projection.Status != "running" ||
+		projection.CapsuleDigest != record.CapsuleDigest ||
+		projection.PolicyDigest != record.PolicyDigest ||
+		projection.Generation != record.Generation ||
+		projection.EvidenceKeyID != evidence.KeyID(fixture.config.Evidence.PublicKey()) ||
+		projection.ActivationID != fixture.activationID ||
+		projection.ActivationBeginDigest != fixture.beginDigest {
+		t.Fatalf("preflight projection=%#v fence=%#v", projection, record)
+	}
+}
+
+func TestActivationCanaryPreflightRejectsInvalidAndUnauthorizedRequests(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, true)
+	fixture.start(t)
+	validBody, err := json.Marshal(activationCanaryPreflightRequest{
+		SchemaVersion:         activationCanaryPreflightSchema,
+		ActivationID:          fixture.activationID,
+		ActivationBeginDigest: fixture.beginDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name       string
+		path       string
+		body       []byte
+		authorized bool
+		want       int
+	}{
+		{
+			name: "unauthorized", path: fixture.ref, body: validBody,
+			want: http.StatusUnauthorized,
+		},
+		{
+			name: "invalid runtime ref", path: "not-a-runtime", body: validBody,
+			authorized: true, want: http.StatusBadRequest,
+		},
+		{
+			name: "malformed", path: fixture.ref,
+			body:       []byte(`{"schema_version":`),
+			authorized: true, want: http.StatusBadRequest,
+		},
+		{
+			name: "unknown field", path: fixture.ref,
+			body: append(
+				bytes.TrimSuffix(validBody, []byte("}")),
+				[]byte(`,"unexpected":true}`)...,
+			),
+			authorized: true, want: http.StatusBadRequest,
+		},
+		{
+			name: "oversized", path: fixture.ref,
+			body:       bytes.Repeat([]byte("x"), maxBodyBytes+1),
+			authorized: true, want: http.StatusBadRequest,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/v1/workloads/"+test.path+"/activation-canary-preflight",
+				bytes.NewReader(test.body),
+			)
+			if test.authorized {
+				request.Header.Set("Authorization", "Bearer secret")
+			}
+			response := httptest.NewRecorder()
+			fixture.server.Handler().ServeHTTP(response, request)
+			if response.Code != test.want {
+				t.Fatalf(
+					"status=%d want=%d body=%s",
+					response.Code, test.want, response.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestActivationCanaryPreflightFailsClosedBeforeGatewayUse(t *testing.T) {
+	t.Run("stopped", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		response := postActivationCanaryPreflight(
+			t, fixture.server, fixture.ref, fixture.activationID, fixture.beginDigest,
+		)
+		if response.Code != http.StatusConflict ||
+			!strings.Contains(response.Body.String(), "workload_drift") {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("topology drift", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		fixture.start(t)
+		fixture.docker.network.Internal = false
+		response := postActivationCanaryPreflight(
+			t, fixture.server, fixture.ref, fixture.activationID, fixture.beginDigest,
+		)
+		if response.Code != http.StatusConflict ||
+			!strings.Contains(response.Body.String(), "workload_drift") {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("activation identity", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		fixture.start(t)
+		for name, identity := range map[string][2]string{
+			"activation": {"activation-other", fixture.beginDigest},
+			"begin digest": {
+				fixture.activationID, "sha256:" + strings.Repeat("a", 64),
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				response := postActivationCanaryPreflight(
+					t, fixture.server, fixture.ref, identity[0], identity[1],
+				)
+				if response.Code != http.StatusConflict ||
+					!strings.Contains(response.Body.String(), "activation_runtime_mismatch") {
+					t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+				}
+			})
+		}
+	})
+
+	t.Run("degraded reconciliation", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		fixture.start(t)
+		fixture.server.reconcileMu.Lock()
+		fixture.server.reconcileAttempted = true
+		fixture.server.reconcileReport = ReconcileReport{
+			Ready: false,
+			Failures: []ReconcileFailure{{
+				Code: "test_degraded", Message: "test degraded readiness",
+			}},
+		}
+		fixture.server.reconcileMu.Unlock()
+		response := postActivationCanaryPreflight(
+			t, fixture.server, fixture.ref, fixture.activationID, fixture.beginDigest,
+		)
+		if response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(response.Body.String(), "reconciliation_required") {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("current policy", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		fixture.start(t)
+		fixture.server.secure.policyEnvelope = append(
+			append([]byte(nil), fixture.server.secure.policyEnvelope...), '\n',
+		)
+		response := postActivationCanaryPreflight(
+			t, fixture.server, fixture.ref, fixture.activationID, fixture.beginDigest,
+		)
+		if response.Code != http.StatusForbidden ||
+			!strings.Contains(response.Body.String(), "signed_lifecycle_required") {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("tenant principal", func(t *testing.T) {
+		fixture := newActivationCheckpointServerFixture(t, true)
+		fixture.start(t)
+		fixture.server.secure.allowHostAdmin = false
+		response := postActivationCanaryPreflightWithContext(
+			t, fixture.server,
+			WithAdmissionPrincipal(context.Background(), "tenant-b", "node-a", 1),
+			fixture.ref, fixture.activationID, fixture.beginDigest,
+		)
+		if response.Code != http.StatusForbidden ||
+			!strings.Contains(response.Body.String(), "signed_lifecycle_required") {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		response = postActivationCanaryPreflightWithContext(
+			t, fixture.server,
+			WithAdmissionPrincipal(context.Background(), "tenant-a", "node-a", 1),
+			fixture.ref, fixture.activationID, fixture.beginDigest,
+		)
+		if response.Code != http.StatusOK {
+			t.Fatalf("authorized status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+}
+
 func TestActivationCheckpointAppendsOnceForExactRunningActivation(t *testing.T) {
 	fixture := newActivationCheckpointServerFixture(t, true)
 	fixture.start(t)
@@ -1016,6 +1265,85 @@ func TestActivationCheckpointFailsClosedForStoppedDriftedOrRevokedRuntime(t *tes
 			)
 		}
 	})
+}
+
+func TestActivationCheckpointRejectsStopThenRestartAsInvalidated(t *testing.T) {
+	for _, existingCheckpoint := range []bool{false, true} {
+		name := "before first checkpoint"
+		if existingCheckpoint {
+			name = "exact retry after checkpoint"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newActivationCheckpointServerFixture(t, true)
+			fixture.start(t)
+			checkpointDigest := "sha256:" + strings.Repeat("f", 64)
+			if existingCheckpoint {
+				response := postActivationCheckpoint(
+					t, fixture.server, fixture.ref, fixture.activationID,
+					checkpointDigest,
+				)
+				if response.Code != http.StatusCreated {
+					t.Fatalf(
+						"initial checkpoint status=%d body=%s",
+						response.Code, response.Body.String(),
+					)
+				}
+			}
+			assertLifecycleStatus(
+				t, fixture.server, http.MethodPost,
+				"/v1/workloads/"+fixture.ref+"/stop",
+				context.Background(), http.StatusOK,
+			)
+			fixture.start(t)
+			before := fixture.config.Evidence.NextSequence()
+
+			response := postActivationCheckpoint(
+				t, fixture.server, fixture.ref, fixture.activationID,
+				checkpointDigest,
+			)
+			if response.Code != http.StatusConflict ||
+				!strings.Contains(response.Body.String(), "activation_invalidated") ||
+				fixture.config.Evidence.NextSequence() != before {
+				t.Fatalf(
+					"status=%d next=%d want=%d body=%s",
+					response.Code, fixture.config.Evidence.NextSequence(), before,
+					response.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestActivationCheckpointRejectsCompensatedStopAfterStart(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, true)
+	fixture.start(t)
+	fixture.docker.stopErr = errors.New("stop failed before changing Docker state")
+	assertLifecycleStatus(
+		t, fixture.server, http.MethodPost, "/v1/workloads/"+fixture.ref+"/stop",
+		context.Background(), http.StatusBadGateway,
+	)
+	if fixture.docker.observed.Status != "running" ||
+		len(fixture.config.Journal.Pending()) != 0 {
+		t.Fatalf(
+			"failed stop status=%q pending=%#v",
+			fixture.docker.observed.Status,
+			fixture.config.Journal.Pending(),
+		)
+	}
+	before := fixture.config.Evidence.NextSequence()
+	response := postActivationCheckpoint(
+		t, fixture.server, fixture.ref, fixture.activationID,
+		"sha256:"+strings.Repeat("f", 64),
+	)
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "activation_invalidated") ||
+		fixture.config.Evidence.NextSequence() != before {
+		t.Fatalf(
+			"status=%d next=%d want=%d body=%s",
+			response.Code, fixture.config.Evidence.NextSequence(), before,
+			response.Body.String(),
+		)
+	}
 }
 
 func TestActivationCheckpointReturnsUnavailableWhenEvidenceIsClosed(t *testing.T) {

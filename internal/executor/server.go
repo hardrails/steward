@@ -30,6 +30,7 @@ import (
 const (
 	maxBodyBytes                      = 1 << 20
 	activationAdmissionRequestSchema  = "steward.executor-activation-admission.v1"
+	activationCanaryPreflightSchema   = "steward.executor-activation-canary-preflight.v1"
 	activationCheckpointRequestSchema = "steward.executor-activation-checkpoint.v1"
 )
 
@@ -214,6 +215,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admissions", s.secureProvision)
 	mux.HandleFunc("POST /v1/state/purge", s.purgeState)
 	mux.HandleFunc(
+		"POST /v1/workloads/{id}/activation-canary-preflight",
+		s.activationCanaryPreflight,
+	)
+	mux.HandleFunc(
 		"POST /v1/workloads/{id}/activation-checkpoints",
 		s.activationCheckpoint,
 	)
@@ -298,6 +303,12 @@ type activationCheckpointRequest struct {
 	SchemaVersion    string `json:"schema_version"`
 	ActivationID     string `json:"activation_id"`
 	CheckpointDigest string `json:"checkpoint_digest"`
+}
+
+type activationCanaryPreflightRequest struct {
+	SchemaVersion         string `json:"schema_version"`
+	ActivationID          string `json:"activation_id"`
+	ActivationBeginDigest string `json:"activation_begin_digest"`
 }
 
 func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
@@ -592,6 +603,87 @@ func (s *Server) purgeState(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// activationCanaryPreflight is the read-only authorization boundary before a
+// node may contact Gateway. Unlike generic status, it serializes with signed
+// mutations and requires the current policy, authenticated principal, retained
+// activation, and exact running topology to agree.
+func (s *Server) activationCanaryPreflight(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	if s.secure == nil {
+		writeError(w, http.StatusServiceUnavailable, "secure_admission_unavailable", "signed admission is not configured on this node")
+		return
+	}
+	name, ok := runtimeRef(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_runtime_ref", "invalid executor runtime_ref")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body exceeds the activation canary preflight limit")
+		return
+	}
+	var request activationCanaryPreflightRequest
+	if err := dsse.DecodeStrictInto(raw, maxBodyBytes, &request); err != nil ||
+		request.SchemaVersion != activationCanaryPreflightSchema ||
+		!activationCheckpointID(request.ActivationID) ||
+		!imageConfigDigest.MatchString(request.ActivationBeginDigest) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be one bounded activation canary preflight")
+		return
+	}
+
+	s.provisionMu.Lock()
+	defer s.provisionMu.Unlock()
+	if s.secureMutationBlockedLocked() {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; activation canary dispatch is blocked until reconciliation succeeds")
+		return
+	}
+	observed, err := s.managed(r.Context(), name)
+	if err != nil {
+		writeDockerError(w, err)
+		return
+	}
+	record, ok := s.secureLifecycleRecord(observed)
+	if !ok || !s.principalAuthorizesRecord(r.Context(), record) ||
+		!s.currentPolicyAuthorizesRecord(record) {
+		writeError(w, http.StatusForbidden, "signed_lifecycle_required", "workload is not bound to the current authenticated signed admission")
+		return
+	}
+	runtime := observed.Workload.Runtime
+	if name != RuntimeRef(
+		observed.Workload.TenantID,
+		observed.Workload.InstanceID,
+	) ||
+		runtime == nil ||
+		runtime.ActivationID != request.ActivationID ||
+		runtime.ActivationBeginDigest != request.ActivationBeginDigest {
+		writeError(w, http.StatusConflict, "activation_runtime_mismatch", "workload is not bound to the requested activation admission")
+		return
+	}
+	if !lifecycleMatches(observed.Status, true) ||
+		s.proveRuntimeTopologyState(
+			r.Context(),
+			observed.Workload,
+			true,
+			record.RoutePolicyDigest,
+		) != nil {
+		writeError(w, http.StatusConflict, "workload_drift", "activation canary requires the exact signed runtime topology to be running")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.secureResponse(
+		name,
+		observed.Status,
+		record.CapsuleDigest,
+		record.PolicyDigest,
+		record.Generation,
+		runtime,
+		record.RoutePolicyDigest,
+	))
+}
+
 // activationCheckpoint appends a content-free causal join to the signed
 // Executor receipt stream. The caller supplies only a bounded activation
 // identity and digest; every lifecycle binding is derived from the current
@@ -665,7 +757,9 @@ func (s *Server) activationCheckpoint(w http.ResponseWriter, r *http.Request) {
 		MetadataHash:  request.CheckpointDigest,
 	}
 	if _, err := s.secure.evidence.AppendActivationCheckpoint(event); err != nil {
-		if errors.Is(err, evidence.ErrActivationMarkerConflict) {
+		if errors.Is(err, evidence.ErrActivationInvalidated) {
+			writeError(w, http.StatusConflict, "activation_invalidated", err.Error())
+		} else if errors.Is(err, evidence.ErrActivationMarkerConflict) {
 			writeError(w, http.StatusConflict, "activation_checkpoint_conflict", err.Error())
 		} else {
 			writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
