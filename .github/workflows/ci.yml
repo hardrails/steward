@@ -59,6 +59,7 @@ jobs:
           scripts/control-acceptance.sh scripts/uninstall-node.sh scripts/node-removal-guard.sh
           scripts/build-deb.sh scripts/build-rpm.sh scripts/build-hermes-adapter.sh
           scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh
+          scripts/build-openclaw-adapter.sh scripts/openclaw-feasibility.sh
           scripts/write-release-manifest.sh
           scripts/node-upgrade-smoke.sh scripts/privileged-shell-test.sh
           scripts/node-installer-security-test.sh scripts/configure-input-boundary-test.sh
@@ -151,7 +152,7 @@ jobs:
           go build -o "$stage/steward-mcp" ./cmd/steward-mcp
           go build -o "$stage/steward-gateway" ./cmd/steward-gateway
           go build -o "$stage/steward-relay" ./cmd/steward-relay
-          cp -R adapters/hermes-agent "$stage/adapters/"
+          cp -R adapters/hermes-agent adapters/openclaw "$stage/adapters/"
           cp -R deploy/config deploy/systemd "$stage/deploy/"
           rm -f "$stage/deploy/config/control.env" \
             "$stage/deploy/systemd/steward-control.service"
@@ -159,7 +160,8 @@ jobs:
             scripts/node-preflight.sh scripts/node-doctor.sh scripts/configure-node.sh scripts/configure-admission.sh \
             scripts/uninstall-node.sh scripts/node-removal-guard.sh scripts/build-relay-image.sh \
             scripts/build-hermes-adapter.sh scripts/hermes-feasibility.sh \
-            scripts/hermes-steward-acceptance.sh "$stage/scripts/"
+            scripts/hermes-steward-acceptance.sh scripts/build-openclaw-adapter.sh \
+            scripts/openclaw-feasibility.sh "$stage/scripts/"
           cp LICENSE README.md "$stage/"
           test "$("$stage/scripts/hermes-steward-acceptance.sh" --check-layout)" = "$stage"
           mkdir -p "$smoke/layout/release/integration/scripts"
@@ -177,7 +179,7 @@ jobs:
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' "$stage/release.json"
           grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 6, "write": 6},' "$stage/release.json"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' "$stage/release.json"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 49
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 61
           grep -Fxq 'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_EVIDENCE_UPLINK_ENABLED=false' "$stage/deploy/config/executor.env"
@@ -247,11 +249,17 @@ jobs:
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' \
             /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/adapters/openclaw/adapter.json' \
+            /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' \
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/scripts/hermes-feasibility.sh' \
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/scripts/build-openclaw-adapter.sh' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/scripts/openclaw-feasibility.sh' \
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/scripts/node-doctor.sh' \
             /tmp/steward-node-test.deb.contents
@@ -275,11 +283,17 @@ jobs:
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' \
             /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/adapters/openclaw/adapter.json' \
+            /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/scripts/hermes-feasibility.sh' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/scripts/hermes-steward-acceptance.sh' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/scripts/build-openclaw-adapter.sh' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/scripts/openclaw-feasibility.sh' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/scripts/node-doctor.sh' \
             /tmp/steward-node-test.rpm.contents

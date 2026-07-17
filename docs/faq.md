@@ -16,9 +16,10 @@ runs hardened Docker/gVisor workloads through a separate Executor.
 ## Is Steward an agent framework?
 
 No. Agent runtimes are packaged as Open Container Initiative (OCI) images. Steward
-provides lifecycle, isolation, and remote control beneath them. Steward includes one
-qualified, exact-pinned Hermes Agent adapter definition. OpenClaw remains a layout
-contract that requires a separately qualified adapter.
+provides lifecycle, isolation, and remote control beneath them. Steward includes
+qualified, exact-pinned adapters for a closed Hermes Agent surface and a closed
+OpenClaw surface. Broader agent features require separate capability contracts and
+qualification.
 
 ## Does Steward require a particular control plane?
 
@@ -129,8 +130,13 @@ exact workspace-audit run request, dispatches it through the generic task lifecy
 and audits receipt format 4. The connector portion still uses ordinary connector grant
 and task authority; it does not exercise the optional connector action-permit path.
 
-OpenClaw has not completed this qualification and remains a layout contract. See the
-[Hermes]({{ '/guides/hermes-agent/' | relative_url }}) and
+The OpenClaw qualification derives from exact official release `2026.7.1` on
+`linux/amd64`. It exposes a bounded one-shot run API on port `18789`, fixes inference
+through Steward, and allows only `read` and `exec` inside the outer gVisor capsule.
+The gate ran the real `steward-workspace-audit` skill, restarted and reused it, and
+required persisted skill tamper to stop startup. OpenClaw Gateway, UI, channels,
+browser, cron, plugins, nodes, discovery, arbitrary skills, and nested sandboxes are
+not qualified. See the [Hermes]({{ '/guides/hermes-agent/' | relative_url }}) and
 [OpenClaw]({{ '/guides/openclaw/' | relative_url }}) guides before signing an exact
 adapter archive.
 

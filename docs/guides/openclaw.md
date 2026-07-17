@@ -1,150 +1,182 @@
 ---
-title: OpenClaw adapter contract
-description: Understand the built-in OpenClaw layout, its upstream runtime and onboarding requirements, Steward's bounded WebSocket service path, and the acceptance work required for a hardened adapter.
+title: Run OpenClaw with Steward
+description: Build, qualify, inspect, and operate the exact pinned OpenClaw adapter with a real custom skill under Docker and gVisor.
 section: Agent compatibility
 ---
 
-# OpenClaw adapter contract
+# Run OpenClaw with Steward
 
-The compiled-in `openclaw-v1@v1` **layout contract** fixes paths and identity
-settings that an untrusted capsule cannot change. Steward does not include OpenClaw,
-build its image, or certify the upstream image.
+Steward packages a narrow, qualified OpenClaw runtime for one-shot agent work. It
+uses the real OpenClaw agent and skill system, but does not expose the full OpenClaw
+Gateway, browser, channels, plugins, or administration interface.
 
-| Property | Enforced value |
+This boundary is intentional. A calendar invite, email, web page, document, memory,
+or tool response can contain instructions that manipulate an agent. Steward cannot
+make those instructions safe. It can keep the resulting process inside gVisor,
+limit its filesystem and network access, keep reusable inference credentials out of
+the container, and require separate signed authority for sensitive external effects.
+
+## What works
+
+| Capability | Qualified behavior |
 | --- | --- |
-| persistent state | `/home/node/.openclaw` |
-| `HOME` | `/home/node` |
-| working directory | `/home/node/.openclaw/workspace` |
-| process identity | UID/GID `65532:65532` |
-| writable filesystem | lineage volume plus a 64 MiB memory-backed `/tmp` (`tmpfs`) |
+| upstream runtime | OpenClaw `2026.7.1`, exact source revision and official OCI image digest |
+| platform | Linux on `amd64` |
+| useful work | OpenClaw loads and runs the `steward-workspace-audit` custom skill |
+| tools | `read` and `exec`, inside the outer Steward capsule |
+| inference | one operator-selected OpenAI-compatible model alias through Steward's fixed relay |
+| service | health, negotiation, submit run, and read run status on port `18789` |
+| state | fixed `/home/node/.openclaw` lineage volume on an explicitly dedicated host |
+| isolation | gVisor, UID/GID `65532:65532`, read-only root, no Linux capabilities, no public route during qualification |
 
-A lineage volume preserves one workload's state across approved replacements.
-Steward's portable Docker volume has no hard byte or inode quota, so this layout is
-usable only with the explicit dedicated-host state mode. It is not a shared-host
-state guarantee.
+The retained [qualification evidence]({{ '/reference/evidence/openclaw-feasibility.json' | relative_url }})
+contains only hashes and gate outcomes. It records a real tool call, deterministic
+workspace result, restart, and rejected skill tamper. It contains no prompt, model
+response, tool output, or workspace content.
 
-OpenClaw changes quickly. The status below was reviewed on 2026-07-11 at upstream
-commit
-[`7197eef3ebeb5ac294da51ca073fff33277ed429`](https://github.com/openclaw/openclaw/commit/7197eef3ebeb5ac294da51ca073fff33277ed429),
-using its pinned
-[Docker guide](https://github.com/openclaw/openclaw/blob/7197eef3ebeb5ac294da51ca073fff33277ed429/docs/install/docker.md),
-[Dockerfile](https://github.com/openclaw/openclaw/blob/7197eef3ebeb5ac294da51ca073fff33277ed429/Dockerfile),
-[gateway runbook](https://github.com/openclaw/openclaw/blob/7197eef3ebeb5ac294da51ca073fff33277ed429/docs/gateway/index.md),
-and [Gateway protocol](https://github.com/openclaw/openclaw/blob/7197eef3ebeb5ac294da51ca073fff33277ed429/docs/gateway/protocol.md).
-Review the exact revision you plan to package; a later upstream change can
-invalidate this assessment.
+## Try the complete path
 
-## Current validation status
+Use a disposable Linux `amd64` host with Docker, gVisor's `runsc` runtime, and at
+least 6 GiB of free space. The qualification creates and removes temporary Docker
+containers, a private network, a volume, and the loaded adapter image. Do not run it
+on a host where those names or resources matter.
 
-Steward does not ship or claim a validated OpenClaw adapter. The built-in layout is
-enforcement metadata; it does not mean the official image passed end-to-end tests.
-
-The official container runs as `node` with UID `1000`. It keeps state and
-`openclaw.json` under `/home/node/.openclaw`, but stores the auth-profile encryption
-key under `/home/node/.config/openclaw`. Docker onboarding creates configuration and
-authentication material before Gateway startup. Steward enforces UID/GID
-`65532:65532`, mounts only the declared state path, permits no interactive exec, and
-provides no generic secret or extra-mount channel.
-
-The upstream Gateway multiplexes HTTP and WebSocket traffic on port `18789`, fitting
-Steward's one-port contract. UID, state initialization, the separate key path, and
-two-layer authentication still require an adapter and tests. Do not hide these gaps
-by baking provider keys, channel tokens, OAuth material, or a reusable Gateway token
-into the image.
-
-## What Steward's service path provides
-
-For an active grant, a trusted host-local caller authenticates to Gateway and reaches
-the capsule-declared port through the relay. Steward preserves path and query and
-supports HTTP/1.1 RFC 6455 WebSocket upgrades. Limits are:
-
-- at most 16 concurrent HTTP requests or WebSocket streams per grant;
-- a two-minute lifetime for each request or stream;
-- at most 4 MiB from client to service and 32 MiB from service to client; and
-- immediate connection cancellation when the grant is deactivated or removed.
-
-Steward consumes the outer `Authorization` header. It does not forward client
-`Authorization`, `Proxy-Authorization`, `Cookie`, or upstream `Set-Cookie` headers.
-OpenClaw authentication must occur inside the WebSocket `connect` frame; Steward's
-bearer token is not an OpenClaw token. These transport properties are tested, but a
-complete Control UI and protocol session has not passed the requirements below.
-
-## Adapter acceptance contract
-
-A signed OpenClaw adapter must satisfy all of the following:
-
-1. Pin the source revision and every base image by digest. Record source, inputs,
-   output manifest and config digests, and platform.
-2. Make the image start and remain at UID/GID `65532:65532`. Pre-create only
-   the required state/workspace paths, prove all runtime writes stay under
-   `/home/node/.openclaw` or `/tmp`, and prove the image works read-only with
-   all capabilities dropped and `no-new-privileges`.
-3. Produce deterministic offline first-run configuration without secrets in the
-   image, archive, capsule, arguments, or logs. Resolve the auth-profile key path:
-   prove the approved configuration does not use it, or propose a
-   reviewed profile change. Never silently move or discard it.
-4. Configure a custom OpenAI-compatible provider from Steward's injected
-   `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`. `OPENAI_API_KEY` is
-   the fixed, non-secret placeholder `steward-local`; Gateway removes the agent's
-   `Authorization` header and injects the operator-owned upstream credential, if
-   configured. Prove OpenClaw requests only the signed model alias and cannot
-   enumerate or select another upstream model.
-5. Bind the OpenClaw Gateway to the adapter's private interface on the single
-   capsule-declared port. Preserve upstream's single-port HTTP/WebSocket
-   multiplexing; do not publish a Docker port or add a second listener.
-6. Design OpenClaw Gateway authentication without reusing Steward's service token.
-   Prove an authorized client can complete `connect.challenge` and authenticated
-   `connect` through Steward while an unauthorized client cannot. This remains
-   blocking; the current profile does not inject an OpenClaw Gateway secret.
-7. Test HTTP health and a real WebSocket remote procedure call (RPC) session through
-   `service_path`. Test
-   concurrency, byte, lifetime, and revocation limits, restart reconciliation, and
-   retained state.
-8. Disable or reject features that require multicast DNS (mDNS/Bonjour), raw
-   messaging
-   transports, browser control, a Docker socket, nested Docker sandboxes, host
-   mounts, extra ports, or arbitrary environment variables. For an HTTP(S) channel
-   or plugin, verify that its exact library honors the injected proxy and authorize
-   only its named route. A protocol name alone does not prove compatibility.
-9. Sign only the tested argument vector and service port. Store resulting receipts
-   with source and image identities.
-
-This checklist is a release gate. It is not evidence that a compliant adapter
-already exists.
-
-## Inspect and import an adapter immutably
-
-Inspect a trusted-pipeline archive before it reaches Docker:
+Create an owner-only build directory:
 
 ```console
-chmod go-w openclaw-adapter.tar
-stewardctl image inspect -archive openclaw-adapter.tar
+mkdir -m 700 "$HOME/steward-openclaw"
 ```
 
-Take the manifest digest, config digest, and platform from `image inspect`. Select
-the approved repository provenance separately from the trusted build or promotion
-pipeline; an OCI archive may not contain a repository name. Sign those values and
-the `openclaw-v1@v1` profile into a capsule. After site policy authorizes them,
-import the same bytes:
+On an installed Steward node, build one offline-transferable bundle:
+
+```console
+/usr/local/libexec/steward/build-openclaw-adapter \
+  --output "$HOME/steward-openclaw/bundle"
+```
+
+From a source checkout, use `scripts/build-openclaw-adapter.sh` instead. Add
+`--non-interactive` in automation. The builder pulls only the exact digest-pinned
+official OpenClaw base image; Docker then assembles the adapter with build-time
+network access disabled. The new bundle contains:
+
+```text
+bundle/
+├── attestation.json
+└── image.tar
+```
+
+`attestation.json` is canonical build metadata, not a signature. It records the
+upstream and adapter revisions, archive hash, OCI manifest and config digests, and
+runtime image ID. Authenticate the Steward release or checkout before trusting it.
+
+Run the destructive qualification:
+
+```console
+mkdir -m 700 "$HOME/steward-openclaw/evidence"
+STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES \
+  /usr/local/libexec/steward/openclaw-feasibility \
+  --bundle "$HOME/steward-openclaw/bundle" \
+  --output "$HOME/steward-openclaw/evidence/feasibility.json"
+```
+
+A successful final line is:
+
+```text
+OpenClaw feasibility passed; metadata-only evidence: /home/you/steward-openclaw/evidence/feasibility.json
+```
+
+This is more than a container health check. The gate makes OpenClaw call the real
+custom skill through an OpenAI-compatible model fixture, verifies the deterministic
+result, restarts the container and runs the skill again, then changes the persisted
+skill and requires startup to fail closed.
+
+## Inspect and admit the exact image
+
+Inspect the archive without loading it into Docker:
+
+```console
+stewardctl image inspect \
+  -archive "$HOME/steward-openclaw/bundle/image.tar"
+```
+
+Copy the returned `manifest_digest`, `config_digest`, and `platform` into the
+publisher-signed capsule for profile `openclaw-v1@v1`. The signed runtime command is
+`["serve"]`, and the declared service port is `18789`. Authorize the exact
+repository provenance separately in site policy, then import the same archive
+bytes:
 
 ```console
 sudo stewardctl image import \
-  -archive openclaw-adapter.tar \
+  -archive "$HOME/steward-openclaw/bundle/image.tar" \
   -capsule openclaw-capsule.dsse.json \
   -policy site-policy.dsse.json \
   -site-root-public-key site-root.public \
   -site-root-key-id site-root-1
 ```
 
-Import success proves archive identity and the static image contract, not OpenClaw
-runtime compatibility. See
-[image and evidence tools]({{ '/reference/offline-tools/' | relative_url }}) and
-[signed admission]({{ '/guides/signed-admission/' | relative_url }}).
+Follow [signed admission]({{ '/guides/signed-admission/' | relative_url }}) for the
+complete capsule, site-policy, and instance-intent workflow. Import proves the
+archive identity and static image contract. The separate feasibility record proves
+the tested OpenClaw behavior for the exact build; neither grants deployment
+authority by itself.
 
-## Deliberate capability limits
+## Submit agent work
 
-Steward does not provide OpenClaw discovery, multicast DNS (mDNS), raw messaging
-protocols, browser control, Docker-based sandboxes, host projects, arbitrary
-credentials, extra mounts, or undeclared ports. You may qualify a proxy-aware
-HTTP(S) integration against an exact signed egress route. Another OpenClaw
-deployment reaching it does not prove Steward compatibility.
+The adapter accepts one active run and retains at most 64 completed run records.
+Its private HTTP contract is:
+
+```http
+POST /v1/runs
+Content-Type: application/json
+
+{"message":"Run the Steward workspace audit.","session_id":"operator-example"}
+```
+
+It returns `202` with a `run_id`. Read the terminal record with:
+
+```http
+GET /v1/runs/run_0123456789abcdef0123456789abcdef
+```
+
+Do not publish port `18789`. Configure it as the capsule's one private service and
+reach it through Steward's authenticated service path. For tenant-authorized work,
+scope an off-node task key to the configured OpenClaw service operation, sign the
+exact JSON request, then use `stewardctl task submit`, `task status`, or `task wait`.
+The [task lifecycle reference]({{ '/reference/offline-tools/#submit-and-recover-a-service-task' | relative_url }})
+explains retries and offline audit. A successful retry returns the recorded run ID
+without dispatching the request again while the same Gateway ledger epoch remains.
+
+## Security boundary
+
+OpenClaw still decides when to use `read` or `exec`. Treat the model, prompt, skill,
+workspace, configuration, and upstream image as untrusted. `exec` can run commands
+inside the capsule and can damage the workload's own writable state. The security
+claim is the outer boundary: exact admitted image, gVisor, fixed non-root identity,
+read-only root, fixed state path, resource ceilings, mediated inference, and no
+undeclared network route.
+
+Do not place provider keys, passwords, recovery codes, channel tokens, OAuth
+material, or a Docker socket in the image or workspace. Steward gives the agent a
+fixed placeholder inference key; Gateway injects the real upstream credential only
+on the trusted relay connection. Use the [secret materialization guide]({{ '/guides/secrets/' | relative_url }})
+to keep inference and connector credentials in owner-only Gateway files.
+
+For external changes such as sending a message, changing an account, or mutating
+infrastructure, use [Authorized Effects]({{ '/guides/authorized-effects/' | relative_url }}).
+It assumes the agent has been manipulated and requires separate signed authority
+for the exact connector request before DNS. It does not cover unmanaged browser
+sessions, local files, computer use, or credentials given directly to OpenClaw.
+
+## Deliberate limits
+
+The qualification does not include OpenClaw Gateway, Control UI, channels, browser
+control, cron, plugins, remote nodes, multicast discovery, arbitrary skills, host
+mounts, extra ports, or nested Docker sandboxes. Adding one of those features needs
+a new signed capability contract and its own adversarial qualification. Another
+OpenClaw installation reaching that feature is not evidence that it is safe or
+supported through Steward.
+
+The adapter reuses the exact official OCI release instead of reproducing it from
+source. Sites that require a source-reproducible OpenClaw image must create and
+qualify a separate build recipe. See [ADR 0025]({{ '/decisions/0025-qualify-a-closed-openclaw-agent-surface/' | relative_url }})
+for this buy-versus-build decision and its tradeoffs.

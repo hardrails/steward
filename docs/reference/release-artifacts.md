@@ -73,6 +73,7 @@ the documented admission workflow.
 The Linux payload also exposes the packaged end-to-end harness at
 `/usr/local/libexec/steward/hermes-steward-acceptance`. It requires Docker, the
 `runsc` gVisor runtime, Python 3, `curl`, `base64`, and standard GNU userland tools.
+
 Run it only on a disposable `linux/amd64` host with no production Steward services:
 it uses fixed ports and creates and removes Docker resources.
 
@@ -87,6 +88,34 @@ Set `HERMES_INTEGRATION_EVIDENCE_OUT` to a new path when an owner-only,
 metadata-only qualification record is required. The detailed
 [Hermes guide]({{ '/guides/hermes-agent/' | relative_url }}) explains the
 qualification evidence and its limits.
+
+## OpenClaw adapter build outputs
+
+Linux `amd64` node packages include the exact OpenClaw adapter source, its atomic
+bundle builder, and its disposable-host qualification harness:
+
+```console
+/usr/local/libexec/steward/build-openclaw-adapter \
+  --output "$HOME/steward-openclaw/bundle"
+
+STEWARD_ACCEPT_DISPOSABLE_HOST_RISK=YES \
+  /usr/local/libexec/steward/openclaw-feasibility \
+  --bundle "$HOME/steward-openclaw/bundle" \
+  --output "$HOME/steward-openclaw/feasibility.json"
+```
+
+The builder accepts either an exact committed Steward checkout or the adapter and
+builder bytes authenticated by the installed release manifest. It publishes one
+new owner-only directory containing `image.tar` and `attestation.json`. The
+attestation binds the upstream release and image, adapter source inventory, archive
+hash, OCI manifest and config digests, and Docker runtime image ID. It contains no
+agent content and is not a signature.
+
+The qualification requires Docker, registered `runsc`, Python 3, `stewardctl`, and
+standard GNU userland on a disposable Linux `amd64` host. It loads and removes the
+image, containers, private network, and volume used by the test. Its output is a
+metadata-only result; use `--keep-failed` only when a diagnostic directory that may
+contain failed agent state is acceptable.
 
 ## Verify a downloaded release
 

@@ -1,0 +1,53 @@
+{
+  "schema_version": "steward.adapter-source.v1",
+  "adapter_contract": "steward.openclaw.v1",
+  "qualified_platforms": ["linux/amd64"],
+  "upstream": {
+    "repository": "https://github.com/openclaw/openclaw.git",
+    "release": "v2026.7.1",
+    "revision": "2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4",
+    "license": "MIT",
+    "license_sha256": "73571b25326281d369087f469842c02444fe39faaecebda4d82ed21ff3a1c29d"
+  },
+  "base_images": [
+    {
+      "reference": "ghcr.io/openclaw/openclaw:2026.7.1@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c",
+      "linux_amd64_manifest_digest": "sha256:165b4992f1b4b74ffdd7a02c887ba006f9f5dc951eca420eef573a8b233b543f",
+      "purpose": "upstream runtime"
+    }
+  ],
+  "runtime": {
+    "uid": 65532,
+    "gid": 65532,
+    "state_path": "/home/node/.openclaw",
+    "home": "/home/node",
+    "workdir": "/home/node/.openclaw/workspace",
+    "tmp_path": "/tmp",
+    "command": ["serve"],
+    "service_port": 18789
+  },
+  "service_surface": {
+    "negotiation_path": "/steward/v1/negotiation",
+    "operations": [
+      "GET /health",
+      "POST /v1/runs",
+      "GET /v1/runs/{run_id}"
+    ],
+    "run_id_pattern": "^run_[a-f0-9]{32}$",
+    "events": false,
+    "max_request_body_bytes": 65536,
+    "max_response_body_bytes": 1048576,
+    "timeout_seconds": 120
+  },
+  "qualified_skill_fixture": {
+    "name": "steward-workspace-audit",
+    "workspace_root": "/home/node/.openclaw/workspace/qualification/input",
+    "network": false,
+    "result_schema": "steward.workspace-audit.result.v1"
+  },
+  "deliberate_limits": [
+    "The qualified surface is a bounded one-shot agent API, not OpenClaw Gateway, Control UI, channels, browser control, cron, plugins, nodes, or nested sandboxes.",
+    "The adapter allows only OpenClaw read and exec tools inside Steward's gVisor capsule and grants inference only through Steward's fixed relay.",
+    "The adapter reuses an exact official OCI release image; Steward does not independently reproduce the upstream image from source."
+  ]
+}
