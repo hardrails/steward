@@ -322,10 +322,13 @@ func TestOpenClawRetainedFeasibilityEvidenceMatchesTheHarness(t *testing.T) {
 		(evidence.RuntimeImageID != evidence.ImageManifestDigest && evidence.RuntimeImageID != evidence.ImageConfigDigest) {
 		t.Fatalf("invalid OpenClaw feasibility identity: %#v", evidence)
 	}
-	git := exec.Command("git", "-C", root, "rev-parse", evidence.AdapterStewardCommit+":adapters/openclaw")
+	// Compare with the checked-out adapter tree instead of resolving the retained
+	// commit. GitHub Actions intentionally uses a shallow checkout, so an older
+	// commit may be unavailable even though the exact tree is present at HEAD.
+	git := exec.Command("git", "-C", root, "rev-parse", "HEAD:adapters/openclaw")
 	observedTree, err := git.Output()
 	if err != nil || strings.TrimSpace(string(observedTree)) != evidence.AdapterTree {
-		t.Fatalf("retained OpenClaw adapter tree is unavailable or mismatched: %v %q", err, observedTree)
+		t.Fatalf("checked-out OpenClaw adapter tree is unavailable or mismatched: %v %q", err, observedTree)
 	}
 	required := []string{
 		"bundle.contract", "image.load", "image.contract", "network.internal", "fixture.model",
