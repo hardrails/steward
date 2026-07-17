@@ -53,6 +53,8 @@ func permitCommand(arguments []string, stdout, stderr io.Writer) error {
 		return errors.New("permit command requires issue, approve, verify, or audit")
 	}
 	switch arguments[0] {
+	case "bundle":
+		return permitBundleCommand(arguments[1:], stdout, stderr)
 	case "issue":
 		return issuePermit(arguments[1:], stdout, stderr)
 	case "approve":
