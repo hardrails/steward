@@ -13,22 +13,26 @@ import (
 
 	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/nodeclient"
 	"github.com/hardrails/steward/internal/securefile"
 )
 
 const (
-	cliContextSchema       = "steward.cli-context.v1"
+	legacyCLIContextSchema = "steward.cli-context.v1"
+	cliContextSchema       = "steward.cli-context.v2"
 	maxCLIContextFileBytes = 64 << 10
 	maxCLIContexts         = 32
 )
 
 type cliContext struct {
-	Name       string `json:"name"`
-	ControlURL string `json:"control_url"`
-	TokenFile  string `json:"token_file"`
-	CAFile     string `json:"ca_file,omitempty"`
-	TenantID   string `json:"tenant_id,omitempty"`
-	NodeID     string `json:"node_id,omitempty"`
+	Name          string `json:"name"`
+	ControlURL    string `json:"control_url,omitempty"`
+	TokenFile     string `json:"token_file,omitempty"`
+	CAFile        string `json:"ca_file,omitempty"`
+	NodeURL       string `json:"node_url,omitempty"`
+	NodeTokenFile string `json:"node_token_file,omitempty"`
+	TenantID      string `json:"tenant_id,omitempty"`
+	NodeID        string `json:"node_id,omitempty"`
 }
 
 type cliContextConfig struct {
@@ -101,13 +105,15 @@ func contextSet(arguments []string, stdout io.Writer) error {
 	return withCLIContextConfigMutation(func(config *cliContextConfig, path string) error {
 		existing, _ := findCLIContext(*config, name)
 		if existing.Name == "" {
-			existing = cliContext{Name: name, ControlURL: "http://127.0.0.1:8443"}
+			existing = cliContext{Name: name}
 		}
 		flags := flag.NewFlagSet("context set", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
 		controlURL := flags.String("control-url", existing.ControlURL, "Steward Control origin")
 		tokenFile := flags.String("token-file", existing.TokenFile, "operator token file path")
 		caFile := flags.String("ca-file", existing.CAFile, "private CA PEM bundle path")
+		nodeURL := flags.String("node-url", existing.NodeURL, "loopback Executor origin")
+		nodeTokenFile := flags.String("node-token-file", existing.NodeTokenFile, "owner-only Executor token file path")
 		tenantID := flags.String("tenant-id", existing.TenantID, "default tenant for scoped operations")
 		nodeID := flags.String("node-id", existing.NodeID, "default node for scoped operations")
 		if err := flags.Parse(arguments[1:]); err != nil {
@@ -119,7 +125,17 @@ func contextSet(arguments []string, stdout io.Writer) error {
 		if !validOptionalControlIdentifier(*tenantID, 128) || !validOptionalControlIdentifier(*nodeID, 128) {
 			return errors.New("context tenant or node is invalid")
 		}
-		resolvedToken, err := absoluteContextPath(*tokenFile, true)
+		if *tokenFile != "" && *controlURL == "" {
+			*controlURL = "http://127.0.0.1:8443"
+		}
+		if *nodeTokenFile != "" && *nodeURL == "" {
+			*nodeURL = "http://127.0.0.1:8090"
+		}
+		if (*controlURL == "") != (*tokenFile == "") || (*nodeURL == "") != (*nodeTokenFile == "") ||
+			*tokenFile == "" && *nodeTokenFile == "" {
+			return errors.New("context requires a complete control or node connection")
+		}
+		resolvedToken, err := absoluteContextPath(*tokenFile, false)
 		if err != nil {
 			return fmt.Errorf("resolve context token file: %w", err)
 		}
@@ -127,12 +143,25 @@ func contextSet(arguments []string, stdout io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("resolve context CA file: %w", err)
 		}
-		if _, err := controlclient.NewFromFiles(*controlURL, resolvedToken, resolvedCA); err != nil {
-			return fmt.Errorf("validate context connection files: %w", err)
+		resolvedNodeToken, err := absoluteContextPath(*nodeTokenFile, false)
+		if err != nil {
+			return fmt.Errorf("resolve context node token file: %w", err)
+		}
+		if resolvedToken != "" {
+			if _, err := controlclient.NewFromFiles(*controlURL, resolvedToken, resolvedCA); err != nil {
+				return fmt.Errorf("validate context control connection: %w", err)
+			}
+		} else if resolvedCA != "" {
+			return errors.New("context CA file requires a control connection")
+		}
+		if resolvedNodeToken != "" {
+			if _, err := nodeclient.NewFromTokenFile(*nodeURL, resolvedNodeToken); err != nil {
+				return fmt.Errorf("validate context node connection: %w", err)
+			}
 		}
 		next := cliContext{
 			Name: name, ControlURL: *controlURL, TokenFile: resolvedToken, CAFile: resolvedCA,
-			TenantID: *tenantID, NodeID: *nodeID,
+			NodeURL: *nodeURL, NodeTokenFile: resolvedNodeToken, TenantID: *tenantID, NodeID: *nodeID,
 		}
 		upsertCLIContext(config, next)
 		config.Current = name
@@ -277,6 +306,35 @@ func applyCLIContext(arguments []string) ([]string, error) {
 	return result, nil
 }
 
+func applyNodeCLIContext(arguments []string) ([]string, error) {
+	arguments, disabled, err := stripNoContextFlag(arguments)
+	if err != nil || disabled {
+		return arguments, err
+	}
+	config, _, err := loadCLIContextConfig()
+	if err != nil {
+		return nil, err
+	}
+	if config.Current == "" && os.Getenv("STEWARD_CONTEXT") == "" {
+		return arguments, nil
+	}
+	selected, err := selectedCLIContext(config)
+	if err != nil {
+		return nil, err
+	}
+	if selected.NodeURL == "" || selected.NodeTokenFile == "" {
+		return arguments, nil
+	}
+	result := append([]string(nil), arguments...)
+	if !hasNamedFlag(result, "node-url") {
+		result = append(result, "-node-url", selected.NodeURL)
+	}
+	if !hasNamedFlag(result, "token-file") {
+		result = append(result, "-token-file", selected.NodeTokenFile)
+	}
+	return result, nil
+}
+
 func stripNoContextFlag(arguments []string) ([]string, bool, error) {
 	result := make([]string, 0, len(arguments))
 	found := false
@@ -334,15 +392,25 @@ func loadCLIContextConfig() (cliContextConfig, string, error) {
 }
 
 func validateCLIContextConfig(config cliContextConfig) error {
-	if config.SchemaVersion != cliContextSchema || len(config.Contexts) > maxCLIContexts {
+	if (config.SchemaVersion != cliContextSchema && config.SchemaVersion != legacyCLIContextSchema) || len(config.Contexts) > maxCLIContexts {
 		return errors.New("CLI context file has an unsupported schema or too many contexts")
 	}
 	seen := make(map[string]struct{}, len(config.Contexts))
 	for _, context := range config.Contexts {
-		if !validCLIContextName(context.Name) || context.ControlURL == "" || context.TokenFile == "" ||
-			!filepath.IsAbs(context.TokenFile) || context.CAFile != "" && !filepath.IsAbs(context.CAFile) ||
+		controlComplete := context.ControlURL != "" && context.TokenFile != "" && filepath.IsAbs(context.TokenFile)
+		nodeComplete := context.NodeURL != "" && context.NodeTokenFile != "" && filepath.IsAbs(context.NodeTokenFile)
+		if !validCLIContextName(context.Name) || !controlComplete && !nodeComplete ||
+			(context.ControlURL == "") != (context.TokenFile == "") ||
+			(context.NodeURL == "") != (context.NodeTokenFile == "") ||
+			context.CAFile != "" && (!controlComplete || !filepath.IsAbs(context.CAFile)) ||
+			config.SchemaVersion == legacyCLIContextSchema && nodeComplete ||
 			!validOptionalControlIdentifier(context.TenantID, 128) || !validOptionalControlIdentifier(context.NodeID, 128) {
 			return errors.New("CLI context file contains an invalid context")
+		}
+		if nodeComplete {
+			if _, err := nodeclient.New(context.NodeURL, "context-validation"); err != nil {
+				return errors.New("CLI context file contains an invalid node connection")
+			}
 		}
 		if _, duplicate := seen[context.Name]; duplicate {
 			return errors.New("CLI context file contains duplicate context names")

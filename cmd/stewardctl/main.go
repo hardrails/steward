@@ -98,7 +98,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 
 func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "usage: stewardctl context set|use|show|list|delete ...")
-	fmt.Fprintln(writer, "       stewardctl completion bash|zsh|fish")
+	fmt.Fprintln(writer, "       stewardctl completion install|bash|zsh|fish")
 	fmt.Fprintln(writer, "       stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]")
 	fmt.Fprintln(writer, "       stewardctl key match -private-key FILE -public-key FILE")
 	fmt.Fprintln(writer, "       stewardctl capsule sign|verify ...")
@@ -108,7 +108,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl executor-command issue|verify ...")
 	fmt.Fprintln(writer, "       stewardctl control pki|tenant|operator|enrollment|node|node-credential|operations|attention|command|credential|evidence|evidence-capture ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
-	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state ...")
+	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...")
 	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector|service|effects ...")
 	fmt.Fprintln(writer, "       stewardctl gateway effects check -config FILE -intent FILE -policy FILE -site-root-public-key FILE -site-root-key-id ID")
 	fmt.Fprintln(writer, "       stewardctl secret materialization check -manifest FILE [-root DIRECTORY] [-status-root DIRECTORY]")
@@ -125,7 +125,18 @@ func usage(writer io.Writer) error {
 
 func nodeCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("node command requires admit, status, logs, egress, start, stop, destroy, or purge-state")
+		return errors.New("node command requires admit, status, logs, egress, start, stop, destroy, purge-state, or maintenance")
+	}
+	var err error
+	arguments, err = applyNodeCLIContext(arguments)
+	if err != nil {
+		return err
+	}
+	if len(arguments) == 0 {
+		return errors.New("node command requires a subcommand after -no-context")
+	}
+	if arguments[0] == "maintenance" {
+		return nodeMaintenanceCommand(arguments[1:], stdout)
 	}
 	action := arguments[0]
 	flags := flag.NewFlagSet("node "+action, flag.ContinueOnError)

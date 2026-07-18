@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -81,5 +82,57 @@ func TestNodeCommandsRejectIncompleteArguments(t *testing.T) {
 		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 			t.Fatalf("accepted %#v", arguments)
 		}
+	}
+}
+
+func TestNodeMaintenanceDrainPlansThenAppliesUnderCordon(t *testing.T) {
+	const runtimeRef = "executor-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	destroyed := false
+	entered := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			t.Fatal("missing bearer token")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/maintenance":
+			refs := `[]`
+			if !destroyed {
+				refs = `["` + runtimeRef + `"]`
+			}
+			_, _ = w.Write([]byte(`{"schema_version":"steward.executor-maintenance.v1","enabled":` + fmt.Sprint(entered) + `,"active_runtime_refs":` + refs + `,"pending_operations":0}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/maintenance/enter":
+			var request struct {
+				Reason string `json:"reason"`
+			}
+			if json.NewDecoder(r.Body).Decode(&request) != nil || request.Reason != "kernel update" {
+				t.Fatalf("enter request=%+v", request)
+			}
+			entered = true
+			_, _ = w.Write([]byte(`{"schema_version":"steward.executor-maintenance.v1","enabled":true,"reason":"kernel update","active_runtime_refs":["` + runtimeRef + `"],"pending_operations":0}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/workloads/"+runtimeRef:
+			if !entered {
+				t.Fatal("runtime destroyed before cordon")
+			}
+			destroyed = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	common := []string{"node", "maintenance", "drain", "-node-url", server.URL, "-token-file", tokenPath, "-reason", "kernel update"}
+	var plan bytes.Buffer
+	if err := run(common, &plan, &bytes.Buffer{}); err != nil || !strings.Contains(plan.String(), `"applied":false`) || destroyed || entered {
+		t.Fatalf("plan=%s entered=%v destroyed=%v error=%v", plan.String(), entered, destroyed, err)
+	}
+	var applied bytes.Buffer
+	if err := run(append(common, "-apply"), &applied, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(applied.String(), `"applied":true`) || !strings.Contains(applied.String(), runtimeRef) || !destroyed || !entered {
+		t.Fatalf("applied=%s entered=%v destroyed=%v error=%v", applied.String(), entered, destroyed, err)
 	}
 }
