@@ -25,6 +25,7 @@ import (
 
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/influence"
 )
 
 const maxProxyBody = 4 << 20
@@ -245,6 +246,7 @@ type Server struct {
 	connectorCallCounts      map[string]map[string]int
 	connectorDenials         map[string]struct{}
 	connectorDenialPending   map[string]chan struct{}
+	connectorInfluences      map[string]influence.Head
 	connectorAttempts        map[string]connectorAttemptWindow
 	egressDeniedAttempts     map[string]egressDeniedAttemptWindow
 	egressTenantDenials      map[string]egressDeniedAttemptWindow
@@ -313,6 +315,7 @@ func Open(config Config, routes map[string]loadedRoute, egressRoutes map[string]
 		connectorSpends: receiptIndex.spends, serviceTasks: receiptIndex.tasks, serviceTaskPermits: receiptIndex.permits,
 		connectorCallCounts:    receiptIndex.counts,
 		connectorDenials:       receiptIndex.denials,
+		connectorInfluences:    receiptIndex.influences,
 		connectorDenialPending: make(map[string]chan struct{}),
 		connectorAttempts:      make(map[string]connectorAttemptWindow),
 		egressDeniedAttempts:   make(map[string]egressDeniedAttemptWindow),
@@ -1475,6 +1478,7 @@ type boundedHTTPResponseResult struct {
 	written int64
 	reason  string
 	abort   bool
+	digest  string
 }
 
 // prepareBoundedHTTPResponse advertises an integrity trailer for responses

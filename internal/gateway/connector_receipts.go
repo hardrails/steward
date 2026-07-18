@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/connectorledger"
+	"github.com/hardrails/steward/internal/influence"
 )
 
 type connectorSpendOwner struct {
@@ -18,12 +19,13 @@ type connectorSpendOwner struct {
 }
 
 type connectorReceiptIndex struct {
-	spends  map[string]connectorSpendOwner
-	counts  map[string]map[string]int
-	denials map[string]struct{}
-	pending map[string]connectorledger.Event
-	tasks   map[string]serviceTaskReceipt
-	permits map[string]string
+	spends     map[string]connectorSpendOwner
+	counts     map[string]map[string]int
+	denials    map[string]struct{}
+	pending    map[string]connectorledger.Event
+	tasks      map[string]serviceTaskReceipt
+	permits    map[string]string
+	influences map[string]influence.Head
 }
 
 type serviceTaskReceipt struct {
@@ -79,8 +81,12 @@ func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary
 		config.ConnectorReceiptFile, public, config.ConnectorReceiptNodeID, config.ConnectorReceiptEpoch,
 		func(record connectorledger.VerifiedReceipt) error {
 			switch record.Receipt.SchemaVersion {
+			case connectorledger.SchemaV7:
+				formatVersion = 7
 			case connectorledger.SchemaV6:
-				formatVersion = 6
+				if formatVersion < 6 {
+					formatVersion = 6
+				}
 			case connectorledger.SchemaV5:
 				if formatVersion < 5 {
 					formatVersion = 5
@@ -111,11 +117,52 @@ func newConnectorReceiptIndex() *connectorReceiptIndex {
 		spends: make(map[string]connectorSpendOwner), counts: make(map[string]map[string]int),
 		denials: make(map[string]struct{}), pending: make(map[string]connectorledger.Event),
 		tasks: make(map[string]serviceTaskReceipt), permits: make(map[string]string),
+		influences: make(map[string]influence.Head),
 	}
+}
+
+func (index *connectorReceiptIndex) contextFor(event connectorledger.Event) (influence.Head, error) {
+	head, ok := index.influences[event.GrantID]
+	if !ok {
+		var err error
+		head, err = influence.Genesis(event.TenantID, event.GrantID, event.Generation)
+		if err != nil {
+			return influence.Head{}, err
+		}
+	}
+	if head.TenantID != event.TenantID || head.GrantID != event.GrantID || head.Generation != event.Generation ||
+		head.Sequence != event.InfluenceSequence || head.ChainHash != event.InfluenceHash {
+		return influence.Head{}, errors.New("connector receipt influence context is not the current grant history")
+	}
+	return head, nil
+}
+
+func (index *connectorReceiptIndex) advanceContext(event connectorledger.Event, receiptHash string) error {
+	head, err := index.contextFor(event)
+	if err != nil {
+		return err
+	}
+	next, err := influence.Advance(head, receiptHash)
+	if err != nil {
+		return err
+	}
+	index.influences[event.GrantID] = next
+	return nil
 }
 
 func (index *connectorReceiptIndex) visit(record connectorledger.VerifiedReceipt) error {
 	event := record.Receipt.Event
+	if event.Kind == connectorledger.ConnectorCall && event.InfluenceHash != "" {
+		if event.Phase == connectorledger.Authorize {
+			if _, err := index.contextFor(event); err != nil {
+				return err
+			}
+		} else if event.Phase == connectorledger.Terminal {
+			if err := index.advanceContext(event, record.Hash); err != nil {
+				return err
+			}
+		}
+	}
 	if event.Kind == connectorledger.ConnectorCall && event.EffectMode == connectorledger.EffectModeAuthorized &&
 		event.Phase == connectorledger.Deny {
 		index.denials[connectorDenialKey(event.GrantID, event.ErrorCode)] = struct{}{}
@@ -185,9 +232,16 @@ func openConnectorReceiptLedger(config Config, key ed25519.PrivateKey) (*connect
 		terminal.Phase = connectorledger.Terminal
 		terminal.Outcome = connectorledger.Failed
 		terminal.ErrorCode = "outcome_unknown"
-		if _, err := log.Finish(terminal); err != nil {
+		head, err := log.Finish(terminal)
+		if err != nil {
 			_ = log.Close()
 			return nil, nil, fmt.Errorf("close incomplete connector receipt: %w", err)
+		}
+		if terminal.InfluenceHash != "" {
+			if err := index.advanceContext(terminal, head.ChainHash); err != nil {
+				_ = log.Close()
+				return nil, nil, fmt.Errorf("advance incomplete connector influence context: %w", err)
+			}
 		}
 		delete(index.pending, latest.TaskDigest)
 		if latest.Kind == connectorledger.ServiceTask {
@@ -314,11 +368,12 @@ func (s *Server) recordActionPermitDenial(event connectorledger.Event) error {
 	}
 }
 
-func (s *Server) finishConnectorReceipt(event connectorledger.Event, status int, responseBytes int64, errorCode string) error {
+func (s *Server) finishConnectorReceipt(event connectorledger.Event, status int, responseBytes int64, responseDigest, errorCode string) error {
 	event.Phase = connectorledger.Terminal
 	event.HTTPStatus = status
 	event.ResponseBytes = responseBytes
 	event.ErrorCode = errorCode
+	event.ResponseDigest = responseDigest
 	if errorCode == "" {
 		event.Outcome = connectorledger.Responded
 	} else {
@@ -327,8 +382,25 @@ func (s *Server) finishConnectorReceipt(event connectorledger.Event, status int,
 	if s.connectorLedger == nil {
 		return errors.New("connector receipt ledger is unavailable")
 	}
-	_, err := s.connectorLedger.Finish(event)
-	return err
+	head, err := s.connectorLedger.Finish(event)
+	if err != nil {
+		return err
+	}
+	if event.InfluenceHash == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.connectorInfluences[event.GrantID]
+	if !ok || current.Sequence != event.InfluenceSequence || current.ChainHash != event.InfluenceHash {
+		return errors.New("connector influence context changed before its terminal receipt")
+	}
+	next, err := influence.Advance(current, head.ChainHash)
+	if err != nil {
+		return err
+	}
+	s.connectorInfluences[event.GrantID] = next
+	return nil
 }
 
 func connectorReceiptKeyID(config Config) string {

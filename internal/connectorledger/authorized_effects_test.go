@@ -12,12 +12,12 @@ import (
 	"github.com/hardrails/steward/internal/dsse"
 )
 
-func TestConnectorLedgerReadsMixedV1ThroughV6ReceiptFormats(t *testing.T) {
+func TestConnectorLedgerReadsMixedV1ThroughV7ReceiptFormats(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "mixed-v1-v6.ndjson")
+	path := filepath.Join(t.TempDir(), "mixed-v1-v7.ndjson")
 	log, err := Open(path, private, "node-a/gateway", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +92,20 @@ func TestConnectorLedgerReadsMixedV1ThroughV6ReceiptFormats(t *testing.T) {
 	if _, err := log.Finish(multiPartyTerminal); err != nil {
 		t.Fatal(err)
 	}
+
+	contextBound := validAuthorizedEffectEvent(Authorize, Allowed)
+	contextBound.TaskDigest = "sha256:" + strings.Repeat("f", 64)
+	contextBound.InfluenceHash = "sha256:" + strings.Repeat("1", 64)
+	if _, err := log.Begin(contextBound); err != nil {
+		t.Fatal(err)
+	}
+	contextTerminal := contextBound
+	contextTerminal.Phase, contextTerminal.Outcome, contextTerminal.HTTPStatus = Terminal, Responded, 200
+	contextTerminal.ResponseBytes = 17
+	contextTerminal.ResponseDigest = "sha256:" + strings.Repeat("2", 64)
+	if _, err := log.Finish(contextTerminal); err != nil {
+		t.Fatal(err)
+	}
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +117,7 @@ func TestConnectorLedgerReadsMixedV1ThroughV6ReceiptFormats(t *testing.T) {
 		SchemaV4, SchemaV4, SchemaV4,
 		SchemaV5, SchemaV5,
 		SchemaV6, SchemaV6,
+		SchemaV7, SchemaV7,
 	}
 	var gotSchemas []string
 	if _, err := VerifyRecords(path, public, "node-a/gateway", 1, func(record VerifiedReceipt) error {
@@ -132,6 +147,7 @@ func TestConnectorLedgerReadsMixedV1ThroughV6ReceiptFormats(t *testing.T) {
 		PayloadTypeV4, PayloadTypeV4, PayloadTypeV4,
 		PayloadTypeV5, PayloadTypeV5,
 		PayloadTypeV6, PayloadTypeV6,
+		PayloadTypeV7, PayloadTypeV7,
 	}
 	for index, line := range lines {
 		envelope, err := dsse.Parse([]byte(line))
@@ -214,6 +230,40 @@ func TestAuthorizedEffectV5DenialBindsRequestWithoutPermitClaim(t *testing.T) {
 		records[0].Receipt.Event.AuthorityKeyID != "" || records[0].Receipt.Event.PermitDigest != "" ||
 		records[0].Receipt.Event.RequestDigest != denial.RequestDigest || records[0].Receipt.Event.OperationPolicyDigest != denial.OperationPolicyDigest {
 		t.Fatalf("authorized denial record=%#v", records)
+	}
+}
+
+func TestContextBoundReceiptRequiresOneStableContextAndRespondedBodyDigest(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := Open(filepath.Join(t.TempDir(), "context.ndjson"), private, "node-a/gateway", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	authorized := validAuthorizedEffectEvent(Authorize, Allowed)
+	authorized.InfluenceHash = "sha256:" + strings.Repeat("1", 64)
+	if _, err := log.Begin(authorized); err != nil {
+		t.Fatal(err)
+	}
+
+	missingDigest := authorized
+	missingDigest.Phase, missingDigest.Outcome, missingDigest.HTTPStatus = Terminal, Responded, 200
+	if _, err := log.Finish(missingDigest); err == nil || !strings.Contains(err.Error(), "response digest") {
+		t.Fatalf("responded context terminal without body digest err=%v", err)
+	}
+	mismatched := missingDigest
+	mismatched.ResponseDigest = "sha256:" + strings.Repeat("2", 64)
+	mismatched.InfluenceHash = "sha256:" + strings.Repeat("3", 64)
+	if _, err := log.Finish(mismatched); err == nil || !strings.Contains(err.Error(), "matching authorization") {
+		t.Fatalf("terminal context substitution err=%v", err)
+	}
+	terminal := missingDigest
+	terminal.ResponseDigest = "sha256:" + strings.Repeat("2", 64)
+	if _, err := log.Finish(terminal); err != nil {
+		t.Fatal(err)
 	}
 }
 

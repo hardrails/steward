@@ -32,12 +32,14 @@ const (
 	PayloadTypeV4 = "application/vnd.steward.connector-receipt.v4+json"
 	PayloadTypeV5 = "application/vnd.steward.connector-receipt.v5+json"
 	PayloadTypeV6 = "application/vnd.steward.connector-receipt.v6+json"
+	PayloadTypeV7 = "application/vnd.steward.connector-receipt.v7+json"
 	SchemaV1      = "steward.connector-receipt.v1"
 	SchemaV2      = "steward.connector-receipt.v2"
 	SchemaV3      = "steward.connector-receipt.v3"
 	SchemaV4      = "steward.connector-receipt.v4"
 	SchemaV5      = "steward.connector-receipt.v5"
 	SchemaV6      = "steward.connector-receipt.v6"
+	SchemaV7      = "steward.connector-receipt.v7"
 	// PayloadType remains the original format identifier for source compatibility
 	// with callers that construct legacy, non-permit receipt fixtures.
 	PayloadType              = PayloadTypeV1
@@ -223,6 +225,9 @@ type Event struct {
 	TaskProtocol          string     `json:"task_protocol,omitempty"`
 	TaskStatus            TaskStatus `json:"task_status,omitempty"`
 	ResultDigest          string     `json:"result_digest,omitempty"`
+	InfluenceSequence     uint64     `json:"influence_sequence,omitempty"`
+	InfluenceHash         string     `json:"influence_hash,omitempty"`
+	ResponseDigest        string     `json:"response_digest,omitempty"`
 }
 
 // Receipt contains one signed chain coordinate and one mediated-effect event.
@@ -509,7 +514,9 @@ func (l *Log) appendLocked(event Event, reservationDelta int64) (Head, error) {
 		return Head{}, errors.New("connector ledger requires reopen after an ambiguous write")
 	}
 	payloadType, schemaVersion := PayloadTypeV1, SchemaV1
-	if event.ApprovalThreshold > 1 || event.AuthorityKeySet != "" {
+	if event.InfluenceHash != "" || event.ResponseDigest != "" {
+		payloadType, schemaVersion = PayloadTypeV7, SchemaV7
+	} else if event.ApprovalThreshold > 1 || event.AuthorityKeySet != "" {
 		payloadType, schemaVersion = PayloadTypeV6, SchemaV6
 	} else if event.EffectMode != "" {
 		payloadType, schemaVersion = PayloadTypeV5, SchemaV5
@@ -756,7 +763,7 @@ func verifyFile(file *os.File, public ed25519.PublicKey, nodeID string, epoch ui
 		envelope, err := dsse.Parse(raw)
 		if err != nil || envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 &&
 			envelope.PayloadType != PayloadTypeV3 && envelope.PayloadType != PayloadTypeV4 &&
-			envelope.PayloadType != PayloadTypeV5 && envelope.PayloadType != PayloadTypeV6 {
+			envelope.PayloadType != PayloadTypeV5 && envelope.PayloadType != PayloadTypeV6 && envelope.PayloadType != PayloadTypeV7 {
 			return Head{}, fmt.Errorf("verify connector ledger line %d: unsupported receipt envelope", lineNumber)
 		}
 		payload, keyID, err := dsse.Verify(raw, envelope.PayloadType, trusted)
@@ -800,6 +807,8 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 		expectedSchema = SchemaV5
 	case PayloadTypeV6:
 		expectedSchema = SchemaV6
+	case PayloadTypeV7:
+		expectedSchema = SchemaV7
 	}
 	if receipt.SchemaVersion != expectedSchema || receipt.NodeID != nodeID || receipt.Epoch != epoch ||
 		receipt.Sequence != sequence || receipt.PreviousHash != previous {
@@ -819,7 +828,10 @@ func validateReceipt(receipt Receipt, payloadType, nodeID string, epoch, sequenc
 		payloadType == PayloadTypeV6 && (receipt.Event.Kind != ConnectorCall || receipt.Event.EffectMode != EffectModeAuthorized ||
 			!digest(receipt.Event.OperationPolicyDigest) || receipt.Event.TaskProtocol != "" ||
 			receipt.Event.ApprovalThreshold < 2 || len(strings.Split(receipt.Event.AuthorityKeySet, ",")) != receipt.Event.ApprovalThreshold ||
-			receipt.Event.AuthorityKeyID != "") {
+			receipt.Event.AuthorityKeyID != "") ||
+		payloadType == PayloadTypeV7 && (receipt.Event.Kind != ConnectorCall || receipt.Event.EffectMode != EffectModeAuthorized ||
+			!digest(receipt.Event.OperationPolicyDigest) || receipt.Event.TaskProtocol != "" || !digest(receipt.Event.InfluenceHash)) ||
+		payloadType != PayloadTypeV7 && (receipt.Event.InfluenceSequence != 0 || receipt.Event.InfluenceHash != "" || receipt.Event.ResponseDigest != "") {
 		return errors.New("connector receipt schema does not match its permit fields")
 	}
 	if payloadType == PayloadTypeV4 {
@@ -935,7 +947,8 @@ func sameCall(left, right Event) bool {
 		left.AuthorityKeyID == right.AuthorityKeyID && left.AuthorityKeySet == right.AuthorityKeySet &&
 		left.ApprovalThreshold == right.ApprovalThreshold &&
 		left.PermitDigest == right.PermitDigest && left.RequestDigest == right.RequestDigest &&
-		left.RequestBytes == right.RequestBytes && left.TaskProtocol == right.TaskProtocol
+		left.RequestBytes == right.RequestBytes && left.TaskProtocol == right.TaskProtocol &&
+		left.InfluenceSequence == right.InfluenceSequence && left.InfluenceHash == right.InfluenceHash
 }
 
 func validateEvent(event Event) error {
@@ -946,6 +959,11 @@ func validateEvent(event Event) error {
 		event.ResponseBytes < 0 || event.ResponseBytes > 1<<30 || event.HTTPStatus < 0 || event.HTTPStatus > 599 ||
 		(event.ErrorCode != "" && !identifier(event.ErrorCode)) {
 		return errors.New("invalid bounded connector event")
+	}
+	if (event.InfluenceSequence != 0 && event.InfluenceHash == "") ||
+		(event.InfluenceHash != "" && !digest(event.InfluenceHash)) ||
+		(event.ResponseDigest != "" && !digest(event.ResponseDigest)) {
+		return errors.New("connector influence context is invalid")
 	}
 	authorizedDenial := event.Kind == ConnectorCall && event.EffectMode == EffectModeAuthorized && event.Phase == Deny
 	if authorizedDenial {
@@ -1001,6 +1019,12 @@ func validateEvent(event Event) error {
 			}
 		default:
 			return errors.New("connector call uses an unsupported effect mode")
+		}
+		if event.ResponseDigest != "" && (event.Phase != Terminal || event.Outcome != Responded) {
+			return errors.New("connector response digest requires a responded terminal event")
+		}
+		if event.InfluenceHash != "" && event.Phase == Terminal && event.Outcome == Responded && !digest(event.ResponseDigest) {
+			return errors.New("context-bound connector response requires a response digest")
 		}
 	case ServiceTask:
 		if event.EffectMode != "" || event.ConnectorID != "" || !identifier(event.ServiceID) || !digest(event.OperationPolicyDigest) {
