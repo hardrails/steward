@@ -151,6 +151,68 @@ func TestPermitContextReconstructsHistoryAndIssuesV5(t *testing.T) {
 	if err != nil || json.Unmarshal(nextRaw, &gotNext) != nil || gotNext != wantNext {
 		t.Fatalf("next context=%#v want=%#v err=%v", gotNext, wantNext, err)
 	}
+
+	base := []string{
+		"permit", "context", "-admission", admissionPath, "-intent", intentPath, "-receipts", receiptsPath,
+		"-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/gateway", "-receipt-epoch", "4",
+		"-out", filepath.Join(directory, "unused-context.json"),
+	}
+	assertContextError := func(arguments []string, contains string) {
+		t.Helper()
+		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), contains) {
+			t.Fatalf("permit context error=%v, want text %q", err, contains)
+		}
+	}
+	assertContextError([]string{"permit", "context"}, "requires -admission")
+
+	missingAdmission := append([]string(nil), base...)
+	missingAdmission[3] = filepath.Join(directory, "missing-admission.json")
+	assertContextError(missingAdmission, "read admission response")
+	malformedAdmission := filepath.Join(directory, "malformed-admission.json")
+	if err := os.WriteFile(malformedAdmission, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalidAdmission := append([]string(nil), base...)
+	invalidAdmission[3] = malformedAdmission
+	assertContextError(invalidAdmission, "decode admission response")
+
+	missingIntent := append([]string(nil), base...)
+	missingIntent[5] = filepath.Join(directory, "missing-intent.json")
+	assertContextError(missingIntent, "read instance intent")
+	malformedIntent := filepath.Join(directory, "malformed-intent.json")
+	if err := os.WriteFile(malformedIntent, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalidIntent := append([]string(nil), base...)
+	invalidIntent[5] = malformedIntent
+	assertContextError(invalidIntent, "decode instance intent")
+
+	nonContextAdmission := admitted
+	nonContextAdmission.ActionContextRequired = false
+	nonContextPath := writePermitJSON(t, directory, "non-context-admission.json", nonContextAdmission)
+	mismatchedAdmission := append([]string(nil), base...)
+	mismatchedAdmission[3] = nonContextPath
+	assertContextError(mismatchedAdmission, "do not identify one context-locked grant")
+
+	badReceiptKey := filepath.Join(directory, "bad-receipt.public")
+	if err := os.WriteFile(badReceiptKey, []byte("not-base64\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalidKey := append([]string(nil), base...)
+	invalidKey[9] = badReceiptKey
+	assertContextError(invalidKey, "public key")
+
+	missingLedger := append([]string(nil), base...)
+	missingLedger[7] = filepath.Join(directory, "missing-receipts.ndjson")
+	assertContextError(missingLedger, "verify effect-context receipts")
+
+	wrongHead := append(append([]string(nil), base...), "-expected-sequence", "1",
+		"-expected-chain-hash", terminalHead.ChainHash)
+	assertContextError(wrongHead, "advanced sequence")
+
+	existingOutput := append([]string(nil), base...)
+	existingOutput[len(existingOutput)-1] = nextPath
+	assertContextError(existingOutput, "already exists")
 }
 
 func TestPermitIssueAndVerifyExactRequest(t *testing.T) {
