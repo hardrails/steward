@@ -98,6 +98,10 @@ func TestMaintenanceAPIIsAuthenticatedBoundedAndSecureOnly(t *testing.T) {
 		t.Fatalf("legacy status=%d body=%s", response.Code, response.Body.String())
 	}
 	server := mustSecureServer(t)
+	if response := maintenanceRequest(t, server, http.MethodGet, "/v1/maintenance", nil); response.Code != http.StatusOK ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"schema_version":"steward.executor-maintenance.v1"`)) {
+		t.Fatalf("secure status=%d body=%s", response.Code, response.Body.String())
+	}
 	unauthorized := httptest.NewRecorder()
 	server.Handler().ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/maintenance", nil))
 	if unauthorized.Code != http.StatusUnauthorized {
@@ -106,6 +110,7 @@ func TestMaintenanceAPIIsAuthenticatedBoundedAndSecureOnly(t *testing.T) {
 	for _, body := range [][]byte{
 		[]byte(`{"reason":""}`),
 		[]byte(`{"reason":" padded "}`),
+		[]byte(`{"reason":"\u007f"}`),
 		[]byte(`{"reason":"ok","extra":true}`),
 		bytes.Repeat([]byte("x"), maxBodyBytes+1),
 	} {

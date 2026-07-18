@@ -136,3 +136,88 @@ func TestNodeMaintenanceDrainPlansThenAppliesUnderCordon(t *testing.T) {
 		t.Fatalf("applied=%s entered=%v destroyed=%v error=%v", applied.String(), entered, destroyed, err)
 	}
 }
+
+func TestNodeMaintenanceStatusEnterAndExit(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/maintenance":
+			_, _ = w.Write([]byte(`{"schema_version":"steward.executor-maintenance.v1","enabled":false,"active_runtime_refs":[],"pending_operations":0}`))
+		case "/v1/maintenance/enter":
+			_, _ = w.Write([]byte(`{"schema_version":"steward.executor-maintenance.v1","enabled":true,"reason":"inspection","active_runtime_refs":[],"pending_operations":0}`))
+		case "/v1/maintenance/exit":
+			_, _ = w.Write([]byte(`{"schema_version":"steward.executor-maintenance.v1","enabled":false,"active_runtime_refs":[],"pending_operations":0}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		action []string
+		want   string
+	}{
+		{action: []string{"status"}, want: `"enabled":false`},
+		{action: []string{"enter", "-reason", "inspection"}, want: `"enabled":true`},
+		{action: []string{"exit"}, want: `"enabled":false`},
+	} {
+		arguments := append([]string{"node", "maintenance"}, test.action...)
+		arguments = append(arguments, "-node-url", server.URL, "-token-file", tokenPath)
+		var output bytes.Buffer
+		if err := run(arguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), test.want) {
+			t.Fatalf("arguments=%v output=%s error=%v", arguments, output.String(), err)
+		}
+	}
+	if requests != 3 {
+		t.Fatalf("requests=%d", requests)
+	}
+	for _, arguments := range [][]string{
+		{"node", "maintenance"},
+		{"node", "maintenance", "status", "-node-url", server.URL, "-token-file", tokenPath, "-reason", "invalid"},
+		{"node", "maintenance", "enter", "-node-url", server.URL, "-token-file", tokenPath},
+		{"node", "maintenance", "exit", "-node-url", server.URL, "-token-file", tokenPath, "-apply"},
+		{"node", "maintenance", "unknown", "-node-url", server.URL, "-token-file", tokenPath},
+	} {
+		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("invalid maintenance command accepted: %v", arguments)
+		}
+	}
+}
+
+func TestNodeMaintenanceDrainFailureKeepsCordonAndStops(t *testing.T) {
+	const runtimeRef = "executor-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	entered := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/maintenance":
+			_, _ = w.Write([]byte(`{"schema_version":"steward.executor-maintenance.v1","enabled":false,"active_runtime_refs":["` + runtimeRef + `"],"pending_operations":0}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/maintenance/enter":
+			entered = true
+			_, _ = w.Write([]byte(`{"schema_version":"steward.executor-maintenance.v1","enabled":true,"reason":"repair","active_runtime_refs":["` + runtimeRef + `"],"pending_operations":0}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/workloads/"+runtimeRef:
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"reconciliation_required","message":"ambiguous destroy"}`))
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := run([]string{
+		"node", "maintenance", "drain", "-node-url", server.URL,
+		"-token-file", tokenPath, "-reason", "repair", "-apply",
+	}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "maintenance remains enabled") ||
+		!strings.Contains(err.Error(), runtimeRef) || !entered {
+		t.Fatalf("entered=%v error=%v", entered, err)
+	}
+}
