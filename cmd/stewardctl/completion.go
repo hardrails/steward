@@ -38,8 +38,8 @@ var completionTree = map[string][]string{
 	"node":                     {"admit", "status", "logs", "egress", "start", "stop", "destroy", "purge-state"},
 	"gateway":                  {"validate", "route", "connector", "service", "effects"},
 	"gateway route":            {"add", "remove", "list"},
-	"gateway connector":        {"add", "remove", "list", "trust"},
-	"gateway service":          {"add", "remove", "list", "trust"},
+	"gateway connector":        {"set", "list", "trust"},
+	"gateway service":          {"set", "list", "trust"},
 	"gateway effects":          {"check"},
 	"secret":                   {"materialization", "openbao"},
 	"secret materialization":   {"check", "prepare"},
@@ -66,7 +66,7 @@ var completionFlags = map[string][]string{
 	"control evidence-capture":  {"-tenant-id", "-node-id", "-capture-id", "-request-id", "-runtime-ref", "-out", "-in"},
 	"executor-command issue":    {"-command-id", "-tenant-id", "-node-id", "-instance-id", "-runtime-ref", "-kind", "-claim-generation", "-instance-generation", "-sequence", "-payload", "-key", "-key-id", "-out"},
 	"node":                      {"-node-url", "-token-file", "-runtime-ref", "-capsule", "-intent", "-tenant-id", "-node-id", "-lineage-id", "-generation"},
-	"gateway":                   {"-config", "-tenant-id", "-node-id", "-receipt-file", "-receipt-key-file", "-receipt-node-id", "-receipt-epoch"},
+	"gateway":                   {"-config", "-agent", "-tenant-id", "-node-id", "-receipt-file", "-receipt-key-file", "-receipt-node-id", "-receipt-epoch"},
 	"activation":                {"-workspace", "-control-url", "-token-file", "-ca-file", "-tenant-id", "-node-id"},
 	"rollout":                   {"-workspace", "-control-url", "-token-file", "-ca-file", "-tenant-id"},
 }
@@ -106,6 +106,9 @@ func stewardctlCompletionCandidates(arguments []string) []string {
 	current := ""
 	if len(arguments) > 0 {
 		current = arguments[len(arguments)-1]
+	}
+	if len(arguments) > 1 && arguments[len(arguments)-2] == "-agent" {
+		return matchingCandidates([]string{"hermes", "openclaw"}, current)
 	}
 	if strings.HasPrefix(current, "-") {
 		return matchingCandidates(completionFlagsFor(arguments[:len(arguments)-1]), current)

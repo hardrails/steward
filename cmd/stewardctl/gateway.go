@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/gateway"
 )
 
@@ -146,6 +147,7 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("gateway service "+action, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	path := flags.String("config", "/etc/steward/gateway.json", "gateway configuration")
+	agent := flags.String("agent", "", "built-in agent preset: hermes or openclaw")
 	serviceID := flags.String("service-id", "", "exact admitted service ID")
 	trustNodeID := flags.String("node-id", "", "exact node identity for an exported service-trust inventory")
 	trustTenantID := flags.String("tenant-id", "", "exact tenant identity for an exported service-trust inventory")
@@ -195,8 +197,21 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	if flagWasVisited(flags, "node-id") || flagWasVisited(flags, "tenant-id") {
 		return errors.New("-node-id and -tenant-id are accepted only by gateway service trust")
 	}
+	if *agent != "" {
+		if flagWasVisited(flags, "service-id") || flagWasVisited(flags, "operation") ||
+			flagWasVisited(flags, "lifecycle") {
+			return errors.New("-agent cannot be combined with -service-id, -operation, or -lifecycle")
+		}
+		contract, ok := gatewayAgentServicePreset(*agent)
+		if !ok {
+			return errors.New("-agent must be hermes or openclaw")
+		}
+		*serviceID = contract.ServiceID
+		operations = repeatedFlag{contract.OperationID + "=POST:/v1/runs"}
+		lifecycles = repeatedFlag{contract.OperationID + "=/v1/runs/"}
+	}
 	if *serviceID == "" || len(operations) == 0 {
-		return errors.New("gateway service set requires -service-id and at least one -operation")
+		return errors.New("gateway service set requires -agent, or -service-id and at least one -operation")
 	}
 	lifecyclePaths, err := parseServiceLifecycleMappings(lifecycles)
 	if err != nil {
@@ -307,6 +322,17 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(result)
+}
+
+func gatewayAgentServicePreset(value string) (agentrelease.CanaryContract, bool) {
+	switch value {
+	case "hermes":
+		return agentrelease.CanaryContractForKind(agentrelease.CanaryKindHermesWorkspaceAuditV1)
+	case "openclaw":
+		return agentrelease.CanaryContractForKind(agentrelease.CanaryKindOpenClawWorkspaceAuditV1)
+	default:
+		return agentrelease.CanaryContract{}, false
+	}
 }
 
 func parseServiceLifecycleMappings(values []string) (map[string]string, error) {

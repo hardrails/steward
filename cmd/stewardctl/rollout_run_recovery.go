@@ -13,7 +13,6 @@ import (
 	"github.com/hardrails/steward/internal/activation"
 	"github.com/hardrails/steward/internal/activationcanary"
 	"github.com/hardrails/steward/internal/admission"
-	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/controlcapture"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
@@ -53,10 +52,10 @@ func verifyRetainedRolloutExecution(
 		}
 	}
 	taskKeys, err := run.verified.SitePolicy.TrustedTaskKeys(
-		run.plan.TenantID, agentrelease.HermesServiceID,
+		run.plan.TenantID, run.contract.ServiceID,
 	)
 	if err != nil || !bytes.Equal(taskKeys[keys.taskID], keys.taskPublic) {
-		return errors.New("supplied task key is not authorized for the Hermes service")
+		return errors.New("supplied task key is not authorized for the release service")
 	}
 	for index := range run.targets {
 		if err := verifyRetainedRolloutTarget(

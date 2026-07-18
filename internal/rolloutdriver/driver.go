@@ -68,6 +68,7 @@ type PreparedTargetV1 struct {
 	stateRuntimeRef     string
 	capsuleDigest       string
 	capsuleExpiresAt    time.Time
+	canaryContract      agentrelease.CanaryContract
 	expectedTaskKeys    []controlprotocol.ExecutorTaskAuthorityV1
 	commandAuthorities  map[string]map[string]ed25519.PublicKey
 }
@@ -96,6 +97,10 @@ func PrepareTargetV1(input PrepareInputV1) (PreparedTargetV1, error) {
 		return PreparedTargetV1{}, invalid("target index is outside the rollout plan")
 	}
 	target := plan.Targets[input.TargetIndex]
+	contract, ok := agentrelease.CanaryContractForKind(plan.Canary.Kind)
+	if !ok {
+		return PreparedTargetV1{}, invalid("rollout canary contract is unsupported")
+	}
 
 	if target.IntentDigest != dsse.Digest(input.IntentRaw) {
 		return PreparedTargetV1{}, invalid("target does not identify the exact intent bytes")
@@ -137,10 +142,10 @@ func PrepareTargetV1(input PrepareInputV1) (PreparedTargetV1, error) {
 	}
 	if effective.Intent.StateDisposition != "new" ||
 		!effective.Intent.Capabilities.State || !effective.Intent.Capabilities.Service ||
-		effective.Intent.ServiceID != agentrelease.HermesServiceID ||
+		effective.Intent.ServiceID != contract.ServiceID ||
 		!effective.Capsule.Capabilities.State || !effective.Capsule.Capabilities.Service ||
-		effective.Capsule.Service.ID != agentrelease.HermesServiceID {
-		return PreparedTargetV1{}, invalid("target is not the fresh-state Hermes service contract")
+		effective.Capsule.Service.ID != contract.ServiceID {
+		return PreparedTargetV1{}, invalid("target is not the rollout's fresh-state agent service contract")
 	}
 
 	activationPlan := activation.PlanV1{
@@ -211,7 +216,7 @@ func PrepareTargetV1(input PrepareInputV1) (PreparedTargetV1, error) {
 		return PreparedTargetV1{}, invalid("self-verify signed-admission payload: %v", err)
 	}
 
-	expectedTaskKeys, err := taskAuthorities(effective.SitePolicy, plan.TenantID)
+	expectedTaskKeys, err := taskAuthorities(effective.SitePolicy, plan.TenantID, contract.ServiceID)
 	if err != nil {
 		return PreparedTargetV1{}, err
 	}
@@ -248,6 +253,7 @@ func PrepareTargetV1(input PrepareInputV1) (PreparedTargetV1, error) {
 		stateRuntimeRef:     stateRuntimeRef,
 		capsuleDigest:       input.VerifiedCapsule.CapsuleDigest,
 		capsuleExpiresAt:    capsuleExpiresAt,
+		canaryContract:      contract,
 		expectedTaskKeys:    append([]controlprotocol.ExecutorTaskAuthorityV1(nil), expectedTaskKeys...),
 		commandAuthorities:  commandAuthorities,
 	}, nil
@@ -280,10 +286,10 @@ func validateVerifiedCapsule(raw []byte, verified admission.VerifiedCapsuleImpor
 	return nil
 }
 
-func taskAuthorities(policy admission.SitePolicy, tenantID string) ([]controlprotocol.ExecutorTaskAuthorityV1, error) {
-	keys, err := policy.TrustedTaskKeys(tenantID, agentrelease.HermesServiceID)
+func taskAuthorities(policy admission.SitePolicy, tenantID, serviceID string) ([]controlprotocol.ExecutorTaskAuthorityV1, error) {
+	keys, err := policy.TrustedTaskKeys(tenantID, serviceID)
 	if err != nil || len(keys) == 0 {
-		return nil, invalid("site policy has no Hermes task authority: %v", err)
+		return nil, invalid("site policy has no task authority for the release service: %v", err)
 	}
 	ids := make([]string, 0, len(keys))
 	for id := range keys {
@@ -479,7 +485,7 @@ func validateSigningWindow(
 }
 
 // CanaryInputV1 supplies only the finite authorities needed for the closed
-// Hermes workspace-audit canary.
+// release-selected workspace-audit canary.
 type CanaryInputV1 struct {
 	Prepared              PreparedTargetV1
 	Admission             controlprotocol.ExecutorAdmissionProjectionV1
@@ -517,7 +523,7 @@ func (artifacts CanaryArtifactsV1) CanaryRaw() []byte {
 }
 func (artifacts CanaryArtifactsV1) OuterCommand() SignedCommandV1 { return artifacts.outer }
 
-// BuildCanaryCommandV1 creates the fixed Hermes request permit, the closed
+// BuildCanaryCommandV1 creates the release's fixed request permit, the closed
 // activation-canary payload, and the outer sequence-three command.
 func BuildCanaryCommandV1(input CanaryInputV1) (CanaryArtifactsV1, error) {
 	prepared := input.Prepared
@@ -559,14 +565,11 @@ func BuildCanaryCommandV1(input CanaryInputV1) (CanaryArtifactsV1, error) {
 		return CanaryArtifactsV1{}, invalid("canary deadline, task permit, outer command, and rollout windows are incoherent")
 	}
 	request, err := agentrelease.BuildCanaryRequest(
-		agentrelease.RequestRecipe{
-			Input:           agentrelease.HermesWorkspaceAuditInput,
-			SessionIDPrefix: agentrelease.HermesSessionIDPrefix,
-		},
+		prepared.canaryContract.Request,
 		prepared.target.ActivationID,
 	)
 	if err != nil {
-		return CanaryArtifactsV1{}, invalid("construct fixed Hermes request: %v", err)
+		return CanaryArtifactsV1{}, invalid("construct fixed agent request: %v", err)
 	}
 	statement := taskpermit.Statement{
 		SchemaVersion:         taskpermit.SchemaV1,
@@ -579,8 +582,8 @@ func BuildCanaryCommandV1(input CanaryInputV1) (CanaryArtifactsV1, error) {
 		CapsuleDigest:         input.Admission.CapsuleDigest,
 		PolicyDigest:          input.Admission.PolicyDigest,
 		RoutePolicyDigest:     input.Admission.RoutePolicyDigest,
-		ServiceID:             agentrelease.HermesServiceID,
-		OperationID:           agentrelease.HermesOperationID,
+		ServiceID:             prepared.canaryContract.ServiceID,
+		OperationID:           prepared.canaryContract.OperationID,
 		OperationPolicyDigest: input.OperationPolicyDigest,
 		TaskID:                prepared.target.CanaryCommandID,
 		RequestDigest:         taskpermit.RequestDigest(request),
@@ -690,7 +693,7 @@ func validateProjection(prepared PreparedTargetV1, projection controlprotocol.Ex
 		projection.Generation != prepared.target.InstanceGeneration ||
 		projection.GrantID != expectedGrant ||
 		projection.ServicePath != "/v1/services/"+expectedGrant+"/" ||
-		projection.ServiceID != agentrelease.HermesServiceID ||
+		projection.ServiceID != prepared.canaryContract.ServiceID ||
 		!slices.Equal(projection.TaskAuthorities, prepared.expectedTaskKeys) ||
 		projection.ActivationID != prepared.target.ActivationID ||
 		projection.ActivationBeginDigest != prepared.executorBeginDigest {

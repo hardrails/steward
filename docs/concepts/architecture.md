@@ -200,13 +200,13 @@ binds the runtime reference, grant, policies, request, and public task
 authorities. The default flow pauses until a separate signing station returns the
 matching tenant-signed task bundle; the private key does not enter the node.
 
-The current Hermes recipe is a dedicated-host composition, not a shared-host
+The current qualified agent recipes are dedicated-host compositions, not a shared-host
 activation path. It requires exactly one tenant in the signed site policy,
 host-administrator local admission, and the explicit unquotaed-state compatibility
 setting because Docker's portable local volume driver does not enforce hard byte
 or inode quotas.
 
-The initial canary is only the closed Hermes fresh-state workspace audit. A final
+The initial canary is only the release-selected closed Hermes or OpenClaw fresh-state workspace audit. A final
 unsigned proof manifest correlates the passed state, exact result digest, task and
 permit, activation-begin and activation-checkpoint digests, Executor and Gateway
 receipt coordinates, and the controller witness coordinate. After verifying
@@ -221,7 +221,7 @@ but does not provide hostile-host attestation.
 
 ## Proof-carrying fleet rollout
 
-The operator-side rollout coordinator applies the same closed Hermes activation
+The operator-side rollout coordinator applies the same closed qualified-agent activation
 contract to an explicit ordered node list through Steward Control. It authenticates
 all retained inputs before contacting the controller, signs exact commands on the
 trusted coordinator, and stores each command before submission. The controller

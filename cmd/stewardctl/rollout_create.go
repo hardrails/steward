@@ -75,7 +75,7 @@ func createRollout(arguments []string, stdout io.Writer) (resultErr error) {
 	importTimeout := flags.Duration("image-import-timeout", 30*time.Minute, "reserved node image-import ceiling")
 	admissionTimeout := flags.Duration("admission-timeout", 2*time.Minute, "remote admission ceiling")
 	startupTimeout := flags.Duration("startup-timeout", 5*time.Minute, "remote startup ceiling")
-	canaryTimeout := flags.Duration("canary-timeout", 5*time.Minute, "Hermes canary ceiling")
+	canaryTimeout := flags.Duration("canary-timeout", 5*time.Minute, "agent canary ceiling")
 	evidenceTimeout := flags.Duration("evidence-timeout", 2*time.Minute, "controller evidence ceiling")
 	jsonOutput := flags.Bool("json", false, "emit machine-readable status")
 	if err := flags.Parse(arguments); err != nil {
@@ -160,6 +160,10 @@ func createRollout(arguments []string, stdout io.Writer) (resultErr error) {
 	)
 	if err != nil {
 		return fmt.Errorf("verify rollout release: %w", err)
+	}
+	contract, ok := agentrelease.CanaryContractForKind(verifiedRelease.Release.Canary.Kind)
+	if !ok {
+		return errors.New("rollout release does not select a supported canary contract")
 	}
 	policyRaw, err := securefile.Read(*policyPath, maxArtifactBytes, securefile.TrustFile)
 	if err != nil {
@@ -269,8 +273,8 @@ func createRollout(arguments []string, stdout io.Writer) (resultErr error) {
 		if intent.StateDisposition != "new" ||
 			!intent.Capabilities.State ||
 			!intent.Capabilities.Service ||
-			intent.ServiceID != agentrelease.HermesServiceID {
-			return fmt.Errorf("rollout target %d is not the fresh-state Hermes service contract", index)
+			intent.ServiceID != contract.ServiceID {
+			return fmt.Errorf("rollout target %d is not the release's fresh-state agent service contract", index)
 		}
 		serviceTrustRaw, readErr := readRolloutInputCompanion(
 			inputRoot,
@@ -283,15 +287,15 @@ func createRollout(arguments []string, stdout io.Writer) (resultErr error) {
 		operation, decodeErr := decodeServiceTrust(
 			serviceTrustRaw,
 			intent,
-			agentrelease.HermesOperationID,
+			contract.OperationID,
 		)
 		if decodeErr != nil {
 			return fmt.Errorf("verify rollout target %d service trust: %w", index, decodeErr)
 		}
-		if operation.ServiceID != agentrelease.HermesServiceID ||
+		if operation.ServiceID != contract.ServiceID ||
 			operation.TaskProtocol != connectorledger.TaskProtocolLifecycleV1 ||
 			operation.MaxRequestBytes < int64(agentrelease.MaxCanaryRequestBytes) {
-			return fmt.Errorf("rollout target %d does not expose the closed Hermes lifecycle operation", index)
+			return fmt.Errorf("rollout target %d does not expose the release's closed lifecycle operation", index)
 		}
 		gatewayPublicRaw, readErr := readRolloutInputCompanion(
 			inputRoot,

@@ -28,7 +28,7 @@ their own environment.
 
 For the guided path from an outcome-led signed release through admission, off-node
 canary authorization, deterministic result checking, and offline proof, use
-[Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }}).
+[Activate a qualified agent release]({{ '/guides/agent-activation/' | relative_url }}).
 The manual procedures on this page remain the detailed source for building,
 qualifying, configuring, and troubleshooting the adapter.
 

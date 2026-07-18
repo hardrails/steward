@@ -43,6 +43,12 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"control", "tenant", "list", "-token-file", ""}); len(candidates) != 0 {
 		t.Fatalf("file argument candidates=%v; shell file completion should handle the value", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"gateway", "service", ""}); !slices.Equal(candidates, []string{"list", "set", "trust"}) {
+		t.Fatalf("gateway service candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"gateway", "service", "set", "-agent", "o"}); !slices.Equal(candidates, []string{"openclaw"}) {
+		t.Fatalf("agent preset candidates=%v", candidates)
+	}
 
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0o700); err != nil {

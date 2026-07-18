@@ -126,6 +126,10 @@ func issueAgentRelease(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	contract, ok := agentrelease.CanaryContractForService(capsule.Service.ID)
+	if !ok || capsule.Profile != contract.Profile {
+		return errors.New("capsule does not select a supported built-in workspace-audit agent")
+	}
 	skillManifest, err := securefile.Read(
 		*skillManifestPath, maxAgentReleaseSkillManifestBytes, securefile.TrustFile,
 	)
@@ -163,16 +167,12 @@ func issueAgentRelease(arguments []string, stdout io.Writer) error {
 			Image:        image,
 		},
 		Canary: agentrelease.Canary{
-			Kind:      agentrelease.CanaryKindHermesWorkspaceAuditV1,
-			ServiceID: agentrelease.HermesServiceID, OperationID: agentrelease.HermesOperationID,
-			Request: agentrelease.RequestRecipe{
-				Input:           agentrelease.HermesWorkspaceAuditInput,
-				SessionIDPrefix: agentrelease.HermesSessionIDPrefix,
-			},
+			Kind: contract.Kind, ServiceID: contract.ServiceID, OperationID: contract.OperationID,
+			Request:                         contract.Request,
 			RequiredStateDisposition:        "new",
 			SkillManifestDigest:             dsse.Digest(skillManifest),
-			ExpectedWorkspaceManifestDigest: agentrelease.HermesWorkspaceAuditEmptyManifestDigest,
-			FixtureID:                       agentrelease.HermesWorkspaceAuditEmptyFixtureID,
+			ExpectedWorkspaceManifestDigest: contract.ExpectedWorkspaceManifestDigest,
+			FixtureID:                       contract.FixtureID,
 		},
 		Qualification: agentrelease.Qualification{
 			EvidenceDigest: dsse.Digest(qualificationEvidence),

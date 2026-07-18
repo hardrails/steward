@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -201,8 +202,8 @@ func CorrelateProofV1(planRaw, stateRaw, proofRaw []byte) (ProofV1, error) {
 }
 
 func (canary CanaryProofV1) validate() error {
-	if canary.Kind != CanaryHermesWorkspaceAuditV1 {
-		return fmt.Errorf("kind must be %q", CanaryHermesWorkspaceAuditV1)
+	if _, ok := agentrelease.CanaryContractForKind(canary.Kind); !ok {
+		return errors.New("kind is not a supported built-in canary contract")
 	}
 	if !sha256Digest(canary.TaskDigest) || !sha256Digest(canary.PermitDigest) ||
 		!sha256Digest(canary.ResultDigest) {

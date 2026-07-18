@@ -485,7 +485,7 @@ the other protocol is reconciled.
 
 Protocol 4 always advertises `rollout-authorization-context-v1`, showing that its
 strict signed-command decoder accepts the optional rollout authorization digest.
-It also enables the fixed Hermes activation canary when signed admission has a
+It also enables the fixed release-selected agent activation canary when signed admission has a
 complete Gateway topology. Executor advertises `activation-canary-v1` only
 while no other canary is active and a host-local Gateway control client is
 configured. The controller leases at most one canary per poll; ordinary lifecycle
@@ -494,7 +494,7 @@ one-use task, Executor rechecks reconciliation, current policy, tenant authority
 the retained activation identity, and the complete running topology under the
 same lifecycle lock used by signed mutations. Canary execution then runs outside
 the polling loop, so stop and destroy remain responsive. A known failed or
-cancelled Hermes result is terminal; an ambiguous post-dispatch result is retained
+cancelled agent result is terminal; an ambiguous post-dispatch result is retained
 as `outcome_unknown` and is never retried automatically.
 
 Remote plaintext HTTP is rejected by default. Private-CA and mutual TLS (mTLS)

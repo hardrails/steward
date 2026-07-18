@@ -18,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/ocibundle"
 )
@@ -25,13 +26,14 @@ import (
 const (
 	PlanSchemaV1 = "steward.activation-plan.v1"
 
-	TransportNodeLocal                  = "node_local"
-	TransportControlUplink              = "control_uplink"
-	CanaryHermesWorkspaceAuditV1        = "hermes_workspace_audit_v1"
-	MaxPlanBytes                        = 64 << 10
-	MaxActivationArchiveBytes    int64  = ocibundle.DefaultMaxArchiveBytes
-	MinStepTimeoutSeconds        uint32 = 1
-	MaxStepTimeoutSeconds        uint32 = 24 * 60 * 60
+	TransportNodeLocal                    = "node_local"
+	TransportControlUplink                = "control_uplink"
+	CanaryHermesWorkspaceAuditV1          = agentrelease.CanaryKindHermesWorkspaceAuditV1
+	CanaryOpenClawWorkspaceAuditV1        = agentrelease.CanaryKindOpenClawWorkspaceAuditV1
+	MaxPlanBytes                          = 64 << 10
+	MaxActivationArchiveBytes      int64  = ocibundle.DefaultMaxArchiveBytes
+	MinStepTimeoutSeconds          uint32 = 1
+	MaxStepTimeoutSeconds          uint32 = 24 * 60 * 60
 )
 
 var (
@@ -136,8 +138,8 @@ func (plan PlanV1) Validate() error {
 			TransportControlUplink,
 		)
 	}
-	if plan.Canary.Kind != CanaryHermesWorkspaceAuditV1 {
-		return invalidPlan("canary kind must be %q", CanaryHermesWorkspaceAuditV1)
+	if _, ok := agentrelease.CanaryContractForKind(plan.Canary.Kind); !ok {
+		return invalidPlan("canary kind is not a supported built-in contract")
 	}
 	if err := plan.Timeouts.validate(); err != nil {
 		return invalidPlan("timeouts: %v", err)

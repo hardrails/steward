@@ -14,7 +14,7 @@ import (
 
 // VerifyCanaryInputV1 contains the retained, public companions needed to
 // qualify one rollout target without contacting a node, controller, Gateway,
-// or Hermes. CommandRaw and ResultRaw must be their exact canonical JSON
+// or the agent. CommandRaw and ResultRaw must be their exact canonical JSON
 // encodings. ReceiptPublicKey is independent trust input, not a key learned
 // from either retained projection.
 type VerifyCanaryInputV1 struct {
@@ -26,7 +26,7 @@ type VerifyCanaryInputV1 struct {
 }
 
 // VerifiedCanaryV1 is constructible only after the closed command, tenant
-// permit, Hermes result, Gateway receipt chain, rollout bindings, and derived
+// permit, agent result, Gateway receipt chain, rollout bindings, and derived
 // activation checkpoint all verify. Accessors return values or detached bytes.
 type VerifiedCanaryV1 struct {
 	command       activationcanary.CommandV1
@@ -161,7 +161,7 @@ func (verified VerifiedCanaryV1) ResultRaw() []byte {
 }
 
 // Checkpoint returns the deterministic checkpoint reconstructed from the
-// authenticated rollout, admission, Gateway, and Hermes evidence.
+// authenticated rollout, admission, Gateway, and agent evidence.
 func (verified VerifiedCanaryV1) Checkpoint() activation.ExecutorCheckpointV1 {
 	return verified.checkpoint
 }

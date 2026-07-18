@@ -1,10 +1,10 @@
 ---
-title: Activate a qualified Hermes release
-description: Verify an outcome-led signed agent release, keep tenant task authority off-node, run Steward's deterministic Hermes canary, and retain evidence for offline review.
+title: Activate a qualified agent release
+description: Verify a signed Hermes or OpenClaw release, keep tenant task authority off-node, run its deterministic canary, and retain evidence for offline review.
 section: Agent compatibility
 ---
 
-# Activate a qualified Hermes release
+# Activate a qualified agent release
 
 Steward turns agent deployment into a fixed operator journey:
 
@@ -21,13 +21,14 @@ retains the artifacts needed for independent offline review.
 
 The product principle is simple: **borrow the journey; own the proof**.
 
-This guide covers the first built-in activation recipe: the qualified Hermes
-`steward.workspace-audit` skill on a new workspace. It is a closed recipe, not a
-general workflow engine. Arbitrary commands, hooks, prompts, canaries, and
-automatic winner selection are not accepted.
+Steward has two built-in activation recipes: the qualified Hermes
+`steward.workspace-audit` skill and the qualified OpenClaw
+`steward-workspace-audit` skill. Both operate on a new workspace. They are closed
+recipes, not a general workflow engine. Arbitrary commands, hooks, prompts,
+canaries, and automatic winner selection are not accepted.
 
 This recipe is also deliberately limited to a dedicated host whose signed site
-policy contains exactly one tenant. Hermes needs persistent Docker state, and the
+policy contains exactly one tenant. Both agents need persistent Docker state, and the
 portable local volume driver does not enforce hard byte or inode quotas. The
 node-local coordinator also uses the explicitly enabled host-administrator
 admission path. Do not enable either compatibility setting on a shared host.
@@ -40,7 +41,7 @@ admission path. Do not enable either compatibility setting on a shared host.
 | Configure | Approve the tenant, node, instance generation, site policy, Gateway operation, and task authority. | The release grants no runtime authority. Site policy, instance intent, live Executor admission, and a tenant-signed task permit remain authoritative. |
 | Preflight | Authenticate the publisher key and inputs, verify the exact archive, and check the node. | An unsigned plan binds the exact input-file digests, archive digest and size, canary kind, local transport, and finite step timeouts. |
 | Activate | Permit Steward to import, admit, and start the exact workload. | After authority, policy, and read-only admission preflights pass, Executor signs an activation-begin marker before the admission-allow receipt, mutation journal, or host mutation. A fixed state machine records each completed phase in an owner-only, append-only activation workspace. |
-| Canary | Approve one exact post-admission Hermes request. | The default flow emits an unsigned challenge derived from the real admission response, then waits for a matching bundle signed by the off-node tenant key. |
+| Canary | Approve one exact post-admission agent request. | The flow emits an unsigned challenge derived from the real admission response, then waits for a matching bundle signed by the off-node tenant key. |
 | Prove | Review the deterministic result and signed enforcement evidence. | After verifying Gateway's authorization, dispatch, and terminal receipts, Steward writes a causal checkpoint into Executor evidence. The proof correlates both activation markers with the release, plan, final state, task and permit, result digest, signed receipt heads, and controller witness export. |
 | Monitor | Watch the running workload and evidence state. | Activation ends in `passed`; an invalid canary authorization, terminal canary failure, expired absolute canary deadline, or invalid retained evidence becomes sticky `action_required`. |
 
@@ -59,18 +60,17 @@ Prepare these inputs through authenticated channels:
   archive it identifies;
 - the publisher's qualification evidence and exact skill manifest identified
   by the release;
-- a signed site policy and exact instance intent for a new Hermes instance;
-- a Gateway configuration that exposes only `hermes.run` for service
-  `hermes-api`;
+- a signed site policy and exact instance intent for a new Hermes or OpenClaw instance;
+- a Gateway configuration that exposes only the selected release operation;
 - a tenant task-signing station whose private key is not copied to the node; and
 - configured Executor evidence publication and controller evidence witnessing,
   plus authenticated receipt and witness public keys for the final proof.
 
-The retained Steward qualification currently applies to the documented pinned
-Hermes adapter on `linux/amd64`. A release for another platform needs its own
-qualification evidence. Read the
-[Hermes adapter guide]({{ '/guides/hermes-agent/' | relative_url }}) before
-approving the image or its requested capabilities.
+The retained Steward qualifications apply to the documented pinned Hermes and
+OpenClaw adapters on `linux/amd64`. A release for another platform needs its own
+qualification evidence. Read the [Hermes adapter guide]({{ '/guides/hermes-agent/' | relative_url }})
+or [OpenClaw adapter guide]({{ '/guides/openclaw/' | relative_url }}) before
+approving the selected image or its requested capabilities.
 
 ## 1. Read the release as a decision record
 
@@ -81,7 +81,7 @@ being proposed before reasoning about container details. It includes:
 - the publisher-signed workload capsule;
 - the SHA-256 digest and byte length of the exact offline archive;
 - the archive's image manifest, configuration, and platform identity;
-- the fixed Hermes workspace-audit canary;
+- the selected fixed workspace-audit canary;
 - the skill-manifest digest covered by the release signature;
 - the qualification-evidence digest and completion time; and
 - one to eight explicit limitations.
@@ -103,6 +103,10 @@ stewardctl agent-release verify \
   -archive hermes-agent-adapter.tar
 ```
 
+The filenames in this guide use a Hermes release as the concrete example. For
+OpenClaw, use the signed OpenClaw release and its exact `bundle/image.tar`; the
+commands and workspace format are otherwise the same.
+
 The command requires the release and embedded capsule to use the same publisher
 key and key ID. It validates the capsule at the current time, checks every finite
 release field, and verifies that the supplied archive has the signed digest, byte
@@ -115,9 +119,9 @@ transferred archive bytes.
 ## 3. Configure authority without widening it
 
 Follow the [signed-admission guide]({{ '/guides/signed-admission/' | relative_url }})
-to prepare the site policy and instance intent. The policy must permit the
-Hermes profile, required state and service capabilities, and the public task key
-for `hermes-api`. Its publisher and tenant rules must also allow the release
+to prepare the site policy and instance intent. The policy must permit the selected
+agent profile, required state and service capabilities, and the public task key
+for the release service. Its publisher and tenant rules must also allow the release
 capsule's exact skill-manifest `{kind, digest}` artifact pair. The intent must bind
 the intended tenant, node, instance, lineage, and generation.
 
@@ -142,8 +146,18 @@ is not tenant authentication.
 volume without a hard storage quota. Together these settings make this a
 dedicated-host workflow, not a shared-host isolation mode.
 
-Configure only the `hermes.run` operation through the
-[Hermes task procedure]({{ '/guides/hermes-agent/' | relative_url }}#authorize-and-run-one-exact-hermes-task).
+Configure the release's one qualified operation. The shortest safe setup is:
+
+```console
+sudo stewardctl gateway service set \
+  -config /etc/steward/gateway.json \
+  -agent openclaw \
+  -tenant-budget tenant-a=4194304
+```
+
+Use `-agent hermes` for Hermes. The preset fixes the service ID, operation,
+`POST /v1/runs` path, lifecycle status prefix, content type, and hardened limits.
+It cannot be combined with manual service, operation, or lifecycle flags.
 The release does not authorize:
 
 - a tenant, node, or instance;
@@ -269,7 +283,7 @@ signed admission request. Executor appends that digest to its signed receipt
 stream after authority, policy, image, capacity, and other read-only preflights
 pass, but before the admission-allow receipt, mutation journal, or host mutation.
 It then persists the activation identity with the runtime. The command starts
-Hermes, derives the tenant-specific service policy from the current Gateway
+the selected agent, derives the tenant-specific service policy from the current Gateway
 configuration, and writes the canary request and challenge.
 
 The `release_verified` state is a local resumability checkpoint. It is not
@@ -301,22 +315,23 @@ On the signing station, issue and verify one short-lived task with the admitted
 tenant key:
 
 ```console
+AGENT_OPERATION=openclaw.run # use hermes.run for a Hermes release
 stewardctl task issue \
   -admission admission.json \
   -intent intent.json \
   -trust service-trust.json \
   -request canary.request.json \
-  -operation-id hermes.run \
+  -operation-id "$AGENT_OPERATION" \
   -valid-for 5m \
   -clock-skew 5s \
-  -key hermes-task-approver.private.pem \
-  -key-id hermes-task-approver \
+  -key agent-task-approver.private.pem \
+  -key-id agent-task-approver \
   -out canary.task.json
 
 stewardctl task verify \
   -in canary.task.json \
-  -public-key hermes-task-approver.public \
-  -key-id hermes-task-approver \
+  -public-key agent-task-approver.public \
+  -key-id agent-task-approver \
   -request canary.request.json
 ```
 
@@ -345,22 +360,22 @@ submission, observation, or Gateway receipt collection remains necessary. Do not
 change or reorder that configuration during those phases. If the derived bytes
 differ, restore the exact policy and rerun.
 
-## 7. Require the deterministic Hermes result
+## 7. Require the deterministic agent result
 
-The built-in canary uses:
+Both canaries use session ID `steward-activation-<activation-id>`, a newly admitted
+state lineage, and the exact skill-manifest digest from the release. Hermes uses
+input `STEWARD_WORKSPACE_AUDIT` and must return its canonical empty-workspace
+manifest. OpenClaw uses message `Run the Steward workspace audit.` and must return
+one sanitized success payload, exactly one `exec` tool call, no media or tool
+failure, and the descriptor-verified qualification workspace digest. The OpenClaw
+terminal also binds the activation session and an independently recomputed digest
+of the sanitized result.
 
-- input `STEWARD_WORKSPACE_AUDIT`;
-- session ID `steward-activation-<activation-id>`;
-- a newly admitted state lineage; and
-- the qualified `steward.workspace-audit` skill-manifest digest from the release.
+Agent-reported completion is insufficient. Steward selects the verifier from the
+signed release, rejects every other canary kind, and requires the exact canonical
+terminal shape and qualified workspace identity.
 
-Agent-reported completion is insufficient. Steward also requires a completed
-Hermes run with the activation-scoped session, consistent timestamps and token
-accounting, and canonical `steward.workspace-audit.result.v1` JSON for the
-qualified empty workspace. The result must contain zero entries, zero files, zero
-bytes, root `workspace`, and the expected manifest digest.
-
-This canary demonstrates that the admitted Hermes service accepted the exact
+This canary demonstrates that the admitted agent service accepted the exact
 tenant-authorized request and returned the one qualified fresh-state result while
 Steward recorded the dispatch path. It does not prove arbitrary prompts, models,
 plugins, skills, workspace contents, or future agent behavior are safe or correct.
@@ -524,9 +539,9 @@ event types instead of silently ignoring evidence it does not understand.
 | Local file, Docker, Executor, Gateway, network, or incomplete evidence-source error | Correct the transient condition and rerun the exact same `activation run` command while the applicable deadline remains open. The last completed checkpoint remains resumable and completed steps are revalidated rather than repeated with new authority. |
 | Executor readiness is degraded while writing the activation checkpoint | Reconcile the node until `GET /v1/readiness` returns ready, then rerun. Executor does not append a checkpoint while reconciliation is degraded. |
 | Invalid attached canary authorization or binding | The runner records sticky `action_required` with reason `canary_authorization_invalid`. Preserve the workspace and follow the replacement procedure below. |
-| Canary submission is terminally rejected, Hermes reports a non-completed terminal state, or the completed result fails the closed recipe | The runner records sticky `action_required` with reason `canary_terminal_failure`. Do not replace the task or clear the checkpoint; follow the replacement procedure below. |
+| Canary submission is terminally rejected, the agent reports a non-completed terminal state, or the completed result fails the closed recipe | The runner records sticky `action_required` with reason `canary_terminal_failure`. Do not replace the task or clear the checkpoint; follow the replacement procedure below. |
 | Retained evidence is invalid or conflicts with already published bytes | The runner records sticky `action_required` with reason `evidence_invalid`. Preserve the workspace for investigation and follow the replacement procedure below; retry cannot change write-once evidence. |
-| Timeout after task submission, before the absolute canary deadline | The task may have reached Hermes. Rerun the same activation with the same retained bundle; Gateway recovers or replays its durable task identity without another authorized dispatch. |
+| Timeout after task submission, before the absolute canary deadline | The task may have reached the agent. Rerun the same activation with the same retained bundle; Gateway recovers or replays its durable task identity without another authorized dispatch. |
 | Absolute canary deadline expired | The runner records sticky `action_required` with reason `canary_timeout`. Retry cannot extend or resume that activation. |
 | Current Gateway service policy differs | Restore the exact byte-consistent tenant service policy and rerun. The mismatch does not silently widen or replace the retained policy. |
 | Sticky `action_required`, or changed policy, intent, release, or archive | Correct or investigate the failure, stop and destroy the failed workload, then start a distinct activation with a new activation ID and an instance generation greater than the failed activation. Do not rewrite or resume the old evidence history. |

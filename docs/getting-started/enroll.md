@@ -128,7 +128,7 @@ Node-scoped enrollment selects uplink protocol 4 automatically. Add
 that has not implemented protocol 4's typed admission projection.
 
 When the same node has the complete packaged Gateway and relay configuration,
-protocol 4 also enables the closed Hermes activation canary. Executor advertises
+protocol 4 also enables the closed release-selected agent activation canary. Executor advertises
 that capability only when it can enforce the signed runtime, task permit, Gateway
 receipt authority, and activation-checkpoint boundary locally.
 

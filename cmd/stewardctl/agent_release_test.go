@@ -29,6 +29,7 @@ type agentReleaseCLIFixture struct {
 	configDigest              string
 	skillManifest             []byte
 	qualificationEvidence     []byte
+	contract                  agentrelease.CanaryContract
 }
 
 func TestAgentReleaseIssueAndVerify(t *testing.T) {
@@ -118,6 +119,25 @@ func TestAgentReleaseIssueAndVerify(t *testing.T) {
 		withArchiveOutput.Canary.RequiredStateDisposition != "new" ||
 		withArchiveOutput.Canary.FixtureID != agentrelease.HermesWorkspaceAuditEmptyFixtureID {
 		t.Fatalf("archive verification output = %#v", withArchiveOutput)
+	}
+}
+
+func TestAgentReleaseIssueSelectsOpenClawContractFromCapsule(t *testing.T) {
+	fixture := newAgentReleaseCLIFixtureForKind(
+		t, agentrelease.CanaryKindOpenClawWorkspaceAuditV1,
+	)
+	var output bytes.Buffer
+	if err := run(fixture.issueArguments(), &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	issued := decodeAgentReleaseOutput(t, output.Bytes())
+	if issued.Canary.Kind != agentrelease.CanaryKindOpenClawWorkspaceAuditV1 ||
+		issued.Canary.ServiceID != agentrelease.OpenClawServiceID ||
+		issued.Canary.OperationID != agentrelease.OpenClawOperationID ||
+		issued.Canary.Request != fixture.contract.Request ||
+		issued.Canary.FixtureID != agentrelease.OpenClawWorkspaceAuditFixtureID ||
+		issued.Canary.ExpectedWorkspaceManifestDigest != agentrelease.OpenClawWorkspaceAuditManifestDigest {
+		t.Fatalf("issued release did not select the closed OpenClaw contract: %#v", issued.Canary)
 	}
 }
 
@@ -283,7 +303,20 @@ func TestAgentReleaseCommandsRejectIncompleteArguments(t *testing.T) {
 }
 
 func newAgentReleaseCLIFixture(t *testing.T) agentReleaseCLIFixture {
+	return newAgentReleaseCLIFixtureForKind(
+		t, agentrelease.CanaryKindHermesWorkspaceAuditV1,
+	)
+}
+
+func newAgentReleaseCLIFixtureForKind(
+	t *testing.T,
+	kind string,
+) agentReleaseCLIFixture {
 	t.Helper()
+	contract, ok := agentrelease.CanaryContractForKind(kind)
+	if !ok {
+		t.Fatal("agent release fixture contract is unavailable")
+	}
 	now := time.Date(2026, 7, 16, 19, 0, 0, 0, time.UTC)
 	previousNow := timeNow
 	timeNow = func() time.Time { return now }
@@ -319,6 +352,7 @@ func newAgentReleaseCLIFixture(t *testing.T) agentReleaseCLIFixture {
 		outputPath:     filepath.Join(directory, "agent-release.dsse.json"),
 		manifestDigest: manifestDigest, configDigest: configDigest,
 		skillManifest: skillManifest, qualificationEvidence: qualificationEvidence,
+		contract: contract,
 	}
 	privateKey, err := readPrivateKey(privateKeyPath)
 	if err != nil {
@@ -333,11 +367,15 @@ func newAgentReleaseCLIFixture(t *testing.T) agentReleaseCLIFixture {
 
 func (fixture agentReleaseCLIFixture) capsule(t *testing.T) admission.ProfileCapsule {
 	t.Helper()
+	profile, ok := admission.DefaultProfiles().Lookup(fixture.contract.Profile)
+	if !ok {
+		t.Fatal("agent release fixture profile is unavailable")
+	}
 	return admission.ProfileCapsule{
 		SchemaVersion:  admission.SchemaV1,
 		CapsuleID:      "hermes-workspace-audit",
 		PublisherKeyID: "publisher-a",
-		Profile:        admission.ProfileRef{ID: "hermes-v1", Version: "v1"},
+		Profile:        fixture.contract.Profile,
 		Image: admission.ImageIdentity{
 			Repository:     "registry.example/agent",
 			ManifestDigest: fixture.manifestDigest,
@@ -356,8 +394,8 @@ func (fixture agentReleaseCLIFixture) capsule(t *testing.T) admission.ProfileCap
 		Artifacts: []admission.ArtifactDigest{{
 			Kind: agentrelease.SkillManifestArtifactKind, Digest: dsse.Digest(fixture.skillManifest),
 		}},
-		State:   admission.StateShape{SchemaVersion: "v1", Path: "/opt/data"},
-		Service: admission.ServiceShape{ID: agentrelease.HermesServiceID, Port: 8766},
+		State:   admission.StateShape{SchemaVersion: profile.StateSchemaVersion, Path: profile.StatePath},
+		Service: admission.ServiceShape{ID: fixture.contract.ServiceID, Port: 8766},
 	}
 }
 

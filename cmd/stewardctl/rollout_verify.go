@@ -420,7 +420,7 @@ func verifyRolloutTarget(
 	terminalResult := verifiedResult.TerminalResult()
 	if state.CanaryResultDigest != dsse.Digest(terminalResult) ||
 		state.CanaryResultBytes != int64(len(terminalResult)) {
-		return rolloutVerifiedTargetArtifacts{}, errors.New("target state does not identify the exact verified Hermes terminal result")
+		return rolloutVerifiedTargetArtifacts{}, errors.New("target state does not identify the exact verified agent terminal result")
 	}
 
 	captureRaw, err := readRolloutTargetArtifact(

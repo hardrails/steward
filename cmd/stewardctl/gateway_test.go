@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/gateway"
 )
 
@@ -149,6 +150,20 @@ func TestGatewayCommandRejectsAmbiguousInputs(t *testing.T) {
 	}
 	if err := writeGatewayConfig(unsafe, gateway.Config{}); err == nil {
 		t.Fatal("unsafe config file accepted")
+	}
+}
+
+func TestGatewayAgentServicePresetsAreFinite(t *testing.T) {
+	hermes, ok := gatewayAgentServicePreset("hermes")
+	if !ok || hermes.Kind != agentrelease.CanaryKindHermesWorkspaceAuditV1 {
+		t.Fatalf("Hermes preset=%#v ok=%t", hermes, ok)
+	}
+	openClaw, ok := gatewayAgentServicePreset("openclaw")
+	if !ok || openClaw.Kind != agentrelease.CanaryKindOpenClawWorkspaceAuditV1 {
+		t.Fatalf("OpenClaw preset=%#v ok=%t", openClaw, ok)
+	}
+	if contract, ok := gatewayAgentServicePreset("custom"); ok || contract.Kind != "" {
+		t.Fatalf("unknown preset=%#v ok=%t", contract, ok)
 	}
 }
 
@@ -360,6 +375,35 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	if trustedLifecycle.TaskProtocol != gateway.TaskProtocolLifecycleV1 || trustedLifecycle.StatusPathPrefix != "/v1/runs/" ||
 		trustedLifecycle.PolicyDigest != gateway.ServiceOperationDigest(lifecycle) {
 		t.Fatalf("trusted lifecycle=%#v", trustedLifecycle)
+	}
+
+	output.Reset()
+	if err := run([]string{
+		"gateway", "service", "set", "-config", path, "-agent", "openclaw",
+	}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatalf("apply OpenClaw service preset: %v", err)
+	}
+	loaded, _, _, _, err = gateway.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var openClaw *gateway.ServiceOperation
+	for index := range loaded.ServiceOperations {
+		if loaded.ServiceOperations[index].ServiceID == agentrelease.OpenClawServiceID {
+			openClaw = &loaded.ServiceOperations[index]
+		}
+	}
+	if openClaw == nil || openClaw.ID != agentrelease.OpenClawOperationID ||
+		openClaw.Path != "/v1/runs" || openClaw.StatusPathPrefix != "/v1/runs/" ||
+		openClaw.TaskProtocol != gateway.TaskProtocolLifecycleV1 ||
+		!strings.Contains(output.String(), "systemctl reload") {
+		t.Fatalf("OpenClaw preset did not install the closed lifecycle operation: %#v output=%q", openClaw, output.String())
+	}
+	if err := run([]string{
+		"gateway", "service", "set", "-config", path, "-agent", "openclaw",
+		"-service-id", "other",
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("OpenClaw preset accepted a conflicting manual service identity")
 	}
 }
 

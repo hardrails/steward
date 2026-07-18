@@ -17,7 +17,7 @@ operations use only local files; `image import` contacts Docker after offline
 verification. Commands under `stewardctl node` contact the local Executor API.
 `stewardctl task submit`, `status`, `observe`, and `wait` contact an explicit
 literal-loopback Gateway origin; task issue, verify, and audit remain offline.
-`stewardctl activation` composes one node-local Hermes activation, while
+`stewardctl activation` composes one node-local qualified Hermes or OpenClaw activation, while
 `stewardctl rollout` composes an ordered remote fleet through Steward Control and
 verifies the resulting proof set offline.
 `stewardctl control evidence export` contacts the customer-owned controller,
@@ -514,13 +514,13 @@ receipt frames exclude prompts, request bodies, result bodies, and workspace
 content. The activation workspace separately retains the bounded canary result and
 remains sensitive operational evidence.
 
-See [Activate a qualified Hermes release]({{ '/guides/agent-activation/' | relative_url }})
+See [Activate a qualified agent release]({{ '/guides/agent-activation/' | relative_url }})
 for input preparation, the baseline-witness procedure, phase semantics, and proof
 limits.
 
 ## Proof-carrying fleet rollout
 
-`stewardctl rollout` applies the fixed Hermes activation contract to one release,
+`stewardctl rollout` applies the signed release's fixed Hermes or OpenClaw activation contract,
 one tenant, and an explicit ordered list of remote nodes. It is an operator-side
 coordinator over Steward Control, not a controller API resource. The controller
 delivers exact signed commands and retains evidence captures; it does not select
@@ -691,7 +691,7 @@ not a signature, and the fixed canary is not proof of arbitrary agent correctnes
 or host integrity. Signed promotions attest the common command signer's
 authorization sequence over retained evidence; they do not independently prove
 wall-clock order, host execution order, or a human approval reason. See
-[Roll out a qualified Hermes release across a fleet]({{ '/guides/fleet-rollout/' | relative_url }})
+[Roll out a qualified agent release across a fleet]({{ '/guides/fleet-rollout/' | relative_url }})
 for target preparation, operator gates, recovery, air-gap transfer, and evidence
 limits.
 

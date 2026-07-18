@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/gateway"
@@ -17,7 +18,7 @@ import (
 )
 
 // GatewayEvidenceRequestV1 carries an already verified task permit and the
-// exact terminal bytes independently checked against the closed Hermes canary.
+// exact terminal bytes independently checked against one closed built-in canary.
 type GatewayEvidenceRequestV1 struct {
 	Task             taskpermit.Verified
 	TaskProtocol     string
@@ -194,7 +195,7 @@ func VerifyGatewayEvidenceV1Context(
 		terminal.ResultDigest != resultDigest ||
 		terminal.ResponseBytes != int64(len(request.Result)) {
 		return GatewayEvidenceResultV1{}, invalidEvidence(
-			errors.New("Gateway terminal evidence does not match the verified Hermes result"),
+			errors.New("Gateway terminal evidence does not match the verified canary result"),
 		)
 	}
 	coordinate := ReceiptCoordinateV1{
@@ -205,7 +206,7 @@ func VerifyGatewayEvidenceV1Context(
 		PublicKeySHA256: publicKeySHA256(request.ReceiptPublicKey),
 	}
 	canary := CanaryProofV1{
-		Kind:         CanaryHermesWorkspaceAuditV1,
+		Kind:         expectation.canaryKind,
 		TaskDigest:   expectation.taskDigest,
 		PermitDigest: request.Task.EnvelopeDigest,
 		ResultDigest: resultDigest,
@@ -223,13 +224,15 @@ func VerifyGatewayEvidenceV1Context(
 type gatewayEvidenceExpectation struct {
 	taskDigest    string
 	receiptNodeID string
+	canaryKind    string
 }
 
 func validateGatewayEvidenceRequest(
 	request GatewayEvidenceRequestV1,
 ) (gatewayEvidenceExpectation, error) {
 	statement := request.Task.Statement
-	if request.TaskProtocol != connectorledger.TaskProtocolLifecycleV1 ||
+	contract, supported := agentrelease.CanaryContractForOperation(statement.ServiceID, statement.OperationID)
+	if request.TaskProtocol != connectorledger.TaskProtocolLifecycleV1 || !supported ||
 		!identifier(request.RunID) ||
 		len(request.Result) == 0 || int64(len(request.Result)) > MaxCanaryResultBytes ||
 		len(request.ReceiptPublicKey) != ed25519.PublicKeySize ||
@@ -255,6 +258,7 @@ func validateGatewayEvidenceRequest(
 			statement.TenantID, statement.InstanceID, statement.TaskID,
 		),
 		receiptNodeID: gateway.ServiceTaskReceiptNodeID(statement.NodeID),
+		canaryKind:    contract.Kind,
 	}, nil
 }
 

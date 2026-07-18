@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/activation"
+	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/ocibundle"
@@ -133,8 +134,8 @@ func (plan PlanV1) Validate() error {
 		plan.Archive.Bytes > activation.MaxActivationArchiveBytes {
 		return invalidPlan("archive identity is invalid")
 	}
-	if plan.Canary.Kind != activation.CanaryHermesWorkspaceAuditV1 {
-		return invalidPlan("canary kind must be %q", activation.CanaryHermesWorkspaceAuditV1)
+	if _, ok := agentrelease.CanaryContractForKind(plan.Canary.Kind); !ok {
+		return invalidPlan("canary kind is not a supported built-in contract")
 	}
 	if plan.BatchSize == 0 || plan.BatchSize > MaxBatchSize {
 		return invalidPlan("batch_size must be between 1 and %d", MaxBatchSize)

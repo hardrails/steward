@@ -1,17 +1,17 @@
 ---
-title: Roll out a qualified Hermes release across a fleet
-description: Stage one exact Hermes release across an explicit node list, require a verified canary before each operator-approved batch, resume safely after interruption, and verify the resulting evidence offline.
+title: Roll out a qualified agent release across a fleet
+description: Stage one exact Hermes or OpenClaw release across an explicit node list, require a verified canary before each operator-approved batch, resume safely after interruption, and verify the resulting evidence offline.
 section: How-to guide
 ---
 
-# Roll out a qualified Hermes release across a fleet
+# Roll out a qualified agent release across a fleet
 
-Steward can coordinate one qualified Hermes release across an ordered list of
+Steward can coordinate one qualified Hermes or OpenClaw release across an ordered list of
 remote nodes without placing a tenant signing key in Steward Control. The first
 node is the canary. Each `rollout run` invocation advances one fixed batch,
 sequentially verifies every target in that batch, and stops at the next operator
 decision point. A target passes only after Steward correlates its signed admission,
-fixed Hermes workspace-audit task, Gateway receipts, Executor activation markers,
+fixed release-selected workspace-audit task, Gateway receipts, Executor activation markers,
 controller evidence capture, and activation proof.
 
 This closes a specific operational gap: a successful container start is not enough
@@ -31,10 +31,10 @@ in separate trust domains:
 
 | Component | What it may do | What it does not establish |
 | --- | --- | --- |
-| Trusted operator workstation | Select the exact ordered targets, hold the command and Hermes task private keys, create the owner-only workspace, sign the exact plan and evidence-bound batch promotions, and decide when to start each batch. | A signer authorization records the approved bytes and sequence, not the operator's reasoning or an external approval ticket. |
+| Trusted operator workstation | Select the exact ordered targets, hold the command and agent task private keys, create the owner-only workspace, sign the exact plan and evidence-bound batch promotions, and decide when to start each batch. | A signer authorization records the approved bytes and sequence, not the operator's reasoning or an external approval ticket. |
 | Steward Control | Deliver exact signed commands, report bounded terminal results, witness Executor evidence, and retain a site-admin-armed evidence capture. | It does not select targets, hold tenant signing keys, mint commands or tasks, choose a winner, or decide rollback. |
 | Executor and Gateway on each node | Enforce signed admission, run the fixed activation canary, and sign the relevant evidence within the node trust boundary. | Their evidence is not hardware attestation and does not prove the host administrator or kernel was uncompromised. |
-| Agent container | Return the bounded Hermes result through its admitted service. Treat the image and its configuration as untrusted. | Its run ID and work product are not trusted merely because Steward recorded them. |
+| Agent container | Return the bounded qualified result through its admitted service. Treat the image and its configuration as untrusted. | Its run ID and work product are not trusted merely because Steward recorded them. |
 | Offline verifier | Re-authenticate the signed plan authorization and promotion chain, exact archive, release, policy, commands, task permit, receipt chains, evidence capture, state history, and aggregate proof. | `proof.json` and rollout state files remain unsigned correlation records, not standalone proof. |
 
 The controller evidence capture can contain interleaved receipt metadata from other
@@ -43,7 +43,7 @@ exporting a capture therefore requires a `site_admin` token, not a tenant operat
 token. Treat the complete rollout workspace as sensitive operational evidence.
 
 The fixed canary accepts no URL, shell command, hook, arbitrary prompt, or generic
-workflow step. It demonstrates the qualified fresh-workspace Hermes fixture and
+workflow step. It demonstrates the release-selected qualified fresh-workspace fixture and
 the recorded enforcement path. It does not demonstrate that arbitrary prompts,
 skills, models, plugins, future runs, or agent output are safe or correct.
 
@@ -59,14 +59,14 @@ their existing controller uplinks.
 
 The current rollout contract also requires all of the following:
 
-- one publisher-signed Hermes agent release, the exact capsule envelope embedded
+- one publisher-signed Hermes or OpenClaw agent release, the exact capsule envelope embedded
   in it, and its exact Open Container Initiative (OCI) archive;
 - one site-root-signed policy containing exactly one tenant;
 - from 1 through 64 explicit, unique target nodes in the intended order;
 - a dedicated host for each target, configured with
   `--allow-host-admin-intent` and
   `--allow-unquotaed-state-on-dedicated-host`;
-- a fresh-state Hermes instance intent for every target, with a positive new
+- a fresh-state intent for the selected agent on every target, with a positive new
   instance generation and the state and service capabilities enabled;
 - the exact image already imported on every target node;
 - an active controller enrollment for the tenant on every target;
@@ -76,12 +76,12 @@ The current rollout contract also requires all of the following:
 - an existing, finding-free Executor evidence checkpoint for every target;
 - a command key authorized by the signed policy for `admit`, `start`, and
   `activation-canary` commands;
-- a Hermes task key authorized by the signed policy for service `hermes-api`;
+- an agent task key authorized by the signed policy for the release service;
 - the controller's witness public key, publisher public key, and site-root public
   key obtained through independent authenticated channels; and
 - a site-administrator controller token. Evidence capture is site-wide authority.
 
-Persistent Hermes state uses a Docker volume without a portable hard byte or inode
+Persistent agent state uses a Docker volume without a portable hard byte or inode
 quota. The dedicated-host requirement is therefore material. Do not enable this
 recipe on a shared multi-tenant host. Steward's stateless shared-host isolation is
 available outside this rollout path.
@@ -170,11 +170,11 @@ intent must name the same tenant and the corresponding target node. It must use:
 
 - `state_disposition: "new"`;
 - `capabilities.state: true` and `capabilities.service: true`;
-- service ID `hermes-api`; and
+- the service ID from the signed release (`hermes-api` or `openclaw-api`); and
 - a positive instance generation that has not been superseded for that
   `(tenant_id, node_id, instance_id)` lineage.
 
-Export the tenant-specific Hermes service trust inventory on each node:
+Export the tenant-specific agent service trust inventory on each node:
 
 ```console
 umask 077
@@ -185,7 +185,7 @@ sudo stewardctl gateway service trust \
 ```
 
 Authenticate that transfer. The inventory is unsigned and contains no credential,
-but it fixes the exact `hermes.run` method, path, limits, lifecycle protocol, and
+but it fixes the exact release operation method, path, limits, lifecycle protocol, and
 operation-policy digest that the coordinator will require.
 
 Also copy `/etc/steward/connector-receipts.public` from each node through an
@@ -278,7 +278,7 @@ The optional timeouts are recorded in every target's activation plan:
 | `-image-import-timeout` | `30m` | Reserved image-import ceiling; this runner does not import remotely |
 | `-admission-timeout` | `2m` | Remote admission ceiling |
 | `-startup-timeout` | `5m` | Remote startup ceiling |
-| `-canary-timeout` | `5m` | Fixed Hermes canary ceiling |
+| `-canary-timeout` | `5m` | Fixed agent canary ceiling |
 | `-evidence-timeout` | `2m` | Controller evidence collection ceiling |
 
 Timeouts must be whole seconds. The rollout window must be from one second through
@@ -315,7 +315,7 @@ authenticate signatures or evidence. Its output therefore says
 ## 6. Run the canary batch
 
 The coordinator needs one command private key authorized for all three rollout
-command kinds and one Hermes task private key authorized for `hermes-api`. Keep
+command kinds and one agent task private key authorized for the release service. Keep
 both owner-only on the trusted coordinator. The controller token must have the
 `site_admin` role because the coordinator arms and exports evidence captures.
 
@@ -329,8 +329,8 @@ stewardctl rollout run \
   -witness-public-key steward-control-witness.public.pem \
   -command-private-key tenant-a-commands.private.pem \
   -command-key-id tenant-a-commands \
-  -task-private-key hermes-task-approver.private.pem \
-  -task-key-id hermes-task-approver \
+  -task-private-key agent-task-approver.private.pem \
+  -task-key-id agent-task-approver \
   -control-url "$CONTROL_URL" \
   -token-file "$ADMIN_TOKEN" \
   -ca-file "$CONTROL_CA"
@@ -370,7 +370,7 @@ then advances only target 0. For that target it:
 6. derives one closed workspace-audit task and tenant permit from the authenticated
    admission, then retains the signed `activation-canary` command with the same
    authorization context before submission;
-7. verifies the bounded terminal Hermes result and Gateway authorization, dispatch,
+7. verifies the bounded terminal agent result and Gateway authorization, dispatch,
    and terminal receipts;
 8. requires Executor's activation checkpoint, seals and exports the exact controller
    evidence range, and authenticates the controller witness signature; and
@@ -409,8 +409,8 @@ stewardctl rollout run \
   -witness-public-key steward-control-witness.public.pem \
   -command-private-key tenant-a-commands.private.pem \
   -command-key-id tenant-a-commands \
-  -task-private-key hermes-task-approver.private.pem \
-  -task-key-id hermes-task-approver \
+  -task-private-key agent-task-approver.private.pem \
+  -task-key-id agent-task-approver \
   -control-url "$CONTROL_URL" \
   -token-file "$ADMIN_TOKEN" \
   -ca-file "$CONTROL_CA"
@@ -616,7 +616,7 @@ authenticated proof set.
 - A plan contains at most 64 targets and lasts at most 24 hours.
 - Images must already exist on every target; there is no registry pull, remote
   transfer, or import step in the runner.
-- The only accepted canary is the qualified fresh-state Hermes workspace audit.
+- The only accepted canaries are the compiled-in qualified fresh-state Hermes and OpenClaw workspace audits selected by the signed release.
 - The coordinator is invoked by an operator. It is not a daemon, scheduler,
   desired-state controller, or automatic rollback engine.
 - The coordinator workspace requires same-filesystem POSIX hard links, reliable

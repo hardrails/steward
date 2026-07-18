@@ -1,6 +1,6 @@
 // Package activationcanary defines the closed remote activation canary
 // contract. It validates and correlates data only; it does not contact Gateway,
-// Hermes, Docker, or the controller and it exposes no generic execution
+// an agent, Docker, or the controller and it exposes no generic execution
 // surface.
 package activationcanary
 
@@ -31,7 +31,7 @@ const (
 	ResultSchemaV1  = "steward.activation-canary-result.v1"
 
 	// MaxCommandBytes accommodates one maximally sized task permit and the
-	// much smaller fixed Hermes request without inheriting the generic command
+	// much smaller fixed workspace-audit request without inheriting the generic command
 	// payload ceiling.
 	MaxCommandBytes = 32 << 10
 	// The qualified empty-workspace response and its three task-local receipts
@@ -49,7 +49,7 @@ var (
 
 	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	grantIDPattern    = regexp.MustCompile(`^grant-[a-f0-9]{64}$`)
-	hermesRunPattern  = regexp.MustCompile(`^run_[a-f0-9]{32}$`)
+	canaryRunPattern  = regexp.MustCompile(`^run_[a-f0-9]{32}$`)
 )
 
 // ReceiptAuthorityV1 pins the Gateway receipt identity expected for this
@@ -62,7 +62,7 @@ type ReceiptAuthorityV1 struct {
 }
 
 // CommandV1 is the only remote activation canary recipe. RequestBase64 is the
-// exact canonical Hermes workspace-audit request. ExecutorBeginBase64 is the
+// exact canonical built-in workspace-audit request. ExecutorBeginBase64 is the
 // exact admission-bound activation begin marker. TaskPermit is the canonical
 // HTTP-header representation of one tenant-signed permit. There is no URL,
 // path, method, prompt, command, environment, or extension field.
@@ -130,7 +130,7 @@ type checkpointExpectationV1 struct {
 // ResultV1 carries the bounded raw terminal observation and the original
 // signed Gateway receipt lines. Qualified is meaningful only after
 // VerifyResultV1 authenticates those receipts and independently verifies the
-// closed Hermes result.
+// closed release-selected agent result.
 type ResultV1 struct {
 	SchemaVersion              string `json:"schema_version"`
 	ActivationID               string `json:"activation_id"`
@@ -153,7 +153,7 @@ type VerifiedResultV1 struct {
 	commandKey      string
 	terminalResult  []byte
 	gatewayReceipts []byte
-	hermes          activation.HermesCanaryResultV1
+	canary          activation.CanaryResultV1
 	gateway         activation.GatewayEvidenceResultV1
 }
 
@@ -164,7 +164,7 @@ type VerifiedEvidenceV1 struct {
 	commandKey      string
 	terminalResult  []byte
 	gatewayReceipts []byte
-	hermes          activation.HermesCanaryResultV1
+	canary          activation.CanaryResultV1
 	gateway         activation.GatewayEvidenceResultV1
 }
 
@@ -201,7 +201,7 @@ func MarshalCommandV1(command CommandV1) ([]byte, error) {
 	return raw, nil
 }
 
-// BuildCommandV1 constructs and self-validates the only accepted remote Hermes
+// BuildCommandV1 constructs and self-validates one accepted remote built-in
 // workspace-audit payload. Callers cannot supply a prompt, URL, method, path,
 // arbitrary request, or operation identifier.
 func BuildCommandV1(input CommandInputV1) ([]byte, CommandV1, error) {
@@ -218,6 +218,10 @@ func BuildCommandV1(input CommandInputV1) ([]byte, CommandV1, error) {
 			"admission projection does not bind the requested activation",
 		)
 	}
+	contract, ok := agentrelease.CanaryContractForService(input.Admission.ServiceID)
+	if !ok {
+		return nil, CommandV1{}, invalidCommand("admission service has no built-in canary contract")
+	}
 	begin, err := activation.ParseExecutorBeginV1(input.ExecutorBegin)
 	if err != nil {
 		return nil, CommandV1{}, invalidCommand("Executor begin marker: %v", err)
@@ -232,9 +236,9 @@ func BuildCommandV1(input CommandInputV1) ([]byte, CommandV1, error) {
 	if err != nil {
 		return nil, CommandV1{}, invalidCommand("task permit envelope: %v", err)
 	}
-	request, err := fixedHermesRequest(input.ActivationID)
+	request, err := agentrelease.BuildCanaryRequest(contract.Request, input.ActivationID)
 	if err != nil {
-		return nil, CommandV1{}, invalidCommand("build fixed Hermes request: %v", err)
+		return nil, CommandV1{}, invalidCommand("build fixed canary request: %v", err)
 	}
 	admissionRaw, err := json.Marshal(input.Admission)
 	if err != nil {
@@ -247,7 +251,7 @@ func BuildCommandV1(input CommandInputV1) ([]byte, CommandV1, error) {
 		Admission:           input.Admission,
 		ExecutorBeginBase64: base64.StdEncoding.EncodeToString(input.ExecutorBegin),
 		GrantID:             input.Admission.GrantID,
-		OperationID:         agentrelease.HermesOperationID,
+		OperationID:         contract.OperationID,
 		TaskPermit:          permitHeader,
 		RequestBase64:       base64.StdEncoding.EncodeToString(request),
 		Deadline:            input.Deadline.UTC().Format(time.RFC3339Nano),
@@ -271,9 +275,12 @@ func BuildCommandV1(input CommandInputV1) ([]byte, CommandV1, error) {
 // VerifyCommandV1 must still be called before any Gateway interaction.
 func (command CommandV1) Validate() error {
 	if command.SchemaVersion != CommandSchemaV1 || !identifier(command.ActivationID) ||
-		!digest(command.AdmissionDigest) || !grantIDPattern.MatchString(command.GrantID) ||
-		command.OperationID != agentrelease.HermesOperationID {
+		!digest(command.AdmissionDigest) || !grantIDPattern.MatchString(command.GrantID) {
 		return invalidCommand("identity or fixed operation is invalid")
+	}
+	contract, ok := agentrelease.CanaryContractForOperation(command.Admission.ServiceID, command.OperationID)
+	if !ok {
+		return invalidCommand("service operation has no built-in canary contract")
 	}
 	if err := command.Admission.Validate(); err != nil {
 		return invalidCommand("admission projection: %v", err)
@@ -305,9 +312,9 @@ func (command CommandV1) Validate() error {
 	if err != nil {
 		return invalidCommand("request: %v", err)
 	}
-	expected, err := fixedHermesRequest(command.ActivationID)
+	expected, err := agentrelease.BuildCanaryRequest(contract.Request, command.ActivationID)
 	if err != nil || !bytes.Equal(request, expected) {
-		return invalidCommand("request is not the exact Hermes workspace-audit request")
+		return invalidCommand("request is not the exact built-in workspace-audit request")
 	}
 	beginRaw, err := decodeCanonicalBase64(
 		command.ExecutorBeginBase64,
@@ -388,6 +395,10 @@ func VerifyCommandV1(
 		return VerifiedCommandV1{}, invalidCommand("verify task permit: %v", err)
 	}
 	statement := verified.Statement
+	contract, ok := agentrelease.CanaryContractForOperation(admission.Projection.ServiceID, command.OperationID)
+	if !ok {
+		return VerifiedCommandV1{}, invalidCommand("admission operation has no built-in canary contract")
+	}
 	if statement.NodeID != admission.NodeID || statement.TenantID != admission.TenantID ||
 		statement.InstanceID != admission.InstanceID ||
 		statement.RuntimeRef != admission.Projection.RuntimeRef ||
@@ -396,13 +407,13 @@ func VerifyCommandV1(
 		statement.CapsuleDigest != admission.Projection.CapsuleDigest ||
 		statement.PolicyDigest != admission.Projection.PolicyDigest ||
 		statement.RoutePolicyDigest != admission.Projection.RoutePolicyDigest ||
-		statement.ServiceID != agentrelease.HermesServiceID ||
+		statement.ServiceID != contract.ServiceID ||
 		statement.ServiceID != admission.Projection.ServiceID ||
-		statement.OperationID != agentrelease.HermesOperationID ||
+		statement.OperationID != contract.OperationID ||
 		statement.RequestDigest != taskpermit.RequestDigest(request) ||
 		statement.RequestBytes != int64(len(request)) ||
 		statement.ContentType != "application/json" {
-		return VerifiedCommandV1{}, invalidCommand("task permit does not match every admitted Hermes request binding")
+		return VerifiedCommandV1{}, invalidCommand("task permit does not match every admitted canary request binding")
 	}
 	if command.ReceiptAuthority.NodeID != gateway.ServiceTaskReceiptNodeID(statement.NodeID) {
 		return VerifiedCommandV1{}, invalidCommand("Gateway receipt authority belongs to another node")
@@ -458,11 +469,12 @@ func (admission AdmissionContextV1) validate() error {
 		return err
 	}
 	projection := admission.Projection
+	_, supported := agentrelease.CanaryContractForService(projection.ServiceID)
 	if projection.Status != "created" && projection.Status != "running" ||
-		projection.GrantID == "" || projection.ServiceID != agentrelease.HermesServiceID ||
+		projection.GrantID == "" || !supported ||
 		len(projection.TaskAuthorities) == 0 || projection.RoutePolicyDigest == "" ||
 		projection.ActivationID == "" || projection.ActivationBeginDigest == "" {
-		return errors.New("projection is not a usable Hermes activation admission")
+		return errors.New("projection is not a usable built-in activation admission")
 	}
 	return nil
 }
@@ -500,7 +512,7 @@ func (verified VerifiedCommandV1) Deadline() time.Time { return verified.deadlin
 // Result returns the authenticated bounded projection.
 func (verified VerifiedResultV1) Result() ResultV1 { return verified.result }
 
-// TerminalResult returns a copy of the exact verified Hermes terminal bytes.
+// TerminalResult returns a copy of the exact verified agent terminal bytes.
 func (verified VerifiedResultV1) TerminalResult() []byte {
 	return append([]byte(nil), verified.terminalResult...)
 }
@@ -512,8 +524,22 @@ func (verified VerifiedResultV1) GatewayReceipts() []byte {
 
 // Hermes returns the closed Hermes workspace-audit observation.
 func (verified VerifiedResultV1) Hermes() activation.HermesCanaryResultV1 {
-	return verified.hermes
+	if verified.canary.Kind != agentrelease.CanaryKindHermesWorkspaceAuditV1 {
+		return activation.HermesCanaryResultV1{}
+	}
+	return activation.HermesCanaryResultV1{RunID: verified.canary.RunID, SessionID: verified.canary.SessionID, ManifestDigest: verified.canary.ManifestDigest}
 }
+
+// OpenClaw returns the closed OpenClaw workspace-audit observation.
+func (verified VerifiedResultV1) OpenClaw() activation.OpenClawCanaryResultV1 {
+	if verified.canary.Kind != agentrelease.CanaryKindOpenClawWorkspaceAuditV1 {
+		return activation.OpenClawCanaryResultV1{}
+	}
+	return activation.OpenClawCanaryResultV1{RunID: verified.canary.RunID, SessionID: verified.canary.SessionID, ManifestDigest: verified.canary.ManifestDigest}
+}
+
+// Canary returns the agent-neutral verified workspace-audit observation.
+func (verified VerifiedResultV1) Canary() activation.CanaryResultV1 { return verified.canary }
 
 // Gateway returns a copy of the verified Gateway evidence projection.
 func (verified VerifiedResultV1) Gateway() activation.GatewayEvidenceResultV1 {
@@ -560,7 +586,7 @@ func MarshalResultV1(result ResultV1) ([]byte, error) {
 func (result ResultV1) Validate() error {
 	if result.SchemaVersion != ResultSchemaV1 || !identifier(result.ActivationID) ||
 		!digest(result.AdmissionDigest) || !digest(result.TaskDigest) ||
-		!digest(result.PermitDigest) || !hermesRunPattern.MatchString(result.RunID) ||
+		!digest(result.PermitDigest) || !canaryRunPattern.MatchString(result.RunID) ||
 		!digest(result.TerminalResultDigest) || !digest(result.ActivationCheckpointDigest) ||
 		!result.Qualified {
 		return invalidResult("identity, digest, run, or qualification field is invalid")
@@ -594,7 +620,7 @@ func VerifyEvidenceV1(
 	if _, err := MarshalResultV1(result); err != nil {
 		return VerifiedEvidenceV1{}, err
 	}
-	hermes, gatewayResult, err := verifyProjectedEvidence(
+	canary, gatewayResult, err := verifyProjectedEvidence(
 		command, result, terminal, receipts, receiptPublic,
 	)
 	if err != nil {
@@ -604,7 +630,7 @@ func VerifyEvidenceV1(
 		commandKey:      command.commandKey,
 		terminalResult:  append([]byte(nil), terminal...),
 		gatewayReceipts: append([]byte(nil), receipts...),
-		hermes:          hermes,
+		canary:          canary,
 		gateway:         cloneGatewayEvidence(gatewayResult),
 	}, nil
 }
@@ -636,7 +662,7 @@ func BuildCheckpointV1(
 
 // VerifyResultV1 authenticates all three portable Gateway receipts with the
 // independently supplied key and expected node/epoch, correlates their full
-// task-permit bindings, and verifies the terminal Hermes workspace audit. Use
+// task-permit bindings, and verifies the terminal built-in workspace audit. Use
 // VerifyCheckpointV1 as well when the checkpoint companion is available.
 func VerifyResultV1(
 	command VerifiedCommandV1,
@@ -662,7 +688,7 @@ func VerifyResultV1(
 	}
 	terminal, _ := decodeCanonicalBase64(result.TerminalResultBase64, MaxTerminalResultBytes)
 	receipts, _ := decodeCanonicalBase64(result.GatewayEvidenceBase64, MaxGatewayEvidenceBytes)
-	hermes, gatewayResult, err := verifyProjectedEvidence(
+	canary, gatewayResult, err := verifyProjectedEvidence(
 		command, result, terminal, receipts, receiptPublic,
 	)
 	if err != nil {
@@ -673,7 +699,7 @@ func VerifyResultV1(
 		commandKey:      command.commandKey,
 		terminalResult:  append([]byte(nil), terminal...),
 		gatewayReceipts: append([]byte(nil), receipts...),
-		hermes:          hermes, gateway: cloneGatewayEvidence(gatewayResult),
+		canary:          canary, gateway: cloneGatewayEvidence(gatewayResult),
 	}, nil
 }
 
@@ -683,23 +709,24 @@ func verifyProjectedEvidence(
 	terminal []byte,
 	receipts []byte,
 	receiptPublic ed25519.PublicKey,
-) (activation.HermesCanaryResultV1, activation.GatewayEvidenceResultV1, error) {
+) (activation.CanaryResultV1, activation.GatewayEvidenceResultV1, error) {
 	if len(receiptPublic) != ed25519.PublicKeySize ||
 		controlprotocol.ExecutorEvidencePublicKeySHA256(receiptPublic) != command.command.ReceiptAuthority.PublicKeySHA256 {
-		return activation.HermesCanaryResultV1{}, activation.GatewayEvidenceResultV1{},
+		return activation.CanaryResultV1{}, activation.GatewayEvidenceResultV1{},
 			invalidResult("Gateway receipt public key does not match its pin")
 	}
-	hermes, err := activation.VerifyHermesWorkspaceAuditResultV1(
-		terminal,
-		agentrelease.HermesSessionIDPrefix+"-"+command.command.ActivationID,
-	)
-	if err != nil {
-		return activation.HermesCanaryResultV1{}, activation.GatewayEvidenceResultV1{},
-			invalidResult("verify Hermes workspace audit: %v", err)
+	contract, ok := agentrelease.CanaryContractForOperation(command.permit.Statement.ServiceID, command.command.OperationID)
+	if !ok {
+		return activation.CanaryResultV1{}, activation.GatewayEvidenceResultV1{}, invalidResult("canary contract is unavailable")
 	}
-	if hermes.RunID != result.RunID {
-		return activation.HermesCanaryResultV1{}, activation.GatewayEvidenceResultV1{},
-			invalidResult("Hermes run ID does not match the projected result")
+	canary, err := activation.VerifyCanaryResultV1(contract.Kind, terminal, command.command.ActivationID)
+	if err != nil {
+		return activation.CanaryResultV1{}, activation.GatewayEvidenceResultV1{},
+			invalidResult("verify workspace audit: %v", err)
+	}
+	if canary.RunID != result.RunID {
+		return activation.CanaryResultV1{}, activation.GatewayEvidenceResultV1{},
+			invalidResult("canary run ID does not match the projected result")
 	}
 	gatewayResult, err := activation.VerifyGatewayEvidenceV1(
 		activation.GatewayEvidenceRequestV1{
@@ -711,7 +738,7 @@ func verifyProjectedEvidence(
 		receipts,
 	)
 	if err != nil {
-		return activation.HermesCanaryResultV1{}, activation.GatewayEvidenceResultV1{},
+		return activation.CanaryResultV1{}, activation.GatewayEvidenceResultV1{},
 			invalidResult("verify Gateway task evidence: %v", err)
 	}
 	coordinate := gatewayResult.Coordinate
@@ -722,26 +749,26 @@ func verifyProjectedEvidence(
 		gatewayResult.Canary.PermitDigest != result.PermitDigest ||
 		gatewayResult.Canary.ResultDigest != result.TerminalResultDigest ||
 		gatewayResult.Canary.ResultBytes != result.TerminalResultBytes {
-		return activation.HermesCanaryResultV1{}, activation.GatewayEvidenceResultV1{},
+		return activation.CanaryResultV1{}, activation.GatewayEvidenceResultV1{},
 			invalidResult("verified Gateway evidence does not match the projected result")
 	}
 	authorizedAt, err := time.Parse(time.RFC3339Nano, gatewayResult.AuthorizedAt)
 	if err != nil {
-		return activation.HermesCanaryResultV1{}, activation.GatewayEvidenceResultV1{},
+		return activation.CanaryResultV1{}, activation.GatewayEvidenceResultV1{},
 			invalidResult("Gateway authorization time is invalid")
 	}
 	terminalAt, err := time.Parse(time.RFC3339Nano, gatewayResult.TerminalAt)
 	if err != nil {
-		return activation.HermesCanaryResultV1{}, activation.GatewayEvidenceResultV1{},
+		return activation.CanaryResultV1{}, activation.GatewayEvidenceResultV1{},
 			invalidResult("Gateway terminal time is invalid")
 	}
 	notBefore, err := time.Parse(time.RFC3339, command.permit.Statement.NotBefore)
 	if err != nil || authorizedAt.Before(notBefore) ||
 		authorizedAt.After(command.deadline) || terminalAt.After(command.deadline) {
-		return activation.HermesCanaryResultV1{}, activation.GatewayEvidenceResultV1{},
+		return activation.CanaryResultV1{}, activation.GatewayEvidenceResultV1{},
 			invalidResult("Gateway evidence falls outside the authorized canary deadline")
 	}
-	return hermes, gatewayResult, nil
+	return canary, gatewayResult, nil
 }
 
 // VerifyCheckpointV1 binds one canonical existing activation checkpoint to the
@@ -778,7 +805,7 @@ func VerifyCheckpointV1(
 	return nil
 }
 
-// BuildResultV1 verifies raw Gateway and Hermes evidence, requires an exact
+// BuildResultV1 verifies raw Gateway and agent evidence, requires an exact
 // matching canonical activation checkpoint, and then returns the bounded
 // qualified projection. Compute checkpointRaw with BuildCheckpointV1 but append
 // it only after this function succeeds, so projection overflow can never claim
@@ -858,13 +885,6 @@ func cloneCommand(command CommandV1) CommandV1 {
 		command.Admission.ConnectorIDs...,
 	)
 	return command
-}
-
-func fixedHermesRequest(activationID string) ([]byte, error) {
-	return agentrelease.BuildCanaryRequest(agentrelease.RequestRecipe{
-		Input:           agentrelease.HermesWorkspaceAuditInput,
-		SessionIDPrefix: agentrelease.HermesSessionIDPrefix,
-	}, activationID)
 }
 
 func decodeCanonicalBase64(value string, maximum int) ([]byte, error) {
