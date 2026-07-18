@@ -228,15 +228,7 @@ func MarshalStatement(statement Statement, payloadType string) ([]byte, error) {
 	if payloadType != PayloadTypeV5 {
 		return json.Marshal(statement)
 	}
-	return json.Marshal(statementV5Wire{
-		SchemaVersion: statement.SchemaVersion, EffectMode: statement.EffectMode, ApprovalThreshold: statement.ApprovalThreshold,
-		NodeID: statement.NodeID, TenantID: statement.TenantID, InstanceID: statement.InstanceID, Generation: statement.Generation,
-		CapsuleDigest: statement.CapsuleDigest, PolicyDigest: statement.PolicyDigest, RoutePolicyDigest: statement.RoutePolicyDigest,
-		ConnectorID: statement.ConnectorID, OperationID: statement.OperationID, OperationDigest: statement.OperationDigest,
-		TaskID: statement.TaskID, RequestDigest: statement.RequestDigest, RequestBytes: statement.RequestBytes,
-		ContentType: statement.ContentType, InfluenceSequence: statement.InfluenceSequence, InfluenceHash: statement.InfluenceHash,
-		NotBefore: statement.NotBefore, ExpiresAt: statement.ExpiresAt,
-	})
+	return json.Marshal(statementV5Wire(statement))
 }
 
 // Verify authenticates and validates one bounded DSSE permit. maxValidity is
