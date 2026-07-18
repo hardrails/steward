@@ -189,7 +189,7 @@ func installCompletionFile(path string, content []byte, force bool) (bool, error
 		return false, fmt.Errorf("create completion directory: %w", err)
 	}
 	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		if !info.Mode().IsRegular() {
 			return false, errors.New("completion target must be a regular file, not a link")
 		}
 		existing, readErr := os.ReadFile(path)

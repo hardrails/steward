@@ -192,7 +192,7 @@ func (s *FenceStore) Maintenance() MaintenanceState {
 // established.
 func (s *FenceStore) SetMaintenance(enabled bool, reason string, now time.Time) error {
 	if enabled {
-		if !validMaintenanceReason(reason) || now.IsZero() {
+		if !ValidMaintenanceReason(reason) || now.IsZero() {
 			return errors.New("maintenance requires a bounded reason and observation time")
 		}
 		now = now.UTC()
@@ -439,7 +439,7 @@ func (s *FenceStore) decode(raw []byte) error {
 				return errors.New("invalid fence maintenance time")
 			}
 			reason, rest, ok := takeFenceText(rest, 256)
-			if !ok || !validMaintenanceReason(reason) {
+			if !ok || !ValidMaintenanceReason(reason) {
 				return errors.New("invalid fence maintenance reason")
 			}
 			s.maintenance = MaintenanceState{Enabled: true, EnteredAt: enteredAt, Reason: reason}
@@ -455,7 +455,9 @@ func (s *FenceStore) decode(raw []byte) error {
 
 func fenceKey(tenantID, instanceID string) string { return tenantID + "\x00" + instanceID }
 
-func validMaintenanceReason(value string) bool {
+// ValidMaintenanceReason reports whether value is safe for both the executor
+// API and the durable fence representation.
+func ValidMaintenanceReason(value string) bool {
 	if len(value) == 0 || len(value) > 256 || strings.TrimSpace(value) != value || !utf8.ValidString(value) {
 		return false
 	}

@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -48,7 +48,7 @@ func (s *Server) maintenanceEnter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request maintenanceEnterRequest
-	if err := dsse.DecodeStrictInto(raw, maxBodyBytes, &request); err != nil || !validMaintenanceReason(request.Reason) {
+	if err := dsse.DecodeStrictInto(raw, maxBodyBytes, &request); err != nil || !admission.ValidMaintenanceReason(request.Reason) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must contain one bounded maintenance reason")
 		return
 	}
@@ -111,16 +111,4 @@ func (s *Server) maintenanceStatusLocked() maintenanceStatusResponse {
 		Enabled:       state.Enabled, EnteredAt: state.EnteredAt, Reason: state.Reason,
 		ActiveRuntimeRefs: refs, PendingOperations: len(s.secure.journal.Pending()),
 	}
-}
-
-func validMaintenanceReason(value string) bool {
-	if len(value) == 0 || len(value) > 256 || strings.TrimSpace(value) != value || !utf8.ValidString(value) {
-		return false
-	}
-	for _, character := range value {
-		if character < 0x20 || character == 0x7f {
-			return false
-		}
-	}
-	return true
 }
