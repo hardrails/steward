@@ -296,6 +296,22 @@ func TestOpenClawReleaseAndRequestUseTheClosedQualifiedContract(t *testing.T) {
 	if observed, ok := CanaryContractForOperation(OpenClawServiceID, OpenClawOperationID); !ok || observed != contract {
 		t.Fatalf("operation contract = %#v, %t", observed, ok)
 	}
+	if observed, ok := CanaryContractForService(OpenClawServiceID); !ok || observed != contract {
+		t.Fatalf("service contract = %#v, %t", observed, ok)
+	}
+	if observed, ok := CanaryContractForService("custom-agent-api"); ok || observed.Kind != "" {
+		t.Fatalf("unknown service contract = %#v, %t", observed, ok)
+	}
+	if _, err := CanarySessionID("custom-contract", "activation-001"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unknown contract session err = %v", err)
+	}
+	if _, err := CanarySessionID(contract.Kind, "tenant/activation"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid activation session err = %v", err)
+	}
+	tooLong := strings.Repeat("a", 128-len(contract.Request.SessionIDPrefix))
+	if _, err := CanarySessionID(contract.Kind, tooLong); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversized derived session err = %v", err)
+	}
 
 	capsule := fixture.capsule
 	capsule.CapsuleID = "openclaw-workspace-audit"

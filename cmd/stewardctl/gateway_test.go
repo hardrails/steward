@@ -153,6 +153,20 @@ func TestGatewayCommandRejectsAmbiguousInputs(t *testing.T) {
 	}
 }
 
+func TestGatewayAgentServicePresetsAreFinite(t *testing.T) {
+	hermes, ok := gatewayAgentServicePreset("hermes")
+	if !ok || hermes.Kind != agentrelease.CanaryKindHermesWorkspaceAuditV1 {
+		t.Fatalf("Hermes preset=%#v ok=%t", hermes, ok)
+	}
+	openClaw, ok := gatewayAgentServicePreset("openclaw")
+	if !ok || openClaw.Kind != agentrelease.CanaryKindOpenClawWorkspaceAuditV1 {
+		t.Fatalf("OpenClaw preset=%#v ok=%t", openClaw, ok)
+	}
+	if contract, ok := gatewayAgentServicePreset("custom"); ok || contract.Kind != "" {
+		t.Fatalf("unknown preset=%#v ok=%t", contract, ok)
+	}
+}
+
 func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "sgcs-")
 	if err != nil {

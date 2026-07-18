@@ -75,6 +75,7 @@ func TestActivationCanaryClosedContractRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if verified.Hermes().RunID != fixture.result.RunID ||
+		verified.OpenClaw() != (activation.OpenClawCanaryResultV1{}) ||
 		verified.Gateway().Canary.TaskDigest != fixture.result.TaskDigest ||
 		!bytes.Equal(verified.TerminalResult(), fixture.terminal) ||
 		!bytes.Equal(verified.GatewayReceipts(), fixture.receipts) {
