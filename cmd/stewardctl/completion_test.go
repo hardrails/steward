@@ -49,6 +49,13 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "service", "set", "-agent", "o"}); !slices.Equal(candidates, []string{"openclaw"}) {
 		t.Fatalf("agent preset candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"permit", "con"}); !slices.Equal(candidates, []string{"context"}) {
+		t.Fatalf("permit context candidates=%v", candidates)
+	}
+	permitFlags := stewardctlCompletionCandidates([]string{"permit", "issue", "-con"})
+	if !slices.Equal(permitFlags, []string{"-connector-id", "-context"}) {
+		t.Fatalf("permit issue flags=%v", permitFlags)
+	}
 
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0o700); err != nil {

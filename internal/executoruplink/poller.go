@@ -297,6 +297,7 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 				Capabilities: []string{
 					"signed-commands-v2", "delivery-leases-v3",
 					controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
+					controlprotocol.ExecutorCapabilityContextLockedEffectsV1,
 					"multi-tenant", "read", "state-purge",
 				},
 			})
@@ -306,6 +307,7 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 				"delivery-leases-v3",
 				controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
 				controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
+				controlprotocol.ExecutorCapabilityContextLockedEffectsV1,
 				controlprotocol.ExecutorCapabilityRolloutAuthorizationContextV1,
 				"multi-tenant",
 				"read",
@@ -328,6 +330,7 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 				Capabilities: []string{
 					"signed-commands-v2",
 					controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
+					controlprotocol.ExecutorCapabilityContextLockedEffectsV1,
 					"multi-tenant", "read", "state-purge",
 				},
 			})

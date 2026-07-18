@@ -599,7 +599,13 @@ func (e EffectiveAdmission) AuthorizedActionContextRequired() (bool, error) {
 	if e.Intent.EffectMode != EffectModeAuthorized {
 		return false, deny("instance was not admitted for authorized effects")
 	}
-	tenant, ok := e.SitePolicy.tenant(e.Intent.TenantID)
+	return e.SitePolicy.AuthorizedActionContextRequired(e.Intent.TenantID)
+}
+
+// AuthorizedActionContextRequired reports the tenant's site-root-signed
+// context-lock requirement without exposing mutable policy state.
+func (p SitePolicy) AuthorizedActionContextRequired(tenantID string) (bool, error) {
+	tenant, ok := p.tenant(tenantID)
 	if !ok || tenant.AuthorizedEffects == nil {
 		return false, deny("tenant has no authorized effects policy")
 	}

@@ -18,7 +18,140 @@ import (
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/gateway"
+	"github.com/hardrails/steward/internal/influence"
 )
+
+func TestPermitContextReconstructsHistoryAndIssuesV5(t *testing.T) {
+	directory := t.TempDir()
+	privatePath, publicPath := generateTestKeyPair(t, directory, "context-approver")
+	receiptPrivatePath, receiptPublicPath := generateTestKeyPair(t, directory, "context-receipt")
+	request := []byte(`{"title":"Review backup alarm"}`)
+	requestPath := filepath.Join(directory, "request.json")
+	if err := os.WriteFile(requestPath, request, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	intent := admission.InstanceIntent{
+		TenantID: "tenant-a", NodeID: "node-a", InstanceID: "agent-a", LineageID: "lineage-a", Generation: 9,
+		CapsuleDigest: digest, Resources: admission.ResourceLimits{MemoryBytes: 1, CPUMillis: 1, PIDs: 1},
+		Capabilities: admission.Capabilities{Connector: true}, StateDisposition: "none",
+		ConnectorIDs: []string{"ticketing"}, EffectMode: admission.EffectModeAuthorized,
+	}
+	intentPath := writePermitJSON(t, directory, "context-intent.json", intent)
+	grantID := gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation)
+	admitted := permitAdmission{
+		RuntimeRef: "executor-" + strings.Repeat("b", 64), CapsuleDigest: digest,
+		PolicyDigest: "sha256:" + strings.Repeat("c", 64), Generation: intent.Generation,
+		GrantID: grantID, ConnectorIDs: intent.ConnectorIDs, RoutePolicyDigest: "sha256:" + strings.Repeat("d", 64),
+		EffectMode: admission.EffectModeAuthorized, ActionApprovalThreshold: 1, ActionContextRequired: true,
+	}
+	admissionPath := writePermitJSON(t, directory, "context-admission.json", admitted)
+	trustPath := writeActionTrustFixture(t, directory, intent.NodeID, intent.TenantID, "ticketing", "create-ticket",
+		"approver-a", publicPath, 300)
+	receiptPrivate, err := readPrivateKey(receiptPrivatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptsPath := filepath.Join(directory, "context-receipts.ndjson")
+	ledger, err := connectorledger.Open(receiptsPath, receiptPrivate, "node-a/gateway", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	contextPath := filepath.Join(directory, "genesis-context.json")
+	var contextOutput bytes.Buffer
+	if err := run([]string{
+		"permit", "context", "-admission", admissionPath, "-intent", intentPath, "-receipts", receiptsPath,
+		"-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/gateway", "-receipt-epoch", "4", "-out", contextPath,
+	}, &contextOutput, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	genesis, err := influence.Genesis(intent.TenantID, grantID, intent.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contextOutput.String() != genesis.ChainHash+"\n" {
+		t.Fatalf("context stdout=%q", contextOutput.String())
+	}
+
+	fixedNow := time.Date(2026, time.July, 17, 20, 0, 0, 0, time.UTC)
+	priorNow := timeNow
+	timeNow = func() time.Time { return fixedNow }
+	t.Cleanup(func() { timeNow = priorNow })
+	permitPath := filepath.Join(directory, "context-permit.dsse.json")
+	if err := run([]string{
+		"permit", "issue", "-admission", admissionPath, "-intent", intentPath, "-context", contextPath,
+		"-trust", trustPath, "-request", requestPath, "-connector-id", "ticketing", "-operation-id", "create-ticket",
+		"-task-id", "task-context-1", "-key", privatePath, "-key-id", "approver-a", "-out", permitPath,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(permitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := readPublicKey(publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := actionpermit.Verify(raw, map[string]ed25519.PublicKey{"approver-a": public}, fixedNow, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.PayloadType != actionpermit.PayloadTypeV5 || verified.Statement.InfluenceSequence != 0 ||
+		verified.Statement.InfluenceHash != genesis.ChainHash || verified.Statement.ApprovalThreshold != 1 {
+		t.Fatalf("context permit=%#v", verified)
+	}
+
+	ledger, err = connectorledger.Open(receiptsPath, receiptPrivate, "node-a/gateway", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := connectorledger.Event{
+		Phase: connectorledger.Authorize, Outcome: connectorledger.Allowed, Kind: connectorledger.ConnectorCall,
+		EffectMode: connectorledger.EffectModeAuthorized, TenantID: intent.TenantID, RuntimeRef: admitted.RuntimeRef,
+		CapsuleDigest: admitted.CapsuleDigest, PolicyDigest: admitted.PolicyDigest, RoutePolicyDigest: admitted.RoutePolicyDigest,
+		Generation: intent.Generation, GrantID: grantID, ConnectorID: "ticketing", OperationID: "create-ticket",
+		OperationPolicyDigest: verified.Statement.OperationDigest,
+		TaskDigest:            gateway.ConnectorCallDigest(intent.TenantID, intent.InstanceID, "task-context-1", "ticketing", "create-ticket"),
+		AuthorityKeyID:        "approver-a", PermitDigest: verified.EnvelopeDigest, RequestDigest: verified.Statement.RequestDigest,
+		RequestBytes: verified.Statement.RequestBytes, InfluenceHash: genesis.ChainHash,
+	}
+	if _, err := ledger.Begin(event); err != nil {
+		t.Fatal(err)
+	}
+	terminal := event
+	terminal.Phase, terminal.Outcome, terminal.HTTPStatus = connectorledger.Terminal, connectorledger.Responded, 201
+	terminal.ResponseBytes, terminal.ResponseDigest = 12, actionpermit.RequestDigest([]byte(`{"ok":true}`))
+	terminalHead, err := ledger.Finish(terminal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantNext, err := influence.Advance(genesis, terminalHead.ChainHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextPath := filepath.Join(directory, "next-context.json")
+	contextOutput.Reset()
+	if err := run([]string{
+		"permit", "context", "-admission", admissionPath, "-intent", intentPath, "-receipts", receiptsPath,
+		"-receipt-public-key", receiptPublicPath, "-receipt-node-id", "node-a/gateway", "-receipt-epoch", "4",
+		"-expected-sequence", "2", "-expected-chain-hash", terminalHead.ChainHash, "-out", nextPath,
+	}, &contextOutput, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var gotNext influence.Head
+	nextRaw, err := os.ReadFile(nextPath)
+	if err != nil || json.Unmarshal(nextRaw, &gotNext) != nil || gotNext != wantNext {
+		t.Fatalf("next context=%#v want=%#v err=%v", gotNext, wantNext, err)
+	}
+}
 
 func TestPermitIssueAndVerifyExactRequest(t *testing.T) {
 	directory := t.TempDir()
@@ -485,6 +618,46 @@ func TestPermitMultiPartyApprovalHandoffIsExactAndNonOverwriting(t *testing.T) {
 		"-out", filepath.Join(directory, "tampered.dsse.json"),
 	}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "exact request bytes") {
 		t.Fatalf("tampered request approval error = %v", err)
+	}
+
+	if err := os.WriteFile(requestPath, request, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	admitted.ActionContextRequired = true
+	writePermitJSONReplace(t, admissionPath, admitted)
+	contextHead, err := influence.Genesis(intent.TenantID, admitted.GrantID, intent.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextPath := writePermitJSON(t, directory, "approval-context.json", contextHead)
+	contextPartialPath := filepath.Join(directory, "context-partial.dsse.json")
+	if err := run([]string{
+		"permit", "issue", "-admission", admissionPath, "-intent", intentPath, "-context", contextPath, "-trust", trustPath,
+		"-request", requestPath, "-connector-id", "secrets-admin", "-operation-id", "rotate", "-task-id", "rotate-context",
+		"-key", privateA, "-key-id", "approver-a", "-out", contextPartialPath,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	contextCompletePath := filepath.Join(directory, "context-complete.dsse.json")
+	if err := run([]string{
+		"permit", "approve", "-in", contextPartialPath, "-admission", admissionPath, "-intent", intentPath,
+		"-trust", trustPath, "-request", requestPath, "-key", privateB, "-key-id", "approver-b", "-out", contextCompletePath,
+	}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	contextRaw, err := os.ReadFile(contextCompletePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextVerified, err := actionpermit.Verify(contextRaw, map[string]ed25519.PublicKey{
+		"approver-a": publicA, "approver-b": publicB,
+	}, fixedNow, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contextVerified.PayloadType != actionpermit.PayloadTypeV5 ||
+		contextVerified.Statement.InfluenceHash != contextHead.ChainHash || contextVerified.Statement.ApprovalThreshold != 2 {
+		t.Fatalf("multi-party context permit=%#v", contextVerified)
 	}
 }
 

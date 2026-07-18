@@ -184,11 +184,19 @@ func executeRolloutTarget(
 				}
 				return fmt.Errorf("preflight rollout node: %w", callErr)
 			}
+			contextLockedEffects := false
+			if target.prepared.Intent().EffectMode == admission.EffectModeAuthorized {
+				contextLockedEffects, err = run.verified.SitePolicy.AuthorizedActionContextRequired(run.plan.TenantID)
+				if err != nil {
+					return markRolloutActionRequired(store, run, index, stdout, jsonOutput, reasonNodePreflightFailed, err)
+				}
+			}
 			if node.NodeID != target.prepared.Target().NodeID ||
 				!nodeSupportsRollout(
 					node,
 					run.plan.TenantID,
 					target.prepared.Intent().EffectMode == admission.EffectModeAuthorized,
+					contextLockedEffects,
 				) {
 				return markRolloutActionRequired(
 					store, run, index, stdout, jsonOutput,
