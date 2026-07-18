@@ -1474,6 +1474,7 @@ func TestSecureAdmissionProjectsAuthorizedEffectsIntoImmutableRuntimeGrant(t *te
 	grant := grants.grants[admitted.GrantID]
 	if admitted.EffectMode != admission.EffectModeAuthorized ||
 		runtime.EffectMode != admission.EffectModeAuthorized || grant.EffectMode != gateway.EffectModeAuthorized ||
+		!admitted.ActionContextRequired || !runtime.ActionContextRequired || !grant.ActionContextRequired ||
 		runtime.NodeID != intent.NodeID || grant.NodeID != intent.NodeID ||
 		len(runtime.EgressRouteIDs) != 0 || len(grant.EgressRouteIDs) != 0 ||
 		admitted.ActionApprovalThreshold != 2 || runtime.ActionApprovalThreshold != 2 || grant.ActionApprovalThreshold != 2 ||
@@ -2875,7 +2876,7 @@ func secureAdmissionFixtureFor(t *testing.T, capabilities admission.Capabilities
 	}
 	if len(authorizedEffects) > 0 && authorizedEffects[0] {
 		policy.Tenants[0].AuthorizedEffects = &admission.AuthorizedEffectsPolicy{
-			Mode: admission.AuthorizedEffectsRequired, MinApprovals: 2,
+			Mode: admission.AuthorizedEffectsRequired, MinApprovals: 2, ContextBinding: admission.ActionContextRequired,
 			Keys: []admission.ActionKey{{
 				KeyID: "effects-approver-a", PublicKey: base64.StdEncoding.EncodeToString(actionPublic),
 				ConnectorIDs: []string{"git.read", "issues.create"},

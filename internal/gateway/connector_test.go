@@ -834,7 +834,7 @@ func TestAuthorizedEffectsDenyDowngradeAndRecordOneBoundedDenial(t *testing.T) {
 		t.Fatalf("format summary=%#v err=%v", summary, err)
 	}
 	stateRaw, err := os.ReadFile(rig.config.StateFile)
-	if err != nil || !bytes.Contains(stateRaw, []byte(`"version":6`)) ||
+	if err != nil || !bytes.Contains(stateRaw, []byte(`"version":7`)) ||
 		!bytes.Contains(stateRaw, []byte(`"effect_mode":"authorized"`)) ||
 		!bytes.Contains(stateRaw, []byte(`"action_authorities"`)) {
 		t.Fatalf("authorized state=%s err=%v", stateRaw, err)
@@ -1095,6 +1095,60 @@ func TestMultiPartyAuthorizedEffectsRetainedGrantRequiresStateFormatSix(t *testi
 		_ = reopened.audit.Close()
 		_ = reopened.connectorLedger.Close()
 		t.Fatal("multi-party approval authority loaded from pre-v6 Gateway state")
+	}
+}
+
+func TestContextLockedAuthorizedEffectsArePolicyBoundAndRequireStateFormatSeven(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, authorizedEffects: true,
+	})
+	baselineDigest := rig.server.routePolicyDigestLocked(rig.grant)
+	contextLocked := rig.grant
+	contextLocked.ActionContextRequired = true
+	if baselineDigest == rig.server.routePolicyDigestLocked(contextLocked) {
+		t.Fatal("route-policy digest does not bind the context-lock requirement")
+	}
+	if !rig.server.validGrant(contextLocked) {
+		t.Fatal("valid context-locked grant rejected")
+	}
+
+	rig.server.mu.Lock()
+	rig.server.grants[contextLocked.GrantID] = contextLocked
+	rig.server.policyDigests[contextLocked.GrantID] = rig.server.routePolicyDigestLocked(contextLocked)
+	if err := rig.server.persistLocked(); err != nil {
+		rig.server.mu.Unlock()
+		t.Fatal(err)
+	}
+	rig.server.mu.Unlock()
+	rig.server.closeGrantListeners()
+	_ = rig.server.audit.Close()
+	_ = rig.server.connectorLedger.Close()
+
+	raw, err := os.ReadFile(rig.config.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["version"] = float64(6)
+	downgraded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rig.config.StateFile, downgraded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(rig.config, nil, nil, "service-token"); err == nil {
+		reopened.closeGrantListeners()
+		_ = reopened.audit.Close()
+		_ = reopened.connectorLedger.Close()
+		t.Fatal("context-locked authority loaded from pre-v7 Gateway state")
 	}
 }
 

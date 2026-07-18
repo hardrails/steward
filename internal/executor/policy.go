@@ -129,6 +129,7 @@ type RuntimeGrant struct {
 	ConnectorIDs            []string                       `json:"connector_ids,omitempty"`
 	EffectMode              string                         `json:"effect_mode,omitempty"`
 	ActionApprovalThreshold int                            `json:"action_approval_threshold,omitempty"`
+	ActionContextRequired   bool                           `json:"action_context_required,omitempty"`
 	ActionAuthorities       []gateway.GrantActionAuthority `json:"action_authorities,omitempty"`
 	CapsuleDigest           string                         `json:"capsule_digest,omitempty"`
 	PolicyDigest            string                         `json:"policy_digest,omitempty"`
@@ -283,7 +284,7 @@ func (w Workload) Validate() error {
 			(len(w.Runtime.TaskAuthorities) == 0 && w.Runtime.ServiceID != "") ||
 			((len(w.Runtime.TaskAuthorities) > 0 || authorizedEffects) && !boundedText(w.Runtime.NodeID, 128)) ||
 			(len(w.Runtime.TaskAuthorities) == 0 && !authorizedEffects && w.Runtime.NodeID != "") ||
-			!validRuntimeEffectAuthority(w.Runtime.EffectMode, w.Runtime.ActionApprovalThreshold, w.Runtime.EgressRouteIDs, w.Runtime.ConnectorIDs, w.Runtime.ActionAuthorities) ||
+			!validRuntimeEffectAuthority(w.Runtime.EffectMode, w.Runtime.ActionApprovalThreshold, w.Runtime.ActionContextRequired, w.Runtime.EgressRouteIDs, w.Runtime.ConnectorIDs, w.Runtime.ActionAuthorities) ||
 			(w.Runtime.Inference && !boundedText(w.Runtime.ModelAlias, 256)) ||
 			(w.Runtime.Inference && !boundedText(w.Runtime.RouteID, 128)) ||
 			(!w.Runtime.Inference && (w.Runtime.ModelAlias != "" || w.Runtime.RouteID != "")) ||
@@ -325,12 +326,13 @@ func (w Workload) Validate() error {
 func validRuntimeEffectAuthority(
 	effectMode string,
 	approvalThreshold int,
+	contextRequired bool,
 	egressRouteIDs, connectorIDs []string,
 	actionAuthorities []gateway.GrantActionAuthority,
 ) bool {
 	switch effectMode {
 	case "", gateway.EffectModeStandard:
-		return approvalThreshold == 0 && len(actionAuthorities) == 0
+		return approvalThreshold == 0 && !contextRequired && len(actionAuthorities) == 0
 	case gateway.EffectModeAuthorized:
 		if len(egressRouteIDs) != 0 || len(connectorIDs) == 0 || approvalThreshold < 1 ||
 			approvalThreshold > len(actionAuthorities) || !gateway.GrantActionAuthoritiesValid(actionAuthorities, connectorIDs) {

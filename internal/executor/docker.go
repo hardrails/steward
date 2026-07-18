@@ -174,6 +174,7 @@ const runtimeEgressRoutesLabel = "io.hardrails.runtime.egress-routes"
 const runtimeConnectorsLabel = "io.hardrails.runtime.connectors"
 const runtimeEffectModeLabel = "io.hardrails.runtime.effect-mode"
 const runtimeActionApprovalThresholdLabel = "io.hardrails.runtime.action-approval-threshold"
+const runtimeActionContextRequiredLabel = "io.hardrails.runtime.action-context-required"
 const runtimeActionAuthoritiesLabel = "io.hardrails.runtime.action-authorities"
 const maxRuntimeActionAuthorityLabelBytes = 64 << 10
 const runtimeCapsuleDigestLabel = "io.hardrails.runtime.capsule-digest"
@@ -453,7 +454,7 @@ func reservationFromLabels(labels map[string]string) (CapacityReservation, strin
 	runtimeLabels := []string{runtimeGrantLabel, runtimeNodeIDLabel, runtimeInferenceLabel, runtimeModelLabel, runtimeRouteLabel,
 		runtimeServicePortLabel, runtimeServiceIDLabel, runtimeTaskAuthoritiesLabel, runtimeGenerationLabel, runtimeSubnetLabel, runtimeGatewayLabel,
 		runtimeRelayIPLabel, runtimeAgentIPLabel, runtimeEgressRoutesLabel, runtimeConnectorsLabel, runtimeEffectModeLabel, runtimeActionAuthoritiesLabel,
-		runtimeActionApprovalThresholdLabel,
+		runtimeActionApprovalThresholdLabel, runtimeActionContextRequiredLabel,
 		runtimeCapsuleDigestLabel, runtimePolicyDigestLabel, runtimeActivationIDLabel, runtimeActivationBeginDigestLabel}
 	hasRuntimeMetadata := labels[runtimeNetworkLabel] != ""
 	for _, key := range runtimeLabels {
@@ -670,6 +671,9 @@ func (d *DockerHTTP) Create(ctx context.Context, name string, w Workload) error 
 		if w.Runtime.ActionApprovalThreshold > 0 {
 			labels[runtimeActionApprovalThresholdLabel] = strconv.Itoa(w.Runtime.ActionApprovalThreshold)
 		}
+		if w.Runtime.ActionContextRequired {
+			labels[runtimeActionContextRequiredLabel] = strconv.FormatBool(true)
+		}
 		if len(w.Runtime.ActionAuthorities) > 0 {
 			raw, _ := json.Marshal(dockerActionAuthorityLabel{Authorities: w.Runtime.ActionAuthorities})
 			labels[runtimeActionAuthoritiesLabel] = string(raw)
@@ -835,7 +839,7 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 	var runtimeGrant *RuntimeGrant
 	runtimeHardened := payload.HostConfig.NetworkMode == "none" && labels[runtimeNetworkLabel] == "" && labels[runtimeGrantLabel] == "" &&
 		labels[runtimeNodeIDLabel] == "" && labels[runtimeConnectorsLabel] == "" && labels[runtimeServiceIDLabel] == "" && labels[runtimeTaskAuthoritiesLabel] == "" &&
-		labels[runtimeEffectModeLabel] == "" && labels[runtimeActionApprovalThresholdLabel] == "" && labels[runtimeActionAuthoritiesLabel] == "" &&
+		labels[runtimeEffectModeLabel] == "" && labels[runtimeActionApprovalThresholdLabel] == "" && labels[runtimeActionContextRequiredLabel] == "" && labels[runtimeActionAuthoritiesLabel] == "" &&
 		labels[runtimeCapsuleDigestLabel] == "" && labels[runtimePolicyDigestLabel] == "" &&
 		labels[runtimeActivationIDLabel] == "" && labels[runtimeActivationBeginDigestLabel] == "" &&
 		hasExactNetwork(payload.NetworkSettings.Networks, "none", "", false) && len(payload.HostConfig.ExtraHosts) == 0 && len(payload.HostConfig.DNS) == 0
@@ -850,6 +854,10 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			// Containers admitted before the threshold label existed used exactly
 			// one action authority per permit.
 			approvalThreshold = 1
+		}
+		contextRequired, contextRequiredErr := false, error(nil)
+		if labels[runtimeActionContextRequiredLabel] != "" {
+			contextRequired, contextRequiredErr = strconv.ParseBool(labels[runtimeActionContextRequiredLabel])
 		}
 		taskAuthorities, taskAuthorityErr := decodeTaskAuthorityLabel(labels[runtimeTaskAuthoritiesLabel])
 		actionAuthorities, actionAuthorityErr := decodeActionAuthorityLabel(
@@ -866,20 +874,21 @@ func (d *DockerHTTP) Inspect(ctx context.Context, name string) (ObservedWorkload
 			ConnectorIDs:            splitRouteIDs(labels[runtimeConnectorsLabel]),
 			EffectMode:              labels[runtimeEffectModeLabel],
 			ActionApprovalThreshold: approvalThreshold,
+			ActionContextRequired:   contextRequired,
 			ActionAuthorities:       actionAuthorities,
 			CapsuleDigest:           labels[runtimeCapsuleDigestLabel], PolicyDigest: labels[runtimePolicyDigestLabel],
 			ActivationID:          labels[runtimeActivationIDLabel],
 			ActivationBeginDigest: labels[runtimeActivationBeginDigestLabel],
 		}
 		authorizedEffects := runtimeGrant.EffectMode == gateway.EffectModeAuthorized
-		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil && approvalThresholdErr == nil &&
+		runtimeHardened = serviceErr == nil && inferenceErr == nil && generationErr == nil && approvalThresholdErr == nil && contextRequiredErr == nil &&
 			taskAuthorityErr == nil && actionAuthorityErr == nil && generation > 0 &&
 			(len(taskAuthorities) == 0 && runtimeGrant.ServiceID == "" ||
 				len(taskAuthorities) > 0 && egressRouteID.MatchString(runtimeGrant.ServiceID) && servicePort > 0) &&
 			((len(taskAuthorities) > 0 || authorizedEffects) && boundedText(runtimeGrant.NodeID, 128) ||
 				len(taskAuthorities) == 0 && !authorizedEffects && runtimeGrant.NodeID == "") &&
 			validRuntimeEffectAuthority(
-				runtimeGrant.EffectMode, runtimeGrant.ActionApprovalThreshold,
+				runtimeGrant.EffectMode, runtimeGrant.ActionApprovalThreshold, runtimeGrant.ActionContextRequired,
 				runtimeGrant.EgressRouteIDs, runtimeGrant.ConnectorIDs, actionAuthorities,
 			) &&
 			validEgressRouteIDs(runtimeGrant.EgressRouteIDs) && validConnectorIDs(runtimeGrant.ConnectorIDs) &&

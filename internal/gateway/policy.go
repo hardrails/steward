@@ -13,6 +13,7 @@ type routePolicyDocument struct {
 	Version                     int                          `json:"version"`
 	EffectMode                  string                       `json:"effect_mode,omitempty"`
 	ActionApprovalThreshold     int                          `json:"action_approval_threshold,omitempty"`
+	ActionContextRequired       bool                         `json:"action_context_required,omitempty"`
 	AuthorizedActionAuthorities []grantActionAuthorityPolicy `json:"authorized_action_authorities,omitempty"`
 	Inference                   *inferenceRoutePolicy        `json:"inference,omitempty"`
 	Egress                      []egressRoutePolicy          `json:"egress,omitempty"`
@@ -188,6 +189,10 @@ func routePolicyDigest(grant Grant, routes map[string]loadedRoute, egressRoutes 
 		if grant.ActionApprovalThreshold > 1 {
 			document.Version = 8
 			document.ActionApprovalThreshold = grant.ActionApprovalThreshold
+		}
+		if grant.ActionContextRequired {
+			document.Version = 9
+			document.ActionContextRequired = true
 		}
 		for _, authority := range grant.ActionAuthorities {
 			public, _ := base64.StdEncoding.DecodeString(authority.PublicKey)
