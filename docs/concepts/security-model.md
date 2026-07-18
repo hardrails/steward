@@ -230,6 +230,12 @@ spent one complete exact-request permit before attempting the network call. They
 not show that each approver understood the request or that the upstream applied it
 exactly once.
 
+Format 7 additionally binds a context-locked permit to the grant's current signed
+history of completed Steward connector responses. Its terminal record commits the
+digest of the exact response bytes Gateway released. This proves history identity,
+not the safety or meaning of that history, and excludes observations outside the
+named connector boundary.
+
 For service tasks, verification can establish that the configured node key signed
 an authorization before dispatch and later signed a status and run ID. It does not
 establish that the agent performed useful work, that its output was true, or that an

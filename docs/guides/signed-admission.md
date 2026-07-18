@@ -131,6 +131,9 @@ the tenant rule, pin each public key to connector IDs, and require explicit
 generic egress and requires a complete exact-request permit. `min_approvals` can
 require distinct action keys over the same request. Follow the complete
 [Authorized Effects procedure]({{ '/guides/authorized-effects/' | relative_url }}).
+Set `"context_binding":"required"` only when each permit must also match the
+grant's current signed connector-response history; follow the separate
+[context-locking procedure]({{ '/guides/context-locked-effects/' | relative_url }}).
 
 ## 3. Sign a reusable profile capsule
 

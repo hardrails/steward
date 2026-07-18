@@ -112,6 +112,61 @@ func TestVerifyV3RequiresCanonicalDistinctApprovalThreshold(t *testing.T) {
 	}
 }
 
+func TestVerifyV5BindsGenesisInfluenceContextAndThreshold(t *testing.T) {
+	publicA, privateA := testKey(t)
+	publicB, privateB := testKey(t)
+	statement := validAuthorizedStatement()
+	statement.SchemaVersion = SchemaV5
+	statement.ApprovalThreshold = 2
+	statement.InfluenceHash = "sha256:" + strings.Repeat("e", 64)
+	payload, err := MarshalStatement(statement, PayloadTypeV5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(payload, []byte(`"influence_sequence":0`)) {
+		t.Fatalf("genesis sequence is absent: %s", payload)
+	}
+	first, err := dsse.Sign(PayloadTypeV5, payload, "authority-b", privateB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete, err := dsse.AddSignature(first, "authority-a", privateA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := dsse.Marshal(complete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := Verify(raw, map[string]ed25519.PublicKey{"authority-a": publicA, "authority-b": publicB}, testNow, 5*time.Minute)
+	if err != nil || verified.Statement != statement || !verified.Complete || verified.PayloadType != PayloadTypeV5 {
+		t.Fatalf("verified=%#v err=%v", verified, err)
+	}
+
+	for name, mutate := range map[string]func(map[string]any){
+		"missing sequence": func(value map[string]any) { delete(value, "influence_sequence") },
+		"missing hash":     func(value map[string]any) { delete(value, "influence_hash") },
+		"bad hash":         func(value map[string]any) { value["influence_hash"] = "sha256:bad" },
+		"zero threshold":   func(value map[string]any) { value["approval_threshold"] = float64(0) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var changed map[string]any
+			if err := json.Unmarshal(payload, &changed); err != nil {
+				t.Fatal(err)
+			}
+			mutate(changed)
+			changedRaw, err := json.Marshal(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			signed := signPayload(t, PayloadTypeV5, changedRaw, "authority-a", privateA)
+			if _, err := Verify(signed, map[string]ed25519.PublicKey{"authority-a": publicA}, testNow, 5*time.Minute); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("mutation err=%v", err)
+			}
+		})
+	}
+}
+
 func TestVerifyRejectsVersionAndEffectModeAmbiguity(t *testing.T) {
 	public, private := testKey(t)
 	trusted := map[string]ed25519.PublicKey{"authority-a": public}

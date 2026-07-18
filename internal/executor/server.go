@@ -289,6 +289,7 @@ type secureProvisionResponse struct {
 	ConnectorIDs            []string                       `json:"connector_ids,omitempty"`
 	EffectMode              string                         `json:"effect_mode,omitempty"`
 	ActionApprovalThreshold int                            `json:"action_approval_threshold,omitempty"`
+	ActionContextRequired   bool                           `json:"action_context_required,omitempty"`
 	ActionAuthorities       []gateway.GrantActionAuthority `json:"action_authorities,omitempty"`
 	RoutePolicyDigest       string                         `json:"route_policy_digest,omitempty"`
 	ActivationID            string                         `json:"activation_id,omitempty"`
@@ -438,6 +439,12 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			workload.Runtime.ActionApprovalThreshold = approvalThreshold
+			contextRequired, err := effective.AuthorizedActionContextRequired()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "enforcement_failed", "signed action context policy could not be projected into the runtime grant")
+				return
+			}
+			workload.Runtime.ActionContextRequired = contextRequired
 			actionAuthorities, err := admittedActionAuthorities(effective)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "enforcement_failed", "signed action authority could not be projected into the runtime grant")
@@ -1102,6 +1109,7 @@ func legacyRuntimeReplay(desired, observed Workload) (Workload, bool) {
 		len(desired.Runtime.TaskAuthorities) != 0 || len(observed.Runtime.TaskAuthorities) != 0 ||
 		desired.Runtime.EffectMode != "" || observed.Runtime.EffectMode != "" ||
 		desired.Runtime.ActionApprovalThreshold != 0 || observed.Runtime.ActionApprovalThreshold != 0 ||
+		desired.Runtime.ActionContextRequired || observed.Runtime.ActionContextRequired ||
 		len(desired.Runtime.ActionAuthorities) != 0 || len(observed.Runtime.ActionAuthorities) != 0 ||
 		!imageConfigDigest.MatchString(desired.Runtime.CapsuleDigest) || !imageConfigDigest.MatchString(desired.Runtime.PolicyDigest) ||
 		observed.Runtime.CapsuleDigest != "" || observed.Runtime.PolicyDigest != "" ||
@@ -1121,6 +1129,7 @@ func runtimeGrantEqualExceptAdmissionBindings(left, right *RuntimeGrant) bool {
 		left.ModelAlias == right.ModelAlias && left.ServicePort == right.ServicePort && left.ServiceID == right.ServiceID &&
 		left.ActivationID == right.ActivationID && left.ActivationBeginDigest == right.ActivationBeginDigest &&
 		left.EffectMode == right.EffectMode && left.ActionApprovalThreshold == right.ActionApprovalThreshold &&
+		left.ActionContextRequired == right.ActionContextRequired &&
 		slices.Equal(left.TaskAuthorities, right.TaskAuthorities) &&
 		slices.EqualFunc(left.ActionAuthorities, right.ActionAuthorities, func(left, right gateway.GrantActionAuthority) bool {
 			return left.KeyID == right.KeyID && left.PublicKey == right.PublicKey && slices.Equal(left.ConnectorIDs, right.ConnectorIDs)
@@ -1287,6 +1296,7 @@ func (s *Server) secureResponse(
 	}
 	response.EffectMode = runtime.EffectMode
 	response.ActionApprovalThreshold = runtime.ActionApprovalThreshold
+	response.ActionContextRequired = runtime.ActionContextRequired
 	response.ActionAuthorities = cloneGrantActionAuthorities(runtime.ActionAuthorities)
 	response.ActivationID = runtime.ActivationID
 	response.ActivationBeginDigest = runtime.ActivationBeginDigest

@@ -176,6 +176,33 @@ func TestAuthorizedEffectsApprovalThresholdIsSignedAchievableAndBackwardCompatib
 	}
 }
 
+func TestAuthorizedEffectsContextBindingIsExplicitAndPolicyControlled(t *testing.T) {
+	capsule, policy, intent, caller := authorizedEffectsFixture(t)
+	effective, err := Intersect(capsule, testDigest('d'), policy, testDigest('e'), "publisher-1", "site-root", intent, caller, PersistedFences{}, DefaultProfiles())
+	if err != nil {
+		t.Fatal(err)
+	}
+	required, err := effective.AuthorizedActionContextRequired()
+	if err != nil || required {
+		t.Fatalf("omitted context binding = (%t, %v), want false", required, err)
+	}
+
+	policy.Tenants[0].AuthorizedEffects.ContextBinding = ActionContextRequired
+	effective, err = Intersect(capsule, testDigest('d'), policy, testDigest('e'), "publisher-1", "site-root", intent, caller, PersistedFences{}, DefaultProfiles())
+	if err != nil {
+		t.Fatal(err)
+	}
+	required, err = effective.AuthorizedActionContextRequired()
+	if err != nil || !required {
+		t.Fatalf("required context binding = (%t, %v), want true", required, err)
+	}
+
+	effective.Intent.EffectMode = EffectModeStandard
+	if _, err := effective.AuthorizedActionContextRequired(); err == nil {
+		t.Fatal("standard-effects admission exposed authorized context policy")
+	}
+}
+
 func TestAuthorizedEffectsPolicyRejectsAmbiguousKeyIdentityAndScope(t *testing.T) {
 	publisher, _, _ := ed25519.GenerateKey(rand.Reader)
 	public, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -187,6 +214,7 @@ func TestAuthorizedEffectsPolicyRejectsAmbiguousKeyIdentityAndScope(t *testing.T
 		mutate func(*AuthorizedEffectsPolicy)
 	}{
 		{"invalid mode", func(p *AuthorizedEffectsPolicy) { p.Mode = "best-effort" }},
+		{"invalid context binding", func(p *AuthorizedEffectsPolicy) { p.ContextBinding = "best-effort" }},
 		{"empty keys", func(p *AuthorizedEffectsPolicy) { p.Keys = nil }},
 		{"threshold above key count", func(p *AuthorizedEffectsPolicy) { p.MinApprovals = 2 }},
 		{"invalid key ID", func(p *AuthorizedEffectsPolicy) { p.Keys[0].KeyID = "bad key" }},

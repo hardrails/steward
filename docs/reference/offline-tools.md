@@ -906,7 +906,9 @@ contract. Current lifecycle service tasks use format 4, with task-local sequence
 and hash links across authorization, dispatch, and terminal records. Format 5
 records authorized connector calls with explicit effect mode and the exact
 operation-policy digest. Format 6 adds the canonical signer set and threshold for
-a multi-party authorized call. One verified chain may contain all six formats. The
+a multi-party authorized call. Format 7 binds a context-locked call's current
+response-history head and terminal response digest. One verified chain may contain
+all seven formats. The
 observed format is the highest schema present. It is at least 2 when Gateway
 configures an action authority and 4 when it
 configures a current service-task operation, even before the receipt file exists or
@@ -915,7 +917,8 @@ authorized-effects denial, authorization, or terminal event raises the observed
 receipt format to 5 when its first record is written. The retained authorized grant
 separately requires Gateway state format 5 before that first call. A multi-party
 call raises the receipt boundary to 6, and its retained grant requires Gateway
-state format 6 as soon as it is stored. A target whose
+state format 6 as soon as it is stored. A context-required grant raises both
+boundaries to 7. A target whose
 manifest cannot read and preserve either observed boundary is incompatible.
 
 Executor evidence format 1 contains the original closed event vocabulary. Format 2
@@ -929,7 +932,7 @@ target whose evidence reader stops at format 1 is incompatible with that log.
 Gateway state format 4 retains the service ID and public tenant task authorities of
 task-enabled grants. Format 5 additionally retains authorized effect mode and
 signed-policy-derived connector/action-key scopes. Format 6 binds a multi-party
-approval threshold. A target release must read and
+approval threshold. Format 7 retains the context-lock requirement. A target release must read and
 preserve those bindings even if the receipt ledger has not yet recorded the related
 operation. Keep state and receipt-format compatibility checks together; neither
 file can be downgraded safely in isolation.
@@ -948,10 +951,33 @@ Steward node.
 
 When the supplied admission and intent select Authorized Effects, `permit issue`
 emits `steward.action-permit.v2` for a one-approver policy or an incomplete
-`steward.action-permit.v3` for a multi-party policy. Both fix `effect_mode` to
-`authorized`. Gateway rejects version 1 for that grant and accepts version 3 only
-after the exact signed threshold is present. Standard permit-enabled connectors
-continue to use version 1.
+`steward.action-permit.v3` for a multi-party policy. A context-locked policy emits
+`steward.action-permit.v5` for either threshold and requires `-context` with a
+verified `steward.effect-context.v1` document. These formats fix `effect_mode` to
+`authorized`. Gateway rejects version 1 for that grant and accepts a multi-party
+artifact only after the exact signed threshold is present. Standard
+permit-enabled connectors continue to use version 1.
+
+Derive the context from the signed Gateway receipt ledger before issuing a permit:
+
+```console
+stewardctl permit context \
+  -admission admission.json \
+  -intent instance-intent.json \
+  -receipts connector-receipts.ndjson \
+  -receipt-public-key connector-receipts.public \
+  -receipt-node-id steward-0123456789abcdef0123456789abcdef/gateway \
+  -receipt-epoch 1 \
+  -expected-sequence '<retained-sequence>' \
+  -expected-chain-hash 'sha256:<retained-chain-hash>' \
+  -out effect-context.json
+```
+
+The command verifies the complete ledger, reconstructs only the admitted grant's
+response history, and rejects overlapping or incomplete connector calls. Add
+`-context effect-context.json` to `permit issue`. See
+[Invalidate approvals when agent context changes]({{ '/guides/context-locked-effects/' | relative_url }})
+for the complete workflow and limitations.
 
 Before issuance, export Gateway's non-secret view:
 
@@ -1008,7 +1034,7 @@ stewardctl permit approve \
   -header-out action-permit.header
 ```
 
-`permit approve` accepts only canonical version-3 partial artifacts. It refuses to
+`permit approve` accepts canonical version-3 and version-5 partial artifacts. It refuses to
 overwrite or update the input, rejects a duplicate or unadmitted signer, verifies
 every existing signature and exact external binding, and adds a signature over the
 unchanged DSSE payload. Key IDs are canonically sorted. A final artifact contains
@@ -1087,7 +1113,9 @@ permit, request, grant, policy, connector operation, and stable task-based call
 digest, and re-evaluates the permit at the authorization receipt's signed
 observation time. A version-2 permit requires format-5 receipt bindings for
 `effect_mode` and the exact operation-policy digest. A version-3 permit requires
-format 6 and also binds the canonical signer set and approval threshold. Output contains `valid`,
+format 6 and also binds the canonical signer set and approval threshold. A
+version-5 permit requires format-7 influence sequence, influence hash, and
+terminal response-digest bindings. Output contains `valid`,
 `permit_digest`, `request_digest`, `permit_key_id`, `permit_key_ids`, the signed `statement`,
 matching `authorization`, optional `terminal`, and final `head`. Supply both
 expected-head fields to compare with an
@@ -1346,7 +1374,7 @@ stewardctl task audit \
   -expected-chain-hash 'sha256:<retained-chain-hash>'
 ```
 
-The command verifies formats 1 through 6 in one chain, finds the exact service-task
+The command verifies formats 1 through 7 in one chain, finds the exact service-task
 permit, re-evaluates it at the signed authorization time, and checks every available
 tenant, runtime, grant, policy, service, operation, task, authority, permit, and
 request binding. For a format-4 task it also verifies the task-local sequence and

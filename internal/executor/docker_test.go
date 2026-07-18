@@ -339,7 +339,7 @@ func TestCreateWithSignedConnectorInjectsOnlyFixedRelayURLAndAdmissionBindings(t
 			NetworkName: addresses.Name, GrantID: "grant-" + strings.Repeat("b", 64), NodeID: "node-a", Generation: 4,
 			Subnet: addresses.Subnet, Gateway: addresses.Gateway, RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP,
 			ConnectorIDs: []string{"git.read", "issues.create"},
-			EffectMode:   gateway.EffectModeAuthorized, ActionApprovalThreshold: 2, ActionAuthorities: actionAuthorities,
+			EffectMode:   gateway.EffectModeAuthorized, ActionApprovalThreshold: 2, ActionContextRequired: true, ActionAuthorities: actionAuthorities,
 			CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
 			ActivationID:          "activation-test",
 			ActivationBeginDigest: "sha256:" + strings.Repeat("e", 64),
@@ -357,6 +357,7 @@ func TestCreateWithSignedConnectorInjectsOnlyFixedRelayURLAndAdmissionBindings(t
 	if labels[runtimeConnectorsLabel] != "git.read,issues.create" ||
 		labels[runtimeEffectModeLabel] != gateway.EffectModeAuthorized ||
 		labels[runtimeActionApprovalThresholdLabel] != "2" ||
+		labels[runtimeActionContextRequiredLabel] != "true" ||
 		labels[runtimeActionAuthoritiesLabel] != string(actionAuthorityRaw) ||
 		labels[runtimeCapsuleDigestLabel] != workload.Runtime.CapsuleDigest ||
 		labels[runtimePolicyDigestLabel] != workload.Runtime.PolicyDigest ||
@@ -1308,7 +1309,7 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 		TaskAuthorities: taskAuthorities,
 		Subnet:          addresses.Subnet, Gateway: addresses.Gateway,
 		RelayIP: addresses.RelayIP, AgentIP: addresses.AgentIP, ConnectorIDs: []string{"git.read", "issues.create"},
-		EffectMode: gateway.EffectModeAuthorized, ActionApprovalThreshold: 2, ActionAuthorities: actionAuthorities,
+		EffectMode: gateway.EffectModeAuthorized, ActionApprovalThreshold: 2, ActionContextRequired: true, ActionAuthorities: actionAuthorities,
 		CapsuleDigest: "sha256:" + strings.Repeat("d", 64), PolicyDigest: "sha256:" + strings.Repeat("e", 64),
 		ActivationID:          "activation-test",
 		ActivationBeginDigest: "sha256:" + strings.Repeat("f", 64),
@@ -1348,8 +1349,9 @@ func TestInspectProjectsPersistentStateAndRuntimeGrant(t *testing.T) {
 					runtimeInferenceLabel: "true", runtimeModelLabel: "private-model", runtimeRouteLabel: "local",
 					runtimeServiceIDLabel: "hermes-api", runtimeTaskAuthoritiesLabel: string(authorityLabel),
 					runtimeEffectModeLabel: gateway.EffectModeAuthorized, runtimeActionApprovalThresholdLabel: "2",
-					runtimeActionAuthoritiesLabel: string(actionAuthorityLabel),
-					runtimeSubnetLabel:            addresses.Subnet, runtimeGatewayLabel: addresses.Gateway,
+					runtimeActionContextRequiredLabel: "true",
+					runtimeActionAuthoritiesLabel:     string(actionAuthorityLabel),
+					runtimeSubnetLabel:                addresses.Subnet, runtimeGatewayLabel: addresses.Gateway,
 					runtimeServicePortLabel: "8080", runtimeRelayIPLabel: addresses.RelayIP, runtimeAgentIPLabel: addresses.AgentIP,
 					runtimeConnectorsLabel: "git.read,issues.create", runtimeCapsuleDigestLabel: runtime.CapsuleDigest,
 					runtimePolicyDigestLabel:          runtime.PolicyDigest,

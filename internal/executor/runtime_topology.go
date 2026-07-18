@@ -86,6 +86,7 @@ func (s *Server) desiredGatewayGrant(workload Workload, serviceURL string) gatew
 		ServiceID: workload.Runtime.ServiceID, TaskAuthorities: append([]gateway.TaskAuthority(nil), workload.Runtime.TaskAuthorities...),
 		EffectMode:              workload.Runtime.EffectMode,
 		ActionApprovalThreshold: workload.Runtime.ActionApprovalThreshold,
+		ActionContextRequired:   workload.Runtime.ActionContextRequired,
 		ActionAuthorities:       cloneGrantActionAuthorities(workload.Runtime.ActionAuthorities),
 	}
 	if imageConfigDigest.MatchString(workload.Runtime.CapsuleDigest) && imageConfigDigest.MatchString(workload.Runtime.PolicyDigest) {

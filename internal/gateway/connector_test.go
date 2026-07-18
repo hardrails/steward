@@ -24,6 +24,7 @@ import (
 	"github.com/hardrails/steward/internal/actionpermit"
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/influence"
 )
 
 type connectorRigOptions struct {
@@ -37,6 +38,7 @@ type connectorRigOptions struct {
 	actionTenant      string
 	authorizedEffects bool
 	approvalThreshold int
+	contextRequired   bool
 }
 
 type connectorRig struct {
@@ -203,6 +205,7 @@ func newConnectorRig(t *testing.T, baseURL string, options connectorRigOptions) 
 		grant.NodeID = config.ActionPermitNodeID
 		grant.EffectMode = EffectModeAuthorized
 		grant.ActionApprovalThreshold = options.approvalThreshold
+		grant.ActionContextRequired = options.contextRequired
 		for _, authority := range config.ActionAuthorities {
 			grant.ActionAuthorities = append(grant.ActionAuthorities, GrantActionAuthority{
 				KeyID: authority.KeyID, PublicKey: authority.PublicKey, ConnectorIDs: []string{"issues"},
@@ -307,11 +310,16 @@ func actionPermitForPayload(
 		if rig.grant.ActionApprovalThreshold > 1 {
 			schemaVersion = actionpermit.SchemaV3
 		}
+		if rig.grant.ActionContextRequired {
+			schemaVersion = actionpermit.SchemaV5
+		}
 	}
 	if payloadType == "" {
 		if effectMode == actionpermit.EffectModeAuthorized {
 			payloadType = actionpermit.PayloadTypeV2
-			if rig.grant.ActionApprovalThreshold > 1 {
+			if rig.grant.ActionContextRequired {
+				payloadType = actionpermit.PayloadTypeV5
+			} else if rig.grant.ActionApprovalThreshold > 1 {
 				payloadType = actionpermit.PayloadTypeV3
 			}
 		} else {
@@ -333,10 +341,24 @@ func actionPermitForPayload(
 	if rig.grant.ActionApprovalThreshold > 1 {
 		statement.ApprovalThreshold = rig.grant.ActionApprovalThreshold
 	}
+	if rig.grant.ActionContextRequired {
+		statement.ApprovalThreshold = rig.grant.ActionApprovalThreshold
+		rig.server.mu.Lock()
+		head := rig.server.connectorInfluences[rig.grant.GrantID]
+		rig.server.mu.Unlock()
+		if head.SchemaVersion == "" {
+			head, err = influence.Genesis(rig.grant.TenantID, rig.grant.GrantID, rig.grant.Generation)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		statement.InfluenceSequence = head.Sequence
+		statement.InfluenceHash = head.ChainHash
+	}
 	if mutate != nil {
 		mutate(&statement)
 	}
-	payload, err := json.Marshal(statement)
+	payload, err := actionpermit.MarshalStatement(statement, payloadType)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +366,7 @@ func actionPermitForPayload(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payloadType == actionpermit.PayloadTypeV3 {
+	if rig.grant.ActionApprovalThreshold > 1 && (payloadType == actionpermit.PayloadTypeV3 || payloadType == actionpermit.PayloadTypeV5) {
 		envelope, err = dsse.AddSignature(envelope, "approver-b", rig.secondActionKey)
 		if err != nil {
 			t.Fatal(err)
@@ -518,6 +540,92 @@ func TestConnectorRequiresAndSpendsExactSignedActionPermit(t *testing.T) {
 	}
 }
 
+func TestContextLockedEffectsRejectStalePermitsAndCommitResponseHistory(t *testing.T) {
+	var calls atomic.Int64
+	responses := [][]byte{[]byte(`{"created":1}`), []byte(`{"created":2}`)}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		index := int(calls.Add(1)) - 1
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(responses[index])
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true,
+		authorizedEffects: true, contextRequired: true,
+	})
+	body := []byte(`{"title":"bounded"}`)
+	firstHeader, _ := actionPermitFor(t, rig, "task.context.first", "create", body, nil)
+	staleHeader, _ := actionPermitFor(t, rig, "task.context.stale", "create", body, nil)
+
+	firstRequest := connectorRequest(http.MethodPost, "issues", "create", "task.context.first", bytes.NewReader(body))
+	firstRequest.Header.Set(actionPermitHeader, firstHeader)
+	first := invokeConnector(rig.server, rig.grant.GrantID, firstRequest)
+	if first.Code != http.StatusOK || first.Body.String() != string(responses[0]) || calls.Load() != 1 {
+		t.Fatalf("first status=%d body=%s calls=%d", first.Code, first.Body.String(), calls.Load())
+	}
+
+	staleRequest := connectorRequest(http.MethodPost, "issues", "create", "task.context.stale", bytes.NewReader(body))
+	staleRequest.Header.Set(actionPermitHeader, staleHeader)
+	stale := invokeConnector(rig.server, rig.grant.GrantID, staleRequest)
+	if stale.Code != http.StatusForbidden || !strings.Contains(stale.Body.String(), `"error":"action_permit_denied"`) || calls.Load() != 1 {
+		t.Fatalf("stale status=%d body=%s calls=%d", stale.Code, stale.Body.String(), calls.Load())
+	}
+
+	freshHeader, _ := actionPermitFor(t, rig, "task.context.fresh", "create", body, nil)
+	freshRequest := connectorRequest(http.MethodPost, "issues", "create", "task.context.fresh", bytes.NewReader(body))
+	freshRequest.Header.Set(actionPermitHeader, freshHeader)
+	fresh := invokeConnector(rig.server, rig.grant.GrantID, freshRequest)
+	if fresh.Code != http.StatusOK || fresh.Body.String() != string(responses[1]) || calls.Load() != 2 {
+		t.Fatalf("fresh status=%d body=%s calls=%d", fresh.Code, fresh.Body.String(), calls.Load())
+	}
+
+	rig.server.mu.Lock()
+	live := rig.server.connectorInfluences[rig.grant.GrantID]
+	rig.server.mu.Unlock()
+	if live.Sequence != 2 {
+		t.Fatalf("live influence head=%#v", live)
+	}
+	reconstructed := newConnectorReceiptIndex()
+	var contextRecords []connectorledger.VerifiedReceipt
+	if _, err := connectorledger.VerifyRecords(
+		rig.config.ConnectorReceiptFile, rig.server.connectorReceiptPublic,
+		rig.config.ConnectorReceiptNodeID, rig.config.ConnectorReceiptEpoch,
+		func(record connectorledger.VerifiedReceipt) error {
+			if err := reconstructed.visit(record); err != nil {
+				return err
+			}
+			if record.Receipt.SchemaVersion == connectorledger.SchemaV7 {
+				contextRecords = append(contextRecords, record)
+			}
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if reconstructed.influences[rig.grant.GrantID] != live || len(contextRecords) != 4 {
+		t.Fatalf("reconstructed=%#v live=%#v records=%d", reconstructed.influences[rig.grant.GrantID], live, len(contextRecords))
+	}
+	if summary, err := InspectConnectorReceiptFormat(rig.config); err != nil || summary.FormatVersion != 7 {
+		t.Fatalf("context receipt format=%#v err=%v", summary, err)
+	}
+	if terminal := contextRecords[1].Receipt.Event; terminal.ResponseDigest != actionpermit.RequestDigest(responses[0]) ||
+		terminal.InfluenceSequence != 0 || terminal.InfluenceHash == "" {
+		t.Fatalf("first context terminal=%#v", terminal)
+	}
+	if authorization := contextRecords[2].Receipt.Event; authorization.InfluenceSequence != 1 || authorization.InfluenceHash == contextRecords[0].Receipt.Event.InfluenceHash {
+		t.Fatalf("second context authorization=%#v", authorization)
+	}
+	controlRequest(t, rig.server, http.MethodDelete, "/v1/grants/"+rig.grant.GrantID, nil, http.StatusNoContent)
+	registerConnectorGrant(t, rig.server, rig.grant)
+	activateConnectorGrant(t, rig.server, rig.grant.GrantID)
+	rig.server.mu.Lock()
+	afterReregister := rig.server.connectorInfluences[rig.grant.GrantID]
+	rig.server.mu.Unlock()
+	if afterReregister != live {
+		t.Fatalf("grant re-registration reset influence history: got=%#v want=%#v", afterReregister, live)
+	}
+}
+
 func TestAuthorizedEffectsRequiresEveryPolicyApprovalBeforeNetwork(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -669,7 +777,7 @@ func TestExactEffectBundleRequiresEverySignerOnEveryConnector(t *testing.T) {
 	wrongNodeHeaders := make(http.Header)
 	wrongNodeHeaders.Set(actionPermitHeader, wrongNodeHeader)
 	if _, err := verifyConnectorActionPermit(
-		wrongNodeHeaders, rig.connector, connectors, grant, rig.server.policyDigests[rig.grant.GrantID],
+		wrongNodeHeaders, rig.connector, connectors, grant, influence.Head{}, rig.server.policyDigests[rig.grant.GrantID],
 		"issues", "create", "task.bundle.scope", body, time.Now().UTC(),
 	); err == nil || !strings.Contains(err.Error(), "active tenant and grant") {
 		t.Fatalf("wrong-node bundle diagnostic = %v", err)
@@ -679,7 +787,7 @@ func TestExactEffectBundleRequiresEverySignerOnEveryConnector(t *testing.T) {
 	header.Set(actionPermitHeader, headerValue)
 	verify := func() error {
 		_, err := verifyConnectorActionPermit(
-			header, rig.connector, connectors, grant, rig.server.policyDigests[rig.grant.GrantID],
+			header, rig.connector, connectors, grant, influence.Head{}, rig.server.policyDigests[rig.grant.GrantID],
 			"issues", "create", "task.bundle.scope", body, time.Now().UTC(),
 		)
 		return err
@@ -834,7 +942,7 @@ func TestAuthorizedEffectsDenyDowngradeAndRecordOneBoundedDenial(t *testing.T) {
 		t.Fatalf("format summary=%#v err=%v", summary, err)
 	}
 	stateRaw, err := os.ReadFile(rig.config.StateFile)
-	if err != nil || !bytes.Contains(stateRaw, []byte(`"version":6`)) ||
+	if err != nil || !bytes.Contains(stateRaw, []byte(`"version":7`)) ||
 		!bytes.Contains(stateRaw, []byte(`"effect_mode":"authorized"`)) ||
 		!bytes.Contains(stateRaw, []byte(`"action_authorities"`)) {
 		t.Fatalf("authorized state=%s err=%v", stateRaw, err)
@@ -1095,6 +1203,68 @@ func TestMultiPartyAuthorizedEffectsRetainedGrantRequiresStateFormatSix(t *testi
 		_ = reopened.audit.Close()
 		_ = reopened.connectorLedger.Close()
 		t.Fatal("multi-party approval authority loaded from pre-v6 Gateway state")
+	}
+}
+
+func TestContextLockedAuthorizedEffectsArePolicyBoundAndRequireStateFormatSeven(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	rig := newConnectorRig(t, upstream.URL, connectorRigOptions{
+		allowedCIDRs: []string{"127.0.0.0/8"}, requirePermit: true, authorizedEffects: true,
+	})
+	baselineDigest := rig.server.routePolicyDigestLocked(rig.grant)
+	contextLocked := rig.grant
+	contextLocked.ActionContextRequired = true
+	if baselineDigest == rig.server.routePolicyDigestLocked(contextLocked) {
+		t.Fatal("route-policy digest does not bind the context-lock requirement")
+	}
+	if !rig.server.validGrant(contextLocked) {
+		t.Fatal("valid context-locked grant rejected")
+	}
+
+	rig.server.mu.Lock()
+	rig.server.grants[contextLocked.GrantID] = contextLocked
+	rig.server.policyDigests[contextLocked.GrantID] = rig.server.routePolicyDigestLocked(contextLocked)
+	if err := rig.server.persistLocked(); err != nil {
+		rig.server.mu.Unlock()
+		t.Fatal(err)
+	}
+	rig.server.mu.Unlock()
+	rig.server.closeGrantListeners()
+	_ = rig.server.audit.Close()
+	_ = rig.server.connectorLedger.Close()
+	stateSummary, err := InspectState(rig.config, rig.server.routes, rig.server.egressRoutes)
+	if err != nil || !stateSummary.contextLocked {
+		t.Fatalf("context-locked state summary=%#v err=%v", stateSummary, err)
+	}
+	receiptSummary, err := InspectConnectorReceiptFormat(rig.config, stateSummary)
+	if err != nil || receiptSummary.FormatVersion != 7 {
+		t.Fatalf("prospective context receipt summary=%#v err=%v", receiptSummary, err)
+	}
+
+	raw, err := os.ReadFile(rig.config.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["version"] = float64(6)
+	downgraded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rig.config.StateFile, downgraded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(rig.config, nil, nil, "service-token"); err == nil {
+		reopened.closeGrantListeners()
+		_ = reopened.audit.Close()
+		_ = reopened.connectorLedger.Close()
+		t.Fatal("context-locked authority loaded from pre-v7 Gateway state")
 	}
 }
 

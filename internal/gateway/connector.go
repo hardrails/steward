@@ -22,6 +22,7 @@ import (
 	"github.com/hardrails/steward/internal/actionpermit"
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
+	"github.com/hardrails/steward/internal/influence"
 )
 
 var (
@@ -88,8 +89,29 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		semaphore := s.connectorSemaphores[connectorID]
 		grantSemaphore := s.connectorGrantSemaphores[grantID]
 		if grantSemaphore == nil {
-			grantSemaphore = make(chan struct{}, maxConnectorGrantConcurrent)
+			concurrency := maxConnectorGrantConcurrent
+			if grant.ActionContextRequired {
+				concurrency = 1
+			}
+			grantSemaphore = make(chan struct{}, concurrency)
 			s.connectorGrantSemaphores[grantID] = grantSemaphore
+		}
+		actionContext := influence.Head{}
+		if grant.ActionContextRequired {
+			actionContext = s.connectorInfluences[grantID]
+			if actionContext.SchemaVersion == "" {
+				derived, contextErr := influence.Genesis(grant.TenantID, grant.GrantID, grant.Generation)
+				if contextErr != nil {
+					s.mu.Unlock()
+					writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector influence context could not be derived")
+					return
+				}
+				actionContext = derived
+				if s.connectorInfluences == nil {
+					s.connectorInfluences = make(map[string]influence.Head)
+				}
+				s.connectorInfluences[grantID] = actionContext
+			}
 		}
 		lease := s.grantLeaseLocked(grantID)
 		select {
@@ -145,7 +167,7 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		}
 
 		permit, permitErr := verifyConnectorActionPermit(
-			request.Header, connector, s.connectors, grant, routePolicyDigest, connectorID, operationID, taskID, body, s.now().UTC(),
+			request.Header, connector, s.connectors, grant, actionContext, routePolicyDigest, connectorID, operationID, taskID, body, s.now().UTC(),
 		)
 		if permitErr != nil {
 			slog.Warn("connector action permit denied", "grant_id", grantID, "connector_id", connectorID,
@@ -174,6 +196,10 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 			permit.permitDigest, permit.requestDigest, int64(len(body)),
 			permit.operationDigest,
 		)
+		if grant.ActionContextRequired {
+			receipt.InfluenceSequence = actionContext.Sequence
+			receipt.InfluenceHash = actionContext.ChainHash
+		}
 		if err := s.spendConnectorCall(grantID, connectorID, callDigest, receipt); err != nil {
 			switch {
 			case errors.Is(err, errConnectorReplay):
@@ -192,7 +218,7 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 			return
 		}
 		if !permit.expiresAt.IsZero() && !s.now().UTC().Before(permit.expiresAt) {
-			if err := s.finishConnectorReceipt(receipt, 0, 0, "action_permit_expired"); err != nil {
+			if err := s.finishConnectorReceipt(receipt, 0, 0, "", "action_permit_expired"); err != nil {
 				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
 				return
 			}
@@ -207,7 +233,7 @@ func (s *Server) connectorHandler(grantID string) http.Handler {
 		ip, err := resolveAllowedIP(request.Context(), host, loadedEgressDestination{prefixes: connector.prefixes})
 		if err != nil {
 			status, code := classifyAddressFailure(err, lease)
-			if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, code); receiptErr != nil {
+			if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "", code); receiptErr != nil {
 				writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
 				return
 			}
@@ -240,6 +266,7 @@ func verifyConnectorActionPermit(
 	connector loadedConnector,
 	connectors map[string]loadedConnector,
 	grant Grant,
+	actionContext influence.Head,
 	routePolicyDigest, connectorID, operationID, taskID string,
 	body []byte,
 	now time.Time,
@@ -269,6 +296,9 @@ func verifyConnectorActionPermit(
 		return connectorActionPermit{}, err
 	}
 	if verified.PayloadType == actionpermit.PayloadTypeV4 {
+		if grant.ActionContextRequired {
+			return connectorActionPermit{}, errors.New("effect bundles are unavailable when action context binding is required")
+		}
 		return verifyConnectorActionBundle(
 			verified, connector, connectors, grant, routePolicyDigest, connectorID, operationID, taskID, body,
 		)
@@ -294,7 +324,10 @@ func verifyConnectorActionPermit(
 	requiredApprovalThreshold := 0
 	if grant.EffectMode == EffectModeAuthorized {
 		requiredPayloadType = actionpermit.PayloadTypeV2
-		if grant.ActionApprovalThreshold > 1 {
+		if grant.ActionContextRequired {
+			requiredPayloadType = actionpermit.PayloadTypeV5
+			requiredApprovalThreshold = grant.ActionApprovalThreshold
+		} else if grant.ActionApprovalThreshold > 1 {
 			requiredPayloadType = actionpermit.PayloadTypeV3
 			requiredApprovalThreshold = grant.ActionApprovalThreshold
 		}
@@ -308,7 +341,8 @@ func verifyConnectorActionPermit(
 		statement.RoutePolicyDigest != routePolicyDigest || statement.ConnectorID != connectorID ||
 		statement.OperationID != operationID || statement.OperationDigest != operationDigest || statement.TaskID != taskID ||
 		statement.RequestDigest != requestDigest || statement.RequestBytes != int64(len(body)) ||
-		statement.ContentType != contentType {
+		statement.ContentType != contentType || grant.ActionContextRequired &&
+		(statement.InfluenceSequence != actionContext.Sequence || statement.InfluenceHash != actionContext.ChainHash) {
 		return connectorActionPermit{}, errors.New("permit does not match the active tenant, grant, operation, task, and request")
 	}
 	for _, keyID := range verified.KeyIDs {
@@ -669,7 +703,7 @@ func (s *Server) proxyConnector(
 	}
 	request, err := http.NewRequestWithContext(incoming.Context(), operation.Method, target.String(), bodyReader)
 	if err != nil {
-		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "invalid_request"); receiptErr != nil {
+		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "", "invalid_request"); receiptErr != nil {
 			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
 			return
 		}
@@ -687,7 +721,7 @@ func (s *Server) proxyConnector(
 	case CredentialModeXAPIKey:
 		request.Header.Set("X-API-Key", connector.credential)
 	default:
-		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "connector_unavailable"); receiptErr != nil {
+		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "", "connector_unavailable"); receiptErr != nil {
 			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
 			return
 		}
@@ -712,7 +746,7 @@ func (s *Server) proxyConnector(
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "upstream_unavailable"); receiptErr != nil {
+		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "", "upstream_unavailable"); receiptErr != nil {
 			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
 			return
 		}
@@ -721,7 +755,7 @@ func (s *Server) proxyConnector(
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "redirect_denied"); receiptErr != nil {
+		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "", "redirect_denied"); receiptErr != nil {
 			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
 			return
 		}
@@ -729,7 +763,7 @@ func (s *Server) proxyConnector(
 		return
 	}
 	if response.ContentLength > connector.MaxResponseBytes {
-		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "response_too_large"); receiptErr != nil {
+		if receiptErr := s.finishConnectorReceipt(receipt, 0, 0, "", "response_too_large"); receiptErr != nil {
 			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
 			return
 		}
@@ -737,7 +771,7 @@ func (s *Server) proxyConnector(
 		return
 	}
 	if headerContainsCredential(response.Header, connector.credential) {
-		if receiptErr := s.finishConnectorReceipt(receipt, response.StatusCode, 0, "credential_reflected"); receiptErr != nil {
+		if receiptErr := s.finishConnectorReceipt(receipt, response.StatusCode, 0, "", "credential_reflected"); receiptErr != nil {
 			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
 			return
 		}
@@ -758,7 +792,11 @@ func (s *Server) proxyConnector(
 		}
 	}
 	if connectorResponseHasNoBody(incoming.Method, response.StatusCode) {
-		if err := s.finishConnectorReceipt(receipt, response.StatusCode, 0, ""); err != nil {
+		responseDigest := ""
+		if receipt.InfluenceHash != "" {
+			responseDigest = actionpermit.RequestDigest(nil)
+		}
+		if err := s.finishConnectorReceipt(receipt, response.StatusCode, 0, responseDigest, ""); err != nil {
 			writeGatewayError(w, http.StatusServiceUnavailable, "evidence_unavailable", "connector result could not be recorded")
 			return
 		}
@@ -777,7 +815,11 @@ func (s *Server) proxyConnector(
 	if result.abort {
 		errorCode = result.reason
 	}
-	if err := s.finishConnectorReceipt(receipt, response.StatusCode, result.written, errorCode); err != nil {
+	responseDigest := ""
+	if !result.abort && receipt.InfluenceHash != "" {
+		responseDigest = result.digest
+	}
+	if err := s.finishConnectorReceipt(receipt, response.StatusCode, result.written, responseDigest, errorCode); err != nil {
 		panic(http.ErrAbortHandler)
 	}
 	w.Header().Set(connectorReceiptStatusTrailer, "recorded")
@@ -877,7 +919,8 @@ func (w *credentialRejectingWriter) flushPrefix(length int) error {
 
 func copyConnectorResponseBody(w http.ResponseWriter, body io.Reader, maximum int64, credential string) boundedHTTPResponseResult {
 	destination := flushingResponseWriter{writer: w, controller: http.NewResponseController(w)}
-	filter := credentialRejectingWriter{destination: destination, credential: []byte(credential)}
+	hash := sha256.New()
+	filter := credentialRejectingWriter{destination: io.MultiWriter(destination, hash), credential: []byte(credential)}
 	consumed, copyErr := io.Copy(&filter, io.LimitReader(body, maximum))
 	if copyErr == nil {
 		copyErr = filter.finish()
@@ -897,6 +940,9 @@ func copyConnectorResponseBody(w http.ResponseWriter, body io.Reader, maximum in
 		case probeErr != nil && !errors.Is(probeErr, io.EOF) && !errors.Is(probeErr, io.ErrUnexpectedEOF):
 			result.reason, result.abort = "stream_failed", true
 		}
+	}
+	if !result.abort {
+		result.digest = "sha256:" + fmt.Sprintf("%x", hash.Sum(nil))
 	}
 	w.Header().Set(streamStatusTrailer, result.reason)
 	return result

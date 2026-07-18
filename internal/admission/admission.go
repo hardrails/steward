@@ -28,6 +28,7 @@ const (
 	EffectModeAuthorized      = "authorized"
 	AuthorizedEffectsOptional = "optional"
 	AuthorizedEffectsRequired = "required"
+	ActionContextRequired     = "required"
 	maxAllowedArtifacts       = 128
 	maxAuthorizedEffectKeys   = 8
 )
@@ -173,9 +174,10 @@ type TenantRule struct {
 // authorized effects; required policies reject every downgrade to standard
 // effects.
 type AuthorizedEffectsPolicy struct {
-	Mode         string      `json:"mode"`
-	MinApprovals int         `json:"min_approvals,omitempty"`
-	Keys         []ActionKey `json:"keys"`
+	Mode           string      `json:"mode"`
+	MinApprovals   int         `json:"min_approvals,omitempty"`
+	ContextBinding string      `json:"context_binding,omitempty"`
+	Keys           []ActionKey `json:"keys"`
 }
 
 // ActionKey grants one tenant-owned Ed25519 key authority over action permits
@@ -591,6 +593,25 @@ func (e EffectiveAdmission) AuthorizedActionApprovalThreshold() (int, error) {
 	return e.SitePolicy.AuthorizedActionApprovalThreshold(e.Intent.TenantID, e.Intent.ConnectorIDs)
 }
 
+// AuthorizedActionContextRequired reports the site-root-signed requirement to
+// bind every exact effect to the current Gateway-mediated response history.
+func (e EffectiveAdmission) AuthorizedActionContextRequired() (bool, error) {
+	if e.Intent.EffectMode != EffectModeAuthorized {
+		return false, deny("instance was not admitted for authorized effects")
+	}
+	return e.SitePolicy.AuthorizedActionContextRequired(e.Intent.TenantID)
+}
+
+// AuthorizedActionContextRequired reports the tenant's site-root-signed
+// context-lock requirement without exposing mutable policy state.
+func (p SitePolicy) AuthorizedActionContextRequired(tenantID string) (bool, error) {
+	tenant, ok := p.tenant(tenantID)
+	if !ok || tenant.AuthorizedEffects == nil {
+		return false, deny("tenant has no authorized effects policy")
+	}
+	return tenant.AuthorizedEffects.ContextBinding == ActionContextRequired, nil
+}
+
 func actionApprovalThreshold(policy AuthorizedEffectsPolicy) int {
 	if policy.MinApprovals == 0 {
 		return 1
@@ -879,6 +900,10 @@ func (p SitePolicy) Validate() error {
 			if tenant.AuthorizedEffects.Mode != AuthorizedEffectsOptional &&
 				tenant.AuthorizedEffects.Mode != AuthorizedEffectsRequired {
 				return deny("invalid authorized effects policy mode")
+			}
+			if tenant.AuthorizedEffects.ContextBinding != "" &&
+				tenant.AuthorizedEffects.ContextBinding != ActionContextRequired {
+				return deny("invalid authorized effects context binding")
 			}
 			if len(tenant.AuthorizedEffects.Keys) == 0 || len(tenant.AuthorizedEffects.Keys) > maxAuthorizedEffectKeys {
 				return deny("tenant authorized effects policy must contain 1 to 8 keys")

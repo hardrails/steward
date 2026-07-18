@@ -19,6 +19,7 @@ import (
 	"github.com/hardrails/steward/internal/connectorledger"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/gateway"
+	"github.com/hardrails/steward/internal/influence"
 	"github.com/hardrails/steward/internal/securefile"
 )
 
@@ -45,14 +46,17 @@ type permitAdmission struct {
 	RoutePolicyDigest       string                         `json:"route_policy_digest,omitempty"`
 	EffectMode              string                         `json:"effect_mode,omitempty"`
 	ActionApprovalThreshold int                            `json:"action_approval_threshold,omitempty"`
+	ActionContextRequired   bool                           `json:"action_context_required,omitempty"`
 	ActionAuthorities       []gateway.GrantActionAuthority `json:"action_authorities,omitempty"`
 }
 
 func permitCommand(arguments []string, stdout, stderr io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("permit command requires bundle, issue, approve, verify, or audit")
+		return errors.New("permit command requires context, bundle, issue, approve, verify, or audit")
 	}
 	switch arguments[0] {
+	case "context":
+		return permitContextCommand(arguments[1:], stdout)
 	case "bundle":
 		return permitBundleCommand(arguments[1:], stdout, stderr)
 	case "issue":
@@ -64,8 +68,116 @@ func permitCommand(arguments []string, stdout, stderr io.Writer) error {
 	case "audit":
 		return auditPermit(arguments[1:], stdout)
 	default:
-		return errors.New("permit command requires bundle, issue, approve, verify, or audit")
+		return errors.New("permit command requires context, bundle, issue, approve, verify, or audit")
 	}
+}
+
+func permitContextCommand(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("permit context", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	admissionPath := flags.String("admission", "", "Executor admission response JSON")
+	intentPath := flags.String("intent", "", "instance intent JSON used for admission")
+	receiptsPath := flags.String("receipts", "", "signed connector receipt ledger")
+	receiptPublicKeyPath := flags.String("receipt-public-key", "", "base64 Ed25519 connector receipt public key")
+	receiptNodeID := flags.String("receipt-node-id", "", "expected connector receipt node ID")
+	receiptEpoch := flags.Uint64("receipt-epoch", 1, "expected connector receipt key epoch")
+	expectedSequence := flags.String("expected-sequence", "", "externally retained final receipt sequence")
+	expectedChainHash := flags.String("expected-chain-hash", "", "externally retained final receipt chain hash")
+	output := flags.String("out", "", "new verified effect-context JSON output")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *admissionPath == "" || *intentPath == "" || *receiptsPath == "" || *receiptPublicKeyPath == "" ||
+		*receiptNodeID == "" || *receiptEpoch == 0 || *output == "" || flags.NArg() != 0 {
+		return errors.New("permit context requires -admission, -intent, -receipts, -receipt-public-key, -receipt-node-id, and -out")
+	}
+
+	admissionRaw, err := securefile.Read(*admissionPath, maxArtifactBytes, securefile.TrustFile)
+	if err != nil {
+		return fmt.Errorf("read admission response: %w", err)
+	}
+	var admitted permitAdmission
+	if err := dsse.DecodeStrictInto(admissionRaw, maxArtifactBytes, &admitted); err != nil {
+		return fmt.Errorf("decode admission response: %w", err)
+	}
+	intentRaw, err := securefile.Read(*intentPath, maxArtifactBytes, securefile.TrustFile)
+	if err != nil {
+		return fmt.Errorf("read instance intent: %w", err)
+	}
+	var intent admission.InstanceIntent
+	if err := dsse.DecodeStrictInto(intentRaw, maxArtifactBytes, &intent); err != nil {
+		return fmt.Errorf("decode instance intent: %w", err)
+	}
+	if err := intent.Validate(admission.AuthenticatedIdentity{TenantID: intent.TenantID, NodeID: intent.NodeID}); err != nil {
+		return err
+	}
+	grantID := gateway.GrantID(intent.TenantID, intent.InstanceID, intent.Generation)
+	if !admitted.ActionContextRequired || admitted.EffectMode != admission.EffectModeAuthorized ||
+		intent.EffectMode != admission.EffectModeAuthorized || admitted.Generation != intent.Generation ||
+		admitted.CapsuleDigest != intent.CapsuleDigest || admitted.PolicyDigest == "" || admitted.RoutePolicyDigest == "" ||
+		admitted.GrantID != grantID {
+		return errors.New("admission response and instance intent do not identify one context-locked grant")
+	}
+	receiptPublic, err := readPublicKey(*receiptPublicKeyPath)
+	if err != nil {
+		return err
+	}
+	current, err := influence.Genesis(intent.TenantID, grantID, intent.Generation)
+	if err != nil {
+		return err
+	}
+	pending := make(map[string]struct{})
+	ledgerHead, err := connectorledger.VerifyRecords(
+		*receiptsPath, receiptPublic, *receiptNodeID, *receiptEpoch,
+		func(record connectorledger.VerifiedReceipt) error {
+			event := record.Receipt.Event
+			if event.Kind != connectorledger.ConnectorCall || event.GrantID != grantID || event.Phase == connectorledger.Deny {
+				return nil
+			}
+			if event.TenantID != intent.TenantID || event.Generation != intent.Generation || event.InfluenceHash == "" ||
+				event.InfluenceSequence != current.Sequence || event.InfluenceHash != current.ChainHash {
+				return fmt.Errorf("receipt sequence %d does not continue the admitted grant's effect context", record.Receipt.Sequence)
+			}
+			switch event.Phase {
+			case connectorledger.Authorize:
+				if len(pending) != 0 {
+					return errors.New("context-locked grant has overlapping connector authorizations")
+				}
+				pending[event.TaskDigest] = struct{}{}
+			case connectorledger.Terminal:
+				if _, ok := pending[event.TaskDigest]; !ok {
+					return errors.New("context-locked terminal receipt has no matching authorization")
+				}
+				delete(pending, event.TaskDigest)
+				next, err := influence.Advance(current, record.Hash)
+				if err != nil {
+					return err
+				}
+				current = next
+			default:
+				return errors.New("context-locked connector receipt has an unsupported phase")
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("verify effect-context receipts: %w", err)
+	}
+	if err := checkExpectedConnectorHead(ledgerHead, *expectedSequence, *expectedChainHash); err != nil {
+		return err
+	}
+	if len(pending) != 0 {
+		return errors.New("context-locked grant has an in-flight connector call; wait for a terminal receipt")
+	}
+	raw, err := json.Marshal(current)
+	if err != nil {
+		return err
+	}
+	if err := writePermitOutputs([]permitOutput{{path: *output, contents: append(raw, '\n')}}); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, current.ChainHash)
+	return err
 }
 
 func issuePermit(arguments []string, stdout, stderr io.Writer) error {
@@ -75,6 +187,7 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 	intentPath := flags.String("intent", "", "instance intent JSON used for admission")
 	trustPath := flags.String("trust", "", "exported Gateway action-trust inventory")
 	requestPath := flags.String("request", "", "exact connector request body; omit only for an empty body")
+	contextPath := flags.String("context", "", "verified current effect-context JSON")
 	connectorID := flags.String("connector-id", "", "admitted connector ID")
 	operationID := flags.String("operation-id", "", "exact connector operation ID")
 	taskID := flags.String("task-id", "", "one-use task ID")
@@ -125,6 +238,12 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 	}
 	if admitted.EffectMode != intent.EffectMode {
 		return errors.New("admission response effect mode does not match the instance intent")
+	}
+	if admitted.ActionContextRequired && *contextPath == "" {
+		return errors.New("context-locked admission requires -context from stewardctl permit context")
+	}
+	if !admitted.ActionContextRequired && *contextPath != "" {
+		return errors.New("-context is valid only when the admission requires context-locked effects")
 	}
 	approvalThreshold := admitted.ActionApprovalThreshold
 	if intent.EffectMode == admission.EffectModeAuthorized && approvalThreshold == 0 {
@@ -191,6 +310,9 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 		if approvalThreshold > 1 {
 			payloadType, schemaVersion = actionpermit.PayloadTypeV3, actionpermit.SchemaV3
 		}
+		if admitted.ActionContextRequired {
+			payloadType, schemaVersion = actionpermit.PayloadTypeV5, actionpermit.SchemaV5
+		}
 	}
 	statement := actionpermit.Statement{
 		SchemaVersion: schemaVersion, EffectMode: effectMode, NodeID: intent.NodeID, TenantID: intent.TenantID,
@@ -203,7 +325,23 @@ func issuePermit(arguments []string, stdout, stderr io.Writer) error {
 	if approvalThreshold > 1 {
 		statement.ApprovalThreshold = approvalThreshold
 	}
-	payload, err := json.Marshal(statement)
+	if admitted.ActionContextRequired {
+		contextRaw, err := securefile.Read(*contextPath, maxArtifactBytes, securefile.TrustFile)
+		if err != nil {
+			return fmt.Errorf("read effect context: %w", err)
+		}
+		var head influence.Head
+		if err := dsse.DecodeStrictInto(contextRaw, maxArtifactBytes, &head); err != nil || head.Validate() != nil {
+			return errors.New("effect context is invalid")
+		}
+		if head.TenantID != intent.TenantID || head.GrantID != admitted.GrantID || head.Generation != intent.Generation {
+			return errors.New("effect context does not match the admitted grant")
+		}
+		statement.ApprovalThreshold = approvalThreshold
+		statement.InfluenceSequence = head.Sequence
+		statement.InfluenceHash = head.ChainHash
+	}
+	payload, err := actionpermit.MarshalStatement(statement, payloadType)
 	if err != nil {
 		return err
 	}
@@ -268,8 +406,8 @@ func approvePermit(arguments []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	envelope, err := dsse.Parse(raw)
-	if err != nil || envelope.PayloadType != actionpermit.PayloadTypeV3 {
-		return errors.New("permit approve requires a canonical version-3 multi-party approval artifact")
+	if err != nil || envelope.PayloadType != actionpermit.PayloadTypeV3 && envelope.PayloadType != actionpermit.PayloadTypeV5 {
+		return errors.New("permit approve requires a canonical multi-party approval artifact")
 	}
 	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
 	if err != nil || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
@@ -308,7 +446,9 @@ func approvePermit(arguments []string, stdout, stderr io.Writer) error {
 	if err := intent.Validate(admission.AuthenticatedIdentity{TenantID: intent.TenantID, NodeID: intent.NodeID}); err != nil {
 		return err
 	}
+	contextBound := envelope.PayloadType == actionpermit.PayloadTypeV5
 	if intent.EffectMode != admission.EffectModeAuthorized || admitted.EffectMode != intent.EffectMode ||
+		admitted.ActionContextRequired != contextBound ||
 		admitted.ActionApprovalThreshold != statement.ApprovalThreshold || statement.ApprovalThreshold < 2 ||
 		admitted.Generation != intent.Generation || statement.Generation != intent.Generation ||
 		admitted.CapsuleDigest != intent.CapsuleDigest || statement.CapsuleDigest != admitted.CapsuleDigest ||
@@ -444,6 +584,8 @@ type permitApprovalSummary struct {
 	ApprovalThreshold  int      `json:"approval_threshold"`
 	ApprovalsCollected int      `json:"approvals_collected"`
 	Complete           bool     `json:"complete"`
+	InfluenceSequence  uint64   `json:"influence_sequence,omitempty"`
+	InfluenceHash      string   `json:"influence_hash,omitempty"`
 }
 
 func writePermitApprovalSummary(writer io.Writer, verified actionpermit.Verified, operation validatedActionTrust) error {
@@ -464,6 +606,7 @@ func writePermitApprovalSummary(writer io.Writer, verified actionpermit.Verified
 		AuthorityKey: verified.KeyID, AuthorityKeys: append([]string(nil), verified.KeyIDs...),
 		ApprovalThreshold:  max(1, verified.Statement.ApprovalThreshold),
 		ApprovalsCollected: len(verified.KeyIDs), Complete: verified.Complete,
+		InfluenceSequence: verified.Statement.InfluenceSequence, InfluenceHash: verified.Statement.InfluenceHash,
 	})
 }
 
@@ -656,7 +799,7 @@ func verifyPermitForAudit(raw []byte, trusted map[string]ed25519.PublicKey, maxV
 		return actionpermit.Verified{}, err
 	}
 	if envelope.PayloadType != actionpermit.PayloadTypeV1 && envelope.PayloadType != actionpermit.PayloadTypeV2 &&
-		envelope.PayloadType != actionpermit.PayloadTypeV3 {
+		envelope.PayloadType != actionpermit.PayloadTypeV3 && envelope.PayloadType != actionpermit.PayloadTypeV5 {
 		return actionpermit.Verified{}, errors.New("unsupported action permit payload type")
 	}
 	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
@@ -691,6 +834,7 @@ func checkPermitReceiptBindings(statement actionpermit.Statement, authorityKeyID
 		event.TaskDigest != taskDigest || event.AuthorityKeyID != authorityKeyID || event.AuthorityKeySet != authorityKeySet ||
 		event.ApprovalThreshold != approvalThreshold || event.RequestDigest != statement.RequestDigest ||
 		event.RequestBytes != statement.RequestBytes || event.EffectMode != statement.EffectMode ||
+		event.InfluenceSequence != statement.InfluenceSequence || event.InfluenceHash != statement.InfluenceHash ||
 		(statement.EffectMode != "" && event.OperationPolicyDigest != statement.OperationDigest) {
 		return errors.New("connector receipt does not match every available action-permit binding")
 	}

@@ -36,6 +36,13 @@ This boundary is opt-in. Use it for account changes, secret-management operation
 messages, financial instructions, infrastructure mutations, or any connector call
 whose consequence should require independent authority.
 
+For the stricter case where an approval must stop working after the agent receives
+another managed connector response, signed policy can require
+[context-locked effects]({{ '/guides/context-locked-effects/' | relative_url }}).
+That mode binds each permit to the grant's current signed response history and
+serializes connector calls. It trades concurrency and bundle support for a clear
+staleness boundary.
+
 ## What the boundary covers
 
 Authorized Effects covers only calls that pass completely through a Steward named
@@ -50,7 +57,8 @@ connector. For those calls, it binds all of the following:
   permit may bind one request, or an exact-effect bundle may bind up to eight
   independently one-use requests; and
 - a durable signed authorization record written before DNS, followed by a signed
-  terminal record when Gateway can observe one.
+  terminal record when Gateway can observe one. With context locking, the permit
+  and both records also bind the current response-history sequence and hash.
 
 It does **not** cover:
 
@@ -170,6 +178,12 @@ choose either `"standard"` or `"authorized"`. `"mode":"required"` accepts only
 `"authorized"`; omitting `effect_mode` or selecting `"standard"` is a signed-policy
 downgrade and admission fails. An intent cannot select `"authorized"` when its
 tenant has no `authorized_effects` policy.
+
+`"context_binding":"required"` is an optional stricter policy field. It requires
+version-5 permits bound to the current signed connector-response history. Omit the
+field for ordinary Authorized Effects. See the
+[context-locking procedure]({{ '/guides/context-locked-effects/' | relative_url }})
+before enabling it; exact-effect bundles are not available for such a grant.
 
 ## Configure Gateway without giving the agent a credential
 
@@ -573,11 +587,13 @@ stewardctl permit audit \
   -expected-chain-hash 'sha256:<retained-chain-hash>'
 ```
 
-Multi-party connector authorization and terminal events use receipt format 6. The
+Multi-party connector authorization and terminal events use receipt format 6.
+Context-locked authorization and terminal events use receipt format 7, including
+the influence sequence, influence hash, and terminal response digest. The
 records bind `effect_mode`, the exact operation-policy digest, canonical signer
 set, approval threshold, permit digest, request digest, and durable call identity
 without storing request or response bodies, credentials, or raw task IDs. A
-one-approver authorized call remains format 5 for compatibility. A missing terminal
+non-context-locked one-approver authorized call remains format 5 for compatibility. A missing terminal
 record means the outcome is unknown; it is not evidence that the upstream did
 nothing.
 
@@ -616,3 +632,5 @@ The separation-of-duties extension is recorded in
 [ADR 0021]({{ '/decisions/0021-enforce-multi-party-authorized-effects/' | relative_url }}).
 Bounded exact-effect sets are recorded in
 [ADR 0022]({{ '/decisions/0022-native-exact-effect-bundles/' | relative_url }}).
+Response-history locking is recorded in
+[ADR 0027]({{ '/decisions/0027-bind-effect-permits-to-connector-response-history/' | relative_url }}).

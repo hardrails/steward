@@ -26,10 +26,12 @@ const (
 	PayloadTypeV2 = "application/vnd.steward.action-permit.v2+json"
 	PayloadTypeV3 = "application/vnd.steward.action-permit.v3+json"
 	PayloadTypeV4 = "application/vnd.steward.action-permit.v4+json"
+	PayloadTypeV5 = "application/vnd.steward.action-permit.v5+json"
 	SchemaV1      = "steward.action-permit.v1"
 	SchemaV2      = "steward.action-permit.v2"
 	SchemaV3      = "steward.action-permit.v3"
 	SchemaV4      = "steward.action-permit.v4"
+	SchemaV5      = "steward.action-permit.v5"
 
 	// PayloadType remains the original format identifier for source
 	// compatibility with callers that construct legacy permit fixtures.
@@ -81,6 +83,32 @@ type Statement struct {
 	RequestDigest     string `json:"request_digest"`
 	RequestBytes      int64  `json:"request_bytes"`
 	ContentType       string `json:"content_type"`
+	InfluenceSequence uint64 `json:"influence_sequence,omitempty"`
+	InfluenceHash     string `json:"influence_hash,omitempty"`
+	NotBefore         string `json:"not_before"`
+	ExpiresAt         string `json:"expires_at"`
+}
+
+type statementV5Wire struct {
+	SchemaVersion     string `json:"schema_version"`
+	EffectMode        string `json:"effect_mode"`
+	ApprovalThreshold int    `json:"approval_threshold"`
+	NodeID            string `json:"node_id"`
+	TenantID          string `json:"tenant_id"`
+	InstanceID        string `json:"instance_id"`
+	Generation        uint64 `json:"generation"`
+	CapsuleDigest     string `json:"capsule_digest"`
+	PolicyDigest      string `json:"policy_digest"`
+	RoutePolicyDigest string `json:"route_policy_digest"`
+	ConnectorID       string `json:"connector_id"`
+	OperationID       string `json:"operation_id"`
+	OperationDigest   string `json:"operation_policy_digest"`
+	TaskID            string `json:"task_id"`
+	RequestDigest     string `json:"request_digest"`
+	RequestBytes      int64  `json:"request_bytes"`
+	ContentType       string `json:"content_type"`
+	InfluenceSequence uint64 `json:"influence_sequence"`
+	InfluenceHash     string `json:"influence_hash"`
 	NotBefore         string `json:"not_before"`
 	ExpiresAt         string `json:"expires_at"`
 }
@@ -140,6 +168,8 @@ type wireStatement struct {
 	RequestDigest     *string         `json:"request_digest"`
 	RequestBytes      *int64          `json:"request_bytes"`
 	ContentType       *string         `json:"content_type"`
+	InfluenceSequence *uint64         `json:"influence_sequence"`
+	InfluenceHash     *string         `json:"influence_hash"`
 	NotBefore         *string         `json:"not_before"`
 	ExpiresAt         *string         `json:"expires_at"`
 }
@@ -191,6 +221,16 @@ func RequestDigest(raw []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// MarshalStatement emits the exact member set for one supported single-effect
+// permit version. Version 5 keeps influence_sequence present even at genesis
+// sequence zero; ordinary omitempty marshaling cannot represent that contract.
+func MarshalStatement(statement Statement, payloadType string) ([]byte, error) {
+	if payloadType != PayloadTypeV5 {
+		return json.Marshal(statement)
+	}
+	return json.Marshal(statementV5Wire(statement))
+}
+
 // Verify authenticates and validates one bounded DSSE permit. maxValidity is
 // an explicit local-policy ceiling and must itself be within the 24-hour hard
 // limit. now is required: a missing clock cannot safely establish validity.
@@ -240,7 +280,8 @@ func verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.T
 		return Verified{}, invalid("permit envelope is not canonical")
 	}
 	if envelope.PayloadType != PayloadTypeV1 && envelope.PayloadType != PayloadTypeV2 &&
-		envelope.PayloadType != PayloadTypeV3 && envelope.PayloadType != PayloadTypeV4 {
+		envelope.PayloadType != PayloadTypeV3 && envelope.PayloadType != PayloadTypeV4 &&
+		envelope.PayloadType != PayloadTypeV5 {
 		return Verified{}, invalid("unsupported permit payload type")
 	}
 	payload := payloadBytes
@@ -290,7 +331,7 @@ func verify(rawEnvelope []byte, trusted map[string]ed25519.PublicKey, now time.T
 		if len(keyIDs) != 1 {
 			return Verified{}, invalid("version 1 and 2 permits require exactly one signature")
 		}
-	case PayloadTypeV3, PayloadTypeV4:
+	case PayloadTypeV3, PayloadTypeV4, PayloadTypeV5:
 		if len(keyIDs) > approvalThreshold || !allowPartial && len(keyIDs) != approvalThreshold {
 			return Verified{}, invalid("permit signature count does not match approval threshold")
 		}
@@ -313,9 +354,14 @@ func (wire wireStatement) statement(payloadType string) (Statement, bool) {
 		wire.RequestBytes == nil || wire.ContentType == nil || wire.NotBefore == nil || wire.ExpiresAt == nil {
 		return Statement{}, false
 	}
-	if payloadType == PayloadTypeV1 && (len(wire.EffectMode) != 0 || len(wire.ApprovalThreshold) != 0) ||
-		payloadType == PayloadTypeV2 && (len(wire.EffectMode) == 0 || len(wire.ApprovalThreshold) != 0) ||
-		payloadType == PayloadTypeV3 && (len(wire.EffectMode) == 0 || len(wire.ApprovalThreshold) == 0) {
+	if payloadType == PayloadTypeV1 && (len(wire.EffectMode) != 0 || len(wire.ApprovalThreshold) != 0 ||
+		wire.InfluenceSequence != nil || wire.InfluenceHash != nil) ||
+		payloadType == PayloadTypeV2 && (len(wire.EffectMode) == 0 || len(wire.ApprovalThreshold) != 0 ||
+			wire.InfluenceSequence != nil || wire.InfluenceHash != nil) ||
+		payloadType == PayloadTypeV3 && (len(wire.EffectMode) == 0 || len(wire.ApprovalThreshold) == 0 ||
+			wire.InfluenceSequence != nil || wire.InfluenceHash != nil) ||
+		payloadType == PayloadTypeV5 && (len(wire.EffectMode) == 0 || len(wire.ApprovalThreshold) == 0 ||
+			wire.InfluenceSequence == nil || wire.InfluenceHash == nil) {
 		return Statement{}, false
 	}
 	effectMode := ""
@@ -337,6 +383,7 @@ func (wire wireStatement) statement(payloadType string) (Statement, bool) {
 		PolicyDigest: *wire.PolicyDigest, RoutePolicyDigest: *wire.RoutePolicyDigest,
 		ConnectorID: *wire.ConnectorID, OperationID: *wire.OperationID, OperationDigest: *wire.OperationDigest, TaskID: *wire.TaskID,
 		RequestDigest: *wire.RequestDigest, RequestBytes: *wire.RequestBytes, ContentType: *wire.ContentType,
+		InfluenceSequence: valueOrZero(wire.InfluenceSequence), InfluenceHash: valueOrEmpty(wire.InfluenceHash),
 		NotBefore: *wire.NotBefore, ExpiresAt: *wire.ExpiresAt,
 	}, true
 }
@@ -420,6 +467,11 @@ func validateStatement(statement Statement, payloadType string, now time.Time, m
 			statement.ApprovalThreshold < 2 || statement.ApprovalThreshold > 8 {
 			return invalid("payload type, schema version, and effect mode do not form a supported permit version")
 		}
+	case PayloadTypeV5:
+		if statement.SchemaVersion != SchemaV5 || statement.EffectMode != EffectModeAuthorized ||
+			statement.ApprovalThreshold < 1 || statement.ApprovalThreshold > 8 || !digest(statement.InfluenceHash) {
+			return invalid("payload type, schema version, effect mode, approval threshold, and influence context do not form a supported permit version")
+		}
 	default:
 		return invalid("unsupported permit payload type")
 	}
@@ -434,6 +486,20 @@ func validateStatement(statement Statement, payloadType string, now time.Time, m
 		return err
 	}
 	return validateValidity(statement.NotBefore, statement.ExpiresAt, now, maxValidity)
+}
+
+func valueOrZero(value *uint64) uint64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func validateBundleStatement(bundle BundleStatement, now time.Time, maxValidity time.Duration) error {

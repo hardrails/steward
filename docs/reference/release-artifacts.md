@@ -163,8 +163,8 @@ delivery ledger, and supervisor state. Activation uses these ranges to reject an
 unsafe upgrade or rollback before changing the active-release symlink or relay
 binding.
 
-Current manifests declare `connector_receipt_log` with `read_min: 1`, `read_max: 6`,
-and `write: 6`. Ordinary connector records retain schema 1. Action-permit records use
+Current manifests declare `connector_receipt_log` with `read_min: 1`, `read_max: 7`,
+and `write: 7`. Ordinary connector records retain schema 1. Action-permit records use
 schema 2 and add the action-authority key ID, exact permit digest, and exact request
 digest. Schema 3 is the historical two-record service-task format. Current lifecycle
 tasks use schema 4, which adds task-local sequence and hash links across
@@ -173,19 +173,22 @@ schema 5, which adds explicit effect mode and exact operation-policy digest. A
 stable pre-effect denial marker binds the first observed attacker-selectable request
 digest but claims no verified permit or authority key and does not enumerate later
 denials. Schema 6 records a multi-party authorized call's canonical signer set and
-signed approval threshold. All six schemas may appear in one signed chain. Format inspection
+signed approval threshold. Schema 7 binds a context-locked call's response-history
+head and terminal response digest. All seven schemas may appear in one signed chain. Format inspection
 requires reader 2 whenever action authorities are configured, reader 4 whenever
 service-task operations are configured, reader 5 after the first authorized
 denial, authorization, or terminal record. Before that event, action-authority
 configuration makes the prospective connector-receipt requirement format 2. A
-multi-party authorization or terminal record requires reader 6.
+multi-party authorization or terminal record requires reader 6. A context-required
+grant requires reader 7.
 
-Current manifests also declare `gateway_state` readers 1 through 6 and writer 6.
+Current manifests also declare `gateway_state` readers 1 through 7 and writer 7.
 Gateway state format 4 retains service identity and tenant task authorities for
 task-authorized grants. Format 5 additionally retains authorized mode and the
 signed-policy-derived connector/action-key scopes, so a retained authorized grant
 requires Gateway state format 5 before its first connector event. Format 6 binds a
-multi-party approval threshold into the retained grant. A release whose
+multi-party approval threshold into the retained grant. Format 7 retains the
+context-lock requirement. A release whose
 reader or writer stops at an observed or configuration-required format is not a
 safe rollback target.
 

@@ -74,6 +74,18 @@ func TestInspectConnectorReceiptFormatIsReadOnlyForProspectiveAndActualLedger(t 
 		t.Fatal("receipt-format inspection rewrote the ledger")
 	}
 
+	summary, err = InspectConnectorReceiptFormat(config, StateSummary{contextLocked: true})
+	if err != nil || !summary.Present || summary.FormatVersion != 7 {
+		t.Fatalf("context-locked prospective summary = %#v, error = %v", summary, err)
+	}
+	contextAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, contextAfter) {
+		t.Fatal("context-locked format inspection rewrote the ledger")
+	}
+
 	config.ActionAuthorities = []ActionAuthority{{KeyID: "approver-a", TenantID: "tenant-a", PublicKey: "configured-by-validated-loader"}}
 	summary, err = InspectConnectorReceiptFormat(config)
 	if err != nil || !summary.Present || summary.FormatVersion != 2 {

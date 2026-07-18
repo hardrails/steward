@@ -226,7 +226,8 @@ func TestNodeScopedPollVerifiesTenantSignedCommandAndAdvertisesProtocol(t *testi
 			raw, _ := io.ReadAll(r.Body)
 			if err := dsse.DecodeStrictInto(raw, maxWireBytes, &request); err != nil ||
 				request.ProtocolVersion != 2 || request.NodeID != "node-1" || request.CredentialScope != "node" ||
-				!slices.Contains(request.Capabilities, controlprotocol.ExecutorCapabilityAuthorizedEffectsV1) {
+				!slices.Contains(request.Capabilities, controlprotocol.ExecutorCapabilityAuthorizedEffectsV1) ||
+				!slices.Contains(request.Capabilities, controlprotocol.ExecutorCapabilityContextLockedEffectsV1) {
 				t.Errorf("poll request=%#v raw=%s err=%v", request, raw, err)
 			}
 			_ = json.NewEncoder(w).Encode(pollResponse{ProtocolVersion: 2, Commands: []json.RawMessage{signed}})

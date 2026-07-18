@@ -385,6 +385,9 @@ func loadEffectBundleContext(admissionPath, intentPath string) (effectBundleCont
 	if err := intent.Validate(admission.AuthenticatedIdentity{TenantID: intent.TenantID, NodeID: intent.NodeID}); err != nil {
 		return effectBundleContext{}, err
 	}
+	if admitted.ActionContextRequired {
+		return effectBundleContext{}, errors.New("effect bundles are unavailable for context-locked admissions; issue one exact permit against the current context")
+	}
 	threshold := admitted.ActionApprovalThreshold
 	if threshold == 0 {
 		threshold = 1

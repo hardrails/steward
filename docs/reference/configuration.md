@@ -343,8 +343,9 @@ private task key stays off-node. A service with no matching task key keeps the
 ordinary host-authenticated service behavior.
 
 A tenant policy may also contain one `authorized_effects` object. `mode` is
-`optional` or `required`; `min_approvals` is from 1 through 8 and defaults to 1
-when omitted; `keys` contains one through eight unique Ed25519 action public keys,
+`optional` or `required`; `context_binding` may be omitted or set to `required`;
+`min_approvals` is from 1 through 8 and defaults to 1 when omitted; `keys` contains
+one through eight unique Ed25519 action public keys,
 each scoped to one through 32 sorted connector IDs already allowed by that tenant.
 The threshold cannot exceed the number of distinct keys available to any selected
 connector. Key material cannot be assigned to another tenant. An authenticated
@@ -353,6 +354,14 @@ instance intent must explicitly set `effect_mode` when this policy exists.
 Authorized mode requires connector capability and selected connector IDs, forbids
 generic egress, and projects only the selected signed key scopes and approval
 threshold to Gateway.
+
+`context_binding: required` additionally makes every exact permit name the
+current signed history of responses released through Steward connectors for that
+grant. Gateway allows one in-flight connector call for the grant, rejects a permit
+after another call completes, and records format-7 receipts. It does not cover
+task input, inference, local files or memory, generic egress, browser sessions, or
+other unmanaged observations. Context-required grants do not accept exact-effect
+bundles.
 
 The installer, `configure-node`, and `configure-admission` accept
 `--allow-unquotaed-state-on-dedicated-host`. The non-interactive installer also
@@ -598,7 +607,7 @@ decision for the old chain, drain retained grants, preserve the old ledger and
 verification material, configure the new file and table, and restart Gateway.
 There is no CLI operation that removes a budget or compacts an existing ledger.
 
-The same signed ledger may contain receipt formats 1 through 6. Format 1 is an
+The same signed ledger may contain receipt formats 1 through 7. Format 1 is an
 ordinary connector event, format 2 adds a connector action permit, and format 3 is
 the historical two-record service-task contract. Current lifecycle tasks use format
 4 and add task-local sequence and hash links across authorization, dispatch, and
@@ -606,10 +615,13 @@ terminal records. Format 5 records authorized connector calls with explicit effe
 mode and exact operation-policy digest; a stable pre-effect denial marker binds the
 first observed, attacker-selectable request digest without claiming a permit or
 authority key. It does not enumerate later denials. Format 6 records a multi-party
-authorized call's canonical signer set and signed approval threshold. Gateway state format 4
+authorized call's canonical signer set and signed approval threshold. Format 7
+binds a context-locked call's response-history head and terminal response digest.
+Gateway state format 4
 retains service ID and public tenant task authorities. State format 5 additionally
 retains authorized mode and policy-derived connector/action-key scopes. State
-format 6 binds a multi-party threshold into the retained grant. Keep the
+format 6 binds a multi-party threshold into the retained grant. State format 7
+retains the context-lock requirement. Keep the
 ledger, Gateway state, and declared release-format compatibility together during
 backup, upgrade, and rollback; do not downgrade either file independently.
 

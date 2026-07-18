@@ -340,6 +340,13 @@ Receipt format 5 binds a one-approver call's mode and operation-policy digest;
 format 6 additionally binds a multi-party signer set and threshold. Standard
 permit-enabled connectors continue to use version 1.
 
+When signed policy requires context locking, Gateway accepts only
+`steward.action-permit.v5`. The permit also binds the current influence sequence
+and hash reconstructed from the grant's signed connector-response history. Format
+7 receipts preserve those fields and commit the terminal response digest. A later
+completed connector call makes the prior permit stale. Context-required grants are
+serialized to one call and do not accept exact-effect bundles.
+
 The task claim and call budget are spent in the signed connector ledger before DNS.
 A clean relayed response ends with `X-Steward-Connector-Receipt: recorded`.
 Connector errors use the common JSON shape; a permit failure is HTTP 403

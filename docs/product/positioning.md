@@ -25,6 +25,10 @@ web, document, memory, or tool content. Asking the same model to detect or revie
 the attack is not a complete authorization boundary. For managed connector calls,
 Authorized Effects assumes the agent is compromised and requires an independently
 signed exact request outside the workload.
+For selected connectors, policy can also require that approval to name the current
+signed history of completed connector responses. A later response invalidates the
+old approval instead of letting it survive a change in the agent's managed
+external context.
 
 ## The operator outcome
 
@@ -55,7 +59,8 @@ operator can:
    require an off-node tenant authority to sign the exact request for selected
    agent-service operations, or require Authorized Effects for selected connectors
    with no generic egress, durable one-use spend before DNS, and credentials kept
-   outside the workload;
+   outside the workload; context-locked policy can additionally require every
+   permit to match the grant's current signed connector-response history;
 9. optionally compile a non-secret OpenBao KV v2 plan into exact read policy,
    fail-closed Agent templates, expected-version readiness, and a systemd sandbox,
    while keeping storage, bootstrap authentication, recovery, provider tokens, and

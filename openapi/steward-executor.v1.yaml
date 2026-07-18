@@ -833,6 +833,9 @@ components:
             `authorized` forbids generic egress and requires every selected
             connector call to carry an exact-request permit. A one-approver
             policy uses permit version 2; a multi-party policy uses version 3.
+            Signed tenant policy may additionally require context locking; that
+            mode uses permit version 5 for either threshold and invalidates a
+            permit after another managed connector response completes.
     Capabilities:
       type: object
       additionalProperties: false
@@ -943,6 +946,12 @@ components:
           minimum: 1
           maximum: 8
           description: Number of distinct admitted action-authority signatures Gateway requires for each authorized connector effect. Present only with authorized effect mode.
+        action_context_required:
+          type: boolean
+          description: |
+            True when signed site policy requires each exact connector-effect
+            permit to bind the current grant-scoped Gateway response history.
+            Omitted or false for backward-compatible authorized-effects policy.
         action_authorities:
           type: array
           minItems: 1

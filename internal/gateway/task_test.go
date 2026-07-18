@@ -763,7 +763,7 @@ func TestTaskAuthorizedGatewayStateWritesCurrentFormatAndRejectsFormatThree(t *t
 		t.Fatal(err)
 	}
 	grants, ok := state["grants"].([]any)
-	if !ok || state["version"] != float64(6) || len(grants) != 1 {
+	if !ok || state["version"] != float64(7) || len(grants) != 1 {
 		t.Fatalf("task state=%s", raw)
 	}
 	retained, ok := grants[0].(map[string]any)
