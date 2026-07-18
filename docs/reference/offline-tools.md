@@ -265,7 +265,7 @@ one tenant, and Executor configured with both
 `-allow-unquotaed-state-on-dedicated-host`. The packaged configuration helpers
 expose these as `--allow-host-admin-intent` and
 `--allow-unquotaed-state-on-dedicated-host`. The persistent volume has no hard
-byte or inode quota, and the local token has host-administrator authority for
+byte or inode quota, and the local host-admin credential has authority for
 both admission and the later activation checkpoint. It is not tenant
 authentication. Do not use this recipe on a shared host.
 

@@ -46,19 +46,42 @@ Steward does not infer a destructive target. Commands such as node revocation
 still require an explicit node or credential identifier even when the context has
 a default node.
 
-For direct administration of the host-local Executor, create a node context. The
-packaged token is readable only by `root` and the Executor service account, so run
-both setup and later commands as `root`:
+For direct administration of the host-local Executor, create a node context. Start
+with the narrowest role that can do the work. The packaged token files are readable
+only by `root` and the Executor service account, so run both setup and later
+commands as `root`:
 
 ```console
 sudo -H stewardctl context set local-node \
-  -node-token-file /etc/steward/executor-token
+  -node-token-file /etc/steward/executor-observer-token
+sudo -H stewardctl node whoami
 sudo -H stewardctl node maintenance status
 ```
+
+`node whoami` returns the credential ID and role without exposing its value. Use
+`/etc/steward/executor-operator-token` for lifecycle or maintenance changes. Use
+the host-admin `/etc/steward/executor-token` only for admission, state purge, or
+activation administration. These roles are host-wide API limits, not tenant
+identities.
 
 The loopback URL defaults to `http://127.0.0.1:8090` when
 `-node-token-file` is present. Set `-node-url` only when the packaged loopback port
 was changed. A single context may contain both Control and local-node settings.
+
+Previewing a drain needs no reason and changes nothing:
+
+```console
+sudo -H stewardctl node maintenance drain
+```
+
+Applying the plan requires the operator role or host-admin role, an explicit
+reason, and `-apply`:
+
+```console
+sudo -H stewardctl node maintenance drain \
+  -reason "kernel update" \
+  -apply
+```
 
 ## Switch between environments
 

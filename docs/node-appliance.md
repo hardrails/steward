@@ -32,7 +32,7 @@ Staging requires:
 Activation also requires the Docker daemon and the gVisor sandbox runtime
 registered as `runsc`, plus operator-provided enrollment inputs.
 The guided installer can install official gVisor, register `runsc`, and generate
-the host-local Executor token. Inference, service, connector, or egress topology
+host-admin, operator, and observer Executor tokens. Inference, service, connector, or egress topology
 requires Docker Engine 28 or newer.
 
 Persistent Docker state is disabled by default. The portable local volume driver
@@ -80,8 +80,9 @@ The interactive installer detects the platform and offers a local-only node,
 remote enrollment, or staging without activation. Bundled-controller enrollment
 requests the control-plane URL, node-scoped Executor credential, CA, and signed
 admission trust material. A compatible external controller may also supply a
-generic supervisor credential. The installer generates a host-local Executor token
-unless one is supplied.
+generic supervisor credential. The installer generates a host-admin Executor token
+unless one is supplied and creates narrower operator and observer tokens when
+configuration completes.
 
 If Docker does not report `runsc`, the installer asks before downloading official
 gVisor binaries. It verifies both binaries against their published SHA-512 values,
@@ -240,7 +241,9 @@ generated configuration in place.
 | --- | --- | --- |
 | `/etc/steward/uplink-credential.json` | `steward:steward`, `0600` | Steward node credential |
 | `/etc/steward/executor-uplink.json` | `steward-executor:steward-executor`, `0600` | Executor tenant- or node-scoped credential |
-| `/etc/steward/executor-token` | `steward-executor:steward-executor`, `0600` | Host-local Executor bearer secret |
+| `/etc/steward/executor-token` | `steward-executor:steward-executor`, `0600` | Host-admin Executor bearer secret |
+| `/etc/steward/executor-operator-token` | `steward-executor:steward-executor`, `0600` | Inspection, lifecycle, and maintenance bearer secret |
+| `/etc/steward/executor-observer-token` | `steward-executor:steward-executor`, `0600` | Read-only inspection bearer secret |
 | `/etc/steward/control-plane-ca.pem` | `root:root`, `0644` | Control-plane CA bundle |
 | `/etc/steward/site-policy.dsse.json` | `root:steward-executor`, `0640` | Signed tenant, publisher, and command-key policy |
 | `/etc/steward/site-root.public` | `root:root`, `0644` | Site-root verification key |

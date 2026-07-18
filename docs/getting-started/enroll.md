@@ -79,7 +79,8 @@ Executor polls remotely through protocol version 3, while the generic supervisor
 remains loopback-only with process execution disabled. Supplying a supervisor
 credential retains the compatible external-controller path.
 
-The script generates an omitted host-local Executor token. For control-plane
+The script generates an omitted host-admin Executor token and creates narrower
+operator and observer tokens. For control-plane
 enrollment it imports the exact receipt key that signed the enrollment proof;
 changing that key is rejected. It initializes both anti-replay stores once,
 validates policy before configuring the Gateway and relay, checks all seven

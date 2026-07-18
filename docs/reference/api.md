@@ -168,8 +168,15 @@ Default base URL: `http://127.0.0.1:8090`
 Every endpoint except `GET /v1/healthz` requires
 `Authorization: Bearer <token-from-token-file>`.
 
+The bearer has one node-local role. `observer` can read inspection endpoints;
+`operator` adds workload lifecycle and maintenance changes; `host-admin` adds
+admission, state purge, and activation authorization. Roles are host-wide API
+limits, not tenant identities. Signed operations still enforce tenant, node, and
+generation authority independently.
+
 | Method and path | Purpose |
 | --- | --- |
+| `GET /v1/local-principal` | Return the authenticated local credential ID and role |
 | `POST /v1/admissions` | Verify a publisher-signed profile, local policy, and tenant-bound instance request; optionally bind an activation begin digest; journal the mutation; and create a receipt-bound workload |
 | `POST /v1/workloads/{runtime_ref}/activation-canary-preflight` | Recheck current policy, tenant authority, activation identity, reconciliation, lifecycle, and complete runtime topology immediately before the uplink contacts Gateway |
 | `POST /v1/workloads/{runtime_ref}/activation-checkpoints` | Append an idempotent, content-free signed checkpoint after a running activation has verified terminal Gateway evidence |

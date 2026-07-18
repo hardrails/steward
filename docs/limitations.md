@@ -179,15 +179,17 @@ journal paths, and an evidence private key. Partial configuration stops startup.
 An operator must initialize a fence once; startup never recreates a missing fence.
 
 The packaged Executor exposes a bearer-protected loopback API for `stewardctl node`
-and `steward-mcp`. A control plane can send `admit` through the authenticated
-Executor uplink. Local admission and activation-checkpoint calls also require the
-explicit host-admin-intent flag. The local token grants host-administrator
-authority, not tenant authentication.
+and `steward-mcp`. Observer, operator, and host-admin credentials reduce local API
+authority, but every role remains host-wide and has no automatic expiry. A control
+plane can send `admit` through the authenticated Executor uplink. Local admission
+and activation-checkpoint calls require the host-admin credential and the explicit
+host-admin-intent flag. That compatibility path grants host authority, not tenant
+authentication.
 
 ## Proof-carrying activation is deliberately narrow
 
-The signed agent release and activation flow supports one closed, fresh-state
-Hermes workspace-audit canary. It is not a hosted catalog, general workflow engine,
+The signed agent release and activation flow supports closed, fresh-state Hermes
+and OpenClaw workspace-audit canaries. It is not a hosted catalog, general workflow engine,
 arbitrary command runner, or proof framework for user-defined prompts and hooks.
 
 The offline agent catalog is a curator-signed descriptive index. It re-verifies
@@ -200,8 +202,8 @@ and envelope digest to detect rollback or conflicting revisions.
 
 The recipe requires a dedicated host, a signed policy containing exactly one
 tenant, `-admission-allow-host-admin-intent`, and
-`-allow-unquotaed-state-on-dedicated-host`. The local token therefore has
-host-administrator authority, and the Hermes state volume has no hard byte or
+`-allow-unquotaed-state-on-dedicated-host`. The host-admin credential therefore has
+host-administrator authority, and the agent state volume has no hard byte or
 inode quota. The coordinator rejects a multi-tenant policy. Steward's stateless
 shared-host isolation remains available outside this recipe.
 
@@ -781,10 +783,9 @@ Future hardening must preserve deny-by-default operation:
 
 1. encrypted or externally managed state backends without caller-selected host paths;
 2. stronger receipt-key isolation and optional external evidence anchoring;
-3. finer authenticated service principals beyond the host-wide local token;
-4. optional external signature, software bill of materials (SBOM), and provenance
+3. optional external signature, software bill of materials (SBOM), and provenance
    verification before the bounded local OCI import; and
-5. a verified node-retirement and control-store rollover procedure that preserves
+4. a verified node-retirement and control-store rollover procedure that preserves
    receipt continuity and replay protection.
 
 Each capability requires crash recovery, drift inspection, cross-tenant tests, and
