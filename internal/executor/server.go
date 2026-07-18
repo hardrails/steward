@@ -34,8 +34,9 @@ const (
 )
 
 // Server is the authenticated control boundary in front of the local Docker API.
-// The bearer token is a host-control credential; tenant authorization belongs in the
-// upstream control plane and must never be inferred from a caller-supplied label.
+// Node-local credentials limit the host API surface; tenant authorization belongs
+// in signed admission and the upstream principal and must never be inferred from
+// a local role or caller-supplied label.
 type Server struct {
 	docker           Docker
 	localCredentials []localCredentialVerifier
