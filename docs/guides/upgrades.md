@@ -27,9 +27,11 @@ the current lifecycle contract: it records task-local authorization, dispatch, a
 terminal outcomes, including the service, operation-policy, permit, request, run,
 task sequence, and prior-task hash bindings. Format 5 records authorized connector
 calls with the explicit effect mode and exact operation-policy digest. Format 6
-adds the canonical signer set and threshold for a multi-party authorized call. A single
-ledger may contain all six schemas in one signed hash chain. Current release manifests declare
-`connector_receipt_log` readers 1 through 6 and writer 6. The inspector reports the
+adds the canonical signer set and threshold for a multi-party authorized call.
+Format 7 binds a context-locked call's response-history head and terminal response
+digest. A single ledger may contain all seven schemas in one signed hash chain.
+Current release manifests declare `connector_receipt_log` readers 1 through 7 and
+writer 7. The inspector reports the
 highest format present. It reports format 2 when action authorities are configured
 and format 4 when service-task operations are configured, even before the receipt
 file exists or contains that schema, because the running configuration can write the
@@ -40,12 +42,14 @@ makes the receipt path prospectively format 2. The retained authorized grant
 independently requires Gateway state format 5 as soon as it is stored. A
 multi-party authorization raises the receipt boundary to 6, and its retained
 grant requires Gateway state format 6 before any call.
+Context-required grants raise both the receipt and retained-state boundary to 7.
 
-Current release manifests declare `gateway_state` readers 1 through 6 and writer 6.
+Current release manifests declare `gateway_state` readers 1 through 7 and writer 7.
 Format 4 retains the service identity and tenant task authorities of task-authorized
 grants. Format 5 additionally retains authorized effect mode and the
 signed-policy-derived connector/action-key scopes. Format 6 additionally retains
-the multi-party approval threshold. Activation therefore blocks a rollback that
+the multi-party approval threshold. Format 7 retains the context-lock requirement.
+Activation therefore blocks a rollback that
 cannot preserve those bindings.
 
 Gateway treats every configured inference-route or connector credential file as

@@ -20,7 +20,7 @@ home: true
 
 <div class="grid">
   <article class="card"><span class="number">01 / AUTHORIZE</span><h3>Why may this run?</h3><p>Signed admission requires the publisher's workload limits, the operator's site policy, and the tenant's instance request to allow the same deployment. A stored instance generation rejects delayed commands for a replaced instance; a separate policy epoch rejects policy rollback.</p><a href="{{ '/guides/signed-admission/' | relative_url }}">Signed admission →</a></article>
-  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor accepts only immutable, resource-bounded images. Signed policy can grant approved model, private-service, exact connector, and HTTP(S) routes. Authorized Effects assumes the agent is compromised, prohibits generic egress for that grant, and requires one independently signed exact connector request. Persistent Docker state is available only through an explicit dedicated-host compatibility mode because it has no portable hard quota.</p><a href="{{ '/guides/authorized-effects/' | relative_url }}">Authorize external effects →</a></article>
+  <article class="card"><span class="number">02 / CONSTRAIN</span><h3>What may it do?</h3><p>Executor accepts only immutable, resource-bounded images. Signed policy can grant approved model, private-service, exact connector, and HTTP(S) routes. Authorized Effects assumes the agent is compromised, prohibits generic egress for that grant, and requires one independently signed exact connector request. A stricter mode invalidates an approval after the agent receives another managed connector response. Persistent Docker state is available only through an explicit dedicated-host compatibility mode because it has no portable hard quota.</p><a href="{{ '/guides/authorized-effects/' | relative_url }}">Authorize external effects →</a></article>
   <article class="card"><span class="number">03 / VERIFY</span><h3>What did the node enforce?</h3><p>Hash-linked, signed receipts record the accepted artifact, policy, instance generation, host mutation, exact task permit and request digest, dispatch outcome, and observed run ID. They never contain the raw prompt.</p><a href="{{ '/reference/offline-tools/' | relative_url }}">Verify and export evidence →</a></article>
 </div>
 
@@ -69,6 +69,12 @@ signed authority for one exact request or an unordered set of up to eight exact
 requests, prohibits generic egress, and spends each selected task before DNS. It covers only
 Steward-mediated connectors, not unmanaged credentials, browser sessions, local
 filesystem or computer use, inference confidentiality, or host root.
+
+[Context-locked effects]({{ '/guides/context-locked-effects/' | relative_url }})
+can additionally bind each permit to the grant's current signed history of
+completed Steward connector responses. A later managed response invalidates the
+old permit. This history excludes the task, inference, local memory, browser data,
+generic egress, and unmanaged channels.
 
 Steward Control's `/console/` provides a separate operator experience without a
 separate authority boundary. It reads bounded summary, attention, node, command,

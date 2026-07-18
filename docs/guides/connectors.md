@@ -41,6 +41,9 @@ version-3 single-request permit or version-4 bundle; and format-5 or format-6
 evidence records the enforced mode, exact operation policy, and any signer
 threshold. Steward assumes the agent is compromised for this
 decision; it does not ask the agent to detect prompt injection.
+Signed policy can instead require a version-5 context-locked single-request
+permit. Format-7 evidence then binds the grant's current completed connector
+response history, and a later response invalidates the older permit.
 
 ## Define one exact operation
 
@@ -450,9 +453,10 @@ reformatting and binds `application/json`. For GET, HEAD, and DELETE, omit
 `-request`; the permit binds an empty request and empty content type.
 
 When admission and intent select Authorized Effects, the command emits
-`steward.action-permit.v2` with `effect_mode` fixed to `authorized`. Gateway rejects
-a version-1 permit for that grant. A standard permit-enabled connector emits and
-requires version 1.
+`steward.action-permit.v2` with `effect_mode` fixed to `authorized`; a multi-party
+policy uses version 3. A context-required admission uses version 5 and requires
+`-context` from `stewardctl permit context`. Gateway rejects a version-1 permit for
+that grant. A standard permit-enabled connector emits and requires version 1.
 
 Standard output contains only the exact permit digest. Standard error contains one
 canonical JSON approval summary with the exact target, request digest and byte
@@ -573,13 +577,15 @@ authorization, dispatch, and terminal records. Authorized connector calls use
 `steward.connector-receipt.v5`; they add the explicit effect mode and exact
 operation-policy digest. Multi-party authorized calls use
 `steward.connector-receipt.v6` and add the canonical signer set and threshold. A
-stable pre-effect permit denial may add one format-5 marker per retained grant
-without claiming a verified permit or authority key. One chain may contain all six
+context-locked call uses `steward.connector-receipt.v7` and adds the influence
+sequence, influence hash, and terminal response digest. A stable pre-effect permit denial may add one format-5 marker per retained grant
+without claiming a verified permit or authority key. One chain may contain all seven
 schemas, and the verifier checks them as one sequence.
 Configuring any action authority requires a reader for format 2, configuring any
 current service-task operation requires a reader for format 4, an authorized grant
 requires state format 5, and a multi-party grant requires state format 6 before its
-first call. A multi-party receipt requires reader 6 after it is written.
+first call. A multi-party receipt requires reader 6 after it is written. A
+context-required grant and receipt require state and reader format 7.
 Service-task records carry exact permit and request digests, service and
 operation-policy bindings, bounded status, and an observed run ID, but no raw
 prompt or request body. See the

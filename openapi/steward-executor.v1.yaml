@@ -833,6 +833,9 @@ components:
             `authorized` forbids generic egress and requires every selected
             connector call to carry an exact-request permit. A one-approver
             policy uses permit version 2; a multi-party policy uses version 3.
+            Signed tenant policy may additionally require context locking; that
+            mode uses permit version 5 for either threshold and invalidates a
+            permit after another managed connector response completes.
     Capabilities:
       type: object
       additionalProperties: false

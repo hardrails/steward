@@ -35,7 +35,9 @@ digests before the effect. See
 For sensitive effects, signed tenant policy can require this boundary, pin action
 keys and an approval threshold to connector IDs, prohibit generic egress, and
 require exact single-request or bounded-bundle authority with format-5 or format-6
-evidence. See
+evidence. For a stricter single-request boundary, context locking uses format 7
+and invalidates a permit after the grant receives another completed Steward
+connector response. See
 [Authorize exact external effects]({{ '/guides/authorized-effects/' | relative_url }}).
 
 Gateway rejects the exact configured connector credential in upstream response

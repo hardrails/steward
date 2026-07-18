@@ -483,6 +483,15 @@ distinct valid signatures and records the canonical signer set and threshold in
 receipt format 6. Gateway state format 5 preserves the mode and narrowed key scopes
 across restart; format 6 also preserves a multi-party threshold.
 
+Signed policy may additionally set `context_binding` to `required`. Gateway then
+accepts only a version-5 permit that binds the grant's current signed
+connector-response history, permits only one in-flight connector call for the
+grant, and records format-7 authorization and terminal evidence. A completed call
+invalidates permits issued against the prior history. This is not semantic
+prompt-injection detection: task input, inference, local files or memory, browser
+observations, generic egress, unmanaged channels, and upstream interpretation are
+outside the history. Context-required grants do not accept exact-effect bundles.
+
 The same policy can authorize a version-4 exact-effect bundle containing one
 through eight requests. Every signer must be admitted and configured for every
 connector in the bundle. Gateway validates every listed connector, operation

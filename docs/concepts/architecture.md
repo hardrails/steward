@@ -303,8 +303,9 @@ secret-delivery mechanism. An optional action permit narrows that outer connecto
 grant to one authority-signed request; it cannot add an operation or tenant that
 the admitted grant lacks. Authorized Effects additionally makes that requirement
 continuous from signed tenant policy through intent, immutable runtime state,
-Gateway grant, exact signed authority, durable per-task spend, and format-5 or
-format-6 evidence. It assumes the agent is compromised and applies only to fully mediated connector
+Gateway grant, exact signed authority, durable per-task spend, and format-5,
+format-6, or context-locked format-7 evidence. Context locking can invalidate a
+permit after a later managed connector response. It assumes the agent is compromised and applies only to fully mediated connector
 calls; it is not prompt-injection detection or control over unmanaged channels.
 
 For HTTP(S) egress, the agent receives standard proxy variables that point to its
