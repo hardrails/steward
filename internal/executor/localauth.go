@@ -66,8 +66,8 @@ func buildLocalCredentialVerifiers(credentials []LocalCredential) ([]localCreden
 		if credential.Role == LocalRoleHostAdmin {
 			hostAdmins++
 		}
-		if strings.TrimSpace(credential.Token) == "" || len(credential.Token) > 4096 {
-			return nil, errors.New("executor local credential token must be non-empty and at most 4096 bytes")
+		if !validLocalCredentialToken(credential.Token) {
+			return nil, errors.New("executor local credential token must contain 1 through 4096 visible ASCII bytes without whitespace")
 		}
 		hash := sha256.Sum256([]byte("Bearer " + credential.Token))
 		if _, exists := seenHashes[hash]; exists {
@@ -82,6 +82,18 @@ func buildLocalCredentialVerifiers(credentials []LocalCredential) ([]localCreden
 		return nil, errors.New("executor requires exactly one host-admin local credential")
 	}
 	return verifiers, nil
+}
+
+func validLocalCredentialToken(token string) bool {
+	if token == "" || len(token) > 4096 || strings.TrimSpace(token) != token {
+		return false
+	}
+	for index := 0; index < len(token); index++ {
+		if token[index] < 0x21 || token[index] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) authenticate(authorization string) (localPrincipal, bool) {

@@ -35,7 +35,7 @@ Signed admission (all trust inputs are optional as one group):
                                 Receipt private key used during enrollment
   --executor-evidence-public-key FILE
                                 Matching receipt public key
-  --allow-host-admin-intent     Let the host token select signed tenant intent
+  --allow-host-admin-intent     Let the host-admin token select signed tenant intent
   --allow-unquotaed-state-on-dedicated-host
                                 Allow persistent Docker volumes only when the
                                 signed policy contains exactly one tenant; no
@@ -43,7 +43,7 @@ Signed admission (all trust inputs are optional as one group):
 
 Optional:
   --local-only                 Configure loopback HTTP, CLI, and MCP without an uplink
-  --executor-token FILE         Existing host-local bearer token; generated if omitted
+  --executor-token FILE         Existing host-admin bearer token; generated if omitted
   --executor-uplink-protocol-version VERSION
                                 Use protocol 3 or 4 for a node-scoped credential.
                                 The default is 4; use 3 only for controller
@@ -581,6 +581,8 @@ targets=(
 	/etc/steward/uplink-credential.json
 	/etc/steward/executor-uplink.json
 	/etc/steward/executor-token
+	/etc/steward/executor-operator-token
+	/etc/steward/executor-observer-token
 	/etc/steward/control-plane-ca.pem
 	/etc/steward/site-policy.dsse.json
 	/etc/steward/site-root.public
@@ -600,6 +602,7 @@ committed=false
 steward_tmp=
 executor_tmp=
 token_tmp=
+scoped_token_tmp=
 atomic_tmp=
 uplink_fence=/var/lib/steward-executor/uplink-state.json
 uplink_delivery_state=/var/lib/steward-executor/uplink-delivery-state.json
@@ -631,7 +634,7 @@ rollback() {
 		[[ $evidence_log_created == false ]] || rm -f -- "$evidence_log"
 		echo "configure-node: preflight failed; restored previous configuration" >&2
 	fi
-	rm -f -- "${steward_tmp:-}" "${executor_tmp:-}" "${token_tmp:-}" "${atomic_tmp:-}"
+	rm -f -- "${steward_tmp:-}" "${executor_tmp:-}" "${token_tmp:-}" "${scoped_token_tmp:-}" "${atomic_tmp:-}"
 	rm -rf -- "$backup_dir"
 	exit "$status"
 }
@@ -710,6 +713,16 @@ awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" -v loc
 		found_url = 1
 		next
 	}
+	/^EXECUTOR_OPERATOR_TOKEN_FILE=/ {
+		if (found_operator_token++) exit 3
+		print "EXECUTOR_OPERATOR_TOKEN_FILE=/etc/steward/executor-operator-token"
+		next
+	}
+	/^EXECUTOR_OBSERVER_TOKEN_FILE=/ {
+		if (found_observer_token++) exit 3
+		print "EXECUTOR_OBSERVER_TOKEN_FILE=/etc/steward/executor-observer-token"
+		next
+	}
 	/^EXECUTOR_UPLINK_CREDENTIAL_FILE=/ {
 		print "EXECUTOR_UPLINK_CREDENTIAL_FILE=" (local_only == "true" ? "" : "/etc/steward/executor-uplink.json")
 		found_credential = 1
@@ -754,6 +767,8 @@ awk -v url="$control_plane_url" -v ca="/etc/steward/control-plane-ca.pem" -v loc
 	}
 	{ print }
 	END {
+		if (!found_operator_token) print "EXECUTOR_OPERATOR_TOKEN_FILE=/etc/steward/executor-operator-token"
+		if (!found_observer_token) print "EXECUTOR_OBSERVER_TOKEN_FILE=/etc/steward/executor-observer-token"
 		if (!found_delivery) print "EXECUTOR_UPLINK_DELIVERY_STATE_FILE="
 		if (!found_protocol) print "EXECUTOR_UPLINK_PROTOCOL_VERSION=0"
 		if (!found_evidence_enabled) print "EXECUTOR_EVIDENCE_UPLINK_ENABLED=" evidence_enabled
@@ -829,6 +844,19 @@ elif [[ ! -e /etc/steward/executor-token ]]; then
 	mv -f "$token_tmp" /etc/steward/executor-token
 	token_tmp=
 fi
+
+for scoped_role in operator observer; do
+	scoped_path="/etc/steward/executor-${scoped_role}-token"
+	if [[ ! -e $scoped_path ]]; then
+		scoped_token_tmp=$(mktemp "/etc/steward/.executor-${scoped_role}-token.XXXXXX")
+		od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$scoped_token_tmp"
+		printf '\n' >>"$scoped_token_tmp"
+		chown steward-executor:steward-executor "$scoped_token_tmp"
+		chmod 0600 "$scoped_token_tmp"
+		mv -f "$scoped_token_tmp" "$scoped_path"
+		scoped_token_tmp=
+	fi
+done
 
 if [[ $local_only == false && ! -e $uplink_fence && ! -L $uplink_fence ]]; then
 	uplink_fence_created=true

@@ -43,7 +43,7 @@ Node enrollment:
                                 supervisor remains loopback-only.
   --executor-credential FILE    Executor uplink credential JSON
   --ca-file FILE                PEM CA bundle for the control plane
-  --executor-token FILE         Host-local token (securely generated if omitted)
+  --executor-token FILE         Host-admin local token (securely generated if omitted)
   --admission-policy FILE       Signed site policy (with both site-root flags)
   --site-root-public-key FILE   Base64 Ed25519 site-root public key
   --site-root-key-id ID         Signature key ID used by the policy
@@ -54,7 +54,7 @@ Node enrollment:
                                 Receipt private key used during enrollment
   --executor-evidence-public-key FILE
                                 Matching receipt public key
-  --allow-host-admin-intent     Let the host token select signed tenant intent
+  --allow-host-admin-intent     Let the host-admin token select signed tenant intent
   --allow-unquotaed-state-on-dedicated-host
                                 Allow persistent Docker volumes only when the
                                 signed policy contains exactly one tenant; no
@@ -1268,6 +1268,8 @@ else
 	fi
 	/usr/local/libexec/steward/configure-node "${configure_args[@]}"
 fi
+
+echo "install-steward: local Executor roles use /etc/steward/executor-observer-token, /etc/steward/executor-operator-token, and /etc/steward/executor-token"
 
 if [[ $start_services == true ]]; then
 	"/opt/steward/releases/$version/integration/scripts/activate-node-release.sh" "$version" --restart

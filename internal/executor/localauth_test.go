@@ -77,6 +77,7 @@ func TestLocalCredentialConfigurationFailsClosed(t *testing.T) {
 		{name: "unknown role", credentials: []LocalCredential{validAdmin, {ID: "other", Role: "owner", Token: "other-secret"}}},
 		{name: "invalid ID", credentials: []LocalCredential{{ID: "bad/id", Role: LocalRoleHostAdmin, Token: "admin-secret"}}},
 		{name: "empty token", credentials: []LocalCredential{{ID: "admin", Role: LocalRoleHostAdmin}}},
+		{name: "whitespace token", credentials: []LocalCredential{{ID: "admin", Role: LocalRoleHostAdmin, Token: "admin secret"}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
