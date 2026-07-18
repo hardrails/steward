@@ -111,6 +111,55 @@ func TestClientActivationAdmissionCarriesExactRuntimeIdentity(t *testing.T) {
 	}
 }
 
+func TestClientDrivesMaintenanceContract(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			t.Fatal("missing authorization")
+		}
+		switch r.URL.Path {
+		case "/v1/maintenance":
+			if r.Method != http.MethodGet {
+				t.Fatalf("maintenance method=%s", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"schema_version":"steward.executor-maintenance.v1","enabled":false,"active_runtime_refs":[],"pending_operations":0}`))
+		case "/v1/maintenance/enter":
+			var body struct {
+				Reason string `json:"reason"`
+			}
+			if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&body) != nil || body.Reason != "kernel update" {
+				t.Fatalf("maintenance enter method=%s body=%+v", r.Method, body)
+			}
+			_, _ = w.Write([]byte(`{"schema_version":"steward.executor-maintenance.v1","enabled":true,"entered_at":"2026-07-17T00:00:00Z","reason":"kernel update","active_runtime_refs":["executor-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"pending_operations":0}`))
+		case "/v1/maintenance/exit":
+			if r.Method != http.MethodPost || r.ContentLength != 0 {
+				t.Fatalf("maintenance exit method=%s length=%d", r.Method, r.ContentLength)
+			}
+			_, _ = w.Write([]byte(`{"schema_version":"steward.executor-maintenance.v1","enabled":false,"active_runtime_refs":[],"pending_operations":0}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, err := client.MaintenanceStatus(context.Background()); err != nil || status.Enabled {
+		t.Fatalf("status=%+v error=%v", status, err)
+	}
+	if status, err := client.EnterMaintenance(context.Background(), "kernel update"); err != nil || !status.Enabled || status.Reason != "kernel update" || len(status.ActiveRuntimeRefs) != 1 {
+		t.Fatalf("entered=%+v error=%v", status, err)
+	}
+	if status, err := client.ExitMaintenance(context.Background()); err != nil || status.Enabled {
+		t.Fatalf("exited=%+v error=%v", status, err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests=%d", requests)
+	}
+}
+
 func TestClientRejectsUnsafeOriginsPathsAndErrors(t *testing.T) {
 	for _, origin := range []string{"https://127.0.0.1:8090", "http://example.com:8090", "http://127.0.0.1", "http://127.0.0.1:8090/path"} {
 		if _, err := New(origin, "secret"); err == nil {

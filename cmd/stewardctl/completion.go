@@ -1,9 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 )
@@ -11,7 +16,7 @@ import (
 var completionTree = map[string][]string{
 	"":                 {"context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "agent-release", "agent-catalog", "activation", "rollout", "upgrade", "version"},
 	"context":          {"set", "use", "show", "list", "delete"},
-	"completion":       {"bash", "zsh", "fish"},
+	"completion":       {"install", "bash", "zsh", "fish"},
 	"key":              {"match"},
 	"capsule":          {"sign", "verify"},
 	"policy":           {"sign", "verify"},
@@ -53,7 +58,8 @@ var completionTree = map[string][]string{
 }
 
 var completionFlags = map[string][]string{
-	"context set":               {"-control-url", "-token-file", "-ca-file", "-tenant-id", "-node-id"},
+	"context set":               {"-control-url", "-token-file", "-ca-file", "-node-url", "-node-token-file", "-tenant-id", "-node-id"},
+	"completion install":        {"-shell", "-force"},
 	"control":                   {"-control-url", "-token-file", "-ca-file", "-no-context"},
 	"control node":              {"-tenant-id", "-node-id", "-after", "-limit"},
 	"control operations status": {"-tenant-id"},
@@ -74,15 +80,18 @@ var completionFlags = map[string][]string{
 	"permit bundle approve":     {"-in", "-admission", "-intent", "-trust", "-plan", "-key", "-key-id", "-out", "-header-out"},
 	"permit bundle verify":      {"-in", "-plan", "-trust", "-authority", "-max-validity", "-at"},
 	"permit bundle audit":       {"-in", "-plan", "-trust", "-authority", "-receipts", "-receipt-public-key", "-receipt-node-id", "-receipt-epoch", "-max-validity", "-expected-sequence", "-expected-chain-hash"},
-	"node":                      {"-node-url", "-token-file", "-runtime-ref", "-capsule", "-intent", "-tenant-id", "-node-id", "-lineage-id", "-generation"},
+	"node":                      {"-node-url", "-token-file", "-no-context", "-runtime-ref", "-capsule", "-intent", "-tenant-id", "-node-id", "-lineage-id", "-generation", "-reason", "-apply"},
 	"gateway":                   {"-config", "-agent", "-tenant-id", "-node-id", "-receipt-file", "-receipt-key-file", "-receipt-node-id", "-receipt-epoch"},
 	"activation":                {"-workspace", "-control-url", "-token-file", "-ca-file", "-tenant-id", "-node-id"},
 	"rollout":                   {"-workspace", "-control-url", "-token-file", "-ca-file", "-tenant-id"},
 }
 
 func completionCommand(arguments []string, stdout io.Writer) error {
+	if len(arguments) > 0 && arguments[0] == "install" {
+		return completionInstall(arguments[1:], stdout)
+	}
 	if len(arguments) != 1 {
-		return errors.New("completion requires bash, zsh, or fish")
+		return errors.New("completion requires install, bash, zsh, or fish")
 	}
 	var script string
 	switch arguments[0] {
@@ -93,10 +102,183 @@ func completionCommand(arguments []string, stdout io.Writer) error {
 	case "fish":
 		script = fishCompletionScript
 	default:
-		return errors.New("completion requires bash, zsh, or fish")
+		return errors.New("completion requires install, bash, zsh, or fish")
 	}
 	_, err := io.WriteString(stdout, script)
 	return err
+}
+
+type completionInstallResult struct {
+	Shell          string `json:"shell"`
+	CompletionFile string `json:"completion_file"`
+	StartupFile    string `json:"startup_file,omitempty"`
+	Changed        bool   `json:"changed"`
+}
+
+func completionInstall(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("completion install", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	shell := flags.String("shell", "", "bash, zsh, or fish")
+	force := flags.Bool("force", false, "replace a conflicting generated completion file")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("completion install accepts only named flags")
+	}
+	selected := strings.ToLower(strings.TrimSpace(*shell))
+	if selected == "" {
+		selected = filepath.Base(os.Getenv("SHELL"))
+	}
+	if selected != "bash" && selected != "zsh" && selected != "fish" {
+		return errors.New("could not detect bash, zsh, or fish; use -shell")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) {
+		return errors.New("locate an absolute home directory for completion installation")
+	}
+	configRoot := os.Getenv("XDG_CONFIG_HOME")
+	if configRoot == "" {
+		configRoot = filepath.Join(home, ".config")
+	} else if !filepath.IsAbs(configRoot) {
+		return errors.New("XDG_CONFIG_HOME must be an absolute path")
+	}
+
+	var script, completionPath, startupPath, startupBlock string
+	switch selected {
+	case "bash":
+		script = bashCompletionScript
+		completionPath = filepath.Join(configRoot, "steward", "completions", "stewardctl.bash")
+		startupPath = filepath.Join(home, ".bashrc")
+		if runtime.GOOS == "darwin" {
+			if _, statErr := os.Stat(filepath.Join(home, ".bashrc")); errors.Is(statErr, os.ErrNotExist) {
+				startupPath = filepath.Join(home, ".bash_profile")
+			}
+		}
+		startupBlock = "source " + shellQuote(completionPath)
+	case "zsh":
+		script = zshCompletionScript
+		completionPath = filepath.Join(configRoot, "steward", "completions", "_stewardctl")
+		startupPath = filepath.Join(home, ".zshrc")
+		startupBlock = "autoload -Uz compinit\nif ! (( $+functions[compdef] )); then compinit; fi\nsource " + shellQuote(completionPath)
+	case "fish":
+		script = fishCompletionScript
+		completionPath = filepath.Join(configRoot, "fish", "completions", "stewardctl.fish")
+	}
+	changed, err := installCompletionFile(completionPath, []byte(script), *force)
+	if err != nil {
+		return err
+	}
+	if startupPath != "" {
+		startupChanged, err := installCompletionStartupBlock(startupPath, startupBlock)
+		if err != nil {
+			return err
+		}
+		changed = startupChanged || changed
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(completionInstallResult{
+		Shell: selected, CompletionFile: completionPath, StartupFile: startupPath, Changed: changed,
+	})
+}
+
+func installCompletionFile(path string, content []byte, force bool) (bool, error) {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return false, fmt.Errorf("create completion directory: %w", err)
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			return false, errors.New("completion target must be a regular file, not a link")
+		}
+		existing, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return false, fmt.Errorf("read existing completion file: %w", readErr)
+		}
+		if string(existing) == string(content) {
+			return false, nil
+		}
+		if !force {
+			return false, errors.New("completion file already contains different content; inspect it or retry with -force")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect completion target: %w", err)
+	}
+	temporary, err := os.CreateTemp(directory, ".stewardctl-completion-*")
+	if err != nil {
+		return false, fmt.Errorf("create temporary completion file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	cleanup := func(cause error) error {
+		return errors.Join(cause, temporary.Close(), os.Remove(temporaryPath))
+	}
+	if err := temporary.Chmod(0o644); err != nil {
+		return false, cleanup(err)
+	}
+	if _, err := temporary.Write(content); err != nil {
+		return false, cleanup(err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return false, cleanup(err)
+	}
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return false, err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		_ = os.Remove(temporaryPath)
+		return false, fmt.Errorf("replace completion file: %w", err)
+	}
+	if err := syncOutputDirectory(path); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func installCompletionStartupBlock(path, command string) (bool, error) {
+	const begin = "# >>> Steward stewardctl completion >>>"
+	const end = "# <<< Steward stewardctl completion <<<"
+	var existing []byte
+	info, err := os.Stat(path)
+	if err == nil {
+		if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+			return false, errors.New("shell startup file must be a regular file no larger than 1 MiB")
+		}
+		existing, err = os.ReadFile(path)
+		if err != nil {
+			return false, fmt.Errorf("read shell startup file: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect shell startup file: %w", err)
+	}
+	text := string(existing)
+	if strings.Contains(text, begin) || strings.Contains(text, end) {
+		if strings.Contains(text, begin+"\n"+command+"\n"+end) {
+			return false, nil
+		}
+		return false, errors.New("shell startup file contains a conflicting Steward completion block")
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return false, fmt.Errorf("open shell startup file: %w", err)
+	}
+	prefix := ""
+	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
+		prefix = "\n"
+	}
+	_, writeErr := io.WriteString(file, prefix+begin+"\n"+command+"\n"+end+"\n")
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func writeCompletionCandidates(arguments []string, stdout io.Writer) error {
@@ -206,9 +388,9 @@ func filepathBase(value string) string {
 
 const bashCompletionScript = `# Steward command completion. Generated by: stewardctl completion bash
 _stewardctl_complete() {
-  local -a candidates
-  mapfile -t candidates < <(command stewardctl __complete "${COMP_WORDS[@]:1}")
-  COMPREPLY=( $(compgen -W "${candidates[*]}" -- "${COMP_WORDS[COMP_CWORD]}") )
+	local candidates
+	candidates="$(command stewardctl __complete "${COMP_WORDS[@]:1}")"
+	COMPREPLY=( $(compgen -W "$candidates" -- "${COMP_WORDS[COMP_CWORD]}") )
 }
 complete -o default -F _stewardctl_complete stewardctl
 `

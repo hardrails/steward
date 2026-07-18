@@ -9,11 +9,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
+	"unicode/utf8"
 )
 
 const (
 	legacyFenceVersion = 1
-	fenceVersion       = 2
+	routeFenceVersion  = 2
+	fenceVersion       = 3
 	maxFenceBytes      = 4 << 20
 )
 
@@ -41,7 +44,17 @@ type FenceStore struct {
 	path          string
 	formatVersion int
 	policyEpoch   uint64
+	maintenance   MaintenanceState
 	byInstance    map[string]FenceRecord
+}
+
+// MaintenanceState is the durable node-local admission cordon. It blocks new
+// workload admission and starts while leaving status, stop, destroy, evidence,
+// and recovery operations available.
+type MaintenanceState struct {
+	Enabled   bool   `json:"enabled"`
+	EnteredAt string `json:"entered_at,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 // OpenFenceStore loads an existing strict snapshot. Initialization is separate.
@@ -166,6 +179,52 @@ func (s *FenceStore) Count() int {
 	return len(s.byInstance)
 }
 
+// Maintenance returns a copy of the durable node-local cordon state.
+func (s *FenceStore) Maintenance() MaintenanceState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maintenance
+}
+
+// SetMaintenance atomically enters or exits the node-local admission cordon.
+// Re-entering with the same reason is idempotent. A different reason is a
+// conflict so an operator cannot accidentally rewrite why an active cordon was
+// established.
+func (s *FenceStore) SetMaintenance(enabled bool, reason string, now time.Time) error {
+	if enabled {
+		if !ValidMaintenanceReason(reason) || now.IsZero() {
+			return errors.New("maintenance requires a bounded reason and observation time")
+		}
+		now = now.UTC()
+	} else if reason != "" {
+		return errors.New("maintenance exit does not accept a reason")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if enabled && s.maintenance.Enabled {
+		if s.maintenance.Reason != reason {
+			return errors.New("maintenance is already enabled with a different reason")
+		}
+		return nil
+	}
+	if !enabled && !s.maintenance.Enabled {
+		return nil
+	}
+	previous := s.maintenance
+	if enabled {
+		s.maintenance = MaintenanceState{
+			Enabled: true, EnteredAt: now.Format(time.RFC3339Nano), Reason: reason,
+		}
+	} else {
+		s.maintenance = MaintenanceState{}
+	}
+	if err := s.persistLocked(); err != nil {
+		s.maintenance = previous
+		return err
+	}
+	return nil
+}
+
 // Commit advances the policy and instance high-water marks. Equal generation
 // is accepted only when it names the exact same capsule.
 func (s *FenceStore) Commit(record FenceRecord, policyEpoch uint64) error {
@@ -288,6 +347,13 @@ func (s *FenceStore) encode() ([]byte, error) {
 			raw = append(raw, 0)
 		}
 	}
+	if s.maintenance.Enabled {
+		raw = append(raw, 1)
+		raw = appendFenceText(raw, s.maintenance.EnteredAt)
+		raw = appendFenceText(raw, s.maintenance.Reason)
+	} else {
+		raw = append(raw, 0)
+	}
 	if len(raw) > maxFenceBytes {
 		return nil, errors.New("fence store exceeds size limit")
 	}
@@ -295,7 +361,8 @@ func (s *FenceStore) encode() ([]byte, error) {
 }
 
 func (s *FenceStore) decode(raw []byte) error {
-	if len(raw) < 17 || string(raw[:4]) != "STFN" || (raw[4] != legacyFenceVersion && raw[4] != fenceVersion) {
+	if len(raw) < 17 || string(raw[:4]) != "STFN" ||
+		(raw[4] != legacyFenceVersion && raw[4] != routeFenceVersion && raw[4] != fenceVersion) {
 		return errors.New("invalid fence store header")
 	}
 	version := raw[4]
@@ -333,7 +400,7 @@ func (s *FenceStore) decode(raw []byte) error {
 			return errors.New("invalid fence image config digest")
 		}
 		routePolicyDigest := ""
-		if version == fenceVersion {
+		if version >= routeFenceVersion {
 			routePolicyDigest, rest, ok = takeOptionalFenceDigest(rest)
 			if !ok {
 				return errors.New("invalid fence route policy digest")
@@ -356,6 +423,29 @@ func (s *FenceStore) decode(raw []byte) error {
 		}
 		raw = rest
 	}
+	if version == fenceVersion {
+		if len(raw) < 1 || raw[0] > 1 {
+			return errors.New("invalid fence maintenance state")
+		}
+		enabled := raw[0] == 1
+		raw = raw[1:]
+		if enabled {
+			enteredAt, rest, ok := takeFenceText(raw, len(time.RFC3339Nano)+10)
+			if !ok {
+				return errors.New("invalid fence maintenance time")
+			}
+			observed, err := time.Parse(time.RFC3339Nano, enteredAt)
+			if err != nil || observed.IsZero() || enteredAt != observed.UTC().Format(time.RFC3339Nano) {
+				return errors.New("invalid fence maintenance time")
+			}
+			reason, rest, ok := takeFenceText(rest, 256)
+			if !ok || !ValidMaintenanceReason(reason) {
+				return errors.New("invalid fence maintenance reason")
+			}
+			s.maintenance = MaintenanceState{Enabled: true, EnteredAt: enteredAt, Reason: reason}
+			raw = rest
+		}
+	}
 	if len(raw) != 0 {
 		return errors.New("trailing fence store bytes")
 	}
@@ -364,6 +454,20 @@ func (s *FenceStore) decode(raw []byte) error {
 }
 
 func fenceKey(tenantID, instanceID string) string { return tenantID + "\x00" + instanceID }
+
+// ValidMaintenanceReason reports whether value is safe for both the executor
+// API and the durable fence representation.
+func ValidMaintenanceReason(value string) bool {
+	if len(value) == 0 || len(value) > 256 || strings.TrimSpace(value) != value || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
 
 func appendFenceText(raw []byte, value string) []byte {
 	raw = binary.BigEndian.AppendUint16(raw, uint16(len(value)))

@@ -7,7 +7,8 @@
 > exact-request permits and bounded exact-effect bundles,
 > optional response-history locking that invalidates stale approvals,
 > Docker/gVisor enforcement, spend-before-DNS records, and offline-verifiable
-> receipts without
+> receipts, plus a restart-safe node maintenance cordon and resumable exact-runtime
+> drain, without
 > requiring a hosted service. A signed agent release can also bind one qualified
 > outcome to an exact offline archive, deterministic canary, evidence digest, and
 > known limits without granting runtime authority. Steward includes an optional
@@ -38,7 +39,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Proof-carrying agent activation](https://hardrails.github.io/steward/guides/agent-activation/): Verify a signed outcome-led Hermes release and exact archive, keep task signing off-node, run the deterministic canary, and retain an offline-verifiable evidence set
 - [Proof-carrying fleet rollout](https://hardrails.github.io/steward/guides/fleet-rollout/): Authorize one exact plan, promote a qualified Hermes release through an explicit canary and signed evidence-bound batches, resume from crash-recoverable immutable artifacts, and verify an offline proof digest that commits the exact plan, promotions, and signed outer command envelopes
 - [Operator console](https://hardrails.github.io/steward/guides/operator-console/): Use the same scoped control API bearer in an embedded, air-gapped React interface; review and submit exact offline-signed bytes while keeping signing keys outside the browser
-- [CLI contexts and completion](https://hardrails.github.io/steward/guides/cli/): Save repeated controller, CA, token-file, tenant, and node defaults without storing bearer values; generate Bash, Zsh, or Fish completion
+- [CLI contexts and completion](https://hardrails.github.io/steward/guides/cli/): Save repeated Control and local Executor connection paths without storing bearer values; install Bash, Zsh, or Fish completion with one command
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
 - [Signed admission](https://hardrails.github.io/steward/guides/signed-admission/): Sign capsules and policy, configure fences and receipts, verify offline
 - [Positive capabilities](https://hardrails.github.io/steward/guides/positive-capabilities/): Configure optional state, inference, service, connector, and HTTP(S) egress grants
@@ -53,7 +54,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/): Build the exact-pinned qualified adapter; review its gVisor qualification evidence, signed workspace and connector skills, service API, and limits
 - [OpenClaw](https://hardrails.github.io/steward/guides/openclaw/): Build and qualify the exact official release, run a real custom skill through the bounded one-shot API under gVisor, inspect the offline bundle, and review excluded authority
 - [Air-gapped installation](https://hardrails.github.io/steward/guides/air-gapped/): Offline import and verification
-- [Upgrade and rollback](https://hardrails.github.io/steward/guides/upgrades/): Manifest-bound activation, drained-node requirements, durable-format checks, and rollback limits
+- [Upgrade and rollback](https://hardrails.github.io/steward/guides/upgrades/): Persist maintenance before a resumable exact-runtime drain, activate a manifest-bound release, preserve durable formats, and exit only after reconciliation
 
 ## Explanation
 

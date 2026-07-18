@@ -711,11 +711,18 @@ extend Steward's shared-host isolation claim to persistent state.
 ## Release transitions require a drained node
 
 Steward does not upgrade or roll back in place while workloads or grants remain.
-Before a release transition, destroy all managed agent and relay containers and
-capability networks; stopped containers also count. No live admission fence,
-pending journal entry, or retained Gateway grant may remain. Steward-managed state
-volumes may remain. This interruption lets activation bind one relay image to the
-release, inspect every durable format with services stopped, and avoid changing the
+The host-local maintenance command can persist a cordon and destroy all exact
+active signed-runtime references, but it does not preserve application
+availability, migrate work, choose another node, wait for graceful agent
+completion, or apply a fleet disruption budget. Stopped containers also count and
+are destroyed. No live admission fence, pending journal entry, or retained Gateway
+grant may remain. Steward-managed state volumes may remain.
+
+The cordon blocks new signed admission and starts but is not a general scheduler.
+It remains enabled across failure and restart until an operator exits it after
+successful reconciliation. An applied drain is destructive and may interrupt
+agent work. This interruption lets activation bind one relay image to the release,
+inspect every durable format with services stopped, and avoid changing the
 execution boundary beneath a retained workload.
 
 ## Not available

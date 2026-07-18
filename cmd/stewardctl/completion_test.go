@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -84,5 +85,132 @@ func TestCompletionDispatchWritesCandidatesForExecutablePaths(t *testing.T) {
 	}
 	if err := completionCommand(nil, &bytes.Buffer{}); err == nil {
 		t.Fatal("completion without a shell succeeded")
+	}
+}
+
+func TestCompletionInstallDetectsActivatesAndUpdatesIdempotently(t *testing.T) {
+	home := t.TempDir()
+	config := filepath.Join(home, "config")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("SHELL", "/bin/zsh")
+	var output bytes.Buffer
+	if err := completionCommand([]string{"install"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var installed completionInstallResult
+	if err := json.Unmarshal(output.Bytes(), &installed); err != nil {
+		t.Fatal(err)
+	}
+	if installed.Shell != "zsh" || !installed.Changed || installed.StartupFile != filepath.Join(home, ".zshrc") {
+		t.Fatalf("install result=%+v", installed)
+	}
+	script, err := os.ReadFile(installed.CompletionFile)
+	if err != nil || string(script) != zshCompletionScript {
+		t.Fatalf("script=%q error=%v", script, err)
+	}
+	startup, err := os.ReadFile(installed.StartupFile)
+	if err != nil || !strings.Contains(string(startup), "compinit") || !strings.Contains(string(startup), installed.CompletionFile) {
+		t.Fatalf("startup=%q error=%v", startup, err)
+	}
+
+	output.Reset()
+	if err := completionCommand([]string{"install"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	installed = completionInstallResult{}
+	if err := json.Unmarshal(output.Bytes(), &installed); err != nil || installed.Changed {
+		t.Fatalf("idempotent result=%+v error=%v", installed, err)
+	}
+	if err := os.WriteFile(installed.CompletionFile, []byte("user content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := completionCommand([]string{"install"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "-force") {
+		t.Fatalf("conflicting completion error=%v", err)
+	}
+	if err := completionCommand([]string{"install", "-force"}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompletionInstallUsesFishAutoloadWithoutStartupMutation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("SHELL", "/usr/bin/unknown")
+	var output bytes.Buffer
+	if err := completionCommand([]string{"install", "-shell", "fish"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var installed completionInstallResult
+	if err := json.Unmarshal(output.Bytes(), &installed); err != nil {
+		t.Fatal(err)
+	}
+	if installed.StartupFile != "" || !strings.HasSuffix(installed.CompletionFile, filepath.Join("fish", "completions", "stewardctl.fish")) {
+		t.Fatalf("fish install=%+v", installed)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "fish", "config.fish")); !os.IsNotExist(err) {
+		t.Fatalf("fish startup file was unexpectedly created: %v", err)
+	}
+	if err := completionCommand([]string{"install"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "could not detect") {
+		t.Fatalf("unknown shell error=%v", err)
+	}
+}
+
+func TestCompletionInstallActivatesBashAndPreservesStartupContent(t *testing.T) {
+	home := t.TempDir()
+	config := filepath.Join(home, ".config")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("SHELL", "/bin/bash")
+	startupPath := filepath.Join(home, ".bashrc")
+	if err := os.WriteFile(startupPath, []byte("export EXISTING=value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := completionCommand([]string{"install"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var installed completionInstallResult
+	if err := json.Unmarshal(output.Bytes(), &installed); err != nil {
+		t.Fatal(err)
+	}
+	startup, err := os.ReadFile(startupPath)
+	if err != nil || !strings.HasPrefix(string(startup), "export EXISTING=value\n") ||
+		!strings.Contains(string(startup), "source '") || installed.Shell != "bash" {
+		t.Fatalf("install=%+v startup=%q error=%v", installed, startup, err)
+	}
+	if script, err := os.ReadFile(installed.CompletionFile); err != nil || !strings.Contains(string(script), "compgen") || strings.Contains(string(script), "mapfile") {
+		t.Fatalf("bash script=%q error=%v", script, err)
+	}
+}
+
+func TestCompletionInstallRejectsAmbiguousConfiguration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/bin/bash")
+	if err := completionCommand([]string{"install", "positional"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "named flags") {
+		t.Fatalf("positional install error=%v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", "relative")
+	if err := completionCommand([]string{"install"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative XDG error=%v", err)
+	}
+	startup := filepath.Join(home, ".zshrc")
+	if err := os.WriteFile(startup, []byte("# >>> Steward stewardctl completion >>>\nuser managed\n# <<< Steward stewardctl completion <<<\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installCompletionStartupBlock(startup, "source '/expected'"); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("conflicting startup block error=%v", err)
+	}
+	if err := completionCommand([]string{"install", "-shell", "powershell"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "detect") {
+		t.Fatalf("unsupported install shell error=%v", err)
+	}
+	target := filepath.Join(home, "completion")
+	if err := os.Symlink(startup, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installCompletionFile(target, []byte("generated"), false); err == nil || !strings.Contains(err.Error(), "not a link") {
+		t.Fatalf("symlink completion target error=%v", err)
 	}
 }

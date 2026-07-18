@@ -20,6 +20,12 @@ journal, Executor evidence log, Executor lifecycle uplink fence
 (`uplink-state.json`), separate durable delivery ledger
 (`uplink-delivery-state.json`), and supervisor state before a binary switch.
 
+Admission-fence format 1 stores policy and generation rollback records. Format 2
+adds the committed Gateway route-policy digest. Format 3 adds the durable node
+maintenance cordon. Current manifests read formats 1 through 3 and write format 3.
+An exact maintenance entry therefore creates a rollback boundary even when no
+workload remains.
+
 Connector receipt format 1 records ordinary connector events. Format 2 records the
 action-authority key ID, permit digest, and exact request digest for permit-backed
 events. Format 3 is the historical two-record service-task contract. Format 4 is
@@ -215,6 +221,49 @@ Follow an approved recovery procedure for that specific mutation; Steward has no
 generic journal-recovery command. Do not delete Docker objects or fencing files by
 hand.
 
+On a node whose active Executor supports maintenance, first save its local
+connection and preview the drain:
+
+```console
+sudo -H stewardctl context set local-node \
+  -node-token-file /etc/steward/executor-token
+sudo -H stewardctl node maintenance drain \
+  -reason "planned Steward upgrade"
+```
+
+The preview changes nothing. Its `active_runtime_refs` field is the exact signed
+inventory the applied drain will remove. Review application availability first:
+Steward does not migrate a workload to another node or apply a disruption budget.
+Kubernetes likewise requires operators to plan availability before a node drain,
+while Nomad separates scheduling eligibility from allocation migration
+([Kubernetes guidance](https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/),
+[Nomad guidance](https://developer.hashicorp.com/nomad/commands/node/drain)).
+
+Apply the local drain explicitly:
+
+```console
+sudo -H stewardctl node maintenance drain \
+  -reason "planned Steward upgrade" \
+  -apply
+```
+
+Executor persists the cordon before it reads the destroy inventory. The cordon
+blocks new signed admissions, starts, activation canary dispatch, and activation
+checkpoints. Exact admission replays, status, logs, egress statistics, stop,
+destroy, evidence publication, and recovery remain available. The drain destroys
+each returned signed runtime through the normal journaled lifecycle API and leaves
+persistent state volumes untouched. If a destroy fails, the command stops and the
+cordon stays enabled; repeat the same command and reason after investigating.
+
+The command does not delete an ambiguous journal entry or an orphaned Gateway
+grant. Activation still fails closed on those states. A node running an older
+Executor without the maintenance API must use the documented per-runtime destroy
+path; do not bypass it with Docker commands.
+
+Entering maintenance writes admission-fence format 3. A target or rollback release
+whose manifest cannot read and preserve that format becomes ineligible. This is a
+durable safety boundary, not a cache that can be removed to regain rollback.
+
 ```console
 TARGET_RELEASE="<release-tag>"
 sudo "/opt/steward/releases/$TARGET_RELEASE/integration/scripts/activate-node-release.sh" \
@@ -231,6 +280,19 @@ image binding, and runs the target's full preflight. It then switches the active
 release and relay binding, reloads systemd, and starts only the services that were
 previously active, in Gateway, Steward, Executor order. It does not enable an
 intentionally disabled service.
+
+Maintenance deliberately remains enabled across the restart. After activation
+succeeds and Executor readiness reports a completed reconciliation, return the node
+to service:
+
+```console
+sudo -H stewardctl node maintenance status
+sudo -H stewardctl node maintenance exit
+```
+
+Exit fails while reconciliation is pending or degraded and never starts a stopped
+workload. If activation or rollback fails, leave maintenance enabled until the
+node's retained authority and durable state have been investigated.
 
 `--no-restart` is accepted only when all three services are already inactive. This
 prevents the active-release symlink from changing underneath a running process.

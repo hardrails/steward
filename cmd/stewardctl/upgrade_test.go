@@ -130,7 +130,7 @@ func newUpgradeFixture(t *testing.T) upgradeFixture {
 		t.Fatal(err)
 	}
 	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
-		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 2},
+		"admission_fence":       {ReadMin: 1, ReadMax: 3, Write: 3},
 		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
 		"evidence_log":          {ReadMin: 1, ReadMax: 2, Write: 2},
 		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
@@ -190,7 +190,7 @@ func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 	if err := run(fixture.arguments("check-drained", "configured"), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"signed_admission\":\"configured\",\"active_fences\":0,\"pending_operations\":0,\"retained_gateway_grants\":0,\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_delivery_state\":4,\"uplink_state\":2},\"target_compatible\":true,\"drained\":true}\n"
+	want := "{\"signed_admission\":\"configured\",\"active_fences\":0,\"pending_operations\":0,\"retained_gateway_grants\":0,\"formats\":{\"admission_fence\":3,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_delivery_state\":4,\"uplink_state\":2},\"target_compatible\":true,\"drained\":true}\n"
 	if output.String() != want {
 		t.Fatalf("check-drained snapshot\n got: %s want: %s", output.String(), want)
 	}
@@ -211,7 +211,7 @@ func TestUpgradeCheckDrainedSnapshotIsReadOnly(t *testing.T) {
 	if err := run(fixture.arguments("inspect-formats", "configured"), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	want = "{\"signed_admission\":\"configured\",\"formats\":{\"admission_fence\":2,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_delivery_state\":4,\"uplink_state\":2},\"target_compatible\":true}\n"
+	want = "{\"signed_admission\":\"configured\",\"formats\":{\"admission_fence\":3,\"connector_receipt_log\":1,\"evidence_log\":null,\"gateway_state\":null,\"operation_journal\":null,\"supervisor_state\":1,\"uplink_delivery_state\":4,\"uplink_state\":2},\"target_compatible\":true}\n"
 	if output.String() != want {
 		t.Fatalf("inspect-formats snapshot\n got: %s want: %s", output.String(), want)
 	}
@@ -333,7 +333,7 @@ func TestUpgradeInspectionReportsHighestMixedEvidenceFormatAndBlocksLegacyReader
 	}
 
 	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
-		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 2},
+		"admission_fence":       {ReadMin: 1, ReadMax: 3, Write: 3},
 		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
 		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
 		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
@@ -485,7 +485,7 @@ func TestUpgradeManifestCompatibilityBlocksUnreadableObservedVersion(t *testing.
 	})
 	var output bytes.Buffer
 	err := run(fixture.arguments("check-drained", "configured"), &output, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "admission_fence version 2") || !strings.Contains(err.Error(), "choose a compatible release") {
+	if err == nil || !strings.Contains(err.Error(), "admission_fence version 3") || !strings.Contains(err.Error(), "choose a compatible release") {
 		t.Fatalf("compatibility error = %v", err)
 	}
 	if !strings.Contains(output.String(), `"target_compatible":false`) {
@@ -493,7 +493,7 @@ func TestUpgradeManifestCompatibilityBlocksUnreadableObservedVersion(t *testing.
 	}
 
 	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
-		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 1},
+		"admission_fence":       {ReadMin: 1, ReadMax: 3, Write: 1},
 		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
 		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
 		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
@@ -658,7 +658,7 @@ func TestUpgradeManifestRequiresReceiptFormatAndPreservesGatewayV3(t *testing.T)
 		t.Fatal(err)
 	}
 	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
-		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 2},
+		"admission_fence":       {ReadMin: 1, ReadMax: 3, Write: 3},
 		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
 		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
 		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 3},
@@ -675,7 +675,7 @@ func TestUpgradeManifestRequiresReceiptFormatAndPreservesGatewayV3(t *testing.T)
 	}
 
 	writeUpgradeManifest(t, fixture.manifest, map[string]releaseFormatRange{
-		"admission_fence":       {ReadMin: 1, ReadMax: 2, Write: 2},
+		"admission_fence":       {ReadMin: 1, ReadMax: 3, Write: 3},
 		"connector_receipt_log": {ReadMin: 1, ReadMax: 1, Write: 1},
 		"evidence_log":          {ReadMin: 1, ReadMax: 1, Write: 1},
 		"gateway_state":         {ReadMin: 1, ReadMax: 3, Write: 2},

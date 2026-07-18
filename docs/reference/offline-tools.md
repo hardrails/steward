@@ -874,6 +874,24 @@ report or capture operation after the deadline rather than by a background timer
 
 ## Upgrade inspection
 
+Before inspection, a maintenance-capable active Executor can close admission and
+destroy its exact active signed-runtime inventory:
+
+```console
+sudo -H stewardctl context set local-node \
+  -node-token-file /etc/steward/executor-token
+sudo -H stewardctl node maintenance drain -reason "planned upgrade"
+sudo -H stewardctl node maintenance drain -reason "planned upgrade" -apply
+```
+
+Without `-apply`, `drain` is a read-only preview. With `-apply`, it persists the
+cordon first, then calls the ordinary destroy API once for each sorted runtime
+reference returned by Executor. A retry with the same reason resumes from the
+remaining inventory. It never purges persistent state, clears a journal, removes a
+grant directly, exits maintenance, or migrates work to another node. Inspect the
+final state with `stewardctl node maintenance status`; exit only after a successful
+release transition and ready reconciliation.
+
 After stopping Steward's node services, inspect retained workload state and verify
 that the target manifest can read every observed durable format:
 
@@ -899,6 +917,12 @@ format means the file is absent or, for the Executor evidence log, has no record
 header yet. Tombstone fences preserve replay history but do not count as active.
 The command exits nonzero when workload or grant state remains, a file is malformed
 or missing when required, or the target reader/writer range is unsafe.
+
+Admission-fence format 1 retains policy and generation rollback state. Format 2
+adds the committed route-policy digest. Format 3 adds the durable maintenance
+cordon. Once a maintenance mutation writes format 3, a target whose fence reader or
+writer stops at format 1 or 2 is incompatible; exiting maintenance does not
+downgrade the snapshot.
 
 Connector receipt format 1 contains ordinary connector records. Format 2 adds
 connector action permits. Format 3 is the historical two-record service-task

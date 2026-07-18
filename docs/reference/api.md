@@ -432,14 +432,33 @@ for response and failure schemas.
 
 ## Offline operator tools
 
+Executor exposes three authenticated, host-local maintenance operations:
+
+- `GET /v1/maintenance` returns the durable cordon, bounded reason and entry time,
+  exact active signed runtime references, and pending journal count.
+- `POST /v1/maintenance/enter` accepts one strict `{"reason":"..."}` object no
+  larger than 1 MiB. The reason is 1 through 256 bytes of trimmed UTF-8 without
+  control characters. An exact retry is idempotent; a different reason returns
+  `409 maintenance_conflict`.
+- `POST /v1/maintenance/exit` requires an empty body and successful Executor
+  reconciliation. It is idempotent and returns the disabled state. It never
+  clears an ambiguous journal entry.
+
+All three require the loopback Executor bearer. They are host-administration
+operations, not tenant scheduling APIs. Entering maintenance blocks new signed
+admission, starts, activation canary dispatch, and activation checkpoints. It does
+not stop a workload or remove state. The CLI composes these operations with the
+existing signed-runtime destroy endpoint; no separate drain engine exists.
+
 `stewardctl image`, `stewardctl evidence`, `stewardctl permit`, `stewardctl task`,
 `stewardctl activation`, `stewardctl rollout`, and `stewardctl upgrade` are CLIs,
 not HTTP endpoints. They provide bounded,
 policy-bound Open Container Initiative (OCI) inspection and import; offline evidence
 verification and export; exact connector- and service-request permit issuance,
 verification, dispatch, and receipt correlation; one-node and ordered-fleet
-composition of a fixed qualified agent activation contract; and read-only release drain
-and durable-format inspection. The rollout coordinator uses existing controller
+composition of a fixed qualified agent activation contract; authenticated
+node-local maintenance and drain; and read-only release and durable-format
+inspection. The rollout coordinator uses existing controller
 node, command, and evidence-capture APIs; there is no controller `/rollouts`
 resource and the controller does not hold rollout signing keys. The coordinator
 retains its signed plan authorization and chained batch promotions in the local

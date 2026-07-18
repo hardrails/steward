@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Steward Executor API
-  version: "1.8.0"
+  version: "1.9.0"
   description: |
     Public host-local contract for Steward's separate Docker/gVisor executor
     process. The control plane supplies a fully resolved generic OCI workload;
@@ -26,6 +26,8 @@ tags:
     description: Signed, locally bounded deployment admission and receipts.
   - name: state
     description: Explicit lifecycle for tenant-lineage persistent state.
+  - name: maintenance
+    description: Durable node-local cordon and drain inspection.
   - name: health
     description: Executor process liveness.
 paths:
@@ -79,6 +81,109 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Readiness"
+  /v1/maintenance:
+    get:
+      tags: [maintenance]
+      operationId: executorMaintenanceStatus
+      summary: Inspect the durable node maintenance cordon
+      description: |
+        Returns the persisted cordon and the exact active signed runtime
+        references that a local drain may destroy. Maintenance blocks new
+        signed admissions, starts, activation canary dispatch, and activation
+        checkpoints. It does not block inspection, stop, destroy, evidence, or
+        recovery. Persistent state volumes are not listed or removed.
+      responses:
+        "200":
+          description: Current durable maintenance state and drain inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Signed admission is not configured on this node.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/maintenance/enter:
+    post:
+      tags: [maintenance]
+      operationId: enterExecutorMaintenance
+      summary: Persist a node maintenance cordon
+      description: |
+        Atomically persists a bounded operator reason. Retrying the same reason
+        is idempotent and preserves the original entry time. A different reason
+        conflicts until maintenance exits. Entering maintenance does not stop
+        or destroy existing workloads.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaintenanceEnterRequest"
+      responses:
+        "200":
+          description: Maintenance is enabled with the exact retained reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceStatus"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: Maintenance is already enabled with a different reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Signed admission is unavailable or the cordon could not be persisted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/maintenance/exit:
+    post:
+      tags: [maintenance]
+      operationId: exitExecutorMaintenance
+      summary: Remove the durable node maintenance cordon
+      description: |
+        Requires an empty body and ready reconciled runtime state. The operation
+        is idempotent, but never clears ambiguous journal state. A successful
+        exit allows later admission and starts; it does not start workloads.
+      responses:
+        "200":
+          description: Maintenance is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceStatus"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Signed admission is unavailable, reconciliation is degraded, or the cordon could not be persisted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/workloads:
     post:
       tags: [workloads]
@@ -164,8 +269,10 @@ paths:
         it appends an idempotent signed activation-begin receipt before the
         admission-allow receipt, mutation journal, or host mutation. This
         metadata grants no authority; all normal admission checks still apply.
-        Admission is blocked while the latest reconciliation is degraded or a
-        prior journaled mutation remains ambiguous.
+        A new admission is blocked while maintenance is enabled, the latest
+        reconciliation is degraded, or a prior journaled mutation remains
+        ambiguous. An exact replay of an existing admitted workload remains
+        available during maintenance.
       requestBody:
         required: true
         content:
@@ -214,7 +321,7 @@ paths:
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
-          description: Signed admission is unconfigured, capacity is exhausted, or durable journal/evidence state requires recovery.
+          description: Signed admission is unconfigured, maintenance blocks a new workload, capacity is exhausted, or durable journal/evidence state requires recovery.
           content:
             application/json:
               schema:
@@ -276,7 +383,7 @@ paths:
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
-          description: Signed admission is unavailable or reconciliation is degraded.
+          description: Signed admission is unavailable, maintenance is enabled, or reconciliation is degraded.
           content:
             application/json:
               schema:
@@ -343,7 +450,7 @@ paths:
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
-          description: Signed admission is unavailable, reconciliation is degraded, or the signed evidence log cannot safely retain the checkpoint.
+          description: Signed admission is unavailable, maintenance is enabled, reconciliation is degraded, or the signed evidence log cannot safely retain the checkpoint.
           content:
             application/json:
               schema:
@@ -484,7 +591,7 @@ paths:
       tags: [workloads]
       operationId: startWorkload
       summary: Idempotently start a workload
-      description: Starts only an Executor-managed, still-hardened workload; an already-running workload is a no-op. Start is blocked while signed-runtime reconciliation is degraded because it would widen runtime authority.
+      description: Starts only an Executor-managed, still-hardened workload; an already-running workload is a no-op. Start is blocked while maintenance is enabled or signed-runtime reconciliation is degraded because it would widen runtime authority.
       responses:
         "200":
           description: Workload is running.
@@ -511,7 +618,7 @@ paths:
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
-          description: Journal, receipt, or reconciliation state prevents a safe mutation.
+          description: Maintenance, journal, receipt, or reconciliation state prevents a safe mutation.
           content:
             application/json:
               schema:
@@ -872,6 +979,43 @@ components:
           type: integer
           format: int64
           minimum: 1
+    MaintenanceEnterRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: UTF-8 operator reason without leading, trailing, or control characters.
+    MaintenanceStatus:
+      type: object
+      additionalProperties: false
+      required: [schema_version, enabled, active_runtime_refs, pending_operations]
+      properties:
+        schema_version:
+          type: string
+          enum: [steward.executor-maintenance.v1]
+        enabled:
+          type: boolean
+        entered_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+        active_runtime_refs:
+          type: array
+          maxItems: 16384
+          uniqueItems: true
+          items:
+            type: string
+            pattern: "^executor-[a-f0-9]{64}$"
+        pending_operations:
+          type: integer
+          minimum: 0
     SignedAdmissionState:
       type: object
       additionalProperties: false

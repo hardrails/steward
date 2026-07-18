@@ -54,6 +54,53 @@ func TestCLIContextDrivesARealControlCommand(t *testing.T) {
 	}
 }
 
+func TestCLIContextMakesLocalNodeCommandsShort(t *testing.T) {
+	const runtimeRef = "executor-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer executor-secret" || request.URL.Path != "/v1/workloads/"+runtimeRef {
+			t.Fatalf("request=%s authorization=%q", request.URL.Path, request.Header.Get("Authorization"))
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"runtime_ref":"` + runtimeRef + `","status":"running"}`))
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(directory, "executor.token")
+	if err := os.WriteFile(tokenPath, []byte("executor-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contextPath := filepath.Join(directory, "contexts.json")
+	t.Setenv("STEWARD_CONTEXT_FILE", contextPath)
+	if err := contextCommand([]string{
+		"set", "local-node", "-node-url", server.URL, "-node-token-file", tokenPath,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := run([]string{"node", "status", "-runtime-ref", runtimeRef}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"status":"running"`) {
+		t.Fatalf("node output=%s", output.String())
+	}
+	raw, err := os.ReadFile(contextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "executor-secret") || !strings.Contains(string(raw), `"schema_version": "steward.cli-context.v2"`) ||
+		!strings.Contains(string(raw), `"node_token_file":`) {
+		t.Fatalf("node context persistence=%s", raw)
+	}
+
+	disabled, err := applyNodeCLIContext([]string{"status", "-no-context", "-runtime-ref", runtimeRef})
+	if err != nil || slices.Contains(disabled, tokenPath) || slices.Contains(disabled, "-no-context") {
+		t.Fatalf("disabled node context=%v error=%v", disabled, err)
+	}
+}
+
 func TestCLIContextShortensScopedControlCommandsWithoutStoringBearer(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0o700); err != nil {

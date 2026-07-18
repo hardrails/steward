@@ -213,6 +213,9 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/workloads", s.provision)
 	mux.HandleFunc("POST /v1/admissions", s.secureProvision)
+	mux.HandleFunc("GET /v1/maintenance", s.maintenanceStatus)
+	mux.HandleFunc("POST /v1/maintenance/enter", s.maintenanceEnter)
+	mux.HandleFunc("POST /v1/maintenance/exit", s.maintenanceExit)
 	mux.HandleFunc("POST /v1/state/purge", s.purgeState)
 	mux.HandleFunc(
 		"POST /v1/workloads/{id}/activation-canary-preflight",
@@ -667,6 +670,10 @@ func (s *Server) activationCanaryPreflight(
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; activation canary dispatch is blocked until reconciliation succeeds")
 		return
 	}
+	if s.secure.fences.Maintenance().Enabled {
+		writeError(w, http.StatusServiceUnavailable, "maintenance_enabled", "node maintenance blocks activation canary dispatch")
+		return
+	}
 	observed, err := s.managed(r.Context(), name)
 	if err != nil {
 		writeDockerError(w, err)
@@ -743,6 +750,10 @@ func (s *Server) activationCheckpoint(w http.ResponseWriter, r *http.Request) {
 	defer s.provisionMu.Unlock()
 	if s.secureMutationBlockedLocked() {
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; activation checkpoint is blocked until reconciliation succeeds")
+		return
+	}
+	if s.secure.fences.Maintenance().Enabled {
+		writeError(w, http.StatusServiceUnavailable, "maintenance_enabled", "node maintenance blocks activation checkpoints")
 		return
 	}
 	observed, err := s.managed(r.Context(), name)
@@ -884,6 +895,10 @@ func (s *Server) provisionSecureWorkload(
 	}
 	if !errors.Is(err, ErrNotFound) {
 		writeDockerError(w, err)
+		return
+	}
+	if s.secure.fences.Maintenance().Enabled {
+		writeError(w, http.StatusServiceUnavailable, "maintenance_enabled", "node maintenance blocks new signed admissions")
 		return
 	}
 	if persisted := s.secure.fences.Fences(workload.TenantID, workload.InstanceID); persisted.Generation >= effective.Intent.Generation {
@@ -1629,6 +1644,10 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 			return
 		}
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; start is blocked until reconciliation succeeds")
+		return
+	}
+	if action == "start" && s.secure.fences.Maintenance().Enabled {
+		writeError(w, http.StatusServiceUnavailable, "maintenance_enabled", "node maintenance blocks workload starts")
 		return
 	}
 	observed, err := s.managed(r.Context(), name)

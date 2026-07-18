@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
 func TestFenceStorePersistsAndRejectsRollback(t *testing.T) {
@@ -78,6 +79,107 @@ func TestFenceStoreMustBeInitializedExactlyOnce(t *testing.T) {
 	}
 	if err := InitializeFenceStore(path); err == nil {
 		t.Fatal("existing fence store was overwritten")
+	}
+}
+
+func TestFenceStorePersistsMaintenanceCordonAndRequiresExactRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fences.bin")
+	if err := InitializeFenceStore(path); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenFenceStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := store.Maintenance(); state.Enabled || state.EnteredAt != "" || state.Reason != "" {
+		t.Fatalf("initial maintenance=%#v", state)
+	}
+	enteredAt := time.Date(2026, time.July, 18, 3, 30, 0, 123, time.FixedZone("offset", 3600))
+	if err := store.SetMaintenance(true, "kernel security update", enteredAt); err != nil {
+		t.Fatal(err)
+	}
+	wantTime := enteredAt.UTC().Format(time.RFC3339Nano)
+	if state := store.Maintenance(); !state.Enabled || state.EnteredAt != wantTime || state.Reason != "kernel security update" {
+		t.Fatalf("maintenance=%#v", state)
+	}
+	if err := store.SetMaintenance(true, "kernel security update", enteredAt.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if state := store.Maintenance(); state.EnteredAt != wantTime {
+		t.Fatalf("idempotent maintenance retry changed time: %#v", state)
+	}
+	if err := store.SetMaintenance(true, "different incident", enteredAt); err == nil {
+		t.Fatal("maintenance reason was silently replaced")
+	}
+
+	reopened, err := OpenFenceStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := reopened.Maintenance(); !state.Enabled || state.EnteredAt != wantTime || state.Reason != "kernel security update" {
+		t.Fatalf("reopened maintenance=%#v", state)
+	}
+	if reopened.FormatVersion() != fenceVersion {
+		t.Fatalf("maintenance format=%d want=%d", reopened.FormatVersion(), fenceVersion)
+	}
+	if err := reopened.SetMaintenance(false, "reason is forbidden", time.Time{}); err == nil {
+		t.Fatal("maintenance exit accepted a reason")
+	}
+	if err := reopened.SetMaintenance(false, "", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if state := reopened.Maintenance(); state != (MaintenanceState{}) {
+		t.Fatalf("maintenance exit=%#v", state)
+	}
+	if err := reopened.SetMaintenance(false, "", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	final, err := OpenFenceStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := final.Maintenance(); state != (MaintenanceState{}) {
+		t.Fatalf("reopened maintenance exit=%#v", state)
+	}
+}
+
+func TestFenceStoreRejectsInvalidMaintenanceState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fences.bin")
+	if err := InitializeFenceStore(path); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenFenceStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, reason := range []string{"", " leading", "trailing ", "line\nbreak", string([]byte{0xff}), string(make([]byte, 257))} {
+		if err := store.SetMaintenance(true, reason, now); err == nil {
+			t.Fatalf("invalid maintenance reason %q accepted", reason)
+		}
+	}
+	if err := store.SetMaintenance(true, "valid", time.Time{}); err == nil {
+		t.Fatal("zero maintenance time accepted")
+	}
+
+	valid, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string][]byte{
+		"missing state": valid[:len(valid)-1],
+		"invalid flag":  append(append([]byte(nil), valid[:len(valid)-1]...), 2),
+		"trailing":      append(append([]byte(nil), valid...), 0),
+	} {
+		t.Run(name, func(t *testing.T) {
+			malformed := filepath.Join(t.TempDir(), "fences.bin")
+			if err := os.WriteFile(malformed, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := OpenFenceStore(malformed); err == nil {
+				t.Fatal("malformed maintenance state accepted")
+			}
+		})
 	}
 }
 
@@ -244,6 +346,38 @@ func TestFenceStoreLoadsLegacyRecordWithoutInventingRoutePolicy(t *testing.T) {
 	loaded, ok := store.Record(record.TenantID, record.InstanceID)
 	if !ok || loaded.RoutePolicyDigest != "" {
 		t.Fatalf("legacy route policy binding = %q, want empty fail-closed marker", loaded.RoutePolicyDigest)
+	}
+}
+
+func TestFenceStoreLoadsRouteVersionWithoutInventingMaintenance(t *testing.T) {
+	record := testFenceRecord("tenant", "instance", 1)
+	raw := []byte{'S', 'T', 'F', 'N', routeFenceVersion}
+	raw = binary.BigEndian.AppendUint64(raw, 1)
+	raw = binary.BigEndian.AppendUint32(raw, 1)
+	raw = appendFenceText(raw, record.TenantID)
+	raw = appendFenceText(raw, record.InstanceID)
+	raw = binary.BigEndian.AppendUint64(raw, record.Generation)
+	raw = appendFenceText(raw, record.CapsuleDigest)
+	raw = appendFenceText(raw, record.PolicyDigest)
+	raw = appendFenceText(raw, record.LineageID)
+	raw = appendFenceText(raw, record.WorkloadDigest)
+	raw = appendFenceText(raw, record.ImageConfigDigest)
+	raw = appendFenceText(raw, record.RoutePolicyDigest)
+	raw = append(raw, 1)
+	path := filepath.Join(t.TempDir(), "fences.bin")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenFenceStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := store.Maintenance(); state != (MaintenanceState{}) {
+		t.Fatalf("version-2 maintenance=%#v", state)
+	}
+	loaded, ok := store.Record(record.TenantID, record.InstanceID)
+	if !ok || loaded.RoutePolicyDigest != record.RoutePolicyDigest {
+		t.Fatalf("version-2 record=%#v found=%t", loaded, ok)
 	}
 }
 

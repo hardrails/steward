@@ -89,6 +89,15 @@ type StatePurge struct {
 	Generation uint64 `json:"generation"`
 }
 
+type MaintenanceStatus struct {
+	SchemaVersion     string   `json:"schema_version"`
+	Enabled           bool     `json:"enabled"`
+	EnteredAt         string   `json:"entered_at,omitempty"`
+	Reason            string   `json:"reason,omitempty"`
+	ActiveRuntimeRefs []string `json:"active_runtime_refs"`
+	PendingOperations int      `json:"pending_operations"`
+}
+
 type APIError struct {
 	Status  int
 	Code    string
@@ -277,6 +286,33 @@ func (c *Client) PurgeState(ctx context.Context, request StatePurge) error {
 	return c.do(ctx, http.MethodPost, "/v1/state/purge", request, nil)
 }
 
+func (c *Client) MaintenanceStatus(ctx context.Context) (MaintenanceStatus, error) {
+	var status MaintenanceStatus
+	if err := c.do(ctx, http.MethodGet, "/v1/maintenance", nil, &status); err != nil {
+		return MaintenanceStatus{}, err
+	}
+	return status, nil
+}
+
+func (c *Client) EnterMaintenance(ctx context.Context, reason string) (MaintenanceStatus, error) {
+	var status MaintenanceStatus
+	body := struct {
+		Reason string `json:"reason"`
+	}{Reason: reason}
+	if err := c.do(ctx, http.MethodPost, "/v1/maintenance/enter", body, &status); err != nil {
+		return MaintenanceStatus{}, err
+	}
+	return status, nil
+}
+
+func (c *Client) ExitMaintenance(ctx context.Context) (MaintenanceStatus, error) {
+	var status MaintenanceStatus
+	if err := c.do(ctx, http.MethodPost, "/v1/maintenance/exit", nil, &status); err != nil {
+		return MaintenanceStatus{}, err
+	}
+	return status, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body, output any) error {
 	if !validRuntimePath(path) {
 		return errors.New("invalid node API path")
@@ -362,7 +398,8 @@ func ReadBounded(path string, limit int64) ([]byte, error) {
 }
 
 func validRuntimePath(path string) bool {
-	if path == "/v1/admissions" || path == "/v1/state/purge" {
+	if path == "/v1/admissions" || path == "/v1/state/purge" ||
+		path == "/v1/maintenance" || path == "/v1/maintenance/enter" || path == "/v1/maintenance/exit" {
 		return true
 	}
 	const prefix = "/v1/workloads/executor-"

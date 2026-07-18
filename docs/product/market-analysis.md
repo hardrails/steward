@@ -50,6 +50,36 @@ Agent Sandbox, and other systems document customer-operated control components.
 The comparison below evaluates the narrower authorization, replay, and evidence
 boundary instead.
 
+## Differentiation: maintenance that preserves the authority boundary
+
+Node drain is mature infrastructure practice, not a novel Steward feature. The
+important distinction is what remains authoritative when agent images,
+configuration, and model output are untrusted. Steward persists its cordon in the
+same restart-safe store as admission rollback fences, closes admission before
+destruction, and drains only exact runtime references derived from committed signed
+admission. It deliberately provides no placement or migration scheduler.
+
+| System | New-work gate | Existing-work behavior | Failure and restart behavior |
+| --- | --- | --- | --- |
+| Steward | Durable node-local cordon blocks signed admission, starts, and activation work under the same mutation lock | Explicit `-apply` destroys exact signed runtimes through the normal journaled API; state volumes remain; no migration or availability claim | Cordon survives restart and partial drain, a same-reason retry resumes, and exit requires successful reconciliation |
+| [Nomad](https://developer.hashicorp.com/nomad/commands/node/drain) | Drain disables scheduling eligibility | Migrates or stops allocations according to job type and deadline | Drain is server-managed and monitorable; eligibility remains an explicit scheduler concern |
+| [Kubernetes](https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/) | Drain marks a node unschedulable | Evicts pods and can respect PodDisruptionBudgets; controllers place replacements | Operators uncordon after maintenance; direct node binding and special tolerations remain documented exceptions |
+
+The comparison explains product scope, not superiority: Nomad and Kubernetes offer
+placement and availability machinery Steward does not. Steward's narrower value is
+continuity between signed agent admission, durable cordon, lifecycle evidence, and
+release-format rollback checks on one sovereign node.
+
+This direction is consistent with two current security signals. NIST's May 2026
+summary found broad agreement that established cybersecurity practices remain
+relevant but require adaptation for agents, while CAISI's red-team analysis focuses
+on indirect prompt injection through external data
+([NIST CAISI 800-5](https://www.nist.gov/publications/summary-analysis-responses-request-information-regarding-security-considerations-ai),
+[CAISI agent-hijacking analysis](https://www.nist.gov/blogs/caisi-research-blog/insights-ai-agent-security-large-scale-red-teaming-competition)).
+A durable cordon does not prevent prompt injection. It gives operators a reliable
+way to stop additional authority and remove running workloads without asking the
+agent to cooperate.
+
 ## Differentiation: signed separation of duties
 
 The market increasingly treats a host prompt that says “approve this network

@@ -65,11 +65,14 @@ operator can:
    fail-closed Agent templates, expected-version readiness, and a systemd sandbox,
    while keeping storage, bootstrap authentication, recovery, provider tokens, and
    rendered values outside the controller, MCP, evidence, and React surfaces;
-10. publish bounded signed receipt deltas to the customer-owned controller on an
+10. persist a node maintenance cordon before a resumable exact-runtime drain,
+    leave persistent state intact, and keep admission closed across restart until
+    reconciliation succeeds and an operator explicitly returns the node to service;
+11. publish bounded signed receipt deltas to the customer-owned controller on an
    independent loop, so the controller can retain one exact checkpoint and make an
    authenticated rollback or equivocation finding sticky without becoming a
    receipt warehouse; and
-11. inspect or export the controller's witnessed state under a separate stable
+12. inspect or export the controller's witnessed state under a separate stable
    witness key, while retaining the full node-local receipt chain for detailed
    offline verification.
 
