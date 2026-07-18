@@ -416,9 +416,11 @@ sudo /bin/bash -p /root/steward-install/install-steward.sh \
 
 Package removal and the archive uninstaller refuse to proceed while a managed agent
 container, relay container, or capability network remains; stopped containers also
-count. Destroy workloads through Steward before removing the node software. Do not
-delete Docker objects by hand because the durable fences and receipts would no
-longer match observed state.
+count. On a maintenance-capable node, preview and apply
+`sudo -H stewardctl node maintenance drain -reason "node removal"`; otherwise destroy
+each runtime through Steward. The drain does not erase persistent state or retire
+node identity. Do not delete Docker objects by hand because the durable fences and
+receipts would no longer match observed state.
 
 For native packages, run `apt remove steward-node` or `rpm -e steward-node`.
 Removal stops and disables all three services and removes package-owned

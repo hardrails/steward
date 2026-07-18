@@ -269,8 +269,10 @@ paths:
         it appends an idempotent signed activation-begin receipt before the
         admission-allow receipt, mutation journal, or host mutation. This
         metadata grants no authority; all normal admission checks still apply.
-        Admission is blocked while the latest reconciliation is degraded or a
-        prior journaled mutation remains ambiguous.
+        A new admission is blocked while maintenance is enabled, the latest
+        reconciliation is degraded, or a prior journaled mutation remains
+        ambiguous. An exact replay of an existing admitted workload remains
+        available during maintenance.
       requestBody:
         required: true
         content:
@@ -319,7 +321,7 @@ paths:
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
-          description: Signed admission is unconfigured, capacity is exhausted, or durable journal/evidence state requires recovery.
+          description: Signed admission is unconfigured, maintenance blocks a new workload, capacity is exhausted, or durable journal/evidence state requires recovery.
           content:
             application/json:
               schema:
@@ -381,7 +383,7 @@ paths:
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
-          description: Signed admission is unavailable or reconciliation is degraded.
+          description: Signed admission is unavailable, maintenance is enabled, or reconciliation is degraded.
           content:
             application/json:
               schema:
@@ -448,7 +450,7 @@ paths:
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
-          description: Signed admission is unavailable, reconciliation is degraded, or the signed evidence log cannot safely retain the checkpoint.
+          description: Signed admission is unavailable, maintenance is enabled, reconciliation is degraded, or the signed evidence log cannot safely retain the checkpoint.
           content:
             application/json:
               schema:
@@ -589,7 +591,7 @@ paths:
       tags: [workloads]
       operationId: startWorkload
       summary: Idempotently start a workload
-      description: Starts only an Executor-managed, still-hardened workload; an already-running workload is a no-op. Start is blocked while signed-runtime reconciliation is degraded because it would widen runtime authority.
+      description: Starts only an Executor-managed, still-hardened workload; an already-running workload is a no-op. Start is blocked while maintenance is enabled or signed-runtime reconciliation is degraded because it would widen runtime authority.
       responses:
         "200":
           description: Workload is running.
@@ -616,7 +618,7 @@ paths:
         "502":
           $ref: "#/components/responses/DockerError"
         "503":
-          description: Journal, receipt, or reconciliation state prevents a safe mutation.
+          description: Maintenance, journal, receipt, or reconciliation state prevents a safe mutation.
           content:
             application/json:
               schema:
@@ -1006,7 +1008,7 @@ components:
           maxLength: 256
         active_runtime_refs:
           type: array
-          maxItems: 1024
+          maxItems: 16384
           uniqueItems: true
           items:
             type: string

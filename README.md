@@ -151,12 +151,24 @@ an expected-version manifest, and a sandboxed systemd service. OpenBao remains a
 optional, separately operated service; Steward never exposes its tokens or rendered
 values to the agent or React console.
 
-After admission, replace `executor-DIGEST` with the returned `runtime_ref` to query
-the workload through the bearer-protected loopback API:
+Save the local connection once. The context stores the token-file path, never the
+token value:
 
 ```bash
-sudo stewardctl node status --node-url http://127.0.0.1:8090 \
-  --token-file /etc/steward/executor-token --runtime-ref executor-DIGEST
+sudo -H stewardctl context set local-node \
+  -node-token-file /etc/steward/executor-token
+```
+
+After admission, replace `executor-DIGEST` with the returned `runtime_ref`:
+
+```bash
+sudo -H stewardctl node status -runtime-ref executor-DIGEST
+```
+
+Enable command and flag completion for Bash, Zsh, or Fish with one command:
+
+```bash
+stewardctl completion install
 ```
 
 For any lifecycle-enabled service, an off-node tenant key can sign one exact JSON

@@ -289,12 +289,18 @@ workloads; use Executor.
 
 Upgrade and rollback require a drained node: no managed containers or capability
 networks, live admission fences, pending journal entries, or retained Gateway
-grants may remain. Activation stops previously active services, verifies that the
-target can read every durable state file, and switches the complete release and its
-relay image binding. It then restarts only the services that were active before the
-transition. A rollback restores release files and the retained relay binding; it
-does not restore configuration or durable data. A directory from an older installer
-without `release.json` is not an eligible rollback target. See
+grants may remain. `stewardctl node maintenance drain` previews that inventory;
+`-apply` persists a cordon before destroying the exact active signed runtimes and
+leaves persistent state volumes in place. It does not migrate work or clear an
+ambiguous journal. Maintenance remains enabled until the restarted Executor has
+reconciled and an operator runs `stewardctl node maintenance exit`.
+
+Activation stops previously active services, verifies that the target can read
+every durable state file, and switches the complete release and its relay image
+binding. It then restarts only the services that were active before the transition.
+A rollback restores release files and the retained relay binding; it does not
+restore configuration or durable data. A directory from an older installer without
+`release.json` is not an eligible rollback target. See
 [upgrade and rollback]({{ '/guides/upgrades/' | relative_url }}).
 
 Normal Executor startup may migrate `uplink-delivery-state.json` from format 2 or 3

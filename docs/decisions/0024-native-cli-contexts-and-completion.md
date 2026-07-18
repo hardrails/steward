@@ -12,8 +12,8 @@ section: Architecture decision
 
 ## Context
 
-Routine control-plane commands repeat the controller URL, private CA file,
-operator token file, tenant, and node. Repetition makes the safe path harder to
+Routine control-plane and host-local node commands repeat URLs, private CA files,
+token-file paths, tenant, and node. Repetition makes the safe path harder to
 learn, hides the task-specific values in long commands, and encourages operators
 to build unreviewed shell aliases. The large command tree is also difficult to
 discover without completion.
@@ -25,10 +25,11 @@ not inherit a target merely because the operator previously inspected that node.
 
 ## Decision
 
-Add named `stewardctl` contexts using the Go standard library. A context stores a
-controller URL, optional CA path, required operator-token path, and optional tenant
-and node defaults. It never stores the bearer value, private signing material, or
-command content.
+Add named `stewardctl` contexts using the Go standard library. A context stores one
+complete Control connection, one complete host-local Executor connection, or both,
+plus optional tenant and node defaults. Connections store token-file paths, never
+bearer values. The node origin remains restricted to loopback HTTP. Private signing
+material and command content are never stored.
 
 Explicit flags override context values. Connection defaults apply across remote
 control commands. Tenant and node defaults apply only to scoped inspection,
@@ -50,6 +51,11 @@ Generate Bash, Zsh, and Fish completion scripts from `stewardctl completion`.
 Each script asks the local binary for command, nested subcommand, common flag, and
 saved context-name candidates. It makes no network request and falls back to the
 shell's normal file completion for path values.
+
+`stewardctl completion install` detects the current shell, atomically writes that
+generated script, and activates it through a clearly marked Bash or Zsh startup
+block or Fish's native completion directory. Exact reruns are no-ops; a conflicting
+generated file requires `-force`.
 
 **Tradeoff:** the command tree and common flags have a small explicit completion
 catalog that must change with the CLI. Tests cover important paths, but completion

@@ -163,6 +163,12 @@ delivery ledger, and supervisor state. Activation uses these ranges to reject an
 unsafe upgrade or rollback before changing the active-release symlink or relay
 binding.
 
+Current manifests declare `admission_fence` readers 1 through 3 and writer 3.
+Format 1 stores policy and instance-generation high-water records. Format 2 adds
+the committed route-policy digest. Format 3 adds the durable node maintenance
+cordon. Entering or exiting maintenance rewrites the atomic snapshot as format 3;
+a release limited to format 1 or 2 is then ineligible even after the cordon exits.
+
 Current manifests declare `connector_receipt_log` with `read_min: 1`, `read_max: 7`,
 and `write: 7`. Ordinary connector records retain schema 1. Action-permit records use
 schema 2 and add the action-authority key ID, exact permit digest, and exact request
