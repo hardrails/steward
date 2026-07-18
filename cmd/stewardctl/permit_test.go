@@ -163,7 +163,10 @@ func TestPermitContextReconstructsHistoryAndIssuesV5(t *testing.T) {
 			t.Fatalf("permit context error=%v, want text %q", err, contains)
 		}
 	}
+	assertContextError([]string{"permit"}, "requires context")
+	assertContextError([]string{"permit", "unknown"}, "requires context")
 	assertContextError([]string{"permit", "context"}, "requires -admission")
+	assertContextError([]string{"permit", "context", "-receipt-epoch", "not-a-number"}, "invalid value")
 
 	missingAdmission := append([]string(nil), base...)
 	missingAdmission[3] = filepath.Join(directory, "missing-admission.json")
@@ -186,6 +189,12 @@ func TestPermitContextReconstructsHistoryAndIssuesV5(t *testing.T) {
 	invalidIntent := append([]string(nil), base...)
 	invalidIntent[5] = malformedIntent
 	assertContextError(invalidIntent, "decode instance intent")
+	invalidResources := intent
+	invalidResources.Resources.MemoryBytes = 0
+	invalidResourcesPath := writePermitJSON(t, directory, "invalid-resources-intent.json", invalidResources)
+	invalidResourceArguments := append([]string(nil), base...)
+	invalidResourceArguments[5] = invalidResourcesPath
+	assertContextError(invalidResourceArguments, "resource limits must all be positive")
 
 	nonContextAdmission := admitted
 	nonContextAdmission.ActionContextRequired = false
@@ -206,6 +215,97 @@ func TestPermitContextReconstructsHistoryAndIssuesV5(t *testing.T) {
 	missingLedger[7] = filepath.Join(directory, "missing-receipts.ndjson")
 	assertContextError(missingLedger, "verify effect-context receipts")
 
+	inFlightPath := filepath.Join(directory, "in-flight-receipts.ndjson")
+	inFlightLedger, err := connectorledger.Open(inFlightPath, receiptPrivate, "node-a/gateway", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inFlightLedger.Begin(event); err != nil {
+		t.Fatal(err)
+	}
+	if err := inFlightLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inFlight := append([]string(nil), base...)
+	inFlight[7] = inFlightPath
+	assertContextError(inFlight, "in-flight connector call")
+
+	wrongInfluencePath := filepath.Join(directory, "wrong-influence-receipts.ndjson")
+	wrongInfluenceLedger, err := connectorledger.Open(wrongInfluencePath, receiptPrivate, "node-a/gateway", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongInfluence := event
+	wrongInfluence.InfluenceHash = "sha256:" + strings.Repeat("f", 64)
+	wrongInfluence.TaskDigest = gateway.ConnectorCallDigest(
+		intent.TenantID, intent.InstanceID, "task-wrong-influence", "ticketing", "create-ticket",
+	)
+	if _, err := wrongInfluenceLedger.Begin(wrongInfluence); err != nil {
+		t.Fatal(err)
+	}
+	if err := wrongInfluenceLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wrongInfluenceArguments := append([]string(nil), base...)
+	wrongInfluenceArguments[7] = wrongInfluencePath
+	assertContextError(wrongInfluenceArguments, "does not continue the admitted grant's effect context")
+
+	overlapPath := filepath.Join(directory, "overlap-receipts.ndjson")
+	overlapLedger, err := connectorledger.Open(overlapPath, receiptPrivate, "node-a/gateway", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := overlapLedger.Begin(event); err != nil {
+		t.Fatal(err)
+	}
+	overlap := event
+	overlap.TaskDigest = gateway.ConnectorCallDigest(
+		intent.TenantID, intent.InstanceID, "task-overlap", "ticketing", "create-ticket",
+	)
+	if _, err := overlapLedger.Begin(overlap); err != nil {
+		t.Fatal(err)
+	}
+	if err := overlapLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	overlapArguments := append([]string(nil), base...)
+	overlapArguments[7] = overlapPath
+	assertContextError(overlapArguments, "overlapping connector authorizations")
+
+	ignoredPath := filepath.Join(directory, "other-grant-receipts.ndjson")
+	ignoredLedger, err := connectorledger.Open(ignoredPath, receiptPrivate, "node-a/gateway", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ignored := event
+	ignored.GrantID = "grant-" + strings.Repeat("e", 64)
+	ignored.TaskDigest = gateway.ConnectorCallDigest(
+		intent.TenantID, intent.InstanceID, "task-other-grant", "ticketing", "create-ticket",
+	)
+	if _, err := ignoredLedger.Begin(ignored); err != nil {
+		t.Fatal(err)
+	}
+	ignoredTerminal := ignored
+	ignoredTerminal.Phase, ignoredTerminal.Outcome = connectorledger.Terminal, connectorledger.Responded
+	ignoredTerminal.HTTPStatus, ignoredTerminal.ResponseBytes = 200, 2
+	ignoredTerminal.ResponseDigest = actionpermit.RequestDigest([]byte(`{}`))
+	if _, err := ignoredLedger.Finish(ignoredTerminal); err != nil {
+		t.Fatal(err)
+	}
+	if err := ignoredLedger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ignoredArguments := append([]string(nil), base...)
+	ignoredArguments[7] = ignoredPath
+	ignoredArguments[len(ignoredArguments)-1] = filepath.Join(directory, "other-grant-context.json")
+	contextOutput.Reset()
+	if err := run(ignoredArguments, &contextOutput, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if contextOutput.String() != genesis.ChainHash+"\n" {
+		t.Fatalf("context with unrelated grant receipts=%q", contextOutput.String())
+	}
+
 	wrongHead := append(append([]string(nil), base...), "-expected-sequence", "1",
 		"-expected-chain-hash", terminalHead.ChainHash)
 	assertContextError(wrongHead, "advanced sequence")
@@ -213,6 +313,9 @@ func TestPermitContextReconstructsHistoryAndIssuesV5(t *testing.T) {
 	existingOutput := append([]string(nil), base...)
 	existingOutput[len(existingOutput)-1] = nextPath
 	assertContextError(existingOutput, "already exists")
+	missingOutputDirectory := append([]string(nil), base...)
+	missingOutputDirectory[len(missingOutputDirectory)-1] = filepath.Join(directory, "missing", "context.json")
+	assertContextError(missingOutputDirectory, "no such file or directory")
 }
 
 func TestPermitIssueAndVerifyExactRequest(t *testing.T) {
