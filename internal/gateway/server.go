@@ -358,6 +358,7 @@ type StateSummary struct {
 	Present        bool `json:"present"`
 	FormatVersion  int  `json:"format_version"`
 	RetainedGrants int  `json:"retained_grants"`
+	contextLocked  bool
 }
 
 // Validate checks the retained Gateway state and audit sink without creating
@@ -1619,6 +1620,7 @@ func (s *Server) loadExisting() (StateSummary, error) {
 		(state.Version < 1 || state.Version > 7) || len(state.Grants) > 4096 {
 		return StateSummary{}, errors.New("gateway state is invalid")
 	}
+	contextLocked := false
 	for _, retained := range state.Grants {
 		grant := retained.grant()
 		grant.Active = false
@@ -1653,6 +1655,7 @@ func (s *Server) loadExisting() (StateSummary, error) {
 		if grant.ActionContextRequired && state.Version < 7 {
 			return StateSummary{}, errors.New("gateway state contains context-bound action authority without its durable state format")
 		}
+		contextLocked = contextLocked || grant.ActionContextRequired
 		if retained.RoutePolicyDigest != effectivePolicyDigest || retained.CredentialBindingDigest != effectiveCredentialDigest {
 			return StateSummary{}, errors.New("gateway state route policy does not match current configuration")
 		}
@@ -1667,7 +1670,9 @@ func (s *Server) loadExisting() (StateSummary, error) {
 			s.connectorCalls[grant.GrantID] = calls
 		}
 	}
-	return StateSummary{Present: true, FormatVersion: state.Version, RetainedGrants: len(state.Grants)}, nil
+	return StateSummary{
+		Present: true, FormatVersion: state.Version, RetainedGrants: len(state.Grants), contextLocked: contextLocked,
+	}, nil
 }
 
 func (s *Server) persistLocked() error {

@@ -49,7 +49,7 @@ type ConnectorReceiptFormatSummary struct {
 // InspectConnectorReceiptFormat verifies an existing connector receipt ledger
 // without creating or changing it. A configured but not-yet-created ledger is
 // a valid prospective path and is reported as absent.
-func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary, error) {
+func InspectConnectorReceiptFormat(config Config, states ...StateSummary) (ConnectorReceiptFormatSummary, error) {
 	requiredFormat := 0
 	if len(config.ActionAuthorities) > 0 {
 		requiredFormat = 2
@@ -59,6 +59,11 @@ func InspectConnectorReceiptFormat(config Config) (ConnectorReceiptFormatSummary
 	}
 	if config.hasTaskLifecycle() {
 		requiredFormat = 4
+	}
+	for _, state := range states {
+		if state.contextLocked {
+			requiredFormat = 7
+		}
 	}
 	key, err := config.connectorReceiptPrivateKey()
 	if err != nil {

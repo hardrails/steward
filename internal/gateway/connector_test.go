@@ -1235,6 +1235,14 @@ func TestContextLockedAuthorizedEffectsArePolicyBoundAndRequireStateFormatSeven(
 	rig.server.closeGrantListeners()
 	_ = rig.server.audit.Close()
 	_ = rig.server.connectorLedger.Close()
+	stateSummary, err := InspectState(rig.config, rig.server.routes, rig.server.egressRoutes)
+	if err != nil || !stateSummary.contextLocked {
+		t.Fatalf("context-locked state summary=%#v err=%v", stateSummary, err)
+	}
+	receiptSummary, err := InspectConnectorReceiptFormat(rig.config, stateSummary)
+	if err != nil || receiptSummary.FormatVersion != 7 {
+		t.Fatalf("prospective context receipt summary=%#v err=%v", receiptSummary, err)
+	}
 
 	raw, err := os.ReadFile(rig.config.StateFile)
 	if err != nil {

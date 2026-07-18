@@ -241,7 +241,7 @@ func inspectUpgradeState(options upgradeOptions) (upgradeInspection, error) {
 	if gatewaySummary.Present {
 		result.Formats.GatewayState = integerPointer(gatewaySummary.FormatVersion)
 	}
-	receiptSummary, err := gateway.InspectConnectorReceiptFormat(config)
+	receiptSummary, err := gateway.InspectConnectorReceiptFormat(config, gatewaySummary)
 	if err != nil {
 		return upgradeInspection{}, fmt.Errorf("inspect connector receipt log: %w", err)
 	}
