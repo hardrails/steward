@@ -80,6 +80,36 @@ A durable cordon does not prevent prompt injection. It gives operators a reliabl
 way to stop additional authority and remove running workloads without asking the
 agent to cooperate.
 
+## Differentiation: least privilege reaches the node API
+
+Agent authorization can be undermined when the surrounding services share an
+overpowered credential. NIST's 2026
+[agent identity and authorization concept paper](https://www.nccoe.nist.gov/sites/default/files/2026-02/accelerating-the-adoption-of-software-and-ai-agent-identity-and-authorization-concept-paper.pdf)
+asks how software and AI agents can receive least privilege and prove authority for
+specific actions. Its draft
+[AI Cybersecurity Framework Profile](https://nvlpubs.nist.gov/nistpubs/ir/2025/NIST.IR.8596.iprd.pdf)
+prioritizes distinguishing agents as entities and assigning their own permissions.
+These sources do not assess Steward; they support continuing least privilege across
+the services that operate agents.
+
+Steward therefore separates the loopback Executor credential used by monitoring
+from lifecycle automation and admission administration. `node whoami` lets a
+process verify the role it received. The roles remain host-wide and static; they do
+not expire automatically or identify a tenant. Signed intent and authenticated
+uplink context still authorize the tenant and generation.
+
+| Boundary | Read-only identity | Lifecycle authority | Admission and activation authority | Tenant identity |
+| --- | --- | --- | --- | --- |
+| Steward local Executor API | `observer` | `operator` or `host-admin`, subject to signed lifecycle checks | `host-admin`, subject to signed policy and explicit compatibility settings | Never inferred from a local role |
+| Steward outbound fleet path | Scoped controller operator plus node enrollment identity | Exact signed command and authenticated tenant/node/generation context | Exact signed admission command and node verification | Authenticated independently from transport bearer |
+| [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) | The current README describes alpha “single-player mode” and says multi-tenant enterprise deployment is future work | Sandbox and policy operations are documented | Provider and policy administration are documented | Recheck as the alpha boundary evolves |
+| [OpenClaw](https://docs.openclaw.ai/gateway/security) | Gateway security guidance documents a personal-assistant trust model | Gateway operators control the instance | Gateway configuration controls agent capabilities | Mutually untrusted users require separate Gateway and credential boundaries |
+
+This is not a claim that role-based access is novel. The differentiator is the
+continuity from a narrow local role into signed tenant intent, deterministic
+pre-action authorization, durable replay control, and offline evidence without a
+hosted identity dependency.
+
 ## Differentiation: signed separation of duties
 
 The market increasingly treats a host prompt that says “approve this network

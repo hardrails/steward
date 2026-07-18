@@ -164,8 +164,17 @@ func TestExecutorMainServesHealthAndShutsDown(t *testing.T) {
 	bin := buildExecutor(t)
 	socket := fakeDockerSocket(t, true)
 	token := executorTokenFile(t)
+	operatorToken := filepath.Join(t.TempDir(), "operator-token")
+	observerToken := filepath.Join(t.TempDir(), "observer-token")
+	if err := os.WriteFile(operatorToken, []byte("operator-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(observerToken, []byte("observer-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	addr := freeAddress(t)
-	cmd := exec.Command(bin, "-docker-socket", socket, "-token-file", token, "-addr", addr)
+	cmd := exec.Command(bin, "-docker-socket", socket, "-token-file", token,
+		"-operator-token-file", operatorToken, "-observer-token-file", observerToken, "-addr", addr)
 	cmd.Env = executorEnv()
 	var output strings.Builder
 	cmd.Stdout, cmd.Stderr = &output, &output
@@ -205,6 +214,41 @@ func TestExecutorMainServesHealthAndShutsDown(t *testing.T) {
 			t.Fatalf("executor health timed out: err=%v output=%s", err, output.String())
 		case <-time.After(25 * time.Millisecond):
 		}
+	}
+	for _, expected := range []struct {
+		token, id, role string
+	}{
+		{token: "operator-secret", id: "operator", role: "operator"},
+		{token: "observer-secret", id: "observer", role: "observer"},
+	} {
+		request, err := http.NewRequest(http.MethodGet, "http://"+addr+"/v1/local-principal", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+expected.token)
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var principal nodeclient.LocalPrincipal
+		decodeErr := json.NewDecoder(response.Body).Decode(&principal)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK || decodeErr != nil || principal.ID != expected.id || principal.Role != expected.role {
+			t.Fatalf("principal=%+v status=%d error=%v", principal, response.StatusCode, decodeErr)
+		}
+	}
+	observerMutation, err := http.NewRequest(http.MethodPost, "http://"+addr+"/v1/workloads", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observerMutation.Header.Set("Authorization", "Bearer observer-secret")
+	response, err := client.Do(observerMutation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("observer mutation status=%d", response.StatusCode)
 	}
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)

@@ -226,9 +226,8 @@ connection and preview the drain:
 
 ```console
 sudo -H stewardctl context set local-node \
-  -node-token-file /etc/steward/executor-token
-sudo -H stewardctl node maintenance drain \
-  -reason "planned Steward upgrade"
+  -node-token-file /etc/steward/executor-operator-token
+sudo -H stewardctl node maintenance drain
 ```
 
 The preview changes nothing. Its `active_runtime_refs` field is the exact signed

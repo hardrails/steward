@@ -156,7 +156,8 @@ token value:
 
 ```bash
 sudo -H stewardctl context set local-node \
-  -node-token-file /etc/steward/executor-token
+  -node-token-file /etc/steward/executor-observer-token
+sudo -H stewardctl node whoami
 ```
 
 After admission, replace `executor-DIGEST` with the returned `runtime_ref`:
@@ -298,10 +299,12 @@ enables only the local node tools:
 
 ```bash
 sudo steward-mcp -node-url http://127.0.0.1:8090 \
-  -token-file /etc/steward/executor-token
+  -token-file /etc/steward/executor-operator-token
 ```
 
-Fleet tools require a scoped control operator token and the controller CA; they do
+The operator token lets local MCP tools inspect and manage lifecycle but not admit
+or purge. Use the host-admin token only for a separate, fully trusted MCP client
+that needs those operations. Fleet tools require a scoped control operator token and the controller CA; they do
 not expose operator or enrollment secret issuance. Optional task tools require a loopback Gateway credential and a dedicated
 owner-only result directory. The task signing key still stays off-node; MCP can
 submit only a pre-signed exact request. These bearer tokens are privileged

@@ -180,8 +180,12 @@ EOF
 chmod 0755 "$work/bin/"*
 
 token=$work/state/executor-token
+operator_token=$work/state/executor-operator-token
+observer_token=$work/state/executor-observer-token
 printf 'doctor-super-secret\n' >"$token"
-chmod 0600 "$token"
+printf 'doctor-operator-secret\n' >"$operator_token"
+printf 'doctor-observer-secret\n' >"$observer_token"
+chmod 0600 "$token" "$operator_token" "$observer_token"
 fence=$work/state/admission-fences.bin
 journal=$work/state/operation-journal.bin
 evidence=$work/state/evidence.bin
@@ -197,8 +201,8 @@ connector=$work/state/connector\"receipts.ndjson
 chmod 0600 "$fence" "$journal" "$evidence" "$uplink" "$uplink_delivery" "$connector"
 executor_env=$work/state/executor.env
 docker_socket=$work/state/docker.sock
-printf 'EXECUTOR_DOCKER_SOCKET=%s\nEXECUTOR_TOKEN_FILE=%s\nEXECUTOR_UPLINK_STATE_FILE=%s\nEXECUTOR_UPLINK_DELIVERY_STATE_FILE=%s\n' \
-	"$docker_socket" "$token" "$uplink" "$uplink_delivery" >"$executor_env"
+printf 'EXECUTOR_DOCKER_SOCKET=%s\nEXECUTOR_TOKEN_FILE=%s\nEXECUTOR_OPERATOR_TOKEN_FILE=%s\nEXECUTOR_OBSERVER_TOKEN_FILE=%s\nEXECUTOR_UPLINK_STATE_FILE=%s\nEXECUTOR_UPLINK_DELIVERY_STATE_FILE=%s\n' \
+	"$docker_socket" "$token" "$operator_token" "$observer_token" "$uplink" "$uplink_delivery" >"$executor_env"
 chmod 0600 "$executor_env"
 : >"$work/curl.log"
 : >"$work/stewardctl.log"
@@ -268,6 +272,8 @@ json=$(run_doctor)
 [[ $json == '{"schema":"steward.node-doctor.v1","overall":"pass"'* ]]
 [[ $json == *'"canary":{"requested":false,"status":"skipped"}'* ]]
 [[ $json == *'connector\"receipts.ndjson'* ]]
+[[ $json == *'"id":"identity.executor_operator_token","status":"pass"'* ]]
+[[ $json == *'"id":"identity.executor_observer_token","status":"pass"'* ]]
 [[ $json != *doctor-super-secret* && $json != *actual-agent-work-secret* ]]
 [[ $(printf '%s\n' "$json" | wc -l | tr -d ' ') == 1 ]]
 

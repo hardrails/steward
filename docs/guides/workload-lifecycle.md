@@ -17,9 +17,9 @@ signed admission is disabled. Production workflows should use
 [policy-bound image importer]({{ '/reference/offline-tools/' | relative_url }}).
 The commands require `curl`, `jq`, and Docker's command-line client.
 
-## 1. Prepare a host-local token
+## 1. Prepare the host-admin token
 
-The packaged installer creates an owner-only, non-empty token before Executor
+The packaged installer creates an owner-only, non-empty host-admin token before Executor
 starts. Read that existing token; do not replace it on a running or enrolled node:
 
 ```console
@@ -27,7 +27,7 @@ sudo test -s /etc/steward/executor-token
 TOKEN=$(sudo cat /etc/steward/executor-token)
 ```
 
-The token authorizes workload changes across the node; it is not a tenant end-user
+The token authorizes admission and workload changes across the node; it is not a tenant end-user
 credential. Executor reads it at startup, so changing the file does not rotate a
 running process. Keep the listener on loopback.
 

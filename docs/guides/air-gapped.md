@@ -282,7 +282,7 @@ The current qualified agent recipes require a dedicated host and a signed site
 policy containing exactly one tenant. Configure Executor with
 `--allow-host-admin-intent` and
 `--allow-unquotaed-state-on-dedicated-host` before activation. The first flag
-grants the host-local token administrator authority to select the signed tenant
+grants the host-admin local credential authority to select the signed tenant
 intent and append the later activation checkpoint; it is not tenant
 authentication. The second permits persistent Docker state without a hard byte
 or inode quota. Neither setting is safe for a shared host.

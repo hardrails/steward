@@ -83,7 +83,7 @@ enter MCP JSON or standard output as raw agent-controlled bytes.
 ## Configure node tools
 
 Set `OPERATOR` to the existing operating-system user that runs the MCP client. Copy
-the Executor token into an owner-only directory for that account:
+the Executor operator token into an owner-only directory for that account:
 
 ```bash
 OPERATOR=alice
@@ -92,7 +92,7 @@ OPERATOR_GROUP=$(id -gn "$OPERATOR")
 sudo install -d -o "$OPERATOR" -g "$OPERATOR_GROUP" -m 0700 \
   "$OPERATOR_HOME/.config/steward"
 sudo install -o "$OPERATOR" -g "$OPERATOR_GROUP" -m 0600 \
-  /etc/steward/executor-token "$OPERATOR_HOME/.config/steward/executor-token"
+  /etc/steward/executor-operator-token "$OPERATOR_HOME/.config/steward/executor-token"
 ```
 
 Use this server entry in a client that supports local stdio MCP servers. Replace
@@ -115,6 +115,11 @@ Use this server entry in a client that supports local stdio MCP servers. Replace
 Restart the MCP client, list tools, and call `steward_status` with an
 `executor-…` runtime reference. The server writes newline-delimited JSON-RPC to
 standard output and diagnostics only to standard error.
+
+With the operator credential, `steward_admit` and `steward_purge_state` remain
+visible but fail with `insufficient_role`. Give a separate trusted MCP process the
+host-admin token only when it must expose those authority-sensitive operations. A
+tool being visible is not evidence that the configured credential authorizes it.
 
 ## Enable task tools
 

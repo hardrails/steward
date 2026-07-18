@@ -37,7 +37,9 @@ func main() {
 	checkConfig := flag.Bool("check-config", false, "validate configuration and host prerequisites, then exit")
 	addr := flag.String("addr", "127.0.0.1:8090", "host:port to listen on")
 	dockerSocket := flag.String("docker-socket", "/var/run/docker.sock", "Docker Engine Unix socket")
-	tokenFile := flag.String("token-file", "", "path to executor bearer token (required)")
+	tokenFile := flag.String("token-file", "", "path to host-admin executor bearer token (required)")
+	operatorTokenFile := flag.String("operator-token-file", "", "optional path to operator executor bearer token")
+	observerTokenFile := flag.String("observer-token-file", "", "optional path to observer executor bearer token")
 	disableInbound := flag.Bool("disable-inbound-listener", false, "run outbound-only without binding the host-local HTTP API")
 	uplinkURL := flag.String("uplink-url", "", "optional control-plane base URL for outbound executor commands")
 	uplinkCredentialFile := flag.String("uplink-credential-file", "", "path to versioned executor uplink credential")
@@ -166,6 +168,29 @@ func main() {
 		slog.Error("read executor token", "err", err)
 		os.Exit(2)
 	}
+	localCredentials := []executor.LocalCredential{{
+		ID: "host-admin", Role: executor.LocalRoleHostAdmin, Token: token,
+	}}
+	for _, configured := range []struct {
+		path string
+		id   string
+		role executor.LocalRole
+	}{
+		{path: *operatorTokenFile, id: "operator", role: executor.LocalRoleOperator},
+		{path: *observerTokenFile, id: "observer", role: executor.LocalRoleObserver},
+	} {
+		if configured.path == "" {
+			continue
+		}
+		value, err := nodeclient.ReadToken(configured.path)
+		if err != nil {
+			slog.Error("read scoped executor token", "role", configured.role, "err", err)
+			os.Exit(2)
+		}
+		localCredentials = append(localCredentials, executor.LocalCredential{
+			ID: configured.id, Role: configured.role, Token: value,
+		})
+	}
 	docker := executor.NewDockerHTTP(*dockerSocket)
 	available, err := docker.RuntimeAvailable(context.Background(), "runsc")
 	if err != nil {
@@ -189,7 +214,7 @@ func main() {
 		MaxTenantCPUMillis:    *maxTenantCPUMillis,
 		MaxTenantPIDs:         *maxTenantPIDs,
 	}
-	server, err := executor.NewServerWithPolicy(docker, token, policy, slog.Default())
+	server, err := executor.NewServerWithLocalCredentials(docker, localCredentials, policy, slog.Default())
 	if err != nil {
 		slog.Error("configure executor", "err", err)
 		os.Exit(2)

@@ -98,6 +98,12 @@ type MaintenanceStatus struct {
 	PendingOperations int      `json:"pending_operations"`
 }
 
+type LocalPrincipal struct {
+	SchemaVersion string `json:"schema_version"`
+	ID            string `json:"id"`
+	Role          string `json:"role"`
+}
+
 type APIError struct {
 	Status  int
 	Code    string
@@ -294,6 +300,14 @@ func (c *Client) MaintenanceStatus(ctx context.Context) (MaintenanceStatus, erro
 	return status, nil
 }
 
+func (c *Client) LocalPrincipal(ctx context.Context) (LocalPrincipal, error) {
+	var principal LocalPrincipal
+	if err := c.do(ctx, http.MethodGet, "/v1/local-principal", nil, &principal); err != nil {
+		return LocalPrincipal{}, err
+	}
+	return principal, nil
+}
+
 func (c *Client) EnterMaintenance(ctx context.Context, reason string) (MaintenanceStatus, error) {
 	var status MaintenanceStatus
 	body := struct {
@@ -398,7 +412,7 @@ func ReadBounded(path string, limit int64) ([]byte, error) {
 }
 
 func validRuntimePath(path string) bool {
-	if path == "/v1/admissions" || path == "/v1/state/purge" ||
+	if path == "/v1/admissions" || path == "/v1/local-principal" || path == "/v1/state/purge" ||
 		path == "/v1/maintenance" || path == "/v1/maintenance/enter" || path == "/v1/maintenance/exit" {
 		return true
 	}

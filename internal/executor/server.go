@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -35,14 +34,15 @@ const (
 )
 
 // Server is the authenticated control boundary in front of the local Docker API.
-// The bearer token is a host-control credential; tenant authorization belongs in the
-// upstream control plane and must never be inferred from a caller-supplied label.
+// Node-local credentials limit the host API surface; tenant authorization belongs
+// in signed admission and the upstream principal and must never be inferred from
+// a local role or caller-supplied label.
 type Server struct {
-	docker    Docker
-	tokenHash [sha256.Size]byte
-	policy    HostPolicy
-	logger    *slog.Logger
-	secure    *secureAdmission
+	docker           Docker
+	localCredentials []localCredentialVerifier
+	policy           HostPolicy
+	logger           *slog.Logger
+	secure           *secureAdmission
 
 	// provisionMu makes the count-then-create admission check atomic within the
 	// one Docker-socket-bearing executor process. Docker inventory makes the
@@ -188,14 +188,23 @@ func (s *Server) EnableSecureAdmission(config SecureAdmissionConfig) error {
 func NewServerWithPolicy(
 	docker Docker, token string, policy HostPolicy, logger *slog.Logger,
 ) (*Server, error) {
+	return NewServerWithLocalCredentials(docker, []LocalCredential{{
+		ID: "host-admin", Role: LocalRoleHostAdmin, Token: token,
+	}}, policy, logger)
+}
+
+// NewServerWithLocalCredentials configures explicit role-scoped identities for
+// the loopback API. Exactly one host administrator is required so recovery and
+// configuration operations cannot become unreachable through partial setup.
+func NewServerWithLocalCredentials(
+	docker Docker, credentials []LocalCredential, policy HostPolicy, logger *slog.Logger,
+) (*Server, error) {
 	if docker == nil {
 		return nil, errors.New("docker client is required")
 	}
-	if strings.TrimSpace(token) == "" {
-		return nil, errors.New("executor token is required")
-	}
-	if len(token) > 4096 {
-		return nil, errors.New("executor token must not exceed 4096 bytes")
+	verifiers, err := buildLocalCredentialVerifiers(credentials)
+	if err != nil {
+		return nil, err
 	}
 	if err := policy.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid host policy: %w", err)
@@ -204,34 +213,34 @@ func NewServerWithPolicy(
 		logger = slog.Default()
 	}
 	return &Server{
-		docker: docker, tokenHash: sha256.Sum256([]byte("Bearer " + token)),
-		policy: policy, logger: logger,
+		docker: docker, localCredentials: verifiers, policy: policy, logger: logger,
 	}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/workloads", s.provision)
-	mux.HandleFunc("POST /v1/admissions", s.secureProvision)
-	mux.HandleFunc("GET /v1/maintenance", s.maintenanceStatus)
-	mux.HandleFunc("POST /v1/maintenance/enter", s.maintenanceEnter)
-	mux.HandleFunc("POST /v1/maintenance/exit", s.maintenanceExit)
-	mux.HandleFunc("POST /v1/state/purge", s.purgeState)
+	mux.HandleFunc("POST /v1/workloads", requireLocalRole(LocalRoleHostAdmin, s.provision))
+	mux.HandleFunc("POST /v1/admissions", requireLocalRole(LocalRoleHostAdmin, s.secureProvision))
+	mux.HandleFunc("GET /v1/local-principal", requireLocalRole(LocalRoleObserver, s.localPrincipal))
+	mux.HandleFunc("GET /v1/maintenance", requireLocalRole(LocalRoleObserver, s.maintenanceStatus))
+	mux.HandleFunc("POST /v1/maintenance/enter", requireLocalRole(LocalRoleOperator, s.maintenanceEnter))
+	mux.HandleFunc("POST /v1/maintenance/exit", requireLocalRole(LocalRoleOperator, s.maintenanceExit))
+	mux.HandleFunc("POST /v1/state/purge", requireLocalRole(LocalRoleHostAdmin, s.purgeState))
 	mux.HandleFunc(
 		"POST /v1/workloads/{id}/activation-canary-preflight",
-		s.activationCanaryPreflight,
+		requireLocalRole(LocalRoleHostAdmin, s.activationCanaryPreflight),
 	)
 	mux.HandleFunc(
 		"POST /v1/workloads/{id}/activation-checkpoints",
-		s.activationCheckpoint,
+		requireLocalRole(LocalRoleHostAdmin, s.activationCheckpoint),
 	)
-	mux.HandleFunc("POST /v1/workloads/{id}/start", s.start)
-	mux.HandleFunc("POST /v1/workloads/{id}/stop", s.stop)
-	mux.HandleFunc("DELETE /v1/workloads/{id}", s.destroy)
-	mux.HandleFunc("GET /v1/workloads/{id}", s.status)
-	mux.HandleFunc("GET /v1/workloads/{id}/logs", s.logs)
-	mux.HandleFunc("GET /v1/workloads/{id}/egress", s.egressStats)
-	mux.HandleFunc("GET /v1/readiness", s.readiness)
+	mux.HandleFunc("POST /v1/workloads/{id}/start", requireLocalRole(LocalRoleOperator, s.start))
+	mux.HandleFunc("POST /v1/workloads/{id}/stop", requireLocalRole(LocalRoleOperator, s.stop))
+	mux.HandleFunc("DELETE /v1/workloads/{id}", requireLocalRole(LocalRoleOperator, s.destroy))
+	mux.HandleFunc("GET /v1/workloads/{id}", requireLocalRole(LocalRoleObserver, s.status))
+	mux.HandleFunc("GET /v1/workloads/{id}/logs", requireLocalRole(LocalRoleObserver, s.logs))
+	mux.HandleFunc("GET /v1/workloads/{id}/egress", requireLocalRole(LocalRoleObserver, s.egressStats))
+	mux.HandleFunc("GET /v1/readiness", requireLocalRole(LocalRoleObserver, s.readiness))
 	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -1417,21 +1426,6 @@ func recoverMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
 				writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 			}
 		}()
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (s *Server) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/healthz" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		presented := sha256.Sum256([]byte(r.Header.Get("Authorization")))
-		if subtle.ConstantTimeCompare(presented[:], s.tokenHash[:]) != 1 {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "valid executor bearer credential required")
-			return
-		}
 		next.ServeHTTP(w, r)
 	})
 }

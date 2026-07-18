@@ -139,7 +139,7 @@ sudo /usr/local/libexec/steward/configure-admission \
 
 The installer and `configure-node` accept the same two compatibility flags. The
 configuration check rejects the state flag unless the verified policy contains
-exactly one tenant. `--allow-host-admin-intent` lets the host-wide loopback token
+exactly one tenant. `--allow-host-admin-intent` lets the host-admin loopback credential
 select that tenant's signed intent and later append the activation checkpoint; it
 is not tenant authentication.
 `--allow-unquotaed-state-on-dedicated-host` permits a persistent local Docker

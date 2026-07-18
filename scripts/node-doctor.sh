@@ -51,6 +51,8 @@ executor_url=${STEWARD_DOCTOR_EXECUTOR_URL:-http://127.0.0.1:8090}
 executor_token_file=${STEWARD_DOCTOR_EXECUTOR_TOKEN_FILE:-}
 executor_token_overridden=false
 [[ -z ${STEWARD_DOCTOR_EXECUTOR_TOKEN_FILE:-} ]] || executor_token_overridden=true
+executor_operator_token_file=
+executor_observer_token_file=
 executor_env_file=${STEWARD_DOCTOR_EXECUTOR_ENV_FILE:-/etc/steward/executor.env}
 executor_docker_socket=
 gateway_control_socket=${STEWARD_DOCTOR_GATEWAY_CONTROL_SOCKET:-/run/steward-gateway/control.sock}
@@ -378,7 +380,7 @@ exit_on_signal() {
 }
 
 configure_docker_target() {
-	local line key value docker_seen=false token_seen=false uplink_seen=false uplink_delivery_seen=false docker_config_dir
+	local line key value docker_seen=false token_seen=false operator_token_seen=false observer_token_seen=false uplink_seen=false uplink_delivery_seen=false docker_config_dir
 	local environment before after owner mode size device inode mtime ctime mode_value
 	if [[ ! -f $executor_env_file || -L $executor_env_file ]]; then
 		add_check docker.target fail 'Executor environment is not a regular, non-symlink file'
@@ -428,6 +430,22 @@ configure_docker_target() {
 			fi
 			[[ $executor_token_overridden == true ]] || executor_token_file=$value
 			token_seen=true
+			;;
+		EXECUTOR_OPERATOR_TOKEN_FILE)
+			if [[ $operator_token_seen == true || $value == *[[:space:]]* ]] || { [[ -n $value ]] && ! valid_absolute_ascii_path "$value"; }; then
+				add_check docker.target fail 'Executor operator token path is duplicate or invalid'
+				return 1
+			fi
+			executor_operator_token_file=$value
+			operator_token_seen=true
+			;;
+		EXECUTOR_OBSERVER_TOKEN_FILE)
+			if [[ $observer_token_seen == true || $value == *[[:space:]]* ]] || { [[ -n $value ]] && ! valid_absolute_ascii_path "$value"; }; then
+				add_check docker.target fail 'Executor observer token path is duplicate or invalid'
+				return 1
+			fi
+			executor_observer_token_file=$value
+			observer_token_seen=true
 			;;
 		EXECUTOR_UPLINK_STATE_FILE)
 			if [[ $uplink_seen == true || $value == *[[:space:]]* ]] || { [[ -n $value ]] && ! valid_absolute_ascii_path "$value"; }; then
@@ -637,6 +655,25 @@ check_executor_readiness() {
 		add_check readiness.executor fail 'authenticated Executor readiness returned non-ready or was unreachable'
 	fi
 	"$rm_bin" -f -- "$header"
+}
+
+check_scoped_executor_tokens() {
+	local role path header
+	for role in operator observer; do
+		if [[ $role == operator ]]; then
+			path=$executor_operator_token_file
+		else
+			path=$executor_observer_token_file
+		fi
+		[[ -n $path ]] || continue
+		header="$work_dir/executor-$role-auth.header"
+		if create_bearer_header "$path" "$header"; then
+			add_check "identity.executor_${role}_token" pass "Executor $role token is owner-only and bounded"
+		else
+			add_check "identity.executor_${role}_token" fail "Executor $role token is not a stable, non-empty, owner-only regular file"
+		fi
+		"$rm_bin" -f -- "$header"
+	done
 }
 
 check_gateway_health() {
@@ -1029,6 +1066,7 @@ main() {
 	check_units
 	check_health
 	check_executor_readiness
+	check_scoped_executor_tokens
 	check_gateway_health
 	check_capacity
 	run_canary

@@ -239,7 +239,9 @@ outbound-only deployment.
 | --- | --- | --- |
 | `-addr` | `127.0.0.1:8090` | Optional host-local API listener |
 | `-docker-socket` | `/var/run/docker.sock` | Docker Engine Unix socket |
-| `-token-file` | required | Owner-only local API bearer token |
+| `-token-file` | required | Owner-only host-admin local API bearer token |
+| `-operator-token-file` | empty | Optional owner-only local token for inspection, lifecycle, and maintenance operations |
+| `-observer-token-file` | empty | Optional owner-only local token for inspection only |
 | `-disable-inbound-listener` | `false` | Outbound-only operation; requires uplink |
 | `-uplink-url` | empty | Control-plane base URL |
 | `-uplink-credential-file` | empty | Owner-only Executor transport credential: legacy tenant scope or signed multi-tenant node scope |
@@ -272,7 +274,7 @@ outbound-only deployment.
 | `-admission-node-id` | empty | Stable node ID bound into intents and receipts |
 | `-admission-fence-file` | `/var/lib/steward-executor/admission-fences.bin` | Highest accepted policy/generation snapshot; capped at 4 MiB and 65,535 records |
 | `-initialize-admission-fence` | `false` | Exclusively create the empty fence and exit; normal startup never recreates it |
-| `-admission-allow-host-admin-intent` | `false` | Dedicated-host compatibility: let the host-wide local token select an intent tenant and authorize signed lifecycle, activation-canary preflight, and activation-checkpoint calls; the token is host-administrator authority, not tenant authentication |
+| `-admission-allow-host-admin-intent` | `false` | Dedicated-host compatibility: let the host-admin local credential select an intent tenant and authorize signed lifecycle, activation-canary preflight, and activation-checkpoint calls; the credential is host authority, not tenant authentication |
 | `-admission-journal-file` | `/var/lib/steward-executor/operation-journal.bin` | Append-only host-mutation journal; capped at 16 MiB |
 | `-admission-evidence-file` | `/var/lib/steward-executor/evidence.bin` | Append-only signed receipt chain; capped at 64 MiB |
 | `-admission-evidence-key-file` | empty | Owner-only PKCS#8 Ed25519 receipt private key |
@@ -281,6 +283,33 @@ outbound-only deployment.
 | `-gateway-grant-root` | `/run/steward-gateway/grants` | Host directory containing per-grant capability sockets |
 | `-relay-image` | empty | Trusted relay image pinned by repository digest or local Docker image ID |
 | `-relay-gid` | `0` | Nonzero host GID used for per-grant relay socket access |
+
+### Executor local roles
+
+The packaged listener stays on loopback and uses three fixed host-wide roles. A
+role limits API operations; it never identifies a tenant or bypasses signed
+admission.
+
+| Role | May call |
+| --- | --- |
+| `observer` | Local identity, readiness, maintenance status, workload status, bounded logs, and egress statistics |
+| `operator` | Everything an observer can call, plus start, stop, destroy, and maintenance enter or exit |
+| `host-admin` | Every local endpoint, including admission, legacy provisioning, state purge, activation preflight, and activation checkpoints |
+
+Fresh packaged configuration creates owner-only files at
+`/etc/steward/executor-observer-token`,
+`/etc/steward/executor-operator-token`, and `/etc/steward/executor-token`.
+Existing nodes that have only `/etc/steward/executor-token` remain compatible.
+Run the configuration helper again to create missing scoped tokens without
+replacing the existing host-admin token.
+
+The operator and host-admin roles describe the local API surface. On a signed
+runtime, lifecycle handlers still require an authenticated uplink tenant principal
+unless `-admission-allow-host-admin-intent` is explicitly enabled. Use the latter
+only for the documented dedicated-host compatibility flows.
+
+See [Scope node-local credentials by role]({{ '/decisions/0029-scope-node-local-credentials-by-role/' | relative_url }})
+for the trust boundary and rejected alternatives.
 
 ### Executor uplink credential scopes
 

@@ -25,7 +25,7 @@ Optional:
   --node-id ID                   Stable node identity (derived from /etc/machine-id by default)
   --receipt-private-key FILE     Owner-only enrollment receipt private key
   --receipt-public-key FILE      Matching base64 Ed25519 receipt public key
-  --allow-host-admin-intent      Allow the host-local token to select signed tenant intent
+  --allow-host-admin-intent      Allow the host-admin credential to select signed tenant intent
   --allow-unquotaed-state-on-dedicated-host
                                  Allow persistent Docker volumes only when the
                                  signed policy contains exactly one tenant; no
