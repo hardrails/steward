@@ -218,22 +218,9 @@ func activationCanaryContract(inputs verifiedActivationInputs) (agentrelease.Can
 	if kind == "" {
 		kind = inputs.release.Release.Canary.Kind
 	}
-	if kind == "" {
-		if contract, ok := agentrelease.CanaryContractForOperation(
-			inputs.release.Release.Canary.ServiceID,
-			inputs.release.Release.Canary.OperationID,
-		); ok {
-			kind = contract.Kind
-		}
-	}
-	if kind == "" {
-		if contract, ok := agentrelease.CanaryContractForService(inputs.intent.ServiceID); ok {
-			kind = contract.Kind
-		}
-	}
 	contract, ok := agentrelease.CanaryContractForKind(kind)
-	if !ok || inputs.release.Release.Canary.Kind != "" &&
-		inputs.release.Release.Canary.Kind != contract.Kind {
+	if !ok || (inputs.release.Release.Canary.Kind != "" &&
+		inputs.release.Release.Canary.Kind != contract.Kind) {
 		return agentrelease.CanaryContract{}, errors.New("activation does not select a supported canary contract")
 	}
 	return contract, nil

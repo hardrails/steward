@@ -463,8 +463,8 @@ func rolloutOpenClawTerminal(t *testing.T, activationID string) []byte {
 			DurationMS   int64    `json:"duration_ms"`
 			Model        string   `json:"model"`
 			Provider     string   `json:"provider"`
-			ToolCalls    int64    `json:"tool_calls"`
-			ToolFailures int64    `json:"tool_failures"`
+			ToolCalls    int      `json:"tool_calls"`
+			ToolFailures int      `json:"tool_failures"`
 			Tools        []string `json:"tools"`
 		} `json:"meta"`
 	}{}

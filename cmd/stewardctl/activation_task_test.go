@@ -133,6 +133,7 @@ func newActivationTaskFixture(t *testing.T) activationTaskFixture {
 			CapsuleEnvelopeDigest: fixture.admitted.CapsuleDigest,
 			Release: agentrelease.Release{
 				Canary: agentrelease.Canary{
+					Kind:        agentrelease.CanaryKindHermesWorkspaceAuditV1,
 					ServiceID:   agentrelease.HermesServiceID,
 					OperationID: agentrelease.HermesOperationID,
 					Request: agentrelease.RequestRecipe{
