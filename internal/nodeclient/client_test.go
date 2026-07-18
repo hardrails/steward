@@ -160,6 +160,26 @@ func TestClientDrivesMaintenanceContract(t *testing.T) {
 	}
 }
 
+func TestClientReadsLocalPrincipal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/local-principal" ||
+			r.Header.Get("Authorization") != "Bearer secret" {
+			t.Fatalf("unexpected request %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"steward.executor-local-principal.v1","id":"operator","role":"operator"}`))
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := client.LocalPrincipal(context.Background())
+	if err != nil || principal.ID != "operator" || principal.Role != "operator" ||
+		principal.SchemaVersion != "steward.executor-local-principal.v1" {
+		t.Fatalf("principal=%+v error=%v", principal, err)
+	}
+}
+
 func TestClientRejectsUnsafeOriginsPathsAndErrors(t *testing.T) {
 	for _, origin := range []string{"https://127.0.0.1:8090", "http://example.com:8090", "http://127.0.0.1", "http://127.0.0.1:8090/path"} {
 		if _, err := New(origin, "secret"); err == nil {

@@ -85,6 +85,29 @@ func TestNodeCommandsRejectIncompleteArguments(t *testing.T) {
 	}
 }
 
+func TestNodeWhoAmIUsesScopedCredential(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/local-principal" ||
+			r.Header.Get("Authorization") != "Bearer observer-secret" {
+			t.Fatalf("unexpected request %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"steward.executor-local-principal.v1","id":"observer","role":"observer"}`))
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(t.TempDir(), "observer-token")
+	if err := os.WriteFile(tokenPath, []byte("observer-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := run([]string{"node", "whoami", "-node-url", server.URL, "-token-file", tokenPath}, &output, &bytes.Buffer{}); err != nil ||
+		output.String() != "{\"schema_version\":\"steward.executor-local-principal.v1\",\"id\":\"observer\",\"role\":\"observer\"}\n" {
+		t.Fatalf("output=%s error=%v", output.String(), err)
+	}
+	if err := run([]string{"node", "whoami", "-node-url", server.URL, "-token-file", tokenPath, "-runtime-ref", "unexpected"}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("node whoami accepted a workload flag")
+	}
+}
+
 func TestNodeMaintenanceDrainPlansThenAppliesUnderCordon(t *testing.T) {
 	const runtimeRef = "executor-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	destroyed := false
@@ -125,13 +148,13 @@ func TestNodeMaintenanceDrainPlansThenAppliesUnderCordon(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	common := []string{"node", "maintenance", "drain", "-node-url", server.URL, "-token-file", tokenPath, "-reason", "kernel update"}
+	common := []string{"node", "maintenance", "drain", "-node-url", server.URL, "-token-file", tokenPath}
 	var plan bytes.Buffer
 	if err := run(common, &plan, &bytes.Buffer{}); err != nil || !strings.Contains(plan.String(), `"applied":false`) || destroyed || entered {
 		t.Fatalf("plan=%s entered=%v destroyed=%v error=%v", plan.String(), entered, destroyed, err)
 	}
 	var applied bytes.Buffer
-	if err := run(append(common, "-apply"), &applied, &bytes.Buffer{}); err != nil ||
+	if err := run(append(common, "-apply", "-reason", "kernel update"), &applied, &bytes.Buffer{}); err != nil ||
 		!strings.Contains(applied.String(), `"applied":true`) || !strings.Contains(applied.String(), runtimeRef) || !destroyed || !entered {
 		t.Fatalf("applied=%s entered=%v destroyed=%v error=%v", applied.String(), entered, destroyed, err)
 	}
@@ -180,6 +203,7 @@ func TestNodeMaintenanceStatusEnterAndExit(t *testing.T) {
 		{"node", "maintenance"},
 		{"node", "maintenance", "status", "-node-url", server.URL, "-token-file", tokenPath, "-reason", "invalid"},
 		{"node", "maintenance", "enter", "-node-url", server.URL, "-token-file", tokenPath},
+		{"node", "maintenance", "drain", "-node-url", server.URL, "-token-file", tokenPath, "-apply"},
 		{"node", "maintenance", "exit", "-node-url", server.URL, "-token-file", tokenPath, "-apply"},
 		{"node", "maintenance", "unknown", "-node-url", server.URL, "-token-file", tokenPath},
 	} {

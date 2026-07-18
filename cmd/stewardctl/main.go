@@ -108,7 +108,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "       stewardctl executor-command issue|verify ...")
 	fmt.Fprintln(writer, "       stewardctl control pki|tenant|operator|enrollment|node|node-credential|operations|attention|command|credential|evidence|evidence-capture ...")
 	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
-	fmt.Fprintln(writer, "       stewardctl node admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...")
+	fmt.Fprintln(writer, "       stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...")
 	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector|service|effects ...")
 	fmt.Fprintln(writer, "       stewardctl gateway effects check -config FILE -intent FILE -policy FILE -site-root-public-key FILE -site-root-key-id ID")
 	fmt.Fprintln(writer, "       stewardctl secret materialization check -manifest FILE [-root DIRECTORY] [-status-root DIRECTORY]")
@@ -125,7 +125,7 @@ func usage(writer io.Writer) error {
 
 func nodeCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("node command requires admit, status, logs, egress, start, stop, destroy, purge-state, or maintenance")
+		return errors.New("node command requires whoami, admit, status, logs, egress, start, stop, destroy, purge-state, or maintenance")
 	}
 	var err error
 	arguments, err = applyNodeCLIContext(arguments)
@@ -164,6 +164,15 @@ func nodeCommand(arguments []string, stdout io.Writer) error {
 	defer cancel()
 	var result any
 	switch action {
+	case "whoami":
+		if *runtimeRef != "" || *capsulePath != "" || *intentPath != "" || *tenantID != "" ||
+			*nodeID != "" || *lineageID != "" || *generation != 0 {
+			return errors.New("node whoami accepts only connection flags")
+		}
+		result, err = client.LocalPrincipal(ctx)
+		if err != nil {
+			return err
+		}
 	case "admit":
 		if *capsulePath == "" || *intentPath == "" || *runtimeRef != "" {
 			return errors.New("node admit requires -capsule and -intent")

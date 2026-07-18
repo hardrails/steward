@@ -53,6 +53,9 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"permit", "con"}); !slices.Equal(candidates, []string{"context"}) {
 		t.Fatalf("permit context candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"node", "maintenance", ""}); !slices.Equal(candidates, []string{"drain", "enter", "exit", "status"}) {
+		t.Fatalf("node maintenance candidates=%v", candidates)
+	}
 	permitFlags := stewardctlCompletionCandidates([]string{"permit", "issue", "-con"})
 	if !slices.Equal(permitFlags, []string{"-connector-id", "-context"}) {
 		t.Fatalf("permit issue flags=%v", permitFlags)

@@ -42,7 +42,7 @@ func nodeMaintenanceCommand(arguments []string, stdout io.Writer) error {
 	if action != "drain" && *apply {
 		return fmt.Errorf("node maintenance %s does not accept -apply", action)
 	}
-	if (action == "enter" || action == "drain") && *reason == "" {
+	if (action == "enter" || action == "drain" && *apply) && *reason == "" {
 		return fmt.Errorf("node maintenance %s requires -reason", action)
 	}
 	client, err := nodeclient.NewFromTokenFile(*nodeURL, *tokenFile)
