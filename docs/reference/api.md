@@ -473,8 +473,11 @@ retains its signed plan authorization and chained batch promotions in the local
 workspace, then includes the applicable envelope digest in each rollout command's
 signed `authorization_context_digest`. A compatible protocol-4 Executor must
 advertise `admission-projection-v1`, `activation-canary-v1`, and
-`rollout-authorization-context-v1`. Executor verifies that digest as signed command
-data; the coordinator and offline verifier authenticate the referenced envelope.
+`rollout-authorization-context-v1`. Automated reconciliation additionally requires
+`controller-delegation-v1`, which means Executor verifies the tenant-signed bounded
+delegation and delegated controller signature locally. Executor verifies the
+authorization-context digest as signed command data; the coordinator and offline
+verifier authenticate a referenced rollout envelope.
 The final CLI-generated `proof.json` is not an HTTP resource or a signature. Its
 plan-authorization and ordered promotion digests bind those exact signed envelopes.
 Each target's `admit_command_digest`, `start_command_digest`, and

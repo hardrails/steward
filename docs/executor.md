@@ -407,6 +407,21 @@ the field. Executor validates the digest as part of the signed command but does 
 fetch or verify the referenced rollout envelope; `stewardctl rollout` performs that
 correlation before submission and during offline verification.
 
+For automated reconciliation, the command can also carry
+`delegation_dsse_base64`. This is the canonical base64 encoding of a tenant-signed
+controller delegation. The signed `authorization_context_digest` must equal the
+digest of those exact envelope bytes. A protocol-4 node advertises
+`controller-delegation-v1` only when it supports this path.
+
+Executor verifies two signatures: a site-policy-authorized tenant command key must
+sign the delegation, and the exact controller key named by that delegation must
+sign the command. The delegation fixes the allowed operations, nodes, exact
+instance and lineage identities, claim and instance generations, validity window,
+and—when it permits admission—the exact capsule, resources, capabilities, state
+disposition, model route, service, egress routes, connectors, and effect mode.
+Control cannot widen those fields. The delegation lifetime cannot exceed 24 hours.
+Normal command fences still reject stale sequences and generations.
+
 `admit` carries the OpenAPI `SignedAdmissionRequest`. `start`, `stop`, `destroy`,
 and `read` require an empty payload. `purge` carries one bounded `lineage_id`. The
 signed intent and every runtime-reference identity must describe the same tuple

@@ -2766,7 +2766,9 @@ components:
           uniqueItems: true
           description: |
             A node must include `activation-canary-v1` before the controller can
-            lease an `activation-canary` command to it.
+            lease an `activation-canary` command to it. A node includes
+            `controller-delegation-v1` only when it independently verifies the
+            tenant-signed bounded delegation and delegated controller signature.
           items:
             $ref: "#/components/schemas/Identifier128"
     ExecutorPollResponse:

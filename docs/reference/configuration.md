@@ -340,6 +340,12 @@ cleanup keys and no tenant rules. The bearer credential cannot select a tenant. 
 [Executor outbound uplink]({{ '/executor/' | relative_url }}#outbound-executor-uplink)
 for the wire contract.
 
+A protocol-4 node can also verify `controller-delegation-v1`. In that path, one
+tenant command key signs a delegation whose operation set is a subset of that key's
+policy scope, then only the exact controller key named by the delegation signs the
+command. Site cleanup keys cannot create controller delegations. The controller
+does not receive the tenant private key.
+
 `-uplink-allow-insecure-http` and `-uplink-tls-skip-verify` weaken transport
 authentication. They are disabled by default, unsuitable for production, and
 rejected with node-scoped credentials.
