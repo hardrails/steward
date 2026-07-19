@@ -3,14 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/hardrails/steward/internal/openbaobundle"
 	"github.com/hardrails/steward/internal/secretmaterial"
 )
 
@@ -88,68 +86,6 @@ func TestSecretMaterializationPrepareAndEpochCheck(t *testing.T) {
 	if strings.Contains(stdout.String(), "inference-key-123456") || !strings.Contains(stdout.String(), `"observed_epoch":7`) || !strings.Contains(stdout.String(), `"ready":true`) {
 		t.Fatalf("unsafe or incomplete epoch report: %s", stdout.String())
 	}
-}
-
-func TestOpenBaoCompileWritesNewDeterministicBundle(t *testing.T) {
-	plan := openbaobundle.Plan{SchemaVersion: openbaobundle.PlanSchemaV1, OpenBaoAddress: "https://bao.internal:8200", AuthMount: "auth/approle",
-		CAFile: "/etc/steward/openbao/ca.pem", RoleIDFile: "/etc/steward/openbao/role-id", SecretIDFile: "/run/steward-openbao/secret-id",
-		BaoPath: "/usr/bin/bao", StewardctlPath: "/usr/bin/stewardctl", InstallRoot: "/etc/steward/openbao-agent",
-		SecretRoot: "/var/lib/steward-gateway/secrets", StatusRoot: "/var/lib/steward-gateway/secret-status",
-		Bindings: []openbaobundle.Binding{{TenantID: "tenant-a", SecretID: "inference", Purpose: secretmaterial.PurposeInference,
-			KVPath: "steward-kv/data/tenant-a/inference", Field: "token", ExpectedVersion: 7}}}
-	planPath := writeSecretJSON(t, "plan.json", plan)
-	output := filepath.Join(t.TempDir(), "bundle")
-	var stdout bytes.Buffer
-	if err := secretCommand([]string{"openbao", "compile", "-plan", planPath, "-out", output}, &stdout); err != nil {
-		t.Fatalf("compile: %v", err)
-	}
-	info, err := os.Lstat(output)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
-		t.Fatalf("bundle directory: info=%v err=%v", info, err)
-	}
-	for _, name := range []string{"agent.hcl", "materialization.json", "openbao-read-policy.hcl", "steward-openbao-agent.service"} {
-		info, err := os.Lstat(filepath.Join(output, name))
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o640 {
-			t.Fatalf("bundle file %q: info=%v err=%v", name, info, err)
-		}
-	}
-	if strings.Contains(stdout.String(), "token") || !strings.Contains(stdout.String(), `"schema_version":"steward.openbao-materializer-plan.v1"`) {
-		t.Fatalf("unsafe or incomplete compile output: %s", stdout.String())
-	}
-	var summary struct {
-		Files []string `json:"files"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &summary); err != nil {
-		t.Fatalf("decode compile output: %v", err)
-	}
-	entries, err := os.ReadDir(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(summary.Files) != len(entries) {
-		t.Fatalf("summary files %q do not match output entries %q", summary.Files, entries)
-	}
-	for index, entry := range entries {
-		if summary.Files[index] != entry.Name() {
-			t.Fatalf("summary files %q do not match output entries %q", summary.Files, entries)
-		}
-	}
-	if err := secretCommand([]string{"openbao", "compile", "-plan", planPath, "-out", output}, io.Discard); err == nil {
-		t.Fatal("compile overwrote an existing bundle")
-	}
-	failedOutput := filepath.Join(t.TempDir(), "failed-bundle")
-	if err := secretCommand([]string{"openbao", "compile", "-plan", planPath, "-out", failedOutput}, failingSecretWriter{}); err == nil {
-		t.Fatal("compile accepted a failed summary write")
-	}
-	if _, err := os.Lstat(failedOutput); !os.IsNotExist(err) {
-		t.Fatalf("compile retained a bundle after summary failure: %v", err)
-	}
-}
-
-type failingSecretWriter struct{}
-
-func (failingSecretWriter) Write([]byte) (int, error) {
-	return 0, errors.New("injected summary failure")
 }
 
 func writeSecretJSON(t *testing.T, name string, value any) string {

@@ -658,38 +658,6 @@ across all states, and 16 MiB of reserved or captured frame data. An armed captu
 reserves its full 512 KiB allowance, so delete obsolete records deliberately when
 the site approaches a fixed limit.
 
-## Coordinate a proof-carrying fleet rollout
-
-`stewardctl rollout` composes command delivery and evidence capture into one
-operator-controlled, canary-first qualified-agent rollout. The coordinator runs on a trusted
-operator workstation, not inside Steward Control. It fixes an explicit target
-order, holds the command and task private keys, signs the exact plan and each
-evidence-bound promotion into a later batch, stores each exact signed command before
-submission, and advances one batch per operator invocation. Commands bind the
-applicable plan-authorization or promotion digest.
-
-Steward Control remains a bounded transport and witness. It does not select nodes,
-receive either private key, mint a command or task, decide promotion, or roll back a
-workload. Because the coordinator arms and exports captures that can contain
-interleaved tenant metadata, its `-token-file` must hold a `site_admin` credential.
-A tenant-scoped operator token is insufficient.
-
-Before starting, ensure every target is active for the rollout tenant, reports
-`admission-projection-v1`, `activation-canary-v1`, and
-`rollout-authorization-context-v1`, has an existing finding-free evidence
-checkpoint, and already contains the exact imported image. Inspect checkpoint
-timestamps against your site's freshness requirement; capture arming itself does
-not enforce an
-evidence-age threshold. The later bounded capture must reach the rollout's exact
-activation markers or fail or expire. Evidence-capture capacity is shared with
-manually created captures; one already-armed capture on a target prevents the
-rollout capture from arming. See [Proof-carrying fleet rollout]({{ '/guides/fleet-rollout/' | relative_url }})
-for input preparation, exact `create`, `run`, `status`, and offline `verify`
-commands, crash recovery, promotion boundaries, and proof limits.
-The promotion signature attests the command signer's authorization sequence; it
-does not record the operator's human reason or independently attest wall-clock or
-host execution order.
-
 ## Sign, submit, and observe one command
 
 Create commands only on the trusted signing station. The public half of

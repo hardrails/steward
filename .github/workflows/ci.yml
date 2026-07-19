@@ -65,7 +65,6 @@ jobs:
           scripts/node-installer-security-test.sh scripts/configure-input-boundary-test.sh
           scripts/node-control-plane-conflict-test.sh
           scripts/check-docs-consistency.sh
-          scripts/openbao-materializer-smoke.sh
           scripts/signed-admission-acceptance.sh
           scripts/egress-acceptance.sh scripts/positive-capabilities-acceptance.sh
           packaging/debian/preinst packaging/debian/postinst
@@ -92,8 +91,6 @@ jobs:
         run: bash integrations/terraform/modules/steward-node/tests/test.sh
       - name: Documentation consistency
         run: bash scripts/check-docs-consistency.sh
-      - name: OpenBao materializer compatibility
-        run: bash scripts/openbao-materializer-smoke.sh
       - name: Installer plan smoke
         run: |
           /bin/bash -p scripts/install-steward.sh --non-interactive --dry-run \

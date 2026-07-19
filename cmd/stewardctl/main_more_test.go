@@ -16,9 +16,25 @@ func TestRunVersionAndRejectsInvalidCommands(t *testing.T) {
 	if !strings.HasPrefix(output.String(), "stewardctl ") {
 		t.Fatalf("version output=%q", output.String())
 	}
+	var help bytes.Buffer
+	if err := run(nil, &help, &bytes.Buffer{}); err != nil || !strings.Contains(help.String(), "external action authority") {
+		t.Fatalf("top-level help error=%v output=%q", err, help.String())
+	}
+	help.Reset()
+	if err := run([]string{"help", "permit"}, &help, &bytes.Buffer{}); err != nil || !strings.Contains(help.String(), "canonical connector request") {
+		t.Fatalf("permit help error=%v output=%q", err, help.String())
+	}
+	help.Reset()
+	if err := run([]string{"help", "executor-command"}, &help, &bytes.Buffer{}); err != nil || !strings.Contains(help.String(), "stewardctl executor-command issue|verify") {
+		t.Fatalf("executor-command help error=%v output=%q", err, help.String())
+	}
 	for _, arguments := range [][]string{
-		nil,
 		{"unknown"},
+		{"help", "unknown"},
+		{"agent-release"},
+		{"agent-catalog"},
+		{"activation"},
+		{"rollout"},
 		{"keygen"},
 		{"capsule"},
 		{"policy", "unknown"},

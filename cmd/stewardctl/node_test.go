@@ -50,6 +50,18 @@ func TestNodeCommandsUsePublicLoopbackContract(t *testing.T) {
 			t.Fatalf("%s output=%s", action, output.String())
 		}
 	}
+	var positionalOutput bytes.Buffer
+	positional := append([]string{"node", "status"}, common...)
+	positional = append(positional, runtimeRef)
+	if err := run(positional, &positionalOutput, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(positionalOutput.String(), runtimeRef) {
+		t.Fatalf("positional runtime output=%s err=%v", positionalOutput.String(), err)
+	}
+	ambiguous := append([]string{"node", "status"}, common...)
+	ambiguous = append(ambiguous, "-runtime-ref", runtimeRef, runtimeRef)
+	if err := run(ambiguous, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("node status accepted both positional and flagged runtime references")
+	}
 	var purgeOutput bytes.Buffer
 	arguments := append([]string{"node", "purge-state"}, common...)
 	arguments = append(arguments, "-tenant-id", "tenant", "-node-id", "node", "-lineage-id", "lineage", "-generation", "1")

@@ -83,19 +83,14 @@ make a compromised browser or controller host trustworthy. See
 Do not put inference keys or connector tokens in agent environment variables,
 mounts, images, skills, prompts, commands, or the operator console. Gateway reads
 owner-only credential files and presents only admitted inference routes or named
-connector operations to a workload. OpenBao Agent or another trusted service may
-materialize those files without becoming a Steward dependency.
-
-`stewardctl secret openbao compile` can generate exact KV v2 read policy,
-fail-closed Agent templates, an expected-version manifest, and a systemd sandbox.
-The compiler neither contacts OpenBao nor accepts provider credentials. Review the
-generated policy and unit before installation; OpenBao, its AppRole bootstrap,
-audit, recovery, and transport remain operator-managed trust boundaries.
+connector operations to a workload. An operator-selected secret manager or
+another trusted service may materialize those files without becoming a Steward
+dependency.
 
 Run `stewardctl secret materialization check` as the Gateway service identity
 before validation. It verifies deterministic tenant paths, ownership, modes,
 link and filesystem boundaries, stable reads, bounded visible-ASCII values, and,
-for a compiled OpenBao handoff, an expected provider-version marker. It never
+for a schema-v2 handoff, an expected rotation-epoch marker. It never
 prints a value, hash, length, provider path, or filesystem path. Value and marker
 templates are not atomic, so the result is a convergence preflight rather than a
 cryptographic version binding. Gateway's later stable value read remains

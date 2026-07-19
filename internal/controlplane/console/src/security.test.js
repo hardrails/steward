@@ -36,7 +36,7 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
     "More nodes exist.",
     "tenantPage.next_after",
     "Load 500 more",
-    "REVIEW HERE. SIGN ELSEWHERE.",
+    "OBSERVE HERE. AUTHORIZE WITH YOUR KEYS.",
     'method !== "GET" && !commandSubmission',
     "The console attempted an unsupported mutation.",
     'method: "POST"',

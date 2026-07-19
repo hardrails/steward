@@ -172,7 +172,7 @@ func TestConsoleSourceRestrictsSignedCommandMutationAndUnsafeBrowserCapabilities
 		`More nodes exist.`,
 		`tenantPage.next_after`,
 		`Load 500 more`,
-		`REVIEW HERE. SIGN ELSEWHERE.`,
+		`OBSERVE HERE. AUTHORIZE WITH YOUR KEYS.`,
 		`method !== "GET" && !commandSubmission`,
 		`reenteredCredential !== credentialRef.current`,
 		`command_dsse_base64: preview.envelopeBase64`,

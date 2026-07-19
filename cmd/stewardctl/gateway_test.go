@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/gateway"
 )
 
@@ -155,14 +154,14 @@ func TestGatewayCommandRejectsAmbiguousInputs(t *testing.T) {
 
 func TestGatewayAgentServicePresetsAreFinite(t *testing.T) {
 	hermes, ok := gatewayAgentServicePreset("hermes")
-	if !ok || hermes.Kind != agentrelease.CanaryKindHermesWorkspaceAuditV1 {
+	if !ok || hermes.ServiceID != "hermes-api" || hermes.OperationID != "hermes.run" {
 		t.Fatalf("Hermes preset=%#v ok=%t", hermes, ok)
 	}
 	openClaw, ok := gatewayAgentServicePreset("openclaw")
-	if !ok || openClaw.Kind != agentrelease.CanaryKindOpenClawWorkspaceAuditV1 {
+	if !ok || openClaw.ServiceID != "openclaw-api" || openClaw.OperationID != "openclaw.run" {
 		t.Fatalf("OpenClaw preset=%#v ok=%t", openClaw, ok)
 	}
-	if contract, ok := gatewayAgentServicePreset("custom"); ok || contract.Kind != "" {
+	if contract, ok := gatewayAgentServicePreset("custom"); ok || contract != (agentServicePreset{}) {
 		t.Fatalf("unknown preset=%#v ok=%t", contract, ok)
 	}
 }
@@ -389,11 +388,11 @@ func TestGatewayServiceSetAndTrustAreValidatedScopedAndAtomic(t *testing.T) {
 	}
 	var openClaw *gateway.ServiceOperation
 	for index := range loaded.ServiceOperations {
-		if loaded.ServiceOperations[index].ServiceID == agentrelease.OpenClawServiceID {
+		if loaded.ServiceOperations[index].ServiceID == "openclaw-api" {
 			openClaw = &loaded.ServiceOperations[index]
 		}
 	}
-	if openClaw == nil || openClaw.ID != agentrelease.OpenClawOperationID ||
+	if openClaw == nil || openClaw.ID != "openclaw.run" ||
 		openClaw.Path != "/v1/runs" || openClaw.StatusPathPrefix != "/v1/runs/" ||
 		openClaw.TaskProtocol != gateway.TaskProtocolLifecycleV1 ||
 		!strings.Contains(output.String(), "systemctl reload") {

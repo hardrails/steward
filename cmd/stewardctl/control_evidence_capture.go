@@ -72,7 +72,7 @@ func controlEvidenceCaptureArm(arguments []string, stdout io.Writer) error {
 		!validRequiredControlIdentifier(*captureID, 128) ||
 		!validRequiredControlIdentifier(*requestID, 128) ||
 		!validRequiredControlIdentifier(*tenantID, 128) ||
-		!activationRuntimeRef(*runtimeRef) ||
+		!validExecutorRuntimeRef(*runtimeRef) ||
 		*generation == 0 ||
 		!validRequiredControlIdentifier(*activationID, 128) ||
 		!controlprotocol.ValidSHA256Digest(*activationBeginDigest) ||
@@ -98,6 +98,19 @@ func controlEvidenceCaptureArm(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	return writeControlJSON(stdout, capture)
+}
+
+func validExecutorRuntimeRef(value string) bool {
+	const prefix = "executor-"
+	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
+		return false
+	}
+	for _, character := range strings.TrimPrefix(value, prefix) {
+		if character < '0' || (character > '9' && character < 'a') || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func controlEvidenceCaptureStatus(arguments []string, stdout io.Writer) error {
