@@ -20,7 +20,6 @@ readonly default_max_archive_bytes=$((4 * 1024 * 1024 * 1024))
 readonly default_min_free_bytes=$((6 * 1024 * 1024 * 1024))
 
 output=
-non_interactive=false
 keep_image=false
 build_timeout=$default_build_timeout
 pull_timeout=$default_pull_timeout
@@ -39,7 +38,7 @@ atomic directory rename, so an interrupted build cannot expose half a bundle.
 
 Options:
   --output DIRECTORY       New bundle directory (required)
-  --non-interactive        Never prompt
+  --non-interactive        Compatibility flag; this builder never prompts
   --keep-image             Keep the temporary local image tag
   --build-timeout SEC      Docker build timeout (300..3600; default 1800)
   --pull-timeout SEC       Pinned base-image pull timeout (30..1800; default 900)
@@ -107,7 +106,6 @@ while (( $# > 0 )); do
 		shift 2
 		;;
 	--non-interactive)
-		non_interactive=true
 		shift
 		;;
 	--keep-image)
@@ -187,9 +185,17 @@ if [[ $checkout == "$root" ]]; then
 	git -C "$root" diff --cached --quiet -- adapters/openclaw || die "adapters/openclaw has staged changes"
 	git -C "$root" diff --quiet -- scripts/build-openclaw-adapter.sh || die "builder has uncommitted changes"
 	git -C "$root" diff --cached --quiet -- scripts/build-openclaw-adapter.sh || die "builder has staged changes"
+elif [[ -f $root/release.json && -d $adapter_path ]]; then
+	adapter_source=release-payload
+	release_manifest=$root/release.json
 elif [[ -f $(dirname "$root")/release.json && -d $adapter_path ]]; then
 	adapter_source=release-payload
 	release_manifest=$(dirname "$root")/release.json
+
+else
+	die "OpenClaw adapter is absent from a committed checkout or verified release payload"
+fi
+if [[ $adapter_source == release-payload ]]; then
 	release_values=$(python3 -I - "$adapter_path" "$script_path" "$release_manifest" <<'PY'
 import hashlib
 import json
@@ -239,12 +245,10 @@ print(version)
 print(digest(manifest_path))
 PY
 	) || die "packaged OpenClaw adapter differs from release.json"
-	mapfile -t release_fields <<<$release_values
+	mapfile -t release_fields <<<"$release_values"
 	(( ${#release_fields[@]} == 2 )) || die "packaged release identity is incomplete"
 	release_version=${release_fields[0]}
 	release_manifest_sha256=${release_fields[1]}
-else
-	die "OpenClaw adapter is absent from a committed checkout or verified release payload"
 fi
 
 work=$(mktemp -d /tmp/steward-openclaw-build.XXXXXX)
@@ -326,7 +330,7 @@ print(manifest)
 print(config)
 PY
 ) || die "saved OCI archive identity is invalid"
-mapfile -t archive_image_fields <<<$archive_image_values
+mapfile -t archive_image_fields <<<"$archive_image_values"
 (( ${#archive_image_fields[@]} == 2 )) || die "saved OCI archive identity is incomplete"
 image_manifest_digest=${archive_image_fields[0]}
 image_config_digest=${archive_image_fields[1]}

@@ -106,6 +106,7 @@ grep -Fqx '  enrollment:   local-only' "$work/local.plan"
 /bin/bash -p "$installer" --non-interactive --dry-run --stage-only \
 	--version v0.0.0 --package tar >"$work/staged.plan"
 grep -Fqx '  enrollment:   staged-only' "$work/staged.plan"
+grep -Fqx '  service start: false' "$work/staged.plan"
 
 # Exercise the exact generator used for both local-only and Executor-only
 # supervisor configuration without touching host paths or requiring root.
