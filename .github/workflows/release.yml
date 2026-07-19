@@ -251,6 +251,7 @@ jobs:
             --expected-version "$STEWARD_RELEASE_VERSION" --verify-package-only | \
             grep -Fxq 'install-node: package release verified'
           sudo rm -rf "$package_verify_root"
+          package_verify_root=
           dpkg-deb --contents "dist/steward-node_${STEWARD_RELEASE_VERSION}_${{ matrix.goarch }}.deb" >"$deb_contents"
           grep -q './usr/lib/steward-node/release/steward-control' "$deb_contents"
           if grep -Eq 'control\.env|steward-control\.service|install-control\.sh|control-doctor\.sh' "$deb_contents"; then
