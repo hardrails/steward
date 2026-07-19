@@ -105,9 +105,13 @@ Steward uses the following ownership boundary:
 - `open-source`: operator-selected identity, secret storage, policy, provenance,
   observability, model-serving, and deployment systems connected through finite
   public contracts.
-- `do-nothing`: general agent catalogs, release workflow engines, placement,
-  rollout promotion, secret storage, and arbitrary computer use until a real
-  enforcement requirement cannot be composed from existing systems.
+- `in-house`: the narrow desired-state controller that binds agent placement,
+  generations, delegated authority, state lineage, capability grants, and
+  evidence. These semantics are part of the product even when Kubernetes,
+  OpenShell, or another system performs the underlying workload operation.
+- `do-nothing`: general agent catalogs, general workflow engines, general-purpose
+  scheduling, secret storage, and arbitrary computer use until a real enforcement
+  requirement cannot be composed from existing systems.
 
 ## What Steward does not build
 
@@ -152,3 +156,6 @@ Steward is succeeding when a new operator can:
 
 Features that do not improve one of those outcomes should be composed from another
 system, deferred, or removed.
+
+The [product roadmap]({{ '/product/roadmap/' | relative_url }}) turns this boundary
+into named delivery milestones and acceptance gates.
