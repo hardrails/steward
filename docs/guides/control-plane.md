@@ -936,7 +936,9 @@ with that backup.
 ## Current limits
 
 The controller includes a bounded React operator console and narrow deterministic
-desired-state placement. It intentionally has no enterprise single sign-on,
+desired-state placement onto recently observed nodes. Blocked deployments expose
+stable reason codes and resume after their condition is repaired. The controller
+intentionally has no enterprise single sign-on,
 business approval workflow, resource reservation, rescheduling after node loss,
 autoscaling, preemption, multi-controller high availability, or external database
 adapter. Its job is a small reliable path from bounded tenant authority to a node

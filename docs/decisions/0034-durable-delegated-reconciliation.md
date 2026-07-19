@@ -34,8 +34,9 @@ admission fields, and an expiry no longer than 24 hours.
 The packaged controller has a dedicated online Ed25519 signing identity, separate
 from TLS and the evidence-witness identity. It computes a deterministic
 least-loaded choice among active delegated nodes that advertise
-`controller-delegation-v1`, then creates only `admit`, `start`, `stop`, or `destroy`
-commands. The deployment transition and new command enter one write-ahead-log
+`controller-delegation-v1` and have reported within the operator's node freshness
+threshold, then creates only `admit`, `start`, `stop`, or `destroy` commands. The
+deployment transition and new command enter one write-ahead-log
 mutation, so a crash cannot retain one without the other. Command identifiers and
 per-instance sequences are deterministic and monotonic.
 
@@ -49,6 +50,11 @@ Known failure is safer than optimistic retry. A terminal failure or
 `outcome_unknown` report makes the deployment degraded; the reconciler does not
 automatically create another effect. Concurrent reconciliation cannot enqueue two
 commands for the same transition, and restart after enqueue does not duplicate it.
+Retryable placement and authority problems use a bounded, machine-readable reason
+vocabulary. Repeating the same blocker does not append another durable mutation.
+New placement resumes after a fresh authenticated node poll. An assigned instance
+is not moved merely because its node becomes stale: without fencing, the controller
+cannot prove the old effect stopped.
 
 ## Consequences
 
@@ -61,5 +67,6 @@ commands for the same transition, and restart after enqueue does not duplicate i
   verbs.
 - The store remains bounded, single-writer, air-gap capable, and free of external
   runtime dependencies.
-- Resource reservations, leases, rescheduling, progressive rollout, autoscaling,
-  snapshots, and high-availability leadership remain separate roadmap work.
+- Resource reservations, fencing leases, safe replacement, progressive rollout,
+  autoscaling, snapshots, and high-availability leadership remain separate roadmap
+  work.

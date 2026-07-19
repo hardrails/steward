@@ -174,17 +174,28 @@ stewardctl agent deployment list
 The apply command checks the bundle, capsule envelope, delegation lifetime, tenant,
 capsule digest, and lifecycle scope locally. It fetches the current revision and
 infers a safe deployment generation. Control then selects an active allowed node
-that advertises delegated-command support and drives `admit` and `start`. Removing
-desired state similarly needs only the name:
+that advertises delegated-command support and has reported within the configured
+node freshness threshold, then drives `admit` and `start`. Removing desired state
+similarly needs only the name:
 
 ```console
 stewardctl agent deployment remove auditor
 ```
 
 Removal is asynchronous. Watch status until the deployment is `removed`. A failed
-or uncertain Executor outcome becomes `degraded` and is not silently retried. The
-current scheduler does not yet reserve resources or replace an instance after node
-loss; see [Known limitations]({{ '/limitations/' | relative_url }}).
+or uncertain Executor outcome becomes `degraded` and is not silently retried.
+`last_error` also reports retryable controller conditions using stable values:
+`no_eligible_node`, `assigned_node_unavailable`, `delegation_expired`,
+`controller_key_mismatch`, or `invalid_deployment_authority`. The controller
+rechecks these conditions and clears the value when it can enqueue the next command.
+
+A stale node is not a safe reason to create a replacement by itself. The existing
+workload may still be running while disconnected, so automatic replacement could
+create two agents with the same logical role. Steward keeps an assigned instance on
+that node and reports `assigned_node_unavailable` until the node returns or an
+operator performs an explicit recovery. The current scheduler does not yet reserve
+resources or provide fenced replacement; see
+[Known limitations]({{ '/limitations/' | relative_url }}).
 
 Keep lifecycle authority valid for any operation Control may still need. After a
 delegation expires, Executor correctly refuses new commands under it. To roll an

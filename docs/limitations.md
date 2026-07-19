@@ -209,7 +209,16 @@ It survives restart without duplicating a queued command. Executor independently
 checks the tenant delegation and controller signature. A failed or
 `outcome_unknown` command becomes `degraded` and is not silently retried.
 
-The current reconciler does not reserve aggregate resources, hold node leases,
+New placement also requires a recent authenticated node poll. A pending instance
+records `no_eligible_node` when none of its delegated nodes is fresh and capable.
+An instance already assigned to a stale or ineligible node records
+`assigned_node_unavailable` and stays assigned. This is deliberate: without a
+fencing lease, the controller cannot prove that a disconnected workload stopped,
+so moving it could create a duplicate. These retryable reason codes do not change
+the instance to a terminal phase and repeated checks do not append repeated durable
+records.
+
+The current reconciler does not reserve aggregate resources, hold fencing leases,
 replace an instance after node loss, preempt workloads, perform progressive
 rollouts, or autoscale. Its least-loaded choice uses bounded current inventory,
 not a capacity reservation. Executor revalidates admission and live capacity, so

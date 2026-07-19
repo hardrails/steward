@@ -308,7 +308,9 @@ The roadmap starts from working primitives rather than a blank design:
   key;
 - durable deployment generations and optimistic revisions;
 - atomic deployment-transition and command enqueue, deterministic command IDs,
-  restart-safe progress, and explicit degraded outcomes; and
+  restart-safe progress, and explicit degraded outcomes;
+- health-aware placement that rejects stale nodes, durable bounded blocked reasons,
+  and deliberate refusal to replace an assigned node without fencing proof; and
 - public HTTP, client, OpenAPI, and context-aware CLI operations for applying,
   inspecting, listing, and removing desired deployments.
 

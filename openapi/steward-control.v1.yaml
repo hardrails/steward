@@ -2861,6 +2861,12 @@ components:
         last_error:
           type: string
           maxLength: 1024
+          description: >-
+            A stable retryable blocked reason (`no_eligible_node`,
+            `assigned_node_unavailable`, `delegation_expired`,
+            `controller_key_mismatch`, or `invalid_deployment_authority`), or a
+            bounded terminal Executor error when phase is `failed`. Retryable
+            reasons clear when reconciliation can enqueue or observe progress.
         transitioned_at:
           type: string
           format: date-time
