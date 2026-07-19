@@ -137,21 +137,22 @@ func helpCommand(arguments []string, writer io.Writer) error {
 }
 
 var commandHelp = map[string]string{
-	"context":    "Save connection details once so routine commands do not repeat URLs, token files, tenant IDs, or node IDs.\n\nUsage: stewardctl context set|use|show|list|delete ...\n",
-	"node":       "Operate one isolated agent on a Steward Executor node. After saving a context, pass the runtime reference directly: stewardctl node status executor-…\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...\n",
-	"control":    "Enroll nodes, manage scoped operators, deliver signed commands, and inspect fleet evidence.\n\nUsage: stewardctl control pki|tenant|operator|enrollment|node|operations|attention|command|credential|evidence ...\n",
-	"permit":     "Authorize one canonical connector request without giving the action key or reusable upstream credential to the agent.\n\nUsage: stewardctl permit context|issue|approve|verify|audit ...\n",
-	"task":       "Issue, submit, observe, and audit a service task through Gateway.\n\nUsage: stewardctl task issue|verify|audit|submit|status|observe|wait ...\n",
-	"evidence":   "Verify or export a signed Executor or Gateway receipt chain without contacting a hosted service.\n\nUsage: stewardctl evidence verify|export ...\n",
-	"image":      "Inspect or import one bounded offline OCI/Docker archive and bind it to the signed workload identity.\n\nUsage: stewardctl image inspect|import ...\n",
-	"gateway":    "Validate the Gateway configuration and inspect routes, connectors, services, and effect policy.\n\nUsage: stewardctl gateway validate|route|connector|service|effects ...\n",
-	"secret":     "Validate or prepare owner-only files rendered by an external secret materializer. Steward does not store secrets.\n\nUsage: stewardctl secret materialization check|prepare ...\n",
-	"capsule":    "Sign or verify a publisher workload profile.\n\nUsage: stewardctl capsule sign|verify ...\n",
-	"policy":     "Sign or verify the site policy that bounds admitted workload authority.\n\nUsage: stewardctl policy sign|verify ...\n",
-	"keygen":     "Create an Ed25519 signing key pair in owner-only files.\n\nUsage: stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]\n",
-	"key":        "Check that one private key matches one public key.\n\nUsage: stewardctl key match -private-key FILE -public-key FILE\n",
-	"completion": "Install or print local shell completion.\n\nUsage: stewardctl completion install|bash|zsh|fish\n",
-	"upgrade":    "Inspect whether a node is drained and whether retained formats are compatible with an upgrade.\n\nUsage: stewardctl upgrade check-drained|inspect-formats ...\n",
+	"context":          "Save connection details once so routine commands do not repeat URLs, token files, tenant IDs, or node IDs.\n\nUsage: stewardctl context set|use|show|list|delete ...\n",
+	"node":             "Operate one isolated agent on a Steward Executor node. After saving a context, pass the runtime reference directly: stewardctl node status executor-…\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...\n",
+	"control":          "Enroll nodes, manage scoped operators, deliver signed commands, and inspect fleet evidence.\n\nUsage: stewardctl control pki|tenant|operator|enrollment|node|operations|attention|command|credential|evidence ...\n",
+	"permit":           "Authorize one canonical connector request without giving the action key or reusable upstream credential to the agent.\n\nUsage: stewardctl permit context|issue|approve|verify|audit ...\n",
+	"task":             "Issue, submit, observe, and audit a service task through Gateway.\n\nUsage: stewardctl task issue|verify|audit|submit|status|observe|wait ...\n",
+	"evidence":         "Verify or export a signed Executor or Gateway receipt chain without contacting a hosted service.\n\nUsage: stewardctl evidence verify|export ...\n",
+	"image":            "Inspect or import one bounded offline OCI/Docker archive and bind it to the signed workload identity.\n\nUsage: stewardctl image inspect|import ...\n",
+	"gateway":          "Validate the Gateway configuration and inspect routes, connectors, services, and effect policy.\n\nUsage: stewardctl gateway validate|route|connector|service|effects ...\n",
+	"secret":           "Validate or prepare owner-only files rendered by an external secret materializer. Steward does not store secrets.\n\nUsage: stewardctl secret materialization check|prepare ...\n",
+	"capsule":          "Sign or verify a publisher workload profile.\n\nUsage: stewardctl capsule sign|verify ...\n",
+	"policy":           "Sign or verify the site policy that bounds admitted workload authority.\n\nUsage: stewardctl policy sign|verify ...\n",
+	"keygen":           "Create an Ed25519 signing key pair in owner-only files.\n\nUsage: stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]\n",
+	"key":              "Check that one private key matches one public key.\n\nUsage: stewardctl key match -private-key FILE -public-key FILE\n",
+	"completion":       "Install or print local shell completion.\n\nUsage: stewardctl completion install|bash|zsh|fish\n",
+	"upgrade":          "Inspect whether a node is drained and whether retained formats are compatible with an upgrade.\n\nUsage: stewardctl upgrade check-drained|inspect-formats ...\n",
+	"executor-command": "Issue or verify a signed command delivered to an Executor node out of band. This is an advanced transport tool; routine fleet operations use stewardctl control.\n\nUsage: stewardctl executor-command issue|verify ...\n",
 }
 
 func nodeCommand(arguments []string, stdout io.Writer) error {

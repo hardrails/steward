@@ -15,7 +15,7 @@ import (
 
 var completionTree = map[string][]string{
 	"":                 {"help", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
-	"help":             {"context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
+	"help":             {"context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
 	"context":          {"set", "use", "show", "list", "delete"},
 	"completion":       {"install", "bash", "zsh", "fish"},
 	"key":              {"match"},
