@@ -97,16 +97,12 @@ Create the immutable approval context:
 
 ```console
 stewardctl permit context \
-  -config /etc/steward/gateway.json \
+  -admission admission.json \
   -intent intent.json \
-  -tenant-id tenant-a \
-  -instance-id agent-1 \
-  -generation 7 \
-  -grant-id grant-DIGEST \
-  -connector-id tickets \
-  -operation-id create \
-  -task-id task-001 \
-  -request request.json \
+  -receipts gateway-receipts.jsonl \
+  -receipt-public-key gateway-receipts.public \
+  -receipt-node-id gateway-node-a \
+  -receipt-epoch 1 \
   -out action.context.json
 ```
 
@@ -114,14 +110,25 @@ Issue or add an approval with a private key that remains outside the workload:
 
 ```console
 stewardctl permit issue \
+  -admission admission.json \
+  -intent intent.json \
   -context action.context.json \
-  -private-key approver-a.private.pem \
+  -trust action-trust.json \
+  -request request.json \
+  -connector-id tickets \
+  -operation-id create \
+  -task-id task-001 \
+  -key approver-a.private.pem \
   -key-id approver-a \
   -out action.permit.json
 
 stewardctl permit approve \
   -in action.permit.json \
-  -private-key approver-b.private.pem \
+  -admission admission.json \
+  -intent intent.json \
+  -trust action-trust.json \
+  -request request.json \
+  -key approver-b.private.pem \
   -key-id approver-b \
   -out action.approved.json
 ```
@@ -131,9 +138,9 @@ Verify before transfer:
 ```console
 stewardctl permit verify \
   -in action.approved.json \
-  -context action.context.json \
-  -public-key approver-a.public \
-  -public-key approver-b.public
+  -authority approver-a=approver-a.public \
+  -authority approver-b=approver-b.public \
+  -request request.json
 ```
 
 Exact flag combinations vary by permit schema and approval threshold. Use
@@ -150,16 +157,19 @@ Issue and verify the owner-only bundle on a signing station:
 
 ```console
 stewardctl task issue \
-  -service-id hermes-api \
+  -admission admission.json \
+  -intent intent.json \
+  -trust service-trust.json \
   -operation-id hermes.run \
   -task-id task-001 \
   -request run.json \
-  -private-key tenant.private.pem \
+  -key tenant.private.pem \
   -key-id tenant-task-1 \
   -out task.json
 
-stewardctl task verify -bundle task.json \
-  -public-key tenant.public -key-id tenant-task-1
+stewardctl task verify -in task.json \
+  -public-key tenant.public -key-id tenant-task-1 \
+  -request run.json
 ```
 
 Submit it to a local Gateway:
@@ -216,18 +226,28 @@ bodies.
 
 ```console
 stewardctl permit audit \
-  -permit action.approved.json \
+  -in action.approved.json \
+  -authority approver-a=approver-a.public \
+  -authority approver-b=approver-b.public \
   -receipts gateway-receipts.jsonl \
-  -receipt-public-key gateway-receipts.public
+  -receipt-public-key gateway-receipts.public \
+  -receipt-node-id gateway-node-a \
+  -receipt-epoch 1 \
+  -request request.json
 ```
 
 For service tasks:
 
 ```console
 stewardctl task audit \
-  -bundle task.json \
+  -in task.json \
+  -public-key tenant.public \
+  -key-id tenant-task-1 \
   -receipts gateway-receipts.jsonl \
-  -receipt-public-key gateway-receipts.public
+  -receipt-public-key gateway-receipts.public \
+  -receipt-node-id gateway-node-a \
+  -receipt-epoch 1 \
+  -request run.json
 ```
 
 An audit proves what Steward signed and correlated. It does not prove that an
