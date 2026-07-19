@@ -5,7 +5,7 @@ import "runtime/debug"
 
 // Version is the fallback used when the Go toolchain supplies no module or VCS
 // metadata (notably go run and go test).
-const Version = "2.0.0"
+const Version = "2.1.0"
 
 // releaseVersion is set only by scripts/release.sh through the standard Go
 // linker's -X flag. A checkout build's module version is normally "(devel)" and
