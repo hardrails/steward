@@ -408,6 +408,10 @@ func runV4Admission(
 				) ||
 				!slices.Contains(
 					poll.Capabilities,
+					controlprotocol.ExecutorCapabilityControllerDelegationV1,
+				) ||
+				!slices.Contains(
+					poll.Capabilities,
 					controlprotocol.ExecutorCapabilityRolloutAuthorizationContextV1,
 				) ||
 				slices.Contains(

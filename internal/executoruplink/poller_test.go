@@ -322,6 +322,70 @@ func TestNodeScopedPollRejectsUnsignedWrongScopeAndExpiredCommands(t *testing.T)
 	}
 }
 
+func TestNodeScopedDecoderAcceptsOnlyExecutorVerifiedControllerDelegation(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	tenantPublic, tenantPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllerPublic, controllerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := commandPolicyFixture(t, tenantPublic, []string{"read"})
+	delegation := admission.CommandDelegation{
+		SchemaVersion: admission.CommandDelegationSchemaV1, DelegationID: "deployment-1",
+		TenantID: "tenant-a", ControllerKeyID: "controller-1",
+		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublic),
+		Operations:          []string{"read"}, NodeIDs: []string{"node-1"},
+		Instances: []admission.CommandDelegationInstance{{
+			InstanceID: "agent-1", LineageID: "lineage-1",
+			MinInstanceGeneration: 1, MaxInstanceGeneration: 4,
+		}},
+		ClaimGeneration: 1,
+		IssuedAt:        now.Add(-time.Minute).Format(time.RFC3339Nano),
+		ExpiresAt:       now.Add(time.Hour).Format(time.RFC3339Nano),
+	}
+	delegationPayload, err := admission.MarshalCommandDelegation(delegation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegationEnvelope, err := dsse.Sign(
+		admission.CommandDelegationPayloadType, delegationPayload, "tenant-command", tenantPrivate,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegationRaw, err := dsse.Marshal(delegationEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRef, _ := RuntimeRefV2("tenant-a", "node-1", "agent-1")
+	statement := admission.CommandStatement{
+		SchemaVersion: admission.CommandSchemaV2, CommandID: "delegated-read",
+		AuthorizationContextDigest: dsse.Digest(delegationRaw),
+		DelegationDSSEBase64:       base64.StdEncoding.EncodeToString(delegationRaw),
+		TenantID:                   "tenant-a", NodeID: "node-1", InstanceID: "agent-1",
+		RuntimeRef: runtimeRef, Kind: "read", ClaimGeneration: 1,
+		InstanceGeneration: 2, CommandSequence: 3,
+		IssuedAt:  now.Format(time.RFC3339Nano),
+		ExpiresAt: now.Add(10 * time.Minute).Format(time.RFC3339Nano), Payload: json.RawMessage(`{}`),
+	}
+	poller := &Poller{commandPolicy: &policy, now: func() time.Time { return now }}
+	decoded, err := poller.decodeCommand(
+		signCommand(t, statement, "controller-1", controllerPrivate), nodeCredentialForTest(),
+	)
+	if err != nil || decoded.CommandID != statement.CommandID || !decoded.signed {
+		t.Fatalf("delegated command = (%+v, %v)", decoded, err)
+	}
+	statement.NodeID = "node-2"
+	if _, err := poller.decodeCommand(
+		signCommand(t, statement, "controller-1", controllerPrivate), nodeCredentialForTest(),
+	); err == nil {
+		t.Fatal("controller command outside delegated node scope was accepted")
+	}
+}
+
 func TestNodeScopedRestartUsesCurrentPolicyAndSiteCleanupAuthority(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	oldTenantPublic, oldTenantPrivate, err := ed25519.GenerateKey(rand.Reader)
