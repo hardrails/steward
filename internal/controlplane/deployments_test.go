@@ -30,7 +30,7 @@ func TestDeploymentHTTPContractAppliesProjectsListsAndRemoves(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	input := deploymentHTTPFixture(t, fixture.now)
+	input := deploymentHTTPFixture(t, fixture.now, "research")
 	response := fixture.request(
 		t, http.MethodPut, "/v1/tenants/tenant-a/deployments/research", fixture.adminToken,
 		mustJSON(t, input),
@@ -51,6 +51,18 @@ func TestDeploymentHTTPContractAppliesProjectsListsAndRemoves(t *testing.T) {
 	)
 	requireStatus(t, response, http.StatusOK)
 	response = fixture.request(
+		t, http.MethodGet, "/v1/tenants/tenant-a/deployments/research", fixture.adminToken, "",
+	)
+	requireStatus(t, response, http.StatusOK)
+	var projected deploymentResponse
+	decodeResponse(t, response, &projected)
+	if projected.DeploymentID != created.DeploymentID || projected.DelegationDigest != created.DelegationDigest {
+		t.Fatalf("projected deployment = %+v", projected)
+	}
+	requireError(t, fixture.request(
+		t, http.MethodGet, "/v1/tenants/tenant-a/deployments/missing", fixture.adminToken, "",
+	), http.StatusNotFound, "not_found")
+	response = fixture.request(
 		t, http.MethodGet, "/v1/tenants/tenant-a/deployments?limit=1", fixture.adminToken, "",
 	)
 	requireStatus(t, response, http.StatusOK)
@@ -58,6 +70,30 @@ func TestDeploymentHTTPContractAppliesProjectsListsAndRemoves(t *testing.T) {
 	decodeResponse(t, response, &list)
 	if len(list.Deployments) != 1 || list.Deployments[0].DeploymentID != "research" || list.NextAfter != "" {
 		t.Fatalf("deployment list = %+v", list)
+	}
+	secondInput := deploymentHTTPFixture(t, fixture.now, "writer")
+	response = fixture.request(
+		t, http.MethodPut, "/v1/tenants/tenant-a/deployments/writer", fixture.adminToken,
+		mustJSON(t, secondInput),
+	)
+	requireStatus(t, response, http.StatusCreated)
+	response = fixture.request(
+		t, http.MethodGet, "/v1/tenants/tenant-a/deployments?limit=1", fixture.adminToken, "",
+	)
+	requireStatus(t, response, http.StatusOK)
+	list = deploymentListResponse{}
+	decodeResponse(t, response, &list)
+	if len(list.Deployments) != 1 || list.Deployments[0].DeploymentID != "research" || list.NextAfter != "research" {
+		t.Fatalf("first deployment page = %+v", list)
+	}
+	response = fixture.request(
+		t, http.MethodGet, "/v1/tenants/tenant-a/deployments?limit=1&after=research", fixture.adminToken, "",
+	)
+	requireStatus(t, response, http.StatusOK)
+	list = deploymentListResponse{}
+	decodeResponse(t, response, &list)
+	if len(list.Deployments) != 1 || list.Deployments[0].DeploymentID != "writer" || list.NextAfter != "" {
+		t.Fatalf("second deployment page = %+v", list)
 	}
 	response = fixture.request(
 		t, http.MethodDelete, "/v1/tenants/tenant-a/deployments/research", fixture.adminToken,
@@ -97,7 +133,7 @@ func TestDeploymentHTTPContractFailsClosedAtRoutingAndEncodingBoundaries(t *test
 	)
 }
 
-func deploymentHTTPFixture(t *testing.T, now time.Time) deploymentApplyRequest {
+func deploymentHTTPFixture(t *testing.T, now time.Time, deploymentID string) deploymentApplyRequest {
 	t.Helper()
 	_, publisherPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -120,11 +156,11 @@ func deploymentHTTPFixture(t *testing.T, now time.Time) deploymentApplyRequest {
 	}
 	delegation := admission.CommandDelegation{
 		SchemaVersion: admission.CommandDelegationSchemaV1,
-		DelegationID:  "research-authority", TenantID: "tenant-a",
+		DelegationID:  deploymentID + "-authority", TenantID: "tenant-a",
 		ControllerKeyID: "controller-a", ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublic),
 		Operations: []string{"admit", "destroy", "start", "stop"}, NodeIDs: []string{"node-1"},
 		Instances: []admission.CommandDelegationInstance{{
-			InstanceID: "research-0", LineageID: "research-lineage-0",
+			InstanceID: deploymentID + "-0", LineageID: deploymentID + "-lineage-0",
 			MinInstanceGeneration: 1, MaxInstanceGeneration: 3,
 		}},
 		ClaimGeneration: 1,

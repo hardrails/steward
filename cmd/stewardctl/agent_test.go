@@ -32,6 +32,10 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 	if err != nil || !bytes.Contains(cueRaw, []byte(`adapter_contract: "steward.openclaw.v1"`)) {
 		t.Fatalf("Stewardfile=%s err=%v", cueRaw, err)
 	}
+	output.Reset()
+	if err := run([]string{"agent", "init", "-force", "-runtime", "openclaw", "-name", "auditor", directory}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatalf("force init: %v", err)
+	}
 	definition := agentapp.Definition{
 		Schema: agentapp.DefinitionSchema, Name: "auditor",
 		Runtime:   agentapp.Runtime{Engine: "openclaw", Image: "example.invalid/openclaw@sha256:" + strings.Repeat("a", 64), AdapterContract: "steward.openclaw.v1"},
@@ -47,11 +51,38 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	output.Reset()
+	if err := run([]string{"agent", "validate", "-file", definitionPath}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"valid":true`) ||
+		!strings.Contains(output.String(), `"name":"auditor"`) {
+		t.Fatalf("validate output=%s", output.String())
+	}
+	output.Reset()
 	if err := run([]string{"agent", "build", "-file", definitionPath, "-out", bundlePath}, &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), `"runtime":"openclaw"`) {
 		t.Fatalf("build output=%s", output.String())
+	}
+	policyPath := filepath.Join(directory, "policy.tar.gz")
+	opaPath := filepath.Join(directory, "opa")
+	policyBundlePath := filepath.Join(directory, "agent.policy.bundle.json")
+	if err := os.WriteFile(policyPath, []byte("offline-policy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(opaPath, []byte("#!/bin/sh\nprintf true\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := run([]string{
+		"agent", "build", "-file", definitionPath, "-out", policyBundlePath,
+		"-policy-bundle", policyPath, "-opa", opaPath,
+	}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"policy_evaluated":true`) {
+		t.Fatalf("policy build output=%s", output.String())
 	}
 	inventory := agentapp.NodeInventory{Schema: agentapp.InventorySchema, Nodes: []agentapp.Node{{
 		ID: "node-1", Ready: true, Tenants: []string{"tenant-a"}, Architecture: "amd64", Isolation: "hardened",
@@ -68,6 +99,101 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"selected_node":"node-1"`) {
 		t.Fatalf("plan output=%s", output.String())
+	}
+
+	bundleRaw, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := agentapp.DecodeBundle(bundleRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleDigest, err := agentapp.DigestJSON(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := agentapp.Snapshot{
+		Schema: agentapp.SnapshotSchema, ID: "snapshot-a", BundleDigest: bundleDigest,
+		RuntimeEngine: "openclaw", StateDigest: "sha256:" + strings.Repeat("b", 64),
+		SourceLineage: "lineage-parent", CreatedAt: "2026-07-19T12:00:00Z",
+	}
+	snapshotRaw, _ := json.Marshal(snapshot)
+	snapshotPath := filepath.Join(directory, "snapshot.json")
+	forkPath := filepath.Join(directory, "fork.json")
+	if err := os.WriteFile(snapshotPath, snapshotRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := run([]string{
+		"agent", "fork", "-bundle", bundlePath, "-snapshot", snapshotPath,
+		"-instance-id", "auditor-fork", "-lineage-id", "lineage-fork",
+		"-ttl", "1h", "-out", forkPath,
+	}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"instance_id":"auditor-fork"`) {
+		t.Fatalf("fork output=%s", output.String())
+	}
+	forkRaw, err := os.ReadFile(forkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fork agentapp.ForkPlan
+	if err := json.Unmarshal(forkRaw, &fork); err != nil || fork.OnExpiry != "destroy" || fork.ExpiresAt == "" {
+		t.Fatalf("fork plan=%s err=%v", forkRaw, err)
+	}
+	generatedForkPath := filepath.Join(directory, "generated-fork.json")
+	output.Reset()
+	if err := run([]string{
+		"agent", "fork", "-bundle", bundlePath, "-snapshot", snapshotPath,
+		"-out", generatedForkPath,
+	}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"instance_id":"agent-`) ||
+		!strings.Contains(output.String(), `"lineage_id":"lineage-`) {
+		t.Fatalf("generated fork output=%s", output.String())
+	}
+}
+
+func TestAgentValidateAndForkRejectAmbiguousArguments(t *testing.T) {
+	directory := t.TempDir()
+	existing := filepath.Join(directory, "existing")
+	if err := os.MkdirAll(existing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existing, "Stewardfile.cue"), []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := filepath.Join(directory, "snapshot.json")
+	if err := os.WriteFile(snapshot, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		arguments []string
+		message   string
+	}{
+		{[]string{"agent"}, "agent requires"},
+		{[]string{"agent", "unknown"}, "unknown agent command"},
+		{[]string{"agent", "init", "-runtime", "unknown"}, "runtime must be"},
+		{[]string{"agent", "init", "-name", "INVALID"}, "agent name"},
+		{[]string{"agent", "init", "one", "two"}, "at most one"},
+		{[]string{"agent", "init", existing}, "already exists"},
+		{[]string{"agent", "validate", "-file", filepath.Join(directory, "missing.json")}, "no such file"},
+		{[]string{"agent", "validate", "extra"}, "only named flags"},
+		{[]string{"agent", "build", "extra"}, "only named flags"},
+		{[]string{"agent", "build", "-file", filepath.Join(directory, "missing.json")}, "no such file"},
+		{[]string{"agent", "plan", "extra"}, "only named flags"},
+		{[]string{"agent", "plan", "-bundle", filepath.Join(directory, "missing.json")}, "no such file"},
+		{[]string{"agent", "fork"}, "requires -snapshot"},
+		{[]string{"agent", "fork", "-snapshot", snapshot, "-bundle", filepath.Join(directory, "missing.json")}, "no such file"},
+		{[]string{"agent", "doctor", "extra"}, "accepts no arguments"},
+	} {
+		if err := run(test.arguments, &bytes.Buffer{}, &bytes.Buffer{}); err == nil ||
+			!strings.Contains(err.Error(), test.message) {
+			t.Fatalf("run %v error = %v", test.arguments, err)
+		}
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -248,6 +249,89 @@ func TestReconcilerReportsExpiredDelegation(t *testing.T) {
 	if err != nil || report.Blocked != 1 || report.Enqueued != 0 ||
 		deployment.Instances[0].LastError != string(controlstore.DeploymentBlockedDelegationExpired) {
 		t.Fatalf("expired delegation = report %+v deployment %+v err %v", report, deployment, err)
+	}
+}
+
+func TestReconcilerRemovesPendingDeploymentWithoutNodeEffect(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	deployment := getControlDeployment(t, fixture)
+	removed, changed, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, "tenant-a", "research", deployment.Revision,
+		controlstore.DeploymentAbsent, fixture.now.Add(time.Second),
+	)
+	if err != nil || !changed {
+		t.Fatalf("set absent = (%+v, %v, %v)", removed, changed, err)
+	}
+	fixture.now = fixture.now.Add(time.Second)
+	reconciler := fixture.reconciler(t)
+	report, err := reconciler.Reconcile(context.Background())
+	deployment = getControlDeployment(t, fixture)
+	if err != nil || report.Removed != 1 || report.Enqueued != 0 ||
+		deployment.Phase != controlstore.DeploymentRemoved ||
+		deployment.Instances[0].Phase != controlstore.DeploymentInstanceRemoved ||
+		deployment.Instances[0].NodeID != "" || deployment.Instances[0].Attempts != 0 {
+		t.Fatalf("remove pending = report %+v deployment %+v err %v", report, deployment, err)
+	}
+}
+
+func TestReconcilerRejectsInvalidConfigurationAndStopsWithContext(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	if _, err := New(Config{
+		Store: fixture.store, KeyID: "controller-a", PrivateKey: fixture.controller,
+		Interval: time.Second,
+	}); err == nil {
+		t.Fatal("reconciler accepted missing node freshness threshold")
+	}
+	reconciler := fixture.reconciler(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := reconciler.Run(ctx); err != nil {
+		t.Fatalf("canceled reconciler run = %v", err)
+	}
+	if _, err := (*Reconciler)(nil).Reconcile(context.Background()); err == nil {
+		t.Fatal("nil reconciler accepted reconciliation")
+	}
+}
+
+func TestReconcilerClassifiesMalformedAuthorityAndBoundaries(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	deployment := getControlDeployment(t, fixture)
+	instance := deployment.Instances[0]
+	if reason := (blockedError{reason: controlstore.DeploymentBlockedNoEligibleNode}).Error(); reason != string(controlstore.DeploymentBlockedNoEligibleNode) {
+		t.Fatalf("blocked error reason = %q", reason)
+	}
+
+	if _, err := reconciler.signCommand(controlstore.Deployment{}, instance, "node-1", "admit", fixture.now); err == nil ||
+		err.Error() != string(controlstore.DeploymentBlockedInvalidAuthority) {
+		t.Fatalf("malformed authority error = %v", err)
+	}
+	missing := instance
+	missing.InstanceID = "not-delegated"
+	if _, err := reconciler.signCommand(deployment, missing, "node-1", "admit", fixture.now); err == nil ||
+		err.Error() != string(controlstore.DeploymentBlockedInvalidAuthority) {
+		t.Fatalf("missing instance authority error = %v", err)
+	}
+	overflow := instance
+	overflow.CommandSequence = ^uint64(0)
+	if _, err := reconciler.signCommand(deployment, overflow, "node-1", "start", fixture.now); !errors.Is(err, controlstore.ErrCapacityExceeded) {
+		t.Fatalf("command sequence overflow error = %v", err)
+	}
+	if _, err := selectNode(nil, nil, controlstore.Deployment{}, instance, fixture.now, time.Minute); err == nil {
+		t.Fatal("malformed placement authority was accepted")
+	}
+	if eligibleNode(controlstore.Node{Active: true, LastSeenAt: "bad"}, "tenant-a", map[string]struct{}{}, fixture.now, time.Minute) {
+		t.Fatal("node with malformed observation time was eligible")
+	}
+	if err := reconciler.Run(nil); err == nil {
+		t.Fatal("reconciler accepted nil run context")
+	}
+	for _, keyID := range []string{"", "-leading", "bad space", strings.Repeat("a", 257)} {
+		if validKeyID(keyID) {
+			t.Fatalf("invalid key ID accepted: %q", keyID)
+		}
 	}
 }
 
