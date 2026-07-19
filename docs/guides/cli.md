@@ -60,13 +60,24 @@ sudo -H stewardctl node maintenance status
 
 `node whoami` returns the credential ID and role without exposing its value. Use
 `/etc/steward/executor-operator-token` for lifecycle or maintenance changes. Use
-the host-admin `/etc/steward/executor-token` only for admission, state purge, or
-activation administration. These roles are host-wide API limits, not tenant
+the host-admin `/etc/steward/executor-token` only for admission or state purge.
+These roles are host-wide API limits, not tenant
 identities.
 
 The loopback URL defaults to `http://127.0.0.1:8090` when
 `-node-token-file` is present. Set `-node-url` only when the packaged loopback port
 was changed. A single context may contain both Control and local-node settings.
+
+Routine lifecycle commands accept the returned runtime reference directly:
+
+```console
+sudo -H stewardctl node status executor-DIGEST
+sudo -H stewardctl node logs executor-DIGEST
+sudo -H stewardctl node stop executor-DIGEST
+```
+
+The existing `-runtime-ref` form remains available for scripts. Supplying both
+forms is rejected as ambiguous.
 
 Previewing a drain needs no reason and changes nothing:
 

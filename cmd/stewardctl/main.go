@@ -138,7 +138,7 @@ func helpCommand(arguments []string, writer io.Writer) error {
 
 var commandHelp = map[string]string{
 	"context":    "Save connection details once so routine commands do not repeat URLs, token files, tenant IDs, or node IDs.\n\nUsage: stewardctl context set|use|show|list|delete ...\n",
-	"node":       "Operate one isolated agent on a Steward Executor node. Destructive actions require the runtime reference returned by admission.\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...\n",
+	"node":       "Operate one isolated agent on a Steward Executor node. After saving a context, pass the runtime reference directly: stewardctl node status executor-…\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...\n",
 	"control":    "Enroll nodes, manage scoped operators, deliver signed commands, and inspect fleet evidence.\n\nUsage: stewardctl control pki|tenant|operator|enrollment|node|operations|attention|command|credential|evidence ...\n",
 	"permit":     "Authorize one canonical connector request without giving the action key or reusable upstream credential to the agent.\n\nUsage: stewardctl permit context|issue|approve|verify|audit ...\n",
 	"task":       "Issue, submit, observe, and audit a service task through Gateway.\n\nUsage: stewardctl task issue|verify|audit|submit|status|observe|wait ...\n",
@@ -184,9 +184,10 @@ func nodeCommand(arguments []string, stdout io.Writer) error {
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
-	if *tokenFile == "" || flags.NArg() != 0 {
-		return errors.New("node command requires -token-file and no positional arguments")
+	if *tokenFile == "" {
+		return errors.New("node command requires -token-file or a context containing one")
 	}
+	positional := flags.Args()
 	client, err := nodeclient.NewFromTokenFile(*nodeURL, *tokenFile)
 	if err != nil {
 		return err
@@ -196,7 +197,7 @@ func nodeCommand(arguments []string, stdout io.Writer) error {
 	var result any
 	switch action {
 	case "whoami":
-		if *runtimeRef != "" || *capsulePath != "" || *intentPath != "" || *tenantID != "" ||
+		if len(positional) != 0 || *runtimeRef != "" || *capsulePath != "" || *intentPath != "" || *tenantID != "" ||
 			*nodeID != "" || *lineageID != "" || *generation != 0 {
 			return errors.New("node whoami accepts only connection flags")
 		}
@@ -205,7 +206,7 @@ func nodeCommand(arguments []string, stdout io.Writer) error {
 			return err
 		}
 	case "admit":
-		if *capsulePath == "" || *intentPath == "" || *runtimeRef != "" {
+		if len(positional) != 0 || *capsulePath == "" || *intentPath == "" || *runtimeRef != "" {
 			return errors.New("node admit requires -capsule and -intent")
 		}
 		capsule, err := nodeclient.ReadBounded(*capsulePath, dsse.DefaultMaxEnvelopeBytes)
@@ -225,29 +226,35 @@ func nodeCommand(arguments []string, stdout io.Writer) error {
 			return err
 		}
 	case "status", "logs", "egress", "start", "stop", "destroy":
-		if *runtimeRef == "" || *capsulePath != "" || *intentPath != "" {
-			return fmt.Errorf("node %s requires -runtime-ref", action)
+		selectedRuntimeRef := *runtimeRef
+		if len(positional) == 1 && selectedRuntimeRef == "" {
+			selectedRuntimeRef = positional[0]
+		} else if len(positional) != 0 {
+			return fmt.Errorf("node %s accepts one runtime reference, either positionally or with -runtime-ref", action)
+		}
+		if selectedRuntimeRef == "" || *capsulePath != "" || *intentPath != "" {
+			return fmt.Errorf("node %s requires one runtime reference", action)
 		}
 		switch action {
 		case "status":
-			result, err = client.Status(ctx, *runtimeRef)
+			result, err = client.Status(ctx, selectedRuntimeRef)
 		case "logs":
-			result, err = client.Logs(ctx, *runtimeRef)
+			result, err = client.Logs(ctx, selectedRuntimeRef)
 		case "egress":
-			result, err = client.EgressStats(ctx, *runtimeRef)
+			result, err = client.EgressStats(ctx, selectedRuntimeRef)
 		case "start":
-			result, err = client.Start(ctx, *runtimeRef)
+			result, err = client.Start(ctx, selectedRuntimeRef)
 		case "stop":
-			result, err = client.Stop(ctx, *runtimeRef)
+			result, err = client.Stop(ctx, selectedRuntimeRef)
 		case "destroy":
-			err = client.Destroy(ctx, *runtimeRef)
-			result = map[string]any{"runtime_ref": *runtimeRef, "destroyed": err == nil}
+			err = client.Destroy(ctx, selectedRuntimeRef)
+			result = map[string]any{"runtime_ref": selectedRuntimeRef, "destroyed": err == nil}
 		}
 		if err != nil {
 			return err
 		}
 	case "purge-state":
-		if *tenantID == "" || *nodeID == "" || *lineageID == "" || *generation == 0 ||
+		if len(positional) != 0 || *tenantID == "" || *nodeID == "" || *lineageID == "" || *generation == 0 ||
 			*runtimeRef != "" || *capsulePath != "" || *intentPath != "" {
 			return errors.New("node purge-state requires -tenant-id, -node-id, -lineage-id, and -generation")
 		}
