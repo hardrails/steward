@@ -268,9 +268,10 @@ $ go list -m all
 github.com/hardrails/steward
 ```
 
-Public contracts live under [`openapi/`](openapi/). Architecture decisions and
-the market analysis live in the
-[documentation site](https://hardrails.github.io/steward/).
+Public contracts live under [`openapi/`](openapi/). Architecture decisions, the
+[market analysis](https://hardrails.github.io/steward/product/market-analysis/),
+and the [product roadmap](https://hardrails.github.io/steward/product/roadmap/)
+live in the documentation site.
 
 ## License
 

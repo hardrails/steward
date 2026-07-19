@@ -113,3 +113,5 @@ and offline-verifiable receipts.
 
 The [dated market analysis]({{ '/product/market-analysis/' | relative_url }})
 compares that claim with public product documentation and states its limits.
+[The product roadmap]({{ '/product/roadmap/' | relative_url }}) explains what
+Steward should build, reuse, and deliberately leave to other systems.

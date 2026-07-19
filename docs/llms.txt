@@ -30,6 +30,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Embedded operator console](https://hardrails.github.io/steward/guides/operator-console/): Inspect scoped fleet metadata and observed agent runtimes, distinguish last successful workload state from the latest signed operation, and courier one exact offline-signed Executor command through the React `/console/` surface without browser-side signing
 - [Why Steward exists](https://hardrails.github.io/steward/product/positioning/): Operator problem, authorization path, and receipt limits
 - [Market analysis](https://hardrails.github.io/steward/product/market-analysis/): Dated competitive matrix and research signals
+- [Product roadmap](https://hardrails.github.io/steward/product/roadmap/): Product scope, reusable substrates, delivery order, acceptance gates, exclusions, and adversarial comparisons
 - [Limitations](https://hardrails.github.io/steward/limitations/): Current capabilities, exclusions, and trusted components
 - [FAQ](https://hardrails.github.io/steward/faq/): Common product and operational questions
 
