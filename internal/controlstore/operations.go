@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,6 +83,53 @@ type CommandMetadata struct {
 type CommandInventoryPage struct {
 	Commands   []CommandMetadata `json:"commands"`
 	NextCursor string            `json:"next_cursor,omitempty"`
+}
+
+// AgentInventoryQuery selects a bounded, read-only projection of runtime
+// identities observed through signed Executor commands. Status filters the
+// last unambiguous successful node observation, not desired state.
+type AgentInventoryQuery struct {
+	TenantID string
+	NodeID   string
+	Status   string
+	Limit    int
+	Cursor   string
+}
+
+// AgentMetadata correlates signed command identity with bounded Executor
+// observations. It contains no command bytes, task public keys, secret values,
+// free-form errors, or authority that can be replayed.
+type AgentMetadata struct {
+	TenantID             string   `json:"tenant_id"`
+	NodeID               string   `json:"node_id"`
+	RuntimeRef           string   `json:"runtime_ref"`
+	InstanceGeneration   uint64   `json:"instance_generation"`
+	ClaimGeneration      uint64   `json:"claim_generation,omitempty"`
+	ObservedStatus       string   `json:"observed_status"`
+	LatestCommandID      string   `json:"latest_command_id"`
+	LatestCommandKind    string   `json:"latest_command_kind"`
+	LatestCommandState   string   `json:"latest_command_state"`
+	LatestTerminalStatus string   `json:"latest_terminal_status,omitempty"`
+	CreatedAt            string   `json:"created_at"`
+	UpdatedAt            string   `json:"updated_at"`
+	CapsuleDigest        string   `json:"capsule_digest,omitempty"`
+	PolicyDigest         string   `json:"policy_digest,omitempty"`
+	ServiceID            string   `json:"service_id,omitempty"`
+	EgressRouteIDs       []string `json:"egress_route_ids,omitempty"`
+	ConnectorIDs         []string `json:"connector_ids,omitempty"`
+}
+
+type AgentInventoryPage struct {
+	Agents     []AgentMetadata `json:"agents"`
+	NextCursor string          `json:"next_cursor,omitempty"`
+}
+
+type agentInventoryAccumulator struct {
+	metadata             AgentMetadata
+	observationAt        string
+	observationCommandID string
+	admissionAt          string
+	admissionCommandID   string
 }
 
 // CredentialInventoryQuery selects durable credential metadata. Revoked is a
@@ -302,6 +350,91 @@ func (store *Store) ListCommandInventory(actor controlauth.Identity, query Comma
 			break
 		}
 		page.Commands = append(page.Commands, commandMetadata(store.current.commands[key]))
+	}
+	return page, nil
+}
+
+// ListAgentInventory derives the last bounded observation for each signed
+// runtime identity. It never retries, schedules, starts, or otherwise mutates a
+// workload. Failed commands remain visible as the latest operation while the
+// last successful reported status remains the observed workload state.
+func (store *Store) ListAgentInventory(actor controlauth.Identity, query AgentInventoryQuery) (AgentInventoryPage, error) {
+	if store == nil {
+		return AgentInventoryPage{}, ErrUnavailable
+	}
+	limit, err := normalizeInventoryLimit(query.Limit)
+	if err != nil {
+		return AgentInventoryPage{}, err
+	}
+	if query.NodeID != "" && !validRecordID(query.NodeID, 128) ||
+		query.Status != "" && !validAgentObservedStatus(query.Status) {
+		return AgentInventoryPage{}, invalid("agent inventory filter is invalid")
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return AgentInventoryPage{}, err
+	}
+	if err := store.revalidateOperatorLocked(actor); err != nil {
+		return AgentInventoryPage{}, err
+	}
+	scope, err := store.resolveOperationsScopeLocked(actor, query.TenantID)
+	if err != nil {
+		return AgentInventoryPage{}, err
+	}
+	cursorBinding := operationsCursorBinding("agent-v1", scope, query.NodeID, query.Status)
+	after, err := decodeOperationsCursor(cursorBinding, query.Cursor)
+	if err != nil {
+		return AgentInventoryPage{}, err
+	}
+
+	byRuntime := make(map[string]agentInventoryAccumulator)
+	for _, command := range store.current.commands {
+		if !scope.siteWide && command.TenantID != scope.tenantID ||
+			query.NodeID != "" && command.NodeID != query.NodeID ||
+			command.SignedInstanceGeneration == 0 || command.CommandKind == "" {
+			continue
+		}
+		runtimeRef, err := commandExecutorRuntimeRef(command)
+		if err != nil {
+			continue
+		}
+		key := agentInventoryKey(
+			command.TenantID, command.NodeID, runtimeRef, command.SignedInstanceGeneration,
+		)
+		agent, found := byRuntime[key]
+		if !found {
+			agent.metadata = AgentMetadata{
+				TenantID: command.TenantID, NodeID: command.NodeID,
+				RuntimeRef:         runtimeRef,
+				InstanceGeneration: command.SignedInstanceGeneration,
+				ObservedStatus:     "unknown", CreatedAt: command.CreatedAt,
+			}
+		}
+		mergeAgentCommand(&agent, command)
+		byRuntime[key] = agent
+	}
+
+	keys := make([]string, 0, len(byRuntime))
+	for key, agent := range byRuntime {
+		if query.Status == "" || agent.metadata.ObservedStatus == query.Status {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	page := AgentInventoryPage{Agents: make([]AgentMetadata, 0, minInt(limit, len(keys)))}
+	for _, key := range keys {
+		if key <= after {
+			continue
+		}
+		if len(page.Agents) == limit {
+			page.NextCursor = encodeOperationsCursor(
+				cursorBinding, agentInventorySortKey(page.Agents[len(page.Agents)-1]),
+			)
+			break
+		}
+		page.Agents = append(page.Agents, byRuntime[key].metadata)
 	}
 	return page, nil
 }
@@ -669,6 +802,56 @@ func commandInventorySortKey(command CommandMetadata) string {
 	return command.TenantID + "\x00" + command.NodeID + "\x00" + command.ID
 }
 
+func agentInventoryKey(tenantID, nodeID, runtimeRef string, generation uint64) string {
+	return tenantID + "\x00" + nodeID + "\x00" + runtimeRef + "\x00" + strconv.FormatUint(generation, 10)
+}
+
+func agentInventorySortKey(agent AgentMetadata) string {
+	return agentInventoryKey(agent.TenantID, agent.NodeID, agent.RuntimeRef, agent.InstanceGeneration)
+}
+
+func mergeAgentCommand(agent *agentInventoryAccumulator, command Command) {
+	if agent.metadata.CreatedAt == "" || command.CreatedAt < agent.metadata.CreatedAt {
+		agent.metadata.CreatedAt = command.CreatedAt
+	}
+	activityAt := command.CreatedAt
+	if command.Terminal != nil && command.Terminal.CompletedAt > activityAt {
+		activityAt = command.Terminal.CompletedAt
+	}
+	if agent.metadata.UpdatedAt == "" || activityAt > agent.metadata.UpdatedAt ||
+		activityAt == agent.metadata.UpdatedAt && command.ID > agent.metadata.LatestCommandID {
+		agent.metadata.UpdatedAt = activityAt
+		agent.metadata.LatestCommandID = command.ID
+		agent.metadata.LatestCommandKind = command.CommandKind
+		agent.metadata.LatestCommandState = string(command.State)
+		agent.metadata.LatestTerminalStatus = commandTerminalStatus(command)
+	}
+	if command.Terminal == nil ||
+		command.Terminal.Report.Status != controlprotocol.ExecutorStatusDone ||
+		!validAgentSuccessfulStatus(command.Terminal.Report.ReportedStatus) {
+		return
+	}
+	observedAt := command.Terminal.CompletedAt
+	if observedAt > agent.observationAt ||
+		observedAt == agent.observationAt && command.ID > agent.observationCommandID {
+		agent.observationAt = observedAt
+		agent.observationCommandID = command.ID
+		agent.metadata.ObservedStatus = command.Terminal.Report.ReportedStatus
+		agent.metadata.ClaimGeneration = command.Terminal.Report.ClaimGeneration
+	}
+	if projection := command.Terminal.Admission; projection != nil &&
+		(observedAt > agent.admissionAt ||
+			observedAt == agent.admissionAt && command.ID > agent.admissionCommandID) {
+		agent.admissionAt = observedAt
+		agent.admissionCommandID = command.ID
+		agent.metadata.CapsuleDigest = projection.CapsuleDigest
+		agent.metadata.PolicyDigest = projection.PolicyDigest
+		agent.metadata.ServiceID = projection.ServiceID
+		agent.metadata.EgressRouteIDs = append([]string(nil), projection.EgressRouteIDs...)
+		agent.metadata.ConnectorIDs = append([]string(nil), projection.ConnectorIDs...)
+	}
+}
+
 func commandTerminalStatus(command Command) string {
 	if command.Terminal == nil {
 		return ""
@@ -684,6 +867,19 @@ func validTerminalStatus(status string) bool {
 	switch status {
 	case controlprotocol.ExecutorStatusDone, controlprotocol.ExecutorStatusFailed,
 		controlprotocol.ExecutorStatusRejected, controlprotocol.ExecutorStatusOutcomeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validAgentObservedStatus(status string) bool {
+	return status == "unknown" || validAgentSuccessfulStatus(status)
+}
+
+func validAgentSuccessfulStatus(status string) bool {
+	switch status {
+	case "provisioning", "running", "stopped", "hibernated":
 		return true
 	default:
 		return false

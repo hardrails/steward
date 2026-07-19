@@ -517,6 +517,20 @@ func (c *Client) ListCommandInventory(ctx context.Context, tenantID, nodeID, sta
 	return page, err
 }
 
+func (c *Client) ListAgentInventory(ctx context.Context, tenantID, nodeID, status, cursor string, limit int) (controlstore.AgentInventoryPage, error) {
+	path, err := operationsPath(
+		"/v1/operations/agents",
+		map[string]string{"tenant_id": tenantID, "node_id": nodeID, "status": status},
+		nil, cursor, limit,
+	)
+	if err != nil {
+		return controlstore.AgentInventoryPage{}, err
+	}
+	var page controlstore.AgentInventoryPage
+	err = c.do(ctx, http.MethodGet, path, nil, &page, true)
+	return page, err
+}
+
 func (c *Client) ListCredentialInventory(ctx context.Context, tenantID, kind, role, nodeID string, revoked *bool, cursor string, limit int) (controlstore.CredentialInventoryPage, error) {
 	if role != "" && nodeID != "" ||
 		kind == "node" && role != "" ||

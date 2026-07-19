@@ -59,6 +59,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET .../commands/{command_id}` | Read durable delivery and terminal status |
 | `GET /v1/operations/summary` | Read tenant-projected capacity, command, evidence, and attention totals |
 | `GET /v1/operations/attention` | Page and filter deterministic action-required facts |
+| `GET /v1/operations/agents` | Page through non-secret observed agent runtime state and latest signed operations |
 | `GET /v1/operations/commands` | Page and filter command metadata without command or result bodies |
 | `GET /v1/operations/credentials` | Page and filter non-secret credential metadata |
 | `GET /metrics` | Optional authenticated Prometheus exposition with fixed bounded labels |

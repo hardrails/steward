@@ -1124,6 +1124,59 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/operations/agents:
+    get:
+      tags: [operations]
+      operationId: listControlAgentInventory
+      summary: List observed agent runtimes
+      description: |
+        Correlates signed Executor command identity with the last bounded,
+        successful node observation for each runtime and instance generation.
+        This is observed state,
+        not desired state: reading it does not schedule, retry, start, stop, or
+        otherwise mutate a workload. A later failed command remains visible as
+        the latest operation without erasing the last successful workload
+        status.
+
+        The projection excludes signed command bytes, private or public task
+        authority, reusable credentials, relay endpoints, error text, and raw
+        result bodies. It includes only non-secret runtime identity, lifecycle
+        metadata, admission digests, and logical route or connector IDs.
+
+        Site administrators may request the site-wide view or one tenant
+        projection. Tenant operators can see only their own projection;
+        another tenant is hidden as not found. `cursor` is opaque and bound to
+        this endpoint, the effective projection, `node_id`, and `status`. A page
+        can contain fewer records than `limit` to keep the encoded response
+        within 1 MiB. Query parameters must be known, non-empty, and occur
+        exactly once.
+      parameters:
+        - $ref: "#/components/parameters/OperationsTenantID"
+        - $ref: "#/components/parameters/OperationsNodeID"
+        - $ref: "#/components/parameters/AgentObservedStatusFilter"
+        - $ref: "#/components/parameters/OperationsCursor"
+        - $ref: "#/components/parameters/OperationsLimit"
+      responses:
+        "200":
+          description: A bounded page of observed agent runtimes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentInventoryPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/operations/commands:
     get:
       tags: [operations]
@@ -1579,6 +1632,14 @@ components:
       description: Return only attention items with this exact derived reason.
       schema:
         $ref: "#/components/schemas/AttentionReason"
+    AgentObservedStatusFilter:
+      name: status
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: Return only runtimes with this last successful observed status.
+      schema:
+        $ref: "#/components/schemas/AgentObservedStatus"
     CommandStateFilter:
       name: state
       in: query
@@ -2083,6 +2144,96 @@ components:
         limit:
           type: integer
           minimum: 1
+    AgentInventoryPage:
+      type: object
+      additionalProperties: false
+      required: [agents]
+      properties:
+        agents:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/AgentMetadata"
+        next_cursor:
+          $ref: "#/components/schemas/OperationsCursor"
+    AgentObservedStatus:
+      type: string
+      enum: [unknown, provisioning, running, stopped, hibernated]
+      description: Last unambiguous successful workload status reported by Executor.
+    AgentMetadata:
+      type: object
+      additionalProperties: false
+      description: |
+        Non-secret observed state for one signed runtime identity. Latest
+        command fields describe delivery activity and may report failure while
+        `observed_status` preserves the last successful workload observation.
+      required:
+        - tenant_id
+        - node_id
+        - runtime_ref
+        - instance_generation
+        - observed_status
+        - latest_command_id
+        - latest_command_kind
+        - latest_command_state
+        - created_at
+        - updated_at
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        runtime_ref:
+          type: string
+          minLength: 73
+          maxLength: 73
+          pattern: '^executor-[a-f0-9]{64}$'
+        instance_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        claim_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        observed_status:
+          $ref: "#/components/schemas/AgentObservedStatus"
+        latest_command_id:
+          $ref: "#/components/schemas/Identifier256"
+        latest_command_kind:
+          type: string
+          minLength: 1
+          maxLength: 64
+        latest_command_state:
+          $ref: "#/components/schemas/CommandLifecycleState"
+        latest_terminal_status:
+          $ref: "#/components/schemas/TerminalCommandStatus"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        policy_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        service_id:
+          $ref: "#/components/schemas/Identifier128"
+        egress_route_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        connector_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
     CommandInventoryPage:
       type: object
       additionalProperties: false

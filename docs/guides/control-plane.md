@@ -760,6 +760,22 @@ freshness is process-local, so every node is conservatively stale or unknown aft
 a controller restart until it reports again. The durable checkpoint and sticky
 finding do not reset.
 
+List observed agent runtimes for the current tenant projection:
+
+```console
+stewardctl control agent list \
+  -control-url "$CONTROL_URL" \
+  -token-file /secure/steward-control/tenant-a-operator.token \
+  -ca-file "$CONTROL_CA" \
+  -status running
+```
+
+Each record separates the last successful workload observation from the latest
+signed operation. A failed stop can therefore appear beside an observed
+`running` status without falsely claiming that the workload stopped. The list is
+read-only and excludes command bodies, task authority, relay endpoints, errors,
+and secret values.
+
 Inspect command metadata across a scope without returning signed command bytes,
 terminal result bodies, reported status text, or error codes:
 

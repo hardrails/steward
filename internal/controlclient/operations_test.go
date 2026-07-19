@@ -15,6 +15,7 @@ import (
 
 func TestOperationsClientForwardsBoundedFiltersAndDecodesStoreTypes(t *testing.T) {
 	attentionCursor := base64.RawURLEncoding.EncodeToString([]byte("attention-cursor"))
+	agentCursor := base64.RawURLEncoding.EncodeToString([]byte("agent-cursor"))
 	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-cursor"))
 	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-cursor"))
 	expected := []struct {
@@ -33,6 +34,14 @@ func TestOperationsClientForwardsBoundedFiltersAndDecodesStoreTypes(t *testing.T
 				"cursor": {attentionCursor}, "limit": {"25"},
 			},
 			body: `{"items":[]}`,
+		},
+		{
+			path: "/v1/operations/agents",
+			query: url.Values{
+				"tenant_id": {"tenant-a"}, "node_id": {"node-1"}, "status": {"running"},
+				"cursor": {agentCursor}, "limit": {"40"},
+			},
+			body: `{"agents":[]}`,
 		},
 		{
 			path: "/v1/operations/commands",
@@ -79,6 +88,11 @@ func TestOperationsClientForwardsBoundedFiltersAndDecodesStoreTypes(t *testing.T
 	}
 	if page, err := client.ListAttention(ctx, "tenant-a", "node_stale", attentionCursor, 25); err != nil || page.Items == nil {
 		t.Fatalf("attention page = (%+v, %v)", page, err)
+	}
+	if page, err := client.ListAgentInventory(
+		ctx, "tenant-a", "node-1", "running", agentCursor, 40,
+	); err != nil || page.Agents == nil {
+		t.Fatalf("agent inventory = (%+v, %v)", page, err)
 	}
 	if page, err := client.ListCommandInventory(
 		ctx, "tenant-a", "node-1", "terminal", "failed", commandCursor, 50,

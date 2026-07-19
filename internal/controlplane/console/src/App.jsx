@@ -203,15 +203,16 @@ export default function App() {
     const requests = [
       prefetchedSummary || api(projectedPath("/v1/operations/summary", tenantID), epoch),
       api(projectedPath("/v1/operations/attention", tenantID, {limit: 100}), epoch),
+      api(projectedPath("/v1/operations/agents", tenantID, {limit: 100}), epoch),
       api(projectedPath("/v1/operations/commands", tenantID, {limit: 100}), epoch),
       api(projectedPath("/v1/operations/credentials", tenantID, {limit: 100}), epoch),
       tenantID
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/nodes?limit=500", epoch)
         : Promise.resolve({nodes: []}),
     ];
-    const [summary, attention, commands, credentials, nodes] = await Promise.all(requests);
+    const [summary, attention, agents, commands, credentials, nodes] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, commands, credentials, nodes};
+    return {summary, attention, agents, commands, credentials, nodes};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -546,7 +547,7 @@ const views = [
   ["nodes", "03", "Agent nodes"],
   ["commands", "04", "Signed activity"],
   ["credentials", "05", "Access records"],
-  ["agents", "06", "Build agents"],
+  ["agents", "06", "Agents"],
 ];
 
 function ControlRoom(props) {
@@ -657,7 +658,7 @@ function ControlRoom(props) {
               />
             ) : null}
             {view === "credentials" ? <CredentialsView page={snapshot.credentials} /> : null}
-            {view === "agents" ? <AgentApplicationsView tenantID={selectedTenant} /> : null}
+            {view === "agents" ? <AgentApplicationsView page={snapshot.agents} tenantID={selectedTenant} /> : null}
           </>
         )}
       </div>
@@ -741,13 +742,69 @@ function EvidenceValue({label, value}) {
   return <div><dt>{label}</dt><dd>{value}</dd></div>;
 }
 
-function AgentApplicationsView({tenantID}) {
-  const tenant = tenantID || "default";
+function agentStatusKind(agent) {
+  if (["failed", "rejected", "outcome_unknown"].includes(agent.latest_terminal_status)) {
+    return "is-danger";
+  }
+  if (["pending", "leased"].includes(agent.latest_command_state) || agent.observed_status === "unknown") {
+    return "is-warning";
+  }
+  return agent.observed_status === "running" ? "is-ok" : "";
+}
+
+function AgentApplicationsView({page, tenantID}) {
+  const tenant = tenantID || "site-wide";
+  const running = page.agents.filter((agent) => agent.observed_status === "running").length;
+  const inFlight = page.agents.filter((agent) => ["pending", "leased"].includes(agent.latest_command_state)).length;
+  const degraded = page.agents.filter((agent) => ["failed", "rejected", "outcome_unknown"].includes(agent.latest_terminal_status)).length;
   return (
     <section className="view" aria-labelledby="agent-applications-title">
-      <ViewHeading eyebrow="PORTABLE AGENT APPLICATIONS" title="Build once. Choose the engine.">
-        Define Hermes or OpenClaw outside the browser, then review its deterministic bundle and placement evidence here.
+      <ViewHeading eyebrow="SIGNED RUNTIME OBSERVATIONS" title="Your agent fleet, without guesswork.">
+        Last successful workload state and latest signed operation for the {tenant} projection. This is observed state, not desired state.
       </ViewHeading>
+      <div className="agent-tally" aria-label="Agent fleet summary">
+        <div><strong>{page.agents.length}</strong><span>observed runtimes</span></div>
+        <div><strong>{running}</strong><span>running</span></div>
+        <div><strong>{inFlight}</strong><span>operations in flight</span></div>
+        <div className={degraded ? "is-degraded" : ""}><strong>{degraded}</strong><span>latest operations failed</span></div>
+      </div>
+      {page.agents.length ? (
+        <div className="agent-board">
+          {page.agents.map((agent) => (
+            <article className="agent-card" key={`${agent.tenant_id}/${agent.node_id}/${agent.runtime_ref}/${agent.instance_generation}`}>
+              <div className="agent-card-head">
+                <div>
+                  <span className="panel-index">{agent.service_id || "AGENT RUNTIME"}</span>
+                  <h3>{agent.latest_command_kind || "observed"}</h3>
+                </div>
+                <Badge kind={agentStatusKind(agent)}>{agent.observed_status}</Badge>
+              </div>
+              <dl className="agent-facts">
+                <div><dt>Tenant / node</dt><dd>{agent.tenant_id} / {agent.node_id}</dd></div>
+                <div><dt>Generation</dt><dd>{agent.instance_generation}</dd></div>
+                <div className="agent-runtime"><dt>Runtime</dt><dd>{agent.runtime_ref}</dd></div>
+                <div><dt>Latest signed operation</dt><dd>{agent.latest_command_kind} · {agent.latest_terminal_status || agent.latest_command_state}</dd></div>
+                <div><dt>Last activity</dt><dd>{formatTime(agent.updated_at)}</dd></div>
+              </dl>
+              <div className="agent-capabilities">
+                {displayStringList(agent.egress_route_ids).map((route) => <Badge key={`egress-${route}`}>egress:{route}</Badge>)}
+                {displayStringList(agent.connector_ids).map((connector) => <Badge key={`connector-${connector}`}>connector:{connector}</Badge>)}
+                {!agent.egress_route_ids?.length && !agent.connector_ids?.length ? <span>No delegated routes observed</span> : null}
+              </div>
+              {["failed", "rejected", "outcome_unknown"].includes(agent.latest_terminal_status) ? (
+                <p className="agent-warning">The latest {agent.latest_command_kind} operation {humanize(agent.latest_terminal_status)}. The status above is the last successful workload observation.</p>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <article className="agent-empty">
+          <span className="panel-index">NO SIGNED RUNTIMES OBSERVED</span>
+          <h3>Deploy the first agent from a trusted terminal.</h3>
+          <p>Steward will show it here after Executor verifies signed admission and reports a bounded runtime observation.</p>
+        </article>
+      )}
+      {page.next_cursor ? <p className="truncation-note">More agents exist. Narrow the tenant projection or use the API continuation cursor.</p> : null}
       <div className="overview-grid">
         <article className="panel">
           <PanelHeading index="01 / DEFINE" title="Create an agent" />

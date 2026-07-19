@@ -184,8 +184,10 @@ delivery, inventory, attention findings, and separately witnessed evidence.
 
 Its embedded React console is available at `/console/`. The console keeps the
 operator bearer only in tab memory, loads no remote assets, and never receives
-private signing keys or secret plaintext. Mutating Executor commands are signed
-outside the browser; the console reviews and transfers the unchanged envelope.
+private signing keys or secret plaintext. It shows each observed agent runtime's
+last successful workload status separately from its latest signed operation.
+Mutating Executor commands are signed outside the browser; the console reviews
+and transfers the unchanged envelope.
 
 `steward-mcp` exposes bounded node, control, and pre-signed task operations to a
 local Model Context Protocol client over standard input and output. MCP

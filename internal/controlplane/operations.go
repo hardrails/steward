@@ -112,6 +112,39 @@ func (server *Server) operationsCommands(writer http.ResponseWriter, request *ht
 	writeJSON(writer, http.StatusOK, page)
 }
 
+func (server *Server) operationsAgents(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodGet) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	query, ok := parseExactQuery(
+		writer, request, "tenant_id", "node_id", "status", "cursor", "limit",
+	)
+	if !ok {
+		return
+	}
+	limit, ok := parseOperationsLimit(writer, query)
+	if !ok {
+		return
+	}
+	input := controlstore.AgentInventoryQuery{
+		TenantID: query.Get("tenant_id"), NodeID: query.Get("node_id"),
+		Status: query.Get("status"), Limit: limit, Cursor: query.Get("cursor"),
+	}
+	page, err := boundedOperationsPage(limit, func(candidateLimit int) (controlstore.AgentInventoryPage, error) {
+		input.Limit = candidateLimit
+		return server.store.ListAgentInventory(identity, input)
+	})
+	if err != nil {
+		server.operationsPageError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, page)
+}
+
 func (server *Server) operationsCredentials(writer http.ResponseWriter, request *http.Request) {
 	if !method(writer, request, http.MethodGet) {
 		return
