@@ -1,0 +1,15 @@
+{
+  "schema": "steward.agent.v1",
+  "name": "hermes-workspace-auditor",
+  "runtime": {
+    "engine": "hermes",
+    "image": "replace.invalid/steward-hermes@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "adapter_contract": "steward.hermes-agent.v1"
+  },
+  "model": {"route": "local/default"},
+  "skills": ["workspace-audit"],
+  "resources": {"cpu_millis": 1000, "memory_mib": 1024, "disk_mib": 2048, "pids": 256},
+  "placement": {"architectures": ["amd64"], "isolation": "hardened"},
+  "state": {"persistent": true},
+  "lifetime": {"mode": "service"}
+}

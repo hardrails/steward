@@ -12,10 +12,11 @@ result, or memory entry and mistake embedded text for instructions. A container
 limits where that agent runs. It does not decide whether the agent may send an
 email, change an account, call an internal service, or spend a reusable API key.
 
-Steward is the open-source enforcement plane for that missing boundary. It runs
-containerized agents on customer-controlled Linux, mediates their network
-capabilities, and records which exact authority produced each managed external
-action.
+Steward is the open-source agent application runtime and enforcement plane for
+that missing boundary. It packages Hermes or OpenClaw agents behind one portable
+contract, places them on customer-controlled infrastructure, mediates their
+network capabilities, and records which exact authority produced each managed
+external action.
 
 Steward is designed for security, platform, and sovereign-infrastructure teams
 that need local control, air-gapped operation, tenant isolation, and evidence
@@ -74,6 +75,22 @@ completion with:
 stewardctl completion install
 ```
 
+## Install on macOS
+
+The native macOS archive supports agent authoring, CUE/OPA policy checks, the
+control plane, CLI, MCP interface, and Docker Desktop development. It supports
+Intel and Apple Silicon. Docker Desktop is not represented as the qualified
+Linux/gVisor production boundary.
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/hardrails/steward/releases/latest/download/install-macos.sh | /bin/bash -p
+```
+
+Run `stewardctl agent doctor` after installation. Use a hardened Linux node for
+sensitive production workloads until the report identifies a hardened execution
+profile.
+
 Start with the [installation tutorial](https://hardrails.github.io/steward/getting-started/)
 or use the [unattended and Terraform paths](https://hardrails.github.io/steward/guides/terraform/)
 for repeatable infrastructure.
@@ -92,6 +109,18 @@ security boundary.
 Inference remains a separate operator responsibility. Steward expects an
 OpenAI-compatible endpoint or another explicitly configured service and mediates
 the route and credential.
+
+Start a portable agent project with:
+
+```console
+stewardctl agent init -runtime hermes -name workspace-auditor workspace-auditor
+cd workspace-auditor
+stewardctl agent build
+```
+
+Use the [agent application guide](https://hardrails.github.io/steward/guides/build-agents/)
+to select Hermes or OpenClaw, apply offline OPA policy, explain fleet placement,
+and derive a temporary or long-lived fork from persistent state.
 
 ## Authorize real work
 
@@ -222,10 +251,10 @@ Linux node: steward-executor -> Docker + gVisor agent -> steward-relay
 
 ## Zero private dependencies
 
-Steward is not an agent framework, model server, hosted SaaS control plane,
-general container orchestrator, secret manager, or endpoint-detection product.
-It is the enforcement layer between an untrusted agent runtime and the authority
-to act.
+Steward is not a reasoning framework, prompt graph, model server, hosted SaaS
+control plane, general container orchestrator, secret manager, or
+endpoint-detection product. It is the portable application and enforcement layer
+between an untrusted agent runtime and the authority to act.
 
 The repository has zero build-time or runtime dependency on a private package,
 API, account, or tool. The Go module intentionally uses only the standard

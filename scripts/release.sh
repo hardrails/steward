@@ -138,6 +138,10 @@ for target in "${targets[@]}"; do
 	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 		go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-control" ./cmd/steward-control
 	files=(steward steward-control stewardctl steward-mcp LICENSE README.md)
+	mkdir -p "${stage}/examples" "${stage}/schemas"
+	cp -R examples/agents examples/policy "${stage}/examples/"
+	cp schemas/agent.cue "${stage}/schemas/"
+	files=(steward steward-control stewardctl steward-mcp LICENSE README.md examples schemas)
 	if [ "$goos" = "linux" ]; then
 		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 			go build -trimpath -ldflags "$release_ldflags" -o "${stage}/steward-executor" ./cmd/steward-executor
@@ -182,7 +186,7 @@ for target in "${targets[@]}"; do
 		# package. The canonical manifest records the target and SHA-256 of all seven
 		# binaries plus every integration file installed with that release.
 		/bin/bash -p scripts/write-release-manifest.sh "$stage" "$VERSION" "$goos" "$goarch"
-		files=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay release.json LICENSE README.md adapters deploy scripts)
+		files=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay release.json LICENSE README.md adapters deploy scripts examples schemas)
 	fi
 	# Ship the license and readme alongside all seven binaries so the download is
 	# self-contained and license-compliant.
@@ -218,6 +222,7 @@ done
 # immutable script beside the packages, or carry it into an air-gapped site.
 install -m 0755 scripts/install-steward.sh "${dist}/install-steward.sh"
 install -m 0755 scripts/install-control.sh "${dist}/install-control.sh"
+install -m 0755 scripts/install-macos.sh "${dist}/install-macos.sh"
 
 # SHA-256 over every archive, in one checksums.txt (the conventional shape a
 # consumer verifies with `sha256sum -c`). Prefer sha256sum (Linux/CI); fall back
@@ -225,7 +230,7 @@ install -m 0755 scripts/install-control.sh "${dist}/install-control.sh"
 (
 	cd "$dist"
 	shopt -s nullglob
-	artifacts=(./*.tar.gz ./*.deb ./*.rpm ./install-steward.sh ./install-control.sh)
+	artifacts=(./*.tar.gz ./*.deb ./*.rpm ./install-steward.sh ./install-control.sh ./install-macos.sh)
 	if (( ${#artifacts[@]} == 0 )); then
 		echo "release: no artifacts were built" >&2
 		exit 1

@@ -6,9 +6,12 @@ from an operator's perspective.
 
 ## Product contract
 
-Steward is the open-source enforcement plane between an untrusted containerized AI
-agent and managed external authority. It owns:
+Steward is the open-source agent application runtime and enforcement plane between
+an untrusted containerized AI agent and managed external authority. It owns:
 
+- a portable, versioned application contract for qualified agent runtimes;
+- deterministic, explainable agent placement artifacts;
+- state-snapshot fork lineage and bounded lifetime declarations;
 - signed workload and site-policy admission;
 - Docker and gVisor workload execution;
 - tenant and instance lifecycle fencing;
@@ -19,8 +22,9 @@ agent and managed external authority. It owns:
 - outbound node control through public protocols; and
 - offline verification.
 
-Steward does not own model serving, agent planning, general scheduling, secret
-storage, single sign-on, software-provenance issuance, or arbitrary computer use.
+Steward does not own model serving, agent reasoning or prompt graphs,
+general-purpose cluster scheduling, secret storage, single sign-on,
+software-provenance issuance, or arbitrary computer use.
 
 ## Dependency invariant
 
@@ -36,6 +40,12 @@ must print only `github.com/hardrails/steward`.
 React and Vite are build-time dependencies for the embedded Control console. Their
 compiled static output is committed and embedded into `steward-control`; Node.js
 is not a production runtime dependency.
+
+CUE and OPA are optional operator-side tools. `stewardctl agent` executes them as
+separate bounded processes when a CUE definition or OPA bundle is explicitly
+selected. Their JSON output is treated as untrusted. Neither tool is linked into
+Executor, Gateway, Control, or the Go module, and neither can weaken native
+admission or runtime safety floors.
 
 ## Processes
 
@@ -110,6 +120,12 @@ set is task-oriented; detailed protocol controls may remain as subcommands.
 
 Private keys are accepted only by explicit local signing operations. Context files
 store paths to token files, never token values.
+
+The `agent` command compiles and validates Hermes or OpenClaw application
+definitions, records optional OPA policy decisions, explains deterministic node
+placement, and derives new state-fork lineage. These are portable authorization
+inputs. They do not give the CLI Docker authority or bypass signed Executor
+admission.
 
 ### steward-mcp
 
@@ -290,14 +306,17 @@ desktop actions in-process.
 
 Steward uses these ownership rungs:
 
-- `in-house`: exact workload admission, generation fences, exact permits, durable
+- `in-house`: the portable agent contract, narrow explainable placement, fork
+  lineage, exact workload admission, generation fences, exact permits, durable
   spend, credential mediation, and signed enforcement evidence. These are the moat.
 - `native-platform`: Docker, gVisor, systemd, Linux users, filesystem permissions,
   TLS primitives, HTTP, JSON, and cryptography supplied by Go and the operating
   system.
-- `open-source`: operator-selected identity, secret storage, telemetry, policy,
-  provenance, and model-serving systems connected through narrow contracts.
-- `do-nothing`: general scheduling, agent catalogs, release promotion
+- `open-source`: CUE, OPA, and operator-selected identity, secret storage,
+  telemetry, provenance, and model-serving systems connected through narrow
+  contracts.
+- `do-nothing`: general-purpose scheduling, visual workflow builders, agent
+  catalogs, release promotion
   coordinators, secret vaults, and workflow engines until a demonstrated customer
   enforcement requirement cannot be composed from existing systems.
 

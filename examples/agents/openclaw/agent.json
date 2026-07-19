@@ -1,0 +1,19 @@
+{
+  "schema": "steward.agent.v1",
+  "name": "openclaw-workspace-auditor",
+  "runtime": {
+    "engine": "openclaw",
+    "image": "ghcr.io/openclaw/openclaw@sha256:165b4992f1b4b74ffdd7a02c887ba006f9f5dc951eca420eef573a8b233b543f",
+    "adapter_contract": "steward.openclaw.v1"
+  },
+  "model": {"route": "local/default"},
+  "skills": ["workspace-audit"],
+  "resources": {"cpu_millis": 1000, "memory_mib": 1024, "disk_mib": 2048, "pids": 256},
+  "placement": {
+    "architectures": ["amd64"],
+    "isolation": "hardened",
+    "preferred_labels": [{"key": "storage", "value": "fast"}]
+  },
+  "state": {"persistent": true},
+  "lifetime": {"mode": "service"}
+}

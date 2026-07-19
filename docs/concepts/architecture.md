@@ -6,12 +6,18 @@ section: Concepts
 
 # Architecture
 
-Steward separates four responsibilities that agent platforms often combine:
+Steward separates six responsibilities that agent platforms often combine:
 
-1. decide which immutable workload and capabilities are allowed;
-2. run the workload behind a hardened container boundary;
-3. mediate external authority without giving reusable credentials to the workload;
-4. retain evidence of the enforcement decision.
+1. define a portable Hermes or OpenClaw agent application;
+2. explain which fleet node satisfies its declared constraints;
+3. decide which immutable workload and capabilities are allowed;
+4. run the workload behind a hardened container boundary;
+5. mediate external authority without giving reusable credentials to the workload;
+6. retain evidence of the enforcement decision.
+
+The first two responsibilities produce deterministic, inspectable artifacts.
+They do not create authority. Signed admission and the Executor remain the only
+path from a definition or placement decision to a Docker mutation.
 
 ## Component map
 
@@ -45,6 +51,12 @@ signed files | enrollment, inventory, command transport   |
 `stewardctl` runs where an operator needs it: signing station, management host,
 node, or offline audit system. `steward-mcp` is an optional local stdio adapter
 over bounded public node, control, and pre-signed task operations.
+
+`stewardctl agent` provides the runtime-neutral authoring surface. CUE compiles
+human-facing definitions to concrete JSON, OPA may deny them under an offline
+organizational policy, and Steward validates the result again at its own strict
+boundary. The bundle selects a qualified Hermes or OpenClaw adapter; it does not
+replace that runtime's reasoning loop.
 
 The legacy `steward` supervisor remains for the generic public uplink contract.
 New Steward Control deployments deliver signed lifecycle commands through
