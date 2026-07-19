@@ -277,7 +277,7 @@ jobs:
 
       - name: Keep one installer copy
         if: matrix.goarch == 'arm64'
-        run: rm dist/install-steward.sh dist/install-control.sh
+        run: rm dist/install-steward.sh dist/install-control.sh dist/install-macos.sh
 
       # Hand this architecture's packages to the combine job. The per-runner
       # checksums are deliberately excluded: combine writes one manifest over
@@ -293,6 +293,7 @@ jobs:
             dist/steward-node_*.rpm
             dist/install-steward.sh
             dist/install-control.sh
+            dist/install-macos.sh
           retention-days: 7
           if-no-files-found: error
 
