@@ -31,21 +31,23 @@ const (
 )
 
 type Config struct {
-	Store      *controlstore.Store
-	KeyID      string
-	PrivateKey ed25519.PrivateKey
-	Interval   time.Duration
-	Now        func() time.Time
-	Logger     *slog.Logger
+	Store          *controlstore.Store
+	KeyID          string
+	PrivateKey     ed25519.PrivateKey
+	Interval       time.Duration
+	NodeStaleAfter time.Duration
+	Now            func() time.Time
+	Logger         *slog.Logger
 }
 
 type Reconciler struct {
-	store      *controlstore.Store
-	keyID      string
-	privateKey ed25519.PrivateKey
-	interval   time.Duration
-	now        func() time.Time
-	logger     *slog.Logger
+	store          *controlstore.Store
+	keyID          string
+	privateKey     ed25519.PrivateKey
+	interval       time.Duration
+	nodeStaleAfter time.Duration
+	now            func() time.Time
+	logger         *slog.Logger
 }
 
 type Report struct {
@@ -58,10 +60,18 @@ type Report struct {
 	Blocked     int `json:"blocked"`
 }
 
+type instanceResult struct {
+	changed       bool
+	kind          string
+	blockedReason controlstore.DeploymentBlockedReason
+	conflict      bool
+}
+
 func New(config Config) (*Reconciler, error) {
 	if config.Store == nil || len(config.PrivateKey) != ed25519.PrivateKeySize ||
-		!validKeyID(config.KeyID) || config.Interval < minInterval || config.Interval > maxInterval {
-		return nil, errors.New("controller reconciler requires a store, bounded key ID, Ed25519 private key, and interval from 1 second through 1 hour")
+		!validKeyID(config.KeyID) || config.Interval < minInterval || config.Interval > maxInterval ||
+		config.NodeStaleAfter <= 0 || config.NodeStaleAfter > controlstore.MaxOperationsThreshold {
+		return nil, errors.New("controller reconciler requires a store, bounded key ID, Ed25519 private key, interval from 1 second through 1 hour, and node freshness from 1 nanosecond through 365 days")
 	}
 	now := config.Now
 	if now == nil {
@@ -74,7 +84,8 @@ func New(config Config) (*Reconciler, error) {
 	return &Reconciler{
 		store: config.Store, keyID: config.KeyID,
 		privateKey: append(ed25519.PrivateKey(nil), config.PrivateKey...),
-		interval:   config.Interval, now: now, logger: logger,
+		interval:   config.Interval, nodeStaleAfter: config.NodeStaleAfter,
+		now: now, logger: logger,
 	}, nil
 }
 
@@ -127,23 +138,25 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 			if actions >= maxActionsPerPass {
 				return report, nil
 			}
-			changed, kind, conflict, err := reconciler.reconcileInstance(snapshot.Nodes, placements, deployment, instance)
+			result, err := reconciler.reconcileInstance(snapshot.Nodes, placements, deployment, instance)
 			if err != nil {
-				report.Blocked++
-				reconciler.logger.Warn("deployment instance is blocked",
-					"tenant_id", deployment.TenantID, "deployment_id", deployment.ID,
-					"instance_id", instance.InstanceID, "error", err)
-				continue
+				return report, err
 			}
-			if conflict {
+			if result.conflict {
 				report.Conflicts++
 				break
 			}
-			if !changed {
+			if result.blockedReason != "" {
+				report.Blocked++
+				reconciler.logger.Warn("deployment instance is blocked",
+					"tenant_id", deployment.TenantID, "deployment_id", deployment.ID,
+					"instance_id", instance.InstanceID, "reason", result.blockedReason)
+			}
+			if !result.changed {
 				continue
 			}
 			actions++
-			switch kind {
+			switch result.kind {
 			case "observed":
 				report.Observed++
 			case "enqueued":
@@ -162,24 +175,24 @@ func (reconciler *Reconciler) reconcileInstance(
 	placements map[string]int,
 	deployment controlstore.Deployment,
 	instance controlstore.DeploymentInstance,
-) (changed bool, kind string, conflict bool, result error) {
+) (instanceResult, error) {
 	now := reconciler.now().UTC()
 	if now.IsZero() {
-		return false, "", false, errors.New("controller clock is invalid")
+		return instanceResult{}, errors.New("controller clock is invalid")
 	}
 	if commandInFlight(instance) {
 		_, changed, err := reconciler.store.ObserveDeploymentCommand(
 			deployment.TenantID, deployment.ID, instance.InstanceID, deployment.Revision, now,
 		)
 		if errors.Is(err, controlstore.ErrConflict) {
-			return false, "", true, nil
+			return instanceResult{conflict: true}, nil
 		}
-		return changed, "observed", false, err
+		return instanceResult{changed: changed, kind: "observed"}, err
 	}
 	if instance.Phase == controlstore.DeploymentInstanceFailed ||
 		instance.Phase == controlstore.DeploymentInstanceRemoved ||
 		deployment.DesiredState == controlstore.DeploymentRunning && instance.Phase == controlstore.DeploymentInstanceRunning {
-		return false, "", false, nil
+		return instanceResult{}, nil
 	}
 	if deployment.DesiredState == controlstore.DeploymentAbsent &&
 		instance.Phase == controlstore.DeploymentInstancePending && instance.CommandID == "" && instance.NodeID == "" {
@@ -187,34 +200,58 @@ func (reconciler *Reconciler) reconcileInstance(
 			deployment.TenantID, deployment.ID, instance.InstanceID, deployment.Revision, now,
 		)
 		if errors.Is(err, controlstore.ErrConflict) {
-			return false, "", true, nil
+			return instanceResult{conflict: true}, nil
 		}
-		return changed, "removed", false, err
+		return instanceResult{changed: changed, kind: "removed"}, err
 	}
 	operation := nextOperation(deployment.DesiredState, instance)
 	if operation == "" {
-		return false, "", false, nil
+		return instanceResult{}, nil
 	}
-	nodeID, err := selectNode(nodes, placements, deployment, instance)
+	nodeID, err := selectNode(nodes, placements, deployment, instance, now, reconciler.nodeStaleAfter)
 	if err != nil {
-		return false, "", false, err
+		return reconciler.recordBlocked(deployment, instance, err, now)
 	}
 	commandRaw, err := reconciler.signCommand(deployment, instance, nodeID, operation, now)
 	if err != nil {
-		return false, "", false, err
+		var blocked blockedError
+		if errors.As(err, &blocked) {
+			return reconciler.recordBlocked(deployment, instance, err, now)
+		}
+		return instanceResult{}, err
 	}
-	_, _, changed, err = reconciler.store.EnqueueDeploymentCommand(controlstore.DeploymentCommandTransition{
+	_, _, changed, err := reconciler.store.EnqueueDeploymentCommand(controlstore.DeploymentCommandTransition{
 		TenantID: deployment.TenantID, DeploymentID: deployment.ID,
 		ExpectedRevision: deployment.Revision, InstanceID: instance.InstanceID,
 		CommandDSSE: commandRaw,
 	}, now)
 	if errors.Is(err, controlstore.ErrConflict) {
-		return false, "", true, nil
+		return instanceResult{conflict: true}, nil
 	}
 	if changed && instance.NodeID == "" {
 		placements[nodeID]++
 	}
-	return changed, "enqueued", false, err
+	return instanceResult{changed: changed, kind: "enqueued"}, err
+}
+
+func (reconciler *Reconciler) recordBlocked(
+	deployment controlstore.Deployment,
+	instance controlstore.DeploymentInstance,
+	cause error,
+	now time.Time,
+) (instanceResult, error) {
+	var blocked blockedError
+	if !errors.As(cause, &blocked) {
+		return instanceResult{}, cause
+	}
+	_, changed, err := reconciler.store.RecordDeploymentBlocked(
+		deployment.TenantID, deployment.ID, instance.InstanceID,
+		deployment.Revision, blocked.reason, now,
+	)
+	if errors.Is(err, controlstore.ErrConflict) {
+		return instanceResult{conflict: true}, nil
+	}
+	return instanceResult{changed: changed, blockedReason: blocked.reason}, err
 }
 
 func (reconciler *Reconciler) signCommand(
@@ -223,20 +260,27 @@ func (reconciler *Reconciler) signCommand(
 	nodeID, operation string,
 	now time.Time,
 ) ([]byte, error) {
-	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, now)
+	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
 	if err != nil {
-		return nil, err
+		return nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+	}
+	delegationExpiry, err := time.Parse(time.RFC3339Nano, delegation.ExpiresAt)
+	if err != nil {
+		return nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+	}
+	if !delegationExpiry.After(now) {
+		return nil, newBlocked(controlstore.DeploymentBlockedDelegationExpired)
 	}
 	if delegation.ControllerKeyID != reconciler.keyID {
-		return nil, errors.New("deployment delegation names a different controller key")
+		return nil, newBlocked(controlstore.DeploymentBlockedControllerKeyMismatch)
 	}
 	public, err := base64.StdEncoding.DecodeString(delegation.ControllerPublicKey)
 	if err != nil || !bytes.Equal(public, reconciler.privateKey.Public().(ed25519.PublicKey)) {
-		return nil, errors.New("deployment delegation public key does not match this controller")
+		return nil, newBlocked(controlstore.DeploymentBlockedControllerKeyMismatch)
 	}
 	runtimeRef, err := executoruplink.RuntimeRefV2(deployment.TenantID, nodeID, instance.InstanceID)
 	if err != nil {
-		return nil, err
+		return nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
 	sequence := instance.CommandSequence + 1
 	if sequence == 0 {
@@ -246,7 +290,7 @@ func (reconciler *Reconciler) signCommand(
 	if operation == "admit" {
 		delegated, found := delegatedInstance(delegation, instance.InstanceID)
 		if !found || delegation.Admission == nil {
-			return nil, errors.New("deployment instance is missing from its delegation")
+			return nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 		}
 		intent := intentFromDelegation(deployment, instance, nodeID, delegated, *delegation.Admission)
 		payload, err = json.Marshal(struct {
@@ -258,12 +302,8 @@ func (reconciler *Reconciler) signCommand(
 		}
 	}
 	expires := now.Add(commandLifetime)
-	delegationExpiry, _ := time.Parse(time.RFC3339Nano, delegation.ExpiresAt)
 	if delegationExpiry.Before(expires) {
 		expires = delegationExpiry
-	}
-	if !expires.After(now) {
-		return nil, errors.New("deployment delegation expired before command issuance")
 	}
 	statement := admission.CommandStatement{
 		SchemaVersion: admission.CommandSchemaV2,
@@ -277,7 +317,7 @@ func (reconciler *Reconciler) signCommand(
 		Payload:                    payload,
 	}
 	if err := statement.Validate(now); err != nil {
-		return nil, err
+		return nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
 	statementRaw, err := json.Marshal(statement)
 	if err != nil {
@@ -330,10 +370,12 @@ func selectNode(
 	placements map[string]int,
 	deployment controlstore.Deployment,
 	instance controlstore.DeploymentInstance,
+	now time.Time,
+	nodeStaleAfter time.Duration,
 ) (string, error) {
 	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
 	if err != nil {
-		return "", err
+		return "", newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
 	allowed := make(map[string]struct{}, len(delegation.NodeIDs))
 	for _, nodeID := range delegation.NodeIDs {
@@ -341,16 +383,16 @@ func selectNode(
 	}
 	if instance.NodeID != "" {
 		for _, node := range nodes {
-			if node.ID == instance.NodeID && eligibleNode(node, deployment.TenantID, allowed) {
+			if node.ID == instance.NodeID && eligibleNode(node, deployment.TenantID, allowed, now, nodeStaleAfter) {
 				return node.ID, nil
 			}
 		}
-		return "", errors.New("assigned deployment node is no longer eligible")
+		return "", newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable)
 	}
 	selected := ""
 	selectedCount := int(^uint(0) >> 1)
 	for _, node := range nodes {
-		if !eligibleNode(node, deployment.TenantID, allowed) {
+		if !eligibleNode(node, deployment.TenantID, allowed, now, nodeStaleAfter) {
 			continue
 		}
 		if count := placements[node.ID]; count < selectedCount || count == selectedCount && node.ID < selected {
@@ -358,13 +400,20 @@ func selectNode(
 		}
 	}
 	if selected == "" {
-		return "", errors.New("no active delegated node advertises controller-delegation-v1")
+		return "", newBlocked(controlstore.DeploymentBlockedNoEligibleNode)
 	}
 	return selected, nil
 }
 
-func eligibleNode(node controlstore.Node, tenantID string, allowed map[string]struct{}) bool {
-	if !node.Active {
+func eligibleNode(
+	node controlstore.Node,
+	tenantID string,
+	allowed map[string]struct{},
+	now time.Time,
+	nodeStaleAfter time.Duration,
+) bool {
+	lastSeen, err := time.Parse(time.RFC3339Nano, node.LastSeenAt)
+	if !node.Active || err != nil || !now.Before(lastSeen.Add(nodeStaleAfter)) {
 		return false
 	}
 	if _, ok := allowed[node.ID]; !ok {
@@ -375,6 +424,18 @@ func eligibleNode(node controlstore.Node, tenantID string, allowed map[string]st
 	return tenantIndex < len(node.TenantIDs) && node.TenantIDs[tenantIndex] == tenantID &&
 		capabilityIndex < len(node.Capabilities) &&
 		node.Capabilities[capabilityIndex] == controlprotocol.ExecutorCapabilityControllerDelegationV1
+}
+
+type blockedError struct {
+	reason controlstore.DeploymentBlockedReason
+}
+
+func (blocked blockedError) Error() string {
+	return string(blocked.reason)
+}
+
+func newBlocked(reason controlstore.DeploymentBlockedReason) error {
+	return blockedError{reason: reason}
 }
 
 func placementCounts(deployments []controlstore.Deployment) map[string]int {

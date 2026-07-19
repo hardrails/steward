@@ -90,6 +90,7 @@ func TestReconcilerConvergesLifecycleWithoutDuplicateEffectAcrossRestart(t *test
 		t.Fatalf("set absent = (%+v, %v, %v)", removed, changed, err)
 	}
 	fixture.now = fixture.now.Add(20 * time.Minute)
+	heartbeatControlNode(t, fixture)
 	assertReconcileCount(t, reconciler, "enqueue stop", 0, 1)
 	completeDeploymentCommand(t, fixture, "stop", controlprotocol.ExecutorStatusDone)
 	assertReconcileCount(t, reconciler, "observe stop", 1, 0)
@@ -166,7 +167,8 @@ func TestConcurrentReconcilersCannotDoubleEnqueueOrWidenAuthority(t *testing.T) 
 	}
 	wrong, err := New(Config{
 		Store: fixture.store, KeyID: "controller-a", PrivateKey: wrongKey,
-		Interval: time.Second, Now: func() time.Time { return fixture.now },
+		Interval: time.Second, NodeStaleAfter: 2 * time.Minute,
+		Now: func() time.Time { return fixture.now },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -178,6 +180,74 @@ func TestConcurrentReconcilersCannotDoubleEnqueueOrWidenAuthority(t *testing.T) 
 	report, err := wrong.Reconcile(context.Background())
 	if err != nil || report.Blocked != 1 || report.Enqueued != 0 {
 		t.Fatalf("wrong controller key widened authority = (%+v, %v)", report, err)
+	}
+	if deployment := getControlDeployment(t, fixture); deployment.Instances[0].LastError !=
+		string(controlstore.DeploymentBlockedControllerKeyMismatch) {
+		t.Fatalf("wrong controller key reason = %+v", deployment.Instances[0])
+	}
+}
+
+func TestReconcilerPersistsStableNodeBlockAndRecoversAfterHeartbeat(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	fixture.now = fixture.now.Add(2 * time.Minute)
+
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.Blocked != 1 || report.Enqueued != 0 {
+		t.Fatalf("stale node block = (%+v, %v)", report, err)
+	}
+	blocked := getControlDeployment(t, fixture)
+	if blocked.Instances[0].LastError != string(controlstore.DeploymentBlockedNoEligibleNode) ||
+		blocked.Instances[0].Phase != controlstore.DeploymentInstancePending ||
+		blocked.Instances[0].Attempts != 0 {
+		t.Fatalf("stale node deployment = %+v", blocked)
+	}
+	report, err = reconciler.Reconcile(context.Background())
+	stable := getControlDeployment(t, fixture)
+	if err != nil || report.Blocked != 1 || report.Enqueued != 0 || stable.Revision != blocked.Revision {
+		t.Fatalf("repeated node block = report %+v deployment %+v err %v", report, stable, err)
+	}
+
+	heartbeatControlNode(t, fixture)
+	report, err = reconciler.Reconcile(context.Background())
+	recovered := getControlDeployment(t, fixture)
+	if err != nil || report.Enqueued != 1 || report.Blocked != 0 ||
+		recovered.Instances[0].LastError != "" || recovered.Instances[0].Attempts != 1 {
+		t.Fatalf("heartbeat recovery = report %+v deployment %+v err %v", report, recovered, err)
+	}
+}
+
+func TestReconcilerDoesNotReplaceStaleAssignedNode(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	assertReconcileCount(t, reconciler, "enqueue admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe admit", 1, 0)
+	fixture.now = fixture.now.Add(2 * time.Minute)
+
+	report, err := reconciler.Reconcile(context.Background())
+	deployment := getControlDeployment(t, fixture)
+	if err != nil || report.Blocked != 1 || report.Enqueued != 0 ||
+		deployment.Instances[0].NodeID != "node-1" || deployment.Instances[0].Attempts != 1 ||
+		deployment.Instances[0].LastError != string(controlstore.DeploymentBlockedAssignedNodeUnavailable) {
+		t.Fatalf("stale assigned node = report %+v deployment %+v err %v", report, deployment, err)
+	}
+}
+
+func TestReconcilerReportsExpiredDelegation(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	fixture.now = fixture.now.Add(24 * time.Hour)
+	heartbeatControlNode(t, fixture)
+
+	report, err := reconciler.Reconcile(context.Background())
+	deployment := getControlDeployment(t, fixture)
+	if err != nil || report.Blocked != 1 || report.Enqueued != 0 ||
+		deployment.Instances[0].LastError != string(controlstore.DeploymentBlockedDelegationExpired) {
+		t.Fatalf("expired delegation = report %+v deployment %+v err %v", report, deployment, err)
 	}
 }
 
@@ -255,7 +325,8 @@ func (fixture *reconcileFixture) reconciler(t *testing.T) *Reconciler {
 	t.Helper()
 	reconciler, err := New(Config{
 		Store: fixture.store, KeyID: "controller-a", PrivateKey: fixture.controller,
-		Interval: time.Second, Now: func() time.Time { return fixture.now },
+		Interval: time.Second, NodeStaleAfter: 2 * time.Minute,
+		Now: func() time.Time { return fixture.now },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -374,6 +445,19 @@ func completeDeploymentCommand(t *testing.T, fixture *reconcileFixture, operatio
 		t.Fatalf("report %s = (%v, %v)", operation, applied, err)
 	}
 	fixture.now = fixture.now.Add(2 * time.Second)
+}
+
+func heartbeatControlNode(t *testing.T, fixture *reconcileFixture) {
+	t.Helper()
+	capabilities := []string{
+		controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
+		controlprotocol.ExecutorCapabilityControllerDelegationV1,
+	}
+	if deliveries, err := fixture.store.PollV4(
+		fixture.node, capabilities, fixture.now, time.Minute, 1,
+	); err != nil || len(deliveries) != 0 {
+		t.Fatalf("heartbeat node = (%+v, %v)", deliveries, err)
+	}
 }
 
 func assertReconcileCount(t *testing.T, reconciler *Reconciler, label string, observed, enqueued int) {

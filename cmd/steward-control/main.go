@@ -116,7 +116,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	reconciler, err := controlreconcile.New(controlreconcile.Config{
 		Store: store, KeyID: parsed.controllerKeyID, PrivateKey: controllerPrivateKey,
-		Interval: parsed.reconcileInterval, Logger: logger,
+		Interval: parsed.reconcileInterval, NodeStaleAfter: parsed.operationsThresholds.NodeStaleAfter,
+		Logger: logger,
 	})
 	if err != nil {
 		return err
