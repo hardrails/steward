@@ -120,13 +120,7 @@ archive identity and static image contract. The separate feasibility record prov
 the tested OpenClaw behavior for the exact build; neither grants deployment
 authority by itself.
 
-## Activate and roll out the qualified release
-
-OpenClaw uses the same proof-carrying activation and fleet coordinator as Hermes.
-`stewardctl agent-release issue` reads profile `openclaw-v1@v1` and service
-`openclaw-api` from the signed capsule, then selects the compiled-in OpenClaw
-qualification contract automatically. There is no agent-name flag that can
-override a capsule.
+## Configure the qualified service
 
 Configure Gateway's exact service operation with the built-in preset:
 
@@ -143,7 +137,7 @@ defaults. The command rejects simultaneous manual service, operation, or lifecyc
 flags. Use the printed reload or restart command, then export the tenant-specific
 service trust inventory.
 
-During activation, Steward derives this exact request from the signed release:
+The qualification procedure uses this exact request:
 
 ```json
 {"message":"Run the Steward workspace audit.","session_id":"steward-activation-<activation-id>"}
@@ -152,13 +146,11 @@ During activation, Steward derives this exact request from the signed release:
 The tenant task permit signs those exact bytes. A successful terminal must bind the
 same session, the qualified fixture and workspace digest, one sanitized success
 payload, exactly one `exec` tool call, no media, no tool failure, and a recomputed
-canonical result digest. Gateway receipts, Executor activation markers, and the
-controller witness then bind that terminal into the portable offline proof.
-
-Follow [Activate a qualified agent release]({{ '/guides/agent-activation/' | relative_url }})
-for one node or [Roll out a qualified agent release across a fleet]({{ '/guides/fleet-rollout/' | relative_url }})
-for canary-first remote promotion. Both flows auto-select `openclaw.run` from the
-authenticated release. The image must already be imported on every fleet target.
+canonical result digest. Gateway receipts bind that task's authorization,
+dispatch, and observed terminal metadata for offline audit. Admit and operate the
+imported image through the [signed admission]({{ '/guides/signed-admission/' | relative_url }})
+and [workload lifecycle]({{ '/guides/workload-lifecycle/' | relative_url }})
+procedures.
 
 ## Submit agent work
 

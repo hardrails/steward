@@ -1,596 +1,245 @@
 # Steward
 
-**Open-source admission and execution software for isolated AI agents on Linux.**
+**Run untrusted AI agents without giving them unrestricted authority.**
 
 [![CI](https://github.com/hardrails/steward/actions/workflows/ci.yml/badge.svg)](https://github.com/hardrails/steward/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/hardrails/steward?display_name=tag)](https://github.com/hardrails/steward/releases/latest)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-f2532d)](https://hardrails.github.io/steward/)
 [![License](https://img.shields.io/github/license/hardrails/steward)](LICENSE)
 
-A sandbox answers where untrusted code runs. It does not answer who authorized the
-code, which tenant it represents, which exact external effect is allowed, whether a
-request was replayed, or what an auditor can verify after the site disconnects.
-Steward supplies that missing control layer for Docker and gVisor Linux servers.
+An agent can read a hostile calendar invitation, email, web page, document, tool
+result, or memory entry and mistake embedded text for instructions. A container
+limits where that agent runs. It does not decide whether the agent may send an
+email, change an account, call an internal service, or spend a reusable API key.
 
-gVisor is a userspace-kernel sandbox that reduces direct exposure to the host
-kernel. Steward adds local artifact and policy admission, tenant isolation,
-capability mediation, durable anti-replay state, and signed evidence around that
-sandbox. It is for operators who need to decide locally which immutable workload
-may run, for which tenant, and with which finite capabilities.
+Steward is the open-source enforcement plane for that missing boundary. It runs
+containerized agents on customer-controlled Linux, mediates their network
+capabilities, and records which exact authority produced each managed external
+action.
 
-The optional signed-admission path verifies three inputs: a publisher-signed
-workload profile that fixes the image identity and maximum capabilities; an
-operator-signed site policy; and an instance request bound to one tenant, node,
-and generation. A generation is an increasing version number for a logical
-instance. It prevents a delayed command for an older instance from acting on its
-replacement. Steward records each accepted host mutation in a signed receipt
-chain that can be verified without a network connection.
+Steward is designed for security, platform, and sovereign-infrastructure teams
+that need local control, air-gapped operation, tenant isolation, and evidence
+they can verify without a vendor service.
 
-For sensitive external actions, Authorized Effects assumes the agent is already
-compromised by hostile calendar, email, web, document, memory, or tool content.
-Signed tenant policy pins off-node action keys to named connectors and can require
-separate operators to sign the same immutable request or a bounded set of up to
-eight immutable requests. Gateway validates the complete authority and spends each
-selected task durably before DNS while keeping the upstream credential outside the
-workload. This protects only
-Steward-mediated connector calls, not unmanaged credentials, browser sessions,
-local filesystem or computer-use effects, inference confidentiality, or host root.
+## What Steward does
 
-For a qualified agent outcome, a publisher can also sign one release that binds
-operator-facing outcome text, the embedded workload profile, exact offline image
-archive, deterministic canary, qualification-evidence digest, and known limits.
-The release remains descriptive: local site policy, tenant intent, live admission,
-and an exact tenant-signed task still control what runs.
+| Problem | Steward's control |
+| --- | --- |
+| Untrusted agent images and configuration | Verifies signed workload and site-policy artifacts, sanitizes offline OCI imports, and admits only the pinned image and declared capabilities. |
+| Multiple tenants on one Linux host | Gives every workload a separate gVisor sandbox, resource reservation, lifecycle identity, command fence, and capability network. Persistent Docker volumes remain a dedicated-host compatibility feature. |
+| Prompt injection reaching a powerful tool | Keeps reusable connector credentials outside the workload. A protected action can require a tenant signature over the exact operation and request bytes. |
+| Replayed or stale authority | Spends one-use permits before network dispatch and rejects old instance generations and command sequences. |
+| Inference and service credentials | Gateway injects credentials only at the trusted outbound boundary. Agents receive a scoped route, not the upstream secret. |
+| Disconnected and sovereign sites | Uses local keys, static Go binaries, local state, offline OCI archives, and customer-operated control services. No hosted service is required after transfer. |
+| Incident review and audit | Writes signed, hash-linked Executor and Gateway receipts. Receipt exports can be verified offline and omit prompt, request, response, and secret plaintext. |
 
-Steward includes a replaceable open-source control plane, while nodes remain
-independently operable through public contracts. Nothing has a build-time or
-runtime dependency on a private package, API, account, or hosted service.
-
-For a qualified Hermes or OpenClaw release, the operator-side rollout coordinator can require
-one verified canary before advancing explicit later batches across remote nodes.
-The same policy-authorized command key signs the exact rollout plan, each
-evidence-bound promotion into a later batch, and commands that name the applicable
-authorization digest. Deterministic command IDs and crash-recoverable write-once
-workspace transactions prevent a compliant retry from changing that history. The
-coordinator keeps command and task signing keys outside the controller and produces
-a proof set that can be verified on a disconnected system. The final unsigned
-aggregate binds the signed plan authorization, ordered promotion envelopes, and
-each target's exact signed admit, start, and canary command envelopes, so its digest
-commits those retained authorization bytes. It does not select nodes, transfer
-images, run arbitrary canaries, or roll back workloads automatically. The current
-recipes require the exact image to be
-pre-imported on each dedicated target host.
+Steward cannot make model output trustworthy and does not claim to detect every
+prompt injection. Its job is narrower and testable: even if the agent is
+compromised, Steward can still deny, constrain, spend, and prove the authority
+used for actions that pass through its enforcement boundaries.
 
 ## Install on Linux
 
-Docker must already be installed. The guided installer detects DEB, RPM, and other
-systemd Linux hosts. It can install gVisor after asking for approval. That optional
-online step fetches gVisor binaries and checksum files from Google-hosted gVisor
-release storage. Its default `latest` selector can change. For a reproducible
-installation, pin `--gvisor-version` to a dated gVisor release or use the verified
-offline path.
+Docker must already be installed. The guided installer supports systemd-based
+DEB, RPM, and other Linux distributions on AMD64 and ARM64. It can optionally
+install and register gVisor after asking for approval.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://github.com/hardrails/steward/releases/latest/download/install-steward.sh | sudo /bin/bash -p
 ```
 
-The `-p` flag is required. It prevents a root installer from loading
-user-controlled Bash startup files or imported shell functions before its own
-validation runs.
+Keep `/bin/bash -p`. Privileged Bash mode prevents a root process from loading
+user-controlled startup files and imported shell functions.
 
-The guided flow first offers a loopback-only evaluation, then remote enrollment.
-Declining both leaves the software installed, disabled, and unconfigured. Remote
-enrollment can install signed multi-tenant authority in the same transaction.
+Piping a script to root trusts GitHub's TLS delivery and the release account. For
+higher assurance, download and inspect the installer, verify the release manifest
+through your own trust process, or follow the
+[air-gapped installation guide](https://hardrails.github.io/steward/guides/air-gapped/).
 
-Piping a script to a root shell trusts GitHub's TLS delivery and the release
-account. Approving the online gVisor step also trusts its Google-hosted release
-storage. A checksum downloaded beside a binary detects transfer errors but does not
-independently authenticate that release. For higher assurance, download and inspect
-the script, authenticate the release manifest through your own trust process, and
-use the [offline installation guide](https://hardrails.github.io/steward/guides/air-gapped/).
-
-After configuration and activation, verify the node before admitting a workload:
+After installation:
 
 ```console
 sudo /usr/local/libexec/steward/node-doctor
-```
-
-To coordinate multiple nodes, install the bundled controller on a separate
-systemd Linux management host:
-
-```bash
-curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/hardrails/steward/releases/latest/download/install-control.sh | sudo /bin/bash -p
-```
-
-It defaults to literal loopback, creates no Docker authority, and keeps tenant
-signing keys outside the service. A remote listener requires an explicit TLS
-certificate and an owner-only key staged through the trusted root-owned path
-described in the guide. See the
-[control-plane guide](https://hardrails.github.io/steward/guides/control-plane/)
-for PKI, tenant creation, scoped operators, one-time node enrollment, signed
-command delivery, separately keyed Executor evidence witnessing, offline export,
-secret-free command and credential inventory, derived action-required findings,
-opt-in authenticated metrics, backup, and MCP. The
-[fleet rollout guide](https://hardrails.github.io/steward/guides/fleet-rollout/)
-shows how to promote one exact qualified agent release through a canary and
-operator-approved batches without giving the controller either signing key.
-
-Steward Control also embeds an observation-first React console at `/console/`. It
-shows the scoped operations summary, attention findings, nodes, command metadata,
-and credential metadata through the same authenticated API. Its one mutation is a
-signed-command courier: load an exact DSSE envelope created on an offline signing
-station, compare its SHA-256 digest and signed route, re-enter the current operator
-bearer, and submit the unchanged bytes. The browser never signs commands or holds
-private keys or secret plaintext. For the default listener, open exactly
-`http://127.0.0.1:8443/console/`. See the
-[operator console guide](https://hardrails.github.io/steward/guides/operator-console/)
-before exposing it remotely or entering an administrator bearer.
-
-The doctor checks the installed release, Docker and gVisor, systemd services,
-loopback health and readiness, Gateway, fixed evidence stores, and filesystem
-capacity without changing node state. Its optional canary submits a real signed
-task and records agent-reported completion; see the [node verification procedure](https://hardrails.github.io/steward/getting-started/#verify-the-selected-installation-mode).
-
-For a first workload, follow the
-[loopback evaluation lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/)
-or the [signed-admission procedure](https://hardrails.github.io/steward/guides/signed-admission/).
-Both return a `runtime_ref` that identifies the admitted workload.
-
-If the workload can change accounts, send messages, rotate secrets, or mutate
-infrastructure, follow the
-[Authorized Effects guide](https://hardrails.github.io/steward/guides/authorized-effects/)
-to require one independently signed exact request before each managed effect.
-For inference keys and connector tokens, follow the
-[secret materialization guide](https://hardrails.github.io/steward/guides/secrets/)
-to keep reusable values in Gateway while OpenBao or another trusted service
-manages storage and distribution. `stewardctl secret openbao compile` turns a
-strict non-secret plan into exact KV v2 read policy, fail-closed Agent templates,
-an expected-version manifest, and a sandboxed systemd service. OpenBao remains an
-optional, separately operated service; Steward never exposes its tokens or rendered
-values to the agent or React console.
-
-Save the local connection once. The context stores the token-file path, never the
-token value:
-
-```bash
 sudo -H stewardctl context set local-node \
   -node-token-file /etc/steward/executor-observer-token
 sudo -H stewardctl node whoami
 ```
 
-After admission, replace `executor-DIGEST` with the returned `runtime_ref`:
+Running `stewardctl` without arguments now shows the small set of common tasks.
+Use `stewardctl help <command>` for a focused explanation and install shell
+completion with:
 
-```bash
-sudo -H stewardctl node status -runtime-ref executor-DIGEST
-```
-
-Enable command and flag completion for Bash, Zsh, or Fish with one command:
-
-```bash
+```console
 stewardctl completion install
 ```
 
-For any lifecycle-enabled service, an off-node tenant key can sign one exact JSON
-request. The generic task client submits the resulting owner-only bundle through
-Gateway without placing that signing key in the agent or on the node:
+Start with the [installation tutorial](https://hardrails.github.io/steward/getting-started/)
+or use the [unattended and Terraform paths](https://hardrails.github.io/steward/guides/terraform/)
+for repeatable infrastructure.
 
-```bash
-sudo stewardctl task submit \
-  -bundle task.json \
-  -gateway-url http://127.0.0.1:8091 \
-  -token-file /etc/steward/gateway-service-token
+## Run an agent
 
-sudo stewardctl task wait \
-  -bundle task.json \
-  -gateway-url http://127.0.0.1:8091 \
-  -token-file /etc/steward/gateway-service-token \
-  -result-out task-result.json
-```
+Steward supports containerized agents that expose bounded service APIs. The
+included adapters make Hermes Agent and OpenClaw usable behind Steward's fixed
+security boundary.
 
-Keep the same bundle after a timeout or transport error: inspect or wait for that
-exact task instead of creating replacement authority. The
-[task lifecycle reference](https://hardrails.github.io/steward/reference/offline-tools/#submit-and-recover-a-service-task)
-and [Hermes guide](https://hardrails.github.io/steward/guides/hermes-agent/#authorize-and-run-one-exact-hermes-task)
-show signing, verification, dispatch, recovery, result handling, and offline audit.
+- [Run Hermes Agent](https://hardrails.github.io/steward/guides/hermes-agent/)
+- [Run OpenClaw](https://hardrails.github.io/steward/guides/openclaw/)
+- [Understand workload admission](https://hardrails.github.io/steward/guides/signed-admission/)
+- [Configure inference, services, connectors, and egress](https://hardrails.github.io/steward/guides/positive-capabilities/)
 
-### Choose an agent release without a hosted registry
+Inference remains a separate operator responsibility. Steward expects an
+OpenAI-compatible endpoint or another explicitly configured service and mediates
+the route and credential.
 
-A curator can sign an offline catalog of exact publisher-signed releases. The
-catalog presents useful outcomes and the signed capsule data needed for selection:
-resources, capabilities, validity, state, services, and exact companion artifact
-identities. Its signature authenticates descriptive inventory; it does not grant
-deployment authority or prove a skill is safe.
+## Authorize real work
 
-```console
-stewardctl agent-catalog verify \
-  -in agents.catalog.dsse.json \
-  -public-key curator.public.pem \
-  -key-id curator-key-id
+A normal sandbox decides whether a process may open a network connection.
+Steward can additionally decide whether this exact agent instance may perform
+this exact connector operation with these exact request bytes.
 
-stewardctl agent-catalog search \
-  -in agents.catalog.dsse.json \
-  -public-key curator.public.pem \
-  -key-id curator-key-id \
-  -query capability:inference
-```
-
-Read the
-[offline agent catalog guide](https://hardrails.github.io/steward/guides/agent-catalog/)
-for issuing, transferring, comparing, and pinning catalog revisions.
-
-### From a signed release to offline proof
-
-A publisher-signed agent release describes useful work in operator terms while
-binding the exact workload capsule, offline image archive, deterministic canary,
-qualification evidence digest, and known limitations. It is descriptive metadata,
-not tenant, node, image-import, or task authority.
-
-Authenticate the publisher key separately, then verify both the release and the
-transferred archive:
-
-```console
-stewardctl agent-release verify \
-  -in hermes-workspace-audit.release.dsse.json \
-  -public-key publisher.public.pem \
-  -key-id publisher-key-id \
-  -archive hermes-agent-adapter.tar
-```
-
-Steward's activation contract then follows a fixed
-choose/configure/preflight/activate/canary/prove/monitor journey. The default
-canary flow derives its signing challenge from the real admission response, so the
-tenant private key stays off-node. Generated artifacts and state checkpoints are
-retained in an owner-only append-only workspace, and the final proof correlates the
-exact result with Executor, Gateway, and controller-witness evidence for offline
-review. Executor signs one activation marker after read-only admission preflights
-and before the admission-allow receipt or host mutation. It signs another after
-Steward verifies Gateway's terminal evidence, creating a receipt-ordered causal
-link that does not depend on comparing service clocks. A proof manifest is a
-correlation record; its signed companions and pinned public keys still require
-independent verification.
-
-The built-in qualified agent recipes currently require a dedicated host whose signed site
-policy contains exactly one tenant. It uses persistent Docker state, which has no
-portable hard byte or inode quota, and it uses the explicitly enabled host-local
-administrator path for node-local admission. Steward still supports stateless
-multi-tenant workloads on a shared host; this specific activation recipe does not.
-
-The concrete workflow is:
-
-1. `stewardctl activation create` verifies and snapshots the release, policy,
-   intent, archive, and pre-admission controller witness.
-2. `stewardctl activation run` imports, records an activation-begin marker,
-   admits, starts, and pauses for a tenant-signed canary task derived from the
-   real admission.
-3. `stewardctl activation attach -kind canary-task` adds that owner-only bundle;
-   rerunning advances through the deterministic release-selected result, verifies Gateway
-   receipts, and records an Executor activation checkpoint.
-4. `stewardctl activation attach -kind final-witness` adds a controller evidence
-   export that covers that checkpoint; rerunning writes the proof.
-5. `stewardctl activation verify` authenticates the copied workspace and signed
-   evidence entirely offline. `activation status` is only an unverified local
-   progress view.
-
-Runs are resumable against retained checkpoints while the applicable deadline
-remains open. The canary uses one absolute deadline anchored to its
-`canary_authorized` checkpoint; retries do not reset it, and expiry becomes sticky
-`action_required`. Invalid canary authorization, terminal canary failure, and
-invalid or conflicting retained evidence are also sticky. Recovery requires
-stopping and destroying the failed workload, then using a new activation ID and
-an instance generation greater than the failed activation.
-
-Read [Activate a qualified agent release](https://hardrails.github.io/steward/guides/agent-activation/)
-for the exact commands, handoff files, runtime overrides, threat boundaries,
-failure handling, and proof limits.
-
-To apply the same closed activation contract to an ordered remote fleet, follow
-[Proof-carrying fleet rollout](https://hardrails.github.io/steward/guides/fleet-rollout/).
-The image must already be imported on every target. Each invocation advances only
-the current canary or later batch. The initial invocation signs the exact plan;
-each later invocation signs a chained promotion that binds the preceding batch's
-passed evidence before it signs any command for the next batch.
-
-`steward-mcp` exposes bounded Steward Control fleet operations, Executor lifecycle
-operations, or both to a local Model Context Protocol (MCP) client over standard
-input and output. Starting it directly waits for an MCP client; this example
-enables only the local node tools:
-
-```bash
-sudo steward-mcp -node-url http://127.0.0.1:8090 \
-  -token-file /etc/steward/executor-operator-token
-```
-
-The operator token lets local MCP tools inspect and manage lifecycle but not admit
-or purge. Use the host-admin token only for a separate, fully trusted MCP client
-that needs those operations. Fleet tools require a scoped control operator token and the controller CA; they do
-not expose operator or enrollment secret issuance. Optional task tools require a loopback Gateway credential and a dedicated
-owner-only result directory. The task signing key still stays off-node; MCP can
-submit only a pre-signed exact request. These bearer tokens are privileged
-credentials and must not be exposed to an untrusted agent or MCP client.
-
-MCP is a standard tool interface for AI clients. See the
-[installation guide](https://hardrails.github.io/steward/getting-started/),
-[MCP setup](https://hardrails.github.io/steward/guides/mcp/), and
-[capability setup](https://hardrails.github.io/steward/guides/positive-capabilities/).
-
-## Why Steward exists
-
-An agent combines untrusted software, credentials, network access, persistent
-state, and the ability to act on other systems. Running it directly on a server,
-or giving the agent a Docker socket, lets one compromise expose every capability.
-Steward separates those capabilities:
-
-| Risk or requirement | Steward control |
-| --- | --- |
-| Untrusted image input | The offline importer verifies the signed workload profile and site policy, checks every referenced Open Container Initiative (OCI) blob, removes tags and unrelated archive content, and gives Docker only the sanitized image. Executor runs the exact local config digest and rejects image-declared volumes. The operator authenticates build provenance separately. |
-| Deployment authority | A publisher-signed workload profile, site policy, and tenant/node-bound instance request must all permit the workload. |
-| Stale commands | Durable policy and generation records reject policy rollback and commands for replaced instances. Read-only commands do not change lifecycle ordering. |
-| Multiple tenants on one host | Each workload has its own gVisor sandbox, per-workload resource limits, host and tenant aggregate memory/CPU/PID reservations, workload-count caps, command authority, and, when needed, private Docker network. Durable admission, command-fence, journal, and receipt records bind the tenant ID. Persistent Docker volumes are disabled on shared hosts because the local volume driver does not provide portable hard byte or inode quotas. |
-| Model, service, and API access | Site policy grants named inference routes, model aliases, service IDs, credential-brokered connector IDs, and HTTP(S) egress routes. A tenant task key can be scoped to one service and sign a short-lived permit for one exact service request; Gateway records authorization before dispatch. The private key is not a Steward node input and is never given to the agent. For a stronger connector boundary, signed tenant policy can require Authorized Effects: explicit instance intent, no generic egress, connector-scoped action keys, an optional multi-party threshold over one exact request or an unordered set of up to eight exact requests, and durable per-task spend before DNS. A stricter context-locked mode invalidates an approval after the grant receives another managed connector response. Signed evidence records formats 5 through 7. Non-borrowing receipt budgets prevent one tenant from consuming another tenant's evidence allocation. |
-| Remote nodes | Authenticated outbound polling works behind network address translation (NAT) and inbound firewalls. Tenant-signed commands include a short validity window, instance generation, and sequence number so Executor can reject replay. |
-| Audit evidence | Executor writes signed, hash-linked lifecycle receipts. It can publish bounded signed deltas to the customer-owned controller, which retains a last-good checkpoint or sticky rollback/equivocation finding and signs portable exports with a separate witness key. Gateway writes a separate signed chain for connector calls and tenant-signed service-task authorization, dispatch, and terminal observation. Permit-backed records bind the authority key or canonical signer set, approval threshold, permit, operation policy, and exact request digest. Receipts omit raw prompts, request bodies, and response or result bodies. `stewardctl` verifies node chains and controller exports offline. |
-| Disconnected operation | Static binaries, local public-key infrastructure (PKI), offline image import, and local model gateways do not require a public network service after transfer. |
-| Vendor independence | Public OpenAPI and uplink contracts have no private runtime dependency. |
-
-Steward is for platform and security teams running agents on customer-controlled
-Linux, regulated or sovereign operators, and control-plane builders that need a
-small public fleet and node contract.
-
-Steward is not an agent framework, inference server, hosted control-plane service,
-or general-purpose container orchestrator. Model serving remains a separate
-operator responsibility behind an OpenAI-compatible endpoint.
-
-Steward's differentiator is not a claim that it can detect every prompt injection.
-Browser origin isolation, model screening, planner information-flow controls, and
-application-protocol firewalls are useful additional layers. Steward supplies a
-framework-independent enforcement path for unmodified containerized agents: local
-signed admission, tenant-pinned connector authority, exact one-use request permits,
-spend-before-network durability, credentials outside the workload, and offline
-permit-to-terminal verification without a required hosted service.
-For selected connectors, context locking can also bind that permit to the current
-signed history of Gateway-mediated responses, so a later response makes the old
-approval unusable. It identifies history; it does not judge whether the history is
-safe or include observations outside Steward connectors.
-
-## Components and trust boundaries
+The protected flow is:
 
 ```text
-  tenant/site signer -- exact signed command --> steward-control
-                                                 ^
-                                                 | node-initiated HTTPS
-                                                 v
-  +------------------- Steward node -------------------+
-  | steward | steward-executor | steward-gateway       |
-  | state   | admission+Docker | inference+connectors  |
-  +-----------------------|-----------------------------+
-                          v
-              gVisor agent <-> trusted relay
-                                  |
-           approved inference + connectors + HTTP(S) routes
+untrusted content -> agent proposes action -> exact signed permit
+                                             |
+                                             v
+agent -> private relay -> Gateway verifies and spends permit -> external service
+                                             |
+                                             v
+                                  signed receipt chain
 ```
 
-A Linux release contains seven static binaries:
+The signing key stays outside the agent and can stay off the node. Gateway holds
+the reusable upstream credential, verifies the tenant and instance binding,
+checks the canonical operation and request digest, durably records the permit as
+spent, and only then performs network resolution and dispatch.
 
-- `steward-control` provides the optional self-hosted tenant, enrollment,
-  inventory, signed-command delivery, and separately keyed evidence-witness
-  plane without holding tenant private keys or Docker authority. Its embedded
-  `/console/` is an observation-first view of bounded control API metadata and a
-  narrow courier for exact offline-signed commands, not a signing surface or a
-  general controller client.
-- `steward` tracks lifecycle state and provides the generic outbound uplink.
-- `steward-executor` verifies admission and is the only long-running Steward
-  service with Docker-group membership.
-- `steward-gateway` holds upstream credentials and enforces inference, service,
-  exact connector-operation, and HTTP(S) egress grants.
-- `steward-relay` is a fixed-destination companion inside one workload network.
-- `stewardctl` manages controller TLS, tenants, operators, enrollment, command
-  delivery, evidence status, signed witness export, and offline verification;
-  keys and policy; outcome-led signed agent releases; exact-request connector and
-  service-task permits; generic task lifecycle and recovery; OCI import; node
-  evidence; and local node actions.
-- `steward-mcp` exposes bounded fleet and node operations plus optional pre-signed
-  task lifecycle tools over MCP stdio.
+Use the [Authorized Effects guide](https://hardrails.github.io/steward/guides/authorized-effects/)
+for one-use and multi-party approvals. Use
+[context-locked effects](https://hardrails.github.io/steward/guides/context-locked-effects/)
+when a new managed connector response should invalidate an older approval.
 
-`steward-control`, `steward`, `steward-executor`, and `steward-gateway` run as
-separate services and Unix users when deployed. The node installer enables only
-the three node services; the controller has its own explicit installation path.
-On a node, Executor must be the Docker group's only member because Docker socket
-access is root-equivalent. The controller, agent containers, supervisor,
-Gateway, and MCP server never receive the Docker socket.
-`sudo stewardctl image import` is a deliberate one-shot exception: it verifies and
-sanitizes one bounded image archive, then connects directly to Docker to load it.
-The root-only relay-image build helper also invokes Docker during node setup.
+This protection covers only calls routed through Steward. An unmanaged browser,
+host credential, mounted socket, direct network path, or computer-use worker is a
+separate authority boundary.
 
-[Read the architecture](https://hardrails.github.io/steward/concepts/architecture/) ·
-[Read the security model](https://hardrails.github.io/steward/concepts/security-model/) ·
-[Review the public APIs](https://hardrails.github.io/steward/reference/api/)
+## Keep secrets out of agents
 
-## Default workload policy
+Steward does not implement another secret vault. An operator-selected secret
+manager writes owner-only files for Gateway; Steward validates the non-secret
+manifest, file ownership, permissions, identity, and expected rotation epoch.
 
-Executor requires Docker to advertise gVisor's `runsc` runtime. Every admitted
-agent has:
+```console
+sudo stewardctl secret materialization prepare \
+  -manifest /etc/steward/secrets/materialization.json
 
-- an immutable image reference verified against its local config digest;
-- gVisor isolation and fixed UID/GID `65532:65532`;
-- all Linux capabilities dropped and `no-new-privileges` enabled;
+sudo stewardctl secret materialization check \
+  -manifest /etc/steward/secrets/materialization.json
+```
+
+This provider-neutral handoff works with an existing vault, hardware-backed
+service, configuration-management system, or manual offline process. Gateway
+reads the value; the agent, control plane, React console, receipts, and MCP
+adapter do not.
+
+See [Manage Gateway secrets](https://hardrails.github.io/steward/guides/secrets/).
+
+## Operate a fleet
+
+`steward-control` is a customer-operated control plane for tenant-scoped
+operators, one-time node enrollment, outbound node polling, signed command
+delivery, inventory, attention findings, and separately witnessed evidence.
+
+Its embedded React console is available at `/console/`. The console keeps the
+operator bearer only in tab memory, loads no remote assets, and never receives
+private signing keys or secret plaintext. Mutating Executor commands are signed
+outside the browser; the console reviews and transfers the unchanged envelope.
+
+`steward-mcp` exposes bounded node, control, and pre-signed task operations to a
+local Model Context Protocol client over standard input and output. MCP
+credentials are privileged and must never be given to the untrusted agent whose
+authority Steward is meant to constrain.
+
+- [Operate Steward Control](https://hardrails.github.io/steward/guides/control-plane/)
+- [Use the operator console](https://hardrails.github.io/steward/guides/operator-console/)
+- [Configure MCP](https://hardrails.github.io/steward/guides/mcp/)
+- [Verify and export evidence](https://hardrails.github.io/steward/reference/offline-tools/)
+
+## Security defaults
+
+Every admitted agent uses:
+
+- the pinned local OCI config digest;
+- gVisor's `runsc` runtime;
+- fixed unprivileged UID and GID `65532:65532`;
+- no Linux capabilities and `no-new-privileges`;
 - a read-only root filesystem and bounded temporary filesystems;
-- explicit per-workload memory, swap, CPU, and PID limits, plus aggregate
-  memory, CPU, PID, and workload-count caps for the host and each tenant;
-- bounded local logs, request bodies, and response bodies;
-- no host mount, device, published port, Docker socket, or caller-defined
-  environment;
-- `network=none`, unless a signed inference, service, connector, or egress
-  capability needs the per-instance relay;
-- an isolated bridge with no host gateway for inference, service, connector, or
-  egress;
-- persistent state only through a Steward-owned volume for one tenant and logical
-  workload, and only after the operator enables the documented dedicated-host
-  compatibility mode; and
-- exact drift checks before lifecycle actions, plus periodic reconciliation.
+- explicit memory, swap, CPU, PID, and workload-count limits;
+- no host mounts, devices, published ports, Docker socket, or arbitrary
+  environment variables;
+- `network=none` unless signed policy grants a capability route; and
+- an isolated capability network with no host-gateway access when networking is
+  required.
 
-Docker Engine 28 or newer is required for capability networks because Steward uses
-Docker's isolated bridge gateway mode. Workloads with `network=none` do not depend
-on that feature.
+These controls reduce authority. A shared host is not equivalent to separate
+hardware. Host root, Docker, gVisor, the Linux kernel, the configured inference
+service, Gateway, and operator key custody remain trusted. Hardware side channels
+and kernel compromise remain residual risks.
 
-These controls reduce authority; they do not make a shared host equivalent to
-separate hardware. Host root, Docker, gVisor, the Linux kernel, and operator
-configuration remain trusted. See the [security model](https://hardrails.github.io/steward/concepts/security-model/)
-for residual risks such as kernel compromise, host administrators, and shared
-hardware side channels.
+Read the [security model](https://hardrails.github.io/steward/concepts/security-model/)
+and [known limitations](https://hardrails.github.io/steward/limitations/) before
+production deployment. Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
-## What is different
+## Components
 
-Sandboxes, lifecycle APIs, self-hosted fleet controllers, egress allowlists, and
-credential injection are necessary but widely available. Steward connects them into a portable
-authorization-to-enforcement record. Local keys and policy identify the artifact,
-tenant, instance, and capability. An off-node tenant key can authorize one exact
-service request, while separate optional action keys can jointly authorize one
-exact connector request. Gateway spends either authority durably before the external
-effect. Signed receipts retain the permit, request digest, policy, task identity,
-and observed outcome linkage for offline audit.
+```text
+offline tenant/site keys ---- signed policy, commands, permits ----+
+                                                                   |
+customer control host: steward-control + React console             |
+                         ^                                         |
+                         | node-initiated authenticated polling     |
+                         v                                         v
+Linux node: steward-executor -> Docker + gVisor agent -> steward-relay
+                 |                                      |
+                 +-> signed lifecycle receipts          +-> steward-gateway
+                                                            | inference
+                                                            | services
+                                                            + connectors
+```
 
-Among the products reviewed in the dated
-[market analysis](https://hardrails.github.io/steward/product/market-analysis/), none
-documents the same combination of customer-operated air-gapped nodes,
-publisher-signed artifacts, site-root-signed policy, authenticated tenant intent,
-service-scoped off-node task keys,
-exact-request dispatch, durable node-local replay control, and offline-verifiable
-authorization-to-outcome receipts. This is a comparison of public documentation,
-not a certification or a claim that another product cannot add these controls.
+- `steward-executor` is the only long-running Steward service with Docker
+  authority. It verifies admission and owns workload lifecycle.
+- `steward-gateway` mediates inference, service, connector, and HTTP(S) egress
+  without giving reusable upstream credentials to workloads.
+- `steward-relay` is a fixed-destination helper inside each capability network.
+- `steward-control` provides the optional self-hosted fleet plane and console.
+- `stewardctl` is the operator CLI and offline verification tool.
+- `steward-mcp` is the bounded local MCP adapter.
+- `steward` remains the compatibility supervisor for the generic public uplink.
+  New Steward Control deployments use Executor's signed command protocol.
 
-Connector credential isolation has a precise boundary: Gateway does not hand the
-configured credential to the workload and aborts an upstream response if any header
-or decoded body chunk contains that exact value. It does not detect encoded or
-transformed credentials, private-origin disclosure, or application-specific secret
-fields. Operators must still use a narrow trusted upstream. Tenant receipt budgets
-isolate ledger bytes; they do not isolate the shared disk, synchronous writes, or a
-hostile host root.
+## Zero private dependencies
 
-This claim is intentionally limited. Service-task dispatch is node-local
-at-most-once only while the same Gateway ledger and epoch are retained; it is not
-fleet-wide or upstream exactly-once delivery. The run ID is supplied by the
-untrusted agent service. Receipts show what Steward authorized, dispatched, and
-observed, not whether the agent did useful work. They do not prove prompt meaning,
-model honesty, semantic tool behavior, or an uncompromised host. Read
-[the product position](https://hardrails.github.io/steward/product/positioning/) and
-[market analysis](https://hardrails.github.io/steward/product/market-analysis/).
+Steward is not an agent framework, model server, hosted SaaS control plane,
+general container orchestrator, secret manager, or endpoint-detection product.
+It is the enforcement layer between an untrusted agent runtime and the authority
+to act.
 
-## Hermes Agent and OpenClaw
-
-Steward includes a qualified, source-built adapter definition for
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) at exact upstream commit
-`095b9eed3801c251796df93f48a8f2a527ff6e70`. The retained qualification applies to
-`linux/amd64`; other platforms require a separate qualification run. The hardened image runs as
-`65532:65532`, fixes inference through `http://steward-relay:8080/v1`, and exposes
-only negotiation, health, run submission, and run-status operations on service port
-`8766`. Run event streams are not exposed.
-
-Qualification runs two signed skills as real Hermes work under gVisor. The harness checks
-the bounded `steward.workspace-audit` inventory, changed persisted workspace state,
-restarted the container, opened a fresh session, and required the changed result.
-For `steward.connector-work`, Hermes had to discover the native skill index entry,
-load the exact signed `SKILL.md` with `skill_view`, and follow its terminal command.
-The integration gate demonstrated one authenticated upstream effect, replay and
-undeclared-operation denial, fixed-material secret scans, state purge, and separate
-Executor and Gateway receipt chains. The task-enabled service workflow additionally
-uses a tenant key scoped to `hermes-api`, signs five exact requests, dispatches them
-through the generic task lifecycle, and checks each format-4 authorization,
-dispatch, and terminal chain. The retained qualification evidence applies only to
-the pinned source, adapter, and
-documented inference, service, state, connector, task, and skill behavior. The
-official upstream image remains inadmissible
-because it starts as root and declares a volume.
-
-Linux releases include the interactive or non-interactive builder and the
-`hermes-steward-acceptance` disposable-host harness. The builder can fetch the exact
-pinned commit or use a transferred source checkout. Steward does not redistribute a
-prebuilt Hermes OCI archive because dependency and base-image notices are incomplete.
-Operators build, qualify, inspect, and sign their exact archive.
-
-Persistent state still requires the explicit dedicated single-tenant host mode for
-volumes without enforced byte or inode quotas. Raw TCP/UDP, host mounts, arbitrary
-secret injection, privileged mode, Docker access, and undeclared ports remain
-unavailable.
-
-Steward also includes a qualified, closed-surface
-[OpenClaw](https://github.com/openclaw/openclaw) adapter for the exact official
-`2026.7.1` OCI release on `linux/amd64`. It exposes one-shot health, negotiation,
-run submission, and run-status operations on port `18789`; allows only OpenClaw's
-`read` and `exec` tools inside the outer gVisor capsule; and fixes inference through
-Steward's relay. Qualification ran the real `steward-workspace-audit` custom skill,
-verified its deterministic result, restarted and reused it, and required persisted
-skill tamper to fail closed. OpenClaw Gateway, Control UI, channels, browser, cron,
-plugins, nodes, discovery, arbitrary skills, and nested sandboxes remain excluded.
-
-- [Build and run the Hermes Agent adapter](https://hardrails.github.io/steward/guides/hermes-agent/)
-- [Build and run the OpenClaw adapter](https://hardrails.github.io/steward/guides/openclaw/)
-- [Current limitations](https://hardrails.github.io/steward/limitations/)
-
-## Platforms and independence
-
-Production nodes are systemd Linux on `amd64` or `arm64`. The installer uses DEB
-for Debian/Ubuntu families, RPM for common RPM families, and a systemd archive for
-other distributions that the operator validates. CI builds and inspects packages
-on Ubuntu 24.04; it does not run node acceptance on every listed distribution.
-macOS builds are for development. Windows, macOS,
-BSD, Alpine/OpenRC, and other non-systemd systems are not Executor node targets.
-
-See the [platform matrix](https://hardrails.github.io/steward/reference/platform-support/).
-
-Steward's Go module uses only the Go standard library:
+The repository has zero build-time or runtime dependency on a private package,
+API, account, or tool. The Go module intentionally uses only the standard
+library:
 
 ```console
 $ go list -m all
 github.com/hardrails/steward
 ```
 
-The source tree separately has frontend-maintenance dependencies: the embedded
-operator console's lockfile pins React and Vite, while its reviewed production
-assets are committed and embedded in `steward-control`. Normal and air-gapped Go
-builds do not run npm, and the installed service needs neither Node.js nor a CDN.
-CI uses Node.js 24 LTS to audit, check, rebuild, and compare the committed
-distribution byte for byte.
+Public contracts live under [`openapi/`](openapi/). Architecture decisions and
+the market analysis live in the
+[documentation site](https://hardrails.github.io/steward/).
 
-Its public contracts are hand-written and CI-linted:
+## License
 
-- [`openapi/steward.v1.yaml`](openapi/steward.v1.yaml)
-- [`openapi/steward-executor.v1.yaml`](openapi/steward-executor.v1.yaml)
-- [`openapi/steward-control.v1.yaml`](openapi/steward-control.v1.yaml)
-
-An operator can clone this repository alone, audit it, and build all seven binaries
-without access to private source or infrastructure.
-
-## Documentation
-
-- [Install and enroll](https://hardrails.github.io/steward/getting-started/)
-- [Activate a qualified agent release](https://hardrails.github.io/steward/guides/agent-activation/)
-- [Operate a workload](https://hardrails.github.io/steward/guides/workload-lifecycle/)
-- [Install without public network access](https://hardrails.github.io/steward/guides/air-gapped/)
-- [Configure signed admission](https://hardrails.github.io/steward/guides/signed-admission/)
-- [Inspect a fleet and submit an offline-signed command](https://hardrails.github.io/steward/guides/operator-console/)
-- [Shorten CLI commands and enable completion](https://hardrails.github.io/steward/guides/cli/)
-- [Authorize exact external effects](https://hardrails.github.io/steward/guides/authorized-effects/)
-- [Store and distribute Gateway credentials](https://hardrails.github.io/steward/guides/secrets/)
-- [Broker authenticated API operations](https://hardrails.github.io/steward/guides/connectors/)
-- [Upgrade and roll back](https://hardrails.github.io/steward/guides/upgrades/)
-- [Configuration reference](https://hardrails.github.io/steward/reference/configuration/)
-- [FAQ](https://hardrails.github.io/steward/faq/)
-
-Machine-oriented documentation is available at
-[`llms.txt`](https://hardrails.github.io/steward/llms.txt).
-
-## Build and contribute
-
-Go 1.24 or newer is required to build from source. Published Linux binaries are
-static and do not require Go.
-
-```console
-go build ./...
-go vet ./...
-go test ./...
-```
-
-Read [`AGENTS.md`](AGENTS.md) before changing code. It documents the invariants
-enforced by review and CI. Steward is licensed under [Apache-2.0](LICENSE).
+Steward is available under the [Apache License 2.0](LICENSE).

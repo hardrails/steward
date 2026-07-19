@@ -26,11 +26,9 @@ The dependency and base-image notice inventory is incomplete, so Steward does no
 redistribute an adapter OCI archive. Operators build and approve the exact image in
 their own environment.
 
-For the guided path from an outcome-led signed release through admission, off-node
-canary authorization, deterministic result checking, and offline proof, use
-[Activate a qualified agent release]({{ '/guides/agent-activation/' | relative_url }}).
-The manual procedures on this page remain the detailed source for building,
-qualifying, configuring, and troubleshooting the adapter.
+This page is the supported path for building, qualifying, configuring, admitting,
+and testing the adapter. It keeps task signing outside the agent and uses Gateway's
+service-task receipts for offline review.
 
 ## Why the official image remains inadmissible
 

@@ -35,9 +35,6 @@ Documentation: https://hardrails.github.io/steward/
 
 ## How-to guides
 
-- [Offline agent catalog](https://hardrails.github.io/steward/guides/agent-catalog/): Issue and verify a curator-signed descriptive catalog, search and compare exact signed capsule metadata, transfer it across an air gap, and pin accepted revisions
-- [Proof-carrying agent activation](https://hardrails.github.io/steward/guides/agent-activation/): Verify a signed outcome-led Hermes release and exact archive, keep task signing off-node, run the deterministic canary, and retain an offline-verifiable evidence set
-- [Proof-carrying fleet rollout](https://hardrails.github.io/steward/guides/fleet-rollout/): Authorize one exact plan, promote a qualified Hermes release through an explicit canary and signed evidence-bound batches, resume from crash-recoverable immutable artifacts, and verify an offline proof digest that commits the exact plan, promotions, and signed outer command envelopes
 - [Operator console](https://hardrails.github.io/steward/guides/operator-console/): Use the same scoped control API bearer in an embedded, air-gapped React interface; review and submit exact offline-signed bytes while keeping signing keys outside the browser
 - [CLI contexts and completion](https://hardrails.github.io/steward/guides/cli/): Save repeated Control and local Executor connection paths without storing bearer values; install Bash, Zsh, or Fish completion with one command
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
