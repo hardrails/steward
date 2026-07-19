@@ -21,7 +21,7 @@ import (
 
 func agentCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("agent requires init, validate, build, plan, apply, fork, or doctor")
+		return errors.New("agent requires init, validate, build, plan, apply, deploy, fork, or doctor")
 	}
 	switch arguments[0] {
 	case "init":
@@ -34,12 +34,14 @@ func agentCommand(arguments []string, stdout io.Writer) error {
 		return agentPlan(arguments[1:], stdout)
 	case "apply":
 		return agentApply(arguments[1:], stdout)
+	case "deploy":
+		return agentDeploy(arguments[1:], stdout)
 	case "fork":
 		return agentFork(arguments[1:], stdout)
 	case "doctor":
 		return agentDoctor(arguments[1:], stdout)
 	default:
-		return fmt.Errorf("unknown agent command %q; expected init, validate, build, plan, apply, fork, or doctor", arguments[0])
+		return fmt.Errorf("unknown agent command %q; expected init, validate, build, plan, apply, deploy, fork, or doctor", arguments[0])
 	}
 }
 

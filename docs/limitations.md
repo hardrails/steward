@@ -199,10 +199,12 @@ replay or rollback guarantee the deletion would remove.
 `stewardctl agent plan` performs deterministic filtering and scoring over a bounded
 node inventory. `stewardctl agent apply` can use that result to derive an exact
 intent, submit it through signed admission, and start the workload on one node.
-The commands explain readiness, tenant, architecture, isolation, labels, taints,
-resources, image locality, snapshot locality, and load. They do not continuously
-watch nodes, reserve capacity, preempt workloads, reschedule a failed allocation,
-or autoscale a fleet.
+`stewardctl agent deploy` can sign the exact admit/start sequence locally, transfer
+it through Control, and wait for authenticated node reports. The commands explain
+readiness, tenant, architecture, isolation, labels, taints, resources, image
+locality, snapshot locality, and load. They do not continuously watch nodes,
+reserve capacity, preempt workloads, reschedule a failed allocation, or autoscale
+a fleet.
 
 Treat placement output as reviewable input rather than a reservation. Executor
 revalidates capacity and policy at execution time, so a stale result fails closed

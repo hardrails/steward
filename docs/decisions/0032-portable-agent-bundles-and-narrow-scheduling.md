@@ -25,6 +25,13 @@ tracker because either would duplicate admission, idempotency, and lifecycle
 checks at a weaker boundary. Revisit only if an external scheduler adapter cannot
 express the same signed intent without bypassing Executor.
 
+Fleet deployment also uses `reuse`: Steward's existing tenant-signed command
+protocol, durable Control courier, and protocol-4 admission projection. The
+operator signs `admit` and `start` locally; Control never receives private command
+authority. Rejected: storing a command private key in Control to make deployment
+look automatic, because compromising the controller would then grant mutation
+authority instead of only denial, delay, and replay attempts.
+
 Decision: use `in-house`: a narrow agent-aware scheduler. Its tenant,
 isolation, lineage, signed-authority, and evidence semantics are Steward's core
 differentiation. Rejected: `open-source` Kubernetes or Nomad as mandatory

@@ -127,6 +127,39 @@ create and install them.
 `agent apply` currently targets one selected node. It does not continuously
 reconcile desired state or move the workload after node failure.
 
+## Deploy through Steward Control
+
+Use `agent deploy` when the Executor reaches a separately hosted Steward Control
+service through outbound polling. The tenant command key must be authorized for
+`admit` and `start` in site policy:
+
+```console
+stewardctl agent deploy \
+  -bundle agent.bundle.json \
+  -capsule hermes.capsule.dsse.json \
+  -policy site.policy.dsse.json \
+  -site-root-public-key site-root.pub \
+  -site-root-key-id site-root-1 \
+  -tenant default \
+  -node-id node-1 \
+  -command-key tenant-command.pem \
+  -command-key-id tenant-command-1
+```
+
+A [CLI context]({{ '/guides/cli/' | relative_url }}) supplies the Control URL,
+private CA, operator token path, tenant, and node in routine use. `agent deploy`
+keeps the tenant private key on the operator machine. It signs one short-lived,
+exact admission command and, after the node reports successful admission, one
+exact start command. Control retains and leases those opaque signed bytes; it
+cannot manufacture another operation.
+
+The command waits for protocol-4 reports and returns the Executor runtime
+reference only after the node reports `running`. It fails if admission is denied,
+the node reports an uncertain outcome, the command expires, or the wait times out.
+Repeated admission and start attempts remain fenced and idempotent at Executor,
+but this command is not yet a continuous controller: it does not replace a failed
+node or keep a replica count converged after the command exits.
+
 ## Fork persistent state
 
 A snapshot is immutable metadata produced by a trusted storage provider. It binds

@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -69,18 +67,6 @@ func agentApply(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if *instanceID == "" {
-		*instanceID = bundle.Definition.Name
-	}
-	bundleDigest, err := agentapp.DigestJSON(bundle)
-	if err != nil {
-		return err
-	}
-	if *lineageID == "" {
-		identity := fmt.Sprintf("%s\x00%s\x00%s\x00%d", bundleDigest, tenantID, *instanceID, *generation)
-		sum := sha256.Sum256([]byte(identity))
-		*lineageID = fmt.Sprintf("lineage-%x", sum[:])
-	}
 	if *nodesPath != "" {
 		inventoryRaw, err := readCLIArtifact(*nodesPath)
 		if err != nil {
@@ -103,39 +89,22 @@ func agentApply(arguments []string, stdout io.Writer) error {
 	if *nodeID == "" {
 		return errors.New("agent apply requires -node-id or a -nodes inventory with an eligible node")
 	}
-	capsuleRaw, err := readCLIArtifact(*capsulePath)
-	if err != nil {
-		return fmt.Errorf("read workload capsule: %w", err)
-	}
-	policyRaw, err := readCLIArtifact(*policyPath)
-	if err != nil {
-		return fmt.Errorf("read site policy: %w", err)
-	}
-	siteRoot, err := readPublicKey(*siteRootPath)
-	if err != nil {
-		return fmt.Errorf("read site root: %w", err)
-	}
-	now := timeNow().UTC()
-	verified, err := admission.VerifyCapsuleForImport(
-		capsuleRaw, policyRaw, map[string]ed25519.PublicKey{*siteRootKeyID: siteRoot},
-		now, admission.DefaultProfiles(),
-	)
-	if err != nil {
-		return err
-	}
-	intent, err := agentapp.BuildIntent(
-		bundle, verified, tenantID, *nodeID, *instanceID, *lineageID, *generation,
-	)
+	prepared, err := prepareAgentAdmission(agentAdmissionInputs{
+		Bundle: bundle, CapsulePath: *capsulePath, PolicyPath: *policyPath,
+		SiteRootPath: *siteRootPath, SiteRootKeyID: *siteRootKeyID,
+		TenantID: tenantID, NodeID: *nodeID, InstanceID: *instanceID,
+		LineageID: *lineageID, Generation: *generation,
+	})
 	if err != nil {
 		return err
 	}
 	result := agentApplyResult{
-		AgentName: bundle.Definition.Name, BundleDigest: bundleDigest,
-		TenantID: tenantID, NodeID: *nodeID, InstanceID: *instanceID,
-		LineageID: *lineageID, Generation: *generation, Status: "planned",
+		AgentName: prepared.Bundle.Definition.Name, BundleDigest: prepared.BundleDigest,
+		TenantID: tenantID, NodeID: *nodeID, InstanceID: prepared.InstanceID,
+		LineageID: prepared.LineageID, Generation: *generation, Status: "planned",
 	}
 	if *planOnly {
-		result.Intent = &intent
+		result.Intent = &prepared.Intent
 		return writeAgentJSON(stdout, result)
 	}
 	client, err := nodeclient.NewFromTokenFile(*nodeURL, *tokenFile)
@@ -144,7 +113,7 @@ func agentApply(arguments []string, stdout io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	state, err := client.Admit(ctx, capsuleRaw, intent)
+	state, err := client.Admit(ctx, prepared.CapsuleRaw, prepared.Intent)
 	if err != nil {
 		return fmt.Errorf("admit agent: %w", err)
 	}

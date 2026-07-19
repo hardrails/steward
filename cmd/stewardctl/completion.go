@@ -16,7 +16,7 @@ import (
 var completionTree = map[string][]string{
 	"":                 {"help", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
 	"help":             {"agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
-	"agent":            {"init", "validate", "build", "plan", "apply", "fork", "doctor"},
+	"agent":            {"init", "validate", "build", "plan", "apply", "deploy", "fork", "doctor"},
 	"context":          {"set", "use", "show", "list", "delete"},
 	"completion":       {"install", "bash", "zsh", "fish"},
 	"key":              {"match"},
@@ -60,6 +60,8 @@ var completionFlags = map[string][]string{
 	"agent validate":            {"-file", "-cue"},
 	"agent build":               {"-file", "-out", "-cue", "-opa", "-policy-bundle", "-policy-query"},
 	"agent plan":                {"-bundle", "-nodes", "-tenant", "-out"},
+	"agent apply":               {"-bundle", "-capsule", "-policy", "-site-root-public-key", "-site-root-key-id", "-nodes", "-tenant", "-node-id", "-instance-id", "-lineage-id", "-generation", "-node-url", "-token-file", "-timeout", "-plan-only", "-no-context"},
+	"agent deploy":              {"-bundle", "-capsule", "-policy", "-site-root-public-key", "-site-root-key-id", "-nodes", "-tenant", "-node-id", "-instance-id", "-lineage-id", "-generation", "-claim-generation", "-command-key", "-command-key-id", "-control-url", "-token-file", "-ca-file", "-timeout", "-plan-only", "-no-context"},
 	"agent fork":                {"-bundle", "-snapshot", "-instance-id", "-lineage-id", "-ttl", "-on-expiry", "-out"},
 	"context set":               {"-control-url", "-token-file", "-ca-file", "-node-url", "-node-token-file", "-tenant-id", "-node-id"},
 	"completion install":        {"-shell", "-force"},

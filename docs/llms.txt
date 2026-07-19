@@ -35,7 +35,7 @@ Documentation: https://hardrails.github.io/steward/
 
 ## How-to guides
 
-- [Build and run agents](https://hardrails.github.io/steward/guides/build-agents/): Define a portable Hermes or OpenClaw application, validate it with CUE, apply optional OPA policy, explain deterministic placement, admit and start it on one node, and derive fresh fork lineage
+- [Build and run agents](https://hardrails.github.io/steward/guides/build-agents/): Define a portable Hermes or OpenClaw application, validate it with CUE, apply optional OPA policy, explain deterministic placement, admit and start it directly or through Steward Control, and derive fresh fork lineage
 - [Operator console](https://hardrails.github.io/steward/guides/operator-console/): Use the same scoped control API bearer in an embedded, air-gapped React interface; review and submit exact offline-signed bytes while keeping signing keys outside the browser
 - [CLI contexts and completion](https://hardrails.github.io/steward/guides/cli/): Save repeated Control and local Executor connection paths without storing bearer values; install Bash, Zsh, or Fish completion with one command
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API
