@@ -156,7 +156,7 @@ var commandHelp = map[string]string{
 	"key":              "Check that one private key matches one public key.\n\nUsage: stewardctl key match -private-key FILE -public-key FILE\n",
 	"completion":       "Install or print local shell completion.\n\nUsage: stewardctl completion install|bash|zsh|fish\n",
 	"upgrade":          "Inspect whether a node is drained and whether retained formats are compatible with an upgrade.\n\nUsage: stewardctl upgrade check-drained|inspect-formats ...\n",
-	"executor-command": "Issue or verify a signed command delivered to an Executor node out of band. This is an advanced transport tool; routine fleet operations use stewardctl control.\n\nUsage: stewardctl executor-command issue|verify ...\n",
+	"executor-command": "Issue or verify a signed command or bounded controller delegation delivered to Executor. This is an advanced transport tool; routine fleet operations use stewardctl control.\n\nUsage: stewardctl executor-command issue|verify|delegation ...\n",
 }
 
 func nodeCommand(arguments []string, stdout io.Writer) error {
@@ -682,6 +682,12 @@ func validatePayload(payload []byte, payloadType string) error {
 			return err
 		}
 		return command.Validate(timeNow())
+	case admission.CommandDelegationPayloadType:
+		var delegation admission.CommandDelegation
+		if err := dsse.DecodeStrictInto(payload, maxArtifactBytes, &delegation); err != nil {
+			return err
+		}
+		return delegation.Validate(timeNow())
 	default:
 		return errors.New("unsupported payload type")
 	}
