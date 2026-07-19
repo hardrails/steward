@@ -40,6 +40,7 @@ const smokeToken = "steward_cp_v1_smoke_bootstrap"
 func main() {
 	initialize := flag.Bool("initialize", false, "")
 	initializeWitness := flag.Bool("initialize-witness-key", false, "")
+	initializeController := flag.Bool("initialize-controller-key", false, "")
 	check := flag.Bool("check-config", false, "")
 	showVersion := flag.Bool("version", false, "")
 	state := flag.String("state-dir", "/var/lib/steward-control", "")
@@ -47,6 +48,8 @@ func main() {
 	admin := flag.String("admin-token-file", "", "")
 	witnessPrivate := flag.String("witness-private-key-file", "/var/lib/steward-control/witness.private.pem", "")
 	witnessPublic := flag.String("witness-public-key-file", "/var/lib/steward-control/witness.public.pem", "")
+	controllerPrivate := flag.String("controller-private-key-file", "/var/lib/steward-control/controller.private.pem", "")
+	controllerPublic := flag.String("controller-public-key-file", "/var/lib/steward-control/controller.public.pem", "")
 	address := flag.String("addr", "127.0.0.1:8443", "")
 	flag.String("tls-cert-file", "", "")
 	flag.String("tls-key-file", "", "")
@@ -54,6 +57,8 @@ func main() {
 	flag.Duration("node-stale-after", 2*time.Minute, "")
 	flag.Duration("evidence-stale-after", 5*time.Minute, "")
 	flag.Duration("command-overdue-after", 5*time.Minute, "")
+	flag.Duration("reconcile-interval", 5*time.Second, "")
+	flag.String("controller-key-id", "controller-default", "")
 	flag.Int("capacity-warning-percent", 80, "")
 	flag.Parse()
 	if *showVersion {
@@ -67,6 +72,7 @@ func main() {
 		writeIfAbsent(filepath.Join(*state, "snapshot.1"), []byte("snapshot\n"))
 		writeIfAbsent(*admin, []byte(smokeToken+"\n"))
 		ensureWitness(*witnessPrivate, *witnessPublic)
+		ensureController(*controllerPrivate, *controllerPublic)
 		if pauseInitialize == "true" {
 			time.Sleep(2 * time.Second)
 		}
@@ -85,7 +91,12 @@ func main() {
 		ensureWitness(*witnessPrivate, *witnessPublic)
 		return
 	}
+	if *initializeController {
+		ensureController(*controllerPrivate, *controllerPublic)
+		return
+	}
 	ensureWitness(*witnessPrivate, *witnessPublic)
+	ensureController(*controllerPrivate, *controllerPublic)
 	lock, err := os.OpenFile(filepath.Join(*state, "LOCK"), os.O_RDWR|os.O_CREATE, 0o600)
 	must(err)
 	must(syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
@@ -162,6 +173,41 @@ func ensureWitness(privatePath, publicPath string) {
 	must(err)
 	if string(privateRaw) != "smoke-witness-private\n" || string(publicRaw) != "smoke-witness-public\n" {
 		must(fmt.Errorf("mismatched witness key pair"))
+	}
+}
+
+func ensureController(privatePath, publicPath string) {
+	privateInfo, privateErr := os.Lstat(privatePath)
+	publicInfo, publicErr := os.Lstat(publicPath)
+	privateMissing := os.IsNotExist(privateErr)
+	publicMissing := os.IsNotExist(publicErr)
+	if privateErr != nil && !privateMissing {
+		must(privateErr)
+	}
+	if publicErr != nil && !publicMissing {
+		must(publicErr)
+	}
+	if privateMissing != publicMissing {
+		must(fmt.Errorf("partial controller key pair"))
+	}
+	if privateMissing {
+		writeIfAbsentMode(privatePath, []byte("smoke-controller-private\n"), 0o600)
+		writeIfAbsentMode(publicPath, []byte("smoke-controller-public\n"), 0o644)
+		privateInfo, privateErr = os.Lstat(privatePath)
+		publicInfo, publicErr = os.Lstat(publicPath)
+		must(privateErr)
+		must(publicErr)
+	}
+	if !privateInfo.Mode().IsRegular() || privateInfo.Mode().Perm() != 0o600 ||
+		!publicInfo.Mode().IsRegular() || publicInfo.Mode().Perm() != 0o644 {
+		must(fmt.Errorf("unsafe controller key metadata"))
+	}
+	privateRaw, err := os.ReadFile(privatePath)
+	must(err)
+	publicRaw, err := os.ReadFile(publicPath)
+	must(err)
+	if string(privateRaw) != "smoke-controller-private\n" || string(publicRaw) != "smoke-controller-public\n" {
+		must(fmt.Errorf("mismatched controller key pair"))
 	}
 }
 
@@ -604,6 +650,8 @@ grep -Fq 'recovered the previous controller state from an interrupted durable tr
 [[ $(stat -c '%U:%G %a' /var/lib/steward-control) == 'steward-control:steward-control 700' ]]
 [[ $(stat -c '%U:%G %a' /var/lib/steward-control/witness.private.pem) == 'steward-control:steward-control 600' ]]
 [[ $(stat -c '%U:%G %a' /var/lib/steward-control/witness.public.pem) == 'steward-control:steward-control 644' ]]
+[[ $(stat -c '%U:%G %a' /var/lib/steward-control/controller.private.pem) == 'steward-control:steward-control 600' ]]
+[[ $(stat -c '%U:%G %a' /var/lib/steward-control/controller.public.pem) == 'steward-control:steward-control 644' ]]
 [[ $(stat -c '%U:%G %a' /root/steward-control-admin.token) == 'root:root 600' ]]
 [[ $(stat -c '%h' /root/steward-control-admin.token) == 1 ]]
 [[ $(id -nG steward-control) == steward-control ]]
@@ -613,6 +661,12 @@ grep -Fxq 'STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=/var/lib/steward-control/wit
 	/etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=/var/lib/steward-control/witness.public.pem' \
 	/etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE=/var/lib/steward-control/controller.private.pem' \
+	/etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE=/var/lib/steward-control/controller.public.pem' \
+	/etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_CONTROLLER_KEY_ID=controller-default' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_RECONCILE_INTERVAL=5s' /etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_ENABLE_METRICS=false' /etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_NODE_STALE_AFTER=2m' /etc/steward-control/control.env
 grep -Fxq 'STEWARD_CONTROL_EVIDENCE_STALE_AFTER=5m' /etc/steward-control/control.env
@@ -683,6 +737,10 @@ STEWARD_CONTROL_STATE_DIR=/var/lib/steward-control
 STEWARD_CONTROL_AUTH_KEY_FILE=/var/lib/steward-control/auth.key
 STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=/var/lib/steward-control/witness.private.pem
 STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=/var/lib/steward-control/witness.public.pem
+STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE=/var/lib/steward-control/controller.private.pem
+STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE=/var/lib/steward-control/controller.public.pem
+STEWARD_CONTROL_CONTROLLER_KEY_ID=controller-default
+STEWARD_CONTROL_RECONCILE_INTERVAL=5s
 STEWARD_CONTROL_TLS_CERT_FILE=/etc/steward-control/tls.crt
 STEWARD_CONTROL_TLS_KEY_FILE=/etc/steward-control/tls.key
 STEWARD_CONTROL_ENABLE_METRICS=false
@@ -744,8 +802,12 @@ passwd -l steward-control >/dev/null
 
 witness_private=/var/lib/steward-control/witness.private.pem
 witness_public=/var/lib/steward-control/witness.public.pem
+controller_private=/var/lib/steward-control/controller.private.pem
+controller_public=/var/lib/steward-control/controller.public.pem
 cp -p "$witness_private" "$fixture/witness.private.pem"
 cp -p "$witness_public" "$fixture/witness.public.pem"
+cp -p "$controller_private" "$fixture/controller.private.pem"
+cp -p "$controller_public" "$fixture/controller.public.pem"
 assert_witness_state_rejected() {
 	local label=$1
 	if install_version v1.0.0 >"/tmp/control-witness-$label.out" 2>&1; then
@@ -777,6 +839,37 @@ chmod 0644 "$witness_public"
 assert_witness_state_rejected mismatched-pair
 install -m 0644 -o steward-control -g steward-control "$fixture/witness.public.pem" "$witness_public"
 
+assert_controller_state_rejected() {
+	local label=$1
+	if install_version v1.0.0 >"/tmp/control-controller-$label.out" 2>&1; then
+		echo "control-install-smoke: installer accepted $label controller signing-key state" >&2
+		exit 1
+	fi
+	[[ $(readlink /opt/steward-control/current) == /opt/steward-control/releases/v1.0.0 ]]
+	[[ ! -e /var/lib/steward-control-installer/transaction ]]
+}
+
+chmod 0640 "$controller_private"
+assert_controller_state_rejected unsafe-permissions
+chmod 0600 "$controller_private"
+
+rm -f "$controller_public"
+assert_controller_state_rejected partial-pair
+[[ ! -e $controller_public ]]
+install -m 0644 -o steward-control -g steward-control "$fixture/controller.public.pem" "$controller_public"
+
+rm -f "$controller_public"
+ln -s "$fixture/controller.public.pem" "$controller_public"
+assert_controller_state_rejected public-symlink
+rm -f "$controller_public"
+install -m 0644 -o steward-control -g steward-control "$fixture/controller.public.pem" "$controller_public"
+
+printf '%s\n' mismatched-public-key >"$controller_public"
+chown steward-control:steward-control "$controller_public"
+chmod 0644 "$controller_public"
+assert_controller_state_rejected mismatched-pair
+install -m 0644 -o steward-control -g steward-control "$fixture/controller.public.pem" "$controller_public"
+
 # Simulate an upgrade from durable state and control.env created before witness
 # keys existed. The candidate must create the pair once, publish the stable
 # paths, and preserve the bytes on every later rerun and upgrade.
@@ -795,6 +888,22 @@ token_hash=$(sha256sum /root/steward-control-admin.token)
 install_version v1.0.0
 [[ $(sha256sum /root/steward-control-admin.token) == "$token_hash" ]]
 [[ $(sha256sum "$witness_private" "$witness_public") == "$legacy_witness_hash" ]]
+
+# Simulate an upgrade from controller state created before online delegated
+# reconciliation. The installer must add one purpose-separated signing pair and
+# publish its stable identity without replacing it on later runs.
+rm -f "$controller_private" "$controller_public"
+sed -i '/^STEWARD_CONTROL_CONTROLLER_/d; /^STEWARD_CONTROL_RECONCILE_INTERVAL=/d' /etc/steward-control/control.env
+install_version v1.0.0
+[[ $(stat -c '%U:%G %a' "$controller_private") == 'steward-control:steward-control 600' ]]
+[[ $(stat -c '%U:%G %a' "$controller_public") == 'steward-control:steward-control 644' ]]
+legacy_controller_hash=$(sha256sum "$controller_private" "$controller_public")
+grep -Fxq "STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE=$controller_private" /etc/steward-control/control.env
+grep -Fxq "STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE=$controller_public" /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_CONTROLLER_KEY_ID=controller-default' /etc/steward-control/control.env
+grep -Fxq 'STEWARD_CONTROL_RECONCILE_INTERVAL=5s' /etc/steward-control/control.env
+install_version v1.0.0
+[[ $(sha256sum "$controller_private" "$controller_public") == "$legacy_controller_hash" ]]
 
 install_version v1.1.0
 [[ $(readlink /opt/steward-control/current) == /opt/steward-control/releases/v1.1.0 ]]
@@ -1241,6 +1350,8 @@ install_real
 [[ $(stat -c '%U:%G %a' /var/lib/steward-control) == 'steward-control:steward-control 700' ]]
 [[ $(stat -c '%U:%G %a' /var/lib/steward-control/witness.private.pem) == 'steward-control:steward-control 600' ]]
 [[ $(stat -c '%U:%G %a' /var/lib/steward-control/witness.public.pem) == 'steward-control:steward-control 644' ]]
+[[ $(stat -c '%U:%G %a' /var/lib/steward-control/controller.private.pem) == 'steward-control:steward-control 600' ]]
+[[ $(stat -c '%U:%G %a' /var/lib/steward-control/controller.public.pem) == 'steward-control:steward-control 644' ]]
 [[ $(stat -c '%U:%G %a' /root/steward-control-admin.token) == 'root:root 600' ]]
 [[ $(stat -c '%h' /root/steward-control-admin.token) == 1 ]]
 if find /root -maxdepth 1 -name "$publication_pattern" -print -quit | grep -q .; then
@@ -1250,12 +1361,16 @@ fi
 real_token_hash=$(sha256sum /root/steward-control-admin.token)
 real_witness_hash=$(sha256sum /var/lib/steward-control/witness.private.pem \
 	/var/lib/steward-control/witness.public.pem)
+real_controller_hash=$(sha256sum /var/lib/steward-control/controller.private.pem \
+	/var/lib/steward-control/controller.public.pem)
 ln /root/steward-control-admin.token "${publication_prefix}interrupted-link"
 install_real >/dev/null
 [[ ! -e ${publication_prefix}interrupted-link ]]
 [[ $(stat -c '%h' /root/steward-control-admin.token) == 1 ]]
 [[ $(sha256sum /var/lib/steward-control/witness.private.pem \
 	/var/lib/steward-control/witness.public.pem) == "$real_witness_hash" ]]
+[[ $(sha256sum /var/lib/steward-control/controller.private.pem \
+	/var/lib/steward-control/controller.public.pem) == "$real_controller_hash" ]]
 
 cp -p /root/steward-control-admin.token "${publication_prefix}interrupted-temp"
 rm /root/steward-control-admin.token
