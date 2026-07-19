@@ -63,6 +63,21 @@ func TestRunInitializesRecoverableControllerWithOwnerOnlyTokenHandoff(t *testing
 	if info, err := os.Stat(witnessPublicPath); err != nil || info.Mode().Perm() != 0o644 {
 		t.Fatalf("witness public key info=%v error=%v", info, err)
 	}
+	controllerPrivatePath := filepath.Join(stateDirectory, "controller.private.pem")
+	controllerPublicPath := filepath.Join(stateDirectory, "controller.public.pem")
+	controllerPrivate, controllerPublic, err := controlwitness.LoadPair(controllerPrivatePath, controllerPublicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(controllerPrivatePath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("controller private key info=%v error=%v", info, err)
+	}
+	if info, err := os.Stat(controllerPublicPath); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("controller public key info=%v error=%v", info, err)
+	}
+	if bytes.Equal(controllerPublic, witnessPublic) {
+		t.Fatal("controller signing and witness identities were reused")
+	}
 	store, err := controlstore.Open(stateDirectory, controlstore.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
@@ -94,6 +109,11 @@ func TestRunInitializesRecoverableControllerWithOwnerOnlyTokenHandoff(t *testing
 	reloadedPrivate, reloadedPublic, err := controlwitness.LoadPair(witnessPrivatePath, witnessPublicPath)
 	if err != nil || !bytes.Equal(reloadedPrivate, witnessPrivate) || !bytes.Equal(reloadedPublic, witnessPublic) {
 		t.Fatalf("bootstrap recovery changed witness identity: %v", err)
+	}
+	reloadedControllerPrivate, reloadedControllerPublic, err := controlwitness.LoadPair(controllerPrivatePath, controllerPublicPath)
+	if err != nil || !bytes.Equal(reloadedControllerPrivate, controllerPrivate) ||
+		!bytes.Equal(reloadedControllerPublic, controllerPublic) {
+		t.Fatalf("bootstrap recovery changed controller signing identity: %v", err)
 	}
 	var checked bytes.Buffer
 	if err := run([]string{"-check-config", "-state-dir", stateDirectory, "-addr", "127.0.0.1:0"}, &checked, &bytes.Buffer{}); err != nil {
@@ -135,15 +155,22 @@ func TestParseOptionsRejectsUnsafePathsAndCapacity(t *testing.T) {
 		{"-state-dir", "/tmp/control", "-witness-public-key-file", "relative"},
 		{"-state-dir", "/tmp/control", "-auth-key-file", "/tmp/same", "-witness-private-key-file", "/tmp/same"},
 		{"-state-dir", "/tmp/control", "-witness-private-key-file", "/tmp/same", "-witness-public-key-file", "/tmp/same"},
+		{"-state-dir", "/tmp/control", "-controller-private-key-file", "relative"},
+		{"-state-dir", "/tmp/control", "-controller-public-key-file", "relative"},
+		{"-state-dir", "/tmp/control", "-witness-private-key-file", "/tmp/same", "-controller-private-key-file", "/tmp/same"},
 		{"-state-dir", "/tmp/control", "-tls-cert-file", "relative", "-tls-key-file", "/tmp/key"},
 		{"-state-dir", "/tmp/control", "-tls-cert-file", "/tmp/control/witness.public.pem", "-tls-key-file", "/tmp/key"},
 		{"-state-dir", "/tmp/control", "-initialize", "-initialize-witness-key"},
 		{"-state-dir", "/tmp/control", "-initialize-witness-key", "-check-config"},
+		{"-state-dir", "/tmp/control", "-initialize-controller-key", "-check-config"},
 		{"-state-dir", "/tmp/control", "-delivery-lease", "0s"},
 		{"-state-dir", "/tmp/control", "-delivery-lease", (controlstore.MaxDeliveryLease + time.Second).String()},
 		{"-state-dir", "/tmp/control", "-max-poll-deliveries", "0"},
 		{"-state-dir", "/tmp/control", "-max-poll-deliveries", "129"},
 		{"-state-dir", "/tmp/control", "-max-tenants", "0"},
+		{"-state-dir", "/tmp/control", "-max-deployments", "0"},
+		{"-state-dir", "/tmp/control", "-reconcile-interval", "0s"},
+		{"-state-dir", "/tmp/control", "-reconcile-interval", "2h"},
 		{"-state-dir", "/tmp/control", "-node-stale-after", "0s"},
 		{"-state-dir", "/tmp/control", "-evidence-stale-after", (controlstore.MaxOperationsThreshold + time.Second).String()},
 		{"-state-dir", "/tmp/control", "-command-overdue-after", "-1s"},
@@ -214,6 +241,9 @@ func TestInitializeWitnessKeyMigratesLegacyStateIdempotently(t *testing.T) {
 	}
 	if !bytes.Equal(privateAfter, privateBefore) || !bytes.Equal(publicAfter, publicBefore) {
 		t.Fatal("idempotent witness migration rotated the controller identity")
+	}
+	if err := run([]string{"-initialize-controller-key", "-state-dir", stateDirectory}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
 	}
 	if err := run([]string{"-check-config", "-state-dir", stateDirectory, "-addr", "127.0.0.1:0"}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("migrated controller configuration is invalid: %v", err)
@@ -299,6 +329,52 @@ func TestWitnessLifecycleRejectsPartialMismatchUnsafePermissionsAndSymlink(t *te
 			t.Fatal("witness public-key symlink was accepted")
 		}
 	})
+}
+
+func TestControllerSigningKeyMigrationIsIdempotentAndIdentitySeparated(t *testing.T) {
+	stateDirectory := initializeLegacyControllerForWitnessTest(t)
+	if err := run([]string{"-initialize-witness-key", "-state-dir", stateDirectory}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	arguments := []string{"-initialize-controller-key", "-state-dir", stateDirectory}
+	var output bytes.Buffer
+	if err := run(arguments, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	privatePath := filepath.Join(stateDirectory, "controller.private.pem")
+	publicPath := filepath.Join(stateDirectory, "controller.public.pem")
+	if strings.TrimSpace(output.String()) != publicPath {
+		t.Fatalf("controller key output = %q", output.String())
+	}
+	privateBefore, publicBefore, err := controlwitness.LoadPair(privatePath, publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	privateAfter, publicAfter, err := controlwitness.LoadPair(privatePath, publicPath)
+	if err != nil || !bytes.Equal(privateBefore, privateAfter) || !bytes.Equal(publicBefore, publicAfter) {
+		t.Fatalf("controller key migration rotated identity: %v", err)
+	}
+
+	witnessPrivateRaw, err := os.ReadFile(filepath.Join(stateDirectory, "witness.private.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	witnessPublicRaw, err := os.ReadFile(filepath.Join(stateDirectory, "witness.public.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(privatePath, witnessPrivateRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(publicPath, witnessPublicRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-check-config", "-state-dir", stateDirectory}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "must use different keys") {
+		t.Fatalf("reused witness/controller identity error = %v", err)
+	}
 }
 
 func TestRunReportsVersionWithoutState(t *testing.T) {
@@ -638,6 +714,9 @@ func initializeLegacyControllerForWitnessTest(t *testing.T) string {
 func initializeWitnessForTest(t *testing.T, stateDirectory string) {
 	t.Helper()
 	if err := run([]string{"-initialize-witness-key", "-state-dir", stateDirectory}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-initialize-controller-key", "-state-dir", stateDirectory}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
@@ -21,6 +22,7 @@ import (
 	"github.com/hardrails/steward/internal/buildinfo"
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlplane"
+	"github.com/hardrails/steward/internal/controlreconcile"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/controlwitness"
 	"github.com/hardrails/steward/internal/securefile"
@@ -36,11 +38,16 @@ type options struct {
 	adminTokenFile                       string
 	witnessPrivateKeyFile                string
 	witnessPublicKeyFile                 string
+	controllerPrivateKeyFile             string
+	controllerPublicKeyFile              string
+	controllerKeyID                      string
 	tlsCertFile, tlsKeyFile              string
 	initialize, initializeWitnessKey     bool
+	initializeControllerKey              bool
 	enableMetrics                        bool
 	checkConfig, version                 bool
 	leaseDuration, terminalRetention     time.Duration
+	reconcileInterval                    time.Duration
 	maxPoll                              int
 	limits                               controlstore.Limits
 	operationsThresholds                 controlstore.OperationsThresholds
@@ -69,6 +76,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if parsed.initializeWitnessKey {
 		return initializeWitnessKey(parsed, stdout)
 	}
+	if parsed.initializeControllerKey {
+		return initializeControllerKey(parsed, stdout)
+	}
 	manager, err := controlauth.LoadKey(parsed.authKeyFile)
 	if err != nil {
 		return err
@@ -92,7 +102,23 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err := validateWitnessTLSKeySeparation(tlsConfig, witnessPrivateKey); err != nil {
 		return err
 	}
+	controllerPrivateKey, controllerPublicKey, err := controlwitness.LoadPair(
+		parsed.controllerPrivateKeyFile, parsed.controllerPublicKeyFile,
+	)
+	if err != nil {
+		return fmt.Errorf("load controller signing key: %w", err)
+	}
+	if err := validateControllerKeySeparation(tlsConfig, witnessPrivateKey, controllerPublicKey); err != nil {
+		return err
+	}
 	if err := controlplane.ValidateTLSHostPolicy(tlsConfig); err != nil {
+		return err
+	}
+	reconciler, err := controlreconcile.New(controlreconcile.Config{
+		Store: store, KeyID: parsed.controllerKeyID, PrivateKey: controllerPrivateKey,
+		Interval: parsed.reconcileInterval, Logger: logger,
+	})
+	if err != nil {
 		return err
 	}
 	if parsed.checkConfig {
@@ -107,7 +133,7 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return serve(parsed.address, handler, tlsConfig, logger)
+	return serve(parsed.address, handler, tlsConfig, logger, reconciler.Run)
 }
 
 func parseOptions(arguments []string, stderr io.Writer) (options, error) {
@@ -122,14 +148,19 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	flags.StringVar(&parsed.adminTokenFile, "admin-token-file", "", "new owner-only bootstrap token file (default: <state-dir>/site-admin.token)")
 	flags.StringVar(&parsed.witnessPrivateKeyFile, "witness-private-key-file", "", "owner-only Ed25519 evidence-witness private key (default: <state-dir>/witness.private.pem)")
 	flags.StringVar(&parsed.witnessPublicKeyFile, "witness-public-key-file", "", "published Ed25519 evidence-witness public key (default: <state-dir>/witness.public.pem)")
+	flags.StringVar(&parsed.controllerPrivateKeyFile, "controller-private-key-file", "", "owner-only online controller signing key (default: <state-dir>/controller.private.pem)")
+	flags.StringVar(&parsed.controllerPublicKeyFile, "controller-public-key-file", "", "published online controller signing key (default: <state-dir>/controller.public.pem)")
+	flags.StringVar(&parsed.controllerKeyID, "controller-key-id", "controller-default", "controller key ID named by tenant delegations")
 	flags.StringVar(&parsed.tlsCertFile, "tls-cert-file", "", "TLS server certificate PEM for a non-loopback listener")
 	flags.StringVar(&parsed.tlsKeyFile, "tls-key-file", "", "owner-only TLS server private key PEM")
 	flags.BoolVar(&parsed.initialize, "initialize", false, "initialize state and print a one-time site-admin token")
 	flags.BoolVar(&parsed.initializeWitnessKey, "initialize-witness-key", false, "create or validate the dedicated evidence-witness key pair and exit")
+	flags.BoolVar(&parsed.initializeControllerKey, "initialize-controller-key", false, "create or validate the online controller signing key pair and exit")
 	flags.BoolVar(&parsed.enableMetrics, "enable-metrics", false, "expose authenticated Prometheus metrics")
 	flags.BoolVar(&parsed.checkConfig, "check-config", false, "validate configuration and durable state without serving")
 	flags.BoolVar(&parsed.version, "version", false, "print version and exit")
 	flags.DurationVar(&parsed.leaseDuration, "delivery-lease", 2*time.Minute, "Executor delivery lease")
+	flags.DurationVar(&parsed.reconcileInterval, "reconcile-interval", 5*time.Second, "desired deployment reconciliation interval")
 	flags.IntVar(&parsed.maxPoll, "max-poll-deliveries", 32, "maximum deliveries considered per node poll")
 	flags.IntVar(&parsed.limits.MaxTenants, "max-tenants", limits.MaxTenants, "maximum retained tenants")
 	flags.IntVar(&parsed.limits.MaxNodes, "max-nodes", limits.MaxNodes, "maximum retained nodes")
@@ -193,6 +224,12 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	if parsed.witnessPublicKeyFile == "" {
 		parsed.witnessPublicKeyFile = filepath.Join(parsed.stateDirectory, "witness.public.pem")
 	}
+	if parsed.controllerPrivateKeyFile == "" {
+		parsed.controllerPrivateKeyFile = filepath.Join(parsed.stateDirectory, "controller.private.pem")
+	}
+	if parsed.controllerPublicKeyFile == "" {
+		parsed.controllerPublicKeyFile = filepath.Join(parsed.stateDirectory, "controller.public.pem")
+	}
 	if !filepath.IsAbs(parsed.authKeyFile) || filepath.Clean(parsed.authKeyFile) != parsed.authKeyFile {
 		return options{}, errors.New("-auth-key-file must be a clean absolute path")
 	}
@@ -208,16 +245,26 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 		filepath.Clean(parsed.witnessPublicKeyFile) != parsed.witnessPublicKeyFile {
 		return options{}, errors.New("-witness-public-key-file must be a clean absolute path")
 	}
+	if !filepath.IsAbs(parsed.controllerPrivateKeyFile) ||
+		filepath.Clean(parsed.controllerPrivateKeyFile) != parsed.controllerPrivateKeyFile {
+		return options{}, errors.New("-controller-private-key-file must be a clean absolute path")
+	}
+	if !filepath.IsAbs(parsed.controllerPublicKeyFile) ||
+		filepath.Clean(parsed.controllerPublicKeyFile) != parsed.controllerPublicKeyFile {
+		return options{}, errors.New("-controller-public-key-file must be a clean absolute path")
+	}
 	distinctPaths := []string{
 		parsed.authKeyFile,
 		parsed.adminTokenFile,
 		parsed.witnessPrivateKeyFile,
 		parsed.witnessPublicKeyFile,
+		parsed.controllerPrivateKeyFile,
+		parsed.controllerPublicKeyFile,
 	}
 	for index, path := range distinctPaths {
 		for other := index + 1; other < len(distinctPaths); other++ {
 			if path == distinctPaths[other] {
-				return options{}, errors.New("control authentication, bootstrap, and witness files must use distinct paths")
+				return options{}, errors.New("control authentication, bootstrap, witness, and controller key files must use distinct paths")
 			}
 		}
 	}
@@ -232,13 +279,15 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 		}
 	}
 	modeCount := 0
-	for _, active := range []bool{parsed.initialize, parsed.initializeWitnessKey, parsed.checkConfig} {
+	for _, active := range []bool{
+		parsed.initialize, parsed.initializeWitnessKey, parsed.initializeControllerKey, parsed.checkConfig,
+	} {
 		if active {
 			modeCount++
 		}
 	}
 	if modeCount > 1 {
-		return options{}, errors.New("-initialize, -initialize-witness-key, and -check-config are mutually exclusive")
+		return options{}, errors.New("initialization and configuration-check modes are mutually exclusive")
 	}
 	parsed.limits.TerminalRetention = parsed.terminalRetention
 	if err := parsed.limits.Validate(); err != nil {
@@ -249,6 +298,9 @@ func parseOptions(arguments []string, stderr io.Writer) (options, error) {
 	}
 	if parsed.leaseDuration <= 0 || parsed.leaseDuration > controlstore.MaxDeliveryLease || parsed.maxPoll <= 0 || parsed.maxPoll > 128 {
 		return options{}, errors.New("delivery lease and poll batch are outside their safe limits")
+	}
+	if parsed.reconcileInterval < time.Second || parsed.reconcileInterval > time.Hour {
+		return options{}, errors.New("reconcile interval must be between 1 second and 1 hour")
 	}
 	if _, _, err := net.SplitHostPort(parsed.address); err != nil {
 		return options{}, fmt.Errorf("-addr must contain a valid host and port: %w", err)
@@ -269,7 +321,8 @@ func initialize(parsed options, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if status.Tenants != 0 || status.Nodes != 0 || status.Credentials > 1 || status.Enrollments != 0 || status.Commands != 0 {
+	if status.Tenants != 0 || status.Nodes != 0 || status.Credentials > 1 || status.Enrollments != 0 ||
+		status.Commands != 0 || status.Deployments != 0 {
 		return errors.New("refusing to initialize control state that is not empty or a lone bootstrap credential")
 	}
 	var manager *controlauth.Manager
@@ -281,6 +334,9 @@ func initialize(parsed options, stdout io.Writer) error {
 		return err
 	}
 	if _, _, err := ensureWitnessKeyPair(parsed.witnessPrivateKeyFile, parsed.witnessPublicKeyFile); err != nil {
+		return err
+	}
+	if _, _, err := ensureControllerKeyPair(parsed.controllerPrivateKeyFile, parsed.controllerPublicKeyFile); err != nil {
 		return err
 	}
 	output, err := reserveSecretOutput(parsed.adminTokenFile)
@@ -318,6 +374,25 @@ func initializeWitnessKey(parsed options, stdout io.Writer) error {
 	return err
 }
 
+func initializeControllerKey(parsed options, stdout io.Writer) error {
+	if _, err := controlauth.LoadKey(parsed.authKeyFile); err != nil {
+		return err
+	}
+	store, err := controlstore.Open(parsed.stateDirectory, parsed.limits)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if _, err := store.Status(); err != nil {
+		return err
+	}
+	if _, _, err := ensureControllerKeyPair(parsed.controllerPrivateKeyFile, parsed.controllerPublicKeyFile); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, parsed.controllerPublicKeyFile)
+	return err
+}
+
 func ensureWitnessKeyPair(privatePath, publicPath string) (ed25519.PrivateKey, ed25519.PublicKey, error) {
 	privateInfo, privateErr := os.Lstat(privatePath)
 	publicInfo, publicErr := os.Lstat(publicPath)
@@ -341,6 +416,29 @@ func ensureWitnessKeyPair(privatePath, publicPath string) (ed25519.PrivateKey, e
 	}
 	private, public, err := controlwitness.LoadPair(privatePath, publicPath)
 	return private, public, err
+}
+
+func ensureControllerKeyPair(privatePath, publicPath string) (ed25519.PrivateKey, ed25519.PublicKey, error) {
+	privateInfo, privateErr := os.Lstat(privatePath)
+	publicInfo, publicErr := os.Lstat(publicPath)
+	privateMissing := errors.Is(privateErr, os.ErrNotExist)
+	publicMissing := errors.Is(publicErr, os.ErrNotExist)
+	if privateErr != nil && !privateMissing {
+		return nil, nil, fmt.Errorf("inspect controller signing private key: %w", privateErr)
+	}
+	if publicErr != nil && !publicMissing {
+		return nil, nil, fmt.Errorf("inspect controller signing public key: %w", publicErr)
+	}
+	if privateMissing != publicMissing {
+		return nil, nil, errors.New("controller signing key pair is partial; refusing to create, rotate, or overwrite either file")
+	}
+	if privateMissing {
+		return controlwitness.Initialize(privatePath, publicPath)
+	}
+	if privateInfo == nil || publicInfo == nil {
+		return nil, nil, errors.New("controller signing key pair could not be classified")
+	}
+	return controlwitness.LoadPair(privatePath, publicPath)
 }
 
 func transportConfig(parsed options) (*tls.Config, error) {
@@ -389,6 +487,37 @@ func validateWitnessTLSKeySeparation(tlsConfig *tls.Config, witnessPrivate ed255
 	witnessPublic := witnessPrivate.Public().(ed25519.PublicKey)
 	if witnessPublic.Equal(certificate.PublicKey) {
 		return errors.New("control TLS and evidence-witness identities must use different keys")
+	}
+	return nil
+}
+
+func validateControllerKeySeparation(
+	tlsConfig *tls.Config,
+	witnessPrivate ed25519.PrivateKey,
+	controllerPublic ed25519.PublicKey,
+) error {
+	if len(witnessPrivate) != ed25519.PrivateKeySize || len(controllerPublic) != ed25519.PublicKeySize {
+		return errors.New("control witness and controller signing keys are invalid")
+	}
+	if bytes.Equal(witnessPrivate.Public().(ed25519.PublicKey), controllerPublic) {
+		return errors.New("evidence-witness and controller signing identities must use different keys")
+	}
+	if tlsConfig == nil {
+		return nil
+	}
+	if len(tlsConfig.Certificates) != 1 || len(tlsConfig.Certificates[0].Certificate) == 0 {
+		return errors.New("control TLS and controller signing key configuration is invalid")
+	}
+	certificate := tlsConfig.Certificates[0].Leaf
+	if certificate == nil {
+		var err error
+		certificate, err = x509.ParseCertificate(tlsConfig.Certificates[0].Certificate[0])
+		if err != nil {
+			return fmt.Errorf("parse control TLS leaf certificate: %w", err)
+		}
+	}
+	if controllerPublic.Equal(certificate.PublicKey) {
+		return errors.New("control TLS and controller signing identities must use different keys")
 	}
 	return nil
 }
@@ -469,7 +598,13 @@ func syncParent(path string) error {
 	return errors.Join(directory.Sync(), directory.Close())
 }
 
-func serve(address string, handler http.Handler, tlsConfig *tls.Config, logger *slog.Logger) error {
+func serve(
+	address string,
+	handler http.Handler,
+	tlsConfig *tls.Config,
+	logger *slog.Logger,
+	background func(context.Context) error,
+) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
@@ -485,6 +620,12 @@ func serve(address string, handler http.Handler, tlsConfig *tls.Config, logger *
 		TLSConfig: tlsConfig, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 	serveErrors := make(chan error, 1)
+	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	backgroundErrors := make(chan error, 1)
+	if background != nil {
+		go func() { backgroundErrors <- background(shutdownContext) }()
+	}
 	go func() {
 		logger.Info("Steward Control listening", "address", listener.Addr().String(), "tls", tlsConfig != nil)
 		if tlsConfig != nil {
@@ -493,14 +634,22 @@ func serve(address string, handler http.Handler, tlsConfig *tls.Config, logger *
 		}
 		serveErrors <- server.Serve(listener)
 	}()
-	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	select {
 	case err := <-serveErrors:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
+	case err := <-backgroundErrors:
+		if err != nil {
+			stop()
+			context, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_ = server.Shutdown(context)
+			<-serveErrors
+			return fmt.Errorf("control background service stopped: %w", err)
+		}
+		return errors.New("control background service stopped unexpectedly")
 	case <-shutdownContext.Done():
 	}
 	context, cancel := context.WithTimeout(context.Background(), 15*time.Second)
