@@ -300,6 +300,43 @@ func VerifyDelegatedCommand(commandRaw, delegationRaw []byte, policy SitePolicy,
 	return command, nil
 }
 
+// VerifyControllerCommand authenticates the controller signature and exact
+// delegated scope without asserting that the delegation's tenant signature is
+// trusted. Control uses this before durable command submission. Executor still
+// calls VerifyDelegatedCommand with authenticated site policy and is the final
+// execution authority.
+func VerifyControllerCommand(commandRaw, delegationRaw []byte, now time.Time) (CommandStatement, error) {
+	statement, err := InspectCommandDelegation(delegationRaw, now)
+	if err != nil {
+		return CommandStatement{}, err
+	}
+	controllerKey, err := decodePublicKey(statement.ControllerPublicKey)
+	if err != nil {
+		return CommandStatement{}, deny("decode delegated controller key")
+	}
+	payload, _, err := dsse.Verify(commandRaw, CommandPayloadType, map[string]ed25519.PublicKey{
+		statement.ControllerKeyID: controllerKey,
+	})
+	if err != nil {
+		return CommandStatement{}, deny("verify controller command: %v", err)
+	}
+	var command CommandStatement
+	if err := dsse.DecodeStrictInto(payload, dsse.MaxPayloadBytes, &command); err != nil {
+		return CommandStatement{}, deny("decode verified controller command")
+	}
+	if err := command.Validate(now); err != nil {
+		return CommandStatement{}, err
+	}
+	verified := VerifiedCommandDelegation{
+		Statement: statement, EnvelopeDigest: dsse.Digest(delegationRaw),
+		ControllerKey: controllerKey,
+	}
+	if err := verified.Authorize(command, delegationRaw); err != nil {
+		return CommandStatement{}, err
+	}
+	return command, nil
+}
+
 func DecodeCommandDelegationEnvelope(encoded string) ([]byte, error) {
 	if encoded == "" || len(encoded) > base64.StdEncoding.EncodedLen(maxCommandDelegationBytes) {
 		return nil, errors.New("signed command delegation exceeds its limit")

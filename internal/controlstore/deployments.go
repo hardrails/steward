@@ -92,6 +92,9 @@ func (store *Store) ApplyDeployment(
 	if exists && input.Generation <= existing.Generation {
 		return Deployment{}, false, ErrConflict
 	}
+	if exists && !deploymentInstancesRollForward(existing.Instances, instances) {
+		return Deployment{}, false, ErrConflict
+	}
 	createdAt := canonicalTimestamp(now)
 	revision := uint64(1)
 	if exists {
@@ -240,6 +243,20 @@ func deploymentSpecEqual(existing Deployment, input DeploymentApply) bool {
 func hasDeploymentLifecycle(operations []string) bool {
 	for _, operation := range []string{"admit", "destroy", "start", "stop"} {
 		if !slices.Contains(operations, operation) {
+			return false
+		}
+	}
+	return true
+}
+
+func deploymentInstancesRollForward(previous, next []DeploymentInstance) bool {
+	previousByID := make(map[string]DeploymentInstance, len(previous))
+	for _, instance := range previous {
+		previousByID[instance.InstanceID] = instance
+	}
+	for _, instance := range next {
+		prior, exists := previousByID[instance.InstanceID]
+		if exists && (instance.Generation <= prior.Generation || instance.LineageID != prior.LineageID) {
 			return false
 		}
 	}
