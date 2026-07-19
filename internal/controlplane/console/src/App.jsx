@@ -466,7 +466,7 @@ function Masthead({health, clock}) {
         <span className="brand-mark" aria-hidden="true"><span>S</span></span>
         <span>
           <strong>STEWARD</strong>
-          <small>CONTROL ROOM</small>
+          <small>AGENT AUTHORITY</small>
         </span>
       </a>
       <div className="masthead-status" aria-live="polite">
@@ -491,15 +491,15 @@ function Airlock({authenticating, error, onUnlock}) {
     <section className="airlock" aria-labelledby="airlock-title">
       <div className="airlock-copy">
         <p className="eyebrow">LOCAL OPERATOR ACCESS</p>
-        <h1 id="airlock-title">Your fleet stops here.</h1>
+        <h1 id="airlock-title">See what your agents can actually do.</h1>
         <p className="lede">
-          Inspect the control plane without sending fleet data, credentials,
-          or telemetry to another service.
+          Inspect nodes, external-action authority, failures, and signed evidence
+          without sending fleet data, credentials, or telemetry to another service.
         </p>
         <dl className="boundary-list">
           <div><dt>Assets</dt><dd>Embedded. No CDN.</dd></div>
           <div><dt>Credential</dt><dd>Memory only. Never browser storage.</dd></div>
-          <div><dt>Authority</dt><dd>Exactly your existing operator scope.</dd></div>
+          <div><dt>Access</dt><dd>Limited to your existing operator scope.</dd></div>
         </dl>
       </div>
       <div className="airlock-panel">
@@ -541,11 +541,11 @@ function Airlock({authenticating, error, onUnlock}) {
 }
 
 const views = [
-  ["overview", "01", "Overview"],
-  ["attention", "02", "Attention"],
-  ["nodes", "03", "Nodes"],
-  ["commands", "04", "Commands"],
-  ["credentials", "05", "Credentials"],
+  ["overview", "01", "Fleet health"],
+  ["attention", "02", "Needs review"],
+  ["nodes", "03", "Agent nodes"],
+  ["commands", "04", "Signed activity"],
+  ["credentials", "05", "Access records"],
 ];
 
 function ControlRoom(props) {
@@ -633,8 +633,8 @@ function ControlRoom(props) {
           </div>
         </div>
         <div className="read-only-boundary">
-          <strong>REVIEW HERE. SIGN ELSEWHERE.</strong>
-          <span>The console can submit a command signed outside the browser. Signing keys and every other change stay outside.</span>
+          <strong>OBSERVE HERE. AUTHORIZE WITH YOUR KEYS.</strong>
+          <span>This console can transfer an exact command signed elsewhere. Private keys, reusable service credentials, and general mutations stay outside the browser.</span>
         </div>
         {tenantError ? <div className="flash-message is-error" role="alert">{tenantError}</div> : null}
         {refreshError ? <div className="flash-message is-error" role="alert">{refreshError}</div> : null}
@@ -669,20 +669,20 @@ function Overview({snapshot, onAttention}) {
   const capacityWarning = summary.capacity.some((item) => item.warning);
   return (
     <section className="view" aria-labelledby="overview-title">
-      <ViewHeading eyebrow="LIVE FLEET POSTURE" title="What needs your judgment?">
+      <ViewHeading eyebrow="LIVE FLEET POSTURE" title="What needs your attention?">
         Generated {formatTime(summary.generated_at)}
       </ViewHeading>
       <div className="metric-grid">
-        <Metric label="Attention" value={summary.attention.total}>
+        <Metric label="Needs review" value={summary.attention.total}>
           {summary.attention.critical} critical · {summary.attention.warnings} warnings
         </Metric>
         <Metric label="Active nodes" value={summary.evidence.active_nodes}>
           {summary.evidence.nodes} retained evidence identities
         </Metric>
-        <Metric label="Evidence current" value={summary.evidence.current}>
+        <Metric label="Current evidence" value={summary.evidence.current}>
           {summary.evidence.witnessed} witnessed · {summary.evidence.stale} stale
         </Metric>
-        <Metric label="Command failures" value={failures}>
+        <Metric label="Failed actions" value={failures}>
           {summary.commands.failed} failed · {summary.commands.outcome_unknown} unknown
         </Metric>
       </div>
@@ -708,7 +708,7 @@ function Overview({snapshot, onAttention}) {
           </div>
         </article>
         <article className="panel">
-          <PanelHeading index="03 / TRUST SIGNALS" title="Evidence posture" />
+          <PanelHeading index="03 / TRUST SIGNALS" title="Evidence health" />
           <dl className="evidence-list">
             <EvidenceValue label="Witnessed" value={summary.evidence.witnessed} />
             <EvidenceValue label="Unwitnessed" value={summary.evidence.unwitnessed} />
@@ -718,7 +718,7 @@ function Overview({snapshot, onAttention}) {
         </article>
       </div>
       <article className="panel recent-attention-panel">
-        <PanelHeading index="04 / FIRST RESPONSE" title="Highest-priority attention">
+        <PanelHeading index="04 / FIRST RESPONSE" title="Review first">
           <button className="text-button" type="button" onClick={onAttention}>See all findings →</button>
         </PanelHeading>
         <AttentionList items={attention.items.slice(0, 4)} />
@@ -729,7 +729,7 @@ function Overview({snapshot, onAttention}) {
 
 function Metric({label, value, children}) {
   return (
-    <article className={"metric" + (label === "Attention" ? " metric-attention" : "")}>
+    <article className={"metric" + (label === "Needs review" ? " metric-attention" : "")}>
       <span>{label}</span><strong>{value}</strong><small>{children}</small>
     </article>
   );
@@ -788,8 +788,8 @@ function AttentionList({items}) {
 function AttentionView({page}) {
   return (
     <section className="view" aria-labelledby="attention-title">
-      <ViewHeading eyebrow="DERIVED, NOT MUTABLE" title="Operator attention">
-        Deterministic findings from retained facts and current process observations.
+      <ViewHeading eyebrow="DERIVED, NOT MUTABLE" title="Needs review">
+        Findings computed from retained records and current node observations. This view does not change fleet state.
       </ViewHeading>
       <AttentionList items={page.items} />
       {page.next_cursor ? <p className="truncation-note">More findings exist. Narrow the tenant projection or use the API cursor.</p> : null}
@@ -804,7 +804,7 @@ function Badge({children, kind = ""}) {
 function NodesView({page, tenantID}) {
   return (
     <section className="view" aria-labelledby="nodes-title">
-      <ViewHeading eyebrow="ENROLLED EXECUTORS" title="Nodes">
+      <ViewHeading eyebrow="ENROLLED EXECUTORS" title="Agent nodes">
         {tenantID ? "Tenant " + tenantID : "Select one tenant to inspect its nodes."}
       </ViewHeading>
       <TableFrame empty={!tenantID ? "Select one tenant to load nodes." : "No nodes in this tenant."} hasRows={page.nodes.length > 0}>
@@ -930,8 +930,8 @@ function CommandsView({page, tenantID, onSubmit}) {
 
   return (
     <section className="view" aria-labelledby="commands-title">
-      <ViewHeading eyebrow="OFFLINE-SIGNED COMMAND" title="Submit a signed command">
-        Load a command signed outside this browser, compare its exact digest, and submit the unchanged file.
+      <ViewHeading eyebrow="OFFLINE-SIGNED COMMAND" title="Transfer a signed action">
+        Load a command signed outside this browser, compare its exact digest with the signing station, and submit the unchanged file.
       </ViewHeading>
       <div className="command-courier">
         <div className="courier-intake">
@@ -1007,7 +1007,7 @@ function CommandsView({page, tenantID, onSubmit}) {
         {error ? <p className="flash-message is-error" role="alert">{error}</p> : null}
         {result ? <p className="flash-message is-success" role="status">{result}</p> : null}
       </div>
-      <ViewHeading eyebrow="RETAINED METADATA" title="Command inventory">
+      <ViewHeading eyebrow="RETAINED METADATA" title="Signed activity">
         Signed command bytes and terminal result text are not returned by this view.
       </ViewHeading>
       <TableFrame empty="No commands in this projection." hasRows={page.commands.length > 0}>
@@ -1039,8 +1039,8 @@ function CommandsView({page, tenantID, onSubmit}) {
 function CredentialsView({page}) {
   return (
     <section className="view" aria-labelledby="credentials-title">
-      <ViewHeading eyebrow="NON-SECRET RECORDS" title="Credential inventory">
-        Bearer values and token message-authentication codes are never returned.
+      <ViewHeading eyebrow="NON-SECRET RECORDS" title="Access records">
+        Review who can call Steward. Bearer values and token message-authentication codes are never returned.
       </ViewHeading>
       <TableFrame empty="No credentials in this projection." hasRows={page.credentials.length > 0}>
         <table>
