@@ -218,6 +218,7 @@ type CommandStatement struct {
 	SchemaVersion              string          `json:"schema_version"`
 	CommandID                  string          `json:"command_id"`
 	AuthorizationContextDigest string          `json:"authorization_context_digest,omitempty"`
+	DelegationDSSEBase64       string          `json:"delegation_dsse_base64,omitempty"`
 	TenantID                   string          `json:"tenant_id"`
 	NodeID                     string          `json:"node_id"`
 	InstanceID                 string          `json:"instance_id"`
@@ -1179,6 +1180,10 @@ func (c CommandStatement) Validate(now time.Time) error {
 	}
 	if c.AuthorizationContextDigest != "" && !digest(c.AuthorizationContextDigest) {
 		return deny("invalid command authorization context digest")
+	}
+	if len(c.DelegationDSSEBase64) > base64.StdEncoding.EncodedLen(maxCommandDelegationBytes) ||
+		c.DelegationDSSEBase64 != "" && c.AuthorizationContextDigest == "" {
+		return deny("invalid command delegation binding")
 	}
 	if _, ok := commandOperations[c.Kind]; !ok {
 		return deny("unsupported command operation")
