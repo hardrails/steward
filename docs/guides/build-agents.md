@@ -143,7 +143,8 @@ stewardctl agent deploy \
   -tenant default \
   -node-id node-1 \
   -command-key tenant-command.pem \
-  -command-key-id tenant-command-1
+  -command-key-id tenant-command-1 \
+  > agent.deployment.json
 ```
 
 A [CLI context]({{ '/guides/cli/' | relative_url }}) supplies the Control URL,
@@ -159,6 +160,40 @@ the node reports an uncertain outcome, the command expires, or the wait times ou
 Repeated admission and start attempts remain fenced and idempotent at Executor,
 but this command is not yet a continuous controller: it does not replace a failed
 node or keep a replica count converged after the command exits.
+
+The deployment file contains the exact intent and authenticated admission result,
+not credentials or private keys. It can authorize a real task without splitting
+those fields into separate files:
+
+```console
+stewardctl task issue \
+  -deployment agent.deployment.json \
+  -trust service-trust.json \
+  -request task-request.json \
+  -operation-id hermes.run \
+  -key tenant-task.pem \
+  -key-id tenant-task-1 \
+  -out task.bundle.json
+
+stewardctl task submit \
+  -bundle task.bundle.json \
+  -gateway-url http://127.0.0.1:8081 \
+  -token-file /etc/steward/gateway-control.token
+
+stewardctl task wait \
+  -bundle task.bundle.json \
+  -gateway-url http://127.0.0.1:8081 \
+  -token-file /etc/steward/gateway-control.token \
+  -result-out task-result.json
+```
+
+`task issue` verifies that the task key appears in the admission projection and
+binds one exact JSON request to the admitted tenant, instance, generation, model
+service, operation policy, and short validity window. `task wait` stores the first
+terminal result in a new owner-only file; it does not silently overwrite a prior
+observation. See the [Hermes guide]({{ '/guides/hermes-agent/' | relative_url }})
+or [OpenClaw guide]({{ '/guides/openclaw/' | relative_url }}) for their supported
+request shapes and qualification limits.
 
 ## Fork persistent state
 

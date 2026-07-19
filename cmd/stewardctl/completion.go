@@ -63,6 +63,7 @@ var completionFlags = map[string][]string{
 	"agent apply":               {"-bundle", "-capsule", "-policy", "-site-root-public-key", "-site-root-key-id", "-nodes", "-tenant", "-node-id", "-instance-id", "-lineage-id", "-generation", "-node-url", "-token-file", "-timeout", "-plan-only", "-no-context"},
 	"agent deploy":              {"-bundle", "-capsule", "-policy", "-site-root-public-key", "-site-root-key-id", "-nodes", "-tenant", "-node-id", "-instance-id", "-lineage-id", "-generation", "-claim-generation", "-command-key", "-command-key-id", "-control-url", "-token-file", "-ca-file", "-timeout", "-plan-only", "-no-context"},
 	"agent fork":                {"-bundle", "-snapshot", "-instance-id", "-lineage-id", "-ttl", "-on-expiry", "-out"},
+	"task issue":                {"-deployment", "-admission", "-intent", "-trust", "-request", "-operation-id", "-task-id", "-valid-for", "-clock-skew", "-key", "-key-id", "-out"},
 	"context set":               {"-control-url", "-token-file", "-ca-file", "-node-url", "-node-token-file", "-tenant-id", "-node-id"},
 	"completion install":        {"-shell", "-force"},
 	"control":                   {"-control-url", "-token-file", "-ca-file", "-no-context"},

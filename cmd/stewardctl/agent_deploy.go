@@ -24,19 +24,23 @@ import (
 )
 
 const agentDeployCommandValidity = 14 * time.Minute
+const agentDeploymentSchema = "steward.agent-deployment.v1"
 
 type agentDeployResult struct {
-	AgentName      string `json:"agent_name"`
-	BundleDigest   string `json:"bundle_digest"`
-	TenantID       string `json:"tenant_id"`
-	NodeID         string `json:"node_id"`
-	InstanceID     string `json:"instance_id"`
-	LineageID      string `json:"lineage_id"`
-	Generation     uint64 `json:"generation"`
-	RuntimeRef     string `json:"runtime_ref"`
-	Status         string `json:"status"`
-	AdmitCommandID string `json:"admit_command_id"`
-	StartCommandID string `json:"start_command_id,omitempty"`
+	SchemaVersion  string                                        `json:"schema_version"`
+	AgentName      string                                        `json:"agent_name"`
+	BundleDigest   string                                        `json:"bundle_digest"`
+	TenantID       string                                        `json:"tenant_id"`
+	NodeID         string                                        `json:"node_id"`
+	InstanceID     string                                        `json:"instance_id"`
+	LineageID      string                                        `json:"lineage_id"`
+	Generation     uint64                                        `json:"generation"`
+	RuntimeRef     string                                        `json:"runtime_ref"`
+	Status         string                                        `json:"status"`
+	AdmitCommandID string                                        `json:"admit_command_id"`
+	StartCommandID string                                        `json:"start_command_id,omitempty"`
+	Intent         admission.InstanceIntent                      `json:"intent"`
+	Admission      controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission"`
 }
 
 func agentDeploy(arguments []string, stdout io.Writer) error {
@@ -172,10 +176,12 @@ func agentDeploy(arguments []string, stdout io.Writer) error {
 	}
 	projection := admit.Result.Admission
 	result := agentDeployResult{
-		AgentName: prepared.Bundle.Definition.Name, BundleDigest: prepared.BundleDigest,
+		SchemaVersion: agentDeploymentSchema,
+		AgentName:     prepared.Bundle.Definition.Name, BundleDigest: prepared.BundleDigest,
 		TenantID: tenantID, NodeID: *nodeID, InstanceID: prepared.InstanceID,
 		LineageID: prepared.LineageID, Generation: *generation,
 		RuntimeRef: projection.RuntimeRef, Status: projection.Status, AdmitCommandID: admitID,
+		Intent: prepared.Intent, Admission: *projection,
 	}
 	if projection.Status == "running" {
 		result.Status = "running"
