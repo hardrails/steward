@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,6 +118,17 @@ func TestAgentInitForceDoesNotFollowSymlink(t *testing.T) {
 	raw, readErr := os.ReadFile(target)
 	if readErr != nil || string(raw) != "keep" {
 		t.Fatalf("target=%q err=%v", raw, readErr)
+	}
+}
+
+func TestAgentInitRejectsInvalidNameBeforeWriting(t *testing.T) {
+	directory := t.TempDir()
+	var output bytes.Buffer
+	if err := run([]string{"agent", "init", "-name", "Invalid Name", directory}, &output, &bytes.Buffer{}); err == nil {
+		t.Fatal("invalid project name accepted")
+	}
+	if _, err := os.Stat(filepath.Join(directory, "Stewardfile.cue")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid project wrote a file: %v", err)
 	}
 }
 

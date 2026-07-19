@@ -49,43 +49,53 @@ func DecodeInventory(raw []byte) (NodeInventory, error) {
 	if err := dsse.DecodeStrictInto(raw, MaxArtifactBytes, &inventory); err != nil {
 		return NodeInventory{}, fmt.Errorf("decode node inventory: %w", err)
 	}
-	if inventory.Schema != InventorySchema || len(inventory.Nodes) == 0 || len(inventory.Nodes) > 4096 {
-		return NodeInventory{}, errors.New("node inventory requires schema steward.nodes.v1 and 1-4096 nodes")
-	}
-	seen := map[string]bool{}
-	for _, node := range inventory.Nodes {
-		if !validToken(node.ID, 128) || seen[node.ID] {
-			return NodeInventory{}, errors.New("node IDs must be unique bounded identifiers")
-		}
-		seen[node.ID] = true
-		if node.Architecture != "amd64" && node.Architecture != "arm64" {
-			return NodeInventory{}, errors.New("node architecture must be amd64 or arm64")
-		}
-		if node.Isolation != "development" && node.Isolation != "hardened" {
-			return NodeInventory{}, errors.New("node isolation must be development or hardened")
-		}
-		if err := validateLabels(node.Labels, 64); err != nil {
-			return NodeInventory{}, fmt.Errorf("node %s labels: %w", node.ID, err)
-		}
-		for _, values := range [][]string{node.Tenants, node.Taints, node.Images, node.Snapshots} {
-			if len(values) > 256 {
-				return NodeInventory{}, errors.New("node inventory list exceeds 256 entries")
-			}
-			for _, value := range values {
-				if !validToken(value, 512) {
-					return NodeInventory{}, errors.New("node inventory contains an invalid identifier")
-				}
-			}
-		}
-		if !resourceNonNegative(node.Capacity) || !resourceNonNegative(node.Allocated) || !resourceFits(node.Allocated, node.Capacity) || node.ActiveAgents < 0 {
-			return NodeInventory{}, errors.New("node capacity or allocation is invalid")
-		}
+	if err := inventory.Validate(); err != nil {
+		return NodeInventory{}, err
 	}
 	return inventory, nil
 }
 
+func (inventory NodeInventory) Validate() error {
+	if inventory.Schema != InventorySchema || len(inventory.Nodes) == 0 || len(inventory.Nodes) > 4096 {
+		return errors.New("node inventory requires schema steward.nodes.v1 and 1-4096 nodes")
+	}
+	seen := map[string]bool{}
+	for _, node := range inventory.Nodes {
+		if !validToken(node.ID, 128) || seen[node.ID] {
+			return errors.New("node IDs must be unique bounded identifiers")
+		}
+		seen[node.ID] = true
+		if node.Architecture != "amd64" && node.Architecture != "arm64" {
+			return errors.New("node architecture must be amd64 or arm64")
+		}
+		if node.Isolation != "development" && node.Isolation != "hardened" {
+			return errors.New("node isolation must be development or hardened")
+		}
+		if err := validateLabels(node.Labels, 64); err != nil {
+			return fmt.Errorf("node %s labels: %w", node.ID, err)
+		}
+		for _, values := range [][]string{node.Tenants, node.Taints, node.Images, node.Snapshots} {
+			if len(values) > 256 {
+				return errors.New("node inventory list exceeds 256 entries")
+			}
+			for _, value := range values {
+				if !validToken(value, 512) {
+					return errors.New("node inventory contains an invalid identifier")
+				}
+			}
+		}
+		if !resourceNonNegative(node.Capacity) || !resourceNonNegative(node.Allocated) || !resourceFits(node.Allocated, node.Capacity) || node.ActiveAgents < 0 {
+			return errors.New("node capacity or allocation is invalid")
+		}
+	}
+	return nil
+}
+
 func Schedule(bundle Bundle, tenant string, inventory NodeInventory) (PlacementDecision, error) {
-	if _, err := Build(bundle.Definition, bundle.Policy); err != nil {
+	if err := bundle.Validate(); err != nil {
+		return PlacementDecision{}, err
+	}
+	if err := inventory.Validate(); err != nil {
 		return PlacementDecision{}, err
 	}
 	if !validToken(tenant, 128) {
@@ -198,18 +208,31 @@ func DecodeSnapshot(raw []byte) (Snapshot, error) {
 	if err := dsse.DecodeStrictInto(raw, MaxArtifactBytes, &value); err != nil {
 		return Snapshot{}, fmt.Errorf("decode snapshot: %w", err)
 	}
-	if value.Schema != SnapshotSchema || !validToken(value.ID, 128) || !validDigest(value.BundleDigest) ||
-		!validDigest(value.StateDigest) || !validToken(value.SourceLineage, 128) ||
-		(value.RuntimeEngine != "hermes" && value.RuntimeEngine != "openclaw") {
-		return Snapshot{}, errors.New("snapshot metadata is invalid")
-	}
-	if _, err := time.Parse(time.RFC3339Nano, value.CreatedAt); err != nil {
-		return Snapshot{}, errors.New("snapshot created_at must be RFC3339Nano")
+	if err := value.Validate(); err != nil {
+		return Snapshot{}, err
 	}
 	return value, nil
 }
 
+func (value Snapshot) Validate() error {
+	if value.Schema != SnapshotSchema || !validToken(value.ID, 128) || !validDigest(value.BundleDigest) ||
+		!validDigest(value.StateDigest) || !validToken(value.SourceLineage, 128) ||
+		(value.RuntimeEngine != "hermes" && value.RuntimeEngine != "openclaw") {
+		return errors.New("snapshot metadata is invalid")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, value.CreatedAt); err != nil {
+		return errors.New("snapshot created_at must be RFC3339Nano")
+	}
+	return nil
+}
+
 func Fork(bundle Bundle, snapshot Snapshot, instanceID, lineageID string, ttl time.Duration, onExpiry string, now time.Time) (ForkPlan, error) {
+	if err := bundle.Validate(); err != nil {
+		return ForkPlan{}, err
+	}
+	if err := snapshot.Validate(); err != nil {
+		return ForkPlan{}, err
+	}
 	bundleDigest, err := DigestJSON(bundle)
 	if err != nil {
 		return ForkPlan{}, err

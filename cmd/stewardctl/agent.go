@@ -53,6 +53,9 @@ func agentInit(arguments []string, stdout io.Writer) error {
 	if *engine != "hermes" && *engine != "openclaw" {
 		return errors.New("agent runtime must be hermes or openclaw")
 	}
+	if err := agentapp.ValidateName(*name); err != nil {
+		return err
+	}
 	if flags.NArg() > 1 {
 		return errors.New("agent init accepts at most one project directory")
 	}

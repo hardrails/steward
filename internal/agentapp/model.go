@@ -109,25 +109,32 @@ func DecodeBundle(raw []byte) (Bundle, error) {
 	if err := dsse.DecodeStrictInto(raw, MaxArtifactBytes, &value); err != nil {
 		return Bundle{}, fmt.Errorf("decode agent bundle: %w", err)
 	}
+	if err := value.Validate(); err != nil {
+		return Bundle{}, err
+	}
+	return value, nil
+}
+
+func (value Bundle) Validate() error {
 	if value.Schema != BundleSchema {
-		return Bundle{}, errors.New("agent bundle schema must be " + BundleSchema)
+		return errors.New("agent bundle schema must be " + BundleSchema)
 	}
 	if err := value.Definition.Validate(); err != nil {
-		return Bundle{}, err
+		return err
 	}
 	expected, err := DigestJSON(value.Definition)
 	if err != nil {
-		return Bundle{}, err
+		return err
 	}
 	if value.SourceDigest != expected {
-		return Bundle{}, errors.New("agent bundle source_digest does not match its definition")
+		return errors.New("agent bundle source_digest does not match its definition")
 	}
 	if value.Policy != nil {
 		if !validDigest(value.Policy.BundleDigest) || !validQuery(value.Policy.Query) || !value.Policy.Allowed {
-			return Bundle{}, errors.New("agent bundle policy evidence is invalid or denied")
+			return errors.New("agent bundle policy evidence is invalid or denied")
 		}
 	}
-	return value, nil
+	return nil
 }
 
 func Build(definition Definition, policy *PolicyEvidence) (Bundle, error) {
@@ -170,8 +177,8 @@ func (value Definition) Validate() error {
 	if value.Schema != DefinitionSchema {
 		return errors.New("agent definition schema must be " + DefinitionSchema)
 	}
-	if !validName(value.Name) {
-		return errors.New("agent name must be 1-63 lowercase letters, digits, or hyphens")
+	if err := ValidateName(value.Name); err != nil {
+		return err
 	}
 	wantContract := map[string]string{"hermes": "steward.hermes-agent.v1", "openclaw": "steward.openclaw.v1"}
 	contract, ok := wantContract[value.Runtime.Engine]
@@ -245,6 +252,13 @@ func (value Definition) Validate() error {
 		}
 	default:
 		return errors.New("lifetime mode must be task, service, or temporary")
+	}
+	return nil
+}
+
+func ValidateName(value string) error {
+	if !validName(value) {
+		return errors.New("agent name must be 1-63 lowercase letters, digits, or hyphens")
 	}
 	return nil
 }

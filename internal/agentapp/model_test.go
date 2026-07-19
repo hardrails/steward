@@ -232,6 +232,14 @@ func TestInventoryAndScheduleRejectMalformedOrIneligibleNodes(t *testing.T) {
 	if _, err := Schedule(bundle, " bad", NodeInventory{}); err == nil {
 		t.Fatal("invalid tenant accepted")
 	}
+	tampered := bundle
+	tampered.SourceDigest = "sha256:" + strings.Repeat("f", 64)
+	if _, err := Schedule(tampered, "tenant-a", NodeInventory{Schema: InventorySchema, Nodes: []Node{base}}); err == nil {
+		t.Fatal("direct tampered bundle accepted")
+	}
+	if _, err := Schedule(bundle, "tenant-a", NodeInventory{}); err == nil {
+		t.Fatal("direct invalid inventory accepted")
+	}
 }
 
 func TestDecodeSnapshotAndForkFailures(t *testing.T) {
@@ -254,6 +262,11 @@ func TestDecodeSnapshotAndForkFailures(t *testing.T) {
 		t.Fatal("incompatible snapshot accepted")
 	}
 	snapshot.BundleDigest = digest
+	invalid := snapshot
+	invalid.Schema = "other"
+	if _, err := Fork(bundle, invalid, "new-agent", "new-lineage", 0, "", time.Now()); err == nil {
+		t.Fatal("direct invalid snapshot accepted")
+	}
 	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", 0, "destroy", time.Now()); err == nil {
 		t.Fatal("expiry without TTL accepted")
 	}
