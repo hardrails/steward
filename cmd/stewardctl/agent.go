@@ -75,7 +75,7 @@ func agentInit(arguments []string, stdout io.Writer) error {
 	}
 	content := fmt.Sprintf(agentCUETemplate, *name, *engine, strings.Repeat("0", 64), contract)
 	if *force {
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		if err := replaceAgentFile(path, []byte(content), 0o644); err != nil {
 			return err
 		}
 	} else if err := writeNewFile(path, []byte(content), 0o644); err != nil {
@@ -314,16 +314,44 @@ func agentDoctor(arguments []string, stdout io.Writer) error {
 }
 
 func readCLIArtifact(path string) ([]byte, error) {
-	file, err := os.Open(path)
+	return readBounded(path)
+}
+
+func replaceAgentFile(path string, contents []byte, mode os.FileMode) error {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".steward-agent-*")
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > agentapp.MaxArtifactBytes {
-		return nil, errors.New("agent artifact must be a regular file no larger than 1 MiB")
+	temporaryPath := temporary.Name()
+	cleanup := func(cause error) error {
+		return errors.Join(cause, temporary.Close(), os.Remove(temporaryPath))
 	}
-	return io.ReadAll(io.LimitReader(file, agentapp.MaxArtifactBytes+1))
+	if err := temporary.Chmod(mode); err != nil {
+		return cleanup(err)
+	}
+	if _, err := temporary.Write(contents); err != nil {
+		return cleanup(err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return cleanup(err)
+	}
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		_ = os.Remove(temporaryPath)
+		return errors.New("Stewardfile.cue replacement target must be a regular file")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	return syncOutputDirectory(path)
 }
 
 func randomAgentID(prefix string) (string, error) {

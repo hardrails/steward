@@ -96,6 +96,30 @@ func TestAgentDoctorAndCompletion(t *testing.T) {
 	}
 }
 
+func TestAgentInitForceDoesNotFollowSymlink(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "target")
+	project := filepath.Join(directory, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(project, "Stewardfile.cue")); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err := run([]string{"agent", "init", "-force", project}, &output, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("force followed a symlink")
+	}
+	raw, readErr := os.ReadFile(target)
+	if readErr != nil || string(raw) != "keep" {
+		t.Fatalf("target=%q err=%v", raw, readErr)
+	}
+}
+
 func containsString(values []string, expected string) bool {
 	for _, value := range values {
 		if value == expected {

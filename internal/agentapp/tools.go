@@ -92,7 +92,7 @@ func runTool(parent context.Context, binary string, stdin []byte, arguments ...s
 		return nil, stderr.Bytes(), errors.New("external tool output exceeded its bound")
 	}
 	if err != nil {
-		detail := strings.TrimSpace(string(stderr.Bytes()))
+		detail := sanitizeToolError(stderr.Bytes())
 		if len(detail) > 512 {
 			detail = detail[:512]
 		}
@@ -102,6 +102,21 @@ func runTool(parent context.Context, binary string, stdin []byte, arguments ...s
 		return nil, stderr.Bytes(), fmt.Errorf("external tool failed: %w", err)
 	}
 	return stdout.Bytes(), stderr.Bytes(), nil
+}
+
+func sanitizeToolError(raw []byte) string {
+	clean := make([]byte, 0, len(raw))
+	for _, value := range raw {
+		switch {
+		case value == '\n' || value == '\t':
+			clean = append(clean, ' ')
+		case value >= 0x20 && value <= 0x7e:
+			clean = append(clean, value)
+		default:
+			clean = append(clean, '?')
+		}
+	}
+	return strings.TrimSpace(string(clean))
 }
 
 type limitedBuffer struct {
