@@ -29,7 +29,7 @@ Install Steward's macOS operator and local-development tools.
 
 Usage:
   /bin/bash -p install-macos.sh
-  /bin/bash -p install-macos.sh --version v2.1.0 --install-dir ~/.local/bin
+  /bin/bash -p install-macos.sh --version v2.1.1 --install-dir ~/.local/bin
   /bin/bash -p install-macos.sh --offline-dir /path/to/release
 
 Options:
