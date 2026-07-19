@@ -53,6 +53,15 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "init", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes", "openclaw"}) {
 		t.Fatalf("agent runtime candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"agent", "deployment", ""}); !slices.Equal(candidates, []string{"apply", "list", "remove", "status"}) {
+		t.Fatalf("agent deployment candidates=%v", candidates)
+	}
+	deploymentFlags := stewardctlCompletionCandidates([]string{"agent", "deployment", "apply", "-"})
+	for _, expected := range []string{"-bundle", "-capsule", "-delegation", "-revision", "-tenant"} {
+		if !slices.Contains(deploymentFlags, expected) {
+			t.Fatalf("deployment flags %v missing %s", deploymentFlags, expected)
+		}
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"permit", "con"}); !slices.Equal(candidates, []string{"context"}) {
 		t.Fatalf("permit context candidates=%v", candidates)
 	}
