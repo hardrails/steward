@@ -127,11 +127,77 @@ create and install them.
 `agent apply` currently targets one selected node. It does not continuously
 reconcile desired state or move the workload after node failure.
 
-## Deploy through Steward Control
+## Keep desired state through Steward Control
+
+Use a durable deployment when Executor nodes poll a separately hosted Steward
+Control service and the agent should keep converging after the operator disconnects.
+Copy `/var/lib/steward-control/controller.public.pem` from the management host to
+the trusted tenant signing station. Do not copy `controller.private.pem`.
+
+Create the exact instance list and admission template described in the
+[offline tools reference]({{ '/reference/offline-tools/' | relative_url }}), then
+issue a short-lived delegation with all four lifecycle operations:
+
+```console
+stewardctl executor-command delegation issue \
+  -delegation-id auditor-deployment \
+  -tenant-id default \
+  -controller-public-key controller.public.pem \
+  -controller-key-id controller-default \
+  -operations admit,start,stop,destroy \
+  -node-ids node-1,node-2 \
+  -instances instances.json \
+  -admission-template admission-template.json \
+  -key tenant-command.pem \
+  -key-id tenant-command-1 \
+  -out delegation.dsse.json
+```
+
+The tenant command key must be authorized by the site policy for every delegated
+operation. The delegation expires within 24 hours and names exact nodes, instances,
+lineages, generations, resources, capabilities, routes, and connectors. Control
+cannot widen those fields.
+
+With a CLI context supplying Control, the operator token, private CA, and tenant,
+apply and inspect the deployment:
+
+```console
+stewardctl agent deployment apply auditor \
+  -bundle agent.bundle.json \
+  -capsule hermes.capsule.dsse.json \
+  -delegation delegation.dsse.json
+
+stewardctl agent deployment status auditor
+stewardctl agent deployment list
+```
+
+The apply command checks the bundle, capsule envelope, delegation lifetime, tenant,
+capsule digest, and lifecycle scope locally. It fetches the current revision and
+infers a safe deployment generation. Control then selects an active allowed node
+that advertises delegated-command support and drives `admit` and `start`. Removing
+desired state similarly needs only the name:
+
+```console
+stewardctl agent deployment remove auditor
+```
+
+Removal is asynchronous. Watch status until the deployment is `removed`. A failed
+or uncertain Executor outcome becomes `degraded` and is not silently retried. The
+current scheduler does not yet reserve resources or replace an instance after node
+loss; see [Known limitations]({{ '/limitations/' | relative_url }}).
+
+Keep lifecycle authority valid for any operation Control may still need. After a
+delegation expires, Executor correctly refuses new commands under it. To roll an
+agent forward or remove it later, sign and apply a higher deployment and instance
+generation with a fresh delegation before requesting cleanup. Steward does not
+silently extend or reinterpret an expired tenant signature.
+
+## Run one synchronous deployment through Control
 
 Use `agent deploy` when the Executor reaches a separately hosted Steward Control
-service through outbound polling. The tenant command key must be authorized for
-`admit` and `start` in site policy:
+service through outbound polling and the operator needs one synchronous
+admit-and-start result for the task tooling. The tenant command key must be
+authorized for `admit` and `start` in site policy:
 
 ```console
 stewardctl agent deploy \
@@ -158,8 +224,8 @@ The command waits for protocol-4 reports and returns the Executor runtime
 reference only after the node reports `running`. It fails if admission is denied,
 the node reports an uncertain outcome, the command expires, or the wait times out.
 Repeated admission and start attempts remain fenced and idempotent at Executor,
-but this command is not yet a continuous controller: it does not replace a failed
-node or keep a replica count converged after the command exits.
+but this one-shot command does not create durable desired state. Use `agent deployment
+apply` for controller reconciliation.
 
 The deployment file contains the exact intent and authenticated admission result,
 not credentials or private keys. It can authorize a real task without splitting

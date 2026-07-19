@@ -49,6 +49,9 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET /v1/tenants/{tenant_id}/nodes` | Page through bounded tenant node inventory |
 | `GET /v1/tenants/{tenant_id}/nodes/{node_id}` | Read one tenant-visible node |
 | `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
+| `GET /v1/tenants/{tenant_id}/deployments` | Page through bounded desired agent deployments |
+| `GET or PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Inspect or apply one optimistic, generation-fenced desired deployment |
+| `DELETE /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Mark one deployment absent; reconciliation performs bounded cleanup asynchronously |
 | `GET /v1/nodes/{node_id}/evidence` | Read the site-admin-only last-good Executor receipt checkpoint and any sticky divergence finding |
 | `GET /v1/nodes/{node_id}/evidence/export` | Sign a portable evidence checkpoint with the controller's dedicated witness key |
 | `POST /v1/nodes/{node_id}/evidence/captures` | Arm one site-admin-only bounded activation evidence capture from the current witnessed head |
@@ -73,6 +76,15 @@ query parameters, redirects are not used, and every error has the common
 `{"error":"...","message":"..."}` shape. The controller parses signed-command
 identity to bind it to the route but does not treat that parse as authorization;
 Executor verifies the signature and local policy before applying the command.
+
+A deployment `PUT` carries a canonical agent bundle digest, publisher-signed
+capsule, and tenant-signed controller delegation. Control validates bounded routing
+and desired-state consistency but does not treat the tenant signature as trusted.
+Executor verifies that signature against its authenticated site policy, then
+verifies the purpose-separated controller signature and exact delegated scope.
+The response exposes public digests and scope, never either private key. Changed
+desired state requires the last observed revision and a higher deployment
+generation; an exact retry is idempotent.
 
 Evidence enrollment proves possession of the node receipt key and pins it to one
 controller, enrollment, control node, receipt node, stream, and epoch. A report

@@ -14,7 +14,7 @@ section: Product
 
 ## Product decision
 
-Steward should become the **customer-owned runtime and authority plane for AI
+Steward is being built as the **customer-owned runtime and authority plane for AI
 agents**.
 
 It should let an operator package Hermes, OpenClaw, or another qualified agent as
@@ -157,11 +157,13 @@ runtime identity, or private signing key.
 
 ### Desired-state control plane
 
-Steward Control should become a real reconciliation controller. It owns desired
-deployment state, observes nodes and instances, computes deterministic placement,
-and drives finite lifecycle operations.
+Steward Control owns bounded desired deployment state, observes nodes and
+instances, computes deterministic placement, and drives finite lifecycle
+operations. The implemented foundation retains public signed artifacts, performs
+least-loaded placement across the exact delegated node set, and reconciles
+`admit`, `start`, `stop`, and `destroy` without storing tenant private keys.
 
-It should support instance counts, singleton agents, node leases, resource
+The next scheduling layer should support instance counts, singleton agents, node leases, resource
 reservations, labels, taints, isolation classes, locality, restart recovery,
 replacement, drain, bounded rollout, rollback, quarantine, garbage collection,
 tenant quotas, and an explanation for every pending or rejected instance.
@@ -293,6 +295,28 @@ Ship two substantial release trains through no more than five vertical pull
 requests. A release is not complete because a schema, plan command, or UI page
 exists; the stated outcome must pass end-to-end acceptance and hostile-path tests.
 
+### Implemented foundation
+
+The roadmap starts from working primitives rather than a blank design:
+
+- portable Hermes and OpenClaw application bundles with CUE authoring and offline
+  OPA policy evidence;
+- strict signed capsule admission, default-deny capabilities, Docker and gVisor
+  execution, Gateway mediation, task permits, and signed receipts;
+- an outbound node uplink and bounded single-writer fleet store;
+- Executor-verifiable tenant delegation to a purpose-separated online controller
+  key;
+- durable deployment generations and optimistic revisions;
+- atomic deployment-transition and command enqueue, deterministic command IDs,
+  restart-safe progress, and explicit degraded outcomes; and
+- public HTTP, client, OpenAPI, and context-aware CLI operations for applying,
+  inspecting, listing, and removing desired deployments.
+
+This foundation is not yet the complete product workflow above. In particular,
+the durable controller does not yet join task execution, health, recovery,
+capacity reservation, snapshots, protected secrets, and one evidence bundle into
+one first-time-user operation.
+
 ### Production Core
 
 This release makes Steward a complete product on one host, then extends the same
@@ -300,7 +324,7 @@ contract across a small fleet.
 
 #### Pull request 1: working runtime vertical
 
-Outcome: `agent apply` continuously converges one application to a healthy agent,
+Outcome: `agent deployment apply` converges one application to a healthy agent,
 and `task run` performs useful work through the enforced boundary.
 
 - Consolidate common operations behind one `steward` command while retaining

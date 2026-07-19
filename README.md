@@ -180,7 +180,14 @@ See [Manage Gateway secrets](https://hardrails.github.io/steward/guides/secrets/
 
 `steward-control` is a customer-operated control plane for tenant-scoped
 operators, one-time node enrollment, outbound node polling, signed command
-delivery, inventory, attention findings, and separately witnessed evidence.
+delivery, durable desired deployments, deterministic placement of exact delegated
+instances, inventory, attention findings, and separately witnessed evidence.
+
+Control uses a purpose-separated online key only within a short-lived
+tenant-signed delegation. Tenant keys remain outside Control, and Executor verifies
+both signatures and the exact delegated scope before changing Docker. The current
+controller reconciles lifecycle but does not yet reserve fleet capacity or replace
+an instance after node loss.
 
 Its embedded React console is available at `/console/`. The console keeps the
 operator bearer only in tab memory, loads no remote assets, and never receives

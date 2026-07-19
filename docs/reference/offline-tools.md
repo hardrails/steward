@@ -60,8 +60,9 @@ key should be trusted.
 ## Delegate bounded reconciliation authority
 
 A tenant command key can authorize one short-lived controller key without giving
-the tenant private key to Steward Control. This is an advanced offline operation;
-the normal desired-state workflow will create the supporting documents.
+the tenant private key to Steward Control. This is currently an advanced offline
+operation: the operator creates and reviews the instance and admission-template
+documents before signing.
 
 Describe the exact instance and lineage identities the controller may place:
 

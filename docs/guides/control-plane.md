@@ -8,16 +8,19 @@ section: How-to
 
 `steward-control` is Steward's optional self-hosted fleet service. It gives a site
 one bounded place to create tenants, issue scoped operator credentials, enroll
-nodes, inspect secret-free inventory and action-required facts, retain exact
-signed commands, lease those commands to Executor, record terminal delivery
-status, and optionally expose authenticated aggregate metrics.
+nodes, retain desired agent deployments, inspect secret-free inventory and
+action-required facts, lease exact signed commands to Executor, record terminal
+delivery status, and optionally expose authenticated aggregate metrics.
 
-The controller does not sign commands or decide what a tenant may run. Tenant and
-site private signing keys remain on a trusted signing station or in a separately
-operated signing service. The node verifies every signed command against its local
-site policy before Executor can change Docker. This separation means compromise of
-the controller can delay or replay delivery attempts, but cannot mint tenant
-authority or add an undeclared container capability.
+The controller cannot decide what a tenant may run. Tenant and site private signing
+keys remain on a trusted signing station or in a separately operated signing
+service. For durable deployments, a tenant signs a short-lived delegation to the
+controller's separate online key. Control can then sign only the exact lifecycle
+commands that delegation permits. Executor verifies the tenant delegation, the
+controller command, and local site policy before changing Docker. A compromised
+controller can exercise active delegated verbs until expiry, but cannot mint new
+tenant authority or add an undeclared instance, node, generation, resource,
+capability, route, or connector.
 
 ## Choose a deployment shape
 
@@ -131,7 +134,8 @@ There is no boot-time recovery unit, so system startup alone does not complete o
 roll back an interrupted installation. Do not remove
 `/var/lib/steward-control-installer/transaction` by hand.
 
-The first installation also creates a dedicated Ed25519 evidence-witness identity:
+The first installation creates two purpose-separated Ed25519 identities. The
+evidence-witness identity is:
 
 - private key: `/var/lib/steward-control/witness.private.pem`, mode `0600`;
 - public key: `/var/lib/steward-control/witness.public.pem`, mode `0644`.
@@ -151,6 +155,18 @@ private key. On an upgrade from a controller that predates this identity, it
 creates the pair only if both paths are absent. A partial pair, unsafe metadata,
 symlink, or mismatch stops the upgrade so an operator can investigate instead of
 silently accepting a new audit identity.
+
+The online controller-signing identity is:
+
+- private key: `/var/lib/steward-control/controller.private.pem`, mode `0600`;
+- public key: `/var/lib/steward-control/controller.public.pem`, mode `0644`;
+- key ID: `controller-default`.
+
+Copy only its public key to a tenant signing station when issuing a bounded
+controller delegation. This key is not the TLS identity, evidence-witness identity,
+or tenant authority. An upgrade from older state creates the pair only when both
+paths are absent and preserves it on later runs. A partial, linked, mismatched, or
+unsafe pair stops installation.
 
 Verify the installed service:
 
@@ -890,15 +906,17 @@ inventory.
 4. Restore only the entire directory to a stopped controller of a compatible
    release. On a replacement host, verify that it contains only single-link regular
    files, set the directory to mode `0700`, set
-   `witness.public.pem` to mode `0644`, and set every other file to mode `0600`
+   `witness.public.pem` and `controller.public.pem` to mode `0644`, and set every
+   other file to mode `0600`
    under the target `steward-control` user and group. Start the service, then run
    the controller doctor to verify configuration and readiness. The doctor
    deliberately reports an inactive service as a failure, even when its
    stopped-state validation succeeds.
 
 Never restore only the write-ahead log, snapshot, manifest, authentication key, or
-one witness-key file. Restore the witness pair together or the controller will
-fail closed.
+one key file. Restore the witness pair and controller-signing pair together or the
+controller will fail closed. Restoring an older controller identity also requires
+new tenant delegations before reconciliation can resume.
 The write-ahead log is a hash-chained durable transaction file. Startup repairs
 only an incomplete final frame, which is the expected shape of a crash during one
 append; a malformed complete frame or broken chain stops startup.
@@ -917,15 +935,16 @@ with that backup.
 
 ## Current limits
 
-The controller intentionally has no user interface, enterprise single sign-on,
-approval workflow, automatic placement, desired-state
-reconciliation, multi-controller high availability, or external database adapter.
-Its job is the small reliable path between an already authorized command and a
-node that independently verifies it.
+The controller includes a bounded React operator console and narrow deterministic
+desired-state placement. It intentionally has no enterprise single sign-on,
+business approval workflow, resource reservation, rescheduling after node loss,
+autoscaling, preemption, multi-controller high availability, or external database
+adapter. Its job is a small reliable path from bounded tenant authority to a node
+that independently verifies it, not general cluster orchestration.
 
 Default retained-capacity ceilings include 256 tenants, 4,096 nodes, 16,384
-credentials, 4,096 enrollment capabilities, and 16,384 commands, with smaller
-per-tenant and per-node ceilings. Expired enrollment records are reclaimed when a
+credentials, 4,096 enrollment capabilities, 16,384 commands, and 1,024 desired
+deployments, with smaller per-tenant and per-node ceilings. Expired enrollment records are reclaimed when a
 new enrollment needs space. Commands with known terminal outcomes become eligible
 for reclamation after the configured minimum retention period, which defaults to
 24 hours. Pending, leased, `failed`, and `outcome_unknown` commands are not
