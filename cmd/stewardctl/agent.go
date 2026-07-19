@@ -174,10 +174,13 @@ func agentBuild(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	digest, err := agentapp.DigestJSON(bundle)
+	if err != nil {
+		return err
+	}
 	if err := writeNewFile(*output, raw, 0o644); err != nil {
 		return err
 	}
-	digest, _ := agentapp.DigestJSON(bundle)
 	return writeAgentJSON(stdout, map[string]any{"bundle": *output, "digest": digest, "runtime": definition.Runtime.Engine, "policy_evaluated": policy != nil})
 }
 

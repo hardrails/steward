@@ -299,8 +299,11 @@ func stewardctlCompletionCandidates(arguments []string) []string {
 	if len(arguments) > 0 {
 		current = arguments[len(arguments)-1]
 	}
-	if len(arguments) > 1 && arguments[len(arguments)-2] == "-agent" {
-		return matchingCandidates([]string{"hermes", "openclaw"}, current)
+	if len(arguments) > 1 {
+		previous := arguments[len(arguments)-2]
+		if previous == "-agent" || previous == "-runtime" && completionLeafPath(arguments[:len(arguments)-2]) == "agent init" {
+			return matchingCandidates([]string{"hermes", "openclaw"}, current)
+		}
 	}
 	if strings.HasPrefix(current, "-") {
 		return matchingCandidates(completionFlagsFor(arguments[:len(arguments)-1]), current)
