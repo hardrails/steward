@@ -5,20 +5,21 @@ info:
   description: |
     Public contract for Steward's optional, self-hosted fleet controller. The
     controller manages tenant scopes, operator credentials, one-time node
-    enrollment, node inventory, reclaimable delivery of exact tenant-signed
-    Executor commands, independently witnessed Executor evidence heads, and
+    enrollment, node inventory, bounded desired deployments, reclaimable
+    delivery of signed Executor commands, independently witnessed Executor evidence heads, and
     authenticated read-only fleet operations views. The embedded React console
     can also courier one exact offline-signed command through the existing command
     endpoint; it does not create, edit, approve, or sign command authority. An
     optional authenticated Prometheus endpoint exposes only bounded aggregate
     metrics.
 
-    `steward-control` is a transport and state authority, not an execution
-    authority. Tenant and site private signing keys stay outside this service.
-    The controller does not need a Docker socket and cannot invoke an agent or
-    weaken a node's local admission policy. Each node verifies the inner DSSE
-    command before acting; the outer delivery lease is unsigned and grants no
-    execution authority.
+    `steward-control` is a desired-state and transport authority, not an
+    execution boundary. Tenant and site private signing keys stay outside this
+    service. An optional online controller key can act only inside a retained,
+    tenant-signed delegation. The controller does not need a Docker socket and
+    cannot weaken a node's local admission policy. Each node verifies the inner
+    DSSE command and any delegation before acting; the outer delivery lease is
+    unsigned and grants no execution authority.
 
     The built-in store is a bounded, single-writer durable store intended for
     one active controller process. A second process cannot open the same state
@@ -52,6 +53,8 @@ tags:
     description: One-time node enrollment capabilities.
   - name: nodes
     description: Tenant-projected node inventory and site-wide revocation.
+  - name: deployments
+    description: Bounded desired agent state reconciled under tenant-signed controller delegation.
   - name: evidence
     description: Site-admin inspection and portable verification of independently witnessed Executor evidence.
   - name: commands
@@ -894,6 +897,155 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/deployments:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [deployments]
+      operationId: listControlDeployments
+      summary: List desired deployments in one tenant
+      description: |
+        Returns bounded desired state, reconciliation progress, and the public
+        fingerprints and scope of each retained delegation. Private keys and
+        raw signed artifacts are not returned. A page may contain fewer records
+        than `limit` to keep the encoded response within 1 MiB.
+      parameters:
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Deployments sorted by deployment ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeploymentList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/deployments/{deployment_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/DeploymentID"
+    get:
+      tags: [deployments]
+      operationId: getControlDeployment
+      summary: Get one desired deployment
+      description: Returns retained desired state, progress, and public delegation scope without returning the signed artifact bytes.
+      responses:
+        "200":
+          description: Durable desired state and reconciliation progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deployment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      tags: [deployments]
+      operationId: applyControlDeployment
+      summary: Create or roll forward desired deployment state
+      description: |
+        Retains a publisher-signed capsule and tenant-signed controller
+        delegation as public authority envelopes. Control validates their
+        bounded routing statement but does not treat the tenant signature as
+        trusted; Executor verifies that signature against authenticated site
+        policy before every effect. Exact retries are idempotent. A changed
+        generation must supply the current `expected_revision`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeploymentApplyRequest"
+      responses:
+        "201":
+          description: Desired deployment created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deployment"
+        "200":
+          description: Exact retry returned or a newer generation applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deployment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      tags: [deployments]
+      operationId: removeControlDeployment
+      summary: Converge a deployment to absent
+      description: |
+        Marks desired state as absent; it does not erase the reconciliation
+        cursor or audit linkage. The current revision is required to prevent a
+        stale operator from removing a newer rollout.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeploymentDeleteRequest"
+      responses:
+        "202":
+          description: Removal intent retained for reconciliation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deployment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/tenants/{tenant_id}/nodes:
     parameters:
       - $ref: "#/components/parameters/TenantID"
@@ -1552,6 +1704,12 @@ components:
       required: true
       schema:
         $ref: "#/components/schemas/Identifier256"
+    DeploymentID:
+      name: deployment_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier128"
     CaptureID:
       name: capture_id
       in: path
@@ -2624,6 +2782,179 @@ components:
         revoked_credentials:
           type: integer
           minimum: 0
+    DeploymentApplyRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - generation
+        - agent_name
+        - bundle_digest
+        - capsule_dsse_base64
+        - delegation_dsse_base64
+      properties:
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Monotonically increasing desired deployment generation.
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Required when changing an existing deployment; omit on create.
+        agent_name:
+          $ref: "#/components/schemas/Identifier128"
+        bundle_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        capsule_dsse_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 1048576
+          description: Canonical standard-base64 encoding of the publisher-signed capsule DSSE JSON.
+        delegation_dsse_base64:
+          type: string
+          format: byte
+          minLength: 4
+          maxLength: 87384
+          description: Canonical standard-base64 encoding of the tenant-signed controller delegation DSSE JSON.
+    DeploymentDeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision]
+      properties:
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 1
+    DeploymentInstance:
+      type: object
+      additionalProperties: false
+      required: [instance_id, lineage_id, generation, phase, transitioned_at]
+      properties:
+        instance_id:
+          $ref: "#/components/schemas/Identifier256"
+        lineage_id:
+          $ref: "#/components/schemas/Identifier256"
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        phase:
+          type: string
+          enum: [pending, admitting, starting, running, stopping, destroying, removed, failed]
+        command_id:
+          $ref: "#/components/schemas/Identifier256"
+        command_operation:
+          type: string
+          enum: [admit, start, read, stop, destroy]
+        command_sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        attempts:
+          type: integer
+          format: int32
+          minimum: 1
+        last_error:
+          type: string
+          maxLength: 1024
+        transitioned_at:
+          type: string
+          format: date-time
+    Deployment:
+      type: object
+      additionalProperties: false
+      required:
+        - tenant_id
+        - deployment_id
+        - generation
+        - revision
+        - agent_name
+        - bundle_digest
+        - capsule_digest
+        - delegation_digest
+        - delegation_id
+        - controller_key_id
+        - claim_generation
+        - allowed_node_ids
+        - delegation_expires_at
+        - desired_state
+        - phase
+        - instances
+        - created_at
+        - updated_at
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        deployment_id:
+          $ref: "#/components/schemas/Identifier128"
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        agent_name:
+          $ref: "#/components/schemas/Identifier128"
+        bundle_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        delegation_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        delegation_id:
+          $ref: "#/components/schemas/Identifier128"
+        controller_key_id:
+          $ref: "#/components/schemas/Identifier256"
+        claim_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        allowed_node_ids:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Identifier128"
+        delegation_expires_at:
+          type: string
+          format: date-time
+        desired_state:
+          type: string
+          enum: [running, absent]
+        phase:
+          type: string
+          enum: [pending, reconciling, ready, stopping, removed, degraded]
+        instances:
+          type: array
+          minItems: 1
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/DeploymentInstance"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DeploymentList:
+      type: object
+      additionalProperties: false
+      required: [deployments]
+      properties:
+        deployments:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/Deployment"
+        next_after:
+          $ref: "#/components/schemas/Identifier128"
     SubmitCommandRequest:
       type: object
       additionalProperties: false
