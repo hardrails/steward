@@ -57,6 +57,105 @@ stewardctl policy verify -in policy.dsse.json \
 These commands authenticate bytes. They do not decide whether a publisher or site
 key should be trusted.
 
+## Delegate bounded reconciliation authority
+
+A tenant command key can authorize one short-lived controller key without giving
+the tenant private key to Steward Control. This is an advanced offline operation;
+the normal desired-state workflow will create the supporting documents.
+
+Describe the exact instance and lineage identities the controller may place:
+
+```json
+{
+  "instances": [
+    {
+      "instance_id": "analyst-1",
+      "lineage_id": "analyst-lineage-1",
+      "min_instance_generation": 1,
+      "max_instance_generation": 4
+    }
+  ]
+}
+```
+
+When `admit` is delegated, also provide the exact non-identity admission template:
+
+```json
+{
+  "capsule_digest": "sha256:<capsule-envelope-digest>",
+  "resources": {
+    "memory_bytes": 1073741824,
+    "cpu_millis": 1000,
+    "pids": 128
+  },
+  "capabilities": {
+    "state": false,
+    "inference": true,
+    "service": true,
+    "egress": false,
+    "connector": false
+  },
+  "state_disposition": "none",
+  "inference_route_id": "local-model",
+  "model_alias": "agent-default",
+  "service_id": "hermes-api"
+}
+```
+
+Issue and verify the delegation on the signing workstation:
+
+```console
+stewardctl executor-command delegation issue \
+  -delegation-id analyst-deployment \
+  -tenant-id tenant-a \
+  -controller-public-key controller.public \
+  -controller-key-id controller-online \
+  -operations admit,start,stop,destroy,read \
+  -node-ids executor-1,executor-2 \
+  -instances instances.json \
+  -admission-template admission-template.json \
+  -claim-generation 1 \
+  -valid-for 1h \
+  -key tenant-command.private.pem \
+  -key-id tenant-command \
+  -out controller.delegation.dsse.json
+
+stewardctl executor-command delegation verify \
+  -in controller.delegation.dsse.json \
+  -public-key tenant-command.public \
+  -key-id tenant-command
+```
+
+The tenant command key must be authorized by site policy for every operation in the
+delegation. Lists are sorted into a canonical representation. Instance identities
+are exact rather than prefix-based, so independent nodes cannot each create extra
+replicas under one delegation.
+
+An advanced command issuer can attach the exact delegation while signing with the
+controller key:
+
+```console
+stewardctl executor-command issue \
+  -command-id start-analyst-1 \
+  -tenant-id tenant-a \
+  -node-id executor-1 \
+  -instance-id analyst-1 \
+  -kind start \
+  -claim-generation 1 \
+  -instance-generation 1 \
+  -sequence 2 \
+  -payload empty.json \
+  -delegation controller.delegation.dsse.json \
+  -key controller.private.pem \
+  -key-id controller-online \
+  -out start.dsse.json
+```
+
+Executor independently verifies the tenant signature, controller signature,
+delegation digest, exact scope, and normal generation and sequence fences. A
+delegation limits authority but does not make a compromised controller available
+or honest inside that scope.
+
 ## Inspect an offline OCI image
 
 Inspect the exact image archive before transfer:
