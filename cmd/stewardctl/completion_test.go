@@ -59,6 +59,13 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"node", "maintenance", ""}); !slices.Equal(candidates, []string{"drain", "enter", "exit", "status"}) {
 		t.Fatalf("node maintenance candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"executor-command", "delegation", ""}); !slices.Equal(candidates, []string{"issue", "verify"}) {
+		t.Fatalf("executor delegation candidates=%v", candidates)
+	}
+	delegationFlags := stewardctlCompletionCandidates([]string{"executor-command", "delegation", "issue", "-controller"})
+	if !slices.Equal(delegationFlags, []string{"-controller-key-id", "-controller-public-key"}) {
+		t.Fatalf("executor delegation flags=%v", delegationFlags)
+	}
 	permitFlags := stewardctlCompletionCandidates([]string{"permit", "issue", "-con"})
 	if !slices.Equal(permitFlags, []string{"-connector-id", "-context"}) {
 		t.Fatalf("permit issue flags=%v", permitFlags)
