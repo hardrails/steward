@@ -33,6 +33,11 @@ unset BASH_ENV ENV TAR_OPTIONS GZIP POSIXLY_CORRECT
 
 cd "$(dirname "$0")/.."
 
+# The manifest writer and privileged installer deliberately keep closed file
+# inventories. Refuse the release before building anything if those inventories
+# drift, because such an artifact would reject its own integrity manifest.
+/bin/bash -p scripts/check-release-inventory.sh
+
 # The published target matrix: pure-stdlib Go with CGO off, so every target is a
 # trivial cross-compile from any host.
 default_targets="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"

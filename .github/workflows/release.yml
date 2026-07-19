@@ -241,7 +241,16 @@ jobs:
             "$control_inventory_sorted" "$corrupt_control"
           deb_contents=$(mktemp)
           rpm_contents=$(mktemp)
-          trap 'rm -f "$deb_contents" "$rpm_contents"' EXIT
+          package_verify_root="/usr/lib/steward-release-verify-${GITHUB_RUN_ID}-${{ matrix.goarch }}"
+          trap 'rm -f "$deb_contents" "$rpm_contents"; sudo rm -rf "$package_verify_root"' EXIT
+          sudo install -d -o root -g root -m 0755 "$package_verify_root"
+          sudo dpkg-deb -x \
+            "dist/steward-node_${STEWARD_RELEASE_VERSION}_${{ matrix.goarch }}.deb" \
+            "$package_verify_root"
+          sudo "$package_verify_root/usr/lib/steward-node/release/scripts/install-node.sh" \
+            --expected-version "$STEWARD_RELEASE_VERSION" --verify-package-only | \
+            grep -Fxq 'install-node: package release verified'
+          sudo rm -rf "$package_verify_root"
           dpkg-deb --contents "dist/steward-node_${STEWARD_RELEASE_VERSION}_${{ matrix.goarch }}.deb" >"$deb_contents"
           grep -q './usr/lib/steward-node/release/steward-control' "$deb_contents"
           if grep -Eq 'control\.env|steward-control\.service|install-control\.sh|control-doctor\.sh' "$deb_contents"; then
