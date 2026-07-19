@@ -187,6 +187,9 @@ if [[ $checkout == "$root" ]]; then
 	git -C "$root" diff --cached --quiet -- adapters/openclaw || die "adapters/openclaw has staged changes"
 	git -C "$root" diff --quiet -- scripts/build-openclaw-adapter.sh || die "builder has uncommitted changes"
 	git -C "$root" diff --cached --quiet -- scripts/build-openclaw-adapter.sh || die "builder has staged changes"
+elif [[ -f $root/release.json && -d $adapter_path ]]; then
+	adapter_source=release-payload
+	release_manifest=$root/release.json
 elif [[ -f $(dirname "$root")/release.json && -d $adapter_path ]]; then
 	adapter_source=release-payload
 	release_manifest=$(dirname "$root")/release.json

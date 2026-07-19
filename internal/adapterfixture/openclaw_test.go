@@ -250,6 +250,8 @@ func TestOpenClawBuildAndQualificationHarnessesAreFailClosed(t *testing.T) {
 		"pinned-base-pull;docker-build-network-none",
 		"stewardctl image inspect -archive",
 		"release-payload",
+		"release_manifest=$root/release.json",
+		"release_manifest=$(dirname \"$root\")/release.json",
 		"release_manifest_sha256",
 		"\"manifest_digest\": image_manifest",
 		"\"runtime_image_id\": runtime_image_id",
