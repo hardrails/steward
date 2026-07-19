@@ -60,7 +60,7 @@ jobs:
           scripts/build-deb.sh scripts/build-rpm.sh scripts/build-hermes-adapter.sh
           scripts/hermes-feasibility.sh scripts/hermes-steward-acceptance.sh
           scripts/build-openclaw-adapter.sh scripts/openclaw-feasibility.sh
-          scripts/write-release-manifest.sh
+          scripts/write-release-manifest.sh scripts/check-release-inventory.sh
           scripts/node-upgrade-smoke.sh scripts/privileged-shell-test.sh
           scripts/node-installer-security-test.sh scripts/configure-input-boundary-test.sh
           scripts/node-control-plane-conflict-test.sh
@@ -71,6 +71,8 @@ jobs:
           packaging/debian/prerm packaging/debian/postrm
       - name: Node upgrade transaction smoke
         run: STEWARD_REQUIRE_ROOT_SMOKE=1 bash scripts/node-upgrade-smoke.sh
+      - name: Node release inventory
+        run: bash scripts/check-release-inventory.sh
       - name: Node privileged shell boundary
         run: bash scripts/privileged-shell-test.sh
       - name: Node installer hostile inputs
@@ -139,8 +141,10 @@ jobs:
             /tmp/steward-overlong-release.out
           stage=$(mktemp -d)
           smoke=$(mktemp -d)
+          package_verify_root=
           trap 'rm -rf "$stage" "$smoke" /tmp/steward-node-test.deb /tmp/steward-node-test.rpm \
-            /tmp/steward-node-test.deb.contents /tmp/steward-node-test.rpm.contents' EXIT
+            /tmp/steward-node-test.deb.contents /tmp/steward-node-test.rpm.contents; \
+            if [[ -n ${package_verify_root:-} ]]; then sudo rm -rf "$package_verify_root"; fi' EXIT
           mkdir -p "$stage/adapters" "$stage/deploy" "$stage/scripts"
           go build -o "$stage/steward" ./cmd/steward
           go build -o "$stage/steward-control" ./cmd/steward-control
@@ -237,6 +241,14 @@ jobs:
           bash scripts/build-rpm.sh "$stage" v0.0.0-test "$(go env GOARCH)" \
             /tmp/steward-node-test.rpm
           dpkg-deb --info /tmp/steward-node-test.deb
+          package_verify_root="/usr/lib/steward-node-package-smoke-${GITHUB_RUN_ID}-$$"
+          sudo install -d -o root -g root -m 0755 "$package_verify_root"
+          sudo dpkg-deb -x /tmp/steward-node-test.deb "$package_verify_root"
+          sudo "$package_verify_root/usr/lib/steward-node/release/scripts/install-node.sh" \
+            --expected-version v0.0.0-test --verify-package-only | \
+            grep -Fxq 'install-node: package release verified'
+          sudo rm -rf "$package_verify_root"
+          package_verify_root=
           dpkg-deb --contents /tmp/steward-node-test.deb > /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/steward-control' /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/steward-executor' /tmp/steward-node-test.deb.contents

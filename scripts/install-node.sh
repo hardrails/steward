@@ -13,8 +13,15 @@ unset TAR_OPTIONS GZIP POSIXLY_CORRECT TMPDIR
 IFS=$' \t\n'
 umask 077
 
-if [[ $# -ne 2 || $1 != --expected-version || -z ${2:-} ]]; then
-	echo "usage: install-node.sh --expected-version vX.Y.Z" >&2
+verify_package_only=false
+if [[ $# -eq 3 && ${3:-} == --verify-package-only ]]; then
+	verify_package_only=true
+elif [[ $# -ne 2 ]]; then
+	echo "usage: install-node.sh --expected-version vX.Y.Z [--verify-package-only]" >&2
+	exit 2
+fi
+if [[ ${1:-} != --expected-version || -z ${2:-} ]]; then
+	echo "usage: install-node.sh --expected-version vX.Y.Z [--verify-package-only]" >&2
 	exit 2
 fi
 expected_version=$2
@@ -858,6 +865,11 @@ release_files=(
 	steward-mcp
 	steward-relay
 	stewardctl
+	integration/examples/agents/hermes/agent.json
+	integration/examples/agents/openclaw/agent.json
+	integration/examples/agents/nodes.json
+	integration/examples/policy/steward.rego
+	integration/schemas/agent.cue
 	integration/adapters/hermes-agent/Dockerfile
 	integration/adapters/hermes-agent/README.md
 	integration/adapters/hermes-agent/adapter.json
@@ -916,10 +928,13 @@ release_files=(
 
 release_file_path() {
 	local base=$1 layout=$2 logical=$3
-	if [[ $layout == source && $logical == integration/* ]]; then
+	if [[ $layout == package && $logical == integration/* ]]; then
 		printf '%s/%s\n' "$base" "${logical#integration/}"
-	else
+	elif [[ $layout == package || $layout == immutable ]]; then
 		printf '%s/%s\n' "$base" "$logical"
+	else
+		echo "install-node: unknown release layout '$layout'" >&2
+		return 2
 	fi
 }
 
@@ -993,7 +1008,7 @@ verify_release() {
 		return 2
 	fi
 	rm -f "$expected_tmp"
-	if [[ $layout == installed ]]; then
+	if [[ $layout == immutable ]]; then
 		if find "$base" -mindepth 1 -type l -print -quit | grep -q . || \
 			find "$base" -mindepth 1 ! -type f ! -type d -print -quit | grep -q .; then
 			echo "install-node: immutable release contains a symlink or special file" >&2
@@ -1013,7 +1028,11 @@ if ! validate_release_source_tree "$root"; then
 	echo "install-node: release source and every ancestor must be root-owned and non-writable; files must be one-link regular files within size bounds" >&2
 	exit 2
 fi
-verify_release "$root" source
+verify_release "$root" package
+if [[ $verify_package_only == true ]]; then
+	echo "install-node: package release verified"
+	exit 0
+fi
 
 acquire_host_role_lock
 if [[ -e $node_role_claim_directory || -L $node_role_claim_directory ]]; then
@@ -1153,6 +1172,9 @@ for binary in steward steward-control stewardctl steward-mcp steward-executor st
 	install -o root -g root -m 0755 "$root/$binary" "$incoming/$binary"
 done
 install -d -o root -g root -m 0755 "$incoming/integration" \
+	"$incoming/integration/examples" "$incoming/integration/examples/agents" \
+	"$incoming/integration/examples/agents/hermes" "$incoming/integration/examples/agents/openclaw" \
+	"$incoming/integration/examples/policy" "$incoming/integration/schemas" \
 	"$incoming/integration/adapters" "$incoming/integration/adapters/hermes-agent" \
 	"$incoming/integration/adapters/hermes-agent/fixtures" \
 	"$incoming/integration/adapters/hermes-agent/fixtures/connector-skill" \
@@ -1165,6 +1187,11 @@ install -d -o root -g root -m 0755 "$incoming/integration" \
 	"$incoming/integration/adapters/openclaw/fixtures/workspace/qualification/input" \
 	"$incoming/integration/deploy" "$incoming/integration/deploy/config" \
 	"$incoming/integration/deploy/systemd" "$incoming/integration/scripts"
+for file in agents/hermes/agent.json agents/openclaw/agent.json agents/nodes.json \
+	policy/steward.rego; do
+	install -o root -g root -m 0644 "$root/examples/$file" "$incoming/integration/examples/$file"
+done
+install -o root -g root -m 0644 "$root/schemas/agent.cue" "$incoming/integration/schemas/agent.cue"
 for file in Dockerfile README.md adapter.json entrypoint.py fixture_connector.py fixture_mcp.py \
 	fixture_model.py fixture_secret_scan.py license-inventory.json source-inputs.sha256; do
 	install -o root -g root -m 0644 "$root/adapters/hermes-agent/$file" \
@@ -1203,7 +1230,7 @@ for script in activate-node-release.sh build-hermes-adapter.sh build-openclaw-ad
 	install -o root -g root -m 0755 "$root/scripts/$script" "$incoming/integration/scripts/$script"
 done
 install -o root -g root -m 0644 "$root/release.json" "$incoming/release.json"
-verify_release "$incoming" installed
+verify_release "$incoming" immutable
 
 steward_version=$(timeout --signal=TERM --kill-after=2 5 runuser -u steward -- "$incoming/steward" -version | awk '{print $2}')
 control_version=$(timeout --signal=TERM --kill-after=2 5 runuser -u steward -- "$incoming/steward-control" -version | awk '{print $2}')
@@ -1228,7 +1255,7 @@ if [[ -e $release_dir || -L $release_dir ]]; then
 		echo "install-node: existing release path is not a directory: $release_dir" >&2
 		exit 2
 	}
-	verify_release "$release_dir" installed
+	verify_release "$release_dir" immutable
 	if ! cmp -s "$incoming/release.json" "$release_dir/release.json"; then
 		echo "install-node: refusing to rewrite immutable release $expected_version" >&2
 		exit 2
