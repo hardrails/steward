@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/activationcanary"
+	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
@@ -26,17 +27,19 @@ import (
 
 const (
 	stateFormatMinReadVersion       = 1
-	stateFormatWriteVersion         = 4
+	stateFormatWriteVersion         = 5
 	stateFormatMaxReadVersion       = stateFormatWriteVersion
 	stateFormatEvidenceVersion      = 2
 	stateFormatExecutorV4Version    = 3
 	stateFormatCaptureVersion       = 4
+	stateFormatDeploymentVersion    = 5
 	transactionFormatMinReadVersion = 1
-	transactionFormatWriteVersion   = 4
+	transactionFormatWriteVersion   = 5
 	transactionFormatMaxReadVersion = transactionFormatWriteVersion
 	transactionEvidenceVersion      = 2
 	transactionExecutorV4Version    = 3
 	transactionCaptureVersion       = 4
+	transactionDeploymentVersion    = 5
 	maxMutationsPerRecord           = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -70,6 +73,8 @@ type Limits struct {
 	MaxCommands             int
 	MaxCommandsPerTenant    int
 	MaxCommandsPerNode      int
+	MaxDeployments          int
+	MaxDeploymentsPerTenant int
 	MaxCommandBytes         int
 	MaxReportBytes          int
 	MaxStateBytes           int
@@ -84,6 +89,7 @@ func DefaultLimits() Limits {
 		MaxCredentials: 16384, MaxCredentialsPerTenant: 2048,
 		MaxEnrollments: 4096, MaxEnrollmentsPerTenant: 512,
 		MaxCommands: 16384, MaxCommandsPerTenant: 1024, MaxCommandsPerNode: 256,
+		MaxDeployments: 1024, MaxDeploymentsPerTenant: 128,
 		MaxCommandBytes: 1 << 20, MaxReportBytes: 64 << 10,
 		MaxStateBytes: 64 << 20, MaxRecordBytes: 2 << 20, MaxWALBytes: 64 << 20,
 		TerminalRetention: 24 * time.Hour,
@@ -95,6 +101,7 @@ func (limits Limits) Validate() error {
 		limits.MaxCredentials <= 0 || limits.MaxCredentialsPerTenant <= 0 ||
 		limits.MaxEnrollments <= 0 || limits.MaxEnrollmentsPerTenant <= 0 ||
 		limits.MaxCommands <= 0 || limits.MaxCommandsPerTenant <= 0 || limits.MaxCommandsPerNode <= 0 ||
+		limits.MaxDeployments <= 0 || limits.MaxDeploymentsPerTenant <= 0 ||
 		limits.MaxCommandBytes <= 0 || limits.MaxReportBytes <= 0 || limits.MaxStateBytes <= 0 ||
 		limits.MaxRecordBytes <= 0 || limits.MaxWALBytes <= 0 || limits.TerminalRetention <= 0 {
 		return errors.New("every control store limit must be positive")
@@ -102,6 +109,7 @@ func (limits Limits) Validate() error {
 	if limits.MaxNodesPerTenant > limits.MaxNodes || limits.MaxCredentialsPerTenant > limits.MaxCredentials ||
 		limits.MaxEnrollmentsPerTenant > limits.MaxEnrollments ||
 		limits.MaxCommandsPerTenant > limits.MaxCommands || limits.MaxCommandsPerNode > limits.MaxCommands ||
+		limits.MaxDeploymentsPerTenant > limits.MaxDeployments ||
 		limits.MaxCommandBytes > limits.MaxRecordBytes || limits.MaxReportBytes > limits.MaxRecordBytes ||
 		limits.MaxRecordBytes > limits.MaxStateBytes || int64(limits.MaxRecordBytes)+walHeaderBytes+4 > limits.MaxWALBytes {
 		return errors.New("control store limits are internally inconsistent")
@@ -209,6 +217,71 @@ type Command struct {
 	Terminal                 *TerminalReport `json:"terminal,omitempty"`
 }
 
+type DeploymentDesiredState string
+
+const (
+	DeploymentRunning DeploymentDesiredState = "running"
+	DeploymentAbsent  DeploymentDesiredState = "absent"
+)
+
+type DeploymentPhase string
+
+const (
+	DeploymentPending     DeploymentPhase = "pending"
+	DeploymentReconciling DeploymentPhase = "reconciling"
+	DeploymentReady       DeploymentPhase = "ready"
+	DeploymentStopping    DeploymentPhase = "stopping"
+	DeploymentRemoved     DeploymentPhase = "removed"
+	DeploymentDegraded    DeploymentPhase = "degraded"
+)
+
+type DeploymentInstancePhase string
+
+const (
+	DeploymentInstancePending    DeploymentInstancePhase = "pending"
+	DeploymentInstanceAdmitting  DeploymentInstancePhase = "admitting"
+	DeploymentInstanceStarting   DeploymentInstancePhase = "starting"
+	DeploymentInstanceRunning    DeploymentInstancePhase = "running"
+	DeploymentInstanceStopping   DeploymentInstancePhase = "stopping"
+	DeploymentInstanceDestroying DeploymentInstancePhase = "destroying"
+	DeploymentInstanceRemoved    DeploymentInstancePhase = "removed"
+	DeploymentInstanceFailed     DeploymentInstancePhase = "failed"
+)
+
+// DeploymentInstance is the controller's durable progress record for one
+// exact instance named by the tenant-signed delegation.
+type DeploymentInstance struct {
+	InstanceID       string                  `json:"instance_id"`
+	LineageID        string                  `json:"lineage_id"`
+	Generation       uint64                  `json:"generation"`
+	NodeID           string                  `json:"node_id,omitempty"`
+	Phase            DeploymentInstancePhase `json:"phase"`
+	CommandID        string                  `json:"command_id,omitempty"`
+	CommandOperation string                  `json:"command_operation,omitempty"`
+	CommandSequence  uint64                  `json:"command_sequence,omitempty"`
+	Attempts         uint32                  `json:"attempts,omitempty"`
+	LastError        string                  `json:"last_error,omitempty"`
+	TransitionedAt   string                  `json:"transitioned_at"`
+}
+
+// Deployment is bounded desired state. It contains public signed artifacts,
+// never a tenant or controller private key.
+type Deployment struct {
+	TenantID       string                 `json:"tenant_id"`
+	ID             string                 `json:"id"`
+	Generation     uint64                 `json:"generation"`
+	Revision       uint64                 `json:"revision"`
+	AgentName      string                 `json:"agent_name"`
+	BundleDigest   string                 `json:"bundle_digest"`
+	CapsuleDSSE    []byte                 `json:"-"`
+	DelegationDSSE []byte                 `json:"-"`
+	DesiredState   DeploymentDesiredState `json:"desired_state"`
+	Phase          DeploymentPhase        `json:"phase"`
+	Instances      []DeploymentInstance   `json:"instances"`
+	CreatedAt      string                 `json:"created_at"`
+	UpdatedAt      string                 `json:"updated_at"`
+}
+
 type EvidenceCaptureState string
 
 const (
@@ -300,6 +373,7 @@ type snapshotState struct {
 	Enrollments []storedEnrollment      `json:"enrollments"`
 	Commands    []storedCommand         `json:"commands"`
 	Captures    []storedEvidenceCapture `json:"captures"`
+	Deployments []storedDeployment      `json:"deployments"`
 }
 
 type storedCredential struct {
@@ -351,6 +425,22 @@ type storedCommand struct {
 	Terminal           *TerminalReport `json:"terminal,omitempty"`
 }
 
+type storedDeployment struct {
+	TenantID             string                 `json:"tenant_id"`
+	ID                   string                 `json:"id"`
+	Generation           uint64                 `json:"generation"`
+	Revision             uint64                 `json:"revision"`
+	AgentName            string                 `json:"agent_name"`
+	BundleDigest         string                 `json:"bundle_digest"`
+	CapsuleDSSEBase64    string                 `json:"capsule_dsse_base64"`
+	DelegationDSSEBase64 string                 `json:"delegation_dsse_base64"`
+	DesiredState         DeploymentDesiredState `json:"desired_state"`
+	Phase                DeploymentPhase        `json:"phase"`
+	Instances            []DeploymentInstance   `json:"instances"`
+	CreatedAt            string                 `json:"created_at"`
+	UpdatedAt            string                 `json:"updated_at"`
+}
+
 type state struct {
 	tenants     map[string]Tenant
 	nodes       map[string]Node
@@ -358,6 +448,7 @@ type state struct {
 	enrollments map[string]controlauth.Enrollment
 	commands    map[string]Command
 	captures    map[string]storedEvidenceCapture
+	deployments map[string]Deployment
 }
 
 type transaction struct {
@@ -377,6 +468,7 @@ type mutation struct {
 	NodeRevoke   *nodeRevocation        `json:"node_revoke,omitempty"`
 	Capture      *storedEvidenceCapture `json:"capture,omitempty"`
 	CaptureID    string                 `json:"capture_id,omitempty"`
+	Deployment   *storedDeployment      `json:"deployment,omitempty"`
 }
 
 type commandReference struct {
@@ -401,6 +493,7 @@ const (
 	mutationNodeRevoke       = "node_revoke"
 	mutationCapture          = "evidence_capture_upsert"
 	mutationCaptureDelete    = "evidence_capture_delete"
+	mutationDeployment       = "deployment_upsert"
 )
 
 func emptyState() state {
@@ -408,6 +501,7 @@ func emptyState() state {
 		tenants: make(map[string]Tenant), nodes: make(map[string]Node),
 		credentials: make(map[string]controlauth.Credential), enrollments: make(map[string]controlauth.Enrollment),
 		commands: make(map[string]Command), captures: make(map[string]storedEvidenceCapture),
+		deployments: make(map[string]Deployment),
 	}
 }
 
@@ -437,6 +531,9 @@ func (current state) clone() state {
 	}
 	for key, capture := range current.captures {
 		next.captures[key] = cloneStoredEvidenceCapture(capture)
+	}
+	for key, deployment := range current.deployments {
+		next.deployments[key] = cloneDeployment(deployment)
 	}
 	return next
 }
@@ -499,6 +596,46 @@ func cloneCommand(command Command) Command {
 		command.Terminal = &terminal
 	}
 	return command
+}
+
+func cloneDeployment(deployment Deployment) Deployment {
+	deployment.CapsuleDSSE = append([]byte(nil), deployment.CapsuleDSSE...)
+	deployment.DelegationDSSE = append([]byte(nil), deployment.DelegationDSSE...)
+	deployment.Instances = append([]DeploymentInstance(nil), deployment.Instances...)
+	return deployment
+}
+
+func deploymentToStored(deployment Deployment) storedDeployment {
+	return storedDeployment{
+		TenantID: deployment.TenantID, ID: deployment.ID,
+		Generation: deployment.Generation, Revision: deployment.Revision,
+		AgentName: deployment.AgentName, BundleDigest: deployment.BundleDigest,
+		CapsuleDSSEBase64:    base64.StdEncoding.EncodeToString(deployment.CapsuleDSSE),
+		DelegationDSSEBase64: base64.StdEncoding.EncodeToString(deployment.DelegationDSSE),
+		DesiredState:         deployment.DesiredState, Phase: deployment.Phase,
+		Instances: append([]DeploymentInstance(nil), deployment.Instances...),
+		CreatedAt: deployment.CreatedAt, UpdatedAt: deployment.UpdatedAt,
+	}
+}
+
+func deploymentFromStored(stored storedDeployment) (Deployment, error) {
+	capsule, err := decodeCanonicalBase64(stored.CapsuleDSSEBase64)
+	if err != nil {
+		return Deployment{}, fmt.Errorf("capsule encoding: %w", err)
+	}
+	delegation, err := decodeCanonicalBase64(stored.DelegationDSSEBase64)
+	if err != nil {
+		return Deployment{}, fmt.Errorf("delegation encoding: %w", err)
+	}
+	return Deployment{
+		TenantID: stored.TenantID, ID: stored.ID,
+		Generation: stored.Generation, Revision: stored.Revision,
+		AgentName: stored.AgentName, BundleDigest: stored.BundleDigest,
+		CapsuleDSSE: capsule, DelegationDSSE: delegation,
+		DesiredState: stored.DesiredState, Phase: stored.Phase,
+		Instances: append([]DeploymentInstance(nil), stored.Instances...),
+		CreatedAt: stored.CreatedAt, UpdatedAt: stored.UpdatedAt,
+	}, nil
 }
 
 func cloneAdmissionProjection(projection *controlprotocol.ExecutorAdmissionProjectionV1) *controlprotocol.ExecutorAdmissionProjectionV1 {
@@ -643,6 +780,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 	snapshot := snapshotState{
 		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Nodes: []Node{}, Credentials: []storedCredential{},
 		Enrollments: []storedEnrollment{}, Commands: []storedCommand{}, Captures: []storedEvidenceCapture{},
+		Deployments: []storedDeployment{},
 	}
 	for _, tenant := range current.tenants {
 		snapshot.Tenants = append(snapshot.Tenants, tenant)
@@ -665,6 +803,9 @@ func encodeState(current state, limit int) ([]byte, error) {
 	for _, capture := range current.captures {
 		snapshot.Captures = append(snapshot.Captures, cloneStoredEvidenceCapture(capture))
 	}
+	for _, deployment := range current.deployments {
+		snapshot.Deployments = append(snapshot.Deployments, deploymentToStored(deployment))
+	}
 	sort.Slice(snapshot.Tenants, func(i, j int) bool { return snapshot.Tenants[i].ID < snapshot.Tenants[j].ID })
 	sort.Slice(snapshot.Nodes, func(i, j int) bool { return snapshot.Nodes[i].ID < snapshot.Nodes[j].ID })
 	sort.Slice(snapshot.Credentials, func(i, j int) bool { return snapshot.Credentials[i].ID < snapshot.Credentials[j].ID })
@@ -681,6 +822,13 @@ func encodeState(current state, limit int) ([]byte, error) {
 	})
 	sort.Slice(snapshot.Captures, func(i, j int) bool {
 		return snapshot.Captures[i].CaptureID < snapshot.Captures[j].CaptureID
+	})
+	sort.Slice(snapshot.Deployments, func(i, j int) bool {
+		left, right := snapshot.Deployments[i], snapshot.Deployments[j]
+		if left.TenantID != right.TenantID {
+			return left.TenantID < right.TenantID
+		}
+		return left.ID < right.ID
 	})
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
@@ -701,7 +849,9 @@ func decodeState(raw []byte, limit int) (state, error) {
 		snapshot.Tenants == nil || snapshot.Nodes == nil ||
 		snapshot.Credentials == nil || snapshot.Enrollments == nil || snapshot.Commands == nil ||
 		snapshot.Version >= stateFormatCaptureVersion && snapshot.Captures == nil ||
-		snapshot.Version < stateFormatCaptureVersion && snapshot.Captures != nil {
+		snapshot.Version < stateFormatCaptureVersion && snapshot.Captures != nil ||
+		snapshot.Version >= stateFormatDeploymentVersion && snapshot.Deployments == nil ||
+		snapshot.Version < stateFormatDeploymentVersion && snapshot.Deployments != nil {
 		return state{}, errors.New("control snapshot has an invalid version or missing collection")
 	}
 	current := emptyState()
@@ -763,6 +913,17 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		current.captures[capture.CaptureID] = cloneStoredEvidenceCapture(capture)
 	}
+	for _, stored := range snapshot.Deployments {
+		deployment, err := deploymentFromStored(stored)
+		if err != nil {
+			return state{}, fmt.Errorf("control snapshot deployment encoding: %w", err)
+		}
+		key := deploymentKey(deployment.TenantID, deployment.ID)
+		if _, exists := current.deployments[key]; exists {
+			return state{}, errors.New("control snapshot contains a duplicate deployment")
+		}
+		current.deployments[key] = cloneDeployment(deployment)
+	}
 	return current, nil
 }
 
@@ -817,6 +978,9 @@ func applyTransaction(current state, value transaction) (state, error) {
 			present++
 		}
 		if change.CaptureID != "" {
+			present++
+		}
+		if change.Deployment != nil {
 			present++
 		}
 		if present != 1 {
@@ -930,6 +1094,15 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("evidence capture deletion references missing state")
 			}
 			delete(next.captures, change.CaptureID)
+		case mutationDeployment:
+			if value.Version < transactionDeploymentVersion || change.Deployment == nil {
+				return state{}, errors.New("deployment mutation is invalid for this transaction version")
+			}
+			deployment, err := deploymentFromStored(*change.Deployment)
+			if err != nil {
+				return state{}, fmt.Errorf("deployment mutation encoding: %w", err)
+			}
+			next.deployments[deploymentKey(deployment.TenantID, deployment.ID)] = cloneDeployment(deployment)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
 		}
@@ -940,7 +1113,8 @@ func applyTransaction(current state, value transaction) (state, error) {
 func validateState(current state, limits Limits) error {
 	if len(current.tenants) > limits.MaxTenants || len(current.nodes) > limits.MaxNodes ||
 		len(current.credentials) > limits.MaxCredentials || len(current.enrollments) > limits.MaxEnrollments ||
-		len(current.commands) > limits.MaxCommands || len(current.captures) > MaxEvidenceCapturesRetained {
+		len(current.commands) > limits.MaxCommands || len(current.captures) > MaxEvidenceCapturesRetained ||
+		len(current.deployments) > limits.MaxDeployments {
 		return ErrCapacityExceeded
 	}
 	for key, tenant := range current.tenants {
@@ -1102,12 +1276,105 @@ func validateState(current state, limits Limits) error {
 	if reservedCaptureBytes > MaxEvidenceCaptureAggregateBytes {
 		return ErrCapacityExceeded
 	}
+	deploymentsByTenant := make(map[string]int)
+	for key, deployment := range current.deployments {
+		if key != deploymentKey(deployment.TenantID, deployment.ID) || validateDeployment(deployment, limits) != nil {
+			return errors.New("control state contains an invalid deployment")
+		}
+		if tenant, ok := current.tenants[deployment.TenantID]; !ok || !tenant.Active {
+			return errors.New("control deployment references an unknown tenant")
+		}
+		deploymentsByTenant[deployment.TenantID]++
+		if deploymentsByTenant[deployment.TenantID] > limits.MaxDeploymentsPerTenant {
+			return ErrCapacityExceeded
+		}
+	}
 	if raw, err := encodeState(current, limits.MaxStateBytes); err != nil {
 		return err
 	} else if len(raw) > limits.MaxStateBytes {
 		return ErrCapacityExceeded
 	}
 	return nil
+}
+
+func validateDeployment(deployment Deployment, limits Limits) error {
+	if !validRecordID(deployment.TenantID, 128) || !validRecordID(deployment.ID, 128) ||
+		!validRecordID(deployment.AgentName, 128) || !validSHA256Digest(deployment.BundleDigest) ||
+		deployment.Generation == 0 || deployment.Revision == 0 ||
+		len(deployment.CapsuleDSSE) == 0 || len(deployment.CapsuleDSSE) > limits.MaxCommandBytes ||
+		len(deployment.DelegationDSSE) == 0 || len(deployment.DelegationDSSE) > limits.MaxCommandBytes ||
+		!validTimestamp(deployment.CreatedAt) || !validTimestamp(deployment.UpdatedAt) {
+		return errors.New("deployment identity or signed artifacts are invalid")
+	}
+	created, _ := parseTimestamp(deployment.CreatedAt)
+	updated, _ := parseTimestamp(deployment.UpdatedAt)
+	if updated.Before(created) {
+		return errors.New("deployment update predates creation")
+	}
+	if deployment.DesiredState != DeploymentRunning && deployment.DesiredState != DeploymentAbsent {
+		return errors.New("deployment desired state is invalid")
+	}
+	switch deployment.Phase {
+	case DeploymentPending, DeploymentReconciling, DeploymentReady, DeploymentStopping, DeploymentRemoved, DeploymentDegraded:
+	default:
+		return errors.New("deployment phase is invalid")
+	}
+	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+	if err != nil || delegation.TenantID != deployment.TenantID || delegation.Admission == nil ||
+		delegation.Admission.CapsuleDigest != dsse.Digest(deployment.CapsuleDSSE) ||
+		len(deployment.Instances) != len(delegation.Instances) {
+		return errors.New("deployment delegation does not bind its desired state")
+	}
+	if envelope, err := dsse.Parse(deployment.CapsuleDSSE); err != nil || envelope.PayloadType != admission.CapsulePayloadType {
+		return errors.New("deployment capsule envelope is invalid")
+	}
+	allowedNodes := make(map[string]struct{}, len(delegation.NodeIDs))
+	for _, nodeID := range delegation.NodeIDs {
+		allowedNodes[nodeID] = struct{}{}
+	}
+	for index, instance := range deployment.Instances {
+		delegated := delegation.Instances[index]
+		if instance.InstanceID != delegated.InstanceID || instance.LineageID != delegated.LineageID ||
+			instance.Generation < delegated.MinInstanceGeneration || instance.Generation > delegated.MaxInstanceGeneration ||
+			index > 0 && deployment.Instances[index-1].InstanceID >= instance.InstanceID ||
+			instance.NodeID != "" && !validRecordID(instance.NodeID, 128) ||
+			instance.NodeID != "" && !mapContains(allowedNodes, instance.NodeID) ||
+			!validTimestamp(instance.TransitionedAt) || !boundedRetainedText(instance.LastError, 1024) {
+			return errors.New("deployment instance identity or placement is invalid")
+		}
+		switch instance.Phase {
+		case DeploymentInstancePending, DeploymentInstanceAdmitting, DeploymentInstanceStarting,
+			DeploymentInstanceRunning, DeploymentInstanceStopping, DeploymentInstanceDestroying,
+			DeploymentInstanceRemoved, DeploymentInstanceFailed:
+		default:
+			return errors.New("deployment instance phase is invalid")
+		}
+		commandEmpty := instance.CommandID == "" && instance.CommandOperation == "" && instance.CommandSequence == 0
+		commandComplete := validRecordID(instance.CommandID, 256) &&
+			validDeploymentOperation(instance.CommandOperation) && instance.CommandSequence > 0
+		if !commandEmpty && !commandComplete {
+			return errors.New("deployment instance command cursor is incomplete")
+		}
+	}
+	return nil
+}
+
+func validDeploymentOperation(operation string) bool {
+	switch operation {
+	case "admit", "start", "read", "stop", "destroy":
+		return true
+	default:
+		return false
+	}
+}
+
+func mapContains(values map[string]struct{}, wanted string) bool {
+	_, ok := values[wanted]
+	return ok
+}
+
+func deploymentKey(tenantID, deploymentID string) string {
+	return tenantID + "\x00" + deploymentID
 }
 
 func evidenceCaptureUsage(captures map[string]storedEvidenceCapture) (active, reservedBytes int) {

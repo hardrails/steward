@@ -249,6 +249,33 @@ func VerifyCommandDelegation(raw []byte, policy SitePolicy, now time.Time) (Veri
 	}, nil
 }
 
+// InspectCommandDelegation decodes and validates the bounded routing statement
+// without treating its signature as trusted. Control uses this to retain and
+// reconcile desired state; Executor remains the authority that verifies the
+// tenant signature against authenticated site policy before executing a
+// delegated command.
+func InspectCommandDelegation(raw []byte, now time.Time) (CommandDelegation, error) {
+	if len(raw) == 0 || len(raw) > maxCommandDelegationBytes {
+		return CommandDelegation{}, deny("command delegation envelope exceeds its limit")
+	}
+	envelope, err := dsse.Parse(raw)
+	if err != nil || envelope.PayloadType != CommandDelegationPayloadType {
+		return CommandDelegation{}, deny("parse command delegation envelope")
+	}
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil || base64.StdEncoding.EncodeToString(payload) != envelope.Payload {
+		return CommandDelegation{}, deny("decode command delegation payload")
+	}
+	var statement CommandDelegation
+	if err := dsse.DecodeStrictInto(payload, maxCommandDelegationBytes, &statement); err != nil {
+		return CommandDelegation{}, deny("decode command delegation statement")
+	}
+	if err := statement.Validate(now); err != nil {
+		return CommandDelegation{}, err
+	}
+	return statement, nil
+}
+
 func VerifyDelegatedCommand(commandRaw, delegationRaw []byte, policy SitePolicy, now time.Time) (CommandStatement, error) {
 	delegation, err := VerifyCommandDelegation(delegationRaw, policy, now)
 	if err != nil {

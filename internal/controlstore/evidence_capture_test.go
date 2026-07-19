@@ -680,9 +680,9 @@ func TestEvidenceCaptureFormatFourStrictlyMigratesLegacyState(t *testing.T) {
 	if err := json.Unmarshal(raw, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Version != stateFormatCaptureVersion || len(snapshot.Captures) != 1 ||
+	if snapshot.Version != stateFormatWriteVersion || len(snapshot.Captures) != 1 ||
 		snapshot.Captures[0].FramesBase64 == nil {
-		t.Fatalf("format-4 snapshot = version %d captures %+v", snapshot.Version, snapshot.Captures)
+		t.Fatalf("current snapshot = version %d captures %+v", snapshot.Version, snapshot.Captures)
 	}
 	decoded, err := decodeState(raw, fixture.limits.MaxStateBytes)
 	if err != nil || len(decoded.captures) != 1 {
@@ -696,6 +696,7 @@ func TestEvidenceCaptureFormatFourStrictlyMigratesLegacyState(t *testing.T) {
 	legacyVersion, _ := json.Marshal(stateFormatExecutorV4Version)
 	legacyObject["version"] = legacyVersion
 	delete(legacyObject, "captures")
+	delete(legacyObject, "deployments")
 	legacyRaw, err := json.Marshal(legacyObject)
 	if err != nil {
 		t.Fatal(err)
@@ -706,6 +707,7 @@ func TestEvidenceCaptureFormatFourStrictlyMigratesLegacyState(t *testing.T) {
 	}
 
 	snapshot.Version = stateFormatExecutorV4Version
+	snapshot.Deployments = nil
 	legacyWithCapture, err := json.Marshal(snapshot)
 	if err != nil {
 		t.Fatal(err)
@@ -728,7 +730,7 @@ func TestEvidenceCaptureFormatFourStrictlyMigratesLegacyState(t *testing.T) {
 	if err := json.Unmarshal(encoded, &written); err != nil {
 		t.Fatal(err)
 	}
-	if written.Version != transactionCaptureVersion {
+	if written.Version != transactionFormatWriteVersion {
 		t.Fatalf("capture transaction write version = %d", written.Version)
 	}
 }

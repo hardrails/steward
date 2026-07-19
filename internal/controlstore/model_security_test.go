@@ -32,6 +32,7 @@ func TestSnapshotDecoderRejectsAmbiguousOrCorruptDurableRecords(t *testing.T) {
 		{"missing credentials", func(value *snapshotState) { value.Credentials = nil }},
 		{"missing enrollments", func(value *snapshotState) { value.Enrollments = nil }},
 		{"missing commands", func(value *snapshotState) { value.Commands = nil }},
+		{"missing deployments", func(value *snapshotState) { value.Deployments = nil }},
 		{"duplicate tenant", func(value *snapshotState) { value.Tenants = append(value.Tenants, value.Tenants[0]) }},
 		{"duplicate node", func(value *snapshotState) { value.Nodes = append(value.Nodes, value.Nodes[0]) }},
 		{"duplicate credential", func(value *snapshotState) { value.Credentials = append(value.Credentials, value.Credentials[0]) }},
@@ -75,7 +76,7 @@ func TestWALDecoderRejectsStructurallyAmbiguousMutations(t *testing.T) {
 		t.Fatal("oversized WAL transaction was accepted")
 	}
 	for _, raw := range [][]byte{
-		[]byte(`{"version":5,"mutations":[{"kind":"tenant_upsert","tenant":{"id":"tenant-a"}}]}`),
+		[]byte(`{"version":6,"mutations":[{"kind":"tenant_upsert","tenant":{"id":"tenant-a"}}]}`),
 		[]byte(`{"version":1,"mutations":[]}`),
 		[]byte(`{"version":1,"mutations":[{"kind":"unknown"}],"extra":true}`),
 	} {
@@ -93,9 +94,11 @@ func TestWALDecoderRejectsStructurallyAmbiguousMutations(t *testing.T) {
 		{Kind: mutationCredential, Tenant: &tenant},
 		{Kind: mutationEnrollment, Tenant: &tenant},
 		{Kind: mutationCommand, Tenant: &tenant},
+		{Kind: mutationDeployment, Tenant: &tenant},
 		{Kind: mutationCredential, Credential: &storedCredential{TokenMACBase64: "not-base64"}},
 		{Kind: mutationEnrollment, Enrollment: &storedEnrollment{TokenMACBase64: "not-base64"}},
 		{Kind: mutationCommand, Command: &storedCommand{CommandDSSEBase64: "not-base64"}},
+		{Kind: mutationDeployment, Deployment: &storedDeployment{CapsuleDSSEBase64: "not-base64"}},
 		{Kind: mutationEnrollmentDelete, EnrollmentID: "bad id"},
 		{Kind: mutationEnrollmentDelete, EnrollmentID: "missing"},
 		{Kind: mutationCommandDelete, CommandRef: &commandReference{TenantID: "bad id", NodeID: "node-1", ID: "command-1"}},
