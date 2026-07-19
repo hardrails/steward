@@ -145,6 +145,55 @@ func TestDeploymentScopeIsolationCapacityAndLegacyFormat(t *testing.T) {
 	}
 }
 
+func TestDeploymentBlockedReasonIsDurableBoundedAndIdempotent(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	created, _, err := fixture.store.ApplyDeployment(
+		fixture.admin, deploymentApplyFixture(t, fixture.now, "deployment-a", 1),
+		fixture.now.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instanceID := created.Instances[0].InstanceID
+	blocked, changed, err := fixture.store.RecordDeploymentBlocked(
+		"tenant-a", "deployment-a", instanceID, created.Revision,
+		DeploymentBlockedNoEligibleNode, fixture.now.Add(2*time.Minute),
+	)
+	if err != nil || !changed || blocked.Revision != created.Revision+1 ||
+		blocked.Instances[0].Phase != DeploymentInstancePending ||
+		blocked.Instances[0].LastError != string(DeploymentBlockedNoEligibleNode) {
+		t.Fatalf("record blocked reason = (%+v, %v, %v)", blocked, changed, err)
+	}
+	retry, changed, err := fixture.store.RecordDeploymentBlocked(
+		"tenant-a", "deployment-a", instanceID, blocked.Revision,
+		DeploymentBlockedNoEligibleNode, fixture.now.Add(3*time.Minute),
+	)
+	if err != nil || changed || !reflect.DeepEqual(retry, blocked) {
+		t.Fatalf("repeat blocked reason = (%+v, %v, %v)", retry, changed, err)
+	}
+	if _, _, err := fixture.store.RecordDeploymentBlocked(
+		"tenant-a", "deployment-a", instanceID, blocked.Revision,
+		DeploymentBlockedReason("free-form detail"), fixture.now.Add(4*time.Minute),
+	); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unbounded blocked reason error = %v", err)
+	}
+
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	loaded, found, err := reopened.GetDeployment(fixture.admin, "tenant-a", "deployment-a")
+	if err != nil || !found || loaded.Instances[0].LastError != string(DeploymentBlockedNoEligibleNode) {
+		t.Fatalf("recovered blocked reason = (%+v, %v, %v)", loaded, found, err)
+	}
+}
+
 func deploymentApplyFixture(t *testing.T, now time.Time, deploymentID string, generation uint64) DeploymentApply {
 	t.Helper()
 	_, publisherPrivate, err := ed25519.GenerateKey(rand.Reader)

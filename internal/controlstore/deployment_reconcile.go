@@ -25,6 +25,73 @@ type DeploymentCommandTransition struct {
 	CommandDSSE      []byte
 }
 
+// DeploymentBlockedReason is a stable, machine-readable explanation for why
+// the controller cannot advance one deployment instance. Blocked instances
+// remain eligible for reconciliation after the operator fixes the condition.
+type DeploymentBlockedReason string
+
+const (
+	DeploymentBlockedNoEligibleNode          DeploymentBlockedReason = "no_eligible_node"
+	DeploymentBlockedAssignedNodeUnavailable DeploymentBlockedReason = "assigned_node_unavailable"
+	DeploymentBlockedDelegationExpired       DeploymentBlockedReason = "delegation_expired"
+	DeploymentBlockedControllerKeyMismatch   DeploymentBlockedReason = "controller_key_mismatch"
+	DeploymentBlockedInvalidAuthority        DeploymentBlockedReason = "invalid_deployment_authority"
+)
+
+// RecordDeploymentBlocked retains a stable reason without changing the
+// instance phase. Repeated reconciliation of the same condition is a no-op so
+// an unavailable fleet cannot create unbounded WAL churn.
+func (store *Store) RecordDeploymentBlocked(
+	tenantID, deploymentID, instanceID string,
+	expectedRevision uint64,
+	reason DeploymentBlockedReason,
+	now time.Time,
+) (Deployment, bool, error) {
+	if store == nil {
+		return Deployment{}, false, ErrUnavailable
+	}
+	if now.IsZero() || expectedRevision == 0 || !validRecordID(tenantID, 128) ||
+		!validRecordID(deploymentID, 128) || !validRecordID(instanceID, 256) ||
+		!validDeploymentBlockedReason(reason) {
+		return Deployment{}, false, invalid("deployment blocked condition is invalid")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return Deployment{}, false, err
+	}
+	deployment, exists := store.current.deployments[deploymentKey(tenantID, deploymentID)]
+	if !exists {
+		return Deployment{}, false, ErrNotFound
+	}
+	if deployment.Revision != expectedRevision {
+		return Deployment{}, false, ErrConflict
+	}
+	index := deploymentInstanceIndex(deployment.Instances, instanceID)
+	if index < 0 {
+		return Deployment{}, false, ErrNotFound
+	}
+	instance := deployment.Instances[index]
+	if instance.Phase == DeploymentInstanceFailed || instance.Phase == DeploymentInstanceRemoved {
+		return Deployment{}, false, ErrConflict
+	}
+	if instance.LastError == string(reason) {
+		return cloneDeployment(deployment), false, nil
+	}
+	if deployment.Revision == math.MaxUint64 {
+		return Deployment{}, false, ErrCapacityExceeded
+	}
+	instance.LastError = string(reason)
+	instance.TransitionedAt = canonicalTimestamp(now)
+	deployment.Instances[index] = instance
+	deployment.Revision++
+	deployment.UpdatedAt = canonicalTimestamp(now)
+	if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+		return Deployment{}, false, err
+	}
+	return cloneDeployment(deployment), true, nil
+}
+
 func (store *Store) SnapshotDeploymentFleet() (DeploymentFleetSnapshot, error) {
 	if store == nil {
 		return DeploymentFleetSnapshot{}, ErrUnavailable
@@ -366,4 +433,15 @@ func deploymentCommandError(command Command) string {
 		message = message[:1024]
 	}
 	return message
+}
+
+func validDeploymentBlockedReason(reason DeploymentBlockedReason) bool {
+	switch reason {
+	case DeploymentBlockedNoEligibleNode, DeploymentBlockedAssignedNodeUnavailable,
+		DeploymentBlockedDelegationExpired, DeploymentBlockedControllerKeyMismatch,
+		DeploymentBlockedInvalidAuthority:
+		return true
+	default:
+		return false
+	}
 }
