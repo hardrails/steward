@@ -296,9 +296,9 @@ func TestGatewayEffectsCheckRejectsMalformedArtifactsAndAmbiguousCLI(t *testing.
 	})
 
 	var usageOutput bytes.Buffer
-	if err := run(nil, &bytes.Buffer{}, &usageOutput); err == nil ||
-		!strings.Contains(usageOutput.String(), "stewardctl gateway effects check -config FILE") {
-		t.Fatalf("root usage = %q error = %v", usageOutput.String(), err)
+	if err := run([]string{"help", "gateway"}, &usageOutput, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(usageOutput.String(), "stewardctl gateway validate|route|connector|service|effects") {
+		t.Fatalf("gateway help = %q error = %v", usageOutput.String(), err)
 	}
 }
 

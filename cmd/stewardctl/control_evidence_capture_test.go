@@ -239,10 +239,10 @@ func TestControlEvidenceCaptureRejectsInvalidFlagsBeforeNetwork(t *testing.T) {
 	if err := controlUsageError(); err == nil || !strings.Contains(err.Error(), "evidence-capture arm|status|seal|export|verify|delete") {
 		t.Fatalf("control usage error=%v", err)
 	}
-	var stderr bytes.Buffer
-	if err := run(nil, &bytes.Buffer{}, &stderr); err == nil ||
-		!strings.Contains(stderr.String(), "evidence|evidence-capture") {
-		t.Fatalf("root usage=%q err=%v", stderr.String(), err)
+	var stdout bytes.Buffer
+	if err := run(nil, &stdout, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(stdout.String(), "evidence") {
+		t.Fatalf("root help=%q err=%v", stdout.String(), err)
 	}
 }
 

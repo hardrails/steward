@@ -41,7 +41,7 @@ func main() {
 
 func run(arguments []string, stdout, stderr io.Writer) error {
 	if len(arguments) == 0 {
-		return usage(stderr)
+		return usage(stdout)
 	}
 	if arguments[0] == "version" || arguments[0] == "-version" {
 		_, err := fmt.Fprintln(stdout, "stewardctl "+buildinfo.Resolve())
@@ -49,6 +49,9 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 	}
 	if arguments[0] == "__complete" {
 		return writeCompletionCandidates(arguments[1:], stdout)
+	}
+	if arguments[0] == "help" || arguments[0] == "-help" || arguments[0] == "--help" {
+		return helpCommand(arguments[1:], stdout)
 	}
 	switch arguments[0] {
 	case "context":
@@ -81,46 +84,74 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return secretCommand(arguments[1:], stdout)
 	case "image":
 		return imageCommand(arguments[1:], stdout)
-	case "agent-release":
-		return agentReleaseCommand(arguments[1:], stdout)
-	case "agent-catalog":
-		return agentCatalogCommand(arguments[1:], stdout)
-	case "activation":
-		return activationCommand(arguments[1:], stdout)
-	case "rollout":
-		return rolloutCommand(arguments[1:], stdout)
 	case "upgrade":
 		return upgradeCommand(arguments[1:], stdout)
 	default:
-		return usage(stderr)
+		return fmt.Errorf("unknown command %q; run 'stewardctl help'", arguments[0])
 	}
 }
 
 func usage(writer io.Writer) error {
-	fmt.Fprintln(writer, "usage: stewardctl context set|use|show|list|delete ...")
-	fmt.Fprintln(writer, "       stewardctl completion install|bash|zsh|fish")
-	fmt.Fprintln(writer, "       stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]")
-	fmt.Fprintln(writer, "       stewardctl key match -private-key FILE -public-key FILE")
-	fmt.Fprintln(writer, "       stewardctl capsule sign|verify ...")
-	fmt.Fprintln(writer, "       stewardctl policy sign|verify ...")
-	fmt.Fprintln(writer, "       stewardctl permit issue|approve|verify|audit ...")
-	fmt.Fprintln(writer, "       stewardctl task issue|verify|audit|submit|status|observe|wait ...")
-	fmt.Fprintln(writer, "       stewardctl executor-command issue|verify ...")
-	fmt.Fprintln(writer, "       stewardctl control pki|tenant|operator|enrollment|node|node-credential|operations|attention|command|credential|evidence|evidence-capture ...")
-	fmt.Fprintln(writer, "       stewardctl evidence verify|export -in FILE -public-key FILE -node-id ID [-epoch N] [-kind executor|connector]")
-	fmt.Fprintln(writer, "       stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...")
-	fmt.Fprintln(writer, "       stewardctl gateway validate|route|connector|service|effects ...")
-	fmt.Fprintln(writer, "       stewardctl gateway effects check -config FILE -intent FILE -policy FILE -site-root-public-key FILE -site-root-key-id ID")
-	fmt.Fprintln(writer, "       stewardctl secret materialization check -manifest FILE [-root DIRECTORY] [-status-root DIRECTORY]")
-	fmt.Fprintln(writer, "       stewardctl secret materialization prepare -manifest FILE [-root DIRECTORY] [-status-root DIRECTORY]")
-	fmt.Fprintln(writer, "       stewardctl secret openbao compile -plan FILE -out DIRECTORY")
-	fmt.Fprintln(writer, "       stewardctl image inspect|import -archive FILE ...")
-	fmt.Fprintln(writer, "       stewardctl agent-release issue|verify ...")
-	fmt.Fprintln(writer, "       stewardctl agent-catalog issue|verify|list|search|show|compare ...")
-	fmt.Fprintln(writer, "       stewardctl activation create|attach|run|status|verify ...")
-	fmt.Fprintln(writer, "       stewardctl rollout create|run|status|verify ...")
-	fmt.Fprintln(writer, "       stewardctl upgrade check-drained|inspect-formats -signed-admission configured|unconfigured ...")
-	return errors.New("invalid command")
+	fmt.Fprintln(writer, "Steward runs untrusted agents with external action authority.")
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "Usage:  stewardctl <command> [options]")
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "Start here")
+	fmt.Fprintln(writer, "  context       Save a control plane or node connection")
+	fmt.Fprintln(writer, "  node          Admit, inspect, start, stop, or destroy an agent")
+	fmt.Fprintln(writer, "  control       Enroll nodes and inspect the fleet")
+	fmt.Fprintln(writer, "  permit        Authorize one exact external action")
+	fmt.Fprintln(writer, "  task          Submit and observe an authorized agent task")
+	fmt.Fprintln(writer, "  evidence      Verify or export signed enforcement records")
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "Configure and inspect")
+	fmt.Fprintln(writer, "  image         Inspect or import an offline OCI image")
+	fmt.Fprintln(writer, "  gateway       Validate routes, services, connectors, and effects")
+	fmt.Fprintln(writer, "  secret        Validate materialized secret files")
+	fmt.Fprintln(writer, "  capsule       Sign or verify an immutable workload profile")
+	fmt.Fprintln(writer, "  policy        Sign or verify site policy")
+	fmt.Fprintln(writer, "  keygen, key   Create or inspect signing keys")
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "Utilities")
+	fmt.Fprintln(writer, "  completion    Install Bash, Zsh, or Fish completion")
+	fmt.Fprintln(writer, "  upgrade       Inspect upgrade safety")
+	fmt.Fprintln(writer, "  version       Print the installed version")
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "Run 'stewardctl help <command>' for command-specific guidance.")
+	return nil
+}
+
+func helpCommand(arguments []string, writer io.Writer) error {
+	if len(arguments) == 0 {
+		return usage(writer)
+	}
+	if len(arguments) != 1 {
+		return errors.New("help accepts one command name")
+	}
+	help, ok := commandHelp[arguments[0]]
+	if !ok {
+		return fmt.Errorf("unknown command %q; run 'stewardctl help'", arguments[0])
+	}
+	_, err := fmt.Fprint(writer, help)
+	return err
+}
+
+var commandHelp = map[string]string{
+	"context":    "Save connection details once so routine commands do not repeat URLs, token files, tenant IDs, or node IDs.\n\nUsage: stewardctl context set|use|show|list|delete ...\n",
+	"node":       "Operate one isolated agent on a Steward Executor node. Destructive actions require the runtime reference returned by admission.\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...\n",
+	"control":    "Enroll nodes, manage scoped operators, deliver signed commands, and inspect fleet evidence.\n\nUsage: stewardctl control pki|tenant|operator|enrollment|node|operations|attention|command|credential|evidence ...\n",
+	"permit":     "Authorize one canonical connector request without giving the action key or reusable upstream credential to the agent.\n\nUsage: stewardctl permit context|issue|approve|verify|audit ...\n",
+	"task":       "Issue, submit, observe, and audit a service task through Gateway.\n\nUsage: stewardctl task issue|verify|audit|submit|status|observe|wait ...\n",
+	"evidence":   "Verify or export a signed Executor or Gateway receipt chain without contacting a hosted service.\n\nUsage: stewardctl evidence verify|export ...\n",
+	"image":      "Inspect or import one bounded offline OCI/Docker archive and bind it to the signed workload identity.\n\nUsage: stewardctl image inspect|import ...\n",
+	"gateway":    "Validate the Gateway configuration and inspect routes, connectors, services, and effect policy.\n\nUsage: stewardctl gateway validate|route|connector|service|effects ...\n",
+	"secret":     "Validate or prepare owner-only files rendered by an external secret materializer. Steward does not store secrets.\n\nUsage: stewardctl secret materialization check|prepare ...\n",
+	"capsule":    "Sign or verify a publisher workload profile.\n\nUsage: stewardctl capsule sign|verify ...\n",
+	"policy":     "Sign or verify the site policy that bounds admitted workload authority.\n\nUsage: stewardctl policy sign|verify ...\n",
+	"keygen":     "Create an Ed25519 signing key pair in owner-only files.\n\nUsage: stewardctl keygen -private-out FILE -public-out FILE [-key-id ID]\n",
+	"key":        "Check that one private key matches one public key.\n\nUsage: stewardctl key match -private-key FILE -public-key FILE\n",
+	"completion": "Install or print local shell completion.\n\nUsage: stewardctl completion install|bash|zsh|fish\n",
+	"upgrade":    "Inspect whether a node is drained and whether retained formats are compatible with an upgrade.\n\nUsage: stewardctl upgrade check-drained|inspect-formats ...\n",
 }
 
 func nodeCommand(arguments []string, stdout io.Writer) error {

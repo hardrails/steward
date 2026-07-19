@@ -220,10 +220,10 @@ func TestControlEvidenceUsageRequiresExactInputs(t *testing.T) {
 			t.Fatalf("incomplete command accepted: %#v", arguments)
 		}
 	}
-	var stderr bytes.Buffer
-	if err := run(nil, &bytes.Buffer{}, &stderr); err == nil ||
-		!strings.Contains(stderr.String(), "control pki|tenant|operator|enrollment|node|node-credential|operations|attention|command|credential|evidence") {
-		t.Fatalf("root usage=%q err=%v", stderr.String(), err)
+	var stdout bytes.Buffer
+	if err := run(nil, &stdout, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(stdout.String(), "control") || !strings.Contains(stdout.String(), "evidence") {
+		t.Fatalf("root help=%q err=%v", stdout.String(), err)
 	}
 	if err := controlUsageError(); err == nil || !strings.Contains(err.Error(), "evidence status|export|verify") {
 		t.Fatalf("control usage error=%v", err)

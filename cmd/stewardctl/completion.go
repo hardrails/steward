@@ -14,7 +14,8 @@ import (
 )
 
 var completionTree = map[string][]string{
-	"":                 {"context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "agent-release", "agent-catalog", "activation", "rollout", "upgrade", "version"},
+	"":                 {"help", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
+	"help":             {"context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
 	"context":          {"set", "use", "show", "list", "delete"},
 	"completion":       {"install", "bash", "zsh", "fish"},
 	"key":              {"match"},
@@ -47,14 +48,9 @@ var completionTree = map[string][]string{
 	"gateway connector":        {"set", "list", "trust"},
 	"gateway service":          {"set", "list", "trust"},
 	"gateway effects":          {"check"},
-	"secret":                   {"materialization", "openbao"},
+	"secret":                   {"materialization"},
 	"secret materialization":   {"check", "prepare"},
-	"secret openbao":           {"compile"},
 	"image":                    {"inspect", "import"},
-	"agent-release":            {"issue", "verify"},
-	"agent-catalog":            {"issue", "verify", "list", "search", "show", "compare"},
-	"activation":               {"create", "attach", "run", "status", "verify"},
-	"rollout":                  {"create", "run", "status", "verify"},
 	"upgrade":                  {"check-drained", "inspect-formats"},
 }
 
@@ -83,8 +79,6 @@ var completionFlags = map[string][]string{
 	"permit bundle audit":       {"-in", "-plan", "-trust", "-authority", "-receipts", "-receipt-public-key", "-receipt-node-id", "-receipt-epoch", "-max-validity", "-expected-sequence", "-expected-chain-hash"},
 	"node":                      {"-node-url", "-token-file", "-no-context", "-runtime-ref", "-capsule", "-intent", "-tenant-id", "-node-id", "-lineage-id", "-generation", "-reason", "-apply"},
 	"gateway":                   {"-config", "-agent", "-tenant-id", "-node-id", "-receipt-file", "-receipt-key-file", "-receipt-node-id", "-receipt-epoch"},
-	"activation":                {"-workspace", "-control-url", "-token-file", "-ca-file", "-tenant-id", "-node-id"},
-	"rollout":                   {"-workspace", "-control-url", "-token-file", "-ca-file", "-tenant-id"},
 }
 
 func completionCommand(arguments []string, stdout io.Writer) error {

@@ -19,7 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hardrails/steward/internal/agentrelease"
 	"github.com/hardrails/steward/internal/gateway"
 )
 
@@ -324,14 +323,19 @@ func gatewayServiceCommand(arguments []string, stdout io.Writer) error {
 	return encoder.Encode(result)
 }
 
-func gatewayAgentServicePreset(value string) (agentrelease.CanaryContract, bool) {
+type agentServicePreset struct {
+	ServiceID   string
+	OperationID string
+}
+
+func gatewayAgentServicePreset(value string) (agentServicePreset, bool) {
 	switch value {
 	case "hermes":
-		return agentrelease.CanaryContractForKind(agentrelease.CanaryKindHermesWorkspaceAuditV1)
+		return agentServicePreset{ServiceID: "hermes-api", OperationID: "hermes.run"}, true
 	case "openclaw":
-		return agentrelease.CanaryContractForKind(agentrelease.CanaryKindOpenClawWorkspaceAuditV1)
+		return agentServicePreset{ServiceID: "openclaw-api", OperationID: "openclaw.run"}, true
 	default:
-		return agentrelease.CanaryContract{}, false
+		return agentServicePreset{}, false
 	}
 }
 

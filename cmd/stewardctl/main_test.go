@@ -376,7 +376,6 @@ func TestEvidenceExportProofRejectsTamperSignatureTruncationAndRollback(t *testi
 
 func TestCommandValidationRejectsIncompleteAndUnknownOperations(t *testing.T) {
 	for _, arguments := range [][]string{
-		nil,
 		{"unknown"},
 		{"capsule"},
 		{"capsule", "unknown"},
@@ -396,6 +395,9 @@ func TestCommandValidationRejectsIncompleteAndUnknownOperations(t *testing.T) {
 		if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
 			t.Fatalf("arguments %#v unexpectedly accepted", arguments)
 		}
+	}
+	if err := run(nil, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("root help failed: %v", err)
 	}
 	if err := validatePayload([]byte(`{}`), "unsupported"); err == nil {
 		t.Fatal("unsupported payload type accepted")

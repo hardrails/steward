@@ -68,10 +68,10 @@ func TestKeyMatchRejectsIncompleteAndUnknownCommands(t *testing.T) {
 
 func TestUsageDocumentsKeyMatch(t *testing.T) {
 	var usageOutput bytes.Buffer
-	if err := run(nil, &bytes.Buffer{}, &usageOutput); err == nil {
-		t.Fatal("empty command unexpectedly succeeded")
+	if err := run([]string{"help", "key"}, &usageOutput, &bytes.Buffer{}); err != nil {
+		t.Fatalf("key help failed: %v", err)
 	}
-	if !strings.Contains(usageOutput.String(), "stewardctl key match -private-key FILE -public-key FILE") {
+	if !strings.Contains(usageOutput.String(), "stewardctl key match") {
 		t.Fatalf("usage does not document key match:\n%s", usageOutput.String())
 	}
 }
