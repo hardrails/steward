@@ -44,16 +44,21 @@ home: true
 Define skills, MCP endpoints, a model route, resources, state, lifetime, and
 placement once. Steward validates the definition with CUE, can require an offline
 OPA policy decision, and packages a deterministic bundle for Hermes or OpenClaw.
-The same surface explains which fleet node is eligible and can derive a new,
-short-lived lineage from an immutable state snapshot.
+The same surface explains which fleet node is eligible, admits and starts the
+agent on that node, and can derive a new, short-lived lineage from an immutable
+state snapshot.
 
 ```console
 stewardctl agent init -runtime hermes -name workspace-auditor workspace-auditor
 stewardctl agent build -file workspace-auditor/Stewardfile.cue
 stewardctl agent plan -bundle agent.bundle.json -nodes nodes.json -tenant default
+stewardctl agent apply -bundle agent.bundle.json -nodes nodes.json -tenant default \
+  -capsule hermes.capsule.dsse.json -policy site.policy.dsse.json \
+  -site-root-public-key site-root.pub -site-root-key-id site-root-1 \
+  -token-file /etc/steward/executor.token
 ```
 
-[Build and place an agent]({{ '/guides/build-agents/' | relative_url }}) ·
+[Build and run an agent]({{ '/guides/build-agents/' | relative_url }}) ·
 [Check platform support]({{ '/reference/platform-support/' | relative_url }})
 
 ## What is protected

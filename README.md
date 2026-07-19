@@ -120,7 +120,8 @@ stewardctl agent build
 
 Use the [agent application guide](https://hardrails.github.io/steward/guides/build-agents/)
 to select Hermes or OpenClaw, apply offline OPA policy, explain fleet placement,
-and derive a temporary or long-lived fork from persistent state.
+admit and start the workload on one node, and derive a temporary or long-lived
+fork from persistent state.
 
 ## Authorize real work
 

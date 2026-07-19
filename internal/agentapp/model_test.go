@@ -3,12 +3,17 @@ package agentapp
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hardrails/steward/internal/admission"
 )
 
 func validDefinition() Definition {
@@ -41,6 +46,72 @@ func TestBuildIsDeterministicAndTamperEvident(t *testing.T) {
 	raw, _ := json.Marshal(first)
 	if _, err := DecodeBundle(raw); err == nil || !strings.Contains(err.Error(), "source_digest") {
 		t.Fatalf("tampered bundle error=%v", err)
+	}
+}
+
+func TestBuildIntentJoinsPortableBundleToAuthenticatedAdmission(t *testing.T) {
+	bundle, err := Build(validDefinition(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule := admission.ProfileCapsule{
+		SchemaVersion: admission.SchemaV1, CapsuleID: "hermes-a", PublisherKeyID: "publisher-a",
+		Profile: admission.ProfileRef{ID: "hermes-v1", Version: "v1"},
+		Image: admission.ImageIdentity{
+			Repository: "example.invalid/hermes", ManifestDigest: "sha256:" + strings.Repeat("a", 64),
+			ConfigDigest: "sha256:" + strings.Repeat("b", 64), Platform: admission.Platform{OS: "linux", Architecture: "amd64"},
+		},
+		Command:      []string{"/opt/hermes/run"},
+		Resources:    admission.ResourceLimits{MemoryBytes: 1024 << 20, CPUMillis: 1000, PIDs: 256},
+		Capabilities: admission.Capabilities{State: true, Inference: true, Service: true},
+		State:        admission.StateShape{SchemaVersion: "v1", Path: "/opt/data"},
+		Service:      admission.ServiceShape{ID: "hermes-api", Port: 8080},
+	}
+	policy := admission.SitePolicy{
+		SchemaVersion: admission.SchemaV1, PolicyID: "site-a", PolicyEpoch: 1,
+		Publishers: []admission.PublisherRule{{
+			KeyID: "publisher-a", PublicKey: base64.StdEncoding.EncodeToString(public),
+			AllowedProfiles:     []admission.ProfileRef{{ID: "hermes-v1", Version: "v1"}},
+			AllowedRepositories: []string{"example.invalid/hermes"},
+			ResourceCeiling:     admission.ResourceLimits{MemoryBytes: 1024 << 20, CPUMillis: 1000, PIDs: 256},
+		}},
+		Tenants: []admission.TenantRule{{
+			TenantID: "tenant-a", PublisherKeyIDs: []string{"publisher-a"},
+			ResourceCeiling:   admission.ResourceLimits{MemoryBytes: 1024 << 20, CPUMillis: 1000, PIDs: 256},
+			InferenceRouteIDs: []string{"local"}, InferenceModelAliases: []string{"default"},
+			ServiceIDs: []string{"hermes-api"},
+		}},
+	}
+	verified := admission.VerifiedCapsuleImport{
+		Capsule: capsule, SitePolicy: policy, Profile: admission.DefaultProfiles()[1],
+		CapsuleDigest: "sha256:" + strings.Repeat("c", 64), PolicyDigest: "sha256:" + strings.Repeat("d", 64),
+		PublisherKeyID: "publisher-a", SiteRootKeyID: "site-root",
+	}
+	intent, err := BuildIntent(bundle, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.InferenceRouteID != "local" || intent.ModelAlias != "default" || intent.ServiceID != "hermes-api" ||
+		intent.StateDisposition != "new" || intent.CapsuleDigest != verified.CapsuleDigest {
+		t.Fatalf("intent=%#v", intent)
+	}
+	lowerResources := bundle
+	lowerResources.Definition.Resources.MemoryMiB = 512
+	lowerResources.SourceDigest, _ = DigestJSON(lowerResources.Definition)
+	if _, err := BuildIntent(lowerResources, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 1); err != nil {
+		t.Fatalf("resources below capsule ceiling were rejected: %v", err)
+	}
+
+	tampered := bundle
+	tampered.Definition.Runtime.Image = "example.invalid/other@sha256:" + strings.Repeat("a", 64)
+	tampered.SourceDigest, _ = DigestJSON(tampered.Definition)
+	if _, err := BuildIntent(tampered, verified, "tenant-a", "node-a", "agent-a", "lineage-a", 1); err == nil ||
+		!strings.Contains(err.Error(), "image") {
+		t.Fatalf("mismatched image error=%v", err)
 	}
 }
 
@@ -186,6 +257,10 @@ func TestDefinitionValidationRejectsEveryAuthorityShape(t *testing.T) {
 		"spread":           func(v *Definition) { v.Placement.SpreadBy = " bad" },
 		"list limit":       func(v *Definition) { v.Skills = tooMany },
 		"list duplicate":   func(v *Definition) { v.MCP = []string{"server", "server"} },
+		"egress route":     func(v *Definition) { v.Capabilities.EgressRouteIDs = []string{"https://example.com"} },
+		"connector duplicate": func(v *Definition) {
+			v.Capabilities.ConnectorIDs = []string{"calendar", "calendar"}
+		},
 		"snapshot":         func(v *Definition) { v.State.Persistent = false; v.State.SnapshotID = "snap" },
 		"task expiry":      func(v *Definition) { v.Lifetime = Lifetime{Mode: "task", TTLSeconds: 60} },
 		"temporary expiry": func(v *Definition) { v.Lifetime = Lifetime{Mode: "temporary", TTLSeconds: 1, OnExpiry: "retain"} },

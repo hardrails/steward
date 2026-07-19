@@ -26,16 +26,17 @@ const (
 )
 
 type Definition struct {
-	Schema    string    `json:"schema"`
-	Name      string    `json:"name"`
-	Runtime   Runtime   `json:"runtime"`
-	Model     Model     `json:"model"`
-	Skills    []string  `json:"skills,omitempty"`
-	MCP       []string  `json:"mcp_servers,omitempty"`
-	Resources Resources `json:"resources"`
-	Placement Placement `json:"placement"`
-	State     State     `json:"state"`
-	Lifetime  Lifetime  `json:"lifetime"`
+	Schema       string             `json:"schema"`
+	Name         string             `json:"name"`
+	Runtime      Runtime            `json:"runtime"`
+	Model        Model              `json:"model"`
+	Skills       []string           `json:"skills,omitempty"`
+	MCP          []string           `json:"mcp_servers,omitempty"`
+	Capabilities CapabilityRequests `json:"capabilities,omitempty"`
+	Resources    Resources          `json:"resources"`
+	Placement    Placement          `json:"placement"`
+	State        State              `json:"state"`
+	Lifetime     Lifetime           `json:"lifetime"`
 }
 
 type Runtime struct {
@@ -46,6 +47,14 @@ type Runtime struct {
 
 type Model struct {
 	Route string `json:"route"`
+}
+
+// CapabilityRequests names positive network capabilities. Inference and the
+// runtime's bounded task service are implied by every agent application; raw
+// credentials and upstream origins never belong here.
+type CapabilityRequests struct {
+	EgressRouteIDs []string `json:"egress_route_ids,omitempty"`
+	ConnectorIDs   []string `json:"connector_ids,omitempty"`
 }
 
 type Resources struct {
@@ -188,8 +197,8 @@ func (value Definition) Validate() error {
 	if !validImage(value.Runtime.Image) {
 		return errors.New("runtime image must be a bounded OCI reference pinned by sha256 digest")
 	}
-	if !validToken(value.Model.Route, 128) {
-		return errors.New("model route must be a non-secret logical identifier")
+	if _, _, err := ParseModelRoute(value.Model.Route); err != nil {
+		return err
 	}
 	if value.Resources.CPUMillis < 10 || value.Resources.CPUMillis > 128000 ||
 		value.Resources.MemoryMiB < 64 || value.Resources.MemoryMiB > 1048576 ||
@@ -237,6 +246,21 @@ func (value Definition) Validate() error {
 			}
 		}
 	}
+	for _, list := range []struct {
+		name   string
+		values []string
+	}{{"egress routes", value.Capabilities.EgressRouteIDs}, {"connector IDs", value.Capabilities.ConnectorIDs}} {
+		if len(list.values) > 32 {
+			return fmt.Errorf("%s exceed the 32-entry admission limit", list.name)
+		}
+		copyValues := append([]string(nil), list.values...)
+		slices.Sort(copyValues)
+		for index, item := range copyValues {
+			if !validRouteIdentifier(item, 128) || (index > 0 && copyValues[index-1] == item) {
+				return fmt.Errorf("%s must contain unique route identifiers", list.name)
+			}
+		}
+	}
 	if value.State.SnapshotID != "" && (!value.State.Persistent || !validToken(value.State.SnapshotID, 128)) {
 		return errors.New("snapshot_id requires persistent state and a bounded identifier")
 	}
@@ -254,6 +278,17 @@ func (value Definition) Validate() error {
 		return errors.New("lifetime mode must be task, service, or temporary")
 	}
 	return nil
+}
+
+// ParseModelRoute converts the portable route/alias shorthand into the two
+// logical identifiers used by Executor admission and Gateway. It rejects URLs,
+// credentials, and ambiguous extra path segments.
+func ParseModelRoute(value string) (string, string, error) {
+	parts := strings.Split(value, "/")
+	if len(parts) != 2 || !validRouteIdentifier(parts[0], 128) || !validRouteIdentifier(parts[1], 256) {
+		return "", "", errors.New("model route must be route-id/model-alias using bounded logical identifiers")
+	}
+	return parts[0], parts[1], nil
 }
 
 func ValidateName(value string) error {
@@ -283,6 +318,20 @@ func validToken(value string, maximum int) bool {
 		if character < 0x21 || character > 0x7e || character == '\\' || character == '"' {
 			return false
 		}
+	}
+	return true
+}
+
+func validRouteIdentifier(value string, maximum int) bool {
+	if len(value) < 1 || len(value) > maximum {
+		return false
+	}
+	for index, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || index > 0 && (character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return false
 	}
 	return true
 }

@@ -196,16 +196,17 @@ replay or rollback guarantee the deletion would remove.
 
 ## Placement is not yet a desired-state controller
 
-`stewardctl agent plan` performs real deterministic filtering and scoring over a
-bounded node inventory. It explains readiness, tenant, architecture, isolation,
-labels, taints, resources, image locality, snapshot locality, and load. It does
-not continuously watch nodes, reserve capacity, preempt workloads, reschedule a
-failed allocation, autoscale a fleet, or submit a tenant-signed command.
+`stewardctl agent plan` performs deterministic filtering and scoring over a bounded
+node inventory. `stewardctl agent apply` can use that result to derive an exact
+intent, submit it through signed admission, and start the workload on one node.
+The commands explain readiness, tenant, architecture, isolation, labels, taints,
+resources, image locality, snapshot locality, and load. They do not continuously
+watch nodes, reserve capacity, preempt workloads, reschedule a failed allocation,
+or autoscale a fleet.
 
-Treat its output as a reviewable placement input. The operator must still issue
-and transfer the exact signed admission and lifecycle commands. Executor
-revalidates capacity and policy at execution time, so a stale scheduler result
-fails closed rather than overruling the node.
+Treat placement output as reviewable input rather than a reservation. Executor
+revalidates capacity and policy at execution time, so a stale result fails closed
+rather than overruling the node.
 
 ## Forks clone state, not a live agent
 

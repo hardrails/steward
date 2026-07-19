@@ -6,9 +6,9 @@ section: How-to guide
 
 # Make `stewardctl` easier to use
 
-Most `stewardctl control` and `stewardctl node` commands need the same connection
-settings. A named context saves those repeated values once. You keep typing only
-the values specific to the task.
+Most `stewardctl control` and `stewardctl node` commands, plus `stewardctl agent
+apply`, need the same connection settings. A named context saves those repeated
+values once. You keep typing only the values specific to the task.
 
 The context stores **paths** to token files, not token values. Private signing keys
 and bearer values are never copied into the context file.
@@ -124,7 +124,8 @@ owner-only, serializes concurrent writers through an owner-only lock, writes
 updates atomically, bounds the file to 64 KiB, accepts at most
 32 contexts, and rejects unknown or duplicate fields.
 
-Contexts affect `stewardctl control` and `stewardctl node` commands. They do not
+Contexts affect `stewardctl control`, `stewardctl node`, and `stewardctl agent
+apply` commands. They do not
 supply signing keys, secret values, workload files, command IDs, capture IDs,
 runtime references, or destructive resource identities. Existing commands with
 explicit flags continue to work when no context is selected. Files written by an

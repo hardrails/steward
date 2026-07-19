@@ -1,19 +1,21 @@
 ---
-title: Build and place an agent
-description: Define, validate, package, place, and fork a Hermes or OpenClaw agent application with CUE and optional OPA policy.
+title: Build and run an agent
+description: Define, validate, package, place, run, and fork a Hermes or OpenClaw agent application with CUE and optional OPA policy.
 section: Guides
 ---
 
-# Build and place an agent
+# Build and run an agent
 
 Steward provides one application surface around Hermes and OpenClaw. The agent
 runtime still owns its reasoning loop. Steward defines the immutable image,
 skills, model route, resources, state, placement, and lifetime that operators can
 inspect before granting authority.
 
-This workflow produces portable artifacts. A placement decision does not start a
-container or bypass signed admission. The existing tenant-signed command and
-Executor checks remain the authority that may admit and start the workload.
+The bundle is portable and contains no runtime authority. `agent apply` combines
+it with a publisher-signed workload capsule and site-root-signed policy, asks an
+Executor to admit it, and starts the admitted workload. Executor still checks the
+exact image, tenant, resources, capabilities, generation, and node identity before
+Docker changes.
 
 ## Check this machine
 
@@ -87,6 +89,43 @@ label, taint, or resource requirements. It then scores eligible nodes using imag
 and snapshot locality, preferred labels, and current agent count. Node ID breaks
 ties, so the same inputs produce the same decision. Every rejection and score
 adjustment is returned.
+
+## Run the agent on one node
+
+Use `agent apply` after the Executor has its signed-admission policy and the
+selected node is reachable through a loopback connection or SSH port forwarding:
+
+```console
+stewardctl agent apply \
+  -bundle agent.bundle.json \
+  -capsule hermes.capsule.dsse.json \
+  -policy site.policy.dsse.json \
+  -site-root-public-key site-root.pub \
+  -site-root-key-id site-root-1 \
+  -tenant default \
+  -node-id node-1 \
+  -token-file /etc/steward/executor.token
+```
+
+The command verifies every local artifact and derives the exact admission intent
+before contacting Executor. It then admits and starts the workload and returns the
+`runtime_ref` needed by lifecycle and task commands. Add `-nodes nodes.json` to
+select a node using the same deterministic placement rules as `agent plan`, or
+use `-plan-only` to inspect the derived intent without changing the node.
+
+When `-lineage-id` is omitted, Steward derives a stable lineage from the bundle,
+tenant, instance, and generation. Repeating the same apply after an ambiguous
+network failure therefore presents the same identity to Executor. Supply the new
+lineage from `agent fork` when starting a state fork.
+
+Put the node URL and token path in a [CLI context]({{ '/guides/cli/' |
+relative_url }}) to omit `-node-url` and `-token-file` from routine commands. The
+signed capsule, policy, and site-root key remain explicit trust inputs. Follow the
+[signed admission guide]({{ '/guides/signed-admission/' | relative_url }}) to
+create and install them.
+
+`agent apply` currently targets one selected node. It does not continuously
+reconcile desired state or move the workload after node failure.
 
 ## Fork persistent state
 
