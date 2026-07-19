@@ -163,3 +163,120 @@ func TestReadBoundedRegularRejectsSymlink(t *testing.T) {
 		t.Fatal("symlink accepted")
 	}
 }
+
+func TestDefinitionValidationRejectsEveryAuthorityShape(t *testing.T) {
+	tooMany := make([]string, 65)
+	for index := range tooMany {
+		tooMany[index] = "skill-" + strings.Repeat("x", index%4) + string(rune('a'+index%26))
+	}
+	tests := map[string]func(*Definition){
+		"schema":                   func(v *Definition) { v.Schema = "other" },
+		"name":                     func(v *Definition) { v.Name = "UPPER" },
+		"engine contract":          func(v *Definition) { v.Runtime.AdapterContract = "wrong" },
+		"model":                    func(v *Definition) { v.Model.Route = "" },
+		"resources":                func(v *Definition) { v.Resources.MemoryMiB = 1 },
+		"architectures empty":      func(v *Definition) { v.Placement.Architectures = nil },
+		"architecture unsupported": func(v *Definition) { v.Placement.Architectures = []string{"s390x"} },
+		"architecture duplicate":   func(v *Definition) { v.Placement.Architectures = []string{"amd64", "amd64"} },
+		"isolation":                func(v *Definition) { v.Placement.Isolation = "magic" },
+		"required labels": func(v *Definition) {
+			v.Placement.RequiredLabels = []Label{{Key: "same", Value: "a"}, {Key: "same", Value: "b"}}
+		},
+		"preferred labels": func(v *Definition) { v.Placement.PreferredLabels = []Label{{Key: "", Value: "a"}} },
+		"spread":           func(v *Definition) { v.Placement.SpreadBy = " bad" },
+		"list limit":       func(v *Definition) { v.Skills = tooMany },
+		"list duplicate":   func(v *Definition) { v.MCP = []string{"server", "server"} },
+		"snapshot":         func(v *Definition) { v.State.Persistent = false; v.State.SnapshotID = "snap" },
+		"task expiry":      func(v *Definition) { v.Lifetime = Lifetime{Mode: "task", TTLSeconds: 60} },
+		"temporary expiry": func(v *Definition) { v.Lifetime = Lifetime{Mode: "temporary", TTLSeconds: 1, OnExpiry: "retain"} },
+		"lifetime":         func(v *Definition) { v.Lifetime = Lifetime{Mode: "forever"} },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			value := validDefinition()
+			mutate(&value)
+			if err := value.Validate(); err == nil {
+				t.Fatal("invalid definition accepted")
+			}
+		})
+	}
+}
+
+func TestInventoryAndScheduleRejectMalformedOrIneligibleNodes(t *testing.T) {
+	base := Node{ID: "node-1", Ready: true, Tenants: []string{"tenant-a"}, Architecture: "amd64", Isolation: "hardened", Capacity: Resources{CPUMillis: 4000, MemoryMiB: 4096, DiskMiB: 4096, PIDs: 512}}
+	tests := map[string]func(*NodeInventory){
+		"schema":       func(v *NodeInventory) { v.Schema = "other" },
+		"duplicate":    func(v *NodeInventory) { v.Nodes = append(v.Nodes, v.Nodes[0]) },
+		"architecture": func(v *NodeInventory) { v.Nodes[0].Architecture = "s390x" },
+		"isolation":    func(v *NodeInventory) { v.Nodes[0].Isolation = "unknown" },
+		"labels":       func(v *NodeInventory) { v.Nodes[0].Labels = []Label{{Key: "", Value: "x"}} },
+		"list":         func(v *NodeInventory) { v.Nodes[0].Taints = make([]string, 257) },
+		"identifier":   func(v *NodeInventory) { v.Nodes[0].Images = []string{" bad"} },
+		"capacity":     func(v *NodeInventory) { v.Nodes[0].Allocated.CPUMillis = 5000 },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			inventory := NodeInventory{Schema: InventorySchema, Nodes: []Node{base}}
+			mutate(&inventory)
+			raw, _ := json.Marshal(inventory)
+			if _, err := DecodeInventory(raw); err == nil {
+				t.Fatal("invalid inventory accepted")
+			}
+		})
+	}
+	bundle, _ := Build(validDefinition(), nil)
+	decision, err := Schedule(bundle, "tenant-a", NodeInventory{Schema: InventorySchema, Nodes: []Node{{ID: "node-1", Ready: false, Tenants: []string{"other"}, Architecture: "arm64", Isolation: "development", Capacity: base.Capacity, Taints: []string{"reserved"}}}})
+	if err == nil || decision.SelectedNode != "" || len(decision.Candidates[0].Reasons) < 4 {
+		t.Fatalf("decision=%#v err=%v", decision, err)
+	}
+	if _, err := Schedule(bundle, " bad", NodeInventory{}); err == nil {
+		t.Fatal("invalid tenant accepted")
+	}
+}
+
+func TestDecodeSnapshotAndForkFailures(t *testing.T) {
+	bundle, _ := Build(validDefinition(), nil)
+	digest, _ := DigestJSON(bundle)
+	snapshot := Snapshot{Schema: SnapshotSchema, ID: "snap-1", BundleDigest: digest, RuntimeEngine: "hermes", StateDigest: "sha256:" + strings.Repeat("b", 64), SourceLineage: "old", CreatedAt: "2026-07-18T00:00:00Z"}
+	raw, _ := json.Marshal(snapshot)
+	decoded, err := DecodeSnapshot(raw)
+	if err != nil || decoded.ID != "snap-1" {
+		t.Fatalf("snapshot=%#v err=%v", decoded, err)
+	}
+	snapshot.CreatedAt = "yesterday"
+	raw, _ = json.Marshal(snapshot)
+	if _, err := DecodeSnapshot(raw); err == nil {
+		t.Fatal("invalid timestamp accepted")
+	}
+	snapshot.CreatedAt = "2026-07-18T00:00:00Z"
+	snapshot.BundleDigest = "sha256:" + strings.Repeat("c", 64)
+	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", 0, "", time.Now()); err == nil {
+		t.Fatal("incompatible snapshot accepted")
+	}
+	snapshot.BundleDigest = digest
+	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", 0, "destroy", time.Now()); err == nil {
+		t.Fatal("expiry without TTL accepted")
+	}
+	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", time.Second, "destroy", time.Now()); err == nil {
+		t.Fatal("short TTL accepted")
+	}
+}
+
+func TestToolBoundaryErrorPathsAndSanitization(t *testing.T) {
+	if got := sanitizeToolError([]byte("bad\x1b[31m\nline\x00")); strings.ContainsAny(got, "\x1b\x00\n") || !strings.Contains(got, "bad?") {
+		t.Fatalf("sanitized=%q", got)
+	}
+	writer := &limitedBuffer{maximum: 3}
+	if _, err := writer.Write([]byte("abcd")); err == nil || !writer.overflow || string(writer.Bytes()) != "abc" {
+		t.Fatalf("writer=%#v err=%v", writer, err)
+	}
+	if _, err := LoadDefinition(context.Background(), filepath.Join(t.TempDir(), "missing.json"), ""); err == nil {
+		t.Fatal("missing JSON accepted")
+	}
+	if _, err := EvaluateOPA(context.Background(), "missing-opa", "bundle", "not-data", []byte("{}")); err == nil {
+		t.Fatal("invalid query accepted")
+	}
+	if _, err := EvaluateOPA(context.Background(), "missing-opa", "bundle", "data.steward.allow", nil); err == nil {
+		t.Fatal("empty input accepted")
+	}
+}
