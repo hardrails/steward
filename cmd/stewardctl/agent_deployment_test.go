@@ -77,9 +77,9 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 	}
 	delegationRaw, _ := json.Marshal(delegationEnvelope)
 	for name, raw := range map[string][]byte{
-		"agent.bundle.json":    bundleRaw,
-		"capsule.dsse.json":    capsuleRaw,
-		"delegation.dsse.json": delegationRaw,
+		"auditor.bundle.json":     bundleRaw,
+		"auditor.capsule.json":    capsuleRaw,
+		"auditor.delegation.json": delegationRaw,
 	} {
 		if err := os.WriteFile(filepath.Join(directory, name), raw, 0o600); err != nil {
 			t.Fatal(err)
@@ -105,6 +105,7 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 	}
 	requests := make([]string, 0, 6)
 	getCount := 0
+	putCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer operator" {
 			t.Errorf("authorization=%q", request.Header.Get("Authorization"))
@@ -125,14 +126,21 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 			}
 			_ = json.NewEncoder(writer).Encode(view)
 		case http.MethodPut:
+			putCount++
 			var input struct {
 				Generation       uint64 `json:"generation"`
 				ExpectedRevision uint64 `json:"expected_revision"`
 			}
-			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.Generation != 1 || input.ExpectedRevision != 0 {
+			wantRevision := uint64(0)
+			if putCount > 1 {
+				wantRevision = 1
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.Generation != 1 || input.ExpectedRevision != wantRevision {
 				t.Errorf("apply input=%+v err=%v", input, err)
 			}
-			writer.WriteHeader(http.StatusCreated)
+			if putCount == 1 {
+				writer.WriteHeader(http.StatusCreated)
+			}
 			_ = json.NewEncoder(writer).Encode(view)
 		case http.MethodDelete:
 			removed := view
@@ -150,10 +158,19 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 	common := []string{"-tenant", "tenant-a", "-control-url", server.URL, "-token-file", tokenPath}
 	var output bytes.Buffer
 	for _, command := range [][]string{
-		append([]string{"agent", "deployment", "apply"}, common...),
-		append(append([]string{"agent", "deployment", "status"}, common...), "auditor"),
+		append([]string{
+			"agent", "deployment", "apply", "auditor",
+			"-bundle", "auditor.bundle.json", "-capsule", "auditor.capsule.json",
+			"-delegation", "auditor.delegation.json",
+		}, common...),
+		append([]string{
+			"agent", "deployment", "apply", "auditor",
+			"-bundle", "auditor.bundle.json", "-capsule", "auditor.capsule.json",
+			"-delegation", "auditor.delegation.json",
+		}, common...),
+		append([]string{"agent", "deployment", "status", "auditor"}, common...),
 		append([]string{"agent", "deployment", "list"}, common...),
-		append(append([]string{"agent", "deployment", "remove"}, common...), "auditor"),
+		append([]string{"agent", "deployment", "remove", "auditor"}, common...),
 	} {
 		output.Reset()
 		if err := run(command, &output, &bytes.Buffer{}); err != nil {
@@ -165,6 +182,8 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		}
 	}
 	wantRequests := "GET /v1/tenants/tenant-a/deployments/auditor," +
+		"PUT /v1/tenants/tenant-a/deployments/auditor," +
+		"GET /v1/tenants/tenant-a/deployments/auditor," +
 		"PUT /v1/tenants/tenant-a/deployments/auditor," +
 		"GET /v1/tenants/tenant-a/deployments/auditor," +
 		"GET /v1/tenants/tenant-a/deployments?limit=100," +

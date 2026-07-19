@@ -38,6 +38,7 @@ func agentDeployment(arguments []string, stdout io.Writer) error {
 }
 
 func agentDeploymentApply(arguments []string, stdout io.Writer) error {
+	leadingName, arguments := deploymentLeadingName(arguments)
 	hydrated, err := applyAgentDeploymentContext(arguments)
 	if err != nil {
 		return err
@@ -56,7 +57,7 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 	if err := flags.Parse(hydrated); err != nil {
 		return err
 	}
-	if tenantID == "" || flags.NArg() > 1 {
+	if tenantID == "" || flags.NArg() > 1 || leadingName != "" && flags.NArg() != 0 {
 		return errors.New("agent deployment apply requires a tenant and accepts at most one deployment name")
 	}
 	bundleRaw, err := readCLIArtifact(*bundlePath)
@@ -72,7 +73,9 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	deploymentID := bundle.Definition.Name
-	if flags.NArg() == 1 {
+	if leadingName != "" {
+		deploymentID = leadingName
+	} else if flags.NArg() == 1 {
 		deploymentID = flags.Arg(0)
 	}
 	capsuleRaw, err := readCLIArtifact(*capsulePath)
@@ -133,6 +136,7 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 }
 
 func agentDeploymentStatus(arguments []string, stdout io.Writer) error {
+	leadingName, arguments := deploymentLeadingName(arguments)
 	hydrated, err := applyAgentDeploymentContext(arguments)
 	if err != nil {
 		return err
@@ -144,8 +148,12 @@ func agentDeploymentStatus(arguments []string, stdout io.Writer) error {
 	if err := flags.Parse(hydrated); err != nil {
 		return err
 	}
-	if *tenantID == "" || flags.NArg() != 1 {
+	if *tenantID == "" || leadingName == "" && flags.NArg() != 1 || leadingName != "" && flags.NArg() != 0 {
 		return errors.New("agent deployment status requires a tenant and one deployment name")
+	}
+	deploymentID := leadingName
+	if deploymentID == "" {
+		deploymentID = flags.Arg(0)
 	}
 	client, err := common.client(true)
 	if err != nil {
@@ -153,7 +161,7 @@ func agentDeploymentStatus(arguments []string, stdout io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	deployment, err := client.GetDeployment(ctx, *tenantID, flags.Arg(0))
+	deployment, err := client.GetDeployment(ctx, *tenantID, deploymentID)
 	if err != nil {
 		return err
 	}
@@ -191,6 +199,7 @@ func agentDeploymentList(arguments []string, stdout io.Writer) error {
 }
 
 func agentDeploymentRemove(arguments []string, stdout io.Writer) error {
+	leadingName, arguments := deploymentLeadingName(arguments)
 	hydrated, err := applyAgentDeploymentContext(arguments)
 	if err != nil {
 		return err
@@ -203,8 +212,12 @@ func agentDeploymentRemove(arguments []string, stdout io.Writer) error {
 	if err := flags.Parse(hydrated); err != nil {
 		return err
 	}
-	if *tenantID == "" || flags.NArg() != 1 {
+	if *tenantID == "" || leadingName == "" && flags.NArg() != 1 || leadingName != "" && flags.NArg() != 0 {
 		return errors.New("agent deployment remove requires a tenant and one deployment name")
+	}
+	deploymentID := leadingName
+	if deploymentID == "" {
+		deploymentID = flags.Arg(0)
 	}
 	client, err := common.client(true)
 	if err != nil {
@@ -213,17 +226,24 @@ func agentDeploymentRemove(arguments []string, stdout io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if *revision == 0 {
-		current, err := client.GetDeployment(ctx, *tenantID, flags.Arg(0))
+		current, err := client.GetDeployment(ctx, *tenantID, deploymentID)
 		if err != nil {
 			return err
 		}
 		*revision = current.Revision
 	}
-	deployment, err := client.RemoveDeployment(ctx, *tenantID, flags.Arg(0), *revision)
+	deployment, err := client.RemoveDeployment(ctx, *tenantID, deploymentID, *revision)
 	if err != nil {
 		return err
 	}
 	return writeAgentJSON(stdout, deployment)
+}
+
+func deploymentLeadingName(arguments []string) (string, []string) {
+	if len(arguments) == 0 || strings.HasPrefix(arguments[0], "-") {
+		return "", arguments
+	}
+	return arguments[0], arguments[1:]
 }
 
 func deploymentTenantFlags(flags *flag.FlagSet) *string {
