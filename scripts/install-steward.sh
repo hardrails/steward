@@ -656,7 +656,9 @@ if [[ $dry_run == true ]]; then
 	echo "  admission:    $([[ $admission_required -eq 3 ]] && printf 'signed' || printf 'unchanged')"
 	echo "  evidence:     $([[ $evidence_input_count -eq 3 ]] && printf 'witnessed-uplink' || printf 'disabled')"
 	echo "  state:        $([[ $allow_unquotaed_state == true ]] && printf 'dedicated-host-unquotaed' || printf 'disabled')"
-	echo "  service start: $start_services"
+	effective_service_start=$start_services
+	[[ $stage_only == false ]] || effective_service_start=false
+	echo "  service start: $effective_service_start"
 	echo "  gVisor install: $install_gvisor"
 	exit 0
 fi

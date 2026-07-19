@@ -397,9 +397,11 @@ Release rollback verifies and restores the selected release's units, helper scri
 and relay binding, but it is not state rollback. A target without explicit
 durable-format reader ranges is not eligible. Preserve `/var/lib/steward`,
 `/var/lib/steward-executor`, `/var/lib/steward-gateway`,
-`/var/lib/steward-node`, `/var/log/steward`, and `/etc/steward`. Deleting or
-restoring them changes lifecycle, route commitments, audit, identity, or anti-replay
-state and needs a separate operator-approved recovery procedure.
+`/var/lib/steward-node`, and `/etc/steward`. Deleting or restoring them changes
+lifecycle, route commitments, audit, identity, or anti-replay state and needs a
+separate operator-approved recovery procedure. Older packages may leave a legacy
+`/var/log/steward/audit.jsonl`; the current package does not move or delete that
+file during upgrade, so archive it under the site's retention policy.
 
 The delivery ledger has a specific one-way transition. Upgrade inspection leaves a
 format-2 or format-3 `uplink-delivery-state.json` unchanged, while normal Executor

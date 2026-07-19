@@ -370,7 +370,8 @@ bypassing the integrity check.
   Preserve <code>/etc/steward</code>,
   <code>/var/lib/steward</code>, <code>/var/lib/steward-executor</code>,
   <code>/var/lib/steward-gateway</code>, <code>/var/lib/steward-node</code>, and
-  <code>/var/log/steward</code> unless an approved recovery procedure explicitly
+  any legacy <code>/var/log/steward/audit.jsonl</code> unless an approved recovery
+  procedure explicitly
   changes node identity, command history, retained route policy, or audit history.
 </div>
 

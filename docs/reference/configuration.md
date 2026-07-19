@@ -187,11 +187,14 @@ The packaged service starts with:
 
 ```console
 steward -config /etc/steward/steward.json \
-  -audit-log-file /var/log/steward/audit.jsonl
+  -audit-log-file /var/lib/steward/audit.jsonl
 ```
 
 The packaged template uses an outbound-only uplink, durable state, disabled process
-execution, and verified TLS.
+execution, and verified TLS. Operational logs go to standard output and systemd
+stores them in the journal. The separate JSON Lines command audit stays in the
+service's owner-only state directory, so installation does not need to trust a
+distribution-specific, group-writable `/var/log` layout.
 
 ### Supervisor settings
 

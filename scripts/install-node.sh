@@ -1251,9 +1251,7 @@ for specification in \
 	'/usr/local/lib/systemd/system root root 0755 true' \
 	'/var root root 0755 false' \
 	'/var/lib root root 0755 false' \
-	'/var/log root root 0755 false' \
 	'/var/lib/steward steward steward 0700 true' \
-	'/var/log/steward steward steward 0700 true' \
 	'/var/lib/steward-executor steward-executor steward-executor 0700 true' \
 	'/var/lib/steward-gateway steward-gateway steward-gateway 0700 true' \
 	'/var/lib/steward-node root root 0700 true' \

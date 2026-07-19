@@ -453,7 +453,7 @@ if [[ -r $executor_gateway_env ]]; then
 fi
 
 runuser -u steward -- "$steward_bin" -check-config -config "$steward_config" \
-	-audit-log-file /var/log/steward/audit.jsonl
+	-audit-log-file /var/lib/steward/audit.jsonl
 runuser -u steward-gateway -- "$gateway_bin" -check-config -config "$gateway_config"
 runuser -u steward-executor -- "$executor_bin" -check-config \
 	-token-file "${executor[EXECUTOR_TOKEN_FILE]}" \
