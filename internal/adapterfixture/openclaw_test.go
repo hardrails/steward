@@ -252,6 +252,7 @@ func TestOpenClawBuildAndQualificationHarnessesAreFailClosed(t *testing.T) {
 		"release-payload",
 		"release_manifest=$root/release.json",
 		"release_manifest=$(dirname \"$root\")/release.json",
+		"if [[ $adapter_source == release-payload ]]",
 		"release_manifest_sha256",
 		"\"manifest_digest\": image_manifest",
 		"\"runtime_image_id\": runtime_image_id",

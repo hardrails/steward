@@ -193,6 +193,11 @@ elif [[ -f $root/release.json && -d $adapter_path ]]; then
 elif [[ -f $(dirname "$root")/release.json && -d $adapter_path ]]; then
 	adapter_source=release-payload
 	release_manifest=$(dirname "$root")/release.json
+
+else
+	die "OpenClaw adapter is absent from a committed checkout or verified release payload"
+fi
+if [[ $adapter_source == release-payload ]]; then
 	release_values=$(python3 -I - "$adapter_path" "$script_path" "$release_manifest" <<'PY'
 import hashlib
 import json
@@ -246,8 +251,6 @@ PY
 	(( ${#release_fields[@]} == 2 )) || die "packaged release identity is incomplete"
 	release_version=${release_fields[0]}
 	release_manifest_sha256=${release_fields[1]}
-else
-	die "OpenClaw adapter is absent from a committed checkout or verified release payload"
 fi
 
 work=$(mktemp -d /tmp/steward-openclaw-build.XXXXXX)
