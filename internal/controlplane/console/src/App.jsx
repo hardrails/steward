@@ -546,6 +546,7 @@ const views = [
   ["nodes", "03", "Agent nodes"],
   ["commands", "04", "Signed activity"],
   ["credentials", "05", "Access records"],
+  ["agents", "06", "Build agents"],
 ];
 
 function ControlRoom(props) {
@@ -656,6 +657,7 @@ function ControlRoom(props) {
               />
             ) : null}
             {view === "credentials" ? <CredentialsView page={snapshot.credentials} /> : null}
+            {view === "agents" ? <AgentApplicationsView tenantID={selectedTenant} /> : null}
           </>
         )}
       </div>
@@ -737,6 +739,35 @@ function Metric({label, value, children}) {
 
 function EvidenceValue({label, value}) {
   return <div><dt>{label}</dt><dd>{value}</dd></div>;
+}
+
+function AgentApplicationsView({tenantID}) {
+  const tenant = tenantID || "default";
+  return (
+    <section className="view" aria-labelledby="agent-applications-title">
+      <ViewHeading eyebrow="PORTABLE AGENT APPLICATIONS" title="Build once. Choose the engine.">
+        Define Hermes or OpenClaw outside the browser, then review its deterministic bundle and placement evidence here.
+      </ViewHeading>
+      <div className="overview-grid">
+        <article className="panel">
+          <PanelHeading index="01 / DEFINE" title="Create an agent" />
+          <p>Choose the reasoning runtime while Steward fixes the image, skills, model route, resources, state, lifetime, and isolation requirements.</p>
+          <pre><code>{`stewardctl agent init -runtime hermes -name my-agent my-agent
+stewardctl agent build -file my-agent/Stewardfile.cue`}</code></pre>
+        </article>
+        <article className="panel">
+          <PanelHeading index="02 / PLACE" title="Explain placement" />
+          <p>The scheduler rejects ineligible nodes first, then scores image and snapshot locality, preferred labels, and current load. The selected tenant projection is <strong>{tenant}</strong>.</p>
+          <pre><code>{`stewardctl agent plan -bundle agent.bundle.json \\
+  -nodes nodes.json -tenant ${tenant}`}</code></pre>
+        </article>
+      </div>
+      <article className="panel recent-attention-panel">
+        <PanelHeading index="03 / AUTHORITY" title="Placement is not permission" />
+        <p>A bundle and placement decision cannot start a workload. Tenant-signed commands and Executor admission still verify the exact node, image, generation, policy, and capability boundary. Private keys and reusable credentials never enter this console.</p>
+      </article>
+    </section>
+  );
 }
 
 function ViewHeading({eyebrow, title, children}) {

@@ -57,6 +57,11 @@ release_files=(
 	steward-mcp
 	steward-relay
 	stewardctl
+	integration/examples/agents/hermes/agent.json
+	integration/examples/agents/openclaw/agent.json
+	integration/examples/agents/nodes.json
+	integration/examples/policy/steward.rego
+	integration/schemas/agent.cue
 	integration/adapters/hermes-agent/Dockerfile
 	integration/adapters/hermes-agent/README.md
 	integration/adapters/hermes-agent/adapter.json

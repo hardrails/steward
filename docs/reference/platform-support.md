@@ -58,13 +58,16 @@ gVisor runtime. It never installs Docker.
 | --- | --- | --- | --- | --- |
 | Linux `amd64` | Yes | Yes | Yes | Controller archive; node DEB, RPM, and archive |
 | Linux `arm64` | Yes | Yes | Yes | Controller archive; node DEB, RPM, and archive |
-| macOS Intel | Development binary | Yes | No | No service installer |
-| macOS Apple Silicon | Development binary | Yes | No | No service installer |
+| macOS Intel | Operator and development binary | Yes | No | Native user installer |
+| macOS Apple Silicon | Operator and development binary | Yes | No | Native user installer |
 | Windows | No artifact | No artifact | No | No |
 
-macOS archives support development and API integration. Production controller and
-Executor services run only on Linux; Executor additionally requires a Docker Unix
-socket, systemd, and gVisor runtime enforcement.
+The checksummed `install-macos.sh` release asset installs the native operator,
+control-plane, CLI, and MCP binaries without root by default. macOS supports agent
+authoring, policy evaluation, scheduling decisions, Docker Desktop development,
+and API integration. It does not run `steward-executor`; production Executor
+services require Linux, a Docker Unix socket, systemd, and gVisor runtime
+enforcement.
 
 ## Build requirements
 

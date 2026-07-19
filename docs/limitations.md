@@ -194,18 +194,43 @@ A full durable store fails closed. Do not delete replay or evidence state merely
 restore availability. First preserve the relevant evidence and understand which
 replay or rollback guarantee the deletion would remove.
 
+## Placement is not yet a desired-state controller
+
+`stewardctl agent plan` performs real deterministic filtering and scoring over a
+bounded node inventory. It explains readiness, tenant, architecture, isolation,
+labels, taints, resources, image locality, snapshot locality, and load. It does
+not continuously watch nodes, reserve capacity, preempt workloads, reschedule a
+failed allocation, autoscale a fleet, or submit a tenant-signed command.
+
+Treat its output as a reviewable placement input. The operator must still issue
+and transfer the exact signed admission and lifecycle commands. Executor
+revalidates capacity and policy at execution time, so a stale scheduler result
+fails closed rather than overruling the node.
+
+## Forks clone state, not a live agent
+
+An agent fork plan binds a new instance and lineage to immutable snapshot
+metadata. Steward does not currently provision the snapshot, copy storage, start
+the fork, or clone process memory. Storage providers must implement bounded,
+tenant-isolated snapshot and clone operations outside the agent.
+
+Never place credentials, task permits, receipt keys, live tokens, runtime IDs,
+network sessions, or random-number-generator state in a snapshot. A fork receives
+fresh authority through normal admission.
+
 ## Current product scope
 
 Steward is not:
 
-- an agent framework or planner;
+- an agent reasoning framework, prompt graph, or planner;
 - a model scheduler or inference server;
 - a general container orchestrator;
 - a secret manager;
 - an identity provider or single sign-on system;
 - a software supply-chain provenance service;
 - an endpoint detection and response product;
-- a general policy engine; or
+- a general policy engine;
+- an automated desired-state scheduler or storage snapshot provider; or
 - a hosted control plane.
 
 It is the local enforcement plane between an untrusted containerized agent and

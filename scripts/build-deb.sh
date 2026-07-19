@@ -57,6 +57,8 @@ for path in steward steward-control stewardctl steward-mcp steward-executor stew
 	adapters/openclaw/fixtures/skill/workspace_audit.mjs \
 	adapters/openclaw/fixtures/workspace/qualification/input/alpha.txt \
 	adapters/openclaw/fixtures/workspace/qualification/input/nested.json \
+	examples/agents/hermes/agent.json examples/agents/openclaw/agent.json \
+	examples/agents/nodes.json examples/policy/steward.rego schemas/agent.cue \
 	release.json LICENSE README.md; do
 	if [[ ! -f "$stage/$path" ]]; then
 		echo "build-deb: stage is missing $path" >&2
@@ -95,6 +97,7 @@ install -d -m 0755 "$package_root/DEBIAN" \
 	"$package_root/usr/share/doc/steward-node"
 cp -R "$stage/steward" "$stage/steward-control" "$stage/stewardctl" "$stage/steward-mcp" "$stage/steward-executor" \
 	"$stage/steward-gateway" "$stage/steward-relay" "$stage/adapters" "$stage/deploy" "$stage/scripts" \
+	"$stage/examples" "$stage/schemas" \
 	"$stage/release.json" \
 	"$package_root/usr/lib/steward-node/release/"
 install -m 0644 "$stage/LICENSE" "$package_root/usr/share/doc/steward-node/copyright"

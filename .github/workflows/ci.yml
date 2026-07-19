@@ -150,6 +150,7 @@ jobs:
           go build -o "$stage/steward-gateway" ./cmd/steward-gateway
           go build -o "$stage/steward-relay" ./cmd/steward-relay
           cp -R adapters/hermes-agent adapters/openclaw "$stage/adapters/"
+          cp -R examples schemas "$stage/"
           cp -R deploy/config deploy/systemd "$stage/deploy/"
           rm -f "$stage/deploy/config/control.env" \
             "$stage/deploy/systemd/steward-control.service"
@@ -177,7 +178,7 @@ jobs:
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' "$stage/release.json"
           grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 7, "write": 7},' "$stage/release.json"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' "$stage/release.json"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 61
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 66
           grep -Fxq 'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_EVIDENCE_UPLINK_ENABLED=false' "$stage/deploy/config/executor.env"
@@ -249,6 +250,16 @@ jobs:
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/adapters/openclaw/adapter.json' \
             /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/examples/agents/hermes/agent.json' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/examples/agents/openclaw/agent.json' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/examples/agents/nodes.json' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/examples/policy/steward.rego' \
+            /tmp/steward-node-test.deb.contents
+          grep -q './usr/lib/steward-node/release/schemas/agent.cue' \
+            /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' \
             /tmp/steward-node-test.deb.contents
           grep -q './usr/lib/steward-node/release/scripts/hermes-feasibility.sh' \
@@ -282,6 +293,16 @@ jobs:
           grep -q '/usr/lib/steward-node/release/adapters/hermes-agent/fixtures/connector-skill/SKILL.md' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/adapters/openclaw/adapter.json' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/examples/agents/hermes/agent.json' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/examples/agents/openclaw/agent.json' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/examples/agents/nodes.json' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/examples/policy/steward.rego' \
+            /tmp/steward-node-test.rpm.contents
+          grep -q '/usr/lib/steward-node/release/schemas/agent.cue' \
             /tmp/steward-node-test.rpm.contents
           grep -q '/usr/lib/steward-node/release/scripts/build-hermes-adapter.sh' \
             /tmp/steward-node-test.rpm.contents

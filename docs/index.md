@@ -5,7 +5,7 @@ home: true
 ---
 
 <section class="hero">
-  <p class="eyebrow">Open-source, operator-controlled agent infrastructure</p>
+  <p class="eyebrow">Open-source, operator-controlled agent application runtime</p>
   <h1>Assume the agent gets tricked.</h1>
   <p class="hero-lede">A hostile calendar invitation, email, web page, document, memory entry, or tool result can steer an AI agent toward a dangerous action. Steward limits the damage: it runs the agent in gVisor, keeps reusable credentials outside the workload, can require a signature over one exact external request, and records what its enforcement points allowed.</p>
   <div class="status-line"><span>Air-gapped operation</span><span>Tenant isolation</span><span>Exact action authority</span><span>Spend-before-network replay control</span><span>Offline evidence</span><span>Apache-2.0</span></div>
@@ -38,6 +38,23 @@ home: true
     <p><a href="{{ '/guides/control-plane/' | relative_url }}">Operate Steward Control →</a> · <a href="{{ '/guides/operator-console/' | relative_url }}">Open the console →</a></p>
   </div>
 </div>
+
+## Build once, choose the agent engine
+
+Define skills, MCP endpoints, a model route, resources, state, lifetime, and
+placement once. Steward validates the definition with CUE, can require an offline
+OPA policy decision, and packages a deterministic bundle for Hermes or OpenClaw.
+The same surface explains which fleet node is eligible and can derive a new,
+short-lived lineage from an immutable state snapshot.
+
+```console
+stewardctl agent init -runtime hermes -name workspace-auditor workspace-auditor
+stewardctl agent build -file workspace-auditor/Stewardfile.cue
+stewardctl agent plan -bundle agent.bundle.json -nodes nodes.json -tenant default
+```
+
+[Build and place an agent]({{ '/guides/build-agents/' | relative_url }}) ·
+[Check platform support]({{ '/reference/platform-support/' | relative_url }})
 
 ## What is protected
 

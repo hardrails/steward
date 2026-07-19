@@ -1,0 +1,16 @@
+{
+  "schema": "steward.nodes.v1",
+  "nodes": [
+    {
+      "id": "node-west-1",
+      "ready": true,
+      "tenants": ["default"],
+      "architecture": "amd64",
+      "isolation": "hardened",
+      "labels": [{"key": "storage", "value": "fast"}, {"key": "zone", "value": "west"}],
+      "capacity": {"cpu_millis": 8000, "memory_mib": 16384, "disk_mib": 102400, "pids": 4096},
+      "allocated": {"cpu_millis": 0, "memory_mib": 0, "disk_mib": 0, "pids": 0},
+      "active_agents": 0
+    }
+  ]
+}

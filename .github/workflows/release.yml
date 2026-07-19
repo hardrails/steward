@@ -180,7 +180,7 @@ jobs:
           grep -Fxq '  "os": "linux",' <<<"$manifest"
           grep -Fxq "  \"arch\": \"${{ matrix.goarch }}\"," <<<"$manifest"
           grep -Fq '    "steward-control": "' <<<"$manifest"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 61
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 66
           grep -Fq '    "integration/adapters/hermes-agent/adapter.json": "' <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/fixtures/connector-skill/SKILL.md": "' <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/fixtures/skill/SKILL.md": "' <<<"$manifest"
@@ -191,6 +191,9 @@ jobs:
           grep -Fq '    "integration/scripts/build-openclaw-adapter.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/openclaw-feasibility.sh": "' <<<"$manifest"
           grep -Fq '    "integration/scripts/node-doctor.sh": "' <<<"$manifest"
+          grep -Fq '    "integration/examples/agents/hermes/agent.json": "' <<<"$manifest"
+          grep -Fq '    "integration/examples/agents/openclaw/agent.json": "' <<<"$manifest"
+          grep -Fq '    "integration/schemas/agent.cue": "' <<<"$manifest"
           tar -tzf "$archive" steward-control >/dev/null
           tar -tzf "$archive" adapters/hermes-agent/adapter.json >/dev/null
           tar -tzf "$archive" adapters/hermes-agent/fixtures/connector-skill/SKILL.md >/dev/null
@@ -202,8 +205,13 @@ jobs:
           tar -tzf "$archive" scripts/build-openclaw-adapter.sh >/dev/null
           tar -tzf "$archive" scripts/openclaw-feasibility.sh >/dev/null
           tar -tzf "$archive" scripts/node-doctor.sh >/dev/null
+          tar -tzf "$archive" examples/agents/hermes/agent.json >/dev/null
+          tar -tzf "$archive" examples/agents/openclaw/agent.json >/dev/null
+          tar -tzf "$archive" schemas/agent.cue >/dev/null
           darwin_archive="dist/steward_${STEWARD_RELEASE_VERSION}_darwin_${{ matrix.goarch }}.tar.gz"
           tar -tzf "$darwin_archive" steward-control >/dev/null
+          tar -tzf "$darwin_archive" examples/agents/hermes/agent.json >/dev/null
+          tar -tzf "$darwin_archive" schemas/agent.cue >/dev/null
           control_archive="dist/steward-control_${STEWARD_RELEASE_VERSION}_linux_${{ matrix.goarch }}.tar.gz"
           control_inventory_raw=$(mktemp)
           control_inventory_stderr=$(mktemp)
@@ -319,6 +327,7 @@ jobs:
             "steward-node_${STEWARD_RELEASE_VERSION}_arm64.rpm"
             "install-steward.sh"
             "install-control.sh"
+            "install-macos.sh"
           )
           for artifact in "${expected[@]}"; do
             test -f "dist/$artifact" || {
@@ -380,4 +389,5 @@ jobs:
             dist/steward-node_*.rpm \
             dist/install-steward.sh \
             dist/install-control.sh \
+            dist/install-macos.sh \
             dist/checksums.txt
