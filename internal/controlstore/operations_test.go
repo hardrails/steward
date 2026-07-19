@@ -181,6 +181,11 @@ func TestCommandInventoryPaginatesFiltersAndProjectsTenants(t *testing.T) {
 }
 
 func TestAgentInventoryCorrelatesSignedRuntimeWithoutInventingDesiredState(t *testing.T) {
+	if key := agentInventorySortKey(AgentMetadata{
+		TenantID: "tenant-a", NodeID: "node-a", RuntimeRef: "runtime-a", InstanceGeneration: 2,
+	}); key != "tenant-a\x00node-a\x00runtime-a\x002" {
+		t.Fatalf("agent inventory sort key = %q", key)
+	}
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")
 	_, node := fixture.createNode(t, "tenant-a")

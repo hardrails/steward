@@ -86,6 +86,11 @@ func (store *Store) ApplyDeployment(
 	if exists && deploymentSpecEqual(existing, input) {
 		return cloneDeployment(existing), false, nil
 	}
+	for otherKey, other := range store.current.deployments {
+		if otherKey != key && deploymentIdentitiesOverlap(other.Instances, instances) {
+			return Deployment{}, false, ErrConflict
+		}
+	}
 	if !exists && input.ExpectedRevision != 0 || exists && input.ExpectedRevision != existing.Revision {
 		return Deployment{}, false, ErrConflict
 	}
@@ -261,4 +266,15 @@ func deploymentInstancesRollForward(previous, next []DeploymentInstance) bool {
 		}
 	}
 	return true
+}
+
+func deploymentIdentitiesOverlap(left, right []DeploymentInstance) bool {
+	for _, first := range left {
+		for _, second := range right {
+			if first.InstanceID == second.InstanceID || first.LineageID == second.LineageID {
+				return true
+			}
+		}
+	}
+	return false
 }

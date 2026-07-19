@@ -194,6 +194,206 @@ func TestDeploymentBlockedReasonIsDurableBoundedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestDeploymentStoreRejectsInvalidAndStaleTransitions(t *testing.T) {
+	var unavailable *Store
+	if _, _, err := unavailable.ApplyDeployment(controlauth.Identity{}, DeploymentApply{}, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil apply error = %v", err)
+	}
+	if _, _, err := unavailable.SetDeploymentDesiredState(controlauth.Identity{}, "a", "b", 1, DeploymentAbsent, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil desired state error = %v", err)
+	}
+	if _, _, err := unavailable.GetDeployment(controlauth.Identity{}, "a", "b"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil get error = %v", err)
+	}
+	if _, err := unavailable.ListDeployments(controlauth.Identity{}, ""); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil list error = %v", err)
+	}
+	if _, err := unavailable.SnapshotDeploymentFleet(); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil snapshot error = %v", err)
+	}
+	if _, _, _, err := unavailable.EnqueueDeploymentCommand(DeploymentCommandTransition{}, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil enqueue error = %v", err)
+	}
+	if _, _, err := unavailable.ObserveDeploymentCommand("a", "b", "c", 1, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil observe error = %v", err)
+	}
+	if _, _, err := unavailable.RemovePendingDeploymentInstance("a", "b", "c", 1, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil remove pending error = %v", err)
+	}
+	if _, _, err := unavailable.RecordDeploymentBlocked(
+		"a", "b", "c", 1, DeploymentBlockedNoEligibleNode, time.Now(),
+	); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil block error = %v", err)
+	}
+
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	input := deploymentApplyFixture(t, fixture.now, "deployment-a", 1)
+	if _, _, err := fixture.store.ApplyDeployment(controlauth.Identity{}, input, fixture.now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized apply error = %v", err)
+	}
+	invalid := input
+	invalid.Generation = 0
+	if _, _, err := fixture.store.ApplyDeployment(fixture.admin, invalid, fixture.now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid apply error = %v", err)
+	}
+	created, _, err := fixture.store.ApplyDeployment(fixture.admin, input, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instanceID := created.Instances[0].InstanceID
+	overlapping := input
+	overlapping.ID = "deployment-overlap"
+	if _, _, err := fixture.store.ApplyDeployment(fixture.admin, overlapping, fixture.now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("overlapping deployment identity error = %v", err)
+	}
+
+	if _, _, err := fixture.store.SetDeploymentDesiredState(
+		controlauth.Identity{}, "tenant-a", "deployment-a", created.Revision,
+		DeploymentAbsent, fixture.now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized desired state error = %v", err)
+	}
+	if _, _, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, "tenant-a", "deployment-a", 0, DeploymentAbsent, fixture.now,
+	); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid desired state error = %v", err)
+	}
+	if _, _, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, "tenant-a", "missing", created.Revision, DeploymentAbsent, fixture.now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing desired state error = %v", err)
+	}
+	if _, _, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, "tenant-a", "deployment-a", created.Revision+1, DeploymentAbsent, fixture.now,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale desired state error = %v", err)
+	}
+	if _, _, err := fixture.store.RecordDeploymentBlocked(
+		"tenant-a", "deployment-a", instanceID, created.Revision+1,
+		DeploymentBlockedNoEligibleNode, fixture.now,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale block error = %v", err)
+	}
+	if _, _, err := fixture.store.RecordDeploymentBlocked(
+		"tenant-a", "deployment-a", "missing", created.Revision,
+		DeploymentBlockedNoEligibleNode, fixture.now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing block instance error = %v", err)
+	}
+	if _, _, err := fixture.store.RecordDeploymentBlocked(
+		"tenant-a", "missing", instanceID, created.Revision,
+		DeploymentBlockedNoEligibleNode, fixture.now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing block deployment error = %v", err)
+	}
+	if _, _, _, err := fixture.store.EnqueueDeploymentCommand(DeploymentCommandTransition{}, fixture.now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid enqueue error = %v", err)
+	}
+	if _, _, err := fixture.store.ObserveDeploymentCommand(
+		"tenant-a", "deployment-a", instanceID, 0, fixture.now,
+	); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid observe error = %v", err)
+	}
+	if _, _, err := fixture.store.ObserveDeploymentCommand(
+		"tenant-a", "missing", instanceID, created.Revision, fixture.now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing observe error = %v", err)
+	}
+	if _, _, err := fixture.store.ObserveDeploymentCommand(
+		"tenant-a", "deployment-a", instanceID, created.Revision+1, fixture.now,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale observe error = %v", err)
+	}
+	if _, _, err := fixture.store.ObserveDeploymentCommand(
+		"tenant-a", "deployment-a", "missing", created.Revision, fixture.now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing observe instance error = %v", err)
+	}
+	if deployment, changed, err := fixture.store.ObserveDeploymentCommand(
+		"tenant-a", "deployment-a", instanceID, created.Revision, fixture.now,
+	); err != nil || changed || deployment.Revision != created.Revision {
+		t.Fatalf("idle observe = (%+v, %v, %v)", deployment, changed, err)
+	}
+	if _, _, err := fixture.store.RemovePendingDeploymentInstance(
+		"tenant-a", "deployment-a", instanceID, created.Revision, fixture.now,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("running desired remove error = %v", err)
+	}
+	if _, _, err := fixture.store.RemovePendingDeploymentInstance(
+		"tenant-a", "missing", instanceID, created.Revision, fixture.now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing pending deployment error = %v", err)
+	}
+	if _, _, err := fixture.store.RemovePendingDeploymentInstance(
+		"tenant-a", "deployment-a", "missing", created.Revision, fixture.now,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing pending instance error = %v", err)
+	}
+	absent, _, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, "tenant-a", "deployment-a", created.Revision,
+		DeploymentAbsent, fixture.now.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, changed, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, "tenant-a", "deployment-a", absent.Revision,
+		DeploymentRunning, fixture.now.Add(2*time.Second),
+	)
+	if err != nil || !changed || running.Phase != DeploymentPending {
+		t.Fatalf("restore running = (%+v, %v, %v)", running, changed, err)
+	}
+	if _, found, err := fixture.store.GetDeployment(fixture.admin, "tenant-a", "bad id"); err != nil || found {
+		t.Fatalf("invalid get = (%v, %v)", found, err)
+	}
+}
+
+func TestDeploymentStoreOperationsStopAfterClose(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	input := deploymentApplyFixture(t, fixture.now, "deployment-a", 1)
+	created, _, err := fixture.store.ApplyDeployment(fixture.admin, input, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	instanceID := created.Instances[0].InstanceID
+	checks := []error{}
+	_, err = fixture.store.SnapshotDeploymentFleet()
+	checks = append(checks, err)
+	_, _, err = fixture.store.GetDeployment(fixture.admin, "tenant-a", "deployment-a")
+	checks = append(checks, err)
+	_, err = fixture.store.ListDeployments(fixture.admin, "tenant-a")
+	checks = append(checks, err)
+	_, _, err = fixture.store.SetDeploymentDesiredState(
+		fixture.admin, "tenant-a", "deployment-a", created.Revision, DeploymentAbsent, fixture.now,
+	)
+	checks = append(checks, err)
+	_, _, err = fixture.store.RecordDeploymentBlocked(
+		"tenant-a", "deployment-a", instanceID, created.Revision,
+		DeploymentBlockedNoEligibleNode, fixture.now,
+	)
+	checks = append(checks, err)
+	_, _, err = fixture.store.ObserveDeploymentCommand(
+		"tenant-a", "deployment-a", instanceID, created.Revision, fixture.now,
+	)
+	checks = append(checks, err)
+	_, _, err = fixture.store.RemovePendingDeploymentInstance(
+		"tenant-a", "deployment-a", instanceID, created.Revision, fixture.now,
+	)
+	checks = append(checks, err)
+	for index, err := range checks {
+		if !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("closed operation %d error = %v", index, err)
+		}
+	}
+}
+
 func deploymentApplyFixture(t *testing.T, now time.Time, deploymentID string, generation uint64) DeploymentApply {
 	t.Helper()
 	_, publisherPrivate, err := ed25519.GenerateKey(rand.Reader)

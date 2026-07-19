@@ -182,18 +182,7 @@ func (store *Store) EnqueueDeploymentCommand(
 		return Deployment{}, Command{}, false, invalidError("parse deployment command", err)
 	}
 	commandKeyValue := commandKey(statement.TenantID, statement.NodeID, statement.CommandID)
-	if existing, exists := store.current.commands[commandKeyValue]; exists {
-		candidate := Command{
-			TenantID: statement.TenantID, NodeID: statement.NodeID,
-			ID: statement.CommandID, Digest: digestBytes(input.CommandDSSE), CommandDSSE: input.CommandDSSE,
-		}
-		if !commandsEqual(existing, candidate) {
-			return Deployment{}, Command{}, false, ErrConflict
-		}
-		if instance.CommandID == existing.ID && instance.CommandOperation == statement.Kind &&
-			instance.CommandSequence == statement.CommandSequence && instance.NodeID == statement.NodeID {
-			return cloneDeployment(deployment), cloneCommand(existing), false, nil
-		}
+	if _, exists := store.current.commands[commandKeyValue]; exists {
 		return Deployment{}, Command{}, false, ErrConflict
 	}
 	command := Command{
