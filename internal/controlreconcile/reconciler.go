@@ -211,6 +211,16 @@ func (reconciler *Reconciler) reconcileInstance(
 		instance.Phase == controlstore.DeploymentInstanceRemoved && instance.Drain == nil {
 		return instanceResult{}, nil
 	}
+	if deployment.DesiredState == controlstore.DeploymentAbsent &&
+		instance.Phase == controlstore.DeploymentInstanceRemoved && instance.Drain != nil {
+		_, changed, err := reconciler.store.CompleteRemovedDeploymentInstanceDrain(
+			deployment.TenantID, deployment.ID, instance.InstanceID, deployment.Revision, now,
+		)
+		if errors.Is(err, controlstore.ErrConflict) {
+			return instanceResult{conflict: true}, nil
+		}
+		return instanceResult{changed: changed, kind: "removed"}, err
+	}
 	if deployment.DesiredState == controlstore.DeploymentRunning &&
 		instance.Phase == controlstore.DeploymentInstanceRemoved && instance.Drain != nil {
 		_, changed, err := reconciler.store.ReplaceDrainedDeploymentInstance(

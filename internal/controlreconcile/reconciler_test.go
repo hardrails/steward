@@ -372,6 +372,71 @@ func TestReconcilerFailsNodeDrainWithoutRetryingFailedStop(t *testing.T) {
 	}
 }
 
+func TestReconcilerCompletesDrainWhenRemovedDeploymentBecomesAbsent(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	source := fixture.node
+	target := addControlNode(t, fixture, "node-2")
+	fixture.node = source
+	heartbeatControlNode(t, fixture)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+
+	assertReconcileCount(t, reconciler, "enqueue source admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source renewal", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source renewal", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source start", 1, 0)
+	fixture.node = target
+	heartbeatControlNode(t, fixture)
+	fixture.node = source
+
+	if _, changed, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-remove", "kernel upgrade", fixture.now,
+	); err != nil || !changed {
+		t.Fatalf("start node drain = (%v, %v)", changed, err)
+	}
+	if report, err := reconciler.Reconcile(context.Background()); err != nil || report.Draining != 1 {
+		t.Fatalf("mark drain = (%+v, %v)", report, err)
+	}
+	assertReconcileCount(t, reconciler, "enqueue drain stop", 0, 1)
+	completeDeploymentCommand(t, fixture, "stop", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe drain stop", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue drain destroy", 0, 1)
+	completeDeploymentCommand(t, fixture, "destroy", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe drain destroy", 1, 0)
+
+	deployment := getControlDeployment(t, fixture)
+	if deployment.Instances[0].Phase != controlstore.DeploymentInstanceRemoved ||
+		deployment.Instances[0].Drain == nil {
+		t.Fatalf("destroyed drain source = %+v", deployment.Instances[0])
+	}
+	fixture.now = fixture.now.Add(time.Minute)
+	if _, changed, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, deployment.TenantID, deployment.ID, deployment.Revision,
+		controlstore.DeploymentAbsent, fixture.now,
+	); err != nil || !changed {
+		t.Fatalf("remove between destroy and replacement = (%v, %v)", changed, err)
+	}
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.Removed != 1 || report.Replaced != 0 || report.DrainsCompleted != 1 {
+		t.Fatalf("complete removed drain = (%+v, %v)", report, err)
+	}
+	deployment = getControlDeployment(t, fixture)
+	if deployment.Phase != controlstore.DeploymentRemoved || deployment.Instances[0].Drain != nil ||
+		deployment.Instances[0].Generation != 1 {
+		t.Fatalf("removed drain completion created replacement = %+v", deployment)
+	}
+	nodes, err := fixture.store.ListNodes(fixture.admin, "tenant-a")
+	if err != nil || len(nodes) != 2 || nodes[0].Drain == nil ||
+		nodes[0].Drain.State != controlstore.NodeDrainCompleted {
+		t.Fatalf("node drain after removal = (%+v, %v)", nodes, err)
+	}
+}
+
 func TestReconcilerDegradesAmbiguousOutcomeWithoutRetry(t *testing.T) {
 	fixture := newControlReconcileFixture(t)
 	applyControlDeployment(t, fixture, 1)

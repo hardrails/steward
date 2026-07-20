@@ -161,6 +161,56 @@ func (store *Store) ReplaceDrainedDeploymentInstance(
 	return cloneDeployment(deployment), true, nil
 }
 
+// CompleteRemovedDeploymentInstanceDrain clears a move marker when the old
+// runtime was already destroyed and the deployment was removed before a
+// replacement could be created. No further node effect is necessary.
+func (store *Store) CompleteRemovedDeploymentInstanceDrain(
+	tenantID, deploymentID, instanceID string,
+	expectedRevision uint64,
+	now time.Time,
+) (Deployment, bool, error) {
+	if store == nil {
+		return Deployment{}, false, ErrUnavailable
+	}
+	if now.IsZero() || expectedRevision == 0 || !validRecordID(tenantID, 128) ||
+		!validRecordID(deploymentID, 128) || !validRecordID(instanceID, 256) {
+		return Deployment{}, false, invalid("removed deployment drain completion input is invalid")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return Deployment{}, false, err
+	}
+	deployment, found := store.current.deployments[deploymentKey(tenantID, deploymentID)]
+	if !found {
+		return Deployment{}, false, ErrNotFound
+	}
+	if deployment.Revision != expectedRevision || deployment.DesiredState != DeploymentAbsent {
+		return Deployment{}, false, ErrConflict
+	}
+	index := deploymentInstanceIndex(deployment.Instances, instanceID)
+	if index < 0 {
+		return Deployment{}, false, ErrNotFound
+	}
+	instance := deployment.Instances[index]
+	if instance.Phase != DeploymentInstanceRemoved || instance.Drain == nil {
+		return Deployment{}, false, ErrConflict
+	}
+	if deployment.Revision == math.MaxUint64 {
+		return Deployment{}, false, ErrCapacityExceeded
+	}
+	instance.Drain = nil
+	instance.TransitionedAt = canonicalTimestamp(now)
+	deployment.Instances[index] = instance
+	deployment.Revision++
+	deployment.UpdatedAt = canonicalTimestamp(now)
+	deployment.Phase = deploymentAggregatePhase(deployment)
+	if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+		return Deployment{}, false, err
+	}
+	return cloneDeployment(deployment), true, nil
+}
+
 // CompleteFinishedNodeDrains seals active drains whose source node no longer
 // owns an instance and has no in-progress drain marker. A concurrent failed
 // assignment fails the drain instead of either blocking forever or falsely

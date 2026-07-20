@@ -163,6 +163,14 @@ func TestDrainOperationsFailClosedAtAuthorityAndStateBoundaries(t *testing.T) {
 			_, _, err := unavailable.ReplaceDrainedDeploymentInstance("tenant-a", "deployment-a", "instance-a", 1, now)
 			return err
 		}(),
+		func() error {
+			_, _, err := unavailable.CompleteRemovedDeploymentInstanceDrain("tenant-a", "deployment-a", "instance-a", 1, now)
+			return err
+		}(),
+		func() error {
+			_, _, err := unavailable.CompleteRemovedDeploymentInstanceDrain("tenant-a", "deployment-a", "instance-a", 1, now)
+			return err
+		}(),
 		func() error { _, _, err := unavailable.CompleteFinishedNodeDrains(now); return err }(),
 	} {
 		if !errors.Is(err, ErrUnavailable) {
