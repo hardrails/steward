@@ -190,6 +190,10 @@ func (reconciler *Reconciler) reconcileInstance(
 	if err != nil {
 		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedInvalidAuthority), now)
 	}
+	if instance.Phase == controlstore.DeploymentInstanceFailed ||
+		instance.Phase == controlstore.DeploymentInstanceRemoved {
+		return instanceResult{}, nil
+	}
 	leaseManaged := containsOperation(delegation.Operations, "renew")
 	if instance.NodeID != "" && deployment.DesiredState == controlstore.DeploymentRunning &&
 		!assignedNodeEligible(nodes, deployment, instance, delegation, now, reconciler.nodeStaleAfter) {
@@ -204,10 +208,8 @@ func (reconciler *Reconciler) reconcileInstance(
 		}
 		return instanceResult{changed: changed, kind: "observed"}, err
 	}
-	if instance.Phase == controlstore.DeploymentInstanceFailed ||
-		instance.Phase == controlstore.DeploymentInstanceRemoved ||
-		deployment.DesiredState == controlstore.DeploymentRunning && instance.Phase == controlstore.DeploymentInstanceRunning &&
-			(!leaseManaged || !workloadLeaseNeedsRenewal(instance, now)) {
+	if deployment.DesiredState == controlstore.DeploymentRunning && instance.Phase == controlstore.DeploymentInstanceRunning &&
+		(!leaseManaged || !workloadLeaseNeedsRenewal(instance, now)) {
 		return instanceResult{}, nil
 	}
 	if deployment.DesiredState == controlstore.DeploymentAbsent &&

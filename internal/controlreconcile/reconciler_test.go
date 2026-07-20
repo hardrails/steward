@@ -244,6 +244,35 @@ func TestReconcilerDoesNotReplaceStaleAssignedNode(t *testing.T) {
 	}
 }
 
+func TestReconcilerIgnoresTerminalInstancesBeforeStaleNodeRecovery(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	fixture.now = fixture.now.Add(2 * time.Minute)
+	snapshot, err := fixture.store.SnapshotDeploymentFleet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Deployments) != 1 || len(snapshot.Deployments[0].Instances) != 1 {
+		t.Fatalf("unexpected fleet snapshot = %+v", snapshot)
+	}
+	deployment := snapshot.Deployments[0]
+	for _, phase := range []controlstore.DeploymentInstancePhase{
+		controlstore.DeploymentInstanceFailed,
+		controlstore.DeploymentInstanceRemoved,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			instance := deployment.Instances[0]
+			instance.NodeID = "node-1"
+			instance.Phase = phase
+			result, err := reconciler.reconcileInstance(snapshot.Nodes, nil, deployment, instance)
+			if err != nil || result != (instanceResult{}) {
+				t.Fatalf("terminal instance entered stale-node recovery = (%+v, %v)", result, err)
+			}
+		})
+	}
+}
+
 func TestReconcilerReplacesStatelessInstanceOnlyAfterLeaseSafetyWindow(t *testing.T) {
 	fixture := newControlReconcileFixture(t)
 	applyControlDeployment(t, fixture, 1)
