@@ -88,6 +88,18 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 			_, _ = w.Write([]byte(`{"node_id":"node-1","revoked_credentials":1}`))
 		case "/v1/nodes/node-1/placement":
 			_, _ = w.Write([]byte(`{"node":{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z","placement":{"mode":"cordoned","reason":"maintenance","changed_at":"2026-07-13T12:01:00Z"}},"changed":true}`))
+		case "/v1/nodes/node-1/drain":
+			var input struct {
+				RequestID string `json:"request_id"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.RequestID == "" {
+				t.Fatalf("drain request=%+v error=%v", input, err)
+			}
+			state := "active"
+			if request.Method == http.MethodDelete {
+				state = "cancelled"
+			}
+			_, _ = w.Write([]byte(`{"node":{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z","placement":{"mode":"cordoned","reason":"kernel upgrade","changed_at":"2026-07-13T12:01:00Z"},"drain":{"request_id":"` + input.RequestID + `","state":"` + state + `","reason":"kernel upgrade","requested_at":"2026-07-13T12:01:00Z","updated_at":"2026-07-13T12:01:00Z"}},"changed":true}`))
 		case "/v1/operations/summary":
 			query := request.URL.Query()
 			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" {
@@ -245,6 +257,18 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	cordonArguments = append(cordonArguments, "-reason", "maintenance", "node-1")
 	if err := run(cordonArguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"mode":"cordoned"`) {
 		t.Fatalf("node cordon output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	drainArguments := append([]string{"control", "node", "drain"}, common...)
+	drainArguments = append(drainArguments, "-reason", "kernel upgrade", "node-1")
+	if err := run(drainArguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"state":"active"`) {
+		t.Fatalf("node drain output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	cancelDrainArguments := append([]string{"control", "node", "cancel-drain"}, common...)
+	cancelDrainArguments = append(cancelDrainArguments, "-request-id", "maintenance-1", "node-1")
+	if err := run(cancelDrainArguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"state":"cancelled"`) {
+		t.Fatalf("node cancel drain output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
 	nodeRevokeArguments := append([]string{"control", "node", "revoke"}, common...)

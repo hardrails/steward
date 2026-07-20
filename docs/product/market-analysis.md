@@ -63,7 +63,9 @@ destruction, and drains only exact runtime references derived from committed sig
 admission. The node-local drain does not migrate workloads. Control's separate
 narrow scheduler places exact delegated instances, reserves enforceable CPU,
 memory, process, tenant, and workload-slot capacity, and can replace a stateless
-instance after its generation-bound lease is safely fenced.
+instance after its generation-bound lease is safely fenced. For planned work,
+Control cordons first and moves stateless instances within their declared
+maximum-unavailable budgets; every move is generation-fenced and restart-safe.
 Control also persists a separate site-admin placement state: cordon blocks new
 placement, while quarantine additionally stops command leasing and triggers only
 lease-fenced stateless recovery. This state remains visible to tenant operators
@@ -71,7 +73,7 @@ and does not erase the node's evidence identity.
 
 | System | New-work gate | Existing-work behavior | Failure and restart behavior |
 | --- | --- | --- | --- |
-| Steward | Durable controller cordon blocks placement; node-local cordon blocks signed admission and starts under the same mutation lock | Quarantine stops command leases; explicit local `-apply` destroys exact signed runtimes through the normal journaled API; state volumes remain; no state migration or disruption-budget claim | Both gates survive restart; stateless replacement waits for the signed lease fence; the local drain is resumable and exit requires successful reconciliation |
+| Steward | Durable controller drain cordons before movement; node-local cordon blocks signed admission and starts under the same mutation lock | Control moves eligible stateless desired instances within per-deployment maximum-unavailable budgets; stateful instances block; local `-apply` remains available for exact unmanaged cleanup | Controller move markers, generation fences, command cursors, and both cordons survive restart; cancellation stops new moves but does not reverse an ambiguous in-flight lifecycle effect |
 | [Nomad](https://developer.hashicorp.com/nomad/commands/node/drain) | Drain disables scheduling eligibility | Migrates or stops allocations according to job type and deadline | Drain is server-managed and monitorable; eligibility remains an explicit scheduler concern |
 | [Kubernetes](https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/) | Drain marks a node unschedulable | Evicts pods and can respect PodDisruptionBudgets; controllers place replacements | Operators uncordon after maintenance; direct node binding and special tolerations remain documented exceptions |
 

@@ -134,6 +134,23 @@ func TestNodeAdministrationFencesEveryCredentialAndTenantView(t *testing.T) {
 	response = fixture.request(t, http.MethodPost, "/v1/nodes/node-1/placement", fixture.adminToken,
 		`{"action":"uncordon"}`)
 	requireStatus(t, response, http.StatusOK)
+	requireError(t, fixture.request(t, http.MethodPut, "/v1/nodes/node-1/drain", operatorA,
+		`{"request_id":"maintenance-1","reason":"kernel upgrade"}`), http.StatusForbidden, "forbidden")
+	response = fixture.request(t, http.MethodPut, "/v1/nodes/node-1/drain", fixture.adminToken,
+		`{"request_id":"maintenance-1","reason":"kernel upgrade"}`)
+	requireStatus(t, response, http.StatusOK)
+	var drain struct {
+		Node    nodeResponse `json:"node"`
+		Changed bool         `json:"changed"`
+	}
+	decodeResponse(t, response, &drain)
+	if !drain.Changed || drain.Node.Drain == nil || drain.Node.Drain.State != controlstore.NodeDrainActive ||
+		drain.Node.Placement.Mode != controlstore.NodeCordoned {
+		t.Fatalf("node drain = %+v", drain)
+	}
+	response = fixture.request(t, http.MethodDelete, "/v1/nodes/node-1/drain", fixture.adminToken,
+		`{"request_id":"maintenance-1"}`)
+	requireStatus(t, response, http.StatusOK)
 
 	requireError(t, fixture.request(t, http.MethodGet, "/v1/tenants/tenant-b/nodes", operatorA, ""),
 		http.StatusNotFound, "not_found")
@@ -409,6 +426,8 @@ func TestControlPlaneRouteMatrixPreservesIdempotencyAndConcealment(t *testing.T)
 		{http.MethodPost, "/v1/nodes/node-1", fixture.adminToken, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
 		{http.MethodGet, "/v1/nodes/node-1/placement", fixture.adminToken, "", http.StatusMethodNotAllowed, "method_not_allowed"},
 		{http.MethodPost, "/v1/nodes/node-1/placement?unexpected=1", fixture.adminToken, `{}`, http.StatusBadRequest, "invalid_request"},
+		{http.MethodGet, "/v1/nodes/node-1/drain", fixture.adminToken, "", http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodPut, "/v1/nodes/node-1/drain?unexpected=1", fixture.adminToken, `{}`, http.StatusBadRequest, "invalid_request"},
 		{http.MethodPost, "/v1/nodes/node-1/evidence", fixture.adminToken, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
 		{http.MethodGet, "/v1/nodes/node-1/evidence?unexpected=1", fixture.adminToken, "", http.StatusBadRequest, "invalid_request"},
 		{http.MethodPost, "/v1/nodes/node-1/evidence/export", fixture.adminToken, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},

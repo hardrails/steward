@@ -49,6 +49,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET /v1/tenants/{tenant_id}/nodes` | Page through bounded tenant node inventory |
 | `GET /v1/tenants/{tenant_id}/nodes/{node_id}` | Read one tenant-visible node |
 | `POST /v1/nodes/{node_id}/placement` | Site-admin-only cordon, quarantine, uncordon, or unquarantine transition with durable reason and time |
+| `PUT or DELETE /v1/nodes/{node_id}/drain` | Start an idempotent, budgeted stateless evacuation or cancel new moves using its request ID; already-started moves continue |
 | `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
 | `GET /v1/tenants/{tenant_id}/deployments` | Page through bounded desired agent deployments, including retained task-ready intent and admission projections when present |
 | `GET or PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Inspect or apply one optimistic, generation-fenced desired deployment |
@@ -87,6 +88,13 @@ quarantine require a bounded reason. Removing quarantine requires the explicit
 `unquarantine` action, so an ordinary maintenance uncordon cannot accidentally
 weaken incident containment.
 
+An active controller drain also leaves the node `cordoned`. Control previews an
+eligible destination, atomically records one instance as unavailable within its
+deployment budget, stops and destroys it through the normal signed lifecycle,
+advances its delegated generation, and places it again. The instance response
+retains the drain marker until the replacement is running, plus an explainable
+placement decision. Controller restart resumes from those durable records.
+
 A deployment `PUT` carries a canonical agent bundle digest, publisher-signed
 capsule, and tenant-signed controller delegation. Control validates bounded routing
 and desired-state consistency but does not treat the tenant signature as trusted.
@@ -95,6 +103,11 @@ verifies the purpose-separated controller signature and exact delegated scope.
 The response exposes public digests and scope, never either private key. Changed
 desired state requires the last observed revision and a higher deployment
 generation; an exact retry is idempotent.
+
+`disruption_budget.max_unavailable` defaults to `1` and may be `0` to pause
+voluntary node-drain movement. It does not create a healthy-replica guarantee or
+surge capacity: the current implementation destroys a source instance before it
+admits the replacement, so each permitted move has bounded downtime.
 
 Evidence enrollment proves possession of the node receipt key and pins it to one
 controller, enrollment, control node, receipt node, stream, and epoch. A report
@@ -478,7 +491,8 @@ All three require the loopback Executor bearer. They are host-administration
 operations, not tenant scheduling APIs. Entering maintenance blocks new signed
 admission, starts, activation canary dispatch, and activation checkpoints. It does
 not stop a workload or remove state. The CLI composes these operations with the
-existing signed-runtime destroy endpoint; no separate drain engine exists.
+existing signed-runtime destroy endpoint; no separate node-local drain engine
+exists. This is distinct from Control's desired-deployment drain state machine.
 
 `stewardctl image`, `stewardctl evidence`, `stewardctl permit`, `stewardctl task`,
 `stewardctl activation`, `stewardctl rollout`, and `stewardctl upgrade` are CLIs,

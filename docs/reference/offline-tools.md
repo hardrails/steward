@@ -105,6 +105,10 @@ When `admit` is delegated, also provide the exact non-identity admission templat
     "required_labels": [
       {"key": "region", "value": "west"}
     ],
+	"preferred_labels": [
+	  {"key": "disk", "value": "fast"}
+	],
+	"spread_by": "zone",
     "tolerations": []
   }
 }
@@ -113,8 +117,10 @@ When `admit` is delegated, also provide the exact non-identity admission templat
 `placement` is optional. When present, label entries and tolerations must be
 sorted and unique. Keys, values, and tolerations may contain letters, digits,
 `.`, `_`, `:`, `/`, and `-`, up to 128 bytes each. Every taint published by a
-candidate node must have an exact toleration. The placement constraint is
-tenant-signed with the rest of the template; Control cannot weaken it.
+candidate node must have an exact toleration. Required labels and tolerations
+are hard constraints. Preferred labels and `spread_by` affect only deterministic
+ranking among eligible nodes. The placement contract is tenant-signed with the
+rest of the template; Control cannot weaken it.
 
 Issue and verify the delegation on the signing workstation:
 

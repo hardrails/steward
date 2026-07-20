@@ -1,0 +1,422 @@
+package controlstore
+
+import (
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/hardrails/steward/internal/controlauth"
+)
+
+func TestNodeDrainIsIdempotentCordonsAndPersists(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	now := fixture.now.Add(2 * time.Minute)
+
+	node, changed, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", "kernel upgrade", now,
+	)
+	if err != nil || !changed || node.Drain == nil || node.Drain.State != NodeDrainActive ||
+		EffectiveNodePlacement(node).Mode != NodeCordoned {
+		t.Fatalf("start drain = (%+v, %v, %v)", node, changed, err)
+	}
+	retry, changed, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", "kernel upgrade", now.Add(time.Second),
+	)
+	if err != nil || changed || retry.Drain == nil || retry.Drain.RequestID != "maintenance-1" {
+		t.Fatalf("retry drain = (%+v, %v, %v)", retry, changed, err)
+	}
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-2", "other work", now.Add(time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("competing drain error = %v", err)
+	}
+	if _, _, err := fixture.store.ChangeNodePlacement(
+		fixture.admin, "node-1", NodePlacementUncordon, "", now.Add(time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("uncordon active drain error = %v", err)
+	}
+
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store = reopened
+	t.Cleanup(func() { _ = reopened.Close() })
+	nodes, err := reopened.ListNodes(fixture.admin, "tenant-a")
+	if err != nil || len(nodes) != 1 || nodes[0].Drain == nil ||
+		nodes[0].Drain.RequestID != "maintenance-1" {
+		t.Fatalf("reopened drain = (%+v, %v)", nodes, err)
+	}
+	cancelled, changed, err := reopened.CancelNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", now.Add(2*time.Second),
+	)
+	if err != nil || !changed || cancelled.Drain.State != NodeDrainCancelled ||
+		cancelled.Drain.CompletedAt == "" || EffectiveNodePlacement(cancelled).Mode != NodeCordoned {
+		t.Fatalf("cancel drain = (%+v, %v, %v)", cancelled, changed, err)
+	}
+}
+
+func TestNewNodeDrainWaitsForCancelledInstanceMoves(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	input := deploymentApplyFixtureWithInstanceCount(t, fixture.now, "deployment-a", 1, 1)
+	input.DisruptionBudget = &DeploymentDisruptionBudget{MaxUnavailable: 1}
+	created, _, err := fixture.store.ApplyDeployment(fixture.admin, input, fixture.now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.Instances[0].NodeID = "node-1"
+	created.Instances[0].Phase = DeploymentInstanceRunning
+	created.Phase = DeploymentReady
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
+	fixture.store.mu.Unlock()
+	startedAt := fixture.now.Add(2 * time.Minute)
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", "kernel upgrade", startedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-1", created.Revision, startedAt.Add(time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.CancelNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", startedAt.Add(2*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-2", "firmware upgrade", startedAt.Add(3*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("new drain while cancelled move remains = %v", err)
+	}
+}
+
+func TestConcurrentUnrelatedFailureFailsActiveNodeDrain(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	input := deploymentApplyFixtureWithInstanceCount(t, fixture.now, "deployment-a", 1, 1)
+	created, _, err := fixture.store.ApplyDeployment(fixture.admin, input, fixture.now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.Instances[0].NodeID = "node-1"
+	created.Instances[0].Phase = DeploymentInstanceRunning
+	created.Phase = DeploymentReady
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
+	fixture.store.mu.Unlock()
+	startedAt := fixture.now.Add(2 * time.Minute)
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", "kernel upgrade", startedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model a command from an unrelated reconciliation path failing after the
+	// drain became active but before this instance received a drain marker.
+	created.Instances[0].Phase = DeploymentInstanceFailed
+	created.Instances[0].LastError = "unrelated_command_failed"
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
+	fixture.store.mu.Unlock()
+	completed, failed, err := fixture.store.CompleteFinishedNodeDrains(startedAt.Add(time.Second))
+	if err != nil || completed != 0 || failed != 1 {
+		t.Fatalf("finish drain around unrelated failure = (%d, %d, %v)", completed, failed, err)
+	}
+	nodes, err := fixture.store.ListNodes(fixture.admin, "tenant-a")
+	if err != nil || len(nodes) != 1 || nodes[0].Drain == nil ||
+		nodes[0].Drain.State != NodeDrainFailed ||
+		nodes[0].Drain.FailedInstanceID != created.Instances[0].InstanceID {
+		t.Fatalf("failed drain after unrelated failure = (%+v, %v)", nodes, err)
+	}
+}
+
+func TestDrainOperationsFailClosedAtAuthorityAndStateBoundaries(t *testing.T) {
+	var unavailable *Store
+	now := time.Now().UTC()
+	for index, err := range []error{
+		func() error {
+			_, _, err := unavailable.StartNodeDrain(controlauth.Identity{}, "node-1", "request-1", "work", now)
+			return err
+		}(),
+		func() error {
+			_, _, err := unavailable.CancelNodeDrain(controlauth.Identity{}, "node-1", "request-1", now)
+			return err
+		}(),
+		func() error {
+			_, _, err := unavailable.BeginDeploymentInstanceDrain("tenant-a", "deployment-a", "instance-a", "node-1", "request-1", 1, now)
+			return err
+		}(),
+		func() error {
+			_, _, err := unavailable.ReplaceDrainedDeploymentInstance("tenant-a", "deployment-a", "instance-a", 1, now)
+			return err
+		}(),
+		func() error {
+			_, _, err := unavailable.CompleteRemovedDeploymentInstanceDrain("tenant-a", "deployment-a", "instance-a", 1, now)
+			return err
+		}(),
+		func() error {
+			_, _, err := unavailable.CompleteRemovedDeploymentInstanceDrain("tenant-a", "deployment-a", "instance-a", 1, now)
+			return err
+		}(),
+		func() error { _, _, err := unavailable.CompleteFinishedNodeDrains(now); return err }(),
+	} {
+		if !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("unavailable drain operation %d error = %v", index, err)
+		}
+	}
+
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	unauthorized := controlauth.Identity{Role: controlauth.RoleTenantOperator, TenantID: "tenant-a"}
+	if _, _, err := fixture.store.StartNodeDrain(unauthorized, "node-1", "request-1", "work", fixture.now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant start drain error = %v", err)
+	}
+	if _, _, err := fixture.store.CancelNodeDrain(unauthorized, "node-1", "request-1", fixture.now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant cancel drain error = %v", err)
+	}
+	if _, _, err := fixture.store.StartNodeDrain(fixture.admin, "node 1", "request-1", "work", fixture.now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid start drain error = %v", err)
+	}
+	startedAt := fixture.now.Add(2 * time.Minute)
+	if _, _, err := fixture.store.StartNodeDrain(fixture.admin, "node-1", "request-1", "work", startedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.CancelNodeDrain(fixture.admin, "node-1", "wrong-request", startedAt); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale cancellation error = %v", err)
+	}
+	if _, _, err := fixture.store.CancelNodeDrain(fixture.admin, "node-1", "request-1", startedAt.Add(-time.Second)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("backdated cancellation error = %v", err)
+	}
+	if _, changed, err := fixture.store.CancelNodeDrain(fixture.admin, "node-1", "request-1", startedAt.Add(time.Second)); err != nil || !changed {
+		t.Fatalf("cancel drain = (%v, %v)", changed, err)
+	}
+	if _, changed, err := fixture.store.CancelNodeDrain(fixture.admin, "node-1", "request-1", startedAt.Add(2*time.Second)); err != nil || changed {
+		t.Fatalf("retry cancelled drain = (%v, %v)", changed, err)
+	}
+	if _, _, err := fixture.store.CancelNodeDrain(fixture.admin, "node-missing", "request-1", startedAt.Add(2*time.Second)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing node cancellation error = %v", err)
+	}
+	if _, _, err := fixture.store.CompleteFinishedNodeDrains(time.Time{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid drain completion error = %v", err)
+	}
+	if _, _, err := fixture.store.ChangeNodePlacement(
+		fixture.admin, "node-1", NodePlacementUncordon, "", startedAt.Add(3*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.ChangeNodePlacement(
+		fixture.admin, "node-1", NodePlacementQuarantine, "investigation", startedAt.Add(4*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "request-2", "work", startedAt.Add(5*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("quarantined node drain error = %v", err)
+	}
+}
+
+func TestDeploymentDrainEnforcesBudgetAndAdvancesGenerationAfterRemoval(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	budget := DeploymentDisruptionBudget{MaxUnavailable: 1}
+	input := deploymentApplyFixture(t, fixture.now, "deployment-a", 1)
+	input.DisruptionBudget = &budget
+	created, _, err := fixture.store.ApplyDeployment(fixture.admin, input, fixture.now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range created.Instances {
+		created.Instances[index].NodeID = "node-1"
+		created.Instances[index].Phase = DeploymentInstanceRunning
+	}
+	created.Phase = DeploymentReady
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
+	fixture.store.mu.Unlock()
+
+	startedAt := fixture.now.Add(3 * time.Minute)
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-1", created.Revision+1, startedAt,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale begin drain error = %v", err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", "missing-instance", "node-1",
+		"maintenance-1", created.Revision, startedAt,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing begin drain instance error = %v", err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-1", created.Revision, startedAt,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin without node drain error = %v", err)
+	}
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", "kernel upgrade", startedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	marked, changed, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-1", created.Revision, startedAt.Add(time.Second),
+	)
+	if err != nil || !changed || marked.Instances[0].Drain == nil {
+		t.Fatalf("begin instance drain = (%+v, %v, %v)", marked, changed, err)
+	}
+	if _, changed, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-1", marked.Revision, startedAt.Add(2*time.Second),
+	); err != nil || changed {
+		t.Fatalf("retry instance drain = (%v, %v)", changed, err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-2", marked.Revision, startedAt.Add(2*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting instance drain error = %v", err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[1].InstanceID, "node-1",
+		"maintenance-1", marked.Revision, startedAt.Add(2*time.Second),
+	); !errors.Is(err, ErrDisruptionBudget) {
+		t.Fatalf("second instance drain error = %v", err)
+	}
+	if _, _, err := fixture.store.ReplaceDrainedDeploymentInstance(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID,
+		marked.Revision+1, startedAt.Add(3*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale replacement error = %v", err)
+	}
+	if _, _, err := fixture.store.ReplaceDrainedDeploymentInstance(
+		"tenant-a", "deployment-a", "missing-instance",
+		marked.Revision, startedAt.Add(3*time.Second),
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing replacement instance error = %v", err)
+	}
+	if _, _, err := fixture.store.ReplaceDrainedDeploymentInstance(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID,
+		marked.Revision, startedAt.Add(3*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("premature replacement error = %v", err)
+	}
+
+	removed := marked
+	removed.Instances[0].Phase = DeploymentInstanceRemoved
+	removed.Revision++
+	removed.UpdatedAt = canonicalTimestamp(startedAt.Add(3 * time.Second))
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = removed
+	fixture.store.mu.Unlock()
+	replaced, changed, err := fixture.store.ReplaceDrainedDeploymentInstance(
+		"tenant-a", "deployment-a", removed.Instances[0].InstanceID,
+		removed.Revision, startedAt.Add(4*time.Second),
+	)
+	if err != nil || !changed || replaced.Instances[0].Generation != 2 ||
+		replaced.Instances[0].NodeID != "" || replaced.Instances[0].Phase != DeploymentInstancePending ||
+		replaced.Instances[0].Drain == nil {
+		t.Fatalf("replace drained instance = (%+v, %v, %v)", replaced.Instances[0], changed, err)
+	}
+	if completed, failed, err := fixture.store.CompleteFinishedNodeDrains(startedAt.Add(5 * time.Second)); err != nil || completed != 0 || failed != 0 {
+		t.Fatalf("complete with replacement pending = (%d, %d, %v)", completed, failed, err)
+	}
+	absent, changed, err := fixture.store.SetDeploymentDesiredState(
+		fixture.admin, "tenant-a", "deployment-a", replaced.Revision,
+		DeploymentAbsent, startedAt.Add(6*time.Second),
+	)
+	if err != nil || !changed {
+		t.Fatalf("remove replacement deployment = (%+v, %v, %v)", absent, changed, err)
+	}
+	removedPending, changed, err := fixture.store.RemovePendingDeploymentInstance(
+		"tenant-a", "deployment-a", replaced.Instances[0].InstanceID,
+		absent.Revision, startedAt.Add(7*time.Second),
+	)
+	if err != nil || !changed || removedPending.Instances[0].Drain != nil {
+		t.Fatalf("remove pending drained replacement = (%+v, %v, %v)", removedPending.Instances[0], changed, err)
+	}
+}
+
+func TestFleetOperationsFormatRejectsLegacySmuggling(t *testing.T) {
+	current, limits := populatedControlState(t)
+	node := firstNode(current)
+	node.Drain = &NodeDrain{
+		RequestID: "maintenance-1", State: NodeDrainActive, Reason: "kernel upgrade",
+		RequestedAt: node.CreatedAt, UpdatedAt: node.CreatedAt,
+	}
+	current.nodes[node.ID] = node
+	raw, err := encodeState(current, limits.MaxStateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot snapshotState
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Version = stateFormatNodePlacementVersion
+	legacy, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeState(legacy, limits.MaxStateBytes); err == nil {
+		t.Fatal("legacy snapshot accepted node drain state")
+	}
+	if _, err := applyTransaction(emptyState(), transaction{
+		Version:   transactionNodePlacementVersion,
+		Mutations: []mutation{{Kind: mutationNode, Node: &node}},
+	}); err == nil {
+		t.Fatal("legacy transaction accepted node drain state")
+	}
+
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	if _, _, err := fixture.store.ApplyDeployment(
+		fixture.admin, deploymentApplyFixture(t, fixture.now, "deployment-a", 1), fixture.now.Add(2*time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	fixture.store.mu.Lock()
+	deploymentRaw, err := encodeState(fixture.store.current, fixture.limits.MaxStateBytes)
+	fixture.store.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deploymentSnapshot snapshotState
+	if err := json.Unmarshal(deploymentRaw, &deploymentSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	deploymentSnapshot.Version = stateFormatNodePlacementVersion
+	smuggled, err := json.Marshal(deploymentSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeState(smuggled, fixture.limits.MaxStateBytes); err == nil {
+		t.Fatal("legacy snapshot accepted deployment fleet operations state")
+	}
+	deploymentSnapshot.Deployments[0].DisruptionBudget = DeploymentDisruptionBudget{}
+	legacyDeployment, err := json.Marshal(deploymentSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := decodeState(legacyDeployment, fixture.limits.MaxStateBytes)
+	if err != nil || migrated.deployments[deploymentKey("tenant-a", "deployment-a")].DisruptionBudget.MaxUnavailable != 1 {
+		t.Fatalf("legacy deployment budget migration = (%+v, %v)", migrated.deployments, err)
+	}
+}

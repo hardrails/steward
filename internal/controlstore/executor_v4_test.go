@@ -389,9 +389,9 @@ func TestExecutorV4FormatRangeMigratesV2AndRejectsAuthoritySmuggling(t *testing.
 		controlprotocol.MaxExecutorReportBytes != 16<<10 {
 		t.Fatal("controller or protocol report byte cap changed")
 	}
-	if stateFormatMinReadVersion != 1 || stateFormatMaxReadVersion != 8 ||
+	if stateFormatMinReadVersion != 1 || stateFormatMaxReadVersion != 9 ||
 		stateFormatWriteVersion != stateFormatMaxReadVersion ||
-		transactionFormatMinReadVersion != 1 || transactionFormatMaxReadVersion != 8 ||
+		transactionFormatMinReadVersion != 1 || transactionFormatMaxReadVersion != 9 ||
 		transactionFormatWriteVersion != transactionFormatMaxReadVersion {
 		t.Fatal("control store read/write ranges changed without an explicit migration")
 	}

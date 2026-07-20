@@ -90,7 +90,7 @@ response cannot retain pre-session authority indefinitely.
 | --- | --- | --- |
 | Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, and retained-state capacity | Mutation controls and raw evidence frames |
 | Attention | Deterministic findings derived from retained facts and current process observations; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, remediation, or incident workflow |
-| Nodes | Node state, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
+| Nodes | Node state, placement mode, durable drain state and request ID, failed drain instance when applicable, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
 | Commands | A local, unverified preview and exact SHA-256 digest for one offline-signed command; submission after confirmation and bearer re-entry; retained command ID, digest, tenant, node, lifecycle state, and creation time | Command creation or editing, signature verification, private keys, terminal result text, prompts, and task bodies |
 | Credentials | Credential ID, kind, role or node, scope, creation time, and revoked state | Bearer values, token message-authentication codes, and private keys |
 | Agents | One card per signed runtime identity and instance generation with its last successful workload status, latest signed operation, node, logical egress routes, and connector IDs | Desired state, automatic recovery promises, command bytes, task authorities, relay endpoints, free-form errors, and secrets |

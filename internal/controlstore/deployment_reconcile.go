@@ -29,6 +29,7 @@ type DeploymentCommandTransition struct {
 	InstanceID           string
 	CommandDSSE          []byte
 	SchedulingStaleAfter time.Duration
+	Placement            *DeploymentPlacementDecision
 }
 
 // DeploymentBlockedReason is a stable, machine-readable explanation for why
@@ -50,6 +51,8 @@ const (
 	DeploymentBlockedWorkloadLimit           DeploymentBlockedReason = "workload_limit_exceeded"
 	DeploymentBlockedNodeCapacity            DeploymentBlockedReason = "node_capacity_exhausted"
 	DeploymentBlockedTenantCapacity          DeploymentBlockedReason = "tenant_capacity_exhausted"
+	DeploymentBlockedDrainDisruptionBudget   DeploymentBlockedReason = "drain_disruption_budget_exhausted"
+	DeploymentBlockedStatefulDrain           DeploymentBlockedReason = "stateful_drain_unsupported"
 	deploymentCommandRecordMissing                                   = "deployment_command_record_missing"
 )
 
@@ -172,13 +175,16 @@ func (store *Store) EnqueueDeploymentCommand(
 	if statement.TenantID != input.TenantID || statement.InstanceID != input.InstanceID {
 		return Deployment{}, Command{}, false, invalid("deployment command identity differs from its reconciliation cursor")
 	}
+	if statement.Kind != "admit" && input.Placement != nil {
+		return Deployment{}, Command{}, false, invalid("only admission may retain a placement decision")
+	}
 	instanceIndex := deploymentInstanceIndex(deployment.Instances, input.InstanceID)
 	if instanceIndex < 0 {
 		return Deployment{}, Command{}, false, ErrNotFound
 	}
 	instance := deployment.Instances[instanceIndex]
 	if statement.InstanceGeneration != instance.Generation ||
-		!deploymentTransitionAllowed(deployment.DesiredState, instance.Phase, statement.Kind) ||
+		!deploymentTransitionAllowed(deployment.DesiredState, instance, statement.Kind) ||
 		instance.NodeID != "" && instance.NodeID != statement.NodeID ||
 		statement.CommandSequence <= instance.CommandSequence {
 		return Deployment{}, Command{}, false, ErrConflict
@@ -232,6 +238,13 @@ func (store *Store) EnqueueDeploymentCommand(
 			delegation.Admission.Placement, now, input.SchedulingStaleAfter,
 		); err != nil {
 			return Deployment{}, Command{}, false, err
+		}
+		if input.Placement != nil {
+			placement := cloneDeploymentPlacement(input.Placement)
+			if placement.NodeID != statement.NodeID || placement.DecidedAt != canonicalTimestamp(now) {
+				return Deployment{}, Command{}, false, invalid("deployment placement decision differs from its admission")
+			}
+			instance.Placement = placement
 		}
 		instance.Intent = &intent
 		instance.Admission = nil
@@ -310,12 +323,17 @@ func (store *Store) ObserveDeploymentCommand(
 		}
 		instance.Phase = DeploymentInstanceFailed
 		instance.LastError = deploymentCommandRecordMissing
+		failedDrainNode := store.failDeploymentInstanceDrainLocked(&instance, now)
 		instance.TransitionedAt = canonicalTimestamp(now)
 		deployment.Instances[index] = instance
 		deployment.Revision++
 		deployment.UpdatedAt = canonicalTimestamp(now)
 		deployment.Phase = deploymentAggregatePhase(deployment)
-		if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+		mutations := []mutation{deploymentMutation(deployment)}
+		if failedDrainNode != nil {
+			mutations = append(mutations, mutation{Kind: mutationNode, Node: failedDrainNode})
+		}
+		if err := store.applyMutationsLocked(mutations...); err != nil {
 			return Deployment{}, false, err
 		}
 		return cloneDeployment(deployment), true, nil
@@ -344,9 +362,20 @@ func (store *Store) ObserveDeploymentCommand(
 				instance.Admission = cloneAdmissionProjection(command.Terminal.Admission)
 			}
 		}
+		if instance.CommandOperation == "start" && instance.Drain != nil &&
+			instance.NodeID != instance.Drain.SourceNodeID {
+			instance.Drain = nil
+		}
+		if instance.CommandOperation == "destroy" && deployment.DesiredState == DeploymentAbsent {
+			instance.Drain = nil
+		}
 	} else {
 		instance.Phase = DeploymentInstanceFailed
 		instance.LastError = deploymentCommandError(command)
+	}
+	failedDrainNode := (*Node)(nil)
+	if instance.Phase == DeploymentInstanceFailed {
+		failedDrainNode = store.failDeploymentInstanceDrainLocked(&instance, now)
 	}
 	if instance.CommandOperation == "renew" && instance.Phase != DeploymentInstanceFailed {
 		instance.CommandID = ""
@@ -357,7 +386,11 @@ func (store *Store) ObserveDeploymentCommand(
 	deployment.Revision++
 	deployment.UpdatedAt = canonicalTimestamp(now)
 	deployment.Phase = deploymentAggregatePhase(deployment)
-	if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+	mutations := []mutation{deploymentMutation(deployment)}
+	if failedDrainNode != nil {
+		mutations = append(mutations, mutation{Kind: mutationNode, Node: failedDrainNode})
+	}
+	if err := store.applyMutationsLocked(mutations...); err != nil {
 		return Deployment{}, false, err
 	}
 	return cloneDeployment(deployment), true, nil
@@ -419,6 +452,7 @@ func (store *Store) RemovePendingDeploymentInstance(
 		return Deployment{}, false, ErrCapacityExceeded
 	}
 	instance.Phase = DeploymentInstanceRemoved
+	instance.Drain = nil
 	instance.TransitionedAt = canonicalTimestamp(now)
 	deployment.Instances[index] = instance
 	deployment.Revision++
@@ -500,6 +534,7 @@ func (store *Store) ReplaceDeploymentInstance(
 	}
 	instance.Generation++
 	instance.NodeID = ""
+	instance.Placement = nil
 	instance.Intent = nil
 	instance.Admission = nil
 	instance.LeaseExpiresAt = ""
@@ -535,7 +570,13 @@ func deploymentDelegatedInstance(
 	return instances[index], true
 }
 
-func deploymentTransitionAllowed(desired DeploymentDesiredState, phase DeploymentInstancePhase, operation string) bool {
+func deploymentTransitionAllowed(desired DeploymentDesiredState, instance DeploymentInstance, operation string) bool {
+	phase := instance.Phase
+	if desired == DeploymentRunning && instance.Drain != nil &&
+		instance.NodeID == instance.Drain.SourceNodeID {
+		return (phase == DeploymentInstanceRunning || phase == DeploymentInstanceStarting) && operation == "stop" ||
+			phase == DeploymentInstanceDestroying && operation == "destroy"
+	}
 	if desired == DeploymentRunning {
 		return phase == DeploymentInstancePending && operation == "admit" ||
 			phase == DeploymentInstanceStarting && (operation == "renew" || operation == "start") ||
@@ -649,7 +690,8 @@ func validDeploymentBlockedReason(reason DeploymentBlockedReason) bool {
 		DeploymentBlockedInvalidAuthority, DeploymentBlockedAwaitingLeaseExpiry,
 		DeploymentBlockedStatefulReplacement, DeploymentBlockedGenerationExhausted,
 		DeploymentBlockedSchedulingUnavailable, DeploymentBlockedPlacementConstraints,
-		DeploymentBlockedWorkloadLimit, DeploymentBlockedNodeCapacity, DeploymentBlockedTenantCapacity:
+		DeploymentBlockedWorkloadLimit, DeploymentBlockedNodeCapacity, DeploymentBlockedTenantCapacity,
+		DeploymentBlockedDrainDisruptionBudget, DeploymentBlockedStatefulDrain:
 		return true
 	default:
 		return false

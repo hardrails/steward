@@ -191,6 +191,11 @@ func TestCommandDelegationPlacementRequiresCanonicalFiniteConstraints(t *testing
 			{Key: "accelerator", Value: "gpu"},
 			{Key: "region", Value: "west"},
 		},
+		PreferredLabels: []CommandDelegationLabel{
+			{Key: "rack", Value: "r1"},
+			{Key: "zone", Value: "west-a"},
+		},
+		SpreadBy:    "zone",
 		Tolerations: []string{"dedicated", "gpu"},
 	}
 	if !validCommandDelegationPlacement(valid) {
@@ -207,6 +212,11 @@ func TestCommandDelegationPlacementRequiresCanonicalFiniteConstraints(t *testing
 		}},
 		{"empty label", func(value *CommandDelegationPlacement) { value.RequiredLabels[0].Key = "" }},
 		{"invalid label", func(value *CommandDelegationPlacement) { value.RequiredLabels[0].Value = "gpu pool" }},
+		{"unsorted preferred labels", func(value *CommandDelegationPlacement) {
+			value.PreferredLabels[0], value.PreferredLabels[1] = value.PreferredLabels[1], value.PreferredLabels[0]
+		}},
+		{"invalid preferred label", func(value *CommandDelegationPlacement) { value.PreferredLabels[0].Value = "rack one" }},
+		{"invalid spread label", func(value *CommandDelegationPlacement) { value.SpreadBy = "zone name" }},
 		{"nil tolerations", func(value *CommandDelegationPlacement) { value.Tolerations = nil }},
 		{"duplicate toleration", func(value *CommandDelegationPlacement) { value.Tolerations[1] = "dedicated" }},
 		{"empty toleration", func(value *CommandDelegationPlacement) { value.Tolerations[0] = "" }},
@@ -215,6 +225,7 @@ func TestCommandDelegationPlacementRequiresCanonicalFiniteConstraints(t *testing
 		t.Run(test.name, func(t *testing.T) {
 			candidate := valid
 			candidate.RequiredLabels = append([]CommandDelegationLabel{}, valid.RequiredLabels...)
+			candidate.PreferredLabels = append([]CommandDelegationLabel{}, valid.PreferredLabels...)
 			candidate.Tolerations = append([]string{}, valid.Tolerations...)
 			test.mutate(&candidate)
 			if validCommandDelegationPlacement(candidate) {

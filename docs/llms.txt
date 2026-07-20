@@ -7,8 +7,9 @@
 > exact-request permits and bounded exact-effect bundles,
 > optional response-history locking that invalidates stale approvals,
 > Docker/gVisor enforcement, spend-before-DNS records, and offline-verifiable
-> receipts, plus controller-owned cordon and quarantine, a restart-safe node
-> maintenance cordon, and resumable exact-runtime drain, without
+> receipts, plus explainable topology-aware placement, controller-owned cordon
+> and quarantine, restart-safe disruption-budgeted stateless evacuation, a
+> node-local maintenance cordon, and resumable exact-runtime cleanup, without
 > requiring a hosted service. A signed agent release can also bind one qualified
 > outcome to an exact offline archive, deterministic canary, evidence digest, and
 > known limits without granting runtime authority. Steward includes an optional
@@ -39,7 +40,7 @@ Documentation: https://hardrails.github.io/steward/
 
 ## How-to guides
 
-- [Build and run agents](https://hardrails.github.io/steward/guides/build-agents/): Define a portable Hermes or OpenClaw application, validate it with CUE, apply optional OPA policy, explain deterministic placement, run it directly or as durable delegated desired state through Steward Control, authorize an exact task, and derive fresh fork lineage
+- [Build and run agents](https://hardrails.github.io/steward/guides/build-agents/): Define a portable Hermes or OpenClaw application, validate it with CUE, apply optional OPA policy, explain topology-aware placement, run it as durable delegated desired state, drain stateless instances within a disruption budget, authorize an exact task, and derive fresh fork lineage
 - [Operator console](https://hardrails.github.io/steward/guides/operator-console/): Use the same scoped control API bearer in an embedded, air-gapped React interface; review observed agent runtimes and submit exact offline-signed bytes while keeping signing keys outside the browser
 - [CLI contexts and completion](https://hardrails.github.io/steward/guides/cli/): Save repeated Control and local Executor connection paths without storing bearer values; install Bash, Zsh, or Fish completion with one command
 - [Workload lifecycle](https://hardrails.github.io/steward/guides/workload-lifecycle/): Use the host-local Executor API

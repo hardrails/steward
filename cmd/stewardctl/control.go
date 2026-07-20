@@ -63,6 +63,10 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlNodePlacement(arguments[2:], stdout, controlstore.NodePlacementQuarantine)
 	case "node unquarantine":
 		return controlNodePlacement(arguments[2:], stdout, controlstore.NodePlacementUnquarantine)
+	case "node drain":
+		return controlNodeDrain(arguments[2:], stdout, false)
+	case "node cancel-drain":
+		return controlNodeDrain(arguments[2:], stdout, true)
 	case "node-credential revoke":
 		return controlNodeCredentialRevoke(arguments[2:], stdout)
 	case "operations status":
@@ -103,7 +107,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|revoke, node-credential revoke, operations status, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, operations status, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
 }
 
 type controlFlags struct {
@@ -512,6 +516,63 @@ func controlNodePlacement(
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	change, err := client.ChangeNodePlacement(ctx, *nodeID, action, *reason)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, change)
+}
+
+func controlNodeDrain(arguments []string, stdout io.Writer, cancelDrain bool) error {
+	name := "control node drain"
+	if cancelDrain {
+		name = "control node cancel-drain"
+	}
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	nodeID := flags.String("node-id", "", "node identity (or pass it as the final argument)")
+	requestID := flags.String("request-id", "", "stable drain identity; generated when starting and omitted")
+	reason := flags.String("reason", "", "bounded maintenance reason")
+	flagArguments, positional := placementFlagArguments(arguments)
+	if err := flags.Parse(flagArguments); err != nil {
+		return err
+	}
+	if *nodeID == "" && len(positional) == 1 {
+		*nodeID = positional[0]
+	} else if len(positional) != 0 {
+		return fmt.Errorf("%s accepts one node ID", name)
+	}
+	if *nodeID == "" {
+		return fmt.Errorf("%s requires a node ID", name)
+	}
+	if cancelDrain {
+		if *requestID == "" || *reason != "" {
+			return fmt.Errorf("%s requires -request-id and does not accept -reason", name)
+		}
+	} else {
+		if *reason == "" {
+			return fmt.Errorf("%s requires -reason", name)
+		}
+		if *requestID == "" {
+			generated, err := randomAgentID("drain")
+			if err != nil {
+				return err
+			}
+			*requestID = generated
+		}
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var change controlclient.NodeDrainChange
+	if cancelDrain {
+		change, err = client.CancelNodeDrain(ctx, *nodeID, *requestID)
+	} else {
+		change, err = client.StartNodeDrain(ctx, *nodeID, *requestID, *reason)
+	}
 	if err != nil {
 		return err
 	}

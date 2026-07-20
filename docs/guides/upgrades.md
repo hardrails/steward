@@ -238,10 +238,13 @@ sudo -H stewardctl node maintenance drain
 ```
 
 The preview changes nothing. Its `active_runtime_refs` field is the exact signed
-inventory the applied drain will remove. Review application availability first:
-Steward does not migrate a workload to another node or apply a disruption budget.
-Kubernetes likewise requires operators to plan availability before a node drain,
-while Nomad separates scheduling eligibility from allocation migration
+inventory the applied local drain will remove. For workloads owned by a Control
+desired deployment, first use `stewardctl control node drain`; it moves stateless
+instances to eligible nodes within their maximum-unavailable budgets. Wait until
+the returned node drain is `completed`, then use this local workflow to verify
+that no managed or unmanaged runtime remains. Stateful workloads are not
+migrated. Kubernetes likewise requires operators to plan availability before a
+node drain, while Nomad separates scheduling eligibility from allocation migration
 ([Kubernetes guidance](https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/),
 [Nomad guidance](https://developer.hashicorp.com/nomad/commands/node/drain)).
 

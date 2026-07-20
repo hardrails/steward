@@ -26,27 +26,29 @@ import (
 )
 
 const (
-	stateFormatMinReadVersion       = 1
-	stateFormatWriteVersion         = 8
-	stateFormatMaxReadVersion       = stateFormatWriteVersion
-	stateFormatEvidenceVersion      = 2
-	stateFormatExecutorV4Version    = 3
-	stateFormatCaptureVersion       = 4
-	stateFormatDeploymentVersion    = 5
-	stateFormatWorkloadLeaseVersion = 6
-	stateFormatSchedulingVersion    = 7
-	stateFormatNodePlacementVersion = 8
-	transactionFormatMinReadVersion = 1
-	transactionFormatWriteVersion   = 8
-	transactionFormatMaxReadVersion = transactionFormatWriteVersion
-	transactionEvidenceVersion      = 2
-	transactionExecutorV4Version    = 3
-	transactionCaptureVersion       = 4
-	transactionDeploymentVersion    = 5
-	transactionWorkloadLeaseVersion = 6
-	transactionSchedulingVersion    = 7
-	transactionNodePlacementVersion = 8
-	maxMutationsPerRecord           = 128
+	stateFormatMinReadVersion         = 1
+	stateFormatWriteVersion           = 9
+	stateFormatMaxReadVersion         = stateFormatWriteVersion
+	stateFormatEvidenceVersion        = 2
+	stateFormatExecutorV4Version      = 3
+	stateFormatCaptureVersion         = 4
+	stateFormatDeploymentVersion      = 5
+	stateFormatWorkloadLeaseVersion   = 6
+	stateFormatSchedulingVersion      = 7
+	stateFormatNodePlacementVersion   = 8
+	stateFormatFleetOperationsVersion = 9
+	transactionFormatMinReadVersion   = 1
+	transactionFormatWriteVersion     = 9
+	transactionFormatMaxReadVersion   = transactionFormatWriteVersion
+	transactionEvidenceVersion        = 2
+	transactionExecutorV4Version      = 3
+	transactionCaptureVersion         = 4
+	transactionDeploymentVersion      = 5
+	transactionWorkloadLeaseVersion   = 6
+	transactionSchedulingVersion      = 7
+	transactionNodePlacementVersion   = 8
+	transactionFleetOperationsVersion = 9
+	maxMutationsPerRecord             = 128
 
 	MaxEvidenceCapturesActive        = 16
 	MaxEvidenceCapturesRetained      = 256
@@ -136,10 +138,34 @@ type Node struct {
 	Evidence     *EvidenceWitness `json:"evidence,omitempty"`
 	Scheduling   *NodeScheduling  `json:"scheduling,omitempty"`
 	Placement    *NodePlacement   `json:"placement,omitempty"`
+	Drain        *NodeDrain       `json:"drain,omitempty"`
 	CreatedAt    string           `json:"created_at"`
 	LastSeenAt   string           `json:"last_seen_at,omitempty"`
 	RevokedAt    string           `json:"revoked_at,omitempty"`
 	Active       bool             `json:"active"`
+}
+
+type NodeDrainState string
+
+const (
+	NodeDrainActive    NodeDrainState = "active"
+	NodeDrainCompleted NodeDrainState = "completed"
+	NodeDrainCancelled NodeDrainState = "cancelled"
+	NodeDrainFailed    NodeDrainState = "failed"
+)
+
+// NodeDrain is the controller-owned intent for a planned, disruption-budgeted
+// evacuation. Starting a drain also cordons the node. Terminal records remain
+// visible until a later request replaces them. A failed drain never implies
+// that the failed instance stopped; the deployment retains that uncertainty.
+type NodeDrain struct {
+	RequestID        string         `json:"request_id"`
+	State            NodeDrainState `json:"state"`
+	Reason           string         `json:"reason"`
+	RequestedAt      string         `json:"requested_at"`
+	UpdatedAt        string         `json:"updated_at"`
+	CompletedAt      string         `json:"completed_at,omitempty"`
+	FailedInstanceID string         `json:"failed_instance_id,omitempty"`
 }
 
 type NodePlacementMode string
@@ -286,6 +312,8 @@ type DeploymentInstance struct {
 	LineageID  string                                         `json:"lineage_id"`
 	Generation uint64                                         `json:"generation"`
 	NodeID     string                                         `json:"node_id,omitempty"`
+	Placement  *DeploymentPlacementDecision                   `json:"placement,omitempty"`
+	Drain      *DeploymentInstanceDrain                       `json:"drain,omitempty"`
 	Intent     *admission.InstanceIntent                      `json:"intent,omitempty"`
 	Admission  *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
 	// LeaseExpiresAt is the latest signed lease expiry that Executor could have
@@ -301,22 +329,52 @@ type DeploymentInstance struct {
 	TransitionedAt   string                  `json:"transitioned_at"`
 }
 
+// DeploymentInstanceDrain records one move before the first stop command is
+// issued. Source authority remains explicit while NodeID is cleared between a
+// proven destroy and replacement admission.
+type DeploymentInstanceDrain struct {
+	RequestID    string `json:"request_id"`
+	SourceNodeID string `json:"source_node_id"`
+	StartedAt    string `json:"started_at"`
+}
+
+type DeploymentDisruptionBudget struct {
+	MaxUnavailable int `json:"max_unavailable"`
+}
+
+// DeploymentPlacementDecision is the bounded explanation retained with the
+// admission cursor. Hard eligibility and capacity are rechecked separately in
+// the enqueue transaction; this record explains the deterministic soft ranking
+// that selected the node.
+type DeploymentPlacementDecision struct {
+	NodeID                       string   `json:"node_id"`
+	PreferredLabelMatches        []string `json:"preferred_label_matches"`
+	PreferredLabelCount          int      `json:"preferred_label_count"`
+	SpreadBy                     string   `json:"spread_by,omitempty"`
+	SpreadValue                  string   `json:"spread_value,omitempty"`
+	SpreadLabelPresent           bool     `json:"spread_label_present,omitempty"`
+	SameDeploymentInSpreadDomain int      `json:"same_deployment_in_spread_domain"`
+	AssignedWorkloads            int      `json:"assigned_workloads"`
+	DecidedAt                    string   `json:"decided_at"`
+}
+
 // Deployment is bounded desired state. It contains public signed artifacts,
 // never a tenant or controller private key.
 type Deployment struct {
-	TenantID       string                 `json:"tenant_id"`
-	ID             string                 `json:"id"`
-	Generation     uint64                 `json:"generation"`
-	Revision       uint64                 `json:"revision"`
-	AgentName      string                 `json:"agent_name"`
-	BundleDigest   string                 `json:"bundle_digest"`
-	CapsuleDSSE    []byte                 `json:"-"`
-	DelegationDSSE []byte                 `json:"-"`
-	DesiredState   DeploymentDesiredState `json:"desired_state"`
-	Phase          DeploymentPhase        `json:"phase"`
-	Instances      []DeploymentInstance   `json:"instances"`
-	CreatedAt      string                 `json:"created_at"`
-	UpdatedAt      string                 `json:"updated_at"`
+	TenantID         string                     `json:"tenant_id"`
+	ID               string                     `json:"id"`
+	Generation       uint64                     `json:"generation"`
+	Revision         uint64                     `json:"revision"`
+	AgentName        string                     `json:"agent_name"`
+	BundleDigest     string                     `json:"bundle_digest"`
+	CapsuleDSSE      []byte                     `json:"-"`
+	DelegationDSSE   []byte                     `json:"-"`
+	DesiredState     DeploymentDesiredState     `json:"desired_state"`
+	DisruptionBudget DeploymentDisruptionBudget `json:"disruption_budget"`
+	Phase            DeploymentPhase            `json:"phase"`
+	Instances        []DeploymentInstance       `json:"instances"`
+	CreatedAt        string                     `json:"created_at"`
+	UpdatedAt        string                     `json:"updated_at"`
 }
 
 type EvidenceCaptureState string
@@ -463,19 +521,20 @@ type storedCommand struct {
 }
 
 type storedDeployment struct {
-	TenantID             string                 `json:"tenant_id"`
-	ID                   string                 `json:"id"`
-	Generation           uint64                 `json:"generation"`
-	Revision             uint64                 `json:"revision"`
-	AgentName            string                 `json:"agent_name"`
-	BundleDigest         string                 `json:"bundle_digest"`
-	CapsuleDSSEBase64    string                 `json:"capsule_dsse_base64"`
-	DelegationDSSEBase64 string                 `json:"delegation_dsse_base64"`
-	DesiredState         DeploymentDesiredState `json:"desired_state"`
-	Phase                DeploymentPhase        `json:"phase"`
-	Instances            []DeploymentInstance   `json:"instances"`
-	CreatedAt            string                 `json:"created_at"`
-	UpdatedAt            string                 `json:"updated_at"`
+	TenantID             string                     `json:"tenant_id"`
+	ID                   string                     `json:"id"`
+	Generation           uint64                     `json:"generation"`
+	Revision             uint64                     `json:"revision"`
+	AgentName            string                     `json:"agent_name"`
+	BundleDigest         string                     `json:"bundle_digest"`
+	CapsuleDSSEBase64    string                     `json:"capsule_dsse_base64"`
+	DelegationDSSEBase64 string                     `json:"delegation_dsse_base64"`
+	DesiredState         DeploymentDesiredState     `json:"desired_state"`
+	DisruptionBudget     DeploymentDisruptionBudget `json:"disruption_budget"`
+	Phase                DeploymentPhase            `json:"phase"`
+	Instances            []DeploymentInstance       `json:"instances"`
+	CreatedAt            string                     `json:"created_at"`
+	UpdatedAt            string                     `json:"updated_at"`
 }
 
 type state struct {
@@ -642,10 +701,31 @@ func cloneDeployment(deployment Deployment) Deployment {
 	deployment.DelegationDSSE = append([]byte(nil), deployment.DelegationDSSE...)
 	deployment.Instances = append([]DeploymentInstance(nil), deployment.Instances...)
 	for index := range deployment.Instances {
+		deployment.Instances[index].Placement = cloneDeploymentPlacement(deployment.Instances[index].Placement)
+		deployment.Instances[index].Drain = cloneDeploymentInstanceDrain(deployment.Instances[index].Drain)
 		deployment.Instances[index].Intent = cloneInstanceIntent(deployment.Instances[index].Intent)
 		deployment.Instances[index].Admission = cloneAdmissionProjection(deployment.Instances[index].Admission)
 	}
 	return deployment
+}
+
+func cloneDeploymentInstanceDrain(value *DeploymentInstanceDrain) *DeploymentInstanceDrain {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneDeploymentPlacement(value *DeploymentPlacementDecision) *DeploymentPlacementDecision {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	if value.PreferredLabelMatches != nil {
+		cloned.PreferredLabelMatches = append([]string{}, value.PreferredLabelMatches...)
+	}
+	return &cloned
 }
 
 func deploymentToStored(deployment Deployment) storedDeployment {
@@ -656,8 +736,9 @@ func deploymentToStored(deployment Deployment) storedDeployment {
 		CapsuleDSSEBase64:    base64.StdEncoding.EncodeToString(deployment.CapsuleDSSE),
 		DelegationDSSEBase64: base64.StdEncoding.EncodeToString(deployment.DelegationDSSE),
 		DesiredState:         deployment.DesiredState, Phase: deployment.Phase,
-		Instances: cloneDeployment(deployment).Instances,
-		CreatedAt: deployment.CreatedAt, UpdatedAt: deployment.UpdatedAt,
+		DisruptionBudget: deployment.DisruptionBudget,
+		Instances:        cloneDeployment(deployment).Instances,
+		CreatedAt:        deployment.CreatedAt, UpdatedAt: deployment.UpdatedAt,
 	}
 }
 
@@ -675,7 +756,7 @@ func deploymentFromStored(stored storedDeployment) (Deployment, error) {
 		Generation: stored.Generation, Revision: stored.Revision,
 		AgentName: stored.AgentName, BundleDigest: stored.BundleDigest,
 		CapsuleDSSE: capsule, DelegationDSSE: delegation,
-		DesiredState: stored.DesiredState, Phase: stored.Phase,
+		DesiredState: stored.DesiredState, DisruptionBudget: stored.DisruptionBudget, Phase: stored.Phase,
 		Instances: cloneDeployment(Deployment{Instances: stored.Instances}).Instances,
 		CreatedAt: stored.CreatedAt, UpdatedAt: stored.UpdatedAt,
 	}, nil
@@ -931,12 +1012,19 @@ func decodeState(raw []byte, limit int) (state, error) {
 		if snapshot.Version < stateFormatNodePlacementVersion && node.Placement != nil {
 			return state{}, errors.New("legacy control snapshot contains node placement state")
 		}
+		if snapshot.Version < stateFormatFleetOperationsVersion && node.Drain != nil {
+			return state{}, errors.New("legacy control snapshot contains node drain state")
+		}
 		if node.Placement != nil && !validNodePlacement(*node.Placement) {
 			return state{}, errors.New("control snapshot contains invalid node placement state")
+		}
+		if node.Drain != nil && !validNodeDrain(*node.Drain) {
+			return state{}, errors.New("control snapshot contains invalid node drain state")
 		}
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
 		node.Scheduling = cloneNodeScheduling(node.Scheduling)
 		node.Placement = cloneNodePlacement(node.Placement)
+		node.Drain = cloneNodeDrain(node.Drain)
 		current.nodes[node.ID] = node
 	}
 	for _, stored := range snapshot.Credentials {
@@ -986,6 +1074,12 @@ func decodeState(raw []byte, limit int) (state, error) {
 		}
 		if snapshot.Version < stateFormatWorkloadLeaseVersion && deploymentUsesWorkloadLeaseFormat(deployment) {
 			return state{}, errors.New("legacy control snapshot contains workload lease state")
+		}
+		if snapshot.Version < stateFormatFleetOperationsVersion {
+			if deploymentUsesFleetOperationsFormat(deployment) {
+				return state{}, errors.New("legacy control snapshot contains fleet operations state")
+			}
+			deployment.DisruptionBudget = DeploymentDisruptionBudget{MaxUnavailable: 1}
 		}
 		key := deploymentKey(deployment.TenantID, deployment.ID)
 		if _, exists := current.deployments[key]; exists {
@@ -1075,14 +1169,21 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if value.Version < transactionNodePlacementVersion && node.Placement != nil {
 				return state{}, errors.New("legacy control transaction contains node placement state")
 			}
+			if value.Version < transactionFleetOperationsVersion && node.Drain != nil {
+				return state{}, errors.New("legacy control transaction contains node drain state")
+			}
 			if node.Placement != nil && !validNodePlacement(*node.Placement) {
 				return state{}, errors.New("control transaction contains invalid node placement state")
+			}
+			if node.Drain != nil && !validNodeDrain(*node.Drain) {
+				return state{}, errors.New("control transaction contains invalid node drain state")
 			}
 			node.TenantIDs = append([]string(nil), change.Node.TenantIDs...)
 			node.Capabilities = copyStringSlice(change.Node.Capabilities)
 			node.Evidence = cloneEvidenceWitness(change.Node.Evidence)
 			node.Scheduling = cloneNodeScheduling(change.Node.Scheduling)
 			node.Placement = cloneNodePlacement(change.Node.Placement)
+			node.Drain = cloneNodeDrain(change.Node.Drain)
 			next.nodes[node.ID] = node
 		case mutationCredential:
 			if change.Credential == nil {
@@ -1185,6 +1286,12 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if value.Version < transactionWorkloadLeaseVersion && deploymentUsesWorkloadLeaseFormat(deployment) {
 				return state{}, errors.New("legacy deployment mutation contains workload lease state")
 			}
+			if value.Version < transactionFleetOperationsVersion {
+				if deploymentUsesFleetOperationsFormat(deployment) {
+					return state{}, errors.New("legacy deployment mutation contains fleet operations state")
+				}
+				deployment.DisruptionBudget = DeploymentDisruptionBudget{MaxUnavailable: 1}
+			}
 			next.deployments[deploymentKey(deployment.TenantID, deployment.ID)] = cloneDeployment(deployment)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
@@ -1197,6 +1304,18 @@ func deploymentUsesWorkloadLeaseFormat(deployment Deployment) bool {
 	for _, instance := range deployment.Instances {
 		if instance.LeaseExpiresAt != "" ||
 			instance.CommandID == "" && instance.CommandOperation == "" && instance.CommandSequence > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func deploymentUsesFleetOperationsFormat(deployment Deployment) bool {
+	if deployment.DisruptionBudget.MaxUnavailable != 0 {
+		return true
+	}
+	for _, instance := range deployment.Instances {
+		if instance.Placement != nil || instance.Drain != nil {
 			return true
 		}
 	}
@@ -1256,6 +1375,10 @@ func validateState(current state, limits Limits) error {
 			if observed.Before(created) {
 				return errors.New("control node scheduling observation predates creation")
 			}
+		}
+		if node.Placement != nil && !validNodePlacement(*node.Placement) ||
+			node.Drain != nil && !validNodeDrain(*node.Drain) {
+			return errors.New("control state contains invalid node operations state")
 		}
 		for _, tenantID := range node.TenantIDs {
 			if _, ok := current.tenants[tenantID]; !ok {
@@ -1418,6 +1541,10 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 	if deployment.DesiredState != DeploymentRunning && deployment.DesiredState != DeploymentAbsent {
 		return errors.New("deployment desired state is invalid")
 	}
+	if deployment.DisruptionBudget.MaxUnavailable < 0 ||
+		deployment.DisruptionBudget.MaxUnavailable > len(deployment.Instances) {
+		return errors.New("deployment disruption budget is invalid")
+	}
 	switch deployment.Phase {
 	case DeploymentPending, DeploymentReconciling, DeploymentReady, DeploymentStopping, DeploymentRemoved, DeploymentDegraded:
 	default:
@@ -1469,6 +1596,39 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 				instance.Intent.LineageID != instance.LineageID || instance.Intent.Generation != instance.Generation ||
 				instance.Intent.CapsuleDigest != dsse.Digest(deployment.CapsuleDSSE) {
 				return errors.New("deployment instance intent is invalid")
+			}
+		}
+		if instance.Placement != nil {
+			placement := instance.Placement
+			if placement.NodeID != instance.NodeID || !validRecordID(placement.NodeID, 128) ||
+				placement.PreferredLabelMatches == nil || len(placement.PreferredLabelMatches) > 32 ||
+				placement.PreferredLabelCount < len(placement.PreferredLabelMatches) || placement.PreferredLabelCount > 32 ||
+				placement.SameDeploymentInSpreadDomain < 0 || placement.AssignedWorkloads < 0 ||
+				!validTimestamp(placement.DecidedAt) {
+				return errors.New("deployment placement decision is invalid")
+			}
+			for matchIndex, key := range placement.PreferredLabelMatches {
+				if !controlprotocol.ValidSchedulingAttribute(key) ||
+					matchIndex > 0 && placement.PreferredLabelMatches[matchIndex-1] >= key {
+					return errors.New("deployment placement matches are not canonical")
+				}
+			}
+			if placement.SpreadBy == "" {
+				if placement.SpreadValue != "" || placement.SpreadLabelPresent || placement.SameDeploymentInSpreadDomain != 0 {
+					return errors.New("deployment placement spread explanation is inconsistent")
+				}
+			} else if !controlprotocol.ValidSchedulingAttribute(placement.SpreadBy) ||
+				placement.SpreadLabelPresent && !controlprotocol.ValidSchedulingAttribute(placement.SpreadValue) ||
+				!placement.SpreadLabelPresent && placement.SpreadValue != "" {
+				return errors.New("deployment placement spread explanation is invalid")
+			}
+		}
+		if instance.Drain != nil {
+			if !validRecordID(instance.Drain.RequestID, 128) ||
+				!validRecordID(instance.Drain.SourceNodeID, 128) ||
+				!mapContains(allowedNodes, instance.Drain.SourceNodeID) ||
+				!validTimestamp(instance.Drain.StartedAt) {
+				return errors.New("deployment instance drain is invalid")
 			}
 		}
 		if instance.Admission != nil {
