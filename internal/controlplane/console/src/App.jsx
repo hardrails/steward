@@ -889,6 +889,23 @@ function Badge({children, kind = ""}) {
   return <span className={"badge" + (kind ? " " + kind : "")}>{children}</span>;
 }
 
+function NodeScheduling({scheduling}) {
+  if (!scheduling?.observation?.policy?.host) {
+    return <div><Badge kind="is-warning">not reported</Badge><small>New placement pauses.</small></div>;
+  }
+  const observation = scheduling.observation;
+  const host = observation.policy.host;
+  const tenant = observation.policy.tenant;
+  return (
+    <div>
+      <Badge kind="is-ok">reported</Badge>
+      <small>{observation.isolation} · {observation.architecture}</small>
+      <small>{host.workloads} host slots · {tenant.workloads}/tenant</small>
+      <small>Observed {formatTime(scheduling.observed_at)}</small>
+    </div>
+  );
+}
+
 function NodesView({page, tenantID}) {
   return (
     <section className="view" aria-labelledby="nodes-title">
@@ -897,13 +914,14 @@ function NodesView({page, tenantID}) {
       </ViewHeading>
       <TableFrame empty={!tenantID ? "Select one tenant to load nodes." : "No nodes in this tenant."} hasRows={page.nodes.length > 0}>
         <table>
-          <thead><tr><th>Node</th><th>State</th><th>Last seen</th><th>Capabilities</th></tr></thead>
+          <thead><tr><th>Node</th><th>State</th><th>Last seen</th><th>Scheduling</th><th>Capabilities</th></tr></thead>
           <tbody>
             {page.nodes.map((node) => (
               <tr key={node.node_id}>
                 <td><strong>{node.node_id}</strong><small>{node.tenant_ids.join(", ")}</small></td>
                 <td><Badge kind={node.state === "active" ? "is-ok" : "is-danger"}>{node.state}</Badge></td>
                 <td>{formatTime(node.last_seen_at || node.created_at)}</td>
+                <td><NodeScheduling scheduling={node.scheduling} /></td>
                 <td>
                   <div className="badge-row">
                     {displayStringList(node.capabilities).map((capability) => (

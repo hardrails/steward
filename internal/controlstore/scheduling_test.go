@@ -25,11 +25,12 @@ func TestObserveNodeSchedulingIsAuthenticatedBoundedAndDurable(t *testing.T) {
 	if err != nil || len(nodes) != 1 || nodes[0].Scheduling.Observation.Labels[0].Value != "west" {
 		t.Fatalf("caller mutated retained observation = (%+v, %v)", nodes, err)
 	}
-	unchanged := storeSchedulingObservation("node-1")
-	node, applied, err = fixture.store.ObserveNodeScheduling(identity, unchanged, fixture.now.Add(2*time.Minute+30*time.Second))
-	if err != nil || applied || node.Scheduling.ObservedAt != originalObservedAt {
-		t.Fatalf("early equal observation = (%+v, %v, %v)", node, applied, err)
+	node, applied, err = fixture.store.ObserveNodeScheduling(identity, observation, fixture.now.Add(2*time.Minute+30*time.Second))
+	if err != nil || applied || node.Scheduling.ObservedAt != originalObservedAt ||
+		node.Scheduling.Observation.Labels[0].Value != "west" {
+		t.Fatalf("early changed observation = (%+v, %v, %v)", node, applied, err)
 	}
+	unchanged := storeSchedulingObservation("node-1")
 	node, applied, err = fixture.store.ObserveNodeScheduling(identity, unchanged, fixture.now.Add(3*time.Minute))
 	if err != nil || !applied || node.Scheduling.ObservedAt == originalObservedAt {
 		t.Fatalf("refreshed observation = (%+v, %v, %v)", node, applied, err)

@@ -142,6 +142,72 @@ func TestNewPollerRequiresBothNodeScopeSecurityGuards(t *testing.T) {
 	}
 }
 
+func TestPollerPublishesSchedulingIndependentlyWithNodeCredential(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := commandPolicyFixture(t, public, []string{"read"})
+	credentialPath := filepath.Join(t.TempDir(), "credential.json")
+	if err := os.WriteFile(credentialPath, []byte(`{"version":2,"scope":"node","node_id":"node-1","credential":"bearer"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan controlprotocol.ExecutorSchedulingObservationV1, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/executor-uplink/scheduling" || request.Header.Get("Authorization") != "Bearer bearer" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		raw, readErr := io.ReadAll(request.Body)
+		if readErr != nil {
+			t.Error(readErr)
+			return
+		}
+		var observation controlprotocol.ExecutorSchedulingObservationV1
+		if decodeErr := dsse.DecodeStrictInto(raw, controlprotocol.MaxExecutorSchedulingBytes, &observation); decodeErr != nil {
+			t.Error(decodeErr)
+			return
+		}
+		received <- observation
+		_ = json.NewEncoder(writer).Encode(map[string]any{"applied": true})
+	}))
+	defer server.Close()
+	observation := controlprotocol.ExecutorSchedulingObservationV1{
+		SchemaVersion: controlprotocol.ExecutorSchedulingSchemaV1,
+		NodeID:        "node-1", CredentialScope: "node", OS: "linux", Architecture: "amd64",
+		Isolation: controlprotocol.ExecutorSchedulingIsolationGVisor,
+		Labels:    []controlprotocol.ExecutorSchedulingLabelV1{}, Taints: []string{},
+		Policy: controlprotocol.ExecutorSchedulingPolicyV1{
+			PerWorkload:     controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 512 << 20, CPUMillis: 1000, PIDs: 128, Workloads: 1},
+			Host:            controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 8 << 30, CPUMillis: 8000, PIDs: 2048, Workloads: 32},
+			Tenant:          controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 2 << 30, CPUMillis: 2000, PIDs: 512, Workloads: 4},
+			RuntimeOverhead: controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32},
+		},
+	}
+	poller, err := NewPoller(Config{
+		BaseURL: server.URL, CredentialPath: credentialPath, PollInterval: time.Second,
+		HTTPClient: server.Client(), Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		LocalToken: "local", State: newStateStore(t, filepath.Join(t.TempDir(), "state.json")),
+		SecureExecutor: true, SecureNodeID: "node-1", ProtectedTransport: true,
+		CommandPolicy: &policy, ProtocolVersion: 2, Scheduling: &observation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation.Architecture = "mutated-after-construction"
+	if err := poller.publishScheduling(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case published := <-received:
+		if published.NodeID != "node-1" || published.Architecture != "amd64" {
+			t.Fatalf("published scheduling observation = %+v", published)
+		}
+	default:
+		t.Fatal("scheduling observation was not published")
+	}
+}
+
 func TestPollerRunBacksOffAfterFailureAndStopsWithContext(t *testing.T) {
 	credentialPath := filepath.Join(t.TempDir(), "credential.json")
 	_ = os.WriteFile(credentialPath, []byte(`{"version":1,"tenant_id":"t","node_id":"n","credential":"c"}`), 0o600)

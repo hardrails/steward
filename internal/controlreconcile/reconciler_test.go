@@ -195,6 +195,41 @@ func TestConcurrentReconcilersCannotDoubleEnqueueOrWidenAuthority(t *testing.T) 
 	}
 }
 
+func TestReconcilerAtomicallyRechecksCapacityAcrossOneFleetSnapshot(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	observation := testSchedulingObservation("node-1")
+	observation.Policy.Host.Workloads = 1
+	observation.Policy.Tenant.Workloads = 1
+	if _, applied, err := fixture.store.ObserveNodeScheduling(fixture.node, observation, fixture.now); err != nil || !applied {
+		t.Fatalf("tighten scheduling capacity = (%v, %v)", applied, err)
+	}
+	applyControlDeploymentNamed(t, fixture, "alpha", "alpha-0", "alpha-lineage-0", 1)
+	applyControlDeploymentNamed(t, fixture, "beta", "beta-0", "beta-lineage-0", 1)
+	report, err := fixture.reconciler(t).Reconcile(context.Background())
+	if err != nil || report.Enqueued != 1 || report.Blocked != 1 {
+		t.Fatalf("capacity reconciliation = (%+v, %v)", report, err)
+	}
+	snapshot, err := fixture.store.SnapshotDeploymentFleet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitting, blocked := 0, 0
+	for _, deployment := range snapshot.Deployments {
+		instance := deployment.Instances[0]
+		if instance.Phase == controlstore.DeploymentInstanceAdmitting {
+			admitting++
+		}
+		if instance.Phase == controlstore.DeploymentInstancePending &&
+			instance.LastError == string(controlstore.DeploymentBlockedNodeCapacity) {
+			blocked++
+		}
+	}
+	status, err := fixture.store.Status()
+	if err != nil || admitting != 1 || blocked != 1 || status.Commands != 1 {
+		t.Fatalf("atomic reservation result = admitting %d blocked %d status %+v err %v", admitting, blocked, status, err)
+	}
+}
+
 func TestReconcilerPersistsStableNodeBlockAndRecoversAfterHeartbeat(t *testing.T) {
 	fixture := newControlReconcileFixture(t)
 	applyControlDeployment(t, fixture, 1)
@@ -605,16 +640,25 @@ func (fixture *reconcileFixture) reconciler(t *testing.T) *Reconciler {
 }
 
 func applyControlDeployment(t *testing.T, fixture *reconcileFixture, generation uint64) {
+	applyControlDeploymentNamed(t, fixture, "research", "research-0", "research-lineage-0", generation)
+}
+
+func applyControlDeploymentNamed(
+	t *testing.T,
+	fixture *reconcileFixture,
+	deploymentID, instanceID, lineageID string,
+	generation uint64,
+) {
 	t.Helper()
 	_, publisherPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	capsule := admission.ProfileCapsule{
-		SchemaVersion: admission.SchemaV1, CapsuleID: "research-capsule", PublisherKeyID: "publisher-a",
+		SchemaVersion: admission.SchemaV1, CapsuleID: deploymentID + "-capsule", PublisherKeyID: "publisher-a",
 		Profile: admission.ProfileRef{ID: "generic-v1", Version: "v1"},
 		Image: admission.ImageIdentity{
-			Repository: "registry.example/research", ManifestDigest: "sha256:" + strings.Repeat("c", 64),
+			Repository: "registry.example/" + deploymentID, ManifestDigest: "sha256:" + strings.Repeat("c", 64),
 			ConfigDigest: "sha256:" + strings.Repeat("d", 64),
 			Platform:     admission.Platform{OS: "linux", Architecture: "amd64"},
 		},
@@ -638,12 +682,12 @@ func applyControlDeployment(t *testing.T, fixture *reconcileFixture, generation 
 	}
 	delegation := admission.CommandDelegation{
 		SchemaVersion: admission.CommandDelegationSchemaV1,
-		DelegationID:  "research-authority", TenantID: "tenant-a",
+		DelegationID:  deploymentID + "-authority", TenantID: "tenant-a",
 		ControllerKeyID:     "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(fixture.controller.Public().(ed25519.PublicKey)),
 		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: []string{"node-1"},
 		Instances: []admission.CommandDelegationInstance{{
-			InstanceID: "research-0", LineageID: "research-lineage-0",
+			InstanceID: instanceID, LineageID: lineageID,
 			MinInstanceGeneration: generation, MaxInstanceGeneration: generation + 4,
 		}},
 		ClaimGeneration: generation,
@@ -672,8 +716,8 @@ func applyControlDeployment(t *testing.T, fixture *reconcileFixture, generation 
 		t.Fatal(err)
 	}
 	if _, changed, err := fixture.store.ApplyDeployment(fixture.admin, controlstore.DeploymentApply{
-		TenantID: "tenant-a", ID: "research", Generation: generation,
-		AgentName: "research-agent", BundleDigest: "sha256:" + strings.Repeat("a", 64),
+		TenantID: "tenant-a", ID: deploymentID, Generation: generation,
+		AgentName: deploymentID + "-agent", BundleDigest: "sha256:" + strings.Repeat("a", 64),
 		CapsuleDSSE: capsuleRaw, DelegationDSSE: delegationRaw,
 	}, fixture.now); err != nil || !changed {
 		t.Fatalf("apply deployment = (%v, %v)", changed, err)

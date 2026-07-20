@@ -174,9 +174,10 @@ stewardctl agent deployment list
 The apply command checks the bundle, capsule envelope, delegation lifetime, tenant,
 capsule digest, and lifecycle scope locally. It fetches the current revision and
 infers a safe deployment generation. Control then selects an active allowed node
-that advertises delegated-command support and has reported within the configured
-node freshness threshold, then drives `admit`, a bounded workload-lease renewal,
-and `start`. It renews the lease while the agent should remain running. Removing
+that advertises delegated-command support, has reported within the configured
+freshness threshold, satisfies the capsule architecture and signed placement
+constraints, and has reserved host and tenant capacity. It then drives `admit`,
+a bounded workload-lease renewal, and `start`. It renews the lease while the agent should remain running. Removing
 desired state similarly needs only the name:
 
 ```console
@@ -188,7 +189,9 @@ or uncertain Executor outcome becomes `degraded` and is not silently retried.
 `last_error` also reports retryable controller conditions using stable values:
 `no_eligible_node`, `assigned_node_unavailable`, `awaiting_lease_expiry`,
 `stateful_replacement_unsupported`, `replacement_generation_exhausted`,
-`delegation_expired`, `controller_key_mismatch`, or
+`scheduling_observation_unavailable`, `placement_constraints_unsatisfied`,
+`node_capacity_exhausted`, `tenant_capacity_exhausted`, `delegation_expired`,
+`controller_key_mismatch`, or
 `invalid_deployment_authority`. The controller
 rechecks these conditions and clears the value when it can enqueue the next command.
 `deployment_command_record_missing` is different: it means the durable command
@@ -202,6 +205,31 @@ delivery, waits through the command clock-skew allowance, advances the instance
 generation within the tenant-signed range, and then selects an eligible node. A
 lost renewal report therefore delays replacement; it cannot make replacement
 earlier. Before that bound, status reports `awaiting_lease_expiry`.
+
+Executor publishes the CPU, memory, process, and workload ceilings it enforces
+locally. Control reserves those resources in the durable transaction that queues
+`admit`; concurrent reconciliation cannot overcommit the retained budget.
+Executor still checks real Docker usage before creation. Failed and
+`outcome_unknown` effects keep their reservation because the workload may still
+exist. A successful destroy or safely fenced replacement releases it.
+
+To narrow placement, add this optional object to `admission-template.json`:
+
+```json
+{
+  "placement": {
+    "required_isolation": "gvisor",
+    "required_labels": [
+      {"key": "region", "value": "west"}
+    ],
+    "tolerations": ["dedicated"]
+  }
+}
+```
+
+The arrays must be sorted and contain no duplicates. Every node taint requires
+an exact toleration. These fields are part of the tenant-signed delegation, so
+Control cannot silently move the workload outside them.
 
 Delegations without `renew` retain the older non-relocatable behavior and report
 `assigned_node_unavailable`. Stateful instances are also not moved automatically:

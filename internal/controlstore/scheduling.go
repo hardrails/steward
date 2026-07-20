@@ -166,8 +166,9 @@ func schedulingPlacementMatches(
 }
 
 // ObserveNodeScheduling records a bounded scheduling profile only after the
-// node credential has been revalidated under the store mutex. Equal profiles
-// refresh at most once per observation interval to bound WAL growth.
+// node credential has been revalidated under the store mutex. Profiles refresh
+// at most once per observation interval to bound WAL growth even if a node
+// repeatedly changes the authenticated body.
 func (store *Store) ObserveNodeScheduling(
 	identity controlauth.NodeIdentity,
 	observation controlprotocol.ExecutorSchedulingObservationV1,
@@ -193,8 +194,7 @@ func (store *Store) ObserveNodeScheduling(
 	if !found || !node.Active || !tenantSubset(identity.TenantIDs, node.TenantIDs) {
 		return Node{}, false, ErrNotFound
 	}
-	if node.Scheduling != nil && schedulingObservationsEqual(node.Scheduling.Observation, observation) &&
-		!observationDue(node.Scheduling.ObservedAt, now) {
+	if node.Scheduling != nil && !observationDue(node.Scheduling.ObservedAt, now) {
 		return cloneNode(node), false, nil
 	}
 	updated := cloneNode(node)
@@ -218,31 +218,4 @@ func cloneSchedulingObservation(
 		value.Taints = append([]string{}, value.Taints...)
 	}
 	return value
-}
-
-func schedulingObservationsEqual(
-	left, right controlprotocol.ExecutorSchedulingObservationV1,
-) bool {
-	if left.SchemaVersion != right.SchemaVersion || left.NodeID != right.NodeID ||
-		left.CredentialScope != right.CredentialScope || left.OS != right.OS ||
-		left.Architecture != right.Architecture || left.Isolation != right.Isolation ||
-		left.Policy != right.Policy || !equalSchedulingLabels(left.Labels, right.Labels) ||
-		!equalStrings(left.Taints, right.Taints) {
-		return false
-	}
-	return true
-}
-
-func equalSchedulingLabels(
-	left, right []controlprotocol.ExecutorSchedulingLabelV1,
-) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }

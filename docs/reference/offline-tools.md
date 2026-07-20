@@ -99,9 +99,21 @@ When `admit` is delegated, also provide the exact non-identity admission templat
   "state_disposition": "none",
   "inference_route_id": "local-model",
   "model_alias": "agent-default",
-  "service_id": "hermes-api"
+  "service_id": "hermes-api",
+  "placement": {
+    "required_isolation": "gvisor",
+    "required_labels": [
+      {"key": "region", "value": "west"}
+    ],
+    "tolerations": []
+  }
 }
 ```
+
+`placement` is optional. When present, label entries and tolerations must be
+sorted and unique. Every taint published by a candidate node must have an exact
+toleration. The placement constraint is tenant-signed with the rest of the
+template; Control cannot weaken it.
 
 Issue and verify the delegation on the signing workstation:
 

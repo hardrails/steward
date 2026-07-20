@@ -376,6 +376,15 @@ func main() {
 			slog.Error("-uplink-credential-file and -uplink-state-file are required with -uplink-url")
 			os.Exit(2)
 		}
+		uplinkMetadata, err := stewarduplink.InspectCredential(*uplinkCredentialFile)
+		if err != nil {
+			slog.Error("inspect executor uplink credential", "err", err)
+			os.Exit(2)
+		}
+		var publishedScheduling *controlprotocol.ExecutorSchedulingObservationV1
+		if uplinkMetadata.NodeScoped() {
+			publishedScheduling = schedulingObservation
+		}
 		state, err := executoruplink.LoadStateStore(*uplinkStateFile)
 		if err != nil {
 			slog.Error("load executor uplink state", "err", err)
@@ -417,7 +426,7 @@ func main() {
 			ProtectedTransport: parsedUplink.Scheme == "https" && !*uplinkTLSSkipVerify,
 			CommandPolicy:      commandPolicy, ProtocolVersion: *uplinkProtocolVersion,
 			DeliveryState: deliveryState, GatewayControl: gatewayControlClient,
-			ValidateOnly: *checkConfig, Scheduling: schedulingObservation,
+			ValidateOnly: *checkConfig, Scheduling: publishedScheduling,
 		})
 		if err != nil {
 			slog.Error("configure executor uplink", "err", err)
