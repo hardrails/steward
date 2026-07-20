@@ -269,6 +269,19 @@ func TestAgentDeploymentWaitExportsOneTaskReadyInstance(t *testing.T) {
 	if !strings.Contains(output.String(), `"output":"`+outputPath+`"`) || strings.Contains(output.String(), string(public)) {
 		t.Fatalf("wait output=%s", output.String())
 	}
+
+	output.Reset()
+	err = run([]string{
+		"agent", "deployment", "wait", "-tenant", "tenant-a", "-control-url", server.URL,
+		"-token-file", tokenPath, "-timeout", "1s", "auditor",
+	}, &output, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ready agentDeployResult
+	if err := json.Unmarshal(output.Bytes(), &ready); err != nil || ready.InstanceID != "auditor-0" || ready.RuntimeRef != runtimeRef {
+		t.Fatalf("stdout deployment=%+v error=%v output=%s", ready, err, output.Bytes())
+	}
 }
 
 func TestTaskReadyDeploymentSelectionFailsClosed(t *testing.T) {

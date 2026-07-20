@@ -96,7 +96,7 @@ func TestTaskRunPersistsAuthorityBeforeDispatchAndReturnsVerifiedResult(t *testi
 		"task", "run", "auditor", "-tenant", "tenant-a",
 		"-control-url", controlServer.URL, "-control-token-file", controlTokenPath, "-deployment-timeout", "1s",
 		"-trust", fixture.trustPath, "-request", fixture.requestPath,
-		"-operation-id", fixture.operation.ID, "-key", fixture.privatePath, "-key-id", fixture.keyID,
+		"-operation-id", fixture.operation.ID, "-task-id", "task.fixed", "-key", fixture.privatePath, "-key-id", fixture.keyID,
 		"-bundle-out", fixture.bundlePath, "-result-out", resultPath,
 		"-gateway-url", server.URL, "-gateway-token-file", tokenPath, "-wait-timeout", "1s",
 	}, &output, &bytes.Buffer{})
@@ -182,6 +182,48 @@ func TestTaskRunRetainsSignedBundleWhenWaitFails(t *testing.T) {
 	}
 	if _, err := os.Stat(fixture.bundlePath); err != nil {
 		t.Fatalf("signed recovery bundle missing: %v", err)
+	}
+}
+
+func TestTaskRunRejectsIncompleteAuthorityAndControlInputs(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	t.Setenv("STEWARD_CONTEXT_FILE", filepath.Join(fixture.directory, "missing-contexts.json"))
+	if err := runTask([]string{"-no-context", "-unknown"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("unknown task run flag was accepted")
+	}
+	if err := runTask([]string{"-no-context"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("incomplete task run was accepted")
+	}
+	base := []string{
+		"auditor", "-no-context", "-trust", fixture.trustPath, "-request", fixture.requestPath,
+		"-operation-id", fixture.operation.ID, "-key", fixture.privatePath, "-key-id", fixture.keyID,
+		"-bundle-out", fixture.bundlePath, "-gateway-token-file", fixture.requestPath, "-discard-result",
+	}
+	if err := runTask(base, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "requires a tenant") {
+		t.Fatalf("missing durable Control authority error=%v", err)
+	}
+	withMissingToken := append(append([]string(nil), base...),
+		"-tenant", "tenant-a", "-control-token-file", filepath.Join(fixture.directory, "missing.token"))
+	if err := runTask(withMissingToken, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "token") {
+		t.Fatalf("missing Control token error=%v", err)
+	}
+
+	deploymentPath := taskRunDeploymentFixture(t, fixture)
+	gatewayToken := filepath.Join(fixture.directory, "gateway.token")
+	if err := os.WriteFile(gatewayToken, []byte("gateway-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runTask([]string{
+		"-no-context", "-deployment", deploymentPath, "-trust", fixture.trustPath,
+		"-request", filepath.Join(fixture.directory, "missing-request.json"), "-operation-id", fixture.operation.ID,
+		"-key", fixture.privatePath, "-key-id", fixture.keyID, "-bundle-out", fixture.bundlePath,
+		"-gateway-token-file", gatewayToken, "-discard-result",
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "missing-request.json") {
+		t.Fatalf("missing request error=%v", err)
+	}
+	if _, err := os.Stat(fixture.bundlePath); !os.IsNotExist(err) {
+		t.Fatalf("invalid task unexpectedly created bundle: %v", err)
 	}
 }
 

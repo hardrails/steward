@@ -71,8 +71,8 @@ func runTask(arguments []string, stdout io.Writer) error {
 		return errors.New("task run with a durable deployment requires a tenant and Control operator token")
 	}
 	resolvedDeploymentPath := *deploymentPath
-	cleanup := func() {}
 	if leadingDeployment != "" {
+		var cleanup func()
 		resolvedDeploymentPath, cleanup, err = exportTaskRunDeployment(
 			*controlURL, *controlTokenPath, *caFile, tenantID,
 			leadingDeployment, *instanceID, *deploymentTimeout,
