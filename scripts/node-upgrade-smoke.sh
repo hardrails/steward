@@ -367,6 +367,7 @@ exercise_activation_service_boundaries() {
 SMOKE_GATEWAY_ACTIVITY=inactive
 SMOKE_STEWARD_ACTIVITY=inactive
 SMOKE_EXECUTOR_ACTIVITY=inactive
+SMOKE_STORAGE_ACTIVITY=inactive
 SMOKE_STOP_FAILURE=
 SMOKE_STICKY_STOP=
 systemctl() {
@@ -377,6 +378,7 @@ systemctl() {
 				steward-gateway.service) state=$SMOKE_GATEWAY_ACTIVITY ;;
 				steward.service) state=$SMOKE_STEWARD_ACTIVITY ;;
 				steward-executor.service) state=$SMOKE_EXECUTOR_ACTIVITY ;;
+				steward-storage-zfs.service) state=$SMOKE_STORAGE_ACTIVITY ;;
 				*) state=query-error ;;
 			esac
 			case "$state" in
@@ -393,6 +395,7 @@ systemctl() {
 					steward-gateway.service) SMOKE_GATEWAY_ACTIVITY=inactive ;;
 					steward.service) SMOKE_STEWARD_ACTIVITY=inactive ;;
 					steward-executor.service) SMOKE_EXECUTOR_ACTIVITY=inactive ;;
+					steward-storage-zfs.service) SMOKE_STORAGE_ACTIVITY=inactive ;;
 					*) return 2 ;;
 				esac
 			fi
@@ -438,6 +441,7 @@ stop_active_services
 [[ $SMOKE_GATEWAY_ACTIVITY == inactive ]]
 [[ $SMOKE_STEWARD_ACTIVITY == inactive ]]
 [[ $SMOKE_EXECUTOR_ACTIVITY == inactive ]]
+[[ $SMOKE_STORAGE_ACTIVITY == inactive ]]
 
 selectors_switched=false
 mv() { return 72; }
