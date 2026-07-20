@@ -109,3 +109,12 @@ func TestControlFreezeCommandsRejectAmbiguousScopeAndMissingReason(t *testing.T)
 		t.Fatal("ambiguous site and tenant scope succeeded")
 	}
 }
+
+func TestControlFreezeChangeCommandMatchesPublicCLI(t *testing.T) {
+	if got := controlFreezeChangeCommand(controlstore.OperationalFreezeActionFreeze); got != "control freeze set" {
+		t.Fatalf("freeze command name = %q", got)
+	}
+	if got := controlFreezeChangeCommand(controlstore.OperationalFreezeActionUnfreeze); got != "control freeze clear" {
+		t.Fatalf("unfreeze command name = %q", got)
+	}
+}

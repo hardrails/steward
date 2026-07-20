@@ -40,6 +40,7 @@ test("the React source keeps credentials ephemeral and limits mutation to signed
     'projectedPath("/v1/operations/agents"',
     "This is observed state, not desired state.",
     "The status above is the last successful workload observation.",
+    "No freeze is active for tenant ",
     'method !== "GET" && !commandSubmission',
     "The console attempted an unsupported mutation.",
     'method: "POST"',

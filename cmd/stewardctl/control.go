@@ -684,10 +684,7 @@ func controlFreezeChange(
 	stdout io.Writer,
 	action controlstore.OperationalFreezeAction,
 ) error {
-	name := "control freeze " + string(action)
-	if action == controlstore.OperationalFreezeActionUnfreeze {
-		name = "control freeze clear"
-	}
+	name := controlFreezeChangeCommand(action)
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	common := addControlFlags(flags, true)
@@ -728,6 +725,14 @@ func controlFreezeChange(
 		return err
 	}
 	return writeControlJSON(stdout, change)
+}
+
+func controlFreezeChangeCommand(action controlstore.OperationalFreezeAction) string {
+	name := "control freeze set"
+	if action == controlstore.OperationalFreezeActionUnfreeze {
+		name = "control freeze clear"
+	}
+	return name
 }
 
 func controlAttentionList(arguments []string, stdout io.Writer) error {

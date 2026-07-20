@@ -679,7 +679,7 @@ function OperationalFreezeBanner({status, tenantID}) {
           <span className="freeze-kicker">DELIVERY GATE / OPEN</span>
           <strong>New signed commands can be delivered.</strong>
         </div>
-        <p>{tenantID ? "Tenant " + tenantID : "No site freeze is active."}</p>
+        <p>{tenantID ? "No freeze is active for tenant " + tenantID + "." : "No site freeze is active."}</p>
       </aside>
     );
   }
