@@ -325,8 +325,8 @@ func TestReconcilerClassifiesMalformedAuthorityAndBoundaries(t *testing.T) {
 	if eligibleNode(controlstore.Node{Active: true, LastSeenAt: "bad"}, "tenant-a", map[string]struct{}{}, fixture.now, time.Minute) {
 		t.Fatal("node with malformed observation time was eligible")
 	}
-	if err := reconciler.Run(nil); err == nil {
-		t.Fatal("reconciler accepted nil run context")
+	if err := (*Reconciler)(nil).Run(context.Background()); err == nil {
+		t.Fatal("nil reconciler accepted run")
 	}
 	for _, keyID := range []string{"", "-leading", "bad space", strings.Repeat("a", 257)} {
 		if validKeyID(keyID) {
