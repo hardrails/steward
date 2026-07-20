@@ -8,7 +8,7 @@ section: How-to guide
 
 Steward nodes store immutable releases under `/opt/steward/releases/<version>` and
 select the complete node release through the `/opt/steward/current` symbolic link.
-The node payload contains all seven binaries, three node systemd units, helper
+The node payload contains every binary, packaged systemd units, helper
 scripts, configuration templates, and `release.json`; it never installs a
 controller service. The manifest binds the release tag, operating
 system, architecture, and SHA-256 digest of every executable and integration file.

@@ -97,6 +97,7 @@ release_files=(
 	steward-gateway
 	steward-mcp
 	steward-relay
+	steward-storage-zfs
 	stewardctl
 	integration/adapters/hermes-agent/Dockerfile
 	integration/adapters/hermes-agent/README.md
@@ -135,8 +136,10 @@ release_files=(
 	integration/deploy/config/gateway.json.in
 	integration/deploy/config/steward-local.json
 	integration/deploy/config/steward.json
+	integration/deploy/config/storage-zfs.json.in
 	integration/deploy/systemd/steward-executor.service
 	integration/deploy/systemd/steward-gateway.service
+	integration/deploy/systemd/steward-storage-zfs.service
 	integration/deploy/systemd/steward.service
 	integration/scripts/activate-node-release.sh
 	integration/scripts/build-hermes-adapter.sh
@@ -233,7 +236,7 @@ if [[ $file_count -ne $((${#release_files[@]} + 1)) ]]; then
 	echo "activate-node-release: immutable release contains unexpected files" >&2
 	exit 2
 fi
-for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs; do
 	reported=$(runuser -u steward -- "$release_dir/$binary" -version | awk '{print $2}')
 	if [[ $reported != "$version" ]]; then
 		echo "activate-node-release: $binary reports '$reported', expected '$version'" >&2
@@ -328,6 +331,7 @@ transition=true
 was_gateway=false
 was_steward=false
 was_executor=false
+was_storage=false
 read_service_activity() {
 	local unit=$1 state status=0
 	state=$(systemctl is-active "$unit" 2>/dev/null) || status=$?
@@ -346,12 +350,19 @@ read_service_activity() {
 gateway_activity=$(read_service_activity steward-gateway.service) || exit 2
 steward_activity=$(read_service_activity steward.service) || exit 2
 executor_activity=$(read_service_activity steward-executor.service) || exit 2
+if systemctl cat steward-storage-zfs.service >/dev/null 2>&1; then
+	storage_activity=$(read_service_activity steward-storage-zfs.service) || exit 2
+else
+	# Releases predating the optional storage worker have no unit to inspect.
+	storage_activity=inactive
+fi
 [[ $gateway_activity == active ]] && was_gateway=true
 [[ $steward_activity == active ]] && was_steward=true
 [[ $executor_activity == active ]] && was_executor=true
-if [[ $restart == false && ( $was_gateway == true || $was_steward == true || $was_executor == true ) ]]; then
+[[ $storage_activity == active ]] && was_storage=true
+if [[ $restart == false && ( $was_gateway == true || $was_steward == true || $was_executor == true || $was_storage == true ) ]]; then
 	echo "activate-node-release: --no-restart is unsafe while a Steward service is active" >&2
-	echo "  Re-run with --restart, or stop Gateway, Steward, and Executor first." >&2
+	echo "  Re-run with --restart, or stop Gateway, Steward, Executor, and the storage worker first." >&2
 	exit 2
 fi
 
@@ -418,13 +429,14 @@ start_previous_services() {
 	local failed=false
 	[[ $was_gateway == false ]] || systemctl start steward-gateway.service || failed=true
 	[[ $was_steward == false ]] || systemctl start steward.service || failed=true
+	[[ $was_storage == false ]] || systemctl start steward-storage-zfs.service || failed=true
 	[[ $was_executor == false ]] || systemctl start steward-executor.service || failed=true
 	[[ $failed == false ]]
 }
 
 stop_active_services() {
 	local failed=false state unit
-	for unit in steward-gateway.service steward.service steward-executor.service; do
+	for unit in steward-gateway.service steward.service steward-executor.service steward-storage-zfs.service; do
 		state=$(read_service_activity "$unit") || { failed=true; continue; }
 		if [[ $state == active ]] && ! systemctl stop "$unit"; then
 			failed=true
@@ -680,7 +692,7 @@ prepare_uplink_delivery_state() {
 	write_executor_uplink_setup "$protocol_version" "$uplink_delivery_state"
 }
 
-if [[ $restart == true && ( $was_gateway == true || $was_steward == true || $was_executor == true ) ]]; then
+if [[ $restart == true && ( $was_gateway == true || $was_steward == true || $was_executor == true || $was_storage == true ) ]]; then
 	services_stopped=true
 	# Stop writers and capability entry points in a fixed order before checking
 	# drain state or durable-format compatibility.
@@ -731,9 +743,17 @@ STEWARD_BIN="$release_dir/steward" \
 	STEWARD_EXECUTOR_BIN="$release_dir/steward-executor" \
 	STEWARD_GATEWAY_BIN="$release_dir/steward-gateway" \
 	STEWARD_RELAY_BIN="$release_dir/steward-relay" \
+	STEWARD_STORAGE_ZFS_BIN="$release_dir/steward-storage-zfs" \
 	STEWARD_EXECUTOR_GATEWAY_ENV_FILE="$target_gateway_env" \
 	STEWARD_UNIT_DIR="$release_dir/integration/deploy/systemd" \
 	"$release_dir/integration/scripts/node-preflight.sh"
+
+# Keep the currently selected worker available while the prospective Executor
+# probes the storage contract. Stop it only after target preflight succeeds and
+# immediately before switching the immutable release entry points.
+if [[ $restart == true && $was_storage == true ]]; then
+	systemctl stop steward-storage-zfs.service
+fi
 
 check_managed_symlink() {
 	local path=$1 target
@@ -755,7 +775,7 @@ check_legacy_regular() {
 	(( (8#$mode & 0022) == 0 ))
 }
 
-for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs; do
 	check_managed_symlink "/usr/local/bin/$binary"
 done
 for mapping in \
@@ -781,7 +801,7 @@ for mapping in \
 		fi
 	fi
 done
-for unit in steward.service steward-executor.service steward-gateway.service; do
+for unit in steward.service steward-executor.service steward-gateway.service steward-storage-zfs.service; do
 	path="/usr/local/lib/systemd/system/$unit"
 	if [[ -e $path || -L $path ]]; then
 		if [[ -L $path ]]; then check_managed_symlink "$path"
@@ -813,7 +833,7 @@ done
 
 install -d -o root -g root -m 0755 /opt/steward /usr/local/bin \
 	/usr/local/libexec/steward /usr/local/lib/systemd/system
-for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs; do
 	tmp="/usr/local/bin/.${binary}.new.$$"
 	rm -f "$tmp"
 	ln -s "/opt/steward/current/$binary" "$tmp"
@@ -839,7 +859,7 @@ for mapping in \
 	ln -s "$target" "$tmp"
 	mv -Tf "$tmp" "/usr/local/libexec/steward/$name"
 done
-for unit in steward.service steward-executor.service steward-gateway.service; do
+for unit in steward.service steward-executor.service steward-gateway.service steward-storage-zfs.service; do
 	legacy="/etc/systemd/system/$unit"
 	if [[ -e $legacy || -L $legacy ]]; then
 		rm -f "$legacy"
@@ -867,10 +887,12 @@ if [[ $restart == true ]]; then
 	target_services_started=true
 	[[ $was_gateway == false ]] || systemctl start steward-gateway.service
 	[[ $was_steward == false ]] || systemctl start steward.service
+	[[ $was_storage == false ]] || systemctl start steward-storage-zfs.service
 	[[ $was_executor == false ]] || systemctl start steward-executor.service
 	[[ $was_gateway == false ]] || systemctl is-active --quiet steward-gateway.service
 	[[ $was_steward == false ]] || systemctl is-active --quiet steward.service
 	[[ $was_executor == false ]] || systemctl is-active --quiet steward-executor.service
+	[[ $was_storage == false ]] || systemctl is-active --quiet steward-storage-zfs.service
 fi
 
 rm -rf -- "$gateway_env_backup"

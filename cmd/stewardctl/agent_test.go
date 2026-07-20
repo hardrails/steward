@@ -140,7 +140,8 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var fork agentapp.ForkPlan
-	if err := json.Unmarshal(forkRaw, &fork); err != nil || fork.OnExpiry != "destroy" || fork.ExpiresAt == "" {
+	if err := json.Unmarshal(forkRaw, &fork); err != nil || fork.OnExpiry != "destroy" || fork.ExpiresAt == "" ||
+		fork.SourceLineageID != "lineage-parent" {
 		t.Fatalf("fork plan=%s err=%v", forkRaw, err)
 	}
 	generatedForkPath := filepath.Join(directory, "generated-fork.json")

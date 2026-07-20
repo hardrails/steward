@@ -1,5 +1,5 @@
 #!/bin/bash -p
-# Validate the installed node, trust material, seven binaries, and three services.
+# Validate the installed node, trust material, binaries, and packaged services.
 set -euo pipefail
 if ! shopt -qo privileged; then
 	echo "node-preflight: execute this root helper directly or invoke it with /bin/bash -p" >&2
@@ -26,6 +26,7 @@ mcp_bin=${STEWARD_MCP_BIN:-/usr/local/bin/steward-mcp}
 executor_bin=${STEWARD_EXECUTOR_BIN:-/usr/local/bin/steward-executor}
 gateway_bin=${STEWARD_GATEWAY_BIN:-/usr/local/bin/steward-gateway}
 relay_bin=${STEWARD_RELAY_BIN:-/usr/local/bin/steward-relay}
+storage_bin=${STEWARD_STORAGE_ZFS_BIN:-/usr/local/bin/steward-storage-zfs}
 gateway_config=${STEWARD_GATEWAY_CONFIG_FILE:-/etc/steward/gateway.json}
 connector_receipt_private=${STEWARD_CONNECTOR_RECEIPT_PRIVATE_KEY_FILE:-/etc/steward/connector-receipts.private.pem}
 connector_receipt_public=${STEWARD_CONNECTOR_RECEIPT_PUBLIC_KEY_FILE:-/etc/steward/connector-receipts.public}
@@ -124,6 +125,7 @@ mcp_bin=$(resolve_managed_binary "$mcp_bin" steward-mcp) || { echo "node-preflig
 executor_bin=$(resolve_managed_binary "$executor_bin" steward-executor) || { echo "node-preflight: refusing unmanaged steward-executor executable" >&2; exit 2; }
 gateway_bin=$(resolve_managed_binary "$gateway_bin" steward-gateway) || { echo "node-preflight: refusing unmanaged steward-gateway executable" >&2; exit 2; }
 relay_bin=$(resolve_managed_binary "$relay_bin" steward-relay) || { echo "node-preflight: refusing unmanaged steward-relay executable" >&2; exit 2; }
+storage_bin=$(resolve_managed_binary "$storage_bin" steward-storage-zfs) || { echo "node-preflight: refusing unmanaged steward-storage-zfs executable" >&2; exit 2; }
 
 hash_file() {
 	if command -v sha256sum >/dev/null 2>&1; then
@@ -154,8 +156,8 @@ if ! docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
 	echo "node-preflight: Docker runtime runsc is required" >&2
 	exit 2
 fi
-binary_names=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay)
-binary_paths=("$steward_bin" "$control_bin" "$ctl_bin" "$mcp_bin" "$executor_bin" "$gateway_bin" "$relay_bin")
+binary_names=(steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs)
+binary_paths=("$steward_bin" "$control_bin" "$ctl_bin" "$mcp_bin" "$executor_bin" "$gateway_bin" "$relay_bin" "$storage_bin")
 for binary in "${binary_paths[@]}"; do
 	if [[ ! -x $binary ]]; then
 		echo "node-preflight: missing executable $binary" >&2
@@ -225,10 +227,16 @@ done
 for mapping in \
 	steward.service:steward:steward \
 	steward-executor.service:steward-executor:steward-executor \
-	steward-gateway.service:steward-gateway:steward-gateway; do
+	steward-gateway.service:steward-gateway:steward-gateway \
+	steward-storage-zfs.service:root:steward-executor; do
 	IFS=: read -r unit expected_user expected_group <<<"$mapping"
-	actual_user=$(systemctl show "$unit" --property=User --value)
-	actual_group=$(systemctl show "$unit" --property=Group --value)
+	if [[ -n $unit_dir ]]; then
+		actual_user=$(sed -n 's/^User=//p' "$unit_dir/$unit")
+		actual_group=$(sed -n 's/^Group=//p' "$unit_dir/$unit")
+	else
+		actual_user=$(systemctl show "$unit" --property=User --value)
+		actual_group=$(systemctl show "$unit" --property=Group --value)
+	fi
 	if [[ $actual_user != "$expected_user" || $actual_group != "$expected_group" ]]; then
 		echo "node-preflight: $unit must run as $expected_user:$expected_group (effective identity is ${actual_user:-<unset>}:${actual_group:-<unset>})" >&2
 		exit 2
@@ -242,7 +250,7 @@ fi
 declare -A executor=()
 required=' EXECUTOR_TOKEN_FILE EXECUTOR_DOCKER_SOCKET EXECUTOR_MAX_MEMORY_BYTES EXECUTOR_MAX_CPU_MILLIS EXECUTOR_MAX_PIDS EXECUTOR_MAX_WORKLOADS EXECUTOR_MAX_WORKLOADS_PER_TENANT '
 uplink=' EXECUTOR_UPLINK_URL EXECUTOR_UPLINK_CREDENTIAL_FILE EXECUTOR_UPLINK_STATE_FILE EXECUTOR_UPLINK_TLS_CA_FILE '
-optional=' EXECUTOR_OPERATOR_TOKEN_FILE EXECUTOR_OBSERVER_TOKEN_FILE EXECUTOR_UPLINK_DELIVERY_STATE_FILE EXECUTOR_UPLINK_PROTOCOL_VERSION EXECUTOR_EVIDENCE_UPLINK_ENABLED EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG EXECUTOR_STATE_ARG EXECUTOR_MAX_TOTAL_MEMORY_BYTES EXECUTOR_MAX_TOTAL_CPU_MILLIS EXECUTOR_MAX_TOTAL_PIDS EXECUTOR_MAX_TENANT_MEMORY_BYTES EXECUTOR_MAX_TENANT_CPU_MILLIS EXECUTOR_MAX_TENANT_PIDS EXECUTOR_NODE_LABELS EXECUTOR_NODE_TAINTS '
+optional=' EXECUTOR_OPERATOR_TOKEN_FILE EXECUTOR_OBSERVER_TOKEN_FILE EXECUTOR_UPLINK_DELIVERY_STATE_FILE EXECUTOR_UPLINK_PROTOCOL_VERSION EXECUTOR_EVIDENCE_UPLINK_ENABLED EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID EXECUTOR_EVIDENCE_UPLINK_POLL_INTERVAL EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE EXECUTOR_ADMISSION_HOST_ADMIN_ARG EXECUTOR_STATE_ARG EXECUTOR_STATE_BACKEND_SOCKET EXECUTOR_STATE_BACKEND_TOKEN_FILE EXECUTOR_STATE_VOLUME_BYTE_LIMIT EXECUTOR_STATE_VOLUME_OBJECT_LIMIT EXECUTOR_MAX_TOTAL_MEMORY_BYTES EXECUTOR_MAX_TOTAL_CPU_MILLIS EXECUTOR_MAX_TOTAL_PIDS EXECUTOR_MAX_TENANT_MEMORY_BYTES EXECUTOR_MAX_TENANT_CPU_MILLIS EXECUTOR_MAX_TENANT_PIDS EXECUTOR_NODE_LABELS EXECUTOR_NODE_TAINTS '
 allowed="$required$uplink$optional"
 while IFS= read -r line || [[ -n $line ]]; do
 	[[ -z $line || $line == \#* ]] && continue
@@ -314,6 +322,7 @@ fi
 admission_args=()
 gateway_args=()
 evidence_args=()
+state_args=()
 admission_keys=(EXECUTOR_ADMISSION_POLICY_FILE EXECUTOR_ADMISSION_SITE_ROOT_PUBLIC_KEY_FILE \
 	EXECUTOR_ADMISSION_SITE_ROOT_KEY_ID EXECUTOR_ADMISSION_NODE_ID EXECUTOR_ADMISSION_EVIDENCE_KEY_FILE)
 admission_set=0
@@ -355,6 +364,38 @@ elif [[ -n ${executor[EXECUTOR_STATE_ARG]:-} ]]; then
 	echo "node-preflight: persistent-state compatibility requires complete signed admission" >&2
 	exit 2
 fi
+
+state_backend_set=0
+for key in EXECUTOR_STATE_BACKEND_SOCKET EXECUTOR_STATE_BACKEND_TOKEN_FILE; do
+	[[ -z ${executor[$key]:-} ]] || ((state_backend_set += 1))
+done
+if (( state_backend_set != 0 && state_backend_set != 2 )); then
+	echo "node-preflight: quota-enforced state socket and token settings must be set together" >&2
+	exit 2
+fi
+if (( state_backend_set == 2 )); then
+	if (( admission_set != ${#admission_keys[@]} )); then
+		echo "node-preflight: quota-enforced state requires complete signed admission" >&2
+		exit 2
+	fi
+	if [[ -n ${executor[EXECUTOR_STATE_ARG]:-} ]]; then
+		echo "node-preflight: quota-enforced and unquotaed persistent-state modes are mutually exclusive" >&2
+		exit 2
+	fi
+	if [[ ! ${executor[EXECUTOR_STATE_VOLUME_BYTE_LIMIT]:-} =~ ^[1-9][0-9]*$ ||
+		! ${executor[EXECUTOR_STATE_VOLUME_OBJECT_LIMIT]:-} =~ ^[1-9][0-9]*$ ]]; then
+		echo "node-preflight: quota-enforced state limits must be positive decimal integers" >&2
+		exit 2
+	fi
+	state_args=(
+		-state-backend-socket "${executor[EXECUTOR_STATE_BACKEND_SOCKET]}"
+		-state-backend-token-file "${executor[EXECUTOR_STATE_BACKEND_TOKEN_FILE]}"
+	)
+fi
+state_args+=(
+	-state-volume-byte-limit "${executor[EXECUTOR_STATE_VOLUME_BYTE_LIMIT]:-10737418240}"
+	-state-volume-object-limit "${executor[EXECUTOR_STATE_VOLUME_OBJECT_LIMIT]:-1000000}"
+)
 
 evidence_enabled=${executor[EXECUTOR_EVIDENCE_UPLINK_ENABLED]:-false}
 evidence_controller=${executor[EXECUTOR_EVIDENCE_UPLINK_CONTROLLER_INSTANCE_ID]:-}
@@ -479,15 +520,20 @@ runuser -u steward-executor -- "$executor_bin" -check-config \
 	-max-tenant-pids "${executor[EXECUTOR_MAX_TENANT_PIDS]:-512}" \
 	-node-labels "${executor[EXECUTOR_NODE_LABELS]:-}" \
 	-node-taints "${executor[EXECUTOR_NODE_TAINTS]:-}" \
-	"${evidence_args[@]}" "${admission_args[@]}" "${gateway_args[@]}"
+	"${evidence_args[@]}" "${state_args[@]}" "${admission_args[@]}" "${gateway_args[@]}"
+if [[ -e /etc/steward/storage-zfs.json || -L /etc/steward/storage-zfs.json ]]; then
+	"$storage_bin" -check-config -config /etc/steward/storage-zfs.json
+fi
 if [[ -n $unit_dir ]]; then
 	if [[ ! -d $unit_dir || -L $unit_dir ]]; then
 		echo "node-preflight: target unit directory is missing or invalid: $unit_dir" >&2
 		exit 2
 	fi
 	systemd-analyze verify "$unit_dir/steward.service" \
-		"$unit_dir/steward-executor.service" "$unit_dir/steward-gateway.service"
+		"$unit_dir/steward-executor.service" "$unit_dir/steward-gateway.service" \
+		"$unit_dir/steward-storage-zfs.service"
 else
-	systemd-analyze verify steward.service steward-executor.service steward-gateway.service
+	systemd-analyze verify steward.service steward-executor.service steward-gateway.service \
+		steward-storage-zfs.service
 fi
 echo "node-preflight: Steward node configuration valid"

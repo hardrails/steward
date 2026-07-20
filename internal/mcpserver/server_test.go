@@ -93,6 +93,41 @@ func (n *fakeNode) PurgeState(_ context.Context, request nodeclient.StatePurge) 
 	n.calls = append(n.calls, "purge:"+request.LineageID)
 	return nil
 }
+func (n *fakeNode) SnapshotState(_ context.Context, request nodeclient.StateSnapshotRequest) (nodeclient.StateSnapshot, error) {
+	n.calls = append(n.calls, "snapshot:"+request.SnapshotID)
+	return nodeclient.StateSnapshot{Status: "stopped", SnapshotID: request.SnapshotID, TenantID: request.TenantID, SourceLineageID: request.LineageID}, nil
+}
+func (n *fakeNode) CloneState(_ context.Context, request nodeclient.StateCloneRequest) (nodeclient.StateClone, error) {
+	n.calls = append(n.calls, "clone:"+request.SnapshotID)
+	return nodeclient.StateClone{Status: "stopped", SnapshotID: request.SnapshotID, TenantID: request.TenantID, InstanceID: request.InstanceID, LineageID: request.LineageID}, nil
+}
+func (n *fakeNode) DeleteStateSnapshot(_ context.Context, request nodeclient.StateSnapshotRequest) error {
+	n.calls = append(n.calls, "delete-snapshot:"+request.SnapshotID)
+	return nil
+}
+
+func TestMCPStateToolsFailClosedWithoutCapabilityOrCompleteIdentity(t *testing.T) {
+	for _, name := range []string{"steward_snapshot_state", "steward_clone_state", "steward_delete_snapshot"} {
+		raw := []byte(`{"name":"` + name + `","arguments":{}}`)
+		if _, rpcErr := (&Server{}).callTool(context.Background(), raw); rpcErr == nil || rpcErr.Code != -32602 {
+			t.Fatalf("unconfigured %s RPC error=%+v", name, rpcErr)
+		}
+		result, rpcErr := (&Server{node: &fakeNode{}}).callTool(context.Background(), raw)
+		if rpcErr != nil || result == nil {
+			t.Fatalf("invalid %s result=%+v RPC error=%+v", name, result, rpcErr)
+		}
+	}
+	selfClone := []byte(`{"name":"steward_clone_state","arguments":{"tenant_id":"tenant","node_id":"node","instance_id":"fork","lineage_id":"same","generation":1,"snapshot_id":"snap","source_lineage_id":"same"}}`)
+	result, rpcErr := (&Server{node: &fakeNode{}}).callTool(context.Background(), selfClone)
+	if rpcErr != nil || result == nil {
+		t.Fatalf("self-clone result=%+v RPC error=%+v", result, rpcErr)
+	}
+	snapshotSchema := stateSnapshotToolSchema()
+	cloneSchema := stateCloneToolSchema()
+	if len(snapshotSchema["required"].([]string)) != 6 || len(cloneSchema["required"].([]string)) != 7 {
+		t.Fatalf("state tool schemas snapshot=%+v clone=%+v", snapshotSchema, cloneSchema)
+	}
+}
 
 func TestMCPInitializeListAndCallTools(t *testing.T) {
 	node := &fakeNode{}
@@ -177,6 +212,9 @@ func TestMCPAllLifecycleToolsAndToolFailures(t *testing.T) {
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"steward_start","arguments":{"runtime_ref":"` + ref + `"}}}`,
 		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"steward_stop","arguments":{"runtime_ref":"` + ref + `"}}}`,
 		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"steward_purge_state","arguments":{"tenant_id":"tenant","node_id":"node","lineage_id":"lineage","generation":1}}}`,
+		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"steward_snapshot_state","arguments":{"tenant_id":"tenant","node_id":"node","instance_id":"source","lineage_id":"lineage","generation":1,"snapshot_id":"snap"}}}`,
+		`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"steward_clone_state","arguments":{"tenant_id":"tenant","node_id":"node","instance_id":"fork","lineage_id":"fork-lineage","generation":1,"snapshot_id":"snap","source_lineage_id":"lineage"}}}`,
+		`{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"steward_delete_snapshot","arguments":{"tenant_id":"tenant","node_id":"node","instance_id":"source","lineage_id":"lineage","generation":1,"snapshot_id":"snap"}}}`,
 		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"steward_status","arguments":{}}}`,
 		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"missing","arguments":{}}}`,
 		`{"jsonrpc":"2.0","id":8,"method":"initialize","params":{}}`,
@@ -186,7 +224,7 @@ func TestMCPAllLifecycleToolsAndToolFailures(t *testing.T) {
 	if err := server.Serve(context.Background(), strings.NewReader(input), &output, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"logs", "start", "stop", "purge:lineage"} {
+	for _, want := range []string{"logs", "start", "stop", "purge:lineage", "snapshot:snap", "clone:snap", "delete-snapshot:snap"} {
 		if !strings.Contains(strings.Join(node.calls, ","), want) {
 			t.Fatalf("missing call %q in %#v", want, node.calls)
 		}

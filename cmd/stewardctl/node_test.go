@@ -21,8 +21,18 @@ func TestNodeCommandsUsePublicLoopbackContract(t *testing.T) {
 			t.Fatal("missing bearer token")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodDelete || r.URL.Path == "/v1/state/purge" {
+		if r.Method == http.MethodDelete || r.URL.Path == "/v1/state/purge" || r.URL.Path == "/v1/state/snapshots/delete" {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Path == "/v1/state/snapshots" {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"status":"stopped","snapshot_id":"snap","tenant_id":"tenant","source_lineage_id":"lineage","content_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","retained_bytes":0,"object_count":0,"created_at":"2026-07-20T00:00:00Z"}`))
+			return
+		}
+		if r.URL.Path == "/v1/state/clones" {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"status":"stopped","tenant_id":"tenant","instance_id":"fork","lineage_id":"fork-lineage","snapshot_id":"snap"}`))
 			return
 		}
 		status := "running"
@@ -67,6 +77,24 @@ func TestNodeCommandsUsePublicLoopbackContract(t *testing.T) {
 	arguments = append(arguments, "-tenant-id", "tenant", "-node-id", "node", "-lineage-id", "lineage", "-generation", "1")
 	if err := run(arguments, &purgeOutput, &bytes.Buffer{}); err != nil || !strings.Contains(purgeOutput.String(), `"purged":true`) {
 		t.Fatalf("purge output=%s err=%v", purgeOutput.String(), err)
+	}
+	var snapshotOutput bytes.Buffer
+	arguments = append([]string{"node", "snapshot-state"}, common...)
+	arguments = append(arguments, "-tenant-id", "tenant", "-node-id", "node", "-instance-id", "source", "-lineage-id", "lineage", "-generation", "1", "-snapshot-id", "snap")
+	if err := run(arguments, &snapshotOutput, &bytes.Buffer{}); err != nil || !strings.Contains(snapshotOutput.String(), `"snapshot_id":"snap"`) {
+		t.Fatalf("snapshot output=%s err=%v", snapshotOutput.String(), err)
+	}
+	var cloneOutput bytes.Buffer
+	arguments = append([]string{"node", "clone-state"}, common...)
+	arguments = append(arguments, "-tenant-id", "tenant", "-node-id", "node", "-instance-id", "fork", "-lineage-id", "fork-lineage", "-generation", "1", "-snapshot-id", "snap", "-source-lineage-id", "lineage")
+	if err := run(arguments, &cloneOutput, &bytes.Buffer{}); err != nil || !strings.Contains(cloneOutput.String(), `"instance_id":"fork"`) {
+		t.Fatalf("clone output=%s err=%v", cloneOutput.String(), err)
+	}
+	var deleteOutput bytes.Buffer
+	arguments = append([]string{"node", "delete-snapshot"}, common...)
+	arguments = append(arguments, "-tenant-id", "tenant", "-node-id", "node", "-instance-id", "source", "-lineage-id", "lineage", "-generation", "1", "-snapshot-id", "snap")
+	if err := run(arguments, &deleteOutput, &bytes.Buffer{}); err != nil || !strings.Contains(deleteOutput.String(), `"deleted":true`) {
+		t.Fatalf("delete snapshot output=%s err=%v", deleteOutput.String(), err)
 	}
 	capsulePath := filepath.Join(directory, "capsule.dsse.json")
 	intentPath := filepath.Join(directory, "intent.json")

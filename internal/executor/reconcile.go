@@ -13,6 +13,7 @@ import (
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/gateway"
+	"github.com/hardrails/steward/internal/storagebackend"
 )
 
 const (
@@ -276,19 +277,28 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 	}
 
 	if observed.Workload.State != nil {
-		stateDocker, ok := s.docker.(StateDocker)
-		if !ok {
-			return s.containReconciliation(ctx, plan, observed, "state_unavailable", "persistent state inspection is unavailable")
-		}
-		want := StateVolumeSpec{
-			Name: StateVolumeName(record.TenantID, record.LineageID), TenantID: record.TenantID, LineageID: record.LineageID,
-		}
-		if observed.Workload.State.VolumeName != want.Name {
-			return s.containReconciliation(ctx, plan, observed, "state_drift", "workload state mount does not match its signed lineage")
-		}
-		state, err := stateDocker.InspectStateVolume(ctx, want.Name)
-		if err != nil || !stateVolumeEqual(state, want) {
-			return s.containReconciliation(ctx, plan, observed, "state_drift", "persistent state volume is missing or drifted")
+		if s.secure.stateBackend != nil {
+			spec := s.qualifiedStateSpec(record.TenantID, record.LineageID)
+			state, err := s.secure.stateBackend.InspectVolume(ctx, spec.Scope())
+			if err != nil || !qualifiedStateSpecMatches(state.Spec, spec) || state.State != storagebackend.StateReady ||
+				state.DockerVolumeHandle != observed.Workload.State.VolumeName {
+				return s.containReconciliation(ctx, plan, observed, "state_drift", "quota-enforced persistent state is missing or drifted")
+			}
+		} else {
+			stateDocker, ok := s.docker.(StateDocker)
+			if !ok {
+				return s.containReconciliation(ctx, plan, observed, "state_unavailable", "persistent state inspection is unavailable")
+			}
+			want := StateVolumeSpec{
+				Name: StateVolumeName(record.TenantID, record.LineageID), TenantID: record.TenantID, LineageID: record.LineageID,
+			}
+			if observed.Workload.State.VolumeName != want.Name {
+				return s.containReconciliation(ctx, plan, observed, "state_drift", "workload state mount does not match its signed lineage")
+			}
+			state, err := stateDocker.InspectStateVolume(ctx, want.Name)
+			if err != nil || !stateVolumeEqual(state, want) {
+				return s.containReconciliation(ctx, plan, observed, "state_drift", "persistent state volume is missing or drifted")
+			}
 		}
 	}
 

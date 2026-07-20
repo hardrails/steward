@@ -193,14 +193,45 @@ type Snapshot struct {
 }
 
 type ForkPlan struct {
-	Schema       string `json:"schema"`
-	SnapshotID   string `json:"snapshot_id"`
-	BundleDigest string `json:"bundle_digest"`
-	InstanceID   string `json:"instance_id"`
-	LineageID    string `json:"lineage_id"`
-	Generation   uint64 `json:"generation"`
-	ExpiresAt    string `json:"expires_at,omitempty"`
-	OnExpiry     string `json:"on_expiry,omitempty"`
+	Schema          string `json:"schema"`
+	SnapshotID      string `json:"snapshot_id"`
+	BundleDigest    string `json:"bundle_digest"`
+	InstanceID      string `json:"instance_id"`
+	LineageID       string `json:"lineage_id"`
+	Generation      uint64 `json:"generation"`
+	SourceLineageID string `json:"source_lineage_id"`
+	ExpiresAt       string `json:"expires_at,omitempty"`
+	OnExpiry        string `json:"on_expiry,omitempty"`
+}
+
+func DecodeForkPlan(raw []byte) (ForkPlan, error) {
+	var value ForkPlan
+	if err := dsse.DecodeStrictInto(raw, MaxArtifactBytes, &value); err != nil {
+		return ForkPlan{}, fmt.Errorf("decode fork plan: %w", err)
+	}
+	if err := value.Validate(); err != nil {
+		return ForkPlan{}, err
+	}
+	return value, nil
+}
+
+func (value ForkPlan) Validate() error {
+	if value.Schema != ForkSchema || !validToken(value.SnapshotID, 128) || !validDigest(value.BundleDigest) ||
+		!validToken(value.InstanceID, 128) || !validToken(value.LineageID, 128) ||
+		!validToken(value.SourceLineageID, 128) || value.LineageID == value.SourceLineageID || value.Generation == 0 {
+		return errors.New("fork plan is invalid")
+	}
+	if value.ExpiresAt == "" {
+		if value.OnExpiry != "" {
+			return errors.New("fork plan expiry action requires expires_at")
+		}
+		return nil
+	}
+	expires, err := time.Parse(time.RFC3339Nano, value.ExpiresAt)
+	if err != nil || value.ExpiresAt != expires.UTC().Format(time.RFC3339Nano) || value.OnExpiry != "destroy" {
+		return errors.New("temporary fork plan requires a canonical expiry and destroy action")
+	}
+	return nil
 }
 
 func DecodeSnapshot(raw []byte) (Snapshot, error) {
@@ -243,10 +274,10 @@ func Fork(bundle Bundle, snapshot Snapshot, instanceID, lineageID string, ttl ti
 	if !validToken(instanceID, 128) || !validToken(lineageID, 128) || lineageID == snapshot.SourceLineage {
 		return ForkPlan{}, errors.New("fork requires new bounded instance and lineage identities")
 	}
-	plan := ForkPlan{Schema: ForkSchema, SnapshotID: snapshot.ID, BundleDigest: bundleDigest, InstanceID: instanceID, LineageID: lineageID, Generation: 1}
+	plan := ForkPlan{Schema: ForkSchema, SnapshotID: snapshot.ID, BundleDigest: bundleDigest, InstanceID: instanceID, LineageID: lineageID, SourceLineageID: snapshot.SourceLineage, Generation: 1}
 	if ttl != 0 {
-		if ttl < time.Minute || ttl > 30*24*time.Hour || (onExpiry != "destroy" && onExpiry != "hibernate") {
-			return ForkPlan{}, errors.New("fork TTL must be 1 minute-30 days with destroy or hibernate expiry")
+		if ttl < time.Minute || ttl > 30*24*time.Hour || onExpiry != "destroy" {
+			return ForkPlan{}, errors.New("fork TTL must be 1 minute-30 days with destroy expiry")
 		}
 		plan.ExpiresAt = now.UTC().Add(ttl).Format(time.RFC3339Nano)
 		plan.OnExpiry = onExpiry

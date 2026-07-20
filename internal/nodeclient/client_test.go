@@ -111,6 +111,44 @@ func TestClientActivationAdmissionCarriesExactRuntimeIdentity(t *testing.T) {
 	}
 }
 
+func TestClientActivationCheckpointBindsReturnedMarker(t *testing.T) {
+	const runtimeRef = "executor-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/workloads/"+runtimeRef+"/activation-checkpoints" {
+			t.Fatalf("checkpoint request %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			SchemaVersion    string `json:"schema_version"`
+			ActivationID     string `json:"activation_id"`
+			CheckpointDigest string `json:"checkpoint_digest"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ActivationID != "activation-a" {
+			t.Fatalf("checkpoint body=%+v error=%v", body, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	if err := client.ActivationCheckpoint(context.Background(), runtimeRef, "activation-a", digest); err != nil {
+		t.Fatal(err)
+	}
+
+	mismatch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"schema_version":"steward.activation-checkpoint.v1","activation_id":"other","checkpoint_digest":"` + digest + `"}`))
+	}))
+	defer mismatch.Close()
+	client, _ = New(mismatch.URL, "secret")
+	if err := client.ActivationCheckpoint(context.Background(), runtimeRef, "activation-a", digest); err == nil {
+		t.Fatal("changed activation checkpoint response was accepted")
+	}
+}
+
 func TestClientDrivesMaintenanceContract(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -313,6 +351,108 @@ func TestClientPurgeAndStrictResponseFailures(t *testing.T) {
 	}
 	if _, err := client.Status(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "exceeds 1 MiB") {
 		t.Fatalf("oversized error=%v", err)
+	}
+}
+
+func TestClientSnapshotsAndClonesThroughBoundedPublicPaths(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/state/snapshots":
+			var request StateSnapshotRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.SnapshotID != "snap" || request.InstanceID != "source" {
+				t.Fatalf("snapshot request=%+v err=%v", request, err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"status":"stopped","snapshot_id":"snap","tenant_id":"tenant","source_lineage_id":"source-lineage","content_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","retained_bytes":10,"object_count":2,"created_at":"2026-07-20T00:00:00Z"}`))
+		case "/v1/state/clones":
+			var request StateCloneRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.SnapshotID != "snap" || request.InstanceID != "fork" {
+				t.Fatalf("clone request=%+v err=%v", request, err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"status":"stopped","tenant_id":"tenant","instance_id":"fork","lineage_id":"fork-lineage","snapshot_id":"snap"}`))
+		case "/v1/state/snapshots/delete":
+			var request StateSnapshotRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.SnapshotID != "snap" || request.InstanceID != "source" {
+				t.Fatalf("delete request=%+v err=%v", request, err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, _ := New(server.URL, "secret")
+	snapshot, err := client.SnapshotState(context.Background(), StateSnapshotRequest{
+		TenantID: "tenant", NodeID: "node", InstanceID: "source", LineageID: "source-lineage", Generation: 1, SnapshotID: "snap",
+	})
+	if err != nil || snapshot.ContentDigest == "" || snapshot.ObjectCount != 2 {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+	clone, err := client.CloneState(context.Background(), StateCloneRequest{
+		TenantID: "tenant", NodeID: "node", InstanceID: "fork", LineageID: "fork-lineage", Generation: 1,
+		SnapshotID: "snap", SourceLineageID: "source-lineage",
+	})
+	if err != nil || clone.InstanceID != "fork" || clone.LineageID != "fork-lineage" {
+		t.Fatalf("clone=%+v err=%v", clone, err)
+	}
+	if err := client.DeleteStateSnapshot(context.Background(), StateSnapshotRequest{
+		TenantID: "tenant", NodeID: "node", InstanceID: "source", LineageID: "source-lineage", Generation: 1, SnapshotID: "snap",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientRejectsIncompleteStateMutationsAndChangedNodeIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/state/snapshots":
+			_, _ = w.Write([]byte(`{"status":"stopped","snapshot_id":"other","tenant_id":"tenant","source_lineage_id":"lineage","content_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2026-07-20T00:00:00Z"}`))
+		case "/v1/state/clones":
+			_, _ = w.Write([]byte(`{"status":"stopped","tenant_id":"tenant","instance_id":"other","lineage_id":"fork-lineage","snapshot_id":"snap"}`))
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SnapshotState(context.Background(), StateSnapshotRequest{}); err == nil {
+		t.Fatal("incomplete snapshot request was sent")
+	}
+	if _, err := client.CloneState(context.Background(), StateCloneRequest{}); err == nil {
+		t.Fatal("incomplete clone request was sent")
+	}
+	if err := client.DeleteStateSnapshot(context.Background(), StateSnapshotRequest{}); err == nil {
+		t.Fatal("incomplete snapshot deletion was sent")
+	}
+	snapshotRequest := StateSnapshotRequest{
+		TenantID: "tenant", NodeID: "node", InstanceID: "source", LineageID: "lineage", Generation: 1, SnapshotID: "snap",
+	}
+	if _, err := client.SnapshotState(context.Background(), snapshotRequest); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("changed snapshot identity error = %v", err)
+	}
+	if _, err := client.CloneState(context.Background(), StateCloneRequest{
+		TenantID: "tenant", NodeID: "node", InstanceID: "fork", LineageID: "fork-lineage", Generation: 1,
+		SnapshotID: "snap", SourceLineageID: "lineage",
+	}); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("changed clone identity error = %v", err)
+	}
+	invalidTime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"stopped","snapshot_id":"snap","tenant_id":"tenant","source_lineage_id":"lineage","content_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","retained_bytes":0,"object_count":0,"created_at":"not-a-time"}`))
+	}))
+	defer invalidTime.Close()
+	client, err = New(invalidTime.URL, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SnapshotState(context.Background(), snapshotRequest); err == nil || !strings.Contains(err.Error(), "creation time") {
+		t.Fatalf("invalid snapshot creation time error = %v", err)
 	}
 }
 

@@ -50,14 +50,14 @@ Every admitted agent container receives one fixed policy:
 | Sandbox | Docker must advertise `runsc`, the gVisor runtime. Every untrusted agent runs in its own gVisor sandbox. |
 | Identity | The container runs as fixed UID/GID `65532:65532`; the caller cannot select a user. |
 | Privilege and namespaces | Executor drops every Linux capability and sets `no-new-privileges`. Interprocess communication (IPC) and control-group (cgroup) namespaces are private; process ID (PID) and hostname/domain-name (UTS) namespaces use Docker's private modes. Host, peer-container, shareable namespace, and custom cgroup-parent settings are rejected. |
-| Filesystem | The root filesystem is read-only. Executor adds fixed bounded temporary filesystems. Persistent state uses one fixed-path Steward-owned Docker volume, but Docker's portable local volume driver has no hard byte or inode quota. State is therefore disabled by default and must remain disabled on a shared host. The exact mount set is inspected; host mounts, extra volumes, devices, and caller-selected files are unavailable. |
+| Filesystem | The root filesystem is read-only. Executor adds fixed bounded temporary filesystems. Shared-host persistent state uses a separate OpenZFS worker that applies hard byte and object quotas to one dataset per tenant lineage, then exposes it through an exact Docker bind volume. The legacy unquotaed Docker-volume mode is dedicated-host only. The exact mount set is inspected; host mounts, extra volumes, devices, and caller-selected files are unavailable. |
 | Network | The default is `network=none`. A workload with inference, service, connector, or egress authority receives one internal per-instance Docker network containing only the agent and its trusted relay. Docker allocates the subnet from its daemon-wide address pools, and its bridge host gateway is disabled. Gateway performs approved connections; the container receives no raw host or Internet route. |
 | Inference | Site policy selects one route and model alias. Gateway injects the upstream credential, rejects any other model, and synthesizes `/v1/models` from the allowed alias. |
 | Agent service | Gateway exposes a bearer-protected loopback endpoint. It reaches only the declared port through the grant's Unix socket and fixed relay; Docker publishes no container port. The bearer is host-administrator transport authority, not a tenant approval. |
 | Tenant-signed service task | Signed site policy scopes each tenant Ed25519 public key to exact service IDs. The private key stays off-node. Gateway accepts only configured exact JSON `POST` operations, verifies one short-lived permit against the active tenant, instance, generation, artifact, policies, task, operation, and request bytes, fsyncs authorization before dispatch, and never automatically retries an ambiguous outcome. |
 | Authenticated connector | The signed capsule, tenant policy, and intent select connector IDs. Node configuration maps each connector operation to one exact method, path, origin, address policy, and owner-only credential. Gateway strips agent credentials, spends a durable task claim and call budget, pins the resolved address, injects only the configured Bearer or API-key value, denies redirects, and bounds concurrency, bodies, response, and time. In Authorized Effects mode, site-root-signed tenant policy pins action keys and an approval threshold to connector IDs, intent explicitly selects `authorized`, generic egress is prohibited, and Gateway requires a complete one-use permit that matches the live grant and exact request. It spends that permit before DNS. |
 | HTTP(S) egress | Executor intersects the publisher profile, tenant route IDs, and instance request. Gateway enforces host and port, a pinned resolved IP, explicit private Classless Inter-Domain Routing (CIDR) ranges, concurrency, byte and time limits, lifecycle, and bounded audit output. Synchronous denial work is limited to 30 per grant, 120 per tenant, and 480 per host per minute; exhaustion suppresses further denial writes while allowed traffic continues. |
-| Resources | Per-workload memory, swap, CPU, PID, and shared-memory limits are mandatory. Docker's bounded `local` log rotation is fixed and the out-of-memory (OOM) killer remains enabled. Executor reconstructs host and tenant aggregate memory, CPU, PID, and workload reservations from Docker, including stopped containers and fixed relay overhead. Control can also reserve one site-defined CPU, memory, PID, and workload ceiling for a tenant across all nodes in the same atomic transaction that queues signed admission. Disk, inode, and I/O quotas remain outside this portable contract. |
+| Resources | Per-workload memory, swap, CPU, PID, and shared-memory limits are mandatory. Docker's bounded `local` log rotation is fixed and the out-of-memory (OOM) killer remains enabled. Executor reconstructs host and tenant aggregate memory, CPU, PID, and workload reservations from Docker, including stopped containers and fixed relay overhead. Control can also reserve one site-defined CPU, memory, PID, and workload ceiling for a tenant across all nodes in the same atomic transaction that queues signed admission. Qualified OpenZFS state adds per-lineage byte and object quotas; fleet storage scheduling and I/O bandwidth limits remain outside this contract. |
 | Lifecycle | Docker restart and automatic-removal policies are disabled. Executor, not Docker, owns lifecycle. It inspects restart, log, port, device, mount, network, namespace, and image settings after creation. |
 | Integrity and recovery | A SHA-256 fingerprint covers the admitted definition. Reconciliation—comparison of durable signed state with actual runtime objects—runs before normal mutations are accepted and every 30 seconds. It may repair limited lifecycle drift, but never recreates or adopts missing or structurally changed objects. A degraded scan can only narrow authority. |
 | Route integrity | Gateway persists a non-secret digest of each retained route policy and a private credential-content binding. Executor stores the route-policy digest in the admission fence and receipt. Reload, restart, start, and reconciliation refuse a mismatch while the grant remains retained. |
@@ -105,10 +105,11 @@ the deterministic grant and stop only an agent and relay whose retained identity
 is exact.
 
 These controls prevent a tenant from expanding its own authority through Steward.
-They apply only to workloads with `state=false`. The compatibility flag
-`-allow-unquotaed-state-on-dedicated-host` enables a Docker volume without enforced
-byte or inode quotas and is limited to a dedicated single-tenant host; using it on a
-shared host leaves storage exhaustion outside Steward's tenant-isolation boundary.
+A workload with state on a shared host additionally requires the qualified OpenZFS
+worker. The compatibility flag `-allow-unquotaed-state-on-dedicated-host` enables a
+Docker volume without enforced byte or object quotas and is limited to a dedicated
+single-tenant host; using it on a shared host leaves storage exhaustion outside
+Steward's tenant-isolation boundary.
 
 They do not remove risks shared by any multi-tenant host: vulnerabilities in the
 host kernel, Docker, or gVisor; CPU-cache and other microarchitectural side
@@ -155,7 +156,7 @@ log.
 
 Policy rotation revokes the ability to start an instance admitted under stale
 policy while preserving cleanup authorization. While Executor is serving, the bound
-tenant principal or an authorized site cleanup key may stop, destroy, or purge it
+tenant principal or an authorized site cleanup key may stop, destroy, purge it, or delete an unreferenced snapshot
 while Executor is ready. Reconciliation deactivates Gateway before stopping the
 agent and relay when installed policy no longer authorizes a present instance. In
 degraded mode, only the narrower stop containment path remains available; destroy

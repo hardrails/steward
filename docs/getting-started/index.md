@@ -68,11 +68,12 @@ steward-control -version
 steward-executor -version
 steward-gateway -version
 steward-relay -version
+steward-storage-zfs -version
 stewardctl -version
 steward-mcp -version
 ```
 
-All seven binaries must report the same release. Then verify the mode you selected.
+Every binary must report the same release. Then verify the mode you selected.
 For a staged, unenrolled install, all services must remain inactive:
 
 ```console
@@ -88,7 +89,7 @@ sudo /usr/local/libexec/steward/node-doctor
 
 The default diagnostic is read-only. It runs the installed preflight, pins Docker
 inspection to Executor's configured socket, checks Docker Engine 28 and `runsc`,
-requires all three systemd services to be active, probes supervisor and Executor
+requires the three core systemd services to be active, probes supervisor and Executor
 health and readiness, probes Gateway's Unix control socket, and reports fixed-store
 and filesystem capacity. `--json` emits bounded `steward.node-doctor.v1` output for
 automation. Exit status 0 permits warnings; exit status 1 means at least one check
@@ -206,7 +207,7 @@ credentials in Terraform state. See
   Executor the group's only member because Docker socket access is root-equivalent.
 - Installs each root-owned release under `/opt/steward/releases/`; its
   `release.json` binds every binary and integration file by SHA-256.
-- Selects all seven binaries, helper scripts, and systemd units through one
+- Selects every binary, helper script, and systemd unit through one
   `/opt/steward/current` symlink.
 - Installs hardened vendor units and configuration templates with the release.
 - Preserves operator-owned configuration and systemd drop-ins.

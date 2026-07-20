@@ -24,6 +24,7 @@ import (
 	"github.com/hardrails/steward/internal/evidence"
 	"github.com/hardrails/steward/internal/gateway"
 	"github.com/hardrails/steward/internal/journal"
+	"github.com/hardrails/steward/internal/storagebackend"
 )
 
 const (
@@ -65,6 +66,9 @@ type secureAdmission struct {
 	evidence            *evidence.Log
 	allowHostAdmin      bool
 	allowUnquotaedState bool
+	stateBackend        storagebackend.Backend
+	stateByteLimit      int64
+	stateObjectLimit    int64
 	topology            TopologyDocker
 	gateway             GatewayControl
 	relayImage          string
@@ -99,6 +103,11 @@ type SecureAdmissionConfig struct {
 	// though it has no portable hard byte or inode quota. It must remain false on
 	// shared multi-tenant hosts.
 	AllowUnquotaedStateOnDedicatedHost bool
+	// StateBackend enables quota-enforced shared-host state. Limits are fixed
+	// host policy and cannot be selected or raised by a signed tenant request.
+	StateBackend           storagebackend.Backend
+	StateVolumeByteLimit   int64
+	StateVolumeObjectLimit int64
 	// Positive-capability topology is optional as a complete unit. When absent,
 	// inference, service, and egress fail closed. State also fails closed unless
 	// the dedicated-host-only unquotaed compatibility flag is explicit.
@@ -165,6 +174,22 @@ func (s *Server) EnableSecureAdmission(config SecureAdmissionConfig) error {
 	if config.AllowUnquotaedStateOnDedicatedHost && len(policy.Tenants) != 1 {
 		return errors.New("unquotaed persistent state requires a signed site policy with exactly one tenant")
 	}
+	if config.AllowUnquotaedStateOnDedicatedHost && config.StateBackend != nil {
+		return errors.New("quota-enforced and unquotaed persistent state modes are mutually exclusive")
+	}
+	if config.StateBackend != nil {
+		if config.StateVolumeByteLimit <= 0 || config.StateVolumeObjectLimit <= 0 {
+			return errors.New("quota-enforced persistent state requires positive byte and object limits")
+		}
+		probeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		capabilities, capabilityErr := config.StateBackend.Capabilities(probeContext)
+		cancel()
+		if capabilityErr != nil || !capabilities.ProductionQualified() {
+			return errors.New("persistent state backend is unavailable or not production-qualified")
+		}
+	} else if config.StateVolumeByteLimit != 0 || config.StateVolumeObjectLimit != 0 {
+		return errors.New("persistent state limits require a quota-enforced backend")
+	}
 	s.secure = &secureAdmission{
 		policyEnvelope:      append([]byte(nil), config.PolicyEnvelope...),
 		siteRoots:           clonePublicKeys(config.SiteRoots),
@@ -174,7 +199,9 @@ func (s *Server) EnableSecureAdmission(config SecureAdmissionConfig) error {
 		evidence:            config.Evidence,
 		allowHostAdmin:      config.AllowHostAdminIntent,
 		allowUnquotaedState: config.AllowUnquotaedStateOnDedicatedHost,
-		topology:            config.Topology, gateway: config.Gateway, relayImage: config.RelayImage,
+		stateBackend:        config.StateBackend, stateByteLimit: config.StateVolumeByteLimit,
+		stateObjectLimit: config.StateVolumeObjectLimit,
+		topology:         config.Topology, gateway: config.Gateway, relayImage: config.RelayImage,
 		grantRoot: config.GrantRoot, relayGID: config.RelayGID,
 	}
 	s.reconcileMu.Lock()
@@ -226,6 +253,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/maintenance/enter", requireLocalRole(LocalRoleOperator, s.maintenanceEnter))
 	mux.HandleFunc("POST /v1/maintenance/exit", requireLocalRole(LocalRoleOperator, s.maintenanceExit))
 	mux.HandleFunc("POST /v1/state/purge", requireLocalRole(LocalRoleHostAdmin, s.purgeState))
+	mux.HandleFunc("POST /v1/state/snapshots", requireLocalRole(LocalRoleHostAdmin, s.createStateSnapshot))
+	mux.HandleFunc("POST /v1/state/snapshots/delete", requireLocalRole(LocalRoleHostAdmin, s.deleteStateSnapshot))
+	mux.HandleFunc("POST /v1/state/clones", requireLocalRole(LocalRoleHostAdmin, s.cloneStateSnapshot))
 	mux.HandleFunc(
 		"POST /v1/workloads/{id}/activation-canary-preflight",
 		requireLocalRole(LocalRoleHostAdmin, s.activationCanaryPreflight),
@@ -488,17 +518,26 @@ func (s *Server) secureProvision(w http.ResponseWriter, r *http.Request) {
 		workload.Runtime.ActivationBeginDigest = request.Activation.BeginDigest
 	}
 	if effective.Intent.Capabilities.State {
-		if !s.secure.allowUnquotaedState {
+		switch {
+		case s.secure.stateBackend != nil:
+			spec := s.qualifiedStateSpec(effective.Intent.TenantID, effective.Intent.LineageID)
+			plan, err := s.secure.stateBackend.PlanVolume(r.Context(), spec)
+			if err != nil {
+				writeStateBackendError(w, err)
+				return
+			}
+			workload.State = &StateMount{VolumeName: plan.DockerVolumeHandle, Path: effective.Capsule.State.Path}
+		case !s.secure.allowUnquotaedState:
 			writeError(w, http.StatusNotImplemented, "capability_unavailable", "persistent state is disabled because the configured Docker volume has no hard byte or inode quota")
 			return
-		}
-		if _, ok := s.docker.(StateDocker); !ok {
+		case !implementsStateDocker(s.docker):
 			writeError(w, http.StatusNotImplemented, "capability_unavailable", "persistent state is unavailable with this Docker backend")
 			return
-		}
-		workload.State = &StateMount{
-			VolumeName: StateVolumeName(effective.Intent.TenantID, effective.Intent.LineageID),
-			Path:       effective.Capsule.State.Path,
+		default:
+			workload.State = &StateMount{
+				VolumeName: StateVolumeName(effective.Intent.TenantID, effective.Intent.LineageID),
+				Path:       effective.Capsule.State.Path,
+			}
 		}
 	}
 	if err := workload.Validate(); err != nil {
@@ -517,8 +556,16 @@ func (s *Server) purgeState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "secure_admission_unavailable", "signed admission is not configured on this node")
 		return
 	}
-	docker, ok := s.docker.(StateDocker)
-	if !ok {
+	var docker StateDocker
+	if s.secure.stateBackend == nil {
+		var ok bool
+		docker, ok = s.docker.(StateDocker)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "capability_unavailable", "persistent state is unavailable with this Docker backend")
+			return
+		}
+	}
+	if s.secure.stateBackend == nil && !s.secure.allowUnquotaedState {
 		writeError(w, http.StatusNotImplemented, "capability_unavailable", "persistent state is unavailable with this Docker backend")
 		return
 	}
@@ -579,22 +626,48 @@ func (s *Server) purgeState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := StateVolumeName(request.TenantID, request.LineageID)
+	var qualifiedSpec storagebackend.VolumeSpec
+	if s.secure.stateBackend != nil {
+		qualifiedSpec = s.qualifiedStateSpec(request.TenantID, request.LineageID)
+		plan, planErr := s.secure.stateBackend.PlanVolume(r.Context(), qualifiedSpec)
+		if planErr != nil {
+			writeStateBackendError(w, planErr)
+			return
+		}
+		name = plan.DockerVolumeHandle
+	}
 	if len(s.secure.journal.Pending()) != 0 {
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "a prior host mutation requires reconciliation")
 		return
 	}
-	observed, err := docker.InspectStateVolume(r.Context(), name)
-	if errors.Is(err, ErrNotFound) {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if err != nil {
-		writeDockerError(w, err)
-		return
-	}
-	if !stateVolumeEqual(observed, StateVolumeSpec{Name: name, TenantID: request.TenantID, LineageID: request.LineageID}) {
-		writeError(w, http.StatusConflict, "state_drift", "state volume does not match the signed tenant lineage")
-		return
+	if s.secure.stateBackend != nil {
+		observed, inspectErr := s.secure.stateBackend.InspectVolume(r.Context(), qualifiedSpec.Scope())
+		if errors.Is(inspectErr, storagebackend.ErrNotFound) || inspectErr == nil && observed.State == storagebackend.StateDeleted {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if inspectErr != nil {
+			writeStateBackendError(w, inspectErr)
+			return
+		}
+		if !qualifiedStateSpecMatches(observed.Spec, qualifiedSpec) || observed.State != storagebackend.StateReady || observed.DockerVolumeHandle != name {
+			writeError(w, http.StatusConflict, "state_drift", "state volume does not match the signed tenant lineage and fixed host quota")
+			return
+		}
+	} else {
+		observed, inspectErr := docker.InspectStateVolume(r.Context(), name)
+		if errors.Is(inspectErr, ErrNotFound) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if inspectErr != nil {
+			writeDockerError(w, inspectErr)
+			return
+		}
+		if !stateVolumeEqual(observed, StateVolumeSpec{Name: name, TenantID: request.TenantID, LineageID: request.LineageID}) {
+			writeError(w, http.StatusConflict, "state_drift", "state volume does not match the signed tenant lineage")
+			return
+		}
 	}
 	opID, err := newOperationID("purge-"+name, request.Generation)
 	if err != nil {
@@ -615,19 +688,41 @@ func (s *Server) purgeState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
 		return
 	}
-	removeErr := docker.RemoveStateVolume(r.Context(), name)
-	_, inspectErr := docker.InspectStateVolume(r.Context(), name)
-	if !errors.Is(inspectErr, ErrNotFound) {
-		if inspectErr == nil {
-			s.recordCompensation(opID, prepared, "state_purge")
-			if removeErr == nil {
-				removeErr = errors.New("state volume remained after Docker reported successful removal")
-			}
-			writeDockerError(w, removeErr)
-		} else {
-			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "state purge result is ambiguous; operation remains prepared")
+	if s.secure.stateBackend != nil {
+		deleteRequest := storagebackend.DeleteVolumeRequest{
+			RequestID: stateBackendRequestID("purge", request.TenantID, request.LineageID, request.Generation),
+			Volume:    qualifiedSpec.Scope(),
 		}
-		return
+		deleted, _, deleteErr := s.secure.stateBackend.DeleteVolume(r.Context(), deleteRequest)
+		if deleteErr != nil {
+			observed, inspectErr := s.secure.stateBackend.InspectVolume(r.Context(), qualifiedSpec.Scope())
+			if inspectErr != nil || observed.State != storagebackend.StateDeleted {
+				if errors.Is(inspectErr, storagebackend.ErrNotFound) {
+					writeStateBackendError(w, deleteErr)
+				} else {
+					writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "state purge result is ambiguous; operation remains prepared")
+				}
+				return
+			}
+		} else if deleted.State != storagebackend.StateDeleted || !qualifiedStateSpecMatches(deleted.Spec, qualifiedSpec) {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "state purge returned an invalid terminal projection; operation remains prepared")
+			return
+		}
+	} else {
+		removeErr := docker.RemoveStateVolume(r.Context(), name)
+		_, inspectErr := docker.InspectStateVolume(r.Context(), name)
+		if !errors.Is(inspectErr, ErrNotFound) {
+			if inspectErr == nil {
+				s.recordCompensation(opID, prepared, "state_purge")
+				if removeErr == nil {
+					removeErr = errors.New("state volume remained after Docker reported successful removal")
+				}
+				writeDockerError(w, removeErr)
+			} else {
+				writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "state purge result is ambiguous; operation remains prepared")
+			}
+			return
+		}
 	}
 	committed := prepared
 	committed.Type, committed.Outcome = evidence.StatePurge, evidence.Committed
@@ -924,7 +1019,7 @@ func (s *Server) provisionSecureWorkload(
 			}
 		}
 	}
-	stateDocker, stateExists, stateErr := s.prepareStateAdmission(r.Context(), workload, effective)
+	statePlan, stateErr := s.prepareStateAdmission(r.Context(), workload, effective)
 	if stateErr != nil {
 		var admissionErr *stateAdmissionError
 		if errors.As(stateErr, &admissionErr) {
@@ -1000,29 +1095,53 @@ func (s *Server) provisionSecureWorkload(
 		return
 	}
 	stateCreated := false
-	if workload.State != nil && !stateExists {
-		spec := StateVolumeSpec{Name: workload.State.VolumeName, TenantID: workload.TenantID, LineageID: effective.Intent.LineageID}
-		if err := stateDocker.CreateStateVolume(r.Context(), spec); err != nil {
-			observedState, inspectErr := stateDocker.InspectStateVolume(r.Context(), spec.Name)
-			if inspectErr != nil || !stateVolumeEqual(observedState, spec) {
-				if errors.Is(inspectErr, ErrNotFound) {
-					s.recordCompensation(opID, prepared, "state_create")
-					writeDockerError(w, err)
-				} else {
-					writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "state creation returned an ambiguous result; operation remains prepared")
+	if statePlan.required && !statePlan.exists {
+		if statePlan.backend != nil {
+			request := storagebackend.CreateVolumeRequest{
+				RequestID: stateBackendRequestID("create", workload.TenantID, effective.Intent.LineageID, statePlan.spec.Generation),
+				Volume:    statePlan.spec,
+			}
+			created, changed, createErr := statePlan.backend.CreateVolume(r.Context(), request)
+			if createErr != nil {
+				observedState, inspectErr := statePlan.backend.InspectVolume(r.Context(), statePlan.spec.Scope())
+				if inspectErr != nil || observedState.Spec != statePlan.spec || observedState.State != storagebackend.StateReady || observedState.DockerVolumeHandle != statePlan.handle {
+					if errors.Is(inspectErr, storagebackend.ErrNotFound) {
+						s.recordCompensation(opID, prepared, "state_create")
+						writeStateBackendError(w, createErr)
+					} else {
+						writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "state creation returned an ambiguous result; operation remains prepared")
+					}
+					return
 				}
+			} else if created.Spec != statePlan.spec || created.State != storagebackend.StateReady || created.DockerVolumeHandle != statePlan.handle {
+				writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "created state volume could not be verified; operation remains prepared")
 				return
 			}
+			stateCreated = changed
+		} else {
+			spec := StateVolumeSpec{Name: workload.State.VolumeName, TenantID: workload.TenantID, LineageID: effective.Intent.LineageID}
+			if err := statePlan.docker.CreateStateVolume(r.Context(), spec); err != nil {
+				observedState, inspectErr := statePlan.docker.InspectStateVolume(r.Context(), spec.Name)
+				if inspectErr != nil || !stateVolumeEqual(observedState, spec) {
+					if errors.Is(inspectErr, ErrNotFound) {
+						s.recordCompensation(opID, prepared, "state_create")
+						writeDockerError(w, err)
+					} else {
+						writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "state creation returned an ambiguous result; operation remains prepared")
+					}
+					return
+				}
+			}
+			observedState, err := statePlan.docker.InspectStateVolume(r.Context(), spec.Name)
+			if err != nil || !stateVolumeEqual(observedState, spec) {
+				writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "created state volume could not be verified; operation remains prepared")
+				return
+			}
+			stateCreated = true
 		}
-		observedState, err := stateDocker.InspectStateVolume(r.Context(), spec.Name)
-		if err != nil || !stateVolumeEqual(observedState, spec) {
-			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "created state volume could not be verified; operation remains prepared")
-			return
-		}
-		stateCreated = true
 	}
 	if err := s.prepareRuntimeTopology(r.Context(), workload); err != nil {
-		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
+		if !s.rollbackSecureProvision(r.Context(), name, statePlan, workload, stateCreated) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "runtime topology preparation failed and rollback is ambiguous; operation remains prepared")
 			return
 		}
@@ -1031,7 +1150,7 @@ func (s *Server) provisionSecureWorkload(
 		return
 	}
 	if err := workload.Validate(); err != nil {
-		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
+		if !s.rollbackSecureProvision(r.Context(), name, statePlan, workload, stateCreated) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "allocated runtime topology was invalid and rollback is ambiguous; operation remains prepared")
 			return
 		}
@@ -1041,7 +1160,7 @@ func (s *Server) provisionSecureWorkload(
 	}
 	if err := s.docker.Create(r.Context(), name, workload); err != nil {
 		if _, inspectErr := s.docker.Inspect(r.Context(), name); errors.Is(inspectErr, ErrNotFound) {
-			if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
+			if !s.rollbackSecureProvision(r.Context(), name, statePlan, workload, stateCreated) {
 				writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "Docker create failed and topology rollback is ambiguous; operation remains prepared")
 				return
 			}
@@ -1053,7 +1172,7 @@ func (s *Server) provisionSecureWorkload(
 		return
 	}
 	if err := s.completeRuntimeTopology(r.Context(), workload); err != nil {
-		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
+		if !s.rollbackSecureProvision(r.Context(), name, statePlan, workload, stateCreated) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "runtime topology completion failed and rollback is ambiguous; operation remains prepared")
 			return
 		}
@@ -1065,7 +1184,7 @@ func (s *Server) provisionSecureWorkload(
 	if err != nil || !observed.Managed || !observed.Hardened ||
 		observed.Fingerprint != workloadFingerprint(workload) ||
 		observed.ImageID != effective.Capsule.Image.ConfigDigest {
-		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
+		if !s.rollbackSecureProvision(r.Context(), name, statePlan, workload, stateCreated) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "rejected workload could not be removed; operation remains prepared")
 			return
 		}
@@ -1075,7 +1194,7 @@ func (s *Server) provisionSecureWorkload(
 	}
 	routePolicyDigest, err := s.gatewayRoutePolicyDigest(r.Context(), workload)
 	if err != nil {
-		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
+		if !s.rollbackSecureProvision(r.Context(), name, statePlan, workload, stateCreated) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "gateway policy inspection failed and workload rollback is ambiguous; operation remains prepared")
 			return
 		}
@@ -1088,7 +1207,7 @@ func (s *Server) provisionSecureWorkload(
 	committed.Outcome = evidence.Committed
 	committed.MetadataHash = routePolicyDigest
 	if _, err := s.secure.evidence.Append(committed); err != nil {
-		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
+		if !s.rollbackSecureProvision(r.Context(), name, statePlan, workload, stateCreated) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "commit receipt failed and workload rollback is ambiguous; operation remains prepared")
 			return
 		}
@@ -1104,7 +1223,7 @@ func (s *Server) provisionSecureWorkload(
 		ImageConfigDigest: effective.Capsule.Image.ConfigDigest,
 		RoutePolicyDigest: routePolicyDigest, Present: true,
 	}, effective.SitePolicy.PolicyEpoch); err != nil {
-		if !s.rollbackSecureProvision(r.Context(), name, stateDocker, workload, stateCreated) {
+		if !s.rollbackSecureProvision(r.Context(), name, statePlan, workload, stateCreated) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "fence commit failed and workload rollback is ambiguous; operation remains prepared")
 			return
 		}
@@ -1192,37 +1311,85 @@ type stateAdmissionError struct {
 
 func (e *stateAdmissionError) Error() string { return e.Message }
 
-func (s *Server) prepareStateAdmission(ctx context.Context, workload Workload, effective admission.EffectiveAdmission) (StateDocker, bool, error) {
+type stateAdmissionPlan struct {
+	required bool
+	exists   bool
+	docker   StateDocker
+	backend  storagebackend.Backend
+	spec     storagebackend.VolumeSpec
+	handle   string
+}
+
+func (s *Server) prepareStateAdmission(ctx context.Context, workload Workload, effective admission.EffectiveAdmission) (stateAdmissionPlan, error) {
 	if workload.State == nil {
-		return nil, false, nil
+		return stateAdmissionPlan{}, nil
+	}
+	if s.secure.stateBackend != nil {
+		spec := s.qualifiedStateSpec(workload.TenantID, effective.Intent.LineageID)
+		observed, err := s.secure.stateBackend.InspectVolume(ctx, spec.Scope())
+		if err == nil && qualifiedStateSpecMatches(observed.Spec, spec) {
+			spec = observed.Spec
+		}
+		planned, planErr := s.secure.stateBackend.PlanVolume(ctx, spec)
+		if planErr != nil {
+			return stateAdmissionPlan{}, planErr
+		}
+		if workload.State.VolumeName != planned.DockerVolumeHandle {
+			return stateAdmissionPlan{}, &stateAdmissionError{http.StatusConflict, "state_drift", "planned state volume does not match the admitted workload"}
+		}
+		plan := stateAdmissionPlan{required: true, backend: s.secure.stateBackend, spec: spec, handle: planned.DockerVolumeHandle}
+		observed, err = plan.backend.InspectVolume(ctx, spec.Scope())
+		if errors.Is(err, storagebackend.ErrNotFound) {
+			if effective.Intent.StateDisposition == "resume" {
+				return stateAdmissionPlan{}, &stateAdmissionError{http.StatusConflict, "state_missing", "resume requires an existing state lineage"}
+			}
+			return plan, nil
+		}
+		if err != nil {
+			return stateAdmissionPlan{}, err
+		}
+		if !qualifiedStateSpecMatches(observed.Spec, spec) || observed.DockerVolumeHandle != plan.handle || observed.State != storagebackend.StateReady {
+			return stateAdmissionPlan{}, &stateAdmissionError{http.StatusConflict, "state_drift", "existing state volume does not match the signed tenant lineage and fixed host quota"}
+		}
+		if effective.Intent.StateDisposition == "new" && s.lineageHasCommittedFence(workload.TenantID, effective.Intent.LineageID) {
+			return stateAdmissionPlan{}, &stateAdmissionError{http.StatusConflict, "state_exists", "new state disposition refuses an existing committed lineage; use resume"}
+		}
+		plan.exists = true
+		return plan, nil
 	}
 	docker, ok := s.docker.(StateDocker)
 	if !ok {
-		return nil, false, &stateAdmissionError{http.StatusNotImplemented, "capability_unavailable", "persistent state is unavailable with this Docker backend"}
+		return stateAdmissionPlan{}, &stateAdmissionError{http.StatusNotImplemented, "capability_unavailable", "persistent state is unavailable with this Docker backend"}
 	}
 	want := StateVolumeSpec{Name: workload.State.VolumeName, TenantID: workload.TenantID, LineageID: effective.Intent.LineageID}
 	observed, err := docker.InspectStateVolume(ctx, want.Name)
 	if errors.Is(err, ErrNotFound) {
 		if effective.Intent.StateDisposition == "resume" {
-			return nil, false, &stateAdmissionError{http.StatusConflict, "state_missing", "resume requires an existing state lineage"}
+			return stateAdmissionPlan{}, &stateAdmissionError{http.StatusConflict, "state_missing", "resume requires an existing state lineage"}
 		}
-		return docker, false, nil
+		return stateAdmissionPlan{required: true, docker: docker, handle: want.Name}, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return stateAdmissionPlan{}, err
 	}
 	if !stateVolumeEqual(observed, want) {
-		return nil, false, &stateAdmissionError{http.StatusConflict, "state_drift", "existing state volume does not match the signed tenant lineage"}
+		return stateAdmissionPlan{}, &stateAdmissionError{http.StatusConflict, "state_drift", "existing state volume does not match the signed tenant lineage"}
 	}
 	if effective.Intent.StateDisposition == "new" {
-		return nil, false, &stateAdmissionError{http.StatusConflict, "state_exists", "new state disposition refuses an existing lineage; use resume"}
+		return stateAdmissionPlan{}, &stateAdmissionError{http.StatusConflict, "state_exists", "new state disposition refuses an existing lineage; use resume"}
 	}
-	return docker, true, nil
+	return stateAdmissionPlan{required: true, exists: true, docker: docker, handle: want.Name}, nil
 }
 
 func (s *Server) stateVolumeMatches(ctx context.Context, workload Workload, lineageID string) bool {
 	if workload.State == nil {
 		return true
+	}
+	if s.secure.stateBackend != nil {
+		spec := s.qualifiedStateSpec(workload.TenantID, lineageID)
+		observed, err := s.secure.stateBackend.InspectVolume(ctx, spec.Scope())
+		return err == nil && qualifiedStateSpecMatches(observed.Spec, spec) && observed.State == storagebackend.StateReady &&
+			observed.DockerVolumeHandle == workload.State.VolumeName
 	}
 	docker, ok := s.docker.(StateDocker)
 	if !ok {
@@ -1238,17 +1405,67 @@ func stateVolumeEqual(observed ObservedStateVolume, want StateVolumeSpec) bool {
 	return observed.Managed && observed.StateVolumeSpec == want
 }
 
-func (s *Server) rollbackSecureProvision(ctx context.Context, name string, stateDocker StateDocker, workload Workload, stateCreated bool) bool {
+func (s *Server) rollbackSecureProvision(ctx context.Context, name string, statePlan stateAdmissionPlan, workload Workload, stateCreated bool) bool {
 	if !s.removeAndConfirmAbsent(ctx, name) {
 		return false
 	}
 	if !s.removeRuntimeTopology(ctx, workload) {
 		return false
 	}
-	if stateCreated && !removeAndConfirmStateAbsent(ctx, stateDocker, workload.State.VolumeName) {
+	// A newly created quota volume is recoverable lineage state, not ephemeral
+	// topology. Retain it across later-stage failure so an exact admission retry
+	// can continue without destroying data after an uncertain container result.
+	if stateCreated && statePlan.backend == nil && !removeAndConfirmStateAbsent(ctx, statePlan.docker, workload.State.VolumeName) {
 		return false
 	}
 	return true
+}
+
+func (s *Server) qualifiedStateSpec(tenantID, lineageID string) storagebackend.VolumeSpec {
+	return storagebackend.VolumeSpec{
+		VolumeID: stateBackendVolumeID(tenantID, lineageID), TenantID: tenantID, LineageID: lineageID,
+		Generation: 1, ByteLimit: s.secure.stateByteLimit, ObjectLimit: s.secure.stateObjectLimit,
+	}
+}
+
+// qualifiedStateSpecMatches treats the immutable parent snapshot as retained
+// provenance rather than caller-selected policy. Executor still requires the
+// exact derived scope and fixed host quotas on every inspection.
+func qualifiedStateSpecMatches(observed, expected storagebackend.VolumeSpec) bool {
+	if observed.Validate() != nil || expected.Validate() != nil {
+		return false
+	}
+	if expected.ParentSnapshotID != "" && observed.ParentSnapshotID != expected.ParentSnapshotID {
+		return false
+	}
+	parent := observed.ParentSnapshotID
+	observed.ParentSnapshotID = ""
+	expected.ParentSnapshotID = ""
+	return observed == expected && (parent == "" || len(parent) <= storagebackend.MaxIdentifierBytes)
+}
+
+func (s *Server) lineageHasCommittedFence(tenantID, lineageID string) bool {
+	for _, record := range s.secure.fences.Records() {
+		if record.TenantID == tenantID && record.LineageID == lineageID {
+			return true
+		}
+	}
+	return false
+}
+
+func stateBackendVolumeID(tenantID, lineageID string) string {
+	digest := sha256.Sum256([]byte(tenantID + "\x00" + lineageID))
+	return "state-" + hex.EncodeToString(digest[:])
+}
+
+func stateBackendRequestID(action, tenantID, lineageID string, generation uint64) string {
+	digest := sha256.Sum256([]byte(action + "\x00" + tenantID + "\x00" + lineageID + "\x00" + fmt.Sprint(generation)))
+	return action + "-" + hex.EncodeToString(digest[:])
+}
+
+func implementsStateDocker(value Docker) bool {
+	_, ok := value.(StateDocker)
+	return ok
 }
 
 func removeAndConfirmStateAbsent(ctx context.Context, docker StateDocker, name string) bool {
@@ -2249,6 +2466,24 @@ func writeDockerError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusBadGateway, "docker_error", fmt.Sprintf("Docker operation failed: %v", err))
+}
+func writeStateBackendError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, storagebackend.ErrInvalid):
+		writeError(w, http.StatusBadRequest, "invalid_state", "persistent state request is invalid")
+	case errors.Is(err, storagebackend.ErrNotFound):
+		writeError(w, http.StatusNotFound, "state_not_found", "persistent state lineage was not found")
+	case errors.Is(err, storagebackend.ErrConflict):
+		writeError(w, http.StatusConflict, "state_drift", "persistent state conflicts with retained backend identity")
+	case errors.Is(err, storagebackend.ErrInUse):
+		writeError(w, http.StatusConflict, "state_in_use", "persistent state is still referenced")
+	case errors.Is(err, storagebackend.ErrCapacity):
+		writeError(w, http.StatusInsufficientStorage, "state_capacity_exceeded", "persistent state capacity is exhausted")
+	case errors.Is(err, storagebackend.ErrUnsupported):
+		writeError(w, http.StatusNotImplemented, "capability_unavailable", "persistent state operation is unsupported")
+	default:
+		writeError(w, http.StatusServiceUnavailable, "state_backend_unavailable", "persistent state backend is unavailable")
+	}
 }
 func writeCreateError(w http.ResponseWriter, err error) {
 	if errors.Is(err, ErrNotFound) {

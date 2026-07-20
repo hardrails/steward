@@ -61,9 +61,37 @@ sudo -H stewardctl node maintenance status
 
 `node whoami` returns the credential ID and role without exposing its value. Use
 `/etc/steward/executor-operator-token` for lifecycle or maintenance changes. Use
-the host-admin `/etc/steward/executor-token` only for admission or state purge.
+the host-admin `/etc/steward/executor-token` only for admission, state snapshots,
+state clones, or state purge.
 These roles are host-wide API limits, not tenant
 identities.
+
+After a stateful source is destroyed, host administrators can drive the same
+bounded Executor contracts used by signed uplink commands:
+
+```console
+sudo -H stewardctl node snapshot-state \
+  -tenant-id tenant-a -node-id node-a \
+  -instance-id source -lineage-id source-lineage -generation 1 \
+  -snapshot-id checkpoint-a
+
+sudo -H stewardctl node clone-state \
+  -tenant-id tenant-a -node-id node-a \
+  -instance-id fork -lineage-id fork-lineage -generation 1 \
+  -snapshot-id checkpoint-a -source-lineage-id source-lineage
+```
+
+These direct commands require the explicitly enabled host-administrator intent
+compatibility mode. Shared multi-tenant production should deliver the equivalent
+tenant-signed `snapshot-state`, `clone-state`, and `delete-snapshot` commands through
+the uplink. Purge every clone lineage before deleting its source snapshot:
+
+```console
+sudo -H stewardctl node delete-snapshot \
+  -tenant-id tenant-a -node-id node-a \
+  -instance-id source -lineage-id source-lineage -generation 1 \
+  -snapshot-id checkpoint-a
+```
 
 The loopback URL defaults to `http://127.0.0.1:8090` when
 `-node-token-file` is present. Set `-node-url` only when the packaged loopback port

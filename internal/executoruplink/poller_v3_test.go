@@ -435,6 +435,7 @@ func (f *v3Fixture) config(server *httptest.Server, local http.Handler) Config {
 		SecureExecutor: true, SecureNodeID: "node-1", ProtectedTransport: true,
 		CommandPolicy: &f.policy, Now: func() time.Time { return f.now },
 		ProtocolVersion: controlprotocol.ExecutorProtocolV3, DeliveryState: f.deliveryStore,
+		StateSnapshots: true,
 	}
 }
 
@@ -457,7 +458,8 @@ func assertPollV3(t *testing.T, request *http.Request) {
 	if err := dsse.DecodeStrictInto(raw, maxWireBytes, &poll); err != nil ||
 		poll.ProtocolVersion != controlprotocol.ExecutorProtocolV3 || poll.NodeID != "node-1" ||
 		!slices.Contains(poll.Capabilities, controlprotocol.ExecutorCapabilityAuthorizedEffectsV1) ||
-		!slices.Contains(poll.Capabilities, controlprotocol.ExecutorCapabilityContextLockedEffectsV1) {
+		!slices.Contains(poll.Capabilities, controlprotocol.ExecutorCapabilityContextLockedEffectsV1) ||
+		!slices.Contains(poll.Capabilities, controlprotocol.ExecutorCapabilityStateSnapshotsV1) {
 		t.Fatalf("poll=%#v raw=%s err=%v", poll, raw, err)
 	}
 }

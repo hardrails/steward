@@ -1,0 +1,50 @@
+[Unit]
+Description=Steward quota-enforced OpenZFS storage worker
+Documentation=https://github.com/hardrails/steward
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/etc/steward/storage-zfs.json
+ConditionPathExists=/etc/steward/storage-zfs-token
+
+[Service]
+Type=notify
+NotifyAccess=main
+# This separate process holds only the host authority needed to manage the
+# operator-selected ZFS subtree and its exact Docker bind volumes. The Executor
+# remains an unprivileged process and reaches this worker through a protected
+# Unix socket.
+User=root
+Group=steward-executor
+UMask=0007
+ExecStart=/usr/local/bin/steward-storage-zfs -config=/etc/steward/storage-zfs.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+TimeoutStartSec=3min
+RuntimeDirectory=steward-storage-zfs
+RuntimeDirectoryMode=0750
+StateDirectory=steward-state
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/steward-state
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

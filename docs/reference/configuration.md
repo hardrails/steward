@@ -278,6 +278,10 @@ outbound-only deployment.
 | `-max-tenant-pids` | `512` | Aggregate process reservation for one tenant |
 | `-node-labels` | empty | Comma-separated scheduling labels such as `region=west,accelerator=gpu` |
 | `-node-taints` | empty | Comma-separated scheduling taints; a delegated workload must tolerate every taint |
+| `-state-backend-socket` | empty | Unix socket for a quota-enforced storage worker; requires the token file and complete signed admission |
+| `-state-backend-token-file` | empty | Owner-only bearer token shared by Executor and the storage worker |
+| `-state-volume-byte-limit` | `10737418240` | Hard byte limit for each qualified state lineage |
+| `-state-volume-object-limit` | `1000000` | Hard filesystem-object limit for each qualified state lineage |
 | `-allow-unquotaed-state-on-dedicated-host` | `false` | With complete signed admission and exactly one policy tenant, allow persistent local Docker volumes without hard byte or inode quotas |
 | `-admission-policy-file` | empty | Signed site-policy DSSE; enables signed admission |
 | `-admission-site-root-public-key-file` | empty | Base64 Ed25519 site-root public key |
@@ -285,7 +289,7 @@ outbound-only deployment.
 | `-admission-node-id` | empty | Stable node ID bound into intents and receipts |
 | `-admission-fence-file` | `/var/lib/steward-executor/admission-fences.bin` | Highest accepted policy/generation snapshot; capped at 4 MiB and 65,535 records |
 | `-initialize-admission-fence` | `false` | Exclusively create the empty fence and exit; normal startup never recreates it |
-| `-admission-allow-host-admin-intent` | `false` | Dedicated-host compatibility: let the host-admin local credential select an intent tenant and authorize signed lifecycle, activation-canary preflight, and activation-checkpoint calls; the credential is host authority, not tenant authentication |
+| `-admission-allow-host-admin-intent` | `false` | Dedicated-host compatibility: let the host-admin local credential select an intent tenant and authorize signed lifecycle, state snapshot/clone, activation-canary preflight, and activation-checkpoint calls; the credential is host authority, not tenant authentication |
 | `-admission-journal-file` | `/var/lib/steward-executor/operation-journal.bin` | Append-only host-mutation journal; capped at 16 MiB |
 | `-admission-evidence-file` | `/var/lib/steward-executor/evidence.bin` | Append-only signed receipt chain; capped at 64 MiB |
 | `-admission-evidence-key-file` | empty | Owner-only PKCS#8 Ed25519 receipt private key |
@@ -317,7 +321,7 @@ admission.
 | --- | --- |
 | `observer` | Local identity, readiness, maintenance status, workload status, bounded logs, and egress statistics |
 | `operator` | Everything an observer can call, plus start, stop, destroy, and maintenance enter or exit |
-| `host-admin` | Every local endpoint, including admission, legacy provisioning, state purge, activation preflight, and activation checkpoints |
+| `host-admin` | Every local endpoint, including admission, legacy provisioning, state snapshot/clone/delete/purge, activation preflight, and activation checkpoints |
 
 Fresh packaged configuration creates owner-only files at
 `/etc/steward/executor-observer-token`,
@@ -353,7 +357,7 @@ admission, matching node IDs, verified HTTPS, and verified policy containing at
 least one `site_cleanup_command_keys` entry. Every DSSE (Dead Simple Signing
 Envelope) `steward.executor-command.v2` statement binds a typed payload to a
 signature from either an authorized tenant-operation key or a site cleanup key for
-`stop`, `destroy`, or `purge`. Cleanup keys cannot authorize
+`stop`, `destroy`, `purge`, or `delete-snapshot`. Cleanup keys cannot authorize
 `admit`, `renew`, `start`, or `read`, or share tenant-key IDs. They remain usable after a
 tenant rule is removed, preventing stranded workloads. An emergency policy may have
 cleanup keys and no tenant rules. The bearer credential cannot select a tenant. See
@@ -421,15 +425,48 @@ task input, inference, local files or memory, generic egress, browser sessions, 
 other unmanaged observations. Context-required grants do not accept exact-effect
 bundles.
 
-The installer, `configure-node`, and `configure-admission` accept
+For a shared host, set all four `EXECUTOR_STATE_BACKEND_*` and
+`EXECUTOR_STATE_VOLUME_*` values in `/etc/steward/executor.env`. The worker token
+must be owned by `steward-executor` with mode `0600`; the root worker can read that
+file without widening its permissions. Start `steward-storage-zfs` before Executor.
+See [Configure quota-enforced persistent state]({{ '/guides/persistent-state/' |
+relative_url }}).
+
+The installer, `configure-node`, and `configure-admission` also accept
 `--allow-unquotaed-state-on-dedicated-host`. The non-interactive installer also
 accepts `STEWARD_ALLOW_UNQUOTAED_STATE_ON_DEDICATED_HOST=true`. These interfaces
 map `EXECUTOR_STATE_ARG` to the dedicated-host state flag and run node preflight
 before committing the configuration. Preflight accepts the flag only with complete
 signed admission and a verified policy containing exactly one tenant. Omit it on a
 shared host. The packaged aggregate settings reserve memory, CPU, and PIDs for the
-host and each tenant, including fixed relay overhead. They do not cap disk bytes,
-inodes, or I/O bandwidth.
+host and each tenant, including fixed relay overhead. The OpenZFS worker caps state
+bytes and objects per lineage; Control does not yet schedule those storage
+reservations across a fleet, and Steward does not cap I/O bandwidth.
+
+## OpenZFS storage worker configuration
+
+`steward-storage-zfs` reads strict JSON from
+`/etc/steward/storage-zfs.json`. The package ships
+`deploy/config/storage-zfs.json.in` as a template but does not select a pool or
+enable the worker automatically.
+
+| Field | Purpose |
+| --- | --- |
+| `schema` | Must be `steward.storage-zfs.config.v1` |
+| `socket` | Protected Unix socket used by Executor |
+| `token_file` | Bearer token file; the packaged path is `/etc/steward/storage-zfs-token` |
+| `dataset_root` | Existing operator-selected ZFS parent reserved for Steward |
+| `mount_root` | Fixed parent for worker-created dataset mount points |
+| `docker_socket` | Docker Engine Unix socket used only for exact volume operations |
+| `zfs_binary` | Clean absolute path to the OpenZFS CLI |
+
+`-check-config` validates the strict file, token, paths, Docker client construction,
+and ZFS executable without changing the pool. `-check-backend` additionally runs a
+bounded destructive scratch test of quota exhaustion, snapshots, clones, Docker
+bindings, and cleanup. Normal startup runs the same conformance test before it
+signals systemd readiness and serves the authenticated storage protocol. The worker
+verifies the existing parent dataset, creates only its fixed `volumes` and
+`tombstones` children, and never imports or creates a pool.
 
 `/etc/steward/executor-gateway.env` is either the empty packaged default or a
 symbolic link that selects a root-owned relay binding under

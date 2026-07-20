@@ -153,6 +153,7 @@ jobs:
           go build -o "$stage/steward-mcp" ./cmd/steward-mcp
           go build -o "$stage/steward-gateway" ./cmd/steward-gateway
           go build -o "$stage/steward-relay" ./cmd/steward-relay
+          go build -o "$stage/steward-storage-zfs" ./cmd/steward-storage-zfs
           cp -R adapters/hermes-agent adapters/openclaw "$stage/adapters/"
           cp -R examples schemas "$stage/"
           cp -R deploy/config deploy/systemd "$stage/deploy/"
@@ -182,15 +183,19 @@ jobs:
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' "$stage/release.json"
           grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 7, "write": 7},' "$stage/release.json"
           grep -Fxq '    "uplink_delivery_state": {"read_min": 2, "read_max": 4, "write": 4},' "$stage/release.json"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 66
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' "$stage/release.json" | grep -c '^    "')" -eq 69
           grep -Fxq 'EXECUTOR_UPLINK_DELIVERY_STATE_FILE=' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_UPLINK_PROTOCOL_VERSION=0' "$stage/deploy/config/executor.env"
           grep -Fxq 'EXECUTOR_EVIDENCE_UPLINK_ENABLED=false' "$stage/deploy/config/executor.env"
+          grep -Fxq 'EXECUTOR_STATE_BACKEND_SOCKET=' "$stage/deploy/config/executor.env"
+          grep -Fxq 'EXECUTOR_STATE_VOLUME_BYTE_LIMIT=10737418240' "$stage/deploy/config/executor.env"
           grep -Fq -- '-uplink-delivery-state-file=${EXECUTOR_UPLINK_DELIVERY_STATE_FILE}' \
             "$stage/deploy/systemd/steward-executor.service"
           grep -Fq -- '-uplink-protocol-version=${EXECUTOR_UPLINK_PROTOCOL_VERSION}' \
             "$stage/deploy/systemd/steward-executor.service"
           grep -Fq -- '-evidence-uplink=${EXECUTOR_EVIDENCE_UPLINK_ENABLED}' \
+            "$stage/deploy/systemd/steward-executor.service"
+          grep -Fq -- '-state-backend-socket=${EXECUTOR_STATE_BACKEND_SOCKET}' \
             "$stage/deploy/systemd/steward-executor.service"
           grep -Fq -- '-uplink-delivery-state-file "${executor[EXECUTOR_UPLINK_DELIVERY_STATE_FILE]:-}"' \
             "$stage/scripts/node-preflight.sh"

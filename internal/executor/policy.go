@@ -268,7 +268,7 @@ func (w Workload) Validate() error {
 		return &PolicyError{"egress allowlists require the tenant egress proxy and are not enabled"}
 	}
 	if w.State != nil {
-		if !strings.HasPrefix(w.State.VolumeName, "steward-state-") || len(w.State.VolumeName) != len("steward-state-")+64 ||
+		if !validStateVolumeHandle(w.State.VolumeName) ||
 			w.State.Path != profileLayoutFor(w.ProfileID).StatePath {
 			return &PolicyError{"internal state mount is invalid"}
 		}
@@ -321,6 +321,20 @@ func (w Workload) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validStateVolumeHandle(value string) bool {
+	if len(value) < 2 || len(value) > 256 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' ||
+			char == '.' || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validRuntimeEffectAuthority(

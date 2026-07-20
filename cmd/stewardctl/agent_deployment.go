@@ -58,6 +58,8 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 	generation := flags.Uint64("generation", 0, "desired generation; inferred when omitted")
 	revision := flags.Uint64("revision", 0, "last observed revision; fetched when omitted")
 	maxUnavailable := flags.Int("max-unavailable", -1, "maximum replicas a node drain may move at once (default 1)")
+	forkPlanPath := flags.String("fork-plan", "", "fork plan from stewardctl agent fork")
+	forkSourceNode := flags.String("source-node", "", "node that retains the fork snapshot")
 	if err := flags.Parse(hydrated); err != nil {
 		return err
 	}
@@ -66,6 +68,9 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 	}
 	if *maxUnavailable < -1 {
 		return errors.New("agent deployment apply requires max-unavailable to be zero or greater")
+	}
+	if (*forkPlanPath == "") != (*forkSourceNode == "") {
+		return errors.New("agent deployment apply requires fork-plan and source-node together")
 	}
 	bundleRaw, err := readCLIArtifact(*bundlePath)
 	if err != nil {
@@ -78,6 +83,25 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 	bundleDigest, err := agentapp.DigestJSON(bundle)
 	if err != nil {
 		return err
+	}
+	var fork *controlstore.DeploymentFork
+	var forkPlan agentapp.ForkPlan
+	if *forkPlanPath != "" {
+		forkRaw, readErr := readCLIArtifact(*forkPlanPath)
+		if readErr != nil {
+			return fmt.Errorf("read fork plan: %w", readErr)
+		}
+		forkPlan, err = agentapp.DecodeForkPlan(forkRaw)
+		if err != nil {
+			return err
+		}
+		if forkPlan.BundleDigest != bundleDigest {
+			return errors.New("fork plan does not bind the selected agent bundle")
+		}
+		fork = &controlstore.DeploymentFork{
+			SnapshotID: forkPlan.SnapshotID, SourceLineageID: forkPlan.SourceLineageID,
+			SourceNodeID: *forkSourceNode, ExpiresAt: forkPlan.ExpiresAt,
+		}
 	}
 	deploymentID := bundle.Definition.Name
 	if leadingName != "" {
@@ -101,6 +125,14 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 		delegation.Admission.CapsuleDigest != dsse.Digest(capsuleRaw) ||
 		!deploymentLifecycleGranted(delegation.Operations) {
 		return errors.New("controller delegation does not bind this tenant, capsule, and complete agent lifecycle")
+	}
+	if fork != nil && (len(delegation.Instances) != 1 ||
+		delegation.Instances[0].InstanceID != forkPlan.InstanceID ||
+		delegation.Instances[0].LineageID != forkPlan.LineageID ||
+		forkPlan.Generation < delegation.Instances[0].MinInstanceGeneration ||
+		forkPlan.Generation > delegation.Instances[0].MaxInstanceGeneration ||
+		!slices.Contains(delegation.Operations, "clone-state") || !slices.Contains(delegation.Operations, "purge")) {
+		return errors.New("controller delegation does not grant the exact fork identity and cleanup lifecycle")
 	}
 	if envelope, err := dsse.Parse(capsuleRaw); err != nil || envelope.PayloadType != admission.CapsulePayloadType {
 		return errors.New("workload capsule is not a Steward capsule envelope")
@@ -144,6 +176,7 @@ func agentDeploymentApply(arguments []string, stdout io.Writer) error {
 		AgentName: bundle.Definition.Name, BundleDigest: bundleDigest,
 		CapsuleDSSE: capsuleRaw, DelegationDSSE: delegationRaw,
 		DisruptionBudget: &disruptionBudget,
+		Fork:             fork,
 	})
 	if err != nil {
 		return err

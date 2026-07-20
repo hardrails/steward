@@ -1037,13 +1037,17 @@ with that backup.
 
 ## Current limits
 
-The controller includes a bounded React operator console and narrow deterministic
-desired-state placement onto recently observed nodes. Blocked deployments expose
-stable reason codes and resume after their condition is repaired. The controller
-intentionally has no enterprise single sign-on, business approval workflow, disk
-or persistent-state quota backend, autoscaling, preemption, progressive rollout,
-multi-controller high availability, or external database adapter. Its job is a small reliable path from bounded tenant authority to a node
-that independently verifies it, not general cluster orchestration.
+The controller includes a bounded React operator console, deterministic placement,
+resource reservations, disruption-budgeted rollouts, and node-local snapshot
+forks. Blocked deployments expose stable reason codes and resume after their
+condition is repaired. A temporary fork is pinned to its snapshot node and follows
+the signed clone, admit, run, stop, destroy, and purge lifecycle automatically.
+
+The controller intentionally has no enterprise single sign-on, business approval
+workflow, autoscaling, preemption, multi-controller high availability, external
+database adapter, or cross-node state replication. Its job is a small reliable
+path from bounded tenant authority to a node that independently verifies it, not
+general cluster orchestration.
 
 Default retained-capacity ceilings include 256 tenants, 4,096 nodes, 16,384
 credentials, 4,096 enrollment capabilities, 16,384 commands, and 1,024 desired

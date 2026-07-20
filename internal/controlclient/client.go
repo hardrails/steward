@@ -187,6 +187,7 @@ type DeploymentApply struct {
 	CapsuleDSSE      []byte
 	DelegationDSSE   []byte
 	DisruptionBudget *controlstore.DeploymentDisruptionBudget
+	Fork             *controlstore.DeploymentFork
 }
 
 type Deployment struct {
@@ -208,6 +209,7 @@ type Deployment struct {
 	Phase               controlstore.DeploymentPhase            `json:"phase"`
 	Instances           []controlstore.DeploymentInstance       `json:"instances"`
 	Rollout             *DeploymentRollout                      `json:"rollout,omitempty"`
+	Fork                *controlstore.DeploymentFork            `json:"fork,omitempty"`
 	CreatedAt           string                                  `json:"created_at"`
 	UpdatedAt           string                                  `json:"updated_at"`
 }
@@ -401,12 +403,14 @@ func (c *Client) ApplyDeployment(
 		CapsuleDSSEBase64    string                                   `json:"capsule_dsse_base64"`
 		DelegationDSSEBase64 string                                   `json:"delegation_dsse_base64"`
 		DisruptionBudget     *controlstore.DeploymentDisruptionBudget `json:"disruption_budget,omitempty"`
+		Fork                 *controlstore.DeploymentFork             `json:"fork,omitempty"`
 	}{
 		Generation: input.Generation, ExpectedRevision: input.ExpectedRevision,
 		AgentName: input.AgentName, BundleDigest: input.BundleDigest,
 		CapsuleDSSEBase64:    base64.StdEncoding.EncodeToString(input.CapsuleDSSE),
 		DelegationDSSEBase64: base64.StdEncoding.EncodeToString(input.DelegationDSSE),
 		DisruptionBudget:     input.DisruptionBudget,
+		Fork:                 input.Fork,
 	}, &deployment, true)
 	if err != nil {
 		return Deployment{}, err
@@ -426,7 +430,17 @@ func (c *Client) ApplyDeployment(
 	if deployment.DisruptionBudget != expectedBudget {
 		return Deployment{}, errors.New("control deployment response changed the requested disruption budget")
 	}
+	if !deploymentForkResponseEqual(deployment.Fork, input.Fork) {
+		return Deployment{}, errors.New("control deployment response changed the requested fork")
+	}
 	return deployment, nil
+}
+
+func deploymentForkResponseEqual(left, right *controlstore.DeploymentFork) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func (c *Client) GetDeployment(ctx context.Context, tenantID, deploymentID string) (Deployment, error) {
@@ -1384,12 +1398,44 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 				return errors.New("control deployment response admission projection is invalid")
 			}
 		}
+		switch instance.Phase {
+		case controlstore.DeploymentInstancePending, controlstore.DeploymentInstanceCloning,
+			controlstore.DeploymentInstanceCloned, controlstore.DeploymentInstanceAdmitting,
+			controlstore.DeploymentInstanceStarting, controlstore.DeploymentInstanceRunning,
+			controlstore.DeploymentInstanceStopping, controlstore.DeploymentInstanceDestroying,
+			controlstore.DeploymentInstancePurging, controlstore.DeploymentInstanceRemoved,
+			controlstore.DeploymentInstanceFailed:
+		default:
+			return errors.New("control deployment response instance phase is invalid")
+		}
 	}
 	created, createdErr := time.Parse(time.RFC3339Nano, deployment.CreatedAt)
 	updated, updatedErr := time.Parse(time.RFC3339Nano, deployment.UpdatedAt)
 	expires, expiresErr := time.Parse(time.RFC3339Nano, deployment.DelegationExpiresAt)
 	if createdErr != nil || updatedErr != nil || expiresErr != nil || updated.Before(created) || !expires.After(created) {
 		return errors.New("control deployment response timestamps are invalid")
+	}
+	if deployment.Fork != nil {
+		fork := deployment.Fork
+		sourceAllowed := false
+		for _, nodeID := range deployment.AllowedNodeIDs {
+			if nodeID == fork.SourceNodeID {
+				sourceAllowed = true
+			}
+		}
+		if len(deployment.Instances) != 1 || !validEvidenceRouteIdentity(fork.SnapshotID, 128) ||
+			!validEvidenceRouteIdentity(fork.SourceLineageID, 256) ||
+			!validEvidenceRouteIdentity(fork.SourceNodeID, 128) || !sourceAllowed ||
+			fork.SourceLineageID == deployment.Instances[0].LineageID || deployment.Rollout != nil {
+			return errors.New("control deployment response fork is invalid")
+		}
+		if fork.ExpiresAt != "" {
+			forkExpiry, err := time.Parse(time.RFC3339Nano, fork.ExpiresAt)
+			if err != nil || !forkExpiry.After(created) || forkExpiry.After(created.Add(30*24*time.Hour)) ||
+				forkExpiry.Add(controlstore.MinDeploymentForkCleanupWindow).After(expires) {
+				return errors.New("control deployment response fork expiry is invalid")
+			}
+		}
 	}
 	if deployment.DesiredState != controlstore.DeploymentRunning &&
 		deployment.DesiredState != controlstore.DeploymentAbsent {

@@ -973,6 +973,68 @@ func TestDeploymentStoreOperationsStopAfterClose(t *testing.T) {
 	}
 }
 
+func TestDeploymentForkExpiryGuardsStaleOrInapplicableReconciliation(t *testing.T) {
+	if _, _, err := (*Store)(nil).ExpireDeploymentFork("tenant-a", "deployment-a", 1, time.Now()); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil store expiry error = %v", err)
+	}
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	created, _, err := fixture.store.ApplyDeployment(
+		fixture.admin, deploymentApplyFixture(t, fixture.now, "deployment-a", 1), fixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		tenant, deployment string
+		revision           uint64
+		now                time.Time
+		want               error
+	}{
+		{"", "deployment-a", created.Revision, fixture.now, ErrInvalid},
+		{"tenant-a", "deployment-a", 0, fixture.now, ErrInvalid},
+		{"tenant-a", "missing", created.Revision, fixture.now, ErrNotFound},
+		{"tenant-a", "deployment-a", created.Revision + 1, fixture.now, ErrConflict},
+	} {
+		if _, _, err := fixture.store.ExpireDeploymentFork(test.tenant, test.deployment, test.revision, test.now); !errors.Is(err, test.want) {
+			t.Fatalf("expire (%q, %q, %d) error=%v want=%v", test.tenant, test.deployment, test.revision, err, test.want)
+		}
+	}
+	unchanged, changed, err := fixture.store.ExpireDeploymentFork(
+		"tenant-a", "deployment-a", created.Revision, fixture.now.Add(time.Minute),
+	)
+	if err != nil || changed || unchanged.Revision != created.Revision {
+		t.Fatalf("non-fork expiry = (%+v, %v, %v)", unchanged, changed, err)
+	}
+
+	fixture.store.mu.Lock()
+	deployment := fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")]
+	deployment.Fork = &DeploymentFork{
+		SnapshotID: "snapshot-a", SourceLineageID: "source-lineage", SourceNodeID: "node-1",
+		ExpiresAt: fixture.now.Add(time.Hour).Format(time.RFC3339Nano),
+	}
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = deployment
+	fixture.store.mu.Unlock()
+	unchanged, changed, err = fixture.store.ExpireDeploymentFork(
+		"tenant-a", "deployment-a", created.Revision, fixture.now.Add(30*time.Minute),
+	)
+	if err != nil || changed || unchanged.DesiredState != DeploymentRunning {
+		t.Fatalf("early fork expiry = (%+v, %v, %v)", unchanged, changed, err)
+	}
+	fixture.store.mu.Lock()
+	deployment = fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")]
+	deployment.Revision = ^uint64(0)
+	deployment.Fork.ExpiresAt = fixture.now.Add(-time.Minute).Format(time.RFC3339Nano)
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = deployment
+	fixture.store.mu.Unlock()
+	if _, _, err := fixture.store.ExpireDeploymentFork(
+		"tenant-a", "deployment-a", ^uint64(0), fixture.now,
+	); !errors.Is(err, ErrCapacityExceeded) {
+		t.Fatalf("exhausted fork revision error = %v", err)
+	}
+}
+
 func deploymentApplyFixture(t *testing.T, now time.Time, deploymentID string, generation uint64) DeploymentApply {
 	return deploymentApplyFixtureWithInstanceCount(t, now, deploymentID, generation, 2)
 }

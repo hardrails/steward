@@ -446,9 +446,41 @@ stewardctl agent fork \
 ```
 
 Steward generates a new instance ID and lineage ID. The default expiry action is
-`destroy`. A fork never copies credentials, permits, runtime identity, receipt
-keys, active network connections, or process memory. Storage cloning and the
-subsequent signed admission remain explicit provider and Executor operations.
+`destroy`; it is the only supported expiry action. A fork never copies credentials, permits, runtime identity, receipt
+keys, active network connections, or process memory. The qualified Linux storage
+worker performs the actual immutable snapshot and copy-on-write clone through
+Executor's signed `snapshot-state` and `clone-state` commands. Create the snapshot
+after destroying the source workload. Then apply the fork as durable desired state:
+
+```console
+stewardctl agent deployment apply forked-auditor \
+  -tenant acme \
+  -bundle agent.bundle.json \
+  -capsule capsule.dsse.json \
+  -delegation delegation.dsse.json \
+  -fork-plan fork.json \
+  -source-node node-1
+```
+
+The delegation must name the fork plan's single instance and lineage, grant
+`clone-state`, `admit`, `renew`, `start`, `stop`, `destroy`, and `purge`, and use
+`state_disposition: resume`. It must remain valid for at least four hours after a
+temporary fork expires so cleanup retains authority.
+
+Control pins the fork to the node that holds the snapshot, clones before admission,
+and starts the agent through the normal signed lifecycle. At expiry it changes the
+deployment to absent, stops and destroys the runtime, and purges the clone. A crash
+after clone but before admission also converges to purge when the fork is removed or
+expires. The snapshot remains until every dependent clone is purged; then use
+`delete-snapshot` to release its retained capacity. Steward does not yet replicate
+snapshots between nodes, so an unavailable source node blocks start and cleanup
+instead of silently placing the fork elsewhere.
+
+The snapshot JSON consumed by `agent fork` is the portable compatibility record:
+it binds the backend's returned `content_digest` to the exact agent bundle and
+runtime engine. It contains no storage path or credential. See
+[Persistent state]({{ '/guides/persistent-state/' | relative_url }}) for the
+enforced node workflow and failure behavior.
 
 ## What this surface does not do
 

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -155,6 +156,103 @@ func TestReconcilerConvergesLifecycleWithoutDuplicateEffectAcrossRestart(t *test
 	recreated := getControlDeployment(t, fixture)
 	if recreated.Generation != 2 || recreated.Phase != controlstore.DeploymentPending || recreated.Rollout != nil {
 		t.Fatalf("removed deployment was not reusable: %+v", recreated)
+	}
+}
+
+func TestReconcilerRunsAndExpiresSnapshotForkWithoutOrphaningState(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	expires := fixture.now.Add(10 * time.Minute).Format(time.RFC3339Nano)
+	applyControlDeploymentSpec(t, fixture, "forked-research", "fork-0", "fork-lineage-0", 1, &controlstore.DeploymentFork{
+		SnapshotID: "checkpoint-a", SourceLineageID: "source-lineage-0",
+		SourceNodeID: "node-1", ExpiresAt: expires,
+	})
+	reconciler := fixture.reconciler(t)
+
+	assertReconcileCount(t, reconciler, "enqueue clone", 0, 1)
+	cloning := getControlDeploymentNamed(t, fixture, "forked-research")
+	if cloning.Instances[0].Phase != controlstore.DeploymentInstanceCloning ||
+		cloning.Instances[0].CommandOperation != "clone-state" || cloning.Instances[0].NodeID != "node-1" {
+		t.Fatalf("clone cursor = %+v", cloning)
+	}
+	completeDeploymentCommandNamed(t, fixture, "forked-research", "clone-state", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe clone", 1, 0)
+	cloned := getControlDeploymentNamed(t, fixture, "forked-research")
+	if cloned.Instances[0].Phase != controlstore.DeploymentInstanceCloned {
+		t.Fatalf("cloned phase = %+v", cloned.Instances[0])
+	}
+
+	assertReconcileCount(t, reconciler, "enqueue fork admission", 0, 1)
+	completeDeploymentCommandNamed(t, fixture, "forked-research", "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe fork admission", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue fork lease", 0, 1)
+	completeDeploymentCommandNamed(t, fixture, "forked-research", "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe fork lease", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue fork start", 0, 1)
+	completeDeploymentCommandNamed(t, fixture, "forked-research", "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe fork start", 1, 0)
+
+	expiry, err := time.Parse(time.RFC3339Nano, expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.now = expiry
+	heartbeatControlNode(t, fixture)
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.ForksExpired != 1 {
+		t.Fatalf("expire fork = (%+v, %v)", report, err)
+	}
+	expired := getControlDeploymentNamed(t, fixture, "forked-research")
+	if expired.DesiredState != controlstore.DeploymentAbsent || expired.Phase != controlstore.DeploymentStopping {
+		t.Fatalf("expired fork = %+v", expired)
+	}
+
+	assertReconcileCount(t, reconciler, "enqueue fork stop", 0, 1)
+	completeDeploymentCommandNamed(t, fixture, "forked-research", "stop", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe fork stop", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue fork destroy", 0, 1)
+	completeDeploymentCommandNamed(t, fixture, "forked-research", "destroy", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe fork destroy", 1, 0)
+	destroyed := getControlDeploymentNamed(t, fixture, "forked-research")
+	if destroyed.Instances[0].Phase != controlstore.DeploymentInstancePurging {
+		t.Fatalf("destroyed fork did not retain cleanup work: %+v", destroyed.Instances[0])
+	}
+	assertReconcileCount(t, reconciler, "enqueue fork purge", 0, 1)
+	completeDeploymentCommandNamed(t, fixture, "forked-research", "purge", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe fork purge", 1, 0)
+	removed := getControlDeploymentNamed(t, fixture, "forked-research")
+	if removed.Phase != controlstore.DeploymentRemoved ||
+		removed.Instances[0].Phase != controlstore.DeploymentInstanceRemoved || removed.Instances[0].Attempts != 7 {
+		t.Fatalf("removed fork = %+v", removed)
+	}
+}
+
+func TestReconcilerPurgesForkThatExpiresWhileCloneResultIsPending(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	expires := fixture.now.Add(time.Minute).Format(time.RFC3339Nano)
+	applyControlDeploymentSpec(t, fixture, "short-fork", "fork-0", "fork-lineage-0", 1, &controlstore.DeploymentFork{
+		SnapshotID: "checkpoint-a", SourceLineageID: "source-lineage-0",
+		SourceNodeID: "node-1", ExpiresAt: expires,
+	})
+	reconciler := fixture.reconciler(t)
+	assertReconcileCount(t, reconciler, "enqueue short clone", 0, 1)
+	completeDeploymentCommandNamed(t, fixture, "short-fork", "clone-state", controlprotocol.ExecutorStatusDone)
+
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.ForksExpired != 1 || report.Observed != 0 {
+		t.Fatalf("expire before clone observation = (%+v, %v)", report, err)
+	}
+	assertReconcileCount(t, reconciler, "observe expired clone", 1, 0)
+	cloned := getControlDeploymentNamed(t, fixture, "short-fork")
+	if cloned.Instances[0].Phase != controlstore.DeploymentInstanceCloned ||
+		cloned.DesiredState != controlstore.DeploymentAbsent {
+		t.Fatalf("expired cloned cursor = %+v", cloned)
+	}
+	assertReconcileCount(t, reconciler, "enqueue orphan purge", 0, 1)
+	completeDeploymentCommandNamed(t, fixture, "short-fork", "purge", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe orphan purge", 1, 0)
+	removed := getControlDeploymentNamed(t, fixture, "short-fork")
+	if removed.Phase != controlstore.DeploymentRemoved || removed.Instances[0].Phase != controlstore.DeploymentInstanceRemoved {
+		t.Fatalf("expired pre-admission fork was not removed: %+v", removed)
 	}
 }
 
@@ -1027,7 +1125,7 @@ func TestLeaseManagedLifecycleOperationPlan(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			instance := controlstore.DeploymentInstance{Phase: test.phase, LeaseExpiresAt: test.leaseExpiry}
-			if got := nextOperation(test.desired, instance, test.leaseManaged, now); got != test.want {
+			if got := nextOperation(test.desired, instance, test.leaseManaged, false, now); got != test.want {
 				t.Fatalf("next operation=%q want=%q", got, test.want)
 			}
 		})
@@ -1191,6 +1289,7 @@ func newControlReconcileFixture(t *testing.T) *reconcileFixture {
 	capabilities := []string{
 		controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
 		controlprotocol.ExecutorCapabilityControllerDelegationV1,
+		controlprotocol.ExecutorCapabilityStateSnapshotsV1,
 	}
 	if deliveries, err := store.PollV4(node, capabilities, now.Add(2*time.Minute), time.Minute, 1); err != nil || len(deliveries) != 0 {
 		t.Fatalf("prime node capabilities = (%+v, %v)", deliveries, err)
@@ -1243,6 +1342,7 @@ func addControlNode(t *testing.T, fixture *reconcileFixture, nodeID string) cont
 	capabilities := []string{
 		controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
 		controlprotocol.ExecutorCapabilityControllerDelegationV1,
+		controlprotocol.ExecutorCapabilityStateSnapshotsV1,
 	}
 	fixture.now = fixture.now.Add(2 * time.Minute)
 	if deliveries, err := fixture.store.PollV4(node, capabilities, fixture.now, time.Minute, 1); err != nil || len(deliveries) != 0 {
@@ -1278,6 +1378,16 @@ func applyControlDeploymentNamed(
 	deploymentID, instanceID, lineageID string,
 	generation uint64,
 ) {
+	applyControlDeploymentSpec(t, fixture, deploymentID, instanceID, lineageID, generation, nil)
+}
+
+func applyControlDeploymentSpec(
+	t *testing.T,
+	fixture *reconcileFixture,
+	deploymentID, instanceID, lineageID string,
+	generation uint64,
+	fork *controlstore.DeploymentFork,
+) {
 	t.Helper()
 	_, publisherPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -1309,21 +1419,30 @@ func applyControlDeploymentNamed(
 	if err != nil {
 		t.Fatal(err)
 	}
+	operations := []string{"admit", "destroy", "renew", "start", "stop"}
+	capabilities := admission.Capabilities{}
+	stateDisposition := "none"
+	if fork != nil {
+		operations = append(operations, "clone-state", "purge")
+		sort.Strings(operations)
+		capabilities.State = true
+		stateDisposition = "resume"
+	}
 	delegation := admission.CommandDelegation{
 		SchemaVersion: admission.CommandDelegationSchemaV1,
 		DelegationID:  deploymentID + "-authority", TenantID: "tenant-a",
 		ControllerKeyID:     "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(fixture.controller.Public().(ed25519.PublicKey)),
-		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: append([]string(nil), fixture.nodeIDs...),
+		Operations:          operations, NodeIDs: append([]string(nil), fixture.nodeIDs...),
 		Instances: []admission.CommandDelegationInstance{{
 			InstanceID: instanceID, LineageID: lineageID,
 			MinInstanceGeneration: generation, MaxInstanceGeneration: generation + 4,
 		}},
 		ClaimGeneration: generation,
 		Admission: &admission.CommandDelegationAdmissionTemplate{
-			CapsuleDigest:    dsse.Digest(capsuleRaw),
-			Resources:        admission.ResourceLimits{MemoryBytes: 128 << 20, CPUMillis: 250, PIDs: 32},
-			StateDisposition: "none",
+			CapsuleDigest: dsse.Digest(capsuleRaw),
+			Resources:     admission.ResourceLimits{MemoryBytes: 128 << 20, CPUMillis: 250, PIDs: 32},
+			Capabilities:  capabilities, StateDisposition: stateDisposition,
 		},
 		IssuedAt:  fixture.now.Add(-time.Minute).Format(time.RFC3339Nano),
 		ExpiresAt: fixture.now.Add(23 * time.Hour).Format(time.RFC3339Nano),
@@ -1354,25 +1473,30 @@ func applyControlDeploymentNamed(
 		TenantID: "tenant-a", ID: deploymentID, Generation: generation,
 		ExpectedRevision: expectedRevision,
 		AgentName:        deploymentID + "-agent", BundleDigest: "sha256:" + strings.Repeat("a", 64),
-		CapsuleDSSE: capsuleRaw, DelegationDSSE: delegationRaw,
+		CapsuleDSSE: capsuleRaw, DelegationDSSE: delegationRaw, Fork: fork,
 	}, fixture.now); err != nil || !changed {
 		t.Fatalf("apply deployment = (%v, %v)", changed, err)
 	}
 }
 
 func completeDeploymentCommand(t *testing.T, fixture *reconcileFixture, operation, status string) {
+	completeDeploymentCommandNamed(t, fixture, "research", operation, status)
+}
+
+func completeDeploymentCommandNamed(t *testing.T, fixture *reconcileFixture, deploymentID, operation, status string) {
 	t.Helper()
 	fixture.now = fixture.now.Add(time.Minute)
 	capabilities := []string{
 		controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
 		controlprotocol.ExecutorCapabilityControllerDelegationV1,
+		controlprotocol.ExecutorCapabilityStateSnapshotsV1,
 	}
 	deliveries, err := fixture.store.PollV4(fixture.node, capabilities, fixture.now, time.Minute, 1)
 	if err != nil || len(deliveries) != 1 {
 		t.Fatalf("poll %s = (%+v, %v)", operation, deliveries, err)
 	}
 	observeControlNodeScheduling(t, fixture)
-	deployment := getControlDeployment(t, fixture)
+	deployment := getControlDeploymentNamed(t, fixture, deploymentID)
 	instance := deployment.Instances[0]
 	if instance.CommandOperation != operation || instance.CommandID != deliveries[0].CommandID {
 		t.Fatalf("%s delivery differs from cursor: delivery=%+v instance=%+v", operation, deliveries[0], instance)
@@ -1430,6 +1554,7 @@ func heartbeatControlNode(t *testing.T, fixture *reconcileFixture) {
 	capabilities := []string{
 		controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
 		controlprotocol.ExecutorCapabilityControllerDelegationV1,
+		controlprotocol.ExecutorCapabilityStateSnapshotsV1,
 	}
 	if deliveries, err := fixture.store.PollV4(
 		fixture.node, capabilities, fixture.now, time.Minute, 1,
@@ -1480,8 +1605,12 @@ func assertReconcileCount(t *testing.T, reconciler *Reconciler, label string, ob
 }
 
 func getControlDeployment(t *testing.T, fixture *reconcileFixture) controlstore.Deployment {
+	return getControlDeploymentNamed(t, fixture, "research")
+}
+
+func getControlDeploymentNamed(t *testing.T, fixture *reconcileFixture, deploymentID string) controlstore.Deployment {
 	t.Helper()
-	deployment, found, err := fixture.store.GetDeployment(fixture.admin, "tenant-a", "research")
+	deployment, found, err := fixture.store.GetDeployment(fixture.admin, "tenant-a", deploymentID)
 	if err != nil || !found {
 		t.Fatalf("get deployment = (%+v, %v, %v)", deployment, found, err)
 	}

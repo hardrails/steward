@@ -48,15 +48,20 @@ Use separate hardware or an independently isolated virtual machine when tenant
 policy requires a stronger boundary. Steward still provides tenant and action
 identity across those hosts.
 
-## Persistent Docker state is dedicated-host only
+## Shared-host state requires OpenZFS
 
-Docker's portable local volume driver does not provide a reliable hard byte and
-inode quota. Steward therefore disables persistent Docker state on a normal shared
-host. The compatibility setting for persistent state requires an explicit
-dedicated-host decision and does not turn the volume into quota-enforced storage.
+Steward ships a separate OpenZFS worker that creates one dataset per tenant lineage
+with hard byte and object quotas. Shared-host persistent state is rejected unless
+Executor can negotiate the qualified storage contract. The worker is not portable
+to a host without OpenZFS, and it adds trusted host authority: it runs as root, can
+administer the selected ZFS subtree, and can reach Docker's root-equivalent socket.
 
-For shared-host state, use a separate storage component with an enforceable tenant
-quota and a narrow protocol. Steward does not currently ship that component.
+Docker's portable local volume driver still has no reliable hard byte or object
+quota. Steward exposes it only through the explicit dedicated-host compatibility
+setting, and only when signed policy contains one tenant. That setting does not
+create a shared-host storage-isolation claim. See
+[Configure quota-enforced persistent state]({{ '/guides/persistent-state/' |
+relative_url }}).
 
 ## Gateway is trusted
 
@@ -303,9 +308,12 @@ require an explicit instance selection.
 ## Forks clone state, not a live agent
 
 An agent fork plan binds a new instance and lineage to immutable snapshot
-metadata. Steward does not currently provision the snapshot, copy storage, start
-the fork, or clone process memory. Storage providers must implement bounded,
-tenant-isolated snapshot and clone operations outside the agent.
+metadata. A forked deployment invokes the qualified OpenZFS worker through signed
+Executor commands, admits the cloned state, and runs the normal agent lifecycle.
+Temporary forks automatically stop, destroy, and purge at expiry. Steward does not
+clone process memory or replicate snapshots between nodes. The source node must
+remain available until every fork clone has been purged; Steward blocks rather than
+moving node-local state without proof.
 
 Never place credentials, task permits, receipt keys, live tokens, runtime IDs,
 network sessions, or random-number-generator state in a snapshot. A fork receives
@@ -323,7 +331,7 @@ Steward is not:
 - a software supply-chain provenance service;
 - an endpoint detection and response product;
 - a general policy engine;
-- a general cluster scheduler or storage snapshot provider; or
+- a general cluster scheduler or storage replication manager; or
 - a hosted control plane.
 
 It is the local enforcement plane between an untrusted containerized agent and

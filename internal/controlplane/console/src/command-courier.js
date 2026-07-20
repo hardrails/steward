@@ -5,7 +5,7 @@ export const COMMAND_REVIEW_WINDOW_MILLISECONDS = 5 * 60 * 1000;
 
 const MAX_PAYLOAD_BYTES = 512 * 1024;
 const MAX_SIGNATURES = 16;
-const commandKinds = new Set(["admit", "renew", "start", "stop", "destroy", "read", "purge", "activation-canary"]);
+const commandKinds = new Set(["admit", "renew", "start", "stop", "destroy", "read", "purge", "snapshot-state", "clone-state", "delete-snapshot", "activation-canary"]);
 
 function plainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);

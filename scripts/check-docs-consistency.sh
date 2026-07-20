@@ -52,7 +52,7 @@ report_matches \
 	docs/_config.yml docs/_layouts/default.html
 
 report_matches \
-	'component counts are stale; the node package has seven binaries and three systemd services' \
+	'component counts are stale; avoid hard-coding package component counts' \
 	'((both|two)[[:space:]]+(Steward[[:space:]]+)?services|all[[:space:]]+three[[:space:]]+(binaries|entry[[:space:]]+points)|six([[:space:]]+[[:alnum:]_-]+){0,2}[[:space:]]+(binaries|entry[[:space:]]+points))' \
 	"${docs_files[@]}"
 

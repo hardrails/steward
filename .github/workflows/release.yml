@@ -15,7 +15,7 @@ name: Release
 # code, and only attaches already-built artifacts.
 #
 # scripts/release.sh stamps the release tag into all binaries with the standard Go
-# linker and independently executes all seven to assert the result before publishing.
+# linker and independently executes every binary to assert the result before publishing.
 
 on:
   push:
@@ -134,7 +134,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y rpm
 
       # Cross-compiles the target matrix, packages each as a .tar.gz, writes
-      # checksums.txt, and asserts that all seven binaries self-report the stamped
+      # checksums.txt, and asserts that every binary self-reports the stamped
       # version on tag builds and manual dry-runs. All output lands in dist/.
       - name: Build release artifacts
         env:
@@ -180,7 +180,7 @@ jobs:
           grep -Fxq '  "os": "linux",' <<<"$manifest"
           grep -Fxq "  \"arch\": \"${{ matrix.goarch }}\"," <<<"$manifest"
           grep -Fq '    "steward-control": "' <<<"$manifest"
-          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 66
+          test "$(sed -n '/^  "files": {$/,/^  }$/p' <<<"$manifest" | grep -c '^    "')" -eq 69
           grep -Fq '    "integration/adapters/hermes-agent/adapter.json": "' <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/fixtures/connector-skill/SKILL.md": "' <<<"$manifest"
           grep -Fq '    "integration/adapters/hermes-agent/fixtures/skill/SKILL.md": "' <<<"$manifest"

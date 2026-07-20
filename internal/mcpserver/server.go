@@ -34,6 +34,9 @@ type Node interface {
 	Stop(context.Context, string) (nodeclient.State, error)
 	Destroy(context.Context, string) error
 	PurgeState(context.Context, nodeclient.StatePurge) error
+	SnapshotState(context.Context, nodeclient.StateSnapshotRequest) (nodeclient.StateSnapshot, error)
+	CloneState(context.Context, nodeclient.StateCloneRequest) (nodeclient.StateClone, error)
+	DeleteStateSnapshot(context.Context, nodeclient.StateSnapshotRequest) error
 }
 
 type Server struct {
@@ -265,6 +268,25 @@ type purgeStateArgs struct {
 	Generation uint64 `json:"generation"`
 }
 
+type snapshotStateArgs struct {
+	TenantID   string `json:"tenant_id"`
+	NodeID     string `json:"node_id"`
+	InstanceID string `json:"instance_id"`
+	LineageID  string `json:"lineage_id"`
+	Generation uint64 `json:"generation"`
+	SnapshotID string `json:"snapshot_id"`
+}
+
+type cloneStateArgs struct {
+	TenantID        string `json:"tenant_id"`
+	NodeID          string `json:"node_id"`
+	InstanceID      string `json:"instance_id"`
+	LineageID       string `json:"lineage_id"`
+	Generation      uint64 `json:"generation"`
+	SnapshotID      string `json:"snapshot_id"`
+	SourceLineageID string `json:"source_lineage_id"`
+}
+
 func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 	var call toolCall
 	if err := dsse.DecodeStrictInto(raw, maxMessageBytes, &call); err != nil || call.Name == "" {
@@ -337,6 +359,54 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 			TenantID: arguments.TenantID, NodeID: arguments.NodeID, LineageID: arguments.LineageID, Generation: arguments.Generation,
 		})
 		value = map[string]any{"tenant_id": arguments.TenantID, "lineage_id": arguments.LineageID, "purged": err == nil}
+	case "steward_snapshot_state":
+		if s.node == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
+		var arguments snapshotStateArgs
+		if decodeArguments(call.Arguments, &arguments) != nil || arguments.TenantID == "" || arguments.NodeID == "" ||
+			arguments.InstanceID == "" || arguments.LineageID == "" || arguments.Generation == 0 || arguments.SnapshotID == "" {
+			return toolFailure("steward_snapshot_state requires tenant_id, node_id, instance_id, lineage_id, generation, and snapshot_id"), nil
+		}
+		nodeCtx, cancel := context.WithTimeout(ctx, nodeOperationTimeout)
+		defer cancel()
+		value, err = s.node.SnapshotState(nodeCtx, nodeclient.StateSnapshotRequest{
+			TenantID: arguments.TenantID, NodeID: arguments.NodeID, InstanceID: arguments.InstanceID,
+			LineageID: arguments.LineageID, Generation: arguments.Generation, SnapshotID: arguments.SnapshotID,
+		})
+	case "steward_clone_state":
+		if s.node == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
+		var arguments cloneStateArgs
+		if decodeArguments(call.Arguments, &arguments) != nil || arguments.TenantID == "" || arguments.NodeID == "" ||
+			arguments.InstanceID == "" || arguments.LineageID == "" || arguments.Generation == 0 || arguments.SnapshotID == "" ||
+			arguments.SourceLineageID == "" || arguments.SourceLineageID == arguments.LineageID {
+			return toolFailure("steward_clone_state requires tenant_id, node_id, instance_id, lineage_id, generation, snapshot_id, and a different source_lineage_id"), nil
+		}
+		nodeCtx, cancel := context.WithTimeout(ctx, nodeOperationTimeout)
+		defer cancel()
+		value, err = s.node.CloneState(nodeCtx, nodeclient.StateCloneRequest{
+			TenantID: arguments.TenantID, NodeID: arguments.NodeID, InstanceID: arguments.InstanceID,
+			LineageID: arguments.LineageID, Generation: arguments.Generation, SnapshotID: arguments.SnapshotID,
+			SourceLineageID: arguments.SourceLineageID,
+		})
+	case "steward_delete_snapshot":
+		if s.node == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
+		var arguments snapshotStateArgs
+		if decodeArguments(call.Arguments, &arguments) != nil || arguments.TenantID == "" || arguments.NodeID == "" ||
+			arguments.InstanceID == "" || arguments.LineageID == "" || arguments.Generation == 0 || arguments.SnapshotID == "" {
+			return toolFailure("steward_delete_snapshot requires tenant_id, node_id, instance_id, lineage_id, generation, and snapshot_id"), nil
+		}
+		nodeCtx, cancel := context.WithTimeout(ctx, nodeOperationTimeout)
+		defer cancel()
+		err = s.node.DeleteStateSnapshot(nodeCtx, nodeclient.StateSnapshotRequest{
+			TenantID: arguments.TenantID, NodeID: arguments.NodeID, InstanceID: arguments.InstanceID,
+			LineageID: arguments.LineageID, Generation: arguments.Generation, SnapshotID: arguments.SnapshotID,
+		})
+		value = map[string]any{"tenant_id": arguments.TenantID, "snapshot_id": arguments.SnapshotID, "deleted": err == nil}
 	case "steward_task_submit":
 		if s.tasks == nil {
 			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
@@ -436,7 +506,34 @@ func nodeTools() []any {
 				"generation": map[string]any{"type": "integer", "minimum": 1},
 			},
 		}, false, true, true, false),
+		tool("steward_snapshot_state", "Snapshot agent state", "Create an immutable snapshot after the complete signed source lineage is destroyed.", stateSnapshotToolSchema(), false, false, true, false),
+		tool("steward_clone_state", "Clone agent state", "Create a new quota-enforced copy-on-write lineage from an immutable same-tenant snapshot.", stateCloneToolSchema(), false, false, true, false),
+		tool("steward_delete_snapshot", "Delete state snapshot", "Delete an immutable snapshot after every dependent clone is purged.", stateSnapshotToolSchema(), false, true, true, false),
 	}
+}
+
+func stateSnapshotToolSchema() map[string]any {
+	return map[string]any{
+		"type": "object", "additionalProperties": false,
+		"required": []string{"tenant_id", "node_id", "instance_id", "lineage_id", "generation", "snapshot_id"},
+		"properties": map[string]any{
+			"tenant_id":   map[string]any{"type": "string", "minLength": 1, "maxLength": 128},
+			"node_id":     map[string]any{"type": "string", "minLength": 1, "maxLength": 128},
+			"instance_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 256},
+			"lineage_id":  map[string]any{"type": "string", "minLength": 1, "maxLength": 256},
+			"generation":  map[string]any{"type": "integer", "minimum": 1},
+			"snapshot_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 128},
+		},
+	}
+}
+
+func stateCloneToolSchema() map[string]any {
+	schema := stateSnapshotToolSchema()
+	required := append(schema["required"].([]string), "source_lineage_id")
+	properties := schema["properties"].(map[string]any)
+	properties["source_lineage_id"] = map[string]any{"type": "string", "minLength": 1, "maxLength": 256}
+	schema["required"] = required
+	return schema
 }
 
 func (s *Server) configuredTools() []any {

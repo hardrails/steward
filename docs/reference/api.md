@@ -249,6 +249,9 @@ generation authority independently.
 | `POST /v1/workloads/{runtime_ref}/activation-canary-preflight` | Recheck current policy, tenant authority, activation identity, reconciliation, lifecycle, and complete runtime topology immediately before the uplink contacts Gateway |
 | `POST /v1/workloads/{runtime_ref}/activation-checkpoints` | Append an idempotent, content-free signed checkpoint after a running activation has verified terminal Gateway evidence |
 | `POST /v1/state/purge` | Permanently purge an inactive, authorized state lineage with a receipt |
+| `POST /v1/state/snapshots` | Create an immutable snapshot after the signed source lineage is destroyed |
+| `POST /v1/state/clones` | Create a quota-enforced copy-on-write lineage from a same-tenant snapshot |
+| `POST /v1/state/snapshots/delete` | Delete a snapshot after every dependent clone is purged |
 | `POST /v1/workloads` | Validate and create a stopped gVisor container |
 | `GET /v1/workloads/{runtime_ref}` | Read observed container state; signed runtimes also return their complete committed admission projection |
 | `POST .../start`, `.../stop` | Idempotent lifecycle operation; while reconciliation is degraded, start is blocked and stop becomes a safety-only containment operation |
@@ -545,7 +548,9 @@ advertise `admission-projection-v1`, `activation-canary-v1`, and
 `controller-delegation-v1`, which means Executor verifies the tenant-signed bounded
 delegation and delegated controller signature locally. Executor verifies the
 authorization-context digest as signed command data; the coordinator and offline
-verifier authenticate a referenced rollout envelope.
+verifier authenticate a referenced rollout envelope. A node advertises
+`state-snapshots-v1` only when its production-qualified state backend is configured;
+controllers must require it before scheduling snapshot or clone work.
 The final CLI-generated `proof.json` is not an HTTP resource or a signature. Its
 plan-authorization and ordered promotion digests bind those exact signed envelopes.
 Each target's `admit_command_digest`, `start_command_digest`, and
@@ -576,18 +581,24 @@ output formats, and failure boundaries.
 Multi-tenant uplink uses a node credential and DSSE
 `steward.executor-command.v2` statements. DSSE binds a typed payload to its
 signature. Site policy must authorize a tenant key for `admit`, `renew`, `start`,
-`stop`, `destroy`, `read`, or `purge`. A site cleanup key may authorize only `stop`,
-`destroy`, or `purge`, including after tenant removal. Signatures bind tenant, node,
+`stop`, `destroy`, `read`, `purge`, `snapshot-state`, `clone-state`, or
+`delete-snapshot`. A site cleanup key may authorize only `stop`, `destroy`, `purge`,
+or `delete-snapshot`, including after tenant removal. Signatures bind tenant, node,
 instance, runtime, generations, sequence, validity window, kind, and payload to
 Executor's durable admission record. The bearer cannot select a tenant; legacy
 credentials remain single-tenant.
 
 `admit` carries exact `capsule_dsse_base64` and OpenAPI `intent`; identity and
-generation must match the command. Positive capabilities are explicit state or
+generation must match the command. `snapshot-state` carries `lineage_id` and
+`snapshot_id` and requires the exact destroyed lifecycle generation. `clone-state`
+carries the new `lineage_id`, `snapshot_id`, and `source_lineage_id`; it creates
+state for the command's new instance identity but does not admit or start that
+workload. `delete-snapshot` carries `lineage_id` and `snapshot_id` and remains
+blocked until dependent clones are purged. Positive capabilities are explicit state or
 network grants. Network grants require configured Gateway and relay components.
-State also requires the dedicated-host-only compatibility flag for a volume without
-enforced byte or inode quotas; it is unavailable on shared hosts. A missing
-enforcement component returns HTTP 501. Signed admission disables legacy
+State also requires either a qualified quota backend or the dedicated-host-only
+compatibility flag for an unquotaed Docker volume. A missing enforcement component
+returns HTTP 501. Signed admission disables legacy
 `POST /v1/workloads`. Uplink lifecycle operations record verified tenant, node, and
 generation in journal and evidence.
 

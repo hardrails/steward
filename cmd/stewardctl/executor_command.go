@@ -43,7 +43,7 @@ func issueExecutorCommand(arguments []string, stdout io.Writer) error {
 	tenantID := flags.String("tenant-id", "", "tenant identity")
 	nodeID := flags.String("node-id", "", "destination node identity")
 	instanceID := flags.String("instance-id", "", "destination instance identity")
-	kind := flags.String("kind", "", "admit, renew, start, stop, destroy, read, purge, or activation-canary")
+	kind := flags.String("kind", "", "admit, renew, start, stop, destroy, read, purge, snapshot-state, clone-state, delete-snapshot, or activation-canary")
 	claimGeneration := flags.Uint64("claim-generation", 1, "signed authorization generation")
 	instanceGeneration := flags.Uint64("instance-generation", 0, "instance lineage generation")
 	commandSequence := flags.Uint64("sequence", 0, "monotonic instance command sequence")

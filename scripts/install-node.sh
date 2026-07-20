@@ -864,6 +864,7 @@ release_files=(
 	steward-gateway
 	steward-mcp
 	steward-relay
+	steward-storage-zfs
 	stewardctl
 	integration/examples/agents/hermes/agent.json
 	integration/examples/agents/openclaw/agent.json
@@ -907,8 +908,10 @@ release_files=(
 	integration/deploy/config/gateway.json.in
 	integration/deploy/config/steward-local.json
 	integration/deploy/config/steward.json
+	integration/deploy/config/storage-zfs.json.in
 	integration/deploy/systemd/steward-executor.service
 	integration/deploy/systemd/steward-gateway.service
+	integration/deploy/systemd/steward-storage-zfs.service
 	integration/deploy/systemd/steward.service
 	integration/scripts/activate-node-release.sh
 	integration/scripts/build-hermes-adapter.sh
@@ -1168,7 +1171,7 @@ ensure_managed_directory /opt/steward/releases root root 0755 true || {
 incoming=$(mktemp -d /opt/steward/.incoming.XXXXXX)
 trap 'rm -rf "$incoming"' EXIT
 chmod 0755 "$incoming"
-for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs; do
 	install -o root -g root -m 0755 "$root/$binary" "$incoming/$binary"
 done
 install -d -o root -g root -m 0755 "$incoming/integration" \
@@ -1219,8 +1222,8 @@ for file in alpha.txt nested.json; do
 		"$incoming/integration/adapters/openclaw/fixtures/workspace/qualification/input/$file"
 done
 for file in deploy/config/executor-gateway.env deploy/config/executor.env \
-	deploy/config/gateway.json.in deploy/config/steward-local.json deploy/config/steward.json \
-	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
+	deploy/config/gateway.json.in deploy/config/steward-local.json deploy/config/steward.json deploy/config/storage-zfs.json.in \
+	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service deploy/systemd/steward-storage-zfs.service \
 	deploy/systemd/steward.service; do
 	install -o root -g root -m 0644 "$root/$file" "$incoming/integration/$file"
 done
@@ -1238,9 +1241,10 @@ ctl_version=$(timeout --signal=TERM --kill-after=2 5 runuser -u steward -- "$inc
 executor_version=$(timeout --signal=TERM --kill-after=2 5 runuser -u steward -- "$incoming/steward-executor" -version | awk '{print $2}')
 gateway_version=$(timeout --signal=TERM --kill-after=2 5 runuser -u steward -- "$incoming/steward-gateway" -version | awk '{print $2}')
 relay_version=$(timeout --signal=TERM --kill-after=2 5 runuser -u steward -- "$incoming/steward-relay" -version | awk '{print $2}')
+storage_version=$(timeout --signal=TERM --kill-after=2 5 runuser -u steward -- "$incoming/steward-storage-zfs" -version | awk '{print $2}')
 mcp_version=$(timeout --signal=TERM --kill-after=2 5 runuser -u steward -- "$incoming/steward-mcp" -version | awk '{print $2}')
 if [[ -z $steward_version || $steward_version != "$control_version" || $steward_version != "$executor_version" || $steward_version != "$ctl_version" || \
-	$steward_version != "$gateway_version" || $steward_version != "$relay_version" || $steward_version != "$mcp_version" ]]; then
+	$steward_version != "$gateway_version" || $steward_version != "$relay_version" || $steward_version != "$storage_version" || $steward_version != "$mcp_version" ]]; then
 	echo "install-node: Steward process versions do not match" >&2
 	exit 2
 fi
@@ -1352,7 +1356,7 @@ if [[ $reconcile_selected_release == true ]]; then
 		echo "install-node: refusing unmanaged /opt/steward/current publication state" >&2
 		exit 2
 	}
-	for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+	for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs; do
 		path="/usr/local/bin/$binary"
 		validate_managed_symlink_slot "$path" "/opt/steward/current/$binary" || {
 			echo "install-node: refusing to replace unmanaged $path" >&2
@@ -1380,7 +1384,7 @@ if [[ $reconcile_selected_release == true ]]; then
 			exit 2
 		}
 	done
-	for unit in steward.service steward-executor.service steward-gateway.service; do
+	for unit in steward.service steward-executor.service steward-gateway.service steward-storage-zfs.service; do
 		path="/usr/local/lib/systemd/system/$unit"
 		target="/opt/steward/current/integration/deploy/systemd/$unit"
 		validate_managed_symlink_slot "$path" "$target" || {
@@ -1404,7 +1408,7 @@ if [[ $reconcile_selected_release == true ]]; then
 		exit 2
 	}
 
-	for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+	for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs; do
 		ensure_managed_symlink "/usr/local/bin/$binary" "/opt/steward/current/$binary" || {
 			echo "install-node: could not publish /usr/local/bin/$binary" >&2
 			exit 2
@@ -1430,7 +1434,7 @@ if [[ $reconcile_selected_release == true ]]; then
 			exit 2
 		}
 	done
-	for unit in steward.service steward-executor.service steward-gateway.service; do
+	for unit in steward.service steward-executor.service steward-gateway.service steward-storage-zfs.service; do
 		legacy="/etc/systemd/system/$unit"
 		if [[ -e $legacy || -L $legacy ]]; then
 			rm -f "$legacy"

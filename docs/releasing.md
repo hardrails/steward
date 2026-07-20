@@ -55,9 +55,9 @@ The workflow uses six job executions across five job definitions:
    unmerged branch cannot publish. `scripts/release.sh` cross-compiles Linux and Darwin,
    creates `.tar.gz` archives with `LICENSE` and `README.md`, builds DEB and RPM
    packages, creates a closed-inventory Linux controller archive, includes both
-   installers, and checks that all seven host-native binaries report the tag. Each
+   installers, and checks that every host-native binary reports the tag. Each
    Linux node artifact contains a deterministic
-   `release.json` that binds the tag, target, seven binaries, units, templates, and
+   `release.json` that binds the tag, target, binaries, units, templates, and
    helper scripts by SHA-256 and declares durable-state reader/writer ranges. Native
    package hosts are required because RPM validates build architecture;
    cross-compiled payloads alone do not safely
@@ -130,7 +130,7 @@ go build -trimpath \
   ./cmd/steward
 ```
 
-The script also builds host-native copies through this path, runs all seven with
+The script also builds host-native copies through this path, runs each with
 `-version`, and fails unless each result equals the `VERSION` stamped into the
 artifacts. On a tag build, that value is `GITHUB_REF_NAME`. This checks the linker
 symbol, import path, and every entry point.

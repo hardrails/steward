@@ -35,10 +35,11 @@ The guided installer can install official gVisor, register `runsc`, and generate
 host-admin, operator, and observer Executor tokens. Inference, service, connector, or egress topology
 requires Docker Engine 28 or newer.
 
-Persistent Docker state is disabled by default. The portable local volume driver
-has no hard byte or inode quota, so the compatibility flag that enables state is
-limited to a dedicated single-tenant host and requires complete signed admission
-with exactly one tenant in verified site policy. Leave it disabled on a shared node.
+Persistent state is disabled until the operator selects a storage mode. A shared
+host uses the optional OpenZFS worker for a hard byte and object quota per lineage.
+The portable Docker-volume compatibility flag remains limited to a dedicated
+single-tenant host and requires complete signed admission with exactly one tenant
+in verified site policy.
 
 Steward does not install Docker. It changes Docker configuration only when the
 operator approves gVisor registration. No installation path pulls an agent image,
@@ -206,8 +207,8 @@ The node installer:
 
 1. requires Linux and an existing Docker group;
 2. requires the expected release tag, then verifies that `release.json` binds that
-   tag, Linux architecture, all seven binaries, and every host-integration asset;
-3. verifies that all seven binaries report the expected release tag;
+   tag, Linux architecture, every binary, and every host-integration asset;
+3. verifies that every binary reports the expected release tag;
 4. creates unprivileged `steward`, `steward-executor`, and `steward-gateway`
    users, requiring Executor to be the Docker group's only member;
 5. installs the root-owned binaries, units, helper scripts, templates, and manifest
@@ -263,7 +264,7 @@ Executor credential has
 - the uplink uses HTTPS with certificate verification.
 
 Tenant keys authorize normal operations. The site cleanup key authorizes only
-stop, destroy, and purge, so an operator can remove abandoned workloads after
+stop, destroy, purge, and snapshot deletion, so an operator can remove abandoned workloads after
 tenant access is revoked. Configure the node in one fail-closed transaction:
 
 ```console
@@ -341,9 +342,9 @@ sudo /usr/local/libexec/steward/node-preflight
 sudo systemctl enable --now steward-gateway steward steward-executor
 ```
 
-Preflight checks the actual node service identities, Docker `runsc`, all seven binaries,
+Preflight checks the actual node service identities, Docker `runsc`, every binary,
 required Executor settings, credential/state/CA readability and permissions,
-Gateway receipt-key ownership, and all three systemd units. Binary configuration
+Gateway receipt-key ownership, and every packaged systemd unit. Binary configuration
 checks do not bind a listener or start an uplink poll. They inspect existing durable
 files through read-only file descriptors and leave prospective Gateway state,
 audit, and connector receipt paths absent. Executor requires its admission fence,

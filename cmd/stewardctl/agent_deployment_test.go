@@ -58,7 +58,7 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		SchemaVersion: admission.CommandDelegationSchemaV1, DelegationID: "auditor-authority",
 		TenantID: "tenant-a", ControllerKeyID: "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublic),
-		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: []string{"node-a"},
+		Operations:          []string{"admit", "clone-state", "destroy", "purge", "renew", "start", "stop"}, NodeIDs: []string{"node-a"},
 		Instances: []admission.CommandDelegationInstance{{
 			InstanceID: "auditor-0", LineageID: "auditor-lineage", MinInstanceGeneration: 1, MaxInstanceGeneration: 2,
 		}},
@@ -68,7 +68,7 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 			Resources:        admission.ResourceLimits{MemoryBytes: 512 << 20, CPUMillis: 500, PIDs: 128},
 			StateDisposition: "none",
 		},
-		IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano),
+		IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(24 * time.Hour).Format(time.RFC3339Nano),
 	}
 	delegationPayload, err := admission.MarshalCommandDelegation(delegation)
 	if err != nil {
@@ -79,10 +79,16 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		t.Fatal(err)
 	}
 	delegationRaw, _ := json.Marshal(delegationEnvelope)
+	forkRaw, _ := json.Marshal(agentapp.ForkPlan{
+		Schema: agentapp.ForkSchema, SnapshotID: "snapshot-a", BundleDigest: bundleDigest,
+		InstanceID: "auditor-0", LineageID: "auditor-lineage", Generation: 1,
+		SourceLineageID: "source-lineage", ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano), OnExpiry: "destroy",
+	})
 	for name, raw := range map[string][]byte{
 		"auditor.bundle.json":     bundleRaw,
 		"auditor.capsule.json":    capsuleRaw,
 		"auditor.delegation.json": delegationRaw,
+		"auditor.fork.json":       forkRaw,
 	} {
 		if err := os.WriteFile(filepath.Join(directory, name), raw, 0o600); err != nil {
 			t.Fatal(err)
@@ -132,8 +138,9 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		case http.MethodPut:
 			putCount++
 			var input struct {
-				Generation       uint64 `json:"generation"`
-				ExpectedRevision uint64 `json:"expected_revision"`
+				Generation       uint64                       `json:"generation"`
+				ExpectedRevision uint64                       `json:"expected_revision"`
+				Fork             *controlstore.DeploymentFork `json:"fork"`
 			}
 			wantRevision := uint64(0)
 			if putCount > 1 {
@@ -142,10 +149,15 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.Generation != 1 || input.ExpectedRevision != wantRevision {
 				t.Errorf("apply input=%+v err=%v", input, err)
 			}
+			if putCount == 2 && (input.Fork == nil || input.Fork.SnapshotID != "snapshot-a" || input.Fork.SourceNodeID != "node-a") {
+				t.Errorf("fork apply input=%+v", input)
+			}
 			if putCount == 1 {
 				writer.WriteHeader(http.StatusCreated)
 			}
-			_ = json.NewEncoder(writer).Encode(view)
+			responseView := view
+			responseView.Fork = input.Fork
+			_ = json.NewEncoder(writer).Encode(responseView)
 		case http.MethodDelete:
 			removed := view
 			removed.Revision = 2
@@ -170,7 +182,7 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		append([]string{
 			"agent", "deployment", "apply", "auditor",
 			"-bundle", "auditor.bundle.json", "-capsule", "auditor.capsule.json",
-			"-delegation", "auditor.delegation.json",
+			"-delegation", "auditor.delegation.json", "-fork-plan", "auditor.fork.json", "-source-node", "node-a",
 		}, common...),
 		append([]string{"agent", "deployment", "status", "auditor"}, common...),
 		append([]string{"agent", "deployment", "list"}, common...),
@@ -417,6 +429,120 @@ func TestAgentDeploymentCommandAndLifecycleValidationErrors(t *testing.T) {
 	}
 	if _, err := applyTaskRunContext([]string{"-no-context", "--no-context"}); err == nil {
 		t.Fatal("duplicate task run no-context flag was accepted")
+	}
+}
+
+func TestAgentCommandsHydrateSelectedContextWithoutOverridingFlags(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contextPath := filepath.Join(directory, "contexts.json")
+	t.Setenv("STEWARD_CONTEXT_FILE", contextPath)
+	t.Setenv("STEWARD_CONTEXT", "")
+	selected := cliContext{
+		Name: "production", ControlURL: "https://control.example", TokenFile: filepath.Join(directory, "operator.token"),
+		CAFile: filepath.Join(directory, "ca.pem"), TenantID: "tenant-context", NodeID: "node-context",
+	}
+	if err := writeCLIContextConfig(contextPath, cliContextConfig{
+		Current: selected.Name, Contexts: []cliContext{selected},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	agentArguments, err := applyAgentControlContext([]string{"-control-url", "https://explicit.example", "-tenant", "tenant-explicit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"-control-url", "https://explicit.example", "-tenant", "tenant-explicit",
+		"-token-file", selected.TokenFile, "-ca-file", selected.CAFile, "-node-id", selected.NodeID,
+	} {
+		if !slices.Contains(agentArguments, expected) {
+			t.Fatalf("agent context arguments %v do not contain %q", agentArguments, expected)
+		}
+	}
+	if slices.Contains(agentArguments, selected.ControlURL) || slices.Contains(agentArguments, selected.TenantID) {
+		t.Fatalf("agent context overrode explicit flags: %v", agentArguments)
+	}
+
+	deploymentArguments, err := applyAgentDeploymentContext([]string{"status", "auditor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedPrefix := []string{
+		"-control-url", selected.ControlURL, "-token-file", selected.TokenFile,
+		"-ca-file", selected.CAFile, "-tenant", selected.TenantID,
+	}
+	if len(deploymentArguments) < len(expectedPrefix) || !slices.Equal(deploymentArguments[:len(expectedPrefix)], expectedPrefix) {
+		t.Fatalf("deployment context arguments = %v, want prefix %v", deploymentArguments, expectedPrefix)
+	}
+
+	withoutContext, err := applyAgentControlContext([]string{"-no-context", "-tenant", "tenant-explicit"})
+	if err != nil || !slices.Equal(withoutContext, []string{"-tenant", "tenant-explicit"}) {
+		t.Fatalf("agent no-context arguments=%v error=%v", withoutContext, err)
+	}
+	t.Setenv("STEWARD_CONTEXT", "missing")
+	if _, err := applyAgentControlContext(nil); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing selected context error = %v", err)
+	}
+}
+
+func TestSubmitAndWaitAgentCommandHandlesTerminalPollingAndCancellation(t *testing.T) {
+	command := func(state, status, detail string) controlclient.Command {
+		result := (*controlclient.CommandResult)(nil)
+		if detail != "" {
+			result = &controlclient.CommandResult{Error: detail}
+		}
+		return controlclient.Command{
+			CommandID: "command-a", TenantID: "tenant-a", NodeID: "node-a",
+			CommandDigest: "sha256:" + strings.Repeat("a", 64), CommandKind: "stop",
+			State: state, TerminalStatus: status, Result: result,
+		}
+	}
+	for _, test := range []struct {
+		name       string
+		submitted  controlclient.Command
+		polled     controlclient.Command
+		cancel     bool
+		wantStatus string
+		wantError  string
+	}{
+		{name: "already terminal", submitted: command("terminal", controlprotocol.ExecutorStatusDone, ""), wantStatus: controlprotocol.ExecutorStatusDone},
+		{name: "terminal failure", submitted: command("terminal", "denied", "policy rejected command"), wantError: "denied: policy rejected command"},
+		{name: "polls to terminal", submitted: command("pending", "", ""), polled: command("terminal", controlprotocol.ExecutorStatusDone, ""), wantStatus: controlprotocol.ExecutorStatusDone},
+		{name: "cancellation", submitted: command("pending", "", ""), cancel: true, wantError: context.Canceled.Error()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				if request.Method == http.MethodPost {
+					_ = json.NewEncoder(writer).Encode(test.submitted)
+					if test.cancel {
+						cancel()
+					}
+					return
+				}
+				_ = json.NewEncoder(writer).Encode(test.polled)
+			}))
+			defer server.Close()
+			client, err := controlclient.New(server.URL, "operator", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := submitAndWaitAgentCommand(ctx, client, "tenant-a", "node-a", []byte("signed"), "command-a")
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("wait error = %v, want %q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil || result.TerminalStatus != test.wantStatus {
+				t.Fatalf("wait result=%+v error=%v", result, err)
+			}
+		})
 	}
 }
 

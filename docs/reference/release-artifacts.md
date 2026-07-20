@@ -135,7 +135,7 @@ an independently authenticated release bundle.
 ## Version identity
 
 Published binaries are linker-stamped. For each Linux target, the release build
-executes all seven host-native binaries and requires each to report the exact tag.
+executes every host-native binary and requires each to report the exact tag.
 Verify after installation:
 
 ```console
@@ -145,10 +145,11 @@ steward-executor -version
 stewardctl -version
 steward-gateway -version
 steward-relay -version
+steward-storage-zfs -version
 steward-mcp -version
 ```
 
-All seven node-payload binaries must match the active
+Every node-payload binary must match the active
 `/opt/steward/releases/<version>` directory. A controller installed through the
 dedicated path must match `/opt/steward-control/releases/<version>`. Release tags
 use `vX.Y.Z` semantic versioning, with optional prerelease suffixes and no build

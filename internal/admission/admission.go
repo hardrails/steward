@@ -1059,11 +1059,11 @@ var routeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 var commandOperations = map[string]struct{}{
 	"admit": {}, "renew": {}, "start": {}, "stop": {}, "destroy": {}, "read": {}, "purge": {},
-	"activation-canary": {},
+	"snapshot-state": {}, "clone-state": {}, "delete-snapshot": {}, "activation-canary": {},
 }
 
 var cleanupCommandOperations = map[string]struct{}{
-	"stop": {}, "destroy": {}, "purge": {},
+	"stop": {}, "destroy": {}, "purge": {}, "delete-snapshot": {},
 }
 
 func routeID(value string) bool { return routeIDPattern.MatchString(value) }
@@ -1115,7 +1115,7 @@ func (p SitePolicy) PublisherKeys() (map[string]ed25519.PublicKey, error) {
 }
 
 // TrustedCommandKeys returns tenant keys whose signed policy scope includes the
-// operation and, for stop/destroy/purge only, site-owned cleanup keys. Cleanup
+// operation and, for stop/destroy/purge/delete-snapshot only, site-owned cleanup keys. Cleanup
 // keys are independent of tenant rules so the site can contain or remove a
 // workload after revoking that tenant's compromised authority. Callers should
 // pass this result directly to DSSE verification; selecting a tenant or

@@ -348,6 +348,55 @@ func TestDecodeSnapshotAndForkFailures(t *testing.T) {
 	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", time.Second, "destroy", time.Now()); err == nil {
 		t.Fatal("short TTL accepted")
 	}
+	if _, err := Fork(bundle, snapshot, "new-agent", "new-lineage", time.Hour, "hibernate", time.Now()); err == nil {
+		t.Fatal("unsupported fork hibernation accepted")
+	}
+}
+
+func TestForkPlanStrictDecodingAndValidation(t *testing.T) {
+	valid := ForkPlan{
+		Schema: ForkSchema, SnapshotID: "snapshot-a", BundleDigest: "sha256:" + strings.Repeat("a", 64),
+		InstanceID: "fork-a", LineageID: "lineage-fork", SourceLineageID: "lineage-source", Generation: 1,
+		ExpiresAt: "2026-07-21T12:00:00Z", OnExpiry: "destroy",
+	}
+	raw, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded, err := DecodeForkPlan(raw); err != nil || decoded != valid {
+		t.Fatalf("decode fork plan = (%+v, %v)", decoded, err)
+	}
+	if _, err := DecodeForkPlan(append(raw[:len(raw)-1], []byte(`,"unknown":true}`)...)); err == nil {
+		t.Fatal("fork plan with unknown field was accepted")
+	}
+	for name, mutate := range map[string]func(*ForkPlan){
+		"schema":         func(value *ForkPlan) { value.Schema = "other" },
+		"snapshot":       func(value *ForkPlan) { value.SnapshotID = "bad snapshot" },
+		"bundle":         func(value *ForkPlan) { value.BundleDigest = "bad" },
+		"instance":       func(value *ForkPlan) { value.InstanceID = "" },
+		"lineage":        func(value *ForkPlan) { value.LineageID = value.SourceLineageID },
+		"source lineage": func(value *ForkPlan) { value.SourceLineageID = "" },
+		"generation":     func(value *ForkPlan) { value.Generation = 0 },
+		"expiry":         func(value *ForkPlan) { value.ExpiresAt = "not-a-time" },
+		"action":         func(value *ForkPlan) { value.OnExpiry = "hibernate" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatalf("invalid fork plan accepted: %+v", candidate)
+			}
+		})
+	}
+	withoutExpiry := valid
+	withoutExpiry.ExpiresAt = ""
+	if err := withoutExpiry.Validate(); err == nil {
+		t.Fatal("fork expiry action without expiry was accepted")
+	}
+	withoutExpiry.OnExpiry = ""
+	if err := withoutExpiry.Validate(); err != nil {
+		t.Fatalf("durable fork plan rejected: %v", err)
+	}
 }
 
 func TestToolBoundaryErrorPathsAndSanitization(t *testing.T) {

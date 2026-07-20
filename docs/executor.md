@@ -81,13 +81,14 @@ with no network-enabled inference, service, connector, or egress grant remains o
 Executor adds fixed, non-configurable 64 MiB tmpfs mounts at `/workspace` and
 `/tmp`, sets `HOME=/workspace` and `TMPDIR=/tmp`, and starts in `/workspace`. This
 provides bounded ephemeral scratch space without a host path or tenant-selected
-mount. A signed state grant can replace `/workspace` with one Steward-owned Docker
-volume at the profile's fixed state path. Docker's portable local volume driver
-provides no hard byte or inode quota, so Executor rejects state by default. The
-explicit `-allow-unquotaed-state-on-dedicated-host` compatibility flag enables a
-volume without enforced byte or inode quotas. The flag requires complete signed
-admission, is suitable only for a dedicated single-tenant host, and is rejected
-unless the verified site policy contains exactly one tenant. Raw secret and
+mount. A signed state grant can replace `/workspace` with one Steward-owned volume
+at the profile's fixed state path. On a shared host, Executor requires a qualified
+backend that enforces hard byte and object quotas. Steward's separate OpenZFS worker
+implements that contract and returns one exact Docker bind-volume handle. The
+explicit `-allow-unquotaed-state-on-dedicated-host` compatibility flag instead
+enables a portable Docker volume without enforced quotas. The flag requires
+complete signed admission, is suitable only for a dedicated single-tenant host,
+and is rejected unless the verified site policy contains exactly one tenant. Raw secret and
 arbitrary file injection remain unavailable; the image must contain its approved
 content.
 
@@ -204,7 +205,7 @@ upstream. `GET /v1/models` is synthesized from the same alias, so broader upstre
 credential access does not expand tenant authority.
 
 Signed mode disables legacy `POST /v1/workloads` creation. Authenticated start,
-stop, destroy, and purge operations are journaled and receipted while Executor is
+stop, destroy, snapshot, clone, snapshot deletion, and purge operations are journaled and receipted while Executor is
 ready. Destroy records a
 generation tombstone—a durable marker that prevents older commands from reviving
 the removed instance. Direct tenant selection remains disabled unless an operator
@@ -221,9 +222,9 @@ authority. The journal remains pending when Executor cannot prove that the agent
 relay, and grant are all inactive.
 
 A state grant uses one Steward-owned volume for a persistent workload history. It
-is rejected unless the dedicated-host-only compatibility flag for a volume without
-enforced byte or inode quotas is enabled. Only one live instance can hold the
-writable lease for a `(tenant_id, lineage_id)` pair. Inference, service, connector,
+requires either the quota-enforced storage backend or the dedicated-host-only
+compatibility flag. Only one live instance can hold the writable lease for a
+`(tenant_id, lineage_id)` pair. Inference, service, connector,
 and egress grants require the configured Gateway and hardened relay; partial
 configuration fails closed. See
 [positive-capability setup]({{ '/guides/positive-capabilities/' | relative_url }}),
@@ -296,14 +297,14 @@ authority:
   "site_cleanup_command_keys": [{
     "key_id": "site-cleanup",
     "public_key": "BASE64_ED25519_PUBLIC_KEY",
-    "operations": ["stop", "destroy", "purge"]
+    "operations": ["stop", "destroy", "purge", "delete-snapshot"]
   }],
   "tenants": [{
     "tenant_id": "tenant-a",
     "command_keys": [{
       "key_id": "tenant-a-commands",
       "public_key": "BASE64_ED25519_PUBLIC_KEY",
-      "operations": ["admit", "renew", "start", "stop", "destroy", "read", "purge", "activation-canary"]
+      "operations": ["admit", "renew", "start", "stop", "destroy", "read", "purge", "snapshot-state", "clone-state", "delete-snapshot", "activation-canary"]
     }]
   }]
 }
@@ -312,7 +313,7 @@ authority:
 Tenant private keys stay on a tenant-authorized signing station or separate signing
 service outside Steward Control. A separate site incident-response signer holds
 the cleanup private key. Cleanup keys can
-authorize only `stop`, `destroy`, and `purge`; they cannot authorize `admit`,
+authorize only `stop`, `destroy`, `purge`, and `delete-snapshot`; they cannot authorize `admit`,
 `start`, or `read`. Their top-level placement lets a site remove a compromised
 tenant key or tenant rule without losing containment of that tenant's existing
 workload while Executor is able to serve commands.
@@ -347,7 +348,7 @@ the bounded admission projection capability:
   "protocol_version": 4,
   "node_id": "executor-1",
   "credential_scope": "node",
-  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "admission-projection-v1", "rollout-authorization-context-v1", "multi-tenant", "read", "state-purge"]
+  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "admission-projection-v1", "rollout-authorization-context-v1", "multi-tenant", "read", "state-purge", "state-snapshots-v1"]
 }
 ```
 
@@ -424,7 +425,13 @@ Normal command fences still reject stale sequences and generations.
 
 `admit` carries the OpenAPI `SignedAdmissionRequest`. `renew` carries one bounded
 `steward.workload-lease.v1` expiry. `start`, `stop`, `destroy`, and `read` require
-an empty payload. `purge` carries one bounded `lineage_id`. The
+an empty payload. `purge` carries one bounded `lineage_id`. `snapshot-state`
+carries `lineage_id` and `snapshot_id`; `clone-state` carries `lineage_id`,
+`snapshot_id`, and `source_lineage_id`. Snapshot requires the exact destroyed
+source generation. Clone creates only a new quota-backed lineage; a later signed
+`admit` with `state_disposition: resume` creates the workload. `delete-snapshot`
+carries `lineage_id` and `snapshot_id`; it fails while any dependent clone remains.
+The
 signed intent and every runtime-reference identity must describe the same tuple
 before the local handler runs.
 
@@ -537,6 +544,10 @@ Before entering a mutating handler, Executor proves that every accepted or
 executing delivery can grow into the largest valid JSON terminal report. Settled
 `done`, `rejected`, and acknowledged terminal canary-failure entries may be
 compacted. A canary failure is compactable only when the ledger retains the verified
+`state-snapshots-v1` is advertised only when the node successfully configures a
+production-qualified storage backend. It means signed `snapshot-state` and
+`clone-state` commands are available; it does not imply cross-node replication.
+
 `activation-canary` command kind and the exact terminal error mapping. Ambiguous
 entries remain. Destroyed identities remain as tombstones or positions because
 deleting them would permit replay. There is currently no supported manual
@@ -561,8 +572,8 @@ inference service may run elsewhere; neither needs filesystem or Docker access o
 the node. Multiple tenants share a host only through signed tenant commands,
 site-scoped cleanup authority, anti-replay state keyed by tenant and instance,
 tenant-labeled gVisor containers, per-tenant aggregate resource and workload-count
-caps, and per-instance networks and grants. Shared-host workloads must keep
-persistent state disabled.
+caps, per-lineage OpenZFS byte and object quotas when state is enabled, and
+per-instance networks and grants. Shared-host state must use the qualified backend.
 
 `scripts/executor-acceptance.sh` exercises this boundary on a real Linux host. It
 uses `EXECUTOR_BIN` when supplied, builds with a local Go toolchain when available,
