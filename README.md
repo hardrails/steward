@@ -75,6 +75,23 @@ completion with:
 stewardctl completion install
 ```
 
+Before enrolling a production node, create the site's authority package on a
+trusted operator workstation:
+
+```console
+stewardctl site init steward-site \
+  -site-id site-a \
+  -tenant-id tenant-a \
+  -control-server-names control.customer.example
+stewardctl site verify steward-site
+```
+
+This produces a signed site policy, separated lifecycle and task keys, public
+node trust, and Control TLS material in one owner-only directory. It does not
+install or transmit private keys. Move each private key to the custody named in
+the signed inventory before using it. See
+[Create a site authority](https://hardrails.github.io/steward/getting-started/site-authority/).
+
 ## Install on macOS
 
 The native macOS archive supports agent authoring, CUE/OPA policy checks, the

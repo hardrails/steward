@@ -333,7 +333,12 @@ The roadmap starts from working primitives rather than a blank design:
   and result storage, and can derive the qualified Hermes or OpenClaw request from
   one prompt into a private recoverable run directory;
 - concise `agent create` and durable `agent apply NAME` commands that reuse the
-  exact application-init and deployment reconciliation implementations.
+  exact application-init and deployment reconciliation implementations;
+- an atomic `site init` package that generates the initial signed policy,
+  separated authority roles, public node trust, and Control TLS material, plus
+  signed inventory verification against an independently pinned site root;
+- a thin protected GitHub issue preset over the generic exact-operation connector,
+  with bounded calls and no provider SDK or agent-visible upstream credential;
 - authority-preserving in-place rollouts that retain source and target signed
   delegations, spend disruption budget atomically, and switch each instance only
   after a proven destroy; and
@@ -345,8 +350,10 @@ The roadmap starts from working primitives rather than a blank design:
   logs.
 
 This foundation is not yet the complete product workflow above. The normal
-create, apply, and prompt path is joined, but a fresh site still needs explicit policy,
-delegation, Gateway, and service-trust setup. The controller also does not yet join
+create, apply, and prompt path is joined, and initial policy/key composition is one
+verified operation, but a fresh site still needs explicit Control tenant and node
+enrollment, deployment delegation, Gateway activation, and service-trust setup.
+The controller also does not yet join
 continuous health recovery, snapshots, protected-secret
 providers, and one offline evidence bundle into one first-time-user operation.
 
@@ -374,8 +381,8 @@ and `task run` performs useful work through the enforced boundary.
   tenant root keys in Control.
 - Qualify one pinned Hermes adapter and one pinned OpenClaw adapter through the
   same task, chat, health, log, and result contract.
-- Ship one protected connector that performs reversible real work, such as creating
-  a draft GitHub issue, plus one generic read-only OpenAPI example.
+- Qualify the shipped protected GitHub issue preset through the release acceptance
+  workflow, and add one generic read-only OpenAPI example.
 
 Acceptance gates:
 

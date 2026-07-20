@@ -13,6 +13,26 @@ contact a node, Gateway, or Steward Control say so explicitly.
 Run `stewardctl help <command>` for the focused command summary and
 `stewardctl <command> ... -h` for exact flags.
 
+## Create and verify a site authority package
+
+Generate a valid initial site policy, separated Ed25519 roles, and Control TLS
+material without contacting a service:
+
+```console
+stewardctl site init steward-site \
+  -site-id site-a \
+  -tenant-id tenant-a \
+  -control-server-names control.customer.example
+stewardctl site verify steward-site
+```
+
+`site verify` authenticates the signed inventory and policy, checks every recorded
+digest and mode, and rejects unrecorded files. Supply
+`-site-root-public-key FILE` to verify against a root obtained outside the package.
+The generated directory is a custody handoff, not a secret store; separate its
+private keys before deployment. See
+[Create a site authority]({{ '/getting-started/site-authority/' | relative_url }}).
+
 ## Generate and inspect keys
 
 Create an Ed25519 key pair:
@@ -42,13 +62,13 @@ what the local operator permits.
 
 ```console
 stewardctl capsule sign -in capsule.json -out capsule.dsse.json \
-  -private-key publisher.private.pem -key-id publisher-1
+  -key publisher.private.pem -key-id publisher-1
 
 stewardctl capsule verify -in capsule.dsse.json \
   -public-key publisher.public -key-id publisher-1
 
 stewardctl policy sign -in policy.json -out policy.dsse.json \
-  -private-key site.private.pem -key-id site-1
+  -key site.private.pem -key-id site-1
 
 stewardctl policy verify -in policy.dsse.json \
   -public-key site.public -key-id site-1

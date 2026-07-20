@@ -30,6 +30,7 @@ Documentation: https://hardrails.github.io/steward/
 
 - [Overview](https://hardrails.github.io/steward/): Purpose, enforced boundary, and documentation map
 - [Install](https://hardrails.github.io/steward/getting-started/): Interactive and unattended Linux installation
+- [Create a site authority](https://hardrails.github.io/steward/getting-started/site-authority/): Generate and verify separated site, publisher, tenant, incident-response, and Control TLS material without placing tenant private keys in Control
 - [Operate Steward Control](https://hardrails.github.io/steward/guides/control-plane/): Install the bundled controller, create tenants and operators, enroll nodes, apply exact delegated desired state, deliver signed commands, and protect durable state
 - [Embedded operator console](https://hardrails.github.io/steward/guides/operator-console/): Inspect scoped fleet metadata and observed agent runtimes, distinguish last successful workload state from the latest signed operation, and courier one exact offline-signed Executor command through the React `/console/` surface without browser-side signing
 - [Why Steward exists](https://hardrails.github.io/steward/product/positioning/): Operator problem, authorization path, and receipt limits
@@ -50,7 +51,7 @@ Documentation: https://hardrails.github.io/steward/
 - [Context-locked effects](https://hardrails.github.io/steward/guides/context-locked-effects/): Bind each exact permit to the signed history of completed Gateway-mediated connector responses so later responses invalidate older approvals
 - [Gateway credentials](https://hardrails.github.io/steward/guides/secrets/): Compile exact OpenBao KV v2 policy, fail-closed Agent templates, expected-version readiness, and a systemd sandbox while keeping rendered inference keys and connector tokens in owner-only Gateway files and outside agents and the React console
 - [Tenant-signed service tasks](https://hardrails.github.io/steward/guides/hermes-agent/#authorize-and-run-one-exact-hermes-task): Scope a tenant key to Hermes, issue one exact task bundle, dispatch it through loopback Gateway, and audit its receipts
-- [Authenticated connectors](https://hardrails.github.io/steward/guides/connectors/): Broker exact API operations without directly configuring the workload with upstream credentials or origins; optionally require a tenant-scoped signature over one exact request; verify permit-to-receipt linkage offline
+- [Authenticated connectors](https://hardrails.github.io/steward/guides/connectors/): Broker exact API operations without directly configuring the workload with upstream credentials or origins; use the protected GitHub issue preset or a generic exact operation; verify permit-to-receipt linkage offline
 - [Signed egress](https://hardrails.github.io/steward/guides/egress/): Configure HTTP(S) routes, private CIDRs, audit, and diagnostics
 - [Terraform](https://hardrails.github.io/steward/guides/terraform/): Non-secret cloud bootstrap and AWS hardening
 - [MCP](https://hardrails.github.io/steward/guides/mcp/): Operate the fleet controller, a local node, or both with Model Context Protocol 2025-11-25 stdio tools

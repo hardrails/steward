@@ -221,7 +221,24 @@ or embed a vendor control-plane endpoint.
 ## Do useful work next
 
 Installation establishes the enforcement boundary; it does not invent authority
-for an agent. Next, follow [Build and run an agent application]({{ '/guides/build-agents/' |
+for an agent. Create the site's signed trust package on the operator workstation
+before remote enrollment:
+
+```console
+stewardctl site init steward-site \
+  -site-id site-a \
+  -tenant-id tenant-a \
+  -control-server-names control.customer.example
+stewardctl site verify steward-site
+```
+
+The package groups files by public or private handling and signs an inventory over
+every byte and expected file mode. It does not copy keys to a node or turn Control
+into a tenant signing service. Follow
+[Create a site authority]({{ '/getting-started/site-authority/' | relative_url }})
+to separate key custody and use the generated inputs.
+
+Next, follow [Build and run an agent application]({{ '/guides/build-agents/' |
 relative_url }}) to package Hermes or OpenClaw, admit a task service, and apply a
 durable deployment. Then configure the repeated local paths once and run the first
 task:
