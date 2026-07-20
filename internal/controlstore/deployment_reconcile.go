@@ -292,13 +292,18 @@ func (store *Store) ObserveDeploymentCommand(
 		return Deployment{}, false, ErrCapacityExceeded
 	}
 	if command.Terminal.Report.Status == controlprotocol.ExecutorStatusDone {
-		if instance.CommandOperation == "admit" && (instance.Intent == nil || command.Terminal.Admission == nil) {
-			instance.Phase = DeploymentInstanceFailed
-			instance.LastError = "admission_projection_missing"
-		} else {
-			instance.Phase = deploymentSuccessfulPhase(instance.CommandOperation)
-			instance.LastError = ""
-			if instance.CommandOperation == "admit" {
+		instance.Phase = deploymentSuccessfulPhase(instance.CommandOperation)
+		instance.LastError = ""
+		if instance.CommandOperation == "admit" {
+			if instance.Intent == nil {
+				// An admit enqueued by a pre-projection controller has no intent to
+				// authenticate the projection against. Preserve its legacy lifecycle
+				// result, but do not make it task-ready by retaining unverified data.
+				instance.Admission = nil
+			} else if command.Terminal.Admission == nil {
+				instance.Phase = DeploymentInstanceFailed
+				instance.LastError = "admission_projection_missing"
+			} else {
 				instance.Admission = cloneAdmissionProjection(command.Terminal.Admission)
 			}
 		}

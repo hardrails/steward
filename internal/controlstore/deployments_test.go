@@ -131,6 +131,83 @@ func TestDeploymentMissingCommandFailsClosedAndActiveCommandIsRetained(t *testin
 	}
 }
 
+func TestDeploymentLegacyInflightAdmitCompletesWithoutTaskReadyProjection(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	created, _, err := fixture.store.ApplyDeployment(
+		fixture.admin, deploymentApplyFixture(t, fixture.now, "deployment-a", 1), fixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := created.Instances[0]
+	instance.NodeID = "node-1"
+	instance.Phase = DeploymentInstanceAdmitting
+	instance.CommandID = "legacy-admit"
+	instance.CommandOperation = "admit"
+	instance.CommandSequence = 1
+	instance.Intent = nil
+	instance.Admission = nil
+	instance.TransitionedAt = canonicalTimestamp(fixture.now.Add(time.Minute))
+	created.Instances[0] = instance
+	created.Revision++
+	created.UpdatedAt = instance.TransitionedAt
+	statement := baseV4CommandStatement(instance.CommandID, "tenant-a", "node-1", "admit", 1, instance.Generation)
+	statement.InstanceID = instance.InstanceID
+	raw := signV4CommandStatement(t, statement)
+	if _, submitted, err := fixture.store.SubmitCommand(
+		fixture.admin, "tenant-a", "node-1", raw, fixture.now.Add(2*time.Minute),
+	); err != nil || !submitted {
+		t.Fatalf("submit legacy admit = (%v, %v)", submitted, err)
+	}
+	deliveries, err := fixture.store.Poll(node, []string{}, fixture.now.Add(3*time.Minute), time.Minute, 1)
+	if err != nil || len(deliveries) != 1 {
+		t.Fatalf("poll legacy admit = (%+v, %v)", deliveries, err)
+	}
+	if applied, err := fixture.store.ApplyReport(
+		node, reportFor(deliveries[0], controlprotocol.ExecutorStatusDone), fixture.now.Add(4*time.Minute),
+	); err != nil || !applied {
+		t.Fatalf("apply legacy admit report = (%v, %v)", applied, err)
+	}
+
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
+	fixture.store.mu.Unlock()
+
+	observed, changed, err := fixture.store.ObserveDeploymentCommand(
+		"tenant-a", "deployment-a", instance.InstanceID, created.Revision, fixture.now.Add(5*time.Minute),
+	)
+	if err != nil || !changed || observed.Instances[0].Phase != DeploymentInstanceStarting ||
+		observed.Instances[0].LastError != "" || observed.Instances[0].Intent != nil ||
+		observed.Instances[0].Admission != nil {
+		t.Fatalf("legacy admit observation = (%+v, %v, %v)", observed, changed, err)
+	}
+
+	withIntent := observed
+	current := withIntent.Instances[0]
+	current.Phase = DeploymentInstanceAdmitting
+	current.Intent = &admission.InstanceIntent{
+		TenantID: "tenant-a", NodeID: "node-1", InstanceID: current.InstanceID, LineageID: current.LineageID,
+		Generation: current.Generation, CapsuleDigest: dsse.Digest(withIntent.CapsuleDSSE),
+		Resources:        admission.ResourceLimits{MemoryBytes: 128 << 20, CPUMillis: 250, PIDs: 32},
+		StateDisposition: "none",
+	}
+	withIntent.Instances[0] = current
+	withIntent.Revision++
+	withIntent.UpdatedAt = canonicalTimestamp(fixture.now.Add(6 * time.Minute))
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = withIntent
+	fixture.store.mu.Unlock()
+	failed, changed, err := fixture.store.ObserveDeploymentCommand(
+		"tenant-a", "deployment-a", current.InstanceID, withIntent.Revision, fixture.now.Add(7*time.Minute),
+	)
+	if err != nil || !changed || failed.Instances[0].Phase != DeploymentInstanceFailed ||
+		failed.Instances[0].LastError != "admission_projection_missing" {
+		t.Fatalf("current admit without projection = (%+v, %v, %v)", failed, changed, err)
+	}
+}
+
 func TestDeploymentScopeIsolationCapacityAndLegacyFormat(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MaxDeployments = 1

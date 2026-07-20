@@ -167,6 +167,13 @@ the prior release and a tested backup until enrollment, node polling, and comman
 status have succeeded under the new release. Do not run the old and new controller
 over one state directory or restore one state file independently.
 
+An `admit` command already in flight when upgrading from a controller that did
+not retain task-ready admission state can still complete its normal lifecycle.
+Control deliberately does not attach the new admission projection because it has
+no retained intent against which to authenticate that projection. The workload
+can continue running, but `agent deployment wait` and `task run` require a new
+rollout generation before they can use that instance.
+
 Staging does not build or select a relay image. When Gateway and relay topology is
 configured, activation builds the target release's `steward-relay` in a `scratch`
 image with Docker build networking disabled.
