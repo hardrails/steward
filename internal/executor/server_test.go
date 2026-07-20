@@ -651,6 +651,74 @@ func (f activationCheckpointServerFixture) start(t *testing.T) {
 	)
 }
 
+func TestWorkloadLeaseEndpointPersistsExactAuthenticatedGeneration(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, false)
+	workload := fixture.docker.observed.Workload
+	authorized := WithAdmissionPrincipal(
+		context.Background(), workload.TenantID, fixture.config.NodeID, workload.Runtime.Generation,
+	)
+	post := func(ctx context.Context, lease admission.WorkloadLease) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(lease)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(
+			http.MethodPost, "/v1/workloads/"+fixture.ref+"/lease", bytes.NewReader(body),
+		).WithContext(ctx)
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		fixture.server.Handler().ServeHTTP(response, request)
+		return response
+	}
+	lease := admission.WorkloadLease{
+		SchemaVersion: admission.WorkloadLeaseSchemaV1,
+		ExpiresAt:     time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339Nano),
+	}
+	response := post(authorized, lease)
+	if response.Code != http.StatusOK {
+		t.Fatalf("lease status=%d body=%s", response.Code, response.Body.String())
+	}
+	var got admission.WorkloadLease
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil || got != lease {
+		t.Fatalf("lease response=%+v err=%v", got, err)
+	}
+	record, ok := fixture.config.Fences.Record(workload.TenantID, workload.InstanceID)
+	if !ok || record.Generation != workload.Runtime.Generation || record.LeaseExpiresAt != lease.ExpiresAt {
+		t.Fatalf("lease fence=%+v present=%v", record, ok)
+	}
+
+	wrongTenant := WithAdmissionPrincipal(
+		context.Background(), "tenant-b", fixture.config.NodeID, workload.Runtime.Generation,
+	)
+	if response := post(wrongTenant, lease); response.Code != http.StatusForbidden {
+		t.Fatalf("wrong tenant lease status=%d body=%s", response.Code, response.Body.String())
+	}
+	rollback := lease
+	rollback.ExpiresAt = time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+	if response := post(authorized, rollback); response.Code != http.StatusConflict {
+		t.Fatalf("rollback lease status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestWorkloadLeaseEndpointRequiresSecureAdmission(t *testing.T) {
+	server, err := NewServer(&fakeDocker{}, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/workloads/executor-"+strings.Repeat("a", 64)+"/lease",
+		strings.NewReader(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T12:05:00Z"}`),
+	)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("lease without secure admission status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func postActivationCheckpoint(
 	t *testing.T,
 	server *Server,
