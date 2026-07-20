@@ -90,7 +90,7 @@ func TestCLIContextMakesLocalNodeCommandsShort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "executor-secret") || !strings.Contains(string(raw), `"schema_version": "steward.cli-context.v2"`) ||
+	if strings.Contains(string(raw), "executor-secret") || !strings.Contains(string(raw), `"schema_version": "steward.cli-context.v3"`) ||
 		!strings.Contains(string(raw), `"node_token_file":`) {
 		t.Fatalf("node context persistence=%s", raw)
 	}
@@ -98,6 +98,87 @@ func TestCLIContextMakesLocalNodeCommandsShort(t *testing.T) {
 	disabled, err := applyNodeCLIContext([]string{"status", "-no-context", "-runtime-ref", runtimeRef})
 	if err != nil || slices.Contains(disabled, tokenPath) || slices.Contains(disabled, "-no-context") {
 		t.Fatalf("disabled node context=%v error=%v", disabled, err)
+	}
+}
+
+func TestCLIContextInjectsTaskAuthorityPathsWithoutSecretValues(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	if err := os.Chmod(fixture.directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gateway := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer gateway.Close()
+	gatewayToken := filepath.Join(fixture.directory, "gateway.token")
+	if err := os.WriteFile(gatewayToken, []byte("gateway-secret-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contextPath := filepath.Join(fixture.directory, "contexts.json")
+	t.Setenv("STEWARD_CONTEXT_FILE", contextPath)
+	if err := contextCommand([]string{
+		"set", "task-site", "-gateway-url", gateway.URL, "-gateway-token-file", gatewayToken,
+		"-service-trust", fixture.trustPath, "-task-key", fixture.privatePath, "-task-key-id", fixture.keyID,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	hydrated, err := applyTaskRunContext([]string{"-deployment", "agent.deployment.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range [][]string{
+		{"-gateway-url", gateway.URL}, {"-gateway-token-file", gatewayToken},
+		{"-trust", fixture.trustPath}, {"-key", fixture.privatePath}, {"-key-id", fixture.keyID},
+	} {
+		if !adjacentArguments(hydrated, pair[0], pair[1]) {
+			t.Fatalf("hydrated task arguments %v missing %v", hydrated, pair)
+		}
+	}
+	raw, err := os.ReadFile(contextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "gateway-secret-value") {
+		t.Fatalf("context stored Gateway token value: %s", raw)
+	}
+}
+
+func TestCLIContextRejectsIncompleteOrInvalidTaskDefaults(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	if err := os.Chmod(fixture.directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STEWARD_CONTEXT_FILE", filepath.Join(fixture.directory, "contexts.json"))
+	gatewayToken := filepath.Join(fixture.directory, "gateway.token")
+	if err := os.WriteFile(gatewayToken, []byte("gateway-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badTrust := filepath.Join(fixture.directory, "bad-trust.json")
+	if err := os.WriteFile(badTrust, []byte("not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(badTrust, 0o622); err != nil {
+		t.Fatal(err)
+	}
+	badKey := filepath.Join(fixture.directory, "bad-key.pem")
+	if err := os.WriteFile(badKey, []byte("not-a-private-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		want      string
+	}{
+		{name: "incomplete gateway", arguments: []string{"incomplete", "-gateway-url", "http://127.0.0.1:8091"}, want: "complete"},
+		{name: "missing gateway token", arguments: []string{"missing-token", "-gateway-token-file", filepath.Join(fixture.directory, "missing.token")}, want: "Gateway token"},
+		{name: "incomplete task authority", arguments: []string{"incomplete-task", "-gateway-token-file", gatewayToken, "-service-trust", fixture.trustPath}, want: "task defaults require"},
+		{name: "invalid trust", arguments: []string{"bad-trust", "-gateway-token-file", gatewayToken, "-service-trust", badTrust, "-task-key", fixture.privatePath, "-task-key-id", fixture.keyID}, want: "service trust"},
+		{name: "invalid key", arguments: []string{"bad-key", "-gateway-token-file", gatewayToken, "-service-trust", fixture.trustPath, "-task-key", badKey, "-task-key-id", fixture.keyID}, want: "task key"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := contextCommand(append([]string{"set"}, test.arguments...), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("context error=%v", err)
+			}
+		})
 	}
 }
 

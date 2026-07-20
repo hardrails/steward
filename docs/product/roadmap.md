@@ -312,12 +312,18 @@ The roadmap starts from working primitives rather than a blank design:
 - health-aware placement that rejects stale nodes, durable bounded blocked reasons,
   and deliberate refusal to replace an assigned node without fencing proof; and
 - public HTTP, client, OpenAPI, and context-aware CLI operations for applying,
-  inspecting, listing, and removing desired deployments.
+  inspecting, listing, waiting for, and removing desired deployments;
+- task-ready desired state that retains the exact verified intent and authenticated
+  admission projection without retaining private keys; and
+- a recovery-safe `task run` workflow that writes signed authority before dispatch
+  and joins deployment wait, task issuance, Gateway submission, terminal
+  observation, and result storage.
 
-This foundation is not yet the complete product workflow above. In particular,
-the durable controller does not yet join task execution, health, recovery,
-capacity reservation, snapshots, protected secrets, and one evidence bundle into
-one first-time-user operation.
+This foundation is not yet the complete product workflow above. The normal task
+path is joined, but a fresh site still needs explicit application, policy,
+delegation, Gateway, and service-trust setup. The controller also does not yet join
+continuous health recovery, capacity reservation, snapshots, protected-secret
+providers, and one offline evidence bundle into one first-time-user operation.
 
 ### Production Core
 

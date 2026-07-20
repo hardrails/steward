@@ -140,12 +140,12 @@ func helpCommand(arguments []string, writer io.Writer) error {
 }
 
 var commandHelp = map[string]string{
-	"agent":            "Build and run portable Hermes or OpenClaw agent applications, evaluate offline policy, explain fleet placement, and converge durable deployments.\n\nUsage: stewardctl agent init|validate|build|plan|apply|deploy|deployment|fork|doctor ...\n",
+	"agent":            "Build and run portable Hermes or OpenClaw agent applications, evaluate offline policy, explain fleet placement, and converge durable deployments.\n\nUsage: stewardctl agent init|validate|build|plan|apply|deploy|deployment|fork|doctor ...\n\nWait for a durable deployment and export one task-ready instance with: stewardctl agent deployment wait NAME -out agent.deployment.json\n",
 	"context":          "Save connection details once so routine commands do not repeat URLs, token files, tenant IDs, or node IDs.\n\nUsage: stewardctl context set|use|show|list|delete ...\n",
 	"node":             "Operate one isolated agent on a Steward Executor node. After saving a context, pass the runtime reference directly: stewardctl node status executor-…\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...\n",
 	"control":          "Enroll nodes, manage scoped operators, deliver signed commands, and inspect fleet evidence.\n\nUsage: stewardctl control pki|tenant|operator|enrollment|node|operations|attention|command|credential|evidence ...\n",
 	"permit":           "Authorize one canonical connector request without giving the action key or reusable upstream credential to the agent.\n\nUsage: stewardctl permit context|issue|approve|verify|audit ...\n",
-	"task":             "Issue, submit, observe, and audit a service task through Gateway.\n\nUsage: stewardctl task issue|verify|audit|submit|status|observe|wait ...\n",
+	"task":             "Run, issue, submit, observe, and audit an authorized service task through Gateway. The run command persists the exact signed bundle before dispatch so an interrupted task can be resumed without minting new authority.\n\nUsage: stewardctl task run|issue|verify|audit|submit|status|observe|wait ...\n",
 	"evidence":         "Verify or export a signed Executor or Gateway receipt chain without contacting a hosted service.\n\nUsage: stewardctl evidence verify|export ...\n",
 	"image":            "Inspect or import one bounded offline OCI/Docker archive and bind it to the signed workload identity.\n\nUsage: stewardctl image inspect|import ...\n",
 	"gateway":          "Validate the Gateway configuration and inspect routes, connectors, services, and effect policy.\n\nUsage: stewardctl gateway validate|route|connector|service|effects ...\n",

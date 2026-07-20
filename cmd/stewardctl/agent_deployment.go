@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,11 +22,13 @@ import (
 
 func agentDeployment(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("agent deployment requires apply, status, list, or remove")
+		return errors.New("agent deployment requires apply, wait, status, list, or remove")
 	}
 	switch arguments[0] {
 	case "apply":
 		return agentDeploymentApply(arguments[1:], stdout)
+	case "wait":
+		return agentDeploymentWait(arguments[1:], stdout)
 	case "status":
 		return agentDeploymentStatus(arguments[1:], stdout)
 	case "list":
@@ -33,7 +36,7 @@ func agentDeployment(arguments []string, stdout io.Writer) error {
 	case "remove":
 		return agentDeploymentRemove(arguments[1:], stdout)
 	default:
-		return fmt.Errorf("unknown agent deployment command %q; expected apply, status, list, or remove", arguments[0])
+		return fmt.Errorf("unknown agent deployment command %q; expected apply, wait, status, list, or remove", arguments[0])
 	}
 }
 
@@ -166,6 +169,134 @@ func agentDeploymentStatus(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	return writeAgentJSON(stdout, deployment)
+}
+
+func agentDeploymentWait(arguments []string, stdout io.Writer) error {
+	leadingName, arguments := deploymentLeadingName(arguments)
+	hydrated, err := applyAgentDeploymentContext(arguments)
+	if err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("agent deployment wait", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := deploymentTenantFlags(flags)
+	instanceID := flags.String("instance-id", "", "exact instance to export; required for a multi-instance deployment")
+	output := flags.String("out", "", "new owner-only task-ready deployment file")
+	timeout := flags.Duration("timeout", 5*time.Minute, "bounded wait for a ready deployment")
+	if err := flags.Parse(hydrated); err != nil {
+		return err
+	}
+	if *tenantID == "" || leadingName == "" && flags.NArg() != 1 || leadingName != "" && flags.NArg() != 0 ||
+		*timeout <= 0 || *timeout > 30*time.Minute {
+		return errors.New("agent deployment wait requires a tenant, one deployment name, and a timeout up to 30 minutes")
+	}
+	deploymentID := leadingName
+	if deploymentID == "" {
+		deploymentID = flags.Arg(0)
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	ready, err := waitForTaskReadyDeployment(ctx, client, *tenantID, deploymentID, *instanceID)
+	if err != nil {
+		return err
+	}
+	if *output == "" {
+		return writeAgentJSON(stdout, ready)
+	}
+	raw, err := json.Marshal(ready)
+	if err != nil {
+		return err
+	}
+	if err := writeNewFile(*output, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	return writeAgentJSON(stdout, map[string]any{
+		"deployment": deploymentID, "instance_id": ready.InstanceID,
+		"runtime_ref": ready.RuntimeRef, "status": ready.Status, "output": *output,
+	})
+}
+
+func waitForTaskReadyDeployment(
+	ctx context.Context,
+	client *controlclient.Client,
+	tenantID, deploymentID, instanceID string,
+) (agentDeployResult, error) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		deployment, err := client.GetDeployment(ctx, tenantID, deploymentID)
+		if err != nil {
+			return agentDeployResult{}, err
+		}
+		switch deployment.Phase {
+		case controlstore.DeploymentReady:
+			return taskReadyDeploymentResult(deployment, instanceID)
+		case controlstore.DeploymentDegraded:
+			return agentDeployResult{}, fmt.Errorf("deployment %q is degraded: %s", deploymentID, deploymentFailureSummary(deployment))
+		case controlstore.DeploymentRemoved, controlstore.DeploymentStopping:
+			return agentDeployResult{}, fmt.Errorf("deployment %q is %s, not becoming ready", deploymentID, deployment.Phase)
+		}
+		select {
+		case <-ctx.Done():
+			return agentDeployResult{}, fmt.Errorf("wait for deployment %q: %w", deploymentID, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func taskReadyDeploymentResult(deployment controlclient.Deployment, wantedInstanceID string) (agentDeployResult, error) {
+	var selected *controlstore.DeploymentInstance
+	for index := range deployment.Instances {
+		instance := &deployment.Instances[index]
+		if wantedInstanceID != "" && instance.InstanceID != wantedInstanceID {
+			continue
+		}
+		if instance.Phase != controlstore.DeploymentInstanceRunning {
+			continue
+		}
+		if selected != nil {
+			return agentDeployResult{}, errors.New("deployment has multiple running instances; select one with -instance-id")
+		}
+		selected = instance
+	}
+	if selected == nil {
+		if wantedInstanceID != "" {
+			return agentDeployResult{}, fmt.Errorf("deployment has no running instance %q", wantedInstanceID)
+		}
+		return agentDeployResult{}, errors.New("ready deployment has no running instance")
+	}
+	if selected.Intent == nil || selected.Admission == nil {
+		return agentDeployResult{}, errors.New("running deployment predates task-ready state; apply a new deployment generation")
+	}
+	if selected.Admission.ServiceID == "" || len(selected.Admission.TaskAuthorities) == 0 {
+		return agentDeployResult{}, errors.New("running deployment does not expose an authorized task service")
+	}
+	return agentDeployResult{
+		SchemaVersion: agentDeploymentSchema,
+		AgentName:     deployment.AgentName, BundleDigest: deployment.BundleDigest,
+		TenantID: deployment.TenantID, NodeID: selected.NodeID,
+		InstanceID: selected.InstanceID, LineageID: selected.LineageID,
+		Generation: selected.Generation, RuntimeRef: selected.Admission.RuntimeRef,
+		Status: "running", Intent: *selected.Intent, Admission: *selected.Admission,
+	}, nil
+}
+
+func deploymentFailureSummary(deployment controlclient.Deployment) string {
+	parts := make([]string, 0, len(deployment.Instances))
+	for _, instance := range deployment.Instances {
+		if instance.LastError != "" {
+			parts = append(parts, instance.InstanceID+"="+instance.LastError)
+		}
+	}
+	if len(parts) == 0 {
+		return "no failure detail was reported"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func agentDeploymentList(arguments []string, stdout io.Writer) error {

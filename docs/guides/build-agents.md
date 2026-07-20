@@ -212,6 +212,34 @@ in-progress, or failed instance is rejected because forgetting it would leave it
 workload unmanaged. An already removed instance may be omitted from the next
 generation.
 
+Wait for a ready single-instance deployment and export its exact non-secret intent
+and authenticated admission result when another tool needs a portable handoff:
+
+```console
+stewardctl agent deployment wait auditor -out agent.deployment.json
+```
+
+For a deployment with multiple running instances, add `-instance-id`. A deployment
+created before task-ready state was introduced must be rolled forward to a new
+generation; Steward will not reconstruct a missing admission result from guesses.
+
+For routine work, configure the [CLI task defaults]({{ '/guides/cli/' |
+relative_url }}) once and run the entire authorized task lifecycle in one command:
+
+```console
+stewardctl task run auditor \
+  -request task-request.json \
+  -operation-id hermes.run \
+  -bundle-out task.bundle.json \
+  -result-out task-result.json
+```
+
+This waits for the deployment, checks the exact admitted service and task key,
+persists the signed bundle before dispatch, submits through the node-local Gateway,
+and saves verified terminal bytes. The bundle remains the recovery handle after a
+timeout or interrupted terminal. Resume it instead of minting replacement
+authority.
+
 ## Run one synchronous deployment through Control
 
 Use `agent deploy` when the Executor reaches a separately hosted Steward Control
@@ -248,8 +276,8 @@ but this one-shot command does not create durable desired state. Use `agent depl
 apply` for controller reconciliation.
 
 The deployment file contains the exact intent and authenticated admission result,
-not credentials or private keys. It can authorize a real task without splitting
-those fields into separate files:
+not credentials or private keys. The separate commands below remain the expert and
+off-node signing path:
 
 ```console
 stewardctl task issue \
@@ -263,13 +291,13 @@ stewardctl task issue \
 
 stewardctl task submit \
   -bundle task.bundle.json \
-  -gateway-url http://127.0.0.1:8081 \
-  -token-file /etc/steward/gateway-control.token
+  -gateway-url http://127.0.0.1:8091 \
+  -token-file /etc/steward/gateway-service-token
 
 stewardctl task wait \
   -bundle task.bundle.json \
-  -gateway-url http://127.0.0.1:8081 \
-  -token-file /etc/steward/gateway-control.token \
+  -gateway-url http://127.0.0.1:8091 \
+  -token-file /etc/steward/gateway-service-token \
   -result-out task-result.json
 ```
 

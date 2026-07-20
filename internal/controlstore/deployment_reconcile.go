@@ -1,6 +1,10 @@
 package controlstore
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"math"
 	"sort"
 	"strings"
@@ -8,6 +12,7 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/dsse"
 )
 
 // DeploymentFleetSnapshot is one immutable controller planning view. Mutations
@@ -197,6 +202,14 @@ func (store *Store) EnqueueDeploymentCommand(
 	if _, err := deliveryFor(command, 1); err != nil {
 		return Deployment{}, Command{}, false, invalidError("deployment command cannot fit one Executor delivery", err)
 	}
+	if statement.Kind == "admit" {
+		intent, err := deploymentAdmitIntent(statement.Payload, deployment.CapsuleDSSE)
+		if err != nil {
+			return Deployment{}, Command{}, false, invalidError("decode deployment admission intent", err)
+		}
+		instance.Intent = &intent
+		instance.Admission = nil
+	}
 	if deployment.Revision == math.MaxUint64 || instance.Attempts == math.MaxUint32 {
 		return Deployment{}, Command{}, false, ErrCapacityExceeded
 	}
@@ -281,6 +294,19 @@ func (store *Store) ObserveDeploymentCommand(
 	if command.Terminal.Report.Status == controlprotocol.ExecutorStatusDone {
 		instance.Phase = deploymentSuccessfulPhase(instance.CommandOperation)
 		instance.LastError = ""
+		if instance.CommandOperation == "admit" {
+			if instance.Intent == nil {
+				// An admit enqueued by a pre-projection controller has no intent to
+				// authenticate the projection against. Preserve its legacy lifecycle
+				// result, but do not make it task-ready by retaining unverified data.
+				instance.Admission = nil
+			} else if command.Terminal.Admission == nil {
+				instance.Phase = DeploymentInstanceFailed
+				instance.LastError = "admission_projection_missing"
+			} else {
+				instance.Admission = cloneAdmissionProjection(command.Terminal.Admission)
+			}
+		}
 	} else {
 		instance.Phase = DeploymentInstanceFailed
 		instance.LastError = deploymentCommandError(command)
@@ -294,6 +320,27 @@ func (store *Store) ObserveDeploymentCommand(
 		return Deployment{}, false, err
 	}
 	return cloneDeployment(deployment), true, nil
+}
+
+func deploymentAdmitIntent(raw json.RawMessage, capsule []byte) (admission.InstanceIntent, error) {
+	var payload struct {
+		Capsule string                   `json:"capsule_dsse_base64"`
+		Intent  admission.InstanceIntent `json:"intent"`
+	}
+	if err := dsse.DecodeStrictInto(raw, len(raw), &payload); err != nil {
+		return admission.InstanceIntent{}, err
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload.Capsule)
+	if err != nil || base64.StdEncoding.EncodeToString(decoded) != payload.Capsule || !bytes.Equal(decoded, capsule) {
+		return admission.InstanceIntent{}, errors.New("admission capsule does not match deployment")
+	}
+	if err := payload.Intent.Validate(admission.AuthenticatedIdentity{
+		TenantID: payload.Intent.TenantID,
+		NodeID:   payload.Intent.NodeID,
+	}); err != nil {
+		return admission.InstanceIntent{}, err
+	}
+	return payload.Intent, nil
 }
 
 // RemovePendingDeploymentInstance completes an absent instance that never

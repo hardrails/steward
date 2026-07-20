@@ -123,6 +123,23 @@ to select Hermes or OpenClaw, apply offline OPA policy, explain fleet placement,
 admit and start the workload directly or through Steward Control, and derive a
 temporary or long-lived fork from persistent state.
 
+After a durable deployment is applied, one recovery-safe command can wait for a
+running instance, issue exact task authority, dispatch through the local Gateway,
+wait for the agent, and save the verified result:
+
+```console
+stewardctl task run workspace-auditor \
+  -request workspace-audit.request.json \
+  -operation-id hermes.run \
+  -bundle-out workspace-audit.task.json \
+  -result-out workspace-audit.result.json
+```
+
+A named CLI context supplies Control, tenant, Gateway, service-trust, and task-key
+paths. `task run` writes the signed bundle before dispatch. If the terminal or host
+fails after dispatch, resume that same authority with `task submit` and `task wait`;
+do not create a replacement task that might duplicate the work.
+
 ## Authorize real work
 
 A normal sandbox decides whether a process may open a network connection.

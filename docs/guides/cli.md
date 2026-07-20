@@ -1,6 +1,6 @@
 ---
 title: Make stewardctl easier to use
-description: Save repeated connection settings in named contexts and enable Bash, Zsh, or Fish completion without storing bearer credentials.
+description: Save repeated connection and task-authority paths in named contexts, run a recoverable first task, and enable Bash, Zsh, or Fish completion without copying secret values.
 section: How-to guide
 ---
 
@@ -11,8 +11,8 @@ apply`, `stewardctl agent deploy`, and `stewardctl agent deployment`, need the s
 context saves those repeated values once. You keep typing only the values specific
 to the task.
 
-The context stores **paths** to token files, not token values. Private signing keys
-and bearer values are never copied into the context file.
+The context stores **paths** to token and key files, not their values. Private
+signing keys and bearer values are never copied into the context file.
 
 ## Set up a context once
 
@@ -68,6 +68,51 @@ identities.
 The loopback URL defaults to `http://127.0.0.1:8090` when
 `-node-token-file` is present. Set `-node-url` only when the packaged loopback port
 was changed. A single context may contain both Control and local-node settings.
+
+### Save the first-task defaults
+
+On the node that can reach Gateway through loopback, extend the Control context
+with the files used for authorized service tasks:
+
+```console
+sudo -H stewardctl context set production \
+  -control-url https://control.customer.example:8443 \
+  -ca-file /etc/steward-control/pki/ca.crt \
+  -token-file /secure/steward-control/tenant-a-operator.token \
+  -tenant-id tenant-a \
+  -gateway-token-file /etc/steward/gateway-service-token \
+  -service-trust /secure/steward/hermes-service-trust.json \
+  -task-key /secure/steward/tenant-task.private.pem \
+  -task-key-id tenant-task-1
+```
+
+The Gateway origin defaults to `http://127.0.0.1:8091` when its token path is
+present. The service-trust inventory is non-secret but authenticated transfer
+material. The task private key remains an owner-only external file; the context
+stores only its absolute path. A higher-assurance site can keep this key off-node
+and continue using the separate `task issue`, transfer, `task submit`, and `task
+wait` commands.
+
+With the context selected, run one exact request against a durable deployment:
+
+```console
+sudo -H stewardctl task run auditor \
+  -request auditor.request.json \
+  -operation-id hermes.run \
+  -bundle-out auditor.task.json \
+  -result-out auditor.result.json
+```
+
+The command waits for exactly one running instance unless `-instance-id` selects
+one. It retains the verified intent and authenticated admission result from
+Control, checks that the configured key is admitted for the selected service,
+writes the owner-only signed task bundle, dispatches through Gateway, waits, and
+writes the result without printing request or result bytes.
+
+The bundle is created before network dispatch. If dispatch or waiting fails, keep
+it and follow the recovery command printed in the error. Reusing the same bundle
+is safe and observable; issuing a new task ID could duplicate an effect whose
+outcome is still unknown.
 
 Routine lifecycle commands accept the returned runtime reference directly:
 
@@ -126,11 +171,13 @@ updates atomically, bounds the file to 64 KiB, accepts at most
 32 contexts, and rejects unknown or duplicate fields.
 
 Contexts affect `stewardctl control`, `stewardctl node`, `stewardctl agent apply`,
-`stewardctl agent deploy`, and `stewardctl agent deployment` commands. They do not
-supply signing keys, secret values, workload files, command IDs, capture IDs,
-runtime references, or destructive resource identities. Existing commands with
-explicit flags continue to work when no context is selected. Files written by an
-older context schema remain readable and are upgraded on the next edit.
+`stewardctl agent deploy`, `stewardctl agent deployment`, and `stewardctl task run`.
+For `task run`, a context may supply paths to the Gateway token, service-trust
+inventory, and task private key plus its public key ID. It never stores the secret
+values or silently supplies workload files, command IDs, capture IDs, runtime
+references, result paths, or destructive resource identities. Existing commands
+with explicit flags continue to work when no context is selected. Files written by
+an older context schema remain readable and are upgraded on the next edit.
 
 Add `-no-context` to a Control or node command to ignore the context file
 entirely. This is useful for self-contained automation and recovery from a damaged
@@ -192,5 +239,5 @@ another loopback port, or another token file. The completion installer also make
 a narrow, visible change to the user's shell startup file. Keep the user account
 and configuration directory trusted, inspect those files under a managed-dotfiles
 policy, review `stewardctl context show` before a sensitive operation, and keep
-token files owner-only. Executor still verifies signed command authority before
-acting, regardless of which context transported the command.
+token and key files owner-only. Executor and Gateway still verify the signed
+authority before acting, regardless of which context selected the file paths.
