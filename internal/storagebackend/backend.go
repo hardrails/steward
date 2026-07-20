@@ -179,6 +179,7 @@ type Snapshot struct {
 type SnapshotScope struct {
 	SnapshotID      string `json:"snapshot_id"`
 	TenantID        string `json:"tenant_id"`
+	SourceVolumeID  string `json:"source_volume_id"`
 	SourceLineageID string `json:"source_lineage_id"`
 	Generation      uint64 `json:"generation"`
 }
@@ -186,6 +187,7 @@ type SnapshotScope struct {
 func (value SnapshotScope) Validate() error {
 	if !validIdentifier(value.SnapshotID, MaxIdentifierBytes) ||
 		!validIdentifier(value.TenantID, MaxIdentifierBytes) ||
+		!validIdentifier(value.SourceVolumeID, MaxIdentifierBytes) ||
 		!validIdentifier(value.SourceLineageID, MaxIdentifierBytes) || value.Generation == 0 {
 		return fmt.Errorf("%w: snapshot scope", ErrInvalid)
 	}
@@ -195,6 +197,7 @@ func (value SnapshotScope) Validate() error {
 func (value Snapshot) Scope() SnapshotScope {
 	return SnapshotScope{
 		SnapshotID: value.SnapshotID, TenantID: value.TenantID,
+		SourceVolumeID:  value.SourceVolumeID,
 		SourceLineageID: value.SourceLineageID, Generation: value.Generation,
 	}
 }

@@ -144,10 +144,11 @@ func (client *Client) CreateSnapshot(ctx context.Context, request CreateSnapshot
 		return Snapshot{}, false, err
 	}
 	if response.Snapshot == nil || response.Volume != nil || response.Snapshot.Validate() != nil ||
-		response.Snapshot.SnapshotID != request.SnapshotID ||
-		response.Snapshot.TenantID != request.Source.TenantID ||
-		response.Snapshot.SourceVolumeID != request.Source.VolumeID ||
-		response.Snapshot.SourceLineageID != request.Source.LineageID {
+		response.Snapshot.Scope() != (SnapshotScope{
+			SnapshotID: request.SnapshotID, TenantID: request.Source.TenantID,
+			SourceVolumeID: request.Source.VolumeID, SourceLineageID: request.Source.LineageID,
+			Generation: request.Source.Generation,
+		}) {
 		return Snapshot{}, false, errors.New("storage backend snapshot mutation response is invalid or out of scope")
 	}
 	return *response.Snapshot, response.Changed, nil
