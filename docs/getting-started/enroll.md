@@ -113,7 +113,7 @@ This credential authenticates the connection, not a tenant. Executor requires th
 same signed-admission node ID, a verified policy with a site cleanup command key,
 and verified HTTPS. Tenant keys sign normal remote commands as DSSE envelopes,
 which wrap a typed JSON statement and its signature. A site cleanup key may
-authorize only stop, destroy, or purge. Each statement binds tenant, node, instance,
+authorize only stop, destroy, purge, or snapshot deletion. Each statement binds tenant, node, instance,
 runtime, generations, sequence, and a short validity window.
 
 Pass the node-scoped credential, evidence config, receipt key pair, and all

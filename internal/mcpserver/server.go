@@ -36,6 +36,7 @@ type Node interface {
 	PurgeState(context.Context, nodeclient.StatePurge) error
 	SnapshotState(context.Context, nodeclient.StateSnapshotRequest) (nodeclient.StateSnapshot, error)
 	CloneState(context.Context, nodeclient.StateCloneRequest) (nodeclient.StateClone, error)
+	DeleteStateSnapshot(context.Context, nodeclient.StateSnapshotRequest) error
 }
 
 type Server struct {
@@ -390,6 +391,22 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 			LineageID: arguments.LineageID, Generation: arguments.Generation, SnapshotID: arguments.SnapshotID,
 			SourceLineageID: arguments.SourceLineageID,
 		})
+	case "steward_delete_snapshot":
+		if s.node == nil {
+			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
+		}
+		var arguments snapshotStateArgs
+		if decodeArguments(call.Arguments, &arguments) != nil || arguments.TenantID == "" || arguments.NodeID == "" ||
+			arguments.InstanceID == "" || arguments.LineageID == "" || arguments.Generation == 0 || arguments.SnapshotID == "" {
+			return toolFailure("steward_delete_snapshot requires tenant_id, node_id, instance_id, lineage_id, generation, and snapshot_id"), nil
+		}
+		nodeCtx, cancel := context.WithTimeout(ctx, nodeOperationTimeout)
+		defer cancel()
+		err = s.node.DeleteStateSnapshot(nodeCtx, nodeclient.StateSnapshotRequest{
+			TenantID: arguments.TenantID, NodeID: arguments.NodeID, InstanceID: arguments.InstanceID,
+			LineageID: arguments.LineageID, Generation: arguments.Generation, SnapshotID: arguments.SnapshotID,
+		})
+		value = map[string]any{"tenant_id": arguments.TenantID, "snapshot_id": arguments.SnapshotID, "deleted": err == nil}
 	case "steward_task_submit":
 		if s.tasks == nil {
 			return nil, &rpcError{Code: -32602, Message: "unknown tool " + call.Name}
@@ -491,6 +508,7 @@ func nodeTools() []any {
 		}, false, true, true, false),
 		tool("steward_snapshot_state", "Snapshot agent state", "Create an immutable snapshot after the complete signed source lineage is destroyed.", stateSnapshotToolSchema(), false, false, true, false),
 		tool("steward_clone_state", "Clone agent state", "Create a new quota-enforced copy-on-write lineage from an immutable same-tenant snapshot.", stateCloneToolSchema(), false, false, true, false),
+		tool("steward_delete_snapshot", "Delete state snapshot", "Delete an immutable snapshot after every dependent clone is purged.", stateSnapshotToolSchema(), false, true, true, false),
 	}
 }
 

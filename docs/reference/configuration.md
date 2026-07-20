@@ -321,7 +321,7 @@ admission.
 | --- | --- |
 | `observer` | Local identity, readiness, maintenance status, workload status, bounded logs, and egress statistics |
 | `operator` | Everything an observer can call, plus start, stop, destroy, and maintenance enter or exit |
-| `host-admin` | Every local endpoint, including admission, legacy provisioning, state snapshot/clone/purge, activation preflight, and activation checkpoints |
+| `host-admin` | Every local endpoint, including admission, legacy provisioning, state snapshot/clone/delete/purge, activation preflight, and activation checkpoints |
 
 Fresh packaged configuration creates owner-only files at
 `/etc/steward/executor-observer-token`,
@@ -357,7 +357,7 @@ admission, matching node IDs, verified HTTPS, and verified policy containing at
 least one `site_cleanup_command_keys` entry. Every DSSE (Dead Simple Signing
 Envelope) `steward.executor-command.v2` statement binds a typed payload to a
 signature from either an authorized tenant-operation key or a site cleanup key for
-`stop`, `destroy`, or `purge`. Cleanup keys cannot authorize
+`stop`, `destroy`, `purge`, or `delete-snapshot`. Cleanup keys cannot authorize
 `admit`, `renew`, `start`, or `read`, or share tenant-key IDs. They remain usable after a
 tenant rule is removed, preventing stranded workloads. An emergency policy may have
 cleanup keys and no tenant rules. The bearer credential cannot select a tenant. See

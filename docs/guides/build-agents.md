@@ -453,7 +453,8 @@ Executor's signed `snapshot-state` and `clone-state` commands. Create the snapsh
 after destroying the source workload, clone it into the new instance and lineage
 from this plan, then admit the fork with `state_disposition: resume`. The snapshot
 and clone must currently stay on the same node. Retention and expiry cleanup remain
-explicit operator or controller work.
+explicit operator or controller work. After every fork lineage has been destroyed
+and purged, use `delete-snapshot` to release the checkpoint's retained capacity.
 
 The snapshot JSON consumed by `agent fork` is the portable compatibility record:
 it binds the backend's returned `content_digest` to the exact agent bundle and

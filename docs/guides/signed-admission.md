@@ -46,7 +46,7 @@ Insert the exact base64 values from `publisher.public`,
   "site_cleanup_command_keys": [{
     "key_id": "site-cleanup",
     "public_key": "PASTE site-cleanup.public HERE",
-    "operations": ["stop", "destroy", "purge"]
+    "operations": ["stop", "destroy", "purge", "delete-snapshot"]
   }],
   "publishers": [{
     "key_id": "publisher-1",
@@ -72,7 +72,7 @@ Insert the exact base64 values from `publisher.public`,
     "command_keys": [{
       "key_id": "tenant-a-commands",
       "public_key": "PASTE tenant-a-commands.public HERE",
-      "operations": ["admit", "renew", "start", "stop", "destroy", "read", "purge", "snapshot-state", "clone-state", "activation-canary"]
+      "operations": ["admit", "renew", "start", "stop", "destroy", "read", "purge", "snapshot-state", "clone-state", "delete-snapshot", "activation-canary"]
     }]
   }]
 }
@@ -90,7 +90,7 @@ value and rejects older policy.
 
 Node-scoped multi-tenant uplink requires at least one
 `site_cleanup_command_keys` entry. These entries may authorize only `stop`,
-`destroy`, or `purge`; their IDs cannot match tenant command keys. This site authority survives
+`destroy`, `purge`, or `delete-snapshot`; their IDs cannot match tenant command keys. This site authority survives
 tenant-key compromise or rule removal but cannot admit, start, or read. Each command
 binds tenant, node, instance, generations, sequence, validity window, and runtime
 reference to Executor's durable record. An emergency cleanup policy may set

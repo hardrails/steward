@@ -205,7 +205,7 @@ upstream. `GET /v1/models` is synthesized from the same alias, so broader upstre
 credential access does not expand tenant authority.
 
 Signed mode disables legacy `POST /v1/workloads` creation. Authenticated start,
-stop, destroy, and purge operations are journaled and receipted while Executor is
+stop, destroy, snapshot, clone, snapshot deletion, and purge operations are journaled and receipted while Executor is
 ready. Destroy records a
 generation tombstone—a durable marker that prevents older commands from reviving
 the removed instance. Direct tenant selection remains disabled unless an operator
@@ -297,14 +297,14 @@ authority:
   "site_cleanup_command_keys": [{
     "key_id": "site-cleanup",
     "public_key": "BASE64_ED25519_PUBLIC_KEY",
-    "operations": ["stop", "destroy", "purge"]
+    "operations": ["stop", "destroy", "purge", "delete-snapshot"]
   }],
   "tenants": [{
     "tenant_id": "tenant-a",
     "command_keys": [{
       "key_id": "tenant-a-commands",
       "public_key": "BASE64_ED25519_PUBLIC_KEY",
-      "operations": ["admit", "renew", "start", "stop", "destroy", "read", "purge", "snapshot-state", "clone-state", "activation-canary"]
+      "operations": ["admit", "renew", "start", "stop", "destroy", "read", "purge", "snapshot-state", "clone-state", "delete-snapshot", "activation-canary"]
     }]
   }]
 }
@@ -313,7 +313,7 @@ authority:
 Tenant private keys stay on a tenant-authorized signing station or separate signing
 service outside Steward Control. A separate site incident-response signer holds
 the cleanup private key. Cleanup keys can
-authorize only `stop`, `destroy`, and `purge`; they cannot authorize `admit`,
+authorize only `stop`, `destroy`, `purge`, and `delete-snapshot`; they cannot authorize `admit`,
 `start`, or `read`. Their top-level placement lets a site remove a compromised
 tenant key or tenant rule without losing containment of that tenant's existing
 workload while Executor is able to serve commands.
@@ -429,7 +429,9 @@ an empty payload. `purge` carries one bounded `lineage_id`. `snapshot-state`
 carries `lineage_id` and `snapshot_id`; `clone-state` carries `lineage_id`,
 `snapshot_id`, and `source_lineage_id`. Snapshot requires the exact destroyed
 source generation. Clone creates only a new quota-backed lineage; a later signed
-`admit` with `state_disposition: resume` creates the workload. The
+`admit` with `state_disposition: resume` creates the workload. `delete-snapshot`
+carries `lineage_id` and `snapshot_id`; it fails while any dependent clone remains.
+The
 signed intent and every runtime-reference identity must describe the same tuple
 before the local handler runs.
 

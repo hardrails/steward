@@ -152,6 +152,9 @@ Executor exposes the qualified backend through two signed operations:
 - `clone-state` creates a new, quota-enforced copy-on-write lineage in the same
   tenant. The target instance and lineage must be new. Normal signed admission
   with `state_disposition: resume` is still required before the fork can run.
+- `delete-snapshot` removes the immutable checkpoint only after every dependent
+  clone lineage has been destroyed and purged. This releases retained snapshot
+  capacity and allows the source lineage to be purged.
 
 Both operations bind tenant, node, instance, lineage, generation, and snapshot
 identity to the signed command. Executor derives the dataset and Docker volume
@@ -162,6 +165,8 @@ The same bounded operations are available as `stewardctl node snapshot-state` an
 `stewardctl node clone-state`, and as MCP tools `steward_snapshot_state` and
 `steward_clone_state`. Those local surfaces use the configured Executor credential;
 they do not weaken tenant authorization or enable host-admin intent implicitly.
+Snapshot deletion is available as `stewardctl node delete-snapshot` and
+`steward_delete_snapshot`.
 
 If Executor loses the worker response after preparing a mutation, it blocks every
 unrelated mutation. Reissuing the exact same signed snapshot or clone request is the

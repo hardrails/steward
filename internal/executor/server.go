@@ -254,6 +254,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/maintenance/exit", requireLocalRole(LocalRoleOperator, s.maintenanceExit))
 	mux.HandleFunc("POST /v1/state/purge", requireLocalRole(LocalRoleHostAdmin, s.purgeState))
 	mux.HandleFunc("POST /v1/state/snapshots", requireLocalRole(LocalRoleHostAdmin, s.createStateSnapshot))
+	mux.HandleFunc("POST /v1/state/snapshots/delete", requireLocalRole(LocalRoleHostAdmin, s.deleteStateSnapshot))
 	mux.HandleFunc("POST /v1/state/clones", requireLocalRole(LocalRoleHostAdmin, s.cloneStateSnapshot))
 	mux.HandleFunc(
 		"POST /v1/workloads/{id}/activation-canary-preflight",

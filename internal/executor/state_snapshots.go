@@ -284,6 +284,107 @@ func (s *Server) cloneStateSnapshot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, cloneResponse(request))
 }
 
+func (s *Server) deleteStateSnapshot(w http.ResponseWriter, r *http.Request) {
+	if s.secure == nil {
+		writeError(w, http.StatusServiceUnavailable, "secure_admission_unavailable", "signed admission is not configured on this node")
+		return
+	}
+	if s.secure.stateBackend == nil {
+		writeError(w, http.StatusNotImplemented, "capability_unavailable", "snapshot deletion requires a qualified persistent state backend")
+		return
+	}
+	var request stateSnapshotRequest
+	if !decodeStateMutation(w, r, &request) || !validStateSnapshotRequest(request) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be one bounded state snapshot deletion object")
+		return
+	}
+	if !s.authorizeStateMutation(r, request.TenantID, request.NodeID, request.Generation) {
+		writeError(w, http.StatusForbidden, "admission_denied", "state snapshot deletion does not match the authenticated command")
+		return
+	}
+
+	s.provisionMu.Lock()
+	defer s.provisionMu.Unlock()
+	target := stateMutationTarget("delete-snapshot", request.SnapshotID, request.TenantID, request.LineageID, request.Generation)
+	opID, recovering, blocked := s.stateMutationRecovery(target, request.Generation)
+	if blocked {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "a prior host mutation requires reconciliation")
+		return
+	}
+	record, found := s.exactLineageRecord(request.TenantID, request.InstanceID, request.LineageID, request.Generation)
+	if !found || !s.principalAuthorizesRecord(r.Context(), record) {
+		writeError(w, http.StatusNotFound, "state_not_found", "the signed source lineage is not known on this node")
+		return
+	}
+	scope := storagebackend.SnapshotScope{
+		SnapshotID: request.SnapshotID, TenantID: request.TenantID,
+		SourceVolumeID:  stateBackendVolumeID(request.TenantID, request.LineageID),
+		SourceLineageID: request.LineageID, Generation: 1,
+	}
+	snapshot, err := s.secure.stateBackend.InspectSnapshot(r.Context(), scope)
+	if errors.Is(err, storagebackend.ErrNotFound) {
+		if recovering {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "prepared snapshot deletion cannot prove its retained target")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		writeStateBackendError(w, err)
+		return
+	}
+	if snapshot.Scope() != scope {
+		writeError(w, http.StatusConflict, "state_drift", "snapshot does not match the signed tenant lineage")
+		return
+	}
+	prepared := stateMutationEvidence(record, request.SnapshotID, "state-snapshot-delete", evidence.JournalPrepare, evidence.Allowed)
+	if !recovering {
+		opID, err = newOperationID("delete-snapshot-"+request.SnapshotID, request.Generation)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "create snapshot deletion operation identity")
+			return
+		}
+		if _, err := s.secure.journal.Prepare(opID, target, request.Generation); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "journal_unavailable", err.Error())
+			return
+		}
+		if _, err := s.secure.evidence.Append(prepared); err != nil {
+			_ = s.secure.journal.Compensate(opID)
+			writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
+			return
+		}
+	}
+	deleted, _, mutationErr := s.secure.stateBackend.DeleteSnapshot(r.Context(), storagebackend.DeleteSnapshotRequest{
+		RequestID: stateBackendRequestID("delete-snapshot-"+request.SnapshotID, request.TenantID, request.LineageID, request.Generation),
+		Snapshot:  scope,
+	})
+	if mutationErr != nil {
+		if definitiveStateBackendError(mutationErr) {
+			s.recordCompensation(opID, prepared, "state_snapshot_delete")
+			writeStateBackendError(w, mutationErr)
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "snapshot deletion result is ambiguous; operation remains prepared")
+		}
+		return
+	}
+	if deleted.Scope() != scope || deleted.State != storagebackend.StateDeleted {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "snapshot deletion returned an invalid projection; operation remains prepared")
+		return
+	}
+	committed := prepared
+	committed.Type, committed.Outcome, committed.MetadataHash = evidence.JournalCommit, evidence.Committed, snapshot.ContentDigest
+	if _, err := s.secure.evidence.Append(committed); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "snapshot was deleted but its receipt could not be persisted")
+		return
+	}
+	if err := s.secure.journal.Commit(opID); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func decodeStateMutation(w http.ResponseWriter, r *http.Request, output any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	raw, err := io.ReadAll(r.Body)
@@ -368,6 +469,15 @@ func (s *Server) latestLineageRecord(tenantID, lineageID string) (admission.Fenc
 		}
 	}
 	return latest, latest.Generation != 0
+}
+
+func (s *Server) exactLineageRecord(tenantID, instanceID, lineageID string, generation uint64) (admission.FenceRecord, bool) {
+	for _, record := range s.secure.fences.Records() {
+		if record.TenantID == tenantID && record.InstanceID == instanceID && record.LineageID == lineageID && record.Generation == generation {
+			return record, true
+		}
+	}
+	return admission.FenceRecord{}, false
 }
 
 func stateMutationEvidence(record admission.FenceRecord, runtimeRef, grant string, kind evidence.EventType, outcome evidence.Outcome) evidence.Event {

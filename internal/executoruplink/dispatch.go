@@ -205,6 +205,12 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 			rep.Result["error"] = "state snapshot requires the exact durable destroyed lifecycle generation"
 			return rep
 		}
+	} else if cmd.Kind == "delete-snapshot" {
+		if !hasCurrent || cmd.InstanceGeneration != current.Generation ||
+			(!current.LegacyClaimFence && cmd.ClaimGeneration != current.ClaimGeneration) {
+			rep.Result["error"] = "snapshot deletion requires the exact durable lifecycle generation"
+			return rep
+		}
 	}
 	if hasCurrent {
 		if commandIsStale(cmd, current) {
@@ -265,8 +271,11 @@ func (d *dispatcher) execute(ctx context.Context, cmd command) report {
 		rep.Result["error"] = err.Error()
 		return rep
 	}
+	if cmd.Kind == "delete-snapshot" {
+		reported = current.ReportedStatus
+	}
 	absent := cmd.Kind == "destroy" || cmd.Kind == "purge" || cmd.Kind == "clone-state" ||
-		cmd.Kind == "snapshot-state" && current.Absent
+		(cmd.Kind == "snapshot-state" || cmd.Kind == "delete-snapshot") && current.Absent
 	// A read-only key must not be able to advance the lifecycle high-water
 	// position and fence out a later admit/stop/destroy. Reads are authorized
 	// against the exact durable generation above, but intentionally do not
@@ -412,6 +421,22 @@ func (d *dispatcher) apply(ctx context.Context, cmd command, tenantID, instanceI
 			"snapshot_id": payload.SnapshotID, "source_lineage_id": payload.SourceLineageID,
 		}
 		if _, err := d.call(ctx, http.MethodPost, "/v1/state/clones", request); err != nil {
+			return "", err
+		}
+		return "stopped", nil
+	case "delete-snapshot":
+		var payload snapshotStatePayload
+		if err := dsse.DecodeStrictInto(cmd.Payload, maxWireBytes, &payload); err != nil ||
+			!boundedCommandText(payload.LineageID, 256) || !boundedCommandText(payload.SnapshotID, 128) {
+			return "", errors.New("invalid snapshot deletion payload")
+		}
+		ctx = executor.WithAdmissionPrincipal(ctx, tenantID, d.nodeID, cmd.InstanceGeneration)
+		request := map[string]any{
+			"tenant_id": tenantID, "node_id": d.nodeID, "instance_id": instanceID,
+			"lineage_id": payload.LineageID, "generation": cmd.InstanceGeneration,
+			"snapshot_id": payload.SnapshotID,
+		}
+		if _, err := d.call(ctx, http.MethodPost, "/v1/state/snapshots/delete", request); err != nil {
 			return "", err
 		}
 		return "stopped", nil

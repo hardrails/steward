@@ -29,7 +29,8 @@ credentials. A control operator token can read or change the tenants and nodes i
 its scope and submit any already valid signed command it possesses. Controller MCP
 does not issue operator or enrollment secrets. The Executor and Gateway tokens are
 **host-administrator credentials**. A
-client that can invoke node tools can admit, start, stop, destroy, and purge state
+client that can invoke node tools can admit, start, stop, destroy, snapshot, clone,
+delete snapshots, and purge state
 within Executor's configured authority. A client with task tools can spend a valid
 pre-signed permit and cause its exact external effect. Do not expose either token,
 the MCP process, or its standard-input channel to an untrusted agent or shared
@@ -198,6 +199,7 @@ lineage is one workload's persistent state history.
 | `steward_destroy` | Destroy the containers, network, and grant while retaining state. |
 | `steward_snapshot_state` | Create an immutable cold snapshot after the complete signed source lineage is destroyed. |
 | `steward_clone_state` | Create a new quota-enforced copy-on-write lineage from a same-tenant snapshot; normal signed admission is still required before it can run. |
+| `steward_delete_snapshot` | Delete an immutable snapshot after every dependent clone lineage is purged. |
 | `steward_purge_state` | Permanently remove an inactive persistent-state lineage after signed authorization. |
 | `steward_task_submit` | Submit one exact request and signed permit. Required arguments are `service_path`, `operation_path`, `request_base64`, `permit_base64`, and `acknowledge_external_effects=true`. Returns task and permit digests plus the durable receipt marker, never raw agent output. |
 | `steward_task_status` | Read durable lifecycle metadata by task and permit digest without contacting the agent. |

@@ -367,6 +367,14 @@ func (c *Client) CloneState(ctx context.Context, request StateCloneRequest) (Sta
 	return clone, nil
 }
 
+func (c *Client) DeleteStateSnapshot(ctx context.Context, request StateSnapshotRequest) error {
+	if request.TenantID == "" || request.NodeID == "" || request.InstanceID == "" || request.LineageID == "" ||
+		request.Generation == 0 || request.SnapshotID == "" {
+		return errors.New("state snapshot deletion request is incomplete")
+	}
+	return c.do(ctx, http.MethodPost, "/v1/state/snapshots/delete", request, nil)
+}
+
 func (c *Client) MaintenanceStatus(ctx context.Context) (MaintenanceStatus, error) {
 	var status MaintenanceStatus
 	if err := c.do(ctx, http.MethodGet, "/v1/maintenance", nil, &status); err != nil {
@@ -488,7 +496,7 @@ func ReadBounded(path string, limit int64) ([]byte, error) {
 
 func validRuntimePath(path string) bool {
 	if path == "/v1/admissions" || path == "/v1/local-principal" || path == "/v1/state/purge" ||
-		path == "/v1/state/snapshots" || path == "/v1/state/clones" ||
+		path == "/v1/state/snapshots" || path == "/v1/state/snapshots/delete" || path == "/v1/state/clones" ||
 		path == "/v1/maintenance" || path == "/v1/maintenance/enter" || path == "/v1/maintenance/exit" {
 		return true
 	}

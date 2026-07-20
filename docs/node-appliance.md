@@ -264,7 +264,7 @@ Executor credential has
 - the uplink uses HTTPS with certificate verification.
 
 Tenant keys authorize normal operations. The site cleanup key authorizes only
-stop, destroy, and purge, so an operator can remove abandoned workloads after
+stop, destroy, purge, and snapshot deletion, so an operator can remove abandoned workloads after
 tenant access is revoked. Configure the node in one fail-closed transaction:
 
 ```console

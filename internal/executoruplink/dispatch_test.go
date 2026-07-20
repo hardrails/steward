@@ -400,6 +400,11 @@ func TestNodeScopedDispatcherSnapshotsDestroyedStateAndClonesNewIdentity(t *test
 	if report := d.execute(context.Background(), snapshot); report.Status != "done" || !report.Result["absent"].(bool) {
 		t.Fatalf("snapshot report=%#v", report)
 	}
+	deleteSnapshot := snapshot
+	deleteSnapshot.CommandID, deleteSnapshot.Kind, deleteSnapshot.CommandSequence = "delete-snapshot", "delete-snapshot", 3
+	if report := d.execute(context.Background(), deleteSnapshot); report.Status != "done" || !report.Result["absent"].(bool) {
+		t.Fatalf("snapshot delete report=%#v", report)
+	}
 	targetRef, _ := RuntimeRefV2("tenant-a", "node-1", "fork")
 	clone := command{
 		CommandID: "clone", TenantID: "tenant-a", NodeID: "node-1", InstanceID: "fork",
@@ -409,11 +414,12 @@ func TestNodeScopedDispatcherSnapshotsDestroyedStateAndClonesNewIdentity(t *test
 	if report := d.execute(context.Background(), clone); report.Status != "done" || !report.Result["absent"].(bool) {
 		t.Fatalf("clone report=%#v", report)
 	}
-	if strings.Join(paths, ",") != "POST /v1/state/snapshots,POST /v1/state/clones" {
+	if strings.Join(paths, ",") != "POST /v1/state/snapshots,POST /v1/state/snapshots/delete,POST /v1/state/clones" {
 		t.Fatalf("paths=%#v", paths)
 	}
 	if bodies[0]["instance_id"] != "source" || bodies[0]["snapshot_id"] != "snapshot-a" ||
-		bodies[1]["instance_id"] != "fork" || bodies[1]["source_lineage_id"] != "lineage-source" {
+		bodies[1]["instance_id"] != "source" || bodies[1]["snapshot_id"] != "snapshot-a" ||
+		bodies[2]["instance_id"] != "fork" || bodies[2]["source_lineage_id"] != "lineage-source" {
 		t.Fatalf("bodies=%#v", bodies)
 	}
 }

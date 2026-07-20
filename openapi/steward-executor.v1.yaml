@@ -688,6 +688,62 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/state/snapshots/delete:
+    post:
+      tags: [state]
+      operationId: deleteStateSnapshot
+      summary: Delete an immutable snapshot after its clones are removed
+      description: |
+        Deletes one exact snapshot through the production-qualified storage
+        backend. The request is bound to the authenticated tenant, node, source
+        instance, lineage, and generation. A snapshot with any live dependent
+        clone is rejected. Executor journals and receipts the deletion; an
+        exact retry can settle its own interrupted mutation, while unrelated
+        requests remain blocked. An unknown snapshot is already absent and
+        returns 204 without creating authority or evidence.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StateSnapshotRequest"
+      responses:
+        "204":
+          description: The snapshot is absent; exact authorized retries are idempotent.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The request is not bound to the authenticated signed tenant, node, and generation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: A dependent clone still exists or retained snapshot identity conflicts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "501":
+          description: No production-qualified snapshot backend is configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The state backend, journal, evidence, or reconciliation state is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/workloads/{runtime_ref}:
     parameters:
       - $ref: "#/components/parameters/RuntimeRef"

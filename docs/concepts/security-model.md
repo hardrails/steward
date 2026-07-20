@@ -156,7 +156,7 @@ log.
 
 Policy rotation revokes the ability to start an instance admitted under stale
 policy while preserving cleanup authorization. While Executor is serving, the bound
-tenant principal or an authorized site cleanup key may stop, destroy, or purge it
+tenant principal or an authorized site cleanup key may stop, destroy, purge it, or delete an unreferenced snapshot
 while Executor is ready. Reconciliation deactivates Gateway before stopping the
 agent and relay when installed policy no longer authorizes a present instance. In
 degraded mode, only the narrower stop containment path remains available; destroy

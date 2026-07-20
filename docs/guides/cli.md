@@ -83,7 +83,15 @@ sudo -H stewardctl node clone-state \
 
 These direct commands require the explicitly enabled host-administrator intent
 compatibility mode. Shared multi-tenant production should deliver the equivalent
-tenant-signed `snapshot-state` and `clone-state` commands through the uplink.
+tenant-signed `snapshot-state`, `clone-state`, and `delete-snapshot` commands through
+the uplink. Purge every clone lineage before deleting its source snapshot:
+
+```console
+sudo -H stewardctl node delete-snapshot \
+  -tenant-id tenant-a -node-id node-a \
+  -instance-id source -lineage-id source-lineage -generation 1 \
+  -snapshot-id checkpoint-a
+```
 
 The loopback URL defaults to `http://127.0.0.1:8090` when
 `-node-token-file` is present. Set `-node-url` only when the packaged loopback port

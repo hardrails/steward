@@ -334,6 +334,12 @@ func TestClientSnapshotsAndClonesThroughBoundedPublicPaths(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"status":"stopped","tenant_id":"tenant","instance_id":"fork","lineage_id":"fork-lineage","snapshot_id":"snap"}`))
+		case "/v1/state/snapshots/delete":
+			var request StateSnapshotRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.SnapshotID != "snap" || request.InstanceID != "source" {
+				t.Fatalf("delete request=%+v err=%v", request, err)
+			}
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -352,6 +358,11 @@ func TestClientSnapshotsAndClonesThroughBoundedPublicPaths(t *testing.T) {
 	})
 	if err != nil || clone.InstanceID != "fork" || clone.LineageID != "fork-lineage" {
 		t.Fatalf("clone=%+v err=%v", clone, err)
+	}
+	if err := client.DeleteStateSnapshot(context.Background(), StateSnapshotRequest{
+		TenantID: "tenant", NodeID: "node", InstanceID: "source", LineageID: "source-lineage", Generation: 1, SnapshotID: "snap",
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

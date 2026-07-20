@@ -167,6 +167,28 @@ func TestQualifiedStateSnapshotCloneAndResumeWorkflow(t *testing.T) {
 	if err != nil || fork.Spec.ParentSnapshotID != snapshotRequest.SnapshotID || docker.observed.Workload.State.VolumeName != fork.DockerVolumeHandle {
 		t.Fatalf("fork volume=%+v err=%v workload=%+v", fork, err, docker.observed.Workload)
 	}
+	deleteSnapshot := stateSnapshotRequest{
+		TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: "agent-1",
+		LineageID: "lineage-a", Generation: 1, SnapshotID: snapshotRequest.SnapshotID,
+	}
+	if response := postStateMutation(t, server, "/v1/state/snapshots/delete", deleteSnapshot); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), `"error":"state_in_use"`) {
+		t.Fatalf("in-use snapshot delete status=%d body=%s", response.Code, response.Body.String())
+	}
+	forkRef := RuntimeRef(intent.TenantID, intent.InstanceID)
+	assertLifecycleStatus(t, server, http.MethodDelete, "/v1/workloads/"+forkRef, context.Background(), http.StatusNoContent)
+	assertStatePurge(t, server, purgeStateRequest{
+		TenantID: intent.TenantID, NodeID: intent.NodeID, LineageID: intent.LineageID, Generation: intent.Generation,
+	}, context.Background(), http.StatusNoContent)
+	for attempt := 0; attempt < 2; attempt++ {
+		if response := postStateMutation(t, server, "/v1/state/snapshots/delete", deleteSnapshot); response.Code != http.StatusNoContent {
+			t.Fatalf("snapshot delete attempt=%d status=%d body=%s", attempt, response.Code, response.Body.String())
+		}
+	}
+	assertStatePurge(t, server, purgeStateRequest{
+		TenantID: deleteSnapshot.TenantID, NodeID: deleteSnapshot.NodeID,
+		LineageID: deleteSnapshot.LineageID, Generation: deleteSnapshot.Generation,
+	}, context.Background(), http.StatusNoContent)
 }
 
 func TestQualifiedStateSnapshotFailsClosedWhileLineageIsPresent(t *testing.T) {
@@ -424,6 +446,11 @@ func (backend *qualifiedStateBackend) DeleteSnapshot(_ context.Context, request 
 	}
 	if snapshot.State == storagebackend.StateDeleted {
 		return snapshot, false, nil
+	}
+	for _, volume := range backend.volumes {
+		if volume.State == storagebackend.StateReady && volume.Spec.ParentSnapshotID == request.Snapshot.SnapshotID {
+			return storagebackend.Snapshot{}, false, storagebackend.ErrInUse
+		}
 	}
 	snapshot.State, snapshot.DeletedAt = storagebackend.StateDeleted, "2026-07-20T12:04:00Z"
 	backend.snapshots[request.Snapshot] = snapshot

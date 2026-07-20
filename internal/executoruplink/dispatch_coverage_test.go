@@ -94,6 +94,7 @@ func TestApplyRejectsMalformedOrProtocolIncompatiblePayloads(t *testing.T) {
 		"malformed purge":     {Kind: "purge", Payload: json.RawMessage(`{"lineage_id":""}`), signed: true, InstanceGeneration: 2},
 		"malformed snapshot":  {Kind: "snapshot-state", Payload: json.RawMessage(`{"lineage_id":"lineage-a","snapshot_id":""}`), signed: true, InstanceGeneration: 2},
 		"malformed clone":     {Kind: "clone-state", Payload: json.RawMessage(`{"lineage_id":"same","snapshot_id":"snapshot-a","source_lineage_id":"same"}`), signed: true, InstanceGeneration: 2},
+		"malformed delete":    {Kind: "delete-snapshot", Payload: json.RawMessage(`{"lineage_id":"lineage-a","snapshot_id":""}`), signed: true, InstanceGeneration: 2},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := d.apply(context.Background(), candidate, "tenant-a", "agent-1", "executor-ref"); err == nil {

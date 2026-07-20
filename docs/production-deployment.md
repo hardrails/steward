@@ -20,7 +20,7 @@ for design constraints. Install a pinned package by following the
   tenant-scoped credential. Do not reuse its unsigned command contract for a
   multi-tenant Executor. Executor requires a node-scoped transport credential,
   verified HTTPS, complete signed admission, tenant-signed normal commands, and a
-  site-owned cleanup key restricted to stop/destroy/purge. See the <a href="{{ '/executor/' | relative_url }}#outbound-executor-uplink">Executor uplink contract</a>.
+  site-owned cleanup key restricted to stop/destroy/purge/delete-snapshot. See the <a href="{{ '/executor/' | relative_url }}#outbound-executor-uplink">Executor uplink contract</a>.
 </div>
 
 Steward supports two network topologies:

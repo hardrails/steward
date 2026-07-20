@@ -29,13 +29,13 @@ func TestTenantCommandKeysAreOperationScoped(t *testing.T) {
 		PublicKey: base64.StdEncoding.EncodeToString(commandPublic),
 		Operations: []string{
 			"admit", "start", "stop", "destroy", "read", "purge",
-			"snapshot-state", "clone-state", "activation-canary",
+			"snapshot-state", "clone-state", "delete-snapshot", "activation-canary",
 		},
 	}}
 	policy.SiteCleanupCommandKeys = []CommandKey{{
 		KeyID:      "site-cleanup",
 		PublicKey:  base64.StdEncoding.EncodeToString(cleanupPublic),
-		Operations: []string{"stop", "destroy", "purge"},
+		Operations: []string{"stop", "destroy", "purge", "delete-snapshot"},
 	}}
 	if err := policy.Validate(); err != nil {
 		t.Fatal(err)
@@ -65,6 +65,10 @@ func TestTenantCommandKeysAreOperationScoped(t *testing.T) {
 	keys, err = policy.TrustedCommandKeys("removed-tenant", "destroy")
 	if err != nil || len(keys) != 1 || !cleanupPublic.Equal(keys["site-cleanup"]) {
 		t.Fatalf("site cleanup keys=%#v err=%v", keys, err)
+	}
+	keys, err = policy.TrustedCommandKeys("removed-tenant", "delete-snapshot")
+	if err != nil || len(keys) != 1 || !cleanupPublic.Equal(keys["site-cleanup"]) {
+		t.Fatalf("snapshot cleanup keys=%#v err=%v", keys, err)
 	}
 }
 
@@ -108,7 +112,7 @@ func TestSitePolicyRejectsMalformedCleanupKeysAndAuthorityCollisions(t *testing.
 	}
 	valid := CommandKey{
 		KeyID: "site-cleanup", PublicKey: base64.StdEncoding.EncodeToString(cleanupPublic),
-		Operations: []string{"stop", "destroy", "purge"},
+		Operations: []string{"stop", "destroy", "purge", "delete-snapshot"},
 	}
 	for _, test := range []struct {
 		name string
