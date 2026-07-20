@@ -14,14 +14,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/controlclient"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/gatewayclient"
 	"github.com/hardrails/steward/internal/taskpermit"
 )
 
 func TestTaskRunPersistsAuthorityBeforeDispatchAndReturnsVerifiedResult(t *testing.T) {
 	fixture := newTaskCLIFixture(t)
-	deploymentPath := taskRunDeploymentFixture(t, fixture)
+	controlTokenPath := filepath.Join(fixture.directory, "control.token")
+	if err := os.WriteFile(controlTokenPath, []byte("control-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	controlView := taskRunControlDeploymentFixture(fixture)
+	controlServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/v1/tenants/tenant-a/deployments/auditor" ||
+			request.Header.Get("Authorization") != "Bearer control-secret" {
+			t.Errorf("unexpected Control request %s %s headers=%v", request.Method, request.URL.Path, request.Header)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(controlView)
+	}))
+	defer controlServer.Close()
 	tokenPath := filepath.Join(fixture.directory, "gateway.token")
 	if err := os.WriteFile(tokenPath, []byte("gateway-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -78,7 +93,8 @@ func TestTaskRunPersistsAuthorityBeforeDispatchAndReturnsVerifiedResult(t *testi
 	t.Cleanup(func() { timeNow = priorNow })
 	var output bytes.Buffer
 	err := run([]string{
-		"task", "run", "-deployment", deploymentPath,
+		"task", "run", "auditor", "-tenant", "tenant-a",
+		"-control-url", controlServer.URL, "-control-token-file", controlTokenPath, "-deployment-timeout", "1s",
 		"-trust", fixture.trustPath, "-request", fixture.requestPath,
 		"-operation-id", fixture.operation.ID, "-key", fixture.privatePath, "-key-id", fixture.keyID,
 		"-bundle-out", fixture.bundlePath, "-result-out", resultPath,
@@ -159,4 +175,38 @@ func taskRunDeploymentFixture(t *testing.T, fixture *taskCLIFixture) string {
 		RuntimeRef: projection.RuntimeRef, Status: "running", Intent: fixture.intent, Admission: projection,
 	}
 	return writePermitJSON(t, fixture.directory, "task-run.deployment.json", deployment)
+}
+
+func taskRunControlDeploymentFixture(fixture *taskCLIFixture) controlclient.Deployment {
+	authorities := make([]controlprotocol.ExecutorTaskAuthorityV1, 0, len(fixture.admitted.TaskAuthorities))
+	for _, authority := range fixture.admitted.TaskAuthorities {
+		authorities = append(authorities, controlprotocol.ExecutorTaskAuthorityV1{
+			KeyID: authority.KeyID, PublicKey: authority.PublicKey,
+		})
+	}
+	intent := fixture.intent
+	projection := controlprotocol.ExecutorAdmissionProjectionV1{
+		SchemaVersion: controlprotocol.ExecutorAdmissionProjectionSchemaV1,
+		RuntimeRef:    fixture.admitted.RuntimeRef, Status: "running",
+		CapsuleDigest: fixture.admitted.CapsuleDigest, PolicyDigest: fixture.admitted.PolicyDigest,
+		Generation: fixture.admitted.Generation, EvidenceKeyID: strings.Repeat("d", 32),
+		GrantID: fixture.admitted.GrantID, ServicePath: fixture.admitted.ServicePath,
+		ServiceID: fixture.admitted.ServiceID, TaskAuthorities: authorities,
+		RoutePolicyDigest: fixture.admitted.RoutePolicyDigest,
+	}
+	return controlclient.Deployment{
+		TenantID: "tenant-a", DeploymentID: "auditor", Generation: 1, Revision: 4,
+		AgentName: "auditor", BundleDigest: "sha256:" + strings.Repeat("f", 64),
+		CapsuleDigest: intent.CapsuleDigest, DelegationDigest: "sha256:" + strings.Repeat("1", 64),
+		DelegationID: "auditor-authority", ControllerKeyID: "controller-a", ClaimGeneration: 1,
+		AllowedNodeIDs:      []string{intent.NodeID},
+		DelegationExpiresAt: fixture.now.Add(time.Hour).Format(time.RFC3339Nano),
+		DesiredState:        controlstore.DeploymentRunning, Phase: controlstore.DeploymentReady,
+		Instances: []controlstore.DeploymentInstance{{
+			InstanceID: intent.InstanceID, LineageID: intent.LineageID, Generation: intent.Generation,
+			NodeID: intent.NodeID, Intent: &intent, Admission: &projection,
+			Phase: controlstore.DeploymentInstanceRunning, TransitionedAt: fixture.now.Format(time.RFC3339Nano),
+		}},
+		CreatedAt: fixture.now.Format(time.RFC3339Nano), UpdatedAt: fixture.now.Format(time.RFC3339Nano),
+	}
 }
