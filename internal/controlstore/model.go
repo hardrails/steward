@@ -1774,10 +1774,6 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 				instance.Drain != nil {
 				return errors.New("deployment instance rollout is invalid")
 			}
-			if (instance.Rollout.Stage == "draining" && bytes.Equal(delegationRaw, deployment.DelegationDSSE)) ||
-				(instance.Rollout.Stage == "deploying" && !bytes.Equal(delegationRaw, deployment.DelegationDSSE)) {
-				return errors.New("deployment instance rollout stage and authority disagree")
-			}
 		}
 		if instance.Admission != nil {
 			if instance.Intent == nil || instance.Admission.Validate() != nil ||

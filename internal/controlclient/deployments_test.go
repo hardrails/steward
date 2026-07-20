@@ -153,6 +153,26 @@ func TestDeploymentClientValidatesRolloutProjection(t *testing.T) {
 	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
 		t.Fatal("unknown rollout stage was accepted")
 	}
+	deployment.Instances[0].Rollout.Stage = "draining"
+	deployment.Rollout.StartedAt = "not-a-time"
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("malformed rollout time was accepted")
+	}
+	deployment.Rollout.StartedAt = deployment.UpdatedAt
+	deployment.Rollout.SourceGeneration = deployment.Generation
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("non-forward rollout generation was accepted")
+	}
+	deployment.Rollout.SourceGeneration = 1
+	deployment.Instances[0].Rollout.StartedAt = "not-a-time"
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("malformed instance rollout time was accepted")
+	}
+	deployment.Instances[0].Rollout.StartedAt = deployment.UpdatedAt
+	deployment.Rollout = nil
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("instance rollout without deployment rollout was accepted")
+	}
 }
 
 func validClientDeployment() Deployment {

@@ -353,6 +353,32 @@ func TestDeploymentDrainEnforcesBudgetAndAdvancesGenerationAfterRemoval(t *testi
 	}
 }
 
+func TestDeploymentRolloutOnNodeIgnoresUnrelatedAndRemovedInstances(t *testing.T) {
+	deployments := map[string]Deployment{
+		"unrelated": {
+			Rollout:   &DeploymentRollout{SourceGeneration: 1},
+			Instances: []DeploymentInstance{{NodeID: "node-2", Phase: DeploymentInstanceRunning}},
+		},
+		"removed": {
+			Rollout:   &DeploymentRollout{SourceGeneration: 1},
+			Instances: []DeploymentInstance{{NodeID: "node-1", Phase: DeploymentInstanceRemoved}},
+		},
+		"stable": {
+			Instances: []DeploymentInstance{{NodeID: "node-1", Phase: DeploymentInstanceRunning}},
+		},
+	}
+	if deploymentRolloutOnNode(nil, "node-1") || deploymentRolloutOnNode(deployments, "node-1") {
+		t.Fatal("unrelated, removed, or stable instances blocked node drain")
+	}
+	deployments["active"] = Deployment{
+		Rollout:   &DeploymentRollout{SourceGeneration: 1},
+		Instances: []DeploymentInstance{{NodeID: "node-1", Phase: DeploymentInstanceRunning}},
+	}
+	if !deploymentRolloutOnNode(deployments, "node-1") {
+		t.Fatal("active rollout did not block node drain")
+	}
+}
+
 func TestFleetOperationsFormatRejectsLegacySmuggling(t *testing.T) {
 	current, limits := populatedControlState(t)
 	node := firstNode(current)
