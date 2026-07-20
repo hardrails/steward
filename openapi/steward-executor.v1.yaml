@@ -553,7 +553,9 @@ paths:
         derives the storage volume identity, binds the request to the
         authenticated tenant, node, instance, and generation, and records the
         mutation in its durable journal and signed evidence log. An exact retry
-        returns the retained snapshot without creating another copy.
+        returns the retained snapshot without creating another copy. If a worker
+        response is lost, only that exact request may settle its prepared journal
+        entry; unrelated mutations remain blocked.
       requestBody:
         required: true
         content:
@@ -625,7 +627,8 @@ paths:
         derives all host storage identities and fixed quotas; callers cannot
         select a dataset, path, driver, mount option, or quota. The returned
         lineage is state only and must pass normal signed admission with the
-        `resume` state disposition before an agent can run.
+        `resume` state disposition before an agent can run. If a worker response
+        is lost, only that exact request may settle its prepared journal entry.
       requestBody:
         required: true
         content:

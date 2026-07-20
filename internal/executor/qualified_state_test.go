@@ -141,9 +141,15 @@ func TestQualifiedStateSnapshotCloneAndResumeWorkflow(t *testing.T) {
 		LineageID: "lineage-fork", Generation: 1, SnapshotID: "checkpoint-a",
 		SourceLineageID: intent.LineageID,
 	}
+	backend.cloneErr = errors.New("storage transport closed")
 	clone := postStateMutation(t, server, "/v1/state/clones", cloneRequest)
-	if clone.Code != http.StatusCreated {
-		t.Fatalf("clone status=%d body=%s", clone.Code, clone.Body.String())
+	if clone.Code != http.StatusServiceUnavailable || len(config.Journal.Pending()) != 1 {
+		t.Fatalf("ambiguous clone status=%d pending=%d body=%s", clone.Code, len(config.Journal.Pending()), clone.Body.String())
+	}
+	backend.cloneErr = nil
+	clone = postStateMutation(t, server, "/v1/state/clones", cloneRequest)
+	if clone.Code != http.StatusCreated || len(config.Journal.Pending()) != 0 {
+		t.Fatalf("recovered clone status=%d pending=%d body=%s", clone.Code, len(config.Journal.Pending()), clone.Body.String())
 	}
 	if replay := postStateMutation(t, server, "/v1/state/clones", cloneRequest); replay.Code != http.StatusOK {
 		t.Fatalf("clone replay status=%d body=%s", replay.Code, replay.Body.String())
@@ -221,6 +227,30 @@ func TestQualifiedStateSnapshotDistinguishesDefinitiveAndAmbiguousBackendFailure
 			})
 			if response.Code != test.wantStatus || len(config.Journal.Pending()) != test.wantPending {
 				t.Fatalf("status=%d pending=%d body=%s", response.Code, len(config.Journal.Pending()), response.Body.String())
+			}
+			if test.wantPending == 0 {
+				return
+			}
+			if report, err := server.Reconcile(context.Background()); !errors.Is(err, ErrReconciliationIncomplete) || report.Ready {
+				t.Fatalf("pending reconcile report=%+v err=%v", report, err)
+			}
+			mismatch := postStateMutation(t, server, "/v1/state/snapshots", stateSnapshotRequest{
+				TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+				LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: "different",
+			})
+			if mismatch.Code != http.StatusServiceUnavailable || len(config.Journal.Pending()) != 1 {
+				t.Fatalf("mismatched recovery status=%d pending=%d body=%s", mismatch.Code, len(config.Journal.Pending()), mismatch.Body.String())
+			}
+			backend.snapshotErr = nil
+			recovered := postStateMutation(t, server, "/v1/state/snapshots", stateSnapshotRequest{
+				TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+				LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: "failure",
+			})
+			if recovered.Code != http.StatusCreated || len(config.Journal.Pending()) != 0 {
+				t.Fatalf("recovery status=%d pending=%d body=%s", recovered.Code, len(config.Journal.Pending()), recovered.Body.String())
+			}
+			if report, err := server.Reconcile(context.Background()); err != nil || !report.Ready {
+				t.Fatalf("recovered reconcile report=%+v err=%v", report, err)
 			}
 		})
 	}

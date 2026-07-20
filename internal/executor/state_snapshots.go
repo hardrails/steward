@@ -70,7 +70,9 @@ func (s *Server) createStateSnapshot(w http.ResponseWriter, r *http.Request) {
 
 	s.provisionMu.Lock()
 	defer s.provisionMu.Unlock()
-	if s.secureMutationBlockedLocked() || len(s.secure.journal.Pending()) != 0 {
+	target := stateMutationTarget("snapshot", request.SnapshotID, request.TenantID, request.LineageID, request.Generation)
+	opID, recovering, blocked := s.stateMutationRecovery(target, request.Generation)
+	if blocked {
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "a prior host mutation requires reconciliation")
 		return
 	}
@@ -107,20 +109,22 @@ func (s *Server) createStateSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opID, err := newOperationID("snapshot-"+request.SnapshotID, request.Generation)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "create state snapshot operation identity")
-		return
-	}
-	if _, err := s.secure.journal.Prepare(opID, "snapshot:"+request.SnapshotID, request.Generation); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "journal_unavailable", err.Error())
-		return
-	}
 	prepared := stateMutationEvidence(record, request.SnapshotID, "state-snapshot", evidence.JournalPrepare, evidence.Allowed)
-	if _, err := s.secure.evidence.Append(prepared); err != nil {
-		_ = s.secure.journal.Compensate(opID)
-		writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
-		return
+	if !recovering {
+		opID, err = newOperationID("snapshot-"+request.SnapshotID, request.Generation)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "create state snapshot operation identity")
+			return
+		}
+		if _, err := s.secure.journal.Prepare(opID, target, request.Generation); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "journal_unavailable", err.Error())
+			return
+		}
+		if _, err := s.secure.evidence.Append(prepared); err != nil {
+			_ = s.secure.journal.Compensate(opID)
+			writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
+			return
+		}
 	}
 	snapshot, changed, mutationErr := s.secure.stateBackend.CreateSnapshot(r.Context(), storagebackend.CreateSnapshotRequest{
 		RequestID:  stateBackendRequestID("snapshot-"+request.SnapshotID, request.TenantID, request.LineageID, request.Generation),
@@ -177,7 +181,9 @@ func (s *Server) cloneStateSnapshot(w http.ResponseWriter, r *http.Request) {
 
 	s.provisionMu.Lock()
 	defer s.provisionMu.Unlock()
-	if s.secureMutationBlockedLocked() || len(s.secure.journal.Pending()) != 0 {
+	target := stateMutationTarget("clone", request.SnapshotID, request.TenantID, request.LineageID, request.Generation)
+	opID, recovering, blocked := s.stateMutationRecovery(target, request.Generation)
+	if blocked {
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "a prior host mutation requires reconciliation")
 		return
 	}
@@ -223,24 +229,26 @@ func (s *Server) cloneStateSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opID, err := newOperationID("clone-"+request.InstanceID, request.Generation)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "create state clone operation identity")
-		return
-	}
-	if _, err := s.secure.journal.Prepare(opID, "clone:"+request.LineageID, request.Generation); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "journal_unavailable", err.Error())
-		return
-	}
 	prepared := evidence.Event{
 		Type: evidence.JournalPrepare, TenantID: request.TenantID, RuntimeRef: plan.DockerVolumeHandle,
 		CapsuleDigest: sourceRecord.CapsuleDigest, PolicyDigest: sourceRecord.PolicyDigest,
 		Generation: request.Generation, GrantID: "state-clone", Outcome: evidence.Allowed,
 	}
-	if _, err := s.secure.evidence.Append(prepared); err != nil {
-		_ = s.secure.journal.Compensate(opID)
-		writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
-		return
+	if !recovering {
+		opID, err = newOperationID("clone-"+request.InstanceID, request.Generation)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "create state clone operation identity")
+			return
+		}
+		if _, err := s.secure.journal.Prepare(opID, target, request.Generation); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "journal_unavailable", err.Error())
+			return
+		}
+		if _, err := s.secure.evidence.Append(prepared); err != nil {
+			_ = s.secure.journal.Compensate(opID)
+			writeError(w, http.StatusServiceUnavailable, "evidence_unavailable", err.Error())
+			return
+		}
 	}
 	volume, changed, mutationErr := s.secure.stateBackend.CloneVolume(r.Context(), storagebackend.CloneVolumeRequest{
 		RequestID: stateBackendRequestID("clone-"+request.SnapshotID, request.TenantID, request.LineageID, request.Generation),
@@ -290,6 +298,27 @@ func definitiveStateBackendError(err error) bool {
 		errors.Is(err, storagebackend.ErrConflict) || errors.Is(err, storagebackend.ErrInUse) ||
 		errors.Is(err, storagebackend.ErrCapacity) || errors.Is(err, storagebackend.ErrUnsupported) ||
 		errors.Is(err, storagebackend.ErrUnavailable)
+}
+
+func stateMutationTarget(action, snapshotID, tenantID, lineageID string, generation uint64) string {
+	return action + ":" + stateBackendRequestID(action+"-"+snapshotID, tenantID, lineageID, generation)
+}
+
+// stateMutationRecovery permits only an exact retry to resolve its own durable
+// prepared operation. This is narrower than general degraded-mode mutation:
+// unrelated or multiple pending operations still fail closed.
+func (s *Server) stateMutationRecovery(target string, generation uint64) (string, bool, bool) {
+	pending := s.secure.journal.Pending()
+	if len(pending) != 0 {
+		if len(pending) == 1 && pending[0].Target == target && pending[0].Generation == generation {
+			return pending[0].ID, true, false
+		}
+		return "", false, true
+	}
+	s.reconcileMu.RLock()
+	degraded := s.reconcileAttempted && !s.reconcileReport.Ready
+	s.reconcileMu.RUnlock()
+	return "", false, degraded
 }
 
 func validStateSnapshotRequest(value stateSnapshotRequest) bool {

@@ -159,6 +159,12 @@ identity, records the mutation in its durable journal, and appends a signed rece
 Exact retries are idempotent. The storage worker's private socket remains an
 internal boundary; operating it directly bypasses lifecycle authority and evidence.
 
+If Executor loses the worker response after preparing a mutation, it blocks every
+unrelated mutation. Reissuing the exact same signed snapshot or clone request is the
+only operation allowed to settle that journal entry. A different snapshot, lineage,
+tenant, or generation remains blocked. After recovery, run reconciliation (normal
+service operation does this automatically) before admitting more work.
+
 Snapshots are node-local. Placement must select a node whose inventory advertises
 the snapshot ID. Cross-node replication and retention automation are not yet part
 of this workflow.
