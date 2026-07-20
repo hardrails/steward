@@ -32,6 +32,7 @@ import (
 	"github.com/hardrails/steward/internal/journal"
 	"github.com/hardrails/steward/internal/nodeclient"
 	"github.com/hardrails/steward/internal/securefile"
+	"github.com/hardrails/steward/internal/storagebackend"
 	stewarduplink "github.com/hardrails/steward/internal/uplink"
 )
 
@@ -77,6 +78,10 @@ func main() {
 	nodeLabels := flag.String("node-labels", "", "comma-separated scheduling labels as key=value")
 	nodeTaints := flag.String("node-taints", "", "comma-separated scheduling taints; workloads require matching tolerations")
 	allowUnquotaedState := flag.Bool("allow-unquotaed-state-on-dedicated-host", false, "INSECURE on shared hosts: allow persistent Docker volumes without hard byte or inode quotas")
+	stateBackendSocket := flag.String("state-backend-socket", "", "quota-enforced storage worker Unix socket")
+	stateBackendTokenFile := flag.String("state-backend-token-file", "", "owner-only storage worker bearer token")
+	stateVolumeByteLimit := flag.Int64("state-volume-byte-limit", 10<<30, "hard byte limit for each quota-enforced state lineage")
+	stateVolumeObjectLimit := flag.Int64("state-volume-object-limit", 1_000_000, "hard object limit for each quota-enforced state lineage")
 	admissionPolicyFile := flag.String("admission-policy-file", "", "signed site-policy DSSE file; enables signed admission")
 	admissionSiteRootFile := flag.String("admission-site-root-public-key-file", "", "base64 Ed25519 site-root public key")
 	admissionSiteRootKeyID := flag.String("admission-site-root-key-id", "", "site-root key ID used by the signed policy")
@@ -238,7 +243,8 @@ func main() {
 	secureNodeID := ""
 	admissionRequested := *admissionPolicyFile != "" || *admissionSiteRootFile != "" ||
 		*admissionSiteRootKeyID != "" || *admissionNodeID != "" || *admissionEvidenceKeyFile != "" ||
-		*admissionAllowHostAdmin || *allowUnquotaedState || *gatewayControlSocket != "" || *relayImage != "" || *relayGID != 0
+		*admissionAllowHostAdmin || *allowUnquotaedState || *stateBackendSocket != "" || *stateBackendTokenFile != "" ||
+		*gatewayControlSocket != "" || *relayImage != "" || *relayGID != 0
 	if admissionRequested {
 		if *admissionPolicyFile == "" || *admissionSiteRootFile == "" || *admissionSiteRootKeyID == "" ||
 			*admissionNodeID == "" || *admissionEvidenceKeyFile == "" {
@@ -265,6 +271,27 @@ func main() {
 		if *allowUnquotaedState && len(verifiedPolicy.Policy.Tenants) != 1 {
 			slog.Error("unquotaed persistent state requires a signed site policy with exactly one tenant")
 			os.Exit(2)
+		}
+		if *allowUnquotaedState && (*stateBackendSocket != "" || *stateBackendTokenFile != "") {
+			slog.Error("quota-enforced and unquotaed persistent state modes are mutually exclusive")
+			os.Exit(2)
+		}
+		var stateBackend storagebackend.Backend
+		if *stateBackendSocket != "" || *stateBackendTokenFile != "" {
+			if *stateBackendSocket == "" || *stateBackendTokenFile == "" || *stateVolumeByteLimit <= 0 || *stateVolumeObjectLimit <= 0 {
+				slog.Error("quota-enforced state requires socket, token file, and positive byte and object limits")
+				os.Exit(2)
+			}
+			stateToken, err := nodeclient.ReadToken(*stateBackendTokenFile)
+			if err != nil {
+				slog.Error("read storage backend token", "err", err)
+				os.Exit(2)
+			}
+			stateBackend, err = storagebackend.NewUnixClient(*stateBackendSocket, stateToken)
+			if err != nil {
+				slog.Error("configure storage backend client", "err", err)
+				os.Exit(2)
+			}
 		}
 		receiptPrivate, err = readEd25519PrivateKey(*admissionEvidenceKeyFile)
 		if err != nil {
@@ -323,6 +350,9 @@ func main() {
 			NodeID: *admissionNodeID, Fences: fences, Journal: operationJournal, Evidence: receiptLog,
 			AllowHostAdminIntent:               *admissionAllowHostAdmin,
 			AllowUnquotaedStateOnDedicatedHost: *allowUnquotaedState,
+			StateBackend:                       stateBackend,
+			StateVolumeByteLimit:               selectedStateLimit(stateBackend, *stateVolumeByteLimit),
+			StateVolumeObjectLimit:             selectedStateLimit(stateBackend, *stateVolumeObjectLimit),
 			Topology:                           topology, Gateway: gatewayControl, RelayImage: *relayImage,
 			GrantRoot: configuredGrantRoot, RelayGID: *relayGID,
 		}); err != nil {
@@ -527,6 +557,13 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+func selectedStateLimit(backend storagebackend.Backend, value int64) int64 {
+	if backend == nil {
+		return 0
+	}
+	return value
 }
 
 func parseSchedulingAttributes(
