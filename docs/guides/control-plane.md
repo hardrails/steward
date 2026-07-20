@@ -907,8 +907,9 @@ you require complete historical reconstruction.
 
 ### Preserve a metadata-only support bundle
 
-A site administrator can capture the current incident context in one owner-only
-JSON file before making destructive changes:
+A site administrator can capture the whole-site incident context in one owner-only
+JSON file before making destructive changes. A tenant operator can use the same
+command with `-tenant-id` for only their tenant:
 
 ```console
 stewardctl control support-bundle create \
@@ -918,28 +919,33 @@ stewardctl control support-bundle create \
 Add `-tenant-id tenant-a` to restrict the bundle to one tenant. A bundle includes
 the operations summary, attention findings, current incident timeline, freeze and
 quota records, node and deployment state, agent and command metadata, credential
-metadata, and the last controller evidence checkpoint for each visible node.
+metadata, and, for a site-admin bundle, the last controller evidence checkpoint
+for each visible node. Tenant bundles omit those site-admin-only checkpoints rather
+than widening access or failing after the tenant-scoped reads succeed.
 Collection is read-only and bounded. It does not acknowledge a finding, retry a
 command, stop an agent, or change incident state.
 
 The format cannot represent raw prompts, request or response bodies, signed
 command envelopes, credential values, private keys, agent result text, or logs.
-The output file is created with owner-only permissions and the command prints its
-SHA-256 digest. Treat the remaining metadata as sensitive: tenant, node, connector,
-and deployment names can still disclose operational details.
+The output file is created with owner-only permissions and the command prints a
+`sha256:` digest. Preserve that digest through a separate authenticated channel;
+keeping it beside the bundle does not establish provenance. Treat the remaining
+metadata as sensitive: tenant, node, connector, and deployment names can still
+disclose operational details.
 
 Verify the strict format and recalculate the digest without contacting Control:
 
 ```console
 stewardctl control support-bundle verify \
-  -in ./steward-support.json
+  -in ./steward-support.json \
+  -expected-sha256 sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-Verification rejects unknown fields, non-canonical JSON, an incomplete exclusion
-contract, invalid evidence checkpoints, inconsistent tenant scope, and mismatched
-or unknown deployment tenant identity. The SHA-256 digest detects changes only when compared with
-a value obtained through a trusted channel. The bundle is not signed and does not
-prove that Control or the host was uncompromised.
+Verification requires the separately retained digest, rejects a byte mismatch,
+then checks unknown fields, canonical JSON, the exclusion contract, evidence
+checkpoints, tenant scope, and deployment identities. The bundle is not signed;
+the trusted digest authenticates only the exact bytes you retained, not that
+Control or the host was uncompromised or that the recorded facts were true.
 
 ## Inspect fleet operations and action-required findings
 

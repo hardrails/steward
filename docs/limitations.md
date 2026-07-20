@@ -168,7 +168,10 @@ audit log and cannot reconstruct overwritten or removed transitions. The bundle
 is a strict, owner-only snapshot of several controller reads, not an atomic
 database snapshot or a signed attestation. Objects can change while collection
 is in progress; repeated node records that disagree fail the collection instead
-of being silently merged.
+of being silently merged. Offline verification requires a SHA-256 digest retained
+through a separate trusted channel. That detects changed bytes but does not prove
+who created the bundle. Tenant-scoped bundles omit site-admin-only evidence
+checkpoints.
 
 ## Air-gapped does not mean supply-chain verified
 
