@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/executor"
 )
 
 func TestDispatcherOverridesTenantAndInstanceAndFencesReplay(t *testing.T) {
@@ -47,6 +49,54 @@ func TestDispatcherOverridesTenantAndInstanceAndFencesReplay(t *testing.T) {
 	replay := d.execute(context.Background(), cmd)
 	if replay.Status != "done" || replay.Result["replayed"] != true || provisions != 1 {
 		t.Fatalf("replay=%#v provisions=%d", replay, provisions)
+	}
+}
+
+func TestDispatcherRoutesBoundedWorkloadLeaseForExactGeneration(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
+	if err := store.advance("tenant-a", "agent-1", position{
+		ClaimGeneration: 1, Generation: 2, Sequence: 1, ReportedStatus: "created",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called++
+		wantPath := "/v1/workloads/" + executor.RuntimeRef("tenant-a", "agent-1") + "/lease"
+		if r.Method != http.MethodPost || r.URL.Path != wantPath {
+			t.Fatalf("renew request = %s %s, want POST %s", r.Method, r.URL.Path, wantPath)
+		}
+		var lease admission.WorkloadLease
+		if err := json.NewDecoder(r.Body).Decode(&lease); err != nil ||
+			lease.SchemaVersion != admission.WorkloadLeaseSchemaV1 {
+			t.Fatalf("renew lease=%+v err=%v", lease, err)
+		}
+		_ = json.NewEncoder(w).Encode(lease)
+	})
+	d := dispatcher{
+		handler: handler, token: "token", nodeID: "node-1", nodeScoped: true,
+		state: store, now: func() time.Time { return now },
+	}
+	runtimeRef, err := RuntimeRefV2("tenant-a", "node-1", "agent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := command{
+		CommandID: "renew-1", TenantID: "tenant-a", NodeID: "node-1", InstanceID: "agent-1",
+		RuntimeRef: runtimeRef, Kind: "renew", ClaimGeneration: 1,
+		InstanceGeneration: 2, CommandSequence: 2, signed: true,
+		Payload: json.RawMessage(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T12:02:00Z"}`),
+	}
+	rep := d.execute(context.Background(), cmd)
+	if rep.Status != "done" || rep.ReportedStatus != "leased" || called != 1 {
+		t.Fatalf("renew report=%+v calls=%d", rep, called)
+	}
+	cmd.CommandID = "renew-2"
+	cmd.CommandSequence = 3
+	cmd.Payload = json.RawMessage(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T11:59:59Z"}`)
+	if rep := d.execute(context.Background(), cmd); rep.Status != "failed" || called != 1 {
+		t.Fatalf("invalid renew report=%+v calls=%d", rep, called)
 	}
 }
 

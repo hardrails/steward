@@ -503,6 +503,47 @@ func TestReconcileContainsExpiredWorkloadLeaseWithoutPermanentDegradation(t *tes
 	assertLifecycleStatus(t, rig.server, http.MethodPost, "/v1/workloads/"+RuntimeRef(rig.record.TenantID, rig.record.InstanceID)+"/start", ctx, http.StatusConflict)
 }
 
+func TestReconcileDestroysAndTombstonesExpiredStatelessWorkload(t *testing.T) {
+	docker := &secureDocker{}
+	server, err := NewServer(docker, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule, intent, config := secureAdmissionFixtureFor(t, admission.Capabilities{})
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	if response := submitSecureAdmission(t, server, capsule, intent); response.Code != http.StatusCreated {
+		t.Fatalf("admission status=%d body=%s", response.Code, response.Body.String())
+	}
+	now := time.Now().UTC()
+	if err := config.Fences.RenewLease(
+		intent.TenantID,
+		intent.InstanceID,
+		intent.Generation,
+		now.Add(100*time.Millisecond).Format(time.RFC3339Nano),
+		now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	report, err := server.Reconcile(context.Background())
+	if err != nil || !report.Ready || report.Changed != 1 || len(config.Journal.Pending()) != 0 {
+		t.Fatalf("expired stateless reconcile report=%#v pending=%#v err=%v", report, config.Journal.Pending(), err)
+	}
+	if _, inspectErr := docker.Inspect(context.Background(), RuntimeRef(intent.TenantID, intent.InstanceID)); !errors.Is(inspectErr, ErrNotFound) {
+		t.Fatalf("expired stateless workload remains: %v", inspectErr)
+	}
+	record, ok := config.Fences.Record(intent.TenantID, intent.InstanceID)
+	if !ok || record.Present || record.LeaseExpiresAt == "" {
+		t.Fatalf("expired stateless tombstone=%+v present=%v", record, ok)
+	}
+	report, err = server.Reconcile(context.Background())
+	if err != nil || !report.Ready || report.Checked != 0 || report.Changed != 0 {
+		t.Fatalf("post-tombstone reconcile report=%#v err=%v", report, err)
+	}
+}
+
 func TestReconcileCleanRuntimeIsReceiptFreeNoop(t *testing.T) {
 	rig := newReconcileRig(t, true)
 	before := rig.config.Evidence.NextSequence()
