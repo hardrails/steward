@@ -205,6 +205,12 @@ func TestSchedulingBlockedReasonMapsStoreFailures(t *testing.T) {
 			t.Fatalf("scheduling reason for %v = %q, want %q", test.err, got, test.want)
 		}
 	}
+	if _, found := activeNodeDrain(nil, "node-missing"); found {
+		t.Fatal("missing node unexpectedly had an active drain")
+	}
+	if _, found := schedulingLabel(controlstore.Node{}, "zone"); found {
+		t.Fatal("node without a scheduling observation unexpectedly had a label")
+	}
 }
 
 func TestReconcilerDrainsStatelessInstanceAcrossRestart(t *testing.T) {
