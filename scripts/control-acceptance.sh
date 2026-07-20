@@ -731,7 +731,7 @@ PY
 # metadata only. Exercise both its HTTP contract and the human-facing CLI
 # before the node has polled so the node_never_seen finding is deterministic.
 for route in /v1/operations/summary /v1/operations/attention \
-	/v1/operations/commands /v1/operations/credentials; do
+	/v1/operations/timeline /v1/operations/commands /v1/operations/credentials; do
 	safe_name=${route##*/}
 	http_json GET "$route" "" none "" 401 "$work/operations-$safe_name-unauthorized.json"
 done
@@ -781,6 +781,7 @@ PY
 for route in \
 	"/v1/operations/summary?tenant_id=$other_tenant_id" \
 	"/v1/operations/attention?tenant_id=$other_tenant_id" \
+	"/v1/operations/timeline?tenant_id=$other_tenant_id" \
 	"/v1/operations/commands?tenant_id=$other_tenant_id" \
 	"/v1/operations/credentials?tenant_id=$other_tenant_id"; do
 	safe_name=$(printf '%s' "$route" | tr '/?=&' '-----')
@@ -793,6 +794,8 @@ for route in \
 	"/v1/operations/attention?reason=" \
 	"/v1/operations/attention?reason=not_a_reason" \
 	"/v1/operations/attention?limit=01" \
+	"/v1/operations/timeline?kind=unknown" \
+	"/v1/operations/timeline?severity=urgent" \
 	"/v1/operations/commands?state=unknown" \
 	"/v1/operations/commands?cursor=a&cursor=b" \
 	"/v1/operations/credentials?revoked=1" \
@@ -1358,6 +1361,49 @@ if any(field in command for field in (
     raise SystemExit("control-acceptance: terminal command inventory exposed execution content")
 PY
 
+# Create one retained containment fact after delivery is settled, then prove the
+# CLI projection is scoped, newest-first metadata rather than execution content.
+run_bounded 30 "$work" "$work/node-quarantine.stdout" "$work/node-quarantine.stderr" \
+	"$ctl_bin" control node quarantine -control-url "$control_url" -token-file "$admin_token" \
+	-node-id "$node_id" -reason "acceptance incident containment"
+run_bounded 30 "$work" "$work/incident-timeline.stdout" "$work/incident-timeline.stderr" \
+	"$ctl_bin" control incident timeline -control-url "$control_url" -token-file "$operator_token" \
+	-node-id "$node_id" -kind containment -severity critical -limit 1
+python3 -I - "$work/incident-timeline.stdout" "$tenant_id" "$node_id" \
+	"$work/command.dsse.json" "$node_credential" "$admin_token" "$operator_token" <<'PY'
+import base64
+import json
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+page = json.loads(path.read_text())
+events = page.get("events", [])
+if len(events) != 1 or page.get("next_cursor"):
+    raise SystemExit("control-acceptance: incident timeline is not exactly bounded")
+event = events[0]
+if not re.fullmatch(r"incident-[0-9a-f]{64}", event.get("id", "")) or \
+        event.get("kind") != "containment" or event.get("action") != "node_quarantined" or \
+        event.get("severity") != "critical" or event.get("scope") != "tenant" or \
+        event.get("tenant_id") != sys.argv[2] or event.get("node_id") != sys.argv[3] or \
+        event.get("reason") != "acceptance incident containment" or not event.get("occurred_at"):
+    raise SystemExit("control-acceptance: incident timeline changed the retained containment fact")
+raw = path.read_bytes()
+command = pathlib.Path(sys.argv[4]).read_bytes()
+node_secret = json.loads(pathlib.Path(sys.argv[5]).read_text())["credential"].encode()
+for secret in (
+    command, base64.b64encode(command), node_secret,
+    pathlib.Path(sys.argv[6]).read_bytes().strip(),
+    pathlib.Path(sys.argv[7]).read_bytes().strip(),
+):
+    if secret in raw:
+        raise SystemExit("control-acceptance: incident timeline exposed protected bytes")
+for forbidden in (b'"command_dsse', b'"payload"', b'"result"', b'"token"', b'"credential"'):
+    if forbidden in raw:
+        raise SystemExit("control-acceptance: incident timeline exposed an execution field")
+PY
+
 # Exercise the same read-only fleet views through a real control-only MCP
 # process. Structured and text results must agree, remain tenant scoped, and
 # exclude the signed command, terminal result, and all bearer material.
@@ -1414,6 +1460,16 @@ messages = [
     {
         "jsonrpc": "2.0", "id": 6, "method": "tools/call",
         "params": {
+            "name": "steward_control_incident_timeline",
+            "arguments": {
+                "tenant_id": tenant_id, "node_id": node_id,
+                "kind": "containment", "severity": "critical", "limit": 1,
+            },
+        },
+    },
+    {
+        "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": {
             "name": "steward_control_operations_summary",
             "arguments": {"tenant_id": other_tenant_id},
         },
@@ -1444,11 +1500,11 @@ for line in stdout_path.read_text(encoding="utf-8").splitlines():
     if value.get("jsonrpc") != "2.0" or value.get("id") in responses:
         raise SystemExit("control-acceptance: MCP response identity is invalid")
     responses[value.get("id")] = value
-if set(responses) != {1, 2, 3, 4, 5, 6} or "error" in responses[1]:
+if set(responses) != {1, 2, 3, 4, 5, 6, 7} or "error" in responses[1]:
     raise SystemExit("control-acceptance: MCP lifecycle responses are incomplete")
 
 structured = {}
-for identifier in range(2, 6):
+for identifier in range(2, 7):
     response = responses[identifier]
     if "error" in response:
         raise SystemExit(f"control-acceptance: MCP operations tool {identifier} returned an RPC error")
@@ -1486,7 +1542,16 @@ if len(credentials) != 1 or credentials[0].get("kind") != "node" or \
     raise SystemExit("control-acceptance: MCP credential inventory is invalid")
 if any(field in credentials[0] for field in ("credential", "token", "token_mac", "mac")):
     raise SystemExit("control-acceptance: MCP credential inventory exposed secret-bearing fields")
-denied = responses[6].get("result", {})
+timeline = structured[6].get("events", [])
+if len(timeline) != 1 or timeline[0].get("action") != "node_quarantined" or \
+        timeline[0].get("tenant_id") != tenant_id or timeline[0].get("node_id") != node_id or \
+        timeline[0].get("reason") != "acceptance incident containment":
+    raise SystemExit("control-acceptance: MCP incident timeline changed containment metadata or scope")
+if any(field in timeline[0] for field in (
+        "result", "payload", "command_dsse_base64", "runtime_ref", "reported_status", "error_code",
+)):
+    raise SystemExit("control-acceptance: MCP incident timeline exposed execution content")
+denied = responses[7].get("result", {})
 denied_content = denied.get("content", [])
 if denied.get("isError") is not True or len(denied_content) != 1 or \
         "HTTP 404" not in denied_content[0].get("text", "") or \
@@ -1636,4 +1701,4 @@ assert_secret_absent raw "$wrong_admin" "${process_outputs[@]}"
 assert_secret_absent raw "$wrong_witness_private" "${process_outputs[@]}"
 assert_secret_absent raw "$work/command.private" "${process_outputs[@]}"
 
-echo "Steward Control acceptance passed: initialization, scoped tenancy, operations HTTP/CLI/MCP, secret-free inventories, opt-in fixed-cardinality metrics, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."
+echo "Steward Control acceptance passed: initialization, scoped tenancy, operations HTTP/CLI/MCP, retained incident chronology, secret-free inventories, opt-in fixed-cardinality metrics, deterministic enrollment, witnessed evidence export, offline verification, exact signed delivery, restart recovery, fencing, and terminal retention verified."
