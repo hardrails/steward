@@ -51,6 +51,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	version := flags.Bool("version", false, "print the Steward ZFS storage worker version and exit")
 	checkConfig := flags.Bool("check-config", false, "validate configuration and token files, then exit")
+	checkBackend := flags.Bool("check-backend", false, "destructively verify ZFS quotas, snapshots, clones, and Docker bindings, then exit")
 	configPath := flags.String("config", "/etc/steward/storage-zfs.json", "strict ZFS storage worker configuration")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return 2
@@ -58,6 +59,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if *version {
 		fmt.Fprintln(stdout, "steward-storage-zfs "+buildinfo.Resolve())
 		return 0
+	}
+	if *checkConfig && *checkBackend {
+		fmt.Fprintln(stderr, "steward-storage-zfs: -check-config and -check-backend are mutually exclusive")
+		return 2
 	}
 	loaded, token, err := loadConfig(*configPath)
 	if err != nil {
@@ -87,6 +92,17 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "steward-storage-zfs: initialize backend:", err)
 		return 1
 	}
+	conformanceContext, cancelConformance := context.WithTimeout(ctx, 2*time.Minute)
+	err = backend.VerifyConformance(conformanceContext)
+	cancelConformance()
+	if err != nil {
+		fmt.Fprintln(stderr, "steward-storage-zfs: backend conformance failed:", err)
+		return 1
+	}
+	if *checkBackend {
+		fmt.Fprintln(stdout, "ZFS storage backend conformance passed")
+		return 0
+	}
 	handler, err := storagebackend.NewHandler(backend, token)
 	if err != nil {
 		fmt.Fprintln(stderr, "steward-storage-zfs: create handler:", err)
@@ -101,6 +117,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		_ = listener.Close()
 		_ = os.Remove(loaded.Socket)
 	}()
+	if err := notifySocket(os.Getenv("NOTIFY_SOCKET"), "READY=1\nSTATUS=ZFS storage backend qualified"); err != nil {
+		fmt.Fprintln(stderr, "steward-storage-zfs: notify service manager:", err)
+		return 1
+	}
 	server := &http.Server{
 		Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second,
 		WriteTimeout: 10 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
@@ -115,6 +135,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	case <-ctx.Done():
+		_ = notifySocket(os.Getenv("NOTIFY_SOCKET"), "STOPPING=1\nSTATUS=Stopping ZFS storage worker")
 		shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdown); err != nil {
@@ -128,6 +149,30 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
+}
+
+func notifySocket(path, state string) error {
+	if path == "" {
+		return nil
+	}
+	if state == "" || len(state) > 4096 || strings.ContainsRune(state, '\x00') {
+		return errors.New("service notification state is invalid")
+	}
+	address := path
+	if strings.HasPrefix(address, "@") {
+		address = "\x00" + strings.TrimPrefix(address, "@")
+	} else if !filepath.IsAbs(address) || filepath.Clean(address) != address || address == string(filepath.Separator) {
+		return errors.New("service notification socket is invalid")
+	}
+	connection, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: address, Net: "unixgram"})
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	if _, err := connection.Write([]byte(state)); err != nil {
+		return err
+	}
+	return nil
 }
 
 func loadConfig(path string) (config, string, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -113,6 +114,59 @@ func TestBackendLifecycleIsScopedDurableAndIdempotent(t *testing.T) {
 	if len(binder.bindings) != 0 {
 		t.Fatalf("bindings after delete = %+v", binder.bindings)
 	}
+}
+
+func TestBackendConformanceExercisesQualifiedLifecycle(t *testing.T) {
+	runner := newFakeZFS("tank/steward")
+	binder := &fakeBinder{bindings: make(map[string]Binding)}
+	probe := &recordingQuotaProbe{}
+	backend, err := New(Config{
+		DatasetRoot: "tank/steward", MountRoot: "/var/lib/steward-state",
+		Runner: runner, Binder: binder, QuotaProbe: probe,
+		Now: func() time.Time { return time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := backend.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.VerifyConformance(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if probe.calls != 1 || probe.byteLimit != conformanceByteLimit || probe.objectLimit != conformanceObjectLimit ||
+		!strings.HasPrefix(probe.mountpoint, "/var/lib/steward-state/v-") {
+		t.Fatalf("quota probe = %+v", probe)
+	}
+	if len(binder.bindings) != 0 {
+		t.Fatalf("conformance leaked Docker bindings: %+v", binder.bindings)
+	}
+}
+
+func TestFilesystemQuotaProbeRejectsAnUnquotaedDirectory(t *testing.T) {
+	directory := t.TempDir()
+	err := (FilesystemQuotaProbe{}).Verify(context.Background(), directory, 2<<20, 16)
+	if err == nil || !strings.Contains(err.Error(), "object quota did not stop") {
+		t.Fatalf("unquotaed probe error = %v", err)
+	}
+	entries, readErr := os.ReadDir(directory)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("probe cleanup entries=%v err=%v", entries, readErr)
+	}
+}
+
+type recordingQuotaProbe struct {
+	calls       int
+	mountpoint  string
+	byteLimit   int64
+	objectLimit int64
+}
+
+func (probe *recordingQuotaProbe) Verify(_ context.Context, mountpoint string, byteLimit, objectLimit int64) error {
+	probe.calls++
+	probe.mountpoint, probe.byteLimit, probe.objectLimit = mountpoint, byteLimit, objectLimit
+	return nil
 }
 
 func TestBackendQuarantinesMissingOrReboundDockerVolume(t *testing.T) {

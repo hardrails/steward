@@ -461,10 +461,12 @@ enable the worker automatically.
 | `zfs_binary` | Clean absolute path to the OpenZFS CLI |
 
 `-check-config` validates the strict file, token, paths, Docker client construction,
-and ZFS executable without changing the pool. Normal startup verifies the existing
-parent dataset and creates only its fixed `volumes` and `tombstones` children. It
-then serves the bounded authenticated storage protocol. The worker never imports or
-creates a pool.
+and ZFS executable without changing the pool. `-check-backend` additionally runs a
+bounded destructive scratch test of quota exhaustion, snapshots, clones, Docker
+bindings, and cleanup. Normal startup runs the same conformance test before it
+signals systemd readiness and serves the authenticated storage protocol. The worker
+verifies the existing parent dataset, creates only its fixed `volumes` and
+`tombstones` children, and never imports or creates a pool.
 
 `/etc/steward/executor-gateway.env` is either the empty packaged default or a
 symbolic link that selects a root-owned relay binding under

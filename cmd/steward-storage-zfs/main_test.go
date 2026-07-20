@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,14 @@ func TestVersionAndCheckConfig(t *testing.T) {
 	if status := run(context.Background(), []string{"-check-config", "-config", configPath}, &stdout, &stderr); status != 0 ||
 		stdout.String() != "ZFS storage worker configuration valid\n" || stderr.Len() != 0 {
 		t.Fatalf("check status=%d stdout=%q stderr=%q", status, stdout.String(), stderr.String())
+	}
+}
+
+func TestConfigurationChecksAreMutuallyExclusive(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	status := run(context.Background(), []string{"-check-config", "-check-backend"}, &stdout, &stderr)
+	if status != 2 || !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("status=%d stdout=%q stderr=%q", status, stdout.String(), stderr.String())
 	}
 }
 
@@ -78,5 +87,30 @@ func TestListenUnixRefusesToReplaceRegularFile(t *testing.T) {
 	raw, err := os.ReadFile(path)
 	if err != nil || string(raw) != "sentinel" {
 		t.Fatalf("regular file changed: %q, %v", raw, err)
+	}
+}
+
+func TestNotifySocketWritesBoundedReadiness(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "steward-notify-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	path := filepath.Join(directory, "notify.sock")
+	listener, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := notifySocket(path, "READY=1\nSTATUS=qualified"); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 128)
+	count, _, err := listener.ReadFromUnix(buffer)
+	if err != nil || string(buffer[:count]) != "READY=1\nSTATUS=qualified" {
+		t.Fatalf("notification=%q err=%v", buffer[:count], err)
+	}
+	if err := notifySocket("relative.sock", "READY=1"); err == nil {
+		t.Fatal("relative notification socket accepted")
 	}
 }

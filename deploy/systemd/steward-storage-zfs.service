@@ -7,7 +7,8 @@ ConditionPathExists=/etc/steward/storage-zfs.json
 ConditionPathExists=/etc/steward/storage-zfs-token
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 # This separate process holds only the host authority needed to manage the
 # operator-selected ZFS subtree and its exact Docker bind volumes. The Executor
 # remains an unprivileged process and reaches this worker through a protected
@@ -19,6 +20,7 @@ ExecStart=/usr/local/bin/steward-storage-zfs -config=/etc/steward/storage-zfs.js
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
+TimeoutStartSec=3min
 RuntimeDirectory=steward-storage-zfs
 RuntimeDirectoryMode=0750
 StateDirectory=steward-state

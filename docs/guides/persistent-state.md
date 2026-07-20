@@ -75,15 +75,23 @@ The following example selects `tank/steward` and applies the packaged defaults: 
 
    ```bash
    sudo steward-storage-zfs -check-config
+   sudo steward-storage-zfs -check-backend
    sudo systemctl enable --now steward-storage-zfs
    sudo /usr/local/libexec/steward/node-preflight
    sudo systemctl restart steward-executor
    sudo /usr/local/libexec/steward/node-doctor
    ```
 
+`-check-backend` is intentionally mutating. It creates a random scratch lineage,
+proves real byte and object quota exhaustion, then exercises snapshot, clone,
+Docker binding, and deletion. It removes the scratch objects before returning.
+Normal worker startup repeats this test and does not signal systemd readiness until
+it passes. Executor therefore starts only after the configured host substrate is
+qualified.
+
 The worker creates only fixed `volumes` and `tombstones` children beneath the
-selected parent. It creates a dataset lazily when Executor admits a signed workload
-that requests state.
+selected parent. After qualification, it creates a tenant dataset lazily when
+Executor admits a signed workload that requests state.
 
 ## Verify enforcement
 
@@ -101,8 +109,8 @@ Do not infer ownership from the dataset name or edit that property manually.
 Executor also checks the worker's advertised capabilities at startup. It refuses
 qualified state if the backend does not report hard byte and object quotas,
 crash-safe metadata, immutable cold snapshots, copy-on-write clones, and exact
-Docker handles. This negotiation catches a wrong backend, but it is not a substitute
-for testing the actual pool, mount, and Docker configuration on the node.
+Docker handles. The worker's startup conformance tests the actual pool, mount, and
+Docker configuration behind that claim.
 
 ## What the worker is trusted to do
 

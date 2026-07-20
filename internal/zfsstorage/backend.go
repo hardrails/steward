@@ -58,16 +58,18 @@ type Config struct {
 	MountRoot   string
 	Runner      Runner
 	Binder      VolumeBinder
+	QuotaProbe  QuotaProbe
 	Now         func() time.Time
 }
 
 type Backend struct {
-	root      string
-	mountRoot string
-	runner    Runner
-	binder    VolumeBinder
-	now       func() time.Time
-	mu        sync.Mutex
+	root       string
+	mountRoot  string
+	runner     Runner
+	binder     VolumeBinder
+	quotaProbe QuotaProbe
+	now        func() time.Time
+	mu         sync.Mutex
 }
 
 func New(config Config) (*Backend, error) {
@@ -81,7 +83,14 @@ func New(config Config) (*Backend, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Backend{root: config.DatasetRoot, mountRoot: config.MountRoot, runner: config.Runner, binder: config.Binder, now: now}, nil
+	probe := config.QuotaProbe
+	if probe == nil {
+		probe = FilesystemQuotaProbe{}
+	}
+	return &Backend{
+		root: config.DatasetRoot, mountRoot: config.MountRoot, runner: config.Runner,
+		binder: config.Binder, quotaProbe: probe, now: now,
+	}, nil
 }
 
 // Initialize verifies the operator-selected root and creates only Steward's two
