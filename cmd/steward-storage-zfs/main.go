@@ -195,9 +195,7 @@ func loadConfig(path string) (config, string, error) {
 		return config{}, "", fmt.Errorf("read token: %w", err)
 	}
 	token := strings.TrimSuffix(string(tokenRaw), "\n")
-	if strings.HasSuffix(token, "\r") {
-		token = strings.TrimSuffix(token, "\r")
-	}
+	token = strings.TrimSuffix(token, "\r")
 	return loaded, token, nil
 }
 
