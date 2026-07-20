@@ -113,7 +113,7 @@ the route and credential.
 Start a portable agent project with:
 
 ```console
-stewardctl agent create workspace-auditor -runtime hermes workspace-auditor
+stewardctl agent create workspace-auditor -runtime hermes
 cd workspace-auditor
 stewardctl agent build
 ```

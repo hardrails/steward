@@ -31,8 +31,7 @@ sensitive production work on a Linux node that reports `hardened`.
 ## Create an agent project
 
 ```console
-mkdir workspace-auditor
-stewardctl agent create workspace-auditor -runtime hermes workspace-auditor
+stewardctl agent create workspace-auditor -runtime hermes
 cd workspace-auditor
 ```
 
