@@ -24,10 +24,12 @@ import (
 )
 
 const (
-	minInterval       = time.Second
-	maxInterval       = time.Hour
-	commandLifetime   = 14 * time.Minute
-	maxActionsPerPass = 128
+	minInterval              = time.Second
+	maxInterval              = time.Hour
+	commandLifetime          = 14 * time.Minute
+	workloadLeaseDuration    = admission.MaxWorkloadLeaseDuration
+	workloadLeaseRenewBefore = 2 * time.Minute
+	maxActionsPerPass        = 128
 )
 
 type Config struct {
@@ -56,6 +58,7 @@ type Report struct {
 	Observed    int `json:"observed"`
 	Enqueued    int `json:"enqueued"`
 	Removed     int `json:"removed"`
+	Replaced    int `json:"replaced"`
 	Conflicts   int `json:"conflicts"`
 	Blocked     int `json:"blocked"`
 }
@@ -108,11 +111,12 @@ func (reconciler *Reconciler) Run(ctx context.Context) error {
 				reconciler.logger.Error("desired-state reconciliation failed", "error", err)
 				continue
 			}
-			if report.Enqueued > 0 || report.Observed > 0 || report.Removed > 0 || report.Blocked > 0 {
+			if report.Enqueued > 0 || report.Observed > 0 || report.Removed > 0 || report.Replaced > 0 || report.Blocked > 0 {
 				reconciler.logger.Info("desired-state reconciliation completed",
 					"deployments", report.Deployments, "instances", report.Instances,
 					"observed", report.Observed, "enqueued", report.Enqueued,
-					"removed", report.Removed, "conflicts", report.Conflicts, "blocked", report.Blocked)
+					"removed", report.Removed, "replaced", report.Replaced,
+					"conflicts", report.Conflicts, "blocked", report.Blocked)
 			}
 		}
 	}
@@ -163,6 +167,8 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 				report.Enqueued++
 			case "removed":
 				report.Removed++
+			case "replaced":
+				report.Replaced++
 			}
 			break
 		}
@@ -180,6 +186,15 @@ func (reconciler *Reconciler) reconcileInstance(
 	if now.IsZero() {
 		return instanceResult{}, errors.New("controller clock is invalid")
 	}
+	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+	if err != nil {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedInvalidAuthority), now)
+	}
+	leaseManaged := containsOperation(delegation.Operations, "renew")
+	if instance.NodeID != "" && deployment.DesiredState == controlstore.DeploymentRunning &&
+		!assignedNodeEligible(nodes, deployment, instance, delegation, now, reconciler.nodeStaleAfter) {
+		return reconciler.recoverUnavailableInstance(deployment, instance, delegation, leaseManaged, now)
+	}
 	if commandInFlight(instance) {
 		_, changed, err := reconciler.store.ObserveDeploymentCommand(
 			deployment.TenantID, deployment.ID, instance.InstanceID, deployment.Revision, now,
@@ -191,7 +206,8 @@ func (reconciler *Reconciler) reconcileInstance(
 	}
 	if instance.Phase == controlstore.DeploymentInstanceFailed ||
 		instance.Phase == controlstore.DeploymentInstanceRemoved ||
-		deployment.DesiredState == controlstore.DeploymentRunning && instance.Phase == controlstore.DeploymentInstanceRunning {
+		deployment.DesiredState == controlstore.DeploymentRunning && instance.Phase == controlstore.DeploymentInstanceRunning &&
+			(!leaseManaged || !workloadLeaseNeedsRenewal(instance, now)) {
 		return instanceResult{}, nil
 	}
 	if deployment.DesiredState == controlstore.DeploymentAbsent &&
@@ -204,7 +220,7 @@ func (reconciler *Reconciler) reconcileInstance(
 		}
 		return instanceResult{changed: changed, kind: "removed"}, err
 	}
-	operation := nextOperation(deployment.DesiredState, instance)
+	operation := nextOperation(deployment.DesiredState, instance, leaseManaged, now)
 	if operation == "" {
 		return instanceResult{}, nil
 	}
@@ -232,6 +248,46 @@ func (reconciler *Reconciler) reconcileInstance(
 		placements[nodeID]++
 	}
 	return instanceResult{changed: changed, kind: "enqueued"}, err
+}
+
+func (reconciler *Reconciler) recoverUnavailableInstance(
+	deployment controlstore.Deployment,
+	instance controlstore.DeploymentInstance,
+	delegation admission.CommandDelegation,
+	leaseManaged bool,
+	now time.Time,
+) (instanceResult, error) {
+	if !leaseManaged || instance.LeaseExpiresAt == "" {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable), now)
+	}
+	delegationExpiry, err := time.Parse(time.RFC3339Nano, delegation.ExpiresAt)
+	if err != nil {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedInvalidAuthority), now)
+	}
+	if !delegationExpiry.After(now) {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedDelegationExpired), now)
+	}
+	leaseExpiry, err := time.Parse(time.RFC3339Nano, instance.LeaseExpiresAt)
+	if err != nil {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedInvalidAuthority), now)
+	}
+	if now.Before(leaseExpiry.Add(admission.CommandClockSkew)) {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedAwaitingLeaseExpiry), now)
+	}
+	if delegation.Admission == nil || delegation.Admission.Capabilities.State {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedStatefulReplacement), now)
+	}
+	delegated, found := delegatedInstance(delegation, instance.InstanceID)
+	if !found || instance.Generation == ^uint64(0) || instance.Generation+1 > delegated.MaxInstanceGeneration {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedGenerationExhausted), now)
+	}
+	_, changed, err := reconciler.store.ReplaceDeploymentInstance(
+		deployment.TenantID, deployment.ID, instance.InstanceID, deployment.Revision, now,
+	)
+	if errors.Is(err, controlstore.ErrConflict) {
+		return instanceResult{conflict: true}, nil
+	}
+	return instanceResult{changed: changed, kind: "replaced"}, err
 }
 
 func (reconciler *Reconciler) recordBlocked(
@@ -286,6 +342,10 @@ func (reconciler *Reconciler) signCommand(
 	if sequence == 0 {
 		return nil, controlstore.ErrCapacityExceeded
 	}
+	expires := now.Add(commandLifetime)
+	if delegationExpiry.Before(expires) {
+		expires = delegationExpiry
+	}
 	payload := []byte(`{}`)
 	if operation == "admit" {
 		delegated, found := delegatedInstance(delegation, instance.InstanceID)
@@ -301,9 +361,18 @@ func (reconciler *Reconciler) signCommand(
 			return nil, err
 		}
 	}
-	expires := now.Add(commandLifetime)
-	if delegationExpiry.Before(expires) {
-		expires = delegationExpiry
+	if operation == "renew" {
+		leaseExpiry := now.Add(workloadLeaseDuration)
+		if expires.Before(leaseExpiry) {
+			leaseExpiry = expires
+		}
+		payload, err = json.Marshal(admission.WorkloadLease{
+			SchemaVersion: admission.WorkloadLeaseSchemaV1,
+			ExpiresAt:     leaseExpiry.Format(time.RFC3339Nano),
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	statement := admission.CommandStatement{
 		SchemaVersion: admission.CommandSchemaV2,
@@ -330,13 +399,25 @@ func (reconciler *Reconciler) signCommand(
 	return dsse.Marshal(envelope)
 }
 
-func nextOperation(desired controlstore.DeploymentDesiredState, instance controlstore.DeploymentInstance) string {
+func nextOperation(
+	desired controlstore.DeploymentDesiredState,
+	instance controlstore.DeploymentInstance,
+	leaseManaged bool,
+	now time.Time,
+) string {
 	if desired == controlstore.DeploymentRunning {
 		switch instance.Phase {
 		case controlstore.DeploymentInstancePending:
 			return "admit"
 		case controlstore.DeploymentInstanceStarting:
+			if leaseManaged && instance.LeaseExpiresAt == "" {
+				return "renew"
+			}
 			return "start"
+		case controlstore.DeploymentInstanceRunning:
+			if leaseManaged && workloadLeaseNeedsRenewal(instance, now) {
+				return "renew"
+			}
 		}
 		return ""
 	}
@@ -356,6 +437,9 @@ func commandInFlight(instance controlstore.DeploymentInstance) bool {
 		return instance.Phase == controlstore.DeploymentInstanceAdmitting
 	case "start":
 		return instance.Phase == controlstore.DeploymentInstanceStarting
+	case "renew":
+		return instance.Phase == controlstore.DeploymentInstanceStarting ||
+			instance.Phase == controlstore.DeploymentInstanceRunning
 	case "stop":
 		return instance.Phase == controlstore.DeploymentInstanceStopping
 	case "destroy":
@@ -363,6 +447,36 @@ func commandInFlight(instance controlstore.DeploymentInstance) bool {
 	default:
 		return false
 	}
+}
+
+func workloadLeaseNeedsRenewal(instance controlstore.DeploymentInstance, now time.Time) bool {
+	expires, err := time.Parse(time.RFC3339Nano, instance.LeaseExpiresAt)
+	return err != nil || !now.Before(expires.Add(-workloadLeaseRenewBefore))
+}
+
+func containsOperation(operations []string, wanted string) bool {
+	index := sort.SearchStrings(operations, wanted)
+	return index < len(operations) && operations[index] == wanted
+}
+
+func assignedNodeEligible(
+	nodes []controlstore.Node,
+	deployment controlstore.Deployment,
+	instance controlstore.DeploymentInstance,
+	delegation admission.CommandDelegation,
+	now time.Time,
+	staleAfter time.Duration,
+) bool {
+	allowed := make(map[string]struct{}, len(delegation.NodeIDs))
+	for _, nodeID := range delegation.NodeIDs {
+		allowed[nodeID] = struct{}{}
+	}
+	for _, node := range nodes {
+		if node.ID == instance.NodeID {
+			return eligibleNode(node, deployment.TenantID, allowed, now, staleAfter)
+		}
+	}
+	return false
 }
 
 func selectNode(

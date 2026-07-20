@@ -891,6 +891,44 @@ func TestTerminalRetentionPrunesOnlyKnownSettledOutcomes(t *testing.T) {
 	}
 }
 
+func TestObservedRenewalUsesBoundedRetentionInsteadOfExhaustingCourier(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxCommands = 1
+	limits.MaxCommandsPerTenant = 1
+	limits.MaxCommandsPerNode = 1
+	limits.TerminalRetention = time.Hour
+	fixture := newRecordsFixture(t, limits)
+	fixture.createTenant(t, "tenant-a")
+	_, nodeIdentity := fixture.createNode(t, "tenant-a")
+	raw := signedRenewCommand(t, "renew-first", "tenant-a", "node-1")
+	if _, _, err := fixture.store.SubmitCommand(
+		fixture.admin, "tenant-a", "node-1", raw, fixture.now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := fixture.store.Poll(nodeIdentity, []string{}, fixture.now, time.Minute, 1)
+	if err != nil || len(deliveries) != 1 {
+		t.Fatalf("poll renewal = (%d, %v)", len(deliveries), err)
+	}
+	if applied, err := fixture.store.ApplyReport(
+		nodeIdentity,
+		reportFor(deliveries[0], controlprotocol.ExecutorStatusDone),
+		fixture.now,
+	); err != nil || !applied {
+		t.Fatalf("settle renewal = (%v, %v)", applied, err)
+	}
+	second := signedCommand(t, "after-renew", "tenant-a", "node-1", 0)
+	if _, _, err := fixture.store.SubmitCommand(
+		fixture.admin,
+		"tenant-a",
+		"node-1",
+		second,
+		fixture.now.Add(admission.MaxWorkloadLeaseDuration+admission.CommandClockSkew+time.Second),
+	); err != nil {
+		t.Fatalf("settled renewal exhausted command inventory: %v", err)
+	}
+}
+
 func TestNearLimitCommandFitsEncodedPollResponseIncludingNewline(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")
@@ -1000,6 +1038,41 @@ func signedCommand(t *testing.T, commandID, tenantID, nodeID string, padding int
 		InstanceID: "agent-1", RuntimeRef: "uplink:6:node-1:agent-1", Kind: "start", ClaimGeneration: 1,
 		InstanceGeneration: 1, CommandSequence: 1, IssuedAt: "2026-07-13T12:00:00Z",
 		ExpiresAt: "2026-07-13T13:00:00Z", Payload: payload,
+	}
+	statementRaw, err := json.Marshal(statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := dsse.Sign(admission.CommandPayloadType, statementRaw, "tenant-key", private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := dsse.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func signedRenewCommand(t *testing.T, commandID, tenantID, nodeID string) []byte {
+	t.Helper()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	payload, err := json.Marshal(admission.WorkloadLease{
+		SchemaVersion: admission.WorkloadLeaseSchemaV1,
+		ExpiresAt:     issued.Add(admission.MaxWorkloadLeaseDuration).Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := admission.CommandStatement{
+		SchemaVersion: admission.CommandSchemaV2, CommandID: commandID, TenantID: tenantID, NodeID: nodeID,
+		InstanceID: "agent-1", RuntimeRef: "uplink:6:node-1:agent-1", Kind: "renew", ClaimGeneration: 1,
+		InstanceGeneration: 1, CommandSequence: 1, IssuedAt: issued.Format(time.RFC3339Nano),
+		ExpiresAt: issued.Add(admission.MaxWorkloadLeaseDuration).Format(time.RFC3339Nano), Payload: payload,
 	}
 	statementRaw, err := json.Marshal(statement)
 	if err != nil {

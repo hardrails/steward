@@ -74,6 +74,9 @@ func TestReconcilerConvergesLifecycleWithoutDuplicateEffectAcrossRestart(t *test
 
 	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
 	assertReconcileCount(t, reconciler, "observe admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue lease renewal", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe lease renewal", 1, 0)
 	assertReconcileCount(t, reconciler, "enqueue start", 0, 1)
 	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
 	assertReconcileCount(t, reconciler, "observe start", 1, 0)
@@ -82,7 +85,8 @@ func TestReconcilerConvergesLifecycleWithoutDuplicateEffectAcrossRestart(t *test
 		deployment.Instances[0].Phase != controlstore.DeploymentInstanceRunning ||
 		deployment.Instances[0].Intent == nil || deployment.Instances[0].Admission == nil ||
 		deployment.Instances[0].Intent.InstanceID != "research-0" ||
-		deployment.Instances[0].Admission.RuntimeRef == "" {
+		deployment.Instances[0].Admission.RuntimeRef == "" ||
+		deployment.Instances[0].LeaseExpiresAt == "" {
 		t.Fatalf("running deployment = %+v", deployment)
 	}
 
@@ -104,7 +108,7 @@ func TestReconcilerConvergesLifecycleWithoutDuplicateEffectAcrossRestart(t *test
 	deployment = getControlDeployment(t, fixture)
 	if deployment.Phase != controlstore.DeploymentRemoved ||
 		deployment.Instances[0].Phase != controlstore.DeploymentInstanceRemoved ||
-		deployment.Instances[0].Attempts != 4 {
+		deployment.Instances[0].Attempts != 5 {
 		t.Fatalf("removed deployment = %+v", deployment)
 	}
 }
@@ -237,6 +241,83 @@ func TestReconcilerDoesNotReplaceStaleAssignedNode(t *testing.T) {
 		deployment.Instances[0].NodeID != "node-1" || deployment.Instances[0].Attempts != 1 ||
 		deployment.Instances[0].LastError != string(controlstore.DeploymentBlockedAssignedNodeUnavailable) {
 		t.Fatalf("stale assigned node = report %+v deployment %+v err %v", report, deployment, err)
+	}
+}
+
+func TestReconcilerReplacesStatelessInstanceOnlyAfterLeaseSafetyWindow(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler, err := New(Config{
+		Store: fixture.store, KeyID: "controller-a", PrivateKey: fixture.controller,
+		Interval: time.Second, NodeStaleAfter: 30 * time.Second,
+		Now: func() time.Time { return fixture.now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeatControlNode(t, fixture)
+	assertReconcileCount(t, reconciler, "enqueue admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue renew", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe renew", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe start", 1, 0)
+
+	running := getControlDeployment(t, fixture)
+	leaseExpiry, err := time.Parse(time.RFC3339Nano, running.Instances[0].LeaseExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.now = leaseExpiry.Add(admission.CommandClockSkew - time.Nanosecond)
+	report, err := reconciler.Reconcile(context.Background())
+	waiting := getControlDeployment(t, fixture)
+	if err != nil || report.Blocked != 1 || report.Replaced != 0 ||
+		waiting.Instances[0].LastError != string(controlstore.DeploymentBlockedAwaitingLeaseExpiry) {
+		t.Fatalf("pre-fence replacement = report %+v deployment %+v err %v", report, waiting, err)
+	}
+
+	fixture.now = leaseExpiry.Add(admission.CommandClockSkew)
+	report, err = reconciler.Reconcile(context.Background())
+	replaced := getControlDeployment(t, fixture)
+	if err != nil || report.Replaced != 1 || report.Enqueued != 0 ||
+		replaced.Instances[0].Generation != 2 || replaced.Instances[0].NodeID != "" ||
+		replaced.Instances[0].Phase != controlstore.DeploymentInstancePending ||
+		replaced.Instances[0].LeaseExpiresAt != "" {
+		t.Fatalf("replacement = report %+v deployment %+v err %v", report, replaced, err)
+	}
+	heartbeatControlNode(t, fixture)
+	report, err = reconciler.Reconcile(context.Background())
+	reassigned := getControlDeployment(t, fixture)
+	if err != nil || report.Enqueued != 1 || reassigned.Instances[0].Generation != 2 ||
+		reassigned.Instances[0].NodeID != "node-1" || reassigned.Instances[0].CommandOperation != "admit" {
+		t.Fatalf("replacement admission = report %+v deployment %+v err %v", report, reassigned, err)
+	}
+}
+
+func TestReconcilerDoesNotReplaceAfterDelegationExpires(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	assertReconcileCount(t, reconciler, "enqueue admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue renew", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe renew", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe start", 1, 0)
+
+	fixture.now = fixture.now.Add(24 * time.Hour)
+	report, err := reconciler.Reconcile(context.Background())
+	deployment := getControlDeployment(t, fixture)
+	if err != nil || report.Blocked != 1 || report.Replaced != 0 ||
+		deployment.Instances[0].Generation != 1 ||
+		deployment.Instances[0].LastError != string(controlstore.DeploymentBlockedDelegationExpired) {
+		t.Fatalf("expired delegation replacement = report %+v deployment %+v err %v", report, deployment, err)
 	}
 }
 
@@ -443,7 +524,7 @@ func applyControlDeployment(t *testing.T, fixture *reconcileFixture, generation 
 		DelegationID:  "research-authority", TenantID: "tenant-a",
 		ControllerKeyID:     "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(fixture.controller.Public().(ed25519.PublicKey)),
-		Operations:          []string{"admit", "destroy", "start", "stop"}, NodeIDs: []string{"node-1"},
+		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: []string{"node-1"},
 		Instances: []admission.CommandDelegationInstance{{
 			InstanceID: "research-0", LineageID: "research-lineage-0",
 			MinInstanceGeneration: generation, MaxInstanceGeneration: generation + 4,

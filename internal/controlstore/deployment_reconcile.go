@@ -41,6 +41,9 @@ const (
 	DeploymentBlockedDelegationExpired       DeploymentBlockedReason = "delegation_expired"
 	DeploymentBlockedControllerKeyMismatch   DeploymentBlockedReason = "controller_key_mismatch"
 	DeploymentBlockedInvalidAuthority        DeploymentBlockedReason = "invalid_deployment_authority"
+	DeploymentBlockedAwaitingLeaseExpiry     DeploymentBlockedReason = "awaiting_lease_expiry"
+	DeploymentBlockedStatefulReplacement     DeploymentBlockedReason = "stateful_replacement_unsupported"
+	DeploymentBlockedGenerationExhausted     DeploymentBlockedReason = "replacement_generation_exhausted"
 	deploymentCommandRecordMissing                                   = "deployment_command_record_missing"
 )
 
@@ -210,11 +213,20 @@ func (store *Store) EnqueueDeploymentCommand(
 		instance.Intent = &intent
 		instance.Admission = nil
 	}
+	if statement.Kind == "renew" {
+		lease, err := admission.DecodeWorkloadLease(statement.Payload, time.Time{})
+		if err != nil {
+			return Deployment{}, Command{}, false, invalidError("decode deployment workload lease", err)
+		}
+		instance.LeaseExpiresAt = lease.ExpiresAt
+	}
 	if deployment.Revision == math.MaxUint64 || instance.Attempts == math.MaxUint32 {
 		return Deployment{}, Command{}, false, ErrCapacityExceeded
 	}
 	instance.NodeID = statement.NodeID
-	instance.Phase = deploymentOperationPhase(statement.Kind)
+	if statement.Kind != "renew" {
+		instance.Phase = deploymentOperationPhase(statement.Kind)
+	}
 	instance.CommandID = statement.CommandID
 	instance.CommandOperation = statement.Kind
 	instance.CommandSequence = statement.CommandSequence
@@ -265,7 +277,7 @@ func (store *Store) ObserveDeploymentCommand(
 	if instance.CommandID == "" || instance.NodeID == "" || instance.CommandOperation == "" {
 		return cloneDeployment(deployment), false, nil
 	}
-	if instance.Phase != deploymentOperationPhase(instance.CommandOperation) {
+	if !deploymentCommandInFlight(instance) {
 		return cloneDeployment(deployment), false, nil
 	}
 	command, exists := store.current.commands[commandKey(tenantID, instance.NodeID, instance.CommandID)]
@@ -292,7 +304,9 @@ func (store *Store) ObserveDeploymentCommand(
 		return Deployment{}, false, ErrCapacityExceeded
 	}
 	if command.Terminal.Report.Status == controlprotocol.ExecutorStatusDone {
-		instance.Phase = deploymentSuccessfulPhase(instance.CommandOperation)
+		if instance.CommandOperation != "renew" {
+			instance.Phase = deploymentSuccessfulPhase(instance.CommandOperation)
+		}
 		instance.LastError = ""
 		if instance.CommandOperation == "admit" {
 			if instance.Intent == nil {
@@ -310,6 +324,10 @@ func (store *Store) ObserveDeploymentCommand(
 	} else {
 		instance.Phase = DeploymentInstanceFailed
 		instance.LastError = deploymentCommandError(command)
+	}
+	if instance.CommandOperation == "renew" && instance.Phase != DeploymentInstanceFailed {
+		instance.CommandID = ""
+		instance.CommandOperation = ""
 	}
 	instance.TransitionedAt = canonicalTimestamp(now)
 	deployment.Instances[index] = instance
@@ -389,16 +407,132 @@ func (store *Store) RemovePendingDeploymentInstance(
 	return cloneDeployment(deployment), true, nil
 }
 
+// ReplaceDeploymentInstance advances a stateless instance only after the last
+// lease that the old node could have accepted is outside its clock-skew safety
+// window. The tenant-signed delegation remains the generation and node ceiling.
+func (store *Store) ReplaceDeploymentInstance(
+	tenantID, deploymentID, instanceID string,
+	expectedRevision uint64,
+	now time.Time,
+) (Deployment, bool, error) {
+	if store == nil {
+		return Deployment{}, false, ErrUnavailable
+	}
+	if now.IsZero() || expectedRevision == 0 || !validRecordID(tenantID, 128) ||
+		!validRecordID(deploymentID, 128) || !validRecordID(instanceID, 256) {
+		return Deployment{}, false, invalid("deployment replacement input is invalid")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.availableLocked(); err != nil {
+		return Deployment{}, false, err
+	}
+	deployment, exists := store.current.deployments[deploymentKey(tenantID, deploymentID)]
+	if !exists {
+		return Deployment{}, false, ErrNotFound
+	}
+	if deployment.Revision != expectedRevision || deployment.DesiredState != DeploymentRunning {
+		return Deployment{}, false, ErrConflict
+	}
+	index := deploymentInstanceIndex(deployment.Instances, instanceID)
+	if index < 0 {
+		return Deployment{}, false, ErrNotFound
+	}
+	instance := deployment.Instances[index]
+	if instance.NodeID == "" || instance.LeaseExpiresAt == "" ||
+		instance.Phase != DeploymentInstanceStarting && instance.Phase != DeploymentInstanceRunning {
+		return Deployment{}, false, ErrConflict
+	}
+	leaseExpiry, err := time.Parse(time.RFC3339Nano, instance.LeaseExpiresAt)
+	if err != nil || now.Before(leaseExpiry.Add(admission.CommandClockSkew)) {
+		return Deployment{}, false, ErrConflict
+	}
+	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+	if err != nil || delegation.Admission == nil || delegation.Admission.Capabilities.State {
+		return Deployment{}, false, ErrConflict
+	}
+	delegationExpiry, err := time.Parse(time.RFC3339Nano, delegation.ExpiresAt)
+	renewIndex := sort.SearchStrings(delegation.Operations, "renew")
+	if err != nil || !delegationExpiry.After(now) || renewIndex >= len(delegation.Operations) ||
+		delegation.Operations[renewIndex] != "renew" {
+		return Deployment{}, false, ErrConflict
+	}
+	delegated, found := deploymentDelegatedInstance(delegation.Instances, instance.InstanceID)
+	if !found || instance.Generation == math.MaxUint64 || instance.Generation+1 > delegated.MaxInstanceGeneration {
+		return Deployment{}, false, ErrCapacityExceeded
+	}
+	if deployment.Revision == math.MaxUint64 {
+		return Deployment{}, false, ErrCapacityExceeded
+	}
+	var abandoned *commandReference
+	if instance.CommandID != "" {
+		key := commandKey(tenantID, instance.NodeID, instance.CommandID)
+		if _, exists := store.current.commands[key]; exists {
+			abandoned = &commandReference{
+				TenantID: tenantID,
+				NodeID:   instance.NodeID,
+				ID:       instance.CommandID,
+			}
+		}
+	}
+	instance.Generation++
+	instance.NodeID = ""
+	instance.Intent = nil
+	instance.Admission = nil
+	instance.LeaseExpiresAt = ""
+	instance.Phase = DeploymentInstancePending
+	instance.CommandID = ""
+	instance.CommandOperation = ""
+	instance.LastError = ""
+	instance.TransitionedAt = canonicalTimestamp(now)
+	deployment.Instances[index] = instance
+	deployment.Revision++
+	deployment.UpdatedAt = canonicalTimestamp(now)
+	deployment.Phase = deploymentAggregatePhase(deployment)
+	mutations := []mutation{deploymentMutation(deployment)}
+	if abandoned != nil {
+		mutations = append(mutations, mutation{Kind: mutationCommandDelete, CommandRef: abandoned})
+	}
+	if err := store.applyMutationsLocked(mutations...); err != nil {
+		return Deployment{}, false, err
+	}
+	return cloneDeployment(deployment), true, nil
+}
+
+func deploymentDelegatedInstance(
+	instances []admission.CommandDelegationInstance,
+	instanceID string,
+) (admission.CommandDelegationInstance, bool) {
+	index := sort.Search(len(instances), func(index int) bool {
+		return instances[index].InstanceID >= instanceID
+	})
+	if index >= len(instances) || instances[index].InstanceID != instanceID {
+		return admission.CommandDelegationInstance{}, false
+	}
+	return instances[index], true
+}
+
 func deploymentTransitionAllowed(desired DeploymentDesiredState, phase DeploymentInstancePhase, operation string) bool {
 	if desired == DeploymentRunning {
 		return phase == DeploymentInstancePending && operation == "admit" ||
-			phase == DeploymentInstanceStarting && operation == "start"
+			phase == DeploymentInstanceStarting && (operation == "renew" || operation == "start") ||
+			phase == DeploymentInstanceRunning && operation == "renew"
 	}
 	if desired != DeploymentAbsent {
 		return false
 	}
 	return (phase == DeploymentInstanceRunning || phase == DeploymentInstanceStarting) && operation == "stop" ||
 		phase == DeploymentInstanceDestroying && operation == "destroy"
+}
+
+func deploymentCommandInFlight(instance DeploymentInstance) bool {
+	if instance.CommandID == "" || instance.CommandOperation == "" {
+		return false
+	}
+	if instance.CommandOperation == "renew" {
+		return instance.Phase == DeploymentInstanceStarting || instance.Phase == DeploymentInstanceRunning
+	}
+	return instance.Phase == deploymentOperationPhase(instance.CommandOperation)
 }
 
 func deploymentOperationPhase(operation string) DeploymentInstancePhase {
@@ -489,7 +623,8 @@ func validDeploymentBlockedReason(reason DeploymentBlockedReason) bool {
 	switch reason {
 	case DeploymentBlockedNoEligibleNode, DeploymentBlockedAssignedNodeUnavailable,
 		DeploymentBlockedDelegationExpired, DeploymentBlockedControllerKeyMismatch,
-		DeploymentBlockedInvalidAuthority:
+		DeploymentBlockedInvalidAuthority, DeploymentBlockedAwaitingLeaseExpiry,
+		DeploymentBlockedStatefulReplacement, DeploymentBlockedGenerationExhausted:
 		return true
 	default:
 		return false
