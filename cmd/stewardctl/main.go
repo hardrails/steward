@@ -140,7 +140,7 @@ func helpCommand(arguments []string, writer io.Writer) error {
 }
 
 var commandHelp = map[string]string{
-	"agent":            "Build portable Hermes or OpenClaw agent applications, evaluate offline policy, explain fleet placement, and derive safe state forks.\n\nUsage: stewardctl agent init|validate|build|plan|fork|doctor ...\n",
+	"agent":            "Build and run portable Hermes or OpenClaw agent applications, evaluate offline policy, explain fleet placement, and converge durable deployments.\n\nUsage: stewardctl agent init|validate|build|plan|apply|deploy|deployment|fork|doctor ...\n",
 	"context":          "Save connection details once so routine commands do not repeat URLs, token files, tenant IDs, or node IDs.\n\nUsage: stewardctl context set|use|show|list|delete ...\n",
 	"node":             "Operate one isolated agent on a Steward Executor node. After saving a context, pass the runtime reference directly: stewardctl node status executor-…\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|purge-state|maintenance ...\n",
 	"control":          "Enroll nodes, manage scoped operators, deliver signed commands, and inspect fleet evidence.\n\nUsage: stewardctl control pki|tenant|operator|enrollment|node|operations|attention|command|credential|evidence ...\n",
@@ -156,7 +156,7 @@ var commandHelp = map[string]string{
 	"key":              "Check that one private key matches one public key.\n\nUsage: stewardctl key match -private-key FILE -public-key FILE\n",
 	"completion":       "Install or print local shell completion.\n\nUsage: stewardctl completion install|bash|zsh|fish\n",
 	"upgrade":          "Inspect whether a node is drained and whether retained formats are compatible with an upgrade.\n\nUsage: stewardctl upgrade check-drained|inspect-formats ...\n",
-	"executor-command": "Issue or verify a signed command delivered to an Executor node out of band. This is an advanced transport tool; routine fleet operations use stewardctl control.\n\nUsage: stewardctl executor-command issue|verify ...\n",
+	"executor-command": "Issue or verify a signed command or bounded controller delegation delivered to Executor. This is an advanced transport tool; routine fleet operations use stewardctl control.\n\nUsage: stewardctl executor-command issue|verify|delegation ...\n",
 }
 
 func nodeCommand(arguments []string, stdout io.Writer) error {
@@ -682,6 +682,12 @@ func validatePayload(payload []byte, payloadType string) error {
 			return err
 		}
 		return command.Validate(timeNow())
+	case admission.CommandDelegationPayloadType:
+		var delegation admission.CommandDelegation
+		if err := dsse.DecodeStrictInto(payload, maxArtifactBytes, &delegation); err != nil {
+			return err
+		}
+		return delegation.Validate(timeNow())
 	default:
 		return errors.New("unsupported payload type")
 	}

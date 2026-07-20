@@ -194,18 +194,35 @@ A full durable store fails closed. Do not delete replay or evidence state merely
 restore availability. First preserve the relevant evidence and understand which
 replay or rollback guarantee the deletion would remove.
 
-## Placement is not yet a desired-state controller
+## Desired-state reconciliation is intentionally narrow
 
-`stewardctl agent plan` performs real deterministic filtering and scoring over a
-bounded node inventory. It explains readiness, tenant, architecture, isolation,
-labels, taints, resources, image locality, snapshot locality, and load. It does
-not continuously watch nodes, reserve capacity, preempt workloads, reschedule a
-failed allocation, autoscale a fleet, or submit a tenant-signed command.
+`stewardctl agent plan` performs deterministic filtering and scoring over a bounded
+node inventory. `stewardctl agent apply` can use that result to derive an exact
+intent, submit it through signed admission, and start the workload on one node.
+`stewardctl agent deploy` can sign the exact admit/start sequence locally, transfer
+it through Control, and wait for authenticated node reports.
 
-Treat its output as a reviewable placement input. The operator must still issue
-and transfer the exact signed admission and lifecycle commands. Executor
-revalidates capacity and policy at execution time, so a stale scheduler result
-fails closed rather than overruling the node.
+`stewardctl agent deployment apply` instead records durable desired state. The
+single active controller chooses an active allowed node deterministically and
+drives `admit`, `start`, `stop`, and `destroy` through a tenant-signed delegation.
+It survives restart without duplicating a queued command. Executor independently
+checks the tenant delegation and controller signature. A failed or
+`outcome_unknown` command becomes `degraded` and is not silently retried.
+
+New placement also requires a recent authenticated node poll. A pending instance
+records `no_eligible_node` when none of its delegated nodes is fresh and capable.
+An instance already assigned to a stale or ineligible node records
+`assigned_node_unavailable` and stays assigned. This is deliberate: without a
+fencing lease, the controller cannot prove that a disconnected workload stopped,
+so moving it could create a duplicate. These retryable reason codes do not change
+the instance to a terminal phase and repeated checks do not append repeated durable
+records.
+
+The current reconciler does not reserve aggregate resources, hold fencing leases,
+replace an instance after node loss, preempt workloads, perform progressive
+rollouts, or autoscale. Its least-loaded choice uses bounded current inventory,
+not a capacity reservation. Executor revalidates admission and live capacity, so
+a stale decision fails closed rather than overruling the node.
 
 ## Forks clone state, not a live agent
 
@@ -230,7 +247,7 @@ Steward is not:
 - a software supply-chain provenance service;
 - an endpoint detection and response product;
 - a general policy engine;
-- an automated desired-state scheduler or storage snapshot provider; or
+- a general cluster scheduler or storage snapshot provider; or
 - a hosted control plane.
 
 It is the local enforcement plane between an untrusted containerized agent and

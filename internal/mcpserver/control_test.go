@@ -114,6 +114,26 @@ func (control *fakeControl) ListCommandInventory(
 	}, control.err
 }
 
+func (control *fakeControl) ListAgentInventory(
+	_ context.Context, tenantID, nodeID, status, cursor string, limit int,
+) (controlstore.AgentInventoryPage, error) {
+	control.calls = append(
+		control.calls,
+		"agent-list:"+tenantID+":"+nodeID+":"+status+":"+cursor+":"+strconv.Itoa(limit),
+	)
+	return controlstore.AgentInventoryPage{
+		Agents: []controlstore.AgentMetadata{{
+			TenantID: tenantID, NodeID: nodeID,
+			RuntimeRef:         "executor-" + strings.Repeat("a", 64),
+			InstanceGeneration: 1, ObservedStatus: status,
+			LatestCommandID: "command-a", LatestCommandKind: "start",
+			LatestCommandState: "terminal", LatestTerminalStatus: "done",
+			CreatedAt: "2026-07-16T11:00:00Z", UpdatedAt: "2026-07-16T11:01:00Z",
+		}},
+		NextCursor: "next-agent",
+	}, control.err
+}
+
 func (control *fakeControl) ListCredentialInventory(
 	_ context.Context, tenantID, kind, role, nodeID string, revoked *bool, cursor string, limit int,
 ) (controlstore.CredentialInventoryPage, error) {
@@ -148,7 +168,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed := controlOnly.configuredTools()
-	if len(listed) != 12 {
+	if len(listed) != 13 {
 		t.Fatalf("control-only tool count=%d", len(listed))
 	}
 	raw := string(mustJSON(t, listed))
@@ -157,6 +177,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 		"steward_control_node_status", "steward_control_node_revoke", "steward_control_command_submit",
 		"steward_control_command_status", "steward_control_operations_summary",
 		"steward_control_attention_list", "steward_control_command_list",
+		"steward_control_agent_list",
 		"steward_control_credential_list", "steward_control_evidence_status",
 	} {
 		if !strings.Contains(raw, name) {
@@ -186,6 +207,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	requireAnnotations(t, definitions["steward_control_operations_summary"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_attention_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_command_list"], true, false, true, false)
+	requireAnnotations(t, definitions["steward_control_agent_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_credential_list"], true, false, true, false)
 	requireAnnotations(t, definitions["steward_control_evidence_status"], true, false, true, false)
 	for toolName, acknowledgment := range map[string]string{
@@ -202,7 +224,7 @@ func TestMCPControlToolsAreOptionalAndAccuratelyAnnotated(t *testing.T) {
 	}
 	for _, toolName := range []string{
 		"steward_control_operations_summary", "steward_control_attention_list",
-		"steward_control_command_list", "steward_control_credential_list",
+		"steward_control_agent_list", "steward_control_command_list", "steward_control_credential_list",
 	} {
 		schema := definitions[toolName]["inputSchema"].(map[string]any)
 		properties := schema["properties"].(map[string]any)
@@ -263,6 +285,7 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		}
 	}
 	attentionCursor := base64.RawURLEncoding.EncodeToString([]byte("attention-v1\x00attention-a"))
+	agentCursor := base64.RawURLEncoding.EncodeToString([]byte("agent-v1\x00agent-a"))
 	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-v1\x00command-a"))
 	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-v1\x00credential-a"))
 	directCalls := []struct {
@@ -280,6 +303,13 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 			arguments: map[string]any{
 				"tenant_id": "tenant-a", "reason": "node_stale",
 				"cursor": attentionCursor, "limit": 25,
+			},
+		},
+		{
+			name: "steward_control_agent_list",
+			arguments: map[string]any{
+				"tenant_id": "tenant-a", "node_id": "node-a", "status": "running",
+				"cursor": agentCursor, "limit": 40,
 			},
 		},
 		{
@@ -322,6 +352,7 @@ func TestMCPControlToolsCallOnlyBoundedPublicOperations(t *testing.T) {
 		"evidence-status:node-a",
 		"operations-summary:tenant-a",
 		"attention-list:tenant-a:node_stale:" + attentionCursor + ":25",
+		"agent-list:tenant-a:node-a:running:" + agentCursor + ":40",
 		"command-list:tenant-a:node-a:terminal:failed:" + commandCursor + ":50",
 		"credential-list:tenant-a:operator:tenant_operator::false:" + credentialCursor + ":10",
 	}
@@ -348,6 +379,9 @@ func TestMCPControlOperationsRejectInvalidAndAmbiguousFilters(t *testing.T) {
 		{name: "attention cursor", tool: "steward_control_attention_list", arguments: map[string]any{"cursor": "%%%"}},
 		{name: "attention negative limit", tool: "steward_control_attention_list", arguments: map[string]any{"limit": -1}},
 		{name: "attention oversized limit", tool: "steward_control_attention_list", arguments: map[string]any{"limit": 501}},
+		{name: "agent status", tool: "steward_control_agent_list", arguments: map[string]any{"status": "destroyed"}},
+		{name: "agent node", tool: "steward_control_agent_list", arguments: map[string]any{"node_id": "-node"}},
+		{name: "agent cursor", tool: "steward_control_agent_list", arguments: map[string]any{"cursor": validCursor + "="}},
 		{name: "command state", tool: "steward_control_command_list", arguments: map[string]any{"state": "running"}},
 		{name: "command terminal without state", tool: "steward_control_command_list", arguments: map[string]any{"terminal_status": "failed"}},
 		{name: "command terminal status", tool: "steward_control_command_list", arguments: map[string]any{"state": "terminal", "terminal_status": "running"}},
@@ -525,6 +559,7 @@ func TestMCPControlOnlyInitializationDescribesItsExactSurface(t *testing.T) {
 		!strings.Contains(raw, "steward_control_command_submit") ||
 		!strings.Contains(raw, "steward_control_operations_summary") ||
 		!strings.Contains(raw, "steward_control_attention_list") ||
+		!strings.Contains(raw, "steward_control_agent_list") ||
 		!strings.Contains(raw, "steward_control_command_list") ||
 		!strings.Contains(raw, "steward_control_credential_list") ||
 		!strings.Contains(raw, "steward_control_evidence_status") ||

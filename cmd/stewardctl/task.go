@@ -90,6 +90,7 @@ func taskCommand(arguments []string, stdout io.Writer) error {
 func issueTask(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("task issue", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	deploymentPath := flags.String("deployment", "", "agent deploy result containing admission and intent")
 	admissionPath := flags.String("admission", "", "exact Executor admission response JSON")
 	intentPath := flags.String("intent", "", "instance intent JSON used for admission")
 	trustPath := flags.String("trust", "", "exported Gateway service-trust inventory")
@@ -104,9 +105,13 @@ func issueTask(arguments []string, stdout io.Writer) error {
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if *admissionPath == "" || *intentPath == "" || *trustPath == "" || *requestPath == "" ||
+	legacyInputs := *admissionPath != "" && *intentPath != ""
+	deploymentInputs := *deploymentPath != ""
+	if deploymentInputs == legacyInputs ||
+		(*deploymentPath != "" && (*admissionPath != "" || *intentPath != "")) ||
+		*trustPath == "" || *requestPath == "" ||
 		*operationID == "" || *privateKeyPath == "" || *keyID == "" || *output == "" || flags.NArg() != 0 {
-		return errors.New("task issue requires -admission, -intent, -trust, -request, -operation-id, -key, -key-id, and -out")
+		return errors.New("task issue requires either -deployment or both -admission and -intent, plus -trust, -request, -operation-id, -key, -key-id, and -out")
 	}
 	if *validFor < time.Second || *validFor > taskpermit.MaxValidity || *validFor%time.Second != 0 {
 		return fmt.Errorf("task validity must be whole seconds from 1s through %s", taskpermit.MaxValidity)
@@ -118,21 +123,29 @@ func issueTask(arguments []string, stdout io.Writer) error {
 		return errors.New("task clock skew must be shorter than the validity interval")
 	}
 
-	admissionRaw, err := securefile.Read(*admissionPath, maxArtifactBytes, securefile.TrustFile)
-	if err != nil {
-		return fmt.Errorf("read admission response: %w", err)
-	}
 	var admitted permitAdmission
-	if err := dsse.DecodeStrictInto(admissionRaw, maxArtifactBytes, &admitted); err != nil {
-		return fmt.Errorf("decode admission response: %w", err)
-	}
-	intentRaw, err := securefile.Read(*intentPath, maxArtifactBytes, securefile.TrustFile)
-	if err != nil {
-		return fmt.Errorf("read instance intent: %w", err)
-	}
 	var intent admission.InstanceIntent
-	if err := dsse.DecodeStrictInto(intentRaw, maxArtifactBytes, &intent); err != nil {
-		return fmt.Errorf("decode instance intent: %w", err)
+	var err error
+	if *deploymentPath != "" {
+		admitted, intent, err = readTaskDeployment(*deploymentPath)
+		if err != nil {
+			return err
+		}
+	} else {
+		admissionRaw, err := securefile.Read(*admissionPath, maxArtifactBytes, securefile.TrustFile)
+		if err != nil {
+			return fmt.Errorf("read admission response: %w", err)
+		}
+		if err := dsse.DecodeStrictInto(admissionRaw, maxArtifactBytes, &admitted); err != nil {
+			return fmt.Errorf("decode admission response: %w", err)
+		}
+		intentRaw, err := securefile.Read(*intentPath, maxArtifactBytes, securefile.TrustFile)
+		if err != nil {
+			return fmt.Errorf("read instance intent: %w", err)
+		}
+		if err := dsse.DecodeStrictInto(intentRaw, maxArtifactBytes, &intent); err != nil {
+			return fmt.Errorf("decode instance intent: %w", err)
+		}
 	}
 	if err := intent.Validate(admission.AuthenticatedIdentity{TenantID: intent.TenantID, NodeID: intent.NodeID}); err != nil {
 		return fmt.Errorf("validate instance intent: %w", err)
@@ -229,6 +242,50 @@ func issueTask(arguments []string, stdout io.Writer) error {
 		RequestDigest string `json:"request_digest"`
 	}{BundlePath: *output, TaskID: selectedTaskID, PermitDigest: verified.Verified.EnvelopeDigest,
 		RequestDigest: statement.RequestDigest})
+}
+
+func readTaskDeployment(path string) (permitAdmission, admission.InstanceIntent, error) {
+	raw, err := securefile.Read(path, maxArtifactBytes, securefile.TrustFile)
+	if err != nil {
+		return permitAdmission{}, admission.InstanceIntent{}, fmt.Errorf("read agent deployment: %w", err)
+	}
+	var deployment agentDeployResult
+	if err := dsse.DecodeStrictInto(raw, maxArtifactBytes, &deployment); err != nil {
+		return permitAdmission{}, admission.InstanceIntent{}, fmt.Errorf("decode agent deployment: %w", err)
+	}
+	if deployment.SchemaVersion != agentDeploymentSchema || deployment.Status != "running" ||
+		deployment.RuntimeRef != deployment.Admission.RuntimeRef ||
+		deployment.TenantID != deployment.Intent.TenantID || deployment.NodeID != deployment.Intent.NodeID ||
+		deployment.InstanceID != deployment.Intent.InstanceID || deployment.Generation != deployment.Intent.Generation ||
+		deployment.LineageID != deployment.Intent.LineageID ||
+		deployment.Admission.Generation != deployment.Intent.Generation ||
+		deployment.Admission.CapsuleDigest != deployment.Intent.CapsuleDigest {
+		return permitAdmission{}, admission.InstanceIntent{}, errors.New("agent deployment does not bind one running admitted instance")
+	}
+	if err := deployment.Intent.Validate(admission.AuthenticatedIdentity{
+		TenantID: deployment.TenantID, NodeID: deployment.NodeID,
+	}); err != nil {
+		return permitAdmission{}, admission.InstanceIntent{}, fmt.Errorf("validate agent deployment intent: %w", err)
+	}
+	if err := deployment.Admission.Validate(); err != nil {
+		return permitAdmission{}, admission.InstanceIntent{}, fmt.Errorf("validate agent deployment admission: %w", err)
+	}
+	taskAuthorities := make([]gateway.TaskAuthority, 0, len(deployment.Admission.TaskAuthorities))
+	for _, authority := range deployment.Admission.TaskAuthorities {
+		taskAuthorities = append(taskAuthorities, gateway.TaskAuthority{
+			KeyID: authority.KeyID, PublicKey: authority.PublicKey,
+		})
+	}
+	return permitAdmission{
+		RuntimeRef: deployment.Admission.RuntimeRef, Status: deployment.Admission.Status,
+		CapsuleDigest: deployment.Admission.CapsuleDigest, PolicyDigest: deployment.Admission.PolicyDigest,
+		Generation: deployment.Admission.Generation, EvidenceKeyID: deployment.Admission.EvidenceKeyID,
+		GrantID: deployment.Admission.GrantID, ServicePath: deployment.Admission.ServicePath,
+		ServiceID: deployment.Admission.ServiceID, TaskAuthorities: taskAuthorities,
+		EgressProxy: deployment.Admission.EgressProxy, EgressRouteIDs: deployment.Admission.EgressRouteIDs,
+		ConnectorURL: deployment.Admission.ConnectorURL, ConnectorIDs: deployment.Admission.ConnectorIDs,
+		RoutePolicyDigest: deployment.Admission.RoutePolicyDigest,
+	}, deployment.Intent, nil
 }
 
 func verifyTask(arguments []string, stdout io.Writer) error {

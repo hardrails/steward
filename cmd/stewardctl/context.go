@@ -61,6 +61,7 @@ var controlContextCommands = map[string]controlContextCommandSpec{
 	"node-credential revoke":  {network: true, token: true},
 	"operations status":       {network: true, token: true, tenant: true},
 	"attention list":          {network: true, token: true, tenant: true},
+	"agent list":              {network: true, token: true, tenant: true, node: true},
 	"command submit":          {network: true, token: true, tenant: true, node: true},
 	"command status":          {network: true, token: true, tenant: true, node: true},
 	"command list":            {network: true, token: true, tenant: true, node: true},

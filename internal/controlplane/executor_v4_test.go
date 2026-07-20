@@ -121,6 +121,27 @@ func TestControlPlaneExecutorProtocolV4PersistsAndExposesAdmissionProjection(t *
 	}
 
 	response = fixture.request(
+		t, http.MethodGet, "/v1/operations/agents?tenant_id=tenant-a&status=stopped",
+		fixture.adminToken, "",
+	)
+	requireStatus(t, response, http.StatusOK)
+	var agents controlstore.AgentInventoryPage
+	decodeResponse(t, response, &agents)
+	if len(agents.Agents) != 1 || agents.Agents[0].RuntimeRef != runtimeRef ||
+		agents.Agents[0].ObservedStatus != "stopped" ||
+		agents.Agents[0].LatestCommandKind != "admit" ||
+		agents.Agents[0].CapsuleDigest != projection.CapsuleDigest {
+		t.Fatalf("agent operations projection = %+v", agents)
+	}
+	requireError(t, fixture.request(
+		t, http.MethodGet, "/v1/operations/agents?status=destroyed",
+		fixture.adminToken, "",
+	), http.StatusBadRequest, "invalid_request")
+	requireError(t, fixture.request(
+		t, http.MethodGet, "/v1/operations/agents", "", "",
+	), http.StatusUnauthorized, "unauthorized")
+
+	response = fixture.request(
 		t, http.MethodPost, "/executor-uplink/poll", nodeCredential.Credential, mustJSON(t, poll),
 	)
 	requireStatus(t, response, http.StatusOK)

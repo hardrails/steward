@@ -63,7 +63,7 @@ require_text "$repo_root/scripts/control-install-smoke.sh" \
   '--artifact "$terraform_stage/$archive" --checksums "$terraform_stage/checksums.txt"'
 require_text "$repo_root/scripts/control-install-smoke.sh" \
   'install_version_from_terraform_stage v1.0.0'
-grep -Fx -- "ExecStart=/usr/local/bin/steward-control -addr=\${STEWARD_CONTROL_ADDR} -state-dir=\${STEWARD_CONTROL_STATE_DIR} -auth-key-file=\${STEWARD_CONTROL_AUTH_KEY_FILE} -witness-private-key-file=\${STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE} -witness-public-key-file=\${STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE} -tls-cert-file=\${STEWARD_CONTROL_TLS_CERT_FILE} -tls-key-file=\${STEWARD_CONTROL_TLS_KEY_FILE} -enable-metrics=\${STEWARD_CONTROL_ENABLE_METRICS} -node-stale-after=\${STEWARD_CONTROL_NODE_STALE_AFTER} -evidence-stale-after=\${STEWARD_CONTROL_EVIDENCE_STALE_AFTER} -command-overdue-after=\${STEWARD_CONTROL_COMMAND_OVERDUE_AFTER} -capacity-warning-percent=\${STEWARD_CONTROL_CAPACITY_WARNING_PERCENT}" \
+grep -Fx -- "ExecStart=/usr/local/bin/steward-control -addr=\${STEWARD_CONTROL_ADDR} -state-dir=\${STEWARD_CONTROL_STATE_DIR} -auth-key-file=\${STEWARD_CONTROL_AUTH_KEY_FILE} -witness-private-key-file=\${STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE} -witness-public-key-file=\${STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE} -controller-private-key-file=\${STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE} -controller-public-key-file=\${STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE} -controller-key-id=\${STEWARD_CONTROL_CONTROLLER_KEY_ID} -reconcile-interval=\${STEWARD_CONTROL_RECONCILE_INTERVAL} -tls-cert-file=\${STEWARD_CONTROL_TLS_CERT_FILE} -tls-key-file=\${STEWARD_CONTROL_TLS_KEY_FILE} -enable-metrics=\${STEWARD_CONTROL_ENABLE_METRICS} -node-stale-after=\${STEWARD_CONTROL_NODE_STALE_AFTER} -evidence-stale-after=\${STEWARD_CONTROL_EVIDENCE_STALE_AFTER} -command-overdue-after=\${STEWARD_CONTROL_COMMAND_OVERDUE_AFTER} -capacity-warning-percent=\${STEWARD_CONTROL_CAPACITY_WARNING_PERCENT}" \
   "$repo_root/deploy/systemd/steward-control.service" >/dev/null || {
   echo 'steward-control Terraform test: packaged systemd argv no longer matches the bootstrap identity proof' >&2
   exit 1
@@ -377,6 +377,10 @@ STEWARD_CONTROL_STATE_DIR=/var/lib/steward-control
 STEWARD_CONTROL_AUTH_KEY_FILE=/var/lib/steward-control/auth.key
 STEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=/var/lib/steward-control/witness.private.pem
 STEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=/var/lib/steward-control/witness.public.pem
+STEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE=/var/lib/steward-control/controller.private.pem
+STEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE=/var/lib/steward-control/controller.public.pem
+STEWARD_CONTROL_CONTROLLER_KEY_ID=controller-default
+STEWARD_CONTROL_RECONCILE_INTERVAL=5s
 STEWARD_CONTROL_TLS_CERT_FILE=
 STEWARD_CONTROL_TLS_KEY_FILE=
 STEWARD_CONTROL_ENABLE_METRICS=false
@@ -480,6 +484,10 @@ run_proof() {
     -auth-key-file=/var/lib/steward-control/auth.key \
     -witness-private-key-file=/var/lib/steward-control/witness.private.pem \
     -witness-public-key-file=/var/lib/steward-control/witness.public.pem \
+    -controller-private-key-file=/var/lib/steward-control/controller.private.pem \
+    -controller-public-key-file=/var/lib/steward-control/controller.public.pem \
+    -controller-key-id=controller-default \
+    -reconcile-interval=5s \
     -tls-cert-file= -tls-key-file= \
     -enable-metrics=false \
     -node-stale-after=2m \
@@ -493,6 +501,9 @@ run_proof() {
     control_state_dir=/var/lib/steward-control control_auth_key=/var/lib/steward-control/auth.key \
     control_witness_private_key=/var/lib/steward-control/witness.private.pem \
     control_witness_public_key=/var/lib/steward-control/witness.public.pem \
+    control_controller_private_key=/var/lib/steward-control/controller.private.pem \
+    control_controller_public_key=/var/lib/steward-control/controller.public.pem \
+    control_controller_key_id=controller-default control_reconcile_interval=5s \
     control_service=steward-control.service binary_link=/usr/local/bin/steward-control \
     release_binary="$RELEASE_BINARY" proc_root="$PROC_ROOT_FIXTURE" work="$work/auth-work" \
     PATH="$work/fake-bin:$PATH" IDENTITY_MODE="$identity_mode" \

@@ -126,10 +126,12 @@ Control is a customer-operated management and evidence-witness plane. Nodes poll
 outbound, which works behind normal inbound firewalls and network address
 translation.
 
-Control stores signed command envelopes but does not need their private keys. It
-has no Docker authority and does not receive Gateway credential plaintext. Its
-operator bearer determines API scope. A separate witness key signs bounded evidence
-exports and checkpoints.
+Control stores signed command envelopes and bounded desired deployments. It never
+needs tenant private keys. For automatic lifecycle reconciliation, it signs only
+within an exact tenant delegation using a separate online key; Executor verifies
+both layers locally. Control has no Docker authority and does not receive Gateway
+credential plaintext. Its operator bearer determines API scope. A different
+witness key signs bounded evidence exports and checkpoints.
 
 The embedded React console uses the same API. Static assets are compiled into the
 Go binary, no CDN or telemetry is required, and the operator bearer remains in tab

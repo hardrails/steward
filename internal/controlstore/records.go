@@ -1215,6 +1215,7 @@ func (store *Store) reclaimExpiredEnrollmentsLocked(now time.Time, reserve int) 
 func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Time) []Command {
 	cutoff := now.Add(-store.limits.TerminalRetention)
 	protectedCanaryCursors := activationCanaryPruningCursors(store.current.commands)
+	protectedDeploymentCursors := deploymentCommandPruningCursors(store.current.deployments)
 	protectedCaptureCanaries := evidenceCapturePruningCanaries(
 		store.current.captures,
 		store.current.commands,
@@ -1226,6 +1227,9 @@ func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Tim
 			continue
 		}
 		if _, protected := protectedCanaryCursors[key]; protected {
+			continue
+		}
+		if _, protected := protectedDeploymentCursors[key]; protected {
 			continue
 		}
 		if _, protected := protectedCaptureCanaries[key]; protected {
@@ -1251,6 +1255,24 @@ func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Tim
 		return commandKey(result[i].TenantID, result[i].NodeID, result[i].ID) < commandKey(result[j].TenantID, result[j].NodeID, result[j].ID)
 	})
 	return result
+}
+
+// deploymentCommandPruningCursors retains every command whose terminal
+// result has not yet been incorporated into its deployment cursor. Without
+// this protection, capacity-driven pruning could erase the only durable
+// evidence needed to decide whether a workload effect succeeded.
+func deploymentCommandPruningCursors(deployments map[string]Deployment) map[string]struct{} {
+	protected := make(map[string]struct{})
+	for _, deployment := range deployments {
+		for _, instance := range deployment.Instances {
+			if instance.CommandID == "" || instance.NodeID == "" || instance.CommandOperation == "" ||
+				instance.Phase != deploymentOperationPhase(instance.CommandOperation) {
+				continue
+			}
+			protected[commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)] = struct{}{}
+		}
+	}
+	return protected
 }
 
 // evidenceCapturePruningCanaries retains one deterministic, fully successful

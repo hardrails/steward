@@ -16,6 +16,7 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/connectorledger"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 	"github.com/hardrails/steward/internal/gateway"
 	"github.com/hardrails/steward/internal/taskpermit"
@@ -181,6 +182,67 @@ func TestTaskIssueAndVerifyProduceOneExactOwnerOnlyBundle(t *testing.T) {
 	}
 	if after, err := os.ReadFile(fixture.bundlePath); err != nil || !bytes.Equal(after, raw) {
 		t.Fatal("failed second issue changed the existing bundle")
+	}
+}
+
+func TestTaskIssueConsumesAgentDeploymentHandoff(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	taskAuthorities := make([]controlprotocol.ExecutorTaskAuthorityV1, 0, len(fixture.admitted.TaskAuthorities))
+	for _, authority := range fixture.admitted.TaskAuthorities {
+		taskAuthorities = append(taskAuthorities, controlprotocol.ExecutorTaskAuthorityV1{
+			KeyID: authority.KeyID, PublicKey: authority.PublicKey,
+		})
+	}
+	projection := controlprotocol.ExecutorAdmissionProjectionV1{
+		SchemaVersion: controlprotocol.ExecutorAdmissionProjectionSchemaV1,
+		RuntimeRef:    fixture.admitted.RuntimeRef, Status: "running",
+		CapsuleDigest: fixture.admitted.CapsuleDigest, PolicyDigest: fixture.admitted.PolicyDigest,
+		Generation: fixture.admitted.Generation, EvidenceKeyID: strings.Repeat("d", 32),
+		GrantID: fixture.admitted.GrantID, ServicePath: fixture.admitted.ServicePath,
+		ServiceID: fixture.admitted.ServiceID, TaskAuthorities: taskAuthorities,
+		RoutePolicyDigest: fixture.admitted.RoutePolicyDigest,
+	}
+	deployment := agentDeployResult{
+		SchemaVersion: agentDeploymentSchema, AgentName: "auditor",
+		BundleDigest: "sha256:" + strings.Repeat("f", 64), TenantID: fixture.intent.TenantID,
+		NodeID: fixture.intent.NodeID, InstanceID: fixture.intent.InstanceID,
+		LineageID: fixture.intent.LineageID, Generation: fixture.intent.Generation,
+		RuntimeRef: projection.RuntimeRef, Status: "running", AdmitCommandID: "admit-a",
+		StartCommandID: "start-a", Intent: fixture.intent, Admission: projection,
+	}
+	deploymentPath := writePermitJSON(t, fixture.directory, "deployment.json", deployment)
+	priorNow := timeNow
+	timeNow = func() time.Time { return fixture.now }
+	t.Cleanup(func() { timeNow = priorNow })
+	arguments := []string{
+		"task", "issue", "-deployment", deploymentPath, "-trust", fixture.trustPath,
+		"-request", fixture.requestPath, "-operation-id", fixture.operation.ID,
+		"-key", fixture.privatePath, "-key-id", fixture.keyID, "-out", fixture.bundlePath,
+	}
+	if err := run(arguments, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	public, err := readPublicKey(fixture.publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, err := readTaskBundle(
+		fixture.bundlePath, map[string]ed25519.PublicKey{fixture.keyID: public},
+		fixture.now, taskpermit.MaxValidity,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issued.Verified.Statement.RuntimeRef != projection.RuntimeRef ||
+		issued.Verified.Statement.RoutePolicyDigest != projection.RoutePolicyDigest {
+		t.Fatalf("statement=%#v", issued.Verified.Statement)
+	}
+
+	bad := deployment
+	bad.Intent.InstanceID = "different-agent"
+	badPath := writePermitJSON(t, fixture.directory, "bad-deployment.json", bad)
+	if _, _, err := readTaskDeployment(badPath); err == nil || !strings.Contains(err.Error(), "does not bind") {
+		t.Fatalf("tampered deployment error=%v", err)
 	}
 }
 

@@ -154,6 +154,41 @@ type NodeList struct {
 	NextAfter string `json:"next_after,omitempty"`
 }
 
+type DeploymentApply struct {
+	Generation       uint64
+	ExpectedRevision uint64
+	AgentName        string
+	BundleDigest     string
+	CapsuleDSSE      []byte
+	DelegationDSSE   []byte
+}
+
+type Deployment struct {
+	TenantID            string                              `json:"tenant_id"`
+	DeploymentID        string                              `json:"deployment_id"`
+	Generation          uint64                              `json:"generation"`
+	Revision            uint64                              `json:"revision"`
+	AgentName           string                              `json:"agent_name"`
+	BundleDigest        string                              `json:"bundle_digest"`
+	CapsuleDigest       string                              `json:"capsule_digest"`
+	DelegationDigest    string                              `json:"delegation_digest"`
+	DelegationID        string                              `json:"delegation_id"`
+	ControllerKeyID     string                              `json:"controller_key_id"`
+	ClaimGeneration     uint64                              `json:"claim_generation"`
+	AllowedNodeIDs      []string                            `json:"allowed_node_ids"`
+	DelegationExpiresAt string                              `json:"delegation_expires_at"`
+	DesiredState        controlstore.DeploymentDesiredState `json:"desired_state"`
+	Phase               controlstore.DeploymentPhase        `json:"phase"`
+	Instances           []controlstore.DeploymentInstance   `json:"instances"`
+	CreatedAt           string                              `json:"created_at"`
+	UpdatedAt           string                              `json:"updated_at"`
+}
+
+type DeploymentList struct {
+	Deployments []Deployment `json:"deployments"`
+	NextAfter   string       `json:"next_after,omitempty"`
+}
+
 type NodeRevocation struct {
 	NodeID             string `json:"node_id"`
 	RevokedCredentials int    `json:"revoked_credentials"`
@@ -309,6 +344,121 @@ func (c *Client) GetNode(ctx context.Context, tenantID, nodeID string) (Node, er
 	path := "/v1/tenants/" + url.PathEscape(tenantID) + "/nodes/" + url.PathEscape(nodeID)
 	err := c.do(ctx, http.MethodGet, path, nil, &node, true)
 	return node, err
+}
+
+func (c *Client) ApplyDeployment(
+	ctx context.Context,
+	tenantID, deploymentID string,
+	input DeploymentApply,
+) (Deployment, error) {
+	path, err := deploymentPath(tenantID, deploymentID)
+	if err != nil {
+		return Deployment{}, err
+	}
+	var deployment Deployment
+	err = c.do(ctx, http.MethodPut, path, struct {
+		Generation           uint64 `json:"generation"`
+		ExpectedRevision     uint64 `json:"expected_revision,omitempty"`
+		AgentName            string `json:"agent_name"`
+		BundleDigest         string `json:"bundle_digest"`
+		CapsuleDSSEBase64    string `json:"capsule_dsse_base64"`
+		DelegationDSSEBase64 string `json:"delegation_dsse_base64"`
+	}{
+		Generation: input.Generation, ExpectedRevision: input.ExpectedRevision,
+		AgentName: input.AgentName, BundleDigest: input.BundleDigest,
+		CapsuleDSSEBase64:    base64.StdEncoding.EncodeToString(input.CapsuleDSSE),
+		DelegationDSSEBase64: base64.StdEncoding.EncodeToString(input.DelegationDSSE),
+	}, &deployment, true)
+	if err != nil {
+		return Deployment{}, err
+	}
+	if err := validateDeploymentResponse(deployment, tenantID, deploymentID); err != nil {
+		return Deployment{}, err
+	}
+	if deployment.Generation != input.Generation || deployment.AgentName != input.AgentName ||
+		deployment.BundleDigest != input.BundleDigest || deployment.CapsuleDigest != dsse.Digest(input.CapsuleDSSE) ||
+		deployment.DelegationDigest != dsse.Digest(input.DelegationDSSE) {
+		return Deployment{}, errors.New("control deployment response changed the requested binding")
+	}
+	return deployment, nil
+}
+
+func (c *Client) GetDeployment(ctx context.Context, tenantID, deploymentID string) (Deployment, error) {
+	path, err := deploymentPath(tenantID, deploymentID)
+	if err != nil {
+		return Deployment{}, err
+	}
+	var deployment Deployment
+	if err := c.do(ctx, http.MethodGet, path, nil, &deployment, true); err != nil {
+		return Deployment{}, err
+	}
+	if err := validateDeploymentResponse(deployment, tenantID, deploymentID); err != nil {
+		return Deployment{}, err
+	}
+	return deployment, nil
+}
+
+func (c *Client) ListDeployments(
+	ctx context.Context,
+	tenantID, after string,
+	limit int,
+) (DeploymentList, error) {
+	collection, err := deploymentPath(tenantID, "")
+	if err != nil {
+		return DeploymentList{}, err
+	}
+	path, err := paginatedPath(collection, after, limit)
+	if err != nil {
+		return DeploymentList{}, err
+	}
+	var page DeploymentList
+	if err := c.do(ctx, http.MethodGet, path, nil, &page, true); err != nil {
+		return DeploymentList{}, err
+	}
+	if page.Deployments == nil {
+		return DeploymentList{}, errors.New("control deployment page omitted its collection")
+	}
+	previous := ""
+	for _, deployment := range page.Deployments {
+		if err := validateDeploymentResponse(deployment, tenantID, deployment.DeploymentID); err != nil {
+			return DeploymentList{}, err
+		}
+		if previous != "" && previous >= deployment.DeploymentID {
+			return DeploymentList{}, errors.New("control deployment page is not canonical")
+		}
+		previous = deployment.DeploymentID
+	}
+	if page.NextAfter != "" && (len(page.Deployments) == 0 || page.NextAfter != previous) {
+		return DeploymentList{}, errors.New("control deployment page cursor is inconsistent")
+	}
+	return page, nil
+}
+
+func (c *Client) RemoveDeployment(
+	ctx context.Context,
+	tenantID, deploymentID string,
+	expectedRevision uint64,
+) (Deployment, error) {
+	path, err := deploymentPath(tenantID, deploymentID)
+	if err != nil {
+		return Deployment{}, err
+	}
+	if expectedRevision == 0 {
+		return Deployment{}, errors.New("deployment removal requires a positive expected revision")
+	}
+	var deployment Deployment
+	if err := c.do(ctx, http.MethodDelete, path, struct {
+		ExpectedRevision uint64 `json:"expected_revision"`
+	}{ExpectedRevision: expectedRevision}, &deployment, true); err != nil {
+		return Deployment{}, err
+	}
+	if err := validateDeploymentResponse(deployment, tenantID, deploymentID); err != nil {
+		return Deployment{}, err
+	}
+	if deployment.DesiredState != controlstore.DeploymentAbsent {
+		return Deployment{}, errors.New("control deployment removal did not retain absent desired state")
+	}
+	return deployment, nil
 }
 
 func (c *Client) RevokeNode(ctx context.Context, nodeID string) (NodeRevocation, error) {
@@ -513,6 +663,20 @@ func (c *Client) ListCommandInventory(ctx context.Context, tenantID, nodeID, sta
 		return controlstore.CommandInventoryPage{}, err
 	}
 	var page controlstore.CommandInventoryPage
+	err = c.do(ctx, http.MethodGet, path, nil, &page, true)
+	return page, err
+}
+
+func (c *Client) ListAgentInventory(ctx context.Context, tenantID, nodeID, status, cursor string, limit int) (controlstore.AgentInventoryPage, error) {
+	path, err := operationsPath(
+		"/v1/operations/agents",
+		map[string]string{"tenant_id": tenantID, "node_id": nodeID, "status": status},
+		nil, cursor, limit,
+	)
+	if err != nil {
+		return controlstore.AgentInventoryPage{}, err
+	}
+	var page controlstore.AgentInventoryPage
 	err = c.do(ctx, http.MethodGet, path, nil, &page, true)
 	return page, err
 }
@@ -860,6 +1024,65 @@ func validExecutorRuntimeRef(value string) bool {
 		}
 	}
 	return true
+}
+
+func deploymentPath(tenantID, deploymentID string) (string, error) {
+	if !validEvidenceRouteIdentity(tenantID, 128) {
+		return "", errors.New("control deployment tenant identity is invalid")
+	}
+	path := "/v1/tenants/" + url.PathEscape(tenantID) + "/deployments"
+	if deploymentID == "" {
+		return path, nil
+	}
+	if !validEvidenceRouteIdentity(deploymentID, 128) {
+		return "", errors.New("control deployment identity is invalid")
+	}
+	return path + "/" + url.PathEscape(deploymentID), nil
+}
+
+func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID string) error {
+	if deployment.TenantID != tenantID || deployment.DeploymentID != deploymentID ||
+		!validEvidenceRouteIdentity(deployment.TenantID, 128) ||
+		!validEvidenceRouteIdentity(deployment.DeploymentID, 128) ||
+		!validEvidenceRouteIdentity(deployment.AgentName, 128) ||
+		!controlprotocol.ValidSHA256Digest(deployment.BundleDigest) ||
+		!controlprotocol.ValidSHA256Digest(deployment.CapsuleDigest) ||
+		!controlprotocol.ValidSHA256Digest(deployment.DelegationDigest) ||
+		!validEvidenceRouteIdentity(deployment.DelegationID, 128) ||
+		!validEvidenceRouteIdentity(deployment.ControllerKeyID, 256) ||
+		deployment.Generation == 0 || deployment.Revision == 0 || deployment.ClaimGeneration == 0 ||
+		deployment.AllowedNodeIDs == nil || deployment.Instances == nil {
+		return errors.New("control deployment response identity is invalid")
+	}
+	for index, nodeID := range deployment.AllowedNodeIDs {
+		if !validEvidenceRouteIdentity(nodeID, 128) || index > 0 && deployment.AllowedNodeIDs[index-1] >= nodeID {
+			return errors.New("control deployment response node scope is not canonical")
+		}
+	}
+	for index, instance := range deployment.Instances {
+		if !validEvidenceRouteIdentity(instance.InstanceID, 256) ||
+			!validEvidenceRouteIdentity(instance.LineageID, 256) || instance.Generation == 0 ||
+			index > 0 && deployment.Instances[index-1].InstanceID >= instance.InstanceID {
+			return errors.New("control deployment response instance set is not canonical")
+		}
+	}
+	created, createdErr := time.Parse(time.RFC3339Nano, deployment.CreatedAt)
+	updated, updatedErr := time.Parse(time.RFC3339Nano, deployment.UpdatedAt)
+	expires, expiresErr := time.Parse(time.RFC3339Nano, deployment.DelegationExpiresAt)
+	if createdErr != nil || updatedErr != nil || expiresErr != nil || updated.Before(created) || !expires.After(created) {
+		return errors.New("control deployment response timestamps are invalid")
+	}
+	if deployment.DesiredState != controlstore.DeploymentRunning &&
+		deployment.DesiredState != controlstore.DeploymentAbsent {
+		return errors.New("control deployment response desired state is invalid")
+	}
+	switch deployment.Phase {
+	case controlstore.DeploymentPending, controlstore.DeploymentReconciling, controlstore.DeploymentReady,
+		controlstore.DeploymentStopping, controlstore.DeploymentRemoved, controlstore.DeploymentDegraded:
+		return nil
+	default:
+		return errors.New("control deployment response phase is invalid")
+	}
 }
 
 func paginatedPath(path, after string, limit int) (string, error) {

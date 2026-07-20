@@ -186,6 +186,7 @@ lineage is one workload's persistent state history.
 | `steward_control_command_status` | Read durable delivery lease and terminal-report metadata for one signed command. |
 | `steward_control_operations_summary` | Read capacity, command, evidence, and action-required totals for the credential's tenant projection or a site-admin-selected scope. |
 | `steward_control_attention_list` | Page through deterministic findings for node contact, evidence, command outcome, and capacity pressure. Findings cannot be acknowledged or cleared through MCP. |
+| `steward_control_agent_list` | Page through non-secret agent runtime observations. It reports the last successful workload status separately from the latest signed operation and never schedules, retries, or mutates a workload. |
 | `steward_control_command_list` | Page and filter secret-free command metadata without returning the signed command body, terminal result body, reported status text, or error codes. |
 | `steward_control_credential_list` | Page and filter non-secret operator and node credential metadata without returning bearer material or token verifiers. |
 | `steward_control_evidence_status` | Read the site-admin-only last-good receipt checkpoint and sticky rollback or equivocation finding. Returns receipt identity digests but omits raw public keys, signatures, and portable export files. |

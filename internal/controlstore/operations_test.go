@@ -12,6 +12,7 @@ import (
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/evidence"
+	"github.com/hardrails/steward/internal/executor"
 )
 
 func TestOperationsThresholdsAndCapacityEqualityAreBounded(t *testing.T) {
@@ -176,6 +177,107 @@ func TestCommandInventoryPaginatesFiltersAndProjectsTenants(t *testing.T) {
 		),
 	}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("cross-domain cursor error = %v", err)
+	}
+}
+
+func TestAgentInventoryCorrelatesSignedRuntimeWithoutInventingDesiredState(t *testing.T) {
+	if key := agentInventorySortKey(AgentMetadata{
+		TenantID: "tenant-a", NodeID: "node-a", RuntimeRef: "runtime-a", InstanceGeneration: 2,
+	}); key != "tenant-a\x00node-a\x00runtime-a\x002" {
+		t.Fatalf("agent inventory sort key = %q", key)
+	}
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, node := fixture.createNode(t, "tenant-a")
+	operator := operationsTenantOperator(t, fixture, "tenant-a", "agent-inventory-operator")
+
+	admit := baseV4CommandStatement("agent-admit", "tenant-a", "node-1", "admit", 7, 11)
+	admit.RuntimeRef = "uplink:v2:8:tenant-a:6:node-1:agent-1"
+	admitDelivery := submitAndPollV4(t, fixture, node, &admit)
+	executorRuntimeRef := executor.RuntimeRef(admit.TenantID, admit.InstanceID)
+	projection := minimalStoreAdmissionProjection(executorRuntimeRef, admit.InstanceGeneration)
+	projection.GrantID = "grant-" + strings.Repeat("e", 64)
+	projection.EgressProxy = "http://steward-relay:8082"
+	projection.EgressRouteIDs = []string{"inference"}
+	projection.ConnectorURL = "http://steward-relay:8081"
+	projection.ConnectorIDs = []string{"calendar"}
+	projection.RoutePolicyDigest = "sha256:" + strings.Repeat("f", 64)
+	admitReport := reportV4For(admitDelivery, admit.ClaimGeneration, projection)
+	if applied, err := fixture.store.ApplyReportV4(node, admitReport, fixture.now.Add(4*time.Minute)); err != nil || !applied {
+		t.Fatalf("apply admit report = (%v, %v)", applied, err)
+	}
+
+	start := baseV4CommandStatement("agent-start", "tenant-a", "node-1", "start", 7, 11)
+	start.RuntimeRef = admit.RuntimeRef
+	start.CommandSequence = 2
+	startDelivery := submitAndPollV4(t, fixture, node, &start)
+	startReport := controlprotocol.ExecutorReportV4{
+		ProtocolVersion: controlprotocol.ExecutorProtocolV4,
+		DeliveryID:      startDelivery.DeliveryID, DeliveryGeneration: startDelivery.DeliveryGeneration,
+		CommandID: startDelivery.CommandID, CommandDigest: startDelivery.CommandDigest,
+		Status: controlprotocol.ExecutorStatusDone, ReportedStatus: "running", ClaimGeneration: 7,
+		Result: controlprotocol.ExecutorReportResultV4{RuntimeRef: executorRuntimeRef},
+	}
+	if applied, err := fixture.store.ApplyReportV4(node, startReport, fixture.now.Add(5*time.Minute)); err != nil || !applied {
+		t.Fatalf("apply start report = (%v, %v)", applied, err)
+	}
+
+	stop := baseV4CommandStatement("agent-stop", "tenant-a", "node-1", "stop", 7, 11)
+	stop.RuntimeRef = admit.RuntimeRef
+	stop.CommandSequence = 3
+	stopDelivery := submitAndPollV4(t, fixture, node, &stop)
+	stopReport := controlprotocol.ExecutorReportV4{
+		ProtocolVersion: controlprotocol.ExecutorProtocolV4,
+		DeliveryID:      stopDelivery.DeliveryID, DeliveryGeneration: stopDelivery.DeliveryGeneration,
+		CommandID: stopDelivery.CommandID, CommandDigest: stopDelivery.CommandDigest,
+		Status: controlprotocol.ExecutorStatusFailed, ReportedStatus: "failed", ClaimGeneration: 7,
+		ErrorCode: "runtime_failure",
+		Result: controlprotocol.ExecutorReportResultV4{
+			RuntimeRef: executorRuntimeRef, Error: "sensitive node detail",
+		},
+	}
+	if applied, err := fixture.store.ApplyReportV4(node, stopReport, fixture.now.Add(6*time.Minute)); err != nil || !applied {
+		t.Fatalf("apply stop report = (%v, %v)", applied, err)
+	}
+	replacement := baseV4CommandStatement("agent-replacement", "tenant-a", "node-1", "admit", 8, 12)
+	replacement.RuntimeRef = admit.RuntimeRef
+	if _, created, err := fixture.store.SubmitCommand(
+		fixture.admin, replacement.TenantID, replacement.NodeID,
+		signV4CommandStatement(t, replacement), fixture.now.Add(7*time.Minute),
+	); err != nil || !created {
+		t.Fatalf("submit replacement generation = (%v, %v)", created, err)
+	}
+
+	page, err := fixture.store.ListAgentInventory(operator, AgentInventoryQuery{Status: "running"})
+	if err != nil || len(page.Agents) != 1 {
+		t.Fatalf("agent inventory = (%+v, %v)", page, err)
+	}
+	agent := page.Agents[0]
+	if agent.TenantID != "tenant-a" || agent.NodeID != "node-1" ||
+		agent.RuntimeRef != executorRuntimeRef || agent.InstanceGeneration != 11 ||
+		agent.ClaimGeneration != 7 || agent.ObservedStatus != "running" ||
+		agent.LatestCommandID != "agent-stop" || agent.LatestCommandKind != "stop" ||
+		agent.LatestTerminalStatus != controlprotocol.ExecutorStatusFailed ||
+		!slices.Equal(agent.EgressRouteIDs, []string{"inference"}) ||
+		!slices.Equal(agent.ConnectorIDs, []string{"calendar"}) {
+		t.Fatalf("agent projection = %+v", agent)
+	}
+	all, err := fixture.store.ListAgentInventory(operator, AgentInventoryQuery{})
+	if err != nil || len(all.Agents) != 2 ||
+		all.Agents[0].InstanceGeneration == all.Agents[1].InstanceGeneration {
+		t.Fatalf("agent lifetimes were collapsed = (%+v, %v)", all, err)
+	}
+	raw, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"sensitive node detail", "task_authorities", "public_key", "egress_proxy", "connector_url"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("agent inventory exposed %q: %s", forbidden, raw)
+		}
+	}
+	if _, err := fixture.store.ListAgentInventory(operator, AgentInventoryQuery{Status: "destroyed"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid status filter = %v", err)
 	}
 }
 

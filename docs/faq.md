@@ -31,11 +31,14 @@ runtime dependency.
 
 ## Does Steward Control hold tenant signing keys?
 
-No. It stores tenant bindings, credential verifiers, inventory, exact signed
-command bytes, delivery leases, and terminal reports. A separate trusted signing
-station or signing service holds tenant and site private keys. Executor verifies
-the resulting signature and local site policy on the node. The controller cannot
-turn its bearer credential into a tenant signature.
+No. It stores tenant bindings, credential verifiers, inventory, public signed
+artifacts, desired deployments, command bytes, delivery leases, and terminal
+reports. A trusted signing station or separate signing service holds tenant and
+site private keys. For reconciliation, a tenant may delegate exact instances,
+nodes, generations, lifecycle verbs, and admission fields to Control's short-lived
+online authority. Executor verifies both signatures and local site policy. The
+controller cannot turn its bearer or online key into a tenant signature or widen
+the signed delegation.
 
 ## Why both Docker and gVisor?
 

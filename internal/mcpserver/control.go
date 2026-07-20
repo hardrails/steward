@@ -33,6 +33,7 @@ type Control interface {
 	GetCommand(context.Context, string, string, string) (controlclient.Command, error)
 	GetOperationsSummary(context.Context, string) (controlstore.OperationsSummary, error)
 	ListAttention(context.Context, string, string, string, int) (controlstore.AttentionPage, error)
+	ListAgentInventory(context.Context, string, string, string, string, int) (controlstore.AgentInventoryPage, error)
 	ListCommandInventory(context.Context, string, string, string, string, string, int) (controlstore.CommandInventoryPage, error)
 	ListCredentialInventory(context.Context, string, string, string, string, *bool, string, int) (controlstore.CredentialInventoryPage, error)
 	InspectExecutorEvidence(context.Context, string) (controlprotocol.ExecutorEvidenceInspectionV1, error)
@@ -95,6 +96,14 @@ type controlCommandListArgs struct {
 	TerminalStatus string `json:"terminal_status,omitempty"`
 	Cursor         string `json:"cursor,omitempty"`
 	Limit          int    `json:"limit,omitempty"`
+}
+
+type controlAgentListArgs struct {
+	TenantID string `json:"tenant_id,omitempty"`
+	NodeID   string `json:"node_id,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Cursor   string `json:"cursor,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
 }
 
 type controlCredentialListArgs struct {
@@ -252,6 +261,23 @@ func (s *Server) callControlTool(ctx context.Context, name string, raw []byte) (
 			return nil, controlFailure("command list", err)
 		}
 		return result, nil
+	case "steward_control_agent_list":
+		var arguments controlAgentListArgs
+		if decodeArguments(raw, &arguments) != nil ||
+			!validOptionalControlIdentifier(arguments.TenantID, 128) ||
+			!validOptionalControlIdentifier(arguments.NodeID, 128) ||
+			!validControlAgentStatus(arguments.Status) ||
+			!validControlInventoryPage(arguments.Cursor, arguments.Limit) {
+			return nil, errors.New("steward_control_agent_list accepts only bounded tenant, node, observed status, cursor, and limit")
+		}
+		result, err := s.control.ListAgentInventory(
+			ctx, arguments.TenantID, arguments.NodeID, arguments.Status,
+			arguments.Cursor, arguments.Limit,
+		)
+		if err != nil {
+			return nil, controlFailure("agent list", err)
+		}
+		return result, nil
 	case "steward_control_credential_list":
 		var arguments controlCredentialListArgs
 		if decodeArguments(raw, &arguments) != nil {
@@ -362,6 +388,15 @@ func validControlAttentionReason(value string) bool {
 func validControlCommandState(value string) bool {
 	switch controlstore.CommandState(value) {
 	case "", controlstore.CommandPending, controlstore.CommandLeased, controlstore.CommandTerminal:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlAgentStatus(value string) bool {
+	switch value {
+	case "", "unknown", "provisioning", "running", "stopped", "hibernated":
 		return true
 	default:
 		return false
@@ -519,6 +554,17 @@ func controlTools() []any {
 					"terminal_status", map[string]any{"type": "string", "enum": []string{
 						controlprotocol.ExecutorStatusDone, controlprotocol.ExecutorStatusFailed,
 						controlprotocol.ExecutorStatusRejected, controlprotocol.ExecutorStatusOutcomeUnknown,
+					}},
+				)}, true, false, true, false),
+		tool("steward_control_agent_list", "List observed agents", "List bounded, non-secret runtime observations derived from signed Executor activity. This reads observed state and does not schedule, retry, or mutate workloads.",
+			map[string]any{"type": "object", "additionalProperties": false,
+				"properties": mergeControlProperties(
+					mergeControlProperties(
+						mergeControlProperties(inventoryProperties(), "tenant_id", optionalTenant),
+						"node_id", id128,
+					),
+					"status", map[string]any{"type": "string", "enum": []string{
+						"unknown", "provisioning", "running", "stopped", "hibernated",
 					}},
 				)}, true, false, true, false),
 		tool("steward_control_credential_list", "List credential inventory", "List bounded non-secret credential metadata. Bearer values, token MACs, and reproducible credential material are never returned.",

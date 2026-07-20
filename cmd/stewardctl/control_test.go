@@ -33,6 +33,7 @@ func TestControlDefaultOriginMatchesLoopbackServer(t *testing.T) {
 func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	const nodeCredentialToken = "steward_node_v1_node-cred-11111111111111111111111111111111_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	attentionCursor := base64.RawURLEncoding.EncodeToString([]byte("attention-v1\x00attention-a"))
+	agentCursor := base64.RawURLEncoding.EncodeToString([]byte("agent-v1\x00agent-a"))
 	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-v1\x00command-a"))
 	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-v1\x00credential-a"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -108,6 +109,14 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 				t.Fatalf("command inventory request=%s %s", request.Method, request.URL.String())
 			}
 			_, _ = w.Write([]byte(`{"commands":[{"tenant_id":"tenant-a","node_id":"node-1","id":"command-1","delivery_id":"delivery-1","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"terminal","delivery_generation":1,"created_at":"2026-07-16T11:00:00Z","terminal_status":"failed","completed_at":"2026-07-16T11:01:00Z"}],"next_cursor":"next-command"}`))
+		case "/v1/operations/agents":
+			query := request.URL.Query()
+			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" ||
+				query.Get("node_id") != "node-1" || query.Get("status") != "running" ||
+				query.Get("cursor") != agentCursor || query.Get("limit") != "40" {
+				t.Fatalf("agent inventory request=%s %s", request.Method, request.URL.String())
+			}
+			_, _ = w.Write([]byte(`{"agents":[{"tenant_id":"tenant-a","node_id":"node-1","runtime_ref":"executor-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","instance_generation":1,"observed_status":"running","latest_command_id":"command-1","latest_command_kind":"start","latest_command_state":"terminal","latest_terminal_status":"done","created_at":"2026-07-16T11:00:00Z","updated_at":"2026-07-16T11:01:00Z"}],"next_cursor":"next-agent"}`))
 		case "/v1/operations/credentials":
 			query := request.URL.Query()
 			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" ||
@@ -266,6 +275,17 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 		t.Fatalf("attention output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
+	agentListArguments := append([]string{"control", "agent", "list"}, common...)
+	agentListArguments = append(
+		agentListArguments, "-tenant-id", "tenant-a", "-node-id", "node-1",
+		"-status", "running", "-cursor", agentCursor, "-limit", "40",
+	)
+	if err := run(agentListArguments, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"observed_status":"running"`) ||
+		!strings.Contains(output.String(), `"latest_command_kind":"start"`) {
+		t.Fatalf("agent inventory output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
 	commandListArguments := append([]string{"control", "command", "list"}, common...)
 	commandListArguments = append(
 		commandListArguments, "-tenant-id", "tenant-a", "-node-id", "node-1",
@@ -332,6 +352,9 @@ func TestControlOperationsCommandsRejectInvalidFilters(t *testing.T) {
 		{name: "attention cursor", call: controlAttentionList, args: []string{"-cursor", "%%%"}},
 		{name: "attention zero limit", call: controlAttentionList, args: []string{"-limit", "0"}},
 		{name: "attention oversized limit", call: controlAttentionList, args: []string{"-limit", "501"}},
+		{name: "agent status", call: controlAgentList, args: []string{"-status", "destroyed"}},
+		{name: "agent node", call: controlAgentList, args: []string{"-node-id", "-node"}},
+		{name: "agent cursor", call: controlAgentList, args: []string{"-cursor", validCursor + "="}},
 		{name: "command state", call: controlCommandList, args: []string{"-state", "running"}},
 		{name: "command terminal without state", call: controlCommandList, args: []string{"-terminal-status", "failed"}},
 		{name: "command terminal status", call: controlCommandList, args: []string{"-state", "terminal", "-terminal-status", "running"}},

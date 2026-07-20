@@ -268,6 +268,7 @@ func TestExecutorV4LegacyUnboundedBindingCannotBrickUpgrade(t *testing.T) {
 	stored.Terminal = nil
 	snapshot.Version = stateFormatEvidenceVersion
 	snapshot.Captures = nil
+	snapshot.Deployments = nil
 	legacyRaw, err := json.Marshal(snapshot)
 	if err != nil {
 		t.Fatal(err)
@@ -388,9 +389,9 @@ func TestExecutorV4FormatRangeMigratesV2AndRejectsAuthoritySmuggling(t *testing.
 		controlprotocol.MaxExecutorReportBytes != 16<<10 {
 		t.Fatal("controller or protocol report byte cap changed")
 	}
-	if stateFormatMinReadVersion != 1 || stateFormatMaxReadVersion != 4 ||
+	if stateFormatMinReadVersion != 1 || stateFormatMaxReadVersion != 5 ||
 		stateFormatWriteVersion != stateFormatMaxReadVersion ||
-		transactionFormatMinReadVersion != 1 || transactionFormatMaxReadVersion != 4 ||
+		transactionFormatMinReadVersion != 1 || transactionFormatMaxReadVersion != 5 ||
 		transactionFormatWriteVersion != transactionFormatMaxReadVersion {
 		t.Fatal("control store read/write ranges changed without an explicit migration")
 	}
@@ -408,6 +409,7 @@ func TestExecutorV4FormatRangeMigratesV2AndRejectsAuthoritySmuggling(t *testing.
 	}
 	snapshot.Version = stateFormatEvidenceVersion
 	snapshot.Captures = nil
+	snapshot.Deployments = nil
 	for index := range snapshot.Commands {
 		snapshot.Commands[index].DeliveryProtocol = 0
 	}

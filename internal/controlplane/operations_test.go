@@ -49,6 +49,7 @@ func TestOperationsHTTPAuthenticatesProjectsFiltersAndExcludesSecrets(t *testing
 	for _, route := range []string{
 		"/v1/operations/summary",
 		"/v1/operations/attention",
+		"/v1/operations/agents",
 		"/v1/operations/commands",
 		"/v1/operations/credentials",
 	} {

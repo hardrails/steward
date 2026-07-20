@@ -49,6 +49,9 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET /v1/tenants/{tenant_id}/nodes` | Page through bounded tenant node inventory |
 | `GET /v1/tenants/{tenant_id}/nodes/{node_id}` | Read one tenant-visible node |
 | `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
+| `GET /v1/tenants/{tenant_id}/deployments` | Page through bounded desired agent deployments |
+| `GET or PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Inspect or apply one optimistic, generation-fenced desired deployment |
+| `DELETE /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Mark one deployment absent; reconciliation performs bounded cleanup asynchronously |
 | `GET /v1/nodes/{node_id}/evidence` | Read the site-admin-only last-good Executor receipt checkpoint and any sticky divergence finding |
 | `GET /v1/nodes/{node_id}/evidence/export` | Sign a portable evidence checkpoint with the controller's dedicated witness key |
 | `POST /v1/nodes/{node_id}/evidence/captures` | Arm one site-admin-only bounded activation evidence capture from the current witnessed head |
@@ -59,6 +62,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET .../commands/{command_id}` | Read durable delivery and terminal status |
 | `GET /v1/operations/summary` | Read tenant-projected capacity, command, evidence, and attention totals |
 | `GET /v1/operations/attention` | Page and filter deterministic action-required facts |
+| `GET /v1/operations/agents` | Page through non-secret observed agent runtime state and latest signed operations |
 | `GET /v1/operations/commands` | Page and filter command metadata without command or result bodies |
 | `GET /v1/operations/credentials` | Page and filter non-secret credential metadata |
 | `GET /metrics` | Optional authenticated Prometheus exposition with fixed bounded labels |
@@ -72,6 +76,15 @@ query parameters, redirects are not used, and every error has the common
 `{"error":"...","message":"..."}` shape. The controller parses signed-command
 identity to bind it to the route but does not treat that parse as authorization;
 Executor verifies the signature and local policy before applying the command.
+
+A deployment `PUT` carries a canonical agent bundle digest, publisher-signed
+capsule, and tenant-signed controller delegation. Control validates bounded routing
+and desired-state consistency but does not treat the tenant signature as trusted.
+Executor verifies that signature against its authenticated site policy, then
+verifies the purpose-separated controller signature and exact delegated scope.
+The response exposes public digests and scope, never either private key. Changed
+desired state requires the last observed revision and a higher deployment
+generation; an exact retry is idempotent.
 
 Evidence enrollment proves possession of the node receipt key and pins it to one
 controller, enrollment, control node, receipt node, stream, and epoch. A report
@@ -472,8 +485,11 @@ retains its signed plan authorization and chained batch promotions in the local
 workspace, then includes the applicable envelope digest in each rollout command's
 signed `authorization_context_digest`. A compatible protocol-4 Executor must
 advertise `admission-projection-v1`, `activation-canary-v1`, and
-`rollout-authorization-context-v1`. Executor verifies that digest as signed command
-data; the coordinator and offline verifier authenticate the referenced envelope.
+`rollout-authorization-context-v1`. Automated reconciliation additionally requires
+`controller-delegation-v1`, which means Executor verifies the tenant-signed bounded
+delegation and delegated controller signature locally. Executor verifies the
+authorization-context digest as signed command data; the coordinator and offline
+verifier authenticate a referenced rollout envelope.
 The final CLI-generated `proof.json` is not an HTTP resource or a signature. Its
 plan-authorization and ordered promotion digests bind those exact signed envelopes.
 Each target's `admit_command_digest`, `start_command_digest`, and

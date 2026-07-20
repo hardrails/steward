@@ -101,6 +101,34 @@ func TestCLIContextMakesLocalNodeCommandsShort(t *testing.T) {
 	}
 }
 
+func TestCLIContextKeepsDeploymentNameAfterInjectedFlags(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(directory, "operator.token")
+	if err := os.WriteFile(tokenPath, []byte("operator-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STEWARD_CONTEXT_FILE", filepath.Join(directory, "contexts.json"))
+	if err := contextCommand([]string{
+		"set", "fleet", "-control-url", "https://control.example:8443", "-token-file", tokenPath,
+		"-tenant-id", "tenant-a",
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	hydrated, err := applyAgentDeploymentContext([]string{"auditor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hydrated) < 7 || hydrated[len(hydrated)-1] != "auditor" ||
+		!hasNamedFlag(hydrated[:len(hydrated)-1], "control-url") ||
+		!hasNamedFlag(hydrated[:len(hydrated)-1], "token-file") ||
+		!hasNamedFlag(hydrated[:len(hydrated)-1], "tenant") {
+		t.Fatalf("hydrated deployment arguments=%v", hydrated)
+	}
+}
+
 func TestCLIContextShortensScopedControlCommandsWithoutStoringBearer(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0o700); err != nil {

@@ -61,6 +61,8 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlOperationsStatus(arguments[2:], stdout)
 	case "attention list":
 		return controlAttentionList(arguments[2:], stdout)
+	case "agent list":
+		return controlAgentList(arguments[2:], stdout)
 	case "command submit":
 		return controlCommandSubmit(arguments[2:], stdout)
 	case "command status":
@@ -93,7 +95,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, operations status, attention list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, operations status, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
 }
 
 type controlFlags struct {
@@ -543,6 +545,37 @@ func controlAttentionList(arguments []string, stdout io.Writer) error {
 	return writeControlJSON(stdout, page)
 }
 
+func controlAgentList(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control agent list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "optional tenant-projected scope")
+	nodeID := flags.String("node-id", "", "optional exact node identity")
+	status := flags.String("status", "", "optional unknown, provisioning, running, stopped, or hibernated status")
+	cursor := flags.String("cursor", "", "opaque continuation cursor")
+	limit := flags.Int("limit", controlstore.DefaultInventoryPageLimit, "maximum agent runtimes to return")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if !validOptionalControlIdentifier(*tenantID, 128) ||
+		!validOptionalControlIdentifier(*nodeID, 128) ||
+		!validControlAgentStatus(*status) ||
+		!validControlInventoryPage(*cursor, *limit, false) || flags.NArg() != 0 {
+		return errors.New("control agent list accepts bounded tenant, node, observed status, cursor, and a limit between 1 and 500")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	page, err := client.ListAgentInventory(ctx, *tenantID, *nodeID, *status, *cursor, *limit)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, page)
+}
+
 func controlCommandSubmit(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("control command submit", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -741,6 +774,15 @@ func validControlAttentionReason(value string) bool {
 func validControlCommandState(value string) bool {
 	switch controlstore.CommandState(value) {
 	case "", controlstore.CommandPending, controlstore.CommandLeased, controlstore.CommandTerminal:
+		return true
+	default:
+		return false
+	}
+}
+
+func validControlAgentStatus(value string) bool {
+	switch value {
+	case "", "unknown", "provisioning", "running", "stopped", "hibernated":
 		return true
 	default:
 		return false

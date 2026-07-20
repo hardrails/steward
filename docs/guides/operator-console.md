@@ -8,8 +8,8 @@ section: How-to guide
 
 Steward Control serves an observation-first operator control room at `/console/`.
 It shows the operations summary, derived attention findings, enrolled nodes,
-command metadata, and credential metadata already available through the bounded
-control API.
+observed agent runtimes, command metadata, and credential metadata already
+available through the bounded control API.
 
 The console has one deliberately narrow mutation: it can submit the exact bytes
 of an Executor command that was already signed outside the browser. It cannot
@@ -84,7 +84,7 @@ Initial authentication has a two-minute hard deadline. Navigation or `pagehide`
 also clears the credential while those first reads are still in flight; a stalled
 response cannot retain pre-session authority indefinitely.
 
-## Read the five views
+## Read the six views
 
 | View | What it shows | What it omits |
 | --- | --- | --- |
@@ -93,6 +93,14 @@ response cannot retain pre-session authority indefinitely.
 | Nodes | Node state, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
 | Commands | A local, unverified preview and exact SHA-256 digest for one offline-signed command; submission after confirmation and bearer re-entry; retained command ID, digest, tenant, node, lifecycle state, and creation time | Command creation or editing, signature verification, private keys, terminal result text, prompts, and task bodies |
 | Credentials | Credential ID, kind, role or node, scope, creation time, and revoked state | Bearer values, token message-authentication codes, and private keys |
+| Agents | One card per signed runtime identity and instance generation with its last successful workload status, latest signed operation, node, logical egress routes, and connector IDs | Desired state, automatic recovery promises, command bytes, task authorities, relay endpoints, free-form errors, and secrets |
+
+The Agents view keeps workload status separate from operation outcome. For
+example, if a running agent receives a stop command that fails, the card shows
+`running` as the last successful observation and flags the failed stop as the
+latest operation. This avoids claiming the workload stopped or failed when
+Executor reported neither result. An `unknown` status means Control has signed
+runtime identity but no unambiguous successful workload observation.
 
 The console refreshes a visible page every 30 seconds and also provides a manual
 refresh. Operations pages request at most 100 records and the selected tenant's

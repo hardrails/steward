@@ -120,7 +120,8 @@ stewardctl agent build
 
 Use the [agent application guide](https://hardrails.github.io/steward/guides/build-agents/)
 to select Hermes or OpenClaw, apply offline OPA policy, explain fleet placement,
-and derive a temporary or long-lived fork from persistent state.
+admit and start the workload directly or through Steward Control, and derive a
+temporary or long-lived fork from persistent state.
 
 ## Authorize real work
 
@@ -179,12 +180,22 @@ See [Manage Gateway secrets](https://hardrails.github.io/steward/guides/secrets/
 
 `steward-control` is a customer-operated control plane for tenant-scoped
 operators, one-time node enrollment, outbound node polling, signed command
-delivery, inventory, attention findings, and separately witnessed evidence.
+delivery, durable desired deployments, deterministic placement of exact delegated
+instances, inventory, attention findings, and separately witnessed evidence.
+
+Control uses a purpose-separated online key only within a short-lived
+tenant-signed delegation. Tenant keys remain outside Control, and Executor verifies
+both signatures and the exact delegated scope before changing Docker. The current
+controller schedules only onto recently observed nodes and reports a stable blocked
+reason when it cannot proceed. It does not yet reserve fleet capacity or replace an
+instance after node loss.
 
 Its embedded React console is available at `/console/`. The console keeps the
 operator bearer only in tab memory, loads no remote assets, and never receives
-private signing keys or secret plaintext. Mutating Executor commands are signed
-outside the browser; the console reviews and transfers the unchanged envelope.
+private signing keys or secret plaintext. It shows each observed agent runtime's
+last successful workload status separately from its latest signed operation.
+Mutating Executor commands are signed outside the browser; the console reviews
+and transfers the unchanged envelope.
 
 `steward-mcp` exposes bounded node, control, and pre-signed task operations to a
 local Model Context Protocol client over standard input and output. MCP
@@ -265,9 +276,10 @@ $ go list -m all
 github.com/hardrails/steward
 ```
 
-Public contracts live under [`openapi/`](openapi/). Architecture decisions and
-the market analysis live in the
-[documentation site](https://hardrails.github.io/steward/).
+Public contracts live under [`openapi/`](openapi/). Architecture decisions, the
+[market analysis](https://hardrails.github.io/steward/product/market-analysis/),
+and the [product roadmap](https://hardrails.github.io/steward/product/roadmap/)
+live in the documentation site.
 
 ## License
 

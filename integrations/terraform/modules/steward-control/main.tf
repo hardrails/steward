@@ -35,6 +35,10 @@ locals {
     readonly control_auth_key=/var/lib/steward-control/auth.key
     readonly control_witness_private_key=/var/lib/steward-control/witness.private.pem
     readonly control_witness_public_key=/var/lib/steward-control/witness.public.pem
+    readonly control_controller_private_key=/var/lib/steward-control/controller.private.pem
+    readonly control_controller_public_key=/var/lib/steward-control/controller.public.pem
+    readonly control_controller_key_id=controller-default
+    readonly control_reconcile_interval=5s
     readonly control_service=steward-control.service
     readonly proc_root=/proc
     readonly stamp_dir=/var/lib/steward-control-bootstrap
@@ -200,9 +204,11 @@ locals {
       local expected actual size
       [[ -f $control_config && ! -L $control_config ]] || return 1
       [[ $(stat -c '%u:%g:%a:%h' -- "$control_config" 2>/dev/null) == 0:0:600:1 ]] || return 1
-      printf -v expected 'STEWARD_CONTROL_ADDR=%s\nSTEWARD_CONTROL_STATE_DIR=%s\nSTEWARD_CONTROL_AUTH_KEY_FILE=%s\nSTEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=%s\nSTEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=%s\nSTEWARD_CONTROL_TLS_CERT_FILE=\nSTEWARD_CONTROL_TLS_KEY_FILE=\nSTEWARD_CONTROL_ENABLE_METRICS=false\nSTEWARD_CONTROL_NODE_STALE_AFTER=2m\nSTEWARD_CONTROL_EVIDENCE_STALE_AFTER=5m\nSTEWARD_CONTROL_COMMAND_OVERDUE_AFTER=5m\nSTEWARD_CONTROL_CAPACITY_WARNING_PERCENT=80' \
+      printf -v expected 'STEWARD_CONTROL_ADDR=%s\nSTEWARD_CONTROL_STATE_DIR=%s\nSTEWARD_CONTROL_AUTH_KEY_FILE=%s\nSTEWARD_CONTROL_WITNESS_PRIVATE_KEY_FILE=%s\nSTEWARD_CONTROL_WITNESS_PUBLIC_KEY_FILE=%s\nSTEWARD_CONTROL_CONTROLLER_PRIVATE_KEY_FILE=%s\nSTEWARD_CONTROL_CONTROLLER_PUBLIC_KEY_FILE=%s\nSTEWARD_CONTROL_CONTROLLER_KEY_ID=%s\nSTEWARD_CONTROL_RECONCILE_INTERVAL=%s\nSTEWARD_CONTROL_TLS_CERT_FILE=\nSTEWARD_CONTROL_TLS_KEY_FILE=\nSTEWARD_CONTROL_ENABLE_METRICS=false\nSTEWARD_CONTROL_NODE_STALE_AFTER=2m\nSTEWARD_CONTROL_EVIDENCE_STALE_AFTER=5m\nSTEWARD_CONTROL_COMMAND_OVERDUE_AFTER=5m\nSTEWARD_CONTROL_CAPACITY_WARNING_PERCENT=80' \
         "$control_address" "$control_state_dir" "$control_auth_key" \
-        "$control_witness_private_key" "$control_witness_public_key"
+        "$control_witness_private_key" "$control_witness_public_key" \
+        "$control_controller_private_key" "$control_controller_public_key" \
+        "$control_controller_key_id" "$control_reconcile_interval"
       size=$(stat -c '%s' -- "$control_config" 2>/dev/null) || return 1
       (( size == $${#expected} + 1 )) || return 1
       actual=$(<"$control_config")
@@ -220,6 +226,10 @@ locals {
         "-auth-key-file=$control_auth_key"
         "-witness-private-key-file=$control_witness_private_key"
         "-witness-public-key-file=$control_witness_public_key"
+        "-controller-private-key-file=$control_controller_private_key"
+        "-controller-public-key-file=$control_controller_public_key"
+        "-controller-key-id=$control_controller_key_id"
+        "-reconcile-interval=$control_reconcile_interval"
         -tls-cert-file=
         -tls-key-file=
         -enable-metrics=false

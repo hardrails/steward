@@ -308,6 +308,7 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 				controlprotocol.ExecutorCapabilityAdmissionProjectionV1,
 				controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
 				controlprotocol.ExecutorCapabilityContextLockedEffectsV1,
+				controlprotocol.ExecutorCapabilityControllerDelegationV1,
 				controlprotocol.ExecutorCapabilityRolloutAuthorizationContextV1,
 				"multi-tenant",
 				"read",
@@ -855,20 +856,31 @@ func (p *Poller) decodeCommand(raw []byte, credential *stewarduplink.Credential)
 	if err := dsse.DecodeStrictInto(untrustedPayload, dsse.MaxPayloadBytes, &routed); err != nil {
 		return command{}, fmt.Errorf("decode signed command statement for key routing: %w", err)
 	}
-	keys, err := p.commandPolicy.TrustedCommandKeys(routed.TenantID, routed.Kind)
-	if err != nil {
-		return command{}, err
-	}
-	verifiedPayload, _, err := dsse.Verify(raw, admission.CommandPayloadType, keys)
-	if err != nil {
-		return command{}, fmt.Errorf("verify signed command: %w", err)
-	}
 	var statement admission.CommandStatement
-	if err := dsse.DecodeStrictInto(verifiedPayload, dsse.MaxPayloadBytes, &statement); err != nil {
-		return command{}, fmt.Errorf("decode verified signed command: %w", err)
-	}
-	if err := statement.Validate(p.now()); err != nil {
-		return command{}, err
+	if routed.DelegationDSSEBase64 != "" {
+		delegationRaw, err := admission.DecodeCommandDelegationEnvelope(routed.DelegationDSSEBase64)
+		if err != nil {
+			return command{}, err
+		}
+		statement, err = admission.VerifyDelegatedCommand(raw, delegationRaw, *p.commandPolicy, p.now())
+		if err != nil {
+			return command{}, err
+		}
+	} else {
+		keys, err := p.commandPolicy.TrustedCommandKeys(routed.TenantID, routed.Kind)
+		if err != nil {
+			return command{}, err
+		}
+		verifiedPayload, _, err := dsse.Verify(raw, admission.CommandPayloadType, keys)
+		if err != nil {
+			return command{}, fmt.Errorf("verify signed command: %w", err)
+		}
+		if err := dsse.DecodeStrictInto(verifiedPayload, dsse.MaxPayloadBytes, &statement); err != nil {
+			return command{}, fmt.Errorf("decode verified signed command: %w", err)
+		}
+		if err := statement.Validate(p.now()); err != nil {
+			return command{}, err
+		}
 	}
 	if statement.NodeID != credential.NodeID {
 		return command{}, errors.New("signed command is addressed to another node")

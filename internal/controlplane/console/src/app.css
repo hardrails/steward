@@ -878,6 +878,163 @@ progress::-moz-progress-bar {
   margin-top: 24px;
 }
 
+.agent-tally {
+  display: grid;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.agent-tally div {
+  display: flex;
+  min-height: 92px;
+  align-items: baseline;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: rgb(255 255 255 / 0.014);
+  gap: 12px;
+  padding: 18px;
+}
+
+.agent-tally strong {
+  font-family: var(--display);
+  font-size: 42px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.agent-tally span {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.agent-tally .is-degraded strong,
+.agent-tally .is-degraded span {
+  color: var(--danger);
+}
+
+.agent-board {
+  display: grid;
+  margin-top: 24px;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.agent-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(142deg, rgb(200 255 67 / 0.035), transparent 38%),
+    var(--panel);
+  padding: 22px;
+}
+
+.agent-card::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 54px;
+  height: 4px;
+  background: var(--signal);
+  content: "";
+}
+
+.agent-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  gap: 16px;
+  padding-bottom: 16px;
+}
+
+.agent-card-head h3,
+.agent-empty h3 {
+  margin: 7px 0 0;
+  font-family: var(--display);
+  font-size: 30px;
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.agent-facts {
+  display: grid;
+  margin: 0;
+  grid-template-columns: 1.35fr 0.65fr;
+}
+
+.agent-facts div {
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 12px 12px 12px 0;
+}
+
+.agent-facts div:nth-child(even) {
+  border-right: 0;
+  padding-left: 12px;
+}
+
+.agent-facts .agent-runtime {
+  grid-column: 1 / -1;
+  border-right: 0;
+}
+
+.agent-facts dt {
+  color: var(--paper-dim);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-facts dd {
+  margin: 5px 0 0;
+  color: var(--paper-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.agent-capabilities {
+  display: flex;
+  min-height: 39px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding-top: 14px;
+}
+
+.agent-capabilities > span {
+  color: var(--paper-dim);
+  font-size: 10px;
+}
+
+.agent-warning {
+  border-left: 3px solid var(--danger);
+  margin: 14px 0 0;
+  background: rgb(255 91 55 / 0.06);
+  color: #ffb3a2;
+  padding: 10px 12px;
+  font-size: 11px;
+}
+
+.agent-empty {
+  border: 1px dashed var(--line-bright);
+  margin-top: 24px;
+  background: var(--ink-soft);
+  padding: clamp(28px, 5vw, 56px);
+}
+
+.agent-empty p {
+  max-width: 620px;
+  color: var(--paper-dim);
+}
+
 .text-button {
   border: 0;
   background: transparent;
@@ -1182,6 +1339,10 @@ td small {
     grid-template-columns: 1fr;
   }
 
+  .agent-board {
+    grid-template-columns: 1fr;
+  }
+
   .courier-review {
     grid-template-columns: 1fr;
   }
@@ -1300,6 +1461,10 @@ td small {
 
   .metric-grid {
     grid-template-columns: 1fr;
+  }
+
+  .agent-tally {
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .metric {

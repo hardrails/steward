@@ -34,7 +34,7 @@ home: true
   </div>
   <div>
     <h3>Operate a fleet</h3>
-    <p>Run the customer-owned control plane, enroll nodes through outbound polling, inspect tenant-scoped state in the React console, and transfer commands signed outside the browser.</p>
+    <p>Run the customer-owned control plane, enroll nodes through outbound polling, keep exact delegated agent instances converged, and inspect tenant-scoped state in the React console.</p>
     <p><a href="{{ '/guides/control-plane/' | relative_url }}">Operate Steward Control →</a> · <a href="{{ '/guides/operator-console/' | relative_url }}">Open the console →</a></p>
   </div>
 </div>
@@ -44,16 +44,21 @@ home: true
 Define skills, MCP endpoints, a model route, resources, state, lifetime, and
 placement once. Steward validates the definition with CUE, can require an offline
 OPA policy decision, and packages a deterministic bundle for Hermes or OpenClaw.
-The same surface explains which fleet node is eligible and can derive a new,
-short-lived lineage from an immutable state snapshot.
+The same surface explains which fleet node is eligible, admits and starts the
+agent directly, retain durable desired state through Steward Control, and derive a
+new, short-lived lineage from immutable state snapshot metadata.
 
 ```console
 stewardctl agent init -runtime hermes -name workspace-auditor workspace-auditor
 stewardctl agent build -file workspace-auditor/Stewardfile.cue
 stewardctl agent plan -bundle agent.bundle.json -nodes nodes.json -tenant default
+stewardctl agent apply -bundle agent.bundle.json -nodes nodes.json -tenant default \
+  -capsule hermes.capsule.dsse.json -policy site.policy.dsse.json \
+  -site-root-public-key site-root.pub -site-root-key-id site-root-1 \
+  -token-file /etc/steward/executor.token
 ```
 
-[Build and place an agent]({{ '/guides/build-agents/' | relative_url }}) ·
+[Build and run an agent]({{ '/guides/build-agents/' | relative_url }}) ·
 [Check platform support]({{ '/reference/platform-support/' | relative_url }})
 
 ## What is protected
@@ -108,3 +113,5 @@ and offline-verifiable receipts.
 
 The [dated market analysis]({{ '/product/market-analysis/' | relative_url }})
 compares that claim with public product documentation and states its limits.
+[The product roadmap]({{ '/product/roadmap/' | relative_url }}) explains what
+Steward should build, reuse, and deliberately leave to other systems.
