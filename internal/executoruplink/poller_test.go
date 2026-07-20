@@ -206,6 +206,18 @@ func TestPollerPublishesSchedulingIndependentlyWithNodeCredential(t *testing.T) 
 	default:
 		t.Fatal("scheduling observation was not published")
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		poller.runScheduling(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("scheduling publisher did not stop after cancellation")
+	}
 }
 
 func TestPollerRunBacksOffAfterFailureAndStopsWithContext(t *testing.T) {

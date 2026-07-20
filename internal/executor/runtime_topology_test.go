@@ -11,6 +11,13 @@ import (
 
 var testGatewayRoutePolicyDigest = "sha256:" + strings.Repeat("e", 64)
 
+func TestRuntimeOverheadResourcesMatchesRelayLimits(t *testing.T) {
+	got := RuntimeOverheadResources()
+	if got.MemoryBytes != defaultRelayMemory || got.CPUMillis != defaultRelayCPU || got.PIDs != defaultRelayPIDs {
+		t.Fatalf("runtime overhead = %+v", got)
+	}
+}
+
 type topologyFixture struct {
 	agent             ObservedWorkload
 	network           *ObservedNetwork
