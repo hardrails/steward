@@ -54,6 +54,8 @@ func run(arguments []string, stdout, stderr io.Writer) error {
 		return helpCommand(arguments[1:], stdout)
 	}
 	switch arguments[0] {
+	case "site":
+		return siteCommand(arguments[1:], stdout)
 	case "agent":
 		return agentCommand(arguments[1:], stdout)
 	case "context":
@@ -99,6 +101,7 @@ func usage(writer io.Writer) error {
 	fmt.Fprintln(writer, "Usage:  stewardctl <command> [options]")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Start here")
+	fmt.Fprintln(writer, "  site          Create and verify a secure site authority package")
 	fmt.Fprintln(writer, "  agent         Initialize, build, place, and fork Hermes or OpenClaw agents")
 	fmt.Fprintln(writer, "  context       Save a control plane or node connection")
 	fmt.Fprintln(writer, "  node          Admit, inspect, start, stop, or destroy an agent")
@@ -140,6 +143,7 @@ func helpCommand(arguments []string, writer io.Writer) error {
 }
 
 var commandHelp = map[string]string{
+	"site":             "Create a complete, offline-verifiable site authority package with separated public and private material. The command does not install or transmit private keys.\n\nUsage: stewardctl site init DIRECTORY [options]\n       stewardctl site verify DIRECTORY [-site-root-public-key FILE]\n\nStart with: stewardctl site init steward-site -tenant-id default -control-server-names control.example.com\n",
 	"agent":            "Build and run portable Hermes or OpenClaw agent applications, evaluate offline policy, explain fleet placement, and converge durable deployments.\n\nUsage: stewardctl agent create|init|validate|build|plan|apply|deploy|deployment|fork|doctor ...\n\nCreate a project with: stewardctl agent create NAME -runtime hermes\nApply durable desired state with: stewardctl agent apply NAME\nThe expert single-node form remains available as agent apply with named flags only.\n",
 	"context":          "Save connection details once so routine commands do not repeat URLs, token files, tenant IDs, or node IDs.\n\nUsage: stewardctl context set|use|show|list|delete ...\n",
 	"node":             "Operate one isolated agent on a Steward Executor node. After saving a context, pass the runtime reference directly: stewardctl node status executor-…\n\nUsage: stewardctl node whoami|admit|status|logs|egress|start|stop|destroy|snapshot-state|clone-state|delete-snapshot|purge-state|maintenance ...\n",

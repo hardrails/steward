@@ -60,6 +60,12 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"gateway", "service", "set", "-agent", "o"}); !slices.Equal(candidates, []string{"openclaw"}) {
 		t.Fatalf("agent preset candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"gateway", "connector", "set", "-preset", "g"}); !slices.Equal(candidates, []string{"github-issues"}) {
+		t.Fatalf("connector preset candidates=%v", candidates)
+	}
+	if candidates := stewardctlCompletionCandidates([]string{"site", "init", "new-site", "-authorized-effects", "r"}); !slices.Equal(candidates, []string{"required"}) {
+		t.Fatalf("site effects candidates=%v", candidates)
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "init", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes", "openclaw"}) {
 		t.Fatalf("agent runtime candidates=%v", candidates)
 	}

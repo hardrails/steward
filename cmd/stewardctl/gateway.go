@@ -417,6 +417,8 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("gateway connector "+action, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	path := flags.String("config", "/etc/steward/gateway.json", "gateway configuration")
+	preset := flags.String("preset", "", "vetted connector preset: github-issues")
+	presetRepository := flags.String("repository", "", "preset repository in OWNER/NAME form")
 	id := flags.String("id", "", "stable connector ID")
 	baseURL := flags.String("base-url", "", "exact upstream HTTPS origin")
 	credentialFile := flags.String("credential-file", "", "owner-only upstream credential file")
@@ -447,6 +449,10 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 	}
 	if flags.NArg() != 0 {
 		return errors.New("gateway connector accepts no positional arguments")
+	}
+	if err := applyGatewayConnectorPreset(action, flags, *preset, *presetRepository, id, baseURL, credentialMode,
+		&operations, maxConcurrent, maxRequest, maxResponse, maxSeconds, maxCalls); err != nil {
+		return err
 	}
 	config, _, _, _, err := gateway.LoadConfig(*path)
 	if err != nil {
@@ -499,6 +505,10 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 			existingConnector = &config.Connectors[index]
 			break
 		}
+	}
+	if *preset == "github-issues" && len(actionAuthorities) == 0 &&
+		(existingConnector == nil || len(existingConnector.ActionAuthorityIDs) == 0) {
+		return errors.New("github-issues preset requires at least one -action-authority")
 	}
 	actionAuthorityIDs := []string(nil)
 	permitSeconds := 0
@@ -662,6 +672,79 @@ func gatewayConnectorCommand(arguments []string, stdout io.Writer) error {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(result)
+}
+
+func applyGatewayConnectorPreset(action string, flags *flag.FlagSet, preset, repository string,
+	id, baseURL, credentialMode *string, operations *repeatedFlag,
+	maxConcurrent *int, maxRequest, maxResponse *int64, maxSeconds, maxCalls *int,
+) error {
+	if preset == "" {
+		if repository != "" {
+			return errors.New("-repository requires -preset github-issues")
+		}
+		return nil
+	}
+	if action != "set" {
+		return errors.New("connector presets are accepted only by gateway connector set")
+	}
+	if preset != "github-issues" {
+		return fmt.Errorf("unsupported connector preset %q", preset)
+	}
+	if !validGitHubRepository(repository) {
+		return errors.New("github-issues preset requires -repository OWNER/NAME")
+	}
+	for _, conflict := range []string{"base-url", "operation", "credential-mode", "allow-insecure-http"} {
+		if flagWasVisited(flags, conflict) {
+			return fmt.Errorf("github-issues preset owns -%s; omit the conflicting flag", conflict)
+		}
+	}
+	if flagWasVisited(flags, "clear-action-permit") {
+		return errors.New("github-issues preset requires protected action authority and cannot clear it")
+	}
+	if *id == "" {
+		*id = "github-issues"
+	}
+	*baseURL = "https://api.github.com"
+	*credentialMode = string(gateway.CredentialModeBearer)
+	*operations = repeatedFlag{"create=POST:/repos/" + repository + "/issues"}
+	if !flagWasVisited(flags, "max-concurrent") {
+		*maxConcurrent = 2
+	}
+	if !flagWasVisited(flags, "max-request-bytes") {
+		*maxRequest = 64 << 10
+	}
+	if !flagWasVisited(flags, "max-response-bytes") {
+		*maxResponse = 1 << 20
+	}
+	if !flagWasVisited(flags, "max-seconds") {
+		*maxSeconds = 30
+	}
+	if !flagWasVisited(flags, "max-calls-per-grant") {
+		*maxCalls = 4
+	}
+	return nil
+}
+
+func validGitHubRepository(value string) bool {
+	owner, repository, ok := strings.Cut(value, "/")
+	if !ok || strings.Contains(repository, "/") || len(owner) < 1 || len(owner) > 39 || len(repository) < 1 || len(repository) > 100 ||
+		owner[0] == '-' || owner[len(owner)-1] == '-' || repository[0] == '.' {
+		return false
+	}
+	for _, value := range []struct {
+		text      string
+		allowDots bool
+	}{{owner, false}, {repository, true}} {
+		for _, character := range value.text {
+			if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+				character >= '0' && character <= '9' || character == '-' ||
+				value.allowDots && (character == '.' || character == '_') {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func pruneActionAuthorities(config *gateway.Config) {

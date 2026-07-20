@@ -1348,6 +1348,11 @@ func repositoryName(value string) bool {
 	}
 	return true
 }
+
+// ValidRepositoryName reports whether value is an exact OCI repository name
+// accepted by signed admission. Authoring tools use the same validator so a
+// generated policy cannot drift from Executor's enforcement contract.
+func ValidRepositoryName(value string) bool { return repositoryName(value) }
 func digest(value string) bool {
 	if !strings.HasPrefix(value, sha256DigestPrefix) || len(value) != len(sha256DigestPrefix)+64 {
 		return false
