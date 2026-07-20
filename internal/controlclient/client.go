@@ -1250,7 +1250,11 @@ func validateTenantResourceQuotaStatus(status controlstore.TenantResourceQuotaSt
 			return errors.New("control quota response has an invalid retained quota")
 		}
 	}
-	if status.OverQuota != expectedOverQuota {
+	// A true server signal is conservative: it can also mean resource
+	// accounting overflowed before producing a complete usage total. A false
+	// signal is safe only when the returned usage independently stays within
+	// every enabled limit.
+	if expectedOverQuota && !status.OverQuota {
 		return errors.New("control quota response has inconsistent usage state")
 	}
 	return nil

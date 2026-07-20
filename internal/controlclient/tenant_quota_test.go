@@ -89,3 +89,19 @@ func TestClientRejectsInvalidTenantResourceQuotaResponses(t *testing.T) {
 		t.Fatal("invalid quota tenant route was accepted")
 	}
 }
+
+func TestClientAcceptsConservativeTenantQuotaOverflowSignal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"tenant_id":"tenant-a","quota":{"enabled":true,"revision":1,"resources":{"memory_bytes":10,"cpu_millis":10,"pids":10,"workloads":10},"changed_at":"2026-07-20T12:00:00Z"},"usage":{"memory_bytes":1,"cpu_millis":1,"pids":1,"workloads":1},"over_quota":true}`))
+	}))
+	defer server.Close()
+	client, err := New(server.URL, "operator", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.GetTenantResourceQuota(context.Background(), "tenant-a")
+	if err != nil || !status.OverQuota {
+		t.Fatalf("conservative overflow status = (%+v, %v)", status, err)
+	}
+}

@@ -725,11 +725,11 @@ func controlTenantQuotaChange(
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	expectedRevision := *revision
 	if expectedRevision == 0 {
-		status, err := client.GetTenantResourceQuota(ctx, *tenantID)
+		discoveryContext, cancelDiscovery := context.WithTimeout(context.Background(), 30*time.Second)
+		status, err := client.GetTenantResourceQuota(discoveryContext, *tenantID)
+		cancelDiscovery()
 		if err != nil {
 			return err
 		}
@@ -737,7 +737,9 @@ func controlTenantQuotaChange(
 			expectedRevision = status.Quota.Revision
 		}
 	}
-	change, err := client.ChangeTenantResourceQuota(ctx, *tenantID, action, expectedRevision, resources)
+	changeContext, cancelChange := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelChange()
+	change, err := client.ChangeTenantResourceQuota(changeContext, *tenantID, action, expectedRevision, resources)
 	if err != nil {
 		return err
 	}

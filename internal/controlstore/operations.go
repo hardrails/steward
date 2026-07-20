@@ -1362,15 +1362,15 @@ func stableAttentionID(item AttentionItem) string {
 }
 
 func attentionSortKey(item AttentionItem) string {
-	resourceRank := "1"
+	resourceRank := "2"
 	resourceID := item.NodeID
 	switch item.Resource {
 	case AttentionResourceCapacity:
 		resourceRank, resourceID = "0", string(item.CapacityResource)
 	case AttentionResourceQuota:
-		resourceRank, resourceID = "0", "quota\x00"+item.QuotaResource
+		resourceRank, resourceID = "1", item.QuotaResource
 	case AttentionResourceCommand:
-		resourceRank, resourceID = "2", item.NodeID+"\x00"+item.CommandID
+		resourceRank, resourceID = "3", item.NodeID+"\x00"+item.CommandID
 	}
 	return item.TenantID + "\x00" + resourceRank + "\x00" + resourceID + "\x00" +
 		string(item.Reason) + "\x00" + string(item.Resource)

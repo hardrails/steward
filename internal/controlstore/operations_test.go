@@ -129,6 +129,26 @@ func TestTenantQuotaAttentionWarnsBeforeAndEscalatesAfterTheCeiling(t *testing.T
 	}
 }
 
+func TestAttentionSortKeyKeepsConcernTypesInDistinctGroups(t *testing.T) {
+	items := []AttentionItem{
+		{TenantID: "tenant-a", Resource: AttentionResourceCommand, NodeID: "node-a", CommandID: "command-a"},
+		{TenantID: "tenant-a", Resource: AttentionResourceNode, NodeID: "node-a"},
+		{TenantID: "tenant-a", Resource: AttentionResourceQuota, QuotaResource: "memory_bytes"},
+		{TenantID: "tenant-a", Resource: AttentionResourceCapacity, CapacityResource: CapacityNodes},
+	}
+	slices.SortFunc(items, func(left, right AttentionItem) int {
+		return strings.Compare(attentionSortKey(left), attentionSortKey(right))
+	})
+	want := []AttentionResource{
+		AttentionResourceCapacity, AttentionResourceQuota, AttentionResourceNode, AttentionResourceCommand,
+	}
+	for index := range items {
+		if items[index].Resource != want[index] {
+			t.Fatalf("attention order = %+v", items)
+		}
+	}
+}
+
 func TestCommandInventoryPaginatesFiltersAndProjectsTenants(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")
