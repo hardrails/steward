@@ -65,6 +65,12 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 			t.Fatalf("deployment flags %v missing %s", deploymentFlags, expected)
 		}
 	}
+	namedApplyFlags := stewardctlCompletionCandidates([]string{"agent", "apply", "auditor", "-"})
+	for _, expected := range []string{"-delegation", "-max-unavailable", "-tenant-id", "-revision", "-control-url", "-ca-file"} {
+		if !slices.Contains(namedApplyFlags, expected) {
+			t.Fatalf("named apply flags %v missing %s", namedApplyFlags, expected)
+		}
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"permit", "con"}); !slices.Equal(candidates, []string{"context"}) {
 		t.Fatalf("permit context candidates=%v", candidates)
 	}

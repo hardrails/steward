@@ -273,6 +273,15 @@ func (reconciler *Reconciler) reconcileInstance(
 		}
 		return instanceResult{changed: changed, kind: "observed"}, err
 	}
+	if sourceRolloutInstance && instance.Rollout != nil && instance.Rollout.Stage == "draining" {
+		delegationExpiry, parseErr := time.Parse(time.RFC3339Nano, delegation.ExpiresAt)
+		if parseErr != nil {
+			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedInvalidAuthority), now)
+		}
+		if !delegationExpiry.After(now) {
+			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedDelegationExpired), now)
+		}
+	}
 	if deployment.DesiredState == controlstore.DeploymentRunning && deployment.Rollout != nil &&
 		sourceRolloutInstance && instance.Rollout == nil &&
 		instance.Phase == controlstore.DeploymentInstanceRunning {

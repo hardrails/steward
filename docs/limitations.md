@@ -274,12 +274,13 @@ capacity remains a documented gap. Executor revalidates admission and live
 capacity, so unmanaged containers or a stale decision fail closed rather than
 overruling the node.
 
-Applying a changed deployment generation is accepted only after every instance
-from the retained generation has a proven `removed` state. Replacing desired state
-while an older runtime might exist would discard the delegation and generation
-cursor needed to stop that runtime safely. Updates therefore require an explicit
-remove, wait, and apply sequence with downtime until a rollout state machine can
-retain both generations and advance instances within a disruption budget.
+An in-place rollout starts only from a `Ready` deployment, with every instance in
+the `Running` phase. Steward retains both generations' signed authority and moves
+instances within the deployment's maximum-unavailable budget. A deployment with
+an instance in `Pending`, `Failing`, `Stopping`, or another non-running phase
+cannot start a rollout; recover it to `Ready` or use an explicit remove, wait, and
+apply sequence. Rollouts do not provide surge capacity or automatic rollback, so
+a single-replica deployment is unavailable while its instance is replaced.
 
 `task run` must execute where its Gateway service endpoint is reachable through a
 literal loopback address, normally on the selected node or through an operator-

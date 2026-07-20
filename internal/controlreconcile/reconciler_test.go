@@ -236,6 +236,54 @@ func TestReconcilerDoesNotSpendRolloutBudgetAfterSourceDelegationExpires(t *test
 	}
 }
 
+func TestReconcilerReportsSourceDelegationExpiryWhileRolloutIsDraining(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	assertReconcileCount(t, reconciler, "enqueue source admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source renewal", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source renewal", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source start", 1, 0)
+	applyControlDeployment(t, fixture, 2)
+	assertReconcileCount(t, reconciler, "begin rollout", 0, 0)
+
+	deployment := getControlDeployment(t, fixture)
+	if deployment.Rollout == nil || deployment.Instances[0].Rollout == nil ||
+		deployment.Instances[0].Rollout.Stage != "draining" {
+		t.Fatalf("source instance did not enter draining: %+v", deployment)
+	}
+	assertReconcileCount(t, reconciler, "enqueue source stop", 0, 1)
+	completeDeploymentCommand(t, fixture, "stop", controlprotocol.ExecutorStatusDone)
+	source, err := admission.InspectCommandDelegation(deployment.Rollout.SourceDelegationDSSE, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires, err := time.Parse(time.RFC3339Nano, source.ExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.now = expires
+	heartbeatControlNode(t, fixture)
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.Observed != 1 || report.Blocked != 0 {
+		t.Fatalf("observe stop after source expiry = report %+v err %v", report, err)
+	}
+	report, err = reconciler.Reconcile(context.Background())
+	blocked := getControlDeployment(t, fixture)
+	if err != nil || report.Blocked != 1 || report.Enqueued != 0 ||
+		blocked.Instances[0].LastError != string(controlstore.DeploymentBlockedDelegationExpired) ||
+		blocked.Instances[0].CommandOperation != "stop" || blocked.Instances[0].Attempts != 4 ||
+		blocked.Instances[0].Rollout == nil ||
+		blocked.Instances[0].Rollout.Stage != "draining" {
+		t.Fatalf("expired draining authority = report %+v deployment %+v err %v", report, blocked, err)
+	}
+}
+
 func TestTopologyPlacementRanksSpreadBeforePreferenceAndLoad(t *testing.T) {
 	now := time.Date(2026, 7, 20, 15, 0, 0, 0, time.UTC)
 	placement := &admission.CommandDelegationPlacement{
