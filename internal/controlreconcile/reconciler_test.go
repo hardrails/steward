@@ -159,6 +159,54 @@ func TestTopologyPlacementRanksSpreadBeforePreferenceAndLoad(t *testing.T) {
 	}
 }
 
+func TestDeploymentSpreadCountsOnlyLiveKnownAssignments(t *testing.T) {
+	nodes := []controlstore.Node{
+		{ID: "node-a", Scheduling: &controlstore.NodeScheduling{Observation: controlprotocol.ExecutorSchedulingObservationV1{
+			Labels: []controlprotocol.ExecutorSchedulingLabelV1{{Key: "zone", Value: "west"}},
+		}}},
+		{ID: "node-b", Scheduling: &controlstore.NodeScheduling{Observation: controlprotocol.ExecutorSchedulingObservationV1{
+			Labels: []controlprotocol.ExecutorSchedulingLabelV1{},
+		}}},
+	}
+	deployment := controlstore.Deployment{Instances: []controlstore.DeploymentInstance{
+		{InstanceID: "empty"},
+		{InstanceID: "removed", NodeID: "node-a", Phase: controlstore.DeploymentInstanceRemoved},
+		{InstanceID: "unknown", NodeID: "node-missing", Phase: controlstore.DeploymentInstanceRunning},
+		{InstanceID: "west", NodeID: "node-a", Phase: controlstore.DeploymentInstanceRunning},
+		{InstanceID: "unlabelled", NodeID: "node-b", Phase: controlstore.DeploymentInstanceRunning},
+	}}
+	if counts := deploymentSpreadCounts(nodes, deployment, nil); len(counts) != 0 {
+		t.Fatalf("nil spread counts = %+v", counts)
+	}
+	if counts := deploymentSpreadCounts(nodes, deployment, &admission.CommandDelegationPlacement{}); len(counts) != 0 {
+		t.Fatalf("empty spread counts = %+v", counts)
+	}
+	counts := deploymentSpreadCounts(nodes, deployment, &admission.CommandDelegationPlacement{SpreadBy: "zone"})
+	if len(counts) != 2 || counts["1:west"] != 1 || counts["0:"] != 1 {
+		t.Fatalf("live spread counts = %+v", counts)
+	}
+}
+
+func TestSchedulingBlockedReasonMapsStoreFailures(t *testing.T) {
+	tests := []struct {
+		err  error
+		want controlstore.DeploymentBlockedReason
+	}{
+		{controlstore.ErrNodeSchedulingUnavailable, controlstore.DeploymentBlockedSchedulingUnavailable},
+		{controlstore.ErrNodePlacementUnavailable, controlstore.DeploymentBlockedNoEligibleNode},
+		{controlstore.ErrNodeSchedulingConstraint, controlstore.DeploymentBlockedPlacementConstraints},
+		{controlstore.ErrTenantCapacityExceeded, controlstore.DeploymentBlockedTenantCapacity},
+		{controlstore.ErrWorkloadLimitExceeded, controlstore.DeploymentBlockedWorkloadLimit},
+		{controlstore.ErrNodeCapacityExceeded, controlstore.DeploymentBlockedNodeCapacity},
+		{errors.New("other"), ""},
+	}
+	for _, test := range tests {
+		if got := schedulingBlockedReason(test.err); got != test.want {
+			t.Fatalf("scheduling reason for %v = %q, want %q", test.err, got, test.want)
+		}
+	}
+}
+
 func TestReconcilerDrainsStatelessInstanceAcrossRestart(t *testing.T) {
 	fixture := newControlReconcileFixture(t)
 	source := fixture.node
