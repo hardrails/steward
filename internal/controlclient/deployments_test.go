@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 )
@@ -172,6 +174,35 @@ func TestDeploymentClientValidatesRolloutProjection(t *testing.T) {
 	deployment.Rollout = nil
 	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
 		t.Fatal("instance rollout without deployment rollout was accepted")
+	}
+}
+
+func TestDeploymentClientRejectsMalformedProjectionFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Deployment)
+	}{
+		{"disruption budget", func(value *Deployment) {
+			value.DisruptionBudget.MaxUnavailable = len(value.Instances) + 1
+		}},
+		{"node scope", func(value *Deployment) { value.AllowedNodeIDs = []string{"bad node"} }},
+		{"instance identity", func(value *Deployment) { value.Instances[0].InstanceID = "bad instance" }},
+		{"intent", func(value *Deployment) { value.Instances[0].Intent = &admission.InstanceIntent{} }},
+		{"admission", func(value *Deployment) {
+			value.Instances[0].Admission = &controlprotocol.ExecutorAdmissionProjectionV1{}
+		}},
+		{"timestamps", func(value *Deployment) { value.UpdatedAt = "not-a-time" }},
+		{"desired state", func(value *Deployment) { value.DesiredState = "unknown" }},
+		{"phase", func(value *Deployment) { value.Phase = "unknown" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deployment := validClientDeployment()
+			test.mutate(&deployment)
+			if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+				t.Fatal("malformed deployment projection was accepted")
+			}
+		})
 	}
 }
 

@@ -172,6 +172,11 @@ func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *tes
 			t.Fatalf("source authority was discarded before destroy: %v", selectErr)
 		}
 	}
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-during-rollout", "kernel maintenance", fixture.now.Add(2*time.Minute),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("node drain raced active rollout: %v", err)
+	}
 	if _, _, err := fixture.store.BeginDeploymentInstanceRollout(
 		"tenant-a", "deployment-a", "missing-instance", target.Revision, fixture.now.Add(2*time.Minute),
 	); !errors.Is(err, ErrNotFound) {
@@ -257,6 +262,27 @@ func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *tes
 	if err != nil || bytes.Equal(selected, recovered.DelegationDSSE) {
 		t.Fatalf("restart discarded source authority: %v", err)
 	}
+	missingAuthorityInstance := recovered.Instances[0]
+	missingAuthorityInstance.InstanceID = "missing-instance"
+	if _, _, err := DeploymentAuthorityForInstance(recovered, missingAuthorityInstance); err == nil {
+		t.Fatal("rollout selected authority for an undelegated instance")
+	}
+	malformedAuthority := cloneDeployment(recovered)
+	malformedAuthority.DelegationDSSE = []byte(`{}`)
+	if _, _, err := DeploymentAuthorityForInstance(malformedAuthority, malformedAuthority.Instances[0]); err == nil {
+		t.Fatal("rollout selected malformed target authority")
+	}
+	unknownStage := recovered.Instances[0]
+	unknownStage.Rollout = cloneDeploymentInstanceRollout(unknownStage.Rollout)
+	unknownStage.Rollout.Stage = "unknown"
+	if _, _, err := DeploymentAuthorityForInstance(recovered, unknownStage); err == nil {
+		t.Fatal("rollout selected authority for an unknown stage")
+	}
+	if !deploymentUsesRolloutFormat(Deployment{
+		Instances: []DeploymentInstance{{Rollout: &DeploymentInstanceRollout{Stage: "draining"}}},
+	}) {
+		t.Fatal("instance rollout cursor did not require the rollout store format")
+	}
 	if err := validateDeployment(recovered, fixture.limits); err != nil {
 		t.Fatalf("recovered rollout validation: %v", err)
 	}
@@ -269,6 +295,33 @@ func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *tes
 	invalidRollout.Rollout.SourceDelegationDSSE = []byte(`{}`)
 	if err := validateDeployment(invalidRollout, fixture.limits); err == nil {
 		t.Fatal("rollout with malformed source authority was accepted")
+	}
+	invalidRollout = cloneDeployment(recovered)
+	invalidRollout.Rollout.SourceDelegationDSSE = rewriteDeploymentDelegation(
+		t, invalidRollout.Rollout.SourceDelegationDSSE,
+		func(value *admission.CommandDelegation) { value.Instances[0].LineageID = "other-lineage" },
+	)
+	if err := validateDeployment(invalidRollout, fixture.limits); err == nil {
+		t.Fatal("rollout whose source changes lineage identity was accepted")
+	}
+	invalidRollout = cloneDeployment(recovered)
+	sourceCapsuleEnvelope, err := dsse.Parse(invalidRollout.Rollout.SourceCapsuleDSSE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceCapsuleEnvelope.PayloadType = "application/vnd.steward.invalid"
+	invalidRollout.Rollout.SourceCapsuleDSSE, err = dsse.Marshal(sourceCapsuleEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidRollout.Rollout.SourceDelegationDSSE = rewriteDeploymentDelegation(
+		t, invalidRollout.Rollout.SourceDelegationDSSE,
+		func(value *admission.CommandDelegation) {
+			value.Admission.CapsuleDigest = dsse.Digest(invalidRollout.Rollout.SourceCapsuleDSSE)
+		},
+	)
+	if err := validateDeployment(invalidRollout, fixture.limits); err == nil {
+		t.Fatal("rollout with a non-capsule source envelope was accepted")
 	}
 	invalidRollout = cloneDeployment(recovered)
 	invalidRollout.Instances[0].Rollout.StartedAt = "not-a-time"
@@ -300,6 +353,37 @@ func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *tes
 	}); err == nil {
 		t.Fatal("legacy transaction smuggled rollout state")
 	}
+}
+
+func rewriteDeploymentDelegation(
+	t *testing.T,
+	raw []byte,
+	mutate func(*admission.CommandDelegation),
+) []byte {
+	t.Helper()
+	envelope, err := dsse.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delegation admission.CommandDelegation
+	if err := json.Unmarshal(payload, &delegation); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&delegation)
+	payload, err = json.Marshal(delegation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope.Payload = base64.StdEncoding.EncodeToString(payload)
+	rewritten, err := dsse.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rewritten
 }
 
 func TestDeploymentRolloutTransitionsRejectUnavailableAndInvalidInputs(t *testing.T) {
