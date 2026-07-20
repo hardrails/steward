@@ -951,9 +951,12 @@ function PanelHeading({index, title, children}) {
 }
 
 function attentionResource(item) {
-  const parts = [item.resource, item.tenant_id, item.node_id, item.command_id, item.capacity_resource].filter(Boolean);
+  const parts = [item.resource, item.tenant_id, item.node_id, item.command_id, item.capacity_resource, item.quota_resource].filter(Boolean);
   if (item.used !== undefined && item.limit !== undefined) {
     parts.push(item.used + " / " + item.limit);
+  }
+  if (item.used_value !== undefined && item.limit_value !== undefined) {
+    parts.push(formatResourceValue(item.quota_resource, item.used_value) + " / " + formatResourceValue(item.quota_resource, item.limit_value));
   }
   return parts.join(" · ");
 }

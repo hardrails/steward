@@ -1074,7 +1074,8 @@ func validControlAttentionReason(value string) bool {
 		controlstore.AttentionRollbackDetected, controlstore.AttentionEquivocationDetected,
 		controlstore.AttentionCommandPendingOverdue, controlstore.AttentionCommandLeaseExpired,
 		controlstore.AttentionCommandFailed, controlstore.AttentionCommandOutcomeUnknown,
-		controlstore.AttentionCapacityWarning:
+		controlstore.AttentionCapacityWarning, controlstore.AttentionTenantQuotaWarning,
+		controlstore.AttentionTenantQuotaExceeded:
 		return true
 	default:
 		return false

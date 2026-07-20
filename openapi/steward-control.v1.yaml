@@ -2513,12 +2513,14 @@ components:
         - command_failed
         - command_outcome_unknown
         - capacity_warning
+        - tenant_quota_warning
+        - tenant_quota_exceeded
     AttentionSeverity:
       type: string
       enum: [warning, critical]
     AttentionResource:
       type: string
-      enum: [node, evidence, command, capacity]
+      enum: [node, evidence, command, capacity, tenant_quota]
     OperationsSummary:
       type: object
       additionalProperties: false
@@ -2646,7 +2648,7 @@ components:
           minimum: 0
         counts:
           type: array
-          maxItems: 11
+          maxItems: 13
           items:
             $ref: "#/components/schemas/AttentionCount"
     AttentionCount:
@@ -2701,6 +2703,9 @@ components:
           $ref: "#/components/schemas/Identifier256"
         capacity_resource:
           $ref: "#/components/schemas/CapacityResource"
+        quota_resource:
+          type: string
+          enum: [memory_bytes, cpu_millis, pids, workloads, accounting]
         since:
           type: string
           format: date-time
@@ -2713,6 +2718,14 @@ components:
           minimum: 0
         limit:
           type: integer
+          minimum: 1
+        used_value:
+          type: integer
+          format: int64
+          minimum: 0
+        limit_value:
+          type: integer
+          format: int64
           minimum: 1
     AgentInventoryPage:
       type: object

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlauth"
 	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/evidence"
@@ -50,6 +51,81 @@ func TestOperationsThresholdsAndCapacityEqualityAreBounded(t *testing.T) {
 	}
 	if !capacityAtOrAbove(4, 5, 80) || capacityAtOrAbove(3, 5, 80) {
 		t.Fatal("capacity warning did not use an exact ceiling threshold")
+	}
+	if !capacityAtOrAbove64(8_000_000_000, 10_000_000_000, 80) ||
+		capacityAtOrAbove64(7_999_999_999, 10_000_000_000, 80) {
+		t.Fatal("int64 capacity warning did not use an exact ceiling threshold")
+	}
+}
+
+func TestTenantQuotaAttentionWarnsBeforeAndEscalatesAfterTheCeiling(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	limit := quotaResources(100, 100, 100, 10)
+	if _, changed, err := fixture.store.ChangeTenantResourceQuota(
+		fixture.admin, "tenant-a", TenantQuotaActionSet, 0, limit, fixture.now.Add(time.Minute),
+	); err != nil || !changed {
+		t.Fatalf("set quota = (%v, %v)", changed, err)
+	}
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "quota-attention")] = Deployment{
+		ID: "quota-attention", TenantID: "tenant-a",
+		Instances: []DeploymentInstance{{
+			InstanceID: "quota-attention-0", Phase: DeploymentInstanceRunning,
+			Intent: &admission.InstanceIntent{Resources: admission.ResourceLimits{
+				MemoryBytes: 79, CPUMillis: 101, PIDs: 80,
+			}},
+		}, {
+			InstanceID: "quota-attention-1", Phase: DeploymentInstanceRunning,
+			Intent: &admission.InstanceIntent{Resources: admission.ResourceLimits{}},
+		}, {
+			InstanceID: "quota-attention-2", Phase: DeploymentInstanceRunning,
+			Intent: &admission.InstanceIntent{Resources: admission.ResourceLimits{}},
+		}, {
+			InstanceID: "quota-attention-3", Phase: DeploymentInstanceRunning,
+			Intent: &admission.InstanceIntent{Resources: admission.ResourceLimits{}},
+		}, {
+			InstanceID: "quota-attention-4", Phase: DeploymentInstanceRunning,
+			Intent: &admission.InstanceIntent{Resources: admission.ResourceLimits{}},
+		}, {
+			InstanceID: "quota-attention-5", Phase: DeploymentInstanceRunning,
+			Intent: &admission.InstanceIntent{Resources: admission.ResourceLimits{}},
+		}, {
+			InstanceID: "quota-attention-6", Phase: DeploymentInstanceRunning,
+			Intent: &admission.InstanceIntent{Resources: admission.ResourceLimits{}},
+		}, {
+			InstanceID: "quota-attention-7", Phase: DeploymentInstanceRunning,
+			Intent: &admission.InstanceIntent{Resources: admission.ResourceLimits{}},
+		}},
+	}
+	fixture.store.mu.Unlock()
+
+	page, err := fixture.store.ListAttention(fixture.admin, AttentionQuery{
+		TenantID: "tenant-a", Now: fixture.now.Add(2 * time.Minute),
+		Thresholds: DefaultOperationsThresholds(), Limit: 500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byResource := make(map[string]AttentionItem)
+	for _, item := range page.Items {
+		if item.Resource == AttentionResourceQuota {
+			byResource[item.QuotaResource] = item
+		}
+	}
+	if len(byResource) != 3 || byResource["memory_bytes"].Reason != "" ||
+		byResource["cpu_millis"].Reason != AttentionTenantQuotaExceeded ||
+		byResource["cpu_millis"].Severity != AttentionCritical ||
+		byResource["pids"].Reason != AttentionTenantQuotaWarning ||
+		byResource["workloads"].Reason != AttentionTenantQuotaWarning ||
+		byResource["workloads"].UsedValue != 8 {
+		t.Fatalf("quota attention = %+v", byResource)
+	}
+
+	accounting := tenantQuotaAttentionItems("tenant-a", controlprotocol.ExecutorSchedulingResourcesV1{}, limit, 80, true)
+	if len(accounting) != 1 || accounting[0].QuotaResource != "accounting" ||
+		accounting[0].Severity != AttentionCritical {
+		t.Fatalf("accounting failure attention = %+v", accounting)
 	}
 }
 
