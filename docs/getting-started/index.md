@@ -238,8 +238,22 @@ into a tenant signing service. Follow
 [Create a site authority]({{ '/getting-started/site-authority/' | relative_url }})
 to separate key custody and use the generated inputs.
 
-After Control is installed, a site-administrator context can prepare the node
-handoff without manually copying trust and enrollment fields:
+After Control is installed, use its initial site-administrator token once to
+establish routine tenant-scoped access:
+
+```console
+stewardctl site connect steward-site \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/control/site-admin.token
+```
+
+The command creates the tenant if needed, issues a recoverable tenant operator,
+writes its bearer to a new owner-only file outside the signed package, and selects
+that least-privilege CLI context. It stores no bearer value in the context or
+command output.
+
+Prepare the node handoff from the resulting context without manually copying
+trust and enrollment fields:
 
 ```console
 stewardctl site node prepare steward-site node-a

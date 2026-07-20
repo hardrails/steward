@@ -125,17 +125,31 @@ relative_url }}).
 
 ## Prepare one node without assembling files by hand
 
-After Control is installed and its first site-administrator token is in an
-owner-only file, save the repeated connection once:
+After Control is installed and its initial site-administrator token is in an
+owner-only file, use that broad credential once to establish the tenant's routine
+operator context:
 
 ```console
-stewardctl context set site-admin \
+stewardctl site connect steward-site \
   -control-url https://control.customer.example:8443 \
-  -ca-file steward-site/public/control-ca.pem \
-  -token-file /secure/control/site-admin.token
+  -token-file /secure/control/site-admin.token \
+  -site-root-public-key /secure/checkpoints/site-a-root.public
 ```
 
-Then prepare a finite handoff for one node:
+`site connect` verifies the complete signed package, checks the independent root
+pin, creates the initial tenant if needed, and idempotently issues a
+`tenant_operator` credential. It writes the new bearer to
+`site-a-tenant-a-operator.token` beside the site directory by default, then saves
+and selects the `site-a-tenant-a` CLI context. The context contains only file paths
+and scoped defaults; neither bearer is printed, and the site-administrator bearer
+is not retained in the new context.
+
+An exact retry recovers the same Control credential. A different token already at
+the output path or different Control authority already under the context name
+causes a closed failure instead of replacement. Use `-operator-token-out` or
+`-context` to choose explicit locations and names.
+
+Then prepare a finite handoff for one node from that tenant-scoped context:
 
 ```console
 stewardctl site node prepare steward-site node-a \
@@ -143,8 +157,8 @@ stewardctl site node prepare steward-site node-a \
 ```
 
 This command verifies the complete site package, checks the independent root pin,
-idempotently creates the initial tenant in Control, and requests one short-lived
-node enrollment. It publishes `steward-node-node-a` only after the complete output
+confirms the initial tenant in Control, and requests one short-lived node
+enrollment. It publishes `steward-node-node-a` only after the complete output
 passes verification.
 
 The handoff contains:

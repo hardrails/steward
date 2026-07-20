@@ -34,6 +34,12 @@ independent root pin, idempotently creates the initial Control tenant, and creat
 one short-lived enrollment. It copies only the signed public node trust, original
 signed inventory, and enrollment capability into a strict owner-only package.
 
+`site connect` spends site-administrator authority only on creating that tenant
+and issuing a deterministic tenant-scoped operator. The new bearer is written to
+an owner-only file outside the signed package; the selected CLI context retains
+only its path. Exact retries recover the same credential, while conflicting files
+or context authority fail closed.
+
 `site node activate` runs on the destination node. Before making a network request,
 it durably creates the receipt key and exchange identity. An exact retry therefore
 uses the same proof and receives the same deterministic credential after a lost
@@ -44,6 +50,8 @@ and do not contact Control.
 
 - The prepared package contains a bearer secret and needs confidential transfer.
 - The activation directory contains reusable node identity and remains owner-only.
+- The tenant-operator file remains a bearer credential and needs the operator's
+  normal secret custody, rotation, backup, and revocation controls.
 - Tenant, publisher, action, incident-response, site-root, and Control private keys
   are never copied into either package.
 - The Control URL is not new authority. TLS must authenticate through the Control

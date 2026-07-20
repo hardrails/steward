@@ -92,8 +92,20 @@ install or transmit private keys. Move each private key to the custody named in
 the signed inventory before using it. See
 [Create a site authority](https://hardrails.github.io/steward/getting-started/site-authority/).
 
-After Control is installed, prepare the first node from the same verified package.
-A saved site-administrator context supplies the Control URL and token:
+After Control is installed, use its initial site-administrator token once to create
+the tenant's routine operator identity:
+
+```console
+stewardctl site connect steward-site \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/control/site-admin.token
+```
+
+This creates the tenant if needed, writes a recoverable tenant-scoped operator
+token outside the signed package, and selects a CLI context that uses it. The
+site-administrator bearer is not copied into the context or printed.
+
+Prepare the first node from that least-privilege context:
 
 ```console
 stewardctl site node prepare steward-site node-a

@@ -110,6 +110,13 @@ point. A compromised browser can misrepresent the preview or steal the operator
 bearer. Compare the displayed file digest with the signing station and use a
 hardened operator browser profile.
 
+`site connect` uses a site-administrator bearer to create one tenant and issue a
+tenant-scoped operator. Steward writes the new bearer to an owner-only file and
+stores only its path in the selected CLI context. It is not a secret manager: it
+does not rotate, escrow, remotely distribute, or revoke either credential. Move
+long-lived credentials into the operator's chosen secret system and update the
+context path when custody changes.
+
 `site node prepare` creates an owner-only handoff containing a short-lived
 enrollment bearer. Anyone who obtains it before activation can race the intended
 node, although Control still requires a valid receipt-key proof and binds the

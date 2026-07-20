@@ -37,13 +37,21 @@ The nested node workflow composes that verified offline trust with Control's
 online, one-time enrollment:
 
 ```console
+stewardctl site connect steward-site \
+  -control-url https://control.customer.example:8443 \
+  -token-file /secure/control/site-admin.token
 stewardctl site node prepare steward-site node-a
 stewardctl site node verify steward-node-node-a
 stewardctl site node activate steward-node-node-a
 ```
 
-`prepare` is the only command in this group that requires a site-administrator
-Control connection. It accepts `-control-url`, `-token-file`, `-ca-file`,
+`connect` is the only command in this group that requires a site-administrator
+Control connection. It creates the tenant, writes a recoverable tenant-scoped
+operator bearer, and selects a CLI context without retaining the administrator
+bearer. It accepts `-control-url`, `-token-file`, `-ca-file`, `-context`,
+`-operator-token-out`, `-request-id`, `-node-id`, and
+`-site-root-public-key`. `prepare` uses the resulting tenant operator and accepts
+`-control-url`, `-token-file`, `-ca-file`,
 `-valid-for`, `-request-id`, `-out`, and `-site-root-public-key`; the connection
 flags can come from the current CLI context. `verify` is offline. `activate`
 contacts the Control origin recorded in the prepared package, retains a resumable
