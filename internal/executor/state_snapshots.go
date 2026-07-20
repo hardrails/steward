@@ -338,6 +338,10 @@ func (s *Server) deleteStateSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "state_drift", "snapshot does not match the signed tenant lineage")
 		return
 	}
+	if snapshot.State == storagebackend.StateDeleted && !recovering {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	prepared := stateMutationEvidence(record, request.SnapshotID, "state-snapshot-delete", evidence.JournalPrepare, evidence.Allowed)
 	if !recovering {
 		opID, err = newOperationID("delete-snapshot-"+request.SnapshotID, request.Generation)
@@ -373,7 +377,7 @@ func (s *Server) deleteStateSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	committed := prepared
-	committed.Type, committed.Outcome, committed.MetadataHash = evidence.JournalCommit, evidence.Committed, snapshot.ContentDigest
+	committed.Type, committed.Outcome, committed.MetadataHash = evidence.JournalCommit, evidence.Committed, deleted.ContentDigest
 	if _, err := s.secure.evidence.Append(committed); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "snapshot was deleted but its receipt could not be persisted")
 		return

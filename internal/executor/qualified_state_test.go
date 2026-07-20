@@ -186,6 +186,9 @@ func TestQualifiedStateSnapshotCloneAndResumeWorkflow(t *testing.T) {
 			t.Fatalf("snapshot delete attempt=%d status=%d body=%s", attempt, response.Code, response.Body.String())
 		}
 	}
+	if backend.deleteSnapshotCalls != 2 {
+		t.Fatalf("idempotent snapshot retry reached backend %d times, want 2 total including the earlier in-use attempt", backend.deleteSnapshotCalls)
+	}
 	assertStatePurge(t, server, purgeStateRequest{
 		TenantID: deleteSnapshot.TenantID, NodeID: deleteSnapshot.NodeID,
 		LineageID: deleteSnapshot.LineageID, Generation: deleteSnapshot.Generation,
@@ -760,22 +763,23 @@ func postStateMutation(t *testing.T, server *Server, path string, body any) *htt
 }
 
 type qualifiedStateBackend struct {
-	mu                 sync.Mutex
-	capabilities       storagebackend.Capabilities
-	volumes            map[storagebackend.VolumeScope]storagebackend.Volume
-	snapshots          map[storagebackend.SnapshotScope]storagebackend.Snapshot
-	snapshotErr        error
-	cloneErr           error
-	inspectVolumeErr   error
-	inspectSnapshotErr error
-	planErr            error
-	deleteSnapshotErr  error
-	invalidSnapshot    bool
-	invalidClone       bool
-	invalidDelete      bool
-	snapshotHook       func()
-	cloneHook          func()
-	deleteHook         func()
+	mu                  sync.Mutex
+	capabilities        storagebackend.Capabilities
+	volumes             map[storagebackend.VolumeScope]storagebackend.Volume
+	snapshots           map[storagebackend.SnapshotScope]storagebackend.Snapshot
+	snapshotErr         error
+	cloneErr            error
+	inspectVolumeErr    error
+	inspectSnapshotErr  error
+	planErr             error
+	deleteSnapshotErr   error
+	invalidSnapshot     bool
+	invalidClone        bool
+	invalidDelete       bool
+	snapshotHook        func()
+	cloneHook           func()
+	deleteHook          func()
+	deleteSnapshotCalls int
 }
 
 func newQualifiedStateBackend() *qualifiedStateBackend {
@@ -938,6 +942,9 @@ func (backend *qualifiedStateBackend) DeleteSnapshot(_ context.Context, request 
 	if err := request.Validate(); err != nil {
 		return storagebackend.Snapshot{}, false, err
 	}
+	backend.mu.Lock()
+	backend.deleteSnapshotCalls++
+	backend.mu.Unlock()
 	if backend.deleteSnapshotErr != nil {
 		return storagebackend.Snapshot{}, false, backend.deleteSnapshotErr
 	}
