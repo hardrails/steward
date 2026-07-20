@@ -299,12 +299,13 @@ an enforcement requirement through a narrow external contract.
 
 ## Delivery roadmap
 
-Complete the remaining roadmap through two substantial vertical pull requests and
-two releases. The first combines fleet/state work with authority and production
-hardening; the second combines disconnected operations with contract
-stabilization. A release is not complete because a schema, plan command, or UI
-page exists; the stated outcome must pass end-to-end acceptance and hostile-path
-tests.
+Complete the remaining roadmap as one integrated product release. Development may
+use small, reviewable commits, but the public pull request and release must prove
+the complete operate, contain, recover, and verify workflow together. This avoids
+publishing another sequence of individually impressive primitives that still leave
+the operator to assemble the system. A release is not complete because a schema,
+plan command, integration example, or UI page exists; the stated outcome must pass
+end-to-end acceptance and hostile-path tests.
 
 ### Implemented foundation
 
@@ -344,10 +345,13 @@ delegation, Gateway, and service-trust setup. The controller also does not yet j
 continuous health recovery, snapshots, protected-secret
 providers, and one offline evidence bundle into one first-time-user operation.
 
-### Production Core
+### Consolidated production release
 
-This release makes Steward a complete product on one host, then extends the same
-contract across a small fleet.
+This release makes Steward a complete product on one host, extends the same
+contract across a small fleet, and makes disconnected operation repeatable. The
+work is organized below as implementation lanes, not separate pull requests or
+release trains. A capability crosses the release boundary only when its user
+workflow, failure behavior, documentation, upgrade path, and evidence are joined.
 
 #### Working runtime foundation
 
@@ -438,12 +442,7 @@ Acceptance gates:
 - Shadow decisions can be compared with enforced decisions before promotion.
 - A support bundle contains no prompt, body, credential, or private key by default.
 
-### Sovereign Stable
-
-This release makes disconnected operation repeatable and freezes the contracts
-after their behavior has been demonstrated.
-
-#### Pull request 3: sovereign stable vertical
+#### Disconnected and stable operations
 
 Outcome: disconnected installation, update, recovery, identity, and compatibility
 contracts are reproducible and independently verifiable as one supported system.
