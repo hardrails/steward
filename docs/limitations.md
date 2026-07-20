@@ -96,6 +96,14 @@ envelopes, and witnessed evidence. It does not need tenant command, task, or act
 private keys. Keep those keys on an operator workstation, hardware token, or
 offline signing station.
 
+`stewardctl site init` initially writes all new private roles into one owner-only
+handoff directory so it can publish an internally consistent package atomically.
+That directory is not a long-term key store. Separate site-root, publisher,
+incident-response, tenant lifecycle, tenant task, action, Control CA, and Control
+server keys according to the generated custody guidance before deployment. Package
+verification without an independently pinned site-root public key proves internal
+consistency, not the origin of the whole package.
+
 The embedded console previews and transfers an already signed command. It does not
 verify the command signature locally; Executor remains the signature enforcement
 point. A compromised browser can misrepresent the preview or steal the operator

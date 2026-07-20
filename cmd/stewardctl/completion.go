@@ -14,8 +14,9 @@ import (
 )
 
 var completionTree = map[string][]string{
-	"":                            {"help", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
-	"help":                        {"agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
+	"":                            {"help", "site", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
+	"help":                        {"site", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
+	"site":                        {"init", "verify"},
 	"agent":                       {"create", "init", "validate", "build", "plan", "apply", "deploy", "deployment", "fork", "doctor"},
 	"agent deployment":            {"apply", "wait", "status", "list", "remove"},
 	"context":                     {"set", "use", "show", "list", "delete"},
@@ -64,6 +65,8 @@ var completionTree = map[string][]string{
 }
 
 var completionFlags = map[string][]string{
+	"site init":                         {"-site-id", "-tenant-id", "-repository", "-service-id", "-connector-id", "-control-server-names", "-authorized-effects", "-dry-run"},
+	"site verify":                       {"-site-root-public-key"},
 	"agent init":                        {"-runtime", "-name", "-force"},
 	"agent create":                      {"-runtime", "-force"},
 	"agent validate":                    {"-file", "-cue"},
@@ -110,6 +113,7 @@ var completionFlags = map[string][]string{
 	"permit bundle audit":               {"-in", "-plan", "-trust", "-authority", "-receipts", "-receipt-public-key", "-receipt-node-id", "-receipt-epoch", "-max-validity", "-expected-sequence", "-expected-chain-hash"},
 	"node":                              {"-node-url", "-token-file", "-no-context", "-runtime-ref", "-capsule", "-intent", "-tenant-id", "-node-id", "-lineage-id", "-generation", "-reason", "-apply"},
 	"gateway":                           {"-config", "-agent", "-tenant-id", "-node-id", "-receipt-file", "-receipt-key-file", "-receipt-node-id", "-receipt-epoch"},
+	"gateway connector set":             {"-preset", "-repository", "-id", "-base-url", "-credential-file", "-credential-mode", "-credential-epoch", "-allow-cidr", "-operation", "-tenant-budget", "-action-authority", "-action-authority-tenant", "-action-node-id", "-max-action-permit-seconds", "-max-concurrent", "-max-request-bytes", "-max-response-bytes", "-max-seconds", "-max-calls-per-grant"},
 }
 
 func completionCommand(arguments []string, stdout io.Writer) error {
@@ -330,6 +334,12 @@ func stewardctlCompletionCandidates(arguments []string) []string {
 		if previous == "-agent" || previous == "-runtime" &&
 			(leaf == "agent init" || leaf == "agent create" || strings.HasPrefix(leaf, "agent create ")) {
 			return matchingCandidates([]string{"hermes", "openclaw"}, current)
+		}
+		if previous == "-preset" && leaf == "gateway connector set" {
+			return matchingCandidates([]string{"github-issues"}, current)
+		}
+		if previous == "-authorized-effects" && (leaf == "site init" || strings.HasPrefix(leaf, "site init ")) {
+			return matchingCandidates([]string{"optional", "required"}, current)
 		}
 	}
 	if strings.HasPrefix(current, "-") {

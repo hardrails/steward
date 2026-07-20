@@ -45,6 +45,53 @@ Signed policy can instead require a version-5 context-locked single-request
 permit. Format-7 evidence then binds the grant's current completed connector
 response history, and a later response invalidates the older permit.
 
+## Configure a protected GitHub issue operation
+
+The `github-issues` preset is the shortest path to a real, reversible external
+effect. It creates one connector operation named `create` for the exact
+`POST /repos/OWNER/NAME/issues` path. It does not contact GitHub while changing
+configuration and it does not give the GitHub token to the agent.
+
+First create a fine-grained GitHub token whose repository access and issue-write
+permission cover only the intended repository. Materialize it as an owner-only
+Gateway file by following [Gateway credentials]({{ '/guides/secrets/' |
+relative_url }}). Then configure the connector with the tenant action public key
+created by `stewardctl site init -connector-id github-issues`:
+
+```console
+sudo stewardctl gateway connector set \
+  -preset github-issues \
+  -repository hardrails/steward \
+  -credential-file /etc/steward/credentials/github-issues \
+  -tenant-budget tenant-a=4194304 \
+  -action-node-id node-a \
+  -action-authority tenant-action-1=/secure/public/tenant-action.public \
+  -action-authority-tenant tenant-action-1=tenant-a \
+  -max-action-permit-seconds 300
+sudo systemctl restart steward-gateway
+```
+
+The preset fixes the public origin to `https://api.github.com`, uses bearer
+credential injection, allows four calls per workload grant, and bounds each call
+to two concurrent requests, 64 KiB of request JSON, 1 MiB of response JSON, and 30
+seconds. Explicit limit flags may narrow or deliberately change those operational
+budgets. The preset rejects manual origin, method, path, credential-mode, and
+plaintext-HTTP overrides because mixing them with a recognizable preset would make
+review misleading.
+
+The approved request body remains ordinary GitHub issue JSON, for example:
+
+```json
+{"title":"Proposed documentation fix","body":"Drafted by the workspace auditor. Review before closing the task."}
+```
+
+Follow [Authorized Effects]({{ '/guides/authorized-effects/' | relative_url }}) to
+bind that exact JSON to the tenant, agent instance, `github-issues` connector,
+`create` operation, and one-use task ID. GitHub issue creation is externally
+visible, so use a test repository for acceptance and close the created issue after
+verification. Steward records dispatch evidence; it does not claim that GitHub
+accepted the business intent or that a human reviewed the issue content.
+
 ## Define one exact operation
 
 Create the credential as an owner-only file. An external secret manager may
