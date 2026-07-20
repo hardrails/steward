@@ -171,7 +171,7 @@ without replacing Executor's node-local maintenance fence. Signed soft label
 preferences, one-key topology spreading, retained placement explanations, and
 restart-safe stateless node drains with maximum-unavailable budgets are also
 implemented. The next scheduling layer should add image and state locality,
-bounded rollout, rollback, quota-capable portable state, and backend conformance. Instance counts, singleton identity, restart
+rollback, quota-capable portable state, and backend conformance. Instance counts, singleton identity, restart
 recovery, lease-fenced stateless replacement, bounded renewal retention, and an
 explanation for placement and replacement blockers are already part of the
 narrow scheduler.
@@ -299,9 +299,12 @@ an enforcement requirement through a narrow external contract.
 
 ## Delivery roadmap
 
-Ship two substantial release trains through no more than five vertical pull
-requests. A release is not complete because a schema, plan command, or UI page
-exists; the stated outcome must pass end-to-end acceptance and hostile-path tests.
+Complete the remaining roadmap through two substantial vertical pull requests and
+two releases. The first combines fleet/state work with authority and production
+hardening; the second combines disconnected operations with contract
+stabilization. A release is not complete because a schema, plan command, or UI
+page exists; the stated outcome must pass end-to-end acceptance and hostile-path
+tests.
 
 ### Implemented foundation
 
@@ -377,10 +380,11 @@ Acceptance gates:
 - One offline bundle links application, instance, task, permit, dispatch, and
   outcome.
 
-#### Pull request 2: fleet and state vertical
+#### Pull request 2: production platform vertical
 
-Outcome: the same application can run across nodes, recover from failure, and
-create safe temporary or durable forks.
+Outcome: the same application can run across nodes, recover from failure, create
+safe temporary or durable forks, use governed tool ecosystems, and remain
+supportable through one coherent operational surface.
 
 - Add node leases, resources, reservations, labels, taints and tolerations,
   isolation classes, topology, image locality, and state locality.
@@ -396,27 +400,6 @@ create safe temporary or durable forks.
   clean warm pools.
 - Add a Kubernetes Agent Sandbox backend after the local backend contract passes
   conformance.
-
-Acceptance gates:
-
-- Concurrent reconciliation cannot oversubscribe capacity or double-place an
-  instance.
-- Node loss produces a visible lease expiry and a fenced replacement; late commands
-  cannot resurrect the old generation.
-- A rollout can be interrupted at every transition and safely resumed or rolled
-  back.
-- Tenant A cannot observe, address, schedule onto, or consume Tenant B's reserved
-  capacity or state.
-- A fork contains declared durable state but no credential, task permit, runtime
-  reference, evidence key, or live session from its parent.
-- TTL cleanup survives restart and never deletes a referenced parent snapshot.
-- A seven-day mixed-workload soak and documented chaos suite pass.
-
-#### Pull request 3: authority and production hardening vertical
-
-Outcome: useful tool ecosystems can be connected without recreating ambient agent
-authority, and the complete product is supportable.
-
 - Add an agent-facing MCP broker distinct from the operator MCP server.
 - Pin MCP server identity, tool schema, version, and requested capabilities; run
   untrusted MCP servers as separately admitted workloads.
@@ -433,6 +416,18 @@ authority, and the complete product is supportable.
 
 Acceptance gates:
 
+- Concurrent reconciliation cannot oversubscribe capacity or double-place an
+  instance.
+- Node loss produces a visible lease expiry and a fenced replacement; late commands
+  cannot resurrect the old generation.
+- A rollout can be interrupted at every transition and safely resumed or rolled
+  back.
+- Tenant A cannot observe, address, schedule onto, or consume Tenant B's reserved
+  capacity or state.
+- A fork contains declared durable state but no credential, task permit, runtime
+  reference, evidence key, or live session from its parent.
+- TTL cleanup survives restart and never deletes a referenced parent snapshot.
+- A seven-day mixed-workload soak and documented chaos suite pass.
 - A malicious skill or MCP server cannot choose its upstream origin, receive the
   reusable credential, widen policy, or replay spent authority.
 - Secret rotation takes effect without redeploying the agent; stale epochs fail
@@ -446,7 +441,10 @@ Acceptance gates:
 This release makes disconnected operation repeatable and freezes the contracts
 after their behavior has been demonstrated.
 
-#### Pull request 4: sovereign operations vertical
+#### Pull request 3: sovereign stable vertical
+
+Outcome: disconnected installation, update, recovery, identity, and compatibility
+contracts are reproducible and independently verifiable as one supported system.
 
 - Add a signed offline site repository using TUF-compatible expiration, threshold
   keys, offline roots, mirrors, and removable-media import and export.
@@ -461,20 +459,6 @@ after their behavior has been demonstrated.
 - Add optional TPM, measured-boot, or confidential-computing evidence through
   SPIRE or platform attestors. Report it as evidence, not proof that the host is
   trustworthy.
-
-Acceptance gates:
-
-- A clean site installs and completes the first task with all Internet interfaces
-  disconnected.
-- Expired, rolled-back, unsigned, revoked, or wrong-site update metadata is
-  rejected.
-- A full restore meets published recovery targets and preserves replay and
-  generation fences.
-- The control plane can fail over without two controllers exercising the same
-  delegated authority concurrently.
-
-#### Pull request 5: stable contract vertical
-
 - Freeze the application, backend, capability, storage, receipt, and control
   contracts with a compatibility policy and migration tools.
 - Remove the legacy compatibility supervisor and transitional command surfaces.
@@ -490,6 +474,14 @@ Acceptance gates:
 
 Acceptance gates:
 
+- A clean site installs and completes the first task with all Internet interfaces
+  disconnected.
+- Expired, rolled-back, unsigned, revoked, or wrong-site update metadata is
+  rejected.
+- A full restore meets published recovery targets and preserves replay and
+  generation fences.
+- The control plane can fail over without two controllers exercising the same
+  delegated authority concurrently.
 - An independent operator can reproduce the build and verify release, image,
   policy, action, and evidence artifacts from published material.
 - Every supported migration is crash-tested from every retained format.
