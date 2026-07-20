@@ -203,3 +203,63 @@ func TestSiteInitDryRunAndValidationAreNonDestructive(t *testing.T) {
 		t.Fatalf("existing directory error=%v", err)
 	}
 }
+
+func TestSiteCommandRejectsIncompleteAndAmbiguousInputs(t *testing.T) {
+	for _, test := range []struct {
+		arguments []string
+		want      string
+	}{
+		{arguments: nil, want: "site requires init or verify"},
+		{arguments: []string{"unknown"}, want: "site requires init or verify"},
+		{arguments: []string{"init"}, want: "exactly one output directory"},
+		{arguments: []string{"init", "one", "two"}, want: "exactly one output directory"},
+		{arguments: []string{"init", "site", "-site-id", "invalid site", "-dry-run"}, want: "identity is invalid"},
+		{arguments: []string{"init", "site", "-authorized-effects", "disabled", "-dry-run"}, want: "required or optional"},
+		{arguments: []string{"init", "site", "-authorized-effects", "optional", "-dry-run"}, want: "requires -connector-id"},
+		{arguments: []string{"init", "site", "-control-server-names", "", "-dry-run"}, want: "requires 1 to 64"},
+		{arguments: []string{"verify"}, want: "exactly one package directory"},
+	} {
+		err := siteCommand(test.arguments, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("site %v error=%v, want %q", test.arguments, err, test.want)
+		}
+	}
+	if validSiteSHA256("sha256:"+strings.Repeat("z", 64)) || validSiteSHA256("sha256:abcd") {
+		t.Fatal("malformed SHA-256 value was accepted")
+	}
+	if got := sitePositionalLast([]string{"-dry-run", "site"}); len(got) != 2 || got[0] != "-dry-run" {
+		t.Fatalf("flag-first arguments changed: %v", got)
+	}
+}
+
+func TestSiteInventoryRequiresCompleteActionKeyPair(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "site")
+	if err := siteCommand([]string{"init", directory, "-connector-id", "issues"}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	root, err := readPublicKey(filepath.Join(directory, "public", "site-root.public"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, "inventory.dsse.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _, err := dsse.Verify(raw, sitePackagePayloadType, map[string]ed25519.PublicKey{"site-root-1": root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inventory sitePackageInventory
+	if err := json.Unmarshal(payload, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	for index, file := range inventory.Files {
+		if file.Path == "public/tenant-action.public" {
+			inventory.Files = append(inventory.Files[:index], inventory.Files[index+1:]...)
+			break
+		}
+	}
+	if err := validateSiteInventory(inventory); err == nil || !strings.Contains(err.Error(), "both tenant action key files") {
+		t.Fatalf("incomplete action key pair error=%v", err)
+	}
+}
