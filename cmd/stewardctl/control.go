@@ -71,6 +71,12 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlNodeCredentialRevoke(arguments[2:], stdout)
 	case "operations status":
 		return controlOperationsStatus(arguments[2:], stdout)
+	case "freeze status":
+		return controlFreezeStatus(arguments[2:], stdout)
+	case "freeze set":
+		return controlFreezeChange(arguments[2:], stdout, controlstore.OperationalFreezeActionFreeze)
+	case "freeze clear":
+		return controlFreezeChange(arguments[2:], stdout, controlstore.OperationalFreezeActionUnfreeze)
 	case "attention list":
 		return controlAttentionList(arguments[2:], stdout)
 	case "agent list":
@@ -107,7 +113,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, operations status, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, operations status, freeze status|set|clear, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
 }
 
 type controlFlags struct {
@@ -646,6 +652,87 @@ func controlOperationsStatus(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	return writeControlJSON(stdout, summary)
+}
+
+func controlFreezeStatus(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control freeze status", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "optional tenant scope; omit for the whole site")
+	site := flags.Bool("site", false, "inspect the site scope even when the current context has a tenant")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if !validOptionalControlIdentifier(*tenantID, 128) || *site && *tenantID != "" || flags.NArg() != 0 {
+		return errors.New("control freeze status accepts only an optional bounded -tenant-id")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	status, err := client.GetOperationalFreeze(ctx, *tenantID)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, status)
+}
+
+func controlFreezeChange(
+	arguments []string,
+	stdout io.Writer,
+	action controlstore.OperationalFreezeAction,
+) error {
+	name := controlFreezeChangeCommand(action)
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "optional tenant scope; omit for the whole site")
+	site := flags.Bool("site", false, "change the site scope even when the current context has a tenant")
+	reason := flags.String("reason", "", "short incident reason required when setting a freeze")
+	revision := flags.Uint64("revision", 0, "expected retained revision; zero discovers it safely")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if !validOptionalControlIdentifier(*tenantID, 128) || *site && *tenantID != "" || flags.NArg() != 0 ||
+		action == controlstore.OperationalFreezeActionFreeze && *reason == "" ||
+		action == controlstore.OperationalFreezeActionUnfreeze && *reason != "" {
+		return errors.New("control freeze set requires -reason; status and clear accept only scope and revision")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	expectedRevision := *revision
+	if expectedRevision == 0 {
+		status, err := client.GetOperationalFreeze(ctx, *tenantID)
+		if err != nil {
+			return err
+		}
+		retained := status.Site
+		if *tenantID != "" {
+			retained = status.Tenant
+		}
+		if retained != nil {
+			expectedRevision = retained.Revision
+		}
+	}
+	change, err := client.ChangeOperationalFreeze(ctx, *tenantID, action, expectedRevision, *reason)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, change)
+}
+
+func controlFreezeChangeCommand(action controlstore.OperationalFreezeAction) string {
+	name := "control freeze set"
+	if action == controlstore.OperationalFreezeActionUnfreeze {
+		name = "control freeze clear"
+	}
+	return name
 }
 
 func controlAttentionList(arguments []string, stdout io.Writer) error {

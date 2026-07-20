@@ -35,6 +35,41 @@ type reconcileFixture struct {
 	limits     controlstore.Limits
 }
 
+func TestReconcilerObservesTerminalWorkThenBlocksWhileTenantIsFrozen(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+
+	assertReconcileCount(t, reconciler, "enqueue admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	if _, changed, err := fixture.store.ChangeOperationalFreeze(
+		fixture.admin, "tenant-a", controlstore.OperationalFreezeActionFreeze, 0,
+		"contain tenant during investigation", fixture.now.Add(time.Second),
+	); err != nil || !changed {
+		t.Fatalf("freeze tenant = (%v, %v)", changed, err)
+	}
+	fixture.now = fixture.now.Add(2 * time.Second)
+
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.Observed != 1 || report.Blocked != 0 || report.Enqueued != 0 {
+		t.Fatalf("observe terminal command under freeze = (%+v, %v)", report, err)
+	}
+	report, err = reconciler.Reconcile(context.Background())
+	blocked := getControlDeployment(t, fixture)
+	if err != nil || report.Blocked != 1 || report.Enqueued != 0 ||
+		blocked.Instances[0].LastError != string(controlstore.DeploymentBlockedTenantFrozen) {
+		t.Fatalf("block next command under freeze = report %+v deployment %+v err %v", report, blocked, err)
+	}
+
+	if _, changed, err := fixture.store.ChangeOperationalFreeze(
+		fixture.admin, "tenant-a", controlstore.OperationalFreezeActionUnfreeze, 1, "", fixture.now.Add(time.Second),
+	); err != nil || !changed {
+		t.Fatalf("unfreeze tenant = (%v, %v)", changed, err)
+	}
+	fixture.now = fixture.now.Add(2 * time.Second)
+	assertReconcileCount(t, reconciler, "resume after unfreeze", 0, 1)
+}
+
 func TestReconcilerConvergesLifecycleWithoutDuplicateEffectAcrossRestart(t *testing.T) {
 	fixture := newControlReconcileFixture(t)
 	applyControlDeployment(t, fixture, 1)
@@ -791,7 +826,7 @@ func TestReconcilerIgnoresTerminalInstancesBeforeStaleNodeRecovery(t *testing.T)
 			instance.NodeID = "node-1"
 			instance.Phase = phase
 			result, err := reconciler.reconcileInstance(
-				snapshot.Nodes, snapshot.Deployments, nil, deployment, instance,
+				snapshot.Nodes, snapshot.Deployments, nil, deployment, instance, nil,
 			)
 			if err != nil || result != (instanceResult{}) {
 				t.Fatalf("terminal instance entered stale-node recovery = (%+v, %v)", result, err)

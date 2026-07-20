@@ -106,6 +106,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/readiness", server.readiness)
 	server.mux.HandleFunc("/v1/tenants", server.tenants)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}", server.tenant)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/freeze", server.tenantOperationalFreeze)
 	server.mux.HandleFunc("/v1/operators", server.operators)
 	server.mux.HandleFunc("/v1/operators/{credential_id}", server.operator)
 	server.mux.HandleFunc("/v1/enrollments", server.enrollments)
@@ -127,6 +128,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments", server.deployments)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments/{deployment_id}", server.deployment)
 	server.mux.HandleFunc("/v1/operations/summary", server.operationsSummary)
+	server.mux.HandleFunc("/v1/operations/freeze", server.siteOperationalFreeze)
 	server.mux.HandleFunc("/v1/operations/attention", server.operationsAttention)
 	server.mux.HandleFunc("/v1/operations/agents", server.operationsAgents)
 	server.mux.HandleFunc("/v1/operations/commands", server.operationsCommands)
@@ -1186,6 +1188,8 @@ func (server *Server) storeError(writer http.ResponseWriter, err error, hideForb
 		writeError(writer, http.StatusBadRequest, "invalid_request", "request does not satisfy the control-plane contract")
 	case errors.Is(err, controlstore.ErrCapacityExceeded):
 		writeError(writer, http.StatusServiceUnavailable, "capacity_exceeded", "bounded control-plane capacity is exhausted")
+	case errors.Is(err, controlstore.ErrOperationallyFrozen):
+		writeError(writer, http.StatusLocked, "operationally_frozen", "new command delivery is frozen for this scope")
 	case errors.Is(err, controlstore.ErrUnavailable):
 		writeError(writer, http.StatusServiceUnavailable, "not_ready", "durable control state requires recovery")
 	default:

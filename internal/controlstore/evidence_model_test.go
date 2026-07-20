@@ -45,6 +45,7 @@ func TestEvidenceWitnessStateRoundTripAndLegacyMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.Version = stateFormatMinReadVersion
+	snapshot.Freezes = nil
 	snapshot.Captures = nil
 	snapshot.Deployments = nil
 	for index := range snapshot.Commands {

@@ -141,6 +141,7 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 	placements := placementCounts(snapshot.Deployments)
 	actions := 0
 	for _, deployment := range snapshot.Deployments {
+		freeze, frozen := controlstore.EffectiveOperationalFreeze(snapshot.Freezes, deployment.TenantID)
 		for _, instance := range deployment.Instances {
 			if err := ctx.Err(); err != nil {
 				return report, err
@@ -150,7 +151,7 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 				return report, nil
 			}
 			result, err := reconciler.reconcileInstance(
-				snapshot.Nodes, snapshot.Deployments, placements, deployment, instance,
+				snapshot.Nodes, snapshot.Deployments, placements, deployment, instance, freezeForReconcile(freeze, frozen),
 			)
 			if err != nil {
 				return report, err
@@ -201,6 +202,7 @@ func (reconciler *Reconciler) reconcileInstance(
 	placements map[string]int,
 	deployment controlstore.Deployment,
 	instance controlstore.DeploymentInstance,
+	freeze *controlstore.OperationalFreeze,
 ) (instanceResult, error) {
 	now := reconciler.now().UTC()
 	if now.IsZero() {
@@ -257,13 +259,6 @@ func (reconciler *Reconciler) reconcileInstance(
 	}
 	leaseManaged := containsOperation(delegation.Operations, "renew")
 	sourceRolloutInstance := deployment.Rollout != nil && !bytes.Equal(delegationRaw, deployment.DelegationDSSE)
-	if instance.NodeID != "" && deployment.DesiredState == controlstore.DeploymentRunning &&
-		!assignedNodeEligible(nodes, deployment, instance, delegation, now, reconciler.nodeStaleAfter) {
-		if sourceRolloutInstance {
-			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable), now)
-		}
-		return reconciler.recoverUnavailableInstance(deployment, instance, delegation, leaseManaged, now)
-	}
 	if commandInFlight(instance) {
 		_, changed, err := reconciler.store.ObserveDeploymentCommand(
 			deployment.TenantID, deployment.ID, instance.InstanceID, deployment.Revision, now,
@@ -272,6 +267,13 @@ func (reconciler *Reconciler) reconcileInstance(
 			return instanceResult{conflict: true}, nil
 		}
 		return instanceResult{changed: changed, kind: "observed"}, err
+	}
+	if instance.NodeID != "" && deployment.DesiredState == controlstore.DeploymentRunning &&
+		!assignedNodeEligible(nodes, deployment, instance, delegation, now, reconciler.nodeStaleAfter) {
+		if sourceRolloutInstance {
+			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable), now)
+		}
+		return reconciler.recoverUnavailableInstance(deployment, instance, delegation, leaseManaged, now)
 	}
 	if sourceRolloutInstance && instance.Rollout != nil && instance.Rollout.Stage == "draining" {
 		delegationExpiry, parseErr := time.Parse(time.RFC3339Nano, delegation.ExpiresAt)
@@ -350,6 +352,9 @@ func (reconciler *Reconciler) reconcileInstance(
 	if operation == "" {
 		return instanceResult{}, nil
 	}
+	if freeze != nil {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(freezeBlockedReason(freeze.Scope)), now)
+	}
 	nodeID, placement, err := selectNode(
 		nodes, deployments, placements, deployment, instance, now, reconciler.nodeStaleAfter,
 	)
@@ -373,6 +378,10 @@ func (reconciler *Reconciler) reconcileInstance(
 	if errors.Is(err, controlstore.ErrConflict) {
 		return instanceResult{conflict: true}, nil
 	}
+	var freezeErr *controlstore.OperationalFreezeError
+	if errors.As(err, &freezeErr) {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(freezeBlockedReason(freezeErr.Scope)), now)
+	}
 	if reason := schedulingBlockedReason(err); reason != "" {
 		return reconciler.recordBlocked(deployment, instance, newBlocked(reason), now)
 	}
@@ -380,6 +389,21 @@ func (reconciler *Reconciler) reconcileInstance(
 		placements[nodeID]++
 	}
 	return instanceResult{changed: changed, kind: "enqueued"}, err
+}
+
+func freezeForReconcile(value controlstore.OperationalFreeze, frozen bool) *controlstore.OperationalFreeze {
+	if !frozen {
+		return nil
+	}
+	cloned := value
+	return &cloned
+}
+
+func freezeBlockedReason(scope controlstore.OperationalFreezeScope) controlstore.DeploymentBlockedReason {
+	if scope == controlstore.OperationalFreezeSite {
+		return controlstore.DeploymentBlockedSiteFrozen
+	}
+	return controlstore.DeploymentBlockedTenantFrozen
 }
 
 func (reconciler *Reconciler) recoverUnavailableInstance(

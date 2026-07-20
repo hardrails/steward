@@ -207,12 +207,15 @@ export default function App() {
       api(projectedPath("/v1/operations/commands", tenantID, {limit: 100}), epoch),
       api(projectedPath("/v1/operations/credentials", tenantID, {limit: 100}), epoch),
       tenantID
+        ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/freeze", epoch)
+        : api("/v1/operations/freeze", epoch),
+      tenantID
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/nodes?limit=500", epoch)
         : Promise.resolve({nodes: []}),
     ];
-    const [summary, attention, agents, commands, credentials, nodes] = await Promise.all(requests);
+    const [summary, attention, agents, commands, credentials, freeze, nodes] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, agents, commands, credentials, nodes};
+    return {summary, attention, agents, commands, credentials, freeze, nodes};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -636,8 +639,9 @@ function ControlRoom(props) {
         </div>
         <div className="read-only-boundary">
           <strong>OBSERVE HERE. AUTHORIZE WITH YOUR KEYS.</strong>
-          <span>This console can transfer an exact command signed elsewhere. Private keys, reusable service credentials, and general mutations stay outside the browser.</span>
+          <span>This console can transfer an exact command signed elsewhere. Incident freeze changes, private keys, reusable service credentials, and general mutations stay outside the browser.</span>
         </div>
+        {snapshot ? <OperationalFreezeBanner status={snapshot.freeze} tenantID={selectedTenant} /> : null}
         {tenantError ? <div className="flash-message is-error" role="alert">{tenantError}</div> : null}
         {refreshError ? <div className="flash-message is-error" role="alert">{refreshError}</div> : null}
         {!snapshot ? (
@@ -663,6 +667,36 @@ function ControlRoom(props) {
         )}
       </div>
     </section>
+  );
+}
+
+function OperationalFreezeBanner({status, tenantID}) {
+  const effective = status?.effective;
+  if (!effective) {
+    return (
+      <aside className="freeze-banner is-open" aria-label="Command delivery status">
+        <div>
+          <span className="freeze-kicker">DELIVERY GATE / OPEN</span>
+          <strong>New signed commands can be delivered.</strong>
+        </div>
+        <p>{tenantID ? "No freeze is active for tenant " + tenantID + "." : "No site freeze is active."}</p>
+      </aside>
+    );
+  }
+  const scope = effective.scope === "site" ? "THE ENTIRE SITE" : "TENANT " + effective.tenant_id;
+  return (
+    <aside className="freeze-banner is-frozen" role="status" aria-live="polite">
+      <div>
+        <span className="freeze-kicker">INCIDENT CONTROL / {effective.scope.toUpperCase()}</span>
+        <strong>New command delivery is frozen for {scope}.</strong>
+      </div>
+      <dl>
+        <div><dt>Reason</dt><dd>{effective.reason}</dd></div>
+        <div><dt>Since</dt><dd>{formatTime(effective.changed_at)}</dd></div>
+        <div><dt>Revision</dt><dd>{effective.revision}</dd></div>
+      </dl>
+      <p>Heartbeats, terminal reports, and evidence continue. A command already accepted by a node is not instantly revoked; its signed authority and workload lease remain the execution fence.</p>
+    </aside>
   );
 }
 

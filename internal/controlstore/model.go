@@ -26,31 +26,33 @@ import (
 )
 
 const (
-	stateFormatMinReadVersion         = 1
-	stateFormatWriteVersion           = 10
-	stateFormatMaxReadVersion         = stateFormatWriteVersion
-	stateFormatEvidenceVersion        = 2
-	stateFormatExecutorV4Version      = 3
-	stateFormatCaptureVersion         = 4
-	stateFormatDeploymentVersion      = 5
-	stateFormatWorkloadLeaseVersion   = 6
-	stateFormatSchedulingVersion      = 7
-	stateFormatNodePlacementVersion   = 8
-	stateFormatFleetOperationsVersion = 9
-	stateFormatRolloutVersion         = 10
-	transactionFormatMinReadVersion   = 1
-	transactionFormatWriteVersion     = 10
-	transactionFormatMaxReadVersion   = transactionFormatWriteVersion
-	transactionEvidenceVersion        = 2
-	transactionExecutorV4Version      = 3
-	transactionCaptureVersion         = 4
-	transactionDeploymentVersion      = 5
-	transactionWorkloadLeaseVersion   = 6
-	transactionSchedulingVersion      = 7
-	transactionNodePlacementVersion   = 8
-	transactionFleetOperationsVersion = 9
-	transactionRolloutVersion         = 10
-	maxMutationsPerRecord             = 128
+	stateFormatMinReadVersion           = 1
+	stateFormatWriteVersion             = 11
+	stateFormatMaxReadVersion           = stateFormatWriteVersion
+	stateFormatEvidenceVersion          = 2
+	stateFormatExecutorV4Version        = 3
+	stateFormatCaptureVersion           = 4
+	stateFormatDeploymentVersion        = 5
+	stateFormatWorkloadLeaseVersion     = 6
+	stateFormatSchedulingVersion        = 7
+	stateFormatNodePlacementVersion     = 8
+	stateFormatFleetOperationsVersion   = 9
+	stateFormatRolloutVersion           = 10
+	stateFormatOperationalFreezeVersion = 11
+	transactionFormatMinReadVersion     = 1
+	transactionFormatWriteVersion       = 11
+	transactionFormatMaxReadVersion     = transactionFormatWriteVersion
+	transactionEvidenceVersion          = 2
+	transactionExecutorV4Version        = 3
+	transactionCaptureVersion           = 4
+	transactionDeploymentVersion        = 5
+	transactionWorkloadLeaseVersion     = 6
+	transactionSchedulingVersion        = 7
+	transactionNodePlacementVersion     = 8
+	transactionFleetOperationsVersion   = 9
+	transactionRolloutVersion           = 10
+	transactionOperationalFreezeVersion = 11
+	maxMutationsPerRecord               = 128
 
 	MaxEvidenceCapturesActive        = 16
 	MaxEvidenceCapturesRetained      = 256
@@ -62,15 +64,34 @@ const (
 )
 
 var (
-	ErrAlreadyInitialized = errors.New("control store is already initialized")
-	ErrNotInitialized     = errors.New("control store is not initialized")
-	ErrCapacityExceeded   = errors.New("control store capacity exceeded")
-	ErrConflict           = errors.New("control store object conflicts with retained state")
-	ErrNotFound           = errors.New("control store object not found")
-	ErrUnavailable        = errors.New("control store requires recovery after a durable write failure")
-	ErrInvalid            = errors.New("control request is invalid")
-	ErrForbidden          = controlauth.ErrForbidden
+	ErrAlreadyInitialized  = errors.New("control store is already initialized")
+	ErrNotInitialized      = errors.New("control store is not initialized")
+	ErrCapacityExceeded    = errors.New("control store capacity exceeded")
+	ErrConflict            = errors.New("control store object conflicts with retained state")
+	ErrNotFound            = errors.New("control store object not found")
+	ErrUnavailable         = errors.New("control store requires recovery after a durable write failure")
+	ErrInvalid             = errors.New("control request is invalid")
+	ErrOperationallyFrozen = errors.New("control command delivery is operationally frozen")
+	ErrForbidden           = controlauth.ErrForbidden
 )
+
+// OperationalFreezeError identifies the effective scope that rejected a new
+// command while still matching ErrOperationallyFrozen with errors.Is.
+type OperationalFreezeError struct {
+	Scope OperationalFreezeScope
+}
+
+func (err *OperationalFreezeError) Error() string {
+	return ErrOperationallyFrozen.Error()
+}
+
+func (err *OperationalFreezeError) Is(target error) bool {
+	return target == ErrOperationallyFrozen
+}
+
+func newOperationalFreezeError(freeze OperationalFreeze) error {
+	return &OperationalFreezeError{Scope: freeze.Scope}
+}
 
 type Limits struct {
 	MaxTenants              int
@@ -131,6 +152,26 @@ type Tenant struct {
 	ID        string `json:"id"`
 	CreatedAt string `json:"created_at"`
 	Active    bool   `json:"active"`
+}
+
+type OperationalFreezeScope string
+
+const (
+	OperationalFreezeSite   OperationalFreezeScope = "site"
+	OperationalFreezeTenant OperationalFreezeScope = "tenant"
+)
+
+// OperationalFreeze is a durable command-delivery gate. A site freeze applies
+// to every tenant; a tenant freeze applies only to its exact tenant. Revision is
+// monotonic even after unfreeze so stale operator retries cannot restore an old
+// incident decision.
+type OperationalFreeze struct {
+	Scope     OperationalFreezeScope `json:"scope"`
+	TenantID  string                 `json:"tenant_id,omitempty"`
+	Frozen    bool                   `json:"frozen"`
+	Revision  uint64                 `json:"revision"`
+	Reason    string                 `json:"reason,omitempty"`
+	ChangedAt string                 `json:"changed_at"`
 }
 
 type Node struct {
@@ -484,6 +525,7 @@ type storedEvidenceCapture struct {
 type snapshotState struct {
 	Version     int                     `json:"version"`
 	Tenants     []Tenant                `json:"tenants"`
+	Freezes     []OperationalFreeze     `json:"freezes"`
 	Nodes       []Node                  `json:"nodes"`
 	Credentials []storedCredential      `json:"credentials"`
 	Enrollments []storedEnrollment      `json:"enrollments"`
@@ -570,6 +612,7 @@ type storedDeploymentRollout struct {
 
 type state struct {
 	tenants     map[string]Tenant
+	freezes     map[string]OperationalFreeze
 	nodes       map[string]Node
 	credentials map[string]controlauth.Credential
 	enrollments map[string]controlauth.Enrollment
@@ -586,6 +629,7 @@ type transaction struct {
 type mutation struct {
 	Kind         string                 `json:"kind"`
 	Tenant       *Tenant                `json:"tenant,omitempty"`
+	Freeze       *OperationalFreeze     `json:"freeze,omitempty"`
 	Node         *Node                  `json:"node,omitempty"`
 	Credential   *storedCredential      `json:"credential,omitempty"`
 	Enrollment   *storedEnrollment      `json:"enrollment,omitempty"`
@@ -610,22 +654,23 @@ type nodeRevocation struct {
 }
 
 const (
-	mutationTenant           = "tenant_upsert"
-	mutationNode             = "node_upsert"
-	mutationCredential       = "credential_upsert"
-	mutationEnrollment       = "enrollment_upsert"
-	mutationCommand          = "command_upsert"
-	mutationEnrollmentDelete = "enrollment_delete"
-	mutationCommandDelete    = "command_delete"
-	mutationNodeRevoke       = "node_revoke"
-	mutationCapture          = "evidence_capture_upsert"
-	mutationCaptureDelete    = "evidence_capture_delete"
-	mutationDeployment       = "deployment_upsert"
+	mutationTenant            = "tenant_upsert"
+	mutationOperationalFreeze = "operational_freeze_upsert"
+	mutationNode              = "node_upsert"
+	mutationCredential        = "credential_upsert"
+	mutationEnrollment        = "enrollment_upsert"
+	mutationCommand           = "command_upsert"
+	mutationEnrollmentDelete  = "enrollment_delete"
+	mutationCommandDelete     = "command_delete"
+	mutationNodeRevoke        = "node_revoke"
+	mutationCapture           = "evidence_capture_upsert"
+	mutationCaptureDelete     = "evidence_capture_delete"
+	mutationDeployment        = "deployment_upsert"
 )
 
 func emptyState() state {
 	return state{
-		tenants: make(map[string]Tenant), nodes: make(map[string]Node),
+		tenants: make(map[string]Tenant), freezes: make(map[string]OperationalFreeze), nodes: make(map[string]Node),
 		credentials: make(map[string]controlauth.Credential), enrollments: make(map[string]controlauth.Enrollment),
 		commands: make(map[string]Command), captures: make(map[string]storedEvidenceCapture),
 		deployments: make(map[string]Deployment),
@@ -637,12 +682,16 @@ func (current state) clone() state {
 	for key, tenant := range current.tenants {
 		next.tenants[key] = tenant
 	}
+	for key, freeze := range current.freezes {
+		next.freezes[key] = freeze
+	}
 	for key, node := range current.nodes {
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
 		node.Capabilities = copyStringSlice(node.Capabilities)
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
 		node.Scheduling = cloneNodeScheduling(node.Scheduling)
 		node.Placement = cloneNodePlacement(node.Placement)
+		node.Drain = cloneNodeDrain(node.Drain)
 		next.nodes[key] = node
 	}
 	for key, credential := range current.credentials {
@@ -987,12 +1036,15 @@ func decodeCanonicalBase64(value string) ([]byte, error) {
 
 func encodeState(current state, limit int) ([]byte, error) {
 	snapshot := snapshotState{
-		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Nodes: []Node{}, Credentials: []storedCredential{},
+		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Freezes: []OperationalFreeze{}, Nodes: []Node{}, Credentials: []storedCredential{},
 		Enrollments: []storedEnrollment{}, Commands: []storedCommand{}, Captures: []storedEvidenceCapture{},
 		Deployments: []storedDeployment{},
 	}
 	for _, tenant := range current.tenants {
 		snapshot.Tenants = append(snapshot.Tenants, tenant)
+	}
+	for _, freeze := range current.freezes {
+		snapshot.Freezes = append(snapshot.Freezes, freeze)
 	}
 	for _, node := range current.nodes {
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
@@ -1018,6 +1070,10 @@ func encodeState(current state, limit int) ([]byte, error) {
 		snapshot.Deployments = append(snapshot.Deployments, deploymentToStored(deployment))
 	}
 	sort.Slice(snapshot.Tenants, func(i, j int) bool { return snapshot.Tenants[i].ID < snapshot.Tenants[j].ID })
+	sort.Slice(snapshot.Freezes, func(i, j int) bool {
+		return operationalFreezeKey(snapshot.Freezes[i].Scope, snapshot.Freezes[i].TenantID) <
+			operationalFreezeKey(snapshot.Freezes[j].Scope, snapshot.Freezes[j].TenantID)
+	})
 	sort.Slice(snapshot.Nodes, func(i, j int) bool { return snapshot.Nodes[i].ID < snapshot.Nodes[j].ID })
 	sort.Slice(snapshot.Credentials, func(i, j int) bool { return snapshot.Credentials[i].ID < snapshot.Credentials[j].ID })
 	sort.Slice(snapshot.Enrollments, func(i, j int) bool { return snapshot.Enrollments[i].ID < snapshot.Enrollments[j].ID })
@@ -1058,6 +1114,8 @@ func decodeState(raw []byte, limit int) (state, error) {
 	}
 	if snapshot.Version < stateFormatMinReadVersion || snapshot.Version > stateFormatMaxReadVersion ||
 		snapshot.Tenants == nil || snapshot.Nodes == nil ||
+		snapshot.Version >= stateFormatOperationalFreezeVersion && snapshot.Freezes == nil ||
+		snapshot.Version < stateFormatOperationalFreezeVersion && snapshot.Freezes != nil ||
 		snapshot.Credentials == nil || snapshot.Enrollments == nil || snapshot.Commands == nil ||
 		snapshot.Version >= stateFormatCaptureVersion && snapshot.Captures == nil ||
 		snapshot.Version < stateFormatCaptureVersion && snapshot.Captures != nil ||
@@ -1071,6 +1129,16 @@ func decodeState(raw []byte, limit int) (state, error) {
 			return state{}, errors.New("control snapshot contains a duplicate tenant")
 		}
 		current.tenants[tenant.ID] = tenant
+	}
+	for _, freeze := range snapshot.Freezes {
+		key := operationalFreezeKey(freeze.Scope, freeze.TenantID)
+		if key == "" || !validOperationalFreeze(freeze) {
+			return state{}, errors.New("control snapshot contains invalid operational freeze state")
+		}
+		if _, exists := current.freezes[key]; exists {
+			return state{}, errors.New("control snapshot contains a duplicate operational freeze")
+		}
+		current.freezes[key] = freeze
 	}
 	for _, node := range snapshot.Nodes {
 		if _, exists := current.nodes[node.ID]; exists {
@@ -1194,6 +1262,9 @@ func applyTransaction(current state, value transaction) (state, error) {
 		if change.Tenant != nil {
 			present++
 		}
+		if change.Freeze != nil {
+			present++
+		}
 		if change.Node != nil {
 			present++
 		}
@@ -1233,6 +1304,16 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("tenant mutation is missing tenant")
 			}
 			next.tenants[change.Tenant.ID] = *change.Tenant
+		case mutationOperationalFreeze:
+			if value.Version < transactionOperationalFreezeVersion || change.Freeze == nil ||
+				!validOperationalFreeze(*change.Freeze) {
+				return state{}, errors.New("operational freeze mutation is invalid for this transaction version")
+			}
+			key := operationalFreezeKey(change.Freeze.Scope, change.Freeze.TenantID)
+			if key == "" {
+				return state{}, errors.New("operational freeze mutation has invalid scope")
+			}
+			next.freezes[key] = *change.Freeze
 		case mutationNode:
 			if change.Node == nil {
 				return state{}, errors.New("node mutation is missing node")
@@ -1416,7 +1497,7 @@ func deploymentUsesRolloutFormat(deployment Deployment) bool {
 }
 
 func validateState(current state, limits Limits) error {
-	if len(current.tenants) > limits.MaxTenants || len(current.nodes) > limits.MaxNodes ||
+	if len(current.tenants) > limits.MaxTenants || len(current.freezes) > len(current.tenants)+1 || len(current.nodes) > limits.MaxNodes ||
 		len(current.credentials) > limits.MaxCredentials || len(current.enrollments) > limits.MaxEnrollments ||
 		len(current.commands) > limits.MaxCommands || len(current.captures) > MaxEvidenceCapturesRetained ||
 		len(current.deployments) > limits.MaxDeployments {
@@ -1425,6 +1506,22 @@ func validateState(current state, limits Limits) error {
 	for key, tenant := range current.tenants {
 		if key != tenant.ID || !validRecordID(tenant.ID, 128) || !validTimestamp(tenant.CreatedAt) {
 			return errors.New("control state contains an invalid tenant")
+		}
+	}
+	for key, freeze := range current.freezes {
+		if key != operationalFreezeKey(freeze.Scope, freeze.TenantID) || !validOperationalFreeze(freeze) {
+			return errors.New("control state contains an invalid operational freeze")
+		}
+		if freeze.Scope == OperationalFreezeTenant {
+			tenant, ok := current.tenants[freeze.TenantID]
+			if !ok {
+				return errors.New("tenant operational freeze references an unknown tenant")
+			}
+			created, _ := parseTimestamp(tenant.CreatedAt)
+			changed, _ := parseTimestamp(freeze.ChangedAt)
+			if changed.Before(created) {
+				return errors.New("tenant operational freeze predates tenant creation")
+			}
 		}
 	}
 	nodesByTenant := make(map[string]int)

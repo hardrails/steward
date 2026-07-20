@@ -194,6 +194,15 @@ A full durable store fails closed. Do not delete replay or evidence state merely
 restore availability. First preserve the relevant evidence and understand which
 replay or rollback guarantee the deletion would remove.
 
+An operational freeze is not revocation or an instant stop. It prevents Control
+from retaining and delivering new signed commands for one tenant or the whole
+site, and pauses reconciliation before the next command boundary. A command
+already leased to Executor may still complete, and a running workload keeps its
+existing identity, lease, and authority. Responders must separately quarantine a
+suspected node, revoke compromised credentials or delegations, and preserve
+evidence as the incident requires. Heartbeats, reports, and evidence remain open
+during a freeze so containment does not erase visibility.
+
 ## Desired-state reconciliation is intentionally narrow
 
 `stewardctl agent plan` performs deterministic filtering and scoring over a bounded

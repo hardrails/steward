@@ -740,6 +740,55 @@ issue a semantically equivalent replacement. `terminal_status: failed` is retain
 with the same fail-closed rule for compatibility. Current nodes report a proven
 pre-effect failure as `rejected`, which is safe to retire after acknowledgement.
 
+## Freeze new command delivery during an incident
+
+Use an operational freeze when new lifecycle commands must stop while responders
+investigate. A site freeze covers every tenant. A tenant freeze covers only that
+tenant, and a tenant operator can inspect and change only its own tenant freeze.
+
+With a saved tenant context, these commands act on that tenant:
+
+```console
+stewardctl control freeze status
+stewardctl control freeze set -reason "suspected credential compromise"
+stewardctl control freeze clear
+```
+
+A site administrator can act on one named tenant with `-tenant-id tenant-a`, or
+override a tenant saved in the current context and act on the whole site with
+`-site`:
+
+```console
+stewardctl control freeze set -site -reason "site incident investigation"
+stewardctl control freeze status -site
+stewardctl control freeze clear -site
+```
+
+The CLI reads the current revision before changing the record. The controller
+rejects a stale concurrent change instead of overwriting it. Automation that has
+already read the retained revision can pass it explicitly with `-revision`.
+Freeze and clear transitions, including exact retries, remain durable across a
+controller restart.
+
+A freeze blocks new command creation and delivery at command boundaries. It also
+pauses deployment reconciliation before the next lifecycle command. It does not
+recall a command already leased to a node, terminate a running workload, revoke a
+credential, cancel an external effect, or invalidate authority already accepted
+by Executor. Node heartbeats, terminal reports, and evidence continue so incident
+responders retain visibility.
+
+Use the narrower control that matches the incident:
+
+- Freeze the tenant or site when the controller must stop sending new work.
+- Quarantine a suspected node to stop placement and command delivery to that node.
+- Revoke a credential or delegated authority when that authority must no longer be
+  usable; do not treat a freeze as revocation.
+- Preserve evidence before destructive recovery work.
+
+The React console shows the effective site or tenant freeze at the top of every
+view. Freeze changes remain CLI/API operations so the browser does not gain a new
+incident-response mutation path.
+
 ## Inspect fleet operations and action-required findings
 
 The operations view combines retained controller facts into a bounded,

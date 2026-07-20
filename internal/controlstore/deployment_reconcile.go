@@ -20,6 +20,7 @@ import (
 type DeploymentFleetSnapshot struct {
 	Deployments []Deployment
 	Nodes       []Node
+	Freezes     []OperationalFreeze
 }
 
 type DeploymentCommandTransition struct {
@@ -54,6 +55,8 @@ const (
 	DeploymentBlockedDrainDisruptionBudget   DeploymentBlockedReason = "drain_disruption_budget_exhausted"
 	DeploymentBlockedRolloutDisruptionBudget DeploymentBlockedReason = "rollout_disruption_budget_exhausted"
 	DeploymentBlockedStatefulDrain           DeploymentBlockedReason = "stateful_drain_unsupported"
+	DeploymentBlockedSiteFrozen              DeploymentBlockedReason = "site_frozen"
+	DeploymentBlockedTenantFrozen            DeploymentBlockedReason = "tenant_frozen"
 	deploymentCommandRecordMissing                                   = "deployment_command_record_missing"
 )
 
@@ -123,12 +126,16 @@ func (store *Store) SnapshotDeploymentFleet() (DeploymentFleetSnapshot, error) {
 	snapshot := DeploymentFleetSnapshot{
 		Deployments: make([]Deployment, 0, len(store.current.deployments)),
 		Nodes:       make([]Node, 0, len(store.current.nodes)),
+		Freezes:     make([]OperationalFreeze, 0, len(store.current.freezes)),
 	}
 	for _, deployment := range store.current.deployments {
 		snapshot.Deployments = append(snapshot.Deployments, cloneDeployment(deployment))
 	}
 	for _, node := range store.current.nodes {
 		snapshot.Nodes = append(snapshot.Nodes, cloneNode(node))
+	}
+	for _, freeze := range store.current.freezes {
+		snapshot.Freezes = append(snapshot.Freezes, freeze)
 	}
 	sort.Slice(snapshot.Deployments, func(i, j int) bool {
 		if snapshot.Deployments[i].TenantID != snapshot.Deployments[j].TenantID {
@@ -137,6 +144,10 @@ func (store *Store) SnapshotDeploymentFleet() (DeploymentFleetSnapshot, error) {
 		return snapshot.Deployments[i].ID < snapshot.Deployments[j].ID
 	})
 	sort.Slice(snapshot.Nodes, func(i, j int) bool { return snapshot.Nodes[i].ID < snapshot.Nodes[j].ID })
+	sort.Slice(snapshot.Freezes, func(i, j int) bool {
+		return operationalFreezeKey(snapshot.Freezes[i].Scope, snapshot.Freezes[i].TenantID) <
+			operationalFreezeKey(snapshot.Freezes[j].Scope, snapshot.Freezes[j].TenantID)
+	})
 	return snapshot, nil
 }
 
@@ -168,6 +179,9 @@ func (store *Store) EnqueueDeploymentCommand(
 	}
 	if deployment.Revision != input.ExpectedRevision {
 		return Deployment{}, Command{}, false, ErrConflict
+	}
+	if freeze, frozen := effectiveOperationalFreezeMap(store.current.freezes, input.TenantID); frozen {
+		return Deployment{}, Command{}, false, newOperationalFreezeError(freeze)
 	}
 	instanceIndex := deploymentInstanceIndex(deployment.Instances, input.InstanceID)
 	if instanceIndex < 0 {
@@ -730,7 +744,7 @@ func validDeploymentBlockedReason(reason DeploymentBlockedReason) bool {
 		DeploymentBlockedSchedulingUnavailable, DeploymentBlockedPlacementConstraints,
 		DeploymentBlockedWorkloadLimit, DeploymentBlockedNodeCapacity, DeploymentBlockedTenantCapacity,
 		DeploymentBlockedDrainDisruptionBudget, DeploymentBlockedRolloutDisruptionBudget,
-		DeploymentBlockedStatefulDrain:
+		DeploymentBlockedStatefulDrain, DeploymentBlockedSiteFrozen, DeploymentBlockedTenantFrozen:
 		return true
 	default:
 		return false

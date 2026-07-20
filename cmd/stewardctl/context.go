@@ -73,6 +73,9 @@ var controlContextCommands = map[string]controlContextCommandSpec{
 	"node cancel-drain":       {network: true, token: true},
 	"node-credential revoke":  {network: true, token: true},
 	"operations status":       {network: true, token: true, tenant: true},
+	"freeze status":           {network: true, token: true, tenant: true},
+	"freeze set":              {network: true, token: true, tenant: true},
+	"freeze clear":            {network: true, token: true, tenant: true},
 	"attention list":          {network: true, token: true, tenant: true},
 	"agent list":              {network: true, token: true, tenant: true, node: true},
 	"command submit":          {network: true, token: true, tenant: true, node: true},
@@ -335,7 +338,8 @@ func applyCLIContext(arguments []string) ([]string, error) {
 	if err != nil || disabled {
 		return arguments, err
 	}
-	spec, found := controlContextCommands[arguments[0]+" "+arguments[1]]
+	commandKey := arguments[0] + " " + arguments[1]
+	spec, found := controlContextCommands[commandKey]
 	if !found || !spec.network {
 		return arguments, nil
 	}
@@ -356,7 +360,7 @@ func applyCLIContext(arguments []string) ([]string, error) {
 	if spec.token {
 		result = injectContextFlag(result, "token-file", selected.TokenFile)
 	}
-	if spec.tenant {
+	if spec.tenant && (!strings.HasPrefix(commandKey, "freeze ") || !hasNamedFlag(result[2:], "site")) {
 		result = injectContextFlag(result, "tenant-id", selected.TenantID)
 	}
 	if spec.node {

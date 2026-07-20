@@ -86,6 +86,17 @@ response cannot retain pre-session authority indefinitely.
 
 ## Read the six views
 
+Every view starts with the effective command-delivery state for the selected
+scope. A green banner means Control may deliver new commands. A red striped banner
+shows whether the whole site or the selected tenant is frozen, together with the
+retained reason, revision, and change time. The banner also states the important
+limit: already accepted work is not instantly revoked, while heartbeats, reports,
+and evidence continue.
+
+The console does not set or clear a freeze. Use the authenticated
+`stewardctl control freeze` workflow described in
+[Freeze new command delivery during an incident]({{ '/guides/control-plane/' | relative_url }}#freeze-new-command-delivery-during-an-incident).
+
 | View | What it shows | What it omits |
 | --- | --- | --- |
 | Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, and retained-state capacity | Mutation controls and raw evidence frames |
