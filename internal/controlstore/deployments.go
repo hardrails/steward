@@ -120,6 +120,12 @@ func (store *Store) ApplyDeployment(
 		if !containsCapability(node.Capabilities, controlprotocol.ExecutorCapabilityStateSnapshotsV1) {
 			return Deployment{}, false, invalid("deployment fork source node does not advertise qualified snapshots")
 		}
+		quarantine := store.current.quarantines[snapshotQuarantineKey(
+			input.TenantID, input.Fork.SourceNodeID, input.Fork.SnapshotID,
+		)]
+		if quarantine.Quarantined {
+			return Deployment{}, false, ErrSnapshotQuarantined
+		}
 	}
 	if input.Fork != nil && input.Fork.ExpiresAt != "" {
 		expires, _ := time.Parse(time.RFC3339Nano, input.Fork.ExpiresAt)

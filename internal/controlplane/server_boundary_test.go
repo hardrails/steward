@@ -364,6 +364,7 @@ func TestControlPlaneFailsClosedOnPanicsUnavailableStateAndEncodingBounds(t *tes
 		{controlstore.ErrNotFound, http.StatusNotFound, "not_found", false},
 		{controlstore.ErrInvalid, http.StatusBadRequest, "invalid_request", false},
 		{controlstore.ErrCapacityExceeded, http.StatusServiceUnavailable, "capacity_exceeded", false},
+		{controlstore.ErrSnapshotQuarantined, http.StatusLocked, "snapshot_quarantined", false},
 		{controlstore.ErrUnavailable, http.StatusServiceUnavailable, "not_ready", false},
 		{errors.New("unexpected"), http.StatusInternalServerError, "internal_error", false},
 	} {

@@ -418,8 +418,9 @@ supportable through one coherent operational surface.
 - Add OpenBao and SPIFFE/SPIRE reference integrations with rotation and freshness
   policy while retaining protected-file materialization.
 - Add a connector conformance kit and two or three anchor connectors.
-- Add site and tenant freeze, capability revoke, snapshot quarantine, and one
-  incident/evidence timeline.
+- Extend the implemented site and tenant freeze, node quarantine, snapshot
+  quarantine, and metadata-only support bundle with capability revocation and one
+  coherent incident/evidence timeline.
 - Finish the React console, concise CLI, autocomplete, SDK/API examples, Terraform
   modules, progressive documentation, packaging, migrations, upgrade tests, and
   release evidence.

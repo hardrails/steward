@@ -833,6 +833,8 @@ Use the narrower control that matches the incident:
 
 - Freeze the tenant or site when the controller must stop sending new work.
 - Quarantine a suspected node to stop placement and command delivery to that node.
+- Quarantine one snapshot when its state may be contaminated but its source node
+  should otherwise remain usable.
 - Revoke a credential or delegated authority when that authority must no longer be
   usable; do not treat a freeze as revocation.
 - Preserve evidence before destructive recovery work.
@@ -840,6 +842,37 @@ Use the narrower control that matches the incident:
 The React console shows the effective site or tenant freeze at the top of every
 view. Freeze changes remain CLI/API operations so the browser does not gain a new
 incident-response mutation path.
+
+### Prevent new forks from a suspect snapshot
+
+Snapshot quarantine is the narrowest containment control for persistent state.
+It binds the tenant, source node, and snapshot identity, so a snapshot with the
+same name in another tenant or on another node is unaffected.
+
+```console
+stewardctl control snapshot status \
+  -tenant-id tenant-a -node-id node-a -snapshot-id snapshot-a
+
+stewardctl control snapshot quarantine \
+  -tenant-id tenant-a -node-id node-a -snapshot-id snapshot-a \
+  -reason "untrusted content may have entered agent state"
+```
+
+The CLI reads the retained revision before changing the record. A new fork from
+that exact snapshot then fails with `snapshot_quarantined`. Existing forks and
+running workloads are unchanged because their admission and cloned state already
+exist. Preserve evidence and use node quarantine, freeze, revocation, or workload
+cleanup separately when the incident is broader.
+
+After investigation, clear the gate explicitly:
+
+```console
+stewardctl control snapshot unquarantine \
+  -tenant-id tenant-a -node-id node-a -snapshot-id snapshot-a
+```
+
+The cleared record remains durable with a higher revision. This prevents an old
+operator view from silently restoring an earlier decision after restart.
 
 ### Preserve a metadata-only support bundle
 

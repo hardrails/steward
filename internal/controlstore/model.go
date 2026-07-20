@@ -27,37 +27,39 @@ import (
 )
 
 const (
-	stateFormatMinReadVersion           = 1
-	stateFormatWriteVersion             = 13
-	stateFormatMaxReadVersion           = stateFormatWriteVersion
-	stateFormatEvidenceVersion          = 2
-	stateFormatExecutorV4Version        = 3
-	stateFormatCaptureVersion           = 4
-	stateFormatDeploymentVersion        = 5
-	stateFormatWorkloadLeaseVersion     = 6
-	stateFormatSchedulingVersion        = 7
-	stateFormatNodePlacementVersion     = 8
-	stateFormatFleetOperationsVersion   = 9
-	stateFormatRolloutVersion           = 10
-	stateFormatOperationalFreezeVersion = 11
-	stateFormatTenantQuotaVersion       = 12
-	stateFormatForkLifecycleVersion     = 13
-	transactionFormatMinReadVersion     = 1
-	transactionFormatWriteVersion       = 13
-	transactionFormatMaxReadVersion     = transactionFormatWriteVersion
-	transactionEvidenceVersion          = 2
-	transactionExecutorV4Version        = 3
-	transactionCaptureVersion           = 4
-	transactionDeploymentVersion        = 5
-	transactionWorkloadLeaseVersion     = 6
-	transactionSchedulingVersion        = 7
-	transactionNodePlacementVersion     = 8
-	transactionFleetOperationsVersion   = 9
-	transactionRolloutVersion           = 10
-	transactionOperationalFreezeVersion = 11
-	transactionTenantQuotaVersion       = 12
-	transactionForkLifecycleVersion     = 13
-	maxMutationsPerRecord               = 128
+	stateFormatMinReadVersion            = 1
+	stateFormatWriteVersion              = 14
+	stateFormatMaxReadVersion            = stateFormatWriteVersion
+	stateFormatEvidenceVersion           = 2
+	stateFormatExecutorV4Version         = 3
+	stateFormatCaptureVersion            = 4
+	stateFormatDeploymentVersion         = 5
+	stateFormatWorkloadLeaseVersion      = 6
+	stateFormatSchedulingVersion         = 7
+	stateFormatNodePlacementVersion      = 8
+	stateFormatFleetOperationsVersion    = 9
+	stateFormatRolloutVersion            = 10
+	stateFormatOperationalFreezeVersion  = 11
+	stateFormatTenantQuotaVersion        = 12
+	stateFormatForkLifecycleVersion      = 13
+	stateFormatSnapshotQuarantineVersion = 14
+	transactionFormatMinReadVersion      = 1
+	transactionFormatWriteVersion        = 14
+	transactionFormatMaxReadVersion      = transactionFormatWriteVersion
+	transactionEvidenceVersion           = 2
+	transactionExecutorV4Version         = 3
+	transactionCaptureVersion            = 4
+	transactionDeploymentVersion         = 5
+	transactionWorkloadLeaseVersion      = 6
+	transactionSchedulingVersion         = 7
+	transactionNodePlacementVersion      = 8
+	transactionFleetOperationsVersion    = 9
+	transactionRolloutVersion            = 10
+	transactionOperationalFreezeVersion  = 11
+	transactionTenantQuotaVersion        = 12
+	transactionForkLifecycleVersion      = 13
+	transactionSnapshotQuarantineVersion = 14
+	maxMutationsPerRecord                = 128
 
 	MaxEvidenceCapturesActive        = 16
 	MaxEvidenceCapturesRetained      = 256
@@ -78,6 +80,7 @@ var (
 	ErrUnavailable         = errors.New("control store requires recovery after a durable write failure")
 	ErrInvalid             = errors.New("control request is invalid")
 	ErrOperationallyFrozen = errors.New("control command delivery is operationally frozen")
+	ErrSnapshotQuarantined = errors.New("control snapshot is quarantined")
 	ErrForbidden           = controlauth.ErrForbidden
 )
 
@@ -198,6 +201,19 @@ type OperationalFreeze struct {
 	Revision  uint64                 `json:"revision"`
 	Reason    string                 `json:"reason,omitempty"`
 	ChangedAt string                 `json:"changed_at"`
+}
+
+// SnapshotQuarantine is an optimistic incident decision over one exact
+// tenant/node/snapshot tuple. Cleared records remain durable so a stale request
+// cannot silently restore a prior decision.
+type SnapshotQuarantine struct {
+	TenantID    string `json:"tenant_id"`
+	NodeID      string `json:"node_id"`
+	SnapshotID  string `json:"snapshot_id"`
+	Quarantined bool   `json:"quarantined"`
+	Revision    uint64 `json:"revision"`
+	Reason      string `json:"reason,omitempty"`
+	ChangedAt   string `json:"changed_at"`
 }
 
 type Node struct {
@@ -566,6 +582,7 @@ type snapshotState struct {
 	Version     int                     `json:"version"`
 	Tenants     []Tenant                `json:"tenants"`
 	Freezes     []OperationalFreeze     `json:"freezes"`
+	Quarantines []SnapshotQuarantine    `json:"snapshot_quarantines"`
 	Nodes       []Node                  `json:"nodes"`
 	Credentials []storedCredential      `json:"credentials"`
 	Enrollments []storedEnrollment      `json:"enrollments"`
@@ -654,6 +671,7 @@ type storedDeploymentRollout struct {
 type state struct {
 	tenants     map[string]Tenant
 	freezes     map[string]OperationalFreeze
+	quarantines map[string]SnapshotQuarantine
 	nodes       map[string]Node
 	credentials map[string]controlauth.Credential
 	enrollments map[string]controlauth.Enrollment
@@ -671,6 +689,7 @@ type mutation struct {
 	Kind         string                 `json:"kind"`
 	Tenant       *Tenant                `json:"tenant,omitempty"`
 	Freeze       *OperationalFreeze     `json:"freeze,omitempty"`
+	Quarantine   *SnapshotQuarantine    `json:"snapshot_quarantine,omitempty"`
 	Node         *Node                  `json:"node,omitempty"`
 	Credential   *storedCredential      `json:"credential,omitempty"`
 	Enrollment   *storedEnrollment      `json:"enrollment,omitempty"`
@@ -695,23 +714,25 @@ type nodeRevocation struct {
 }
 
 const (
-	mutationTenant            = "tenant_upsert"
-	mutationOperationalFreeze = "operational_freeze_upsert"
-	mutationNode              = "node_upsert"
-	mutationCredential        = "credential_upsert"
-	mutationEnrollment        = "enrollment_upsert"
-	mutationCommand           = "command_upsert"
-	mutationEnrollmentDelete  = "enrollment_delete"
-	mutationCommandDelete     = "command_delete"
-	mutationNodeRevoke        = "node_revoke"
-	mutationCapture           = "evidence_capture_upsert"
-	mutationCaptureDelete     = "evidence_capture_delete"
-	mutationDeployment        = "deployment_upsert"
+	mutationTenant             = "tenant_upsert"
+	mutationOperationalFreeze  = "operational_freeze_upsert"
+	mutationSnapshotQuarantine = "snapshot_quarantine_upsert"
+	mutationNode               = "node_upsert"
+	mutationCredential         = "credential_upsert"
+	mutationEnrollment         = "enrollment_upsert"
+	mutationCommand            = "command_upsert"
+	mutationEnrollmentDelete   = "enrollment_delete"
+	mutationCommandDelete      = "command_delete"
+	mutationNodeRevoke         = "node_revoke"
+	mutationCapture            = "evidence_capture_upsert"
+	mutationCaptureDelete      = "evidence_capture_delete"
+	mutationDeployment         = "deployment_upsert"
 )
 
 func emptyState() state {
 	return state{
-		tenants: make(map[string]Tenant), freezes: make(map[string]OperationalFreeze), nodes: make(map[string]Node),
+		tenants: make(map[string]Tenant), freezes: make(map[string]OperationalFreeze),
+		quarantines: make(map[string]SnapshotQuarantine), nodes: make(map[string]Node),
 		credentials: make(map[string]controlauth.Credential), enrollments: make(map[string]controlauth.Enrollment),
 		commands: make(map[string]Command), captures: make(map[string]storedEvidenceCapture),
 		deployments: make(map[string]Deployment),
@@ -725,6 +746,9 @@ func (current state) clone() state {
 	}
 	for key, freeze := range current.freezes {
 		next.freezes[key] = freeze
+	}
+	for key, quarantine := range current.quarantines {
+		next.quarantines[key] = quarantine
 	}
 	for key, node := range current.nodes {
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
@@ -1083,7 +1107,7 @@ func decodeCanonicalBase64(value string) ([]byte, error) {
 
 func encodeState(current state, limit int) ([]byte, error) {
 	snapshot := snapshotState{
-		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Freezes: []OperationalFreeze{}, Nodes: []Node{}, Credentials: []storedCredential{},
+		Version: stateFormatWriteVersion, Tenants: []Tenant{}, Freezes: []OperationalFreeze{}, Quarantines: []SnapshotQuarantine{}, Nodes: []Node{}, Credentials: []storedCredential{},
 		Enrollments: []storedEnrollment{}, Commands: []storedCommand{}, Captures: []storedEvidenceCapture{},
 		Deployments: []storedDeployment{},
 	}
@@ -1092,6 +1116,9 @@ func encodeState(current state, limit int) ([]byte, error) {
 	}
 	for _, freeze := range current.freezes {
 		snapshot.Freezes = append(snapshot.Freezes, freeze)
+	}
+	for _, quarantine := range current.quarantines {
+		snapshot.Quarantines = append(snapshot.Quarantines, quarantine)
 	}
 	for _, node := range current.nodes {
 		node.TenantIDs = append([]string(nil), node.TenantIDs...)
@@ -1120,6 +1147,10 @@ func encodeState(current state, limit int) ([]byte, error) {
 	sort.Slice(snapshot.Freezes, func(i, j int) bool {
 		return operationalFreezeKey(snapshot.Freezes[i].Scope, snapshot.Freezes[i].TenantID) <
 			operationalFreezeKey(snapshot.Freezes[j].Scope, snapshot.Freezes[j].TenantID)
+	})
+	sort.Slice(snapshot.Quarantines, func(i, j int) bool {
+		return snapshotQuarantineKey(snapshot.Quarantines[i].TenantID, snapshot.Quarantines[i].NodeID, snapshot.Quarantines[i].SnapshotID) <
+			snapshotQuarantineKey(snapshot.Quarantines[j].TenantID, snapshot.Quarantines[j].NodeID, snapshot.Quarantines[j].SnapshotID)
 	})
 	sort.Slice(snapshot.Nodes, func(i, j int) bool { return snapshot.Nodes[i].ID < snapshot.Nodes[j].ID })
 	sort.Slice(snapshot.Credentials, func(i, j int) bool { return snapshot.Credentials[i].ID < snapshot.Credentials[j].ID })
@@ -1163,6 +1194,8 @@ func decodeState(raw []byte, limit int) (state, error) {
 		snapshot.Tenants == nil || snapshot.Nodes == nil ||
 		snapshot.Version >= stateFormatOperationalFreezeVersion && snapshot.Freezes == nil ||
 		snapshot.Version < stateFormatOperationalFreezeVersion && snapshot.Freezes != nil ||
+		snapshot.Version >= stateFormatSnapshotQuarantineVersion && snapshot.Quarantines == nil ||
+		snapshot.Version < stateFormatSnapshotQuarantineVersion && snapshot.Quarantines != nil ||
 		snapshot.Credentials == nil || snapshot.Enrollments == nil || snapshot.Commands == nil ||
 		snapshot.Version >= stateFormatCaptureVersion && snapshot.Captures == nil ||
 		snapshot.Version < stateFormatCaptureVersion && snapshot.Captures != nil ||
@@ -1189,6 +1222,16 @@ func decodeState(raw []byte, limit int) (state, error) {
 			return state{}, errors.New("control snapshot contains a duplicate operational freeze")
 		}
 		current.freezes[key] = freeze
+	}
+	for _, quarantine := range snapshot.Quarantines {
+		key := snapshotQuarantineKey(quarantine.TenantID, quarantine.NodeID, quarantine.SnapshotID)
+		if key == "" || !validSnapshotQuarantine(quarantine) {
+			return state{}, errors.New("control snapshot contains invalid snapshot quarantine state")
+		}
+		if _, exists := current.quarantines[key]; exists {
+			return state{}, errors.New("control snapshot contains a duplicate snapshot quarantine")
+		}
+		current.quarantines[key] = quarantine
 	}
 	for _, node := range snapshot.Nodes {
 		if _, exists := current.nodes[node.ID]; exists {
@@ -1321,6 +1364,9 @@ func applyTransaction(current state, value transaction) (state, error) {
 		if change.Node != nil {
 			present++
 		}
+		if change.Quarantine != nil {
+			present++
+		}
 		if change.Credential != nil {
 			present++
 		}
@@ -1370,6 +1416,16 @@ func applyTransaction(current state, value transaction) (state, error) {
 				return state{}, errors.New("operational freeze mutation has invalid scope")
 			}
 			next.freezes[key] = *change.Freeze
+		case mutationSnapshotQuarantine:
+			if value.Version < transactionSnapshotQuarantineVersion || change.Quarantine == nil ||
+				!validSnapshotQuarantine(*change.Quarantine) {
+				return state{}, errors.New("snapshot quarantine mutation is invalid for this transaction version")
+			}
+			key := snapshotQuarantineKey(change.Quarantine.TenantID, change.Quarantine.NodeID, change.Quarantine.SnapshotID)
+			if key == "" {
+				return state{}, errors.New("snapshot quarantine mutation has invalid identity")
+			}
+			next.quarantines[key] = *change.Quarantine
 		case mutationNode:
 			if change.Node == nil {
 				return state{}, errors.New("node mutation is missing node")
@@ -1570,7 +1626,8 @@ func deploymentUsesForkLifecycleFormat(deployment Deployment) bool {
 }
 
 func validateState(current state, limits Limits) error {
-	if len(current.tenants) > limits.MaxTenants || len(current.freezes) > len(current.tenants)+1 || len(current.nodes) > limits.MaxNodes ||
+	if len(current.tenants) > limits.MaxTenants || len(current.freezes) > len(current.tenants)+1 ||
+		len(current.quarantines) > MaxSnapshotQuarantines || len(current.nodes) > limits.MaxNodes ||
 		len(current.credentials) > limits.MaxCredentials || len(current.enrollments) > limits.MaxEnrollments ||
 		len(current.commands) > limits.MaxCommands || len(current.captures) > MaxEvidenceCapturesRetained ||
 		len(current.deployments) > limits.MaxDeployments {
@@ -1605,6 +1662,27 @@ func validateState(current state, limits Limits) error {
 			if changed.Before(created) {
 				return errors.New("tenant operational freeze predates tenant creation")
 			}
+		}
+	}
+	quarantinesByTenant := make(map[string]int)
+	for key, quarantine := range current.quarantines {
+		if key != snapshotQuarantineKey(quarantine.TenantID, quarantine.NodeID, quarantine.SnapshotID) ||
+			!validSnapshotQuarantine(quarantine) {
+			return errors.New("control state contains an invalid snapshot quarantine")
+		}
+		tenant, tenantOK := current.tenants[quarantine.TenantID]
+		node, nodeOK := current.nodes[quarantine.NodeID]
+		if !tenantOK || !nodeOK || !tenantMember(node.TenantIDs, quarantine.TenantID) {
+			return errors.New("snapshot quarantine references an unknown tenant node")
+		}
+		created, _ := parseTimestamp(tenant.CreatedAt)
+		changed, _ := parseTimestamp(quarantine.ChangedAt)
+		if changed.Before(created) {
+			return errors.New("snapshot quarantine predates tenant creation")
+		}
+		quarantinesByTenant[quarantine.TenantID]++
+		if quarantinesByTenant[quarantine.TenantID] > MaxSnapshotQuarantinesPerTenant {
+			return ErrCapacityExceeded
 		}
 	}
 	nodesByTenant := make(map[string]int)

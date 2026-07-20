@@ -696,6 +696,7 @@ func TestEvidenceCaptureFormatFourStrictlyMigratesLegacyState(t *testing.T) {
 	legacyVersion, _ := json.Marshal(stateFormatExecutorV4Version)
 	legacyObject["version"] = legacyVersion
 	delete(legacyObject, "freezes")
+	delete(legacyObject, "snapshot_quarantines")
 	delete(legacyObject, "captures")
 	delete(legacyObject, "deployments")
 	legacyRaw, err := json.Marshal(legacyObject)
@@ -708,6 +709,7 @@ func TestEvidenceCaptureFormatFourStrictlyMigratesLegacyState(t *testing.T) {
 	}
 
 	snapshot.Version = stateFormatExecutorV4Version
+	snapshot.Quarantines = nil
 	snapshot.Freezes = nil
 	snapshot.Deployments = nil
 	legacyWithCapture, err := json.Marshal(snapshot)

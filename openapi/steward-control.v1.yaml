@@ -1296,6 +1296,8 @@ paths:
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
+        "423":
+          $ref: "#/components/responses/SnapshotQuarantined"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1393,6 +1395,77 @@ paths:
           $ref: "#/components/responses/NotFound"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/nodes/{node_id}/snapshots/{snapshot_id}/quarantine:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/NodeID"
+      - $ref: "#/components/parameters/SnapshotID"
+    get:
+      tags: [deployments]
+      operationId: getSnapshotQuarantine
+      summary: Inspect the durable admission gate for one snapshot
+      description: |
+        Returns the retained optimistic revision, if any, and whether this exact
+        tenant, source node, and snapshot identity may seed a new fork. The
+        response does not read, delete, or validate snapshot bytes.
+      responses:
+        "200":
+          description: Snapshot quarantine status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotQuarantineStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      tags: [deployments]
+      operationId: changeSnapshotQuarantine
+      summary: Quarantine or clear one snapshot fork source
+      description: |
+        Retains a tenant-scoped incident decision using optimistic revisions.
+        Quarantine prevents new forks from this exact snapshot. It does not
+        revoke an already-created fork, delete storage, or stop a workload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SnapshotQuarantineRequest"
+      responses:
+        "200":
+          description: Retained status after the transition or exact retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotQuarantineChange"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -2098,6 +2171,12 @@ components:
       required: true
       schema:
         $ref: "#/components/schemas/Identifier128"
+    SnapshotID:
+      name: snapshot_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier128"
     CredentialID:
       name: credential_id
       in: path
@@ -2432,6 +2511,12 @@ components:
             $ref: "#/components/schemas/Error"
     OperationallyFrozen:
       description: A site or tenant incident gate currently prevents new command delivery for this scope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    SnapshotQuarantined:
+      description: The exact source snapshot is quarantined and cannot seed a new fork.
       content:
         application/json:
           schema:
@@ -3197,6 +3282,100 @@ components:
       properties:
         status:
           $ref: "#/components/schemas/OperationalFreezeStatus"
+        changed:
+          type: boolean
+    SnapshotQuarantine:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, node_id, snapshot_id, quarantined, revision, changed_at]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        snapshot_id:
+          $ref: "#/components/schemas/Identifier128"
+        quarantined:
+          type: boolean
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^\S(?:[^\r\n\x00]*\S)?$'
+        changed_at:
+          type: string
+          format: date-time
+      oneOf:
+        - required: [reason]
+          properties:
+            quarantined:
+              type: boolean
+              enum: [true]
+        - properties:
+            quarantined:
+              type: boolean
+              enum: [false]
+          not:
+            required: [reason]
+      description: |
+        One retained fork-admission decision. Cleared records remain so revision
+        history cannot be reset by deleting and recreating the same identity.
+    SnapshotQuarantineStatus:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, node_id, snapshot_id, blocked]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        snapshot_id:
+          $ref: "#/components/schemas/Identifier128"
+        record:
+          $ref: "#/components/schemas/SnapshotQuarantine"
+        blocked:
+          type: boolean
+      description: "`blocked` is true exactly when the retained record is quarantined."
+    SnapshotQuarantineRequest:
+      type: object
+      additionalProperties: false
+      required: [action, expected_revision]
+      properties:
+        action:
+          type: string
+          enum: [quarantine, clear]
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 0
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^\S(?:[^\r\n\x00]*\S)?$'
+      oneOf:
+        - required: [reason]
+          properties:
+            action:
+              type: string
+              enum: [quarantine]
+        - properties:
+            action:
+              type: string
+              enum: [clear]
+          not:
+            required: [reason]
+    SnapshotQuarantineChange:
+      type: object
+      additionalProperties: false
+      required: [status, changed]
+      properties:
+        status:
+          $ref: "#/components/schemas/SnapshotQuarantineStatus"
         changed:
           type: boolean
     TenantList:

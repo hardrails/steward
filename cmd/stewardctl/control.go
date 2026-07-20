@@ -70,6 +70,12 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlNodeDrain(arguments[2:], stdout, true)
 	case "node-credential revoke":
 		return controlNodeCredentialRevoke(arguments[2:], stdout)
+	case "snapshot status":
+		return controlSnapshotQuarantineStatus(arguments[2:], stdout)
+	case "snapshot quarantine":
+		return controlSnapshotQuarantineChange(arguments[2:], stdout, controlstore.SnapshotQuarantineActionSet)
+	case "snapshot unquarantine":
+		return controlSnapshotQuarantineChange(arguments[2:], stdout, controlstore.SnapshotQuarantineActionClear)
 	case "operations status":
 		return controlOperationsStatus(arguments[2:], stdout)
 	case "quota status":
@@ -122,7 +128,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, operations status, quota status|set|clear, freeze status|set|clear, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, snapshot status|quarantine|unquarantine, operations status, quota status|set|clear, freeze status|set|clear, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
 }
 
 type controlFlags struct {

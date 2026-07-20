@@ -160,6 +160,7 @@ func TestSchedulingFormatRejectsLegacyStateSmuggling(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.Version = stateFormatWorkloadLeaseVersion
+	snapshot.Quarantines = nil
 	snapshot.Freezes = nil
 	smuggled, err := json.Marshal(snapshot)
 	if err != nil {

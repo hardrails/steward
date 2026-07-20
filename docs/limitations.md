@@ -326,6 +326,12 @@ Never place credentials, task permits, receipt keys, live tokens, runtime IDs,
 network sessions, or random-number-generator state in a snapshot. A fork receives
 fresh authority through normal admission.
 
+Snapshot quarantine prevents only new forks from one exact tenant, source node,
+and snapshot identity. It does not scan the snapshot, prove contamination, delete
+storage, revoke an already-created fork, stop a running workload, or contain the
+source node. Cleared records remain and count toward the bounded per-tenant
+retention limit so revision history cannot be reset by deleting a decision.
+
 ## Current product scope
 
 Steward is not:

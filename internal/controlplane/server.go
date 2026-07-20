@@ -124,6 +124,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures/{capture_id}/export", server.evidenceCaptureExport)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes", server.nodes)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}", server.node)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/snapshots/{snapshot_id}/quarantine", server.snapshotQuarantine)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands", server.commands)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/nodes/{node_id}/commands/{command_id}", server.command)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/deployments", server.deployments)
@@ -1191,6 +1192,8 @@ func (server *Server) storeError(writer http.ResponseWriter, err error, hideForb
 		writeError(writer, http.StatusServiceUnavailable, "capacity_exceeded", "bounded control-plane capacity is exhausted")
 	case errors.Is(err, controlstore.ErrOperationallyFrozen):
 		writeError(writer, http.StatusLocked, "operationally_frozen", "new command delivery is frozen for this scope")
+	case errors.Is(err, controlstore.ErrSnapshotQuarantined):
+		writeError(writer, http.StatusLocked, "snapshot_quarantined", "snapshot is quarantined and cannot seed a new fork")
 	case errors.Is(err, controlstore.ErrUnavailable):
 		writeError(writer, http.StatusServiceUnavailable, "not_ready", "durable control state requires recovery")
 	default:

@@ -396,6 +396,7 @@ func TestFleetOperationsFormatRejectsLegacySmuggling(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.Version = stateFormatNodePlacementVersion
+	snapshot.Quarantines = nil
 	snapshot.Freezes = nil
 	legacy, err := json.Marshal(snapshot)
 	if err != nil {
@@ -430,6 +431,7 @@ func TestFleetOperationsFormatRejectsLegacySmuggling(t *testing.T) {
 		t.Fatal(err)
 	}
 	deploymentSnapshot.Version = stateFormatNodePlacementVersion
+	deploymentSnapshot.Quarantines = nil
 	deploymentSnapshot.Freezes = nil
 	smuggled, err := json.Marshal(deploymentSnapshot)
 	if err != nil {

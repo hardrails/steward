@@ -174,6 +174,11 @@ type TenantResourceQuotaChange struct {
 	Changed bool                                   `json:"changed"`
 }
 
+type SnapshotQuarantineChange struct {
+	Status  controlstore.SnapshotQuarantineStatus `json:"status"`
+	Changed bool                                  `json:"changed"`
+}
+
 type NodeList struct {
 	Nodes     []Node `json:"nodes"`
 	NextAfter string `json:"next_after,omitempty"`
@@ -609,6 +614,49 @@ func (c *Client) ChangeOperationalFreeze(
 	}
 	if err := validateOperationalFreezeStatus(change.Status, tenantID); err != nil {
 		return OperationalFreezeChange{}, err
+	}
+	return change, nil
+}
+
+func (c *Client) GetSnapshotQuarantine(
+	ctx context.Context,
+	tenantID, nodeID, snapshotID string,
+) (controlstore.SnapshotQuarantineStatus, error) {
+	path, err := snapshotQuarantinePath(tenantID, nodeID, snapshotID)
+	if err != nil {
+		return controlstore.SnapshotQuarantineStatus{}, err
+	}
+	var status controlstore.SnapshotQuarantineStatus
+	if err := c.do(ctx, http.MethodGet, path, nil, &status, true); err != nil {
+		return controlstore.SnapshotQuarantineStatus{}, err
+	}
+	if err := validateSnapshotQuarantineStatus(status, tenantID, nodeID, snapshotID); err != nil {
+		return controlstore.SnapshotQuarantineStatus{}, err
+	}
+	return status, nil
+}
+
+func (c *Client) ChangeSnapshotQuarantine(
+	ctx context.Context,
+	tenantID, nodeID, snapshotID string,
+	action controlstore.SnapshotQuarantineAction,
+	expectedRevision uint64,
+	reason string,
+) (SnapshotQuarantineChange, error) {
+	path, err := snapshotQuarantinePath(tenantID, nodeID, snapshotID)
+	if err != nil {
+		return SnapshotQuarantineChange{}, err
+	}
+	var change SnapshotQuarantineChange
+	if err := c.do(ctx, http.MethodPut, path, struct {
+		Action           controlstore.SnapshotQuarantineAction `json:"action"`
+		ExpectedRevision uint64                                `json:"expected_revision"`
+		Reason           string                                `json:"reason,omitempty"`
+	}{Action: action, ExpectedRevision: expectedRevision, Reason: reason}, &change, true); err != nil {
+		return SnapshotQuarantineChange{}, err
+	}
+	if err := validateSnapshotQuarantineStatus(change.Status, tenantID, nodeID, snapshotID); err != nil {
+		return SnapshotQuarantineChange{}, err
 	}
 	return change, nil
 }
@@ -1240,6 +1288,42 @@ func tenantResourceQuotaPath(tenantID string) (string, error) {
 		return "", errors.New("control quota tenant identity is invalid")
 	}
 	return "/v1/tenants/" + url.PathEscape(tenantID) + "/quota", nil
+}
+
+func snapshotQuarantinePath(tenantID, nodeID, snapshotID string) (string, error) {
+	if !validEvidenceRouteIdentity(tenantID, 128) || !validEvidenceRouteIdentity(nodeID, 128) ||
+		!validEvidenceRouteIdentity(snapshotID, 128) {
+		return "", errors.New("control snapshot quarantine identity is invalid")
+	}
+	return "/v1/tenants/" + url.PathEscape(tenantID) + "/nodes/" + url.PathEscape(nodeID) +
+		"/snapshots/" + url.PathEscape(snapshotID) + "/quarantine", nil
+}
+
+func validateSnapshotQuarantineStatus(
+	status controlstore.SnapshotQuarantineStatus,
+	tenantID, nodeID, snapshotID string,
+) error {
+	if status.TenantID != tenantID || status.NodeID != nodeID || status.SnapshotID != snapshotID ||
+		status.Blocked != (status.Record != nil && status.Record.Quarantined) {
+		return errors.New("control snapshot quarantine response changed route identity or effective state")
+	}
+	if status.Record == nil {
+		return nil
+	}
+	record := status.Record
+	if record.TenantID != tenantID || record.NodeID != nodeID || record.SnapshotID != snapshotID ||
+		record.Revision == 0 || record.ChangedAt == "" ||
+		record.Quarantined && (record.Reason == "" || len(record.Reason) > 256 ||
+			strings.TrimSpace(record.Reason) != record.Reason || !utf8.ValidString(record.Reason) ||
+			strings.ContainsAny(record.Reason, "\r\n\x00")) ||
+		!record.Quarantined && record.Reason != "" {
+		return errors.New("control snapshot quarantine response contains an invalid record")
+	}
+	changed, err := time.Parse(time.RFC3339Nano, record.ChangedAt)
+	if err != nil || record.ChangedAt != changed.UTC().Format(time.RFC3339Nano) {
+		return errors.New("control snapshot quarantine response contains an invalid timestamp")
+	}
+	return nil
 }
 
 func validateTenantResourceQuotaStatus(status controlstore.TenantResourceQuotaStatus, tenantID string) error {
