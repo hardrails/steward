@@ -113,6 +113,15 @@ func (backend *Backend) Capabilities(context.Context) (storagebackend.Capabiliti
 	}, nil
 }
 
+func (backend *Backend) PlanVolume(_ context.Context, spec storagebackend.VolumeSpec) (storagebackend.VolumePlan, error) {
+	if err := spec.Validate(); err != nil {
+		return storagebackend.VolumePlan{}, err
+	}
+	return storagebackend.VolumePlan{
+		Spec: spec, BackendRef: backend.volumeRef(spec.Scope()), DockerVolumeHandle: backend.dockerHandle(spec.Scope()),
+	}, nil
+}
+
 func (backend *Backend) InspectVolume(ctx context.Context, scope storagebackend.VolumeScope) (storagebackend.Volume, error) {
 	if err := scope.Validate(); err != nil {
 		return storagebackend.Volume{}, err

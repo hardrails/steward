@@ -43,7 +43,7 @@ func TestStorageObjectsRejectPathsScopeDriftAndInvalidLimits(t *testing.T) {
 	}
 	for _, mutate := range []func(*VolumeSpec){
 		func(value *VolumeSpec) { value.VolumeID = "../escape" },
-		func(value *VolumeSpec) { value.TenantID = "tenant/a" },
+		func(value *VolumeSpec) { value.TenantID = " tenant/a" },
 		func(value *VolumeSpec) { value.LineageID = "" },
 		func(value *VolumeSpec) { value.Generation = 0 },
 		func(value *VolumeSpec) { value.ByteLimit = 0 },

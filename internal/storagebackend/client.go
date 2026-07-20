@@ -93,6 +93,20 @@ func (client *Client) Capabilities(ctx context.Context) (Capabilities, error) {
 	return result, nil
 }
 
+func (client *Client) PlanVolume(ctx context.Context, spec VolumeSpec) (VolumePlan, error) {
+	if err := spec.Validate(); err != nil {
+		return VolumePlan{}, err
+	}
+	var result VolumePlan
+	if err := client.call(ctx, http.MethodPost, "/v1/volumes/plan", spec, &result); err != nil {
+		return VolumePlan{}, err
+	}
+	if err := result.Validate(); err != nil || result.Spec != spec {
+		return VolumePlan{}, errors.New("storage backend volume plan response is invalid or out of scope")
+	}
+	return result, nil
+}
+
 func (client *Client) InspectVolume(ctx context.Context, scope VolumeScope) (Volume, error) {
 	if err := scope.Validate(); err != nil {
 		return Volume{}, err

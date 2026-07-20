@@ -34,6 +34,10 @@ func TestClientAndHandlerPreserveScopedIdempotentStorageLifecycle(t *testing.T) 
 		VolumeID: "volume-parent", TenantID: "tenant-a", LineageID: "lineage-parent",
 		Generation: 1, ByteLimit: 1 << 30, ObjectLimit: 100_000,
 	}}
+	plan, err := client.PlanVolume(ctx, create.Volume)
+	if err != nil || plan.Spec != create.Volume || plan.DockerVolumeHandle != "memory-volume-parent" {
+		t.Fatalf("plan parent = (%+v, %v)", plan, err)
+	}
 	parent, changed, err := client.CreateVolume(ctx, create)
 	if err != nil || !changed || parent.Scope() != create.Volume.Scope() {
 		t.Fatalf("create parent = (%+v, %v, %v)", parent, changed, err)
@@ -182,6 +186,13 @@ func (backend *memoryBackend) Capabilities(context.Context) (Capabilities, error
 		HardObjectQuota: true, ColdSnapshots: true, ImmutableSnapshots: true,
 		CopyOnWriteClones: true, CrashSafeMetadata: true, DockerVolumeHandles: true,
 	}, nil
+}
+
+func (backend *memoryBackend) PlanVolume(_ context.Context, spec VolumeSpec) (VolumePlan, error) {
+	if err := spec.Validate(); err != nil {
+		return VolumePlan{}, err
+	}
+	return VolumePlan{Spec: spec, BackendRef: "memory-" + spec.VolumeID, DockerVolumeHandle: "memory-" + spec.VolumeID}, nil
 }
 
 func (backend *memoryBackend) InspectVolume(_ context.Context, scope VolumeScope) (Volume, error) {

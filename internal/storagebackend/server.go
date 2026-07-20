@@ -50,6 +50,8 @@ func (service *handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	switch request.Method + " " + request.URL.Path {
 	case http.MethodGet + " /v1/capabilities":
 		service.capabilities(writer, request)
+	case http.MethodPost + " /v1/volumes/plan":
+		serveBackendOperation(writer, request, service.backend.PlanVolume)
 	case http.MethodPost + " /v1/volumes/inspect":
 		serveBackendOperation(writer, request, service.backend.InspectVolume)
 	case http.MethodPost + " /v1/volumes/create":

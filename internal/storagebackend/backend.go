@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -16,6 +17,8 @@ const (
 	SchemaVersion      = "steward.storage-backend.v1"
 	MaxIdentifierBytes = 128
 	MaxOpaqueRefBytes  = 256
+	MaxTenantIDBytes   = 128
+	MaxLineageIDBytes  = 256
 )
 
 var (
@@ -33,6 +36,7 @@ var (
 // retry after a lost response cannot silently create a second object.
 type Backend interface {
 	Capabilities(context.Context) (Capabilities, error)
+	PlanVolume(context.Context, VolumeSpec) (VolumePlan, error)
 	InspectVolume(context.Context, VolumeScope) (Volume, error)
 	CreateVolume(context.Context, CreateVolumeRequest) (Volume, bool, error)
 	DeleteVolume(context.Context, DeleteVolumeRequest) (Volume, bool, error)
@@ -101,8 +105,8 @@ type VolumeScope struct {
 
 func (value VolumeScope) Validate() error {
 	if !validIdentifier(value.VolumeID, MaxIdentifierBytes) ||
-		!validIdentifier(value.TenantID, MaxIdentifierBytes) ||
-		!validIdentifier(value.LineageID, MaxIdentifierBytes) || value.Generation == 0 {
+		!validSubject(value.TenantID, MaxTenantIDBytes) ||
+		!validSubject(value.LineageID, MaxLineageIDBytes) || value.Generation == 0 {
 		return fmt.Errorf("%w: volume scope", ErrInvalid)
 	}
 	return nil
@@ -117,8 +121,8 @@ func (value VolumeSpec) Scope() VolumeScope {
 
 func (value VolumeSpec) Validate() error {
 	if !validIdentifier(value.VolumeID, MaxIdentifierBytes) ||
-		!validIdentifier(value.TenantID, MaxIdentifierBytes) ||
-		!validIdentifier(value.LineageID, MaxIdentifierBytes) || value.Generation == 0 ||
+		!validSubject(value.TenantID, MaxTenantIDBytes) ||
+		!validSubject(value.LineageID, MaxLineageIDBytes) || value.Generation == 0 ||
 		value.ByteLimit <= 0 || value.ObjectLimit <= 0 ||
 		value.ParentSnapshotID != "" && !validIdentifier(value.ParentSnapshotID, MaxIdentifierBytes) {
 		return fmt.Errorf("%w: volume specification", ErrInvalid)
@@ -135,6 +139,25 @@ type Volume struct {
 	UsedObjects        int64       `json:"used_objects"`
 	CreatedAt          string      `json:"created_at"`
 	DeletedAt          string      `json:"deleted_at,omitempty"`
+}
+
+// VolumePlan resolves a signed specification to provider-owned opaque handles
+// without mutating storage. Executor uses it to fingerprint the exact Docker
+// mount before its mutation journal is prepared.
+type VolumePlan struct {
+	Spec               VolumeSpec `json:"spec"`
+	BackendRef         string     `json:"backend_ref"`
+	DockerVolumeHandle string     `json:"docker_volume_handle"`
+}
+
+func (value VolumePlan) Validate() error {
+	if err := value.Spec.Validate(); err != nil {
+		return err
+	}
+	if !validOpaque(value.BackendRef) || !validIdentifier(value.DockerVolumeHandle, MaxOpaqueRefBytes) {
+		return fmt.Errorf("%w: volume plan", ErrInvalid)
+	}
+	return nil
 }
 
 func (value Volume) Validate() error {
@@ -186,9 +209,9 @@ type SnapshotScope struct {
 
 func (value SnapshotScope) Validate() error {
 	if !validIdentifier(value.SnapshotID, MaxIdentifierBytes) ||
-		!validIdentifier(value.TenantID, MaxIdentifierBytes) ||
+		!validSubject(value.TenantID, MaxTenantIDBytes) ||
 		!validIdentifier(value.SourceVolumeID, MaxIdentifierBytes) ||
-		!validIdentifier(value.SourceLineageID, MaxIdentifierBytes) || value.Generation == 0 {
+		!validSubject(value.SourceLineageID, MaxLineageIDBytes) || value.Generation == 0 {
 		return fmt.Errorf("%w: snapshot scope", ErrInvalid)
 	}
 	return nil
@@ -204,9 +227,9 @@ func (value Snapshot) Scope() SnapshotScope {
 
 func (value Snapshot) Validate() error {
 	if !validIdentifier(value.SnapshotID, MaxIdentifierBytes) ||
-		!validIdentifier(value.TenantID, MaxIdentifierBytes) ||
+		!validSubject(value.TenantID, MaxTenantIDBytes) ||
 		!validIdentifier(value.SourceVolumeID, MaxIdentifierBytes) ||
-		!validIdentifier(value.SourceLineageID, MaxIdentifierBytes) || value.Generation == 0 ||
+		!validSubject(value.SourceLineageID, MaxLineageIDBytes) || value.Generation == 0 ||
 		!validObjectState(value.State) || !validOpaque(value.BackendRef) ||
 		!validDigest(value.ContentDigest) || value.RetainedBytes < 0 || value.ObjectCount < 0 ||
 		!validTimestamp(value.CreatedAt) {
@@ -322,6 +345,18 @@ func validIdentifier(value string, maximum int) bool {
 
 func validOpaque(value string) bool {
 	return validIdentifier(value, MaxOpaqueRefBytes) && !strings.ContainsAny(value, `/\\`)
+}
+
+func validSubject(value string, maximum int) bool {
+	if value == "" || len(value) > maximum || !utf8.ValidString(value) || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) {
+			return false
+		}
+	}
+	return true
 }
 
 func validDigest(value string) bool {

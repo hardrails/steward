@@ -38,6 +38,10 @@ func TestBackendLifecycleIsScopedDurableAndIdempotent(t *testing.T) {
 		VolumeID: "parent", TenantID: "tenant-a", LineageID: "lineage-parent", Generation: 1,
 		ByteLimit: 1 << 20, ObjectLimit: 100,
 	}}
+	plan, err := backend.PlanVolume(ctx, parentRequest.Volume)
+	if err != nil || plan.Spec != parentRequest.Volume || !strings.HasPrefix(plan.DockerVolumeHandle, "steward-zfs-") {
+		t.Fatalf("plan parent = (%+v, %v)", plan, err)
+	}
 	parent, changed, err := backend.CreateVolume(ctx, parentRequest)
 	if err != nil || !changed || parent.State != storagebackend.StateReady {
 		t.Fatalf("create parent = (%+v, %v, %v)", parent, changed, err)
