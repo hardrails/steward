@@ -16,7 +16,7 @@ import (
 var completionTree = map[string][]string{
 	"":                            {"help", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
 	"help":                        {"agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
-	"agent":                       {"init", "validate", "build", "plan", "apply", "deploy", "deployment", "fork", "doctor"},
+	"agent":                       {"create", "init", "validate", "build", "plan", "apply", "deploy", "deployment", "fork", "doctor"},
 	"agent deployment":            {"apply", "wait", "status", "list", "remove"},
 	"context":                     {"set", "use", "show", "list", "delete"},
 	"completion":                  {"install", "bash", "zsh", "fish"},
@@ -60,6 +60,7 @@ var completionTree = map[string][]string{
 
 var completionFlags = map[string][]string{
 	"agent init":                        {"-runtime", "-name", "-force"},
+	"agent create":                      {"-runtime", "-force"},
 	"agent validate":                    {"-file", "-cue"},
 	"agent build":                       {"-file", "-out", "-cue", "-opa", "-policy-bundle", "-policy-query"},
 	"agent plan":                        {"-bundle", "-nodes", "-tenant", "-out"},
@@ -72,7 +73,7 @@ var completionFlags = map[string][]string{
 	"agent deployment remove":           {"-tenant", "-tenant-id", "-revision", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"agent fork":                        {"-bundle", "-snapshot", "-instance-id", "-lineage-id", "-ttl", "-on-expiry", "-out"},
 	"task issue":                        {"-deployment", "-admission", "-intent", "-trust", "-request", "-operation-id", "-task-id", "-valid-for", "-clock-skew", "-key", "-key-id", "-out"},
-	"task run":                          {"-deployment", "-instance-id", "-trust", "-request", "-operation-id", "-task-id", "-valid-for", "-clock-skew", "-key", "-key-id", "-bundle-out", "-result-out", "-discard-result", "-gateway-url", "-gateway-token-file", "-wait-timeout", "-deployment-timeout", "-tenant", "-tenant-id", "-control-url", "-control-token-file", "-ca-file", "-no-context"},
+	"task run":                          {"-deployment", "-instance-id", "-trust", "-request", "-operation-id", "-task-id", "-valid-for", "-clock-skew", "-key", "-key-id", "-bundle-out", "-result-out", "-discard-result", "-run-dir", "-gateway-url", "-gateway-token-file", "-wait-timeout", "-deployment-timeout", "-tenant", "-tenant-id", "-control-url", "-control-token-file", "-ca-file", "-no-context"},
 	"context set":                       {"-control-url", "-token-file", "-ca-file", "-node-url", "-node-token-file", "-gateway-url", "-gateway-token-file", "-service-trust", "-task-key", "-task-key-id", "-tenant-id", "-node-id"},
 	"completion install":                {"-shell", "-force"},
 	"control":                           {"-control-url", "-token-file", "-ca-file", "-no-context"},
@@ -315,7 +316,9 @@ func stewardctlCompletionCandidates(arguments []string) []string {
 	}
 	if len(arguments) > 1 {
 		previous := arguments[len(arguments)-2]
-		if previous == "-agent" || previous == "-runtime" && completionLeafPath(arguments[:len(arguments)-2]) == "agent init" {
+		leaf := completionLeafPath(arguments[:len(arguments)-2])
+		if previous == "-agent" || previous == "-runtime" &&
+			(leaf == "agent init" || leaf == "agent create" || strings.HasPrefix(leaf, "agent create ")) {
 			return matchingCandidates([]string{"hermes", "openclaw"}, current)
 		}
 	}

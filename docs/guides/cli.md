@@ -93,26 +93,34 @@ stores only its absolute path. A higher-assurance site can keep this key off-nod
 and continue using the separate `task issue`, transfer, `task submit`, and `task
 wait` commands.
 
-With the context selected, run one exact request against a durable deployment:
+With the context selected, run a prompt against a durable Hermes or OpenClaw
+deployment:
 
 ```console
 sudo -H stewardctl task run auditor \
-  -request auditor.request.json \
-  -operation-id hermes.run \
-  -bundle-out auditor.task.json \
-  -result-out auditor.result.json
+  "Review the workspace and report one concrete issue"
 ```
 
 The command waits for exactly one running instance unless `-instance-id` selects
 one. It retains the verified intent and authenticated admission result from
 Control, checks that the configured key is admitted for the selected service,
 writes the owner-only signed task bundle, dispatches through Gateway, waits, and
-writes the result without printing request or result bytes.
+writes the result without printing request or result bytes. For prompt mode it
+infers the qualified `hermes.run` or `openclaw.run` operation from the authenticated
+admission result. It creates an owner-only run directory beside the CLI context,
+with `request.json`, `task.bundle.json`, and `result.json`, and returns their paths.
+Use `-run-dir` to select a new directory under an existing owner-only parent.
 
 The bundle is created before network dispatch. If dispatch or waiting fails, keep
 it and follow the recovery command printed in the error. Reusing the same bundle
 is safe and observable; issuing a new task ID could duplicate an effect whose
 outcome is still unknown.
+
+For generated requests, the prompt is limited to 32 KiB. Hermes receives it as
+`input`; OpenClaw receives it as `message`. Use the explicit `-request`,
+`-operation-id`, `-bundle-out`, and result flags when exact prebuilt JSON, a
+different qualified operation, deterministic paths, or off-node signing is
+required.
 
 Routine lifecycle commands accept the returned runtime reference directly:
 

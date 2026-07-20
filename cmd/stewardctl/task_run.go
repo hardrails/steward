@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/hardrails/steward/internal/dsse"
 )
 
 const taskRunSchema = "steward.task-run.v1"
@@ -19,6 +21,8 @@ const taskRunSchema = "steward.task-run.v1"
 type taskRunResult struct {
 	SchemaVersion string          `json:"schema_version"`
 	Deployment    string          `json:"deployment,omitempty"`
+	RunDirectory  string          `json:"run_directory,omitempty"`
+	RequestPath   string          `json:"request_path,omitempty"`
 	BundlePath    string          `json:"bundle_path"`
 	ResultPath    string          `json:"result_path,omitempty"`
 	Issue         json.RawMessage `json:"issue"`
@@ -47,6 +51,7 @@ func runTask(arguments []string, stdout io.Writer) error {
 	bundlePath := flags.String("bundle-out", "", "new owner-only signed task bundle written before dispatch")
 	resultPath := flags.String("result-out", "", "new owner-only terminal result file")
 	discardResult := flags.Bool("discard-result", false, "verify and discard the terminal result")
+	runDirectory := flags.String("run-dir", "", "new owner-only directory for automatic prompt artifacts")
 	gatewayURL := flags.String("gateway-url", "http://127.0.0.1:8091", "literal-loopback Gateway service origin")
 	gatewayTokenPath := flags.String("gateway-token-file", "", "owner-only Gateway service token")
 	waitTimeout := flags.Duration("wait-timeout", 3*time.Minute, "bounded total task wait")
@@ -60,12 +65,20 @@ func runTask(arguments []string, stdout io.Writer) error {
 	if err := flags.Parse(hydrated); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || (leadingDeployment == "") == (*deploymentPath == "") ||
-		*trustPath == "" || *requestPath == "" || *operationID == "" || *privateKeyPath == "" ||
-		*keyID == "" || *bundlePath == "" || *gatewayTokenPath == "" ||
-		(*resultPath != "") == *discardResult || *waitTimeout <= 0 || *waitTimeout > maxTaskWait ||
+	promptMode := leadingDeployment != "" && flags.NArg() == 1
+	if flags.NArg() != 0 && !promptMode || (leadingDeployment == "") == (*deploymentPath == "") ||
+		*trustPath == "" || *privateKeyPath == "" || *keyID == "" || *gatewayTokenPath == "" ||
+		*waitTimeout <= 0 || *waitTimeout > maxTaskWait ||
 		*deploymentTimeout <= 0 || *deploymentTimeout > 30*time.Minute {
-		return errors.New("task run requires either one durable deployment name or -deployment, plus trust, request, operation, task key, bundle output, Gateway token, exactly one result disposition, and bounded timeouts")
+		return errors.New("task run requires a deployment, trust, task key, Gateway token, and bounded timeouts; pass one prompt or the expert request, operation, bundle, and result flags")
+	}
+	if promptMode {
+		if *requestPath != "" || *operationID != "" || *bundlePath != "" || *resultPath != "" || *discardResult || *deploymentPath != "" {
+			return errors.New("task run prompt mode creates its own request, bundle, and result artifacts; do not mix prompt and expert artifact flags")
+		}
+	} else if *runDirectory != "" || *requestPath == "" || *operationID == "" || *bundlePath == "" ||
+		(*resultPath != "") == *discardResult {
+		return errors.New("task run expert mode requires request, operation, bundle output, and exactly one result disposition; -run-dir is only for prompt mode")
 	}
 	if leadingDeployment != "" && (tenantID == "" || *controlTokenPath == "") {
 		return errors.New("task run with a durable deployment requires a tenant and Control operator token")
@@ -81,6 +94,28 @@ func runTask(arguments []string, stdout io.Writer) error {
 			return err
 		}
 		defer cleanup()
+	}
+	resolvedRunDirectory := ""
+	if promptMode {
+		selectedTaskID := *taskID
+		if selectedTaskID == "" {
+			selectedTaskID, err = randomTaskID()
+			if err != nil {
+				return err
+			}
+			*taskID = selectedTaskID
+		}
+		artifacts, err := createPromptTaskArtifacts(
+			resolvedDeploymentPath, flags.Arg(0), selectedTaskID, *runDirectory,
+		)
+		if err != nil {
+			return err
+		}
+		resolvedRunDirectory = artifacts.Directory
+		*requestPath = artifacts.Request
+		*operationID = artifacts.OperationID
+		*bundlePath = artifacts.Bundle
+		*resultPath = artifacts.Result
 	}
 
 	issueArguments := []string{
@@ -119,11 +154,102 @@ func runTask(arguments []string, stdout io.Writer) error {
 	}
 	return writeAgentJSON(stdout, taskRunResult{
 		SchemaVersion: taskRunSchema, Deployment: leadingDeployment,
+		RunDirectory: resolvedRunDirectory, RequestPath: *requestPath,
 		BundlePath: *bundlePath, ResultPath: *resultPath,
 		Issue:      json.RawMessage(bytes.TrimSpace(issueOutput.Bytes())),
 		Submission: json.RawMessage(bytes.TrimSpace(submissionOutput.Bytes())),
 		Status:     json.RawMessage(bytes.TrimSpace(statusOutput.Bytes())),
 	})
+}
+
+type promptTaskArtifacts struct {
+	Directory   string
+	Request     string
+	Bundle      string
+	Result      string
+	OperationID string
+}
+
+func createPromptTaskArtifacts(deploymentPath, prompt, taskID, requestedDirectory string) (promptTaskArtifacts, error) {
+	if strings.TrimSpace(prompt) == "" || len([]byte(prompt)) > 32<<10 {
+		return promptTaskArtifacts{}, errors.New("task prompt must contain text and be at most 32 KiB")
+	}
+	if !taskIdentifier(taskID) {
+		return promptTaskArtifacts{}, errors.New("task ID is invalid")
+	}
+	raw, err := readCLIArtifact(deploymentPath)
+	if err != nil {
+		return promptTaskArtifacts{}, fmt.Errorf("read task-ready deployment: %w", err)
+	}
+	var deployment agentDeployResult
+	if err := dsse.DecodeStrictInto(raw, maxArtifactBytes, &deployment); err != nil {
+		return promptTaskArtifacts{}, fmt.Errorf("decode task-ready deployment: %w", err)
+	}
+	var operationID, requestField string
+	switch deployment.Admission.ServiceID {
+	case "hermes-api":
+		operationID, requestField = "hermes.run", "input"
+	case "openclaw-api":
+		operationID, requestField = "openclaw.run", "message"
+	default:
+		return promptTaskArtifacts{}, fmt.Errorf("task prompt mode does not recognize admitted service %q; use expert request flags", deployment.Admission.ServiceID)
+	}
+	request, err := json.Marshal(map[string]string{requestField: prompt, "session_id": taskID})
+	if err != nil {
+		return promptTaskArtifacts{}, err
+	}
+	if len(request) > 64<<10 {
+		return promptTaskArtifacts{}, errors.New("generated task request exceeds 64 KiB")
+	}
+	directory, err := createTaskRunDirectory(requestedDirectory, taskID)
+	if err != nil {
+		return promptTaskArtifacts{}, err
+	}
+	artifacts := promptTaskArtifacts{
+		Directory: directory, OperationID: operationID,
+		Request: filepath.Join(directory, "request.json"),
+		Bundle:  filepath.Join(directory, "task.bundle.json"),
+		Result:  filepath.Join(directory, "result.json"),
+	}
+	if err := writeNewFile(artifacts.Request, append(request, '\n'), 0o600); err != nil {
+		return promptTaskArtifacts{}, fmt.Errorf("write exact task request: %w", err)
+	}
+	return artifacts, nil
+}
+
+func createTaskRunDirectory(requestedDirectory, taskID string) (string, error) {
+	directory := requestedDirectory
+	if directory == "" {
+		contextPath, err := cliContextFilePath()
+		if err != nil {
+			return "", err
+		}
+		base := filepath.Join(filepath.Dir(contextPath), "runs")
+		if err := ensureCLIContextDirectory(base); err != nil {
+			return "", fmt.Errorf("prepare task run directory: %w", err)
+		}
+		directory = filepath.Join(base, taskID)
+	} else {
+		absolute, err := filepath.Abs(directory)
+		if err != nil {
+			return "", fmt.Errorf("resolve task run directory: %w", err)
+		}
+		directory = filepath.Clean(absolute)
+		if err := ensureCLIContextDirectory(filepath.Dir(directory)); err != nil {
+			return "", fmt.Errorf("prepare task run parent: %w", err)
+		}
+	}
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		return "", fmt.Errorf("create new task run directory: %w", err)
+	}
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("task run directory must be a new owner-only real directory")
+	}
+	if err := syncOutputDirectory(directory); err != nil {
+		return "", fmt.Errorf("sync task run parent: %w", err)
+	}
+	return directory, nil
 }
 
 func exportTaskRunDeployment(

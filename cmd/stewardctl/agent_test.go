@@ -157,6 +157,22 @@ func TestAgentInitBuildAndPlanJSONWorkflow(t *testing.T) {
 	}
 }
 
+func TestAgentCreateUsesTheCanonicalInitPath(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "auditor")
+	var output bytes.Buffer
+	if err := run([]string{"agent", "create", "auditor", "-runtime", "openclaw", directory}, &output, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, "Stewardfile.cue"))
+	if err != nil || !bytes.Contains(raw, []byte(`name: "auditor"`)) ||
+		!bytes.Contains(raw, []byte(`engine: "openclaw"`)) {
+		t.Fatalf("Stewardfile=%s err=%v", raw, err)
+	}
+	if err := run([]string{"agent", "create", "auditor", "-name", "other", directory}, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+		t.Fatal("agent create accepted two names")
+	}
+}
+
 func TestAgentValidateAndForkRejectAmbiguousArguments(t *testing.T) {
 	directory := t.TempDir()
 	existing := filepath.Join(directory, "existing")

@@ -119,6 +119,110 @@ func TestTaskRunPersistsAuthorityBeforeDispatchAndReturnsVerifiedResult(t *testi
 	}
 }
 
+func TestTaskRunPromptCreatesPrivateRecoverableArtifacts(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	if err := os.Chmod(fixture.directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STEWARD_CONTEXT_FILE", filepath.Join(fixture.directory, "contexts.json"))
+	controlTokenPath := filepath.Join(fixture.directory, "control.token")
+	if err := os.WriteFile(controlTokenPath, []byte("control-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	controlView := taskRunControlDeploymentFixture(fixture)
+	controlServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(controlView)
+	}))
+	defer controlServer.Close()
+	gatewayTokenPath := filepath.Join(fixture.directory, "gateway.token")
+	if err := os.WriteFile(gatewayTokenPath, []byte("gateway-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runDirectory := filepath.Join(fixture.directory, "runs", "task.fixed")
+	bundlePath := filepath.Join(runDirectory, "task.bundle.json")
+	terminal := []byte(`{"run_id":"run_0123456789abcdef0123456789abcdef","status":"completed","result":{"ok":true}}`)
+	var mu sync.Mutex
+	var taskDigest, permitDigest string
+	gatewayServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/v1/services/") {
+			bundle, err := readHistoricalLifecycleTaskBundle(bundlePath)
+			if err != nil {
+				t.Errorf("read automatic bundle before dispatch: %v", err)
+				return
+			}
+			mu.Lock()
+			taskDigest = taskpermit.TaskDigest(bundle.Verified.Statement.TenantID, bundle.Verified.Statement.InstanceID, bundle.Verified.Statement.TaskID)
+			permitDigest = bundle.Verified.EnvelopeDigest
+			mu.Unlock()
+			writeTaskSubmitCLIResponse(writer, "run_0123456789abcdef0123456789abcdef", gatewayclient.TaskReceiptRecorded)
+			return
+		}
+		mu.Lock()
+		currentTaskDigest, currentPermitDigest := taskDigest, permitDigest
+		mu.Unlock()
+		want := "/v1/tasks/" + currentTaskDigest + "/permits/" + currentPermitDigest
+		if request.Method == http.MethodGet && request.URL.Path == want {
+			writeTaskRuntimeResponse(t, writer, fmt.Sprintf(
+				`{"schema_version":"steward.task-status.v1","task_digest":%q,"permit_digest":%q,%s}`,
+				currentTaskDigest, currentPermitDigest, terminalTaskRuntimeFields(terminal, "completed", false),
+			))
+			return
+		}
+		if request.Method == http.MethodPost && request.URL.Path == want+"/observe" {
+			writeTaskRuntimeResponse(t, writer, fmt.Sprintf(
+				`{"schema_version":"steward.task-status.v1","task_digest":%q,"permit_digest":%q,%s}`,
+				currentTaskDigest, currentPermitDigest, terminalTaskRuntimeFields(terminal, "completed", true),
+			))
+			return
+		}
+		t.Errorf("unexpected Gateway request %s %s", request.Method, request.URL.Path)
+	}))
+	defer gatewayServer.Close()
+
+	priorNow := timeNow
+	timeNow = func() time.Time { return fixture.now }
+	t.Cleanup(func() { timeNow = priorNow })
+	prompt := "Review the workspace and report one concrete issue."
+	var output bytes.Buffer
+	err := run([]string{
+		"task", "run", "auditor", "-no-context", "-tenant", "tenant-a",
+		"-control-url", controlServer.URL, "-control-token-file", controlTokenPath,
+		"-trust", fixture.trustPath, "-task-id", "task.fixed", "-key", fixture.privatePath, "-key-id", fixture.keyID,
+		"-gateway-url", gatewayServer.URL, "-gateway-token-file", gatewayTokenPath,
+		"-deployment-timeout", "1s", "-wait-timeout", "1s", prompt,
+	}, &output, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(runDirectory, "request.json")
+	requestRaw, err := os.ReadFile(requestPath)
+	if err != nil || string(requestRaw) != `{"input":"Review the workspace and report one concrete issue.","session_id":"task.fixed"}`+"\n" {
+		t.Fatalf("request=%q err=%v", requestRaw, err)
+	}
+	for _, path := range []string{runDirectory, requestPath, bundlePath, filepath.Join(runDirectory, "result.json")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		wantMode := os.FileMode(0o600)
+		if info.IsDir() {
+			wantMode = 0o700
+		}
+		if info.Mode().Perm() != wantMode {
+			t.Fatalf("%s mode=%o want=%o", path, info.Mode().Perm(), wantMode)
+		}
+	}
+	var result taskRunResult
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil || result.RunDirectory != runDirectory ||
+		result.RequestPath != requestPath || result.BundlePath != bundlePath {
+		t.Fatalf("result=%+v err=%v output=%s", result, err, output.Bytes())
+	}
+	if bytes.Contains(output.Bytes(), []byte(prompt)) || bytes.Contains(output.Bytes(), terminal) {
+		t.Fatalf("task run exposed private content: %s", output.Bytes())
+	}
+}
+
 func TestTaskRunRetainsSignedBundleWhenDispatchFails(t *testing.T) {
 	fixture := newTaskCLIFixture(t)
 	deploymentPath := taskRunDeploymentFixture(t, fixture)
