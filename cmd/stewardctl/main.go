@@ -749,6 +749,10 @@ func readPrivateKey(path string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodePrivateKey(raw)
+}
+
+func decodePrivateKey(raw []byte) (ed25519.PrivateKey, error) {
 	block, rest := pem.Decode(raw)
 	if block == nil || len(strings.TrimSpace(string(rest))) != 0 {
 		return nil, errors.New("private key must be one PEM block")
@@ -769,6 +773,10 @@ func readPublicKey(path string) (ed25519.PublicKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodePublicKey(raw)
+}
+
+func decodePublicKey(raw []byte) (ed25519.PublicKey, error) {
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
 	if err != nil || len(decoded) != ed25519.PublicKeySize {
 		return nil, errors.New("public key is not base64 Ed25519")

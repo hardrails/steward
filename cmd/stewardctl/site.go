@@ -74,15 +74,17 @@ type siteOutput struct {
 
 func siteCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("site requires init or verify")
+		return errors.New("site requires init, verify, or node")
 	}
 	switch arguments[0] {
 	case "init":
 		return siteInit(arguments[1:], stdout)
 	case "verify":
 		return siteVerify(arguments[1:], stdout)
+	case "node":
+		return siteNodeCommand(arguments[1:], stdout)
 	default:
-		return errors.New("site requires init or verify")
+		return errors.New("site requires init, verify, or node")
 	}
 }
 
@@ -413,59 +415,79 @@ func siteVerify(arguments []string, stdout io.Writer) error {
 	if err != nil {
 		return errors.New("site package directory is invalid")
 	}
-	if err := verifySiteDirectoryLayout(directory); err != nil {
+	verified, err := verifySitePackage(directory, *pinnedRoot)
+	if err != nil {
 		return err
 	}
-	rootPath := *pinnedRoot
+	return writeSiteSummary(stdout, sitePackageSummary{
+		Directory: directory, SiteID: verified.inventory.SiteID, TenantID: verified.inventory.TenantID,
+		PolicyDigest: verified.inventory.PolicyDigest, RootPublicSHA256: verified.rootDigest,
+		FileCount: len(verified.inventory.Files) + 1, Custody: siteCustodySummary(), NextSteps: siteNextSteps(directory),
+	})
+}
+
+type verifiedSitePackage struct {
+	directory    string
+	rootKey      ed25519.PublicKey
+	rootDigest   string
+	inventory    sitePackageInventory
+	policy       admission.SitePolicy
+	inventoryRaw []byte
+}
+
+func verifySitePackage(directory, pinnedRoot string) (verifiedSitePackage, error) {
+	if err := verifySiteDirectoryLayout(directory); err != nil {
+		return verifiedSitePackage{}, err
+	}
+	rootPath := pinnedRoot
 	if rootPath == "" {
 		rootPath = filepath.Join(directory, "public", "site-root.public")
 	}
 	rootKey, err := readPublicKey(rootPath)
 	if err != nil {
-		return fmt.Errorf("read trusted site root: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("read trusted site root: %w", err)
 	}
 	inventoryRaw, err := securefile.Read(filepath.Join(directory, "inventory.dsse.json"), maxArtifactBytes, securefile.TrustFile)
 	if err != nil {
-		return fmt.Errorf("read site inventory: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("read site inventory: %w", err)
 	}
 	payload, _, err := dsse.Verify(inventoryRaw, sitePackagePayloadType, map[string]ed25519.PublicKey{"site-root-1": rootKey})
 	if err != nil {
-		return fmt.Errorf("verify site inventory: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("verify site inventory: %w", err)
 	}
 	var inventory sitePackageInventory
 	if err := dsse.DecodeStrictInto(payload, maxArtifactBytes, &inventory); err != nil {
-		return fmt.Errorf("decode site inventory: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("decode site inventory: %w", err)
 	}
 	if err := validateSiteInventory(inventory); err != nil {
-		return err
+		return verifiedSitePackage{}, err
 	}
 	if err := verifySitePackageFiles(directory, inventory.Files); err != nil {
-		return err
+		return verifiedSitePackage{}, err
 	}
 	policyRaw, err := securefile.Read(filepath.Join(directory, "public", "site-policy.dsse.json"), maxArtifactBytes, securefile.TrustFile)
 	if err != nil {
-		return fmt.Errorf("read site policy: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("read site policy: %w", err)
 	}
 	policyPayload, _, err := dsse.Verify(policyRaw, admission.PolicyPayloadType, map[string]ed25519.PublicKey{"site-root-1": rootKey})
 	if err != nil {
-		return fmt.Errorf("verify site policy: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("verify site policy: %w", err)
 	}
 	var policy admission.SitePolicy
 	if err := dsse.DecodeStrictInto(policyPayload, maxArtifactBytes, &policy); err != nil {
-		return fmt.Errorf("decode site policy: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("decode site policy: %w", err)
 	}
 	if err := policy.Validate(); err != nil {
-		return fmt.Errorf("validate site policy: %w", err)
+		return verifiedSitePackage{}, fmt.Errorf("validate site policy: %w", err)
 	}
 	if dsse.Digest(policyRaw) != inventory.PolicyDigest || policy.PolicyID != inventory.SiteID || len(policy.Tenants) != 1 || policy.Tenants[0].TenantID != inventory.TenantID {
-		return errors.New("site inventory and signed policy identities do not match")
+		return verifiedSitePackage{}, errors.New("site inventory and signed policy identities do not match")
 	}
 	rootDigest := sha256.Sum256(rootKey)
-	return writeSiteSummary(stdout, sitePackageSummary{
-		Directory: directory, SiteID: inventory.SiteID, TenantID: inventory.TenantID,
-		PolicyDigest: inventory.PolicyDigest, RootPublicSHA256: "sha256:" + hex.EncodeToString(rootDigest[:]),
-		FileCount: len(inventory.Files) + 1, Custody: siteCustodySummary(), NextSteps: siteNextSteps(directory),
-	})
+	return verifiedSitePackage{
+		directory: directory, rootKey: rootKey, inventory: inventory, policy: policy,
+		rootDigest: "sha256:" + hex.EncodeToString(rootDigest[:]), inventoryRaw: inventoryRaw,
+	}, nil
 }
 
 func sitePositionalLast(arguments []string) []string {
