@@ -161,6 +161,13 @@ Receipts deliberately omit raw prompts, request bodies, response bodies, termina
 agent result text, and secret values. That protects content but can limit forensic
 detail.
 
+The incident support bundle follows the same metadata-only boundary and also
+excludes command envelopes, credential values, private keys, and logs. It is a
+strict, owner-only snapshot of several controller reads, not an atomic database
+snapshot or a signed attestation. Objects can change while collection is in
+progress; repeated node records that disagree fail the collection instead of being
+silently merged.
+
 ## Air-gapped does not mean supply-chain verified
 
 Steward can build and run without a hosted service and can import OCI archives

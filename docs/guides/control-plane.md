@@ -841,6 +841,42 @@ The React console shows the effective site or tenant freeze at the top of every
 view. Freeze changes remain CLI/API operations so the browser does not gain a new
 incident-response mutation path.
 
+### Preserve a metadata-only support bundle
+
+A site administrator can capture the current incident context in one owner-only
+JSON file before making destructive changes:
+
+```console
+stewardctl control support-bundle create \
+  -out ./steward-support.json
+```
+
+Add `-tenant-id tenant-a` to restrict the bundle to one tenant. A bundle includes
+the operations summary, attention findings, freeze and quota records, node and
+deployment state, agent and command metadata, credential metadata, and the last
+controller evidence checkpoint for each visible node. Collection is read-only and
+bounded. It does not acknowledge a finding, retry a command, stop an agent, or
+change incident state.
+
+The format cannot represent raw prompts, request or response bodies, signed
+command envelopes, credential values, private keys, agent result text, or logs.
+The output file is created with owner-only permissions and the command prints its
+SHA-256 digest. Treat the remaining metadata as sensitive: tenant, node, connector,
+and deployment names can still disclose operational details.
+
+Verify the strict format and recalculate the digest without contacting Control:
+
+```console
+stewardctl control support-bundle verify \
+  -in ./steward-support.json
+```
+
+Verification rejects unknown fields, non-canonical JSON, an incomplete exclusion
+contract, invalid evidence checkpoints, inconsistent tenant scope, and mismatched
+or unknown deployment tenant identity. The SHA-256 digest detects changes only when compared with
+a value obtained through a trusted channel. The bundle is not signed and does not
+prove that Control or the host was uncompromised.
+
 ## Inspect fleet operations and action-required findings
 
 The operations view combines retained controller facts into a bounded,

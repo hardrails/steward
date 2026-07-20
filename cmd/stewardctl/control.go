@@ -114,13 +114,15 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlEvidenceCaptureVerify(arguments[2:], stdout)
 	case "evidence-capture delete":
 		return controlEvidenceCaptureDelete(arguments[2:], stdout)
+	case "support-bundle create", "support-bundle verify":
+		return controlSupportBundleCommand(arguments[1:], stdout)
 	default:
 		return controlUsageError()
 	}
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, operations status, quota status|set|clear, freeze status|set|clear, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, operations status, quota status|set|clear, freeze status|set|clear, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, evidence-capture arm|status|seal|export|verify|delete, or support-bundle create|verify")
 }
 
 type controlFlags struct {

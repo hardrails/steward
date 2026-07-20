@@ -338,6 +338,10 @@ The roadmap starts from working primitives rather than a blank design:
   after a proven destroy; and
 - durable fleet-wide tenant CPU, memory, process, and workload quotas reserved
   atomically with admission, with CLI, API, attention, and console visibility.
+- a strict, owner-only incident support bundle that joins non-secret controller
+  inventory and node evidence checkpoints for offline inspection without exporting
+  prompts, bodies, command envelopes, credentials, private keys, result text, or
+  logs.
 
 This foundation is not yet the complete product workflow above. The normal
 create, apply, and prompt path is joined, but a fresh site still needs explicit policy,
