@@ -27,7 +27,7 @@ import (
 
 const (
 	stateFormatMinReadVersion           = 1
-	stateFormatWriteVersion             = 11
+	stateFormatWriteVersion             = 12
 	stateFormatMaxReadVersion           = stateFormatWriteVersion
 	stateFormatEvidenceVersion          = 2
 	stateFormatExecutorV4Version        = 3
@@ -39,8 +39,9 @@ const (
 	stateFormatFleetOperationsVersion   = 9
 	stateFormatRolloutVersion           = 10
 	stateFormatOperationalFreezeVersion = 11
+	stateFormatTenantQuotaVersion       = 12
 	transactionFormatMinReadVersion     = 1
-	transactionFormatWriteVersion       = 11
+	transactionFormatWriteVersion       = 12
 	transactionFormatMaxReadVersion     = transactionFormatWriteVersion
 	transactionEvidenceVersion          = 2
 	transactionExecutorV4Version        = 3
@@ -52,6 +53,7 @@ const (
 	transactionFleetOperationsVersion   = 9
 	transactionRolloutVersion           = 10
 	transactionOperationalFreezeVersion = 11
+	transactionTenantQuotaVersion       = 12
 	maxMutationsPerRecord               = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -149,9 +151,29 @@ func (limits Limits) Validate() error {
 }
 
 type Tenant struct {
-	ID        string `json:"id"`
-	CreatedAt string `json:"created_at"`
-	Active    bool   `json:"active"`
+	ID        string               `json:"id"`
+	CreatedAt string               `json:"created_at"`
+	Active    bool                 `json:"active"`
+	Quota     *TenantResourceQuota `json:"quota,omitempty"`
+}
+
+type TenantQuotaAction string
+
+const (
+	TenantQuotaActionSet   TenantQuotaAction = "set"
+	TenantQuotaActionClear TenantQuotaAction = "clear"
+)
+
+// TenantResourceQuota is a site-defined ceiling over the signed resource
+// requests retained for every non-removed instance in one tenant. Node-local
+// runtime overhead remains governed by Executor's separately enforced policy.
+// Disabled records retain their revision so a stale operator cannot restore an
+// older limit after a clear.
+type TenantResourceQuota struct {
+	Enabled   bool                                          `json:"enabled"`
+	Revision  uint64                                        `json:"revision"`
+	Resources controlprotocol.ExecutorSchedulingResourcesV1 `json:"resources"`
+	ChangedAt string                                        `json:"changed_at"`
 }
 
 type OperationalFreezeScope string
@@ -680,7 +702,7 @@ func emptyState() state {
 func (current state) clone() state {
 	next := emptyState()
 	for key, tenant := range current.tenants {
-		next.tenants[key] = tenant
+		next.tenants[key] = cloneTenant(tenant)
 	}
 	for key, freeze := range current.freezes {
 		next.freezes[key] = freeze
@@ -1128,7 +1150,10 @@ func decodeState(raw []byte, limit int) (state, error) {
 		if _, exists := current.tenants[tenant.ID]; exists {
 			return state{}, errors.New("control snapshot contains a duplicate tenant")
 		}
-		current.tenants[tenant.ID] = tenant
+		if snapshot.Version < stateFormatTenantQuotaVersion && tenant.Quota != nil {
+			return state{}, errors.New("legacy control snapshot contains tenant quota state")
+		}
+		current.tenants[tenant.ID] = cloneTenant(tenant)
 	}
 	for _, freeze := range snapshot.Freezes {
 		key := operationalFreezeKey(freeze.Scope, freeze.TenantID)
@@ -1303,7 +1328,10 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if change.Tenant == nil {
 				return state{}, errors.New("tenant mutation is missing tenant")
 			}
-			next.tenants[change.Tenant.ID] = *change.Tenant
+			if value.Version < transactionTenantQuotaVersion && change.Tenant.Quota != nil {
+				return state{}, errors.New("legacy control transaction contains tenant quota state")
+			}
+			next.tenants[change.Tenant.ID] = cloneTenant(*change.Tenant)
 		case mutationOperationalFreeze:
 			if value.Version < transactionOperationalFreezeVersion || change.Freeze == nil ||
 				!validOperationalFreeze(*change.Freeze) {
@@ -1506,6 +1534,16 @@ func validateState(current state, limits Limits) error {
 	for key, tenant := range current.tenants {
 		if key != tenant.ID || !validRecordID(tenant.ID, 128) || !validTimestamp(tenant.CreatedAt) {
 			return errors.New("control state contains an invalid tenant")
+		}
+		if tenant.Quota != nil {
+			if !validTenantResourceQuota(*tenant.Quota) {
+				return errors.New("control state contains an invalid tenant resource quota")
+			}
+			created, _ := parseTimestamp(tenant.CreatedAt)
+			changed, _ := parseTimestamp(tenant.Quota.ChangedAt)
+			if changed.Before(created) {
+				return errors.New("tenant resource quota predates tenant creation")
+			}
 		}
 	}
 	for key, freeze := range current.freezes {

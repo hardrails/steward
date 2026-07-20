@@ -170,13 +170,13 @@ func (store *Store) CreateTenant(actor controlauth.Identity, tenantID string, no
 		return Tenant{}, false, err
 	}
 	if existing, ok := store.current.tenants[tenantID]; ok {
-		return existing, false, nil
+		return cloneTenant(existing), false, nil
 	}
 	tenant := Tenant{ID: tenantID, CreatedAt: canonicalTimestamp(now), Active: true}
 	if err := store.applyMutationsLocked(mutation{Kind: mutationTenant, Tenant: &tenant}); err != nil {
 		return Tenant{}, false, err
 	}
-	return tenant, true, nil
+	return cloneTenant(tenant), true, nil
 }
 
 func (store *Store) GetTenant(actor controlauth.Identity, tenantID string) (Tenant, bool, error) {
@@ -195,7 +195,7 @@ func (store *Store) GetTenant(actor controlauth.Identity, tenantID string) (Tena
 		return Tenant{}, false, nil
 	}
 	tenant, ok := store.current.tenants[tenantID]
-	return tenant, ok, nil
+	return cloneTenant(tenant), ok, nil
 }
 
 func (store *Store) ListTenants(actor controlauth.Identity) ([]Tenant, error) {
@@ -213,11 +213,11 @@ func (store *Store) ListTenants(actor controlauth.Identity) ([]Tenant, error) {
 	result := make([]Tenant, 0, len(store.current.tenants))
 	if controlauth.IsSiteAdmin(actor) {
 		for _, tenant := range store.current.tenants {
-			result = append(result, tenant)
+			result = append(result, cloneTenant(tenant))
 		}
 	} else if actor.Role == controlauth.RoleTenantOperator && controlauth.AuthorizedTenant(actor, actor.TenantID) {
 		if tenant, ok := store.current.tenants[actor.TenantID]; ok {
-			result = append(result, tenant)
+			result = append(result, cloneTenant(tenant))
 		}
 	} else {
 		return nil, ErrForbidden

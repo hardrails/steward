@@ -334,12 +334,14 @@ The roadmap starts from working primitives rather than a blank design:
   exact application-init and deployment reconciliation implementations.
 - authority-preserving in-place rollouts that retain source and target signed
   delegations, spend disruption budget atomically, and switch each instance only
-  after a proven destroy.
+  after a proven destroy; and
+- durable fleet-wide tenant CPU, memory, process, and workload quotas reserved
+  atomically with admission, with CLI, API, attention, and console visibility.
 
 This foundation is not yet the complete product workflow above. The normal
 create, apply, and prompt path is joined, but a fresh site still needs explicit policy,
 delegation, Gateway, and service-trust setup. The controller also does not yet join
-continuous health recovery, capacity reservation, snapshots, protected-secret
+continuous health recovery, snapshots, protected-secret
 providers, and one offline evidence bundle into one first-time-user operation.
 
 ### Production Core
@@ -391,8 +393,8 @@ supportable through one coherent operational surface.
 - Make placement an actual controller decision with stale-plan detection and
   Executor revalidation.
 - Extend implemented lease-fenced replacement, rescheduling, topology placement,
-  cordon, quarantine, and budgeted stateless drain with canary rollout, pause,
-  rollback, and per-tenant quotas.
+  cordon, quarantine, budgeted stateless drain, and fleet-wide tenant quotas with
+  canary rollout, pause, and rollback.
 - Add the storage backend contract and one quota-capable local backend.
 - Add quiesce, snapshot, clone, archive, restore, TTL, idle expiry, and garbage
   collection state machines.

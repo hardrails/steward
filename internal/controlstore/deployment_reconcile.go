@@ -52,6 +52,7 @@ const (
 	DeploymentBlockedWorkloadLimit           DeploymentBlockedReason = "workload_limit_exceeded"
 	DeploymentBlockedNodeCapacity            DeploymentBlockedReason = "node_capacity_exhausted"
 	DeploymentBlockedTenantCapacity          DeploymentBlockedReason = "tenant_capacity_exhausted"
+	DeploymentBlockedTenantQuota             DeploymentBlockedReason = "tenant_quota_exhausted"
 	DeploymentBlockedDrainDisruptionBudget   DeploymentBlockedReason = "drain_disruption_budget_exhausted"
 	DeploymentBlockedRolloutDisruptionBudget DeploymentBlockedReason = "rollout_disruption_budget_exhausted"
 	DeploymentBlockedStatefulDrain           DeploymentBlockedReason = "stateful_drain_unsupported"
@@ -239,6 +240,15 @@ func (store *Store) EnqueueDeploymentCommand(
 		}
 		if input.SchedulingStaleAfter <= 0 || input.SchedulingStaleAfter > MaxOperationsThreshold {
 			return Deployment{}, Command{}, false, invalid("deployment scheduling freshness is invalid")
+		}
+		tenant, found := store.current.tenants[input.TenantID]
+		if !found || !tenant.Active {
+			return Deployment{}, Command{}, false, ErrNotFound
+		}
+		if err := checkTenantResourceQuota(
+			tenant, store.current.deployments, input.DeploymentID, input.InstanceID, intent,
+		); err != nil {
+			return Deployment{}, Command{}, false, err
 		}
 		capsule, err := admission.InspectProfileCapsule(capsuleRaw, time.Time{})
 		if err != nil {
@@ -744,7 +754,8 @@ func validDeploymentBlockedReason(reason DeploymentBlockedReason) bool {
 		DeploymentBlockedSchedulingUnavailable, DeploymentBlockedPlacementConstraints,
 		DeploymentBlockedWorkloadLimit, DeploymentBlockedNodeCapacity, DeploymentBlockedTenantCapacity,
 		DeploymentBlockedDrainDisruptionBudget, DeploymentBlockedRolloutDisruptionBudget,
-		DeploymentBlockedStatefulDrain, DeploymentBlockedSiteFrozen, DeploymentBlockedTenantFrozen:
+		DeploymentBlockedStatefulDrain, DeploymentBlockedTenantQuota,
+		DeploymentBlockedSiteFrozen, DeploymentBlockedTenantFrozen:
 		return true
 	default:
 		return false

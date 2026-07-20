@@ -227,6 +227,8 @@ const (
 	AttentionCommandFailed         AttentionReason = "command_failed"
 	AttentionCommandOutcomeUnknown AttentionReason = "command_outcome_unknown"
 	AttentionCapacityWarning       AttentionReason = "capacity_warning"
+	AttentionTenantQuotaWarning    AttentionReason = "tenant_quota_warning"
+	AttentionTenantQuotaExceeded   AttentionReason = "tenant_quota_exceeded"
 )
 
 type AttentionSeverity string
@@ -243,6 +245,7 @@ const (
 	AttentionResourceEvidence AttentionResource = "evidence"
 	AttentionResourceCommand  AttentionResource = "command"
 	AttentionResourceCapacity AttentionResource = "capacity"
+	AttentionResourceQuota    AttentionResource = "tenant_quota"
 )
 
 // AttentionItem is a derived fact, not mutable workflow state. ID is stable
@@ -257,11 +260,14 @@ type AttentionItem struct {
 	NodeID           string            `json:"node_id,omitempty"`
 	CommandID        string            `json:"command_id,omitempty"`
 	CapacityResource CapacityResource  `json:"capacity_resource,omitempty"`
+	QuotaResource    string            `json:"quota_resource,omitempty"`
 	Since            string            `json:"since,omitempty"`
 	State            string            `json:"state,omitempty"`
 	Status           string            `json:"status,omitempty"`
 	Used             int               `json:"used,omitempty"`
 	Limit            int               `json:"limit,omitempty"`
+	UsedValue        int64             `json:"used_value,omitempty"`
+	LimitValue       int64             `json:"limit_value,omitempty"`
 }
 
 type AttentionQuery struct {
@@ -599,6 +605,11 @@ func (store *Store) emitAttentionLocked(sink attentionSink, scope operationsScop
 		}
 		index := store.buildSiteAttentionIndexLocked()
 		for _, tenantID := range index.tenantIDs {
+			if !store.addTenantQuotaAttention(
+				sink, store.current.tenants[tenantID], thresholds.CapacityWarningPercent,
+			) {
+				return
+			}
 			if !addCapacityUsageAttention(
 				sink, tenantID,
 				tenantCapacityUsage(index.capacity[tenantID], store.limits, thresholds.CapacityWarningPercent),
@@ -619,7 +630,9 @@ func (store *Store) emitAttentionLocked(sink attentionSink, scope operationsScop
 		return
 	}
 
-	if !store.addCapacityAttention(sink, scope, thresholds.CapacityWarningPercent) {
+	if !store.addTenantQuotaAttention(
+		sink, store.current.tenants[scope.tenantID], thresholds.CapacityWarningPercent,
+	) || !store.addCapacityAttention(sink, scope, thresholds.CapacityWarningPercent) {
 		return
 	}
 	nodes := make([]Node, 0, len(store.current.nodes))
@@ -970,6 +983,15 @@ func capacityAtOrAbove(used, limit, percent int) bool {
 	return used >= whole+remainder
 }
 
+func capacityAtOrAbove64(used, limit int64, percent int) bool {
+	if used < 0 || limit <= 0 || percent <= 0 || percent > 100 {
+		return false
+	}
+	whole := limit / 100 * int64(percent)
+	remainder := ((limit%100)*int64(percent) + 99) / 100
+	return used >= whole+remainder
+}
+
 func (store *Store) commandSummaryLocked(scope operationsScope) CommandSummary {
 	var summary CommandSummary
 	for _, command := range store.current.commands {
@@ -1144,6 +1166,62 @@ func addCapacityUsageAttention(sink attentionSink, tenantID string, usages []Cap
 	return true
 }
 
+func (store *Store) addTenantQuotaAttention(sink attentionSink, tenant Tenant, warningPercent int) bool {
+	if tenant.Quota == nil || !tenant.Quota.Enabled {
+		return true
+	}
+	usage, err := tenantRequestedResourceUsage(store.current.deployments, tenant.ID, "", "")
+	items := tenantQuotaAttentionItems(tenant.ID, usage, tenant.Quota.Resources, warningPercent, err != nil)
+	for _, item := range items {
+		if !sink.add(item) {
+			return false
+		}
+	}
+	return true
+}
+
+func tenantQuotaAttentionItems(
+	tenantID string,
+	usage, limit controlprotocol.ExecutorSchedulingResourcesV1,
+	warningPercent int,
+	accountingFailed bool,
+) []AttentionItem {
+	if accountingFailed {
+		item := AttentionItem{
+			Reason: AttentionTenantQuotaExceeded, Severity: AttentionCritical,
+			Resource: AttentionResourceQuota, TenantID: tenantID, QuotaResource: "accounting",
+		}
+		item.ID = stableAttentionID(item)
+		return []AttentionItem{item}
+	}
+	resources := []struct {
+		name        string
+		used, limit int64
+	}{
+		{"memory_bytes", usage.MemoryBytes, limit.MemoryBytes},
+		{"cpu_millis", usage.CPUMillis, limit.CPUMillis},
+		{"pids", usage.PIDs, limit.PIDs},
+		{"workloads", usage.Workloads, limit.Workloads},
+	}
+	items := make([]AttentionItem, 0, len(resources))
+	for _, resource := range resources {
+		reason, severity := AttentionTenantQuotaWarning, AttentionWarning
+		if resource.used > resource.limit {
+			reason, severity = AttentionTenantQuotaExceeded, AttentionCritical
+		} else if !capacityAtOrAbove64(resource.used, resource.limit, warningPercent) {
+			continue
+		}
+		item := AttentionItem{
+			Reason: reason, Severity: severity, Resource: AttentionResourceQuota,
+			TenantID: tenantID, QuotaResource: resource.name,
+			UsedValue: resource.used, LimitValue: resource.limit,
+		}
+		item.ID = stableAttentionID(item)
+		items = append(items, item)
+	}
+	return items
+}
+
 func tenantCapacityUsage(counts tenantCapacityCounts, limits Limits, warningPercent int) []CapacityUsage {
 	return markCapacityWarnings([]CapacityUsage{
 		{Resource: CapacityNodes, Used: counts.nodes, Limit: limits.MaxNodesPerTenant},
@@ -1276,17 +1354,23 @@ func stableAttentionID(item AttentionItem) string {
 		_, _ = digest.Write([]byte(value))
 		_, _ = digest.Write([]byte{0})
 	}
+	if item.QuotaResource != "" {
+		_, _ = digest.Write([]byte(item.QuotaResource))
+		_, _ = digest.Write([]byte{0})
+	}
 	return "attention-" + hex.EncodeToString(digest.Sum(nil))
 }
 
 func attentionSortKey(item AttentionItem) string {
-	resourceRank := "1"
+	resourceRank := "2"
 	resourceID := item.NodeID
 	switch item.Resource {
 	case AttentionResourceCapacity:
 		resourceRank, resourceID = "0", string(item.CapacityResource)
+	case AttentionResourceQuota:
+		resourceRank, resourceID = "1", item.QuotaResource
 	case AttentionResourceCommand:
-		resourceRank, resourceID = "2", item.NodeID+"\x00"+item.CommandID
+		resourceRank, resourceID = "3", item.NodeID+"\x00"+item.CommandID
 	}
 	return item.TenantID + "\x00" + resourceRank + "\x00" + resourceID + "\x00" +
 		string(item.Reason) + "\x00" + string(item.Resource)
@@ -1297,7 +1381,8 @@ func validAttentionReason(reason AttentionReason) bool {
 	case AttentionNodeNeverSeen, AttentionNodeStale, AttentionEvidenceUnwitnessed,
 		AttentionEvidenceStale, AttentionRollbackDetected, AttentionEquivocationDetected,
 		AttentionCommandPendingOverdue, AttentionCommandLeaseExpired, AttentionCommandFailed,
-		AttentionCommandOutcomeUnknown, AttentionCapacityWarning:
+		AttentionCommandOutcomeUnknown, AttentionCapacityWarning,
+		AttentionTenantQuotaWarning, AttentionTenantQuotaExceeded:
 		return true
 	default:
 		return false

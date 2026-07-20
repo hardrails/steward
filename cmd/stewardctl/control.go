@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,6 +72,12 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlNodeCredentialRevoke(arguments[2:], stdout)
 	case "operations status":
 		return controlOperationsStatus(arguments[2:], stdout)
+	case "quota status":
+		return controlTenantQuotaStatus(arguments[2:], stdout)
+	case "quota set":
+		return controlTenantQuotaChange(arguments[2:], stdout, controlstore.TenantQuotaActionSet)
+	case "quota clear":
+		return controlTenantQuotaChange(arguments[2:], stdout, controlstore.TenantQuotaActionClear)
 	case "freeze status":
 		return controlFreezeStatus(arguments[2:], stdout)
 	case "freeze set":
@@ -113,7 +120,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, operations status, freeze status|set|clear, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|drain|cancel-drain|revoke, node-credential revoke, operations status, quota status|set|clear, freeze status|set|clear, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
 }
 
 type controlFlags struct {
@@ -654,6 +661,91 @@ func controlOperationsStatus(arguments []string, stdout io.Writer) error {
 	return writeControlJSON(stdout, summary)
 }
 
+func controlTenantQuotaStatus(arguments []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("control quota status", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "tenant scope")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if !validOptionalControlIdentifier(*tenantID, 128) || *tenantID == "" || flags.NArg() != 0 {
+		return errors.New("control quota status requires -tenant-id")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	status, err := client.GetTenantResourceQuota(ctx, *tenantID)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, status)
+}
+
+func controlTenantQuotaChange(
+	arguments []string,
+	stdout io.Writer,
+	action controlstore.TenantQuotaAction,
+) error {
+	command := "control quota set"
+	if action == controlstore.TenantQuotaActionClear {
+		command = "control quota clear"
+	}
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	tenantID := flags.String("tenant-id", "", "tenant scope")
+	revision := flags.Uint64("revision", 0, "expected retained revision; zero discovers it safely")
+	memoryMiB := flags.Int64("memory-mib", 0, "maximum total requested memory in MiB")
+	cpuMillis := flags.Int64("cpu-millis", 0, "maximum total requested CPU in millicores")
+	pids := flags.Int64("pids", 0, "maximum total requested process count")
+	workloads := flags.Int64("workloads", 0, "maximum total workload count")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	resources := controlprotocol.ExecutorSchedulingResourcesV1{}
+	if action == controlstore.TenantQuotaActionSet {
+		if *memoryMiB <= 0 || *memoryMiB > math.MaxInt64/(1<<20) || *cpuMillis <= 0 ||
+			*cpuMillis > math.MaxInt64/1_000_000 || *pids <= 0 || *workloads <= 0 {
+			return errors.New("control quota set requires positive -memory-mib, -cpu-millis, -pids, and -workloads")
+		}
+		resources = controlprotocol.ExecutorSchedulingResourcesV1{
+			MemoryBytes: *memoryMiB * (1 << 20), CPUMillis: *cpuMillis, PIDs: *pids, Workloads: *workloads,
+		}
+	} else if *memoryMiB != 0 || *cpuMillis != 0 || *pids != 0 || *workloads != 0 {
+		return errors.New("control quota clear accepts only tenant scope and revision")
+	}
+	if !validOptionalControlIdentifier(*tenantID, 128) || *tenantID == "" || flags.NArg() != 0 {
+		return errors.New("control quota set and clear require -tenant-id and no positional arguments")
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	expectedRevision := *revision
+	if expectedRevision == 0 {
+		discoveryContext, cancelDiscovery := context.WithTimeout(context.Background(), 30*time.Second)
+		status, err := client.GetTenantResourceQuota(discoveryContext, *tenantID)
+		cancelDiscovery()
+		if err != nil {
+			return err
+		}
+		if status.Quota != nil {
+			expectedRevision = status.Quota.Revision
+		}
+	}
+	changeContext, cancelChange := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelChange()
+	change, err := client.ChangeTenantResourceQuota(changeContext, *tenantID, action, expectedRevision, resources)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, change)
+}
+
 func controlFreezeStatus(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("control freeze status", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -984,7 +1076,8 @@ func validControlAttentionReason(value string) bool {
 		controlstore.AttentionRollbackDetected, controlstore.AttentionEquivocationDetected,
 		controlstore.AttentionCommandPendingOverdue, controlstore.AttentionCommandLeaseExpired,
 		controlstore.AttentionCommandFailed, controlstore.AttentionCommandOutcomeUnknown,
-		controlstore.AttentionCapacityWarning:
+		controlstore.AttentionCapacityWarning, controlstore.AttentionTenantQuotaWarning,
+		controlstore.AttentionTenantQuotaExceeded:
 		return true
 	default:
 		return false

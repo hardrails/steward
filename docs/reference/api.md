@@ -64,6 +64,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `POST /v1/tenants/{tenant_id}/nodes/{node_id}/commands` | Retain one exact signed Executor command |
 | `GET .../commands/{command_id}` | Read durable delivery and terminal status |
 | `GET /v1/operations/summary` | Read tenant-projected capacity, command, evidence, and attention totals |
+| `GET or PUT /v1/tenants/{tenant_id}/quota` | Inspect requested-resource usage or optimistically set and clear the site-defined fleet-wide tenant ceiling; mutation requires a site administrator |
 | `GET or PUT /v1/operations/freeze` | Inspect or optimistically change the site-wide command-delivery freeze; mutation requires a site administrator |
 | `GET /v1/operations/attention` | Page and filter deterministic action-required facts |
 | `GET /v1/operations/agents` | Page through non-secret observed agent runtime state and latest signed operations |
@@ -92,6 +93,16 @@ The freeze gates new command retention and node delivery. It does not revoke a
 live delivery lease, stop a running workload, or suppress node reports and signed
 evidence. See the [incident freeze workflow]({{ '/guides/control-plane/' | relative_url }}#freeze-new-command-delivery-during-an-incident)
 for the operator-facing boundary.
+
+Tenant resource quotas also use optimistic revisions. The ceiling covers raw CPU,
+memory, process, and workload-slot requests in signed admission intent across the
+fleet. The admission enqueue transaction reserves quota; never-admitted pending
+work does not reserve it, while later or ambiguous phases retain the reservation
+until removal or confirmed absence. Lowering a ceiling does not evict existing
+work. It reports `over_quota`, blocks new admission with
+`tenant_quota_exhausted`, and surfaces warning or critical attention facts. This
+contract is separate from Executor's node-local runtime overhead and from storage
+byte or inode quotas.
 
 Every node response includes controller placement state. `schedulable` accepts
 eligible new deployments. `cordoned` preserves existing assignments but excludes

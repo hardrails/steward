@@ -397,6 +397,7 @@ func TestSchedulingBlockedReasonMapsStoreFailures(t *testing.T) {
 		{controlstore.ErrNodePlacementUnavailable, controlstore.DeploymentBlockedNoEligibleNode},
 		{controlstore.ErrNodeSchedulingConstraint, controlstore.DeploymentBlockedPlacementConstraints},
 		{controlstore.ErrTenantCapacityExceeded, controlstore.DeploymentBlockedTenantCapacity},
+		{controlstore.ErrTenantQuotaExceeded, controlstore.DeploymentBlockedTenantQuota},
 		{controlstore.ErrWorkloadLimitExceeded, controlstore.DeploymentBlockedWorkloadLimit},
 		{controlstore.ErrNodeCapacityExceeded, controlstore.DeploymentBlockedNodeCapacity},
 		{errors.New("other"), ""},
@@ -752,6 +753,44 @@ func TestReconcilerAtomicallyRechecksCapacityAcrossOneFleetSnapshot(t *testing.T
 	status, err := fixture.store.Status()
 	if err != nil || admitting != 1 || blocked != 1 || status.Commands != 1 {
 		t.Fatalf("atomic reservation result = admitting %d blocked %d status %+v err %v", admitting, blocked, status, err)
+	}
+}
+
+func TestReconcilerAtomicallyReservesTenantQuotaWithoutPendingDeadlock(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	resources := controlprotocol.ExecutorSchedulingResourcesV1{
+		MemoryBytes: 128 << 20, CPUMillis: 250, PIDs: 32, Workloads: 1,
+	}
+	if _, changed, err := fixture.store.ChangeTenantResourceQuota(
+		fixture.admin, "tenant-a", controlstore.TenantQuotaActionSet, 0, resources, fixture.now,
+	); err != nil || !changed {
+		t.Fatalf("set tenant quota = (%v, %v)", changed, err)
+	}
+	applyControlDeploymentNamed(t, fixture, "alpha", "alpha-0", "alpha-lineage-0", 1)
+	applyControlDeploymentNamed(t, fixture, "beta", "beta-0", "beta-lineage-0", 1)
+
+	report, err := fixture.reconciler(t).Reconcile(context.Background())
+	if err != nil || report.Enqueued != 1 || report.Blocked != 1 {
+		t.Fatalf("quota reconciliation = (%+v, %v)", report, err)
+	}
+	snapshot, err := fixture.store.SnapshotDeploymentFleet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitting, blocked := 0, 0
+	for _, deployment := range snapshot.Deployments {
+		instance := deployment.Instances[0]
+		if instance.Phase == controlstore.DeploymentInstanceAdmitting {
+			admitting++
+		}
+		if instance.Phase == controlstore.DeploymentInstancePending &&
+			instance.LastError == string(controlstore.DeploymentBlockedTenantQuota) {
+			blocked++
+		}
+	}
+	status, statusErr := fixture.store.InspectTenantResourceQuota(fixture.admin, "tenant-a")
+	if statusErr != nil || admitting != 1 || blocked != 1 || status.OverQuota || status.Usage != resources {
+		t.Fatalf("atomic quota result = admitting %d blocked %d status %+v err %v", admitting, blocked, status, statusErr)
 	}
 }
 

@@ -48,6 +48,23 @@ function humanize(value) {
   return String(value || "unknown").replaceAll("_", " ");
 }
 
+function formatResourceValue(resource, value) {
+  if (!Number.isFinite(value) || value < 0) {
+    return "unknown";
+  }
+  if (resource === "memory_bytes") {
+    const gibibytes = value / (1024 ** 3);
+    if (gibibytes >= 1) {
+      return new Intl.NumberFormat(undefined, {maximumFractionDigits: 2}).format(gibibytes) + " GiB";
+    }
+    return new Intl.NumberFormat(undefined, {maximumFractionDigits: 0}).format(value / (1024 ** 2)) + " MiB";
+  }
+  if (resource === "cpu_millis") {
+    return new Intl.NumberFormat(undefined, {maximumFractionDigits: 2}).format(value / 1000) + " CPU";
+  }
+  return new Intl.NumberFormat().format(value);
+}
+
 function projectedPath(base, tenantID, extra = {}) {
   const url = new URL(base, window.location.origin);
   if (tenantID) {
@@ -212,10 +229,13 @@ export default function App() {
       tenantID
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/nodes?limit=500", epoch)
         : Promise.resolve({nodes: []}),
+      tenantID
+        ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/quota", epoch)
+        : Promise.resolve(null),
     ];
-    const [summary, attention, agents, commands, credentials, freeze, nodes] = await Promise.all(requests);
+    const [summary, attention, agents, commands, credentials, freeze, nodes, quota] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, agents, commands, credentials, freeze, nodes};
+    return {summary, attention, agents, commands, credentials, freeze, nodes, quota};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -723,6 +743,7 @@ function Overview({snapshot, onAttention}) {
           {summary.commands.failed} failed · {summary.commands.outcome_unknown} unknown
         </Metric>
       </div>
+      {snapshot.quota ? <TenantQuotaPanel status={snapshot.quota} /> : null}
       <div className="overview-grid">
         <article className="panel">
           <PanelHeading index="02 / RETAINED STATE" title="Capacity">
@@ -761,6 +782,56 @@ function Overview({snapshot, onAttention}) {
         <AttentionList items={attention.items.slice(0, 4)} />
       </article>
     </section>
+  );
+}
+
+const tenantQuotaResources = [
+  ["memory_bytes", "Memory"],
+  ["cpu_millis", "CPU"],
+  ["pids", "Processes"],
+  ["workloads", "Agents"],
+];
+
+function TenantQuotaPanel({status}) {
+  const quota = status.quota;
+  const enabled = Boolean(quota?.enabled);
+  return (
+    <article className={"quota-panel" + (status.over_quota ? " is-over" : "")}>
+      <PanelHeading index="01 / TENANT BOUNDARY" title="Fleet-wide resource quota">
+        <span className={"status-chip " + (status.over_quota ? "is-danger" : enabled ? "is-ok" : "is-warning")}>
+          {status.over_quota ? "OVER QUOTA" : enabled ? "ENFORCED" : "NOT SET"}
+        </span>
+      </PanelHeading>
+      {enabled ? (
+        <>
+          <p className="quota-explainer">
+            Tenant <strong>{status.tenant_id}</strong> cannot win new admission above these combined signed requests across the fleet. Existing work is not evicted when a limit is lowered.
+          </p>
+          <div className="quota-resource-grid">
+            {tenantQuotaResources.map(([resource, label]) => {
+              const used = status.usage[resource];
+              const limit = quota.resources[resource];
+              const exceeded = used > limit;
+              return (
+                <div key={resource} className={exceeded ? "is-exceeded" : ""}>
+                  <span>{label}</span>
+                  <strong>{formatResourceValue(resource, used)}</strong>
+                  <small>of {formatResourceValue(resource, limit)}</small>
+                  <progress max={limit} value={Math.min(used, limit)} aria-label={`${label}: ${used} of ${limit}`} />
+                </div>
+              );
+            })}
+          </div>
+          <p className="quota-footnote">Revision {quota.revision} · changed {formatTime(quota.changed_at)} · node-local runtime overhead remains separately enforced by Executor.</p>
+        </>
+      ) : (
+        <div className="quota-unset">
+          <strong>No tenant-wide ceiling is active.</strong>
+          <p>Executor still enforces each node's workload and tenant limits, but this tenant can consume capacity across multiple nodes until a site administrator sets a fleet-wide quota.</p>
+          <code>stewardctl control quota set -tenant-id {status.tenant_id} …</code>
+        </div>
+      )}
+    </article>
   );
 }
 
@@ -880,9 +951,12 @@ function PanelHeading({index, title, children}) {
 }
 
 function attentionResource(item) {
-  const parts = [item.resource, item.tenant_id, item.node_id, item.command_id, item.capacity_resource].filter(Boolean);
+  const parts = [item.resource, item.tenant_id, item.node_id, item.command_id, item.capacity_resource, item.quota_resource].filter(Boolean);
   if (item.used !== undefined && item.limit !== undefined) {
     parts.push(item.used + " / " + item.limit);
+  }
+  if (item.used_value !== undefined && item.limit_value !== undefined) {
+    parts.push(formatResourceValue(item.quota_resource, item.used_value) + " / " + formatResourceValue(item.quota_resource, item.limit_value));
   }
   return parts.join(" · ");
 }
