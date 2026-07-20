@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/storagebackend"
 )
 
@@ -278,6 +279,473 @@ func TestQualifiedStateSnapshotDistinguishesDefinitiveAndAmbiguousBackendFailure
 	}
 }
 
+func TestStateSnapshotEndpointGuardsAndHelpers(t *testing.T) {
+	paths := []string{"/v1/state/snapshots", "/v1/state/clones", "/v1/state/snapshots/delete"}
+	server, err := NewServer(&secureDocker{}, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		if response := postStateMutation(t, server, path, map[string]string{}); response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("unconfigured %s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+
+	_, _, config := secureAdmissionFixture(t)
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		if response := postStateMutation(t, server, path, map[string]string{}); response.Code != http.StatusNotImplemented {
+			t.Fatalf("backend-free %s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+
+	server, err = NewServer(&secureDocker{}, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, config = secureAdmissionFixture(t)
+	config.StateBackend = newQualifiedStateBackend()
+	config.AllowUnquotaedStateOnDedicatedHost = false
+	config.StateVolumeByteLimit, config.StateVolumeObjectLimit = 4096, 10
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		if response := postStateMutation(t, server, path, map[string]string{}); response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid %s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+	snapshotRequest := stateSnapshotRequest{
+		TenantID: "tenant-a", NodeID: "other-node", InstanceID: "agent-1",
+		LineageID: "lineage-a", Generation: 1, SnapshotID: "snapshot-a",
+	}
+	if response := postStateMutation(t, server, paths[0], snapshotRequest); response.Code != http.StatusForbidden {
+		t.Fatalf("wrong-node snapshot status=%d body=%s", response.Code, response.Body.String())
+	}
+	wrongNodeClone := stateCloneRequest{
+		TenantID: "tenant-a", NodeID: "other-node", InstanceID: "agent-fork", LineageID: "lineage-fork",
+		Generation: 1, SnapshotID: "snapshot-a", SourceLineageID: "lineage-a",
+	}
+	if response := postStateMutation(t, server, paths[1], wrongNodeClone); response.Code != http.StatusForbidden {
+		t.Fatalf("wrong-node clone status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := postStateMutation(t, server, paths[2], snapshotRequest); response.Code != http.StatusForbidden {
+		t.Fatalf("wrong-node deletion status=%d body=%s", response.Code, response.Body.String())
+	}
+	snapshotRequest.NodeID = "node-a"
+	if response := postStateMutation(t, server, paths[0], snapshotRequest); response.Code != http.StatusNotFound {
+		t.Fatalf("unknown snapshot lineage status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := postStateMutation(t, server, paths[2], snapshotRequest); response.Code != http.StatusNotFound {
+		t.Fatalf("unknown deletion lineage status=%d body=%s", response.Code, response.Body.String())
+	}
+	cloneRequest := stateCloneRequest{
+		TenantID: "tenant-a", NodeID: "node-a", InstanceID: "agent-fork", LineageID: "lineage-fork",
+		Generation: 1, SnapshotID: "snapshot-a", SourceLineageID: "lineage-a",
+	}
+	if response := postStateMutation(t, server, paths[1], cloneRequest); response.Code != http.StatusNotFound {
+		t.Fatalf("unknown clone source status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	for _, backendErr := range []error{
+		storagebackend.ErrInvalid, storagebackend.ErrNotFound, storagebackend.ErrConflict,
+		storagebackend.ErrInUse, storagebackend.ErrCapacity, storagebackend.ErrUnsupported,
+		storagebackend.ErrUnavailable,
+	} {
+		if !definitiveStateBackendError(backendErr) {
+			t.Fatalf("definitive backend error not recognized: %v", backendErr)
+		}
+	}
+	if definitiveStateBackendError(errors.New("transport closed")) {
+		t.Fatal("ambiguous transport error was treated as definitive")
+	}
+	if target := stateMutationTarget("snapshot", "snapshot-a", "tenant-a", "lineage-a", 1); !strings.HasPrefix(target, "snapshot:") {
+		t.Fatalf("mutation target = %q", target)
+	}
+	if validStateSnapshotRequest(stateSnapshotRequest{}) || validStateCloneRequest(stateCloneRequest{}) {
+		t.Fatal("empty state mutation request was valid")
+	}
+	if validStateCloneRequest(stateCloneRequest{
+		TenantID: "tenant-a", NodeID: "node-a", InstanceID: "agent-1", LineageID: "same",
+		SourceLineageID: "same", SnapshotID: "snapshot-a", Generation: 1,
+	}) {
+		t.Fatal("self-clone request was valid")
+	}
+	snapshot := storagebackend.Snapshot{
+		SnapshotID: "snapshot-a", TenantID: "tenant-a", SourceLineageID: "lineage-a",
+		ContentDigest: "sha256:" + strings.Repeat("a", 64), RetainedBytes: 10, ObjectCount: 2,
+		CreatedAt: "2026-07-20T12:00:00Z",
+	}
+	if response := snapshotResponse(snapshot); response.SnapshotID != snapshot.SnapshotID || response.Status != "stopped" {
+		t.Fatalf("snapshot response = %+v", response)
+	}
+	if response := cloneResponse(cloneRequest); response.LineageID != cloneRequest.LineageID || response.Status != "stopped" {
+		t.Fatalf("clone response = %+v", response)
+	}
+	for _, test := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{storagebackend.ErrInvalid, http.StatusBadRequest, "invalid_state"},
+		{storagebackend.ErrNotFound, http.StatusNotFound, "state_not_found"},
+		{storagebackend.ErrConflict, http.StatusConflict, "state_drift"},
+		{storagebackend.ErrInUse, http.StatusConflict, "state_in_use"},
+		{storagebackend.ErrCapacity, http.StatusInsufficientStorage, "state_capacity_exceeded"},
+		{storagebackend.ErrUnsupported, http.StatusNotImplemented, "capability_unavailable"},
+		{errors.New("transport"), http.StatusServiceUnavailable, "state_backend_unavailable"},
+	} {
+		recorder := httptest.NewRecorder()
+		writeStateBackendError(recorder, test.err)
+		if recorder.Code != test.status || !strings.Contains(recorder.Body.String(), `"error":"`+test.code+`"`) {
+			t.Fatalf("backend error %v response=%d %s", test.err, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestStateSnapshotLifecycleFailsClosedOnBackendDrift(t *testing.T) {
+	server, backend, intent := stoppedQualifiedStateLineage(t)
+	request := stateSnapshotRequest{
+		TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+		LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: "checkpoint-drift",
+	}
+	backend.inspectVolumeErr = storagebackend.ErrUnavailable
+	assertStateMutationStatus(t, server, "/v1/state/snapshots", request, http.StatusServiceUnavailable, "state_backend_unavailable")
+	backend.inspectVolumeErr = nil
+	spec := server.qualifiedStateSpec(intent.TenantID, intent.LineageID)
+	volume := backend.volumes[spec.Scope()]
+	volume.State = storagebackend.StateDeleted
+	backend.volumes[spec.Scope()] = volume
+	assertStateMutationStatus(t, server, "/v1/state/snapshots", request, http.StatusConflict, "state_drift")
+	volume.State = storagebackend.StateReady
+	backend.volumes[spec.Scope()] = volume
+	backend.inspectSnapshotErr = storagebackend.ErrUnavailable
+	assertStateMutationStatus(t, server, "/v1/state/snapshots", request, http.StatusServiceUnavailable, "state_backend_unavailable")
+	backend.inspectSnapshotErr = nil
+	scope := storagebackend.SnapshotScope{
+		SnapshotID: request.SnapshotID, TenantID: request.TenantID, SourceVolumeID: spec.VolumeID,
+		SourceLineageID: request.LineageID, Generation: 1,
+	}
+	backend.snapshots[scope] = storagebackend.Snapshot{
+		SnapshotID: scope.SnapshotID, TenantID: scope.TenantID, SourceVolumeID: scope.SourceVolumeID,
+		SourceLineageID: scope.SourceLineageID, Generation: scope.Generation, State: storagebackend.StateDeleted,
+		BackendRef: "snapshot-" + scope.SnapshotID, ContentDigest: "sha256:" + strings.Repeat("d", 64),
+		CreatedAt: "2026-07-20T12:02:00Z", DeletedAt: "2026-07-20T12:03:00Z",
+	}
+	assertStateMutationStatus(t, server, "/v1/state/snapshots", request, http.StatusConflict, "state_drift")
+	delete(backend.snapshots, scope)
+	backend.invalidSnapshot = true
+	assertStateMutationStatus(t, server, "/v1/state/snapshots", request, http.StatusServiceUnavailable, "reconciliation_required")
+}
+
+func TestStateCloneAndDeleteFailClosedOnBackendDrift(t *testing.T) {
+	t.Run("clone", func(t *testing.T) {
+		server, backend, intent := stoppedQualifiedStateLineage(t)
+		snapshotRequest := stateSnapshotRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+			LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: "checkpoint-clone",
+		}
+		if response := postStateMutation(t, server, "/v1/state/snapshots", snapshotRequest); response.Code != http.StatusCreated {
+			t.Fatalf("snapshot status=%d body=%s", response.Code, response.Body.String())
+		}
+		request := stateCloneRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: "fork-a", LineageID: "lineage-fork-a",
+			Generation: 1, SnapshotID: snapshotRequest.SnapshotID, SourceLineageID: intent.LineageID,
+		}
+		conflict := request
+		conflict.InstanceID = intent.InstanceID
+		assertStateMutationStatus(t, server, "/v1/state/clones", conflict, http.StatusConflict, "state_exists")
+		scope := storagebackend.SnapshotScope{
+			SnapshotID: request.SnapshotID, TenantID: request.TenantID,
+			SourceVolumeID:  stateBackendVolumeID(request.TenantID, request.SourceLineageID),
+			SourceLineageID: request.SourceLineageID, Generation: 1,
+		}
+		snapshot := backend.snapshots[scope]
+		snapshot.State = storagebackend.StateDeleted
+		backend.snapshots[scope] = snapshot
+		assertStateMutationStatus(t, server, "/v1/state/clones", request, http.StatusConflict, "state_drift")
+		snapshot.State = storagebackend.StateReady
+		backend.snapshots[scope] = snapshot
+		backend.planErr = storagebackend.ErrCapacity
+		assertStateMutationStatus(t, server, "/v1/state/clones", request, http.StatusInsufficientStorage, "state_capacity_exceeded")
+	})
+
+	t.Run("clone target drift", func(t *testing.T) {
+		server, backend, intent, snapshotID := stoppedQualifiedStateSnapshot(t, "checkpoint-target-drift")
+		request := stateCloneRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: "fork-drift", LineageID: "lineage-fork-drift",
+			Generation: 1, SnapshotID: snapshotID, SourceLineageID: intent.LineageID,
+		}
+		spec := server.qualifiedStateSpec(request.TenantID, request.LineageID)
+		spec.ParentSnapshotID = snapshotID
+		backend.volumes[spec.Scope()] = storagebackend.Volume{
+			Spec: spec, State: storagebackend.StateReady, BackendRef: "wrong",
+			DockerVolumeHandle: "wrong", CreatedAt: "2026-07-20T12:00:00Z",
+		}
+		assertStateMutationStatus(t, server, "/v1/state/clones", request, http.StatusConflict, "state_drift")
+	})
+
+	for _, test := range []struct {
+		name string
+		set  func(*qualifiedStateBackend)
+		code string
+	}{
+		{name: "clone mutation", set: func(backend *qualifiedStateBackend) { backend.cloneErr = storagebackend.ErrConflict }, code: "state_drift"},
+		{name: "clone projection", set: func(backend *qualifiedStateBackend) { backend.invalidClone = true }, code: "reconciliation_required"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, backend, intent, snapshotID := stoppedQualifiedStateSnapshot(t, "checkpoint-"+strings.ReplaceAll(test.name, " ", "-"))
+			test.set(backend)
+			request := stateCloneRequest{
+				TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: "fork-b", LineageID: "lineage-fork-b",
+				Generation: 1, SnapshotID: snapshotID, SourceLineageID: intent.LineageID,
+			}
+			status := http.StatusConflict
+			if test.code == "reconciliation_required" {
+				status = http.StatusServiceUnavailable
+			}
+			assertStateMutationStatus(t, server, "/v1/state/clones", request, status, test.code)
+		})
+	}
+
+	t.Run("delete", func(t *testing.T) {
+		server, backend, intent := stoppedQualifiedStateLineage(t)
+		request := stateSnapshotRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+			LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: "checkpoint-delete",
+		}
+		if response := postStateMutation(t, server, "/v1/state/snapshots", request); response.Code != http.StatusCreated {
+			t.Fatalf("snapshot status=%d body=%s", response.Code, response.Body.String())
+		}
+		backend.deleteSnapshotErr = storagebackend.ErrInUse
+		assertStateMutationStatus(t, server, "/v1/state/snapshots/delete", request, http.StatusConflict, "state_in_use")
+		backend.deleteSnapshotErr = nil
+		backend.invalidDelete = true
+		assertStateMutationStatus(t, server, "/v1/state/snapshots/delete", request, http.StatusServiceUnavailable, "reconciliation_required")
+	})
+}
+
+func TestStateSnapshotMutationsBlockBehindUnrelatedPreparedWork(t *testing.T) {
+	server, _, intent, snapshotID := stoppedQualifiedStateSnapshot(t, "checkpoint-pending")
+	if _, err := server.secure.journal.Prepare("unrelated-operation", "unrelated-target", 1); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := stateSnapshotRequest{
+		TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+		LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: snapshotID,
+	}
+	clone := stateCloneRequest{
+		TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: "fork-pending", LineageID: "lineage-fork-pending",
+		Generation: 1, SnapshotID: snapshotID, SourceLineageID: intent.LineageID,
+	}
+	for path, request := range map[string]any{
+		"/v1/state/snapshots":        snapshot,
+		"/v1/state/clones":           clone,
+		"/v1/state/snapshots/delete": snapshot,
+	} {
+		assertStateMutationStatus(t, server, path, request, http.StatusServiceUnavailable, "reconciliation_required")
+	}
+}
+
+func TestStateCloneAndDeleteSurfaceBackendInspectionFailure(t *testing.T) {
+	t.Run("clone", func(t *testing.T) {
+		server, backend, intent, snapshotID := stoppedQualifiedStateSnapshot(t, "checkpoint-inspect-clone")
+		backend.inspectSnapshotErr = storagebackend.ErrUnavailable
+		request := stateCloneRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: "fork-inspect", LineageID: "lineage-fork-inspect",
+			Generation: 1, SnapshotID: snapshotID, SourceLineageID: intent.LineageID,
+		}
+		assertStateMutationStatus(t, server, "/v1/state/clones", request, http.StatusServiceUnavailable, "state_backend_unavailable")
+	})
+	t.Run("delete", func(t *testing.T) {
+		server, backend, intent, snapshotID := stoppedQualifiedStateSnapshot(t, "checkpoint-inspect-delete")
+		backend.inspectSnapshotErr = storagebackend.ErrUnavailable
+		request := stateSnapshotRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+			LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: snapshotID,
+		}
+		assertStateMutationStatus(t, server, "/v1/state/snapshots/delete", request, http.StatusServiceUnavailable, "state_backend_unavailable")
+	})
+}
+
+func TestStateSnapshotMutationsRequireDurableJournalAndEvidence(t *testing.T) {
+	t.Run("snapshot journal", func(t *testing.T) {
+		server, _, intent := stoppedQualifiedStateLineage(t)
+		if err := server.secure.journal.Close(); err != nil {
+			t.Fatal(err)
+		}
+		request := stateSnapshotRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+			LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: "snapshot-journal",
+		}
+		assertStateMutationStatus(t, server, "/v1/state/snapshots", request, http.StatusServiceUnavailable, "journal_unavailable")
+	})
+	t.Run("snapshot evidence", func(t *testing.T) {
+		server, _, intent := stoppedQualifiedStateLineage(t)
+		if err := server.secure.evidence.Close(); err != nil {
+			t.Fatal(err)
+		}
+		request := stateSnapshotRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+			LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: "snapshot-evidence",
+		}
+		assertStateMutationStatus(t, server, "/v1/state/snapshots", request, http.StatusServiceUnavailable, "evidence_unavailable")
+	})
+	for _, action := range []string{"clone", "delete"} {
+		t.Run(action+" evidence", func(t *testing.T) {
+			server, _, intent, snapshotID := stoppedQualifiedStateSnapshot(t, "snapshot-"+action+"-evidence")
+			if err := server.secure.evidence.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if action == "clone" {
+				request := stateCloneRequest{
+					TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: "fork-evidence", LineageID: "lineage-fork-evidence",
+					Generation: 1, SnapshotID: snapshotID, SourceLineageID: intent.LineageID,
+				}
+				assertStateMutationStatus(t, server, "/v1/state/clones", request, http.StatusServiceUnavailable, "evidence_unavailable")
+				return
+			}
+			request := stateSnapshotRequest{
+				TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+				LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: snapshotID,
+			}
+			assertStateMutationStatus(t, server, "/v1/state/snapshots/delete", request, http.StatusServiceUnavailable, "evidence_unavailable")
+		})
+	}
+}
+
+func TestStateSnapshotDeletionRetainsAmbiguousOrUnprovenWork(t *testing.T) {
+	t.Run("already absent", func(t *testing.T) {
+		server, _, intent := stoppedQualifiedStateLineage(t)
+		request := stateSnapshotRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+			LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: "snapshot-already-absent",
+		}
+		if response := postStateMutation(t, server, "/v1/state/snapshots/delete", request); response.Code != http.StatusNoContent {
+			t.Fatalf("absent deletion status=%d body=%s", response.Code, response.Body.String())
+		}
+	})
+	t.Run("ambiguous backend result", func(t *testing.T) {
+		server, backend, intent, snapshotID := stoppedQualifiedStateSnapshot(t, "snapshot-delete-ambiguous")
+		backend.deleteSnapshotErr = errors.New("storage transport closed")
+		request := stateSnapshotRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+			LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: snapshotID,
+		}
+		assertStateMutationStatus(t, server, "/v1/state/snapshots/delete", request, http.StatusServiceUnavailable, "reconciliation_required")
+		if len(server.secure.journal.Pending()) != 1 {
+			t.Fatal("ambiguous deletion did not remain prepared")
+		}
+	})
+	t.Run("missing recovery target", func(t *testing.T) {
+		server, _, intent := stoppedQualifiedStateLineage(t)
+		request := stateSnapshotRequest{
+			TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+			LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: "snapshot-missing-recovery",
+		}
+		target := stateMutationTarget("delete-snapshot", request.SnapshotID, request.TenantID, request.LineageID, request.Generation)
+		if _, err := server.secure.journal.Prepare("delete-recovery", target, request.Generation); err != nil {
+			t.Fatal(err)
+		}
+		assertStateMutationStatus(t, server, "/v1/state/snapshots/delete", request, http.StatusServiceUnavailable, "reconciliation_required")
+	})
+}
+
+func TestStateMutationDoesNotAcknowledgeWithoutCommitReceipt(t *testing.T) {
+	for _, durable := range []string{"evidence", "journal"} {
+		for _, action := range []string{"snapshot", "clone", "delete"} {
+			t.Run(action+" "+durable, func(t *testing.T) {
+				server, backend, intent := stoppedQualifiedStateLineage(t)
+				snapshotID := "snapshot-commit-" + action + "-" + durable
+				if action != "snapshot" {
+					request := stateSnapshotRequest{
+						TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+						LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: snapshotID,
+					}
+					if response := postStateMutation(t, server, "/v1/state/snapshots", request); response.Code != http.StatusCreated {
+						t.Fatalf("prepare snapshot status=%d body=%s", response.Code, response.Body.String())
+					}
+				}
+				closeReceiptStore := func() {
+					if durable == "evidence" {
+						_ = server.secure.evidence.Close()
+					} else {
+						_ = server.secure.journal.Close()
+					}
+				}
+				switch action {
+				case "snapshot":
+					backend.snapshotHook = closeReceiptStore
+					request := stateSnapshotRequest{
+						TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+						LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: snapshotID,
+					}
+					assertStateMutationStatus(t, server, "/v1/state/snapshots", request, http.StatusServiceUnavailable, "reconciliation_required")
+				case "clone":
+					backend.cloneHook = closeReceiptStore
+					request := stateCloneRequest{
+						TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: "fork-commit", LineageID: "lineage-fork-commit",
+						Generation: 1, SnapshotID: snapshotID, SourceLineageID: intent.LineageID,
+					}
+					assertStateMutationStatus(t, server, "/v1/state/clones", request, http.StatusServiceUnavailable, "reconciliation_required")
+				case "delete":
+					backend.deleteHook = closeReceiptStore
+					request := stateSnapshotRequest{
+						TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+						LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: snapshotID,
+					}
+					assertStateMutationStatus(t, server, "/v1/state/snapshots/delete", request, http.StatusServiceUnavailable, "reconciliation_required")
+				}
+			})
+		}
+	}
+}
+
+func stoppedQualifiedStateLineage(t *testing.T) (*Server, *qualifiedStateBackend, admission.InstanceIntent) {
+	t.Helper()
+	backend := newQualifiedStateBackend()
+	server, err := NewServer(&secureDocker{}, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capsule, intent, config := secureAdmissionFixture(t)
+	intent.Capabilities.State, intent.StateDisposition = true, "new"
+	config.StateBackend = backend
+	config.AllowUnquotaedStateOnDedicatedHost = false
+	config.StateVolumeByteLimit, config.StateVolumeObjectLimit = 4096, 10
+	if err := server.EnableSecureAdmission(config); err != nil {
+		t.Fatal(err)
+	}
+	if response := submitSecureAdmission(t, server, capsule, intent); response.Code != http.StatusCreated {
+		t.Fatalf("admission status=%d body=%s", response.Code, response.Body.String())
+	}
+	assertLifecycleStatus(t, server, http.MethodDelete, "/v1/workloads/"+RuntimeRef(intent.TenantID, intent.InstanceID), context.Background(), http.StatusNoContent)
+	return server, backend, intent
+}
+
+func stoppedQualifiedStateSnapshot(t *testing.T, snapshotID string) (*Server, *qualifiedStateBackend, admission.InstanceIntent, string) {
+	t.Helper()
+	server, backend, intent := stoppedQualifiedStateLineage(t)
+	request := stateSnapshotRequest{
+		TenantID: intent.TenantID, NodeID: intent.NodeID, InstanceID: intent.InstanceID,
+		LineageID: intent.LineageID, Generation: intent.Generation, SnapshotID: snapshotID,
+	}
+	if response := postStateMutation(t, server, "/v1/state/snapshots", request); response.Code != http.StatusCreated {
+		t.Fatalf("snapshot status=%d body=%s", response.Code, response.Body.String())
+	}
+	return server, backend, intent, snapshotID
+}
+
+func assertStateMutationStatus(t *testing.T, server *Server, path string, request any, status int, code string) {
+	t.Helper()
+	response := postStateMutation(t, server, path, request)
+	if response.Code != status || !strings.Contains(response.Body.String(), `"error":"`+code+`"`) {
+		t.Fatalf("%s status=%d body=%s", path, response.Code, response.Body.String())
+	}
+}
+
 func postStateMutation(t *testing.T, server *Server, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	raw, err := json.Marshal(body)
@@ -292,12 +760,22 @@ func postStateMutation(t *testing.T, server *Server, path string, body any) *htt
 }
 
 type qualifiedStateBackend struct {
-	mu           sync.Mutex
-	capabilities storagebackend.Capabilities
-	volumes      map[storagebackend.VolumeScope]storagebackend.Volume
-	snapshots    map[storagebackend.SnapshotScope]storagebackend.Snapshot
-	snapshotErr  error
-	cloneErr     error
+	mu                 sync.Mutex
+	capabilities       storagebackend.Capabilities
+	volumes            map[storagebackend.VolumeScope]storagebackend.Volume
+	snapshots          map[storagebackend.SnapshotScope]storagebackend.Snapshot
+	snapshotErr        error
+	cloneErr           error
+	inspectVolumeErr   error
+	inspectSnapshotErr error
+	planErr            error
+	deleteSnapshotErr  error
+	invalidSnapshot    bool
+	invalidClone       bool
+	invalidDelete      bool
+	snapshotHook       func()
+	cloneHook          func()
+	deleteHook         func()
 }
 
 func newQualifiedStateBackend() *qualifiedStateBackend {
@@ -317,6 +795,9 @@ func (backend *qualifiedStateBackend) Capabilities(context.Context) (storageback
 }
 
 func (backend *qualifiedStateBackend) PlanVolume(_ context.Context, spec storagebackend.VolumeSpec) (storagebackend.VolumePlan, error) {
+	if backend.planErr != nil {
+		return storagebackend.VolumePlan{}, backend.planErr
+	}
 	if err := spec.Validate(); err != nil {
 		return storagebackend.VolumePlan{}, err
 	}
@@ -326,6 +807,9 @@ func (backend *qualifiedStateBackend) PlanVolume(_ context.Context, spec storage
 }
 
 func (backend *qualifiedStateBackend) InspectVolume(_ context.Context, scope storagebackend.VolumeScope) (storagebackend.Volume, error) {
+	if backend.inspectVolumeErr != nil {
+		return storagebackend.Volume{}, backend.inspectVolumeErr
+	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	volume, ok := backend.volumes[scope]
@@ -372,6 +856,9 @@ func (backend *qualifiedStateBackend) DeleteVolume(_ context.Context, request st
 }
 
 func (backend *qualifiedStateBackend) InspectSnapshot(_ context.Context, scope storagebackend.SnapshotScope) (storagebackend.Snapshot, error) {
+	if backend.inspectSnapshotErr != nil {
+		return storagebackend.Snapshot{}, backend.inspectSnapshotErr
+	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	snapshot, ok := backend.snapshots[scope]
@@ -408,7 +895,14 @@ func (backend *qualifiedStateBackend) CreateSnapshot(_ context.Context, request 
 		BackendRef:    "snapshot-" + scope.SnapshotID,
 		ContentDigest: "sha256:" + strings.Repeat("d", 64), CreatedAt: "2026-07-20T12:02:00Z",
 	}
+	if backend.invalidSnapshot {
+		snapshot.State = storagebackend.StateDeleted
+		snapshot.DeletedAt = "2026-07-20T12:02:01Z"
+	}
 	backend.snapshots[scope] = snapshot
+	if backend.snapshotHook != nil {
+		backend.snapshotHook()
+	}
 	return snapshot, true, nil
 }
 func (backend *qualifiedStateBackend) CloneVolume(_ context.Context, request storagebackend.CloneVolumeRequest) (storagebackend.Volume, bool, error) {
@@ -431,12 +925,21 @@ func (backend *qualifiedStateBackend) CloneVolume(_ context.Context, request sto
 		BackendRef: "test-" + request.Volume.VolumeID, DockerVolumeHandle: "test-" + request.Volume.VolumeID,
 		CreatedAt: "2026-07-20T12:03:00Z",
 	}
+	if backend.invalidClone {
+		volume.DockerVolumeHandle = "wrong-handle"
+	}
 	backend.volumes[request.Volume.Scope()] = volume
+	if backend.cloneHook != nil {
+		backend.cloneHook()
+	}
 	return volume, true, nil
 }
 func (backend *qualifiedStateBackend) DeleteSnapshot(_ context.Context, request storagebackend.DeleteSnapshotRequest) (storagebackend.Snapshot, bool, error) {
 	if err := request.Validate(); err != nil {
 		return storagebackend.Snapshot{}, false, err
+	}
+	if backend.deleteSnapshotErr != nil {
+		return storagebackend.Snapshot{}, false, backend.deleteSnapshotErr
 	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
@@ -453,7 +956,13 @@ func (backend *qualifiedStateBackend) DeleteSnapshot(_ context.Context, request 
 		}
 	}
 	snapshot.State, snapshot.DeletedAt = storagebackend.StateDeleted, "2026-07-20T12:04:00Z"
+	if backend.invalidDelete {
+		snapshot.State, snapshot.DeletedAt = storagebackend.StateReady, ""
+	}
 	backend.snapshots[request.Snapshot] = snapshot
+	if backend.deleteHook != nil {
+		backend.deleteHook()
+	}
 	return snapshot, true, nil
 }
 

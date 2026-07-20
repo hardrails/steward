@@ -63,6 +63,68 @@ func TestDockerBinderRejectsHostileInputsAndResponses(t *testing.T) {
 	if _, err := binder.Inspect(context.Background(), "../escape"); !errors.Is(err, ErrBindingConflict) {
 		t.Fatalf("hostile handle error = %v, want conflict", err)
 	}
+	if _, _, err := (*DockerBinder)(nil).call(context.Background(), http.MethodGet, "/", nil); err == nil {
+		t.Fatal("nil Docker binder was callable")
+	}
+	if dockerStatusError(http.StatusTeapot).Error() == "" {
+		t.Fatal("Docker status error was empty")
+	}
+}
+
+func TestDockerBinderFailsClosedOnMalformedDaemonState(t *testing.T) {
+	for name, response := range map[string]*http.Response{
+		"server status": dockerResponse(http.StatusInternalServerError, `{}`),
+		"invalid json":  dockerResponse(http.StatusOK, `{`),
+		"wrong driver":  dockerResponse(http.StatusOK, `{"Name":"steward-safe","Driver":"other","Options":{},"Labels":{}}`),
+		"bad options":   dockerResponse(http.StatusOK, `{"Name":"steward-safe","Driver":"local","Options":{"type":"none"},"Labels":{}}`),
+		"bad labels":    dockerResponse(http.StatusOK, `{"Name":"steward-safe","Driver":"local","Options":{"type":"none","o":"bind","device":"/state"},"Labels":[]}`),
+		"wrong name":    dockerResponse(http.StatusOK, `{"Name":"steward-other","Driver":"local","Options":{"type":"none","o":"bind","device":"/state"},"Labels":{"managed":"true","ref":"one"}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			binder := newDockerBinder(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return response, nil
+			})})
+			if _, err := binder.Inspect(context.Background(), "steward-safe"); err == nil {
+				t.Fatal("malformed Docker response was accepted")
+			}
+		})
+	}
+	for status, want := range map[int]error{
+		http.StatusConflict: ErrBindingInUse,
+		http.StatusNotFound: ErrBindingNotFound,
+	} {
+		binder := newDockerBinder(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return dockerResponse(status, `{}`), nil
+		})})
+		if _, err := binder.Delete(context.Background(), "steward-safe"); !errors.Is(err, want) {
+			t.Fatalf("delete HTTP %d error = %v", status, err)
+		}
+	}
+	if _, err := decodeStringMap(nil, 1); err == nil {
+		t.Fatal("empty string map was decoded")
+	}
+	if _, err := decodeStringMap([]byte(`{"a":"b","c":"d"}`), 1); err == nil {
+		t.Fatal("oversized string map was decoded")
+	}
+	if err := validateBinding(Binding{Handle: "valid", Source: "/state", Labels: map[string]string{"": "x", "ref": "y"}}); err == nil {
+		t.Fatal("empty Docker label key was accepted")
+	}
+	binding := Binding{Handle: "steward-safe", Source: "/state", Labels: map[string]string{"managed": "true", "ref": "one"}}
+	binder := newDockerBinder(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet {
+			return dockerResponse(http.StatusNotFound, `{}`), nil
+		}
+		return dockerResponse(http.StatusOK, `{}`), nil
+	})})
+	if _, err := binder.Ensure(context.Background(), binding); err == nil || !strings.Contains(err.Error(), "HTTP 200") {
+		t.Fatalf("unexpected Docker create status error = %v", err)
+	}
+	binder = newDockerBinder(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return dockerResponse(http.StatusTeapot, `{}`), nil
+	})})
+	if _, err := binder.Delete(context.Background(), binding.Handle); err == nil || !strings.Contains(err.Error(), "HTTP 418") {
+		t.Fatalf("unexpected Docker delete status error = %v", err)
+	}
 }
 
 type dockerVolume struct {

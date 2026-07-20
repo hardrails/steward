@@ -7,8 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -59,6 +62,10 @@ func TestClientAndHandlerPreserveScopedIdempotentStorageLifecycle(t *testing.T) 
 	if err != nil || !changed || snapshot.TenantID != parent.Spec.TenantID || snapshot.SourceLineageID != parent.Spec.LineageID {
 		t.Fatalf("create snapshot = (%+v, %v, %v)", snapshot, changed, err)
 	}
+	inspectedSnapshot, err := client.InspectSnapshot(ctx, snapshot.Scope())
+	if err != nil || inspectedSnapshot != snapshot {
+		t.Fatalf("inspect snapshot = (%+v, %v)", inspectedSnapshot, err)
+	}
 	cloneRequest := CloneVolumeRequest{
 		RequestID: "clone-child", Snapshot: snapshot.Scope(),
 		Volume: VolumeSpec{
@@ -87,6 +94,176 @@ func TestClientAndHandlerPreserveScopedIdempotentStorageLifecycle(t *testing.T) 
 	})
 	if err != nil || !changed || deletedSnapshot.State != StateDeleted {
 		t.Fatalf("delete snapshot = (%+v, %v, %v)", deletedSnapshot, changed, err)
+	}
+}
+
+func TestUnixClientAndAPIErrorClassification(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "steward-storage-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	socket := filepath.Join(directory, "storage.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(newMemoryBackend(), "storage-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: handler}
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = listener.Close()
+	})
+	go func() { _ = server.Serve(listener) }()
+	client, err := NewUnixClient(socket, "storage-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capabilities, err := client.Capabilities(context.Background()); err != nil || !capabilities.ProductionQualified() {
+		t.Fatalf("unix capabilities = (%+v, %v)", capabilities, err)
+	}
+	for _, input := range [][2]string{{"relative", "token"}, {socket, ""}, {"/", "token"}} {
+		if _, err := NewUnixClient(input[0], input[1]); err == nil {
+			t.Fatalf("invalid unix client accepted: %q %q", input[0], input[1])
+		}
+	}
+	for code, target := range map[string]error{
+		"invalid_request": ErrInvalid, "not_found": ErrNotFound, "conflict": ErrConflict,
+		"in_use": ErrInUse, "capacity_exceeded": ErrCapacity, "unsupported": ErrUnsupported,
+		"unavailable": ErrUnavailable,
+	} {
+		failure := &APIError{Status: http.StatusConflict, Code: code, Message: "classified"}
+		if !errors.Is(failure, target) || failure.Error() == "" {
+			t.Fatalf("API error %q was not classified as %v", code, target)
+		}
+	}
+	if errors.Is(&APIError{Code: "unknown"}, ErrUnavailable) {
+		t.Fatal("unknown API error was classified")
+	}
+}
+
+func TestClientFailsClosedOnMalformedTransportResponses(t *testing.T) {
+	for name, handler := range map[string]http.HandlerFunc{
+		"wrong media type": func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "text/plain")
+			_, _ = writer.Write([]byte(`{}`))
+		},
+		"oversized": func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write(bytes.Repeat([]byte{'x'}, MaxWireBytes+1))
+		},
+		"invalid error": func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusConflict)
+			_, _ = writer.Write([]byte(`{"error":"conflict"}`))
+		},
+		"valid error": func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusConflict)
+			_, _ = writer.Write([]byte(`{"error":"conflict","message":"retained identity differs"}`))
+		},
+		"invalid success": func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"unknown":true}`))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(handler)
+			defer server.Close()
+			_, err := newClient(server.URL, "storage-secret", server.Client()).Capabilities(context.Background())
+			if err == nil {
+				t.Fatal("malformed transport response was accepted")
+			}
+			if name == "valid error" && !errors.Is(err, ErrConflict) {
+				t.Fatalf("valid wire error = %v", err)
+			}
+		})
+	}
+
+	client := newClient("http://127.0.0.1", "storage-secret", http.DefaultClient)
+	ctx := context.Background()
+	if _, err := client.PlanVolume(ctx, VolumeSpec{}); err == nil {
+		t.Fatal("invalid plan scope was sent")
+	}
+	if _, err := client.InspectVolume(ctx, VolumeScope{}); err == nil {
+		t.Fatal("invalid volume scope was sent")
+	}
+	if _, _, err := client.CreateVolume(ctx, CreateVolumeRequest{}); err == nil {
+		t.Fatal("invalid volume creation was sent")
+	}
+	if _, _, err := client.DeleteVolume(ctx, DeleteVolumeRequest{}); err == nil {
+		t.Fatal("invalid volume deletion was sent")
+	}
+	if _, err := client.InspectSnapshot(ctx, SnapshotScope{}); err == nil {
+		t.Fatal("invalid snapshot scope was sent")
+	}
+	if _, _, err := client.CreateSnapshot(ctx, CreateSnapshotRequest{}); err == nil {
+		t.Fatal("invalid snapshot creation was sent")
+	}
+	if _, _, err := client.CloneVolume(ctx, CloneVolumeRequest{}); err == nil {
+		t.Fatal("invalid clone was sent")
+	}
+	if _, _, err := client.DeleteSnapshot(ctx, DeleteSnapshotRequest{}); err == nil {
+		t.Fatal("invalid snapshot deletion was sent")
+	}
+}
+
+func TestClientRejectsValidButOutOfScopeStorageProjections(t *testing.T) {
+	spec := VolumeSpec{
+		VolumeID: "volume-a", TenantID: "tenant-a", LineageID: "lineage-a",
+		Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+	}
+	snapshot := Snapshot{
+		SnapshotID: "snapshot-a", TenantID: "tenant-b", SourceVolumeID: spec.VolumeID,
+		SourceLineageID: spec.LineageID, Generation: 1, State: StateReady, BackendRef: "snapshot-a",
+		ContentDigest: "sha256:" + strings.Repeat("a", 64), CreatedAt: "2026-07-20T12:00:00Z",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/v1/capabilities":
+			_ = json.NewEncoder(writer).Encode(Capabilities{SchemaVersion: "other", BackendID: "backend-a"})
+		case "/v1/volumes/plan":
+			other := spec
+			other.VolumeID = "volume-other"
+			_ = json.NewEncoder(writer).Encode(VolumePlan{Spec: other, BackendRef: "backend-other", DockerVolumeHandle: "handle-other"})
+		case "/v1/volumes/create":
+			_ = json.NewEncoder(writer).Encode(mutationResponse{Changed: true})
+		case "/v1/snapshots/inspect":
+			_ = json.NewEncoder(writer).Encode(snapshot)
+		case "/v1/snapshots/create", "/v1/snapshots/delete":
+			_ = json.NewEncoder(writer).Encode(mutationResponse{Snapshot: &snapshot, Changed: true})
+		default:
+			t.Errorf("unexpected path %s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newClient(server.URL, "storage-secret", server.Client())
+	ctx := context.Background()
+	if _, err := client.Capabilities(ctx); err == nil {
+		t.Fatal("invalid capabilities projection accepted")
+	}
+	if _, err := client.PlanVolume(ctx, spec); err == nil {
+		t.Fatal("out-of-scope plan accepted")
+	}
+	if _, _, err := client.CreateVolume(ctx, CreateVolumeRequest{RequestID: "create", Volume: spec}); err == nil {
+		t.Fatal("empty volume mutation accepted")
+	}
+	wantSnapshot := snapshot.Scope()
+	wantSnapshot.TenantID = spec.TenantID
+	if _, err := client.InspectSnapshot(ctx, wantSnapshot); err == nil {
+		t.Fatal("out-of-scope snapshot accepted")
+	}
+	if _, _, err := client.CreateSnapshot(ctx, CreateSnapshotRequest{
+		RequestID: "snapshot", SnapshotID: snapshot.SnapshotID, Source: spec.Scope(),
+	}); err == nil {
+		t.Fatal("out-of-scope snapshot mutation accepted")
+	}
+	if _, _, err := client.DeleteSnapshot(ctx, DeleteSnapshotRequest{RequestID: "delete", Snapshot: wantSnapshot}); err == nil {
+		t.Fatal("out-of-scope snapshot deletion accepted")
 	}
 }
 
@@ -124,6 +301,145 @@ func TestHandlerBoundsAndAuthenticatesEveryRequest(t *testing.T) {
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize response = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestBackendErrorContractMapsEveryFailureClass(t *testing.T) {
+	for _, test := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{ErrInvalid, http.StatusBadRequest, "invalid_request"},
+		{ErrNotFound, http.StatusNotFound, "not_found"},
+		{ErrConflict, http.StatusConflict, "conflict"},
+		{ErrInUse, http.StatusConflict, "in_use"},
+		{ErrCapacity, http.StatusInsufficientStorage, "capacity_exceeded"},
+		{ErrUnsupported, http.StatusNotImplemented, "unsupported"},
+		{ErrUnavailable, http.StatusServiceUnavailable, "unavailable"},
+		{errors.New("unexpected"), http.StatusInternalServerError, "backend_error"},
+	} {
+		recorder := httptest.NewRecorder()
+		writeMappedBackendError(recorder, test.err)
+		if recorder.Code != test.status || !strings.Contains(recorder.Body.String(), `"error":"`+test.code+`"`) {
+			t.Fatalf("error %v response=%d %s", test.err, recorder.Code, recorder.Body.String())
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/capabilities", strings.NewReader("x"))
+	request.Header.Set("Authorization", "Bearer storage-secret")
+	recorder := httptest.NewRecorder()
+	handler, err := NewHandler(newMemoryBackend(), "storage-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("capabilities body status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	scope := VolumeScope{VolumeID: "volume-a", TenantID: "tenant-a", LineageID: "lineage-a", Generation: 1}
+	raw, _ := json.Marshal(scope)
+	request = httptest.NewRequest(http.MethodPost, "/v1/volumes/inspect", bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	serveBackendOperation(recorder, request, func(context.Context, VolumeScope) (Volume, error) {
+		return Volume{}, nil
+	})
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("invalid operation projection status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/volumes/inspect", bytes.NewReader(raw))
+	recorder = httptest.NewRecorder()
+	serveBackendOperation(recorder, request, func(context.Context, VolumeScope) (Volume, error) {
+		return Volume{}, nil
+	})
+	if recorder.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("missing media type status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	spec := VolumeSpec{
+		VolumeID: "volume-a", TenantID: "tenant-a", LineageID: "lineage-a",
+		Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+	}
+	create := CreateVolumeRequest{RequestID: "create-a", Volume: spec}
+	raw, _ = json.Marshal(create)
+	request = httptest.NewRequest(http.MethodPost, "/v1/volumes/create", bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	serveBackendMutation(recorder, request, func(context.Context, CreateVolumeRequest) (Volume, bool, error) {
+		return readyVolume(spec), true, nil
+	}, "snapshot")
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("mutation type mismatch status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/volumes/create", bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	serveBackendMutation(recorder, request, func(context.Context, CreateVolumeRequest) (Volume, bool, error) {
+		return Volume{}, true, nil
+	}, "volume")
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("invalid mutation projection status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	snapshot := Snapshot{
+		SnapshotID: "snapshot-a", TenantID: spec.TenantID, SourceVolumeID: spec.VolumeID,
+		SourceLineageID: spec.LineageID, Generation: 1, State: StateReady, BackendRef: "snapshot-a",
+		ContentDigest: "sha256:" + strings.Repeat("a", 64), CreatedAt: "2026-07-20T12:00:00Z",
+	}
+	snapshotRequest := CreateSnapshotRequest{RequestID: "snapshot-a", SnapshotID: snapshot.SnapshotID, Source: spec.Scope()}
+	raw, _ = json.Marshal(snapshotRequest)
+	request = httptest.NewRequest(http.MethodPost, "/v1/snapshots/create", bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	serveBackendMutation(recorder, request, func(context.Context, CreateSnapshotRequest) (Snapshot, bool, error) {
+		return snapshot, true, nil
+	}, "volume")
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("snapshot mutation type mismatch status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/capabilities?unexpected=true", nil)
+	request.Header.Set("Authorization", "Bearer storage-secret")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("query parameter status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestCapabilitiesRejectBackendFailureAndInvalidProjection(t *testing.T) {
+	for name, backend := range map[string]Backend{
+		"failure": &capabilitiesBackend{memoryBackend: newMemoryBackend(), err: ErrUnavailable},
+		"invalid": &capabilitiesBackend{memoryBackend: newMemoryBackend(), capabilities: Capabilities{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			handler, err := NewHandler(backend, "storage-secret")
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
+			request.Header.Set("Authorization", "Bearer storage-secret")
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code < http.StatusBadRequest {
+				t.Fatalf("invalid capabilities status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestStorageHandlerRecoversBackendPanicAsJSON(t *testing.T) {
+	handler, err := NewHandler(&capabilitiesBackend{memoryBackend: newMemoryBackend(), panic: true}, "storage-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
+	request.Header.Set("Authorization", "Bearer storage-secret")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), `"error":"internal_error"`) {
+		t.Fatalf("panic response=%d %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -174,6 +490,20 @@ type memoryBackend struct {
 	mu        sync.Mutex
 	volumes   map[string]Volume
 	snapshots map[string]Snapshot
+}
+
+type capabilitiesBackend struct {
+	*memoryBackend
+	capabilities Capabilities
+	err          error
+	panic        bool
+}
+
+func (backend *capabilitiesBackend) Capabilities(context.Context) (Capabilities, error) {
+	if backend.panic {
+		panic("backend panic")
+	}
+	return backend.capabilities, backend.err
 }
 
 func newMemoryBackend() *memoryBackend {

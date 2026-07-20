@@ -58,7 +58,7 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		SchemaVersion: admission.CommandDelegationSchemaV1, DelegationID: "auditor-authority",
 		TenantID: "tenant-a", ControllerKeyID: "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublic),
-		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: []string{"node-a"},
+		Operations:          []string{"admit", "clone-state", "destroy", "purge", "renew", "start", "stop"}, NodeIDs: []string{"node-a"},
 		Instances: []admission.CommandDelegationInstance{{
 			InstanceID: "auditor-0", LineageID: "auditor-lineage", MinInstanceGeneration: 1, MaxInstanceGeneration: 2,
 		}},
@@ -68,7 +68,7 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 			Resources:        admission.ResourceLimits{MemoryBytes: 512 << 20, CPUMillis: 500, PIDs: 128},
 			StateDisposition: "none",
 		},
-		IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano),
+		IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(24 * time.Hour).Format(time.RFC3339Nano),
 	}
 	delegationPayload, err := admission.MarshalCommandDelegation(delegation)
 	if err != nil {
@@ -79,10 +79,16 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		t.Fatal(err)
 	}
 	delegationRaw, _ := json.Marshal(delegationEnvelope)
+	forkRaw, _ := json.Marshal(agentapp.ForkPlan{
+		Schema: agentapp.ForkSchema, SnapshotID: "snapshot-a", BundleDigest: bundleDigest,
+		InstanceID: "auditor-0", LineageID: "auditor-lineage", Generation: 1,
+		SourceLineageID: "source-lineage", ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano), OnExpiry: "destroy",
+	})
 	for name, raw := range map[string][]byte{
 		"auditor.bundle.json":     bundleRaw,
 		"auditor.capsule.json":    capsuleRaw,
 		"auditor.delegation.json": delegationRaw,
+		"auditor.fork.json":       forkRaw,
 	} {
 		if err := os.WriteFile(filepath.Join(directory, name), raw, 0o600); err != nil {
 			t.Fatal(err)
@@ -132,8 +138,9 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		case http.MethodPut:
 			putCount++
 			var input struct {
-				Generation       uint64 `json:"generation"`
-				ExpectedRevision uint64 `json:"expected_revision"`
+				Generation       uint64                       `json:"generation"`
+				ExpectedRevision uint64                       `json:"expected_revision"`
+				Fork             *controlstore.DeploymentFork `json:"fork"`
 			}
 			wantRevision := uint64(0)
 			if putCount > 1 {
@@ -142,10 +149,15 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.Generation != 1 || input.ExpectedRevision != wantRevision {
 				t.Errorf("apply input=%+v err=%v", input, err)
 			}
+			if putCount == 2 && (input.Fork == nil || input.Fork.SnapshotID != "snapshot-a" || input.Fork.SourceNodeID != "node-a") {
+				t.Errorf("fork apply input=%+v", input)
+			}
 			if putCount == 1 {
 				writer.WriteHeader(http.StatusCreated)
 			}
-			_ = json.NewEncoder(writer).Encode(view)
+			responseView := view
+			responseView.Fork = input.Fork
+			_ = json.NewEncoder(writer).Encode(responseView)
 		case http.MethodDelete:
 			removed := view
 			removed.Revision = 2
@@ -170,7 +182,7 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		append([]string{
 			"agent", "deployment", "apply", "auditor",
 			"-bundle", "auditor.bundle.json", "-capsule", "auditor.capsule.json",
-			"-delegation", "auditor.delegation.json",
+			"-delegation", "auditor.delegation.json", "-fork-plan", "auditor.fork.json", "-source-node", "node-a",
 		}, common...),
 		append([]string{"agent", "deployment", "status", "auditor"}, common...),
 		append([]string{"agent", "deployment", "list"}, common...),

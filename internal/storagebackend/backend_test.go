@@ -102,3 +102,55 @@ func TestSnapshotAndCloneRequireImmutableExactParentIdentity(t *testing.T) {
 		t.Fatalf("cross-tenant clone accepted: %v", err)
 	}
 }
+
+func TestStorageMutationContractsRejectIncompleteLifecycleIdentity(t *testing.T) {
+	spec := VolumeSpec{
+		VolumeID: "volume-a", TenantID: "tenant-a", LineageID: "lineage-a",
+		Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+	}
+	volume := Volume{
+		Spec: spec, State: StateReady, BackendRef: "backend-a", DockerVolumeHandle: "handle-a",
+		CreatedAt: "2026-07-20T12:00:00Z",
+	}
+	for _, mutate := range []func(*Volume){
+		func(value *Volume) { value.State = "other" },
+		func(value *Volume) { value.UsedBytes = -1 },
+		func(value *Volume) { value.State, value.DeletedAt = StateDeleted, "" },
+		func(value *Volume) { value.State, value.DeletedAt = StateReady, "2026-07-20T12:01:00Z" },
+	} {
+		candidate := volume
+		mutate(&candidate)
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid volume accepted: %+v error=%v", candidate, err)
+		}
+	}
+	snapshot := Snapshot{
+		SnapshotID: "snapshot-a", TenantID: "tenant-a", SourceVolumeID: spec.VolumeID,
+		SourceLineageID: spec.LineageID, Generation: 1, State: StateReady, BackendRef: "snapshot-a",
+		ContentDigest: "sha256:" + strings.Repeat("a", 64), CreatedAt: "2026-07-20T12:00:00Z",
+	}
+	for _, mutate := range []func(*Snapshot){
+		func(value *Snapshot) { value.ContentDigest = "bad" },
+		func(value *Snapshot) { value.RetainedBytes = -1 },
+		func(value *Snapshot) { value.State, value.DeletedAt = StateDeleted, "" },
+		func(value *Snapshot) { value.State, value.DeletedAt = StateReady, "2026-07-20T12:01:00Z" },
+	} {
+		candidate := snapshot
+		mutate(&candidate)
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid snapshot accepted: %+v error=%v", candidate, err)
+		}
+	}
+	for name, validate := range map[string]func() error{
+		"create volume": func() error { return (CreateVolumeRequest{Volume: spec}).Validate() },
+		"delete volume": func() error { return (DeleteVolumeRequest{Volume: spec.Scope()}).Validate() },
+		"create snapshot": func() error {
+			return (CreateSnapshotRequest{SnapshotID: "snapshot-a", Source: spec.Scope()}).Validate()
+		},
+		"delete snapshot": func() error { return (DeleteSnapshotRequest{Snapshot: snapshot.Scope()}).Validate() },
+	} {
+		if err := validate(); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("%s without request identity error=%v", name, err)
+		}
+	}
+}

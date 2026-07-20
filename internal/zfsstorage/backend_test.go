@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -75,6 +77,10 @@ func TestBackendLifecycleIsScopedDurableAndIdempotent(t *testing.T) {
 	replayedSnapshot, changed, err := backend.CreateSnapshot(ctx, snapshotRequest)
 	if err != nil || changed || replayedSnapshot != snapshot {
 		t.Fatalf("replay snapshot = (%+v, %v, %v)", replayedSnapshot, changed, err)
+	}
+	inspectedSnapshot, err := backend.InspectSnapshot(ctx, snapshot.Scope())
+	if err != nil || inspectedSnapshot != snapshot {
+		t.Fatalf("inspect snapshot = (%+v, %v)", inspectedSnapshot, err)
 	}
 
 	cloneRequest := storagebackend.CloneVolumeRequest{
@@ -229,6 +235,611 @@ func TestBoundedBufferDetectsOnlyActualOverflow(t *testing.T) {
 	}
 }
 
+func TestBackendErrorClassificationAndInputGuards(t *testing.T) {
+	commandFailure := func(stderr string) error {
+		return &CommandError{Args: []string{"test"}, Stderr: stderr, Err: errors.New("exit status 1")}
+	}
+	for _, test := range []struct {
+		stderr string
+		want   error
+	}{
+		{"dataset is busy", storagebackend.ErrInUse},
+		{"has dependent clones", storagebackend.ErrInUse},
+		{"snapshot is held", storagebackend.ErrInUse},
+		{"out of space", storagebackend.ErrCapacity},
+		{"quota exceeded", storagebackend.ErrCapacity},
+		{"no space left", storagebackend.ErrCapacity},
+		{"dataset already exists", storagebackend.ErrConflict},
+		{"unexpected localized failure", storagebackend.ErrUnavailable},
+	} {
+		if err := mapCommandError(commandFailure(test.stderr)); !errors.Is(err, test.want) {
+			t.Fatalf("command error %q = %v, want %v", test.stderr, err, test.want)
+		}
+	}
+	for input, want := range map[error]error{
+		nil:                 nil,
+		ErrBindingInUse:     storagebackend.ErrInUse,
+		ErrBindingConflict:  storagebackend.ErrConflict,
+		ErrBindingNotFound:  storagebackend.ErrNotFound,
+		errors.New("other"): storagebackend.ErrUnavailable,
+	} {
+		if err := mapBindingError(input); !errors.Is(err, want) {
+			t.Fatalf("binding error %v = %v, want %v", input, err, want)
+		}
+	}
+	for _, value := range []string{"-1", "not-a-number"} {
+		if _, err := parseNonnegative(value); !errors.Is(err, storagebackend.ErrConflict) {
+			t.Fatalf("parse %q error = %v", value, err)
+		}
+	}
+	if value, err := parseNonnegative("42"); err != nil || value != 42 {
+		t.Fatalf("parse nonnegative = (%d, %v)", value, err)
+	}
+
+	backend, _, _ := newBackendFixture(t)
+	badVolume := storagebackend.VolumeScope{VolumeID: "bad id", TenantID: "tenant", LineageID: "lineage", Generation: 1}
+	if _, err := backend.InspectVolume(context.Background(), badVolume); err == nil {
+		t.Fatal("invalid volume scope was inspected")
+	}
+	badSnapshot := storagebackend.SnapshotScope{SnapshotID: "bad id", TenantID: "tenant", SourceVolumeID: "source", SourceLineageID: "lineage", Generation: 1}
+	if _, err := backend.InspectSnapshot(context.Background(), badSnapshot); err == nil {
+		t.Fatal("invalid snapshot scope was inspected")
+	}
+	if _, err := backend.InspectSnapshot(context.Background(), storagebackend.SnapshotScope{
+		SnapshotID: "missing", TenantID: "tenant", SourceVolumeID: "source", SourceLineageID: "lineage", Generation: 1,
+	}); !errors.Is(err, storagebackend.ErrNotFound) {
+		t.Fatalf("missing snapshot error = %v", err)
+	}
+}
+
+func TestConformanceAndQuotaProbeInputFailures(t *testing.T) {
+	backend, _, _ := newBackendFixture(t)
+	if err := backend.VerifyConformance(nil); err == nil {
+		t.Fatal("nil conformance context was accepted")
+	}
+	if err := conformanceError(nil); err == nil {
+		t.Fatal("unexpected conformance projection produced no error")
+	}
+	sentinel := errors.New("sentinel")
+	if !errors.Is(conformanceError(sentinel), sentinel) {
+		t.Fatal("conformance error did not preserve cause")
+	}
+	for _, test := range []struct {
+		ctx         context.Context
+		mount       string
+		bytes, objs int64
+	}{
+		{nil, "/state", 1, 1},
+		{context.Background(), "relative", 1, 1},
+		{context.Background(), "/state", 0, 1},
+		{context.Background(), "/state", 1, 0},
+		{context.Background(), "/state", 1 << 31, 1},
+		{context.Background(), "/state", 1, 4097},
+	} {
+		if err := (FilesystemQuotaProbe{}).Verify(test.ctx, test.mount, test.bytes, test.objs); err == nil {
+			t.Fatalf("invalid quota probe accepted: %+v", test)
+		}
+	}
+	if err := (FilesystemQuotaProbe{}).Verify(context.Background(), filepath.Join(t.TempDir(), "missing"), 1, 1); err == nil {
+		t.Fatal("missing quota mountpoint was accepted")
+	}
+	if !quotaError(syscall.EDQUOT) || !quotaError(syscall.ENOSPC) || quotaError(errors.New("other")) {
+		t.Fatal("quota errors were misclassified")
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := (FilesystemQuotaProbe{}).Verify(cancelled, t.TempDir(), 1, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled quota probe error = %v", err)
+	}
+	if err := (FilesystemQuotaProbe{}).Verify(context.Background(), t.TempDir(), 1, 1); err == nil ||
+		!strings.Contains(err.Error(), "object quota") {
+		t.Fatalf("unquotaed filesystem probe error = %v", err)
+	}
+}
+
+func TestBackendQuarantinesOrRejectsCorruptPhysicalState(t *testing.T) {
+	backend, runner, binder := newBackendFixture(t)
+	ctx := context.Background()
+	spec := storagebackend.VolumeSpec{
+		VolumeID: "volume-corrupt", TenantID: "tenant-a", LineageID: "lineage-corrupt",
+		Generation: 1, ByteLimit: 1 << 20, ObjectLimit: 100,
+	}
+	volume, _, err := backend.CreateVolume(ctx, storagebackend.CreateVolumeRequest{RequestID: "create-corrupt", Volume: spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataset := backend.volumeDataset(spec.Scope())
+	properties := runner.datasets[dataset].properties
+
+	originalMount := properties["mountpoint"]
+	properties["mountpoint"] = "/wrong"
+	if _, err := backend.InspectVolume(ctx, spec.Scope()); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("wrong mountpoint error = %v", err)
+	}
+	properties["mountpoint"] = originalMount
+	project := strconv.FormatUint(uint64(projectID(spec.Scope())), 10)
+	properties["projectused@"+project] = "-1"
+	if _, err := backend.InspectVolume(ctx, spec.Scope()); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("negative byte usage error = %v", err)
+	}
+	properties["projectused@"+project] = "0"
+	delete(binder.bindings, volume.DockerVolumeHandle)
+	quarantined, err := backend.InspectVolume(ctx, spec.Scope())
+	if err != nil || quarantined.State != storagebackend.StateQuarantined {
+		t.Fatalf("missing binding projection = (%+v, %v)", quarantined, err)
+	}
+	_, _ = binder.Ensure(ctx, backend.binding(persistedRecord{Volume: spec, DockerHandle: volume.DockerVolumeHandle, BackendRef: volume.BackendRef}))
+
+	snapshot, _, err := backend.CreateSnapshot(ctx, storagebackend.CreateSnapshotRequest{
+		RequestID: "snapshot-corrupt", SnapshotID: "snapshot-corrupt", Source: spec.Scope(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotDataset := backend.snapshotDataset(snapshot.Scope())
+	snapshotProperties := runner.datasets[snapshotDataset].properties
+	for property, value := range map[string]string{"referenced": "-1", "projectobjused@" + project: "-1", "guid": "-"} {
+		original := snapshotProperties[property]
+		snapshotProperties[property] = value
+		if _, err := backend.InspectSnapshot(ctx, snapshot.Scope()); !errors.Is(err, storagebackend.ErrConflict) {
+			t.Fatalf("corrupt snapshot %s error = %v", property, err)
+		}
+		snapshotProperties[property] = original
+	}
+	originalRecord := properties[recordProperty]
+	properties[recordProperty] = "not-base64"
+	if _, err := backend.InspectVolume(ctx, spec.Scope()); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("corrupt record error = %v", err)
+	}
+	properties[recordProperty] = originalRecord
+}
+
+func TestPersistedRecordValidationRejectsIncompleteObjects(t *testing.T) {
+	valid := persistedRecord{
+		Version: recordVersion, Kind: "volume", State: storagebackend.StateReady,
+		CreateRequestID: "create", Volume: storagebackend.VolumeSpec{
+			VolumeID: "volume-a", TenantID: "tenant-a", LineageID: "lineage-a",
+			Generation: 1, ByteLimit: 1, ObjectLimit: 1,
+		},
+		ProjectID: 1, DockerHandle: "handle-a", BackendRef: "backend-a", CreatedAt: "2026-07-20T12:00:00Z",
+	}
+	for name, mutate := range map[string]func(*persistedRecord){
+		"version":  func(record *persistedRecord) { record.Version = 0 },
+		"kind":     func(record *persistedRecord) { record.Kind = "other" },
+		"volume":   func(record *persistedRecord) { record.DockerHandle = "" },
+		"state":    func(record *persistedRecord) { record.State = "other" },
+		"deleted":  func(record *persistedRecord) { record.State = storagebackend.StateDeleted },
+		"snapshot": func(record *persistedRecord) { record.Kind, record.Volume = "snapshot", storagebackend.VolumeSpec{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			record := valid
+			mutate(&record)
+			if err := record.validate(); err == nil {
+				t.Fatalf("invalid record accepted: %+v", record)
+			}
+			if _, err := encodeRecord(record); err == nil {
+				t.Fatal("invalid record encoded")
+			}
+		})
+	}
+}
+
+func TestBackendPublicOperationsRejectInvalidOrMissingState(t *testing.T) {
+	backend, _, _ := newBackendFixture(t)
+	ctx := context.Background()
+	if _, err := backend.PlanVolume(ctx, storagebackend.VolumeSpec{}); err == nil {
+		t.Fatal("invalid volume plan accepted")
+	}
+	if _, _, err := backend.CreateVolume(ctx, storagebackend.CreateVolumeRequest{}); err == nil {
+		t.Fatal("invalid volume creation accepted")
+	}
+	if _, _, err := backend.DeleteVolume(ctx, storagebackend.DeleteVolumeRequest{}); err == nil {
+		t.Fatal("invalid volume deletion accepted")
+	}
+	if _, _, err := backend.CreateSnapshot(ctx, storagebackend.CreateSnapshotRequest{}); err == nil {
+		t.Fatal("invalid snapshot creation accepted")
+	}
+	if _, _, err := backend.CloneVolume(ctx, storagebackend.CloneVolumeRequest{}); err == nil {
+		t.Fatal("invalid clone accepted")
+	}
+	if _, _, err := backend.DeleteSnapshot(ctx, storagebackend.DeleteSnapshotRequest{}); err == nil {
+		t.Fatal("invalid snapshot deletion accepted")
+	}
+	missingVolume := storagebackend.VolumeScope{VolumeID: "missing", TenantID: "tenant-a", LineageID: "missing", Generation: 1}
+	if _, _, err := backend.DeleteVolume(ctx, storagebackend.DeleteVolumeRequest{RequestID: "delete-missing", Volume: missingVolume}); !errors.Is(err, storagebackend.ErrNotFound) {
+		t.Fatalf("missing volume deletion error = %v", err)
+	}
+	missingSnapshot := storagebackend.SnapshotScope{
+		SnapshotID: "missing", TenantID: "tenant-a", SourceVolumeID: "missing",
+		SourceLineageID: "missing", Generation: 1,
+	}
+	if _, _, err := backend.DeleteSnapshot(ctx, storagebackend.DeleteSnapshotRequest{RequestID: "delete-missing", Snapshot: missingSnapshot}); !errors.Is(err, storagebackend.ErrNotFound) {
+		t.Fatalf("missing snapshot deletion error = %v", err)
+	}
+}
+
+func TestBackendPropertyReaderRejectsAmbiguousZFSOutput(t *testing.T) {
+	for name, output := range map[string]string{
+		"malformed": "property-without-tab\n",
+		"missing":   "other\tvalue\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend, err := New(Config{
+				DatasetRoot: "tank/steward", MountRoot: "/state",
+				Runner: runnerFunc(func(context.Context, ...string) ([]byte, error) { return []byte(output), nil }),
+				Binder: &fakeBinder{bindings: make(map[string]Binding)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := backend.get(context.Background(), "tank/steward", "type"); !errors.Is(err, storagebackend.ErrConflict) {
+				t.Fatalf("ambiguous output error = %v", err)
+			}
+		})
+	}
+	for name, failure := range map[string]error{
+		"missing": &CommandError{Stderr: "dataset does not exist", Err: errors.New("exit 1")},
+		"failure": &CommandError{Stderr: "I/O failure", Err: errors.New("exit 1")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend, err := New(Config{
+				DatasetRoot: "tank/steward", MountRoot: "/state",
+				Runner: runnerFunc(func(context.Context, ...string) ([]byte, error) { return nil, failure }),
+				Binder: &fakeBinder{bindings: make(map[string]Binding)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, found, err := backend.get(context.Background(), "tank/steward", "type")
+			if name == "missing" && (err != nil || found) {
+				t.Fatalf("missing dataset = (%v, %v)", found, err)
+			}
+			if name == "failure" && !errors.Is(err, storagebackend.ErrUnavailable) {
+				t.Fatalf("ZFS failure error = %v", err)
+			}
+		})
+	}
+}
+
+func TestBackendCommandFailuresAbortMutationsWithoutSuccessProjection(t *testing.T) {
+	t.Run("create dataset", func(t *testing.T) {
+		backend, runner, _ := newBackendFixture(t)
+		backend.runner = &failingRunner{base: runner, command: "create"}
+		_, _, err := backend.CreateVolume(context.Background(), storagebackend.CreateVolumeRequest{
+			RequestID: "create-dataset-failure", Volume: storagebackend.VolumeSpec{
+				VolumeID: "volume-create-failure", TenantID: "tenant-a", LineageID: "lineage-create-failure",
+				Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+			},
+		})
+		if !errors.Is(err, storagebackend.ErrUnavailable) {
+			t.Fatalf("dataset creation error = %v", err)
+		}
+	})
+
+	t.Run("create project assignment", func(t *testing.T) {
+		backend, runner, _ := newBackendFixture(t)
+		backend.runner = &failingRunner{base: runner, command: "project"}
+		_, _, err := backend.CreateVolume(context.Background(), storagebackend.CreateVolumeRequest{
+			RequestID: "create-failure", Volume: storagebackend.VolumeSpec{
+				VolumeID: "volume-failure", TenantID: "tenant-a", LineageID: "lineage-failure",
+				Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+			},
+		})
+		if !errors.Is(err, storagebackend.ErrUnavailable) {
+			t.Fatalf("project assignment error = %v", err)
+		}
+	})
+
+	for _, command := range []string{"snapshot", "hold"} {
+		t.Run("snapshot "+command, func(t *testing.T) {
+			backend, runner, _ := newBackendFixture(t)
+			spec := storagebackend.VolumeSpec{
+				VolumeID: "volume-snapshot", TenantID: "tenant-a", LineageID: "lineage-snapshot",
+				Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+			}
+			if _, _, err := backend.CreateVolume(context.Background(), storagebackend.CreateVolumeRequest{RequestID: "create", Volume: spec}); err != nil {
+				t.Fatal(err)
+			}
+			backend.runner = &failingRunner{base: runner, command: command}
+			if _, _, err := backend.CreateSnapshot(context.Background(), storagebackend.CreateSnapshotRequest{
+				RequestID: "snapshot", SnapshotID: "snapshot-failure", Source: spec.Scope(),
+			}); !errors.Is(err, storagebackend.ErrUnavailable) {
+				t.Fatalf("%s failure error = %v", command, err)
+			}
+		})
+	}
+
+	t.Run("clone", func(t *testing.T) {
+		backend, runner, _ := newBackendFixture(t)
+		spec := storagebackend.VolumeSpec{
+			VolumeID: "volume-parent", TenantID: "tenant-a", LineageID: "lineage-parent",
+			Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+		}
+		if _, _, err := backend.CreateVolume(context.Background(), storagebackend.CreateVolumeRequest{RequestID: "create", Volume: spec}); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, _, err := backend.CreateSnapshot(context.Background(), storagebackend.CreateSnapshotRequest{
+			RequestID: "snapshot", SnapshotID: "snapshot-clone", Source: spec.Scope(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		backend.runner = &failingRunner{base: runner, command: "clone"}
+		_, _, err = backend.CloneVolume(context.Background(), storagebackend.CloneVolumeRequest{
+			RequestID: "clone", Snapshot: snapshot.Scope(), Volume: storagebackend.VolumeSpec{
+				VolumeID: "volume-child", TenantID: "tenant-a", LineageID: "lineage-child",
+				Generation: 1, ByteLimit: 1024, ObjectLimit: 10, ParentSnapshotID: snapshot.SnapshotID,
+			},
+		})
+		if !errors.Is(err, storagebackend.ErrUnavailable) {
+			t.Fatalf("clone failure error = %v", err)
+		}
+	})
+
+	t.Run("delete volume", func(t *testing.T) {
+		backend, runner, _ := newBackendFixture(t)
+		spec := storagebackend.VolumeSpec{
+			VolumeID: "volume-delete", TenantID: "tenant-a", LineageID: "lineage-delete",
+			Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+		}
+		if _, _, err := backend.CreateVolume(context.Background(), storagebackend.CreateVolumeRequest{RequestID: "create", Volume: spec}); err != nil {
+			t.Fatal(err)
+		}
+		backend.runner = &failingRunner{base: runner, command: "destroy"}
+		if _, _, err := backend.DeleteVolume(context.Background(), storagebackend.DeleteVolumeRequest{
+			RequestID: "delete", Volume: spec.Scope(),
+		}); !errors.Is(err, storagebackend.ErrUnavailable) {
+			t.Fatalf("volume destroy failure error = %v", err)
+		}
+	})
+
+	for _, command := range []string{"create", "set"} {
+		t.Run("delete volume "+command, func(t *testing.T) {
+			backend, runner, _ := newBackendFixture(t)
+			spec := storagebackend.VolumeSpec{
+				VolumeID: "volume-delete-" + command, TenantID: "tenant-a", LineageID: "lineage-delete-" + command,
+				Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+			}
+			if _, _, err := backend.CreateVolume(context.Background(), storagebackend.CreateVolumeRequest{RequestID: "create", Volume: spec}); err != nil {
+				t.Fatal(err)
+			}
+			backend.runner = &failingRunner{base: runner, command: command}
+			if _, _, err := backend.DeleteVolume(context.Background(), storagebackend.DeleteVolumeRequest{
+				RequestID: "delete", Volume: spec.Scope(),
+			}); !errors.Is(err, storagebackend.ErrUnavailable) {
+				t.Fatalf("volume delete %s failure error = %v", command, err)
+			}
+		})
+	}
+
+	t.Run("delete snapshot", func(t *testing.T) {
+		backend, runner, _ := newBackendFixture(t)
+		spec := storagebackend.VolumeSpec{
+			VolumeID: "volume-delete-snapshot", TenantID: "tenant-a", LineageID: "lineage-delete-snapshot",
+			Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+		}
+		if _, _, err := backend.CreateVolume(context.Background(), storagebackend.CreateVolumeRequest{RequestID: "create", Volume: spec}); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, _, err := backend.CreateSnapshot(context.Background(), storagebackend.CreateSnapshotRequest{
+			RequestID: "snapshot", SnapshotID: "snapshot-delete", Source: spec.Scope(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		backend.runner = &failingRunner{base: runner, command: "release"}
+		if _, _, err := backend.DeleteSnapshot(context.Background(), storagebackend.DeleteSnapshotRequest{
+			RequestID: "delete", Snapshot: snapshot.Scope(),
+		}); !errors.Is(err, storagebackend.ErrUnavailable) {
+			t.Fatalf("snapshot release failure error = %v", err)
+		}
+	})
+
+	t.Run("delete snapshot record", func(t *testing.T) {
+		backend, runner, _ := newBackendFixture(t)
+		spec := storagebackend.VolumeSpec{
+			VolumeID: "volume-snapshot-record", TenantID: "tenant-a", LineageID: "lineage-snapshot-record",
+			Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+		}
+		if _, _, err := backend.CreateVolume(context.Background(), storagebackend.CreateVolumeRequest{RequestID: "create", Volume: spec}); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, _, err := backend.CreateSnapshot(context.Background(), storagebackend.CreateSnapshotRequest{
+			RequestID: "snapshot", SnapshotID: "snapshot-record", Source: spec.Scope(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		backend.runner = &failingRunner{base: runner, command: "set"}
+		if _, _, err := backend.DeleteSnapshot(context.Background(), storagebackend.DeleteSnapshotRequest{
+			RequestID: "delete", Snapshot: snapshot.Scope(),
+		}); !errors.Is(err, storagebackend.ErrUnavailable) {
+			t.Fatalf("snapshot record failure error = %v", err)
+		}
+	})
+}
+
+func TestBackendRetainedIdentitiesRejectDifferentIdempotencyKeys(t *testing.T) {
+	backend, _, _ := newBackendFixture(t)
+	ctx := context.Background()
+	spec := storagebackend.VolumeSpec{
+		VolumeID: "volume-replay", TenantID: "tenant-a", LineageID: "lineage-replay",
+		Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+	}
+	if _, _, err := backend.CreateVolume(ctx, storagebackend.CreateVolumeRequest{RequestID: "create-a", Volume: spec}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.CreateVolume(ctx, storagebackend.CreateVolumeRequest{RequestID: "create-b", Volume: spec}); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("different volume create identity error = %v", err)
+	}
+	snapshot, _, err := backend.CreateSnapshot(ctx, storagebackend.CreateSnapshotRequest{
+		RequestID: "snapshot-a", SnapshotID: "snapshot-replay", Source: spec.Scope(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.CreateSnapshot(ctx, storagebackend.CreateSnapshotRequest{
+		RequestID: "snapshot-b", SnapshotID: snapshot.SnapshotID, Source: spec.Scope(),
+	}); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("different snapshot create identity error = %v", err)
+	}
+	if _, _, err := backend.DeleteSnapshot(ctx, storagebackend.DeleteSnapshotRequest{RequestID: "delete-snapshot-a", Snapshot: snapshot.Scope()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.DeleteSnapshot(ctx, storagebackend.DeleteSnapshotRequest{RequestID: "delete-snapshot-b", Snapshot: snapshot.Scope()}); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("different snapshot delete identity error = %v", err)
+	}
+	if _, _, err := backend.DeleteVolume(ctx, storagebackend.DeleteVolumeRequest{RequestID: "delete-volume-a", Volume: spec.Scope()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.DeleteVolume(ctx, storagebackend.DeleteVolumeRequest{RequestID: "delete-volume-b", Volume: spec.Scope()}); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("different volume delete identity error = %v", err)
+	}
+	record, location, found, err := backend.findVolumeRecord(ctx, spec.Scope())
+	if err != nil || !found {
+		t.Fatalf("retained volume record = (%+v, %q, %v, %v)", record, location, found, err)
+	}
+	if err := backend.createTombstone(ctx, location, record); err != nil {
+		t.Fatalf("idempotent tombstone = %v", err)
+	}
+	record.DeleteRequestID = "different"
+	if err := backend.createTombstone(ctx, location, record); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("conflicting tombstone error = %v", err)
+	}
+}
+
+func TestBackendInitializationRejectsConflictingRootDataset(t *testing.T) {
+	runner := newFakeZFS("tank/steward")
+	runner.datasets["tank/steward/volumes"] = &fakeDataset{properties: map[string]string{
+		"type": "volume", "canmount": "off", "mountpoint": "none",
+	}}
+	backend, err := New(Config{
+		DatasetRoot: "tank/steward", MountRoot: "/state", Runner: runner,
+		Binder: &fakeBinder{bindings: make(map[string]Binding)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Initialize(context.Background()); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("conflicting root error = %v", err)
+	}
+	if equalLabels(map[string]string{"a": "b"}, map[string]string{}) ||
+		equalLabels(map[string]string{"a": "b"}, map[string]string{"a": "c"}) {
+		t.Fatal("unequal labels matched")
+	}
+}
+
+func TestBackendPropagatesDockerBindingFailures(t *testing.T) {
+	t.Run("ensure", func(t *testing.T) {
+		backend, _, binder := newBackendFixture(t)
+		binder.ensureErr = errors.New("Docker unavailable")
+		_, _, err := backend.CreateVolume(context.Background(), storagebackend.CreateVolumeRequest{
+			RequestID: "create-binding", Volume: storagebackend.VolumeSpec{
+				VolumeID: "volume-binding", TenantID: "tenant-a", LineageID: "lineage-binding",
+				Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+			},
+		})
+		if !errors.Is(err, storagebackend.ErrUnavailable) {
+			t.Fatalf("binding ensure error = %v", err)
+		}
+	})
+	t.Run("inspect and delete", func(t *testing.T) {
+		backend, _, binder := newBackendFixture(t)
+		spec := storagebackend.VolumeSpec{
+			VolumeID: "volume-binding-live", TenantID: "tenant-a", LineageID: "lineage-binding-live",
+			Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+		}
+		if _, _, err := backend.CreateVolume(context.Background(), storagebackend.CreateVolumeRequest{RequestID: "create", Volume: spec}); err != nil {
+			t.Fatal(err)
+		}
+		binder.inspectErr = errors.New("Docker unavailable")
+		if _, err := backend.InspectVolume(context.Background(), spec.Scope()); !errors.Is(err, storagebackend.ErrUnavailable) {
+			t.Fatalf("binding inspect error = %v", err)
+		}
+		binder.inspectErr = nil
+		binder.deleteErr = errors.New("Docker unavailable")
+		if _, _, err := backend.DeleteVolume(context.Background(), storagebackend.DeleteVolumeRequest{
+			RequestID: "delete", Volume: spec.Scope(),
+		}); !errors.Is(err, storagebackend.ErrUnavailable) {
+			t.Fatalf("binding delete error = %v", err)
+		}
+	})
+}
+
+func TestBackendRejectsAdditionalCorruptMetadataAndHelperFailures(t *testing.T) {
+	backend, runner, _ := newBackendFixture(t)
+	ctx := context.Background()
+	spec := storagebackend.VolumeSpec{
+		VolumeID: "volume-helper", TenantID: "tenant-a", LineageID: "lineage-helper",
+		Generation: 1, ByteLimit: 1024, ObjectLimit: 10,
+	}
+	if _, _, err := backend.CreateVolume(ctx, storagebackend.CreateVolumeRequest{RequestID: "create", Volume: spec}); err != nil {
+		t.Fatal(err)
+	}
+	project := strconv.FormatUint(uint64(projectID(spec.Scope())), 10)
+	volumeProperties := runner.datasets[backend.volumeDataset(spec.Scope())].properties
+	volumeProperties["projectobjused@"+project] = "-1"
+	if _, err := backend.InspectVolume(ctx, spec.Scope()); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("negative object usage error = %v", err)
+	}
+	volumeProperties["projectobjused@"+project] = "0"
+	snapshot, _, err := backend.CreateSnapshot(ctx, storagebackend.CreateSnapshotRequest{
+		RequestID: "snapshot", SnapshotID: "snapshot-helper", Source: spec.Scope(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotProperties := runner.datasets[backend.snapshotDataset(snapshot.Scope())].properties
+	snapshotProperties["projectobjused@"+project] = "-1"
+	if _, err := backend.InspectSnapshot(ctx, snapshot.Scope()); !errors.Is(err, storagebackend.ErrConflict) {
+		t.Fatalf("negative snapshot object usage error = %v", err)
+	}
+	if _, err := backend.listSnapshots(ctx, "tank/steward/missing"); !errors.Is(err, storagebackend.ErrUnavailable) {
+		t.Fatalf("missing snapshot list error = %v", err)
+	}
+	if err := backend.setRecord(ctx, "tank/steward/invalid", persistedRecord{}); err == nil {
+		t.Fatal("invalid record was persisted")
+	}
+	for _, dataset := range []string{"tank//bad", "tank/$bad", "tank/.."} {
+		if validDataset(dataset) {
+			t.Fatalf("invalid dataset accepted: %q", dataset)
+		}
+	}
+
+	base := newFakeZFS("tank/steward")
+	failing := &failingRunner{base: base, command: "create"}
+	uninitialized, err := New(Config{
+		DatasetRoot: "tank/steward", MountRoot: "/state", Runner: failing,
+		Binder: &fakeBinder{bindings: make(map[string]Binding)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := uninitialized.Initialize(ctx); !errors.Is(err, storagebackend.ErrUnavailable) {
+		t.Fatalf("namespace creation error = %v", err)
+	}
+}
+
+type failingRunner struct {
+	base    Runner
+	command string
+	failed  bool
+}
+
+func (runner *failingRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
+	if len(args) > 0 && args[0] == runner.command && !runner.failed {
+		runner.failed = true
+		return nil, &CommandError{Args: append([]string(nil), args...), Stderr: "I/O failure", Err: errors.New("exit 1")}
+	}
+	return runner.base.Run(ctx, args...)
+}
+
+type runnerFunc func(context.Context, ...string) ([]byte, error)
+
+func (function runnerFunc) Run(ctx context.Context, args ...string) ([]byte, error) {
+	return function(ctx, args...)
+}
+
 func newBackendFixture(t *testing.T) (*Backend, *fakeZFS, *fakeBinder) {
 	t.Helper()
 	runner := newFakeZFS("tank/steward")
@@ -245,11 +856,17 @@ func newBackendFixture(t *testing.T) (*Backend, *fakeZFS, *fakeBinder) {
 }
 
 type fakeBinder struct {
-	mu       sync.Mutex
-	bindings map[string]Binding
+	mu         sync.Mutex
+	bindings   map[string]Binding
+	ensureErr  error
+	inspectErr error
+	deleteErr  error
 }
 
 func (binder *fakeBinder) Ensure(_ context.Context, binding Binding) (bool, error) {
+	if binder.ensureErr != nil {
+		return false, binder.ensureErr
+	}
 	binder.mu.Lock()
 	defer binder.mu.Unlock()
 	if existing, ok := binder.bindings[binding.Handle]; ok {
@@ -264,6 +881,9 @@ func (binder *fakeBinder) Ensure(_ context.Context, binding Binding) (bool, erro
 }
 
 func (binder *fakeBinder) Inspect(_ context.Context, handle string) (Binding, error) {
+	if binder.inspectErr != nil {
+		return Binding{}, binder.inspectErr
+	}
 	binder.mu.Lock()
 	defer binder.mu.Unlock()
 	binding, ok := binder.bindings[handle]
@@ -275,6 +895,9 @@ func (binder *fakeBinder) Inspect(_ context.Context, handle string) (Binding, er
 }
 
 func (binder *fakeBinder) Delete(_ context.Context, handle string) (bool, error) {
+	if binder.deleteErr != nil {
+		return false, binder.deleteErr
+	}
 	binder.mu.Lock()
 	defer binder.mu.Unlock()
 	if _, ok := binder.bindings[handle]; !ok {

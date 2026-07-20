@@ -106,6 +106,29 @@ func (n *fakeNode) DeleteStateSnapshot(_ context.Context, request nodeclient.Sta
 	return nil
 }
 
+func TestMCPStateToolsFailClosedWithoutCapabilityOrCompleteIdentity(t *testing.T) {
+	for _, name := range []string{"steward_snapshot_state", "steward_clone_state", "steward_delete_snapshot"} {
+		raw := []byte(`{"name":"` + name + `","arguments":{}}`)
+		if _, rpcErr := (&Server{}).callTool(context.Background(), raw); rpcErr == nil || rpcErr.Code != -32602 {
+			t.Fatalf("unconfigured %s RPC error=%+v", name, rpcErr)
+		}
+		result, rpcErr := (&Server{node: &fakeNode{}}).callTool(context.Background(), raw)
+		if rpcErr != nil || result == nil {
+			t.Fatalf("invalid %s result=%+v RPC error=%+v", name, result, rpcErr)
+		}
+	}
+	selfClone := []byte(`{"name":"steward_clone_state","arguments":{"tenant_id":"tenant","node_id":"node","instance_id":"fork","lineage_id":"same","generation":1,"snapshot_id":"snap","source_lineage_id":"same"}}`)
+	result, rpcErr := (&Server{node: &fakeNode{}}).callTool(context.Background(), selfClone)
+	if rpcErr != nil || result == nil {
+		t.Fatalf("self-clone result=%+v RPC error=%+v", result, rpcErr)
+	}
+	snapshotSchema := stateSnapshotToolSchema()
+	cloneSchema := stateCloneToolSchema()
+	if len(snapshotSchema["required"].([]string)) != 6 || len(cloneSchema["required"].([]string)) != 7 {
+		t.Fatalf("state tool schemas snapshot=%+v clone=%+v", snapshotSchema, cloneSchema)
+	}
+}
+
 func TestMCPInitializeListAndCallTools(t *testing.T) {
 	node := &fakeNode{}
 	server, err := New(node, "v1.3.0")
