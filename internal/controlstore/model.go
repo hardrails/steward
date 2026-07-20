@@ -643,6 +643,7 @@ func (current state) clone() state {
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
 		node.Scheduling = cloneNodeScheduling(node.Scheduling)
 		node.Placement = cloneNodePlacement(node.Placement)
+		node.Drain = cloneNodeDrain(node.Drain)
 		next.nodes[key] = node
 	}
 	for key, credential := range current.credentials {
