@@ -56,6 +56,7 @@ release_files=(
 	steward-gateway
 	steward-mcp
 	steward-relay
+	steward-storage-zfs
 	stewardctl
 	integration/examples/agents/hermes/agent.json
 	integration/examples/agents/openclaw/agent.json
@@ -99,8 +100,10 @@ release_files=(
 	integration/deploy/config/gateway.json.in
 	integration/deploy/config/steward-local.json
 	integration/deploy/config/steward.json
+	integration/deploy/config/storage-zfs.json.in
 	integration/deploy/systemd/steward-executor.service
 	integration/deploy/systemd/steward-gateway.service
+	integration/deploy/systemd/steward-storage-zfs.service
 	integration/deploy/systemd/steward.service
 	integration/scripts/activate-node-release.sh
 	integration/scripts/build-hermes-adapter.sh

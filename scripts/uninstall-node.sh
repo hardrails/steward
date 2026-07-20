@@ -265,9 +265,11 @@ fi
 was_gateway=false
 was_steward=false
 was_executor=false
+was_storage=false
 systemctl is-active --quiet steward-gateway.service && was_gateway=true
 systemctl is-active --quiet steward.service && was_steward=true
 systemctl is-active --quiet steward-executor.service && was_executor=true
+systemctl is-active --quiet steward-storage-zfs.service && was_storage=true
 removal_guard_complete=false
 restore_services_after_failed_removal() {
 	local status=$?
@@ -275,6 +277,7 @@ restore_services_after_failed_removal() {
 	if [[ $removal_guard_complete != true ]]; then
 		[[ $was_gateway == false ]] || systemctl start steward-gateway.service >/dev/null 2>&1 || true
 		[[ $was_steward == false ]] || systemctl start steward.service >/dev/null 2>&1 || true
+		[[ $was_storage == false ]] || systemctl start steward-storage-zfs.service >/dev/null 2>&1 || true
 		[[ $was_executor == false ]] || systemctl start steward-executor.service >/dev/null 2>&1 || true
 	fi
 	exit "$status"
@@ -284,6 +287,7 @@ trap restore_services_after_failed_removal EXIT HUP INT TERM
 [[ $was_gateway == false ]] || systemctl stop steward-gateway.service
 [[ $was_steward == false ]] || systemctl stop steward.service
 [[ $was_executor == false ]] || systemctl stop steward-executor.service
+[[ $was_storage == false ]] || systemctl stop steward-storage-zfs.service
 guard_status=0
 if [[ $purge_data == true ]]; then
 	"$guard_bin" --purge-data || guard_status=$?
@@ -298,8 +302,8 @@ removal_guard_complete=true
 trap - EXIT HUP INT TERM
 # END QUIESCED_REMOVAL
 
-systemctl disable steward-gateway.service steward.service steward-executor.service >/dev/null 2>&1 || true
-for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay; do
+systemctl disable steward-gateway.service steward.service steward-executor.service steward-storage-zfs.service >/dev/null 2>&1 || true
+for binary in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs; do
 	path="/usr/local/bin/$binary"
 	target=$(readlink "$path" 2>/dev/null || true)
 	case "$target" in
@@ -308,7 +312,8 @@ for binary in steward steward-control stewardctl steward-mcp steward-executor st
 done
 rm -f /usr/local/lib/systemd/system/steward.service \
 	/usr/local/lib/systemd/system/steward-executor.service \
-	/usr/local/lib/systemd/system/steward-gateway.service
+	/usr/local/lib/systemd/system/steward-gateway.service \
+	/usr/local/lib/systemd/system/steward-storage-zfs.service
 rm -rf /usr/local/libexec/steward
 systemctl daemon-reload >/dev/null 2>&1 || true
 

@@ -24,10 +24,10 @@ for forbidden in deploy/config/control.env deploy/systemd/steward-control.servic
 		exit 2
 	fi
 done
-for path in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay deploy/config/steward.json deploy/config/steward-local.json \
+for path in steward steward-control stewardctl steward-mcp steward-executor steward-gateway steward-relay steward-storage-zfs deploy/config/steward.json deploy/config/steward-local.json \
 	deploy/config/executor.env deploy/config/executor-gateway.env deploy/systemd/steward.service \
-	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service \
-	deploy/config/gateway.json.in scripts/install-node.sh \
+	deploy/systemd/steward-executor.service deploy/systemd/steward-gateway.service deploy/systemd/steward-storage-zfs.service \
+	deploy/config/gateway.json.in deploy/config/storage-zfs.json.in scripts/install-node.sh \
 	scripts/activate-node-release.sh scripts/node-doctor.sh scripts/node-preflight.sh \
 	scripts/configure-node.sh scripts/configure-admission.sh scripts/uninstall-node.sh \
 	scripts/node-removal-guard.sh scripts/build-hermes-adapter.sh scripts/build-relay-image.sh \
