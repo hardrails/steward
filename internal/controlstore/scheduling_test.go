@@ -82,6 +82,11 @@ func TestCheckNodeSchedulingEnforcesPlacementAndAggregateReservations(t *testing
 	if err := CheckNodeScheduling(node, []Deployment{existing}, "tenant-a", intent, capsule, nil, now, time.Minute); err != nil {
 		t.Fatalf("fit observation: %v", err)
 	}
+	cordoned := cloneNode(node)
+	cordoned.Placement = &NodePlacement{Mode: NodeCordoned, Reason: "maintenance", ChangedAt: now.Format(time.RFC3339Nano)}
+	if err := CheckNodeScheduling(cordoned, nil, "tenant-a", intent, capsule, nil, now, time.Minute); !errors.Is(err, ErrNodePlacementUnavailable) {
+		t.Fatalf("cordoned placement error = %v", err)
+	}
 
 	stale := node
 	stale.Scheduling = cloneNodeScheduling(node.Scheduling)
@@ -130,6 +135,11 @@ func TestCheckNodeSchedulingEnforcesPlacementAndAggregateReservations(t *testing
 	runtimeLimited.Scheduling.Observation.Policy.Tenant.MemoryBytes = intent.Resources.MemoryBytes
 	if err := CheckNodeScheduling(runtimeLimited, nil, "tenant-a", runtimeIntent, capsule, nil, now, time.Minute); !errors.Is(err, ErrNodeCapacityExceeded) {
 		t.Fatalf("runtime overhead error = %v", err)
+	}
+	perWorkloadLimited := cloneNode(node)
+	perWorkloadLimited.Scheduling.Observation.Policy.PerWorkload.MemoryBytes = intent.Resources.MemoryBytes - 1
+	if err := CheckNodeScheduling(perWorkloadLimited, nil, "tenant-a", intent, capsule, nil, now, time.Minute); !errors.Is(err, ErrWorkloadLimitExceeded) {
+		t.Fatalf("per-workload limit error = %v", err)
 	}
 }
 

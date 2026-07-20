@@ -86,6 +86,8 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 			_, _ = w.Write([]byte(`{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z"}`))
 		case "/v1/nodes/node-1":
 			_, _ = w.Write([]byte(`{"node_id":"node-1","revoked_credentials":1}`))
+		case "/v1/nodes/node-1/placement":
+			_, _ = w.Write([]byte(`{"node":{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z","placement":{"mode":"cordoned","reason":"maintenance","changed_at":"2026-07-13T12:01:00Z"}},"changed":true}`))
 		case "/v1/operations/summary":
 			query := request.URL.Query()
 			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" {
@@ -237,6 +239,12 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	nodeStatusArguments = append(nodeStatusArguments, "-tenant-id", "tenant-a", "-node-id", "node-1")
 	if err := run(nodeStatusArguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"state":"active"`) {
 		t.Fatalf("node status output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	cordonArguments := append([]string{"control", "node", "cordon"}, common...)
+	cordonArguments = append(cordonArguments, "-reason", "maintenance", "node-1")
+	if err := run(cordonArguments, &output, &bytes.Buffer{}); err != nil || !strings.Contains(output.String(), `"mode":"cordoned"`) {
+		t.Fatalf("node cordon output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
 	nodeRevokeArguments := append([]string{"control", "node", "revoke"}, common...)
@@ -445,6 +453,28 @@ func TestEnrollmentCredentialValidationRejectsEndpointSubstitution(t *testing.T)
 				t.Fatalf("substituted credential accepted: %+v", changed)
 			}
 		})
+	}
+}
+
+func TestControlNodePlacementRejectsAmbiguousCLIInput(t *testing.T) {
+	flags, positional := placementFlagArguments([]string{
+		"-reason", "maintenance", "node-1", "-control-url", "http://127.0.0.1:8443", "-token-file=/tmp/token",
+	})
+	if len(positional) != 1 || positional[0] != "node-1" || len(flags) != 5 {
+		t.Fatalf("placement argument normalization = flags %v positional %v", flags, positional)
+	}
+	for _, test := range []struct {
+		arguments []string
+		action    controlstore.NodePlacementAction
+	}{
+		{nil, controlstore.NodePlacementCordon},
+		{[]string{"-node-id", "node-1"}, controlstore.NodePlacementCordon},
+		{[]string{"-node-id", "node-1", "-reason", "unexpected"}, controlstore.NodePlacementUncordon},
+		{[]string{"node-1", "node-2"}, controlstore.NodePlacementQuarantine},
+	} {
+		if err := controlNodePlacement(test.arguments, &bytes.Buffer{}, test.action); err == nil {
+			t.Fatalf("ambiguous placement input accepted: %+v", test)
+		}
 	}
 }
 

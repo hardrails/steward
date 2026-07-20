@@ -115,6 +115,25 @@ func TestNodeAdministrationFencesEveryCredentialAndTenantView(t *testing.T) {
 	if len(node.TenantIDs) != 2 || node.State != "active" {
 		t.Fatalf("site-admin node projection = %+v", node)
 	}
+	if node.Placement.Mode != controlstore.NodeSchedulable {
+		t.Fatalf("legacy node placement = %+v", node.Placement)
+	}
+	requireError(t, fixture.request(t, http.MethodPost, "/v1/nodes/node-1/placement", operatorA,
+		`{"action":"cordon","reason":"maintenance"}`), http.StatusForbidden, "forbidden")
+	response = fixture.request(t, http.MethodPost, "/v1/nodes/node-1/placement", fixture.adminToken,
+		`{"action":"cordon","reason":"maintenance"}`)
+	requireStatus(t, response, http.StatusOK)
+	var placement struct {
+		Node    nodeResponse `json:"node"`
+		Changed bool         `json:"changed"`
+	}
+	decodeResponse(t, response, &placement)
+	if !placement.Changed || placement.Node.Placement.Mode != controlstore.NodeCordoned {
+		t.Fatalf("node cordon = %+v", placement)
+	}
+	response = fixture.request(t, http.MethodPost, "/v1/nodes/node-1/placement", fixture.adminToken,
+		`{"action":"uncordon"}`)
+	requireStatus(t, response, http.StatusOK)
 
 	requireError(t, fixture.request(t, http.MethodGet, "/v1/tenants/tenant-b/nodes", operatorA, ""),
 		http.StatusNotFound, "not_found")
@@ -158,6 +177,8 @@ func TestNodeAdministrationFencesEveryCredentialAndTenantView(t *testing.T) {
 	}
 	requireError(t, fixture.request(t, http.MethodDelete, "/v1/nodes/missing", fixture.adminToken, ""),
 		http.StatusNotFound, "not_found")
+	requireError(t, fixture.request(t, http.MethodPost, "/v1/nodes/missing/placement", fixture.adminToken,
+		`{"action":"cordon","reason":"maintenance"}`), http.StatusNotFound, "not_found")
 }
 
 func TestControlPlaneRejectsProtocolAndPaginationAmbiguity(t *testing.T) {
@@ -186,6 +207,7 @@ func TestControlPlaneRejectsProtocolAndPaginationAmbiguity(t *testing.T) {
 		{http.MethodPost, "/v1/enrollments", `{}`},
 		{http.MethodDelete, "/v1/node-credentials/missing", ""},
 		{http.MethodDelete, "/v1/nodes/node-1", ""},
+		{http.MethodPost, "/v1/nodes/node-1/placement", `{}`},
 		{http.MethodGet, "/v1/nodes/node-1/evidence", ""},
 		{http.MethodGet, "/v1/nodes/node-1/evidence/export", ""},
 		{http.MethodGet, "/v1/tenants/tenant-a/nodes", ""},
@@ -207,6 +229,7 @@ func TestControlPlaneRejectsProtocolAndPaginationAmbiguity(t *testing.T) {
 	}{
 		{"/v1/operators", fixture.adminToken},
 		{"/v1/enrollments", operator},
+		{"/v1/nodes/node-1/placement", fixture.adminToken},
 		{"/v1/enroll", ""},
 		{"/v1/tenants/tenant-a/nodes/node-1/commands", operator},
 		{"/executor-uplink/poll", node.Credential},
@@ -384,6 +407,8 @@ func TestControlPlaneRouteMatrixPreservesIdempotencyAndConcealment(t *testing.T)
 		{http.MethodGet, "/v1/enroll", "", "", http.StatusMethodNotAllowed, "method_not_allowed"},
 		{http.MethodDelete, "/v1/node-credentials/missing", fixture.adminToken, "", http.StatusNotFound, "not_found"},
 		{http.MethodPost, "/v1/nodes/node-1", fixture.adminToken, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodGet, "/v1/nodes/node-1/placement", fixture.adminToken, "", http.StatusMethodNotAllowed, "method_not_allowed"},
+		{http.MethodPost, "/v1/nodes/node-1/placement?unexpected=1", fixture.adminToken, `{}`, http.StatusBadRequest, "invalid_request"},
 		{http.MethodPost, "/v1/nodes/node-1/evidence", fixture.adminToken, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},
 		{http.MethodGet, "/v1/nodes/node-1/evidence?unexpected=1", fixture.adminToken, "", http.StatusBadRequest, "invalid_request"},
 		{http.MethodPost, "/v1/nodes/node-1/evidence/export", fixture.adminToken, `{}`, http.StatusMethodNotAllowed, "method_not_allowed"},

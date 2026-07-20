@@ -845,6 +845,14 @@ func (store *Store) poll(identity controlauth.NodeIdentity, capabilities []strin
 		observed.Capabilities = canonical
 		mutations = append(mutations, mutation{Kind: mutationNode, Node: &observed})
 	}
+	if EffectiveNodePlacement(node).Mode == NodeQuarantined {
+		if len(mutations) > 0 {
+			if err := store.applyMutationsLocked(mutations...); err != nil {
+				return nil, err
+			}
+		}
+		return []controlprotocol.ExecutorDeliveryV3{}, nil
+	}
 	candidates := make([]Command, 0)
 	for _, command := range store.current.commands {
 		if command.NodeID != identity.NodeID || !controlauth.NodeAuthorizedTenant(identity, command.TenantID) {
@@ -1671,7 +1679,16 @@ func cloneNode(node Node) Node {
 	node.Capabilities = copyStringSlice(node.Capabilities)
 	node.Evidence = cloneEvidenceWitness(node.Evidence)
 	node.Scheduling = cloneNodeScheduling(node.Scheduling)
+	node.Placement = cloneNodePlacement(node.Placement)
 	return node
+}
+
+func cloneNodePlacement(value *NodePlacement) *NodePlacement {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func cloneNodeScheduling(value *NodeScheduling) *NodeScheduling {

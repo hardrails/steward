@@ -906,6 +906,18 @@ function NodeScheduling({scheduling}) {
   );
 }
 
+function NodePlacement({placement}) {
+	const mode = placement?.mode || "schedulable";
+	const kind = mode === "quarantined" ? "is-danger" : mode === "cordoned" ? "is-warning" : "is-ok";
+	return (
+		<div>
+			<Badge kind={kind}>{mode}</Badge>
+			{placement?.reason ? <small>{placement.reason}</small> : <small>Accepting eligible work.</small>}
+			{placement?.changed_at ? <small>Changed {formatTime(placement.changed_at)}</small> : null}
+		</div>
+	);
+}
+
 function NodesView({page, tenantID}) {
   return (
     <section className="view" aria-labelledby="nodes-title">
@@ -914,12 +926,13 @@ function NodesView({page, tenantID}) {
       </ViewHeading>
       <TableFrame empty={!tenantID ? "Select one tenant to load nodes." : "No nodes in this tenant."} hasRows={page.nodes.length > 0}>
         <table>
-          <thead><tr><th>Node</th><th>State</th><th>Last seen</th><th>Scheduling</th><th>Capabilities</th></tr></thead>
+			<thead><tr><th>Node</th><th>State</th><th>Placement</th><th>Last seen</th><th>Capacity</th><th>Capabilities</th></tr></thead>
           <tbody>
             {page.nodes.map((node) => (
               <tr key={node.node_id}>
                 <td><strong>{node.node_id}</strong><small>{node.tenant_ids.join(", ")}</small></td>
                 <td><Badge kind={node.state === "active" ? "is-ok" : "is-danger"}>{node.state}</Badge></td>
+				<td><NodePlacement placement={node.placement} /></td>
                 <td>{formatTime(node.last_seen_at || node.created_at)}</td>
                 <td><NodeScheduling scheduling={node.scheduling} /></td>
                 <td>

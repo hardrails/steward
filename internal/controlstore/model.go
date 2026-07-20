@@ -27,7 +27,7 @@ import (
 
 const (
 	stateFormatMinReadVersion       = 1
-	stateFormatWriteVersion         = 7
+	stateFormatWriteVersion         = 8
 	stateFormatMaxReadVersion       = stateFormatWriteVersion
 	stateFormatEvidenceVersion      = 2
 	stateFormatExecutorV4Version    = 3
@@ -35,8 +35,9 @@ const (
 	stateFormatDeploymentVersion    = 5
 	stateFormatWorkloadLeaseVersion = 6
 	stateFormatSchedulingVersion    = 7
+	stateFormatNodePlacementVersion = 8
 	transactionFormatMinReadVersion = 1
-	transactionFormatWriteVersion   = 7
+	transactionFormatWriteVersion   = 8
 	transactionFormatMaxReadVersion = transactionFormatWriteVersion
 	transactionEvidenceVersion      = 2
 	transactionExecutorV4Version    = 3
@@ -44,6 +45,7 @@ const (
 	transactionDeploymentVersion    = 5
 	transactionWorkloadLeaseVersion = 6
 	transactionSchedulingVersion    = 7
+	transactionNodePlacementVersion = 8
 	maxMutationsPerRecord           = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -133,10 +135,27 @@ type Node struct {
 	Capabilities []string         `json:"capabilities"`
 	Evidence     *EvidenceWitness `json:"evidence,omitempty"`
 	Scheduling   *NodeScheduling  `json:"scheduling,omitempty"`
+	Placement    *NodePlacement   `json:"placement,omitempty"`
 	CreatedAt    string           `json:"created_at"`
 	LastSeenAt   string           `json:"last_seen_at,omitempty"`
 	RevokedAt    string           `json:"revoked_at,omitempty"`
 	Active       bool             `json:"active"`
+}
+
+type NodePlacementMode string
+
+const (
+	NodeSchedulable NodePlacementMode = "schedulable"
+	NodeCordoned    NodePlacementMode = "cordoned"
+	NodeQuarantined NodePlacementMode = "quarantined"
+)
+
+// NodePlacement is the controller-owned scheduling and command-delivery gate.
+// A nil value is the legacy representation of schedulable.
+type NodePlacement struct {
+	Mode      NodePlacementMode `json:"mode"`
+	Reason    string            `json:"reason,omitempty"`
+	ChangedAt string            `json:"changed_at"`
 }
 
 // NodeScheduling is the most recent controller-timestamped capacity and
@@ -533,6 +552,7 @@ func (current state) clone() state {
 		node.Capabilities = copyStringSlice(node.Capabilities)
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
 		node.Scheduling = cloneNodeScheduling(node.Scheduling)
+		node.Placement = cloneNodePlacement(node.Placement)
 		next.nodes[key] = node
 	}
 	for key, credential := range current.credentials {
@@ -823,6 +843,7 @@ func encodeState(current state, limit int) ([]byte, error) {
 		node.Capabilities = copyStringSlice(node.Capabilities)
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
 		node.Scheduling = cloneNodeScheduling(node.Scheduling)
+		node.Placement = cloneNodePlacement(node.Placement)
 		snapshot.Nodes = append(snapshot.Nodes, node)
 	}
 	for _, credential := range current.credentials {
@@ -907,8 +928,15 @@ func decodeState(raw []byte, limit int) (state, error) {
 		if snapshot.Version < stateFormatSchedulingVersion && node.Scheduling != nil {
 			return state{}, errors.New("legacy control snapshot contains scheduling observation state")
 		}
+		if snapshot.Version < stateFormatNodePlacementVersion && node.Placement != nil {
+			return state{}, errors.New("legacy control snapshot contains node placement state")
+		}
+		if node.Placement != nil && !validNodePlacement(*node.Placement) {
+			return state{}, errors.New("control snapshot contains invalid node placement state")
+		}
 		node.Evidence = cloneEvidenceWitness(node.Evidence)
 		node.Scheduling = cloneNodeScheduling(node.Scheduling)
+		node.Placement = cloneNodePlacement(node.Placement)
 		current.nodes[node.ID] = node
 	}
 	for _, stored := range snapshot.Credentials {
@@ -1044,10 +1072,17 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if value.Version < transactionSchedulingVersion && node.Scheduling != nil {
 				return state{}, errors.New("legacy control transaction contains scheduling observation state")
 			}
+			if value.Version < transactionNodePlacementVersion && node.Placement != nil {
+				return state{}, errors.New("legacy control transaction contains node placement state")
+			}
+			if node.Placement != nil && !validNodePlacement(*node.Placement) {
+				return state{}, errors.New("control transaction contains invalid node placement state")
+			}
 			node.TenantIDs = append([]string(nil), change.Node.TenantIDs...)
 			node.Capabilities = copyStringSlice(change.Node.Capabilities)
 			node.Evidence = cloneEvidenceWitness(change.Node.Evidence)
 			node.Scheduling = cloneNodeScheduling(change.Node.Scheduling)
+			node.Placement = cloneNodePlacement(change.Node.Placement)
 			next.nodes[node.ID] = node
 		case mutationCredential:
 			if change.Credential == nil {

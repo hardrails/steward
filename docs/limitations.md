@@ -223,6 +223,12 @@ delegated nodes is fresh and capable, or
 `scheduling_observation_unavailable` when an otherwise eligible node has no
 current resource profile. Architecture, signed labels, isolation, taints, and
 tolerations are checked before placement.
+Controller cordon excludes a node from new placement without disturbing its
+current assignments. Quarantine also stops new command leases and treats the
+node as unavailable for lease-fenced stateless recovery while preserving its
+authenticated liveness and evidence channel. Neither operation evicts a
+stateful workload, proves that a compromised host is trustworthy, or replaces
+the node-local Executor maintenance fence used for an exact-runtime drain.
 A lease-managed stateless instance can be replaced after node loss. Control
 retains the latest signed expiry that Executor could have accepted and waits
 through that time plus the two-minute command clock-skew allowance. Executor
@@ -248,7 +254,8 @@ do not append repeated durable records.
 
 The reconciler durably reserves aggregate CPU, memory, process, tenant, and
 workload-slot capacity with admission. It does not schedule disk or persistent
-state bytes, preempt workloads, perform progressive rollouts, or autoscale.
+state bytes, preempt workloads, enforce disruption budgets, perform progressive
+rollouts, or autoscale.
 Docker volumes do not provide a portable hard-quota contract, so stateful
 capacity remains a documented gap. Executor revalidates admission and live
 capacity, so unmanaged containers or a stale decision fail closed rather than

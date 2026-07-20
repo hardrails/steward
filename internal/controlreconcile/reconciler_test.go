@@ -543,6 +543,24 @@ func TestReconcilerClassifiesMalformedAuthorityAndBoundaries(t *testing.T) {
 	if eligibleNode(controlstore.Node{Active: true, LastSeenAt: "bad"}, "tenant-a", map[string]struct{}{}, fixture.now, time.Minute) {
 		t.Fatal("node with malformed observation time was eligible")
 	}
+	allowed := map[string]struct{}{"node-1": {}}
+	maintenanceNode := controlstore.Node{
+		ID: "node-1", Active: true, CreatedAt: fixture.now.Format(time.RFC3339Nano),
+		LastSeenAt: fixture.now.Format(time.RFC3339Nano), TenantIDs: []string{"tenant-a"},
+		Capabilities: []string{controlprotocol.ExecutorCapabilityControllerDelegationV1},
+		Placement: &controlstore.NodePlacement{
+			Mode: controlstore.NodeCordoned, Reason: "maintenance", ChangedAt: fixture.now.Format(time.RFC3339Nano),
+		},
+	}
+	if eligibleNode(maintenanceNode, "tenant-a", allowed, fixture.now, time.Minute) ||
+		!nodeAvailableForAssignment(maintenanceNode, "tenant-a", allowed, fixture.now, time.Minute) {
+		t.Fatal("cordon did not exclude only new placement")
+	}
+	maintenanceNode.Placement.Mode = controlstore.NodeQuarantined
+	if eligibleNode(maintenanceNode, "tenant-a", allowed, fixture.now, time.Minute) ||
+		nodeAvailableForAssignment(maintenanceNode, "tenant-a", allowed, fixture.now, time.Minute) {
+		t.Fatal("quarantine left node available for placement or assignment")
+	}
 	if err := (*Reconciler)(nil).Run(context.Background()); err == nil {
 		t.Fatal("nil reconciler accepted run")
 	}

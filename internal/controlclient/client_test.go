@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hardrails/steward/internal/controlprotocol"
+	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -115,6 +116,15 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 			_, _ = w.Write([]byte(`{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":["signed-commands-v2"],"state":"active","created_at":"2026-07-13T12:00:00Z"}`))
 		case "/v1/nodes/node-1":
 			_, _ = w.Write([]byte(`{"node_id":"node-1","revoked_credentials":1}`))
+		case "/v1/nodes/node-1/placement":
+			var input struct {
+				Action string `json:"action"`
+				Reason string `json:"reason"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil || input.Action != "cordon" || input.Reason != "maintenance" {
+				t.Fatalf("placement request=%+v error=%v", input, err)
+			}
+			_, _ = w.Write([]byte(`{"node":{"node_id":"node-1","tenant_ids":["tenant-a"],"capabilities":[],"state":"active","created_at":"2026-07-13T12:00:00Z","placement":{"mode":"cordoned","reason":"maintenance","changed_at":"2026-07-13T12:01:00Z"}},"changed":true}`))
 		case "/v1/node-credentials/node-credential-1":
 			_, _ = w.Write([]byte(`{"credential_id":"node-credential-1","node_id":"node-1","revoked":true}`))
 		default:
@@ -153,6 +163,10 @@ func TestClientDrivesBoundedAuthenticatedControlAPI(t *testing.T) {
 	}
 	if node, err := client.GetNode(ctx, "tenant-a", "node-1"); err != nil || node.State != "active" {
 		t.Fatalf("node=%#v error=%v", node, err)
+	}
+	if change, err := client.ChangeNodePlacement(ctx, "node-1", controlstore.NodePlacementCordon, "maintenance"); err != nil ||
+		!change.Changed || change.Node.Placement.Mode != controlstore.NodeCordoned {
+		t.Fatalf("placement=%#v error=%v", change, err)
 	}
 	if revoked, err := client.RevokeNode(ctx, "node-1"); err != nil || revoked.RevokedCredentials != 1 {
 		t.Fatalf("revoked=%#v error=%v", revoked, err)

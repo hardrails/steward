@@ -55,6 +55,14 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 		return controlNodeStatus(arguments[2:], stdout)
 	case "node revoke":
 		return controlNodeRevoke(arguments[2:], stdout)
+	case "node cordon":
+		return controlNodePlacement(arguments[2:], stdout, controlstore.NodePlacementCordon)
+	case "node uncordon":
+		return controlNodePlacement(arguments[2:], stdout, controlstore.NodePlacementUncordon)
+	case "node quarantine":
+		return controlNodePlacement(arguments[2:], stdout, controlstore.NodePlacementQuarantine)
+	case "node unquarantine":
+		return controlNodePlacement(arguments[2:], stdout, controlstore.NodePlacementUnquarantine)
 	case "node-credential revoke":
 		return controlNodeCredentialRevoke(arguments[2:], stdout)
 	case "operations status":
@@ -95,7 +103,7 @@ func controlCommand(arguments []string, stdout io.Writer) error {
 }
 
 func controlUsageError() error {
-	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|revoke, node-credential revoke, operations status, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
+	return errors.New("control requires pki create, tenant create|list, operator issue|revoke, enrollment create|exchange, node list|status|cordon|uncordon|quarantine|unquarantine|revoke, node-credential revoke, operations status, attention list, agent list, command submit|status|list, credential list, evidence status|export|verify, or evidence-capture arm|status|seal|export|verify|delete")
 }
 
 type controlFlags struct {
@@ -465,6 +473,70 @@ func controlNodeRevoke(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	return writeControlJSON(stdout, revocation)
+}
+
+func controlNodePlacement(
+	arguments []string,
+	stdout io.Writer,
+	action controlstore.NodePlacementAction,
+) error {
+	name := "control node " + string(action)
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	common := addControlFlags(flags, true)
+	nodeID := flags.String("node-id", "", "node identity (or pass it as the final argument)")
+	reason := flags.String("reason", "", "bounded operator reason")
+	flagArguments, positional := placementFlagArguments(arguments)
+	if err := flags.Parse(flagArguments); err != nil {
+		return err
+	}
+	if *nodeID == "" && len(positional) == 1 {
+		*nodeID = positional[0]
+	} else if len(positional) != 0 {
+		return fmt.Errorf("%s accepts one node ID", name)
+	}
+	requiresReason := action == controlstore.NodePlacementCordon || action == controlstore.NodePlacementQuarantine
+	if *nodeID == "" {
+		return fmt.Errorf("%s requires a node ID", name)
+	}
+	if requiresReason && *reason == "" {
+		return fmt.Errorf("%s requires -reason", name)
+	}
+	if !requiresReason && *reason != "" {
+		return fmt.Errorf("%s does not accept -reason", name)
+	}
+	client, err := common.client(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	change, err := client.ChangeNodePlacement(ctx, *nodeID, action, *reason)
+	if err != nil {
+		return err
+	}
+	return writeControlJSON(stdout, change)
+}
+
+// placementFlagArguments lets the ergonomic positional node ID coexist with
+// context flags appended by applyCLIContext. Every flag in this command takes
+// exactly one value; flag.Parse still rejects unknown or malformed flags.
+func placementFlagArguments(arguments []string) ([]string, []string) {
+	flagArguments := make([]string, 0, len(arguments))
+	positionals := make([]string, 0, 1)
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if !strings.HasPrefix(argument, "-") {
+			positionals = append(positionals, argument)
+			continue
+		}
+		flagArguments = append(flagArguments, argument)
+		if !strings.Contains(argument, "=") && index+1 < len(arguments) {
+			index++
+			flagArguments = append(flagArguments, arguments[index])
+		}
+	}
+	return flagArguments, positionals
 }
 
 func controlNodeCredentialRevoke(arguments []string, stdout io.Writer) error {

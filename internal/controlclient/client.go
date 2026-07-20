@@ -149,6 +149,12 @@ type Node struct {
 	LastSeenAt   string                       `json:"last_seen_at,omitempty"`
 	RevokedAt    string                       `json:"revoked_at,omitempty"`
 	Scheduling   *controlstore.NodeScheduling `json:"scheduling,omitempty"`
+	Placement    controlstore.NodePlacement   `json:"placement"`
+}
+
+type NodePlacementChange struct {
+	Node    Node `json:"node"`
+	Changed bool `json:"changed"`
 }
 
 type NodeList struct {
@@ -467,6 +473,20 @@ func (c *Client) RevokeNode(ctx context.Context, nodeID string) (NodeRevocation,
 	var revocation NodeRevocation
 	err := c.do(ctx, http.MethodDelete, "/v1/nodes/"+url.PathEscape(nodeID), nil, &revocation, true)
 	return revocation, err
+}
+
+func (c *Client) ChangeNodePlacement(
+	ctx context.Context,
+	nodeID string,
+	action controlstore.NodePlacementAction,
+	reason string,
+) (NodePlacementChange, error) {
+	var change NodePlacementChange
+	err := c.do(ctx, http.MethodPost, "/v1/nodes/"+url.PathEscape(nodeID)+"/placement", struct {
+		Action controlstore.NodePlacementAction `json:"action"`
+		Reason string                           `json:"reason,omitempty"`
+	}{Action: action, Reason: reason}, &change, true)
+	return change, err
 }
 
 func (c *Client) RevokeNodeCredential(ctx context.Context, credentialID string) (NodeCredentialRevocation, error) {

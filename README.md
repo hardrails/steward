@@ -202,10 +202,14 @@ instances, inventory, attention findings, and separately witnessed evidence.
 
 Control uses a purpose-separated online key only within a short-lived
 tenant-signed delegation. Tenant keys remain outside Control, and Executor verifies
-both signatures and the exact delegated scope before changing Docker. The current
-controller schedules only onto recently observed nodes and reports a stable blocked
-reason when it cannot proceed. It does not yet reserve fleet capacity or replace an
-instance after node loss.
+both signatures and the exact delegated scope before changing Docker. The
+controller schedules only onto recently observed nodes, atomically reserves the
+CPU, memory, process, tenant, and workload-slot limits Executor enforces, and
+reports a stable blocked reason when it cannot proceed. It can replace a
+lease-managed stateless instance after the signed expiry fence, and site
+administrators can durably cordon or quarantine nodes without erasing their
+evidence identity. Stateful migration, disruption budgets, and progressive
+rollouts remain explicit gaps.
 
 Its embedded React console is available at `/console/`. The console keeps the
 operator bearer only in tab memory, loads no remote assets, and never receives
