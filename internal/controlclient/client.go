@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -166,6 +167,11 @@ type NodeDrainChange struct {
 type OperationalFreezeChange struct {
 	Status  controlstore.OperationalFreezeStatus `json:"status"`
 	Changed bool                                 `json:"changed"`
+}
+
+type TenantResourceQuotaChange struct {
+	Status  controlstore.TenantResourceQuotaStatus `json:"status"`
+	Changed bool                                   `json:"changed"`
 }
 
 type NodeList struct {
@@ -505,6 +511,49 @@ func (c *Client) RevokeNode(ctx context.Context, nodeID string) (NodeRevocation,
 	var revocation NodeRevocation
 	err := c.do(ctx, http.MethodDelete, "/v1/nodes/"+url.PathEscape(nodeID), nil, &revocation, true)
 	return revocation, err
+}
+
+func (c *Client) GetTenantResourceQuota(
+	ctx context.Context,
+	tenantID string,
+) (controlstore.TenantResourceQuotaStatus, error) {
+	path, err := tenantResourceQuotaPath(tenantID)
+	if err != nil {
+		return controlstore.TenantResourceQuotaStatus{}, err
+	}
+	var status controlstore.TenantResourceQuotaStatus
+	if err := c.do(ctx, http.MethodGet, path, nil, &status, true); err != nil {
+		return controlstore.TenantResourceQuotaStatus{}, err
+	}
+	if err := validateTenantResourceQuotaStatus(status, tenantID); err != nil {
+		return controlstore.TenantResourceQuotaStatus{}, err
+	}
+	return status, nil
+}
+
+func (c *Client) ChangeTenantResourceQuota(
+	ctx context.Context,
+	tenantID string,
+	action controlstore.TenantQuotaAction,
+	expectedRevision uint64,
+	resources controlprotocol.ExecutorSchedulingResourcesV1,
+) (TenantResourceQuotaChange, error) {
+	path, err := tenantResourceQuotaPath(tenantID)
+	if err != nil {
+		return TenantResourceQuotaChange{}, err
+	}
+	var change TenantResourceQuotaChange
+	if err := c.do(ctx, http.MethodPut, path, struct {
+		Action           controlstore.TenantQuotaAction                `json:"action"`
+		ExpectedRevision uint64                                        `json:"expected_revision"`
+		Resources        controlprotocol.ExecutorSchedulingResourcesV1 `json:"resources"`
+	}{Action: action, ExpectedRevision: expectedRevision, Resources: resources}, &change, true); err != nil {
+		return TenantResourceQuotaChange{}, err
+	}
+	if err := validateTenantResourceQuotaStatus(change.Status, tenantID); err != nil {
+		return TenantResourceQuotaChange{}, err
+	}
+	return change, nil
 }
 
 func (c *Client) GetOperationalFreeze(
@@ -1170,6 +1219,57 @@ func operationalFreezePath(tenantID string) (string, error) {
 		return "", errors.New("control freeze tenant identity is invalid")
 	}
 	return "/v1/tenants/" + url.PathEscape(tenantID) + "/freeze", nil
+}
+
+func tenantResourceQuotaPath(tenantID string) (string, error) {
+	if !validEvidenceRouteIdentity(tenantID, 128) {
+		return "", errors.New("control quota tenant identity is invalid")
+	}
+	return "/v1/tenants/" + url.PathEscape(tenantID) + "/quota", nil
+}
+
+func validateTenantResourceQuotaStatus(status controlstore.TenantResourceQuotaStatus, tenantID string) error {
+	if status.TenantID != tenantID || !validNonnegativeSchedulingResources(status.Usage) {
+		return errors.New("control quota response has an invalid tenant or usage")
+	}
+	expectedOverQuota := false
+	if status.Quota != nil {
+		quota := status.Quota
+		if quota.Revision == 0 || quota.ChangedAt == "" {
+			return errors.New("control quota response has an invalid retained quota")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, quota.ChangedAt); err != nil {
+			return errors.New("control quota response has an invalid retained quota")
+		}
+		if quota.Enabled {
+			if !validPositiveSchedulingResources(quota.Resources) {
+				return errors.New("control quota response has an invalid retained quota")
+			}
+			expectedOverQuota = schedulingResourcesExceed(status.Usage, quota.Resources)
+		} else if quota.Resources != (controlprotocol.ExecutorSchedulingResourcesV1{}) {
+			return errors.New("control quota response has an invalid retained quota")
+		}
+	}
+	if status.OverQuota != expectedOverQuota {
+		return errors.New("control quota response has inconsistent usage state")
+	}
+	return nil
+}
+
+func validNonnegativeSchedulingResources(resources controlprotocol.ExecutorSchedulingResourcesV1) bool {
+	return resources.MemoryBytes >= 0 && resources.CPUMillis >= 0 && resources.PIDs >= 0 && resources.Workloads >= 0
+}
+
+func validPositiveSchedulingResources(resources controlprotocol.ExecutorSchedulingResourcesV1) bool {
+	return resources.MemoryBytes > 0 && resources.CPUMillis > 0 &&
+		resources.CPUMillis <= math.MaxInt64/1_000_000 && resources.PIDs > 0 && resources.Workloads > 0
+}
+
+func schedulingResourcesExceed(
+	used, maximum controlprotocol.ExecutorSchedulingResourcesV1,
+) bool {
+	return used.MemoryBytes > maximum.MemoryBytes || used.CPUMillis > maximum.CPUMillis ||
+		used.PIDs > maximum.PIDs || used.Workloads > maximum.Workloads
 }
 
 func validateOperationalFreezeStatus(status controlstore.OperationalFreezeStatus, tenantID string) error {

@@ -61,10 +61,13 @@ func (store *Store) ChangeTenantResourceQuota(
 	if store == nil {
 		return TenantResourceQuotaStatus{}, false, ErrUnavailable
 	}
+	if !validRecordID(tenantID, 128) || !controlauth.AuthorizedTenant(actor, tenantID) {
+		return TenantResourceQuotaStatus{}, false, ErrNotFound
+	}
 	if !controlauth.IsSiteAdmin(actor) {
 		return TenantResourceQuotaStatus{}, false, ErrForbidden
 	}
-	if !validRecordID(tenantID, 128) || !validTenantQuotaChange(action, resources) || now.IsZero() {
+	if !validTenantQuotaChange(action, resources) || now.IsZero() {
 		return TenantResourceQuotaStatus{}, false, invalid("tenant resource quota transition is invalid")
 	}
 	store.mu.Lock()
@@ -176,7 +179,7 @@ func tenantRequestedResourceUsage(
 			continue
 		}
 		for _, instance := range deployment.Instances {
-			if instance.Phase == DeploymentInstanceRemoved || instance.Intent == nil ||
+			if !deploymentInstanceReservesTenantQuota(instance) || instance.Intent == nil ||
 				deployment.ID == excludeDeploymentID && instance.InstanceID == excludeInstanceID {
 				continue
 			}
@@ -192,6 +195,14 @@ func tenantRequestedResourceUsage(
 		}
 	}
 	return usage, nil
+}
+
+// A pending instance has not won admission and therefore owns no quota
+// reservation. Every later phase remains conservative: even a failed or
+// destroying instance may still represent resources accepted by a node until
+// Steward observes removal or absence.
+func deploymentInstanceReservesTenantQuota(instance DeploymentInstance) bool {
+	return instance.Phase != DeploymentInstancePending && instance.Phase != DeploymentInstanceRemoved
 }
 
 func validTenantQuotaChange(

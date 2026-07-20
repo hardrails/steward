@@ -38,6 +38,9 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"control", "freeze", ""}); !slices.Equal(candidates, []string{"clear", "set", "status"}) {
 		t.Fatalf("control freeze candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"control", "quota", ""}); !slices.Equal(candidates, []string{"clear", "set", "status"}) {
+		t.Fatalf("control quota candidates=%v", candidates)
+	}
 	flags := stewardctlCompletionCandidates([]string{"control", "command", "submit", "-"})
 	for _, expected := range []string{"-command", "-control-url", "-node-id", "-tenant-id", "-token-file"} {
 		if !slices.Contains(flags, expected) {

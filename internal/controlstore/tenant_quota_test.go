@@ -85,6 +85,7 @@ func TestTenantResourceQuotaCountsConservativelyAndExcludesReplacement(t *testin
 			Instances: []DeploymentInstance{
 				{InstanceID: "replace-me", Intent: intent(100, 100, 10), Phase: DeploymentInstanceRunning},
 				{InstanceID: "ambiguous", Intent: intent(200, 200, 20), Phase: DeploymentInstanceFailed},
+				{InstanceID: "waiting", Intent: intent(700, 700, 70), Phase: DeploymentInstancePending},
 				{InstanceID: "removed", Intent: intent(900, 900, 90), Phase: DeploymentInstanceRemoved},
 			},
 		},

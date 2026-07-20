@@ -379,6 +379,87 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/quota:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [tenants, operations]
+      operationId: getControlTenantResourceQuota
+      summary: Inspect one tenant's fleet-wide requested-resource quota
+      description: |
+        Returns the retained site-defined quota and conservative usage across
+        instances that have won admission and may still hold resources. A
+        never-admitted pending instance does not consume quota until it wins an
+        atomic reservation. Later phases, including failed or destroying work,
+        retain their reservation until removal or confirmed absence. Usage
+        counts the workload's signed CPU, memory, and process request plus one
+        workload slot. It does not include Executor's separate node-local
+        runtime overhead. A tenant operator can inspect only its own tenant;
+        another tenant is hidden as not found.
+      responses:
+        "200":
+          description: Retained quota and current conservative usage.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantResourceQuotaStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      tags: [tenants, operations]
+      operationId: changeControlTenantResourceQuota
+      summary: Set or clear one tenant's fleet-wide requested-resource quota
+      description: |
+        Requires a site administrator and applies an optimistic, durable
+        policy transition. The first transition expects revision zero. Every
+        later transition must use the retained revision; exact retries are
+        idempotent. Lowering a quota never evicts existing work. The status
+        becomes `over_quota` and new admissions remain blocked until usage
+        falls within the retained ceiling. Clearing the quota retains a
+        disabled record and advances its revision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantResourceQuotaRequest"
+      responses:
+        "200":
+          description: Retained quota and current usage after the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantResourceQuotaChange"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
   /v1/tenants/{tenant_id}/freeze:
     parameters:
       - $ref: "#/components/parameters/TenantID"
@@ -2875,6 +2956,133 @@ components:
         created_at:
           type: string
           format: date-time
+        quota:
+          $ref: "#/components/schemas/TenantResourceQuota"
+    TenantResourceQuotaResources:
+      type: object
+      additionalProperties: false
+      required: [memory_bytes, cpu_millis, pids, workloads]
+      properties:
+        memory_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+        cpu_millis:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9223372036854
+        pids:
+          type: integer
+          format: int64
+          minimum: 1
+        workloads:
+          type: integer
+          format: int64
+          minimum: 1
+      description: >-
+        One positive tenant-wide ceiling over raw signed workload requests.
+        Executor's separately enforced runtime overhead is not included.
+    TenantResourceUsage:
+      type: object
+      additionalProperties: false
+      required: [memory_bytes, cpu_millis, pids, workloads]
+      properties:
+        memory_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        cpu_millis:
+          type: integer
+          format: int64
+          minimum: 0
+        pids:
+          type: integer
+          format: int64
+          minimum: 0
+        workloads:
+          type: integer
+          format: int64
+          minimum: 0
+    TenantResourceQuota:
+      type: object
+      additionalProperties: false
+      required: [enabled, revision, resources, changed_at]
+      properties:
+        enabled:
+          type: boolean
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        resources:
+          oneOf:
+            - $ref: "#/components/schemas/TenantResourceQuotaResources"
+            - type: object
+              additionalProperties: false
+              required: [memory_bytes, cpu_millis, pids, workloads]
+              properties:
+                memory_bytes: {type: integer, enum: [0]}
+                cpu_millis: {type: integer, enum: [0]}
+                pids: {type: integer, enum: [0]}
+                workloads: {type: integer, enum: [0]}
+        changed_at:
+          type: string
+          format: date-time
+      description: >-
+        One retained quota decision. A disabled decision retains its revision
+        and reports zero for every resource.
+    TenantResourceQuotaStatus:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, usage, over_quota]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        quota:
+          $ref: "#/components/schemas/TenantResourceQuota"
+        usage:
+          $ref: "#/components/schemas/TenantResourceUsage"
+        over_quota:
+          type: boolean
+      description: >-
+        Current conservative requested-resource usage and the optional retained
+        limit. `over_quota` is true only when an enabled ceiling is exceeded.
+    TenantResourceQuotaRequest:
+      type: object
+      additionalProperties: false
+      required: [action, expected_revision, resources]
+      properties:
+        action:
+          type: string
+          enum: [set, clear]
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 0
+        resources:
+          oneOf:
+            - $ref: "#/components/schemas/TenantResourceQuotaResources"
+            - type: object
+              additionalProperties: false
+              required: [memory_bytes, cpu_millis, pids, workloads]
+              properties:
+                memory_bytes: {type: integer, enum: [0]}
+                cpu_millis: {type: integer, enum: [0]}
+                pids: {type: integer, enum: [0]}
+                workloads: {type: integer, enum: [0]}
+      description: >-
+        `set` requires four positive resource ceilings. `clear` requires four
+        zeros. The server rejects any other action/resource combination.
+    TenantResourceQuotaChange:
+      type: object
+      additionalProperties: false
+      required: [status, changed]
+      properties:
+        status:
+          $ref: "#/components/schemas/TenantResourceQuotaStatus"
+        changed:
+          type: boolean
     OperationalFreeze:
       type: object
       additionalProperties: false
@@ -3639,7 +3847,7 @@ components:
             `replacement_generation_exhausted`,
             `scheduling_observation_unavailable`,
             `placement_constraints_unsatisfied`, `workload_limit_exceeded`, `node_capacity_exhausted`,
-            `tenant_capacity_exhausted`, `delegation_expired`,
+            `tenant_capacity_exhausted`, `tenant_quota_exhausted`, `delegation_expired`,
             `drain_disruption_budget_exhausted`,
             `rollout_disruption_budget_exhausted`,
             `stateful_drain_unsupported`, `controller_key_mismatch`, or

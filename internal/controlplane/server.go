@@ -107,6 +107,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/tenants", server.tenants)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}", server.tenant)
 	server.mux.HandleFunc("/v1/tenants/{tenant_id}/freeze", server.tenantOperationalFreeze)
+	server.mux.HandleFunc("/v1/tenants/{tenant_id}/quota", server.tenantResourceQuota)
 	server.mux.HandleFunc("/v1/operators", server.operators)
 	server.mux.HandleFunc("/v1/operators/{credential_id}", server.operator)
 	server.mux.HandleFunc("/v1/enrollments", server.enrollments)
