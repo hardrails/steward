@@ -1361,7 +1361,7 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 
 func validDeploymentOperation(operation string) bool {
 	switch operation {
-	case "admit", "start", "read", "stop", "destroy":
+	case "admit", "start", "stop", "destroy":
 		return true
 	default:
 		return false

@@ -188,6 +188,9 @@ or uncertain Executor outcome becomes `degraded` and is not silently retried.
 `no_eligible_node`, `assigned_node_unavailable`, `delegation_expired`,
 `controller_key_mismatch`, or `invalid_deployment_authority`. The controller
 rechecks these conditions and clears the value when it can enqueue the next command.
+`deployment_command_record_missing` is different: it means the durable command
+result needed to prove the next state is unavailable. Steward marks the deployment
+`degraded` and requires operator recovery instead of guessing or retrying the effect.
 
 A stale node is not a safe reason to create a replacement by itself. The existing
 workload may still be running while disconnected, so automatic replacement could
@@ -202,6 +205,12 @@ delegation expires, Executor correctly refuses new commands under it. To roll an
 agent forward or remove it later, sign and apply a higher deployment and instance
 generation with a fresh delegation before requesting cleanup. Steward does not
 silently extend or reinterpret an expired tenant signature.
+
+A new generation must retain every instance that has not reached `removed` and
+advance that instance's generation without changing its lineage. Omitting a live,
+in-progress, or failed instance is rejected because forgetting it would leave its
+workload unmanaged. An already removed instance may be omitted from the next
+generation.
 
 ## Run one synchronous deployment through Control
 

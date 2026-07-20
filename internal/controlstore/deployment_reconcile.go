@@ -36,6 +36,7 @@ const (
 	DeploymentBlockedDelegationExpired       DeploymentBlockedReason = "delegation_expired"
 	DeploymentBlockedControllerKeyMismatch   DeploymentBlockedReason = "controller_key_mismatch"
 	DeploymentBlockedInvalidAuthority        DeploymentBlockedReason = "invalid_deployment_authority"
+	deploymentCommandRecordMissing                                   = "deployment_command_record_missing"
 )
 
 // RecordDeploymentBlocked retains a stable reason without changing the
@@ -256,7 +257,20 @@ func (store *Store) ObserveDeploymentCommand(
 	}
 	command, exists := store.current.commands[commandKey(tenantID, instance.NodeID, instance.CommandID)]
 	if !exists {
-		return Deployment{}, false, ErrConflict
+		if deployment.Revision == math.MaxUint64 {
+			return Deployment{}, false, ErrCapacityExceeded
+		}
+		instance.Phase = DeploymentInstanceFailed
+		instance.LastError = deploymentCommandRecordMissing
+		instance.TransitionedAt = canonicalTimestamp(now)
+		deployment.Instances[index] = instance
+		deployment.Revision++
+		deployment.UpdatedAt = canonicalTimestamp(now)
+		deployment.Phase = deploymentAggregatePhase(deployment)
+		if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+			return Deployment{}, false, err
+		}
+		return cloneDeployment(deployment), true, nil
 	}
 	if command.State != CommandTerminal || command.Terminal == nil {
 		return cloneDeployment(deployment), false, nil

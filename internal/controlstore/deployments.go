@@ -259,9 +259,19 @@ func deploymentInstancesRollForward(previous, next []DeploymentInstance) bool {
 	for _, instance := range previous {
 		previousByID[instance.InstanceID] = instance
 	}
+	nextByID := make(map[string]struct{}, len(next))
 	for _, instance := range next {
+		nextByID[instance.InstanceID] = struct{}{}
 		prior, exists := previousByID[instance.InstanceID]
 		if exists && (instance.Generation <= prior.Generation || instance.LineageID != prior.LineageID) {
+			return false
+		}
+	}
+	for _, instance := range previous {
+		if instance.Phase == DeploymentInstanceRemoved {
+			continue
+		}
+		if _, exists := nextByID[instance.InstanceID]; !exists {
 			return false
 		}
 	}

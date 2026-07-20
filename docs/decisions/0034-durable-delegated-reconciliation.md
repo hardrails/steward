@@ -62,6 +62,11 @@ cannot prove the old effect stopped.
   public HTTP API and short `stewardctl agent deployment` commands.
 - Exact retries are idempotent. Changed desired state uses optimistic revisions
   and monotonically increasing deployment generations.
+- A changed generation cannot omit an instance until cleanup has advanced it to
+  `removed`; this prevents roll-forward from abandoning a possible live effect.
+- Command records awaiting deployment observation are retained. If legacy or
+  damaged state references a missing record, reconciliation fails closed as a
+  degraded deployment instead of retrying an effect with an unknown outcome.
 - A controller compromise can use delegated lifecycle authority until expiry, but
   cannot widen its instances, nodes, generations, resources, capabilities, or
   verbs.

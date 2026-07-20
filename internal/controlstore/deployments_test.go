@@ -12,6 +12,7 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlauth"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -43,9 +44,14 @@ func TestDeploymentApplyIsBoundedIdempotentRevisionedAndDurable(t *testing.T) {
 		updated.CreatedAt != created.CreatedAt || updated.UpdatedAt == created.UpdatedAt {
 		t.Fatalf("rollout deployment = (%+v, %v, %v)", updated, changed, err)
 	}
+	scaleDown := deploymentApplyFixtureWithInstanceCount(t, fixture.now.Add(4*time.Minute), "deployment-a", 3, 1)
+	scaleDown.ExpectedRevision = updated.Revision
+	if _, _, err := fixture.store.ApplyDeployment(fixture.admin, scaleDown, fixture.now.Add(5*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("rollout omitted live instance error = %v", err)
+	}
 	absent, changed, err := fixture.store.SetDeploymentDesiredState(
 		fixture.admin, "tenant-a", "deployment-a", updated.Revision,
-		DeploymentAbsent, fixture.now.Add(5*time.Minute),
+		DeploymentAbsent, fixture.now.Add(6*time.Minute),
 	)
 	if err != nil || !changed || absent.Revision != 3 || absent.Phase != DeploymentStopping {
 		t.Fatalf("remove deployment = (%+v, %v, %v)", absent, changed, err)
@@ -72,6 +78,56 @@ func TestDeploymentApplyIsBoundedIdempotentRevisionedAndDurable(t *testing.T) {
 	loaded, found, err := reopened.GetDeployment(fixture.admin, "tenant-a", "deployment-a")
 	if err != nil || !found || !reflect.DeepEqual(loaded, absent) {
 		t.Fatalf("recovered deployment = (%+v, %v, %v)", loaded, found, err)
+	}
+}
+
+func TestDeploymentMissingCommandFailsClosedAndActiveCommandIsRetained(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	created, _, err := fixture.store.ApplyDeployment(
+		fixture.admin, deploymentApplyFixture(t, fixture.now, "deployment-a", 1), fixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	instance := created.Instances[0]
+	instance.NodeID = "node-1"
+	instance.Phase = DeploymentInstanceStarting
+	instance.CommandID = "deployment-command"
+	instance.CommandOperation = "start"
+	instance.CommandSequence = 1
+	instance.TransitionedAt = canonicalTimestamp(fixture.now.Add(time.Minute))
+	created.Instances[0] = instance
+	created.Revision++
+	created.UpdatedAt = instance.TransitionedAt
+	command := Command{
+		TenantID: "tenant-a", NodeID: "node-1", ID: instance.CommandID,
+		State: CommandTerminal,
+		Terminal: &TerminalReport{
+			Report:      controlprotocol.ExecutorReportV3{Status: controlprotocol.ExecutorStatusDone},
+			CompletedAt: canonicalTimestamp(fixture.now.Add(-48 * time.Hour)),
+		},
+	}
+
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
+	fixture.store.current.commands[commandKey("tenant-a", "node-1", command.ID)] = command
+	prunable := fixture.store.prunableCommandsLocked("tenant-a", "node-1", fixture.now)
+	delete(fixture.store.current.commands, commandKey("tenant-a", "node-1", command.ID))
+	fixture.store.mu.Unlock()
+	if len(prunable) != 0 {
+		t.Fatalf("active deployment command became prunable: %+v", prunable)
+	}
+
+	failed, changed, err := fixture.store.ObserveDeploymentCommand(
+		"tenant-a", "deployment-a", instance.InstanceID, created.Revision, fixture.now.Add(2*time.Minute),
+	)
+	if err != nil || !changed || failed.Phase != DeploymentDegraded ||
+		failed.Instances[0].Phase != DeploymentInstanceFailed ||
+		failed.Instances[0].LastError != deploymentCommandRecordMissing {
+		t.Fatalf("missing command observation = (%+v, %v, %v)", failed, changed, err)
 	}
 }
 
@@ -242,6 +298,13 @@ func TestDeploymentStoreRejectsInvalidAndStaleTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	invalidCursor := cloneDeployment(created)
+	invalidCursor.Instances[0].CommandID = "read-command"
+	invalidCursor.Instances[0].CommandOperation = "read"
+	invalidCursor.Instances[0].CommandSequence = 1
+	if err := validateDeployment(invalidCursor, fixture.limits); err == nil {
+		t.Fatal("deployment accepted a command operation the reconciler cannot advance")
+	}
 	instanceID := created.Instances[0].InstanceID
 	overlapping := input
 	overlapping.ID = "deployment-overlap"
@@ -350,6 +413,20 @@ func TestDeploymentStoreRejectsInvalidAndStaleTransitions(t *testing.T) {
 	}
 }
 
+func TestDeploymentRollForwardMayOmitOnlyRemovedInstances(t *testing.T) {
+	previous := []DeploymentInstance{
+		{InstanceID: "removed", Phase: DeploymentInstanceRemoved},
+		{InstanceID: "live", LineageID: "lineage", Generation: 1, Phase: DeploymentInstanceRunning},
+	}
+	next := []DeploymentInstance{{InstanceID: "live", LineageID: "lineage", Generation: 2}}
+	if !deploymentInstancesRollForward(previous, next) {
+		t.Fatal("roll-forward rejected omission of a fully removed instance")
+	}
+	if deploymentInstancesRollForward(previous, nil) {
+		t.Fatal("roll-forward accepted omission of a live instance")
+	}
+}
+
 func TestDeploymentStoreOperationsStopAfterClose(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")
@@ -395,6 +472,16 @@ func TestDeploymentStoreOperationsStopAfterClose(t *testing.T) {
 }
 
 func deploymentApplyFixture(t *testing.T, now time.Time, deploymentID string, generation uint64) DeploymentApply {
+	return deploymentApplyFixtureWithInstanceCount(t, now, deploymentID, generation, 2)
+}
+
+func deploymentApplyFixtureWithInstanceCount(
+	t *testing.T,
+	now time.Time,
+	deploymentID string,
+	generation uint64,
+	instanceCount int,
+) DeploymentApply {
 	t.Helper()
 	_, publisherPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -412,16 +499,21 @@ func deploymentApplyFixture(t *testing.T, now time.Time, deploymentID string, ge
 	if err != nil {
 		t.Fatal(err)
 	}
+	instances := make([]admission.CommandDelegationInstance, instanceCount)
+	for index := range instances {
+		instances[index] = admission.CommandDelegationInstance{
+			InstanceID:            deploymentID + "-" + string(rune('0'+index)),
+			LineageID:             deploymentID + "-lineage-" + string(rune('0'+index)),
+			MinInstanceGeneration: generation, MaxInstanceGeneration: generation + 2,
+		}
+	}
 	delegation := admission.CommandDelegation{
 		SchemaVersion: admission.CommandDelegationSchemaV1,
 		DelegationID:  deploymentID + "-authority-" + string(rune('a'+generation-1)), TenantID: "tenant-a",
 		ControllerKeyID:     "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublic),
 		Operations:          []string{"admit", "destroy", "start", "stop"}, NodeIDs: []string{"node-1"},
-		Instances: []admission.CommandDelegationInstance{
-			{InstanceID: deploymentID + "-0", LineageID: deploymentID + "-lineage-0", MinInstanceGeneration: generation, MaxInstanceGeneration: generation + 2},
-			{InstanceID: deploymentID + "-1", LineageID: deploymentID + "-lineage-1", MinInstanceGeneration: generation, MaxInstanceGeneration: generation + 2},
-		},
+		Instances:       instances,
 		ClaimGeneration: generation,
 		Admission: &admission.CommandDelegationAdmissionTemplate{
 			CapsuleDigest:    dsse.Digest(capsuleRaw),
