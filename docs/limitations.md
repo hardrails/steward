@@ -210,6 +210,14 @@ It survives restart without duplicating a queued command. Executor independently
 checks the tenant delegation and controller signature. A failed or
 `outcome_unknown` command becomes `degraded` and is not silently retried.
 
+A ready deployment can roll to a higher signed generation without discarding its
+source authority. Rollout is restart-safe, limited by `max_unavailable`, and
+switches each instance to target authority only after Executor proves the source
+runtime was destroyed. It is an in-place replacement: there are no surge replicas,
+automatic rollback, or rollout health probes beyond the authenticated lifecycle
+result. Rollback requires a new higher generation and fresh signed delegation;
+Steward never moves generation fences backward.
+
 A ready deployment retains the exact verified instance intent and authenticated
 Executor admission projection needed for task issuance. `agent deployment wait`
 can export one instance, and `task run` joins deployment wait, task issuance,

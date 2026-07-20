@@ -181,6 +181,24 @@ constraints, and has reserved host and tenant capacity. It then drives `admit`,
 a bounded workload-lease renewal, and `start`. It renews the lease while the agent should remain running. Removing
 desired state similarly needs only the name:
 
+Applying a higher generation to a ready deployment performs an in-place rollout.
+The new delegation must name the same instances and lineages, advance every
+instance generation, and continue to allow each assigned node. Control keeps both
+signed authorities until the rollout finishes. For each replica it issues `stop`
+and `destroy` under the source delegation, waits for Executor to report the runtime
+absent, then switches that replica to the target delegation and issues `admit`,
+`renew`, and `start`. The old authority is never overwritten while it may still own
+a runtime.
+
+`max_unavailable` bounds rollout and node-drain disruption in the same atomic store
+transaction. The default is one, so a multi-replica deployment replaces one agent
+at a time. Steward currently retains the assigned node and does not create surge
+replicas. This keeps local state placement stable, but it means a single-replica
+deployment has downtime between its proven destroy and target start. A target that
+changes placement constraints or resource requirements can become blocked after
+the source is removed; inspect the target constraints and node capacity before
+applying it.
+
 ```console
 stewardctl agent deployment remove auditor
 ```
@@ -193,6 +211,7 @@ or uncertain Executor outcome becomes `degraded` and is not silently retried.
 `scheduling_observation_unavailable`, `placement_constraints_unsatisfied`,
 `workload_limit_exceeded`, `node_capacity_exhausted`,
 `tenant_capacity_exhausted`, `delegation_expired`,
+`rollout_disruption_budget_exhausted`,
 `controller_key_mismatch`, or
 `invalid_deployment_authority`. The controller
 rechecks these conditions and clears the value when it can enqueue the next command.

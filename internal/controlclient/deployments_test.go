@@ -131,6 +131,30 @@ func TestDeploymentClientRejectsInvalidLocalInputAndUntrustedProjection(t *testi
 	}
 }
 
+func TestDeploymentClientValidatesRolloutProjection(t *testing.T) {
+	deployment := validClientDeployment()
+	deployment.Generation = 2
+	deployment.Phase = controlstore.DeploymentReconciling
+	deployment.Rollout = &DeploymentRollout{
+		SourceGeneration: 1, SourceAgentName: deployment.AgentName,
+		SourceBundleDigest:     "sha256:" + strings.Repeat("d", 64),
+		SourceCapsuleDigest:    "sha256:" + strings.Repeat("e", 64),
+		SourceDelegationDigest: "sha256:" + strings.Repeat("f", 64),
+		StartedAt:              deployment.UpdatedAt,
+	}
+	deployment.Instances[0].Intent = nil
+	deployment.Instances[0].Rollout = &controlstore.DeploymentInstanceRollout{
+		Stage: "draining", StartedAt: deployment.UpdatedAt,
+	}
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err != nil {
+		t.Fatalf("valid rollout projection was rejected: %v", err)
+	}
+	deployment.Instances[0].Rollout.Stage = "unknown"
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("unknown rollout stage was accepted")
+	}
+}
+
 func validClientDeployment() Deployment {
 	created := time.Date(2026, 7, 13, 20, 0, 0, 0, time.UTC)
 	return Deployment{

@@ -52,6 +52,7 @@ const (
 	DeploymentBlockedNodeCapacity            DeploymentBlockedReason = "node_capacity_exhausted"
 	DeploymentBlockedTenantCapacity          DeploymentBlockedReason = "tenant_capacity_exhausted"
 	DeploymentBlockedDrainDisruptionBudget   DeploymentBlockedReason = "drain_disruption_budget_exhausted"
+	DeploymentBlockedRolloutDisruptionBudget DeploymentBlockedReason = "rollout_disruption_budget_exhausted"
 	DeploymentBlockedStatefulDrain           DeploymentBlockedReason = "stateful_drain_unsupported"
 	deploymentCommandRecordMissing                                   = "deployment_command_record_missing"
 )
@@ -168,7 +169,16 @@ func (store *Store) EnqueueDeploymentCommand(
 	if deployment.Revision != input.ExpectedRevision {
 		return Deployment{}, Command{}, false, ErrConflict
 	}
-	statement, err := admission.VerifyControllerCommand(input.CommandDSSE, deployment.DelegationDSSE, now)
+	instanceIndex := deploymentInstanceIndex(deployment.Instances, input.InstanceID)
+	if instanceIndex < 0 {
+		return Deployment{}, Command{}, false, ErrNotFound
+	}
+	instance := deployment.Instances[instanceIndex]
+	capsuleRaw, delegationRaw, err := DeploymentAuthorityForInstance(deployment, instance)
+	if err != nil {
+		return Deployment{}, Command{}, false, invalidError("select deployment instance authority", err)
+	}
+	statement, err := admission.VerifyControllerCommand(input.CommandDSSE, delegationRaw, now)
 	if err != nil {
 		return Deployment{}, Command{}, false, invalidError("verify deployment controller command", err)
 	}
@@ -178,11 +188,6 @@ func (store *Store) EnqueueDeploymentCommand(
 	if statement.Kind != "admit" && input.Placement != nil {
 		return Deployment{}, Command{}, false, invalid("only admission may retain a placement decision")
 	}
-	instanceIndex := deploymentInstanceIndex(deployment.Instances, input.InstanceID)
-	if instanceIndex < 0 {
-		return Deployment{}, Command{}, false, ErrNotFound
-	}
-	instance := deployment.Instances[instanceIndex]
 	if statement.InstanceGeneration != instance.Generation ||
 		!deploymentTransitionAllowed(deployment.DesiredState, instance, statement.Kind) ||
 		instance.NodeID != "" && instance.NodeID != statement.NodeID ||
@@ -214,18 +219,18 @@ func (store *Store) EnqueueDeploymentCommand(
 		return Deployment{}, Command{}, false, invalidError("deployment command cannot fit one Executor delivery", err)
 	}
 	if statement.Kind == "admit" {
-		intent, err := deploymentAdmitIntent(statement.Payload, deployment.CapsuleDSSE)
+		intent, err := deploymentAdmitIntent(statement.Payload, capsuleRaw)
 		if err != nil {
 			return Deployment{}, Command{}, false, invalidError("decode deployment admission intent", err)
 		}
 		if input.SchedulingStaleAfter <= 0 || input.SchedulingStaleAfter > MaxOperationsThreshold {
 			return Deployment{}, Command{}, false, invalid("deployment scheduling freshness is invalid")
 		}
-		capsule, err := admission.InspectProfileCapsule(deployment.CapsuleDSSE, time.Time{})
+		capsule, err := admission.InspectProfileCapsule(capsuleRaw, time.Time{})
 		if err != nil {
 			return Deployment{}, Command{}, false, invalidError("inspect deployment capsule for scheduling", err)
 		}
-		delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+		delegation, err := admission.InspectCommandDelegation(delegationRaw, time.Time{})
 		if err != nil || delegation.Admission == nil {
 			return Deployment{}, Command{}, false, invalid("deployment scheduling authority is invalid")
 		}
@@ -366,6 +371,10 @@ func (store *Store) ObserveDeploymentCommand(
 			instance.NodeID != instance.Drain.SourceNodeID {
 			instance.Drain = nil
 		}
+		if instance.CommandOperation == "start" && instance.Rollout != nil &&
+			instance.Rollout.Stage == "deploying" {
+			instance.Rollout = nil
+		}
 		if instance.CommandOperation == "destroy" && deployment.DesiredState == DeploymentAbsent {
 			instance.Drain = nil
 		}
@@ -383,6 +392,9 @@ func (store *Store) ObserveDeploymentCommand(
 	}
 	instance.TransitionedAt = canonicalTimestamp(now)
 	deployment.Instances[index] = instance
+	if deployment.Rollout != nil && deploymentRolloutComplete(deployment) {
+		deployment.Rollout = nil
+	}
 	deployment.Revision++
 	deployment.UpdatedAt = canonicalTimestamp(now)
 	deployment.Phase = deploymentAggregatePhase(deployment)
@@ -394,6 +406,25 @@ func (store *Store) ObserveDeploymentCommand(
 		return Deployment{}, false, err
 	}
 	return cloneDeployment(deployment), true, nil
+}
+
+func deploymentRolloutComplete(deployment Deployment) bool {
+	if deployment.Rollout == nil {
+		return false
+	}
+	target, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+	if err != nil || len(target.Instances) != len(deployment.Instances) {
+		return false
+	}
+	for _, instance := range deployment.Instances {
+		delegated, found := deploymentDelegatedInstance(target.Instances, instance.InstanceID)
+		if !found || instance.Generation < delegated.MinInstanceGeneration ||
+			instance.Generation > delegated.MaxInstanceGeneration || instance.Phase != DeploymentInstanceRunning ||
+			instance.Rollout != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func deploymentAdmitIntent(raw json.RawMessage, capsule []byte) (admission.InstanceIntent, error) {
@@ -572,6 +603,10 @@ func deploymentDelegatedInstance(
 
 func deploymentTransitionAllowed(desired DeploymentDesiredState, instance DeploymentInstance, operation string) bool {
 	phase := instance.Phase
+	if desired == DeploymentRunning && instance.Rollout != nil && instance.Rollout.Stage == "draining" {
+		return (phase == DeploymentInstanceRunning || phase == DeploymentInstanceStarting) && operation == "stop" ||
+			phase == DeploymentInstanceDestroying && operation == "destroy"
+	}
 	if desired == DeploymentRunning && instance.Drain != nil &&
 		instance.NodeID == instance.Drain.SourceNodeID {
 		return (phase == DeploymentInstanceRunning || phase == DeploymentInstanceStarting) && operation == "stop" ||
@@ -646,6 +681,9 @@ func deploymentAggregatePhase(deployment Deployment) DeploymentPhase {
 	}
 	if deployment.DesiredState == DeploymentRunning {
 		if running == len(deployment.Instances) {
+			if deployment.Rollout != nil {
+				return DeploymentReconciling
+			}
 			return DeploymentReady
 		}
 		return DeploymentReconciling
@@ -691,7 +729,8 @@ func validDeploymentBlockedReason(reason DeploymentBlockedReason) bool {
 		DeploymentBlockedStatefulReplacement, DeploymentBlockedGenerationExhausted,
 		DeploymentBlockedSchedulingUnavailable, DeploymentBlockedPlacementConstraints,
 		DeploymentBlockedWorkloadLimit, DeploymentBlockedNodeCapacity, DeploymentBlockedTenantCapacity,
-		DeploymentBlockedDrainDisruptionBudget, DeploymentBlockedStatefulDrain:
+		DeploymentBlockedDrainDisruptionBudget, DeploymentBlockedRolloutDisruptionBudget,
+		DeploymentBlockedStatefulDrain:
 		return true
 	default:
 		return false

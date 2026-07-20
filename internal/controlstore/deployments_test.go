@@ -1,6 +1,7 @@
 package controlstore
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -19,7 +20,14 @@ import (
 func TestDeploymentApplyIsBoundedIdempotentRevisionedAndDurable(t *testing.T) {
 	fixture := newRecordsFixture(t, DefaultLimits())
 	fixture.createTenant(t, "tenant-a")
-	fixture.createNode(t, "tenant-a")
+	_, nodeIdentity := fixture.createNode(t, "tenant-a")
+	if deliveries, err := fixture.store.PollV4(
+		nodeIdentity,
+		[]string{controlprotocol.ExecutorCapabilityControllerDelegationV1},
+		fixture.now.Add(2*time.Minute), time.Minute, 1,
+	); err != nil || len(deliveries) != 0 {
+		t.Fatalf("prime node capability = (%+v, %v)", deliveries, err)
+	}
 	input := deploymentApplyFixture(t, fixture.now, "deployment-a", 1)
 
 	created, changed, err := fixture.store.ApplyDeployment(fixture.admin, input, fixture.now.Add(2*time.Minute))
@@ -121,6 +129,107 @@ func TestDeploymentUpdateCannotForgetAuthorityForAFormerRuntime(t *testing.T) {
 				t.Fatalf("phase %s update error = %v", phase, err)
 			}
 		})
+	}
+}
+
+func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	_, nodeIdentity := fixture.createNode(t, "tenant-a")
+	if deliveries, err := fixture.store.PollV4(
+		nodeIdentity,
+		[]string{controlprotocol.ExecutorCapabilityControllerDelegationV1},
+		fixture.now.Add(2*time.Minute), time.Minute, 1,
+	); err != nil || len(deliveries) != 0 {
+		t.Fatalf("prime rollout node capability = (%+v, %v)", deliveries, err)
+	}
+	created, _, err := fixture.store.ApplyDeployment(
+		fixture.admin, deploymentApplyFixture(t, fixture.now, "deployment-a", 1), fixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store.mu.Lock()
+	ready := fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")]
+	for index := range ready.Instances {
+		ready.Instances[index].NodeID = "node-1"
+		ready.Instances[index].Phase = DeploymentInstanceRunning
+	}
+	ready.Phase = DeploymentReady
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = ready
+	fixture.store.mu.Unlock()
+
+	targetInput := deploymentApplyFixture(t, fixture.now.Add(time.Minute), "deployment-a", 2)
+	targetInput.ExpectedRevision = created.Revision
+	target, changed, err := fixture.store.ApplyDeployment(fixture.admin, targetInput, fixture.now.Add(time.Minute))
+	if err != nil || !changed || target.Rollout == nil || target.Rollout.SourceGeneration != 1 ||
+		target.Generation != 2 || target.Phase != DeploymentReconciling {
+		t.Fatalf("apply rollout = (%+v, %v, %v)", target, changed, err)
+	}
+	for _, instance := range target.Instances {
+		_, selected, selectErr := DeploymentAuthorityForInstance(target, instance)
+		if selectErr != nil || bytes.Equal(selected, target.DelegationDSSE) {
+			t.Fatalf("source authority was discarded before destroy: %v", selectErr)
+		}
+	}
+
+	rolling, changed, err := fixture.store.BeginDeploymentInstanceRollout(
+		"tenant-a", "deployment-a", target.Instances[0].InstanceID, target.Revision, fixture.now.Add(2*time.Minute),
+	)
+	if err != nil || !changed || rolling.Instances[0].Rollout == nil ||
+		rolling.Instances[0].Rollout.Stage != "draining" {
+		t.Fatalf("begin first instance = (%+v, %v, %v)", rolling, changed, err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceRollout(
+		"tenant-a", "deployment-a", target.Instances[1].InstanceID, rolling.Revision, fixture.now.Add(2*time.Minute),
+	); !errors.Is(err, ErrDisruptionBudget) {
+		t.Fatalf("second instance exceeded disruption budget: %v", err)
+	}
+	if _, _, err := fixture.store.AdvanceDeploymentInstanceRollout(
+		"tenant-a", "deployment-a", target.Instances[0].InstanceID, rolling.Revision, fixture.now.Add(3*time.Minute),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("instance advanced without a proven destroy: %v", err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatalf("reopen rollout state: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	recovered, found, err := reopened.GetDeployment(fixture.admin, "tenant-a", "deployment-a")
+	if err != nil || !found || recovered.Rollout == nil || recovered.Instances[0].Rollout == nil {
+		t.Fatalf("recover rollout = (%+v, %v, %v)", recovered, found, err)
+	}
+	_, selected, err := DeploymentAuthorityForInstance(recovered, recovered.Instances[0])
+	if err != nil || bytes.Equal(selected, recovered.DelegationDSSE) {
+		t.Fatalf("restart discarded source authority: %v", err)
+	}
+	reopened.mu.Lock()
+	current := reopened.current.clone()
+	reopened.mu.Unlock()
+	snapshotRaw, err := encodeState(current, fixture.limits.MaxStateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy snapshotState
+	if err := json.Unmarshal(snapshotRaw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy.Version = stateFormatRolloutVersion - 1
+	legacyRaw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeState(legacyRaw, fixture.limits.MaxStateBytes); err == nil {
+		t.Fatal("legacy snapshot smuggled rollout state")
+	}
+	if _, err := applyTransaction(current, transaction{
+		Version:   transactionRolloutVersion - 1,
+		Mutations: []mutation{deploymentMutation(recovered)},
+	}); err == nil {
+		t.Fatal("legacy transaction smuggled rollout state")
 	}
 }
 

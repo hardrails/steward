@@ -27,7 +27,7 @@ import (
 
 const (
 	stateFormatMinReadVersion         = 1
-	stateFormatWriteVersion           = 9
+	stateFormatWriteVersion           = 10
 	stateFormatMaxReadVersion         = stateFormatWriteVersion
 	stateFormatEvidenceVersion        = 2
 	stateFormatExecutorV4Version      = 3
@@ -37,8 +37,9 @@ const (
 	stateFormatSchedulingVersion      = 7
 	stateFormatNodePlacementVersion   = 8
 	stateFormatFleetOperationsVersion = 9
+	stateFormatRolloutVersion         = 10
 	transactionFormatMinReadVersion   = 1
-	transactionFormatWriteVersion     = 9
+	transactionFormatWriteVersion     = 10
 	transactionFormatMaxReadVersion   = transactionFormatWriteVersion
 	transactionEvidenceVersion        = 2
 	transactionExecutorV4Version      = 3
@@ -48,6 +49,7 @@ const (
 	transactionSchedulingVersion      = 7
 	transactionNodePlacementVersion   = 8
 	transactionFleetOperationsVersion = 9
+	transactionRolloutVersion         = 10
 	maxMutationsPerRecord             = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -314,6 +316,7 @@ type DeploymentInstance struct {
 	NodeID     string                                         `json:"node_id,omitempty"`
 	Placement  *DeploymentPlacementDecision                   `json:"placement,omitempty"`
 	Drain      *DeploymentInstanceDrain                       `json:"drain,omitempty"`
+	Rollout    *DeploymentInstanceRollout                     `json:"rollout,omitempty"`
 	Intent     *admission.InstanceIntent                      `json:"intent,omitempty"`
 	Admission  *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
 	// LeaseExpiresAt is the latest signed lease expiry that Executor could have
@@ -327,6 +330,11 @@ type DeploymentInstance struct {
 	Attempts         uint32                  `json:"attempts,omitempty"`
 	LastError        string                  `json:"last_error,omitempty"`
 	TransitionedAt   string                  `json:"transitioned_at"`
+}
+
+type DeploymentInstanceRollout struct {
+	Stage     string `json:"stage"`
+	StartedAt string `json:"started_at"`
 }
 
 // DeploymentInstanceDrain records one move before the first stop command is
@@ -373,8 +381,21 @@ type Deployment struct {
 	DisruptionBudget DeploymentDisruptionBudget `json:"disruption_budget"`
 	Phase            DeploymentPhase            `json:"phase"`
 	Instances        []DeploymentInstance       `json:"instances"`
+	Rollout          *DeploymentRollout         `json:"rollout,omitempty"`
 	CreatedAt        string                     `json:"created_at"`
 	UpdatedAt        string                     `json:"updated_at"`
+}
+
+// DeploymentRollout retains the exact source authority while the deployment's
+// top-level fields describe the signed target. Raw envelopes are never exposed
+// through the public deployment projection.
+type DeploymentRollout struct {
+	SourceGeneration     uint64 `json:"source_generation"`
+	SourceAgentName      string `json:"source_agent_name"`
+	SourceBundleDigest   string `json:"source_bundle_digest"`
+	SourceCapsuleDSSE    []byte `json:"-"`
+	SourceDelegationDSSE []byte `json:"-"`
+	StartedAt            string `json:"started_at"`
 }
 
 type EvidenceCaptureState string
@@ -533,8 +554,18 @@ type storedDeployment struct {
 	DisruptionBudget     DeploymentDisruptionBudget `json:"disruption_budget"`
 	Phase                DeploymentPhase            `json:"phase"`
 	Instances            []DeploymentInstance       `json:"instances"`
+	Rollout              *storedDeploymentRollout   `json:"rollout,omitempty"`
 	CreatedAt            string                     `json:"created_at"`
 	UpdatedAt            string                     `json:"updated_at"`
+}
+
+type storedDeploymentRollout struct {
+	SourceGeneration           uint64 `json:"source_generation"`
+	SourceAgentName            string `json:"source_agent_name"`
+	SourceBundleDigest         string `json:"source_bundle_digest"`
+	SourceCapsuleDSSEBase64    string `json:"source_capsule_dsse_base64"`
+	SourceDelegationDSSEBase64 string `json:"source_delegation_dsse_base64"`
+	StartedAt                  string `json:"started_at"`
 }
 
 type state struct {
@@ -703,10 +734,25 @@ func cloneDeployment(deployment Deployment) Deployment {
 	for index := range deployment.Instances {
 		deployment.Instances[index].Placement = cloneDeploymentPlacement(deployment.Instances[index].Placement)
 		deployment.Instances[index].Drain = cloneDeploymentInstanceDrain(deployment.Instances[index].Drain)
+		deployment.Instances[index].Rollout = cloneDeploymentInstanceRollout(deployment.Instances[index].Rollout)
 		deployment.Instances[index].Intent = cloneInstanceIntent(deployment.Instances[index].Intent)
 		deployment.Instances[index].Admission = cloneAdmissionProjection(deployment.Instances[index].Admission)
 	}
+	if deployment.Rollout != nil {
+		rollout := *deployment.Rollout
+		rollout.SourceCapsuleDSSE = append([]byte(nil), rollout.SourceCapsuleDSSE...)
+		rollout.SourceDelegationDSSE = append([]byte(nil), rollout.SourceDelegationDSSE...)
+		deployment.Rollout = &rollout
+	}
 	return deployment
+}
+
+func cloneDeploymentInstanceRollout(value *DeploymentInstanceRollout) *DeploymentInstanceRollout {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func cloneDeploymentInstanceDrain(value *DeploymentInstanceDrain) *DeploymentInstanceDrain {
@@ -729,7 +775,7 @@ func cloneDeploymentPlacement(value *DeploymentPlacementDecision) *DeploymentPla
 }
 
 func deploymentToStored(deployment Deployment) storedDeployment {
-	return storedDeployment{
+	stored := storedDeployment{
 		TenantID: deployment.TenantID, ID: deployment.ID,
 		Generation: deployment.Generation, Revision: deployment.Revision,
 		AgentName: deployment.AgentName, BundleDigest: deployment.BundleDigest,
@@ -740,6 +786,17 @@ func deploymentToStored(deployment Deployment) storedDeployment {
 		Instances:        cloneDeployment(deployment).Instances,
 		CreatedAt:        deployment.CreatedAt, UpdatedAt: deployment.UpdatedAt,
 	}
+	if deployment.Rollout != nil {
+		stored.Rollout = &storedDeploymentRollout{
+			SourceGeneration:           deployment.Rollout.SourceGeneration,
+			SourceAgentName:            deployment.Rollout.SourceAgentName,
+			SourceBundleDigest:         deployment.Rollout.SourceBundleDigest,
+			SourceCapsuleDSSEBase64:    base64.StdEncoding.EncodeToString(deployment.Rollout.SourceCapsuleDSSE),
+			SourceDelegationDSSEBase64: base64.StdEncoding.EncodeToString(deployment.Rollout.SourceDelegationDSSE),
+			StartedAt:                  deployment.Rollout.StartedAt,
+		}
+	}
+	return stored
 }
 
 func deploymentFromStored(stored storedDeployment) (Deployment, error) {
@@ -751,7 +808,7 @@ func deploymentFromStored(stored storedDeployment) (Deployment, error) {
 	if err != nil {
 		return Deployment{}, fmt.Errorf("delegation encoding: %w", err)
 	}
-	return Deployment{
+	deployment := Deployment{
 		TenantID: stored.TenantID, ID: stored.ID,
 		Generation: stored.Generation, Revision: stored.Revision,
 		AgentName: stored.AgentName, BundleDigest: stored.BundleDigest,
@@ -759,7 +816,25 @@ func deploymentFromStored(stored storedDeployment) (Deployment, error) {
 		DesiredState: stored.DesiredState, DisruptionBudget: stored.DisruptionBudget, Phase: stored.Phase,
 		Instances: cloneDeployment(Deployment{Instances: stored.Instances}).Instances,
 		CreatedAt: stored.CreatedAt, UpdatedAt: stored.UpdatedAt,
-	}, nil
+	}
+	if stored.Rollout != nil {
+		sourceCapsule, err := decodeCanonicalBase64(stored.Rollout.SourceCapsuleDSSEBase64)
+		if err != nil {
+			return Deployment{}, fmt.Errorf("rollout source capsule encoding: %w", err)
+		}
+		sourceDelegation, err := decodeCanonicalBase64(stored.Rollout.SourceDelegationDSSEBase64)
+		if err != nil {
+			return Deployment{}, fmt.Errorf("rollout source delegation encoding: %w", err)
+		}
+		deployment.Rollout = &DeploymentRollout{
+			SourceGeneration:   stored.Rollout.SourceGeneration,
+			SourceAgentName:    stored.Rollout.SourceAgentName,
+			SourceBundleDigest: stored.Rollout.SourceBundleDigest,
+			SourceCapsuleDSSE:  sourceCapsule, SourceDelegationDSSE: sourceDelegation,
+			StartedAt: stored.Rollout.StartedAt,
+		}
+	}
+	return deployment, nil
 }
 
 func cloneInstanceIntent(intent *admission.InstanceIntent) *admission.InstanceIntent {
@@ -1081,6 +1156,9 @@ func decodeState(raw []byte, limit int) (state, error) {
 			}
 			deployment.DisruptionBudget = DeploymentDisruptionBudget{MaxUnavailable: 1}
 		}
+		if snapshot.Version < stateFormatRolloutVersion && deploymentUsesRolloutFormat(deployment) {
+			return state{}, errors.New("legacy control snapshot contains deployment rollout state")
+		}
 		key := deploymentKey(deployment.TenantID, deployment.ID)
 		if _, exists := current.deployments[key]; exists {
 			return state{}, errors.New("control snapshot contains a duplicate deployment")
@@ -1292,6 +1370,9 @@ func applyTransaction(current state, value transaction) (state, error) {
 				}
 				deployment.DisruptionBudget = DeploymentDisruptionBudget{MaxUnavailable: 1}
 			}
+			if value.Version < transactionRolloutVersion && deploymentUsesRolloutFormat(deployment) {
+				return state{}, errors.New("legacy deployment mutation contains rollout state")
+			}
 			next.deployments[deploymentKey(deployment.TenantID, deployment.ID)] = cloneDeployment(deployment)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
@@ -1316,6 +1397,18 @@ func deploymentUsesFleetOperationsFormat(deployment Deployment) bool {
 	}
 	for _, instance := range deployment.Instances {
 		if instance.Placement != nil || instance.Drain != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func deploymentUsesRolloutFormat(deployment Deployment) bool {
+	if deployment.Rollout != nil {
+		return true
+	}
+	for _, instance := range deployment.Instances {
+		if instance.Rollout != nil {
 			return true
 		}
 	}
@@ -1553,18 +1646,56 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
 	if err != nil || delegation.TenantID != deployment.TenantID || delegation.Admission == nil ||
 		delegation.Admission.CapsuleDigest != dsse.Digest(deployment.CapsuleDSSE) ||
-		len(deployment.Instances) != len(delegation.Instances) {
+		len(deployment.Instances) != len(delegation.Instances) || !hasDeploymentLifecycle(delegation.Operations) {
 		return errors.New("deployment delegation does not bind its desired state")
 	}
 	if envelope, err := dsse.Parse(deployment.CapsuleDSSE); err != nil || envelope.PayloadType != admission.CapsulePayloadType {
 		return errors.New("deployment capsule envelope is invalid")
 	}
-	allowedNodes := make(map[string]struct{}, len(delegation.NodeIDs))
-	for _, nodeID := range delegation.NodeIDs {
-		allowedNodes[nodeID] = struct{}{}
+	if deployment.Rollout != nil {
+		rollout := deployment.Rollout
+		rolloutStarted, rolloutTimeErr := parseTimestamp(rollout.StartedAt)
+		if rollout.SourceGeneration == 0 || rollout.SourceGeneration >= deployment.Generation ||
+			!validRecordID(rollout.SourceAgentName, 128) || !validSHA256Digest(rollout.SourceBundleDigest) ||
+			len(rollout.SourceCapsuleDSSE) == 0 || len(rollout.SourceCapsuleDSSE) > limits.MaxCommandBytes ||
+			len(rollout.SourceDelegationDSSE) == 0 || len(rollout.SourceDelegationDSSE) > limits.MaxCommandBytes ||
+			rolloutTimeErr != nil || rolloutStarted.Before(created) || rolloutStarted.After(updated) {
+			return errors.New("deployment rollout source is invalid")
+		}
+		source, err := admission.InspectCommandDelegation(rollout.SourceDelegationDSSE, time.Time{})
+		if err != nil || source.TenantID != deployment.TenantID || source.Admission == nil ||
+			source.Admission.CapsuleDigest != dsse.Digest(rollout.SourceCapsuleDSSE) ||
+			len(source.Instances) != len(delegation.Instances) ||
+			!hasDeploymentLifecycle(source.Operations) {
+			return errors.New("deployment rollout source authority is invalid")
+		}
+		if envelope, err := dsse.Parse(rollout.SourceCapsuleDSSE); err != nil || envelope.PayloadType != admission.CapsulePayloadType {
+			return errors.New("deployment rollout source capsule is invalid")
+		}
+		for index := range delegation.Instances {
+			if source.Instances[index].InstanceID != delegation.Instances[index].InstanceID ||
+				source.Instances[index].LineageID != delegation.Instances[index].LineageID {
+				return errors.New("deployment rollout changes instance or lineage identity")
+			}
+		}
 	}
 	for index, instance := range deployment.Instances {
-		delegated := delegation.Instances[index]
+		capsuleRaw, delegationRaw, err := DeploymentAuthorityForInstance(deployment, instance)
+		if err != nil {
+			return errors.New("deployment instance authority is invalid")
+		}
+		selectedDelegation, err := admission.InspectCommandDelegation(delegationRaw, time.Time{})
+		if err != nil {
+			return errors.New("deployment instance delegation is invalid")
+		}
+		delegated, found := deploymentDelegatedInstance(selectedDelegation.Instances, instance.InstanceID)
+		if !found {
+			return errors.New("deployment instance is absent from its selected authority")
+		}
+		allowedNodes := make(map[string]struct{}, len(selectedDelegation.NodeIDs))
+		for _, nodeID := range selectedDelegation.NodeIDs {
+			allowedNodes[nodeID] = struct{}{}
+		}
 		if instance.InstanceID != delegated.InstanceID || instance.LineageID != delegated.LineageID ||
 			instance.Generation < delegated.MinInstanceGeneration || instance.Generation > delegated.MaxInstanceGeneration ||
 			index > 0 && deployment.Instances[index-1].InstanceID >= instance.InstanceID ||
@@ -1594,7 +1725,7 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 			}); err != nil || instance.Intent.TenantID != deployment.TenantID ||
 				instance.Intent.NodeID != instance.NodeID || instance.Intent.InstanceID != instance.InstanceID ||
 				instance.Intent.LineageID != instance.LineageID || instance.Intent.Generation != instance.Generation ||
-				instance.Intent.CapsuleDigest != dsse.Digest(deployment.CapsuleDSSE) {
+				instance.Intent.CapsuleDigest != dsse.Digest(capsuleRaw) {
 				return errors.New("deployment instance intent is invalid")
 			}
 		}
@@ -1631,6 +1762,23 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 				return errors.New("deployment instance drain is invalid")
 			}
 		}
+		if instance.Rollout != nil {
+			instanceRolloutStarted, rolloutTimeErr := parseTimestamp(instance.Rollout.StartedAt)
+			deploymentRolloutStarted := time.Time{}
+			if deployment.Rollout != nil {
+				deploymentRolloutStarted, _ = parseTimestamp(deployment.Rollout.StartedAt)
+			}
+			if deployment.Rollout == nil || rolloutTimeErr != nil ||
+				instanceRolloutStarted.Before(deploymentRolloutStarted) || instanceRolloutStarted.After(updated) ||
+				instance.Rollout.Stage != "draining" && instance.Rollout.Stage != "deploying" ||
+				instance.Drain != nil {
+				return errors.New("deployment instance rollout is invalid")
+			}
+			if (instance.Rollout.Stage == "draining" && bytes.Equal(delegationRaw, deployment.DelegationDSSE)) ||
+				(instance.Rollout.Stage == "deploying" && !bytes.Equal(delegationRaw, deployment.DelegationDSSE)) {
+				return errors.New("deployment instance rollout stage and authority disagree")
+			}
+		}
 		if instance.Admission != nil {
 			if instance.Intent == nil || instance.Admission.Validate() != nil ||
 				instance.Admission.Generation != instance.Generation ||
@@ -1647,6 +1795,42 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 		}
 	}
 	return nil
+}
+
+// DeploymentAuthorityForInstance returns the exact capsule and delegation that
+// still own an instance during a rollout. The deployment's top-level artifacts
+// are the target; source artifacts remain authoritative until the instance is
+// advanced after a proven destroy.
+func DeploymentAuthorityForInstance(
+	deployment Deployment,
+	instance DeploymentInstance,
+) ([]byte, []byte, error) {
+	if deployment.Rollout == nil {
+		return deployment.CapsuleDSSE, deployment.DelegationDSSE, nil
+	}
+	target, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+	if err != nil {
+		return nil, nil, err
+	}
+	delegated, found := deploymentDelegatedInstance(target.Instances, instance.InstanceID)
+	if !found {
+		return nil, nil, errors.New("rollout target omits instance")
+	}
+	usesTarget := instance.Generation >= delegated.MinInstanceGeneration
+	if instance.Rollout != nil {
+		switch instance.Rollout.Stage {
+		case "draining":
+			usesTarget = false
+		case "deploying":
+			usesTarget = true
+		default:
+			return nil, nil, errors.New("rollout instance stage is invalid")
+		}
+	}
+	if usesTarget {
+		return deployment.CapsuleDSSE, deployment.DelegationDSSE, nil
+	}
+	return deployment.Rollout.SourceCapsuleDSSE, deployment.Rollout.SourceDelegationDSSE, nil
 }
 
 func validDeploymentOperation(operation string) bool {

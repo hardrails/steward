@@ -62,6 +62,7 @@ type Report struct {
 	Conflicts       int `json:"conflicts"`
 	Blocked         int `json:"blocked"`
 	Draining        int `json:"draining"`
+	RollingOut      int `json:"rolling_out"`
 	DrainsCompleted int `json:"drains_completed"`
 	DrainsFailed    int `json:"drains_failed"`
 }
@@ -115,13 +116,13 @@ func (reconciler *Reconciler) Run(ctx context.Context) error {
 				continue
 			}
 			if report.Enqueued > 0 || report.Observed > 0 || report.Removed > 0 || report.Replaced > 0 ||
-				report.Blocked > 0 || report.Draining > 0 || report.DrainsCompleted > 0 || report.DrainsFailed > 0 {
+				report.Blocked > 0 || report.Draining > 0 || report.RollingOut > 0 || report.DrainsCompleted > 0 || report.DrainsFailed > 0 {
 				reconciler.logger.Info("desired-state reconciliation completed",
 					"deployments", report.Deployments, "instances", report.Instances,
 					"observed", report.Observed, "enqueued", report.Enqueued,
 					"removed", report.Removed, "replaced", report.Replaced,
 					"conflicts", report.Conflicts, "blocked", report.Blocked,
-					"draining", report.Draining, "drains_completed", report.DrainsCompleted,
+					"draining", report.Draining, "rolling_out", report.RollingOut, "drains_completed", report.DrainsCompleted,
 					"drains_failed", report.DrainsFailed)
 			}
 		}
@@ -179,6 +180,8 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 				report.Replaced++
 			case "draining":
 				report.Draining++
+			case "rolling_out":
+				report.RollingOut++
 			}
 			break
 		}
@@ -203,9 +206,27 @@ func (reconciler *Reconciler) reconcileInstance(
 	if now.IsZero() {
 		return instanceResult{}, errors.New("controller clock is invalid")
 	}
-	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+	_, delegationRaw, err := controlstore.DeploymentAuthorityForInstance(deployment, instance)
 	if err != nil {
 		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedInvalidAuthority), now)
+	}
+	delegation, err := admission.InspectCommandDelegation(delegationRaw, time.Time{})
+	if err != nil {
+		return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedInvalidAuthority), now)
+	}
+	if deployment.DesiredState == controlstore.DeploymentRunning && deployment.Rollout != nil &&
+		instance.Rollout != nil && instance.Rollout.Stage == "draining" &&
+		instance.Phase == controlstore.DeploymentInstanceRemoved {
+		_, changed, err := reconciler.store.AdvanceDeploymentInstanceRollout(
+			deployment.TenantID, deployment.ID, instance.InstanceID, deployment.Revision, now,
+		)
+		if errors.Is(err, controlstore.ErrConflict) {
+			return instanceResult{conflict: true}, nil
+		}
+		if errors.Is(err, controlstore.ErrCapacityExceeded) {
+			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedGenerationExhausted), now)
+		}
+		return instanceResult{changed: changed, kind: "replaced"}, err
 	}
 	if instance.Phase == controlstore.DeploymentInstanceFailed ||
 		instance.Phase == controlstore.DeploymentInstanceRemoved && instance.Drain == nil {
@@ -235,8 +256,12 @@ func (reconciler *Reconciler) reconcileInstance(
 		return instanceResult{changed: changed, kind: "replaced"}, err
 	}
 	leaseManaged := containsOperation(delegation.Operations, "renew")
+	sourceRolloutInstance := deployment.Rollout != nil && !bytes.Equal(delegationRaw, deployment.DelegationDSSE)
 	if instance.NodeID != "" && deployment.DesiredState == controlstore.DeploymentRunning &&
 		!assignedNodeEligible(nodes, deployment, instance, delegation, now, reconciler.nodeStaleAfter) {
+		if sourceRolloutInstance {
+			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedAssignedNodeUnavailable), now)
+		}
 		return reconciler.recoverUnavailableInstance(deployment, instance, delegation, leaseManaged, now)
 	}
 	if commandInFlight(instance) {
@@ -248,7 +273,28 @@ func (reconciler *Reconciler) reconcileInstance(
 		}
 		return instanceResult{changed: changed, kind: "observed"}, err
 	}
-	if deployment.DesiredState == controlstore.DeploymentRunning && instance.Drain == nil &&
+	if deployment.DesiredState == controlstore.DeploymentRunning && deployment.Rollout != nil &&
+		sourceRolloutInstance && instance.Rollout == nil &&
+		instance.Phase == controlstore.DeploymentInstanceRunning {
+		delegationExpiry, parseErr := time.Parse(time.RFC3339Nano, delegation.ExpiresAt)
+		if parseErr != nil {
+			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedInvalidAuthority), now)
+		}
+		if !delegationExpiry.After(now) {
+			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedDelegationExpired), now)
+		}
+		_, changed, err := reconciler.store.BeginDeploymentInstanceRollout(
+			deployment.TenantID, deployment.ID, instance.InstanceID, deployment.Revision, now,
+		)
+		if errors.Is(err, controlstore.ErrConflict) {
+			return instanceResult{conflict: true}, nil
+		}
+		if errors.Is(err, controlstore.ErrDisruptionBudget) {
+			return reconciler.recordBlocked(deployment, instance, newBlocked(controlstore.DeploymentBlockedRolloutDisruptionBudget), now)
+		}
+		return instanceResult{changed: changed, kind: "rolling_out"}, err
+	}
+	if deployment.DesiredState == controlstore.DeploymentRunning && instance.Drain == nil && instance.Rollout == nil &&
 		instance.Phase == controlstore.DeploymentInstanceRunning {
 		if drain, found := activeNodeDrain(nodes, instance.NodeID); found {
 			candidate := instance
@@ -276,7 +322,7 @@ func (reconciler *Reconciler) reconcileInstance(
 			return instanceResult{changed: changed, kind: "draining"}, err
 		}
 	}
-	if deployment.DesiredState == controlstore.DeploymentRunning && instance.Drain == nil &&
+	if deployment.DesiredState == controlstore.DeploymentRunning && instance.Drain == nil && instance.Rollout == nil &&
 		instance.Phase == controlstore.DeploymentInstanceRunning &&
 		(!leaseManaged || !workloadLeaseNeedsRenewal(instance, now)) {
 		return instanceResult{}, nil
@@ -396,7 +442,11 @@ func (reconciler *Reconciler) signCommand(
 	nodeID, operation string,
 	now time.Time,
 ) ([]byte, error) {
-	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+	capsuleRaw, delegationRaw, err := controlstore.DeploymentAuthorityForInstance(deployment, instance)
+	if err != nil {
+		return nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+	}
+	delegation, err := admission.InspectCommandDelegation(delegationRaw, time.Time{})
 	if err != nil {
 		return nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
@@ -436,7 +486,7 @@ func (reconciler *Reconciler) signCommand(
 		payload, err = json.Marshal(struct {
 			Capsule string                   `json:"capsule_dsse_base64"`
 			Intent  admission.InstanceIntent `json:"intent"`
-		}{Capsule: base64.StdEncoding.EncodeToString(deployment.CapsuleDSSE), Intent: intent})
+		}{Capsule: base64.StdEncoding.EncodeToString(capsuleRaw), Intent: intent})
 		if err != nil {
 			return nil, err
 		}
@@ -461,8 +511,8 @@ func (reconciler *Reconciler) signCommand(
 		RuntimeRef: runtimeRef, Kind: operation,
 		ClaimGeneration: delegation.ClaimGeneration, InstanceGeneration: instance.Generation,
 		CommandSequence: sequence, IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: expires.Format(time.RFC3339Nano),
-		AuthorizationContextDigest: dsse.Digest(deployment.DelegationDSSE),
-		DelegationDSSEBase64:       base64.StdEncoding.EncodeToString(deployment.DelegationDSSE),
+		AuthorizationContextDigest: dsse.Digest(delegationRaw),
+		DelegationDSSEBase64:       base64.StdEncoding.EncodeToString(delegationRaw),
 		Payload:                    payload,
 	}
 	if err := statement.Validate(now); err != nil {
@@ -485,6 +535,17 @@ func nextOperation(
 	leaseManaged bool,
 	now time.Time,
 ) string {
+	if desired == controlstore.DeploymentRunning && instance.Rollout != nil &&
+		instance.Rollout.Stage == "draining" {
+		switch instance.Phase {
+		case controlstore.DeploymentInstanceRunning, controlstore.DeploymentInstanceStarting:
+			return "stop"
+		case controlstore.DeploymentInstanceDestroying:
+			return "destroy"
+		default:
+			return ""
+		}
+	}
 	if desired == controlstore.DeploymentRunning && instance.Drain != nil &&
 		instance.NodeID == instance.Drain.SourceNodeID {
 		switch instance.Phase {
@@ -588,7 +649,11 @@ func selectNode(
 	now time.Time,
 	nodeStaleAfter time.Duration,
 ) (string, *controlstore.DeploymentPlacementDecision, error) {
-	delegation, err := admission.InspectCommandDelegation(deployment.DelegationDSSE, time.Time{})
+	capsuleRaw, delegationRaw, err := controlstore.DeploymentAuthorityForInstance(deployment, instance)
+	if err != nil {
+		return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
+	}
+	delegation, err := admission.InspectCommandDelegation(delegationRaw, time.Time{})
 	if err != nil {
 		return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
@@ -607,7 +672,7 @@ func selectNode(
 	if delegation.Admission == nil {
 		return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
-	capsule, err := admission.InspectProfileCapsule(deployment.CapsuleDSSE, time.Time{})
+	capsule, err := admission.InspectProfileCapsule(capsuleRaw, time.Time{})
 	if err != nil {
 		return "", nil, newBlocked(controlstore.DeploymentBlockedInvalidAuthority)
 	}
