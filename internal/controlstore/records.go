@@ -739,6 +739,9 @@ func (store *Store) SubmitCommand(actor controlauth.Identity, tenantID, nodeID s
 		}
 		return cloneCommand(existing), false, nil
 	}
+	if freeze, frozen := effectiveOperationalFreezeMap(store.current.freezes, tenantID); frozen {
+		return Command{}, false, newOperationalFreezeError(freeze)
+	}
 	command := Command{
 		TenantID: tenantID, NodeID: nodeID, ID: commandID, DeliveryID: deliveryID(tenantID, nodeID, commandID),
 		Digest: digestBytes(commandDSSE), CommandDSSE: append([]byte(nil), commandDSSE...),
@@ -856,6 +859,9 @@ func (store *Store) poll(identity controlauth.NodeIdentity, capabilities []strin
 	candidates := make([]Command, 0)
 	for _, command := range store.current.commands {
 		if command.NodeID != identity.NodeID || !controlauth.NodeAuthorizedTenant(identity, command.TenantID) {
+			continue
+		}
+		if _, frozen := effectiveOperationalFreezeMap(store.current.freezes, command.TenantID); frozen {
 			continue
 		}
 		if command.State == CommandPending {
