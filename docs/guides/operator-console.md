@@ -99,8 +99,8 @@ The console does not set or clear a freeze. Use the authenticated
 
 | View | What it shows | What it omits |
 | --- | --- | --- |
-| Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, and retained-state capacity | Mutation controls and raw evidence frames |
-| Attention | Deterministic findings derived from retained facts and current process observations; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, remediation, or incident workflow |
+| Overview | Attention totals, active and retained node counts, evidence posture, command-failure counts, retained-state capacity, and the selected tenant's fleet-wide resource quota and usage | Mutation controls and raw evidence frames |
+| Attention | Deterministic findings derived from retained facts and current process observations, including tenant quota pressure; evidence recency becomes conservatively stale or unknown after a controller restart until the node reports again | Acknowledgement, dismissal, retry, remediation, or incident workflow |
 | Nodes | Node state, placement mode, durable drain state and request ID, failed drain instance when applicable, last observation time, tenant bindings, and reported capabilities for one selected tenant | Node credentials and direct node actions |
 | Commands | A local, unverified preview and exact SHA-256 digest for one offline-signed command; submission after confirmation and bearer re-entry; retained command ID, digest, tenant, node, lifecycle state, and creation time | Command creation or editing, signature verification, private keys, terminal result text, prompts, and task bodies |
 | Credentials | Credential ID, kind, role or node, scope, creation time, and revoked state | Bearer values, token message-authentication codes, and private keys |

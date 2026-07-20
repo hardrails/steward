@@ -274,7 +274,10 @@ reason codes do not change the instance to a terminal phase, and repeated checks
 do not append repeated durable records.
 
 The reconciler durably reserves aggregate CPU, memory, process, tenant, and
-workload-slot capacity with admission. It enforces a per-deployment
+workload-slot capacity with admission. A site-defined tenant resource quota can
+also cap the raw signed requests across all nodes. That global ceiling does not
+measure fixed runtime overhead, disk bytes, inodes, or I/O, and lowering it does
+not evict existing agents. It enforces a per-deployment
 maximum-unavailable budget for planned stateless node drains. It does not
 schedule disk or persistent state bytes, preempt workloads, provide minimum
 healthy duration or surge semantics, perform progressive rollouts, or autoscale.

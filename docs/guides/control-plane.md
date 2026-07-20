@@ -740,6 +740,58 @@ issue a semantically equivalent replacement. `terminal_status: failed` is retain
 with the same fail-closed rule for compatibility. Current nodes report a proven
 pre-effect failure as `rejected`, which is safe to retire after acknowledgement.
 
+## Limit one tenant across the whole fleet
+
+Executor enforces workload and tenant limits on each node. A tenant-wide resource
+quota adds the missing fleet boundary: the tenant cannot consume a full node-local
+allowance again on every additional server.
+
+Inspect the selected tenant's current quota and reserved usage:
+
+```console
+stewardctl control quota status -tenant-id tenant-a
+```
+
+A tenant operator can inspect its own quota. Only a site administrator can set or
+clear it. This example allows up to 8 GiB of requested memory, 8 CPUs, 2,048
+processes, and 16 admitted agent workloads across all nodes:
+
+```console
+stewardctl control quota set \
+  -tenant-id tenant-a \
+  -memory-mib 8192 \
+  -cpu-millis 8000 \
+  -pids 2048 \
+  -workloads 16
+```
+
+The CLI reads the retained revision before a change. Automation that already read
+the record can pass `-revision` so a stale writer receives `409` instead of
+overwriting a newer decision. Clear the fleet ceiling without changing Executor's
+node-local safety limits:
+
+```console
+stewardctl control quota clear -tenant-id tenant-a
+```
+
+Quota measures raw requests from signed admission intent. It does not include the
+fixed relay and runtime overhead that Executor separately reserves on each node.
+An instance reserves quota atomically when admission is queued. Pending work that
+has never won admission does not consume quota; admitting, running, stopping,
+destroying, or ambiguous failed work keeps its reservation until Steward observes
+removal or absence.
+
+Lowering a ceiling below current use does not evict an agent or claim that it
+stopped. Status becomes `over_quota`, new admissions receive the stable blocked
+reason `tenant_quota_exhausted`, and the attention feed emits
+`tenant_quota_exceeded` for each exceeded resource. At the configured capacity
+threshold it emits `tenant_quota_warning` before the ceiling is crossed.
+
+The React console shows this boundary and live usage when one tenant is selected.
+Quota changes stay in the CLI/API so the browser remains a read-only policy view.
+This quota does not cover disk bytes or inodes; see
+[Current limitations]({{ '/limitations/' | relative_url }}#persistent-docker-state-is-dedicated-host-only).
+
 ## Freeze new command delivery during an incident
 
 Use an operational freeze when new lifecycle commands must stop while responders
@@ -820,7 +872,8 @@ stewardctl control attention list \
 
 Reasons cover node contact, evidence witnessing and freshness, retained rollback
 or equivocation, overdue or expired command delivery, failed or unknown command
-outcomes, and capacity pressure. Threshold equality is actionable. Evidence
+outcomes, retained-record capacity, and tenant resource-quota pressure. Threshold
+equality is actionable. Evidence
 freshness is process-local, so every node is conservatively stale or unknown after
 a controller restart until it reports again. The durable checkpoint and sticky
 finding do not reset.

@@ -203,7 +203,11 @@ tenant-signed delegation. Tenant keys remain outside Control, and Executor verif
 both signatures and the exact delegated scope before changing Docker. The
 controller schedules only onto recently observed nodes, atomically reserves the
 CPU, memory, process, tenant, and workload-slot limits Executor enforces, and
-reports a stable blocked reason when it cannot proceed. Tenant-signed soft label
+reports a stable blocked reason when it cannot proceed. A site administrator can
+also set one durable CPU, memory, process, and workload ceiling for a tenant across
+the entire fleet, so adding nodes does not multiply that tenant's allowance.
+Quota pressure appears in the same attention feed and React console as failed
+commands and stale evidence. Tenant-signed soft label
 preferences and one topology spread key influence placement without widening
 hard admission authority, and every decision retains its score inputs. It can
 replace a lease-managed stateless instance after the signed expiry fence. For
