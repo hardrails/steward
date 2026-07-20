@@ -239,6 +239,7 @@ func main() {
 	var receiptPrivate ed25519.PrivateKey
 	var commandPolicy *admission.SitePolicy
 	var gatewayControlClient *gateway.ControlClient
+	stateSnapshots := false
 	secureExecutor := false
 	secureNodeID := ""
 	admissionRequested := *admissionPolicyFile != "" || *admissionSiteRootFile != "" ||
@@ -292,6 +293,7 @@ func main() {
 				slog.Error("configure storage backend client", "err", err)
 				os.Exit(2)
 			}
+			stateSnapshots = true
 		}
 		receiptPrivate, err = readEd25519PrivateKey(*admissionEvidenceKeyFile)
 		if err != nil {
@@ -460,7 +462,8 @@ func main() {
 			ProtectedTransport: parsedUplink.Scheme == "https" && !*uplinkTLSSkipVerify,
 			CommandPolicy:      commandPolicy, ProtocolVersion: *uplinkProtocolVersion,
 			DeliveryState: deliveryState, GatewayControl: gatewayControlClient,
-			ValidateOnly: *checkConfig, Scheduling: publishedScheduling,
+			StateSnapshots: stateSnapshots,
+			ValidateOnly:   *checkConfig, Scheduling: publishedScheduling,
 		})
 		if err != nil {
 			slog.Error("configure executor uplink", "err", err)

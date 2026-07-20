@@ -414,6 +414,10 @@ func runV4Admission(
 					poll.Capabilities,
 					controlprotocol.ExecutorCapabilityRolloutAuthorizationContextV1,
 				) ||
+				!slices.Contains(
+					poll.Capabilities,
+					controlprotocol.ExecutorCapabilityStateSnapshotsV1,
+				) ||
 				slices.Contains(
 					poll.Capabilities,
 					controlprotocol.ExecutorCapabilityActivationCanaryV1,
@@ -472,6 +476,7 @@ func runV4Admission(
 		CommandPolicy: &policy, Now: func() time.Time { return now },
 		ProtocolVersion: controlprotocol.ExecutorProtocolV4,
 		DeliveryState:   deliveryStore,
+		StateSnapshots:  true,
 	})
 	if err != nil {
 		t.Fatal(err)

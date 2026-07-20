@@ -280,7 +280,7 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 		if s.secure.stateBackend != nil {
 			spec := s.qualifiedStateSpec(record.TenantID, record.LineageID)
 			state, err := s.secure.stateBackend.InspectVolume(ctx, spec.Scope())
-			if err != nil || state.Spec != spec || state.State != storagebackend.StateReady ||
+			if err != nil || !qualifiedStateSpecMatches(state.Spec, spec) || state.State != storagebackend.StateReady ||
 				state.DockerVolumeHandle != observed.Workload.State.VolumeName {
 				return s.containReconciliation(ctx, plan, observed, "state_drift", "quota-enforced persistent state is missing or drifted")
 			}

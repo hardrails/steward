@@ -145,10 +145,23 @@ depends on it. The worker writes a durable tombstone before destructive cleanup,
 an interrupted purge can resume without silently recreating old state. Purge retires
 that lineage identity. Use a new lineage ID if you intentionally want fresh state.
 
-The storage protocol includes held snapshots and copy-on-write clones. Steward does
-not yet connect those primitives to the public fork workflow, retention policy, or
-fleet scheduler. Until that integration exists, do not operate the worker's private
-socket directly; doing so would bypass the lifecycle and evidence boundary.
+Executor exposes the qualified backend through two signed operations:
+
+- `snapshot-state` creates an immutable cold snapshot only after the complete
+  source lineage has been destroyed. Merely stopping the container is not enough.
+- `clone-state` creates a new, quota-enforced copy-on-write lineage in the same
+  tenant. The target instance and lineage must be new. Normal signed admission
+  with `state_disposition: resume` is still required before the fork can run.
+
+Both operations bind tenant, node, instance, lineage, generation, and snapshot
+identity to the signed command. Executor derives the dataset and Docker volume
+identity, records the mutation in its durable journal, and appends a signed receipt.
+Exact retries are idempotent. The storage worker's private socket remains an
+internal boundary; operating it directly bypasses lifecycle authority and evidence.
+
+Snapshots are node-local. Placement must select a node whose inventory advertises
+the snapshot ID. Cross-node replication and retention automation are not yet part
+of this workflow.
 
 Back up and replicate the pool using reviewed OpenZFS procedures. Steward does not
 configure pool encryption, `zfs send`, remote replication, scrub schedules, or key

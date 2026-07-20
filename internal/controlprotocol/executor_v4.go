@@ -16,6 +16,9 @@ import (
 const (
 	ExecutorProtocolV4                      = 4
 	ExecutorCapabilityAdmissionProjectionV1 = "admission-projection-v1"
+	// ExecutorCapabilityStateSnapshotsV1 means a node has a qualified storage
+	// backend and accepts signed cold-snapshot and copy-on-write clone commands.
+	ExecutorCapabilityStateSnapshotsV1      = "state-snapshots-v1"
 	ExecutorAdmissionProjectionSchemaV1     = "steward.executor-admission-projection.v1"
 	MaxExecutorReportBytes                  = 16 << 10
 	executorEgressProxyV1                   = "http://steward-relay:8082"

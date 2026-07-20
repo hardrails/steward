@@ -75,6 +75,9 @@ type Config struct {
 	// node advertises that capability only for protocol 4 when this exact
 	// host-local client is configured.
 	GatewayControl *gateway.ControlClient
+	// StateSnapshots is true only when Executor configured a
+	// production-qualified persistent-state backend.
+	StateSnapshots bool
 	// ValidateOnly checks delivery state without converting pre-crash executing
 	// records into outcome_unknown. Normal startup leaves this false.
 	ValidateOnly bool
@@ -99,6 +102,7 @@ type Poller struct {
 	deliveryState                     *DeliveryStore
 	canaryRunner                      *activationCanaryRunner
 	scheduling                        *controlprotocol.ExecutorSchedulingObservationV1
+	stateSnapshots                    bool
 }
 
 func NewPoller(cfg Config) (*Poller, error) {
@@ -229,7 +233,8 @@ func NewPoller(cfg Config) (*Poller, error) {
 		canaryRunner: newActivationCanaryRunner(
 			activationGateway != nil,
 		),
-		scheduling: cloneSchedulingObservation(cfg.Scheduling),
+		scheduling:     cloneSchedulingObservation(cfg.Scheduling),
+		stateSnapshots: cfg.StateSnapshots,
 		dispatcher: dispatcher{
 			handler: cfg.Handler, token: cfg.LocalToken, tenantID: credential.TenantID,
 			nodeID: credential.NodeID, nodeScoped: credential.NodeScoped(), state: cfg.State,
@@ -377,15 +382,19 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 	if credential.NodeScoped() {
 		switch p.protocolVersion {
 		case controlprotocol.ExecutorProtocolV3:
+			capabilities := []string{
+				"signed-commands-v2", "delivery-leases-v3",
+				controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
+				controlprotocol.ExecutorCapabilityContextLockedEffectsV1,
+				"multi-tenant", "read", "state-purge",
+			}
+			if p.stateSnapshots {
+				capabilities = append(capabilities, controlprotocol.ExecutorCapabilityStateSnapshotsV1)
+			}
 			requestBody, err = json.Marshal(controlprotocol.ExecutorPollRequestV3{
 				ProtocolVersion: controlprotocol.ExecutorProtocolV3,
 				NodeID:          credential.NodeID, CredentialScope: "node",
-				Capabilities: []string{
-					"signed-commands-v2", "delivery-leases-v3",
-					controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
-					controlprotocol.ExecutorCapabilityContextLockedEffectsV1,
-					"multi-tenant", "read", "state-purge",
-				},
+				Capabilities: capabilities,
 			})
 		case controlprotocol.ExecutorProtocolV4:
 			capabilities := []string{
@@ -406,20 +415,27 @@ func (p *Poller) pollOnce(ctx context.Context) error {
 					controlprotocol.ExecutorCapabilityActivationCanaryV1,
 				)
 			}
+			if p.stateSnapshots {
+				capabilities = append(capabilities, controlprotocol.ExecutorCapabilityStateSnapshotsV1)
+			}
 			requestBody, err = json.Marshal(controlprotocol.ExecutorPollRequestV4{
 				ProtocolVersion: controlprotocol.ExecutorProtocolV4,
 				NodeID:          credential.NodeID, CredentialScope: "node",
 				Capabilities: capabilities,
 			})
 		default:
+			capabilities := []string{
+				"signed-commands-v2",
+				controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
+				controlprotocol.ExecutorCapabilityContextLockedEffectsV1,
+				"multi-tenant", "read", "state-purge",
+			}
+			if p.stateSnapshots {
+				capabilities = append(capabilities, controlprotocol.ExecutorCapabilityStateSnapshotsV1)
+			}
 			requestBody, err = json.Marshal(pollRequest{
 				ProtocolVersion: 2, NodeID: credential.NodeID, CredentialScope: "node",
-				Capabilities: []string{
-					"signed-commands-v2",
-					controlprotocol.ExecutorCapabilityAuthorizedEffectsV1,
-					controlprotocol.ExecutorCapabilityContextLockedEffectsV1,
-					"multi-tenant", "read", "state-purge",
-				},
+				Capabilities: capabilities,
 			})
 		}
 		if err != nil {

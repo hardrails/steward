@@ -304,7 +304,7 @@ authority:
     "command_keys": [{
       "key_id": "tenant-a-commands",
       "public_key": "BASE64_ED25519_PUBLIC_KEY",
-      "operations": ["admit", "renew", "start", "stop", "destroy", "read", "purge", "activation-canary"]
+      "operations": ["admit", "renew", "start", "stop", "destroy", "read", "purge", "snapshot-state", "clone-state", "activation-canary"]
     }]
   }]
 }
@@ -348,7 +348,7 @@ the bounded admission projection capability:
   "protocol_version": 4,
   "node_id": "executor-1",
   "credential_scope": "node",
-  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "admission-projection-v1", "rollout-authorization-context-v1", "multi-tenant", "read", "state-purge"]
+  "capabilities": ["signed-commands-v2", "delivery-leases-v3", "admission-projection-v1", "rollout-authorization-context-v1", "multi-tenant", "read", "state-purge", "state-snapshots-v1"]
 }
 ```
 
@@ -425,7 +425,11 @@ Normal command fences still reject stale sequences and generations.
 
 `admit` carries the OpenAPI `SignedAdmissionRequest`. `renew` carries one bounded
 `steward.workload-lease.v1` expiry. `start`, `stop`, `destroy`, and `read` require
-an empty payload. `purge` carries one bounded `lineage_id`. The
+an empty payload. `purge` carries one bounded `lineage_id`. `snapshot-state`
+carries `lineage_id` and `snapshot_id`; `clone-state` carries `lineage_id`,
+`snapshot_id`, and `source_lineage_id`. Snapshot requires the exact destroyed
+source generation. Clone creates only a new quota-backed lineage; a later signed
+`admit` with `state_disposition: resume` creates the workload. The
 signed intent and every runtime-reference identity must describe the same tuple
 before the local handler runs.
 
@@ -538,6 +542,10 @@ Before entering a mutating handler, Executor proves that every accepted or
 executing delivery can grow into the largest valid JSON terminal report. Settled
 `done`, `rejected`, and acknowledged terminal canary-failure entries may be
 compacted. A canary failure is compactable only when the ledger retains the verified
+`state-snapshots-v1` is advertised only when the node successfully configures a
+production-qualified storage backend. It means signed `snapshot-state` and
+`clone-state` commands are available; it does not imply cross-node replication.
+
 `activation-canary` command kind and the exact terminal error mapping. Ambiguous
 entries remain. Destroyed identities remain as tombstones or positions because
 deleting them would permit replay. There is currently no supported manual

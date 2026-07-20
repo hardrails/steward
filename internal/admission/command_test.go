@@ -29,7 +29,7 @@ func TestTenantCommandKeysAreOperationScoped(t *testing.T) {
 		PublicKey: base64.StdEncoding.EncodeToString(commandPublic),
 		Operations: []string{
 			"admit", "start", "stop", "destroy", "read", "purge",
-			"activation-canary",
+			"snapshot-state", "clone-state", "activation-canary",
 		},
 	}}
 	policy.SiteCleanupCommandKeys = []CommandKey{{
@@ -44,7 +44,7 @@ func TestTenantCommandKeysAreOperationScoped(t *testing.T) {
 	if err != nil || !commandPublic.Equal(keys["tenant-a-lifecycle"]) {
 		t.Fatalf("keys=%#v err=%v", keys, err)
 	}
-	for _, operation := range []string{"admit", "start", "read", "activation-canary"} {
+	for _, operation := range []string{"admit", "start", "read", "snapshot-state", "clone-state", "activation-canary"} {
 		keys, err := policy.TrustedCommandKeys("tenant-a", operation)
 		if err != nil {
 			t.Fatalf("trusted %s keys: %v", operation, err)

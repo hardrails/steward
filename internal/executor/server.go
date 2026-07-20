@@ -253,6 +253,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/maintenance/enter", requireLocalRole(LocalRoleOperator, s.maintenanceEnter))
 	mux.HandleFunc("POST /v1/maintenance/exit", requireLocalRole(LocalRoleOperator, s.maintenanceExit))
 	mux.HandleFunc("POST /v1/state/purge", requireLocalRole(LocalRoleHostAdmin, s.purgeState))
+	mux.HandleFunc("POST /v1/state/snapshots", requireLocalRole(LocalRoleHostAdmin, s.createStateSnapshot))
+	mux.HandleFunc("POST /v1/state/clones", requireLocalRole(LocalRoleHostAdmin, s.cloneStateSnapshot))
 	mux.HandleFunc(
 		"POST /v1/workloads/{id}/activation-canary-preflight",
 		requireLocalRole(LocalRoleHostAdmin, s.activationCanaryPreflight),
@@ -647,7 +649,7 @@ func (s *Server) purgeState(w http.ResponseWriter, r *http.Request) {
 			writeStateBackendError(w, inspectErr)
 			return
 		}
-		if observed.Spec != qualifiedSpec || observed.State != storagebackend.StateReady || observed.DockerVolumeHandle != name {
+		if !qualifiedStateSpecMatches(observed.Spec, qualifiedSpec) || observed.State != storagebackend.StateReady || observed.DockerVolumeHandle != name {
 			writeError(w, http.StatusConflict, "state_drift", "state volume does not match the signed tenant lineage and fixed host quota")
 			return
 		}
@@ -701,7 +703,7 @@ func (s *Server) purgeState(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
-		} else if deleted.State != storagebackend.StateDeleted || deleted.Spec != qualifiedSpec {
+		} else if deleted.State != storagebackend.StateDeleted || !qualifiedStateSpecMatches(deleted.Spec, qualifiedSpec) {
 			writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "state purge returned an invalid terminal projection; operation remains prepared")
 			return
 		}
@@ -1323,15 +1325,19 @@ func (s *Server) prepareStateAdmission(ctx context.Context, workload Workload, e
 	}
 	if s.secure.stateBackend != nil {
 		spec := s.qualifiedStateSpec(workload.TenantID, effective.Intent.LineageID)
-		planned, err := s.secure.stateBackend.PlanVolume(ctx, spec)
-		if err != nil {
-			return stateAdmissionPlan{}, err
+		observed, err := s.secure.stateBackend.InspectVolume(ctx, spec.Scope())
+		if err == nil && qualifiedStateSpecMatches(observed.Spec, spec) {
+			spec = observed.Spec
+		}
+		planned, planErr := s.secure.stateBackend.PlanVolume(ctx, spec)
+		if planErr != nil {
+			return stateAdmissionPlan{}, planErr
 		}
 		if workload.State.VolumeName != planned.DockerVolumeHandle {
 			return stateAdmissionPlan{}, &stateAdmissionError{http.StatusConflict, "state_drift", "planned state volume does not match the admitted workload"}
 		}
 		plan := stateAdmissionPlan{required: true, backend: s.secure.stateBackend, spec: spec, handle: planned.DockerVolumeHandle}
-		observed, err := plan.backend.InspectVolume(ctx, spec.Scope())
+		observed, err = plan.backend.InspectVolume(ctx, spec.Scope())
 		if errors.Is(err, storagebackend.ErrNotFound) {
 			if effective.Intent.StateDisposition == "resume" {
 				return stateAdmissionPlan{}, &stateAdmissionError{http.StatusConflict, "state_missing", "resume requires an existing state lineage"}
@@ -1341,7 +1347,7 @@ func (s *Server) prepareStateAdmission(ctx context.Context, workload Workload, e
 		if err != nil {
 			return stateAdmissionPlan{}, err
 		}
-		if observed.Spec != spec || observed.DockerVolumeHandle != plan.handle || observed.State != storagebackend.StateReady {
+		if !qualifiedStateSpecMatches(observed.Spec, spec) || observed.DockerVolumeHandle != plan.handle || observed.State != storagebackend.StateReady {
 			return stateAdmissionPlan{}, &stateAdmissionError{http.StatusConflict, "state_drift", "existing state volume does not match the signed tenant lineage and fixed host quota"}
 		}
 		if effective.Intent.StateDisposition == "new" && s.lineageHasCommittedFence(workload.TenantID, effective.Intent.LineageID) {
@@ -1381,7 +1387,7 @@ func (s *Server) stateVolumeMatches(ctx context.Context, workload Workload, line
 	if s.secure.stateBackend != nil {
 		spec := s.qualifiedStateSpec(workload.TenantID, lineageID)
 		observed, err := s.secure.stateBackend.InspectVolume(ctx, spec.Scope())
-		return err == nil && observed.Spec == spec && observed.State == storagebackend.StateReady &&
+		return err == nil && qualifiedStateSpecMatches(observed.Spec, spec) && observed.State == storagebackend.StateReady &&
 			observed.DockerVolumeHandle == workload.State.VolumeName
 	}
 	docker, ok := s.docker.(StateDocker)
@@ -1419,6 +1425,22 @@ func (s *Server) qualifiedStateSpec(tenantID, lineageID string) storagebackend.V
 		VolumeID: stateBackendVolumeID(tenantID, lineageID), TenantID: tenantID, LineageID: lineageID,
 		Generation: 1, ByteLimit: s.secure.stateByteLimit, ObjectLimit: s.secure.stateObjectLimit,
 	}
+}
+
+// qualifiedStateSpecMatches treats the immutable parent snapshot as retained
+// provenance rather than caller-selected policy. Executor still requires the
+// exact derived scope and fixed host quotas on every inspection.
+func qualifiedStateSpecMatches(observed, expected storagebackend.VolumeSpec) bool {
+	if observed.Validate() != nil || expected.Validate() != nil {
+		return false
+	}
+	if expected.ParentSnapshotID != "" && observed.ParentSnapshotID != expected.ParentSnapshotID {
+		return false
+	}
+	parent := observed.ParentSnapshotID
+	observed.ParentSnapshotID = ""
+	expected.ParentSnapshotID = ""
+	return observed == expected && (parent == "" || len(parent) <= storagebackend.MaxIdentifierBytes)
 }
 
 func (s *Server) lineageHasCommittedFence(tenantID, lineageID string) bool {

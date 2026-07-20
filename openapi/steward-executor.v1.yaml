@@ -541,6 +541,150 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/state/snapshots:
+    post:
+      tags: [state]
+      operationId: createStateSnapshot
+      summary: Create an immutable snapshot of an inactive state lineage
+      description: |
+        Creates a cold snapshot through the configured, production-qualified
+        storage backend. The complete signed lineage must be absent on this
+        node; a running or merely stopped container is rejected. Executor
+        derives the storage volume identity, binds the request to the
+        authenticated tenant, node, instance, and generation, and records the
+        mutation in its durable journal and signed evidence log. An exact retry
+        returns the retained snapshot without creating another copy.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StateSnapshotRequest"
+      responses:
+        "200":
+          description: The exact snapshot already exists and is ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StateSnapshot"
+        "201":
+          description: The immutable snapshot was created and receipted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StateSnapshot"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The request is not bound to the authenticated signed tenant, node, and generation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: The lineage is active, drifted, or conflicts with retained snapshot identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "501":
+          description: No production-qualified snapshot backend is configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "507":
+          description: The persistent-state backend has exhausted its bounded capacity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The state backend, journal, evidence, or reconciliation state is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/state/clones:
+    post:
+      tags: [state]
+      operationId: cloneStateSnapshot
+      summary: Create a new state lineage from an immutable snapshot
+      description: |
+        Creates a copy-on-write state volume for a new instance and lineage on
+        the snapshot's current node. Source and target remain in the same
+        tenant, and the target must have no retained lifecycle fence. Executor
+        derives all host storage identities and fixed quotas; callers cannot
+        select a dataset, path, driver, mount option, or quota. The returned
+        lineage is state only and must pass normal signed admission with the
+        `resume` state disposition before an agent can run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StateCloneRequest"
+      responses:
+        "200":
+          description: The exact clone already exists and is ready for signed admission.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StateClone"
+        "201":
+          description: The copy-on-write lineage was created and receipted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StateClone"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: The request is not bound to the authenticated signed tenant, node, and generation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          description: The source snapshot is not ready or the target identity already exists or drifted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "501":
+          description: No production-qualified copy-on-write backend is configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "507":
+          description: The persistent-state backend has exhausted its bounded capacity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The state backend, journal, evidence, or reconciliation state is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/workloads/{runtime_ref}:
     parameters:
       - $ref: "#/components/parameters/RuntimeRef"
@@ -1098,6 +1242,110 @@ components:
           type: integer
           format: int64
           minimum: 1
+    StateSnapshotRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, node_id, instance_id, lineage_id, generation, snapshot_id]
+      properties:
+        tenant_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        node_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        instance_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        lineage_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        snapshot_id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,126}[A-Za-z0-9]$|^[A-Za-z0-9]$"
+    StateSnapshot:
+      type: object
+      additionalProperties: false
+      required: [status, snapshot_id, tenant_id, source_lineage_id, content_digest, retained_bytes, object_count, created_at]
+      properties:
+        status:
+          type: string
+          enum: [stopped]
+        snapshot_id:
+          type: string
+        tenant_id:
+          type: string
+        source_lineage_id:
+          type: string
+        content_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        retained_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        object_count:
+          type: integer
+          format: int64
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+    StateCloneRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, node_id, instance_id, lineage_id, generation, snapshot_id, source_lineage_id]
+      properties:
+        tenant_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        node_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        instance_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        lineage_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        snapshot_id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,126}[A-Za-z0-9]$|^[A-Za-z0-9]$"
+        source_lineage_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+    StateClone:
+      type: object
+      additionalProperties: false
+      required: [status, tenant_id, instance_id, lineage_id, snapshot_id]
+      properties:
+        status:
+          type: string
+          enum: [stopped]
+        tenant_id:
+          type: string
+        instance_id:
+          type: string
+        lineage_id:
+          type: string
+        snapshot_id:
+          type: string
     MaintenanceEnterRequest:
       type: object
       additionalProperties: false

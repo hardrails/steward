@@ -447,8 +447,19 @@ stewardctl agent fork \
 
 Steward generates a new instance ID and lineage ID. The default expiry action is
 `destroy`. A fork never copies credentials, permits, runtime identity, receipt
-keys, active network connections, or process memory. Storage cloning and the
-subsequent signed admission remain explicit provider and Executor operations.
+keys, active network connections, or process memory. The qualified Linux storage
+worker performs the actual immutable snapshot and copy-on-write clone through
+Executor's signed `snapshot-state` and `clone-state` commands. Create the snapshot
+after destroying the source workload, clone it into the new instance and lineage
+from this plan, then admit the fork with `state_disposition: resume`. The snapshot
+and clone must currently stay on the same node. Retention and expiry cleanup remain
+explicit operator or controller work.
+
+The snapshot JSON consumed by `agent fork` is the portable compatibility record:
+it binds the backend's returned `content_digest` to the exact agent bundle and
+runtime engine. It contains no storage path or credential. See
+[Persistent state]({{ '/guides/persistent-state/' | relative_url }}) for the
+enforced node workflow and failure behavior.
 
 ## What this surface does not do
 

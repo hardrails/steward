@@ -372,6 +372,52 @@ func TestNodeScopedDispatcherSupportsReadAndReceiptedPurge(t *testing.T) {
 	}
 }
 
+func TestNodeScopedDispatcherSnapshotsDestroyedStateAndClonesNewIdentity(t *testing.T) {
+	var paths []string
+	var bodies []map[string]any
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, body)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
+	})
+	store := newStateStore(t, filepath.Join(t.TempDir(), "state.json"))
+	if err := store.advance("tenant-a", "source", position{
+		ClaimGeneration: 2, Generation: 3, Sequence: 1, ReportedStatus: "stopped", Absent: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := dispatcher{handler: handler, token: "token", nodeID: "node-1", nodeScoped: true, state: store}
+	sourceRef, _ := RuntimeRefV2("tenant-a", "node-1", "source")
+	snapshot := command{
+		CommandID: "snapshot", TenantID: "tenant-a", NodeID: "node-1", InstanceID: "source",
+		RuntimeRef: sourceRef, Kind: "snapshot-state", ClaimGeneration: 2, InstanceGeneration: 3,
+		CommandSequence: 2, Payload: json.RawMessage(`{"lineage_id":"lineage-source","snapshot_id":"snapshot-a"}`), signed: true,
+	}
+	if report := d.execute(context.Background(), snapshot); report.Status != "done" || !report.Result["absent"].(bool) {
+		t.Fatalf("snapshot report=%#v", report)
+	}
+	targetRef, _ := RuntimeRefV2("tenant-a", "node-1", "fork")
+	clone := command{
+		CommandID: "clone", TenantID: "tenant-a", NodeID: "node-1", InstanceID: "fork",
+		RuntimeRef: targetRef, Kind: "clone-state", ClaimGeneration: 2, InstanceGeneration: 1,
+		CommandSequence: 1, Payload: json.RawMessage(`{"lineage_id":"lineage-fork","snapshot_id":"snapshot-a","source_lineage_id":"lineage-source"}`), signed: true,
+	}
+	if report := d.execute(context.Background(), clone); report.Status != "done" || !report.Result["absent"].(bool) {
+		t.Fatalf("clone report=%#v", report)
+	}
+	if strings.Join(paths, ",") != "POST /v1/state/snapshots,POST /v1/state/clones" {
+		t.Fatalf("paths=%#v", paths)
+	}
+	if bodies[0]["instance_id"] != "source" || bodies[0]["snapshot_id"] != "snapshot-a" ||
+		bodies[1]["instance_id"] != "fork" || bodies[1]["source_lineage_id"] != "lineage-source" {
+		t.Fatalf("bodies=%#v", bodies)
+	}
+}
+
 func TestRuntimeRefV2UsesTenantAwareUTF8ByteLengths(t *testing.T) {
 	ref, err := RuntimeRefV2("té", "节点", "agent:one")
 	if err != nil {
