@@ -196,8 +196,18 @@ type Deployment struct {
 	DisruptionBudget    controlstore.DeploymentDisruptionBudget `json:"disruption_budget"`
 	Phase               controlstore.DeploymentPhase            `json:"phase"`
 	Instances           []controlstore.DeploymentInstance       `json:"instances"`
+	Rollout             *DeploymentRollout                      `json:"rollout,omitempty"`
 	CreatedAt           string                                  `json:"created_at"`
 	UpdatedAt           string                                  `json:"updated_at"`
+}
+
+type DeploymentRollout struct {
+	SourceGeneration       uint64 `json:"source_generation"`
+	SourceAgentName        string `json:"source_agent_name"`
+	SourceBundleDigest     string `json:"source_bundle_digest"`
+	SourceCapsuleDigest    string `json:"source_capsule_digest"`
+	SourceDelegationDigest string `json:"source_delegation_digest"`
+	StartedAt              string `json:"started_at"`
 }
 
 type DeploymentList struct {
@@ -1122,6 +1132,24 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 		deployment.DisruptionBudget.MaxUnavailable > len(deployment.Instances) {
 		return errors.New("control deployment response disruption budget is invalid")
 	}
+	sourceCapsuleDigest := ""
+	rolloutStarted := time.Time{}
+	if deployment.Rollout != nil {
+		rollout := deployment.Rollout
+		if rollout.SourceGeneration == 0 || rollout.SourceGeneration >= deployment.Generation ||
+			!validEvidenceRouteIdentity(rollout.SourceAgentName, 128) ||
+			!controlprotocol.ValidSHA256Digest(rollout.SourceBundleDigest) ||
+			!controlprotocol.ValidSHA256Digest(rollout.SourceCapsuleDigest) ||
+			!controlprotocol.ValidSHA256Digest(rollout.SourceDelegationDigest) {
+			return errors.New("control deployment response rollout is invalid")
+		}
+		var err error
+		rolloutStarted, err = time.Parse(time.RFC3339Nano, rollout.StartedAt)
+		if err != nil {
+			return errors.New("control deployment response rollout timestamp is invalid")
+		}
+		sourceCapsuleDigest = rollout.SourceCapsuleDigest
+	}
 	for index, nodeID := range deployment.AllowedNodeIDs {
 		if !validEvidenceRouteIdentity(nodeID, 128) || index > 0 && deployment.AllowedNodeIDs[index-1] >= nodeID {
 			return errors.New("control deployment response node scope is not canonical")
@@ -1133,6 +1161,16 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 			index > 0 && deployment.Instances[index-1].InstanceID >= instance.InstanceID {
 			return errors.New("control deployment response instance set is not canonical")
 		}
+		if instance.Rollout != nil {
+			if deployment.Rollout == nil ||
+				instance.Rollout.Stage != "draining" && instance.Rollout.Stage != "deploying" {
+				return errors.New("control deployment response instance rollout is invalid")
+			}
+			started, err := time.Parse(time.RFC3339Nano, instance.Rollout.StartedAt)
+			if err != nil || started.Before(rolloutStarted) {
+				return errors.New("control deployment response instance rollout timestamp is invalid")
+			}
+		}
 		if instance.Intent != nil {
 			if err := instance.Intent.Validate(admission.AuthenticatedIdentity{
 				TenantID: instance.Intent.TenantID,
@@ -1140,7 +1178,8 @@ func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID st
 			}); err != nil || instance.Intent.TenantID != deployment.TenantID ||
 				instance.Intent.NodeID != instance.NodeID || instance.Intent.InstanceID != instance.InstanceID ||
 				instance.Intent.LineageID != instance.LineageID || instance.Intent.Generation != instance.Generation ||
-				instance.Intent.CapsuleDigest != deployment.CapsuleDigest {
+				instance.Intent.CapsuleDigest != deployment.CapsuleDigest &&
+					instance.Intent.CapsuleDigest != sourceCapsuleDigest {
 				return errors.New("control deployment response instance intent is invalid")
 			}
 		}

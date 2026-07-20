@@ -47,6 +47,9 @@ func (store *Store) BeginDeploymentInstanceDrain(
 		return Deployment{}, false, ErrNotFound
 	}
 	instance := deployment.Instances[index]
+	if deployment.Rollout != nil || instance.Rollout != nil {
+		return Deployment{}, false, ErrConflict
+	}
 	if instance.Drain != nil {
 		if instance.Drain.SourceNodeID == sourceNodeID && instance.Drain.RequestID == requestID {
 			return cloneDeployment(deployment), false, nil
@@ -272,7 +275,7 @@ func (store *Store) CompleteFinishedNodeDrains(now time.Time) (completed, failed
 func deploymentUnavailableInstances(deployment Deployment) int {
 	unavailable := 0
 	for _, instance := range deployment.Instances {
-		if instance.Drain != nil || instance.Phase != DeploymentInstanceRunning {
+		if instance.Drain != nil || instance.Rollout != nil || instance.Phase != DeploymentInstanceRunning {
 			unavailable++
 		}
 	}

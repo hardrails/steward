@@ -113,7 +113,7 @@ the route and credential.
 Start a portable agent project with:
 
 ```console
-stewardctl agent init -runtime hermes -name workspace-auditor workspace-auditor
+stewardctl agent create workspace-auditor -runtime hermes workspace-auditor
 cd workspace-auditor
 stewardctl agent build
 ```
@@ -123,22 +123,20 @@ to select Hermes or OpenClaw, apply offline OPA policy, explain fleet placement,
 admit and start the workload directly or through Steward Control, and derive a
 temporary or long-lived fork from persistent state.
 
-After a durable deployment is applied, one recovery-safe command can wait for a
-running instance, issue exact task authority, dispatch through the local Gateway,
-wait for the agent, and save the verified result:
+With a CLI context configured as described in the guide, the common path is:
 
 ```console
-stewardctl task run workspace-auditor \
-  -request workspace-audit.request.json \
-  -operation-id hermes.run \
-  -bundle-out workspace-audit.task.json \
-  -result-out workspace-audit.result.json
+stewardctl agent apply workspace-auditor
+stewardctl task run workspace-auditor "Review this workspace and propose one issue"
 ```
 
 A named CLI context supplies Control, tenant, Gateway, service-trust, and task-key
-paths. `task run` writes the signed bundle before dispatch. If the terminal or host
-fails after dispatch, resume that same authority with `task submit` and `task wait`;
-do not create a replacement task that might duplicate the work.
+paths. Prompt mode creates a private run directory containing the exact request,
+signed bundle, and verified result, and prints those paths without printing the
+prompt or result. If the terminal or host fails after dispatch, resume the retained
+bundle with `task submit` and `task wait`; do not create replacement authority that
+might duplicate the work. The explicit request, operation, and output flags remain
+available for automation and off-node signing.
 
 ## Authorize real work
 

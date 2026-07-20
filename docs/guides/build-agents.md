@@ -32,7 +32,7 @@ sensitive production work on a Linux node that reports `hardened`.
 
 ```console
 mkdir workspace-auditor
-stewardctl agent init -runtime hermes -name workspace-auditor workspace-auditor
+stewardctl agent create workspace-auditor -runtime hermes workspace-auditor
 cd workspace-auditor
 ```
 
@@ -159,10 +159,11 @@ lineages, generations, resources, capabilities, routes, and connectors. Control
 cannot widen those fields.
 
 With a CLI context supplying Control, the operator token, private CA, and tenant,
-apply and inspect the deployment:
+apply and inspect the deployment. The concise and expert apply forms call the same
+implementation:
 
 ```console
-stewardctl agent deployment apply auditor \
+stewardctl agent apply auditor \
   -bundle agent.bundle.json \
   -capsule hermes.capsule.dsse.json \
   -delegation delegation.dsse.json
@@ -180,6 +181,24 @@ constraints, and has reserved host and tenant capacity. It then drives `admit`,
 a bounded workload-lease renewal, and `start`. It renews the lease while the agent should remain running. Removing
 desired state similarly needs only the name:
 
+Applying a higher generation to a ready deployment performs an in-place rollout.
+The new delegation must name the same instances and lineages, advance every
+instance generation, and continue to allow each assigned node. Control keeps both
+signed authorities until the rollout finishes. For each replica it issues `stop`
+and `destroy` under the source delegation, waits for Executor to report the runtime
+absent, then switches that replica to the target delegation and issues `admit`,
+`renew`, and `start`. The old authority is never overwritten while it may still own
+a runtime.
+
+`max_unavailable` bounds rollout and node-drain disruption in the same atomic store
+transaction. The default is one, so a multi-replica deployment replaces one agent
+at a time. Steward currently retains the assigned node and does not create surge
+replicas. This keeps local state placement stable, but it means a single-replica
+deployment has downtime between its proven destroy and target start. A target that
+changes placement constraints or resource requirements can become blocked after
+the source is removed; inspect the target constraints and node capacity before
+applying it.
+
 ```console
 stewardctl agent deployment remove auditor
 ```
@@ -192,6 +211,7 @@ or uncertain Executor outcome becomes `degraded` and is not silently retried.
 `scheduling_observation_unavailable`, `placement_constraints_unsatisfied`,
 `workload_limit_exceeded`, `node_capacity_exhausted`,
 `tenant_capacity_exhausted`, `delegation_expired`,
+`rollout_disruption_budget_exhausted`,
 `controller_key_mismatch`, or
 `invalid_deployment_authority`. The controller
 rechecks these conditions and clears the value when it can enqueue the next command.
@@ -333,18 +353,16 @@ For routine work, configure the [CLI task defaults]({{ '/guides/cli/' |
 relative_url }}) once and run the entire authorized task lifecycle in one command:
 
 ```console
-stewardctl task run auditor \
-  -request task-request.json \
-  -operation-id hermes.run \
-  -bundle-out task.bundle.json \
-  -result-out task-result.json
+stewardctl task run auditor "Review the workspace and report one concrete issue"
 ```
 
 This waits for the deployment, checks the exact admitted service and task key,
 persists the signed bundle before dispatch, submits through the node-local Gateway,
-and saves verified terminal bytes. The bundle remains the recovery handle after a
+and saves verified terminal bytes. Steward infers only the qualified Hermes or
+OpenClaw task operation and stores the generated request, bundle, and result in a
+new owner-only run directory. The bundle remains the recovery handle after a
 timeout or interrupted terminal. Resume it instead of minting replacement
-authority.
+authority. The explicit artifact flags remain the stable automation surface.
 
 ## Run one synchronous deployment through Control
 

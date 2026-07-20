@@ -163,7 +163,7 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 	var output bytes.Buffer
 	for _, command := range [][]string{
 		append([]string{
-			"agent", "deployment", "apply", "auditor",
+			"agent", "apply", "auditor",
 			"-bundle", "auditor.bundle.json", "-capsule", "auditor.capsule.json",
 			"-delegation", "auditor.delegation.json",
 		}, common...),

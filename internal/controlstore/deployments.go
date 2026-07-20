@@ -8,6 +8,7 @@ import (
 
 	"github.com/hardrails/steward/internal/admission"
 	"github.com/hardrails/steward/internal/controlauth"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -108,6 +109,35 @@ func (store *Store) ApplyDeployment(
 	if exists && !deploymentInstancesRollForward(existing.Instances, instances) {
 		return Deployment{}, false, ErrConflict
 	}
+	if exists && !deploymentFullyRemoved(existing) {
+		if !deploymentCanStartRollout(existing, delegation, instances, store.current.nodes, now) {
+			return Deployment{}, false, ErrConflict
+		}
+		if existing.Revision == ^uint64(0) {
+			return Deployment{}, false, ErrCapacityExceeded
+		}
+		deployment := cloneDeployment(existing)
+		deployment.Generation = input.Generation
+		deployment.AgentName = input.AgentName
+		deployment.BundleDigest = input.BundleDigest
+		deployment.CapsuleDSSE = append([]byte(nil), input.CapsuleDSSE...)
+		deployment.DelegationDSSE = append([]byte(nil), input.DelegationDSSE...)
+		deployment.DisruptionBudget = disruptionBudget
+		deployment.Rollout = &DeploymentRollout{
+			SourceGeneration: existing.Generation, SourceAgentName: existing.AgentName,
+			SourceBundleDigest:   existing.BundleDigest,
+			SourceCapsuleDSSE:    append([]byte(nil), existing.CapsuleDSSE...),
+			SourceDelegationDSSE: append([]byte(nil), existing.DelegationDSSE...),
+			StartedAt:            canonicalTimestamp(now),
+		}
+		deployment.Revision++
+		deployment.Phase = DeploymentReconciling
+		deployment.UpdatedAt = canonicalTimestamp(now)
+		if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+			return Deployment{}, false, err
+		}
+		return cloneDeployment(deployment), true, nil
+	}
 	createdAt := canonicalTimestamp(now)
 	revision := uint64(1)
 	if exists {
@@ -130,6 +160,55 @@ func (store *Store) ApplyDeployment(
 		return Deployment{}, false, err
 	}
 	return cloneDeployment(deployment), true, nil
+}
+
+func deploymentCanStartRollout(
+	existing Deployment,
+	target admission.CommandDelegation,
+	targetInstances []DeploymentInstance,
+	nodes map[string]Node,
+	now time.Time,
+) bool {
+	if existing.Rollout != nil || existing.DesiredState != DeploymentRunning || existing.Phase != DeploymentReady ||
+		len(existing.Instances) != len(targetInstances) {
+		return false
+	}
+	if _, err := admission.InspectCommandDelegation(existing.DelegationDSSE, now); err != nil {
+		return false
+	}
+	allowed := make(map[string]struct{}, len(target.NodeIDs))
+	for _, nodeID := range target.NodeIDs {
+		allowed[nodeID] = struct{}{}
+	}
+	for index, instance := range existing.Instances {
+		targetInstance := targetInstances[index]
+		if instance.InstanceID != targetInstance.InstanceID || instance.LineageID != targetInstance.LineageID ||
+			targetInstance.Generation <= instance.Generation || instance.NodeID == "" ||
+			instance.Phase != DeploymentInstanceRunning || deploymentCommandInFlight(instance) ||
+			instance.Drain != nil || instance.Rollout != nil {
+			return false
+		}
+		if _, ok := allowed[instance.NodeID]; !ok {
+			return false
+		}
+		if node, found := nodes[instance.NodeID]; !found || !node.Active ||
+			!tenantMember(node.TenantIDs, existing.TenantID) ||
+			!containsCapability(node.Capabilities, controlprotocol.ExecutorCapabilityControllerDelegationV1) ||
+			EffectiveNodePlacement(node).Mode != NodeSchedulable ||
+			node.Drain != nil && node.Drain.State == NodeDrainActive {
+			return false
+		}
+	}
+	return true
+}
+
+func deploymentFullyRemoved(deployment Deployment) bool {
+	for _, instance := range deployment.Instances {
+		if instance.Phase != DeploymentInstanceRemoved || deploymentCommandInFlight(instance) || instance.Drain != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // SetDeploymentDesiredState marks a deployment for convergence without

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hardrails/steward/internal/admission"
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/controlstore"
 	"github.com/hardrails/steward/internal/dsse"
 )
@@ -128,6 +130,79 @@ func TestDeploymentClientRejectsInvalidLocalInputAndUntrustedProjection(t *testi
 	}
 	if requests != 1 {
 		t.Fatalf("invalid local input made %d requests", requests-1)
+	}
+}
+
+func TestDeploymentClientValidatesRolloutProjection(t *testing.T) {
+	deployment := validClientDeployment()
+	deployment.Generation = 2
+	deployment.Phase = controlstore.DeploymentReconciling
+	deployment.Rollout = &DeploymentRollout{
+		SourceGeneration: 1, SourceAgentName: deployment.AgentName,
+		SourceBundleDigest:     "sha256:" + strings.Repeat("d", 64),
+		SourceCapsuleDigest:    "sha256:" + strings.Repeat("e", 64),
+		SourceDelegationDigest: "sha256:" + strings.Repeat("f", 64),
+		StartedAt:              deployment.UpdatedAt,
+	}
+	deployment.Instances[0].Intent = nil
+	deployment.Instances[0].Rollout = &controlstore.DeploymentInstanceRollout{
+		Stage: "draining", StartedAt: deployment.UpdatedAt,
+	}
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err != nil {
+		t.Fatalf("valid rollout projection was rejected: %v", err)
+	}
+	deployment.Instances[0].Rollout.Stage = "unknown"
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("unknown rollout stage was accepted")
+	}
+	deployment.Instances[0].Rollout.Stage = "draining"
+	deployment.Rollout.StartedAt = "not-a-time"
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("malformed rollout time was accepted")
+	}
+	deployment.Rollout.StartedAt = deployment.UpdatedAt
+	deployment.Rollout.SourceGeneration = deployment.Generation
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("non-forward rollout generation was accepted")
+	}
+	deployment.Rollout.SourceGeneration = 1
+	deployment.Instances[0].Rollout.StartedAt = "not-a-time"
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("malformed instance rollout time was accepted")
+	}
+	deployment.Instances[0].Rollout.StartedAt = deployment.UpdatedAt
+	deployment.Rollout = nil
+	if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+		t.Fatal("instance rollout without deployment rollout was accepted")
+	}
+}
+
+func TestDeploymentClientRejectsMalformedProjectionFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Deployment)
+	}{
+		{"disruption budget", func(value *Deployment) {
+			value.DisruptionBudget.MaxUnavailable = len(value.Instances) + 1
+		}},
+		{"node scope", func(value *Deployment) { value.AllowedNodeIDs = []string{"bad node"} }},
+		{"instance identity", func(value *Deployment) { value.Instances[0].InstanceID = "bad instance" }},
+		{"intent", func(value *Deployment) { value.Instances[0].Intent = &admission.InstanceIntent{} }},
+		{"admission", func(value *Deployment) {
+			value.Instances[0].Admission = &controlprotocol.ExecutorAdmissionProjectionV1{}
+		}},
+		{"timestamps", func(value *Deployment) { value.UpdatedAt = "not-a-time" }},
+		{"desired state", func(value *Deployment) { value.DesiredState = "unknown" }},
+		{"phase", func(value *Deployment) { value.Phase = "unknown" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deployment := validClientDeployment()
+			test.mutate(&deployment)
+			if err := validateDeploymentResponse(deployment, "tenant-a", "research"); err == nil {
+				t.Fatal("malformed deployment projection was accepted")
+			}
+		})
 	}
 }
 

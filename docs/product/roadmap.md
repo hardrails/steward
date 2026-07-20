@@ -110,12 +110,9 @@ install site
 The normal command surface should be small:
 
 ```console
-steward init
-steward agent create analyst --runtime hermes
-steward agent apply analyst
-steward task run analyst "Review the repository and propose one issue"
-steward agent fork analyst --ttl 2h --task "Try an alternative approach"
-steward explain analyst
+stewardctl agent create analyst -runtime hermes
+stewardctl agent apply analyst
+stewardctl task run analyst "Review the repository and propose one issue"
 ```
 
 CUE, OPA, signed envelopes, placement scores, receipt chains, and provider details
@@ -326,12 +323,18 @@ The roadmap starts from working primitives rather than a blank design:
   inspecting, listing, waiting for, and removing desired deployments;
 - task-ready desired state that retains the exact verified intent and authenticated
   admission projection without retaining private keys; and
-- a recovery-safe `task run` workflow that writes signed authority before dispatch
-  and joins deployment wait, task issuance, Gateway submission, terminal
-  observation, and result storage.
+- a recovery-safe `task run` workflow that writes signed authority before dispatch,
+  joins deployment wait, task issuance, Gateway submission, terminal observation,
+  and result storage, and can derive the qualified Hermes or OpenClaw request from
+  one prompt into a private recoverable run directory;
+- concise `agent create` and durable `agent apply NAME` commands that reuse the
+  exact application-init and deployment reconciliation implementations.
+- authority-preserving in-place rollouts that retain source and target signed
+  delegations, spend disruption budget atomically, and switch each instance only
+  after a proven destroy.
 
-This foundation is not yet the complete product workflow above. The normal task
-path is joined, but a fresh site still needs explicit application, policy,
+This foundation is not yet the complete product workflow above. The normal
+create, apply, and prompt path is joined, but a fresh site still needs explicit policy,
 delegation, Gateway, and service-trust setup. The controller also does not yet join
 continuous health recovery, capacity reservation, snapshots, protected-secret
 providers, and one offline evidence bundle into one first-time-user operation.

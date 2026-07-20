@@ -45,8 +45,18 @@ type deploymentResponse struct {
 	DisruptionBudget    controlstore.DeploymentDisruptionBudget `json:"disruption_budget"`
 	Phase               controlstore.DeploymentPhase            `json:"phase"`
 	Instances           []controlstore.DeploymentInstance       `json:"instances"`
+	Rollout             *deploymentRolloutResponse              `json:"rollout,omitempty"`
 	CreatedAt           string                                  `json:"created_at"`
 	UpdatedAt           string                                  `json:"updated_at"`
+}
+
+type deploymentRolloutResponse struct {
+	SourceGeneration       uint64 `json:"source_generation"`
+	SourceAgentName        string `json:"source_agent_name"`
+	SourceBundleDigest     string `json:"source_bundle_digest"`
+	SourceCapsuleDigest    string `json:"source_capsule_digest"`
+	SourceDelegationDigest string `json:"source_delegation_digest"`
+	StartedAt              string `json:"started_at"`
 }
 
 type deploymentListResponse struct {
@@ -174,7 +184,7 @@ func deploymentView(value controlstore.Deployment) (deploymentResponse, error) {
 	if err != nil {
 		return deploymentResponse{}, err
 	}
-	return deploymentResponse{
+	view := deploymentResponse{
 		TenantID: value.TenantID, DeploymentID: value.ID,
 		Generation: value.Generation, Revision: value.Revision,
 		AgentName: value.AgentName, BundleDigest: value.BundleDigest,
@@ -187,7 +197,17 @@ func deploymentView(value controlstore.Deployment) (deploymentResponse, error) {
 		DisruptionBudget: value.DisruptionBudget,
 		Instances:        append([]controlstore.DeploymentInstance(nil), value.Instances...),
 		CreatedAt:        value.CreatedAt, UpdatedAt: value.UpdatedAt,
-	}, nil
+	}
+	if value.Rollout != nil {
+		view.Rollout = &deploymentRolloutResponse{
+			SourceGeneration: value.Rollout.SourceGeneration, SourceAgentName: value.Rollout.SourceAgentName,
+			SourceBundleDigest:     value.Rollout.SourceBundleDigest,
+			SourceCapsuleDigest:    dsse.Digest(value.Rollout.SourceCapsuleDSSE),
+			SourceDelegationDigest: dsse.Digest(value.Rollout.SourceDelegationDSSE),
+			StartedAt:              value.Rollout.StartedAt,
+		}
+	}
+	return view, nil
 }
 
 func pageDeploymentViews(values []controlstore.Deployment, page pageRequest) ([]deploymentResponse, string, error) {

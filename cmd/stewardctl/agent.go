@@ -21,9 +21,11 @@ import (
 
 func agentCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("agent requires init, validate, build, plan, apply, deploy, deployment, fork, or doctor")
+		return errors.New("agent requires create, init, validate, build, plan, apply, deploy, deployment, fork, or doctor")
 	}
 	switch arguments[0] {
+	case "create":
+		return agentCreate(arguments[1:], stdout)
 	case "init":
 		return agentInit(arguments[1:], stdout)
 	case "validate":
@@ -33,6 +35,9 @@ func agentCommand(arguments []string, stdout io.Writer) error {
 	case "plan":
 		return agentPlan(arguments[1:], stdout)
 	case "apply":
+		if len(arguments) > 1 && !strings.HasPrefix(arguments[1], "-") {
+			return agentDeploymentApply(arguments[1:], stdout)
+		}
 		return agentApply(arguments[1:], stdout)
 	case "deploy":
 		return agentDeploy(arguments[1:], stdout)
@@ -43,8 +48,25 @@ func agentCommand(arguments []string, stdout io.Writer) error {
 	case "doctor":
 		return agentDoctor(arguments[1:], stdout)
 	default:
-		return fmt.Errorf("unknown agent command %q; expected init, validate, build, plan, apply, deploy, deployment, fork, or doctor", arguments[0])
+		return fmt.Errorf("unknown agent command %q; expected create, init, validate, build, plan, apply, deploy, deployment, fork, or doctor", arguments[0])
 	}
+}
+
+// agentCreate is the task-led alias for agent init. Keeping the implementation
+// in agentInit ensures the concise and expert surfaces produce byte-identical
+// application definitions.
+func agentCreate(arguments []string, stdout io.Writer) error {
+	if len(arguments) == 0 || strings.HasPrefix(arguments[0], "-") {
+		return errors.New("agent create requires an agent name before its flags")
+	}
+	name := arguments[0]
+	for _, argument := range arguments[1:] {
+		if argument == "-name" || strings.HasPrefix(argument, "-name=") {
+			return errors.New("agent create takes the agent name positionally; do not also pass -name")
+		}
+	}
+	forwarded := append([]string{"-name", name}, arguments[1:]...)
+	return agentInit(forwarded, stdout)
 }
 
 func agentInit(arguments []string, stdout io.Writer) error {

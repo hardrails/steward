@@ -116,6 +116,172 @@ func TestReconcilerConvergesLifecycleWithoutDuplicateEffectAcrossRestart(t *test
 		deployment.Instances[0].Attempts != 5 {
 		t.Fatalf("removed deployment = %+v", deployment)
 	}
+	applyControlDeployment(t, fixture, 2)
+	recreated := getControlDeployment(t, fixture)
+	if recreated.Generation != 2 || recreated.Phase != controlstore.DeploymentPending || recreated.Rollout != nil {
+		t.Fatalf("removed deployment was not reusable: %+v", recreated)
+	}
+}
+
+func TestReconcilerRollsRunningDeploymentAcrossSignedAuthorities(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+
+	assertReconcileCount(t, reconciler, "enqueue source admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source renewal", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source renewal", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source start", 1, 0)
+
+	source := getControlDeployment(t, fixture)
+	if source.Phase != controlstore.DeploymentReady {
+		t.Fatalf("source deployment is not ready: %+v", source)
+	}
+	applyControlDeployment(t, fixture, 2)
+	target := getControlDeployment(t, fixture)
+	if target.Generation != 2 || target.Rollout == nil || target.Rollout.SourceGeneration != 1 ||
+		target.Instances[0].Generation != 1 {
+		t.Fatalf("rollout did not retain source authority: %+v", target)
+	}
+	_, selectedSource, err := controlstore.DeploymentAuthorityForInstance(target, target.Instances[0])
+	if err != nil || bytes.Equal(selectedSource, target.DelegationDSSE) {
+		t.Fatalf("source instance selected target authority before destroy: %v", err)
+	}
+
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.RollingOut != 1 {
+		t.Fatalf("begin rollout = (%+v, %v)", report, err)
+	}
+	assertReconcileCount(t, reconciler, "enqueue source stop", 0, 1)
+	completeDeploymentCommand(t, fixture, "stop", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source stop", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source destroy", 0, 1)
+	completeDeploymentCommand(t, fixture, "destroy", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source destroy", 1, 0)
+
+	report, err = reconciler.Reconcile(context.Background())
+	if err != nil || report.Replaced != 1 {
+		t.Fatalf("advance to target authority = (%+v, %v)", report, err)
+	}
+	target = getControlDeployment(t, fixture)
+	if target.Instances[0].Generation != 2 || target.Instances[0].Phase != controlstore.DeploymentInstancePending ||
+		target.Instances[0].Rollout == nil || target.Instances[0].Rollout.Stage != "deploying" {
+		t.Fatalf("target cursor was not prepared after destroy: %+v", target)
+	}
+	_, selectedTarget, err := controlstore.DeploymentAuthorityForInstance(target, target.Instances[0])
+	if err != nil || !bytes.Equal(selectedTarget, target.DelegationDSSE) {
+		t.Fatalf("target instance retained source authority after destroy: %v", err)
+	}
+
+	assertReconcileCount(t, reconciler, "enqueue target admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe target admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue target renewal", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe target renewal", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue target start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe target start", 1, 0)
+
+	completed := getControlDeployment(t, fixture)
+	if completed.Phase != controlstore.DeploymentReady || completed.Rollout != nil ||
+		completed.Instances[0].Rollout != nil || completed.Instances[0].Generation != 2 ||
+		completed.Instances[0].Phase != controlstore.DeploymentInstanceRunning {
+		t.Fatalf("rollout did not converge: %+v", completed)
+	}
+}
+
+func TestReconcilerDoesNotSpendRolloutBudgetAfterSourceDelegationExpires(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	assertReconcileCount(t, reconciler, "enqueue source admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source renewal", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source renewal", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source start", 1, 0)
+	applyControlDeployment(t, fixture, 2)
+
+	deployment := getControlDeployment(t, fixture)
+	if deployment.Rollout == nil {
+		t.Fatal("rollout source authority is missing")
+	}
+	source, err := admission.InspectCommandDelegation(deployment.Rollout.SourceDelegationDSSE, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires, err := time.Parse(time.RFC3339Nano, source.ExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.now = expires
+	heartbeatControlNode(t, fixture)
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.Blocked != 1 {
+		t.Fatalf("expired rollout authority reconciliation = (%+v, %v)", report, err)
+	}
+	blocked := getControlDeployment(t, fixture)
+	if blocked.Instances[0].Rollout != nil ||
+		blocked.Instances[0].LastError != string(controlstore.DeploymentBlockedDelegationExpired) {
+		t.Fatalf("expired source delegation spent rollout budget: %+v", blocked.Instances[0])
+	}
+}
+
+func TestReconcilerReportsSourceDelegationExpiryWhileRolloutIsDraining(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+	assertReconcileCount(t, reconciler, "enqueue source admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source renewal", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source renewal", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source start", 1, 0)
+	applyControlDeployment(t, fixture, 2)
+	assertReconcileCount(t, reconciler, "begin rollout", 0, 0)
+
+	deployment := getControlDeployment(t, fixture)
+	if deployment.Rollout == nil || deployment.Instances[0].Rollout == nil ||
+		deployment.Instances[0].Rollout.Stage != "draining" {
+		t.Fatalf("source instance did not enter draining: %+v", deployment)
+	}
+	assertReconcileCount(t, reconciler, "enqueue source stop", 0, 1)
+	completeDeploymentCommand(t, fixture, "stop", controlprotocol.ExecutorStatusDone)
+	source, err := admission.InspectCommandDelegation(deployment.Rollout.SourceDelegationDSSE, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires, err := time.Parse(time.RFC3339Nano, source.ExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.now = expires
+	heartbeatControlNode(t, fixture)
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.Observed != 1 || report.Blocked != 0 {
+		t.Fatalf("observe stop after source expiry = report %+v err %v", report, err)
+	}
+	report, err = reconciler.Reconcile(context.Background())
+	blocked := getControlDeployment(t, fixture)
+	if err != nil || report.Blocked != 1 || report.Enqueued != 0 ||
+		blocked.Instances[0].LastError != string(controlstore.DeploymentBlockedDelegationExpired) ||
+		blocked.Instances[0].CommandOperation != "stop" || blocked.Instances[0].Attempts != 4 ||
+		blocked.Instances[0].Rollout == nil ||
+		blocked.Instances[0].Rollout.Stage != "draining" {
+		t.Fatalf("expired draining authority = report %+v deployment %+v err %v", report, blocked, err)
+	}
 }
 
 func TestTopologyPlacementRanksSpreadBeforePreferenceAndLoad(t *testing.T) {
@@ -1104,9 +1270,16 @@ func applyControlDeploymentNamed(
 	if err != nil {
 		t.Fatal(err)
 	}
+	expectedRevision := uint64(0)
+	if existing, found, err := fixture.store.GetDeployment(fixture.admin, "tenant-a", deploymentID); err != nil {
+		t.Fatal(err)
+	} else if found {
+		expectedRevision = existing.Revision
+	}
 	if _, changed, err := fixture.store.ApplyDeployment(fixture.admin, controlstore.DeploymentApply{
 		TenantID: "tenant-a", ID: deploymentID, Generation: generation,
-		AgentName: deploymentID + "-agent", BundleDigest: "sha256:" + strings.Repeat("a", 64),
+		ExpectedRevision: expectedRevision,
+		AgentName:        deploymentID + "-agent", BundleDigest: "sha256:" + strings.Repeat("a", 64),
 		CapsuleDSSE: capsuleRaw, DelegationDSSE: delegationRaw,
 	}, fixture.now); err != nil || !changed {
 		t.Fatalf("apply deployment = (%v, %v)", changed, err)
@@ -1130,6 +1303,18 @@ func completeDeploymentCommand(t *testing.T, fixture *reconcileFixture, operatio
 	if instance.CommandOperation != operation || instance.CommandID != deliveries[0].CommandID {
 		t.Fatalf("%s delivery differs from cursor: delivery=%+v instance=%+v", operation, deliveries[0], instance)
 	}
+	commandRaw, err := base64.StdEncoding.DecodeString(deliveries[0].CommandDSSEBase64)
+	if err != nil {
+		t.Fatalf("decode %s command: %v", operation, err)
+	}
+	capsuleRaw, delegationRaw, err := controlstore.DeploymentAuthorityForInstance(deployment, instance)
+	if err != nil {
+		t.Fatalf("select %s authority: %v", operation, err)
+	}
+	statement, err := admission.VerifyControllerCommand(commandRaw, delegationRaw, fixture.now)
+	if err != nil {
+		t.Fatalf("verify %s command: %v", operation, err)
+	}
 	runtimeDigest := sha256.Sum256([]byte(deployment.TenantID + "\x00" + instance.InstanceID))
 	runtimeRef := "executor-" + hex.EncodeToString(runtimeDigest[:])
 	reported := "stopped"
@@ -1140,14 +1325,14 @@ func completeDeploymentCommand(t *testing.T, fixture *reconcileFixture, operatio
 		ProtocolVersion: controlprotocol.ExecutorProtocolV4,
 		DeliveryID:      deliveries[0].DeliveryID, DeliveryGeneration: deliveries[0].DeliveryGeneration,
 		CommandID: deliveries[0].CommandID, CommandDigest: deliveries[0].CommandDigest,
-		Status: status, ReportedStatus: reported, ClaimGeneration: 1,
+		Status: status, ReportedStatus: reported, ClaimGeneration: statement.ClaimGeneration,
 		Result: controlprotocol.ExecutorReportResultV4{RuntimeRef: runtimeRef},
 	}
 	if status == controlprotocol.ExecutorStatusDone && operation == "admit" {
 		report.Result.Admission = &controlprotocol.ExecutorAdmissionProjectionV1{
 			SchemaVersion: controlprotocol.ExecutorAdmissionProjectionSchemaV1,
 			RuntimeRef:    runtimeRef, Status: "created",
-			CapsuleDigest: dsse.Digest(deployment.CapsuleDSSE),
+			CapsuleDigest: dsse.Digest(capsuleRaw),
 			PolicyDigest:  "sha256:" + strings.Repeat("b", 64),
 			Generation:    instance.Generation, EvidenceKeyID: strings.Repeat("d", 32),
 		}

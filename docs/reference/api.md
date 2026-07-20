@@ -98,6 +98,13 @@ placement decision. Controller restart resumes from those durable records.
 A deployment `PUT` carries a canonical agent bundle digest, publisher-signed
 capsule, and tenant-signed controller delegation. Control validates bounded routing
 and desired-state consistency but does not treat the tenant signature as trusted.
+Applying a higher generation to a ready deployment starts a bounded in-place
+rollout when instance and lineage identities are unchanged and each assigned node
+remains in the target delegation. The response's top-level digests describe the
+target. Its `rollout` object identifies the retained source authority, and each
+instance's `rollout.stage` shows whether that instance is still draining under the
+source or deploying under the target. `max_unavailable` is shared with node drains
+and enforced atomically.
 Executor verifies that signature against its authenticated site policy, then
 verifies the purpose-separated controller signature and exact delegated scope.
 The response exposes public digests and scope, never either private key. Changed

@@ -210,6 +210,14 @@ It survives restart without duplicating a queued command. Executor independently
 checks the tenant delegation and controller signature. A failed or
 `outcome_unknown` command becomes `degraded` and is not silently retried.
 
+A ready deployment can roll to a higher signed generation without discarding its
+source authority. Rollout is restart-safe, limited by `max_unavailable`, and
+switches each instance to target authority only after Executor proves the source
+runtime was destroyed. It is an in-place replacement: there are no surge replicas,
+automatic rollback, or rollout health probes beyond the authenticated lifecycle
+result. Rollback requires a new higher generation and fresh signed delegation;
+Steward never moves generation fences backward.
+
 A ready deployment retains the exact verified instance intent and authenticated
 Executor admission projection needed for task issuance. `agent deployment wait`
 can export one instance, and `task run` joins deployment wait, task issuance,
@@ -265,6 +273,14 @@ Docker volumes do not provide a portable hard-quota contract, so stateful
 capacity remains a documented gap. Executor revalidates admission and live
 capacity, so unmanaged containers or a stale decision fail closed rather than
 overruling the node.
+
+An in-place rollout starts only from a `Ready` deployment, with every instance in
+the `Running` phase. Steward retains both generations' signed authority and moves
+instances within the deployment's maximum-unavailable budget. A deployment with
+an instance in `Pending`, `Failing`, `Stopping`, or another non-running phase
+cannot start a rollout; recover it to `Ready` or use an explicit remove, wait, and
+apply sequence. Rollouts do not provide surge capacity or automatic rollback, so
+a single-replica deployment is unavailable while its instance is replaced.
 
 `task run` must execute where its Gateway service endpoint is reachable through a
 literal loopback address, normally on the selected node or through an operator-

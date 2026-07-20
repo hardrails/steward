@@ -134,6 +134,47 @@ func TestDeploymentHTTPContractFailsClosedAtRoutingAndEncodingBoundaries(t *test
 	)
 }
 
+func TestDeploymentViewProjectsRolloutDigestsWithoutAuthorityEnvelopes(t *testing.T) {
+	now := time.Date(2026, 7, 20, 18, 0, 0, 0, time.UTC)
+	input := deploymentHTTPFixture(t, now, "research")
+	capsule, err := base64.StdEncoding.DecodeString(input.CapsuleDSSEBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegation, err := base64.StdEncoding.DecodeString(input.DelegationDSSEBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := controlstore.Deployment{
+		TenantID: "tenant-a", ID: "research", Generation: 2, Revision: 9,
+		AgentName: "research-agent", BundleDigest: input.BundleDigest,
+		CapsuleDSSE: capsule, DelegationDSSE: delegation,
+		DesiredState:     controlstore.DeploymentRunning,
+		DisruptionBudget: controlstore.DeploymentDisruptionBudget{MaxUnavailable: 1},
+		Phase:            controlstore.DeploymentReconciling, Instances: []controlstore.DeploymentInstance{},
+		Rollout: &controlstore.DeploymentRollout{
+			SourceGeneration: 1, SourceAgentName: "research-agent",
+			SourceBundleDigest: input.BundleDigest,
+			SourceCapsuleDSSE:  capsule, SourceDelegationDSSE: delegation,
+			StartedAt: now.Format(time.RFC3339Nano),
+		},
+		CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
+	}
+	view, err := deploymentView(value)
+	if err != nil || view.Rollout == nil || view.Rollout.SourceCapsuleDigest != dsse.Digest(capsule) ||
+		view.Rollout.SourceDelegationDigest != dsse.Digest(delegation) {
+		t.Fatalf("rollout projection = (%+v, %v)", view.Rollout, err)
+	}
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), base64.StdEncoding.EncodeToString(capsule)) ||
+		strings.Contains(string(raw), base64.StdEncoding.EncodeToString(delegation)) {
+		t.Fatal("rollout projection exposed retained authority envelope")
+	}
+}
+
 func deploymentHTTPFixture(t *testing.T, now time.Time, deploymentID string) deploymentApplyRequest {
 	t.Helper()
 	_, publisherPrivate, err := ed25519.GenerateKey(rand.Reader)

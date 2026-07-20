@@ -53,6 +53,9 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "init", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes", "openclaw"}) {
 		t.Fatalf("agent runtime candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"agent", "create", "auditor", "-runtime", ""}); !slices.Equal(candidates, []string{"hermes", "openclaw"}) {
+		t.Fatalf("agent create runtime candidates=%v", candidates)
+	}
 	if candidates := stewardctlCompletionCandidates([]string{"agent", "deployment", ""}); !slices.Equal(candidates, []string{"apply", "list", "remove", "status", "wait"}) {
 		t.Fatalf("agent deployment candidates=%v", candidates)
 	}
@@ -60,6 +63,12 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	for _, expected := range []string{"-bundle", "-capsule", "-delegation", "-revision", "-tenant"} {
 		if !slices.Contains(deploymentFlags, expected) {
 			t.Fatalf("deployment flags %v missing %s", deploymentFlags, expected)
+		}
+	}
+	namedApplyFlags := stewardctlCompletionCandidates([]string{"agent", "apply", "auditor", "-"})
+	for _, expected := range []string{"-delegation", "-max-unavailable", "-tenant-id", "-revision", "-control-url", "-ca-file"} {
+		if !slices.Contains(namedApplyFlags, expected) {
+			t.Fatalf("named apply flags %v missing %s", namedApplyFlags, expected)
 		}
 	}
 	if candidates := stewardctlCompletionCandidates([]string{"permit", "con"}); !slices.Equal(candidates, []string{"context"}) {

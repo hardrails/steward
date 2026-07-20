@@ -47,6 +47,7 @@ func (store *Store) StartNodeDrain(
 		return Node{}, false, ErrConflict
 	}
 	if deploymentInstanceDrainOnNode(store.current.deployments, nodeID) ||
+		deploymentRolloutOnNode(store.current.deployments, nodeID) ||
 		unresolvedDeploymentInstanceOnNode(store.current.deployments, nodeID) {
 		return Node{}, false, ErrConflict
 	}
@@ -76,6 +77,20 @@ func (store *Store) StartNodeDrain(
 		return Node{}, false, err
 	}
 	return cloneNode(updated), true, nil
+}
+
+func deploymentRolloutOnNode(deployments map[string]Deployment, nodeID string) bool {
+	for _, deployment := range deployments {
+		if deployment.Rollout == nil {
+			continue
+		}
+		for _, instance := range deployment.Instances {
+			if instance.NodeID == nodeID && instance.Phase != DeploymentInstanceRemoved {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CancelNodeDrain stops the controller from beginning another move. Instances

@@ -3241,10 +3241,6 @@ components:
           $ref: "#/components/schemas/Identifier128"
         node_id:
           $ref: "#/components/schemas/Identifier128"
-        placement:
-          $ref: "#/components/schemas/DeploymentPlacementDecision"
-        drain:
-          $ref: "#/components/schemas/DeploymentInstanceDrain"
         instance_id:
           $ref: "#/components/schemas/Identifier256"
         lineage_id:
@@ -3333,6 +3329,12 @@ components:
           minimum: 1
         node_id:
           $ref: "#/components/schemas/Identifier128"
+        placement:
+          $ref: "#/components/schemas/DeploymentPlacementDecision"
+        drain:
+          $ref: "#/components/schemas/DeploymentInstanceDrain"
+        rollout:
+          $ref: "#/components/schemas/DeploymentInstanceRollout"
         intent:
           allOf:
             - $ref: "#/components/schemas/DeploymentInstanceIntent"
@@ -3383,6 +3385,7 @@ components:
             `placement_constraints_unsatisfied`, `workload_limit_exceeded`, `node_capacity_exhausted`,
             `tenant_capacity_exhausted`, `delegation_expired`,
             `drain_disruption_budget_exhausted`,
+            `rollout_disruption_budget_exhausted`,
             `stateful_drain_unsupported`, `controller_key_mismatch`, or
             `invalid_deployment_authority`), or a
             bounded terminal Executor error when phase is `failed`. Retryable
@@ -3400,7 +3403,7 @@ components:
           minimum: 0
           maximum: 128
           default: 1
-      description: Maximum replicas this deployment allows a node drain to move concurrently. Zero pauses voluntary movement.
+      description: Maximum replicas this deployment allows a node drain or rollout to replace concurrently. Zero pauses voluntary movement.
     DeploymentInstanceDrain:
       type: object
       additionalProperties: false
@@ -3413,6 +3416,21 @@ components:
         started_at:
           type: string
           format: date-time
+    DeploymentInstanceRollout:
+      type: object
+      additionalProperties: false
+      required: [stage, started_at]
+      properties:
+        stage:
+          type: string
+          enum: [draining, deploying]
+        started_at:
+          type: string
+          format: date-time
+      description: >-
+        Durable per-instance rollout cursor. `draining` remains under the
+        source signed authority through a proven destroy; `deploying` has
+        switched to the target authority.
     DeploymentPlacementDecision:
       type: object
       additionalProperties: false
@@ -3536,12 +3554,44 @@ components:
           maxItems: 128
           items:
             $ref: "#/components/schemas/DeploymentInstance"
+        rollout:
+          $ref: "#/components/schemas/DeploymentRollout"
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
+    DeploymentRollout:
+      type: object
+      additionalProperties: false
+      required:
+        - source_generation
+        - source_agent_name
+        - source_bundle_digest
+        - source_capsule_digest
+        - source_delegation_digest
+        - started_at
+      properties:
+        source_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        source_agent_name:
+          $ref: "#/components/schemas/Identifier128"
+        source_bundle_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        source_capsule_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        source_delegation_digest:
+          $ref: "#/components/schemas/SHA256Digest"
+        started_at:
+          type: string
+          format: date-time
+      description: >-
+        Non-secret status for an in-place rollout. Top-level deployment fields
+        describe the target; these digests identify the source authority that
+        remains valid for instances not yet destroyed.
     DeploymentList:
       type: object
       additionalProperties: false
