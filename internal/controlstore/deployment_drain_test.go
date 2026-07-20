@@ -118,6 +118,27 @@ func TestDrainOperationsFailClosedAtAuthorityAndStateBoundaries(t *testing.T) {
 	if _, changed, err := fixture.store.CancelNodeDrain(fixture.admin, "node-1", "request-1", startedAt.Add(2*time.Second)); err != nil || changed {
 		t.Fatalf("retry cancelled drain = (%v, %v)", changed, err)
 	}
+	if _, _, err := fixture.store.CancelNodeDrain(fixture.admin, "node-missing", "request-1", startedAt.Add(2*time.Second)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing node cancellation error = %v", err)
+	}
+	if _, err := fixture.store.CompleteFinishedNodeDrains(time.Time{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid drain completion error = %v", err)
+	}
+	if _, _, err := fixture.store.ChangeNodePlacement(
+		fixture.admin, "node-1", NodePlacementUncordon, "", startedAt.Add(3*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.ChangeNodePlacement(
+		fixture.admin, "node-1", NodePlacementQuarantine, "investigation", startedAt.Add(4*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "request-2", "work", startedAt.Add(5*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("quarantined node drain error = %v", err)
+	}
 }
 
 func TestDeploymentDrainEnforcesBudgetAndAdvancesGenerationAfterRemoval(t *testing.T) {
@@ -141,6 +162,24 @@ func TestDeploymentDrainEnforcesBudgetAndAdvancesGenerationAfterRemoval(t *testi
 	fixture.store.mu.Unlock()
 
 	startedAt := fixture.now.Add(3 * time.Minute)
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-1", created.Revision+1, startedAt,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale begin drain error = %v", err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", "missing-instance", "node-1",
+		"maintenance-1", created.Revision, startedAt,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing begin drain instance error = %v", err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-1", created.Revision, startedAt,
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("begin without node drain error = %v", err)
+	}
 	if _, _, err := fixture.store.StartNodeDrain(
 		fixture.admin, "node-1", "maintenance-1", "kernel upgrade", startedAt,
 	); err != nil {
@@ -153,11 +192,41 @@ func TestDeploymentDrainEnforcesBudgetAndAdvancesGenerationAfterRemoval(t *testi
 	if err != nil || !changed || marked.Instances[0].Drain == nil {
 		t.Fatalf("begin instance drain = (%+v, %v, %v)", marked, changed, err)
 	}
+	if _, changed, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-1", marked.Revision, startedAt.Add(2*time.Second),
+	); err != nil || changed {
+		t.Fatalf("retry instance drain = (%v, %v)", changed, err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-2", marked.Revision, startedAt.Add(2*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting instance drain error = %v", err)
+	}
 	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
 		"tenant-a", "deployment-a", created.Instances[1].InstanceID, "node-1",
 		"maintenance-1", marked.Revision, startedAt.Add(2*time.Second),
 	); !errors.Is(err, ErrDisruptionBudget) {
 		t.Fatalf("second instance drain error = %v", err)
+	}
+	if _, _, err := fixture.store.ReplaceDrainedDeploymentInstance(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID,
+		marked.Revision+1, startedAt.Add(3*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale replacement error = %v", err)
+	}
+	if _, _, err := fixture.store.ReplaceDrainedDeploymentInstance(
+		"tenant-a", "deployment-a", "missing-instance",
+		marked.Revision, startedAt.Add(3*time.Second),
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing replacement instance error = %v", err)
+	}
+	if _, _, err := fixture.store.ReplaceDrainedDeploymentInstance(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID,
+		marked.Revision, startedAt.Add(3*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("premature replacement error = %v", err)
 	}
 
 	removed := marked
