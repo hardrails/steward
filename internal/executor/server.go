@@ -235,6 +235,7 @@ func (s *Server) Handler() http.Handler {
 		requireLocalRole(LocalRoleHostAdmin, s.activationCheckpoint),
 	)
 	mux.HandleFunc("POST /v1/workloads/{id}/start", requireLocalRole(LocalRoleOperator, s.start))
+	mux.HandleFunc("POST /v1/workloads/{id}/lease", requireLocalRole(LocalRoleHostAdmin, s.renewWorkloadLease))
 	mux.HandleFunc("POST /v1/workloads/{id}/stop", requireLocalRole(LocalRoleOperator, s.stop))
 	mux.HandleFunc("DELETE /v1/workloads/{id}", requireLocalRole(LocalRoleOperator, s.destroy))
 	mux.HandleFunc("GET /v1/workloads/{id}", requireLocalRole(LocalRoleObserver, s.status))
@@ -1655,6 +1656,13 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 		writeError(w, http.StatusForbidden, "signed_lifecycle_required", "workload is not bound to the authenticated signed admission")
 		return
 	}
+	if action == "start" && record.LeaseExpiresAt != "" {
+		expires, parseErr := time.Parse(time.RFC3339Nano, record.LeaseExpiresAt)
+		if parseErr != nil || !expires.After(time.Now().UTC()) {
+			writeError(w, http.StatusConflict, "workload_lease_expired", "workload start requires a current generation-bound lease")
+			return
+		}
+	}
 	priorRunning, priorKnown := desiredStatus(observed.Status)
 	containAmbiguousStart := action == "start" && !priorKnown
 	if action == "start" && priorKnown && observed.Workload.Runtime != nil && s.secure.topology != nil {
@@ -1851,6 +1859,54 @@ func (s *Server) secureTransition(w http.ResponseWriter, r *http.Request, action
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"runtime_ref": name, "status": final.Status})
+}
+
+// renewWorkloadLease persists finite workload authority for the exact signed
+// admission generation. Uplink command verification binds the request to its
+// tenant delegation before this host-local boundary is reached.
+func (s *Server) renewWorkloadLease(w http.ResponseWriter, r *http.Request) {
+	if s.secure == nil {
+		writeError(w, http.StatusServiceUnavailable, "secure_admission_unavailable", "signed admission is not configured on this node")
+		return
+	}
+	name, ok := runtimeRef(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_runtime_ref", "invalid executor runtime_ref")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body exceeds the workload lease limit")
+		return
+	}
+	now := time.Now().UTC()
+	lease, err := admission.DecodeWorkloadLease(raw, now)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	s.provisionMu.Lock()
+	defer s.provisionMu.Unlock()
+	if s.secureMutationBlockedLocked() {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_required", "signed runtime state is degraded; workload lease renewal is blocked until reconciliation succeeds")
+		return
+	}
+	observed, err := s.managed(r.Context(), name)
+	if err != nil {
+		writeDockerError(w, err)
+		return
+	}
+	record, ok := s.secureLifecycleRecord(observed)
+	if !ok || !s.principalAuthorizesRecord(r.Context(), record) || !s.currentPolicyAuthorizesRecord(record) {
+		writeError(w, http.StatusForbidden, "signed_lifecycle_required", "workload is not bound to the authenticated current signed admission")
+		return
+	}
+	if err := s.secure.fences.RenewLease(record.TenantID, record.InstanceID, record.Generation, lease.ExpiresAt, now); err != nil {
+		writeError(w, http.StatusConflict, "workload_lease_conflict", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, lease)
 }
 
 // markRuntimeTopologyDegradedLocked publishes drift discovered between periodic

@@ -204,7 +204,8 @@ it through Control, and wait for authenticated node reports.
 
 `stewardctl agent deployment apply` instead records durable desired state. The
 single active controller chooses an active allowed node deterministically and
-drives `admit`, `start`, `stop`, and `destroy` through a tenant-signed delegation.
+drives `admit`, `renew`, `start`, `stop`, and `destroy` through a tenant-signed
+delegation.
 It survives restart without duplicating a queued command. Executor independently
 checks the tenant delegation and controller signature. A failed or
 `outcome_unknown` command becomes `degraded` and is not silently retried.
@@ -218,18 +219,34 @@ duplicate effect.
 
 New placement also requires a recent authenticated node poll. A pending instance
 records `no_eligible_node` when none of its delegated nodes is fresh and capable.
-An instance already assigned to a stale or ineligible node records
-`assigned_node_unavailable` and stays assigned. This is deliberate: without a
-fencing lease, the controller cannot prove that a disconnected workload stopped,
-so moving it could create a duplicate. These retryable reason codes do not change
-the instance to a terminal phase and repeated checks do not append repeated durable
-records.
+A lease-managed stateless instance can be replaced after node loss. Control
+retains the latest signed expiry that Executor could have accepted and waits
+through that time plus the two-minute command clock-skew allowance. Executor
+locally deactivates Gateway authority and stops the trusted relay and agent at
+expiry. Control then advances the instance generation within the tenant-signed
+range before placing it again. A lost response can extend the wait but cannot
+shorten it.
 
-The current reconciler does not reserve aggregate resources, hold fencing leases,
-replace an instance after node loss, preempt workloads, perform progressive
-rollouts, or autoscale. Its least-loaded choice uses bounded current inventory,
-not a capacity reservation. Executor revalidates admission and live capacity, so
-a stale decision fails closed rather than overruling the node.
+This is service fencing, not hardware fencing. Host root, Docker, gVisor, the
+Executor supervisor, and the machine clock remain trusted. Stopping
+`steward-executor` can delay local enforcement until the service restarts; the
+package configures automatic restart and runs reconciliation before polling or
+accepting mutations. A Control outage eventually stops lease-managed agents, so
+the lease duration is also an availability bound.
+
+An older delegation without `renew` reports `assigned_node_unavailable` and stays
+assigned. A stateful instance reports `stateful_replacement_unsupported` because
+local Docker state cannot be attached safely on another node. Exhausting the
+tenant-signed generation range reports `replacement_generation_exhausted`.
+Before a safe expiry, status reports `awaiting_lease_expiry`. These retryable
+reason codes do not change the instance to a terminal phase, and repeated checks
+do not append repeated durable records.
+
+The current reconciler still does not reserve aggregate resources, preempt
+workloads, perform progressive rollouts, or autoscale. Its least-loaded choice
+uses bounded current inventory, not a capacity reservation. Executor revalidates
+admission and live capacity, so a stale decision fails closed rather than
+overruling the node.
 
 `task run` must execute where its Gateway service endpoint is reachable through a
 literal loopback address, normally on the selected node or through an operator-

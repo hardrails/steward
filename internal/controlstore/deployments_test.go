@@ -327,6 +327,68 @@ func TestDeploymentBlockedReasonIsDurableBoundedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestDeploymentReplacementWaitsForLeaseFenceAndAdvancesGeneration(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	created, _, err := fixture.store.ApplyDeployment(
+		fixture.admin,
+		deploymentApplyFixture(t, fixture.now, "deployment-a", 1),
+		fixture.now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseExpiry := fixture.now.Add(2 * time.Minute).UTC()
+	fixture.store.mu.Lock()
+	deployment := fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")]
+	instance := deployment.Instances[0]
+	instance.NodeID = "node-1"
+	instance.Phase = DeploymentInstanceRunning
+	instance.LeaseExpiresAt = leaseExpiry.Format(time.RFC3339Nano)
+	instance.CommandID = "renew-command"
+	instance.CommandOperation = "renew"
+	instance.CommandSequence = 7
+	instance.Attempts = 3
+	instance.TransitionedAt = canonicalTimestamp(fixture.now)
+	deployment.Instances[0] = instance
+	deployment.Phase = DeploymentReady
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = deployment
+	fixture.store.current.commands[commandKey("tenant-a", "node-1", instance.CommandID)] = Command{
+		TenantID: "tenant-a", NodeID: "node-1", ID: instance.CommandID, State: CommandPending,
+	}
+	fixture.store.mu.Unlock()
+
+	if _, _, err := fixture.store.ReplaceDeploymentInstance(
+		"tenant-a", "deployment-a", instance.InstanceID, created.Revision,
+		leaseExpiry.Add(admission.CommandClockSkew-time.Nanosecond),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("replacement before safety bound error = %v", err)
+	}
+	if _, _, err := fixture.store.ReplaceDeploymentInstance(
+		"tenant-a", "deployment-a", instance.InstanceID, created.Revision,
+		fixture.now.Add(2*time.Hour),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("replacement after delegation expiry error = %v", err)
+	}
+	replaced, changed, err := fixture.store.ReplaceDeploymentInstance(
+		"tenant-a", "deployment-a", instance.InstanceID, created.Revision,
+		leaseExpiry.Add(admission.CommandClockSkew),
+	)
+	if err != nil || !changed {
+		t.Fatalf("replace = (%+v, %v, %v)", replaced, changed, err)
+	}
+	got := replaced.Instances[0]
+	if got.Generation != 2 || got.NodeID != "" || got.Phase != DeploymentInstancePending ||
+		got.LeaseExpiresAt != "" || got.Intent != nil || got.Admission != nil ||
+		got.CommandID != "" || got.CommandOperation != "" || got.CommandSequence != 7 || got.Attempts != 3 {
+		t.Fatalf("replacement cursor = %+v", got)
+	}
+	if status, statusErr := fixture.store.Status(); statusErr != nil || status.Commands != 0 {
+		t.Fatalf("replacement retained abandoned command = (%+v, %v)", status, statusErr)
+	}
+}
+
 func TestDeploymentStoreRejectsInvalidAndStaleTransitions(t *testing.T) {
 	var unavailable *Store
 	if _, _, err := unavailable.ApplyDeployment(controlauth.Identity{}, DeploymentApply{}, time.Now()); !errors.Is(err, ErrUnavailable) {
@@ -589,7 +651,7 @@ func deploymentApplyFixtureWithInstanceCount(
 		DelegationID:  deploymentID + "-authority-" + string(rune('a'+generation-1)), TenantID: "tenant-a",
 		ControllerKeyID:     "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublic),
-		Operations:          []string{"admit", "destroy", "start", "stop"}, NodeIDs: []string{"node-1"},
+		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: []string{"node-1"},
 		Instances:       instances,
 		ClaimGeneration: generation,
 		Admission: &admission.CommandDelegationAdmissionTemplate{

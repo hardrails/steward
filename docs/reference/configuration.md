@@ -340,7 +340,7 @@ least one `site_cleanup_command_keys` entry. Every DSSE (Dead Simple Signing
 Envelope) `steward.executor-command.v2` statement binds a typed payload to a
 signature from either an authorized tenant-operation key or a site cleanup key for
 `stop`, `destroy`, or `purge`. Cleanup keys cannot authorize
-`admit`, `start`, or `read`, or share tenant-key IDs. They remain usable after a
+`admit`, `renew`, `start`, or `read`, or share tenant-key IDs. They remain usable after a
 tenant rule is removed, preventing stranded workloads. An emergency policy may have
 cleanup keys and no tenant rules. The bearer credential cannot select a tenant. See
 [Executor outbound uplink]({{ '/executor/' | relative_url }}#outbound-executor-uplink)

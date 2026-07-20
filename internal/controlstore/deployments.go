@@ -246,7 +246,7 @@ func deploymentSpecEqual(existing Deployment, input DeploymentApply) bool {
 }
 
 func hasDeploymentLifecycle(operations []string) bool {
-	for _, operation := range []string{"admit", "destroy", "start", "stop"} {
+	for _, operation := range []string{"admit", "destroy", "renew", "start", "stop"} {
 		if !slices.Contains(operations, operation) {
 			return false
 		}

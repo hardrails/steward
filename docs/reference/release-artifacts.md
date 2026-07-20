@@ -163,7 +163,7 @@ delivery ledger, and supervisor state. Activation uses these ranges to reject an
 unsafe upgrade or rollback before changing the active-release symlink or relay
 binding.
 
-Current manifests declare `admission_fence` readers 1 through 3 and writer 3.
+Current manifests declare `admission_fence` readers 1 through 4 and writer 4.
 Format 1 stores policy and instance-generation high-water records. Format 2 adds
 the committed route-policy digest. Format 3 adds the durable node maintenance
 cordon. Entering or exiting maintenance rewrites the atomic snapshot as format 3;

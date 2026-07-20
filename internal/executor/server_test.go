@@ -651,6 +651,120 @@ func (f activationCheckpointServerFixture) start(t *testing.T) {
 	)
 }
 
+func TestWorkloadLeaseEndpointPersistsExactAuthenticatedGeneration(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, false)
+	workload := fixture.docker.observed.Workload
+	authorized := WithAdmissionPrincipal(
+		context.Background(), workload.TenantID, fixture.config.NodeID, workload.Runtime.Generation,
+	)
+	post := func(ctx context.Context, lease admission.WorkloadLease) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(lease)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(
+			http.MethodPost, "/v1/workloads/"+fixture.ref+"/lease", bytes.NewReader(body),
+		).WithContext(ctx)
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		fixture.server.Handler().ServeHTTP(response, request)
+		return response
+	}
+	lease := admission.WorkloadLease{
+		SchemaVersion: admission.WorkloadLeaseSchemaV1,
+		ExpiresAt:     time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339Nano),
+	}
+	response := post(authorized, lease)
+	if response.Code != http.StatusOK {
+		t.Fatalf("lease status=%d body=%s", response.Code, response.Body.String())
+	}
+	var got admission.WorkloadLease
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil || got != lease {
+		t.Fatalf("lease response=%+v err=%v", got, err)
+	}
+	record, ok := fixture.config.Fences.Record(workload.TenantID, workload.InstanceID)
+	if !ok || record.Generation != workload.Runtime.Generation || record.LeaseExpiresAt != lease.ExpiresAt {
+		t.Fatalf("lease fence=%+v present=%v", record, ok)
+	}
+
+	wrongTenant := WithAdmissionPrincipal(
+		context.Background(), "tenant-b", fixture.config.NodeID, workload.Runtime.Generation,
+	)
+	if response := post(wrongTenant, lease); response.Code != http.StatusForbidden {
+		t.Fatalf("wrong tenant lease status=%d body=%s", response.Code, response.Body.String())
+	}
+	rollback := lease
+	rollback.ExpiresAt = time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
+	if response := post(authorized, rollback); response.Code != http.StatusConflict {
+		t.Fatalf("rollback lease status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestWorkloadLeaseEndpointRequiresSecureAdmission(t *testing.T) {
+	server, err := NewServer(&fakeDocker{}, "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/workloads/executor-"+strings.Repeat("a", 64)+"/lease",
+		strings.NewReader(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T12:05:00Z"}`),
+	)
+	request.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("lease without secure admission status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestWorkloadLeaseEndpointRejectsInvalidAndDegradedRequests(t *testing.T) {
+	fixture := newActivationCheckpointServerFixture(t, false)
+	workload := fixture.docker.observed.Workload
+	authorized := WithAdmissionPrincipal(
+		context.Background(), workload.TenantID, fixture.config.NodeID, workload.Runtime.Generation,
+	)
+	lease := admission.WorkloadLease{
+		SchemaVersion: admission.WorkloadLeaseSchemaV1,
+		ExpiresAt:     time.Now().UTC().Add(2 * time.Minute).Format(time.RFC3339Nano),
+	}
+	validBody, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(target string, body []byte) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(body)).WithContext(authorized)
+		request.Header.Set("Authorization", "Bearer secret")
+		response := httptest.NewRecorder()
+		fixture.server.Handler().ServeHTTP(response, request)
+		return response
+	}
+	for _, test := range []struct {
+		name   string
+		target string
+		body   []byte
+	}{
+		{name: "invalid runtime", target: "/v1/workloads/not-a-runtime/lease", body: validBody},
+		{name: "invalid lease", target: "/v1/workloads/" + fixture.ref + "/lease", body: []byte(`{}`)},
+		{name: "oversized lease", target: "/v1/workloads/" + fixture.ref + "/lease", body: bytes.Repeat([]byte("x"), maxBodyBytes+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := post(test.target, test.body)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if _, err := fixture.config.Journal.Prepare("lease-pending-test", fixture.ref, workload.Runtime.Generation); err != nil {
+		t.Fatal(err)
+	}
+	if response := post("/v1/workloads/"+fixture.ref+"/lease", validBody); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("degraded lease status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func postActivationCheckpoint(
 	t *testing.T,
 	server *Server,

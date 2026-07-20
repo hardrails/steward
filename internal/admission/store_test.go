@@ -143,6 +143,59 @@ func TestFenceStorePersistsMaintenanceCordonAndRequiresExactRetry(t *testing.T) 
 	}
 }
 
+func TestFenceStorePersistsMonotonicGenerationBoundLease(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fences.bin")
+	if err := InitializeFenceStore(path); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenFenceStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := testFenceRecord("tenant", "agent", 7)
+	if err := store.Commit(record, 1); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	first := now.Add(2 * time.Minute).Format(time.RFC3339Nano)
+	if err := store.RenewLease("tenant", "agent", 7, first, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RenewLease("tenant", "agent", 7, first, now); err != nil {
+		t.Fatalf("exact renewal retry: %v", err)
+	}
+	if err := store.RenewLease("tenant", "agent", 7, now.Add(time.Minute).Format(time.RFC3339Nano), now); err == nil {
+		t.Fatal("lease expiry rollback was accepted")
+	}
+	if err := store.RenewLease("tenant", "agent", 8, now.Add(3*time.Minute).Format(time.RFC3339Nano), now); err == nil {
+		t.Fatal("different generation renewed the lease")
+	}
+
+	reopened, err := OpenFenceStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reopened.Record("tenant", "agent")
+	if !ok || got.LeaseExpiresAt != first || reopened.FormatVersion() != fenceVersion {
+		t.Fatalf("reopened record=%#v present=%v format=%d", got, ok, reopened.FormatVersion())
+	}
+	// An idempotent admit retry must retain the independently renewed lease.
+	if err := reopened.Commit(record, 1); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = reopened.Record("tenant", "agent")
+	if got.LeaseExpiresAt != first {
+		t.Fatalf("admit retry erased lease: %#v", got)
+	}
+	record.Present = false
+	if err := reopened.Commit(record, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.RenewLease("tenant", "agent", 7, now.Add(3*time.Minute).Format(time.RFC3339Nano), now); err == nil {
+		t.Fatal("destroyed admission accepted a renewal")
+	}
+}
+
 func TestFenceStoreRejectsInvalidMaintenanceState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fences.bin")
 	if err := InitializeFenceStore(path); err != nil {

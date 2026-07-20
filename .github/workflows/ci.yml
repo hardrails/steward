@@ -177,7 +177,7 @@ jobs:
             "$smoke/layout/release"
           bash scripts/write-release-manifest.sh "$stage" v0.0.0-test linux "$(go env GOARCH)"
           grep -Fq '    "steward-control": "' "$stage/release.json"
-          grep -Fxq '    "admission_fence": {"read_min": 1, "read_max": 3, "write": 3},' "$stage/release.json"
+          grep -Fxq '    "admission_fence": {"read_min": 1, "read_max": 4, "write": 4},' "$stage/release.json"
           grep -Fxq '    "connector_receipt_log": {"read_min": 1, "read_max": 7, "write": 7},' "$stage/release.json"
           grep -Fxq '    "evidence_log": {"read_min": 1, "read_max": 2, "write": 2},' "$stage/release.json"
           grep -Fxq '    "gateway_state": {"read_min": 1, "read_max": 7, "write": 7},' "$stage/release.json"

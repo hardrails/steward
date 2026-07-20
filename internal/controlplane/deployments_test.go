@@ -158,7 +158,7 @@ func deploymentHTTPFixture(t *testing.T, now time.Time, deploymentID string) dep
 		SchemaVersion: admission.CommandDelegationSchemaV1,
 		DelegationID:  deploymentID + "-authority", TenantID: "tenant-a",
 		ControllerKeyID: "controller-a", ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublic),
-		Operations: []string{"admit", "destroy", "start", "stop"}, NodeIDs: []string{"node-1"},
+		Operations: []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: []string{"node-1"},
 		Instances: []admission.CommandDelegationInstance{{
 			InstanceID: deploymentID + "-0", LineageID: deploymentID + "-lineage-0",
 			MinInstanceGeneration: 1, MaxInstanceGeneration: 3,

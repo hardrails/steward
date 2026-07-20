@@ -266,7 +266,7 @@ grant. Activation still fails closed on those states. A node running an older
 Executor without the maintenance API must use the documented per-runtime destroy
 path; do not bypass it with Docker commands.
 
-Entering maintenance writes admission-fence format 3. A target or rollback release
+Entering maintenance writes admission-fence format 3 or later. A target or rollback release
 whose manifest cannot read and preserve that format becomes ineligible. This is a
 durable safety boundary, not a cache that can be removed to regain rollback.
 

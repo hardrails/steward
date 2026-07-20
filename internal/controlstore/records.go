@@ -1214,6 +1214,7 @@ func (store *Store) reclaimExpiredEnrollmentsLocked(now time.Time, reserve int) 
 
 func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Time) []Command {
 	cutoff := now.Add(-store.limits.TerminalRetention)
+	workloadLeaseCutoff := now.Add(-admission.MaxWorkloadLeaseDuration - admission.CommandClockSkew)
 	protectedCanaryCursors := activationCanaryPruningCursors(store.current.commands)
 	protectedDeploymentCursors := deploymentCommandPruningCursors(store.current.deployments)
 	protectedCaptureCanaries := evidenceCapturePruningCanaries(
@@ -1236,7 +1237,7 @@ func (store *Store) prunableCommandsLocked(tenantID, nodeID string, now time.Tim
 			continue
 		}
 		completed, _ := parseTimestamp(command.Terminal.CompletedAt)
-		if !completed.After(cutoff) {
+		if !completed.After(cutoff) || (command.CommandKind == "renew" && !completed.After(workloadLeaseCutoff)) {
 			result = append(result, cloneCommand(command))
 		}
 	}
@@ -1266,7 +1267,7 @@ func deploymentCommandPruningCursors(deployments map[string]Deployment) map[stri
 	for _, deployment := range deployments {
 		for _, instance := range deployment.Instances {
 			if instance.CommandID == "" || instance.NodeID == "" || instance.CommandOperation == "" ||
-				instance.Phase != deploymentOperationPhase(instance.CommandOperation) {
+				!deploymentCommandInFlight(instance) {
 				continue
 			}
 			protected[commandKey(deployment.TenantID, instance.NodeID, instance.CommandID)] = struct{}{}

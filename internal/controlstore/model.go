@@ -27,19 +27,21 @@ import (
 
 const (
 	stateFormatMinReadVersion       = 1
-	stateFormatWriteVersion         = 5
+	stateFormatWriteVersion         = 6
 	stateFormatMaxReadVersion       = stateFormatWriteVersion
 	stateFormatEvidenceVersion      = 2
 	stateFormatExecutorV4Version    = 3
 	stateFormatCaptureVersion       = 4
 	stateFormatDeploymentVersion    = 5
+	stateFormatWorkloadLeaseVersion = 6
 	transactionFormatMinReadVersion = 1
-	transactionFormatWriteVersion   = 5
+	transactionFormatWriteVersion   = 6
 	transactionFormatMaxReadVersion = transactionFormatWriteVersion
 	transactionEvidenceVersion      = 2
 	transactionExecutorV4Version    = 3
 	transactionCaptureVersion       = 4
 	transactionDeploymentVersion    = 5
+	transactionWorkloadLeaseVersion = 6
 	maxMutationsPerRecord           = 128
 
 	MaxEvidenceCapturesActive        = 16
@@ -251,19 +253,23 @@ const (
 // DeploymentInstance is the controller's durable progress record for one
 // exact instance named by the tenant-signed delegation.
 type DeploymentInstance struct {
-	InstanceID       string                                         `json:"instance_id"`
-	LineageID        string                                         `json:"lineage_id"`
-	Generation       uint64                                         `json:"generation"`
-	NodeID           string                                         `json:"node_id,omitempty"`
-	Intent           *admission.InstanceIntent                      `json:"intent,omitempty"`
-	Admission        *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
-	Phase            DeploymentInstancePhase                        `json:"phase"`
-	CommandID        string                                         `json:"command_id,omitempty"`
-	CommandOperation string                                         `json:"command_operation,omitempty"`
-	CommandSequence  uint64                                         `json:"command_sequence,omitempty"`
-	Attempts         uint32                                         `json:"attempts,omitempty"`
-	LastError        string                                         `json:"last_error,omitempty"`
-	TransitionedAt   string                                         `json:"transitioned_at"`
+	InstanceID string                                         `json:"instance_id"`
+	LineageID  string                                         `json:"lineage_id"`
+	Generation uint64                                         `json:"generation"`
+	NodeID     string                                         `json:"node_id,omitempty"`
+	Intent     *admission.InstanceIntent                      `json:"intent,omitempty"`
+	Admission  *controlprotocol.ExecutorAdmissionProjectionV1 `json:"admission,omitempty"`
+	// LeaseExpiresAt is the latest signed lease expiry that Executor could have
+	// accepted. It is persisted before delivery and is therefore a conservative
+	// replacement safety bound even when the terminal report is lost.
+	LeaseExpiresAt   string                  `json:"lease_expires_at,omitempty"`
+	Phase            DeploymentInstancePhase `json:"phase"`
+	CommandID        string                  `json:"command_id,omitempty"`
+	CommandOperation string                  `json:"command_operation,omitempty"`
+	CommandSequence  uint64                  `json:"command_sequence,omitempty"`
+	Attempts         uint32                  `json:"attempts,omitempty"`
+	LastError        string                  `json:"last_error,omitempty"`
+	TransitionedAt   string                  `json:"transitioned_at"`
 }
 
 // Deployment is bounded desired state. It contains public signed artifacts,
@@ -934,6 +940,9 @@ func decodeState(raw []byte, limit int) (state, error) {
 		if err != nil {
 			return state{}, fmt.Errorf("control snapshot deployment encoding: %w", err)
 		}
+		if snapshot.Version < stateFormatWorkloadLeaseVersion && deploymentUsesWorkloadLeaseFormat(deployment) {
+			return state{}, errors.New("legacy control snapshot contains workload lease state")
+		}
 		key := deploymentKey(deployment.TenantID, deployment.ID)
 		if _, exists := current.deployments[key]; exists {
 			return state{}, errors.New("control snapshot contains a duplicate deployment")
@@ -1118,12 +1127,25 @@ func applyTransaction(current state, value transaction) (state, error) {
 			if err != nil {
 				return state{}, fmt.Errorf("deployment mutation encoding: %w", err)
 			}
+			if value.Version < transactionWorkloadLeaseVersion && deploymentUsesWorkloadLeaseFormat(deployment) {
+				return state{}, errors.New("legacy deployment mutation contains workload lease state")
+			}
 			next.deployments[deploymentKey(deployment.TenantID, deployment.ID)] = cloneDeployment(deployment)
 		default:
 			return state{}, errors.New("control mutation kind is unsupported")
 		}
 	}
 	return next, nil
+}
+
+func deploymentUsesWorkloadLeaseFormat(deployment Deployment) bool {
+	for _, instance := range deployment.Instances {
+		if instance.LeaseExpiresAt != "" ||
+			instance.CommandID == "" && instance.CommandOperation == "" && instance.CommandSequence > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func validateState(current state, limits Limits) error {
@@ -1366,9 +1388,10 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 			return errors.New("deployment instance phase is invalid")
 		}
 		commandEmpty := instance.CommandID == "" && instance.CommandOperation == "" && instance.CommandSequence == 0
+		commandCursorOnly := instance.CommandID == "" && instance.CommandOperation == "" && instance.CommandSequence > 0
 		commandComplete := validRecordID(instance.CommandID, 256) &&
 			validDeploymentOperation(instance.CommandOperation) && instance.CommandSequence > 0
-		if !commandEmpty && !commandComplete {
+		if !commandEmpty && !commandCursorOnly && !commandComplete {
 			return errors.New("deployment instance command cursor is incomplete")
 		}
 		if instance.Intent != nil {
@@ -1389,13 +1412,20 @@ func validateDeployment(deployment Deployment, limits Limits) error {
 				return errors.New("deployment instance admission projection is invalid")
 			}
 		}
+		if instance.LeaseExpiresAt != "" {
+			leaseExpiry, parseErr := time.Parse(time.RFC3339Nano, instance.LeaseExpiresAt)
+			if parseErr != nil || leaseExpiry.IsZero() ||
+				instance.LeaseExpiresAt != leaseExpiry.UTC().Format(time.RFC3339Nano) {
+				return errors.New("deployment instance lease expiry is invalid")
+			}
+		}
 	}
 	return nil
 }
 
 func validDeploymentOperation(operation string) bool {
 	switch operation {
-	case "admit", "start", "stop", "destroy":
+	case "admit", "renew", "start", "stop", "destroy":
 		return true
 	default:
 		return false

@@ -61,6 +61,7 @@ type reconcilePlan struct {
 	routePolicyDigest string
 	degraded          error
 	containment       bool
+	removeExpired     bool
 
 	startRelay   bool
 	stopRelay    bool
@@ -255,6 +256,15 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 	if !observed.Hardened {
 		return s.containReconciliation(ctx, plan, observed, "workload_drift", "signed workload is not exactly managed and hardened")
 	}
+	if record.LeaseExpiresAt != "" {
+		expires, parseErr := time.Parse(time.RFC3339Nano, record.LeaseExpiresAt)
+		if parseErr != nil {
+			return s.containReconciliation(ctx, plan, observed, "workload_lease_invalid", "signed workload lease is invalid")
+		}
+		if !expires.After(time.Now().UTC()) {
+			return s.expireLeaseReconciliation(ctx, plan, observed), nil
+		}
+	}
 	if plan.revoked {
 		plan.stopAgent = !stoppedStatus(observed.Status)
 	} else {
@@ -375,6 +385,38 @@ func (s *Server) planReconciliation(ctx context.Context, record admission.FenceR
 	}
 	plan.actualChange = plan.startRelay || plan.stopRelay || plan.register || plan.activate || plan.deactivate
 	return plan, nil
+}
+
+// expireLeaseReconciliation narrows an otherwise exact runtime after its local
+// authority window closes. Expiry is an expected failover transition rather
+// than persistent drift, so a fully stopped runtime remains ready for a later
+// signed destroy while it cannot be started without another monotonic renewal.
+func (s *Server) expireLeaseReconciliation(
+	ctx context.Context,
+	plan reconcilePlan,
+	observed ObservedWorkload,
+) reconcilePlan {
+	plan.containment = true
+	plan.removeExpired = observed.Workload.State == nil
+	plan.workload = observed.Workload
+	plan.stopAgent = !stoppedStatus(observed.Status)
+	if observed.Workload.Runtime != nil && s.secure.gateway != nil {
+		inspection, err := s.secure.gateway.InspectWithPolicy(ctx, plan.grantID)
+		if err == nil {
+			plan.deactivate = inspection.Grant.Active
+		} else if !gatewayGrantNotFound(err) {
+			plan.deactivate = true
+		}
+	}
+	if observed.Workload.Runtime != nil && s.secure.topology != nil && runtimeIdentityMatchesRecord(observed.Workload, plan.record) {
+		plan.relayName = RelayName(plan.record.TenantID, plan.record.InstanceID, plan.record.Generation)
+		relay, err := s.secure.topology.InspectRelay(ctx, plan.relayName)
+		if err == nil && relayContainmentIdentity(relay, s.desiredRelay(observed.Workload)) {
+			plan.stopRelay = !stoppedStatus(relay.Status)
+		}
+	}
+	plan.actualChange = plan.deactivate || plan.stopAgent || plan.stopRelay || plan.removeExpired
+	return plan
 }
 
 // containReconciliation turns proven isolation drift into a narrow fail-closed
@@ -519,6 +561,25 @@ func (s *Server) applyReconciliation(ctx context.Context, plan reconcilePlan) er
 		if err := s.verifyReconciliationContainment(ctx, plan); err != nil {
 			return reconciliationError("verification_ambiguous", "verify contained runtime: %v", err)
 		}
+		if plan.removeExpired {
+			if removeErr := s.docker.Remove(ctx, plan.runtimeRef); removeErr != nil && !errors.Is(removeErr, ErrNotFound) {
+				if _, inspectErr := s.docker.Inspect(ctx, plan.runtimeRef); !errors.Is(inspectErr, ErrNotFound) {
+					return reconciliationError("lease_cleanup_ambiguous", "remove expired workload: %v", removeErr)
+				}
+			}
+			if !s.removeRuntimeTopology(ctx, plan.workload) {
+				return reconciliationError("lease_cleanup_ambiguous", "expired workload topology cleanup is ambiguous")
+			}
+			if _, inspectErr := s.docker.Inspect(ctx, plan.runtimeRef); !errors.Is(inspectErr, ErrNotFound) {
+				return reconciliationError("lease_cleanup_ambiguous", "expired workload remained after removal")
+			}
+			tombstone := plan.record
+			tombstone.Present = false
+			policyEpoch := s.secure.fences.Fences(tombstone.TenantID, tombstone.InstanceID).PolicyEpoch
+			if err := s.secure.fences.Commit(tombstone, policyEpoch); err != nil {
+				return reconciliationError("lease_cleanup_ambiguous", "persist expired workload tombstone: %v", err)
+			}
+		}
 		settledRoutePolicyDigest = plan.routePolicyDigest
 	} else {
 		settled, err := s.planReconciliation(ctx, plan.record)
@@ -533,7 +594,9 @@ func (s *Server) applyReconciliation(ctx context.Context, plan reconcilePlan) er
 	committed := prepared
 	committed.ErrorCode = ""
 	committed.Outcome = evidence.Committed
-	if plan.revoked {
+	if plan.removeExpired {
+		committed.Type = evidence.LifecycleDestroy
+	} else if plan.revoked {
 		committed.Type = evidence.Revocation
 	} else {
 		committed.Type = evidence.Drift

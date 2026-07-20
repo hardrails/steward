@@ -389,9 +389,9 @@ func TestExecutorV4FormatRangeMigratesV2AndRejectsAuthoritySmuggling(t *testing.
 		controlprotocol.MaxExecutorReportBytes != 16<<10 {
 		t.Fatal("controller or protocol report byte cap changed")
 	}
-	if stateFormatMinReadVersion != 1 || stateFormatMaxReadVersion != 5 ||
+	if stateFormatMinReadVersion != 1 || stateFormatMaxReadVersion != 6 ||
 		stateFormatWriteVersion != stateFormatMaxReadVersion ||
-		transactionFormatMinReadVersion != 1 || transactionFormatMaxReadVersion != 5 ||
+		transactionFormatMinReadVersion != 1 || transactionFormatMaxReadVersion != 6 ||
 		transactionFormatWriteVersion != transactionFormatMaxReadVersion {
 		t.Fatal("control store read/write ranges changed without an explicit migration")
 	}
@@ -406,6 +406,29 @@ func TestExecutorV4FormatRangeMigratesV2AndRejectsAuthoritySmuggling(t *testing.
 	}
 	if snapshot.Version != stateFormatWriteVersion {
 		t.Fatalf("snapshot write version = %d", snapshot.Version)
+	}
+	leaseSnapshot := snapshot
+	leaseSnapshot.Version = stateFormatDeploymentVersion
+	leaseSnapshot.Deployments = []storedDeployment{{
+		CapsuleDSSEBase64: "e30=", DelegationDSSEBase64: "e30=",
+		Instances: []DeploymentInstance{{LeaseExpiresAt: "2026-07-20T12:05:00Z"}},
+	}}
+	leaseSmuggling, err := json.Marshal(leaseSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeState(leaseSmuggling, limits.MaxStateBytes); err == nil ||
+		!strings.Contains(err.Error(), "legacy control snapshot contains workload lease state") {
+		t.Fatalf("legacy workload lease snapshot error = %v", err)
+	}
+	leaseSnapshot.Deployments[0].Instances[0] = DeploymentInstance{CommandSequence: 1}
+	cursorSmuggling, err := json.Marshal(leaseSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeState(cursorSmuggling, limits.MaxStateBytes); err == nil ||
+		!strings.Contains(err.Error(), "legacy control snapshot contains workload lease state") {
+		t.Fatalf("legacy workload lease cursor error = %v", err)
 	}
 	snapshot.Version = stateFormatEvidenceVersion
 	snapshot.Captures = nil

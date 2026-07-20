@@ -58,7 +58,7 @@ func TestAgentDeploymentCommandsConvergeDesiredStateWithShortDefaults(t *testing
 		SchemaVersion: admission.CommandDelegationSchemaV1, DelegationID: "auditor-authority",
 		TenantID: "tenant-a", ControllerKeyID: "controller-a",
 		ControllerPublicKey: base64.StdEncoding.EncodeToString(controllerPublic),
-		Operations:          []string{"admit", "destroy", "start", "stop"}, NodeIDs: []string{"node-a"},
+		Operations:          []string{"admit", "destroy", "renew", "start", "stop"}, NodeIDs: []string{"node-a"},
 		Instances: []admission.CommandDelegationInstance{{
 			InstanceID: "auditor-0", LineageID: "auditor-lineage", MinInstanceGeneration: 1, MaxInstanceGeneration: 2,
 		}},
@@ -405,8 +405,8 @@ func TestAgentDeploymentCommandAndLifecycleValidationErrors(t *testing.T) {
 			t.Fatalf("deployment arguments %v were accepted", arguments)
 		}
 	}
-	if !deploymentLifecycleGranted([]string{"admit", "destroy", "start", "stop"}) ||
-		deploymentLifecycleGranted([]string{"admit", "start", "stop"}) {
+	if !deploymentLifecycleGranted([]string{"admit", "destroy", "renew", "start", "stop"}) ||
+		deploymentLifecycleGranted([]string{"admit", "destroy", "start", "stop"}) {
 		t.Fatal("deployment lifecycle scope validation is inconsistent")
 	}
 	withoutContext, err := applyTaskRunContext([]string{"-no-context", "-deployment", "agent.json"})

@@ -161,12 +161,16 @@ Steward Control owns bounded desired deployment state, observes nodes and
 instances, computes deterministic placement, and drives finite lifecycle
 operations. The implemented foundation retains public signed artifacts, performs
 least-loaded placement across the exact delegated node set, and reconciles
-`admit`, `start`, `stop`, and `destroy` without storing tenant private keys.
+`admit`, generation-bound `renew`, `start`, `stop`, and `destroy` without storing
+tenant private keys. Executor enforces lease expiry locally, and Control can
+replace a stateless instance after the conservative expiry and clock-skew window.
 
-The next scheduling layer should support instance counts, singleton agents, node leases, resource
-reservations, labels, taints, isolation classes, locality, restart recovery,
-replacement, drain, bounded rollout, rollback, quarantine, garbage collection,
-tenant quotas, and an explanation for every pending or rejected instance.
+The next scheduling layer should add resource observations and atomic
+reservations, labels, taints, isolation classes, topology and image locality,
+controller-side cordon and quarantine, drain budgets, bounded rollout, rollback,
+tenant quotas, and portable state. Instance counts, singleton identity, restart
+recovery, lease-fenced stateless replacement, bounded renewal retention, and an
+explanation for replacement blockers are already part of the narrow scheduler.
 
 The controller may request authority but may not invent it. Automated operation
 uses a tenant-signed, time-bounded delegation that limits application, version,

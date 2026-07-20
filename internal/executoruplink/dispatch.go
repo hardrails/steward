@@ -318,6 +318,16 @@ func (d *dispatcher) apply(ctx context.Context, cmd command, tenantID, instanceI
 		}
 		ctx = executor.WithAdmissionPrincipal(ctx, tenantID, d.nodeID, cmd.InstanceGeneration)
 		return d.call(ctx, http.MethodPost, "/v1/workloads/"+runtimeRef+"/start", nil)
+	case "renew":
+		lease, err := admission.DecodeWorkloadLease(cmd.Payload, d.now().UTC())
+		if err != nil {
+			return "", err
+		}
+		ctx = executor.WithAdmissionPrincipal(ctx, tenantID, d.nodeID, cmd.InstanceGeneration)
+		if err := d.callWorkloadLease(ctx, runtimeRef, lease); err != nil {
+			return "", err
+		}
+		return "leased", nil
 	case "stop":
 		if err := validateLifecyclePayload(cmd); err != nil {
 			return "", err
@@ -616,6 +626,48 @@ func (d *dispatcher) call(ctx context.Context, method, target string, body any) 
 	default:
 		return "", localCallError(method, fmt.Errorf("local executor returned unsupported status %q", payload.Status))
 	}
+}
+
+func (d *dispatcher) callWorkloadLease(
+	ctx context.Context,
+	runtimeRef string,
+	want admission.WorkloadLease,
+) error {
+	raw, err := json.Marshal(want)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		"http://executor.local/v1/workloads/"+runtimeRef+"/lease",
+		bytes.NewReader(raw),
+	)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+d.token)
+	req.Header.Set("Content-Type", "application/json")
+	response := newLocalResponse(controlprotocol.MaxExecutorReportBytes)
+	d.handler.ServeHTTP(response, req)
+	if response.overflow {
+		return localCallError(http.MethodPost, errLocalResponseLimit)
+	}
+	if response.status >= 400 {
+		return localCallError(http.MethodPost, fmt.Errorf(
+			"local executor returned HTTP %d: %s",
+			response.status,
+			strings.TrimSpace(response.body.String()),
+		))
+	}
+	var got admission.WorkloadLease
+	if err := dsse.DecodeStrictInto(response.body.Bytes(), controlprotocol.MaxExecutorReportBytes, &got); err != nil {
+		return localCallError(http.MethodPost, fmt.Errorf("decode local workload lease response: %w", err))
+	}
+	if got != want {
+		return localCallError(http.MethodPost, errors.New("local executor response changed workload lease expiry"))
+	}
+	return nil
 }
 
 type localResponse struct {

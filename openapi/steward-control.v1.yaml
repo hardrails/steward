@@ -2947,6 +2947,14 @@ components:
             successful admission. Together with intent, this is sufficient to
             bind a tenant-signed service task without retrieving old command
             records.
+        lease_expires_at:
+          type: string
+          format: date-time
+          description: >-
+            Latest signed workload-lease expiry that Executor could have
+            accepted. Control retains this conservative bound before delivery;
+            replacement waits through this time plus the command clock-skew
+            allowance even if the terminal report is lost.
         phase:
           type: string
           enum: [pending, admitting, starting, running, stopping, destroying, removed, failed]
@@ -2954,7 +2962,7 @@ components:
           $ref: "#/components/schemas/Identifier256"
         command_operation:
           type: string
-          enum: [admit, start, stop, destroy]
+          enum: [admit, renew, start, stop, destroy]
         command_sequence:
           type: integer
           format: int64
@@ -2968,7 +2976,9 @@ components:
           maxLength: 1024
           description: >-
             A stable retryable blocked reason (`no_eligible_node`,
-            `assigned_node_unavailable`, `delegation_expired`,
+            `assigned_node_unavailable`, `awaiting_lease_expiry`,
+            `stateful_replacement_unsupported`,
+            `replacement_generation_exhausted`, `delegation_expired`,
             `controller_key_mismatch`, or `invalid_deployment_authority`), or a
             bounded terminal Executor error when phase is `failed`. Retryable
             reasons clear when reconciliation can enqueue or observe progress.
