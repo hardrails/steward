@@ -432,6 +432,120 @@ func TestAgentDeploymentCommandAndLifecycleValidationErrors(t *testing.T) {
 	}
 }
 
+func TestAgentCommandsHydrateSelectedContextWithoutOverridingFlags(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contextPath := filepath.Join(directory, "contexts.json")
+	t.Setenv("STEWARD_CONTEXT_FILE", contextPath)
+	t.Setenv("STEWARD_CONTEXT", "")
+	selected := cliContext{
+		Name: "production", ControlURL: "https://control.example", TokenFile: filepath.Join(directory, "operator.token"),
+		CAFile: filepath.Join(directory, "ca.pem"), TenantID: "tenant-context", NodeID: "node-context",
+	}
+	if err := writeCLIContextConfig(contextPath, cliContextConfig{
+		Current: selected.Name, Contexts: []cliContext{selected},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	agentArguments, err := applyAgentControlContext([]string{"-control-url", "https://explicit.example", "-tenant", "tenant-explicit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"-control-url", "https://explicit.example", "-tenant", "tenant-explicit",
+		"-token-file", selected.TokenFile, "-ca-file", selected.CAFile, "-node-id", selected.NodeID,
+	} {
+		if !slices.Contains(agentArguments, expected) {
+			t.Fatalf("agent context arguments %v do not contain %q", agentArguments, expected)
+		}
+	}
+	if slices.Contains(agentArguments, selected.ControlURL) || slices.Contains(agentArguments, selected.TenantID) {
+		t.Fatalf("agent context overrode explicit flags: %v", agentArguments)
+	}
+
+	deploymentArguments, err := applyAgentDeploymentContext([]string{"status", "auditor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedPrefix := []string{
+		"-control-url", selected.ControlURL, "-token-file", selected.TokenFile,
+		"-ca-file", selected.CAFile, "-tenant", selected.TenantID,
+	}
+	if len(deploymentArguments) < len(expectedPrefix) || !slices.Equal(deploymentArguments[:len(expectedPrefix)], expectedPrefix) {
+		t.Fatalf("deployment context arguments = %v, want prefix %v", deploymentArguments, expectedPrefix)
+	}
+
+	withoutContext, err := applyAgentControlContext([]string{"-no-context", "-tenant", "tenant-explicit"})
+	if err != nil || !slices.Equal(withoutContext, []string{"-tenant", "tenant-explicit"}) {
+		t.Fatalf("agent no-context arguments=%v error=%v", withoutContext, err)
+	}
+	t.Setenv("STEWARD_CONTEXT", "missing")
+	if _, err := applyAgentControlContext(nil); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing selected context error = %v", err)
+	}
+}
+
+func TestSubmitAndWaitAgentCommandHandlesTerminalPollingAndCancellation(t *testing.T) {
+	command := func(state, status, detail string) controlclient.Command {
+		result := (*controlclient.CommandResult)(nil)
+		if detail != "" {
+			result = &controlclient.CommandResult{Error: detail}
+		}
+		return controlclient.Command{
+			CommandID: "command-a", TenantID: "tenant-a", NodeID: "node-a",
+			CommandDigest: "sha256:" + strings.Repeat("a", 64), CommandKind: "stop",
+			State: state, TerminalStatus: status, Result: result,
+		}
+	}
+	for _, test := range []struct {
+		name       string
+		submitted  controlclient.Command
+		polled     controlclient.Command
+		cancel     bool
+		wantStatus string
+		wantError  string
+	}{
+		{name: "already terminal", submitted: command("terminal", controlprotocol.ExecutorStatusDone, ""), wantStatus: controlprotocol.ExecutorStatusDone},
+		{name: "terminal failure", submitted: command("terminal", "denied", "policy rejected command"), wantError: "denied: policy rejected command"},
+		{name: "polls to terminal", submitted: command("pending", "", ""), polled: command("terminal", controlprotocol.ExecutorStatusDone, ""), wantStatus: controlprotocol.ExecutorStatusDone},
+		{name: "cancellation", submitted: command("pending", "", ""), cancel: true, wantError: context.Canceled.Error()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				if request.Method == http.MethodPost {
+					_ = json.NewEncoder(writer).Encode(test.submitted)
+					if test.cancel {
+						cancel()
+					}
+					return
+				}
+				_ = json.NewEncoder(writer).Encode(test.polled)
+			}))
+			defer server.Close()
+			client, err := controlclient.New(server.URL, "operator", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := submitAndWaitAgentCommand(ctx, client, "tenant-a", "node-a", []byte("signed"), "command-a")
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("wait error = %v, want %q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil || result.TerminalStatus != test.wantStatus {
+				t.Fatalf("wait result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
 func withWorkingDirectory(t *testing.T, directory string) {
 	t.Helper()
 	previous, err := os.Getwd()

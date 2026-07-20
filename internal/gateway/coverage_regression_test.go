@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -260,6 +261,64 @@ func TestLoadedEgressRouteEqualityIncludesEveryAuthorityField(t *testing.T) {
 		if sameLoadedEgressRoute(base, candidate) {
 			t.Fatalf("authority mutation %d compared equal", index)
 		}
+	}
+}
+
+func TestRetainedConnectorCallsRestoreOnlyCanonicalOwnedSpend(t *testing.T) {
+	digestA := "sha256:" + strings.Repeat("a", 64)
+	digestB := "sha256:" + strings.Repeat("b", 64)
+	digestC := "sha256:" + strings.Repeat("c", 64)
+	server := &Server{connectors: map[string]loadedConnector{
+		"alpha": {Connector: Connector{ID: "alpha", MaxCallsPerGrant: 2}},
+		"beta":  {Connector: Connector{ID: "beta", MaxCallsPerGrant: 2}},
+	}}
+	grant := Grant{GrantID: "grant-a", ConnectorIDs: []string{"alpha", "beta"}}
+	valid := []retainedConnectorCall{
+		{ConnectorID: "alpha", Sequence: 1, Digest: digestA},
+		{ConnectorID: "alpha", Sequence: 2, Digest: digestB},
+		{ConnectorID: "beta", Sequence: 1, Digest: digestC},
+	}
+	calls, err := server.validateRetainedConnectorCalls(grant, valid)
+	if err != nil || !slices.Equal(calls["alpha"], []string{digestA, digestB}) || !slices.Equal(calls["beta"], []string{digestC}) {
+		t.Fatalf("restored calls=%v error=%v", calls, err)
+	}
+	if calls, err := server.validateRetainedConnectorCalls(grant, nil); err != nil || calls != nil {
+		t.Fatalf("empty restored calls=%v error=%v", calls, err)
+	}
+
+	invalid := map[string][]retainedConnectorCall{
+		"foreign connector":  {{ConnectorID: "other", Sequence: 1, Digest: digestA}},
+		"invalid digest":     {{ConnectorID: "alpha", Sequence: 1, Digest: "bad"}},
+		"noncanonical order": {{ConnectorID: "beta", Sequence: 1, Digest: digestA}, {ConnectorID: "alpha", Sequence: 1, Digest: digestB}},
+		"sequence gap":       {{ConnectorID: "alpha", Sequence: 2, Digest: digestA}},
+		"over budget": {
+			{ConnectorID: "alpha", Sequence: 1, Digest: digestA},
+			{ConnectorID: "alpha", Sequence: 2, Digest: digestB},
+			{ConnectorID: "alpha", Sequence: 3, Digest: digestC},
+		},
+		"duplicate digest": {{ConnectorID: "alpha", Sequence: 1, Digest: digestA}, {ConnectorID: "beta", Sequence: 1, Digest: digestA}},
+	}
+	for name, retained := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if calls, err := server.validateRetainedConnectorCalls(grant, retained); err == nil || calls != nil {
+				t.Fatalf("invalid retained calls restored: %v", calls)
+			}
+		})
+	}
+
+	owner := connectorSpendOwner{GrantID: grant.GrantID, ConnectorID: "alpha"}
+	server.connectorCalls = map[string]map[string][]string{grant.GrantID: {"alpha": {digestA, digestB}}}
+	server.connectorSpends = map[string]connectorSpendOwner{digestA: owner}
+	server.connectorCallCounts = map[string]map[string]int{grant.GrantID: {"alpha": 1}}
+	if err := server.mergeRetainedConnectorSpends(); err != nil {
+		t.Fatal(err)
+	}
+	if server.connectorSpends[digestB] != owner || server.connectorCallCounts[grant.GrantID]["alpha"] != 2 {
+		t.Fatalf("merged spends=%v counts=%v", server.connectorSpends, server.connectorCallCounts)
+	}
+	server.connectorSpends[digestB] = connectorSpendOwner{GrantID: "foreign", ConnectorID: "alpha"}
+	if err := server.mergeRetainedConnectorSpends(); err == nil {
+		t.Fatal("conflicting retained spend ownership was accepted")
 	}
 }
 

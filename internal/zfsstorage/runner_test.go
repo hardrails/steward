@@ -27,7 +27,8 @@ esac
 	if err != nil || string(output) != "dataset-value" {
 		t.Fatalf("successful command = (%q, %v)", output, err)
 	}
-	if _, err := runner.Run(nil, "ok"); err == nil {
+	var nilContext context.Context
+	if _, err := runner.Run(nilContext, "ok"); err == nil {
 		t.Fatal("nil command context was accepted")
 	}
 	_, err = runner.Run(context.Background(), "fail")

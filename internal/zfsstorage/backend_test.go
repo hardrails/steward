@@ -294,7 +294,8 @@ func TestBackendErrorClassificationAndInputGuards(t *testing.T) {
 
 func TestConformanceAndQuotaProbeInputFailures(t *testing.T) {
 	backend, _, _ := newBackendFixture(t)
-	if err := backend.VerifyConformance(nil); err == nil {
+	var nilContext context.Context
+	if err := backend.VerifyConformance(nilContext); err == nil {
 		t.Fatal("nil conformance context was accepted")
 	}
 	if err := conformanceError(nil); err == nil {
