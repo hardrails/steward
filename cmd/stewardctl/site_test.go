@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -78,6 +79,12 @@ func TestSiteInitCreatesAndVerifiesSeparatedAuthorityPackage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if policy.Publishers[0].AllowedRepositories[0] != "registry.internal/agents" ||
+		!slices.Equal(policy.Publishers[0].AllowedProfiles, []admission.ProfileRef{
+			{ID: "generic-v1", Version: "v1"}, {ID: "hermes-v1", Version: "v1"}, {ID: "openclaw-v1", Version: "v1"},
+		}) || policy.Publishers[0].ResourceCeiling != (admission.ResourceLimits{MemoryBytes: 1024 << 20, CPUMillis: 1000, PIDs: 256}) ||
+		!slices.Equal(policy.Tenants[0].InferenceRouteIDs, []string{"local"}) ||
+		!slices.Equal(policy.Tenants[0].InferenceModelAliases, []string{"default"}) ||
+		!slices.Equal(policy.Tenants[0].ServiceIDs, []string{"hermes-api"}) ||
 		policy.Tenants[0].AuthorizedEffects == nil ||
 		policy.Tenants[0].AuthorizedEffects.Mode != admission.AuthorizedEffectsRequired ||
 		policy.Tenants[0].AuthorizedEffects.Keys[0].ConnectorIDs[0] != "github-issues" {
@@ -209,8 +216,8 @@ func TestSiteCommandRejectsIncompleteAndAmbiguousInputs(t *testing.T) {
 		arguments []string
 		want      string
 	}{
-		{arguments: nil, want: "site requires init, verify, connect, or node"},
-		{arguments: []string{"unknown"}, want: "site requires init, verify, connect, or node"},
+		{arguments: nil, want: "site requires init, verify, connect, task, or node"},
+		{arguments: []string{"unknown"}, want: "site requires init, verify, connect, task, or node"},
 		{arguments: []string{"init"}, want: "exactly one output directory"},
 		{arguments: []string{"init", "one", "two"}, want: "exactly one output directory"},
 		{arguments: []string{"init", "site", "-site-id", "invalid site", "-dry-run"}, want: "identity is invalid"},

@@ -21,7 +21,7 @@ import (
 
 func agentCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("agent requires create, init, validate, build, plan, apply, deploy, deployment, fork, or doctor")
+		return errors.New("agent requires create, init, validate, build, publish, authorize, service, plan, apply, deploy, deployment, fork, or doctor")
 	}
 	switch arguments[0] {
 	case "create":
@@ -32,6 +32,12 @@ func agentCommand(arguments []string, stdout io.Writer) error {
 		return agentValidate(arguments[1:], stdout)
 	case "build":
 		return agentBuild(arguments[1:], stdout)
+	case "publish":
+		return agentPublish(arguments[1:], stdout)
+	case "authorize":
+		return agentAuthorize(arguments[1:], stdout)
+	case "service":
+		return agentServiceCommand(arguments[1:], stdout)
 	case "plan":
 		return agentPlan(arguments[1:], stdout)
 	case "apply":
@@ -48,7 +54,7 @@ func agentCommand(arguments []string, stdout io.Writer) error {
 	case "doctor":
 		return agentDoctor(arguments[1:], stdout)
 	default:
-		return fmt.Errorf("unknown agent command %q; expected create, init, validate, build, plan, apply, deploy, deployment, fork, or doctor", arguments[0])
+		return fmt.Errorf("unknown agent command %q; expected create, init, validate, build, publish, authorize, service, plan, apply, deploy, deployment, fork, or doctor", arguments[0])
 	}
 }
 

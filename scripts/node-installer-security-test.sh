@@ -270,6 +270,17 @@ if install_default_config_atomic "$fixture/trusted/default.env" \
 	echo "node-installer-security-test: default config followed a destination symlink" >&2
 	exit 1
 fi
+
+# A wrapper-supplied Steward node identity must become the Gateway receipt
+# identity. Otherwise the installed Gateway can never export task trust for the
+# enrolled node without abandoning its receipt chain.
+getent group steward-gateway >/dev/null || groupadd --system steward-gateway
+printf '%s\n' '{"connector_receipt_node_id":"@CONNECTOR_RECEIPT_NODE_ID@"}' \
+	>"$fixture/trusted/gateway.json.in"
+install_gateway_config_atomic "$fixture/trusted/gateway.json.in" \
+	"$fixture/config-root/gateway.json" 1001 1002 node-a
+grep -Fq '"connector_receipt_node_id":"node-a/gateway"' \
+	"$fixture/config-root/gateway.json"
 [[ $(sha256sum "$fixture/trusted/sentinel" | awk '{print $1}') == "$sentinel_digest" ]]
 rm -f "$fixture/config-root/default.env"
 install -o root -g root -m 0600 /dev/null "$fixture/config-root/default.env"

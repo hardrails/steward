@@ -516,36 +516,16 @@ func readServiceTrust(path string, intent admission.InstanceIntent, operationID 
 }
 
 func decodeServiceTrust(raw []byte, intent admission.InstanceIntent, operationID string) (serviceTrustOperation, error) {
-	var inventory serviceTrustInventory
-	if err := dsse.DecodeStrictInto(raw, maxServiceTrustBytes, &inventory); err != nil {
-		return serviceTrustOperation{}, fmt.Errorf("decode service trust inventory: %w", err)
+	inventory, err := decodeServiceTrustInventory(raw)
+	if err != nil {
+		return serviceTrustOperation{}, err
 	}
-	if inventory.SchemaVersion != serviceTrustSchemaV2 || inventory.NodeID != intent.NodeID ||
-		inventory.TenantID != intent.TenantID || len(inventory.Services) == 0 || len(inventory.Services) > maxTaskServices {
+	if inventory.NodeID != intent.NodeID || inventory.TenantID != intent.TenantID {
 		return serviceTrustOperation{}, errors.New("service trust inventory does not match the instance node and tenant")
 	}
 	var selected *serviceTrustOperation
-	totalOperations := 0
-	for serviceIndex, service := range inventory.Services {
-		if !taskIdentifier(service.ServiceID) || len(service.Operations) == 0 || len(service.Operations) > maxTaskOperations ||
-			serviceIndex > 0 && inventory.Services[serviceIndex-1].ServiceID >= service.ServiceID {
-			return serviceTrustOperation{}, errors.New("service trust inventory services must be non-empty, unique, and sorted")
-		}
-		totalOperations += len(service.Operations)
-		if totalOperations > maxTaskOperations {
-			return serviceTrustOperation{}, fmt.Errorf("service trust inventory permits at most %d total operations", maxTaskOperations)
-		}
-		paths := make(map[string]struct{}, len(service.Operations))
-		for operationIndex, operation := range service.Operations {
-			if operation.ServiceID != service.ServiceID || !validTrustedServiceOperation(operation) ||
-				operationIndex > 0 && service.Operations[operationIndex-1].ID >= operation.ID {
-				return serviceTrustOperation{}, errors.New("service trust inventory operations are invalid or not uniquely sorted")
-			}
-			methodPath := operation.Method + "\x00" + operation.Path
-			if _, duplicate := paths[methodPath]; duplicate {
-				return serviceTrustOperation{}, errors.New("service trust inventory maps one method and path to multiple operations")
-			}
-			paths[methodPath] = struct{}{}
+	for _, service := range inventory.Services {
+		for _, operation := range service.Operations {
 			if service.ServiceID == intent.ServiceID && operation.ID == operationID {
 				copy := operation
 				selected = &copy
@@ -556,6 +536,42 @@ func decodeServiceTrust(raw []byte, intent admission.InstanceIntent, operationID
 		return serviceTrustOperation{}, errors.New("service trust inventory does not contain the admitted service operation")
 	}
 	return *selected, nil
+}
+
+func decodeServiceTrustInventory(raw []byte) (serviceTrustInventory, error) {
+	var inventory serviceTrustInventory
+	if err := dsse.DecodeStrictInto(raw, maxServiceTrustBytes, &inventory); err != nil {
+		return serviceTrustInventory{}, fmt.Errorf("decode service trust inventory: %w", err)
+	}
+	if inventory.SchemaVersion != serviceTrustSchemaV2 || !validOptionalControlIdentifier(inventory.NodeID, 128) ||
+		!validOptionalControlIdentifier(inventory.TenantID, 128) || inventory.NodeID == "" || inventory.TenantID == "" ||
+		len(inventory.Services) == 0 || len(inventory.Services) > maxTaskServices {
+		return serviceTrustInventory{}, errors.New("service trust inventory has an invalid node, tenant, or service set")
+	}
+	totalOperations := 0
+	for serviceIndex, service := range inventory.Services {
+		if !taskIdentifier(service.ServiceID) || len(service.Operations) == 0 || len(service.Operations) > maxTaskOperations ||
+			serviceIndex > 0 && inventory.Services[serviceIndex-1].ServiceID >= service.ServiceID {
+			return serviceTrustInventory{}, errors.New("service trust inventory services must be non-empty, unique, and sorted")
+		}
+		totalOperations += len(service.Operations)
+		if totalOperations > maxTaskOperations {
+			return serviceTrustInventory{}, fmt.Errorf("service trust inventory permits at most %d total operations", maxTaskOperations)
+		}
+		paths := make(map[string]struct{}, len(service.Operations))
+		for operationIndex, operation := range service.Operations {
+			if operation.ServiceID != service.ServiceID || !validTrustedServiceOperation(operation) ||
+				operationIndex > 0 && service.Operations[operationIndex-1].ID >= operation.ID {
+				return serviceTrustInventory{}, errors.New("service trust inventory operations are invalid or not uniquely sorted")
+			}
+			methodPath := operation.Method + "\x00" + operation.Path
+			if _, duplicate := paths[methodPath]; duplicate {
+				return serviceTrustInventory{}, errors.New("service trust inventory maps one method and path to multiple operations")
+			}
+			paths[methodPath] = struct{}{}
+		}
+	}
+	return inventory, nil
 }
 
 func validTrustedServiceOperation(operation serviceTrustOperation) bool {
