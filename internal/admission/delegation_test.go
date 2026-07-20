@@ -206,9 +206,11 @@ func TestCommandDelegationPlacementRequiresCanonicalFiniteConstraints(t *testing
 			value.RequiredLabels[0], value.RequiredLabels[1] = value.RequiredLabels[1], value.RequiredLabels[0]
 		}},
 		{"empty label", func(value *CommandDelegationPlacement) { value.RequiredLabels[0].Key = "" }},
+		{"invalid label", func(value *CommandDelegationPlacement) { value.RequiredLabels[0].Value = "gpu pool" }},
 		{"nil tolerations", func(value *CommandDelegationPlacement) { value.Tolerations = nil }},
 		{"duplicate toleration", func(value *CommandDelegationPlacement) { value.Tolerations[1] = "dedicated" }},
 		{"empty toleration", func(value *CommandDelegationPlacement) { value.Tolerations[0] = "" }},
+		{"invalid toleration", func(value *CommandDelegationPlacement) { value.Tolerations[0] = "gpu pool" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			candidate := valid

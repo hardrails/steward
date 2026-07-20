@@ -10,6 +10,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/hardrails/steward/internal/controlprotocol"
 	"github.com/hardrails/steward/internal/dsse"
 )
 
@@ -185,13 +186,15 @@ func validCommandDelegationPlacement(placement CommandDelegationPlacement) bool 
 		return false
 	}
 	for index, label := range placement.RequiredLabels {
-		if !bounded(label.Key, 128) || !bounded(label.Value, 128) ||
+		if !controlprotocol.ValidSchedulingAttribute(label.Key) ||
+			!controlprotocol.ValidSchedulingAttribute(label.Value) ||
 			index > 0 && placement.RequiredLabels[index-1].Key >= label.Key {
 			return false
 		}
 	}
 	for index, value := range placement.Tolerations {
-		if !bounded(value, 128) || index > 0 && placement.Tolerations[index-1] >= value {
+		if !controlprotocol.ValidSchedulingAttribute(value) ||
+			index > 0 && placement.Tolerations[index-1] >= value {
 			return false
 		}
 	}

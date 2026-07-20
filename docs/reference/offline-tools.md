@@ -111,9 +111,10 @@ When `admit` is delegated, also provide the exact non-identity admission templat
 ```
 
 `placement` is optional. When present, label entries and tolerations must be
-sorted and unique. Every taint published by a candidate node must have an exact
-toleration. The placement constraint is tenant-signed with the rest of the
-template; Control cannot weaken it.
+sorted and unique. Keys, values, and tolerations may contain letters, digits,
+`.`, `_`, `:`, `/`, and `-`, up to 128 bytes each. Every taint published by a
+candidate node must have an exact toleration. The placement constraint is
+tenant-signed with the rest of the template; Control cannot weaken it.
 
 Issue and verify the delegation on the signing workstation:
 

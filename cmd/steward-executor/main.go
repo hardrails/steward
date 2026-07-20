@@ -368,6 +368,10 @@ func main() {
 				},
 			},
 		}
+		if err := schedulingObservation.Validate(); err != nil {
+			slog.Error("validate node scheduling observation", "err", err)
+			os.Exit(2)
+		}
 	}
 	var poller *executoruplink.Poller
 	var evidencePublisher *executoruplink.EvidencePublisher
@@ -535,6 +539,10 @@ func parseSchedulingAttributes(
 			if !found || key == "" || value == "" {
 				return nil, nil, errors.New("node labels must use comma-separated key=value entries")
 			}
+			if !controlprotocol.ValidSchedulingAttribute(key) ||
+				!controlprotocol.ValidSchedulingAttribute(value) {
+				return nil, nil, fmt.Errorf("node label %q contains an invalid key or value", item)
+			}
 			if _, duplicate := labelValues[key]; duplicate {
 				return nil, nil, fmt.Errorf("node label %q is duplicated", key)
 			}
@@ -555,8 +563,11 @@ func parseSchedulingAttributes(
 		taints = strings.Split(taintsRaw, ",")
 		sort.Strings(taints)
 		for index, value := range taints {
-			if value == "" || index > 0 && taints[index-1] == value {
-				return nil, nil, errors.New("node taints must be non-empty and unique")
+			if !controlprotocol.ValidSchedulingAttribute(value) {
+				return nil, nil, fmt.Errorf("node taint %q contains invalid characters", value)
+			}
+			if index > 0 && taints[index-1] == value {
+				return nil, nil, errors.New("node taints must be unique")
 			}
 		}
 	}

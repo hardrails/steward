@@ -60,8 +60,11 @@ func TestParseSchedulingAttributesCanonicalizesAndRejectsAmbiguity(t *testing.T)
 	}{
 		{labels: "missing-value"},
 		{labels: "region=west,region=east"},
+		{labels: "region name=west"},
+		{labels: "region=west coast"},
 		{taints: "dedicated,dedicated"},
 		{taints: "dedicated,"},
+		{taints: "gpu pool"},
 	} {
 		if _, _, err := parseSchedulingAttributes(test.labels, test.taints); err == nil {
 			t.Fatalf("ambiguous attributes were accepted: %+v", test)

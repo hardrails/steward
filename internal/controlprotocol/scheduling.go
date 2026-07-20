@@ -57,8 +57,8 @@ type ExecutorSchedulingObservationV1 struct {
 
 func (observation ExecutorSchedulingObservationV1) Validate() error {
 	if observation.SchemaVersion != ExecutorSchedulingSchemaV1 ||
-		!schedulingAttribute(observation.NodeID) || observation.CredentialScope != "node" ||
-		observation.OS != "linux" || !schedulingAttribute(observation.Architecture) ||
+		!ValidSchedulingAttribute(observation.NodeID) || observation.CredentialScope != "node" ||
+		observation.OS != "linux" || !ValidSchedulingAttribute(observation.Architecture) ||
 		observation.Isolation != ExecutorSchedulingIsolationGVisor {
 		return errors.New("executor scheduling observation identity is invalid")
 	}
@@ -67,7 +67,7 @@ func (observation ExecutorSchedulingObservationV1) Validate() error {
 		return errors.New("executor scheduling attributes exceed their limits")
 	}
 	for index, label := range observation.Labels {
-		if !schedulingAttribute(label.Key) || !schedulingAttribute(label.Value) ||
+		if !ValidSchedulingAttribute(label.Key) || !ValidSchedulingAttribute(label.Value) ||
 			index > 0 && observation.Labels[index-1].Key >= label.Key {
 			return errors.New("executor scheduling label is invalid")
 		}
@@ -76,7 +76,7 @@ func (observation ExecutorSchedulingObservationV1) Validate() error {
 		return errors.New("executor scheduling taints are not canonical")
 	}
 	for index, taint := range observation.Taints {
-		if !schedulingAttribute(taint) || index > 0 && observation.Taints[index-1] == taint {
+		if !ValidSchedulingAttribute(taint) || index > 0 && observation.Taints[index-1] == taint {
 			return errors.New("executor scheduling taint is invalid")
 		}
 	}
@@ -115,7 +115,11 @@ func positiveSchedulingResources(resources ExecutorSchedulingResourcesV1, allowZ
 	return resources.Workloads > 0
 }
 
-func schedulingAttribute(value string) bool {
+// ValidSchedulingAttribute defines the one shared vocabulary for node labels,
+// taints, and tenant-signed placement constraints. Using the same validator at
+// every boundary prevents a valid delegation from requesting an attribute no
+// valid node can advertise.
+func ValidSchedulingAttribute(value string) bool {
 	if value == "" || len(value) > MaxExecutorSchedulingAttribute || !utf8.ValidString(value) ||
 		strings.TrimSpace(value) != value {
 		return false

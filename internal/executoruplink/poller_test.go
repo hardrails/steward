@@ -184,13 +184,22 @@ func TestPollerPublishesSchedulingIndependentlyWithNodeCredential(t *testing.T) 
 			RuntimeOverhead: controlprotocol.ExecutorSchedulingResourcesV1{MemoryBytes: 64 << 20, CPUMillis: 100, PIDs: 32},
 		},
 	}
-	poller, err := NewPoller(Config{
+	cfg := Config{
 		BaseURL: server.URL, CredentialPath: credentialPath, PollInterval: time.Second,
 		HTTPClient: server.Client(), Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		LocalToken: "local", State: newStateStore(t, filepath.Join(t.TempDir(), "state.json")),
 		SecureExecutor: true, SecureNodeID: "node-1", ProtectedTransport: true,
 		CommandPolicy: &policy, ProtocolVersion: 2, Scheduling: &observation,
-	})
+	}
+	invalid := observation
+	invalid.Architecture = "invalid architecture"
+	invalidCfg := cfg
+	invalidCfg.Scheduling = &invalid
+	if _, err := NewPoller(invalidCfg); err == nil ||
+		!strings.Contains(err.Error(), "observation identity is invalid") {
+		t.Fatalf("invalid scheduling error = %v", err)
+	}
+	poller, err := NewPoller(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

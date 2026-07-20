@@ -191,8 +191,13 @@ func NewPoller(cfg Config) (*Poller, error) {
 		protocolVersion = 1
 	}
 	if cfg.Scheduling != nil {
-		if !credential.NodeScoped() || cfg.Scheduling.Validate() != nil ||
-			cfg.Scheduling.NodeID != credential.NodeID {
+		if !credential.NodeScoped() {
+			return nil, errors.New("executor scheduling observation requires a node-scoped credential")
+		}
+		if err := cfg.Scheduling.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid executor scheduling observation: %w", err)
+		}
+		if cfg.Scheduling.NodeID != credential.NodeID {
 			return nil, errors.New("executor scheduling observation requires its matching node-scoped credential")
 		}
 	}

@@ -227,9 +227,11 @@ To narrow placement, add this optional object to `admission-template.json`:
 }
 ```
 
-The arrays must be sorted and contain no duplicates. Every node taint requires
-an exact toleration. These fields are part of the tenant-signed delegation, so
-Control cannot silently move the workload outside them.
+The arrays must be sorted and contain no duplicates. Keys, values, and
+tolerations may contain letters, digits, `.`, `_`, `:`, `/`, and `-`, up to 128
+bytes each. Every node taint requires an exact toleration. These fields are part
+of the tenant-signed delegation, so Control cannot silently move the workload
+outside them.
 
 Delegations without `renew` retain the older non-relocatable behavior and report
 `assigned_node_unavailable`. Stateful instances are also not moved automatically:
