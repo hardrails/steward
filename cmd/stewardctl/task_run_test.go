@@ -150,6 +150,41 @@ func TestTaskRunRetainsSignedBundleWhenDispatchFails(t *testing.T) {
 	}
 }
 
+func TestTaskRunRetainsSignedBundleWhenWaitFails(t *testing.T) {
+	fixture := newTaskCLIFixture(t)
+	deploymentPath := taskRunDeploymentFixture(t, fixture)
+	tokenPath := filepath.Join(fixture.directory, "gateway.token")
+	if err := os.WriteFile(tokenPath, []byte("gateway-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/v1/services/") {
+			writeTaskSubmitCLIResponse(writer, "run_0123456789abcdef0123456789abcdef", gatewayclient.TaskReceiptRecorded)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(writer, `{"error":"gateway_unavailable","message":"temporary failure"}`)
+	}))
+	defer server.Close()
+	priorNow := timeNow
+	timeNow = func() time.Time { return fixture.now }
+	t.Cleanup(func() { timeNow = priorNow })
+	err := run([]string{
+		"task", "run", "-deployment", deploymentPath,
+		"-trust", fixture.trustPath, "-request", fixture.requestPath,
+		"-operation-id", fixture.operation.ID, "-key", fixture.privatePath, "-key-id", fixture.keyID,
+		"-bundle-out", fixture.bundlePath, "-discard-result",
+		"-gateway-url", server.URL, "-gateway-token-file", tokenPath, "-wait-timeout", "1s",
+	}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "signed bundle retained") || !strings.Contains(err.Error(), "task wait") {
+		t.Fatalf("wait error=%v", err)
+	}
+	if _, err := os.Stat(fixture.bundlePath); err != nil {
+		t.Fatalf("signed recovery bundle missing: %v", err)
+	}
+}
+
 func taskRunDeploymentFixture(t *testing.T, fixture *taskCLIFixture) string {
 	t.Helper()
 	authorities := make([]controlprotocol.ExecutorTaskAuthorityV1, 0, len(fixture.admitted.TaskAuthorities))
