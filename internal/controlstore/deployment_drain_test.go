@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/hardrails/steward/internal/controlauth"
 )
 
 func TestNodeDrainIsIdempotentCordonsAndPersists(t *testing.T) {
@@ -57,6 +59,64 @@ func TestNodeDrainIsIdempotentCordonsAndPersists(t *testing.T) {
 	if err != nil || !changed || cancelled.Drain.State != NodeDrainCancelled ||
 		cancelled.Drain.CompletedAt == "" || EffectiveNodePlacement(cancelled).Mode != NodeCordoned {
 		t.Fatalf("cancel drain = (%+v, %v, %v)", cancelled, changed, err)
+	}
+}
+
+func TestDrainOperationsFailClosedAtAuthorityAndStateBoundaries(t *testing.T) {
+	var unavailable *Store
+	now := time.Now().UTC()
+	for index, err := range []error{
+		func() error {
+			_, _, err := unavailable.StartNodeDrain(controlauth.Identity{}, "node-1", "request-1", "work", now)
+			return err
+		}(),
+		func() error {
+			_, _, err := unavailable.CancelNodeDrain(controlauth.Identity{}, "node-1", "request-1", now)
+			return err
+		}(),
+		func() error {
+			_, _, err := unavailable.BeginDeploymentInstanceDrain("tenant-a", "deployment-a", "instance-a", "node-1", "request-1", 1, now)
+			return err
+		}(),
+		func() error {
+			_, _, err := unavailable.ReplaceDrainedDeploymentInstance("tenant-a", "deployment-a", "instance-a", 1, now)
+			return err
+		}(),
+		func() error { _, err := unavailable.CompleteFinishedNodeDrains(now); return err }(),
+	} {
+		if !errors.Is(err, ErrUnavailable) {
+			t.Fatalf("unavailable drain operation %d error = %v", index, err)
+		}
+	}
+
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	unauthorized := controlauth.Identity{Role: controlauth.RoleTenantOperator, TenantID: "tenant-a"}
+	if _, _, err := fixture.store.StartNodeDrain(unauthorized, "node-1", "request-1", "work", fixture.now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant start drain error = %v", err)
+	}
+	if _, _, err := fixture.store.CancelNodeDrain(unauthorized, "node-1", "request-1", fixture.now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tenant cancel drain error = %v", err)
+	}
+	if _, _, err := fixture.store.StartNodeDrain(fixture.admin, "node 1", "request-1", "work", fixture.now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid start drain error = %v", err)
+	}
+	startedAt := fixture.now.Add(2 * time.Minute)
+	if _, _, err := fixture.store.StartNodeDrain(fixture.admin, "node-1", "request-1", "work", startedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.CancelNodeDrain(fixture.admin, "node-1", "wrong-request", startedAt); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale cancellation error = %v", err)
+	}
+	if _, _, err := fixture.store.CancelNodeDrain(fixture.admin, "node-1", "request-1", startedAt.Add(-time.Second)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("backdated cancellation error = %v", err)
+	}
+	if _, changed, err := fixture.store.CancelNodeDrain(fixture.admin, "node-1", "request-1", startedAt.Add(time.Second)); err != nil || !changed {
+		t.Fatalf("cancel drain = (%v, %v)", changed, err)
+	}
+	if _, changed, err := fixture.store.CancelNodeDrain(fixture.admin, "node-1", "request-1", startedAt.Add(2*time.Second)); err != nil || changed {
+		t.Fatalf("retry cancelled drain = (%v, %v)", changed, err)
 	}
 }
 
