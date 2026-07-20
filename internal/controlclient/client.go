@@ -163,6 +163,11 @@ type NodeDrainChange struct {
 	Changed bool `json:"changed"`
 }
 
+type OperationalFreezeChange struct {
+	Status  controlstore.OperationalFreezeStatus `json:"status"`
+	Changed bool                                 `json:"changed"`
+}
+
 type NodeList struct {
 	Nodes     []Node `json:"nodes"`
 	NextAfter string `json:"next_after,omitempty"`
@@ -500,6 +505,49 @@ func (c *Client) RevokeNode(ctx context.Context, nodeID string) (NodeRevocation,
 	var revocation NodeRevocation
 	err := c.do(ctx, http.MethodDelete, "/v1/nodes/"+url.PathEscape(nodeID), nil, &revocation, true)
 	return revocation, err
+}
+
+func (c *Client) GetOperationalFreeze(
+	ctx context.Context,
+	tenantID string,
+) (controlstore.OperationalFreezeStatus, error) {
+	path, err := operationalFreezePath(tenantID)
+	if err != nil {
+		return controlstore.OperationalFreezeStatus{}, err
+	}
+	var status controlstore.OperationalFreezeStatus
+	if err := c.do(ctx, http.MethodGet, path, nil, &status, true); err != nil {
+		return controlstore.OperationalFreezeStatus{}, err
+	}
+	if err := validateOperationalFreezeStatus(status, tenantID); err != nil {
+		return controlstore.OperationalFreezeStatus{}, err
+	}
+	return status, nil
+}
+
+func (c *Client) ChangeOperationalFreeze(
+	ctx context.Context,
+	tenantID string,
+	action controlstore.OperationalFreezeAction,
+	expectedRevision uint64,
+	reason string,
+) (OperationalFreezeChange, error) {
+	path, err := operationalFreezePath(tenantID)
+	if err != nil {
+		return OperationalFreezeChange{}, err
+	}
+	var change OperationalFreezeChange
+	if err := c.do(ctx, http.MethodPut, path, struct {
+		Action           controlstore.OperationalFreezeAction `json:"action"`
+		ExpectedRevision uint64                               `json:"expected_revision"`
+		Reason           string                               `json:"reason,omitempty"`
+	}{Action: action, ExpectedRevision: expectedRevision, Reason: reason}, &change, true); err != nil {
+		return OperationalFreezeChange{}, err
+	}
+	if err := validateOperationalFreezeStatus(change.Status, tenantID); err != nil {
+		return OperationalFreezeChange{}, err
+	}
+	return change, nil
 }
 
 func (c *Client) ChangeNodePlacement(
@@ -1112,6 +1160,48 @@ func deploymentPath(tenantID, deploymentID string) (string, error) {
 		return "", errors.New("control deployment identity is invalid")
 	}
 	return path + "/" + url.PathEscape(deploymentID), nil
+}
+
+func operationalFreezePath(tenantID string) (string, error) {
+	if tenantID == "" {
+		return "/v1/operations/freeze", nil
+	}
+	if !validEvidenceRouteIdentity(tenantID, 128) {
+		return "", errors.New("control freeze tenant identity is invalid")
+	}
+	return "/v1/tenants/" + url.PathEscape(tenantID) + "/freeze", nil
+}
+
+func validateOperationalFreezeStatus(status controlstore.OperationalFreezeStatus, tenantID string) error {
+	if tenantID == "" && status.Tenant != nil ||
+		status.Site != nil && !validOperationalFreezeRecord(*status.Site, controlstore.OperationalFreezeSite, "") ||
+		status.Tenant != nil && !validOperationalFreezeRecord(*status.Tenant, controlstore.OperationalFreezeTenant, tenantID) {
+		return errors.New("control freeze response has an invalid scope or record")
+	}
+	var expected *controlstore.OperationalFreeze
+	if status.Site != nil && status.Site.Frozen {
+		expected = status.Site
+	} else if status.Tenant != nil && status.Tenant.Frozen {
+		expected = status.Tenant
+	}
+	if expected == nil && status.Effective != nil || expected != nil && (status.Effective == nil || *status.Effective != *expected) {
+		return errors.New("control freeze response has an inconsistent effective gate")
+	}
+	return nil
+}
+
+func validOperationalFreezeRecord(
+	record controlstore.OperationalFreeze,
+	scope controlstore.OperationalFreezeScope,
+	tenantID string,
+) bool {
+	if record.Scope != scope || record.TenantID != tenantID || record.Revision == 0 || record.ChangedAt == "" {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, record.ChangedAt); err != nil {
+		return false
+	}
+	return record.Frozen && record.Reason != "" || !record.Frozen && record.Reason == ""
 }
 
 func validateDeploymentResponse(deployment Deployment, tenantID, deploymentID string) error {
