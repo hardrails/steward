@@ -267,6 +267,7 @@ func TestExecutorV4LegacyUnboundedBindingCannotBrickUpgrade(t *testing.T) {
 	stored.LeaseUntil = ""
 	stored.Terminal = nil
 	snapshot.Version = stateFormatEvidenceVersion
+	snapshot.Freezes = nil
 	snapshot.Captures = nil
 	snapshot.Deployments = nil
 	legacyRaw, err := json.Marshal(snapshot)
@@ -389,9 +390,9 @@ func TestExecutorV4FormatRangeMigratesV2AndRejectsAuthoritySmuggling(t *testing.
 		controlprotocol.MaxExecutorReportBytes != 16<<10 {
 		t.Fatal("controller or protocol report byte cap changed")
 	}
-	if stateFormatMinReadVersion != 1 || stateFormatMaxReadVersion != 10 ||
+	if stateFormatMinReadVersion != 1 || stateFormatMaxReadVersion != 11 ||
 		stateFormatWriteVersion != stateFormatMaxReadVersion ||
-		transactionFormatMinReadVersion != 1 || transactionFormatMaxReadVersion != 10 ||
+		transactionFormatMinReadVersion != 1 || transactionFormatMaxReadVersion != 11 ||
 		transactionFormatWriteVersion != transactionFormatMaxReadVersion {
 		t.Fatal("control store read/write ranges changed without an explicit migration")
 	}
@@ -409,6 +410,7 @@ func TestExecutorV4FormatRangeMigratesV2AndRejectsAuthoritySmuggling(t *testing.
 	}
 	leaseSnapshot := snapshot
 	leaseSnapshot.Version = stateFormatDeploymentVersion
+	leaseSnapshot.Freezes = nil
 	leaseSnapshot.Deployments = []storedDeployment{{
 		CapsuleDSSEBase64: "e30=", DelegationDSSEBase64: "e30=",
 		Instances: []DeploymentInstance{{LeaseExpiresAt: "2026-07-20T12:05:00Z"}},
@@ -431,6 +433,7 @@ func TestExecutorV4FormatRangeMigratesV2AndRejectsAuthoritySmuggling(t *testing.
 		t.Fatalf("legacy workload lease cursor error = %v", err)
 	}
 	snapshot.Version = stateFormatEvidenceVersion
+	snapshot.Freezes = nil
 	snapshot.Captures = nil
 	snapshot.Deployments = nil
 	for index := range snapshot.Commands {

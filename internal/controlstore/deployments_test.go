@@ -340,6 +340,7 @@ func TestDeploymentRolloutRetainsSourceAuthorityAndSpendsBudgetAtomically(t *tes
 		t.Fatal(err)
 	}
 	legacy.Version = stateFormatRolloutVersion - 1
+	legacy.Freezes = nil
 	legacyRaw, err := json.Marshal(legacy)
 	if err != nil {
 		t.Fatal(err)
@@ -615,6 +616,7 @@ func TestDeploymentScopeIsolationCapacityAndLegacyFormat(t *testing.T) {
 	}
 	legacy := snapshot
 	legacy.Version = stateFormatCaptureVersion
+	legacy.Freezes = nil
 	legacy.Deployments = nil
 	legacyRaw, err := json.Marshal(legacy)
 	if err != nil {
@@ -625,6 +627,7 @@ func TestDeploymentScopeIsolationCapacityAndLegacyFormat(t *testing.T) {
 		t.Fatalf("legacy deployment migration = (%+v, %v)", migrated.deployments, err)
 	}
 	snapshot.Version = stateFormatCaptureVersion
+	snapshot.Freezes = nil
 	if smuggled, err := json.Marshal(snapshot); err != nil {
 		t.Fatal(err)
 	} else if _, err := decodeState(smuggled, fixture.limits.MaxStateBytes); err == nil {

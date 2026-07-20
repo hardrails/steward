@@ -28,6 +28,7 @@ func TestSnapshotDecoderRejectsAmbiguousOrCorruptDurableRecords(t *testing.T) {
 	}{
 		{"version", func(value *snapshotState) { value.Version++ }},
 		{"missing tenants", func(value *snapshotState) { value.Tenants = nil }},
+		{"missing freezes", func(value *snapshotState) { value.Freezes = nil }},
 		{"missing nodes", func(value *snapshotState) { value.Nodes = nil }},
 		{"missing credentials", func(value *snapshotState) { value.Credentials = nil }},
 		{"missing enrollments", func(value *snapshotState) { value.Enrollments = nil }},
@@ -76,7 +77,7 @@ func TestWALDecoderRejectsStructurallyAmbiguousMutations(t *testing.T) {
 		t.Fatal("oversized WAL transaction was accepted")
 	}
 	for _, raw := range [][]byte{
-		[]byte(`{"version":11,"mutations":[{"kind":"tenant_upsert","tenant":{"id":"tenant-a"}}]}`),
+		[]byte(`{"version":12,"mutations":[{"kind":"tenant_upsert","tenant":{"id":"tenant-a"}}]}`),
 		[]byte(`{"version":1,"mutations":[]}`),
 		[]byte(`{"version":1,"mutations":[{"kind":"unknown"}],"extra":true}`),
 	} {

@@ -192,6 +192,7 @@ func TestNodePlacementFormatRejectsLegacySmuggling(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.Version = stateFormatSchedulingVersion
+	snapshot.Freezes = nil
 	legacy, err := json.Marshal(snapshot)
 	if err != nil {
 		t.Fatal(err)
