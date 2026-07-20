@@ -147,7 +147,7 @@ func controlSupportBundleCreate(arguments []string, stdout io.Writer) error {
 	}
 	digest := sha256.Sum256(raw)
 	return writeControlJSON(stdout, controlSupportBundleCreateOutput{
-		Output: *output, SHA256: hex.EncodeToString(digest[:]), SizeBytes: len(raw),
+		Output: *output, SHA256: "sha256:" + hex.EncodeToString(digest[:]), SizeBytes: len(raw),
 		GeneratedAt: bundle.GeneratedAt, TenantID: bundle.Scope.TenantID,
 		NodeCount: len(bundle.Nodes), FindingCount: len(bundle.Attention),
 	})
@@ -157,11 +157,12 @@ func controlSupportBundleVerify(arguments []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("control support-bundle verify", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	input := flags.String("in", "", "owner-only JSON support bundle")
+	expectedSHA256 := flags.String("expected-sha256", "", "trusted sha256 digest received separately")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || *input == "" {
-		return errors.New("control support-bundle verify requires -in")
+	if flags.NArg() != 0 || *input == "" || !validSupportBundleSHA256(*expectedSHA256) {
+		return errors.New("control support-bundle verify requires -in and a trusted -expected-sha256")
 	}
 	raw, err := securefile.Read(*input, maxControlSupportBundleBytes, securefile.OwnerOnly)
 	if err != nil {
@@ -172,8 +173,12 @@ func controlSupportBundleVerify(arguments []string, stdout io.Writer) error {
 		return err
 	}
 	digest := sha256.Sum256(raw)
+	actualSHA256 := "sha256:" + hex.EncodeToString(digest[:])
+	if actualSHA256 != *expectedSHA256 {
+		return fmt.Errorf("control support bundle digest mismatch: got %s", actualSHA256)
+	}
 	return writeControlJSON(stdout, controlSupportBundleVerifyOutput{
-		Verified: true, SHA256: hex.EncodeToString(digest[:]), SizeBytes: len(raw),
+		Verified: true, SHA256: actualSHA256, SizeBytes: len(raw),
 		GeneratedAt: bundle.GeneratedAt, TenantID: bundle.Scope.TenantID,
 		NodeCount: len(bundle.Nodes), FindingCount: len(bundle.Attention),
 	})
@@ -271,14 +276,19 @@ func collectControlSupportBundle(
 	if err != nil {
 		return controlSupportBundleV1{}, err
 	}
-	for _, node := range bundle.Nodes {
-		inspection, inspectErr := client.InspectExecutorEvidence(ctx, node.NodeID)
-		if inspectErr != nil {
-			return controlSupportBundleV1{}, fmt.Errorf("collect node %q evidence: %w", node.NodeID, inspectErr)
+	// Executor evidence inspection is deliberately site-admin-only. A tenant
+	// bundle remains useful and tenant scoped without widening that endpoint or
+	// failing after all other scoped inventories have been collected.
+	if tenantID == "" {
+		for _, node := range bundle.Nodes {
+			inspection, inspectErr := client.InspectExecutorEvidence(ctx, node.NodeID)
+			if inspectErr != nil {
+				return controlSupportBundleV1{}, fmt.Errorf("collect node %q evidence: %w", node.NodeID, inspectErr)
+			}
+			bundle.Evidence = append(bundle.Evidence, controlSupportBundleEvidence{
+				NodeID: node.NodeID, Inspection: inspection,
+			})
 		}
-		bundle.Evidence = append(bundle.Evidence, controlSupportBundleEvidence{
-			NodeID: node.NodeID, Inspection: inspection,
-		})
 	}
 	if err := validateControlSupportBundle(bundle); err != nil {
 		return controlSupportBundleV1{}, fmt.Errorf("validate collected support bundle: %w", err)
@@ -529,7 +539,9 @@ func validateControlSupportBundle(bundle controlSupportBundleV1) error {
 			return errors.New("support bundle collection exceeds its item limit")
 		}
 	}
-	if len(bundle.Nodes) != len(bundle.Evidence) || !supportBundleCanonicalOrder(bundle) {
+	if bundle.Scope.TenantID == "" && len(bundle.Nodes) != len(bundle.Evidence) ||
+		bundle.Scope.TenantID != "" && len(bundle.Evidence) != 0 ||
+		!supportBundleCanonicalOrder(bundle) {
 		return errors.New("support bundle inventories are incomplete or not canonical")
 	}
 	knownTenants := make(map[string]struct{}, len(bundle.Tenants))
@@ -560,6 +572,15 @@ func validateControlSupportBundle(bundle controlSupportBundleV1) error {
 		}
 	}
 	return nil
+}
+
+func validSupportBundleSHA256(value string) bool {
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") ||
+		value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value[len("sha256:"):])
+	return err == nil
 }
 
 func validateSupportBundleTimeline(
@@ -638,7 +659,7 @@ func supportBundleCanonicalOrder(bundle controlSupportBundleV1) bool {
 	}
 	for index := range bundle.Nodes {
 		if !validRequiredControlIdentifier(bundle.Nodes[index].NodeID, 128) ||
-			bundle.Evidence[index].NodeID != bundle.Nodes[index].NodeID ||
+			bundle.Scope.TenantID == "" && bundle.Evidence[index].NodeID != bundle.Nodes[index].NodeID ||
 			index > 0 && bundle.Nodes[index-1].NodeID >= bundle.Nodes[index].NodeID {
 			return false
 		}
