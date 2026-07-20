@@ -199,6 +199,44 @@ func TestCommandStatementValidationBindsFiniteValidityWindow(t *testing.T) {
 	}
 }
 
+func TestRenewCommandBindsCanonicalLeaseToSignedWindow(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	valid := CommandStatement{
+		SchemaVersion: CommandSchemaV2, CommandID: "renew-1",
+		TenantID: "tenant-a", NodeID: "node-a", InstanceID: "agent-a",
+		RuntimeRef: "uplink:v2:8:tenant-a:6:node-a:agent-a", Kind: "renew",
+		ClaimGeneration: 1, InstanceGeneration: 2, CommandSequence: 4,
+		IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(4 * time.Minute).Format(time.RFC3339Nano),
+		Payload: json.RawMessage(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T12:02:00Z"}`),
+	}
+	if err := valid.Validate(now); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*CommandStatement){
+		"unknown field": func(command *CommandStatement) {
+			command.Payload = json.RawMessage(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T12:02:00Z","node_id":"node-b"}`)
+		},
+		"past": func(command *CommandStatement) {
+			command.Payload = json.RawMessage(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T11:59:59Z"}`)
+		},
+		"beyond lease maximum": func(command *CommandStatement) {
+			command.ExpiresAt = now.Add(10 * time.Minute).Format(time.RFC3339Nano)
+			command.Payload = json.RawMessage(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T12:05:01Z"}`)
+		},
+		"beyond command": func(command *CommandStatement) {
+			command.Payload = json.RawMessage(`{"schema_version":"steward.workload-lease.v1","expires_at":"2026-07-20T12:04:01Z"}`)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := candidate.Validate(now); err == nil {
+				t.Fatal("invalid renewal was accepted")
+			}
+		})
+	}
+}
+
 func TestVerifyCapsuleForImportAuthenticatesArtifactWithoutTenantSelection(t *testing.T) {
 	rootPublic, rootPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

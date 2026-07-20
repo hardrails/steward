@@ -470,6 +470,39 @@ func newLegacyUpgradeRig(t *testing.T) *reconcileRig {
 	}
 }
 
+func TestReconcileContainsExpiredWorkloadLeaseWithoutPermanentDegradation(t *testing.T) {
+	rig := newReconcileRig(t, true)
+	now := time.Now().UTC()
+	if err := rig.config.Fences.RenewLease(
+		rig.record.TenantID,
+		rig.record.InstanceID,
+		rig.record.Generation,
+		now.Add(100*time.Millisecond).Format(time.RFC3339Nano),
+		now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	report, err := rig.server.Reconcile(context.Background())
+	if err != nil || !report.Ready || report.Changed != 1 || len(report.Failures) != 0 {
+		t.Fatalf("expired lease reconcile report=%#v err=%v", report, err)
+	}
+	if rig.docker.agent.Status != "exited" || rig.docker.relay.Status != "exited" {
+		t.Fatalf("expired runtime remained active: agent=%q relay=%q", rig.docker.agent.Status, rig.docker.relay.Status)
+	}
+	grant := rig.gateway.grants[gateway.GrantID(rig.record.TenantID, rig.record.InstanceID, rig.record.Generation)]
+	if grant.Active {
+		t.Fatal("expired workload retained active Gateway authority")
+	}
+
+	report, err = rig.server.Reconcile(context.Background())
+	if err != nil || !report.Ready || report.Changed != 0 || len(report.Failures) != 0 {
+		t.Fatalf("settled expired lease report=%#v err=%v", report, err)
+	}
+	ctx := WithAdmissionPrincipal(context.Background(), rig.record.TenantID, rig.config.NodeID, rig.record.Generation)
+	assertLifecycleStatus(t, rig.server, http.MethodPost, "/v1/workloads/"+RuntimeRef(rig.record.TenantID, rig.record.InstanceID)+"/start", ctx, http.StatusConflict)
+}
+
 func TestReconcileCleanRuntimeIsReceiptFreeNoop(t *testing.T) {
 	rig := newReconcileRig(t, true)
 	before := rig.config.Evidence.NextSequence()

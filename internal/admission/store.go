@@ -14,10 +14,12 @@ import (
 )
 
 const (
-	legacyFenceVersion = 1
-	routeFenceVersion  = 2
-	fenceVersion       = 3
-	maxFenceBytes      = 4 << 20
+	legacyFenceVersion      = 1
+	routeFenceVersion       = 2
+	maintenanceFenceVersion = 3
+	leaseFenceVersion       = 4
+	fenceVersion            = leaseFenceVersion
+	maxFenceBytes           = 4 << 20
 )
 
 // FenceRecord is the durable high-water mark for one tenant-scoped instance.
@@ -33,6 +35,7 @@ type FenceRecord struct {
 	WorkloadDigest    string
 	ImageConfigDigest string
 	RoutePolicyDigest string
+	LeaseExpiresAt    string
 	Present           bool
 }
 
@@ -153,6 +156,52 @@ func (s *FenceStore) Record(tenantID, instanceID string) (FenceRecord, bool) {
 	return record, ok
 }
 
+// RenewLease atomically extends the local authority window for one exact live
+// generation. Equal expiry is idempotent; shortening or reviving an expired
+// lease is rejected so delayed commands cannot move the fence backward.
+func (s *FenceStore) RenewLease(
+	tenantID, instanceID string,
+	generation uint64,
+	expiresAt string,
+	now time.Time,
+) error {
+	if !bounded(tenantID, 128) || !bounded(instanceID, 256) || generation == 0 || now.IsZero() {
+		return errors.New("invalid workload lease identity")
+	}
+	expires, err := time.Parse(time.RFC3339Nano, expiresAt)
+	if err != nil || expires.IsZero() || expiresAt != expires.UTC().Format(time.RFC3339Nano) ||
+		!expires.After(now) || expires.After(now.Add(MaxWorkloadLeaseDuration+CommandClockSkew)) {
+		return errors.New("invalid workload lease expiry")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := fenceKey(tenantID, instanceID)
+	record, ok := s.byInstance[key]
+	if !ok || !record.Present || record.Generation != generation {
+		return errors.New("workload lease does not match a present admission generation")
+	}
+	if record.LeaseExpiresAt != "" {
+		current, parseErr := time.Parse(time.RFC3339Nano, record.LeaseExpiresAt)
+		if parseErr != nil {
+			return errors.New("stored workload lease is invalid")
+		}
+		if expires.Before(current) {
+			return errors.New("workload lease expiry rollback")
+		}
+		if expires.Equal(current) {
+			return nil
+		}
+	}
+	previous := record
+	record.LeaseExpiresAt = expiresAt
+	s.byInstance[key] = record
+	if err := s.persistLocked(); err != nil {
+		s.byInstance[key] = previous
+		return err
+	}
+	return nil
+}
+
 // Records returns a stable copy for opaque runtime-reference lookup.
 func (s *FenceStore) Records() []FenceRecord {
 	s.mu.Lock()
@@ -234,6 +283,12 @@ func (s *FenceStore) Commit(record FenceRecord, policyEpoch uint64) error {
 		!digest(record.ImageConfigDigest) || record.RoutePolicyDigest != "" && !digest(record.RoutePolicyDigest) || policyEpoch == 0 {
 		return errors.New("invalid fence record")
 	}
+	if record.LeaseExpiresAt != "" {
+		leaseExpiry, err := time.Parse(time.RFC3339Nano, record.LeaseExpiresAt)
+		if err != nil || leaseExpiry.IsZero() || record.LeaseExpiresAt != leaseExpiry.UTC().Format(time.RFC3339Nano) {
+			return errors.New("invalid fence workload lease")
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if policyEpoch < s.policyEpoch {
@@ -249,6 +304,11 @@ func (s *FenceStore) Commit(record FenceRecord, policyEpoch uint64) error {
 			current.LineageID != record.LineageID || current.WorkloadDigest != record.WorkloadDigest ||
 			current.ImageConfigDigest != record.ImageConfigDigest || current.RoutePolicyDigest != record.RoutePolicyDigest) {
 		return errors.New("equal generation identifies a different signed lineage")
+	}
+	if record.Generation == current.Generation {
+		// An idempotent admit retry must not erase a lease accepted after the
+		// original admission. Only RenewLease may change this authority window.
+		record.LeaseExpiresAt = current.LeaseExpiresAt
 	}
 	oldEpoch, oldRecord := s.policyEpoch, current
 	s.policyEpoch = policyEpoch
@@ -341,6 +401,7 @@ func (s *FenceStore) encode() ([]byte, error) {
 		raw = appendFenceText(raw, record.WorkloadDigest)
 		raw = appendFenceText(raw, record.ImageConfigDigest)
 		raw = appendFenceText(raw, record.RoutePolicyDigest)
+		raw = appendFenceText(raw, record.LeaseExpiresAt)
 		if record.Present {
 			raw = append(raw, 1)
 		} else {
@@ -362,7 +423,8 @@ func (s *FenceStore) encode() ([]byte, error) {
 
 func (s *FenceStore) decode(raw []byte) error {
 	if len(raw) < 17 || string(raw[:4]) != "STFN" ||
-		(raw[4] != legacyFenceVersion && raw[4] != routeFenceVersion && raw[4] != fenceVersion) {
+		(raw[4] != legacyFenceVersion && raw[4] != routeFenceVersion &&
+			raw[4] != maintenanceFenceVersion && raw[4] != leaseFenceVersion) {
 		return errors.New("invalid fence store header")
 	}
 	version := raw[4]
@@ -406,6 +468,13 @@ func (s *FenceStore) decode(raw []byte) error {
 				return errors.New("invalid fence route policy digest")
 			}
 		}
+		leaseExpiresAt := ""
+		if version >= leaseFenceVersion {
+			leaseExpiresAt, rest, ok = takeOptionalFenceTimestamp(rest)
+			if !ok {
+				return errors.New("invalid workload lease expiry")
+			}
+		}
 		if len(rest) < 1 || rest[0] > 1 {
 			return errors.New("invalid fence presence")
 		}
@@ -419,11 +488,11 @@ func (s *FenceStore) decode(raw []byte) error {
 			TenantID: tenant, InstanceID: instance, Generation: generation,
 			CapsuleDigest: capsule, PolicyDigest: policy, LineageID: lineage,
 			WorkloadDigest: workloadDigest, ImageConfigDigest: imageConfigDigest,
-			RoutePolicyDigest: routePolicyDigest, Present: present,
+			RoutePolicyDigest: routePolicyDigest, LeaseExpiresAt: leaseExpiresAt, Present: present,
 		}
 		raw = rest
 	}
-	if version == fenceVersion {
+	if version >= maintenanceFenceVersion {
 		if len(raw) < 1 || raw[0] > 1 {
 			return errors.New("invalid fence maintenance state")
 		}
@@ -502,6 +571,25 @@ func takeOptionalFenceDigest(raw []byte) (string, []byte, bool) {
 	}
 	value := string(raw[2 : 2+length])
 	if !digest(value) {
+		return "", nil, false
+	}
+	return value, raw[2+length:], true
+}
+
+func takeOptionalFenceTimestamp(raw []byte) (string, []byte, bool) {
+	if len(raw) < 2 {
+		return "", nil, false
+	}
+	length := int(binary.BigEndian.Uint16(raw[:2]))
+	if length == 0 {
+		return "", raw[2:], true
+	}
+	if length > len(time.RFC3339Nano)+10 || len(raw) < 2+length {
+		return "", nil, false
+	}
+	value := string(raw[2 : 2+length])
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil || parsed.IsZero() || value != parsed.UTC().Format(time.RFC3339Nano) {
 		return "", nil, false
 	}
 	return value, raw[2+length:], true

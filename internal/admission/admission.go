@@ -1032,7 +1032,7 @@ func (p SitePolicy) Validate() error {
 var routeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 var commandOperations = map[string]struct{}{
-	"admit": {}, "start": {}, "stop": {}, "destroy": {}, "read": {}, "purge": {},
+	"admit": {}, "renew": {}, "start": {}, "stop": {}, "destroy": {}, "read": {}, "purge": {},
 	"activation-canary": {},
 }
 
@@ -1166,7 +1166,7 @@ func (p SitePolicy) TrustedTaskKeys(tenantID, serviceID string) (map[string]ed25
 const (
 	maxCommandPayloadBytes = 256 << 10
 	maxCommandLifetime     = 15 * time.Minute
-	maxCommandClockSkew    = 2 * time.Minute
+	maxCommandClockSkew    = CommandClockSkew
 )
 
 // Validate checks the signed command's finite schema and validity window. The
@@ -1208,6 +1208,17 @@ func (c CommandStatement) Validate(now time.Time) error {
 		}
 		if !expires.After(now) {
 			return deny("command has expired according to node time")
+		}
+	}
+	if c.Kind == "renew" {
+		lease, err := DecodeWorkloadLease(c.Payload, now)
+		if err != nil {
+			return deny("invalid workload lease")
+		}
+		leaseExpiry, _ := time.Parse(time.RFC3339Nano, lease.ExpiresAt)
+		if !leaseExpiry.After(issued) || leaseExpiry.After(issued.Add(MaxWorkloadLeaseDuration)) ||
+			leaseExpiry.After(expires) {
+			return deny("workload lease exceeds its signed command window")
 		}
 	}
 	return nil

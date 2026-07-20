@@ -318,6 +318,16 @@ func (d *dispatcher) apply(ctx context.Context, cmd command, tenantID, instanceI
 		}
 		ctx = executor.WithAdmissionPrincipal(ctx, tenantID, d.nodeID, cmd.InstanceGeneration)
 		return d.call(ctx, http.MethodPost, "/v1/workloads/"+runtimeRef+"/start", nil)
+	case "renew":
+		lease, err := admission.DecodeWorkloadLease(cmd.Payload, time.Now().UTC())
+		if err != nil {
+			return "", err
+		}
+		ctx = executor.WithAdmissionPrincipal(ctx, tenantID, d.nodeID, cmd.InstanceGeneration)
+		if _, err := d.call(ctx, http.MethodPost, "/v1/workloads/"+runtimeRef+"/lease", lease); err != nil {
+			return "", err
+		}
+		return "leased", nil
 	case "stop":
 		if err := validateLifecyclePayload(cmd); err != nil {
 			return "", err
