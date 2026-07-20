@@ -543,6 +543,8 @@ func selectNode(
 			switch {
 			case errors.Is(err, controlstore.ErrNodeSchedulingUnavailable):
 				schedulingUnavailable = true
+			case errors.Is(err, controlstore.ErrNodePlacementUnavailable):
+				placementBlocked = true
 			case errors.Is(err, controlstore.ErrNodeSchedulingConstraint):
 				placementBlocked = true
 			case errors.Is(err, controlstore.ErrTenantCapacityExceeded):
