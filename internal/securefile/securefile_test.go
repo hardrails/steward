@@ -195,3 +195,28 @@ func TestReadRootPreservesPostReadStatError(t *testing.T) {
 		t.Fatalf("removed root path err=%v, want wrapped not-exist error", err)
 	}
 }
+
+func TestReadRootModeBindsExactModeToReadSnapshot(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "input")
+	if err := os.WriteFile(path, []byte("stable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if _, err := ReadRootMode(root, "input", 64, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRootMode(root, "input", 64, 0o644); err == nil {
+		t.Fatal("incorrect exact mode accepted")
+	}
+	if _, err := readRootSnapshot(root, "input", 64, Regular, 0o600, true, func(*os.File) error {
+		return os.Chmod(path, 0o400)
+	}); err == nil || !strings.Contains(err.Error(), "changed while reading") {
+		t.Fatalf("mode changed during read err=%v", err)
+	}
+}

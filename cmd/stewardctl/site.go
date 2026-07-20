@@ -542,10 +542,16 @@ func sitePackageFileSpecifications() map[string]siteFileSpecification {
 }
 
 func verifySitePackageFiles(directory string, expected []sitePackageFile) error {
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		return fmt.Errorf("open site package root: %w", err)
+	}
+	defer root.Close()
+
 	actual := make(map[string]struct{}, len(expected))
 	for _, file := range expected {
-		path := filepath.Join(directory, filepath.FromSlash(file.Path))
-		info, err := os.Lstat(path)
+		name := filepath.FromSlash(file.Path)
+		info, err := root.Lstat(name)
 		if err != nil || !info.Mode().IsRegular() {
 			return fmt.Errorf("site package file %q is missing or not regular", file.Path)
 		}
@@ -556,7 +562,7 @@ func verifySitePackageFiles(directory string, expected []sitePackageFile) error 
 		if info.Size() < 0 || info.Size() > maxArtifactBytes {
 			return fmt.Errorf("site package file %q exceeds the verification limit", file.Path)
 		}
-		raw, err := os.ReadFile(path)
+		raw, err := securefile.ReadRootMode(root, name, maxArtifactBytes, info.Mode().Perm())
 		if err != nil {
 			return fmt.Errorf("read site package file %q: %w", file.Path, err)
 		}
@@ -566,7 +572,7 @@ func verifySitePackageFiles(directory string, expected []sitePackageFile) error 
 		}
 		actual[file.Path] = struct{}{}
 	}
-	err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(directory, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}

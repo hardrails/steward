@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"syscall"
@@ -35,7 +36,18 @@ func Read(path string, limit int64, permissions Permissions) ([]byte, error) {
 // Root prevents a mutable ancestor or symlink from redirecting the open
 // outside the selected directory identity.
 func ReadRoot(root *os.Root, name string, limit int64, permissions Permissions) ([]byte, error) {
-	return readRoot(root, name, limit, permissions, nil)
+	return readRootSnapshot(root, name, limit, permissions, 0, false, nil)
+}
+
+// ReadRootMode is ReadRoot with an exact permission-mode requirement. The
+// mode is checked against the same descriptor-backed snapshot that is read,
+// so a pathname replacement cannot separate metadata verification from the
+// returned bytes.
+func ReadRootMode(root *os.Root, name string, limit int64, mode fs.FileMode) ([]byte, error) {
+	if mode&^fs.ModePerm != 0 {
+		return nil, errors.New("secure root file read has an invalid mode")
+	}
+	return readRootSnapshot(root, name, limit, Regular, mode, true, nil)
 }
 
 // The hook lets package tests deterministically exercise changes after open.
@@ -96,6 +108,18 @@ func readRoot(
 	permissions Permissions,
 	afterOpen func(*os.File) error,
 ) ([]byte, error) {
+	return readRootSnapshot(root, name, limit, permissions, 0, false, afterOpen)
+}
+
+func readRootSnapshot(
+	root *os.Root,
+	name string,
+	limit int64,
+	permissions Permissions,
+	exactMode fs.FileMode,
+	requireExactMode bool,
+	afterOpen func(*os.File) error,
+) ([]byte, error) {
 	if root == nil || name == "" || limit <= 0 || limit == math.MaxInt64 ||
 		permissions > TrustFile {
 		return nil, errors.New("secure root file read has an invalid root, name, limit, or permission policy")
@@ -104,7 +128,7 @@ func readRoot(
 	if err != nil {
 		return nil, err
 	}
-	if !validSnapshot(before, limit, permissions) {
+	if !validRootSnapshot(before, limit, permissions, exactMode, requireExactMode) {
 		return nil, errors.New("root file must be non-empty, bounded, regular, and satisfy its permission policy")
 	}
 	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
@@ -116,7 +140,7 @@ func readRoot(
 	if err != nil {
 		return nil, err
 	}
-	if !validSnapshot(opened, limit, permissions) || !sameSnapshot(before, opened) {
+	if !validRootSnapshot(opened, limit, permissions, exactMode, requireExactMode) || !sameSnapshot(before, opened) {
 		return nil, errors.New("root file changed while opening")
 	}
 	if afterOpen != nil {
@@ -137,12 +161,16 @@ func readRoot(
 		return nil, fmt.Errorf("stat root file after reading: %w", err)
 	}
 	if int64(len(raw)) != opened.Size() ||
-		!validSnapshot(after, limit, permissions) ||
-		!validSnapshot(current, limit, permissions) ||
+		!validRootSnapshot(after, limit, permissions, exactMode, requireExactMode) ||
+		!validRootSnapshot(current, limit, permissions, exactMode, requireExactMode) ||
 		!sameSnapshot(opened, after) || !sameSnapshot(opened, current) {
 		return nil, errors.New("root file changed while reading")
 	}
 	return raw, nil
+}
+
+func validRootSnapshot(info os.FileInfo, limit int64, permissions Permissions, exactMode fs.FileMode, requireExactMode bool) bool {
+	return validSnapshot(info, limit, permissions) && (!requireExactMode || info.Mode().Perm() == exactMode)
 }
 
 func validSnapshot(info os.FileInfo, limit int64, permissions Permissions) bool {
