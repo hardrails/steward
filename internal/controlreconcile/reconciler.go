@@ -63,6 +63,7 @@ type Report struct {
 	Blocked         int `json:"blocked"`
 	Draining        int `json:"draining"`
 	DrainsCompleted int `json:"drains_completed"`
+	DrainsFailed    int `json:"drains_failed"`
 }
 
 type instanceResult struct {
@@ -114,13 +115,14 @@ func (reconciler *Reconciler) Run(ctx context.Context) error {
 				continue
 			}
 			if report.Enqueued > 0 || report.Observed > 0 || report.Removed > 0 || report.Replaced > 0 ||
-				report.Blocked > 0 || report.Draining > 0 || report.DrainsCompleted > 0 {
+				report.Blocked > 0 || report.Draining > 0 || report.DrainsCompleted > 0 || report.DrainsFailed > 0 {
 				reconciler.logger.Info("desired-state reconciliation completed",
 					"deployments", report.Deployments, "instances", report.Instances,
 					"observed", report.Observed, "enqueued", report.Enqueued,
 					"removed", report.Removed, "replaced", report.Replaced,
 					"conflicts", report.Conflicts, "blocked", report.Blocked,
-					"draining", report.Draining, "drains_completed", report.DrainsCompleted)
+					"draining", report.Draining, "drains_completed", report.DrainsCompleted,
+					"drains_failed", report.DrainsFailed)
 			}
 		}
 	}
@@ -181,11 +183,12 @@ func (reconciler *Reconciler) Reconcile(ctx context.Context) (Report, error) {
 			break
 		}
 	}
-	completed, err := reconciler.store.CompleteFinishedNodeDrains(reconciler.now().UTC())
+	completed, failed, err := reconciler.store.CompleteFinishedNodeDrains(reconciler.now().UTC())
 	if err != nil {
 		return report, err
 	}
 	report.DrainsCompleted = completed
+	report.DrainsFailed = failed
 	return report, nil
 }
 

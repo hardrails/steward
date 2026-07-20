@@ -162,19 +162,20 @@ func (store *Store) ReplaceDrainedDeploymentInstance(
 }
 
 // CompleteFinishedNodeDrains seals active drains whose source node no longer
-// owns an instance and has no in-progress drain marker. It updates at most one
-// bounded transaction per reconciliation pass.
-func (store *Store) CompleteFinishedNodeDrains(now time.Time) (int, error) {
+// owns an instance and has no in-progress drain marker. A concurrent failed
+// assignment fails the drain instead of either blocking forever or falsely
+// claiming evacuation. It updates at most one bounded transaction per pass.
+func (store *Store) CompleteFinishedNodeDrains(now time.Time) (completed, failed int, err error) {
 	if store == nil {
-		return 0, ErrUnavailable
+		return 0, 0, ErrUnavailable
 	}
 	if now.IsZero() {
-		return 0, invalid("node drain completion time is invalid")
+		return 0, 0, invalid("node drain completion time is invalid")
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if err := store.availableLocked(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	nodeIDs := make([]string, 0, len(store.current.nodes))
 	for nodeID := range store.current.nodes {
@@ -184,15 +185,24 @@ func (store *Store) CompleteFinishedNodeDrains(now time.Time) (int, error) {
 	mutations := make([]mutation, 0)
 	for _, nodeID := range nodeIDs {
 		node := store.current.nodes[nodeID]
-		if node.Drain == nil || node.Drain.State != NodeDrainActive || nodeDrainHasWork(store.current.deployments, node.ID) {
+		if node.Drain == nil || node.Drain.State != NodeDrainActive {
 			continue
 		}
 		updatedAt, _ := parseTimestamp(node.Drain.UpdatedAt)
 		if now.Before(updatedAt) {
-			return 0, invalid("node drain completion predates retained state")
+			return 0, 0, invalid("node drain completion predates retained state")
 		}
 		updated := cloneNode(node)
-		updated.Drain.State = NodeDrainCompleted
+		if failedInstanceID, found := failedDeploymentInstanceOnNode(store.current.deployments, node.ID); found {
+			updated.Drain.State = NodeDrainFailed
+			updated.Drain.FailedInstanceID = failedInstanceID
+			failed++
+		} else if nodeDrainHasWork(store.current.deployments, node.ID) {
+			continue
+		} else {
+			updated.Drain.State = NodeDrainCompleted
+			completed++
+		}
 		updated.Drain.UpdatedAt = canonicalTimestamp(now)
 		updated.Drain.CompletedAt = canonicalTimestamp(now)
 		mutations = append(mutations, mutation{Kind: mutationNode, Node: &updated})
@@ -201,12 +211,12 @@ func (store *Store) CompleteFinishedNodeDrains(now time.Time) (int, error) {
 		}
 	}
 	if len(mutations) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 	if err := store.applyMutationsLocked(mutations...); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return len(mutations), nil
+	return completed, failed, nil
 }
 
 func deploymentUnavailableInstances(deployment Deployment) int {
@@ -229,6 +239,22 @@ func nodeDrainHasWork(deployments map[string]Deployment, nodeID string) bool {
 		}
 	}
 	return false
+}
+
+func failedDeploymentInstanceOnNode(deployments map[string]Deployment, nodeID string) (string, bool) {
+	failedKey, failedInstanceID := "", ""
+	for _, deployment := range deployments {
+		for _, instance := range deployment.Instances {
+			if instance.NodeID != nodeID || instance.Phase != DeploymentInstanceFailed {
+				continue
+			}
+			key := deployment.TenantID + "\x00" + deployment.ID + "\x00" + instance.InstanceID
+			if failedKey == "" || key < failedKey {
+				failedKey, failedInstanceID = key, instance.InstanceID
+			}
+		}
+	}
+	return failedInstanceID, failedKey != ""
 }
 
 // failDeploymentInstanceDrainLocked abandons a planned move after an

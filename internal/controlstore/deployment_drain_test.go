@@ -102,6 +102,47 @@ func TestNewNodeDrainWaitsForCancelledInstanceMoves(t *testing.T) {
 	}
 }
 
+func TestConcurrentUnrelatedFailureFailsActiveNodeDrain(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	input := deploymentApplyFixtureWithInstanceCount(t, fixture.now, "deployment-a", 1, 1)
+	created, _, err := fixture.store.ApplyDeployment(fixture.admin, input, fixture.now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.Instances[0].NodeID = "node-1"
+	created.Instances[0].Phase = DeploymentInstanceRunning
+	created.Phase = DeploymentReady
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
+	fixture.store.mu.Unlock()
+	startedAt := fixture.now.Add(2 * time.Minute)
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", "kernel upgrade", startedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model a command from an unrelated reconciliation path failing after the
+	// drain became active but before this instance received a drain marker.
+	created.Instances[0].Phase = DeploymentInstanceFailed
+	created.Instances[0].LastError = "unrelated_command_failed"
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
+	fixture.store.mu.Unlock()
+	completed, failed, err := fixture.store.CompleteFinishedNodeDrains(startedAt.Add(time.Second))
+	if err != nil || completed != 0 || failed != 1 {
+		t.Fatalf("finish drain around unrelated failure = (%d, %d, %v)", completed, failed, err)
+	}
+	nodes, err := fixture.store.ListNodes(fixture.admin, "tenant-a")
+	if err != nil || len(nodes) != 1 || nodes[0].Drain == nil ||
+		nodes[0].Drain.State != NodeDrainFailed ||
+		nodes[0].Drain.FailedInstanceID != created.Instances[0].InstanceID {
+		t.Fatalf("failed drain after unrelated failure = (%+v, %v)", nodes, err)
+	}
+}
+
 func TestDrainOperationsFailClosedAtAuthorityAndStateBoundaries(t *testing.T) {
 	var unavailable *Store
 	now := time.Now().UTC()
@@ -122,7 +163,7 @@ func TestDrainOperationsFailClosedAtAuthorityAndStateBoundaries(t *testing.T) {
 			_, _, err := unavailable.ReplaceDrainedDeploymentInstance("tenant-a", "deployment-a", "instance-a", 1, now)
 			return err
 		}(),
-		func() error { _, err := unavailable.CompleteFinishedNodeDrains(now); return err }(),
+		func() error { _, _, err := unavailable.CompleteFinishedNodeDrains(now); return err }(),
 	} {
 		if !errors.Is(err, ErrUnavailable) {
 			t.Fatalf("unavailable drain operation %d error = %v", index, err)
@@ -161,7 +202,7 @@ func TestDrainOperationsFailClosedAtAuthorityAndStateBoundaries(t *testing.T) {
 	if _, _, err := fixture.store.CancelNodeDrain(fixture.admin, "node-missing", "request-1", startedAt.Add(2*time.Second)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing node cancellation error = %v", err)
 	}
-	if _, err := fixture.store.CompleteFinishedNodeDrains(time.Time{}); !errors.Is(err, ErrInvalid) {
+	if _, _, err := fixture.store.CompleteFinishedNodeDrains(time.Time{}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid drain completion error = %v", err)
 	}
 	if _, _, err := fixture.store.ChangeNodePlacement(
@@ -285,8 +326,8 @@ func TestDeploymentDrainEnforcesBudgetAndAdvancesGenerationAfterRemoval(t *testi
 		replaced.Instances[0].Drain == nil {
 		t.Fatalf("replace drained instance = (%+v, %v, %v)", replaced.Instances[0], changed, err)
 	}
-	if completed, err := fixture.store.CompleteFinishedNodeDrains(startedAt.Add(5 * time.Second)); err != nil || completed != 0 {
-		t.Fatalf("complete with replacement pending = (%d, %v)", completed, err)
+	if completed, failed, err := fixture.store.CompleteFinishedNodeDrains(startedAt.Add(5 * time.Second)); err != nil || completed != 0 || failed != 0 {
+		t.Fatalf("complete with replacement pending = (%d, %d, %v)", completed, failed, err)
 	}
 	absent, changed, err := fixture.store.SetDeploymentDesiredState(
 		fixture.admin, "tenant-a", "deployment-a", replaced.Revision,

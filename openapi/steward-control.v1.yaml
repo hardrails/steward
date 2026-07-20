@@ -682,9 +682,9 @@ paths:
         each deployment's disruption budget. The request ID makes retries
         idempotent. Stateful instances remain blocked until a configured
         snapshot backend can prove portable state. If an in-progress lifecycle
-        command fails or has an uncertain outcome, the drain becomes `failed`,
-        retains the affected instance ID, and leaves the node cordoned without
-        retrying the effect.
+        command fails or has an uncertain outcome, or another assigned instance
+        fails concurrently, the drain becomes `failed`, retains the affected
+        instance ID, and leaves the node cordoned without retrying the effect.
       requestBody:
         required: true
         content:

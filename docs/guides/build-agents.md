@@ -249,6 +249,9 @@ A completed, cancelled, or failed drain leaves the node cordoned. A failed drain
 identifies the instance whose lifecycle command failed; Steward does not retry
 that uncertain effect or claim the workload stopped. Inspect the degraded
 deployment and apply fresh generation authority before attempting another drain.
+A failure from another deployment assigned to the same node also fails the
+active drain instead of leaving it active forever or falsely reporting that the
+node was evacuated.
 After the host is healthy, restore placement explicitly with
 `stewardctl control node uncordon node-1`. The separate node-local maintenance
 workflow remains the gate for package activation and unmanaged exact-runtime
