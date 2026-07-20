@@ -151,18 +151,21 @@ const (
 	NodeDrainActive    NodeDrainState = "active"
 	NodeDrainCompleted NodeDrainState = "completed"
 	NodeDrainCancelled NodeDrainState = "cancelled"
+	NodeDrainFailed    NodeDrainState = "failed"
 )
 
 // NodeDrain is the controller-owned intent for a planned, disruption-budgeted
-// evacuation. Starting a drain also cordons the node. Completed and cancelled
-// records remain visible until a later request replaces them.
+// evacuation. Starting a drain also cordons the node. Terminal records remain
+// visible until a later request replaces them. A failed drain never implies
+// that the failed instance stopped; the deployment retains that uncertainty.
 type NodeDrain struct {
-	RequestID   string         `json:"request_id"`
-	State       NodeDrainState `json:"state"`
-	Reason      string         `json:"reason"`
-	RequestedAt string         `json:"requested_at"`
-	UpdatedAt   string         `json:"updated_at"`
-	CompletedAt string         `json:"completed_at,omitempty"`
+	RequestID        string         `json:"request_id"`
+	State            NodeDrainState `json:"state"`
+	Reason           string         `json:"reason"`
+	RequestedAt      string         `json:"requested_at"`
+	UpdatedAt        string         `json:"updated_at"`
+	CompletedAt      string         `json:"completed_at,omitempty"`
+	FailedInstanceID string         `json:"failed_instance_id,omitempty"`
 }
 
 type NodePlacementMode string

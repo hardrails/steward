@@ -323,12 +323,17 @@ func (store *Store) ObserveDeploymentCommand(
 		}
 		instance.Phase = DeploymentInstanceFailed
 		instance.LastError = deploymentCommandRecordMissing
+		failedDrainNode := store.failDeploymentInstanceDrainLocked(&instance, now)
 		instance.TransitionedAt = canonicalTimestamp(now)
 		deployment.Instances[index] = instance
 		deployment.Revision++
 		deployment.UpdatedAt = canonicalTimestamp(now)
 		deployment.Phase = deploymentAggregatePhase(deployment)
-		if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+		mutations := []mutation{deploymentMutation(deployment)}
+		if failedDrainNode != nil {
+			mutations = append(mutations, mutation{Kind: mutationNode, Node: failedDrainNode})
+		}
+		if err := store.applyMutationsLocked(mutations...); err != nil {
 			return Deployment{}, false, err
 		}
 		return cloneDeployment(deployment), true, nil
@@ -368,6 +373,10 @@ func (store *Store) ObserveDeploymentCommand(
 		instance.Phase = DeploymentInstanceFailed
 		instance.LastError = deploymentCommandError(command)
 	}
+	failedDrainNode := (*Node)(nil)
+	if instance.Phase == DeploymentInstanceFailed {
+		failedDrainNode = store.failDeploymentInstanceDrainLocked(&instance, now)
+	}
 	if instance.CommandOperation == "renew" && instance.Phase != DeploymentInstanceFailed {
 		instance.CommandID = ""
 		instance.CommandOperation = ""
@@ -377,7 +386,11 @@ func (store *Store) ObserveDeploymentCommand(
 	deployment.Revision++
 	deployment.UpdatedAt = canonicalTimestamp(now)
 	deployment.Phase = deploymentAggregatePhase(deployment)
-	if err := store.applyMutationsLocked(deploymentMutation(deployment)); err != nil {
+	mutations := []mutation{deploymentMutation(deployment)}
+	if failedDrainNode != nil {
+		mutations = append(mutations, mutation{Kind: mutationNode, Node: failedDrainNode})
+	}
+	if err := store.applyMutationsLocked(mutations...); err != nil {
 		return Deployment{}, false, err
 	}
 	return cloneDeployment(deployment), true, nil

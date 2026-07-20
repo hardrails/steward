@@ -912,9 +912,10 @@ function NodePlacement({placement, drain}) {
   return (
     <div>
       <Badge kind={kind}>{mode}</Badge>
-	  {drain ? <Badge kind={drain.state === "active" ? "is-warning" : ""}>drain {drain.state}</Badge> : null}
+      {drain ? <Badge kind={drain.state === "failed" ? "is-danger" : drain.state === "active" ? "is-warning" : ""}>drain {drain.state}</Badge> : null}
       {placement?.reason ? <small>{placement.reason}</small> : <small>Accepting eligible work.</small>}
-	  {drain ? <small>{drain.reason} · request {drain.request_id}</small> : null}
+      {drain ? <small>{drain.reason} · request {drain.request_id}</small> : null}
+      {drain?.failed_instance_id ? <small>Stopped at instance {drain.failed_instance_id}; inspect the degraded deployment.</small> : null}
       {placement?.changed_at ? <small>In state since {formatTime(placement.changed_at)}</small> : null}
     </div>
   );

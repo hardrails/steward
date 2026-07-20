@@ -245,8 +245,11 @@ stewardctl control node cancel-drain \
   node-1
 ```
 
-A completed or cancelled drain leaves the node cordoned. After the host is
-healthy, restore placement explicitly with
+A completed, cancelled, or failed drain leaves the node cordoned. A failed drain
+identifies the instance whose lifecycle command failed; Steward does not retry
+that uncertain effect or claim the workload stopped. Inspect the degraded
+deployment and apply fresh generation authority before attempting another drain.
+After the host is healthy, restore placement explicitly with
 `stewardctl control node uncordon node-1`. The separate node-local maintenance
 workflow remains the gate for package activation and unmanaged exact-runtime
 cleanup; see [Upgrade safely](upgrades.md).

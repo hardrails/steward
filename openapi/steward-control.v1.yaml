@@ -681,7 +681,10 @@ paths:
         the node, then moves eligible stateless instances one at a time within
         each deployment's disruption budget. The request ID makes retries
         idempotent. Stateful instances remain blocked until a configured
-        snapshot backend can prove portable state.
+        snapshot backend can prove portable state. If an in-progress lifecycle
+        command fails or has an uncertain outcome, the drain becomes `failed`,
+        retains the affected instance ID, and leaves the node cordoned without
+        retrying the effect.
       requestBody:
         required: true
         content:
@@ -2994,7 +2997,7 @@ components:
           $ref: "#/components/schemas/Identifier128"
         state:
           type: string
-          enum: [active, completed, cancelled]
+          enum: [active, completed, cancelled, failed]
         reason:
           type: string
           minLength: 1
@@ -3009,6 +3012,12 @@ components:
         completed_at:
           type: string
           format: date-time
+        failed_instance_id:
+          $ref: "#/components/schemas/Identifier256"
+      description: |
+        Durable node evacuation state. `failed_instance_id` is present only
+        when `state` is `failed`; it identifies the degraded deployment
+        instance whose lifecycle effect Steward will not retry automatically.
     NodeDrainStartRequest:
       type: object
       additionalProperties: false

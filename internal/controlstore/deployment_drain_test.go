@@ -62,6 +62,46 @@ func TestNodeDrainIsIdempotentCordonsAndPersists(t *testing.T) {
 	}
 }
 
+func TestNewNodeDrainWaitsForCancelledInstanceMoves(t *testing.T) {
+	fixture := newRecordsFixture(t, DefaultLimits())
+	fixture.createTenant(t, "tenant-a")
+	fixture.createNode(t, "tenant-a")
+	input := deploymentApplyFixtureWithInstanceCount(t, fixture.now, "deployment-a", 1, 1)
+	input.DisruptionBudget = &DeploymentDisruptionBudget{MaxUnavailable: 1}
+	created, _, err := fixture.store.ApplyDeployment(fixture.admin, input, fixture.now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.Instances[0].NodeID = "node-1"
+	created.Instances[0].Phase = DeploymentInstanceRunning
+	created.Phase = DeploymentReady
+	fixture.store.mu.Lock()
+	fixture.store.current.deployments[deploymentKey("tenant-a", "deployment-a")] = created
+	fixture.store.mu.Unlock()
+	startedAt := fixture.now.Add(2 * time.Minute)
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", "kernel upgrade", startedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.BeginDeploymentInstanceDrain(
+		"tenant-a", "deployment-a", created.Instances[0].InstanceID, "node-1",
+		"maintenance-1", created.Revision, startedAt.Add(time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.CancelNodeDrain(
+		fixture.admin, "node-1", "maintenance-1", startedAt.Add(2*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-2", "firmware upgrade", startedAt.Add(3*time.Second),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("new drain while cancelled move remains = %v", err)
+	}
+}
+
 func TestDrainOperationsFailClosedAtAuthorityAndStateBoundaries(t *testing.T) {
 	var unavailable *Store
 	now := time.Now().UTC()

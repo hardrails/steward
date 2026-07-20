@@ -230,3 +230,31 @@ func nodeDrainHasWork(deployments map[string]Deployment, nodeID string) bool {
 	}
 	return false
 }
+
+// failDeploymentInstanceDrainLocked abandons a planned move after an
+// unrepeatable lifecycle command fails. It clears the per-instance marker so a
+// cancelled or failed request cannot poison later maintenance, while leaving
+// the instance failed and the node cordoned because the runtime outcome is not
+// known to be safe. The caller must hold store.mu and persist the returned node
+// mutation with the deployment mutation.
+func (store *Store) failDeploymentInstanceDrainLocked(
+	instance *DeploymentInstance,
+	now time.Time,
+) *Node {
+	if instance == nil || instance.Drain == nil {
+		return nil
+	}
+	drain := *instance.Drain
+	instance.Drain = nil
+	node, found := store.current.nodes[drain.SourceNodeID]
+	if !found || node.Drain == nil || node.Drain.RequestID != drain.RequestID ||
+		node.Drain.State != NodeDrainActive {
+		return nil
+	}
+	updated := cloneNode(node)
+	updated.Drain.State = NodeDrainFailed
+	updated.Drain.UpdatedAt = canonicalTimestamp(now)
+	updated.Drain.CompletedAt = canonicalTimestamp(now)
+	updated.Drain.FailedInstanceID = instance.InstanceID
+	return &updated
+}

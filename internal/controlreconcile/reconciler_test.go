@@ -298,6 +298,80 @@ func TestReconcilerDrainsStatelessInstanceAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestReconcilerFailsNodeDrainWithoutRetryingFailedStop(t *testing.T) {
+	fixture := newControlReconcileFixture(t)
+	source := fixture.node
+	target := addControlNode(t, fixture, "node-2")
+	fixture.node = source
+	heartbeatControlNode(t, fixture)
+	applyControlDeployment(t, fixture, 1)
+	reconciler := fixture.reconciler(t)
+
+	assertReconcileCount(t, reconciler, "enqueue source admit", 0, 1)
+	completeDeploymentCommand(t, fixture, "admit", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source admit", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source renewal", 0, 1)
+	completeDeploymentCommand(t, fixture, "renew", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source renewal", 1, 0)
+	assertReconcileCount(t, reconciler, "enqueue source start", 0, 1)
+	completeDeploymentCommand(t, fixture, "start", controlprotocol.ExecutorStatusDone)
+	assertReconcileCount(t, reconciler, "observe source start", 1, 0)
+	fixture.node = target
+	heartbeatControlNode(t, fixture)
+	fixture.node = source
+
+	if _, changed, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-failed-stop", "kernel upgrade", fixture.now,
+	); err != nil || !changed {
+		t.Fatalf("start node drain = (%v, %v)", changed, err)
+	}
+	if report, err := reconciler.Reconcile(context.Background()); err != nil || report.Draining != 1 {
+		t.Fatalf("mark drain = (%+v, %v)", report, err)
+	}
+	assertReconcileCount(t, reconciler, "enqueue drain stop", 0, 1)
+	completeDeploymentCommand(t, fixture, "stop", controlprotocol.ExecutorStatusFailed)
+	assertReconcileCount(t, reconciler, "observe failed drain stop", 1, 0)
+
+	deployment := getControlDeployment(t, fixture)
+	instance := deployment.Instances[0]
+	if deployment.Phase != controlstore.DeploymentDegraded ||
+		instance.Phase != controlstore.DeploymentInstanceFailed || instance.Drain != nil ||
+		!strings.Contains(instance.LastError, controlprotocol.ExecutorStatusFailed) {
+		t.Fatalf("failed drain deployment = %+v", deployment)
+	}
+	nodes, err := fixture.store.ListNodes(fixture.admin, "tenant-a")
+	if err != nil || len(nodes) != 2 || nodes[0].Drain == nil ||
+		nodes[0].Drain.State != controlstore.NodeDrainFailed ||
+		nodes[0].Drain.FailedInstanceID != instance.InstanceID || nodes[0].Drain.CompletedAt == "" {
+		t.Fatalf("failed node drain = (%+v, %v)", nodes, err)
+	}
+	if _, _, err := fixture.store.StartNodeDrain(
+		fixture.admin, "node-1", "maintenance-after-failure", "retry maintenance", fixture.now.Add(time.Second),
+	); !errors.Is(err, controlstore.ErrConflict) {
+		t.Fatalf("new drain with unresolved failed assignment = %v", err)
+	}
+	report, err := reconciler.Reconcile(context.Background())
+	if err != nil || report.Enqueued != 0 || report.Observed != 0 ||
+		getControlDeployment(t, fixture).Instances[0].Attempts != instance.Attempts {
+		t.Fatalf("failed stop retried = (%+v, %v)", report, err)
+	}
+
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := controlstore.Open(fixture.dir, fixture.limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store = reopened
+	t.Cleanup(func() { _ = reopened.Close() })
+	nodes, err = reopened.ListNodes(fixture.admin, "tenant-a")
+	if err != nil || nodes[0].Drain == nil || nodes[0].Drain.State != controlstore.NodeDrainFailed ||
+		nodes[0].Drain.FailedInstanceID != instance.InstanceID {
+		t.Fatalf("reopened failed node drain = (%+v, %v)", nodes, err)
+	}
+}
+
 func TestReconcilerDegradesAmbiguousOutcomeWithoutRetry(t *testing.T) {
 	fixture := newControlReconcileFixture(t)
 	applyControlDeployment(t, fixture, 1)

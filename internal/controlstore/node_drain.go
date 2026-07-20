@@ -46,6 +46,10 @@ func (store *Store) StartNodeDrain(
 		}
 		return Node{}, false, ErrConflict
 	}
+	if deploymentInstanceDrainOnNode(store.current.deployments, nodeID) ||
+		unresolvedDeploymentInstanceOnNode(store.current.deployments, nodeID) {
+		return Node{}, false, ErrConflict
+	}
 	created, _ := parseTimestamp(node.CreatedAt)
 	placement := EffectiveNodePlacement(node)
 	changed, _ := parseTimestamp(placement.ChangedAt)
@@ -143,9 +147,15 @@ func validNodeDrain(value NodeDrain) bool {
 	}
 	switch value.State {
 	case NodeDrainActive:
-		return value.CompletedAt == ""
+		return value.CompletedAt == "" && value.FailedInstanceID == ""
 	case NodeDrainCompleted, NodeDrainCancelled:
-		if !validTimestamp(value.CompletedAt) {
+		if !validTimestamp(value.CompletedAt) || value.FailedInstanceID != "" {
+			return false
+		}
+		completed, _ := parseTimestamp(value.CompletedAt)
+		return !completed.Before(updated)
+	case NodeDrainFailed:
+		if !validTimestamp(value.CompletedAt) || !validRecordID(value.FailedInstanceID, 256) {
 			return false
 		}
 		completed, _ := parseTimestamp(value.CompletedAt)
@@ -153,4 +163,27 @@ func validNodeDrain(value NodeDrain) bool {
 	default:
 		return false
 	}
+}
+
+func deploymentInstanceDrainOnNode(deployments map[string]Deployment, nodeID string) bool {
+	for _, deployment := range deployments {
+		for _, instance := range deployment.Instances {
+			if instance.Drain != nil && instance.Drain.SourceNodeID == nodeID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func unresolvedDeploymentInstanceOnNode(deployments map[string]Deployment, nodeID string) bool {
+	for _, deployment := range deployments {
+		for _, instance := range deployment.Instances {
+			if instance.NodeID == nodeID && instance.Phase != DeploymentInstanceRunning &&
+				instance.Phase != DeploymentInstanceRemoved {
+				return true
+			}
+		}
+	}
+	return false
 }
