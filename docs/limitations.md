@@ -161,6 +161,18 @@ Receipts deliberately omit raw prompts, request bodies, response bodies, termina
 agent result text, and secret values. That protects content but can limit forensic
 detail.
 
+The incident timeline and support bundle follow the same metadata-only boundary
+and also exclude command envelopes, credential values, private keys, and logs.
+The timeline joins the latest retained controller facts; it is not an append-only
+audit log and cannot reconstruct overwritten or removed transitions. The bundle
+is a strict, owner-only snapshot of several controller reads, not an atomic
+database snapshot or a signed attestation. Objects can change while collection
+is in progress; repeated node records that disagree fail the collection instead
+of being silently merged. Offline verification requires a SHA-256 digest retained
+through a separate trusted channel. That detects changed bytes but does not prove
+who created the bundle. Tenant-scoped bundles omit site-admin-only evidence
+checkpoints and the site-wide freeze record.
+
 ## Air-gapped does not mean supply-chain verified
 
 Steward can build and run without a hosted service and can import OCI archives
@@ -318,6 +330,12 @@ moving node-local state without proof.
 Never place credentials, task permits, receipt keys, live tokens, runtime IDs,
 network sessions, or random-number-generator state in a snapshot. A fork receives
 fresh authority through normal admission.
+
+Snapshot quarantine prevents only new forks from one exact tenant, source node,
+and snapshot identity. It does not scan the snapshot, prove contamination, delete
+storage, revoke an already-created fork, stop a running workload, or contain the
+source node. Cleared records remain and count toward the bounded per-tenant
+retention limit so revision history cannot be reset by deleting a decision.
 
 ## Current product scope
 

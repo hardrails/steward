@@ -426,6 +426,7 @@ func (s *Server) callTool(ctx context.Context, raw []byte) (any, *rpcError) {
 		"steward_control_node_list", "steward_control_node_status", "steward_control_node_revoke",
 		"steward_control_command_submit", "steward_control_command_status",
 		"steward_control_operations_summary", "steward_control_attention_list",
+		"steward_control_incident_timeline",
 		"steward_control_agent_list", "steward_control_command_list", "steward_control_credential_list",
 		"steward_control_evidence_status":
 		if s.control == nil {

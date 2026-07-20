@@ -220,6 +220,7 @@ export default function App() {
     const requests = [
       prefetchedSummary || api(projectedPath("/v1/operations/summary", tenantID), epoch),
       api(projectedPath("/v1/operations/attention", tenantID, {limit: 100}), epoch),
+      api(projectedPath("/v1/operations/timeline", tenantID, {limit: 100}), epoch),
       api(projectedPath("/v1/operations/agents", tenantID, {limit: 100}), epoch),
       api(projectedPath("/v1/operations/commands", tenantID, {limit: 100}), epoch),
       api(projectedPath("/v1/operations/credentials", tenantID, {limit: 100}), epoch),
@@ -233,9 +234,9 @@ export default function App() {
         ? api("/v1/tenants/" + encodeURIComponent(tenantID) + "/quota", epoch)
         : Promise.resolve(null),
     ];
-    const [summary, attention, agents, commands, credentials, freeze, nodes, quota] = await Promise.all(requests);
+    const [summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota] = await Promise.all(requests);
     fenceRef.current.assertCurrent(epoch);
-    return {summary, attention, agents, commands, credentials, freeze, nodes, quota};
+    return {summary, attention, timeline, agents, commands, credentials, freeze, nodes, quota};
   }, [api]);
 
   const authenticate = useCallback(async (rawCredential) => {
@@ -567,10 +568,11 @@ function Airlock({authenticating, error, onUnlock}) {
 const views = [
   ["overview", "01", "Fleet health"],
   ["attention", "02", "Needs review"],
-  ["nodes", "03", "Agent nodes"],
-  ["commands", "04", "Signed activity"],
-  ["credentials", "05", "Access records"],
-  ["agents", "06", "Agents"],
+  ["incident", "03", "Incident view"],
+  ["nodes", "04", "Agent nodes"],
+  ["commands", "05", "Signed activity"],
+  ["credentials", "06", "Access records"],
+  ["agents", "07", "Agents"],
 ];
 
 function ControlRoom(props) {
@@ -673,6 +675,7 @@ function ControlRoom(props) {
           <>
             {view === "overview" ? <Overview snapshot={snapshot} onAttention={() => props.onView("attention")} /> : null}
             {view === "attention" ? <AttentionView page={snapshot.attention} /> : null}
+            {view === "incident" ? <IncidentTimelineView page={snapshot.timeline} /> : null}
             {view === "nodes" ? <NodesView page={snapshot.nodes} tenantID={selectedTenant} /> : null}
             {view === "commands" ? (
               <CommandsView
@@ -989,6 +992,78 @@ function AttentionView({page}) {
       </ViewHeading>
       <AttentionList items={page.items} />
       {page.next_cursor ? <p className="truncation-note">More findings exist. Narrow the tenant projection or use the API cursor.</p> : null}
+    </section>
+  );
+}
+
+const incidentKindLabels = {
+  containment: "Containment",
+  evidence: "Evidence",
+  access: "Access",
+  workload: "Workload",
+};
+
+function IncidentTimelineView({page}) {
+  const counts = page.events.reduce((result, event) => {
+    result[event.kind] = (result[event.kind] || 0) + 1;
+    return result;
+  }, {});
+  return (
+    <section className="view incident-view" aria-labelledby="incident-title">
+      <ViewHeading eyebrow="CURRENT RETAINED FACTS" title="What changed the risk posture?">
+        One chronology for current containment, evidence, access, and failed-workload facts. Metadata only; no prompts, secrets, bodies, or results.
+      </ViewHeading>
+      <div className="incident-summary" aria-label="Incident fact summary">
+        {Object.entries(incidentKindLabels).map(([kind, label]) => (
+          <div key={kind}>
+            <span>{label}</span>
+            <strong>{counts[kind] || 0}</strong>
+          </div>
+        ))}
+      </div>
+      <aside className="incident-boundary">
+        <strong>THIS IS A CURRENT VIEW, NOT A COMPLETE AUDIT LOG.</strong>
+        <span>Later transitions replace earlier retained state. Preserve signed evidence and export historical events to your own SIEM when reconstruction matters.</span>
+      </aside>
+      {page.events.length ? (
+        <ol className="incident-timeline">
+          {page.events.map((event) => (
+            <li key={event.id} className={`incident-event is-${event.severity}`}>
+              <div className="incident-time">
+                <time dateTime={event.occurred_at}>{formatTime(event.occurred_at)}</time>
+                <span>{event.scope === "site" ? "SITE-WIDE" : event.tenant_id}</span>
+              </div>
+              <span className="incident-node" aria-hidden="true" />
+              <article>
+                <div className="incident-event-head">
+                  <div>
+                    <Badge kind={event.severity === "critical" ? "is-danger" : event.severity === "warning" ? "is-warning" : "is-ok"}>
+                      {event.severity}
+                    </Badge>
+                    <span className="incident-kind">{incidentKindLabels[event.kind] || humanize(event.kind)}</span>
+                  </div>
+                  <code>{event.id.slice(-10)}</code>
+                </div>
+                <h3>{humanize(event.action)}</h3>
+                {event.reason ? <p>{event.reason}</p> : null}
+                <dl>
+                  {event.node_id ? <div><dt>Node</dt><dd>{event.node_id}</dd></div> : null}
+                  {event.resource_id ? <div><dt>Resource</dt><dd>{event.resource_id}</dd></div> : null}
+                  {event.status ? <div><dt>Status</dt><dd>{humanize(event.status)}</dd></div> : null}
+                  {event.count ? <div><dt>Observed</dt><dd>{event.count} times</dd></div> : null}
+                </dl>
+              </article>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <article className="incident-empty">
+          <span className="panel-index">NO CURRENT INCIDENT FACTS</span>
+          <h3>No retained containment or failure state is visible.</h3>
+          <p>This does not prove that no incident occurred. It means the current Control projection contains none of the facts represented by this view.</p>
+        </article>
+      )}
+      {page.next_cursor ? <p className="truncation-note">More incident facts exist. Narrow the tenant projection or use the API continuation cursor.</p> : null}
     </section>
   );
 }

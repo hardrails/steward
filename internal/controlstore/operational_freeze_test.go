@@ -159,6 +159,7 @@ func TestOperationalFreezeFormatRejectsLegacySmuggling(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.Version = stateFormatRolloutVersion
+	snapshot.Quarantines = nil
 	smuggled, err := json.Marshal(snapshot)
 	if err != nil {
 		t.Fatal(err)

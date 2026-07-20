@@ -1296,6 +1296,8 @@ paths:
           $ref: "#/components/responses/PayloadTooLarge"
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
+        "423":
+          $ref: "#/components/responses/SnapshotQuarantined"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1393,6 +1395,77 @@ paths:
           $ref: "#/components/responses/NotFound"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/tenants/{tenant_id}/nodes/{node_id}/snapshots/{snapshot_id}/quarantine:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/NodeID"
+      - $ref: "#/components/parameters/SnapshotID"
+    get:
+      tags: [deployments]
+      operationId: getSnapshotQuarantine
+      summary: Inspect the durable admission gate for one snapshot
+      description: |
+        Returns the retained optimistic revision, if any, and whether this exact
+        tenant, source node, and snapshot identity may seed a new fork. The
+        response does not read, delete, or validate snapshot bytes.
+      responses:
+        "200":
+          description: Snapshot quarantine status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotQuarantineStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      tags: [deployments]
+      operationId: changeSnapshotQuarantine
+      summary: Quarantine or clear one snapshot fork source
+      description: |
+        Retains a tenant-scoped incident decision using optimistic revisions.
+        Quarantine prevents new forks from this exact snapshot. It does not
+        revoke an already-created fork, delete storage, or stop a workload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SnapshotQuarantineRequest"
+      responses:
+        "200":
+          description: Retained status after the transition or exact retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotQuarantineChange"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -1628,6 +1701,59 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AttentionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /v1/operations/timeline:
+    get:
+      tags: [operations]
+      operationId: listControlIncidentTimeline
+      summary: List current incident-relevant facts
+      description: |
+        Joins the latest retained containment, evidence, access, and failed
+        workload facts into one deterministic, newest-first chronology. This
+        projection is not an append-only audit log: a later transition replaces
+        an earlier retained transition, and facts removed by bounded retention
+        do not remain in this view. Reading the timeline performs no
+        acknowledgement, retry, remediation, or other mutation.
+
+        Events contain metadata only. They exclude signed command bytes,
+        command results, credentials, prompts, request or response bodies, and
+        logs. A tenant projection includes site-wide freeze state because that
+        state applies to the tenant. Site-wide node facts are emitted once per
+        bound tenant so a tenant operator sees only its own projection.
+
+        `cursor` is opaque and bound to this endpoint, the caller's effective
+        site-wide or tenant projection, and the `node_id`, `kind`, and
+        `severity` filters. Reusing it across projections or with a changed
+        filter returns `400`. A page can contain fewer records than `limit` to
+        keep the encoded response within 1 MiB. Query parameters must be known,
+        non-empty, and occur exactly once.
+      parameters:
+        - $ref: "#/components/parameters/OperationsTenantID"
+        - $ref: "#/components/parameters/OperationsNodeID"
+        - $ref: "#/components/parameters/IncidentKindFilter"
+        - $ref: "#/components/parameters/IncidentSeverityFilter"
+        - $ref: "#/components/parameters/OperationsCursor"
+        - $ref: "#/components/parameters/OperationsLimit"
+      responses:
+        "200":
+          description: A bounded metadata-only page of current incident-relevant facts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentTimelinePage"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -2098,6 +2224,12 @@ components:
       required: true
       schema:
         $ref: "#/components/schemas/Identifier128"
+    SnapshotID:
+      name: snapshot_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier128"
     CredentialID:
       name: credential_id
       in: path
@@ -2196,6 +2328,22 @@ components:
       description: Return only attention items with this exact derived reason.
       schema:
         $ref: "#/components/schemas/AttentionReason"
+    IncidentKindFilter:
+      name: kind
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: Return only incident facts in this exact category.
+      schema:
+        $ref: "#/components/schemas/IncidentKind"
+    IncidentSeverityFilter:
+      name: severity
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: Return only incident facts with this exact severity.
+      schema:
+        $ref: "#/components/schemas/IncidentSeverity"
     AgentObservedStatusFilter:
       name: status
       in: query
@@ -2436,6 +2584,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    SnapshotQuarantined:
+      description: The exact source snapshot is quarantined and cannot seed a new fork.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     InternalError:
       description: The controller could not complete the request.
       content:
@@ -2521,6 +2675,12 @@ components:
     AttentionResource:
       type: string
       enum: [node, evidence, command, capacity, tenant_quota]
+    IncidentKind:
+      type: string
+      enum: [containment, evidence, access, workload]
+    IncidentSeverity:
+      type: string
+      enum: [info, warning, critical]
     OperationsSummary:
       type: object
       additionalProperties: false
@@ -2724,6 +2884,68 @@ components:
           format: int64
           minimum: 0
         limit_value:
+          type: integer
+          format: int64
+          minimum: 1
+    IncidentTimelinePage:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/IncidentEvent"
+        next_cursor:
+          $ref: "#/components/schemas/OperationsCursor"
+    IncidentEvent:
+      type: object
+      additionalProperties: false
+      description: |
+        Metadata-only projection of one latest retained incident-relevant fact.
+        Its stable ID identifies that exact retained fact. This record is not a
+        historical audit entry and can disappear when bounded source state is
+        replaced or removed.
+      required: [id, occurred_at, kind, action, severity, scope]
+      properties:
+        id:
+          type: string
+          minLength: 73
+          maxLength: 73
+          pattern: '^incident-[0-9a-f]{64}$'
+        occurred_at:
+          type: string
+          format: date-time
+        kind:
+          $ref: "#/components/schemas/IncidentKind"
+        action:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[a-z][a-z0-9_]*$'
+        severity:
+          $ref: "#/components/schemas/IncidentSeverity"
+        scope:
+          type: string
+          enum: [site, tenant]
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        resource_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        status:
+          type: string
+          minLength: 1
+          maxLength: 512
+        count:
           type: integer
           format: int64
           minimum: 1
@@ -3197,6 +3419,100 @@ components:
       properties:
         status:
           $ref: "#/components/schemas/OperationalFreezeStatus"
+        changed:
+          type: boolean
+    SnapshotQuarantine:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, node_id, snapshot_id, quarantined, revision, changed_at]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        snapshot_id:
+          $ref: "#/components/schemas/Identifier128"
+        quarantined:
+          type: boolean
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^\S(?:[^\r\n\x00]*\S)?$'
+        changed_at:
+          type: string
+          format: date-time
+      oneOf:
+        - required: [reason]
+          properties:
+            quarantined:
+              type: boolean
+              enum: [true]
+        - properties:
+            quarantined:
+              type: boolean
+              enum: [false]
+          not:
+            required: [reason]
+      description: |
+        One retained fork-admission decision. Cleared records remain so revision
+        history cannot be reset by deleting and recreating the same identity.
+    SnapshotQuarantineStatus:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, node_id, snapshot_id, blocked]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/Identifier128"
+        node_id:
+          $ref: "#/components/schemas/Identifier128"
+        snapshot_id:
+          $ref: "#/components/schemas/Identifier128"
+        record:
+          $ref: "#/components/schemas/SnapshotQuarantine"
+        blocked:
+          type: boolean
+      description: "`blocked` is true exactly when the retained record is quarantined."
+    SnapshotQuarantineRequest:
+      type: object
+      additionalProperties: false
+      required: [action, expected_revision]
+      properties:
+        action:
+          type: string
+          enum: [quarantine, clear]
+        expected_revision:
+          type: integer
+          format: int64
+          minimum: 0
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^\S(?:[^\r\n\x00]*\S)?$'
+      oneOf:
+        - required: [reason]
+          properties:
+            action:
+              type: string
+              enum: [quarantine]
+        - properties:
+            action:
+              type: string
+              enum: [clear]
+          not:
+            required: [reason]
+    SnapshotQuarantineChange:
+      type: object
+      additionalProperties: false
+      required: [status, changed]
+      properties:
+        status:
+          $ref: "#/components/schemas/SnapshotQuarantineStatus"
         changed:
           type: boolean
     TenantList:

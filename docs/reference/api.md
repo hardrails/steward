@@ -49,6 +49,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `DELETE /v1/node-credentials/{credential_id}` | Revoke one node bearer during staged credential rotation |
 | `GET /v1/tenants/{tenant_id}/nodes` | Page through bounded tenant node inventory |
 | `GET /v1/tenants/{tenant_id}/nodes/{node_id}` | Read one tenant-visible node |
+| `GET or PUT /v1/tenants/{tenant_id}/nodes/{node_id}/snapshots/{snapshot_id}/quarantine` | Inspect, quarantine, or clear one exact snapshot as a source for new forks |
 | `POST /v1/nodes/{node_id}/placement` | Site-admin-only cordon, quarantine, uncordon, or unquarantine transition with durable reason and time |
 | `PUT or DELETE /v1/nodes/{node_id}/drain` | Start an idempotent, budgeted stateless evacuation or cancel new moves using its request ID; already-started moves continue |
 | `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
@@ -67,6 +68,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `GET or PUT /v1/tenants/{tenant_id}/quota` | Inspect requested-resource usage or optimistically set and clear the site-defined fleet-wide tenant ceiling; mutation requires a site administrator |
 | `GET or PUT /v1/operations/freeze` | Inspect or optimistically change the site-wide command-delivery freeze; mutation requires a site administrator |
 | `GET /v1/operations/attention` | Page and filter deterministic action-required facts |
+| `GET /v1/operations/timeline` | Page current metadata-only containment, evidence, access, and failed-workload facts in newest-first order |
 | `GET /v1/operations/agents` | Page through non-secret observed agent runtime state and latest signed operations |
 | `GET /v1/operations/commands` | Page and filter command metadata without command or result bodies |
 | `GET /v1/operations/credentials` | Page and filter non-secret credential metadata |
@@ -93,6 +95,23 @@ The freeze gates new command retention and node delivery. It does not revoke a
 live delivery lease, stop a running workload, or suppress node reports and signed
 evidence. See the [incident freeze workflow]({{ '/guides/control-plane/' | relative_url }}#freeze-new-command-delivery-during-an-incident)
 for the operator-facing boundary.
+
+Snapshot quarantine uses the same optimistic-revision pattern, but its scope is
+one tenant, source node, and snapshot ID. A quarantined snapshot cannot seed a
+new deployment fork; the deployment `PUT` returns `423` with error code
+`snapshot_quarantined`. Exact retries of a deployment already retained before the
+quarantine remain idempotent. Clearing requires the current retained revision.
+Neither transition reads or deletes snapshot bytes, recalls an existing fork, or
+stops a running workload.
+
+The incident timeline is a read-only join over the latest retained Control facts.
+It is useful for answering “what is currently contained, revoked, divergent, or
+failing?” without searching several inventories. It is not an append-only audit
+log: a later transition replaces an earlier retained transition, bounded source
+records can disappear, and it does not include unmanaged activity. Events contain
+metadata only and exclude command envelopes, results, credentials, prompts,
+request and response bodies, and logs. Its opaque cursor is bound to the effective
+tenant projection and every filter.
 
 Tenant resource quotas also use optimistic revisions. The ceiling covers raw CPU,
 memory, process, and workload-slot requests in signed admission intent across the

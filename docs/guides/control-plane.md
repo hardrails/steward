@@ -833,6 +833,8 @@ Use the narrower control that matches the incident:
 
 - Freeze the tenant or site when the controller must stop sending new work.
 - Quarantine a suspected node to stop placement and command delivery to that node.
+- Quarantine one snapshot when its state may be contaminated but its source node
+  should otherwise remain usable.
 - Revoke a credential or delegated authority when that authority must no longer be
   usable; do not treat a freeze as revocation.
 - Preserve evidence before destructive recovery work.
@@ -840,6 +842,111 @@ Use the narrower control that matches the incident:
 The React console shows the effective site or tenant freeze at the top of every
 view. Freeze changes remain CLI/API operations so the browser does not gain a new
 incident-response mutation path.
+
+### Prevent new forks from a suspect snapshot
+
+Snapshot quarantine is the narrowest containment control for persistent state.
+It binds the tenant, source node, and snapshot identity, so a snapshot with the
+same name in another tenant or on another node is unaffected.
+
+```console
+stewardctl control snapshot status \
+  -tenant-id tenant-a -node-id node-a -snapshot-id snapshot-a
+
+stewardctl control snapshot quarantine \
+  -tenant-id tenant-a -node-id node-a -snapshot-id snapshot-a \
+  -reason "untrusted content may have entered agent state"
+```
+
+The CLI reads the retained revision before changing the record. A new fork from
+that exact snapshot then fails with `snapshot_quarantined`. Existing forks and
+running workloads are unchanged because their admission and cloned state already
+exist. Preserve evidence and use node quarantine, freeze, revocation, or workload
+cleanup separately when the incident is broader.
+
+After investigation, clear the gate explicitly:
+
+```console
+stewardctl control snapshot unquarantine \
+  -tenant-id tenant-a -node-id node-a -snapshot-id snapshot-a
+```
+
+The cleared record remains durable with a higher revision. This prevents an old
+operator view from silently restoring an earlier decision after restart.
+
+### Read the current incident chronology
+
+Use the incident timeline to see current containment, evidence divergence,
+credential revocation, and failed-workload facts in one newest-first view:
+
+```console
+stewardctl control incident timeline
+```
+
+With a tenant context, the result is automatically limited to that tenant. A
+site administrator can select one tenant with `-tenant-id tenant-a` or omit it
+for the site-wide view. Narrow the result when investigating one system:
+
+```console
+stewardctl control incident timeline \
+  -node-id node-a \
+  -kind containment \
+  -severity critical
+```
+
+Categories are `containment`, `evidence`, `access`, and `workload`. Severities
+are `info`, `warning`, and `critical`. The output contains bounded metadata only;
+it never contains command envelopes, command results, credentials, prompts,
+request or response bodies, or logs.
+
+This chronology shows the latest retained facts, not every historical change. A
+later state transition replaces the earlier retained transition, and bounded
+records can eventually disappear. Use signed Executor and Gateway evidence plus
+an external log or security information and event management (SIEM) system when
+you require complete historical reconstruction.
+
+### Preserve a metadata-only support bundle
+
+A site administrator can capture the whole-site incident context in one owner-only
+JSON file before making destructive changes. A tenant operator can use the same
+command with `-tenant-id` for only their tenant:
+
+```console
+stewardctl control support-bundle create \
+  -out ./steward-support.json
+```
+
+Add `-tenant-id tenant-a` to restrict the bundle to one tenant. A bundle includes
+the operations summary, attention findings, current incident timeline, freeze and
+quota records, node and deployment state, agent and command metadata, credential
+metadata, and, for a site-admin bundle, the last controller evidence checkpoint
+for each visible node. Tenant bundles omit the site-wide freeze record and those
+site-admin-only checkpoints rather than widening access or failing after the
+tenant-scoped reads succeed.
+Collection is read-only and bounded. It does not acknowledge a finding, retry a
+command, stop an agent, or change incident state.
+
+The format cannot represent raw prompts, request or response bodies, signed
+command envelopes, credential values, private keys, agent result text, or logs.
+The output file is created with owner-only permissions and the command prints a
+`sha256:` digest. Preserve that digest through a separate authenticated channel;
+keeping it beside the bundle does not establish provenance. Treat the remaining
+metadata as sensitive: tenant, node, connector, and deployment names can still
+disclose operational details.
+
+Verify the strict format and recalculate the digest without contacting Control:
+
+```console
+stewardctl control support-bundle verify \
+  -in ./steward-support.json \
+  -expected-sha256 sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+Verification requires the separately retained digest, rejects a byte mismatch,
+then checks unknown fields, canonical JSON, the exclusion contract, evidence
+checkpoints, tenant scope, and deployment identities. The bundle is not signed;
+the trusted digest authenticates only the exact bytes you retained, not that
+Control or the host was uncompromised or that the recorded facts were true.
 
 ## Inspect fleet operations and action-required findings
 

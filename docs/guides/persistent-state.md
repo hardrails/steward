@@ -168,6 +168,21 @@ they do not weaken tenant authorization or enable host-admin intent implicitly.
 Snapshot deletion is available as `stewardctl node delete-snapshot` and
 `steward_delete_snapshot`.
 
+If a snapshot may contain attacker-controlled instructions, compromised state,
+or credentials that should never be copied again, block it as a source for new
+forks without destroying forensic evidence:
+
+```console
+stewardctl control snapshot quarantine \
+  -tenant-id tenant-a -node-id node-a -snapshot-id snapshot-a \
+  -reason "suspected state contamination"
+```
+
+The quarantine is durable controller admission state. It does not change the ZFS
+snapshot, delete data, stop a running agent, or revoke a fork that was already
+created. Clear it with `stewardctl control snapshot unquarantine` only after the
+snapshot is trusted again or no longer usable.
+
 If Executor loses the worker response after preparing a mutation, it blocks every
 unrelated mutation. Reissuing the exact same signed snapshot or clone request is the
 only operation allowed to settle that journal entry. A different snapshot, lineage,

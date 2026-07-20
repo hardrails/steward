@@ -113,7 +113,7 @@ the route and credential.
 Start a portable agent project with:
 
 ```console
-stewardctl agent create workspace-auditor -runtime hermes workspace-auditor
+stewardctl agent create workspace-auditor -runtime hermes
 cd workspace-auditor
 stewardctl agent build
 ```
@@ -196,7 +196,8 @@ See [Manage Gateway secrets](https://hardrails.github.io/steward/guides/secrets/
 `steward-control` is a customer-operated control plane for tenant-scoped
 operators, one-time node enrollment, outbound node polling, signed command
 delivery, durable desired deployments, deterministic placement of exact delegated
-instances, inventory, attention findings, and separately witnessed evidence.
+instances, inventory, attention findings, a current metadata-only incident
+chronology, and separately witnessed evidence.
 
 Control uses a purpose-separated online key only within a short-lived
 tenant-signed delegation. Tenant keys remain outside Control, and Executor verifies

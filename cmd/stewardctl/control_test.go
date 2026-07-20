@@ -33,6 +33,7 @@ func TestControlDefaultOriginMatchesLoopbackServer(t *testing.T) {
 func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 	const nodeCredentialToken = "steward_node_v1_node-cred-11111111111111111111111111111111_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	attentionCursor := base64.RawURLEncoding.EncodeToString([]byte("attention-v1\x00attention-a"))
+	timelineCursor := base64.RawURLEncoding.EncodeToString([]byte("incident-timeline-v1\x00incident-a"))
 	agentCursor := base64.RawURLEncoding.EncodeToString([]byte("agent-v1\x00agent-a"))
 	commandCursor := base64.RawURLEncoding.EncodeToString([]byte("command-v1\x00command-a"))
 	credentialCursor := base64.RawURLEncoding.EncodeToString([]byte("credential-v1\x00credential-a"))
@@ -114,6 +115,15 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 				t.Fatalf("attention request=%s %s", request.Method, request.URL.String())
 			}
 			_, _ = w.Write([]byte(`{"items":[{"id":"attention-a","reason":"node_stale","severity":"warning","resource":"node","tenant_id":"tenant-a","node_id":"node-1","since":"2026-07-16T11:55:00Z"}],"next_cursor":"next-attention"}`))
+		case "/v1/operations/timeline":
+			query := request.URL.Query()
+			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" ||
+				query.Get("node_id") != "node-1" || query.Get("kind") != "containment" ||
+				query.Get("severity") != "critical" || query.Get("cursor") != timelineCursor ||
+				query.Get("limit") != "20" {
+				t.Fatalf("incident timeline request=%s %s", request.Method, request.URL.String())
+			}
+			_, _ = w.Write([]byte(`{"events":[{"id":"incident-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","occurred_at":"2026-07-16T11:56:00Z","kind":"containment","action":"node_quarantined","severity":"critical","scope":"tenant","tenant_id":"tenant-a","node_id":"node-1","reason":"evidence mismatch"}]}`))
 		case "/v1/operations/commands":
 			query := request.URL.Query()
 			if request.Method != http.MethodGet || query.Get("tenant_id") != "tenant-a" ||
@@ -307,6 +317,16 @@ func TestControlCommandsCompleteEnrollmentAndQueueWorkflow(t *testing.T) {
 		t.Fatalf("attention output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
+	incidentArguments := append([]string{"control", "incident", "timeline"}, common...)
+	incidentArguments = append(
+		incidentArguments, "-tenant-id", "tenant-a", "-node-id", "node-1",
+		"-kind", "containment", "-severity", "critical", "-cursor", timelineCursor, "-limit", "20",
+	)
+	if err := run(incidentArguments, &output, &bytes.Buffer{}); err != nil ||
+		!strings.Contains(output.String(), `"action":"node_quarantined"`) {
+		t.Fatalf("incident timeline output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
 	agentListArguments := append([]string{"control", "agent", "list"}, common...)
 	agentListArguments = append(
 		agentListArguments, "-tenant-id", "tenant-a", "-node-id", "node-1",
@@ -384,6 +404,11 @@ func TestControlOperationsCommandsRejectInvalidFilters(t *testing.T) {
 		{name: "attention cursor", call: controlAttentionList, args: []string{"-cursor", "%%%"}},
 		{name: "attention zero limit", call: controlAttentionList, args: []string{"-limit", "0"}},
 		{name: "attention oversized limit", call: controlAttentionList, args: []string{"-limit", "501"}},
+		{name: "incident kind", call: controlIncidentTimeline, args: []string{"-kind", "unknown"}},
+		{name: "incident severity", call: controlIncidentTimeline, args: []string{"-severity", "urgent"}},
+		{name: "incident node", call: controlIncidentTimeline, args: []string{"-node-id", "-node"}},
+		{name: "incident cursor", call: controlIncidentTimeline, args: []string{"-cursor", validCursor + "="}},
+		{name: "incident zero limit", call: controlIncidentTimeline, args: []string{"-limit", "0"}},
 		{name: "agent status", call: controlAgentList, args: []string{"-status", "destroyed"}},
 		{name: "agent node", call: controlAgentList, args: []string{"-node-id", "-node"}},
 		{name: "agent cursor", call: controlAgentList, args: []string{"-cursor", validCursor + "="}},
