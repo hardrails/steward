@@ -16,7 +16,7 @@ import (
 var completionTree = map[string][]string{
 	"":                            {"help", "site", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade", "version"},
 	"help":                        {"site", "agent", "context", "completion", "keygen", "key", "capsule", "policy", "permit", "task", "executor-command", "control", "evidence", "node", "gateway", "secret", "image", "upgrade"},
-	"site":                        {"init", "verify", "node"},
+	"site":                        {"init", "verify", "connect", "node"},
 	"site node":                   {"prepare", "activate", "verify"},
 	"agent":                       {"create", "init", "validate", "build", "plan", "apply", "deploy", "deployment", "fork", "doctor"},
 	"agent deployment":            {"apply", "wait", "status", "list", "remove"},
@@ -68,6 +68,7 @@ var completionTree = map[string][]string{
 var completionFlags = map[string][]string{
 	"site init":                         {"-site-id", "-tenant-id", "-repository", "-service-id", "-connector-id", "-control-server-names", "-authorized-effects", "-dry-run"},
 	"site verify":                       {"-site-root-public-key"},
+	"site connect":                      {"-context", "-operator-token-out", "-request-id", "-node-id", "-site-root-public-key", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"site node prepare":                 {"-out", "-request-id", "-valid-for", "-site-root-public-key", "-control-url", "-token-file", "-ca-file", "-no-context"},
 	"site node activate":                {"-out", "-site-root-public-key"},
 	"site node verify":                  {"-site-root-public-key"},

@@ -69,6 +69,15 @@ func TestCompletionCandidatesCoverCommandsFlagsAndContextNames(t *testing.T) {
 	if candidates := stewardctlCompletionCandidates([]string{"site", "node", ""}); !slices.Equal(candidates, []string{"activate", "prepare", "verify"}) {
 		t.Fatalf("site node candidates=%v", candidates)
 	}
+	if candidates := stewardctlCompletionCandidates([]string{"site", ""}); !slices.Equal(candidates, []string{"connect", "init", "node", "verify"}) {
+		t.Fatalf("site candidates=%v", candidates)
+	}
+	siteConnectFlags := stewardctlCompletionCandidates([]string{"site", "connect", "steward-site", "-"})
+	for _, expected := range []string{"-context", "-control-url", "-no-context", "-operator-token-out", "-site-root-public-key", "-token-file"} {
+		if !slices.Contains(siteConnectFlags, expected) {
+			t.Fatalf("site connect flags %v missing %s", siteConnectFlags, expected)
+		}
+	}
 	siteNodeFlags := stewardctlCompletionCandidates([]string{"site", "node", "prepare", "-"})
 	for _, expected := range []string{"-control-url", "-no-context", "-out", "-site-root-public-key", "-token-file"} {
 		if !slices.Contains(siteNodeFlags, expected) {

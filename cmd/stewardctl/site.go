@@ -74,17 +74,19 @@ type siteOutput struct {
 
 func siteCommand(arguments []string, stdout io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("site requires init, verify, or node")
+		return errors.New("site requires init, verify, connect, or node")
 	}
 	switch arguments[0] {
 	case "init":
 		return siteInit(arguments[1:], stdout)
 	case "verify":
 		return siteVerify(arguments[1:], stdout)
+	case "connect":
+		return siteConnect(arguments[1:], stdout)
 	case "node":
 		return siteNodeCommand(arguments[1:], stdout)
 	default:
-		return errors.New("site requires init, verify, or node")
+		return errors.New("site requires init, verify, connect, or node")
 	}
 }
 

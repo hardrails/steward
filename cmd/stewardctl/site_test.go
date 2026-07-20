@@ -209,8 +209,8 @@ func TestSiteCommandRejectsIncompleteAndAmbiguousInputs(t *testing.T) {
 		arguments []string
 		want      string
 	}{
-		{arguments: nil, want: "site requires init, verify, or node"},
-		{arguments: []string{"unknown"}, want: "site requires init, verify, or node"},
+		{arguments: nil, want: "site requires init, verify, connect, or node"},
+		{arguments: []string{"unknown"}, want: "site requires init, verify, connect, or node"},
 		{arguments: []string{"init"}, want: "exactly one output directory"},
 		{arguments: []string{"init", "one", "two"}, want: "exactly one output directory"},
 		{arguments: []string{"init", "site", "-site-id", "invalid site", "-dry-run"}, want: "identity is invalid"},
