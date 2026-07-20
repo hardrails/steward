@@ -83,6 +83,29 @@ func TestSiteInitCreatesAndVerifiesSeparatedAuthorityPackage(t *testing.T) {
 		policy.Tenants[0].AuthorizedEffects.Keys[0].ConnectorIDs[0] != "github-issues" {
 		t.Fatalf("unexpected generated policy: %#v", policy)
 	}
+	inventoryRaw, err := os.ReadFile(filepath.Join(directory, "inventory.dsse.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventoryPayload, _, err := dsse.Verify(inventoryRaw, sitePackagePayloadType, map[string]ed25519.PublicKey{"site-root-1": root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inventory sitePackageInventory
+	if err := json.Unmarshal(inventoryPayload, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	wrongClassification := inventory
+	wrongClassification.Files = append([]sitePackageFile(nil), inventory.Files...)
+	wrongClassification.Files[0].Classification = "public-trust"
+	if err := validateSiteInventory(wrongClassification); err == nil || !strings.Contains(err.Error(), "outside the package contract") {
+		t.Fatalf("invalid custody classification error=%v", err)
+	}
+	missingRequired := inventory
+	missingRequired.Files = append([]sitePackageFile(nil), inventory.Files[1:]...)
+	if err := validateSiteInventory(missingRequired); err == nil || !strings.Contains(err.Error(), "missing required file") {
+		t.Fatalf("missing required file error=%v", err)
+	}
 
 	var verified bytes.Buffer
 	if err := siteCommand([]string{"verify", directory}, &verified); err != nil {

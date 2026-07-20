@@ -484,14 +484,61 @@ func validateSiteInventory(inventory sitePackageInventory) error {
 		return errors.New("site inventory identity is invalid")
 	}
 	previous := ""
+	seen := make(map[string]struct{}, len(inventory.Files))
+	specs := sitePackageFileSpecifications()
 	for _, file := range inventory.Files {
 		if file.Path <= previous || filepath.Clean(file.Path) != file.Path || filepath.IsAbs(file.Path) || strings.HasPrefix(file.Path, "..") ||
 			(file.Mode != "0600" && file.Mode != "0644") || !validSiteSHA256(file.SHA256) || file.Classification == "" {
 			return errors.New("site inventory file entry is invalid")
 		}
+		spec, ok := specs[file.Path]
+		if !ok || file.Mode != fmt.Sprintf("%04o", spec.mode) || file.Classification != spec.classification {
+			return fmt.Errorf("site inventory file %q is outside the package contract", file.Path)
+		}
+		seen[file.Path] = struct{}{}
 		previous = file.Path
 	}
+	for path := range specs {
+		_, present := seen[path]
+		optional := strings.Contains(path, "tenant-action")
+		if !optional && !present {
+			return fmt.Errorf("site inventory is missing required file %q", path)
+		}
+	}
+	_, privateAction := seen["private/tenant-action.private.pem"]
+	_, publicAction := seen["public/tenant-action.public"]
+	if privateAction != publicAction {
+		return errors.New("site inventory must contain both tenant action key files or neither")
+	}
 	return nil
+}
+
+type siteFileSpecification struct {
+	mode           fs.FileMode
+	classification string
+}
+
+func sitePackageFileSpecifications() map[string]siteFileSpecification {
+	return map[string]siteFileSpecification{
+		"private/control-ca.private.pem":     {mode: 0o600, classification: "offline-control-ca"},
+		"private/control-server.private.pem": {mode: 0o600, classification: "control-host-secret"},
+		"private/publisher.private.pem":      {mode: 0o600, classification: "offline-publisher"},
+		"private/site-cleanup.private.pem":   {mode: 0o600, classification: "offline-incident-response"},
+		"private/site-root.private.pem":      {mode: 0o600, classification: "offline-root"},
+		"private/tenant-action.private.pem":  {mode: 0o600, classification: "tenant-action-approver"},
+		"private/tenant-command.private.pem": {mode: 0o600, classification: "tenant-online-signer"},
+		"private/tenant-task.private.pem":    {mode: 0o600, classification: "tenant-online-signer"},
+		"public/control-ca.pem":              {mode: 0o644, classification: "public-trust"},
+		"public/control-server.pem":          {mode: 0o644, classification: "control-host-public"},
+		"public/publisher.public":            {mode: 0o644, classification: "public-trust"},
+		"public/site-cleanup.public":         {mode: 0o644, classification: "public-trust"},
+		"public/site-policy.dsse.json":       {mode: 0o644, classification: "node-trust"},
+		"public/site-policy.json":            {mode: 0o644, classification: "public-policy-source"},
+		"public/site-root.public":            {mode: 0o644, classification: "public-trust"},
+		"public/tenant-action.public":        {mode: 0o644, classification: "public-trust"},
+		"public/tenant-command.public":       {mode: 0o644, classification: "public-trust"},
+		"public/tenant-task.public":          {mode: 0o644, classification: "public-trust"},
+	}
 }
 
 func verifySitePackageFiles(directory string, expected []sitePackageFile) error {
