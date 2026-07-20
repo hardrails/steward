@@ -7,8 +7,8 @@
 > exact-request permits and bounded exact-effect bundles,
 > optional response-history locking that invalidates stale approvals,
 > Docker/gVisor enforcement, spend-before-DNS records, and offline-verifiable
-> receipts, plus a restart-safe node maintenance cordon and resumable exact-runtime
-> drain, without
+> receipts, plus controller-owned cordon and quarantine, a restart-safe node
+> maintenance cordon, and resumable exact-runtime drain, without
 > requiring a hosted service. A signed agent release can also bind one qualified
 > outcome to an exact offline archive, deterministic canary, evidence digest, and
 > known limits without granting runtime authority. Steward includes an optional

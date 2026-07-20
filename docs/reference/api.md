@@ -48,6 +48,7 @@ command and evidence uplink poll and report routes for their bound node.
 | `DELETE /v1/node-credentials/{credential_id}` | Revoke one node bearer during staged credential rotation |
 | `GET /v1/tenants/{tenant_id}/nodes` | Page through bounded tenant node inventory |
 | `GET /v1/tenants/{tenant_id}/nodes/{node_id}` | Read one tenant-visible node |
+| `POST /v1/nodes/{node_id}/placement` | Site-admin-only cordon, quarantine, uncordon, or unquarantine transition with durable reason and time |
 | `DELETE /v1/nodes/{node_id}` | Revoke a node and all of its credentials site-wide |
 | `GET /v1/tenants/{tenant_id}/deployments` | Page through bounded desired agent deployments, including retained task-ready intent and admission projections when present |
 | `GET or PUT /v1/tenants/{tenant_id}/deployments/{deployment_id}` | Inspect or apply one optimistic, generation-fenced desired deployment |
@@ -76,6 +77,15 @@ query parameters, redirects are not used, and every error has the common
 `{"error":"...","message":"..."}` shape. The controller parses signed-command
 identity to bind it to the route but does not treat that parse as authorization;
 Executor verifies the signature and local policy before applying the command.
+
+Every node response includes controller placement state. `schedulable` accepts
+eligible new deployments. `cordoned` preserves existing assignments but excludes
+new placement. `quarantined` also stops the controller from leasing commands to
+the node and makes its assigned deployments unavailable to reconciliation; node
+liveness and signed evidence can still arrive for investigation. Cordon and
+quarantine require a bounded reason. Removing quarantine requires the explicit
+`unquarantine` action, so an ordinary maintenance uncordon cannot accidentally
+weaken incident containment.
 
 A deployment `PUT` carries a canonical agent bundle digest, publisher-signed
 capsule, and tenant-signed controller delegation. Control validates bounded routing

@@ -168,10 +168,11 @@ replace a stateless instance after the conservative expiry and clock-skew window
 Executor now publishes its enforced workload, host, and tenant limits plus
 architecture, gVisor isolation, labels, and taints. Control atomically reserves
 CPU, memory, process, tenant, and workload-slot capacity with admission and
-enforces tenant-signed label and toleration constraints. The next scheduling
-layer should add topology and image locality, controller-side cordon and
-quarantine, drain budgets, bounded rollout, rollback, quota-capable portable
-state, and backend conformance. Instance counts, singleton identity, restart
+enforces tenant-signed label and toleration constraints. Controller-owned
+cordon and quarantine now provide durable placement and command-delivery gates
+without replacing Executor's node-local maintenance fence. The next scheduling
+layer should add topology and image locality, drain budgets, bounded rollout,
+rollback, quota-capable portable state, and backend conformance. Instance counts, singleton identity, restart
 recovery, lease-fenced stateless replacement, bounded renewal retention, and an
 explanation for placement and replacement blockers are already part of the
 narrow scheduler.
@@ -380,8 +381,9 @@ create safe temporary or durable forks.
   isolation classes, topology, image locality, and state locality.
 - Make placement an actual controller decision with stale-plan detection and
   Executor revalidation.
-- Add replacement, rescheduling, cordon, drain, quarantine, bounded disruption,
-  canary rollout, pause, rollback, and per-tenant quotas.
+- Extend implemented lease-fenced replacement, rescheduling, cordon, and
+  quarantine with drain budgets, bounded disruption, canary rollout, pause,
+  rollback, and per-tenant quotas.
 - Add the storage backend contract and one quota-capable local backend.
 - Add quiesce, snapshot, clone, archive, restore, TTL, idle expiry, and garbage
   collection state machines.

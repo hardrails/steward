@@ -35,7 +35,7 @@ var completionTree = map[string][]string{
 	"control enrollment": {
 		"create", "exchange",
 	},
-	"control node":             {"list", "status", "revoke"},
+	"control node":             {"list", "status", "cordon", "uncordon", "quarantine", "unquarantine", "revoke"},
 	"control node-credential":  {"revoke"},
 	"control operations":       {"status"},
 	"control attention":        {"list"},
@@ -76,7 +76,7 @@ var completionFlags = map[string][]string{
 	"context set":                       {"-control-url", "-token-file", "-ca-file", "-node-url", "-node-token-file", "-gateway-url", "-gateway-token-file", "-service-trust", "-task-key", "-task-key-id", "-tenant-id", "-node-id"},
 	"completion install":                {"-shell", "-force"},
 	"control":                           {"-control-url", "-token-file", "-ca-file", "-no-context"},
-	"control node":                      {"-tenant-id", "-node-id", "-after", "-limit"},
+	"control node":                      {"-tenant-id", "-node-id", "-reason", "-after", "-limit"},
 	"control operations status":         {"-tenant-id"},
 	"control attention list":            {"-tenant-id", "-reason", "-cursor", "-limit"},
 	"control agent list":                {"-tenant-id", "-node-id", "-status", "-cursor", "-limit"},

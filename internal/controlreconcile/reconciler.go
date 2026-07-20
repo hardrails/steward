@@ -486,7 +486,7 @@ func assignedNodeEligible(
 	}
 	for _, node := range nodes {
 		if node.ID == instance.NodeID {
-			return eligibleNode(node, deployment.TenantID, allowed, now, staleAfter)
+			return nodeAvailableForAssignment(node, deployment.TenantID, allowed, now, staleAfter)
 		}
 	}
 	return false
@@ -511,7 +511,7 @@ func selectNode(
 	}
 	if instance.NodeID != "" {
 		for _, node := range nodes {
-			if node.ID == instance.NodeID && eligibleNode(node, deployment.TenantID, allowed, now, nodeStaleAfter) {
+			if node.ID == instance.NodeID && nodeAvailableForAssignment(node, deployment.TenantID, allowed, now, nodeStaleAfter) {
 				return node.ID, nil
 			}
 		}
@@ -530,7 +530,7 @@ func selectNode(
 	}
 	selected := ""
 	selectedCount := int(^uint(0) >> 1)
-	var schedulingUnavailable, placementBlocked, nodeCapacity, tenantCapacity bool
+	var schedulingUnavailable, placementBlocked, workloadLimit, nodeCapacity, tenantCapacity bool
 	for _, node := range nodes {
 		if !eligibleNode(node, deployment.TenantID, allowed, now, nodeStaleAfter) {
 			continue
@@ -543,10 +543,14 @@ func selectNode(
 			switch {
 			case errors.Is(err, controlstore.ErrNodeSchedulingUnavailable):
 				schedulingUnavailable = true
+			case errors.Is(err, controlstore.ErrNodePlacementUnavailable):
+				placementBlocked = true
 			case errors.Is(err, controlstore.ErrNodeSchedulingConstraint):
 				placementBlocked = true
 			case errors.Is(err, controlstore.ErrTenantCapacityExceeded):
 				tenantCapacity = true
+			case errors.Is(err, controlstore.ErrWorkloadLimitExceeded):
+				workloadLimit = true
 			case errors.Is(err, controlstore.ErrNodeCapacityExceeded):
 				nodeCapacity = true
 			}
@@ -560,6 +564,8 @@ func selectNode(
 		switch {
 		case tenantCapacity:
 			return "", newBlocked(controlstore.DeploymentBlockedTenantCapacity)
+		case workloadLimit:
+			return "", newBlocked(controlstore.DeploymentBlockedWorkloadLimit)
 		case nodeCapacity:
 			return "", newBlocked(controlstore.DeploymentBlockedNodeCapacity)
 		case schedulingUnavailable:
@@ -576,10 +582,14 @@ func schedulingBlockedReason(err error) controlstore.DeploymentBlockedReason {
 	switch {
 	case errors.Is(err, controlstore.ErrNodeSchedulingUnavailable):
 		return controlstore.DeploymentBlockedSchedulingUnavailable
+	case errors.Is(err, controlstore.ErrNodePlacementUnavailable):
+		return controlstore.DeploymentBlockedNoEligibleNode
 	case errors.Is(err, controlstore.ErrNodeSchedulingConstraint):
 		return controlstore.DeploymentBlockedPlacementConstraints
 	case errors.Is(err, controlstore.ErrTenantCapacityExceeded):
 		return controlstore.DeploymentBlockedTenantCapacity
+	case errors.Is(err, controlstore.ErrWorkloadLimitExceeded):
+		return controlstore.DeploymentBlockedWorkloadLimit
 	case errors.Is(err, controlstore.ErrNodeCapacityExceeded):
 		return controlstore.DeploymentBlockedNodeCapacity
 	default:
@@ -587,13 +597,16 @@ func schedulingBlockedReason(err error) controlstore.DeploymentBlockedReason {
 	}
 }
 
-func eligibleNode(
+func nodeAvailableForAssignment(
 	node controlstore.Node,
 	tenantID string,
 	allowed map[string]struct{},
 	now time.Time,
 	nodeStaleAfter time.Duration,
 ) bool {
+	if controlstore.EffectiveNodePlacement(node).Mode == controlstore.NodeQuarantined {
+		return false
+	}
 	lastSeen, err := time.Parse(time.RFC3339Nano, node.LastSeenAt)
 	if !node.Active || err != nil || !now.Before(lastSeen.Add(nodeStaleAfter)) {
 		return false
@@ -606,6 +619,17 @@ func eligibleNode(
 	return tenantIndex < len(node.TenantIDs) && node.TenantIDs[tenantIndex] == tenantID &&
 		capabilityIndex < len(node.Capabilities) &&
 		node.Capabilities[capabilityIndex] == controlprotocol.ExecutorCapabilityControllerDelegationV1
+}
+
+func eligibleNode(
+	node controlstore.Node,
+	tenantID string,
+	allowed map[string]struct{},
+	now time.Time,
+	nodeStaleAfter time.Duration,
+) bool {
+	return controlstore.EffectiveNodePlacement(node).Mode == controlstore.NodeSchedulable &&
+		nodeAvailableForAssignment(node, tenantID, allowed, now, nodeStaleAfter)
 }
 
 type blockedError struct {

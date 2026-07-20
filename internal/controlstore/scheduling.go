@@ -13,7 +13,9 @@ import (
 
 var (
 	ErrNodeSchedulingUnavailable = errors.New("node scheduling observation is unavailable")
+	ErrNodePlacementUnavailable  = errors.New("node does not accept new placement")
 	ErrNodeSchedulingConstraint  = errors.New("node does not satisfy signed placement constraints")
+	ErrWorkloadLimitExceeded     = errors.New("workload exceeds node per-workload limit")
 	ErrNodeCapacityExceeded      = errors.New("node scheduling capacity exceeded")
 	ErrTenantCapacityExceeded    = errors.New("tenant scheduling capacity exceeded")
 )
@@ -31,6 +33,9 @@ func CheckNodeScheduling(
 	now time.Time,
 	staleAfter time.Duration,
 ) error {
+	if EffectiveNodePlacement(node).Mode != NodeSchedulable {
+		return ErrNodePlacementUnavailable
+	}
 	if now.IsZero() || staleAfter <= 0 || staleAfter > MaxOperationsThreshold || node.Scheduling == nil {
 		return ErrNodeSchedulingUnavailable
 	}
@@ -49,10 +54,13 @@ func CheckNodeScheduling(
 		MemoryBytes: intent.Resources.MemoryBytes, CPUMillis: intent.Resources.CPUMillis,
 		PIDs: intent.Resources.PIDs, Workloads: 1,
 	}
-	requested, err := schedulingReservation(intent, observation.Policy)
-	if err != nil || exceedsSchedulingCapacity(
+	if exceedsSchedulingCapacity(
 		controlprotocol.ExecutorSchedulingResourcesV1{}, perWorkload, observation.Policy.PerWorkload,
 	) {
+		return ErrWorkloadLimitExceeded
+	}
+	requested, err := schedulingReservation(intent, observation.Policy)
+	if err != nil {
 		return ErrNodeCapacityExceeded
 	}
 	host, tenant, err := deploymentSchedulingUsage(deployments, node.ID, tenantID, observation.Policy)

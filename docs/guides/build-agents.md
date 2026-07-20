@@ -190,7 +190,8 @@ or uncertain Executor outcome becomes `degraded` and is not silently retried.
 `no_eligible_node`, `assigned_node_unavailable`, `awaiting_lease_expiry`,
 `stateful_replacement_unsupported`, `replacement_generation_exhausted`,
 `scheduling_observation_unavailable`, `placement_constraints_unsatisfied`,
-`node_capacity_exhausted`, `tenant_capacity_exhausted`, `delegation_expired`,
+`workload_limit_exceeded`, `node_capacity_exhausted`,
+`tenant_capacity_exhausted`, `delegation_expired`,
 `controller_key_mismatch`, or
 `invalid_deployment_authority`. The controller
 rechecks these conditions and clears the value when it can enqueue the next command.
@@ -212,6 +213,44 @@ locally. Control reserves those resources in the durable transaction that queues
 Executor still checks real Docker usage before creation. Failed and
 `outcome_unknown` effects keep their reservation because the workload may still
 exist. A successful destroy or safely fenced replacement releases it.
+
+## Take a node out of placement
+
+Before planned host work, stop new controller placements while existing agents
+continue to run:
+
+```console
+stewardctl control node cordon -reason "kernel maintenance" node-1
+```
+
+Then use the node-local maintenance workflow before destroying exact runtimes:
+
+```console
+sudo -H stewardctl node maintenance drain -reason "kernel maintenance"
+sudo -H stewardctl node maintenance drain -reason "kernel maintenance" -apply
+```
+
+These are separate safety boundaries. The controller cordon prevents another
+deployment from selecting the node. Executor maintenance closes the local race
+between inspecting and destroying runtimes. After the host is healthy, exit
+Executor maintenance first, then restore controller placement:
+
+```console
+sudo -H stewardctl node maintenance exit
+stewardctl control node uncordon node-1
+```
+
+For suspected compromise, use quarantine instead:
+
+```console
+stewardctl control node quarantine -reason "suspected credential theft" node-1
+```
+
+Quarantine stops new command leases and causes lease-managed stateless
+deployments to recover only after their conservative lease fence. It does not
+erase evidence, revoke credentials, or claim that a stateful workload can be
+migrated safely. Inspect and rotate credentials before the distinct
+`unquarantine` action. Revoke the node if its identity must never return.
 
 To narrow placement, add this optional object to `admission-template.json`:
 

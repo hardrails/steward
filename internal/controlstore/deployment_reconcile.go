@@ -47,6 +47,7 @@ const (
 	DeploymentBlockedGenerationExhausted     DeploymentBlockedReason = "replacement_generation_exhausted"
 	DeploymentBlockedSchedulingUnavailable   DeploymentBlockedReason = "scheduling_observation_unavailable"
 	DeploymentBlockedPlacementConstraints    DeploymentBlockedReason = "placement_constraints_unsatisfied"
+	DeploymentBlockedWorkloadLimit           DeploymentBlockedReason = "workload_limit_exceeded"
 	DeploymentBlockedNodeCapacity            DeploymentBlockedReason = "node_capacity_exhausted"
 	DeploymentBlockedTenantCapacity          DeploymentBlockedReason = "tenant_capacity_exhausted"
 	deploymentCommandRecordMissing                                   = "deployment_command_record_missing"
@@ -648,7 +649,7 @@ func validDeploymentBlockedReason(reason DeploymentBlockedReason) bool {
 		DeploymentBlockedInvalidAuthority, DeploymentBlockedAwaitingLeaseExpiry,
 		DeploymentBlockedStatefulReplacement, DeploymentBlockedGenerationExhausted,
 		DeploymentBlockedSchedulingUnavailable, DeploymentBlockedPlacementConstraints,
-		DeploymentBlockedNodeCapacity, DeploymentBlockedTenantCapacity:
+		DeploymentBlockedWorkloadLimit, DeploymentBlockedNodeCapacity, DeploymentBlockedTenantCapacity:
 		return true
 	default:
 		return false

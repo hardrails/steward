@@ -112,6 +112,7 @@ func (server *Server) routes() {
 	server.mux.HandleFunc("/v1/enroll", server.enroll)
 	server.mux.HandleFunc("/v1/node-credentials/{credential_id}", server.nodeCredential)
 	server.mux.HandleFunc("/v1/nodes/{node_id}", server.nodeAdministration)
+	server.mux.HandleFunc("/v1/nodes/{node_id}/placement", server.nodePlacement)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence", server.evidenceAdministration)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/export", server.evidenceExport)
 	server.mux.HandleFunc("/v1/nodes/{node_id}/evidence/captures", server.evidenceCaptures)
@@ -393,6 +394,34 @@ func (server *Server) nodeAdministration(writer http.ResponseWriter, request *ht
 		NodeID             string `json:"node_id"`
 		RevokedCredentials int    `json:"revoked_credentials"`
 	}{request.PathValue("node_id"), revoked})
+}
+
+func (server *Server) nodePlacement(writer http.ResponseWriter, request *http.Request) {
+	if !method(writer, request, http.MethodPost) || !noQuery(writer, request) {
+		return
+	}
+	identity, ok := server.operatorIdentity(writer, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		Action controlstore.NodePlacementAction `json:"action"`
+		Reason string                           `json:"reason,omitempty"`
+	}
+	if !server.decode(writer, request, &input) {
+		return
+	}
+	node, changed, err := server.store.ChangeNodePlacement(
+		identity, request.PathValue("node_id"), input.Action, input.Reason, server.now(),
+	)
+	if err != nil {
+		server.storeError(writer, err, false)
+		return
+	}
+	writeJSON(writer, http.StatusOK, struct {
+		Node    nodeResponse `json:"node"`
+		Changed bool         `json:"changed"`
+	}{Node: nodeView(node), Changed: changed})
 }
 
 func (server *Server) evidenceAdministration(writer http.ResponseWriter, request *http.Request) {
@@ -1142,6 +1171,7 @@ type nodeResponse struct {
 	LastSeenAt   string                       `json:"last_seen_at,omitempty"`
 	RevokedAt    string                       `json:"revoked_at,omitempty"`
 	Scheduling   *controlstore.NodeScheduling `json:"scheduling,omitempty"`
+	Placement    controlstore.NodePlacement   `json:"placement"`
 }
 
 type nodeListResponse struct {
@@ -1159,6 +1189,7 @@ func nodeView(node controlstore.Node) nodeResponse {
 		Capabilities: append([]string{}, node.Capabilities...), State: state,
 		CreatedAt: node.CreatedAt, LastSeenAt: node.LastSeenAt, RevokedAt: node.RevokedAt,
 		Scheduling: node.Scheduling,
+		Placement:  controlstore.EffectiveNodePlacement(node),
 	}
 }
 
